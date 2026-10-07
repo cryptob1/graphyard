@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { humanDecisionLabel, humanOnlyRefusal, openHumanOnly, parkRule, type HumanOnlyChoice, type HumanOnlyPost, type HumanRequestRow } from '../../src/model/human-request';
+import { humanDecisionLabel, humanOnlyRefusal, openHumanOnly, parkRule, recommendedFirst, type HumanOnlyChoice, type HumanOnlyPost, type HumanRequestRow } from '../../src/model/human-request';
 import type { Work } from '../../src/model/work';
 import { formatDuration } from '../../src/model/duration';
 import { shortShas } from '../../src/model/format';
@@ -61,11 +61,11 @@ export function researchQuestionRows(work: readonly Pick<Work, 'id' | 'key' | 't
   return work.filter(item => item.stage !== 'done').flatMap(item => (item.researchBrief?.questions ?? []).filter(question => !question.answer).map(question => ({
     rule: researchQuestionRule, work: item.key, id: item.id, title: item.title,
     request: { id: question.id, kind: question.kind, needed: question.question, requestedBy: 'the research step',
-      reason: `${question.why} Recommended: ${question.recommendation}. The build proceeds on this recommendation, provisionally; answer by ${question.deadline} to settle it before the head is built.`,
-      epoch: item.epoch, at: question.at },
+      reason: `${question.why} The build proceeds on the recommendation, provisionally; answer by ${question.deadline} to settle it before the head is built.`,
+      epoch: item.epoch, at: question.at, recommendation: { text: question.recommendation, why: question.why } },
     waitedMs: Math.max(0, now - Date.parse(question.at)), decision: humanDecisionLabel[question.kind],
     refusal: parkRule.refuse({ id: 'an agent identity', role: 'operator-agent', sessionKind: 'ai' })!,
-    choices: [{ label: 'Use the recommendation', input: 'none', declines: false, body: { question: question.id, answer: question.recommendation }, note: null },
+    choices: [{ label: 'Use the recommendation', input: 'none', declines: false, body: { question: question.id, answer: question.recommendation }, note: null, recommended: true },
       { label: 'Answer differently…', input: 'text', declines: false, body: { question: question.id }, note: 'answer' }] satisfies HumanOnlyChoice[],
     answer: { cli: `POST /api/work/${item.key}/research-answer {"question":"${question.id}","answer":"…"}`, decline: 'Leave it unanswered: the recommendation stands',
       dashboard: 'Work → Needs you → Answer', api: `POST /api/work/${item.key}/research-answer {"question":"${question.id}","answer":"…"}`,
@@ -91,7 +91,10 @@ export function RequestCard({ row, refusal, busy, open, answer, send, signIn }: 
   const [note, setNote] = useState('');
   const [secret, setSecret] = useState('');
   const post: HumanOnlyPost = row.answer.post;
-  const choices = row.choices ?? [];
+  // The recommended choice comes first, labelled, and is the form's default: Enter takes it (GY-1410).
+  const choices = recommendedFirst(row.choices ?? []);
+  const recommended = choices.find(choice => choice.recommended);
+  const advice = row.request.recommendation;
   // A refused answer (the server declined it, the network dropped) is reported by the page's error
   // notice and resolves normally, so nothing here clears on resolution: what the operator typed
   // stays until this card leaves the page, which only the refresh after a successful answer does,
@@ -106,13 +109,16 @@ export function RequestCard({ row, refusal, busy, open, answer, send, signIn }: 
   return <div className="card human-request">
     <div className="card-top"><button className="text-button" onClick={open}>{row.work} <span data-title>{row.title}</span></button><span title={`Asked ${row.request.at}`}>Waiting {formatDuration(row.waitedMs / 60000)}</span></div>
     <h3>{shortShas(row.request.needed)}</h3>
+    {advice && <p className="recommendation"><strong>Recommended</strong>: {shortShas(advice.text)}. <span className="muted">{shortShas(advice.why)}</span></p>}
     <p className="reason">{row.decision} · asked by {row.request.requestedBy}: {shortShas(row.request.reason)}</p>
     {refusal ? <div className="login-actions"><p className="muted">This session cannot answer it: {shortShas(refusal)}.</p>{signIn && <button type="button" onClick={signIn}>{signInAction}</button>}</div> : <>
-      {choices.length > 0 && <form onSubmit={event => event.preventDefault()}>
+      {choices.length > 0 && <form onSubmit={event => { event.preventDefault(); if (recommended && ready(recommended)) choose(recommended); }}>
         {choices.some(choice => choice.input === 'secret') && <label>Value to provide (sealed to the requesting host, never stored as typed)<input type="password" autoComplete="off" value={secret} onChange={event => setSecret(event.target.value)}/></label>}
         {choices.some(choice => choice.note) && <textarea aria-label={`Note for ${row.work}`} placeholder="Note (optional; needed for a choice ending in …)" value={note} onChange={event => setNote(event.target.value)} rows={2}/>}
         {/* The shared wrapping action row: buttons wrap at any width, down to 375 px. */}
-        <div className="pulse-actions human-choices">{choices.map(choice => <button key={choice.label} type="button" className={choice.declines ? 'text-button' : undefined} disabled={!ready(choice)} onClick={() => choose(choice)}>{choice.label}</button>)}</div>
+        <div className="pulse-actions human-choices">{choices.map(choice => <button key={choice.label} type={choice === recommended ? 'submit' : 'button'} className={choice.declines ? 'text-button' : undefined}
+          data-preselected={choice === recommended || undefined} aria-pressed={choice === recommended ? true : undefined} autoFocus={choice === recommended} disabled={!ready(choice)}
+          onClick={event => { event.preventDefault(); choose(choice); }}>{choice === recommended && <strong>Recommended: </strong>}{choice.label}</button>)}</div>
       </form>}
       <details className="own-words" open={choices.length === 0}><summary className="muted">{choices.length ? 'Or answer in your own words' : 'Answer'}</summary><form onSubmit={event => { event.preventDefault(); submit(post.body); }}>
         <textarea aria-label={`${post.field === 'reason' ? 'Reason' : 'Answer'} for ${row.work}`} placeholder="What you decided or provided, in words the next worker can act on…" value={text} onChange={event => setText(event.target.value)} rows={3}/>

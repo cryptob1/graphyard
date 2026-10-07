@@ -172,7 +172,7 @@ test('unit:product-questions-in-graphyard — each product question is a goals-a
   assert.equal(rows.length, 1);
   assert.equal(rows[0].decision, 'goals and priorities');
   assert.equal(rows[0].request.needed, question.question);
-  assert.match(rows[0].request.reason, /Recommended: Yes, collapsed under the criteria/);
+  assert.equal(rows[0].request.recommendation?.text, 'Yes, collapsed under the criteria', 'the recommendation is the request\'s own field, shown first');
   assert.match(rows[0].request.reason, new RegExp(question.deadline.replace(/[.]/g, '\\.')));
   assert.deepEqual(rows[0].answer.post, { command: 'research-answer', body: { question: question.id }, field: 'answer', submit: 'Answer for GY-1', decline: null });
   const page = (actor: object) => renderToStaticMarkup(createElement(HumanRequestsPage, { work: [feature], status: { humanOnly: [], actor }, observedAt: NOW, action: async () => {}, busy: false, setSelected: () => {} } as never));

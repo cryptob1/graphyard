@@ -3,7 +3,7 @@ import { chmod, link, mkdir, readFile, rename, rm, stat, writeFile } from 'node:
 import { dirname, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { Work } from '../model.js';
-import { humanDecisionKinds, type HumanChoice, type HumanDecisionKind, type HumanRequestRow } from '../model/human-request.js';
+import { humanDecisionKinds, parkArgs, recommendationRequired, type HumanDecisionKind, type HumanRequestRow } from '../model/human-request.js';
 import { configHome } from '../install/secrets.js';
 import { scopeRequestOutcome } from '../model/scope.js';
 import type { CliContext } from './context.js';
@@ -112,7 +112,7 @@ export const parkCommand: CliCommand = {
   name: 'park',
   scope: 'work',
   help: [
-    '  park GY-N EPOCH KIND NEEDED... [--choice LABEL]... -- REASON',
+    '  park GY-N EPOCH KIND NEEDED... [--choice LABEL]... --recommend TEXT --why SENTENCE -- REASON',
     '                                Record a decision only a human may make and end this attempt:',
     `                                KIND is ${humanDecisionKinds.join(', ')};`,
     '                                NEEDED is the exact thing the human must provide: every human',
@@ -122,36 +122,23 @@ export const parkCommand: CliCommand = {
     '                                --choice is a button the human presses (--choice-text asks for',
     '                                their words too, --choice-secret for a value sealed to this',
     '                                host); Decline is always offered. Without any, the kind\'s',
-    '                                defaults are offered',
+    '                                defaults are offered. --recommend is required: the choice you',
+    '                                recommend, or the safest way to obtain the value asked for',
+    '                                (a token scoped to one repository, short-lived, least',
+    '                                permissions); --why is one plain sentence of why',
   ],
   async run(context, work) {
     const { args, print } = context;
     const epoch = Number(args[0]), kind = args[1], separator = args.indexOf('--');
-    const { needed, choices } = parkArgs(args.slice(2, separator < 0 ? args.length : separator));
+    const { needed, choices, recommendation } = parkArgs(args.slice(2, separator < 0 ? args.length : separator));
     const reason = separator < 0 ? '' : args.slice(separator + 1).join(' ').trim();
-    if (!Number.isInteger(epoch) || epoch < 1 || !humanDecisionKinds.includes(kind as HumanDecisionKind) || !needed || !reason) throw new Error(`Use park GY-N EPOCH KIND NEEDED... [--choice LABEL]... -- REASON, where KIND is ${humanDecisionKinds.join(', ')}`);
+    if (!Number.isInteger(epoch) || epoch < 1 || !humanDecisionKinds.includes(kind as HumanDecisionKind) || !needed || !reason) throw new Error(`Use park GY-N EPOCH KIND NEEDED... [--choice LABEL]... --recommend TEXT --why SENTENCE -- REASON, where KIND is ${humanDecisionKinds.join(', ')}`);
+    if (!recommendation?.text || !recommendation.why) throw new Error(recommendation?.text ? 'park needs --why: one plain sentence of why you recommend it' : recommendationRequired);
     // A credential is sealed to this host when the human provides it, so the host's key goes with the request.
     const sealTo = kind === 'credentials-for-people' || choices?.some(choice => choice.input === 'secret') ? await hostSealKey(context.individualHostId()).catch(() => undefined) : undefined;
-    return print(await workMutation(context, work)('park', { epoch, kind, needed, reason, ...(choices ? { choices } : {}), ...(sealTo ? { sealTo } : {}) }));
+    return print(await workMutation(context, work)('park', { epoch, kind, needed, reason, recommendation, ...(choices ? { choices } : {}), ...(sealTo ? { sealTo } : {}) }));
   },
 };
-
-const choiceFlags = { '--choice': 'none', '--choice-text': 'text', '--choice-secret': 'secret' } as const;
-/**
- * NEEDED and the requester's choices from the words between KIND and `--`. Each choice flag takes
- * the next word as its label; the choices become buttons in that order, each resuming the item.
- */
-export function parkArgs(words: readonly string[]) {
-  const needed: string[] = [], choices: HumanChoice[] = [];
-  for (let index = 0; index < words.length; index++) {
-    const input = choiceFlags[words[index] as keyof typeof choiceFlags];
-    if (!input) { needed.push(words[index]); continue; }
-    const label = words[++index]?.trim();
-    if (!label || label.startsWith('--')) throw new Error(`${words[index - 1]} needs a LABEL, such as --choice "Approve up to €50/month"`);
-    choices.push({ id: `choice-${choices.length + 1}`, label, outcome: 'provided', input });
-  }
-  return { needed: needed.join(' ').trim(), choices: choices.length ? choices : undefined };
-}
 
 /**
  * This host's sealing key: an RSA key pair kept under the Graphyard configuration home, mode 0600;
@@ -273,7 +260,7 @@ export const humanRequestsCommand: CliCommand = {
   help: ['  human-requests               List every open human-only request: what is needed, why, how', '                                long it has waited, and the command that answers it'],
   async run({ api, print }) {
     const { now, requests } = await api('human-requests') as { now: string; requests: HumanRequestRow[] };
-    return print({ observedAt: now, waiting: requests.length, requests: requests.map(row => ({ work: row.work, title: row.title, decision: row.decision, needed: row.request.needed, reason: row.request.reason,
+    return print({ observedAt: now, waiting: requests.length, requests: requests.map(row => ({ work: row.work, title: row.title, decision: row.decision, needed: row.request.needed, reason: row.request.reason, recommendation: row.request.recommendation ?? null,
       requestedBy: row.request.requestedBy, requestedAt: row.request.at, waited: waitedText(row.waitedMs), answer: row.answer.cli, decline: row.answer.decline })) });
   },
 };

@@ -18,7 +18,7 @@ export const sanctionedRemedies: Record<string, string> = {
   'review-convergence': 'Address review findings directly with code commits or explanations; do not dismiss reviews manually.',
   'decision': 'Two-party decisions require independent approver review; cite context and precedent, never self-approve.',
   'capacity': 'Wait for provider quota reset or switch profiles; do not retry exhausted accounts in a loop.',
-  'human-decision': 'Park with graphyard park GY-N EPOCH KIND NEEDED -- REASON when human-only goals, money or credentials are required.',
+  'human-decision': 'Park with graphyard park GY-N EPOCH KIND NEEDED --recommend TEXT --why SENTENCE -- REASON when human-only goals, money or credentials are required.',
   'resources': 'Clean up unneeded temporary files under managed root; do not exceed disk and ledger bounds.',
   'containment': 'Ensure previous session processes are stopped and containment fences settled before proceeding.',
   'deployment': 'Verify deployed commits match release expectations; follow rollback guidance on smoke failure.',

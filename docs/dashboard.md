@@ -9,7 +9,7 @@ One group per open item (a tile counts and filters it): **Needs you** (yours alo
 
 ## Needs you
 
-`graphyard login` prints the operator's single-use sign-in link. Requests offer choices; **Provide now** seals credentials for `unseal GY-N`.
+`graphyard login` prints the operator's single-use sign-in link. Requests show the requester's **Recommended** choice or safest way first (that choice preselected) and offer choices; **Provide now** seals credentials for `unseal GY-N`.
 
 An operator approval offers **Approve** or terminal **Decline** (`master refuse GY-N DECISION REASON`), answered only from a human admin's sign-in session.
 

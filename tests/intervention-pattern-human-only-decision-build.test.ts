@@ -94,7 +94,7 @@ test('manual:intervention-pattern-human-only-decision-build — GY-1113 and GY-1
 test('manual:intervention-pattern-human-only-decision-build — GY-1384 (6097f31f) and GY-1365: the bare Approve that resumed them with nothing set up is refused; the operator\'s words resume them', async () => {
   for (const [subject, needed] of [['GY-1384', asked['GY-1384-1']], ['GY-1365', asked['GY-1365']]] as const) {
     const work = await claimed(subject);
-    await call(token(worker), `work/${work.key}/park`, { epoch: work.epoch, kind: 'money-or-accounts', needed, reason: 'an account action only the operator may take' }, 200);
+    await call(token(worker), `work/${work.key}/park`, { recommendation: { text: 'Approve', why: 'Nothing else unblocks the item.' }, epoch: work.epoch, kind: 'money-or-accounts', needed, reason: 'an account action only the operator may take' }, 200);
     const request = (await reload(work.id)).humanRequest!;
     const bare = await call(token(operator), `work/${work.key}/answer`, { request: request.id, choice: 'approve' }, 422);
     assert.match(bare.error, /needs your words in the note/);
