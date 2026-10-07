@@ -46,6 +46,8 @@ export const masterCommands = defineCommands([
       "                                Perform GitHub administration through the operator's browser",
       '                                profile: app-permissions, installation-accept, or protection;',
       '                                recorded, API-verified, audited',
+      '  master browser fixtures       List the redacted Confirm-access captures earlier flows saved,',
+      '                                by flow and time, with the latest of each method',
       '  master harness [KIND] [--apply]  Generate the master\'s own harness permissions',
       '  master status                 Graphyard work truth joined with Herdr session health, the',
       '                                dispatch order, overlaps and merge conflicts',

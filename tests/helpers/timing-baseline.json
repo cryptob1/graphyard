@@ -275,6 +275,7 @@
     "tests/close-work.test.ts": 2835,
     "tests/closed-question-evidence.test.ts": 2373,
     "tests/codex-review.test.ts": 531,
+    "tests/confirm-access-capture.test.ts": 1000,
     "tests/connect-account.test.ts": 5302,
     "tests/consent-prompt.test.ts": 1108,
     "tests/containment-attention.test.ts": 1780,
