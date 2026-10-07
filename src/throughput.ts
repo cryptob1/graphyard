@@ -466,18 +466,60 @@ export const openThroughputOwner = <W extends Pick<Work, 'title' | 'stage'> & { 
  */
 export const throughputOwnerAnswered = (owner: Pick<Work, 'policyRevision'>, raisedAt: number | null) => raisedAt !== null && owner.policyRevision > raisedAt;
 
-/** The item the loop files to own the verification, naming the release it found unverified and its progress. */
-export function throughputOwnerItem(revision: string, admitted: number | null) {
+/**
+ * The owner a successor follows (GY-1467): the release's owner the loop closed on its answered
+ * needs-decision, the requirements revision that answered it, and the criteria it was answered
+ * with — the settled admission rule the successor carries until the release serving it applies it.
+ */
+export interface ThroughputOwnerPredecessor { key: string; policyRevision: number; criteria: string[] }
+
+/**
+ * The newest owner of `revision` the loop closed on its answered needs-decision, or null when none
+ * was: read from the closed items themselves (their title, closure reason and criteria), so it holds
+ * whatever the loop's own record kept.
+ */
+export function throughputOwnerPredecessor(work: readonly Pick<Work, 'key' | 'title' | 'stage' | 'criteria' | 'closure'>[], revision: string): ThroughputOwnerPredecessor | null {
+  const title = `${throughputOwnerTitle}: ${revision.slice(0, 12)}`;
+  const answered = work.flatMap(item => {
+    const match = item.stage === 'done' && item.closure && item.title.startsWith(title)
+      ? /needs-decision \(raised at its requirements revision \d+\) was answered by its requirements revision (\d+)/.exec(item.closure.reason ?? '') : null;
+    return match ? [{ item, at: item.closure!.at, policyRevision: Number(match[1]) }] : [];
+  }).sort((a, b) => b.at.localeCompare(a.at));
+  const newest = answered[0];
+  return newest ? { key: newest.item.key, policyRevision: newest.policyRevision, criteria: (newest.item.criteria ?? []).map(criterion => criterion.text) } : null;
+}
+
+/**
+ * The item the loop files to own the verification, naming the release it found unverified, and for
+ * a successor the owner it follows and the settled rule that owner was answered with. It is a pure
+ * function of the release and the predecessor, the parts of its idempotency key
+ * (`throughputOwnerIdempotency`), so a retry under the key sends the same body and is answered from
+ * the stored receipt (GY-1467): nothing measured in the filing cycle enters it. Its progress is read
+ * from the newest recorded measurement by `master status`, never written into the item.
+ */
+export function throughputOwnerItem(revision: string, predecessor: ThroughputOwnerPredecessor | null = null) {
   return {
-    title: `${throughputOwnerTitle}: ${revision.slice(0, 12)}`.slice(0, 200), type: 'bug' as const, priority: 1,
+    title: `${throughputOwnerTitle}: ${revision.slice(0, 12)}${predecessor ? ` (succeeds ${predecessor.key})` : ''}`.slice(0, 200), type: 'bug' as const, priority: 1,
     description: [
-      `The master loop filed this item itself (GY-1438): ${throughputClaim.item}'s throughput claim (${throughputClaim.statement}) is unverified on the release the control plane serves, ${revision}${admitted === null ? '' : `, with ${admitted} of the ${throughputClaim.minimumDeliveries} session-free deliveries it is judged over admitted`}. It owns that verification so it can only end, never age.`,
+      `The master loop filed this item itself (GY-1438): ${throughputClaim.item}'s throughput claim (${throughputClaim.statement}) is unverified on the release the control plane serves, ${revision}. It owns that verification so it can only end, never age.`,
+      ...(predecessor ? [`It succeeds ${predecessor.key}, closed when its needs-decision was answered by its requirements revision ${predecessor.policyRevision}, because the newest measurement of ${revision.slice(0, 12)} still shows the stall: the measurement applies the settled admission rule only once the release it runs carries it (GY-1467). The settled admission rule, as ${predecessor.key} was answered: ${predecessor.criteria.join(' ') || 'its requirements revision names none'}`] : []),
       `There is nothing to build here, so it stays in the backlog and is never released to a worker. The loop re-measures the serving release while its newest measurement is unverified (at most every ${Math.round(throughputRemeasureMs / 60_000)} min; the budgets are never relaxed) and closes this item itself once a recorded measurement of the serving release verifies the claim. When session-free deliveries cannot accumulate it raises a needs-decision on this item instead; an approved requirements revision of this item applied after that answers it, and the loop closes the item then too.`,
     ].join('\n\n'),
     criteria: [{ id: 'AC-1', text: `A recorded measurement of the release the control plane serves verifies ${throughputClaim.item}'s claim (at least ${throughputClaim.minimumDeliveries} admitted deliveries within its submit-to-merge p50 and idle-but-actionable budgets), or the needs-decision the loop raised on this item is answered`, proofs: ['manual:throughput-claim-verified'] }],
-    reason: `${throughputClaim.item}'s throughput claim is unverified on the serving release ${revision.slice(0, 12)} and no open item owns its verification`,
+    reason: predecessor
+      ? `${throughputClaim.item}'s throughput claim is unverified on the serving release ${revision.slice(0, 12)}, its newest measurement still shows the stall, and no open item owns its verification since ${predecessor.key} closed on its answered needs-decision`
+      : `${throughputClaim.item}'s throughput claim is unverified on the serving release ${revision.slice(0, 12)} and no open item owns its verification`,
   };
 }
+
+/**
+ * The idempotency key an owner is filed under: the release for its first owner, and the release
+ * with the predecessor and its answered requirements revision for a successor (GY-1467), so a
+ * successor never reuses the key its predecessor's filing burned and is filed at most once per
+ * (release, answered revision).
+ */
+export const throughputOwnerIdempotency = (revision: string, predecessor: Pick<ThroughputOwnerPredecessor, 'key' | 'policyRevision'> | null = null) =>
+  `throughput-owner:${revision}${predecessor ? `:${predecessor.key}:${predecessor.policyRevision}` : ''}`;
 
 /**
  * Why the loop closes the owner now, or null while it must stay open: the newest answer for the
@@ -486,7 +528,7 @@ export function throughputOwnerItem(revision: string, admitted: number | null) {
  */
 export function throughputOwnerClosure(owner: Pick<Work, 'key' | 'policyRevision'>, serving: { revision: string; verdict: ThroughputReport['verdict'] | null }, raisedAt: number | null): string | null {
   if (serving.verdict === 'verified') return `${throughputClaim.item}'s throughput claim verified on the serving release ${serving.revision}; the loop closes ${owner.key}, which owned that verification`;
-  if (throughputOwnerAnswered(owner, raisedAt)) return `${owner.key}'s needs-decision (raised at its requirements revision ${raisedAt}) was answered by its requirements revision ${owner.policyRevision}; the loop closes it, and files no second owner for ${serving.revision.slice(0, 12)}: the next release it measures unverified files a new one`;
+  if (throughputOwnerAnswered(owner, raisedAt)) return `${owner.key}'s needs-decision (raised at its requirements revision ${raisedAt}) was answered by its requirements revision ${owner.policyRevision}; the loop closes it, and while the newest measurement of ${serving.revision.slice(0, 12)} still shows the stall it files one successor owner carrying the answered rule; otherwise the next release it measures unverified files a new one`;
   return null;
 }
 
@@ -795,7 +837,7 @@ export function throughputClaimVisibility(measurement: { report: ThroughputRepor
   const command = throughputMeasurementCommand;
   const admitted = measurement?.report.population?.admitted ?? 0, ownerKey = ownerItem?.key ?? null;
   const owner = { item: ownerKey, admitted, needed: throughputClaim.minimumDeliveries, measuredAt: measurement?.report.measuredAt ?? null };
-  const progress = `${ownerKey ? `${ownerKey} owns the verification` : 'No open item owns the verification yet (the loop files one on its next unverified measurement of a release whose owner has not closed on an answered needs-decision)'}: ${admitted} admitted of ${throughputClaim.minimumDeliveries}${measurement ? ` in the newest recorded measurement (${measurement.report.measuredAt}, of ${measurement.report.deployed?.revision?.slice(0, 12) ?? 'an unnamed release'})` : ', nothing measured yet'}`;
+  const progress = `${ownerKey ? `${ownerKey} owns the verification` : 'No open item owns the verification yet (the loop files one on its next unverified measurement of a release whose owner has not closed on an answered needs-decision, or a successor while that measurement still shows the stall)'}: ${admitted} admitted of ${throughputClaim.minimumDeliveries}${measurement ? ` in the newest recorded measurement (${measurement.report.measuredAt}, of ${measurement.report.deployed?.revision?.slice(0, 12) ?? 'an unnamed release'})` : ', nothing measured yet'}`;
   const serving = Boolean(measurement && deployed.revision && deployed.revision !== 'unknown' && measurement.report.deployed?.revision === deployed.revision);
   const stall = serving ? throughputStall(measurement!.report, ownerKey) : null, decideOn = ownerKey ?? 'GY-N';
   // GY-1458: a measurement judged under a population rule since revised and applied asks no decision —

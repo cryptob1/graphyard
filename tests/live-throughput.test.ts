@@ -858,7 +858,7 @@ test('integration:throughput-attention-retires — once a recorded measurement o
     assert.equal(short.report!.population.admitted, 9);
     const unowned = await throughputStatus(root, serving, items);
     assert.equal(unowned.owner.item, null);
-    assert.match(unowned.attention!.text, /No open item owns the verification yet \(the loop files one on its next unverified measurement of a release whose owner has not closed on an answered needs-decision\): 9 admitted of 10/);
+    assert.match(unowned.attention!.text, /No open item owns the verification yet \(the loop files one on its next unverified measurement of a release whose owner has not closed on an answered needs-decision, or a successor while that measurement still shows the stall\): 9 admitted of 10/);
     const standing = await throughputStatus(root, serving, withOwner());
     assert.equal(standing.verdict, 'unverified'); assert.ok(standing.attention);
     assert.deepEqual(standing.owner, { item: throughputOwner, admitted: 9, needed: throughputClaim.minimumDeliveries, measuredAt: short.report!.measuredAt });
@@ -994,13 +994,17 @@ test('integration:throughput-stall-escalates — when every delivery in a window
       assert.equal(state.actions[escalationKey].attempts, 1);
       assert.equal(owners.closed.length, 0, 'the owner never closes before the claim verifies or its decision is answered');
 
-      // The decision is answered — an approved requirements revision applied to the owner — and the loop closes it, filing no second owner for this release.
+      // The decision is answered — an approved requirements revision applied to the owner — and the loop closes it.
       owner.policyRevision = 2;
       await runCycle(master, state, effects, () => Date.now());
       assert.deepEqual(owners.closed.map(entry => entry.key), [owner.key]);
       assert.match(owners.closed[0].reason, new RegExp(`${owner.key}'s needs-decision \\(raised at its requirements revision 1\\) was answered by its requirements revision 2`));
-      await runCycle(master, state, effects, () => Date.now());
-      assert.equal(owners.filed.length, 1, 'a release whose owner closed on an answered decision is not given a second');
+      assert.equal(owners.filed.length, 1, 'the closing cycle files nothing more');
+      // GY-1467: the measurement here still applies the same rule, so its next read still shows the
+      // stall, and the loop files one successor rather than leaving the needs-decision masterless.
+      clock += throughputRemeasureMs + minute;
+      for (let cycle = 0; cycle < 6; cycle++) await runCycle(master, state, effects, () => clock);
+      assert.deepEqual(owners.filed.map(entry => entry.key), [`throughput-owner:${deployedRevision}`, `throughput-owner:${deployedRevision}:${owner.key}:2`]);
     } finally { await rm(directory, { recursive: true, force: true }); }
   } finally { await rm(root, { recursive: true, force: true }); }
 });
@@ -1008,9 +1012,8 @@ test('integration:throughput-stall-escalates — when every delivery in a window
 test('integration:throughput-owner-item — the loop files one open owner item for an unverified serving release, names it with its progress, and closes it only once a recorded measurement of the serving release verifies the claim or its needs-decision is answered', async () => {
   const { openThroughputOwner, throughputOwnerClosure, throughputOwnerItem, throughputOwnerTitle } = await owned();
   // The filed item: in the backlog's title family, one criterion, nothing for a worker to build.
-  const filedInput = throughputOwnerItem(deployedRevision, 3);
+  const filedInput = throughputOwnerItem(deployedRevision);
   assert.ok(filedInput.title.startsWith(throughputOwnerTitle)); assert.match(filedInput.description, /never released to a worker/);
-  assert.match(filedInput.description, /3 of the 10 session-free deliveries/);
   // The pure rule: open while unverified and unanswered, whatever the answer's state; closed on either condition.
   const owner = { key: 'GY-7200', policyRevision: 1 };
   for (const verdict of ['unverified', null] as const) assert.equal(throughputOwnerClosure(owner, { revision: deployedRevision, verdict }, null), null, `${verdict}: stays open`);
@@ -1020,7 +1023,7 @@ test('integration:throughput-owner-item — the loop files one open owner item f
   // was raised at, closes nothing while the claim is unverified.
   assert.equal(throughputOwnerClosure({ ...owner, policyRevision: 2 }, { revision: deployedRevision, verdict: 'unverified' }, null), null, 'a revision without a raised needs-decision answers nothing');
   assert.equal(throughputOwnerClosure({ ...owner, policyRevision: 2 }, { revision: deployedRevision, verdict: 'unverified' }, 2), null, 'a needs-decision raised at the current revision is unanswered');
-  assert.match(throughputOwnerClosure({ ...owner, policyRevision: 3 }, { revision: deployedRevision, verdict: 'unverified' }, 2)!, /needs-decision \(raised at its requirements revision 2\) was answered by its requirements revision 3; .* files no second owner/);
+  assert.match(throughputOwnerClosure({ ...owner, policyRevision: 3 }, { revision: deployedRevision, verdict: 'unverified' }, 2)!, /needs-decision \(raised at its requirements revision 2\) was answered by its requirements revision 3; .* still shows the stall it files one successor owner/);
   // A closed or delivered owner owns nothing.
   const template = (await store.list()).find(item => item.stage === 'done')!;
   const open = { ...template, key: 'GY-7201', title: `${throughputOwnerTitle}: x`, stage: 'backlog' as const };
@@ -1074,5 +1077,165 @@ test('integration:throughput-owner-item — the loop files one open owner item f
     assert.equal(openThroughputOwner(work), null);
     await runCycle(master, state, effects, () => Date.now());
     assert.equal(owners.filed.length, 1, 'a verified release files nothing');
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+/**
+ * GY-1467: the owner filing is a pure function of its idempotency key, and a release whose owner
+ * closed on its answered needs-decision while the measurement still shows the stall gets one
+ * successor. The measurement is the test's: `stalled()` says whether this cycle's read shows the
+ * stall, and the read is asked every cycle (its detail names a re-measure time already past).
+ */
+async function successorLoop(directory: string, label: string) {
+  const { throughputOwnerClosure, throughputOwnerTitle } = await owned();
+  const { master, state } = await throughputCycle(directory);
+  const sha = commit(label), template = (await store.list()).find(item => item.stage === 'done')!;
+  const work: Work[] = [template];
+  let stalled = true, admitted = 0, measures = 0;
+  const stall = () => ({ kind: 'needs-decision' as const, owner: null, revision: sha, measuredAt: new Date().toISOString(), rule: populationRule, admitted: admitted++, delivered: 20, bound: 20,
+    reasons: [{ reason: 'a blocked report handed it to a master or operator to clear', deliveries: 20, coordinator: true }], finding: `session-free deliveries cannot accumulate on ${sha.slice(0, 12)}`, text: '' });
+  const measure: DaemonEffects['measureThroughput'] = async () => {
+    measures++;
+    return { outcome: 'recorded', revision: sha, verdict: 'unverified', settled: false, stall: stalled ? stall() : null,
+      detail: `Re-measured for ${sha.slice(0, 12)}: unverified: the claim; measured again from ${new Date(Date.now() - minute).toISOString()} as deliveries accumulate` };
+  };
+  // The predecessor: this release's owner, closed by the loop when its needs-decision was answered.
+  const predecessor = { ...template, id: randomUUID(), key: `GY-${label.length + 7300}`, title: `${throughputOwnerTitle}: ${sha.slice(0, 12)}`, stage: 'done' as const, delivery: undefined, policyRevision: 2,
+    criteria: [{ id: 'AC-1', text: 'A delivery whose only exclusions are superseded control-plane actions is admitted (the settled admission rule)', proofs: ['manual:throughput-claim-verified'] }] } as Work;
+  predecessor.closure = { kind: 'obsolete', ref: null, by: 'operator-agent', at: new Date().toISOString(), from: 'backlog',
+    reason: throughputOwnerClosure(predecessor, { revision: sha, verdict: 'unverified' }, 1)! } as Work['closure'];
+  return { master, state, sha, template, work, predecessor, measure, set stalled(value: boolean) { stalled = value; }, get measures() { return measures; } };
+}
+
+test('unit:throughput-owner-stable-body — the owner filing body is byte-identical for the same serving revision whether or not the filing cycle took a measurement: no in-cycle figure enters it, so a retry under the key replays its receipt', async () => {
+  const { throughputOwnerItem, throughputOwnerIdempotency } = await owned();
+  const first = JSON.stringify(throughputOwnerItem(deployedRevision));
+  assert.equal(JSON.stringify(throughputOwnerItem(deployedRevision)), first);
+  assert.doesNotMatch(first, /\d+ of the \d+ session-free deliveries/, 'no admitted figure: master status reads progress from the newest recorded measurement');
+  const predecessor = { key: 'GY-7300', policyRevision: 2, criteria: ['the settled rule'] };
+  assert.equal(JSON.stringify(throughputOwnerItem(deployedRevision, predecessor)), JSON.stringify(throughputOwnerItem(deployedRevision, { ...predecessor })));
+  assert.equal(throughputOwnerIdempotency(deployedRevision), `throughput-owner:${deployedRevision}`);
+
+  // The loop: filings fail on the backoff across cycles that read the stall and cycles that did not; every body sent is the same.
+  const directory = await temporaryDirectory('throughput-owner-stable');
+  try {
+    const loop = await successorLoop(directory, 'stable-body');
+    const work = [loop.template];
+    const sent: { body: string; key: string; stalled: boolean }[] = [];
+    let stalled = true;
+    const effects = { ...cycleEffects(() => work, loop.sha, loop.measure),
+      fileThroughputOwner: async (input: Parameters<NonNullable<DaemonEffects['fileThroughputOwner']>>[0], key: string) => { sent.push({ body: JSON.stringify(input), key, stalled }); throw new Error('Graphyard refused work (503): unavailable'); },
+      closeThroughputOwner: async () => null };
+    for (let cycle = 0; cycle < 12; cycle++) { stalled = cycle % 2 === 0; loop.stalled = stalled; await runCycle(loop.master, loop.state, effects, () => Date.now()); }
+    assert.ok(sent.some(entry => entry.stalled) && sent.some(entry => !entry.stalled), 'filed on cycles with and without the stall');
+    assert.deepEqual([...new Set(sent.map(entry => entry.body))], [JSON.stringify(throughputOwnerItem(loop.sha))]);
+    assert.deepEqual([...new Set(sent.map(entry => entry.key))], [`throughput-owner:${loop.sha}`]);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('unit:throughput-owner-successor-filed — with no owner open because the release\'s owner closed on an answered needs-decision, a measurement still showing the stall files a successor carrying the settled admission rule under a key fresh per successor', async () => {
+  const directory = await temporaryDirectory('throughput-owner-successor');
+  try {
+    const loop = await successorLoop(directory, 'successor-filed');
+    loop.work.push(loop.predecessor);
+    const owners = ownerEffects(loop.work, loop.template);
+    const effects = { ...cycleEffects(() => loop.work, loop.sha, loop.measure), ...owners.effects };
+    // Without the stall nothing is filed: an answered release with no stall needs no vehicle.
+    loop.stalled = false;
+    await runCycle(loop.master, loop.state, effects, () => Date.now());
+    assert.equal(owners.filed.length, 0, 'no stall, no successor');
+    assert.equal(loop.state.actions[`throughput:owner:${loop.sha}`], undefined, 'and the burned release key is never retried');
+    // The stall stands: one successor, in this filing cycle.
+    loop.stalled = true;
+    await runCycle(loop.master, loop.state, effects, () => Date.now());
+    const key = `throughput-owner:${loop.sha}:${loop.predecessor.key}:2`;
+    assert.deepEqual(owners.filed.map(entry => entry.key), [key]);
+    const successor = loop.work.at(-1)!;
+    assert.match(successor.title, new RegExp(`: ${loop.sha.slice(0, 12)} \\(succeeds ${loop.predecessor.key}\\)$`));
+    assert.match(successor.description, new RegExp(`succeeds ${loop.predecessor.key}, closed when its needs-decision was answered by its requirements revision 2`));
+    assert.ok(successor.description.includes(loop.predecessor.criteria[0].text), 'it carries the settled admission rule');
+    assert.equal(loop.state.actions[`throughput:owner:${loop.sha}:${loop.predecessor.key}:2`].state, 'done');
+    // It is the open owner the needs-decision is asked on.
+    assert.match(loop.state.actions[`escalation:throughput:${successor.key}:1`].detail, new RegExp(`^needs decision on ${successor.key}:`));
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('unit:throughput-owner-single-successor — at most one successor per (release, answered revision): a standing stall with an open owner raises no second decision and files no duplicate', async () => {
+  const directory = await temporaryDirectory('throughput-owner-single');
+  try {
+    const loop = await successorLoop(directory, 'single-successor');
+    loop.work.push(loop.predecessor);
+    const owners = ownerEffects(loop.work, loop.template);
+    let fail = 1;
+    const effects = { ...cycleEffects(() => loop.work, loop.sha, loop.measure), ...owners.effects,
+      fileThroughputOwner: async (input: Parameters<typeof owners.effects.fileThroughputOwner>[0], key: string) => {
+        if (fail-- > 0) throw new Error('control plane unavailable');
+        return owners.effects.fileThroughputOwner(input, key);
+      } };
+    // A failed successor filing is retried on the backoff, even on a cycle whose read shows no stall.
+    await runCycle(loop.master, loop.state, effects, () => Date.now());
+    assert.equal(loop.state.actions[`throughput:owner:${loop.sha}:${loop.predecessor.key}:2`].state, 'failed');
+    loop.stalled = false;
+    for (let cycle = 0; cycle < 4 && owners.filed.length === 0; cycle++) await runCycle(loop.master, loop.state, effects, () => Date.now());
+    assert.equal(owners.filed.length, 1, 'filed on the retry');
+    const successor = loop.work.at(-1)!;
+    loop.stalled = true;
+    for (let cycle = 0; cycle < 6; cycle++) {
+      const ran = await runCycle(loop.master, loop.state, effects, () => Date.now());
+      assert.ok(!ran.actions.some(action => action.kind === 'escalation' && action.work !== successor.key), 'no decision on any other item');
+    }
+    assert.equal(owners.filed.length, 1, 'no duplicate while the successor is open');
+    const raised = Object.keys(loop.state.actions).filter(key => key.startsWith('escalation:throughput:'));
+    assert.deepEqual(raised, [`escalation:throughput:${successor.key}:1`], 'one decision, raised once, on the open successor');
+    assert.equal(loop.state.actions[raised[0]].attempts, 1);
+    // Its own decision answered, it closes; the next stalled read files its one successor under its own key, and no more.
+    successor.policyRevision = 2;
+    await runCycle(loop.master, loop.state, effects, () => Date.now());
+    assert.deepEqual(owners.closed.map(entry => entry.key), [successor.key]);
+    for (let cycle = 0; cycle < 6; cycle++) await runCycle(loop.master, loop.state, effects, () => Date.now());
+    assert.deepEqual(owners.filed.map(entry => entry.key), [`throughput-owner:${loop.sha}:${loop.predecessor.key}:2`, `throughput-owner:${loop.sha}:${successor.key}:2`]);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('unit:throughput-budgets-verbatim — GY-87\'s budgets and the stall text stay as stated', async () => {
+  const { throughputStallBound, throughputStallText } = await owned();
+  const { actionIdleMs } = await import('../src/model/actions.js');
+  assert.deepEqual({ ...throughputClaim }, { item: 'GY-87', statement: 'Stateless executors drive routine deliveries with no master session running: first-submit-to-merge p50 at most 30 minutes, and no item idle but actionable for longer than 5 minutes.',
+    submitToMergeP50Ms: 30 * 60_000, idleActionableMs: actionIdleMs, minimumDeliveries: 10 });
+  assert.equal(actionIdleMs, 5 * 60_000);
+  assert.equal(throughputStallBound, 20);
+  const stall = { kind: 'needs-decision' as const, owner: 'GY-7400', revision: deployedRevision, measuredAt: '2026-10-07T15:30:06.788Z', rule: populationRule, admitted: 0, delivered: 369, bound: 20, reasons: [], finding: 'FINDING' };
+  assert.equal(throughputStallText(stall), 'needs decision on GY-7400: FINDING. Decide whether the population rule or the coordination that leaves these fingerprints changes; the budgets stay as GY-87 stated them (measured 2026-10-07T15:30:06.788Z)');
+  assert.equal(throughputStallText({ ...stall, owner: null }), 'needs decision on the item that owns the verification (the loop files it): FINDING. Decide whether the population rule or the coordination that leaves these fingerprints changes; the budgets stay as GY-87 stated them (measured 2026-10-07T15:30:06.788Z)');
+});
+
+test('integration:throughput-owner-refile-replay — a filing the control plane refuses with the idempotency-mismatch 409 is a failed deployment action naming the refusal, and the next cycle\'s retry with the stable body is answered from the stored receipt', async () => {
+  const { throughputOwnerItem } = await owned();
+  const directory = await temporaryDirectory('throughput-owner-replay');
+  try {
+    const loop = await successorLoop(directory, 'refile-replay');
+    const key = `throughput-owner:${loop.sha}`, operatorAgent: Principal = { id: 'operator-agent-replay', role: 'admin' };
+    // An earlier filing under the key, from a cycle that took no measurement, landed on the plane and
+    // stored its receipt; its reply never reached the loop, whose snapshot does not show it yet.
+    const landed = await engine.execute(operatorAgent, 'create', null, throughputOwnerItem(loop.sha), key);
+    let legacy = true;
+    const effects = { ...cycleEffects(() => loop.work, loop.sha, loop.measure), closeThroughputOwner: async () => null,
+      fileThroughputOwner: async (input: ReturnType<typeof throughputOwnerItem>, idempotency: string) => {
+        // The pre-GY-1467 body on a measuring cycle: the in-cycle admitted count written into it.
+        const body = legacy ? { ...input, description: input.description.replace(`serves, ${loop.sha}.`, `serves, ${loop.sha}, with 0 of the 10 session-free deliveries it is judged over admitted.`) } : input;
+        legacy = false;
+        const filed = await engine.execute(operatorAgent, 'create', null, body, idempotency);
+        if (!loop.work.some(item => item.id === filed.id)) loop.work.push(filed);
+        return filed;
+      } };
+    await runCycle(loop.master, loop.state, effects, () => Date.now());
+    const action = () => loop.state.actions[`throughput:owner:${loop.sha}`];
+    assert.equal(action().state, 'failed');
+    assert.equal(action().kind, 'deployment');
+    assert.match(action().detail, /Could not file the item that owns GY-87's throughput verification on .*: .*Idempotency key reused with different input/);
+    for (let cycle = 0; cycle < 4 && action().state === 'failed'; cycle++) await runCycle(loop.master, loop.state, effects, () => Date.now());
+    assert.equal(action().state, 'done', 'the retry clears the failure');
+    assert.match(action().detail, new RegExp(`^Filed ${landed.key} `), 'answered from the stored receipt: the item that landed, not a second one');
+    assert.equal((await store.list()).filter(item => item.title === landed.title).length, 1);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });

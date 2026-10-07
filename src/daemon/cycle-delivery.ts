@@ -10,7 +10,7 @@ import { record } from './effects.js';
 import type { Cycle } from './cycle.js';
 import { defaultDeploymentReuseMinutes, defaultPromoteEveryMinutes, deploymentDetail, deploymentStepBudgetMs, promotionCycle, promotionWorkflow, reusableDeployment, stillVerifying, withinDeploymentBudget } from './deployment.js';
 import { mainGuardAttention } from '../main-guard.js';
-import { openThroughputOwner, throughputOwnerClosure, throughputOwnerItem, throughputRemeasureAt, throughputStallText, type ThroughputStall } from '../throughput.js';
+import { openThroughputOwner, throughputOwnerClosure, throughputOwnerIdempotency, throughputOwnerItem, throughputOwnerPredecessor, throughputRemeasureAt, throughputStallText, type ThroughputOwnerPredecessor, type ThroughputStall } from '../throughput.js';
 
 /**
  * GY-710. Wake the item's observation job for a step refused on a stale observation — a rework —
@@ -174,7 +174,7 @@ export async function deploymentStep(cycle: Cycle) {
   //        needs-decision no longer holds it back, so the measurement never stands past that bound.
   const verified = observed !== stillVerifying && observed.ok ? state.deployment : null, measure = effects.measureThroughput;
   if (measure && verified && verified.source !== 'unavailable' && verified.sha) {
-    const key = `throughput:${verified.sha}`, previous = state.actions[key], owner = openThroughputOwner(snapshot.work);
+    const key = `throughput:${verified.sha}`, previous = state.actions[key];
     let stall: ThroughputStall | null = null;
     if (throughputAskDue(previous, state.cycle, now())) {
       const measured = await withinDeploymentBudget(state, 'throughput', () => measure(snapshot.work, verified.sha!), deadline, now);
@@ -193,7 +193,7 @@ export async function deploymentStep(cycle: Cycle) {
         stall = outcome?.stall ?? null;
       }
     }
-    await throughputOwnerStep(cycle, verified.sha, owner, stall);
+    await throughputOwnerStep(cycle, verified.sha, snapshot.work, stall);
   }
 
   // 7b. The second confidence layer. For each delivery whose policy asks for a smoke proof: record
@@ -273,11 +273,13 @@ export function answeredVerdict(answer: DaemonAction | undefined): 'verified' | 
 }
 
 /**
- * The loop's action keys for the owner item of a release (filed once per release) and for the
- * needs-decision asked on an owner, keyed by the owner's requirements revision when it was raised,
- * so only a revision applied after it answers it (`throughputOwnerAnswered`).
+ * The loop's action keys for the owner item of a release (filed once per release, and a successor
+ * once per answered predecessor, GY-1467) and for the needs-decision asked on an owner, keyed by the
+ * owner's requirements revision when it was raised, so only a revision applied after it answers it
+ * (`throughputOwnerAnswered`).
  */
-export const throughputOwnerKey = (revision: string) => `throughput:owner:${revision}`;
+export const throughputOwnerKey = (revision: string, predecessor: Pick<ThroughputOwnerPredecessor, 'key' | 'policyRevision'> | null = null) =>
+  `throughput:owner:${revision}${predecessor ? `:${predecessor.key}:${predecessor.policyRevision}` : ''}`;
 export const throughputEscalationKey = (owner: string, policyRevision: number) => `escalation:throughput:${owner}:${policyRevision}`;
 /** The owner's requirements revision at which the loop raised its needs-decision (the earliest, should a key repeat), or null when it raised none. */
 export function throughputEscalatedAt(actions: Record<string, DaemonAction>, owner: Pick<Work, 'key'>): number | null {
@@ -291,32 +293,49 @@ export function throughputEscalatedAt(actions: Record<string, DaemonAction>, own
  * GY-1438: the item that owns GY-87's verification on the serving release, every cycle the
  * deployment verified. An open owner is closed once the release's answer verified the claim or its
  * needs-decision was answered (`throughputOwnerClosure`), and never otherwise. With none open, an
- * unverified answer files one, once per release: a release whose owner was closed on an answered
- * decision is not given a second, and the next release files afresh. A measurement showing the
+ * unverified answer files one, once per release. GY-1467: a release whose owner was closed on an
+ * answered decision while its newest measurement still shows the stall — the answered rule is not
+ * yet served where the measurement runs — gets one successor per (release, answered revision),
+ * carrying the settled rule under a key of its own, retried on the backoff until filed; without the
+ * stall it gets none, and the next release files afresh. Every body is a pure function of its
+ * idempotency key, so a retry after a refusal or a lost reply is answered from the stored receipt.
+ * A measurement showing the
  * population cannot accumulate raises the typed needs-decision on the owner once per owner: it
  * stands until answered, so a re-measure that finds the same — or more of the same — never raises
  * it again. Filing and closing go through the operator-agent; a failure backs off on the action.
  */
-async function throughputOwnerStep(cycle: Pick<Cycle, 'state' | 'effects' | 'now' | 'performed'>, revision: string, open: Work | null, stall: ThroughputStall | null) {
+async function throughputOwnerStep(cycle: Pick<Cycle, 'state' | 'effects' | 'now' | 'performed'>, revision: string, work: Work[], stall: ThroughputStall | null) {
   const { state, effects, now, performed } = cycle, answer = state.actions[`throughput:${revision}`];
   const verdict = answeredVerdict(answer);
-  const ownerKey = throughputOwnerKey(revision), ownerAction = state.actions[ownerKey];
-  const note = (work: string | null, outcome: DaemonAction['state'], detail: string) => record(state, ownerKey, { kind: 'deployment', work, principal: null, state: outcome, detail, attempts: (ownerAction?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist);
-  let owner = open;
+  const note = (actionKey: string, work: string | null, outcome: DaemonAction['state'], detail: string) =>
+    record(state, actionKey, { kind: 'deployment', work, principal: null, state: outcome, detail, attempts: (state.actions[actionKey]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist);
+  const file = async (predecessor: ThroughputOwnerPredecessor | null) => {
+    const actionKey = throughputOwnerKey(revision, predecessor);
+    try {
+      const filed = await effects.fileThroughputOwner!(throughputOwnerItem(revision, predecessor), throughputOwnerIdempotency(revision, predecessor));
+      if (filed) performed.push(await note(actionKey, filed.key, 'done', `Filed ${filed.key} to own GY-87's throughput verification on ${revision.slice(0, 12)}${predecessor ? `, succeeding ${predecessor.key} (answered by its requirements revision ${predecessor.policyRevision}) while the measurement still shows the stall` : ''}; it closes once the claim verifies or its needs-decision is answered`));
+      return filed;
+    } catch (error) {
+      performed.push(await note(actionKey, null, 'failed', `Could not file the item that owns GY-87's throughput verification on ${revision.slice(0, 12)}${predecessor ? ` succeeding ${predecessor.key}` : ''}: ${message(error)}`));
+      return null;
+    }
+  };
+  let owner = openThroughputOwner(work);
   if (owner) {
     // Without a reason it stays open: the claim is not verified and its needs-decision is not answered.
+    const ownerKey = throughputOwnerKey(revision), ownerAction = state.actions[ownerKey];
     const reason = throughputOwnerClosure(owner, { revision, verdict }, throughputEscalatedAt(state.actions, owner));
     if (reason) {
       if (effects.closeThroughputOwner && (ownerAction?.state !== 'failed' || readyToRetry(ownerAction, state.cycle))) try {
-        if (await effects.closeThroughputOwner(owner, reason, `throughput-owner:close:${owner.id}:${owner.revision}`)) performed.push(await note(owner.key, 'done', `Closed ${owner.key}: ${reason}`));
-      } catch (error) { performed.push(await note(owner.key, 'failed', `Could not close ${owner.key}: ${message(error)}`)); }
+        if (await effects.closeThroughputOwner(owner, reason, `throughput-owner:close:${owner.id}:${owner.revision}`)) performed.push(await note(ownerKey, owner.key, 'done', `Closed ${owner.key}: ${reason}`));
+      } catch (error) { performed.push(await note(ownerKey, owner.key, 'failed', `Could not close ${owner.key}: ${message(error)}`)); }
       return;
     }
-  } else if (verdict === 'unverified' && effects.fileThroughputOwner && ownerAction?.state !== 'done' && readyToRetry(ownerAction, state.cycle)) {
-    try {
-      const filed = await effects.fileThroughputOwner(throughputOwnerItem(revision, stall?.admitted ?? null), `throughput-owner:${revision}`);
-      if (filed) { owner = filed; performed.push(await note(filed.key, 'done', `Filed ${filed.key} to own GY-87's throughput verification on ${revision.slice(0, 12)}; it closes once the claim verifies or its needs-decision is answered`)); }
-    } catch (error) { performed.push(await note(null, 'failed', `Could not file the item that owns GY-87's throughput verification on ${revision.slice(0, 12)}: ${message(error)}`)); }
+  } else if (effects.fileThroughputOwner) {
+    const predecessor = throughputOwnerPredecessor(work, revision), action = state.actions[throughputOwnerKey(revision, predecessor)];
+    // A successor is filed in the cycle whose measurement shows the stall, and its failed filing retried after.
+    const due = action?.state !== 'done' && readyToRetry(action, state.cycle);
+    if (due && (predecessor ? stall !== null || action?.state === 'failed' : verdict === 'unverified')) owner = await file(predecessor);
   }
   if (!stall || !owner || throughputEscalatedAt(state.actions, owner) !== null) return;
   performed.push(await record(state, throughputEscalationKey(owner.key, owner.policyRevision), { kind: 'escalation', work: owner.key, principal: null, state: 'done', detail: throughputStallText({ ...stall, owner: owner.key }), attempts: 1, cycle: state.cycle }, now(), effects.persist));
