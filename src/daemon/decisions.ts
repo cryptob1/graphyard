@@ -229,8 +229,8 @@ export function blockerScopeDecision(work: Work): RoutineDecision | null {
  * Recovery releases a delivered item whose supervisor is still quarantined. A merge decision is
  * needed only where automatic merging is off, and then for the exact candidate that is mergeable.
  */
-export function routineDecision(work: Work, config: ReviewCapConfig, now: number, assessment?: ContainmentAssessment | null, baseFailed?: ReadonlySet<string>, exhausted: readonly ExhaustedProof[] = [], mechanical: readonly MechanicalFixRequest[] = []): RoutineDecision | null {
-  const needed = neededDecision(work, config, baseFailed, exhausted, mechanical);
+export function routineDecision(work: Work, config: ReviewCapConfig, now: number, assessment?: ContainmentAssessment | null, baseFailed?: ReadonlySet<string>, exhausted: readonly ExhaustedProof[] = [], mechanical: readonly MechanicalFixRequest[] = [], refused: readonly RefusedAttestation[] = []): RoutineDecision | null {
+  const needed = neededDecision(work, config, baseFailed, exhausted, mechanical, refused);
   if (!needed) return null;
   // None attests anything about a worker: a merge is of a mergeable candidate, a triage closure of an unreleased backlog item,
   // and an attestation's approver judges the proof.
@@ -248,7 +248,7 @@ export function routineDecision(work: Work, config: ReviewCapConfig, now: number
  * What the item calls for, before asking whether the loop may attest that its worker is stopped.
  * `baseFailed` names required checks the base head fails too (GY-528); `exhausted`, spent producer requests (GY-496).
  */
-export function neededDecision(work: Work, config: ReviewCapConfig, baseFailed?: ReadonlySet<string>, exhausted: readonly ExhaustedProof[] = [], mechanical: readonly MechanicalFixRequest[] = []): RoutineDecision | null {
+export function neededDecision(work: Work, config: ReviewCapConfig, baseFailed?: ReadonlySet<string>, exhausted: readonly ExhaustedProof[] = [], mechanical: readonly MechanicalFixRequest[] = [], attestRefusals: readonly RefusedAttestation[] = []): RoutineDecision | null {
   if (work.stage === 'done') {
     return work.containmentQuarantine
       ? { action: 'recover', reason: `${work.key} is delivered and still fenced by its epoch ${work.containmentQuarantine.epoch} containment quarantine; recovery releases it without touching the delivery.`, binding: String(work.containmentQuarantine.epoch) } : null;
@@ -287,6 +287,8 @@ export function neededDecision(work: Work, config: ReviewCapConfig, baseFailed?:
   if (ci) return { action: 'rework', ...ci };
   const spent = exhaustedProofRework(work, exhausted);
   if (spent) return { action: 'rework', ...spent };
+  const attestRefused = refusedAttestationRework(work, attestRefusals);
+  if (attestRefused) return { action: 'rework', ...attestRefused };
   // The operator answered a product question the head was built on provisionally, and the answer
   // differs from that recommendation (GY-259): the head no longer builds what was asked.
   const research = researchRework(work);
@@ -761,6 +763,33 @@ export function approvalStep(watch: ApprovalWatch, decision: { id?: string; acti
 /** Every gate green on a submitted candidate: what "mergeable" means to the cycle and its budget. */
 export const mergeableCandidate = (work: Work) => work.stage === 'merge' && !!work.candidate && !work.violations.length && work.gates.every(gate => gate.passed);
 /** GY-831. The repeated merge refusal the control plane recorded for exactly the current candidate that calls for a rework decision, or null. */
+/**
+ * GY-1394. The refusal an approver recorded on an attest decision, as the watch keeps it, or null.
+ * Only an attestation of a pass bound to a head counts: the refusal judges exactly that head.
+ */
+export function refusedAttestationWatch(judged: { action?: string; state: string; input?: any; refusal?: { approver: string; reason: string; at?: string } | null } | null | undefined): ApprovalWatch['refusal'] {
+  const input = judged?.input;
+  if (!judged || judged.state !== 'refused' || judged.action !== 'attest' || input?.result !== 'pass' || typeof input.sha !== 'string' || typeof input.baseSha !== 'string' || typeof input.policyRevision !== 'number') return null;
+  return { approver: judged.refusal?.approver ?? 'its approver', reason: boundDetail(judged.refusal?.reason ?? 'no reason recorded', 1200), at: judged.refusal?.at ?? new Date().toISOString(),
+    proof: String(input.proof).slice(0, 200), sha: input.sha, baseSha: input.baseSha, policyRevision: input.policyRevision };
+}
+/** A refused attestation of the current head, as `refusedAttestationWatch` keeps it. */
+export interface RefusedAttestation { decision: string; refusal: NonNullable<ApprovalWatch['refusal']> }
+/**
+ * GY-1394. The rework a refused attestation of exactly the current head calls for, or null. The
+ * approver judged the head and found the manual proof does not hold on it; the refusal stands for
+ * that head (GY-141), so nothing but a new head can pass the proof. Before this the refusal was
+ * escalated, and a master turned it into a rework by hand that a second approver then judged
+ * (GY-1098 on 2026-10-03, twice). The server applies it with no approver: the refusal is its ground.
+ */
+export function refusedAttestationRework(work: Work, refused: readonly RefusedAttestation[]): { reason: string; binding: string } | null {
+  const candidate = work.candidate;
+  if (!work.submission || work.reworkRequested || !candidate || work.stage === 'done' || work.observation?.merged) return null;
+  const entry = refused.find(({ refusal }) => refusal.sha === candidate.sha && refusal.baseSha === candidate.baseSha && refusal.policyRevision === work.policyRevision);
+  if (!entry) return null;
+  return { reason: `${work.key}: ${entry.refusal.approver} refused the attestation of ${entry.refusal.proof} on candidate ${candidate.sha.slice(0, 12)} (decision ${entry.decision}): "${boundDetail(entry.refusal.reason, 1200)}". The refusal stands for this head, so the item returns to a worker to fix what it names and push a new head, whose attestation is requested afresh.`,
+    binding: `${candidate.sha}:attest-refused:${entry.decision}` };
+}
 export function repeatedMergeRefusal(work: Pick<Work, 'mergeRefusal' | 'candidate' | 'policyRevision'>) {
   const refusal = work.mergeRefusal, candidate = work.candidate;
   return refusal && refusal.action === 'rework' && candidate && refusal.sha === candidate.sha && refusal.baseSha === candidate.baseSha && refusal.policyRevision === work.policyRevision ? refusal : null;

@@ -7,6 +7,7 @@ import type { Store } from './store.js';
 import { boundedSnapshot } from './store/bounded-snapshot.js';
 import { applyWorkDelta, type DeltaOp } from './store/snapshot-delta.js';
 import { workIdByRef } from './store/locked-read.js';
+import { laneApprover } from './model/rework-ground.js';
 
 /**
  * Interventions read from the ledger (GY-98; see model/interventions.ts for the concept).
@@ -26,7 +27,7 @@ import { workIdByRef } from './store/locked-read.js';
 
 /** The event kinds the fold reads. Every other row of the ledger is left unread. */
 export const interventionLedgerKinds = [
-  'rework', 'decision.requested', 'decision.failed', 'decision.withdrawn', 'decision.stale',
+  'rework', 'decision.requested', 'decision.approved', 'decision.failed', 'decision.withdrawn', 'decision.stale',
   'scope', 'autoscope', 'requirements', 'blocked', 'unblock',
   'merge.reconciliation.refused', 'merge.operator-authorized', 'merge.reconciled',
   'quarantine', 'settle', 'autosettle', 'recover', 'lease.expired', 'escalation.resolved',
@@ -152,7 +153,7 @@ interface Ask { seq: number; at: string; stage: Stage | null; kind: 'scope-reque
 interface WorkState {
   key: string | null; title: string | null; stage: Stage | null; plannedFiles: string[] | null;
   asks: Ask[];
-  reworkDecision: { seq: number; at: string; id: string; stage: Stage | null } | null;
+  reworkDecision: { seq: number; at: string; id: string; stage: Stage | null; self?: boolean } | null;
   bypass: { seq: number; at: string; mergeSha: string; blocked: string; stage: Stage | null } | null;
   quarantine: { seq: number; at: string; epoch: number; concernAt: string | null; stage: Stage | null } | null;
   escalations: Map<string, { seq: number; at: string; reason: string; actor: string; stage: Stage | null }>;
@@ -269,16 +270,23 @@ export function foldInterventions(rows: InterventionLedgerRow[], work: readonly 
         if (row.payload?.action === 'rework') entry.reworkDecision = { seq: row.seq, at: row.at, id: row.payload.id, stage };
         break;
       }
+      case 'decision.approved': {
+        // Approved by the control plane itself — its risk lane (GY-883) or the ground the record
+        // shows (GY-1394) — nobody stepped in, so the rework it applies is no signal.
+        if (entry.reworkDecision && entry.reworkDecision.id === row.payload?.id && row.actor === laneApprover) entry.reworkDecision.self = true;
+        break;
+      }
       case 'decision.failed': case 'decision.withdrawn': case 'decision.stale': {
         if (entry.reworkDecision?.id === row.payload?.id) entry.reworkDecision = null;
         break;
       }
       case 'rework': {
+        const self = !!entry.reworkDecision?.self && !entry.asks.length;
         const sources = [...entry.asks.flatMap(ask => ask.sources), ...(entry.reworkDecision ? [{ seq: entry.reworkDecision.seq, kind: 'decision.requested' }] : []), source];
         const opened = [entry.reworkDecision?.at, ...entry.asks.map(ask => ask.at)].filter((at): at is string => !!at).sort()[0] ?? row.at;
         const candidate = row.work?.candidate, submission = row.work?.submission;
         const blocked = candidate ? `candidate ${candidate.sha.slice(0, 12)} (PR #${candidate.pr})` : submission ? `PR #${submission.pr}` : `attempt ${row.work?.epoch ?? '?'}`;
-        emit(row, 'rework', { id: entry.reworkDecision ? `rework:${row.workId}:${entry.reworkDecision.id}` : undefined, requestedAt: opened, blocked, stage: entry.asks[0]?.stage ?? entry.reworkDecision?.stage ?? stage, resolvedAt: row.at, resolvedBy: row.actor, resolution: text(details.reason ?? details.intent?.reason, 'rework authorized'), trigger: entry.asks[0]?.kind ?? (entry.reworkDecision ? 'decision' : 'direct'), sources });
+        if (!self) emit(row, 'rework', { id: entry.reworkDecision ? `rework:${row.workId}:${entry.reworkDecision.id}` : undefined, requestedAt: opened, blocked, stage: entry.asks[0]?.stage ?? entry.reworkDecision?.stage ?? stage, resolvedAt: row.at, resolvedBy: row.actor, resolution: text(details.reason ?? details.intent?.reason, 'rework authorized'), trigger: entry.asks[0]?.kind ?? (entry.reworkDecision ? 'decision' : 'direct'), sources });
         entry.asks = []; entry.reworkDecision = null;
         if (entry.quarantine && row.work && !row.work.quarantine) {
           emit(row, 'containment-settlement', { requestedAt: entry.quarantine.concernAt ?? entry.quarantine.at, blocked: `containment fence of epoch ${entry.quarantine.epoch}`, stage: entry.quarantine.stage, resolvedAt: row.at, resolvedBy: row.actor, resolution: 'fence discarded by rework', trigger: 'rework', sources: [{ seq: entry.quarantine.seq, kind: 'quarantine' }, source] });
@@ -349,7 +357,7 @@ export function foldInterventions(rows: InterventionLedgerRow[], work: readonly 
       if (ask.kind === 'scope-request' && !ask.trigger) continue;
       open(ask.kind === 'scope-request' ? 'scope-widening' : 'escalation', { requestedAt: ask.at, blocked: ask.blocked, stage: ask.stage, resolvedAt: null, resolvedBy: null, resolution: null, trigger: ask.trigger ?? ask.kind, sources: ask.sources });
     }
-    if (entry.reworkDecision) open('rework', { id: `rework:${id}:${entry.reworkDecision.id}`, requestedAt: entry.reworkDecision.at, blocked: item.candidate ? `candidate ${item.candidate.sha.slice(0, 12)} (PR #${item.candidate.pr})` : `attempt ${item.epoch}`, stage: entry.reworkDecision.stage, resolvedAt: null, resolvedBy: null, resolution: null, trigger: 'decision', sources: [{ seq: entry.reworkDecision.seq, kind: 'decision.requested' }] });
+    if (entry.reworkDecision && !entry.reworkDecision.self) open('rework', { id: `rework:${id}:${entry.reworkDecision.id}`, requestedAt: entry.reworkDecision.at, blocked: item.candidate ? `candidate ${item.candidate.sha.slice(0, 12)} (PR #${item.candidate.pr})` : `attempt ${item.epoch}`, stage: entry.reworkDecision.stage, resolvedAt: null, resolvedBy: null, resolution: null, trigger: 'decision', sources: [{ seq: entry.reworkDecision.seq, kind: 'decision.requested' }] });
     if (entry.bypass) open('bypass', { requestedAt: entry.bypass.at, blocked: entry.bypass.blocked, stage: entry.bypass.stage, resolvedAt: null, resolvedBy: null, resolution: null, trigger: 'refused-reconciliation', sources: [{ seq: entry.bypass.seq, kind: 'merge.reconciliation.refused' }] });
     if (entry.quarantine?.concernAt && item.containmentQuarantine) open('containment-settlement', { requestedAt: entry.quarantine.concernAt, blocked: `containment fence of epoch ${entry.quarantine.epoch}`, stage: entry.quarantine.stage, resolvedAt: null, resolvedBy: null, resolution: null, trigger: 'unsettled', sources: [{ seq: entry.quarantine.seq, kind: 'quarantine' }] });
     for (const escalation of standingEscalations(item)) {

@@ -8,7 +8,7 @@ import { recordSettledDecision } from '../model/project-memory.js';
 import { type ApprovalWatch, approvalWatchSchema, carriedSession, type DaemonActionKind, latencySampleSchema, message, scopeMeasurementSchema } from './state.js';
 import { decisionKey, scopeAnsweredAt, scopeKey, scopeOutcomeAnswered } from './reconcile.js';
 import { readyToRetry } from './sessions.js';
-import { approvalStep, recordWatchEnded, approverLaunchKey, attestDecisions, boundDetail, exhaustedProofKey, decisionReasonMax, detailChanged, fitDecisionReason, githubPause, handWatchPrefix, maxApproverCloses, maxRefusalAnswers, maxDecisionRequests, namePaths, neededDecision, observedFrom, overtakenDecision, resolveCovers, reworkDecisionReason, refusalNamedIn, standingNamedIn, adoptedOnRefusal, reworkObservationWait, routineDecision, type RoutineDecision, sameAnswers, scopeRoutineDecision, blockerScopeDecision, standingVerdict, withheldDecision } from './decisions.js';
+import { approvalStep, recordWatchEnded, approverLaunchKey, attestDecisions, boundDetail, exhaustedProofKey, decisionReasonMax, detailChanged, fitDecisionReason, githubPause, handWatchPrefix, maxApproverCloses, maxRefusalAnswers, maxDecisionRequests, namePaths, neededDecision, observedFrom, overtakenDecision, resolveCovers, reworkDecisionReason, refusalNamedIn, standingNamedIn, adoptedOnRefusal, reworkObservationWait, routineDecision, refusedAttestationWatch, type RefusedAttestation, type RoutineDecision, sameAnswers, scopeRoutineDecision, blockerScopeDecision, standingVerdict, withheldDecision } from './decisions.js';
 import { decisionReads, lateDecisionRead, resumedApplication } from './decision-reads.js';
 import { record } from './effects.js';
 import type { FaultKind } from '../model/fault-classes.js';
@@ -322,6 +322,10 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       // A refused widening is the worker's answer, not the master's: the control plane recorded it
       // on the item, and the worker reads there that it stays inside plannedFiles.
       if (watch.scope && judged) { await noteScopeOutcome(item, watch, judged); return; }
+      // A refused attestation is the approver's judgement that the head fails the proof (GY-1394): the
+      // routine step returns that head to a worker on it, applied with no second approver.
+      const attested = watch.action === 'attest' ? refusedAttestationWatch(judged) : null;
+      if (attested) { watch.refusal = attested; await note(`${base}:refused`, item, 'decision', 'done', `${step.detail}; ${item.key} returns to a worker on that refusal`); return; }
       await note(`escalation:decision-refused:${watch.decision}`, item, 'escalation', 'done', `${step.detail}. The loop does not request it again or launch another approver; answer the refusal: read it with graphyard master decisions ${item.key}, then request what the item needs with a reason that cites ${watch.decision} and gives what the refused request lacked, or act on the refusal instead`);
       return;
     }
@@ -398,10 +402,12 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     const scoped = settled.get(item.id) ?? item;
     const scope = scopeRoutineDecision(scoped, clock, findingsJudged(scoped)) ?? blockerScopeDecision(scoped);
     if (scope) item = scoped;
-    let decision = scope ?? routineDecision(item, config, clock, assessment, cycle.baseFailed.get(item.id), exhausted, mechanical);
+    // Attestations an approver refused on the item's head (GY-1394), kept on their watches.
+    const refused = Object.values(state.approvals).flatMap((watch): RefusedAttestation[] => watch.work === item.key && watch.action === 'attest' && watch.refusal ? [{ decision: watch.decision, refusal: watch.refusal }] : []);
+    let decision = scope ?? routineDecision(item, config, clock, assessment, cycle.baseFailed.get(item.id), exhausted, mechanical, refused);
     if (!decision) {
       // Still called for, only not attestable this cycle: its request is not one the item moved past.
-      const called = neededDecision(item, config, cycle.baseFailed.get(item.id), exhausted, mechanical);
+      const called = neededDecision(item, config, cycle.baseFailed.get(item.id), exhausted, mechanical, refused);
       if (called) unattestable.add(decisionKey(item, called));
       // The item needs the decision and the loop will not attest what it could not verify. Step 3b
       // has already escalated an open item whose fence this host assessed and could not settle.
@@ -420,7 +426,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     const woken = state.actions[`wake:observation:${item.id}`];
     let wait = decision.action === 'rework' ? reworkObservationWait(item, clock, pause, woken?.state === 'done' ? woken.at : null) : null;
     const fresh = wait && !pause && wake && !state.approvals[key] ? await wake(item, clock) : null;
-    const again = fresh && routineDecision(fresh, config, now(), assessment, fresh.candidate?.sha === item.candidate?.sha ? cycle.baseFailed.get(item.id) : undefined);
+    const again = fresh && routineDecision(fresh, config, now(), assessment, fresh.candidate?.sha === item.candidate?.sha ? cycle.baseFailed.get(item.id) : undefined, [], [], refused);
     if (fresh && again?.action !== 'rework') return noteWait(item, `${item.key}: woke its observation for a rework decision; the reading at ${fresh.observation?.at ?? 'unknown'} no longer calls for one`);
     if (fresh && again) { item = fresh; decision = again; key = decisionKey(item, decision); needed.add(key); wait = reworkObservationWait(item, now(), pause); }
     const watch = state.approvals[key];

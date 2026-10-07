@@ -24,7 +24,7 @@ Sessions start with a role-scoped digest (≤500 words) of decisions, recurring 
 - **Medium** (60 min): remainder; adds producer-run `unit:`/`integration:`.
 - **Low** (30 min): test-only, docs-only, single-module. Required CI, one approval; no producer proofs or `manual:` attestations.
 
-All lanes require `e2e:` proofs; low/medium reworks need no approver (recorded as approved by `graphyard-risk-lane`).
+All lanes require `e2e:` proofs; low/medium reworks need no approver (recorded as approved by `graphyard-risk-lane`). Neither does a rework in any lane whose ground the record shows on the exact head: a trusted proof failed on it, an approver refused its `manual:` attestation, or GitHub reports it conflicting (`src/model/rework-ground.ts`). The loop turns a refused attestation into that rework itself, and a rework the control plane approved is no [intervention](dashboard.md).
 
 ## Who holds which authority
 
