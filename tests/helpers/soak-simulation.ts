@@ -32,6 +32,9 @@ import { stoppedStates } from '../../src/daemon/effects.js';
 import { loopThroughputMeasurement, throughputClaim } from '../../src/throughput.js';
 import { type RunOptions, type RunRecord, type RunResult, type Runner } from '../../src/runner/types.js';
 import { type DiagnosticianEffects } from '../../src/daemon/diagnosis.js';
+import { type AcceptanceEffects, clearDrafts, draftsSettled } from '../../src/daemon/acceptance.js';
+import type { Goal, Landing } from '../../src/model/goal.js';
+import { recordLanding } from '../../src/server/routes/goals.js';
 import { terminalDecisions } from '../../src/cli/decision-report.js';
 import { Launcher } from '../../src/daemon/cycle.js';
 import { wakeOwnObservation } from '../../src/master/base-break-refresh.js';
@@ -119,7 +122,9 @@ import { type DiagnosisRun, type Failover, MANUAL, type MainGuardDay, PROOF, api
  * the review ledger the dispatcher's reconciliation keeps (GY-971), with the reviews GitHub holds,
  * and names the item whose first approval raises findings classified mechanical whose bot commit
  * the fresh read accepts (`applied`) and the one whose bot commit it rejects as a misclassification
- * (`rejected`).
+ * (`rejected`). `reviewCap` runs the day under that `reviewRoundCap`: each of `items` is sent back
+ * by a change request naming a BLOCKING: finding on every head through the one past the cap, and the
+ * approver refuses the capped rework request of each of `refused` (GY-1389).
  */
 export let days = 0;
 export async function simulateDay(options: { hours: number; backlog?: boolean; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number; working?: { from: number; retryAt: number } }; regression?: ('approvers-left-open' | 'docs-syncs-left-open')[]; headless?: boolean; handApprovers?: boolean; stranded?: boolean | 'resume'; staleRework?: boolean; staleMerge?: number; capacityWait?: { from: number; to: number }; diagnosisLimit?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; workspaceFailure?: { item: number; until: number }; credentialBlocked?: { recovers: number; never: number }; blockers?: boolean; retrying?: { worker: number; approver: number }; starved?: { items: number[]; dropFirst: number }; docs?: { budget: { total: number; perPage: number } }; dispatchFailing?: { constant: number; changing: number; refuseBlocks: number; unblockAfterMs: number }; mainGuard?: MainGuardDay; containment?: { failUntil: number; slowUntil: number; refuseSettle?: number }; mechanical?: { applied: number; rejected: number }; slowDecisions?: { from: number; to: number; ms: number }; slowObservation?: { from: number; to: number; attentionMs: number }; slowDeployment?: { from: number; to: number; observationMs: number }; selfProvision?: { redeployFails: { from: number; to: number } }; plan?: Partial<typeof basePlan>; github806?: boolean; remedies?: boolean;
@@ -144,7 +149,11 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
    */
   drained?: { finishAt: number; seeded: number };
   /** GY-1302: wire the loop's promotion drive over the day's moving main, with a stubbed ledger, run list and dispatch. */
-  promotion?: boolean }) {
+  promotion?: boolean;
+  /** GY-1389: the review-round cap, the items whose change requests name a blocking finding past it, and those whose capped round the approver refuses. */
+  reviewCap?: { cap: number; items: number[]; refused: number[] };
+  /** GY-1417: record three goals and wire the acceptance role (acceptanceWorld below). */
+  acceptance?: boolean }) {
   const dayStart = clock.now();
   // A day may restage the shared scenario: the day-scoped view of the plan is what every fault
   // below arms from, while each test's own assertions still read the shared base plan.
@@ -157,6 +166,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     // GY-1354: the slow-deployment day's deliveries ask for a smoke proof the loop requests from this workflow.
     : options.slowDeployment ? masterConfigSchema.parse({ ...soakConfig, run: { ...soakConfig.run, smokeWorkflow: 'smoke.yml' } })
     : options.decomposition ? masterConfigSchema.parse({ ...soakConfig, run: { ...soakConfig.run, research: { command: 'pi', model: 'research-pi-model' }, decomposition: { concurrency: options.decomposition.concurrency ?? 2 } } })
+    : options.reviewCap ? masterConfigSchema.parse({ ...soakConfig, reviewRoundCap: options.reviewCap.cap })
     : soakConfig;
   // The spent producer request (GY-496) is a main-day fault, like the blind window and the split:
   // the hand-approver, documentation and regression days exercise their own faults and would only
@@ -398,6 +408,12 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   }
   const numberOf = (work: Pick<Work, 'key'>) => items.findIndex(item => item.key === work.key) + 1;
   for (const n of plan.rework) github.verdicts.set(items[n - 1].key, ['CHANGES_REQUESTED']);
+  // GY-1389: a change request on every head through the first past the cap, each naming a blocking finding.
+  const cappedDay = options.reviewCap;
+  if (cappedDay) {
+    for (const n of cappedDay.items) github.verdicts.set(items[n - 1].key, Array.from({ length: cappedDay.cap + 1 }, () => 'CHANGES_REQUESTED' as const));
+    github.changeRequestBody = (key, review) => cappedDay.items.includes(numberOf({ key })) ? `AC-1 is judged on ${review.sha.slice(0, 12)}.\nBLOCKING: AC-1 is not met — ${key} skips the last frob.` : null;
+  }
   if (plan.unstable) github.unstable.add(items[plan.unstable - 1].key);
   if (plan.slowRecompute) github.slowRecompute.add(items[plan.slowRecompute - 1].key);
   if (plan.blockedMerge) github.blockedMerge.add(items[plan.blockedMerge - 1].key);
@@ -910,7 +926,8 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
 
   // ---- Approvers and producers: sessions the loop launches, each acting on the minute after. ----
   const wakes: { key: string; at: number }[] = [];
-  const approverPanes: string[] = [], approverWorks: string[] = [];
+  // The decision each launch judges beside its item (GY-1389: one approver per capped round).
+  const approverPanes: string[] = [], approverWorks: string[] = [], approverDecisions: string[] = [];
   /** A headless approver's verdict, applied as the approver identity; each run's launch is counted once it is. */
   const applyVerdict = (workId: string, run: string) => async (result: RunResult<DecidePayload>): Promise<Applied[]> => {
     if (!result.ok) return [];
@@ -978,7 +995,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     }
     await confine('approver', work.key, coordinatorRoot!);
     const agentName = approverSessionName(work, decision);
-    approverWorks.push(work.key);
+    approverWorks.push(work.key); approverDecisions.push(decision);
     const standing = (await api(principals.operatorAgent, 'GET', `work/${encodeURIComponent(work.id)}/decisions`)).decisions.find((entry: { id: string }) => entry.id === decision);
     // Only a reworked item's worker is still there to resubmit the head that overtakes the request;
     // on any other day the attestation is judged as asked.
@@ -1048,8 +1065,8 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
         herdr.status(pane, 'done');
         return;
       }
-      const refuseDue = !!options.refuseReworkOf?.includes(numberOf(work)) && !refused.some(entry => entry.key === work.key)
-        && current.action === 'rework';
+      const refuseDue = (!!options.refuseReworkOf?.includes(numberOf(work)) && !refused.some(entry => entry.key === work.key)
+        && current.action === 'rework') || (!!cappedDay?.refused.includes(numberOf(work)) && current.action === 'rework' && /:capped:/.test(current.input?.binding ?? ''));
       if (refuseDue) {
         await api(principals.approver, 'POST', `work/${work.id}/approve`, { action: 'refuse', decision, reason: `Refused: ${work.key}'s rework rests on grounds this approver does not accept` });
         refused.push({ key: work.key, decision });
@@ -1150,6 +1167,8 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   // operator-agent identity.
   const settings = diagnosticianSettings({ diagnostician: { invariantBoundMinutes: 30 } });
   const diagnosed: DiagnosisRun[] = [];
+  clearDrafts();
+  const acceptance = options.acceptance ? await acceptanceWorld(dayStart) : null;
   // GY-1092: for `diagnosisLimit` the provider refuses every run for its spent quota, naming no reset.
   const limited = () => !!options.diagnosisLimit && clock.now() - dayStart >= options.diagnosisLimit.from && clock.now() - dayStart < options.diagnosisLimit.to;
   const diagnostician: DiagnosticianEffects = {
@@ -1296,6 +1315,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
       return engine.execute(principals.operatorAgent, 'create', null, input, key);
     },
     diagnostician,
+    ...(acceptance ? { acceptance: acceptance.effects } : {}),
     baseSuccessions: async since => ({ tip: github.tip, successions: github.successions.filter(entry => github.commits.get(entry.commit)!.at >= Date.parse(since)), files: new Set(github.files) }),
     replan: (work, paths, reason) => api(principals.operatorAgent, 'POST', `work/${work.id}/requirements`, successorWidening(work, paths, reason)),
     // The scope scenarios run the loop's own deciding and widening effects: the rule decides the
@@ -2210,6 +2230,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
         if (options.slowDeployment) { deploymentDay.land(); await new Promise(resolve => setImmediate(resolve)); }
         const cycleStart = clock.now(); budgetDay.cycleSlow = 0;
         const result = await runCycle(config, state, effects, clock.now, launcher); cycles++;
+        if (acceptance) await draftsSettled();
         if (options.staleRelease) { staleReleaseDay.steps.push({ elapsed, ms: result.metrics.steps?.decisions?.ms ?? 0, backlogReads: staleReleaseDay.backlogReads }); staleReleaseDay.backlogReads = 0; }
         if (options.slowDecisions) budgetDay.cycles.push({ cycle: cycles - 1, elapsed, spentMs: clock.now() - cycleStart, slow: budgetDay.cycleSlow, deferred: [...state.decisionsDeferred] });
         if (options.slowDeployment) deploymentDay.cycles.push({ cycle: cycles - 1, elapsed, spentMs: clock.now() - cycleStart, cut: result.actions.some(action => action.kind === 'deployment' && /spent its \d+s budget/.test(action.detail)), pending: deploymentStep.deploymentReadsPending(state) });
@@ -2357,8 +2378,8 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   return { provisionDay, promotion, throughput, reconciled, outside, items, final, github, sessions, docsSyncRuns, lost, launches, violations, faulted, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, headless, herdr, hand, stranded, withdrawals, resumes, strandedLaunches, escalations, spent, attestations, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, guardReads, checkout, landingRefusals, foreignPane, previousWorktrees, closedLeased,
     mergeQueuePosts, config, refused, decideCalls, restarted, approverPanes, failing, herdrClosed: herdr.closed, diagnosisModel: settings.model, diagnosisRuns: diagnosed, baseBreak, capacityRefused, capacityLaunched, capacityWaiters,
     decided, misreads, prompts, screens, heldAccounts, approverAccounts, retryReset, exitedLive, exitedClosed, exitedRowsSeen, reassign, workspaceFailures, workspaceCooled, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, fenced, mergeStallSightings, master, baseFailure,
-    blockerEvents, blockerProbes, blockerDecisions, blockerActions, blockerKeysPeak, attempts, lanesSeen, laneApplications, approverWorks, failover, webhook, remedies, observeRequests, starvation, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size }, mechanical: { ledger, botRounds, misclassified, reviewHolds }, shared, charges: { ...charged, b: charged.b.length, instancesSeen: [...charged.instancesSeen], restarts: chargeRestarts },
-    wakes, staleMerges, restartLog, guardDay, budgetDay, observationDay, deploymentDay, decompositionDay: decompositionHistory, diagnosisRaces, diagnosisRequestRaces, transientRefused, lateReads, staleReleaseDay, drain };
+    blockerEvents, blockerProbes, blockerDecisions, blockerActions, blockerKeysPeak, attempts, lanesSeen, laneApplications, approverWorks, approverDecisions, failover, webhook, remedies, observeRequests, starvation, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size }, mechanical: { ledger, botRounds, misclassified, reviewHolds }, shared, charges: { ...charged, b: charged.b.length, instancesSeen: [...charged.instancesSeen], restarts: chargeRestarts },
+    wakes, staleMerges, restartLog, guardDay, budgetDay, observationDay, deploymentDay, decompositionDay: decompositionHistory, diagnosisRaces, diagnosisRequestRaces, transientRefused, lateReads, staleReleaseDay, drain, acceptanceDay: acceptance?.day ?? null };
 }
 
 /**
@@ -2390,3 +2411,88 @@ export function assertLaunchesConfined(day: { confined: { role: string; key: str
 // GY-612: the main day starts below the host's memory floor — the way the day that item records
 // began — and recovers a quarter hour in, so the only launch it holds back is the first item's.
 export const memoryDay = { memoryDip: { from: 0, until: 15 * minute } };
+
+/**
+ * GY-1417: the acceptance role's day. Three goals are recorded on the soak plane's real /api/goals
+ * and the loop drives them through `acceptanceStep` with headless runs faked and GitHub's pull
+ * requests held here. `signup`'s first open and first post fail and its first draft is refused;
+ * `billing`'s approved pull request is closed unmerged by a person; `audit`'s first draft run
+ * returns nothing and its first approved pull request conflicts with the base. The control plane's
+ * land answers waiting until half an hour after it was first asked, then merged.
+ */
+export async function acceptanceWorld(dayStart: number) {
+  const day = {
+    goals: {} as Record<string, string>, runs: [] as { goal: string; role: 'draft' | 'judge'; at: number }[], opens: [] as { goal: string; pr: number; revision: number; at: number }[],
+    posts: [] as { goal: string; ok: boolean; at: number }[], reads: [] as { pr: number; at: number }[], closes: [] as number[], lands: [] as { pr: number; at: number }[],
+    pulls: new Map<number, { goal: string; branch: string; head: string; state: 'open' | 'closed' | 'merged'; autoAt: number | null }>(),
+  };
+  for (const name of ['signup', 'billing', 'audit'])
+    day.goals[name] = (await api(principals.operatorAgent, 'POST', 'goals', { statement: `Customers can use ${name} without help`, users: ['Repository operators'], constraints: [], deployTarget: 'uat' })).key;
+  const named = (key: string) => Object.entries(day.goals).find(([, goal]) => goal === key)![0];
+  let next = 5000, openFailed = false, billingClosed = false, auditConflicted = false;
+  const runner = (role: 'draft' | 'judge', goal: Goal): Runner => ({ name: 'soak-acceptance', start<T>(_prompt: string, options: RunOptions<T>) {
+    const name = named(goal.key), drafts = day.runs.filter(run => run.goal === name && run.role === role).length;
+    day.runs.push({ goal: name, role, at: clock.now() - dayStart });
+    const failed = role === 'draft' && name === 'audit' && drafts < 2;
+    const outcome = `${name}-${goal.revision}`;
+    const payload = role === 'draft' ? { goal: goal.key, outcomes: [{ id: outcome, title: `A customer completes ${name}`, criteria: [`The ${name} page answers`], case: { id: outcome, title: `${name} answers`, tags: ['api'], target: 'uat', required: true,
+      steps: [{ kind: 'http', name: 'read the board', method: 'GET', path: '/api/board', status: 200 }] } }] }
+      : { goal: goal.key, verdict: name === 'signup' && goal.drafts === 1 ? 'refuse' : 'approve', reason: name === 'signup' && goal.drafts === 1 ? 'The case checks the board, not the sign-up' : 'Each outcome is what a customer asked for' };
+    const result: RunResult<T> = failed ? { ok: false, failure: { reason: 'no-payload', detail: 'the run ended without a graphyard_acceptance call' }, payloads: [] }
+      : { ok: true, tool: options.tool, payload: options.validate(payload), payloads: [] };
+    return { id: `soak-acceptance-${day.runs.length}`, events: [], onEvent: () => () => {}, cancel() {}, result: async () => result };
+  } });
+  const read = (pr: number) => {
+    day.reads.push({ pr, at: clock.now() - dayStart });
+    const pull = day.pulls.get(pr)!;
+    return { state: pull.state, mergeSha: pull.state === 'merged' ? sha('acceptance-merge', pr) : null, head: pull.head };
+  };
+  // POST /api/goals/:key/land as the control plane answers it, its GitHub held here: the merge lands half an hour after it is
+  // first asked; a person closes billing's first approved pull request instead, and audit's first conflicts with the base.
+  const land = async (goal: Goal) => {
+    const pr = goal.acceptance!.pr, pull = day.pulls.get(pr)!;
+    assert.equal(pull.head, goal.approval!.head, 'an acceptance pull request is landed only at its approved head');
+    day.lands.push({ pr, at: clock.now() - dayStart });
+    pull.autoAt ??= clock.now();
+    let state: Landing['state'] = 'waiting';
+    if (pull.goal === 'audit' && !auditConflicted) { auditConflicted = true; pull.state = 'closed'; state = 'conflicting'; }
+    else if (pull.state === 'open' && clock.now() - pull.autoAt >= 30 * minute) {
+      pull.state = pull.goal === 'billing' && !billingClosed ? 'closed' : 'merged';
+      billingClosed ||= pull.goal === 'billing';
+      state = pull.state;
+    }
+    const detail = state === 'conflicting' ? `acceptance pull request #${pr} conflicts with main` : state === 'closed' ? `acceptance pull request #${pr} was closed without merging` : state === 'merged' ? `#${pr} merged` : 'Required status check "test" is expected';
+    const landing: Landing = { state, detail, mergeSha: state === 'merged' ? sha('acceptance-merge', pr) : null };
+    if (state === 'waiting') return { goal, landing };
+    // Recorded as the land route records it: merged has no route of its own.
+    return { goal: await recordLanding(store, goal, landing, principals.operatorAgent), landing };
+  };
+  const effects: AcceptanceEffects = {
+    settings: diagnosticianSettings({}), cwd: coordinatorRoot!,
+    goals: async () => (await api(principals.coordinator, 'GET', 'goals?open=1')).goals,
+    runner: async (role, attempt, goal) => ({ runner: runner(role, goal), runtime: `soak-${attempt}`, model: attempt }),
+    open: async (goal, draft) => {
+      const name = named(goal.key), branch = `graphyard/${goal.key.toLowerCase()}-acceptance-${goal.revision}`;
+      if (name === 'signup' && !openFailed) { openFailed = true; throw new Error('gh pr create: HTTP 502'); }
+      const existing = [...day.pulls].find(([, pull]) => pull.branch === branch && pull.state === 'open');
+      const head = sha('acceptance', goal.key, goal.revision, JSON.stringify(draft));
+      if (existing) { existing[1].head = head; return { pr: existing[0], branch, head }; }
+      const pr = next++;
+      day.pulls.set(pr, { goal: name, branch, head, state: 'open', autoAt: null });
+      day.opens.push({ goal: name, pr, revision: goal.revision, at: clock.now() - dayStart });
+      return { pr, branch, head };
+    },
+    draft: async (goal, input) => {
+      const name = named(goal.key), first = !day.posts.some(entry => entry.goal === name);
+      day.posts.push({ goal: name, ok: !(name === 'signup' && first), at: clock.now() - dayStart });
+      if (name === 'signup' && first) throw new Error('Graphyard refused goals (502): Bad Gateway');
+      return api(principals.operatorAgent, 'POST', `goals/${goal.key}/draft`, input, `acceptance:${goal.id}:${goal.revision}`);
+    },
+    judge: (goal, judgement) => api(principals.approver, 'POST', `goals/${goal.key}/${judgement.verdict}`, { reason: judgement.reason }, `acceptance:${goal.id}:${goal.revision}:judged`),
+    pullRequest: async pr => read(pr),
+    land,
+    close: async pr => { const pull = day.pulls.get(pr)!; if (pull.state === 'open') pull.state = 'closed'; day.closes.push(pr); },
+    closed: (goal, pr, reason) => api(principals.operatorAgent, 'POST', `goals/${goal.key}/closed`, { pr, reason }, `acceptance:${goal.id}:${goal.revision}:closed`),
+  };
+  return { day, effects };
+}

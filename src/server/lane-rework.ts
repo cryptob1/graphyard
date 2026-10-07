@@ -6,16 +6,21 @@ import { assertDecisionAuthority, decisionPrecondition, requiredDecisionCapabili
 import { decisionRace, readDecisions, type DecisionRecord, type StaleRace } from './decision-ledger.js';
 import { applyThroughEngine, authenticated, bookkeepingRebase, findWork, receipt, record, requesterAuthority, staleEvent } from './decisions.js';
 import { withdrawDecision } from './decision-refusal.js';
+import { laneApprover, reworkGround } from '../model/rework-ground.js';
 import type { Services } from './routes.js';
+import { pastReviewCap } from '../review-cap.js';
 
 // A rework on a low- or medium-lane item needs no approver decision (GY-883 AC-2): the risk lane
-// approves and applies it. Approval and application are separate transactions for every action but
+// approves and applies it. So does one on any lane whose ground the record shows (GY-1394,
+// model/rework-ground.ts): a trusted proof failed on the head, an approver refused its attestation,
+// or the control plane's own test merge conflicts with its base (GitHub's reading alone is no
+// ground, GY-375). Approval and application are separate transactions for every action but
 // resolve and merge, so an interruption between them is settled here rather than left standing
 // approved: first only the lane's own (GY-1110), then any approver's — superseded once the item
 // moved past it (GY-1297), or resumed under its recorded approval (GY-1297, GY-1300).
 
-/** The ledger's approver of a rework its lane applied without an approver decision (GY-883). */
-export const laneApprover = 'graphyard-risk-lane';
+// The ledger's approver of a rework its lane (GY-883) or its recorded ground (GY-1394) applied without an approver decision.
+export { laneApprover } from '../model/rework-ground.js';
 
 /**
  * A decision approved whose application recorded no outcome (GY-1300): neither decision.applied,
@@ -64,13 +69,33 @@ export async function answerWith(services: Services, caller: Principal, key: str
   });
 }
 
+/**
+ * A rework past the review-round cap (GY-1118), as the loop requests it on `cappedReworkBinding`'s
+ * grounds (GY-1389): only an independent approver judges whether the finding is blocking, so no
+ * lane applies it. The binding is the requester's text, so it holds the round only while the record
+ * shows what it names: the item's current head, past its first review round, with the named
+ * reviewer's change request standing on it. Any other binding of that shape is applied as the lane would.
+ */
+export function cappedRework(input: unknown, work: Pick<Work, 'candidate' | 'observation' | 'pipeline'>): boolean {
+  const bound = /^([0-9a-f]{40}):capped:(.+)$/.exec(String((input as { binding?: unknown } | null)?.binding ?? ''));
+  const candidate = work.candidate, observation = work.observation;
+  if (!bound || !candidate || candidate.sha !== bound[1] || observation?.candidate?.sha !== candidate.sha || !pastReviewCap(work, 1)) return false;
+  const agent = observation.agentReview;
+  return observation.reviews.some(review => review.sha === candidate.sha && review.state === 'CHANGES_REQUESTED' && review.reviewer === bound[2])
+    || (!!agent && agent.sha === candidate.sha && !agent.approved && agent.verdict === 'changes-requested' && (agent.profile ?? agent.provider) === bound[2]);
+}
+
 export async function applyLaneRework(services: Services, requested: DecisionRecord): Promise<DecisionRecord> {
   const approved = await services.engine.store.transaction(async db => {
     const work = await findWork(db, requested.workId); demand(work, 'Work item not found', 404);
-    const decision = (await readDecisions(db, work!)).find(entry => entry.id === requested.id)!;
-    if (decision.state !== 'requested' || reworkNeedsApprover(work!) || decisionPrecondition(decision.action, decision.input, work!)) return decision;
-    const lane = itemLane(work!), reason = `the ${lane} risk lane applies a rework without an approver decision (GY-883)`;
-    await record(db, work!, laneApprover, 'decision.approved', { id: decision.id, action: decision.action, reason, requestedBy: decision.requestedBy, approver: { id: laneApprover, role: 'risk-lane' }, lane });
+    const history = await readDecisions(db, work!), decision = history.find(entry => entry.id === requested.id)!;
+    if (decision.state !== 'requested' || cappedRework(decision.input, work!) || decisionPrecondition(decision.action, decision.input, work!)) return decision;
+    // A high-lane rework still applies at once when the record itself is its ground (GY-1394); the
+    // ground is recorded in any lane, and the intervention fold reads it.
+    const lane = itemLane(work!), ground = reworkGround(work!, history);
+    if (reworkNeedsApprover(work!) && !ground) return decision;
+    const reason = ground && reworkNeedsApprover(work!) ? `${ground}, so the record is the rework's ground and no approver decision is needed (GY-1394)` : `the ${lane} risk lane applies a rework without an approver decision (GY-883)${ground ? `; the record shows its ground: ${ground}` : ''}`;
+    await record(db, work!, laneApprover, 'decision.approved', { id: decision.id, action: decision.action, reason, requestedBy: decision.requestedBy, approver: { id: laneApprover, role: 'risk-lane' }, lane, ...(ground ? { ground } : {}) });
     return (await readDecisions(db, work!)).find(entry => entry.id === requested.id)!;
   });
   return approvedUnapplied(approved) && approved.approvedBy === laneApprover ? resumeApproved(services, approved) : approved;

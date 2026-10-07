@@ -7,7 +7,7 @@
 
 ### Perpetual master loop
 
-`master verify-deployment GY-N` emits instructions from an isolated served-commit checkout and refuses releases *unobserved*, *stale* (rerun), not serving the merge, or already recorded. Without `--deployment-url`, the newest successful `productionEnvironment` deployment counts.
+`master verify-deployment GY-N` emits instructions from a served-commit checkout, refusing releases *unobserved*, *stale* (rerun), missing the merge, or recorded. Without `--deployment-url`, the newest successful [`productionEnvironment`](deployment.md#production-environment-name) (Railway: `<project> / production`) deployment counts.
 
 ## Lost worker before submission
 
