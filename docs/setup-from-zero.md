@@ -41,7 +41,7 @@ gy install --provider compose --repo OWNER/REPO --reviewer claude --apply
 
 ## 4. Register the GitHub App
 
-`--apply` serves and prints `http://127.0.0.1:4311` ([900 s, then `resume`](install.md#step-3-app-confirmation)), opening no browser; steps 8-9 run meanwhile. **HUMAN:** open it, click **Create GitHub App**, then install it on OWNER/REPO only. *Confirm access* may ask the human for a GitHub Mobile code. **Verify:** `github-app` passes; on `missing permissions`, run `gy github-setup --update-permissions --wait 600` and the human accepts it on the installation page ([permissions](github.md#app-permissions)).
+`--apply` serves `http://127.0.0.1:4311` and prints it; it opens no browser ([900 s, then `resume`](install.md#step-3-app-confirmation)); steps 8-9 run meanwhile. **HUMAN:** open it, click **Create GitHub App**, then install it on OWNER/REPO only. *Confirm access* may need the human's GitHub Mobile code. **Verify:** `github-app` passes; on `missing permissions`, run `gy github-setup --update-permissions --wait 600` and the human accepts it on the installation page ([permissions](github.md#app-permissions)).
 
 ## 5. Reviewer and revert-approver Apps
 
@@ -54,7 +54,7 @@ gy init --scan --apply --url http://127.0.0.1:4310
 git add AGENTS.md .gitignore graphyard.json .github/workflows && git commit -m "Adopt Graphyard" && git push
 ```
 
-It reuses `install`'s identities and App (no principals file) and refuses while step 4 waits. Commit through a pull request if `main` is protected; never commit `.graphyard/`. **Verify:** readiness `setup-proposal` is `ready`. [Documentation policy](onboarding.md#documentation-policy) and [generated instructions](onboarding.md#what-the-generated-instructions-authorize) explain the files.
+It reuses `install`'s identities and App (no principals file), refusing while step 4 waits. Commit through a pull request if `main` is protected; never commit `.graphyard/`. **Verify:** readiness `setup-proposal` is `ready`. [Documentation policy](onboarding.md#documentation-policy) and [generated instructions](onboarding.md#what-the-generated-instructions-authorize) explain the files.
 
 ## 7. Branch protection
 

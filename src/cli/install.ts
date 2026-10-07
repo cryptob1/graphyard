@@ -173,13 +173,13 @@ export const installCommands = defineCommands([
         const fresh = await scanProposal(root, { url: values.url ?? null, runtimes: availableRuntimes(), delivery: values.apply ? { ...reviewed, ...choices } : choices });
         if (values.apply) {
           if (!stored) throw new Error('No stored setup proposal to apply. Run init --scan, review .graphyard/setup-proposal.json, then rerun with --apply');
+          // An install that owns this repository supplies the identities and the App (GY-1413);
+          // when it cannot yet — its App step is still waiting — this refuses before anything else.
+          const installed = await installedOnboarding(root, stored.proposal.repository);
           const differences = repositoryScanDifference(fresh, stored.proposal);
           if (differences.length) throw new Error(`${differences.join('; ')}. Rerun init --scan, review the refreshed proposal, then apply it again. The stored proposal was left unchanged.`);
           const url = values.url ?? stored.proposal.server;
           if (!url) throw new Error('Applying requires the Graphyard server URL; pass --url');
-          // An install that owns this repository supplies the identities and the App (GY-1413);
-          // when it cannot yet — its App step is still waiting — this refuses before any write.
-          const installed = await installedOnboarding(root, stored.proposal.repository);
           if (installed) {
             const result = await applyProposal(root, stored.proposal, { url, installed, github: protectionRun });
             return print({ proposal: stored.file, ...result, installed: installed.directory });
