@@ -438,9 +438,14 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     // A confirmed conflict confined to docs pages is a docs-sync's, not a worker's (GY-566). A standing
     // hold is the item's recorded wait, never a bare skip (GY-1436); one that ended awaits an
     // observation since, which the step wakes below rather than waiting for one unprompted.
+    // A docs-sync stopped at the loop-owned rework's cutoff (GY-1434) gives the conflict up on a reading taken since: woken here at
+    // once, or by the observation job for the next cycle. That reading is the one the rework is then decided from.
+    const synced: { work: Work | null } = { work: null };
+    const observe = async (work: Work) => { synced.work = wake ? await wake(work, clock) : null; if (!synced.work) await wakeObservationJob(cycle, work, 'docs-sync give-up'); return synced.work; };
     const docsConflict = (subject: Work, routine: RoutineDecision) => routine.action === 'rework' && !state.approvals[decisionKey(subject, routine)] && !!baseRefreshConflict(subject) && routine.binding === `${subject.candidate!.sha}:conflict`;
-    const hold = docsConflict(item, decision) ? await docsSync.holds(item) : null;
+    const hold = docsConflict(item, decision) ? await docsSync.holds(item, observe) : null;
     if (hold?.held) return noteHold(item, hold.wait);
+    if (synced.work && synced.work.candidate?.sha === item.candidate?.sha && synced.work.policyRevision === item.policyRevision) item = synced.work;
     needed.add(key);
     // Rework waits for an observation that still describes the item (GY-144); the step wakes it unless paused (GY-793) and re-decides.
     // The loop's own landed wake of the submitted head counts as that observation, whatever its age (GY-1266, GY-1257).

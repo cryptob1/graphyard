@@ -35,6 +35,11 @@ RestartSec=10
 # records that mismatch by name in `master status` instead of obeying it.
 WatchdogSec=180
 NotifyAccess=all
+# A stop completes in seconds: nothing the loop starts in this unit's cgroup ignores SIGTERM. Its
+# scratch runs (triage, diagnosis) record their exit on the stop signal and end with the unit, and
+# the watchdog that bounds each one ends on it too (GY-1432). Reaching this timeout — the journal's
+# "State 'final-sigterm' timed out" — means a process in the unit ignored the stop; read which one
+# from the "Killing process" line that follows.
 TimeoutStopSec=120
 KillSignal=SIGTERM
 StandardOutput=journal

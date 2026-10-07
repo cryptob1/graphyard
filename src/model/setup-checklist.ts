@@ -109,23 +109,23 @@ export function setupChecklist(status: any | null, options: { appSetupUrl?: stri
 
 export const checklistGreen = (items: readonly SetupItem[]) => items.every(item => item.done);
 
-/** The goal box's limits: a sentence to a few paragraphs. */
-export const goalLimits = { min: 10, max: 4000 } as const;
+/** The goal box's limits: a sentence to a few paragraphs, within a goal statement's bound. */
+export const goalLimits = { min: 10, max: 2000 } as const;
 
 /**
- * A first work item for a goal described in plain words (GY-1419). The master refines it into
- * criteria, proofs and the repository's own checks before a worker builds it; until then the one
- * manual criterion keeps it from passing on anything but a person's check.
+ * A goal described in plain words (GY-1419), as the goals API records it (GY-1443): the same
+ * input as `graphyard goal FILE`, so the acceptance role drafts its customer outcomes and locked
+ * E2E cases and the planner splits it into dependency-ordered items. The person names only what
+ * to build; the users and deploy target stay general for the acceptance role to make concrete.
  */
-export function goalWorkItem(text: string) {
-  const goal = text.replace(/\r\n/g, '\n').trim();
-  if (goal.length < goalLimits.min) throw new Error(`Describe what you want built in at least ${goalLimits.min} characters`);
-  if (goal.length > goalLimits.max) throw new Error(`Keep the description under ${goalLimits.max} characters`);
-  const firstLine = goal.split('\n')[0].trim();
-  const title = firstLine.length > 120 ? `${firstLine.slice(0, 117).trimEnd()}…` : firstLine;
+export function goalSubmission(text: string) {
+  const statement = text.replace(/\r\n/g, '\n').trim();
+  if (statement.length < goalLimits.min) throw new Error(`Describe what you want built in at least ${goalLimits.min} characters`);
+  if (statement.length > goalLimits.max) throw new Error(`Keep the description under ${goalLimits.max} characters`);
   return {
-    title,
-    description: `Goal submitted from the first-run setup:\n\n${goal}`,
-    criteria: [{ id: 'AC-1', text: `What was asked is built: ${title}`, proofs: ['manual:goal-delivered'] }],
+    statement,
+    users: ['The people this repository serves'],
+    constraints: [],
+    deployTarget: 'This repository\'s production deployment',
   };
 }

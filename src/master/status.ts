@@ -24,6 +24,7 @@ import { unrunnableRemedies } from './harness.js';
 import { mergeAuthorized, mergedWithoutAuthorization, unauthorizedMergeViolation } from '../merge-queue.js';
 import { splitRelation, splitReport } from '../decomposition.js';
 import type { ProjectMemory } from '../model/project-memory.js';
+import { conflictReworkBoundMs, conflictReworkDue } from '../model/approval.js';
 
 // Reviewer failover is a capacity decision the operator must see, not a silent retry.
 function reviewState(work: Work) {
@@ -191,6 +192,7 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
     const conflicts = work.submission && work.candidate ? { candidates: (conflictReport?.conflicts ?? []).map(conflict => conflict.key), files: conflictReport?.conflicts ?? [], unprobed: conflictReport?.unprobed ?? [], probed: !!conflictReport && candidateConflicts.available } : null;
     const dispatch = describeDispatch(work, reviews, sessions, now);
     const baseRefresh = pendingBaseRefresh(work), baseConflict = baseRefreshConflict(work);
+    const owedRework = baseConflict ? conflictReworkDue(work, now) : null, overdueRework = owedRework?.overdueMs ? owedRework : null;
     const refreshCarry = currentBaseRefreshCarry(work);
     // An approval GitHub dismissed for a merge-base change on an unchanged head that the control
     // plane restored rather than re-requesting.
@@ -231,6 +233,8 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       : stalledLaunch ? [`Automatic ${stalledLaunch.failure!.kind} launch for ${work.key} refused ${stalledLaunch.failure!.attempts} time(s): ${stalledLaunch.failure!.reason}`, stalledLaunch.failure!.kind === 'review' ? 'launch-review' : 'launch-producer']
       : retrying ? [`${retrying.group ? `Producer session for ${retrying.group} proofs` : 'Reviewer session'} of ${work.key} ${retrying.session!.state} after attempt ${retrying.retry!.attempts} of ${retrying.retry!.limit}: ${retrying.session!.resolution ?? 'no reason recorded'}; ${retrying.retry!.exhausted ? 'no further automatic attempt' : `next attempt at ${retrying.retry!.nextAt}`}`, retrying.group ? 'launch-producer' : 'launch-review']
       : unacknowledged ? [`${unacknowledged.group ? `Producer session for ${unacknowledged.group} proofs` : 'Reviewer session'} of ${work.key} (${unacknowledged.session!.agentName}) is awaiting acknowledgement: no activity since its launch at ${unacknowledged.session!.requestedAt}, re-prompted once at ${unacknowledged.session!.repromptedAt}; the loop records it as never started if it stays quiet`, unacknowledged.group ? 'launch-producer' : 'launch-review']
+      // A system-driven conflict rework the loop has not requested within its bound is the loop's step stalled (GY-1434).
+      : overdueRework ? [`The loop's decisions step has not requested ${work.key}'s conflict rework (round ${overdueRework.binding}) within ${conflictReworkBoundMs / 60_000} minutes of the conflict first recorded at ${overdueRework.since}: it fell due at ${overdueRework.dueAt} and is ${Math.ceil(overdueRework.overdueMs / 60_000)} minute(s) overdue. ${baseConflict}`, 'stalled-step']
       : baseConflict ? [baseConflict, 'base-conflict']
       // An approval GitHub withdrew for a merge-base change is named with its time and commits (GY-145).
       : baseDismissal ? [mergeBaseDismissalAttention(work.key, baseDismissal), 'merge-base-dismissed']
@@ -242,7 +246,7 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       : mergeRefusal ? [`GitHub refused the merge request for ${work.key} at ${mergeRefusal.head.slice(0, 12)} since ${mergeRefusal.at}: ${mergeRefusal.reason}`, 'merge-refused']
       : baseRefresh && !work.blocker ? [null, null]
       : work.blocker || dwellMs > 3_600_000 ? [first?.reasons[0] ?? `Work has remained at ${work.stage} for more than one hour`, 'gate'] : [null, null];
-    const attentionOwner = cause ? workAttentionOwner(work, cause) : null;
+    const attentionOwner = cause ? workAttentionOwner(work, cause, now) : null;
     if (cause) causes.set(work.key, cause);
     return { key: work.key, title: work.title, stage: work.stage, owner: active ? work.lease!.owner : null, profile: profile?.name ?? null, session: session?.state ?? null, refusal: first ? { gate: first.name, reason: first.reasons[0] } : null, mergeable, review, dispatch, proofGaps: gaps, containment: quarantine, attention, attentionOwner,
       // The risk lane the item rides and its speed target (GY-883), stamped by the last evaluation
