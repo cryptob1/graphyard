@@ -1048,7 +1048,7 @@ test('an agent or Codex review that has not approved is not a verdict: a head no
   assert.equal(standingVerdict(codexReview('Codex posted review findings/output for this request; fix them and request a fresh clean review', { verdict: 'changes-requested', requestId: 601, completedAt: '2031-03-01T09:25:00.000Z' }))?.reviewer, 'codex');
 });
 
-test('unit:review-rounds-capped — the real loop past an item\'s third review round: a change request naming no BLOCKING: finding is withdrawn with nothing filed, and the item merges with no further rework; a blocking finding is escalated for an independent approver instead of reworked; and the cap is master.json reviewRoundCap', async t => {
+test('unit:review-rounds-capped — the real loop past an item\'s third review round: a change request naming no BLOCKING: finding is withdrawn with nothing filed, and the item merges with no further rework; a blocking finding is the loop\'s own rework request for an independent approver, which no risk lane applies; and the cap is master.json reviewRoundCap', async t => {
   const reviewerApp = { appId: 77, installationId: 78, slug: 'graphyard-reviewer', credentialFile: '/outside/reviewer.pem', boundAt: '2031-01-01T00:00:00Z' };
   const host = await approverHost({ workers: [profile('claude-a')], reviewer: reviewerApp });
   t.after(host.cleanup);
@@ -1099,23 +1099,24 @@ test('unit:review-rounds-capped — the real loop past an item\'s third review r
   assert.ok(delivered.performed.some(action => action.kind === 'review' && action.state === 'done' && /2 findings left as nits, nothing filed, and the change request withdrawn/.test(action.detail)));
   assert.ok(followUps.item.delivery, 'GitHub merged it once it was approved: no merge action is the loop\'s (GY-1235)');
 
-  // A blocking finding still open in round 4: escalated once for an approver, never reworked or withdrawn.
+  // A blocking finding still open in round 4: put to an independent approver as the loop's own rework
+  // request on the capped grounds (GY-1389) — never applied by the risk lane, never withdrawn, and no
+  // escalation asks a master to request it by hand.
   const blocking = third('GY-1202', 'BLOCKING: AC-1 is not met — the widget skips the last frob.\n\nThe naming could be clearer.');
-  const escalated = await drive(blocking, master, 8);
-  assert.equal(blocking.item.epoch, 1);
-  assert.deepEqual(blocking.simulation.decisions.get(blocking.item.id) ?? [], [], 'the blocking finding requested no rework');
+  const escalated = await drive(blocking, master, 8, () => !!(blocking.simulation.decisions.get(blocking.item.id) ?? []).length);
+  const capped = blocking.simulation.decisions.get(blocking.item.id) ?? [];
+  assert.deepEqual(capped.map(decision => [decision.action, decision.approvedBy]), [['rework', 'graphyard-approver']], steps(escalated.performed).join(', '));
+  assert.ok(escalated.state.approvals[`decision:rework:${blocking.item.id}:${capped[0].reason.match(/candidate ([0-9a-f]{40})/)![1]}:capped:graphyard-reviewer[bot]:${blocking.item.policyRevision}`], 'requested on the capped grounds, and judged by the approver the loop launched');
+  assert.match(capped[0].reason, /GY-1202 is in review round 4, past its cap of 3, and graphyard-reviewer\[bot\] names a blocking finding on [0-9a-f]{12}: AC-1 is not met — the widget skips the last frob\. Past the review-round cap only an independent approver sends the head back/);
   assert.deepEqual(blocking.withdrawn, [], 'and was not withdrawn');
-  const raised = escalated.performed.filter(action => action.kind === 'escalation' && action.work === 'GY-1202');
-  assert.equal(raised.length, 1, `raised once across the cycles it stood: ${raised.map(action => action.detail).join('\n')}`);
-  assert.equal(escalated.state.actions[cappedEscalationKey(blocking.item, blocking.item.candidate!.sha)]?.detail, raised[0].detail);
-  assert.match(raised[0].detail, /GY-1202 is in review round 4, past its cap of 3, and graphyard-reviewer\[bot\] names a blocking finding on [0-9a-f]{12}: AC-1 is not met — the widget skips the last frob\./);
-  assert.match(raised[0].detail, /requests no further rework for GY-1202: an independent approver decides .*graphyard master decide GY-1202 rework REASON/);
+  assert.deepEqual(escalated.performed.filter(action => action.kind === 'escalation' && action.work === 'GY-1202'), [], 'no escalation asks a master to request it');
+  assert.equal(escalated.state.actions[cappedEscalationKey(blocking.item, blocking.item.candidate!.sha)], undefined);
 
   // A BLOCKING: line past the observation's body bound — after a long verdict — still escalates, never withdrawn.
   const late = third('GY-1204', `${'The judgement of each criterion, at length. '.repeat(60)}\n\nBLOCKING: AC-2 is not met — the escalation never fires.`);
-  const lateRun = await drive(late, master, 8);
-  assert.deepEqual([late.withdrawn, late.simulation.decisions.get(late.item.id) ?? []], [[], []]);
-  assert.match(lateRun.state.actions[cappedEscalationKey(late.item, late.item.candidate!.sha)]?.detail ?? '', /names a blocking finding on [0-9a-f]{12}: AC-2 is not met — the escalation never fires\./);
+  await drive(late, master, 8, () => !!(late.simulation.decisions.get(late.item.id) ?? []).length);
+  assert.deepEqual(late.withdrawn, []);
+  assert.match((late.simulation.decisions.get(late.item.id) ?? [])[0]?.reason ?? '', /names a blocking finding on [0-9a-f]{12}: AC-2 is not met — the escalation never fires\./);
 
   // A head is withdrawn once: when its re-review requests changes again, the second request is escalated, not withdrawn again.
   const repeat = third('GY-1205', 'The helper could be named more clearly.', {}, 'The helper could still be named more clearly.');

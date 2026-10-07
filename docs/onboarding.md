@@ -21,7 +21,7 @@ Commit `AGENTS.md`, `.gitignore`, `graphyard.json`, workflows ([candidates](deli
 
 ### What the generated instructions authorize
 
-Generated `AGENTS.md`: **every session Graphyard launches receives its instruction as the session's own first request** (Claude Code also `--append-system-prompt-file`), so sessions start without anybody sending `go`; launcher pastes (the loop's single re-prompt, the reviewer's reminder, master wakes) need no confirmation; other bracketed paste is untrusted data (prompt injection). The role files under `.graphyard/harness/` hold permissions, not instructions.
+Generated `AGENTS.md`: **every session Graphyard launches receives its instruction as the session's own first request** (Claude Code also `--append-system-prompt-file`), so nobody sends `go`; launcher pastes (the loop's single re-prompt, the reviewer's reminder, master wakes) need no confirmation; other bracketed paste is untrusted data (prompt injection). Role files under `.graphyard/harness/` hold permissions, not instructions.
 
 ### Agent environments
 
@@ -29,7 +29,7 @@ Login homes (`~/.coding_agents`: `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `XDG_DATA_HO
 
 ### Connect an account
 
-Settings › **Agents** › **Connect an account** (key or login) writes, smoke-tests a 0600 auth file (**Pi (z.ai key)**: Pi's `auth.json` in a `pi-<letter>` home).
+Settings › **Agents** › **Connect an account** (key or login) writes and smoke-tests a 0600 auth file (**Pi (z.ai key)**: Pi's `auth.json` in a `pi-<letter>` home).
 
 ### Configure the fleet
 

@@ -12,6 +12,7 @@ import type { Succession } from '../../src/model/successors.js';
 import type { BaseCheck } from '../../src/model/base-failure.js';
 import { failedTestsAnnotation, readBaseBreak, type BaseBreak } from '../../src/master/base-break-refresh.js';
 import { botCommitSubjectPattern, parseClassifiedFindings } from '../../src/mechanical-findings.js';
+import { blockingFindings } from '../../src/review-cap.js';
 
 // The outside world of the soak test (GY-404), simulated deterministically: one clock that both the
 // test process and the test Postgres read, a GitHub repository with pull requests, CI, a reviewer and
@@ -195,6 +196,11 @@ export class SimulatedGitHub {
    * are counted onto its observed review, except on a head that is the bot round's own commit.
    */
   reviewBody: ((key: string, review: { id: number; sha: string; state: string; reviewer: string }) => string) | null = null;
+  /**
+   * GY-1389. The body of a change request, when the day writes one: the real adapter reads it, and
+   * its BLOCKING: findings from the whole body, for a head past the review-round cap (GY-1118).
+   */
+  changeRequestBody: ((key: string, review: { id: number; sha: string; state: string; reviewer: string }) => string | null) | null = null;
   /** How many times the landing check ran in the loop, the bases it judged, and the two compare kinds it asked; and every head answered blind (GY-839). */
   landingChecks = 0; landingBases = new Set<string>(); ancestorCompares = 0; blindCompares = 0; blindHeads = new Set<string>();
   /**
@@ -268,6 +274,11 @@ export class SimulatedGitHub {
    * merged content, as a hand edit's tree really holds it.
    */
   /** An approval's mechanical-nit count as the real adapter observes it (src/github.ts), when the day writes review bodies. */
+  /** A change request's body and BLOCKING: findings as the real adapter observes them (GY-1118), when the day writes one. */
+  changeRequest(key: string, review: { id: number; sha: string; state: string; reviewer: string }): { body?: string; blocking?: string[] } {
+    const body = review.state === 'CHANGES_REQUESTED' ? this.changeRequestBody?.(key, review) : null;
+    return body ? { body, blocking: blockingFindings(body) } : {};
+  }
   mechanicalNits(key: string, review: { id: number; sha: string; state: string; reviewer: string }): { mechanical?: number } {
     if (!this.reviewBody || review.state !== 'APPROVED' || botCommitSubjectPattern.test(this.commits.get(review.sha)?.message ?? '')) return {};
     const count = parseClassifiedFindings(this.reviewBody(key, review)).filter(finding => finding.classification === 'mechanical').length;
@@ -687,7 +698,7 @@ export class SimulatedGitHub {
           candidate: { sha: pr.head, baseSha: pr.base, pr: pr.number, branch: pr.branch, author: pr.author, createdAt: new Date(pr.createdAt).toISOString() },
           checks,
           // GitHub's latest verdict per reviewer, and the id of every review, as the real adapter reports them.
-          reviews: [...new Map(pr.reviews.map(review => [review.reviewer, { ...review, ...world.mechanicalNits(pr.key, review) }])).values()], reviewIds: pr.reviews.map(review => review.id),
+          reviews: [...new Map(pr.reviews.map(review => [review.reviewer, { ...review, ...world.mechanicalNits(pr.key, review), ...world.changeRequest(pr.key, review) }])).values()], reviewIds: pr.reviews.map(review => review.id),
           // A reviewer App's verdict is read for the request the item is bound to, never for another.
           ...(pr.agentReview && work.reviewRequest?.commentId === pr.agentReview.requestId ? { agentReview: { ...pr.agentReview } } : {}),
           merged: !!pr.merged, mergeSha: pr.merged?.sha ?? null, mergedAt: pr.merged ? new Date(pr.merged.at).toISOString() : null,

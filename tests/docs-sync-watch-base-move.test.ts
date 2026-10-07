@@ -1,0 +1,143 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { fileURLToPath } from 'node:url';
+import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
+import { masterConfigSchema, type MasterConfig } from '../src/master.js';
+import type { Observation, Work } from '../src/model.js';
+import type { BaseRefresh } from '../src/merge-queue.js';
+import { docsSyncWatchSchema } from '../src/model/docs-sync.js';
+import { docsSyncRoute } from '../src/daemon/docs-sync-route.js';
+import { docsSyncMaxMs, docsSyncSessionName, type DocsSyncPlan } from '../src/docs-sync.js';
+
+/**
+ * GY-1423. On 2026-10-07 the docs-sync session gy-docs-sync-gy-1388-c23a177, launched against base
+ * tip cc2cf441cee0, was still running when the tip moved to 4c87e5241d78. The watch was keyed by
+ * item, head and base tip, so the next cycle found none, tried to launch the same session name
+ * again, was refused "already visible in Herdr", and sent the conflict back to a worker although
+ * its docs-sync was live. The watch is now found by the session's own identity: item and head.
+ */
+
+const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
+const clock = Date.parse('2030-01-01T12:00:00Z');
+const iso = (offsetMs: number) => new Date(clock + offsetMs).toISOString();
+const minute = 60_000;
+const reviewed = 'a'.repeat(40), bound = 'b'.repeat(40), tip = 'c'.repeat(40), moved = 'f'.repeat(40);
+const paths = ['docs/master-agent-reference.md'];
+
+function config(): MasterConfig {
+  return masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: launcher,
+    repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project',
+    autoMerge: true, mergeMethod: 'merge', workers: [] });
+}
+
+/** A submitted, approved item whose base refresh confirmed a docs-only conflict with base tip `base`. */
+function conflicted(base: string, observedAt = iso(-30_000)): Work {
+  const candidate = { sha: reviewed, baseSha: bound, pr: 42, branch: 'graphyard/gy-42-1', author: 'worker' };
+  const observation = {
+    clockOffset: { min: 0, max: 0 }, candidate, baseTip: base, baseTipContained: false, conflicting: true,
+    checks: [{ name: 'test', result: 'success', appId: 15368 }], reviews: [{ reviewer: 'independent-reviewer', sha: reviewed, state: 'APPROVED', submittedAt: iso(-60 * minute) }],
+    protected: true, mergeable: false, merged: false, mergeSha: null, files: ['src/loop.ts', ...paths], scopeFiles: [], at: observedAt, prState: 'open', draft: false,
+  } as unknown as Observation;
+  const baseRefresh: BaseRefresh = { from: { sha: reviewed, baseSha: bound }, base, baseTree: 'e'.repeat(40), policyRevision: 1, at: iso(-minute), head: null,
+    conflict: `Candidate ${reviewed.slice(0, 12)} cannot be brought onto base branch tip ${base.slice(0, 12)} without resolving a conflict`, merge: null, carry: null, trigger: 'conflict confirmed', conflictPaths: paths };
+  return {
+    id: 'work-42', key: 'GY-42', title: 'A change that documents itself', description: '', type: 'bug', priority: 1,
+    dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:loop'] }], policy: { checks: ['test'], review: true },
+    plannedFiles: ['src/loop.ts', ...paths], stage: 'merge', revision: 5, policyRevision: 1, createdAt: iso(-4 * 60 * minute), updatedAt: iso(0),
+    stageEnteredAt: iso(-30 * minute), ready: true, epoch: 1, lease: null, workspaces: [], submission: { epoch: 1, pr: 42 },
+    candidate, reworkRequested: false, scenarioRequirements: [], evidence: [], observation, baseRefresh, blocker: null, violations: [],
+    gates: [{ name: 'build', passed: true, reasons: [] }, { name: 'merge', passed: false, reasons: ['Pull request is not mergeable against the current base'] }],
+  } as Work;
+}
+
+/** A launcher that behaves as the real one does: a session name already visible in Herdr is refused. */
+function launch(record: { synced: DocsSyncPlan[]; agents: string[] }) {
+  return async (_item: Work, plan: DocsSyncPlan) => {
+    const name = docsSyncSessionName(plan);
+    if (record.agents.includes(name)) throw new Error(`Docs-sync session ${name} is already visible in Herdr; let it finish first`);
+    record.synced.push(plan); record.agents.push(name);
+    return { agentName: name, pane: 'pane-s', account: 'reviewer-a', runtime: 'claude' as const, session: null };
+  };
+}
+
+test('unit:docs-sync-watch-adopt-on-base-move — the docs-sync watch is found by the session\'s item and head, so a moved base tip keeps the running session holding the item', async () => {
+  // The route itself: launched against `tip`, then the tip moves while the session is visible.
+  const state = emptyDaemonState(config()), record = { synced: [] as DocsSyncPlan[], agents: [] as string[] }, notes: string[] = [];
+  let work = conflicted(tip), now = clock, available = true;
+  const route = () => docsSyncRoute({ config: { baseBranch: 'main' }, state, snapshot: { work: [work] }, stamp: new Date(now).toISOString(), clock: now, inventorySpent: () => {},
+    effects: { docsSync: launch(record), persist: async () => {}, closeSession: async () => { record.agents.length = 0; } },
+    sessions: async () => ({ agents: record.agents.map(name => ({ name, pane_id: 'pane-s', agent_status: 'working' }) as any), available }),
+    note: async (_key, _item, _kind, outcome, detail) => { notes.push(`${outcome}: ${detail}`); } });
+  assert.equal(await route().holds(work), true, 'the first cycle launches the docs-sync');
+  assert.equal(record.synced.length, 1);
+  work = conflicted(moved); now += minute;
+  assert.equal(await route().holds(work), true, 'the moved base keeps the running session holding the item');
+  assert.equal(record.synced.length, 1, 'no second launch of the same session name is attempted');
+  assert.ok(!notes.some(note => note.startsWith('failed')), `nothing failed: ${notes.join(' | ')}`);
+  assert.deepEqual(Object.keys(state.docsSyncs), [`work-42:${reviewed}`], 'one watch, keyed by the session\'s identity');
+  assert.deepEqual(state.conflicts.map(entry => [entry.base, entry.route]), [[tip, 'docs-sync']]);
+
+  // Herdr unavailable is no evidence the session ended.
+  available = false; record.agents.length = 0;
+  assert.equal(await route().holds(work), true);
+  // The session ended without moving the head: held until an observation taken since shows it, then rework.
+  available = true;
+  assert.equal(await route().holds(work), true, 'a push not yet observed is waited for');
+  work = conflicted(moved, new Date(now + 1_000).toISOString()); now += 2_000;
+  assert.equal(await route().holds(work), false, 'the conflict returns to a worker once the session is gone and the head did not move');
+  assert.match(notes.at(-1)!, /ended without moving/);
+  assert.equal(state.conflicts[0].route, 'rework', 'the routed conflict it was launched for is counted as sent back');
+  assert.equal(record.synced.length, 1, 'and still no second launch');
+
+  // A watch kept under the older item-head-base key is still found by its fields after the tip moves.
+  const kept = emptyDaemonState(config()), relaunched: DocsSyncPlan[] = [];
+  kept.docsSyncs[`work-42:${reviewed}:${tip}`] = docsSyncWatchSchema.parse({ work: 'GY-42', head: reviewed, base: tip, paths, agentName: 'gy-docs-sync-gy-42-aaaaaaa', pane: 'p', launchedAt: iso(0) });
+  const legacy = docsSyncRoute({ config: { baseBranch: 'main' }, state: kept, snapshot: { work: [conflicted(moved)] }, stamp: iso(minute), clock: clock + minute, inventorySpent: () => {},
+    effects: { docsSync: async (_item, plan) => { relaunched.push(plan); throw new Error('already visible in Herdr'); }, persist: async () => {}, closeSession: async () => {} },
+    sessions: async () => ({ agents: [{ name: 'gy-docs-sync-gy-42-aaaaaaa', pane_id: 'p', agent_status: 'working' } as any], available: true }), note: async () => {} });
+  assert.equal(await legacy.holds(conflicted(moved)), true, 'the running session still holds the item');
+  assert.deepEqual(relaunched, [], 'and is not launched again');
+});
+
+test('integration:docs-sync-route-holds-across-base-move — through the loop\'s cycles, a base move during a live docs-sync neither relaunches it nor requests rework; rework follows only once it ends or runs past docsSyncMaxMs without moving the head', async () => {
+  const decided: string[] = [], record = { synced: [] as DocsSyncPlan[], agents: [] as string[] };
+  let item = conflicted(tip), at = clock;
+  const effects = (): DaemonEffects => ({
+    agents: () => [], herdr: () => ({ agents: record.agents.map((name, index) => ({ name, pane_id: `pane-${index}`, agent_status: 'working' })), available: true }),
+    credentials: async () => ({}),
+    snapshot: async () => ({ work: [item], now: new Date(at).toISOString(), jobs: [] }),
+    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date(at).toISOString(), reason: 'not configured', deployed: [], pending: [] }),
+    recordDeployment: async () => {}, requestSmoke: () => {},
+    decide: async (_work, action) => { decided.push(action); return { id: '5d8a8b9e-0000-4000-8000-000000000001' }; },
+    decisions: async () => ({ decisions: [] }),
+    approver: async () => ({ agentName: 'graphyard-approver-gy-42', pane: 'pane-a' }),
+    docsSync: launch(record),
+    conflictPaths: async () => paths,
+    persist: async () => {},
+  });
+  const state = emptyDaemonState(config());
+  const cycle = (now: number) => { at = now; return runCycle(config(), state, effects(), () => now); };
+  await cycle(clock);
+  assert.equal(record.synced.length, 1, 'the docs-only conflict launches one docs-sync session');
+  assert.deepEqual(decided, []);
+
+  // The base tip moves while the session is visible in Herdr.
+  item = conflicted(moved);
+  const second = await cycle(clock + minute);
+  assert.equal(record.synced.length, 1, 'no second launch of the same session name');
+  assert.deepEqual(decided, [], 'the item stays held: no rework decision');
+  assert.ok(!second.actions.some(action => action.work === 'GY-42' && /already visible in Herdr|returns to a worker/.test(action.detail)), 'no refused relaunch and no return to a worker');
+  await cycle(clock + 10 * minute);
+  assert.deepEqual(decided, []); assert.equal(record.synced.length, 1);
+
+  // Past docsSyncMaxMs, still visible, head unmoved: once an observation since shows that, rework.
+  const late = clock + docsSyncMaxMs + minute;
+  await cycle(late);
+  assert.deepEqual(decided, [], 'the overdue session is first noted, and a push not yet observed is waited for');
+  item = conflicted(moved, new Date(late + 1_000).toISOString());
+  const last = await cycle(late + 2_000);
+  assert.deepEqual(decided, ['rework'], 'the conflict returns to a worker');
+  assert.ok(last.actions.some(action => action.work === 'GY-42' && new RegExp(`ran past ${docsSyncMaxMs / minute} minutes`).test(action.detail)));
+  assert.equal(record.synced.length, 1, 'never a second launch');
+});

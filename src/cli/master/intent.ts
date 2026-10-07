@@ -9,6 +9,9 @@ import { derivedIntent } from '../planned-files-intent.js';
 import { readSecretFromStdin } from '../context.js';
 import { closeRequest } from '../master-close.js';
 import { assertHandAction, handDecision } from '../hand-actions.js';
+import { assertHandRework, loopBaseFailed } from '../hand-rework.js';
+import { readMechanicalFixRequests } from '../../mechanical-findings.js';
+import { cappedEscalationKey } from '../../daemon/cycle-review-cap.js';
 import { unhandled, type MasterSession } from './session.js';
 
 /** The master's own intent (create, requirements, scope) and the decisions it requests, withdraws or refuses. */
@@ -17,8 +20,15 @@ export async function intentCommand(session: MasterSession): Promise<unknown> {
   if (id === 'create' || id === 'requirements') return print(await derivedIntent(root, master, id, args, { coordinator: masterApi, mutate: masterMutation, token: () => agentToken(root, master, 'operatorAgent') }));
   // Evidence and merge decisions on a system-driven item are the loop's to request (GY-175),
   // judged on the same work document the decision is built from.
-  const assertDecision = async (work: any, action: string, input: unknown, now: number) => {
-    const loop = { sessions: (await readProducerLedger(root)).producers, failures: (await readDispatchCursor(root, master)).failures, now, requestsDecisions: !!master.operatorAgent };
+  // A rework the loop requests itself on its recorded grounds is its round, not the master's (GY-1389).
+  const assertDecision = async (work: any, action: string, input: unknown, now: number, flags: { precedent?: string }) => {
+    // Judged on the loop's own context: the base failures it set aside, its spent producer requests, the planned bot rounds.
+    const cursor = await readDispatchCursor(root, master), state = await readDaemonState(root, master).catch(() => null);
+    const exhausted = Object.entries(cursor.abandoned).filter(([, entry]) => entry.kind === 'producer')
+      .map(([requestId, entry]) => ({ requestId, work: entry.work, sha: entry.sha, group: entry.group ?? null, proofs: entry.proofs ?? [], attempts: entry.attempts, reason: entry.reason }));
+    assertHandRework(work, action, input, master, { now, requestsDecisions: !!master.operatorAgent, precedent: flags.precedent, baseFailed: loopBaseFailed(work, state), exhausted, mechanical: await readMechanicalFixRequests(root),
+      capEscalated: state && work.candidate ? !!state.actions[cappedEscalationKey(work, work.candidate.sha)] : null });
+    const loop = { sessions: (await readProducerLedger(root)).producers, failures: cursor.failures, now, requestsDecisions: !!master.operatorAgent };
     const owned = handDecision(work, action, input, loop); if (owned) assertHandAction(work, owned);
   };
   if ((autonomySubcommands as readonly string[]).includes(id ?? '')) return print(await runAutonomyCommand(root, master, id!, args,

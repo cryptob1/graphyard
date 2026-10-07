@@ -13,7 +13,7 @@ import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import type { Observation, Principal, Work } from '../src/model.js';
 import * as interventions from '../src/interventions.js';
-import { interventionLedgerKinds, interventionLedgerLimit, openPatternItems, readInterventionLedger, reworkGroundsSql, type InterventionLedgerRow } from '../src/interventions.js';
+import { interventionLedgerKinds, interventionLedgerLimit, interventionLedgerSince, openPatternItems, readInterventionLedger, reworkGroundsSql, windowOutcomes, type InterventionLedgerRow } from '../src/interventions.js';
 import { interventionPolicyDefaults } from '../src/model/interventions.js';
 
 /**
@@ -158,9 +158,9 @@ async function perRowLedger(since: string, limit = interventionLedgerLimit): Pro
   const client = await store.pool.connect();
   try {
     await client.query('SET statement_timeout = 0');
-    const result = await client.query(`SELECT ${perRowColumns} FROM (SELECT *, graphyard_event_work(work_id, payload) AS doc FROM (SELECT * FROM events WHERE kind = ANY($1) AND ($3::uuid IS NULL OR work_id=$3) AND ($4::timestamptz IS NULL OR created_at >= $4::timestamptz) ORDER BY seq DESC LIMIT $2) newest) ledger ORDER BY seq DESC`, [[...interventionLedgerKinds], limit + 1, null, since]);
+    const result = await client.query(`SELECT ${perRowColumns} FROM (SELECT *, graphyard_event_work(work_id, payload) AS doc FROM (SELECT * FROM events WHERE kind = ANY($1) AND ($3::uuid IS NULL OR work_id=$3) AND created_at >= (SELECT reach FROM unnest($1::text[], $4::timestamptz[]) AS wanted(kind, reach) WHERE wanted.kind = events.kind) ORDER BY seq DESC LIMIT $2) newest) ledger ORDER BY seq DESC`, [[...interventionLedgerKinds], limit + 1, null, interventionLedgerKinds.map(kind => interventionLedgerSince(kind, since))]);
     const instant = (value: unknown, fallback: string) => { const parsed = typeof value === 'string' ? Date.parse(value) : Number.NaN; return Number.isFinite(parsed) ? new Date(parsed).toISOString() : fallback; };
-    return { truncated: result.rows.length > limit, rows: result.rows.slice(0, limit).reverse().map(row => ({ seq: Number(row.seq), workId: row.work_id, actor: row.actor, kind: row.kind, at: instant(row.updated_at, new Date(row.created_at).toISOString()), details: row.details, payload: row.top ?? undefined, work: row.work ?? null, stageBefore: row.stage_before ?? null, ...(row.kind === 'rework' ? { grounds: row.grounds ?? null } : {}) })) };
+    return { truncated: result.rows.length > limit, rows: windowOutcomes(result.rows.slice(0, limit).reverse(), since).map(row => ({ seq: Number(row.seq), workId: row.work_id, actor: row.actor, kind: row.kind, at: instant(row.updated_at, new Date(row.created_at).toISOString()), details: row.details, payload: row.top ?? undefined, work: row.work ?? null, stageBefore: row.stage_before ?? null, ...(row.kind === 'rework' ? { grounds: row.grounds ?? null } : {}) })) };
   } finally { await client.query('SET statement_timeout = DEFAULT').catch(() => {}); client.release(); }
 }
 
@@ -352,7 +352,8 @@ test('integration:intervention-scan-bounded — openPatternItems reads only the 
   const db = { query: ((text: string, values?: unknown[]) => { statements.push({ text, values }); return store.reportPool.query(text, values); }) as pg.Pool['query'] };
   const since = iso(seededAt - policy.windowDays * day);
   const windowed = await readInterventionLedger(db, { since });
-  assert.ok(windowed.rows.length > 0 && windowed.rows.every(row => row.at >= iso(Date.parse(since) - 3_600_000)), 'every folded row lies inside the policy window');
+  // Decision rows reach back their named bound before it (GY-1389), so an in-window rework is judged by its request.
+  assert.ok(windowed.rows.length > 0 && windowed.rows.every(row => row.at >= iso(Date.parse(interventionLedgerSince(row.kind, since)) - 3_600_000)), 'every folded row lies inside the policy window, or a decision row inside its reach');
   const plan = JSON.stringify((await store.pool.query(`EXPLAIN (FORMAT JSON) ${statements[0].text}`, statements[0].values)).rows[0]);
   assert.match(plan, /events_kind_created/, 'the window is read through the (kind, created_at) index');
   assert.doesNotMatch(plan, /"Node Type": "Seq Scan"[^}]*"Relation Name": "events"/, 'the events table is never scanned whole');
