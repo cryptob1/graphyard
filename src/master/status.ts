@@ -24,7 +24,7 @@ import { unrunnableRemedies } from './harness.js';
 import { mergeAuthorized, mergedWithoutAuthorization, unauthorizedMergeViolation } from '../merge-queue.js';
 import { splitRelation, splitReport } from '../decomposition.js';
 import type { ProjectMemory } from '../model/project-memory.js';
-import { conflictReworkBoundMs, conflictReworkDue } from '../model/conflict-rework.js';
+import { conflictReworkBoundMs, conflictReworkDue } from '../model/approval.js';
 
 // Reviewer failover is a capacity decision the operator must see, not a silent retry.
 function reviewState(work: Work) {
