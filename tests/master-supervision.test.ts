@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { agentRuntimeRun, agentRuntimeTimeoutMs, listHerdrAgents, masterConfigSchema, masterHarness, observeHerdrAgents, setupMaster, type MasterConfig } from '../src/master.js';
 import { daemonEffects, emptyDaemonState, runDaemon, writeDaemonState } from '../src/master-daemon.js';
 import { masterStatusReport } from '../src/cli/master-status.js';
+import { loopSupervisorEvidence } from '../src/cli/master-setup.js';
 import { ChildProcessError, defaultChildTimeoutMs } from '../src/child-runner.js';
 import { installLoopSupervisor, LoopSupervisorRefusal, loopStopTimeoutSeconds, loopSupervision, loopSupervisionAttention, loopUnitDirectory, loopUnitName, loopUnitText, loopWatchdogSeconds, supervisorSupport, temporaryDirectories, testSuiteHomeGuard, underTestRunner, unsupervisedInstruction } from '../src/supervisor.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -255,6 +256,51 @@ test('unit:unsupervised-host-stated — a host that can have no supervisor is to
     // And setup still completes: the configuration it wrote is the whole point of running it.
     assert.match(await readFile(join(root, '.graphyard/master.json'), 'utf8'), /"repository": "owner\/project"/);
   } finally { await rm(root, { recursive: true, force: true }); await rm(credentialDirectory, { recursive: true, force: true }); }
+});
+
+test('unit:loop-supervision-probe-vantage — a probe that cannot reach the user manager does not read a loop the cursor records under its unit as unsupervised', async () => {
+  const directory = await temporaryDirectory('supervision-vantage');
+  const root = await repository();
+  try {
+    const credential = join(directory, 'coordinator.token');
+    await writeFile(credential, coordinatorToken, { mode: 0o600 });
+    const master = config(credential);
+    // Inside a worker's or the doctor's bwrap sandbox the user bus is masked: the probe is refused.
+    const sandboxed = { platform: 'linux' as const, run: (command: string, args: string[]) => {
+      if (command === 'systemctl' && args.includes('show-environment')) throw new Error('Failed to connect to user scope bus via local transport: Connection refused');
+      return '';
+    } };
+    const observed = await loopSupervision({ root, cliPath: launcher }, sandboxed);
+    assert.deepEqual({ supported: observed.supported, unreachable: observed.unreachable }, { supported: false, unreachable: true });
+
+    // The cursor records the loop re-executing itself through its unit (upgrade.last.self): the
+    // sandboxed reading cannot verify, and says so, rather than asserting a host-supervision gap.
+    const state = emptyDaemonState(master);
+    state.upgrade.last = { at: '2026-10-07T01:53:02.179Z', from: '4ab97caebf96', to: 'a4ce5261cf7f', code: true, executors: 'restarted: No executor is registered on vishrog', self: true };
+    await writeDaemonState(master, state);
+    const evidence = await loopSupervisorEvidence(root, master, null);
+    assert.deepEqual(evidence, { unit: null, reexecuted: true });
+    for (const recorded of [evidence, { unit: loopUnitName, reexecuted: false }]) {
+      const items = loopSupervisionAttention(observed, recorded);
+      assert.equal(items.length, 1, JSON.stringify(items));
+      assert.doesNotMatch(items[0].text, /not supervised on this host/);
+      assert.match(items[0].text, /could not be verified from this vantage/);
+      assert.match(items[0].text, /Connection refused/);
+      assert.match(items[0].next, new RegExp(`systemctl --user status ${loopUnitName.replace('.', '\\.')} from a host shell outside any sandbox`));
+      assert.doesNotMatch(items[0].next, /restart|master run/);
+    }
+
+    // With nothing on the cursor, the unreachable manager is still named as no supervision, and a
+    // platform with no systemd at all is named the same whatever the cursor holds.
+    await writeDaemonState(master, emptyDaemonState(master));
+    const none = await loopSupervisorEvidence(root, master, null);
+    assert.deepEqual(none, { unit: null, reexecuted: false });
+    assert.match(loopSupervisionAttention(observed, none)[0].text, /not supervised on this host/);
+    assert.match(loopSupervisionAttention(observed)[0].text, /not supervised on this host/);
+    const darwin = await loopSupervision({ root, cliPath: launcher }, { platform: 'darwin' });
+    assert.equal(darwin.unreachable, undefined);
+    assert.match(loopSupervisionAttention(darwin, { unit: loopUnitName, reexecuted: true })[0].text, /not supervised on this host/);
+  } finally { await rm(directory, { recursive: true, force: true }); await rm(root, { recursive: true, force: true }); }
 });
 
 test('integration:runtime-calls-bounded — a hung agent runtime fails its step, the cycle keeps going, and the loop still answers its stop signal', async () => {

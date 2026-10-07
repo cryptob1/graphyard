@@ -1,6 +1,6 @@
 import { createServer } from 'node:http';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { readFile, writeFile, rename } from 'node:fs/promises';
+import { readFile, writeFile, rename, link, unlink } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { GitHub, appJwt, installationSettingsUrl } from './github.js';
 import { localDirectory } from './onboarding.js';
@@ -164,12 +164,12 @@ export async function startGithubSetup(root: string, repository: string, deploym
     if (repo.full_name?.toLowerCase() !== repository.toLowerCase()) throw new Error('Installation cannot access the expected repository');
   });
   async function persist(value: AppCredentials, initial = false) {
-    if (initial) await writeFile(file, JSON.stringify(value, null, 2), { mode: 0o600, flag: 'wx' });
-    else {
-      const temporary = `${file}.${randomBytes(8).toString('hex')}.tmp`;
-      await writeFile(temporary, JSON.stringify(value, null, 2), { mode: 0o600, flag: 'wx' });
-      await rename(temporary, file);
-    }
+    // Both writes are atomic: the manifest flow polls this file and must never read it half-written.
+    const temporary = `${file}.${randomBytes(8).toString('hex')}.tmp`;
+    await writeFile(temporary, JSON.stringify(value, null, 2), { mode: 0o600, flag: 'wx' });
+    if (!initial) return rename(temporary, file);
+    // link() refuses an existing file, keeping the initial write's exclusive-create guarantee.
+    try { await link(temporary, file); } finally { await unlink(temporary); }
   }
   const http = createServer(async (req, res) => {
     res.setHeader('Cache-Control', 'no-store'); res.setHeader('Referrer-Policy', 'no-referrer');

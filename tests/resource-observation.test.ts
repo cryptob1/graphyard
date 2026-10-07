@@ -19,7 +19,7 @@ import { runExecutorTick } from '../src/auto-dispatch.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { stalledActionAttention } from '../src/cli/master-status.js';
 import { attributeAttention, resourceStatus } from '../src/master-status.js';
-import { dispatchRefusal, loadedRevision, planeVerdict, readGitHubBudget, resourceAttention, finishedSessionGraceMs, nameReclaimBoundMs, stuckSessionMs, ledgerRetentionMs, readReclaimReports, readResources, reclaimResources, registryGaps, resourceIds, resourceRegistry, reviewLedgerBound, type ResourceInputs } from '../src/master-resources.js';
+import { dispatchRefusal, loadedRevision, owedUpgrade, selfUpgradeBoundMs, planeVerdict, readGitHubBudget, resourceAttention, finishedSessionGraceMs, nameReclaimBoundMs, stuckSessionMs, ledgerRetentionMs, readReclaimReports, readResources, reclaimResources, registryGaps, resourceIds, resourceRegistry, reviewLedgerBound, type ResourceInputs } from '../src/master-resources.js';
 import { classifyAttention } from '../src/model/fault-classes.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -476,4 +476,45 @@ test('integration:spent-past-the-pause-still-faults — with the pause over and 
   const verdict = planeVerdict(null, { database: null, github: reading });
   assert.equal(verdict.healthy, false);
   assert.match(verdict.causes[0], /^GitHub App request budget is at its bound: 5000 of 5000 requests/);
+});
+
+// ---- GY-1400 -----------------------------------------------------------------------------------
+
+test('unit:loaded-revision-pending-promotion — commits the loop has not loaded while they wait on an on-schedule promotion read 0 behind; the true count once a verified release serves the tip', () => {
+  const now = Date.parse('2026-10-07T03:10:36.678Z');
+  const loaded = 'a4ce5261cf7f'.padEnd(40, '0'), tip = 'e8a3de4e9a20'.padEnd(40, '0');
+  // Moved well past the self-upgrade's bound: without the promotion wait this is the fault.
+  const revision = { behind: 3, loaded, checkout: tip, movedAt: now - selfUpgradeBoundMs - 39 * 60_000 };
+  const cursor = (promotion: { nextDueAt: string | null; inFlight: boolean }, deployment = { sha: loaded, pending: ['GY-1365', 'GY-1385', 'GY-1398'] }) =>
+    ({ upgrade: { alignedRelease: loaded, pending: null }, deployment, promotion, actions: {} });
+  const read = (upgrade: ResourceInputs['upgrade']) => readResources(blank({ now, revision, upgrade })).find(entry => entry.id === 'loaded-revision')!;
+  const due = '2026-10-07T03:41:53.113Z';
+
+  // Not yet due: the loop runs the verified release, and everything past it waits on the promotion.
+  const waiting = owedUpgrade(cursor({ nextDueAt: due, inFlight: false }));
+  assert.deepEqual(waiting?.promotion, { deployedSha: loaded, alignedRelease: loaded, pending: ['GY-1365', 'GY-1385', 'GY-1398'], nextDueAt: due, inFlight: false });
+  const onSchedule = read(waiting);
+  assert.equal(onSchedule.used, 0);
+  assert.equal(onSchedule.state, 'ok');
+  assert.match(onSchedule.detail!, new RegExp(`3 commits behind; the loop runs the verified release production serves, and GY-1365, GY-1385, GY-1398 wait on the promotion due ${due}`));
+  assert.doesNotMatch(onSchedule.detail!, /systemctl --user restart/);
+  assert.deepEqual(resourceAttention([onSchedule]), []);
+
+  // A candidate in validation, past its due time: still on schedule.
+  const validating = read(owedUpgrade(cursor({ nextDueAt: iso(now - 60_000), inFlight: true })));
+  assert.equal(validating.used, 0);
+  assert.match(validating.detail!, /wait on the promotion in validation/);
+
+  // Overdue with no candidate in validation: the true count, past the existing bound.
+  assert.equal(read(owedUpgrade(cursor({ nextDueAt: iso(now - 60_000), inFlight: false }))).used, 3);
+  // A verified release serves the checkout's tip and the loop has not loaded it: the true count.
+  const served = read(owedUpgrade(cursor({ nextDueAt: due, inFlight: false }, { sha: tip, pending: [] })));
+  assert.equal(served.used, 3);
+  assert.equal(resourceAttention([served]).length, 1);
+  // Served, but read within the existing bound: the self-upgrade under way, as before.
+  const young = readResources(blank({ now, revision: { ...revision, movedAt: now - 60_000 }, upgrade: owedUpgrade(cursor({ nextDueAt: due, inFlight: false }, { sha: tip, pending: [] })) })).find(entry => entry.id === 'loaded-revision')!;
+  assert.equal(young.used, 0);
+  // No deployment observation on the cursor: nothing rides along, and the count stands.
+  assert.equal(owedUpgrade({ upgrade: { pending: null }, actions: {} }), null);
+  assert.equal(read(null).used, 3);
 });
