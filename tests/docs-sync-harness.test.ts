@@ -83,3 +83,21 @@ test('unit:docs-sync-launch-excludes-project-settings — under a repository who
   const bare = await temporaryDirectory('docs-sync-harness-bare');
   assert.deepEqual((await docsSyncHarness(bare, config, plan, 'claude')).args, [], 'a repository with no project settings has nothing to exclude');
 });
+
+test('docs-sync role files do not accumulate — the settle removes the plan\'s file and the orphan reclaim removes every file no visible session owns', async () => {
+  const { docsSyncHarness, docsSyncHarnessFile, releaseDocsSyncHarness, reclaimDocsSyncCheckouts, docsSyncSessionName } = await import('../src/docs-sync.js') as any;
+  const root = await temporaryDirectory('docs-sync-harness-release');
+  await mkdir(join(root, '.claude'), { recursive: true });
+  await writeFile(join(root, '.claude', 'settings.local.json'), `${JSON.stringify({ permissions: { deny: ['Bash(git push:*)'] } })}\n`);
+  const other: DocsSyncPlan = { ...plan, key: 'GY-7', branch: 'graphyard/gy-7-1', head: '0badc0de'.padEnd(40, '1') };
+  const third: DocsSyncPlan = { ...plan, key: 'GY-8', branch: 'graphyard/gy-8-1', head: 'feedface'.padEnd(40, '2') };
+  for (const each of [plan, other, third]) await docsSyncHarness(root, config, each, 'claude');
+  await releaseDocsSyncHarness(root, plan);
+  await assert.rejects(readFile(docsSyncHarnessFile(root, plan)), /ENOENT/, 'a settled session\'s role file is removed');
+  await releaseDocsSyncHarness(root, plan); // already gone is fine
+  // A loop that died before settling leaves files behind: only the one a visible session owns survives the reclaim.
+  const run = async () => { throw new Error('no git here'); };
+  await reclaimDocsSyncCheckouts(root, [docsSyncSessionName(other)], run);
+  assert.ok((await readFile(docsSyncHarnessFile(root, other), 'utf8')).includes('permissions'), 'the role file of a visible session is kept');
+  await assert.rejects(readFile(docsSyncHarnessFile(root, third)), /ENOENT/, 'an orphaned role file is reclaimed');
+});

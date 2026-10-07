@@ -744,7 +744,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     // two commands, instead of a request that fails on every retry; provisioning the identity brings them back on the next reload, with no restart.
     get decide() { return current().operatorAgent ? decide : undefined; },
     get approver() { return current().operatorAgent ? approver : undefined; },
-    get docsSync() { return current().operatorAgent ? docsSyncing.docsSync : undefined; }, conflictPaths: docsSyncing.conflictPaths,
+    get docsSync() { return current().operatorAgent ? docsSyncing.docsSync : undefined; }, conflictPaths: docsSyncing.conflictPaths, docsSyncSettled: docsSyncing.docsSyncSettled,
     get withdraw() { return current().operatorAgent ? withdraw : undefined; },
     get resume() { return current().operatorAgent ? resume : undefined; },
     get decisions() { return current().operatorAgent ? decisions : undefined; },
