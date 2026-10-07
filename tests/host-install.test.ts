@@ -61,8 +61,9 @@ test('unit:host-install-plan — the host plan names every unit, runtime and cre
     const units = Object.fromEntries(host.units.map(unit => [unit.name, unit]));
     for (const name of ['graphyard-postgres.service', 'graphyard-server.service', 'graphyard-proxy.service']) assert.equal(units[name]?.path, `/etc/systemd/system/${name}`, name);
     assert.equal(units['graphyard-herdr.service']?.path, '/home/graphyard/.config/systemd/user/graphyard-herdr.service');
-    assert.equal(units['graphyard-master.service']?.path, '/home/graphyard/.config/systemd/user/graphyard-master.service');
-    assert.ok(units['graphyard-executor@1.service'] && units['graphyard-executor@2.service'], 'executor slots are supervised units');
+    // The loop and executors are named for the install's repository (GY-1441), so another install on the host never shares them.
+    assert.equal(units['graphyard-master-owner-project.service']?.path, '/home/graphyard/.config/systemd/user/graphyard-master-owner-project.service');
+    assert.ok(units['graphyard-executor-owner-project@1.service'] && units['graphyard-executor-owner-project@2.service'], 'executor slots are supervised units');
 
     assert.deepEqual(host.runtimes.map(runtime => runtime.kind), ['claude', 'codex', 'opencode', 'pi']);
     // Every credential lives under the host account's ~/.config/graphyard/<install>/ with mode 0600.
@@ -134,7 +135,7 @@ test('unit:host-install-plan — apply provisions the fixture host: units, runti
     assert.ok(!master.args.some(arg => arg.includes(master.input!)), 'the coordinator credential is never an argument');
     assert.ok(master.args.includes('--herdr-workspace') && master.args.includes('w1'));
     assert.ok(lines.some(line => line.includes('graphyard-executor.mjs --install --count 2')));
-    assert.ok(lines.some(line => line.includes('systemctl --user enable --now graphyard-master.service')));
+    assert.ok(lines.some(line => line.includes('systemctl --user enable --now graphyard-master-owner-project.service')));
 
     // master init keeps its copy of the coordinator credential inside <install>/, and the executors
     // create every connected account's login home under <install>/accounts.
@@ -441,7 +442,7 @@ test('unit:self-contained-auth-plan — GitHub is connected with no human click 
     assert.equal(fixture.state.hookConfig?.url, 'https://graphyard.example.test/api/github/webhook', 'an App whose webhook serves nothing live is pointed here');
     // The fleet starts: the loop, the executors and every unit run, and workers hold the App key.
     assert.deepEqual(summary.host!.units.filter(unit => unit.active !== 'active'), []);
-    assert.ok(hostLines(fixture).some(line => line.includes('systemctl --user enable --now graphyard-master.service')));
+    assert.ok(hostLines(fixture).some(line => line.includes('systemctl --user enable --now graphyard-master-owner-project.service')));
     assert.equal(fixture.hostFiles.get(`${CONFIG}/github/app-private-key.pem`)!.content.trim(), appKey.trim());
     // The registration is kept with the installation's other secrets, 0600, so a re-apply reuses it there.
     const own = join(installDirectory('owner-project', fixture.configHome), 'github-app.json');

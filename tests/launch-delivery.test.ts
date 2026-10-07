@@ -69,7 +69,7 @@ async function installed() {
   const root = await temporaryDirectory('launch-delivery'), credentials = await temporaryDirectory('launch-delivery-credentials');
   execFileSync('git', ['init', '-q', root]);
   execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
-  await setupMaster(root, { url: 'https://graphyard.example', token: 'coordinator-token-'.padEnd(40, 'x'), cliPath: launcher, credentialDirectory: credentials, herdrWorkspace: 'wE' }, coordinatorStatus as typeof fetch);
+  await setupMaster(root, { url: 'https://graphyard.example', token: 'coordinator-token-'.padEnd(40, 'x'), cliPath: launcher, credentialDirectory: credentials, herdrWorkspace: 'w1V' }, coordinatorStatus as typeof fetch);
   const credential = join(credentials, 'producer.token'); await writeFile(credential, 'producer-token-'.padEnd(40, 'x'), { mode: 0o600 });
   await saveProducerProfile(root, { name: 'claude-producer', principal: 'proof-runner', agentName: 'produce-a', kind: 'claude', credentialFile: credential, concurrency: 1 }, producerVerify);
   return { root, cleanup: async () => { await rm(root, { recursive: true, force: true }); await rm(credentials, { recursive: true, force: true }); } };

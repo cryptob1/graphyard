@@ -14,7 +14,7 @@ import { readFileSync } from 'node:fs';
 import type { ChildRun } from '../child-runner.js';
 import { shortCommit, type ExecutorRestartResult } from '../executor-fleet.js';
 import type { MasterConfig } from '../master.js';
-import { alignLoopUnit, loopUnitName } from '../supervisor.js';
+import { alignLoopUnit, loopUnitOf } from '../supervisor.js';
 import { storeAction, touchStanding, message, type DaemonState, type UpgradeStallCause } from './state.js';
 import { detailChanged } from './decisions.js';
 
@@ -120,7 +120,8 @@ export async function awaitSupervisorRestart(restart: () => unknown, host: Signa
  * rewritten, and only when the loop runs under it.
  */
 export async function alignRunningLoopUnit(root: string, config: MasterConfig, unit = detectLoopSupervisorUnit()) {
-  if (unit !== loopUnitName) return { wrote: 'none', reason: `this loop does not run under ${loopUnitName}` };
+  const own = loopUnitOf(root);
+  if (unit !== own) return { wrote: 'none', reason: `this loop does not run under ${own}` };
   return alignLoopUnit({ root, cliPath: config.cliPath, repository: config.repository, intervalSeconds: config.run.intervalSeconds });
 }
 
