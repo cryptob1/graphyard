@@ -151,6 +151,8 @@ export async function readInterventionLedger(db: Db, options: { limit?: number; 
 interface Ask { seq: number; at: string; stage: Stage | null; kind: 'scope-request' | 'blocked-report'; blocked: string; paths: string[]; trigger?: string; sources: { seq: number; kind: string }[] }
 interface WorkState {
   key: string | null; title: string | null; stage: Stage | null; plannedFiles: string[] | null;
+  /** The blocker as the previous row left it; undefined until a row with a document is seen. */
+  blocker?: string | null;
   asks: Ask[];
   reworkDecision: { seq: number; at: string; id: string; stage: Stage | null } | null;
   bypass: { seq: number; at: string; mergeSha: string; blocked: string; stage: Stage | null } | null;
@@ -161,6 +163,24 @@ interface WorkState {
 const stageOf = (value: unknown): Stage | null => typeof value === 'string' ? value as Stage : null;
 const ms = (from: string, to: string) => Math.max(0, Date.parse(to) - Date.parse(from));
 const text = (value: unknown, fallback = '') => typeof value === 'string' && value ? value : fallback;
+
+/**
+ * Whether a requirements revision re-plans work no attempt has started (GY-1396), judged from the
+ * item as the revision found it. An operator agent's row records that whole document as `before`:
+ * the item is unstarted when it was never claimed, or when every attempt lapsed leaving nothing on
+ * the record (no submission, candidate, scope ask or decision, human request, kept commit). Any
+ * other row records only the planned files, so only an item never claimed (epoch 0) is unstarted.
+ * A blocker standing before the revision is always something the revision answers.
+ */
+function unstarted(before: unknown, epochAfter: number | null | undefined, blockerBefore: string | null | undefined): boolean {
+  if (!isObject(before) || !('epoch' in before)) return epochAfter === 0 && !blockerBefore;
+  if (before.blocker) return false;
+  if (!before.epoch) return true;
+  const attempts = before.pipeline?.attempts, exhaustions = before.capacity?.exhaustions;
+  return !before.submission && !before.candidate && !before.scopeRequest && !before.scopeDecision && !before.humanRequest
+    && Array.isArray(attempts) && attempts.every((attempt: { end?: unknown }) => attempt?.end === 'expired')
+    && !(Array.isArray(exhaustions) && exhaustions.some((entry: { role?: unknown; partialWork?: { commit?: unknown } }) => entry?.role === 'worker' && entry.partialWork?.commit));
+}
 
 /**
  * Fold the ledger rows into interventions and judgements. `work` is the current snapshot: it
@@ -209,6 +229,8 @@ export function foldInterventions(rows: InterventionLedgerRow[], work: readonly 
     // The planned scope as the previous row left it, so a revision is judged against what it changed.
     const plannedBefore = entry.plannedFiles;
     if (Array.isArray(row.work?.plannedFiles)) entry.plannedFiles = row.work!.plannedFiles!;
+    const blockerBefore = entry.blocker;
+    if (row.work) entry.blocker = row.work.blocker ?? null;
     const source = { seq: row.seq, kind: row.kind };
     // Standing escalations, as every embedded document shows them: a trigger not seen before was
     // raised since the last row; one that vanished without a resolution row was auto-settled.
@@ -251,10 +273,12 @@ export function foldInterventions(rows: InterventionLedgerRow[], work: readonly 
         if (after) entry.plannedFiles = after;
         const reason = text(details.reason ?? details.intent?.reason, 'requirements revised');
         const cleared = row.work ? !row.work.blocker : true;
-        // An item no attempt holds (backlog, ready) that nobody asked about and nothing blocks is being
-        // planned, not rescued: its coordinator revising the scope of work no worker has started or
-        // resumed waited on no one, so it is no intervention (GY-1396). A blocker it answers still is.
-        const replanned = (stage === 'backlog' || stage === 'ready') && details.liveScopeWidening !== true && !!row.work && !row.work.blocker;
+        // An item at backlog or ready that no attempt has worked on, that nobody asked about and that
+        // nothing blocked is being planned, not rescued: its coordinator revising the scope of work no
+        // worker has started waited on no one, so it is no intervention (GY-1396). A blocker it
+        // answers, or an item an attempt released, submitted or was reworked from, still is.
+        const replanned = (stage === 'backlog' || stage === 'ready') && details.liveScopeWidening !== true && !!row.work
+          && unstarted(details.before, row.work.epoch, blockerBefore === undefined ? row.work.blocker : blockerBefore);
         if (entry.asks.length && (widened || cleared)) {
           // A widening answers the scope request; a blocker it clears beside one was an escalation of its own.
           const scopeAsked = entry.asks.some(ask => ask.kind === 'scope-request');

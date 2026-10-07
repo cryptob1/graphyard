@@ -20,8 +20,9 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
  *   the item's blocker, so nothing routed it and the master widened the item hours later;
  * - GY-1113: the worker parked a plannedFiles widening as a goals-and-priorities decision;
  * - GY-845: the worker's blocker named the file it needed but no commit, so it read as genuine;
- * - GY-1376, GY-1005: the master revised the scope of an item it had just created, before any
- *   worker had started on it — planning, which nobody waited on.
+ * - GY-1376, GY-1005: the master revised the scope of an item no worker had started on (never
+ *   claimed, or only a launch that lapsed leaving nothing on the record) — planning, which nobody
+ *   waited on.
  * Each shape is pinned here as the product now handles it.
  */
 const operator: Principal = { id: 'human-operator', role: 'admin', sessionKind: 'human' };
@@ -71,7 +72,6 @@ test('integration:interrupted-attempt-lifts-its-scope-refusal — an attempt the
   assert.equal(after.stage, 'ready');
   const closed = (await store.pool.query(`SELECT payload->'details' AS details FROM events WHERE work_id=$1 AND kind='scope.closed'`, [work.id])).rows;
   assert.deepEqual(closed.map(row => [row.details.by, row.details.decision, row.details.paths]), [['capacity.interrupted', 'refused', ['src/store/schema.ts']]]);
-
 });
 
 test('integration:scope-park-refused — a park whose decision is a plannedFiles widening is refused with the scope-request command that the loop and the approver answer, and the attempt keeps its lease; a human-only park still parks (GY-1113)', async () => {
@@ -112,15 +112,34 @@ test('unit:named-scope-blocker-routes-with-attempt-commit — a blocker that nam
     assert.equal(itemBlockerClass(item(exhaustions))?.class, 'genuine');
 });
 
-test('unit:ready-replan-is-no-intervention — a widening of an item no attempt holds, that nobody asked for and nothing blocks, is planning; one that answers a standing blocker at ready, or widens a live attempt, is still a scope-widening intervention (GY-1376, GY-1005)', () => {
+test('unit:ready-replan-is-no-intervention — a widening of an item no attempt has worked on, that nobody asked for and nothing blocked, is planning; one of an item an attempt released, submitted or was reworked from, one that answers a blocker standing before it, or one of a live attempt, is still a scope-widening intervention (GY-1376, GY-1005)', () => {
   const at = (seconds: number) => new Date(Date.parse('2026-10-06T00:00:00.000Z') + seconds * 1000).toISOString();
-  const widen = (workId: string, stage: string, blocker: string | null, live = false): InterventionLedgerRow[] => [
-    { seq: 1, workId, actor: 'master-op', kind: 'requirements', at: at(1), details: { reason: 'first plan' }, work: { key: workId, stage, plannedFiles: ['src/a.ts'], blocker }, stageBefore: stage },
-    { seq: 2, workId, actor: 'master-op', kind: 'requirements', at: at(2), details: { reason: 'widened', ...(live ? { liveScopeWidening: true } : {}) }, work: { key: workId, stage, plannedFiles: ['src/a.ts', 'src/b.ts'], blocker }, stageBefore: stage },
+  type Shape = { stage?: string; epoch?: number; blocker?: string | null; after?: string | null; live?: boolean; before?: Record<string, unknown> };
+  const widen = (workId: string, { stage = 'ready', epoch = 0, blocker = null, after = blocker, live = false, before }: Shape): InterventionLedgerRow[] => [
+    { seq: 1, workId, actor: 'master-op', kind: 'requirements', at: at(1), details: { reason: 'first plan' }, work: { key: workId, stage, epoch, plannedFiles: ['src/a.ts'], blocker }, stageBefore: stage },
+    { seq: 2, workId, actor: 'master-op', kind: 'requirements', at: at(2), details: { reason: 'widened', ...(live ? { liveScopeWidening: true } : {}), before: before ?? { plannedFiles: ['src/a.ts'] } },
+      work: { key: workId, stage, epoch, plannedFiles: ['src/a.ts', 'src/b.ts'], blocker: after }, stageBefore: stage },
   ];
   const widenings = (rows: InterventionLedgerRow[]) => foldInterventions(rows, [], at(10)).interventions.filter(entry => entry.kind === 'scope-widening').map(entry => [entry.stage, entry.trigger]);
-  assert.deepEqual(widenings(widen('GY-1376', 'ready', null)), [], 'a re-plan of a ready item');
-  assert.deepEqual(widenings(widen('GY-1005', 'backlog', null)), [], 'a re-plan of a backlog item');
-  assert.deepEqual(widenings(widen('GY-1113', 'ready', 'Waiting on a human-only decision (goals and priorities): widen plannedFiles')), [['ready', 'operator-widening']], 'answering a standing blocker by hand still counts');
-  assert.deepEqual(widenings(widen('GY-1', 'build', null, true)), [['build', 'operator-widening']], 'widening a live attempt still counts');
+  const counted = [['ready', 'operator-widening']];
+  // The operator agent's row records the whole document it revised.
+  const document = (fields: Record<string, unknown>) => ({ plannedFiles: ['src/a.ts'], blocker: null, submission: null, candidate: null, scopeRequest: null, scopeDecision: null, humanRequest: null, capacity: { exhaustions: [] }, ...fields });
+  const attempt = (end: string) => ({ epoch: 1, owner: 'w', claimedAt: at(0), endedAt: at(1), end });
+
+  assert.deepEqual(widenings(widen('GY-1005', { before: document({ epoch: 0, pipeline: { attempts: [] } }) })), [], 'a re-plan of a ready item never claimed');
+  assert.deepEqual(widenings(widen('GY-1005b', { stage: 'backlog' })), [], 'a re-plan of a backlog item never claimed (no whole document)');
+  assert.deepEqual(widenings(widen('GY-1376', { epoch: 1, before: document({ epoch: 1, pipeline: { attempts: [attempt('expired')] } }) })), [], 'a launch that lapsed leaving nothing on the record started no work');
+
+  // An item an attempt has worked on: the widening is what the last worker needed, so it counts.
+  assert.deepEqual(widenings(widen('released', { epoch: 1, before: document({ epoch: 1, pipeline: { attempts: [attempt('released')] } }) })), counted, 'a capacity-ended attempt');
+  assert.deepEqual(widenings(widen('reworked', { epoch: 1, before: document({ epoch: 1, pipeline: { attempts: [attempt('reworked')] } }) })), counted, 'a rework return');
+  assert.deepEqual(widenings(widen('lapsed-ask', { epoch: 1, before: document({ epoch: 1, scopeDecision: { state: 'refused', epoch: 1 }, pipeline: { attempts: [attempt('expired')] } }) })), counted, 'a lapsed attempt that asked for scope');
+  assert.deepEqual(widenings(widen('lapsed-commit', { epoch: 1, before: document({ epoch: 1, capacity: { exhaustions: [{ role: 'worker', epoch: 1, partialWork: { state: 'committed', commit: 'c'.repeat(40) } }] }, pipeline: { attempts: [attempt('expired')] } }) })), counted, 'a lapsed attempt that kept a commit');
+  assert.deepEqual(widenings(widen('claimed', { epoch: 1 })), counted, 'a claimed item whose row records no whole document');
+
+  // A blocker standing before the revision is answered by it, even when the revision clears it.
+  assert.deepEqual(widenings(widen('GY-1113', { blocker: 'Waiting on a human-only decision (goals and priorities): widen plannedFiles' })), counted, 'answering a standing blocker by hand');
+  assert.deepEqual(widenings(widen('cleared', { blocker: 'Scope request refused: src/b.ts', after: null })), counted, 'a widening that clears the blocker it answers');
+  assert.deepEqual(widenings(widen('cleared-doc', { after: null, before: document({ epoch: 0, blocker: 'Scope request refused: src/b.ts', pipeline: { attempts: [] } }) })), counted, 'the same, judged from the whole document');
+  assert.deepEqual(widenings(widen('GY-1', { stage: 'build', epoch: 1, live: true })), [['build', 'operator-widening']], 'widening a live attempt');
 });
