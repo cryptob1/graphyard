@@ -3,7 +3,7 @@
 
 > set up Graphyard for OWNER/REPO following docs/setup-from-zero.md
 
-Run each step, then its **Verify**; ask a human only for **HUMAN** steps. [Hard rules](install.md#hard-rules) apply.
+Run each step, then **Verify**; ask a human only for **HUMAN** steps. [Hard rules](install.md#hard-rules) apply.
 
 `graphyard doctor` prints `setupFromZero.lines`: `PASS`/`FAIL` per prerequisite (`control-plane`, `credentials-file`, `github-app`, `reviewer-app`, `branch-protection`, `agent-environment:NAME`, `worker-sandbox`), each `FAIL` naming its step; `next` names the first gap (readiness `recovery`, then `FAIL`). Generated `AGENTS.md` links here. `GRAPHYARD_CONFIG_HOME` relocates credentials, `GRAPHYARD_AGENT_ENVIRONMENTS` (`~/.coding_agents`) agent environments.
 
@@ -65,7 +65,7 @@ PR if `main` is protected; never commit `.graphyard/`. **Verify:** readiness `se
 
 ## 7. Branch protection
 
-After the first pull request shows `Graphyard / merge`, step 3's `--apply` requires it; `gy master protection --apply` reconciles review policies. **Verify:** `branch-protection` (via admin `gh`): both App checks required, admin enforcement on, "up to date" off (candidates merge on their build base).
+After the first pull request shows `Graphyard / merge`, step 3's `--apply` requires it; `gy master protection --apply` reconciles review policies. **Verify:** `branch-protection` (via admin `gh`): both App checks required, admin enforcement on, "up to date" off (candidates merge on build base).
 
 ## 8. Agent environments
 
@@ -80,7 +80,7 @@ The second `--apply` records `skipDangerousModePermissionPrompt`; launches write
 
 ## 9. Worker sandbox and harness rules
 
-**Verify:** `worker-sandbox` (bubblewrap writes `objects`, `refs/remotes`, `refs/heads/graphyard`, their logs; [sandbox](master-agent-sessions.md#worker-sandbox)). `master harness KIND --apply` (`claude`/`codex`) allows GitHub administration; merges stay [denied](master-agent-reference.md#github-administration-through-the-browser).
+**Verify:** `worker-sandbox` (bubblewrap writes `objects`, `refs/remotes`, `refs/heads/graphyard`, logs; [sandbox](master-agent-sessions.md#worker-sandbox)). `master harness KIND --apply` (`claude`/`codex`) allows GitHub administration; merges stay [denied](master-agent-reference.md#github-administration-through-the-browser).
 
 ## 10. Start the master
 

@@ -7,7 +7,7 @@ All but `/healthz` need `Authorization: Bearer TOKEN` ([roles](../glossary.md#th
 
 - `requirements`: document, `expectedPolicyRevision`, `reason`; `admin` (operator agents additively); omitted `split` kept; stale revisions refused (`Policy revision changed`) before lease/quarantine checks; a partly widened scope request's findings aren't re-read mid-approval. `rule: "successor"` (operator agents, additive) marks the loop's re-plan onto split or renamed files; interventions skip it.
 - `decomposition` (coordinator): `{event:"started"|"decided"|"failed",…}`; `decided` (`payload.children`) makes the [split](#splitting-an-item).
-- `ready`, `unblock`: `{"reason":…}` (operator agents: `expectedRevision`; `master unblock` retries stale refusals (≤3) while the blocker stands). Two-party `release`/`unblock`/pinned `close` decisions survive loop-bookkeeping moves (sessions, gates, next action, action queue); others settle them `stale`. A head-bound `rework` (`input.binding` `SHA:GROUNDS`) is refused while another candidate stands; its approval then settles `stale`: its grounds no longer describe the item.
+- `ready`, `unblock`: `{"reason":…}` (operator agents: `expectedRevision`; `master unblock` retries stale refusals (≤3) while the blocker stands). Two-party `release`/`unblock`/pinned `close` decisions survive loop-bookkeeping moves (sessions, gates, next action, action queue); others settle them `stale`. A head-bound `rework` (`input.binding` `SHA:GROUNDS`) is refused while another candidate stands; its approval then settles `stale` (grounds outdated).
 - `resolve`: `{"trigger":…, "expectedRevision":…, "reason":…}`; human `admin`, or `admin` with `"attestation":{"kind":"blocked"|"stopped-worker","epoch":N}` explaining `lease-loss`.
 - `rework`, `recover` (delivered quarantine): `admin`, `{"reason":…, "previousWorkerStopped":true}`.
 - `repair` `{"reason":…}` (coordinator/admin) rebuilds a head carrying another item's unlanded commits; `refresh` `{"reason":…, "base":SHA}` (coordinator, admin, `intent:unblock` operator agent) merges the base tip into an open candidate, keeping carried approval.
@@ -15,13 +15,13 @@ All but `/healthz` need `Authorization: Bearer TOKEN` ([roles](../glossary.md#th
 - `submit`: `{"epoch":1,"pr":123}`; `409` if non-`plannedFiles` file [regresses shipped code](../coordination.md#refuse-candidates-that-revert-shipped-code-outside-their-scope) or an applied retro check fails.
 - `deployment`: `{"sha":…, "mergeSha":…, "source":"endpoint", "observedAt":…}`; coordinator/admin, delivered work, once.
 - `triage` `{judgement}` (coordinator): [backlog](../master-agent.md#machine-filed-backlog).
-- `POST /api/retro/synthesize` (coordinator/admin) drafts [retro artefacts](../operations-reference.md#retro-synthesis) as caller; `POST /api/retro/ID/approve|refuse` `{reason}` per its rules (`403`; `409` once judged).
+- `POST /api/retro/synthesize` (coordinator/admin) drafts [retro artefacts](../operations-reference.md#retro-synthesis) as caller; `POST /api/retro/ID/approve|refuse` `{reason}` per rules (`403`; `409` once judged).
 
 No endpoint sets lifecycle state.
 
 ## Splitting an item
 
-Before first dispatch the loop checks `run.decomposition` bounds (defaults 4 criteria, 2 root directories, 12 paths, ~1,500 lines); over them, read-only Pi session (`run.research`; `concurrency` 4, `timeoutMinutes` 10) proposes 2–10 children. `"split": false`, within bounds, keep-whole answers, refused splits and failed runs dispatch unchanged; `"split": true` forces the session. `master status`: `split` on rows, `splits` list. Atomically, each parent criterion (text, proofs) goes to one child; child `plannedFiles` sit strictly inside the parent's; `after` orders children, which inherit release, dependencies, `exclusiveResources`, policy, documentation criterion. The parent is never claimed or dispatched, refuses requirements revisions; children add criteria, never rewrite or retire inherited ones; the last child's delivery delivers it (`decomposition.parent-delivered`).
+Before first dispatch, items over `run.decomposition` bounds (4 criteria, 2 root directories, 12 paths, ~1,500 lines) get a read-only Pi session (`run.research`; `concurrency` 4, `timeoutMinutes` 10) proposing 2–10 children; `"split": false`, keep-whole answers, refused splits, failed runs dispatch unchanged; `"split": true` forces it. `master status`: `split` on rows, `splits` list. Atomically, each parent criterion (text, proofs) goes to one child; child `plannedFiles` sit strictly inside the parent's; `after` orders children, inheriting release, dependencies, `exclusiveResources`, policy, documentation criterion. The parent is never claimed, refuses requirements revisions; children add criteria, never rewrite or retire inherited ones; the last child's delivery delivers it (`decomposition.parent-delivered`).
 
 ## Other commands and routes
 

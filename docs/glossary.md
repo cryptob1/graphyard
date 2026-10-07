@@ -11,11 +11,11 @@ A model in runtime, holding only its credential's authority. **Canonical usage:*
 
 ### 3. Agent session (Herdr-managed session or runtime)
 
-One running agent instance. **Canonical usage:** *session*; its host: *runtime*.
+One running agent instance. **Canonical usage:** *session*; host: *runtime*.
 
 ### 4. Principal, role, and credential
 
-*Principal*: authenticated identity; *role*: authority class; *credential* (*token*): its secret. **Canonical usage:** one principal per concurrent session.
+*Principal*: authenticated identity; *role*: authority class; *credential* (*token*): secret. **Canonical usage:** one principal per concurrent session.
 
 ### 5. Worker lease and worktree
 
@@ -49,7 +49,7 @@ Role | Held by | May | Never
 
 Master applies non-weakening intent directly; two-party decisions (`graphyard master decide GY-N ACTION REASON`, approved by another's `graphyard master approve GY-N DECISION REASON`) cover requirement rewrites, escalations, [high-lane](how-graphyard-works.md#risk-lanes) rework, recovery, `manual:` attestation, proof grants, triage closures, merges with automatic merging off; gates decide the rest; human-only decisions [park](master-agent-reference.md#items-scope-and-human-waits) items.
 
-An approved-but-unapplied decision never blocks its action's next request: bound to passed head and base, it settles `superseded` (naming both heads), the new request judged; else it resumes unjudged, settling applied, failed or `stale` (pinned revision moved). Any request resumes it after 60 s (risk-lane rework at once; refusal within names `resume`); after its approver session ends (even hand-put), next loop cycle sends `POST /api/work/:id/decide` `{ "action": "resume", "decision": ID }`. Meanwhile `master status` shows `approved but unapplied since <approvedAt>`, `loop-silence` fault.
+An approved-but-unapplied decision never blocks action's next request: bound to passed head and base, it settles `superseded` (naming both heads), the new request judged; else it resumes unjudged, settling applied, failed or `stale` (pinned revision moved). Requests resume it after 60 s (risk-lane rework at once; earlier refusals name `resume`); once its approver session ends (even hand-put), the next cycle sends `POST /api/work/:id/decide` `{ "action": "resume", "decision": ID }`. Meanwhile `master status` shows `approved but unapplied since <approvedAt>`, `loop-silence` fault.
 
 ## Diagram legend
 

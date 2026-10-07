@@ -7,7 +7,7 @@ Unplanned file: `scope-request GY-N EPOCH PATH… [--wait] -- REASON` (flags bef
 
 ## Conflict avoidance
 
-Dispatch is optimistic (overlap holds nothing), smallest planned scope first ([rules](coordination.md#dispatch-optimistically-smallest-scope-first)); `git merge-tree` reports `conflicts`. Approvals survive base refreshes ([carry](github.md#bindings-and-carry)); one on the current head dismissed `The merge-base changed after approval.` is restored (`observation.reviews[].dismissal`), its re-post no verdict (`observation.dismissedReviewIds`). Another item's unlanded commits fail build gate; the worker runs `git reset --hard REVIEWED_HEAD`, `graphyard sync GY-N`, `graphyard restore-branch GY-N EPOCH`.
+Dispatch is optimistic (overlap holds nothing), smallest planned scope first ([rules](coordination.md#dispatch-optimistically-smallest-scope-first)); `git merge-tree` reports `conflicts`. Approvals survive base refreshes ([carry](github.md#bindings-and-carry)); one on the current head dismissed `The merge-base changed after approval.` is restored (`observation.reviews[].dismissal`), re-post no verdict (`observation.dismissedReviewIds`). Another item's unlanded commits fail build gate; the worker runs `git reset --hard REVIEWED_HEAD`, `graphyard sync GY-N`, `graphyard restore-branch GY-N EPOCH`.
 
 ## GitHub administration through the browser
 
@@ -35,7 +35,7 @@ A producer request spent unacted (never started, launch refused, exited at launc
 
 ## Fault classes
 
-`faultClass` (`master status` `faults`): recurring classes file one item (`GRAPHYARD_FAULT_CLASS_*`); resource at bound is one `resource:ID` fault; `fleet-capacity`, workless sessions; `unanswered-request`, settled requests unanswered past `settledAnswerGraceMs` (5 min); `configuration`, sandbox or `workflows`-permission refusals; `decision-unanswered` (`decision`), not `loop-silence`, decision silently awaiting its approver; doctor commands its allowlist refused: done; failed `action:fault`/`action:diagnosis`: `unclassified` unless its site names the cause (`plane-unavailable`, `fix-item`, `decision-stale`). A review unlaunched 15 min: `concurrency-starved` (capacity) if all reviewer profiles are busy, `review-settlement` (review-convergence) if one answered, else `launch-review`. An unanswering plane (502-504, refused, timeout): one `plane-unavailable` (`deployment`) fault; `planeWaitMs` isn't `loop-cost`.
+`faultClass` (`master status` `faults`): recurring classes file one item (`GRAPHYARD_FAULT_CLASS_*`); resource at bound is one `resource:ID` fault; `fleet-capacity`, workless sessions; `unanswered-request`, settled requests unanswered past `settledAnswerGraceMs` (5 min); `configuration`, sandbox or `workflows`-permission refusals; `decision-unanswered` (`decision`), not `loop-silence`, decision silently awaiting its approver; doctor commands its allowlist refused: done; failed `action:fault`/`action:diagnosis`: `unclassified` unless site names the cause (`plane-unavailable`, `fix-item`, `decision-stale`). A review unlaunched 15 min: `concurrency-starved` (capacity) if all reviewer profiles are busy, `review-settlement` (review-convergence) if one answered, else `launch-review`. An unanswering plane (502-504, refused, timeout): one `plane-unavailable` (`deployment`) fault; `planeWaitMs` isn't `loop-cost`.
 
 ## Pipeline speed
 

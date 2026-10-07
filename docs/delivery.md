@@ -7,7 +7,7 @@ Records which release each environment should run, verified only by service-scop
 
 Own deployment: main → candidate → uat → production; `.railway/railway.ts` deploys `release/uat`, `release/production`, moved only by `graphyard release` to a candidate's exact SHA.
 
-- `release cut [--trigger schedule|manual]` tags main's tip `rc/ID` with its items; merges never pause. `.github/workflows/release-candidate.yml` cuts on loop dispatch or best-effort two-hourly cron, running the [long suites](#pre-merge-gate-and-release-candidate-validation).
+- `release cut [--trigger schedule|manual]` tags main's tip `rc/ID` with items; merges never pause. `.github/workflows/release-candidate.yml` cuts on loop dispatch or best-effort two-hourly cron, running the [long suites](#pre-merge-gate-and-release-candidate-validation).
 - `release uat ID` deploys `uat` (own Postgres, no `GITHUB_*` credentials); refused while UAT serves unjudged candidate under four hours old; push leased on the observed tip.
 - `release validate ID --url UAT_URL [--api] [--suite NAME=COMMAND]...` awaits UAT's `/healthz` `commit`; runs endpoint, API (`GRAPHYARD_UAT_TOKEN`), `browser` (sign-in, Work view), suites (container, chart gate; soak, timing advisory; `GRAPHYARD_UAT_URL`, never `GRAPHYARD_TOKEN`); records `rc-uat/ID`.
 - `release promote ID` needs that (or [accepted flaky cases](validation.md#release-verdicts)), deploys production leased on the last promoted SHA, records `rc-production/ID`; `release verify --url URL` confirms.

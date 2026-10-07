@@ -21,7 +21,7 @@ Non-master launches get their own checkout, the coordinator's unwritable (Codex 
 
 Codex `--add-dir` roots: `.git/worktrees/NAME` (index, HEAD, `FETCH_HEAD`), `objects`, `refs/remotes`, `refs/heads/graphyard`, `logs/`; never `.git` (its read-only `.git/.git` mount kills every command). A failed write probe (inside bubblewrap) fails the launch naming the path.
 
-Profile `accounts` lists [agent environments](onboarding.md#agent-environments) (`master environments`) unless the registry defines the role. Launches take the first account under `run.quotaCeilingPercent`, else (or on failed start) **fail over** (`dispatch.accounts`). A runtime limit notice (never agent text; mid-session only beside `[retrying in 4s]`; agy `Individual quota reached`) commits unpushed `WIP:`, sets `capacity.exhausted`, relaunches elsewhere/after reset. Reviewers/producers use only their profile's `kind` (others skipped `cross-runtime`; profile waits).
+Profile `accounts` lists [agent environments](onboarding.md#agent-environments) (`master environments`) unless the registry defines the role. Launches take the first account under `run.quotaCeilingPercent`, else (or on failed start) **fail over** (`dispatch.accounts`). A runtime limit notice (never agent text; mid-session only beside `[retrying in 4s]`; agy `Individual quota reached`) commits unpushed `WIP:`, sets `capacity.exhausted`, relaunches elsewhere/after reset. Reviewers/producers use only profile's `kind` (others skipped `cross-runtime`; profile waits).
 
 ## The loop's own master session
 

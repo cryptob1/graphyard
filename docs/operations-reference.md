@@ -90,7 +90,7 @@ Stays Done, **delivered with failure**; revert via new item, never backfill.
 
 ## Merge bypass
 
-An ungated merge is a permanent violation: repair access, file follow-up, never backfill. Admin direct-merge window: `graphyard operator direct-merges on --since ISO REASON`.
+Ungated merges are permanent violations: repair access, file follow-up, never backfill. Admin direct-merge window: `graphyard operator direct-merges on --since ISO REASON`.
 
 ## Credentials
 
