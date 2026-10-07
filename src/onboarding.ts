@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { accessSync, constants as fsConstants } from 'node:fs';
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import { z } from 'zod';
 import { configHome } from './install/secrets.js';
 import { sessionNameField, suffixedSessionName } from './session-name.js';
@@ -102,7 +102,7 @@ export async function collectScanInput(root: string): Promise<ScanInput> {
       files.push(path);
       // The workflows `init --apply` generates are Graphyard's output, never an input to the next
       // scan: reading them back would make every apply change the scan it was applied from.
-      if ((generatedWorkflowFiles as readonly string[]).includes(path)) continue;
+      if ((generatedWorkflowFiles as readonly string[]).includes(path) || path === deliveryWorkflowFile) continue;
       if (scanInteresting.some(pattern => pattern.test(path))) {
         const bytes = await readFile(resolve(root, path)).catch((error: any) => { if (error.code === 'ENOENT') return null; throw error; });
         if (bytes && bytes.length <= scanLimits.bytes) contents[path] = bytes.toString('utf8');
@@ -196,6 +196,101 @@ export function workflowCheckNames(input: ScanInput, options: { onlyPullRequest?
     }
   }
   return names.slice(0, 10);
+}
+
+/**
+ * GY-1480: the delivery workflow `init --scan --apply` writes for a repository with no CI of its
+ * own, so the onboarding change gives the base branch a pull-request check from the first merge.
+ * It is Graphyard's output like the candidate workflows, so a rescan never reads it back as the
+ * repository's own CI: the repository still has none, and the apply renders it unchanged.
+ */
+export const deliveryWorkflowFile = '.github/workflows/graphyard-delivery.yml';
+/** The job of the delivery workflow a pull request is gated on: it passes only when build and test both passed. */
+export const deliveryGateJob = 'graphyard-gate';
+
+/** Whether the scan found no CI workflow of the repository's own (Graphyard's generated ones never count). */
+export const hasNoCi = (input: Pick<ScanInput, 'files'>) =>
+  !input.files.some(path => /^\.github\/workflows\/[^/]+\.ya?ml$/.test(path) && path !== deliveryWorkflowFile && !(generatedWorkflowFiles as readonly string[]).includes(path));
+
+/** The branch origin's HEAD names, else main: where the delivery workflow's push runs. */
+const originBase = (root: string) => {
+  try { return execFileSync('git', ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim().replace(/^origin\//, '') || 'main'; }
+  catch { return 'main'; }
+};
+
+/**
+ * GY-1480: write the delivery workflow into a checkout whose scan finds no CI of its own; null when
+ * it has CI. Unchanged content is left alone, so a rerun is idempotent. The caller publishes the
+ * path with the other onboarding files, so the onboarding change carries it.
+ */
+export async function writeDeliveryWorkflow(root: string, base = originBase(root)): Promise<{ path: string; state: 'written' | 'unchanged' } | null> {
+  const input = await collectScanInput(root);
+  if (!hasNoCi(input)) return null;
+  const workflow = renderDeliveryWorkflow(detectStack(input), base);
+  const target = resolve(root, workflow.path);
+  let current: string | null = null;
+  try { current = await readFile(target, 'utf8'); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
+  if (current === workflow.content) return { path: workflow.path, state: 'unchanged' };
+  await mkdir(dirname(target), { recursive: true });
+  await writeFile(target, workflow.content, { mode: 0o644 });
+  return { path: workflow.path, state: 'written' };
+}
+
+/**
+ * The minimal delivery workflow for the detected stack: a build job and a test job, then Graphyard's
+ * gate job, which fails unless both passed, so one check name gates a pull request whatever the
+ * stack later adds. Superseded pull-request runs are cancelled; runs on the base never are.
+ */
+export function renderDeliveryWorkflow(stack: Pick<StackDetection, 'name' | 'frameworks' | 'commands'>, base = 'main'): { path: string; content: string } {
+  const has = (check: string) => stack.commands.some(command => command.check === check);
+  const setup = stack.name === 'node'
+    ? `      - uses: actions/setup-node@v4
+        with: { node-version: '24' }
+      - run: if [ -f package-lock.json ]; then npm ci; else npm install; fi`
+    : stack.name === 'python'
+      ? `      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - run: if [ -f requirements.txt ]; then pip install -r requirements.txt; elif [ -f pyproject.toml ]; then pip install -e .; fi${stack.frameworks.includes('pytest') ? ' && pip install pytest' : ''}`
+      : '';
+  const nothing = (what: string) => `echo "No ${what} step was detected for this repository; replace this line with its ${what} command"`;
+  const build = stack.name === 'node'
+    ? [has('build') ? 'npm run build' : null, has('typecheck') ? 'npm run typecheck' : null, has('lint') ? 'npm run lint' : null].filter(Boolean).join(' && ') || nothing('build')
+    : stack.name === 'python' ? 'python -m compileall -q .' : nothing('build');
+  const testCommand = stack.name === 'node'
+    ? has('test') ? 'npm test' : nothing('test')
+    : stack.name === 'python'
+      ? stack.frameworks.includes('pytest') ? 'python -m pytest -q' : 'python -m unittest discover || [ $? -eq 5 ]'
+      : nothing('test');
+  const job = (name: string, command: string) => `  ${name}:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+${setup ? `${setup}
+` : ''}      - run: ${command}
+`;
+  return { path: deliveryWorkflowFile, content: `name: Graphyard delivery
+# Written by graphyard init --scan --apply because this repository had no CI workflow of its own.
+# Edit the build and test commands freely; ${deliveryGateJob} passes only when both jobs passed.
+on:
+  pull_request:
+  push:
+    branches: [${base}]
+permissions:
+  contents: read
+concurrency:
+  group: \${{ github.workflow }}-\${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: \${{ github.event_name == 'pull_request' }}
+jobs:
+${job('build', build)}${job('test', testCommand)}  ${deliveryGateJob}:
+    needs: [build, test]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: test "$BUILD" = success && test "$TEST" = success
+        env:
+          BUILD: \${{ needs.build.result }}
+          TEST: \${{ needs.test.result }}
+` };
 }
 
 export type DeployTarget = 'railway' | 'vercel' | 'fly' | 'github-pages' | 'container-registry' | 'none';

@@ -586,3 +586,133 @@ const server = createServer((_, response) => response.end('App page')).listen(0,
     }
   }));
 });
+
+test('unit:onboarding-generates-workflow — onboarding a repository with no CI writes a delivery workflow (build and test for its stack, then Graphyard\'s gate) into the onboarding change, up claims only the workflows the apply wrote, and publishOnboarding refuses naming a file it means to publish that is missing', async () => {
+  const { buildProposal, collectScanInput, deliveryGateJob, deliveryWorkflowFile, hasNoCi, renderDeliveryWorkflow, writeDeliveryWorkflow } = await import('../src/onboarding.js');
+  const { applyProposal, repositoryScanDifference, saveProposal, scanProposal } = await import('../src/repository-setup.js');
+  const { publishOnboarding, runUp } = await up();
+  const gitRoot = await temporaryDirectory('graphyard-up-greenfield');
+  const git = (cwd: string, args: string[], env: Record<string, string> = {}) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@example.com', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@example.com', ...env } });
+  const origin = join(gitRoot, 'origin.git'), checkout = join(gitRoot, 'checkout');
+  git(gitRoot, ['init', '--quiet', '--bare', '-b', 'main', origin]);
+  git(gitRoot, ['clone', '--quiet', origin, checkout]);
+  git(checkout, ['remote', 'set-url', 'origin', 'git@github.com:acme/game.git']);
+  // A greenfield game: a Node package with a test script and no CI workflow at all.
+  await writeFile(join(checkout, 'package.json'), JSON.stringify({ name: 'game', scripts: { build: 'tsc', test: 'node --test' } }));
+  await writeFile(join(checkout, 'index.html'), '<canvas></canvas>\n');
+  git(checkout, ['add', '.']); git(checkout, ['commit', '--quiet', '-m', 'first']);
+  git(checkout, ['push', '--quiet', origin, 'HEAD:main']);
+
+  const proposal = await scanProposal(checkout, { url: 'https://graphyard.example', runtimes: [] });
+  assert.equal(proposal.ci.system, 'none');
+  await saveProposal(checkout, proposal);
+  const applyDeps = { url: 'https://graphyard.example', githubSetup: async () => ({ appId: 1, slug: 'graphyard-acme-game' }), now: () => new Date('2030-01-01T00:00:00Z') };
+  const applied = await applyProposal(checkout, proposal, applyDeps);
+  assert.deepEqual(applied.delivery!.workflows, [deliveryWorkflowFile], 'the apply reports the workflow it wrote');
+  assert.ok(applied.applied.includes(deliveryWorkflowFile));
+  const workflow = await readFile(join(checkout, deliveryWorkflowFile), 'utf8');
+  assert.equal(workflow, renderDeliveryWorkflow({ name: 'node', frameworks: ['node:test'], commands: proposal.commands }).content);
+  assert.match(workflow, /^on:\n  pull_request:\n  push:\n    branches: \[main\]\n/m);
+  assert.match(workflow, /  build:\n[\s\S]*npm ci; else npm install[\s\S]*- run: npm run build\n/);
+  assert.match(workflow, /  test:\n[\s\S]*- run: npm test\n/);
+  assert.match(workflow, new RegExp(`  ${deliveryGateJob}:\\n    needs: \\[build, test\\]\\n    if: always\\(\\)`));
+  // The generated workflow is Graphyard's own output: a rescan still sees no CI, and a rerun changes nothing.
+  assert.equal(hasNoCi(await collectScanInput(checkout)), true);
+  assert.deepEqual(repositoryScanDifference(await scanProposal(checkout, { url: 'https://graphyard.example', runtimes: [] }), proposal), []);
+  assert.ok((await applyProposal(checkout, proposal, applyDeps)).unchanged.includes(deliveryWorkflowFile));
+  assert.deepEqual(await writeDeliveryWorkflow(checkout, 'main'), { path: deliveryWorkflowFile, state: 'unchanged' });
+  // A repository with CI of its own gets none.
+  const withCi = buildProposal({ files: ['package.json', '.github/workflows/ci.yml'], contents: { 'package.json': '{"scripts":{"test":"vitest"}}', '.github/workflows/ci.yml': 'on: [pull_request]\njobs:\n  unit:\n    runs-on: ubuntu-latest\n' } }, { repository: 'acme/game' });
+  assert.equal(withCi.ci.system, 'github-actions');
+  const ciRepo = await temporaryDirectory('graphyard-up-has-ci');
+  await mkdir(join(ciRepo, '.github/workflows'), { recursive: true });
+  await writeFile(join(ciRepo, '.github/workflows/ci.yml'), 'on: [pull_request]\n');
+  assert.equal(await writeDeliveryWorkflow(ciRepo, 'main'), null);
+  // Other stacks still get a build and a test job.
+  assert.match(renderDeliveryWorkflow({ name: 'python', frameworks: ['pytest'], commands: [] }).content, /- run: python -m pytest -q\n/);
+  assert.match(renderDeliveryWorkflow({ name: 'unknown', frameworks: [], commands: [] }).content, /No test step was detected/);
+
+  // The publish carries the workflow on the base tip, and the pull request names it.
+  const gh: string[][] = [];
+  const runner = (program: string, args: string[], env?: Record<string, string>) => {
+    if (program === 'git') return git(checkout, args.map(arg => arg === 'origin' ? origin : arg), env);
+    gh.push(args);
+    if (args[0] === 'pr' && args[1] === 'list') return '\n';
+    if (args[0] === 'repo') return 'main\n';
+    return 'https://github.com/acme/game/pull/1\n';
+  };
+  assert.deepEqual(await publishOnboarding(checkout, 'acme/game', runner, [deliveryWorkflowFile]), { pullRequest: 'https://github.com/acme/game/pull/1' });
+  const tree = git(origin, ['ls-tree', '-r', '--name-only', 'graphyard/onboarding']).trim().split('\n');
+  assert.ok(tree.includes(deliveryWorkflowFile) && tree.includes('AGENTS.md') && tree.includes('graphyard.json') && tree.includes('.gitignore'), tree.join(', '));
+  assert.match(gh.find(args => args[1] === 'create')!.at(-1)!, new RegExp(`delivery workflows \\(${deliveryWorkflowFile.replace(/[./]/g, '\\$&')}\\)`));
+
+  // A file the publish means to carry that is missing is refused by name; nothing is pushed.
+  const missing = join(gitRoot, 'missing');
+  await mkdir(missing, { recursive: true });
+  await writeFile(join(missing, 'AGENTS.md'), '# Agents\n');
+  await writeFile(join(missing, 'graphyard.json'), '{}\n');
+  let ran = 0;
+  await assert.rejects(publishOnboarding(missing, 'acme/game', () => { ran++; return ''; }, [deliveryWorkflowFile]), new RegExp(`publishOnboarding refuses: ${deliveryWorkflowFile.replace(/[./]/g, '\\$&')} is missing`));
+  await assert.rejects(publishOnboarding(missing, 'acme/game', () => { ran++; return ''; }, ['.github/workflows/ci.yml', 'graphyard.json']), /\.github\/workflows\/ci\.yml is missing/);
+  assert.equal(ran, 0, 'a refused publish runs nothing');
+
+  // up passes the workflows the apply reported to the publish and claims exactly those; with none it claims none.
+  for (const workflows of [[deliveryWorkflowFile], []]) {
+    const w = world({ app: true, reviewer: true, accounts: true, loop: true, onboardingMerged: true });
+    const root = await temporaryDirectory('graphyard-up-onboarding-claims');
+    const events: UpEvent[] = [];
+    const published: string[][] = [];
+    const deps = dependencies(w, root, events);
+    const cli = deps.cli;
+    const result = await runUp(request(), { ...deps,
+      cli: async (args, options) => args.join(' ').startsWith('init --scan --apply') ? (w.calls.push(args), { code: 0, stdout: JSON.stringify({ delivery: { workflows } }) }) : cli(args, options),
+      publishOnboarding: async files => { published.push(files); w.onboardingPullRequest = 'https://github.com/acme/shop/pull/1'; return { pullRequest: w.onboardingPullRequest }; } });
+    assert.equal(result.exitCode, 0, result.next);
+    assert.deepEqual(published, [workflows]);
+    const detail = events.find((event): event is Extract<UpEvent, { kind: 'step' }> => event.kind === 'step' && event.step === 'onboarding' && event.state === 'done')!.detail!;
+    if (workflows.length) assert.match(detail, /graphyard-delivery\.yml published in/);
+    else { assert.doesNotMatch(detail, /workflow applied|delivery workflows? published/); assert.match(detail, /no delivery workflow was written/); }
+  }
+});
+
+test('unit:up-preflight-clean-cli — up refuses at preflight, naming the dirty paths, before installing anything when the CLI checkout the master loop runs from holds uncommitted work; a loop that refuses to start fails the master-loop step with its cause instead of stalling', async () => {
+  const { runUp, upExitCodes } = await up();
+  // A dirty CLI checkout: preflight refuses with the paths and nothing is planned or installed.
+  const dirty = world();
+  const events: UpEvent[] = [];
+  const refused = await runUp(request(), { ...dependencies(dirty, await temporaryDirectory('graphyard-up-dirty-cli'), events),
+    cliCheckout: async () => ({ root: '/opt/graphyard', dirty: ['src/up.ts', 'tests/new.test.ts'] }) });
+  assert.equal(refused.exitCode, upExitCodes.prerequisite);
+  assert.match(refused.next, /^preflight: the Graphyard CLI checkout the master loop runs from \(\/opt\/graphyard\) holds uncommitted work.*src\/up\.ts, tests\/new\.test\.ts/);
+  assert.deepEqual(refused.completed, []);
+  assert.equal(dirty.calls.filter(args => args[0] === 'install').length, 0, 'nothing is planned or installed');
+
+  // A clean checkout passes preflight; a loop that then refuses to start is a failed step naming the cause, long before the machine wait ends.
+  const w = world({ app: true, reviewer: true, accounts: true, onboardingMerged: true });
+  let checks = 0;
+  const loopEvents: UpEvent[] = [];
+  const cause = 'the master loop refuses to start, self-upgrade or restart from the coordinator checkout at /opt/graphyard: it holds uncommitted work';
+  const stalled = await runUp(request(), { ...dependencies(w, await temporaryDirectory('graphyard-up-loop-refuses'), loopEvents), machineWaitMs: 600_000,
+    cliCheckout: async () => { checks++; return { root: '/opt/graphyard', dirty: [] }; },
+    loopRefusal: async () => w.calls.some(args => args.join(' ') === 'master restart') ? cause : null,
+    status: async () => { const current = status(w); return current && { ...current, setup: { ...current.setup, loop: false } }; } });
+  assert.equal(stalled.exitCode, upExitCodes.failed);
+  assert.equal(stalled.next, `master-loop: the master loop refuses to run: ${cause}`);
+  assert.ok(stalled.completed.includes('preflight') && !stalled.completed.includes('master-loop'));
+  assert.ok(checks >= 2, 'the checkout is read at preflight and again before the loop starts');
+  assert.ok(w.ticks < 5, 'the refusal is reported at once, not after the machine wait');
+
+  // Even when the checklist reads the loop as live, a refusing loop fails the step.
+  const live = world({ app: true, reviewer: true, accounts: true, loop: true, onboardingMerged: true });
+  const green = await runUp(request(), { ...dependencies(live, await temporaryDirectory('graphyard-up-loop-live'), []), loopRefusal: async () => cause });
+  assert.equal(green.exitCode, upExitCodes.failed);
+  assert.match(green.next, /^master-loop: the master loop refuses to run/);
+
+  // A checkout dirtied after preflight is refused again before the loop restarts.
+  const late = world({ app: true, reviewer: true, accounts: true, onboardingMerged: true });
+  let reads = 0;
+  const lateResult = await runUp(request(), { ...dependencies(late, await temporaryDirectory('graphyard-up-late-dirty'), []), cliCheckout: async () => ({ root: '/opt/graphyard', dirty: reads++ === 0 ? [] : ['src/up.ts'] }) });
+  assert.equal(lateResult.exitCode, upExitCodes.prerequisite);
+  assert.match(lateResult.next, /^master-loop: .*src\/up\.ts/);
+  assert.ok(!late.calls.some(args => args.join(' ') === 'master restart'), 'the loop is not restarted onto a dirty checkout');
+});
