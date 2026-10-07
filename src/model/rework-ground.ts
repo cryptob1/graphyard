@@ -28,11 +28,14 @@ export const laneApprover = 'graphyard-risk-lane';
  *   contains the tip, or a reading taken before the base moved, so such a reading was never checked.
  *
  * Every other rework, in particular one resting only on the requester's own judgement, still
- * waits for its approver on a high-lane item (GY-883).
+ * waits for its approver on a high-lane item (GY-883). A head already returned to a worker has
+ * spent its ground: the engine keeps its submission and candidate until a new head is submitted, so
+ * the record still shows the failure, but a later rework of it (the retry cap's `overlong-cap:`
+ * after attempts that never submitted, GY-885) judges those attempts, not the head, and waits too.
  */
 export function reworkGround(work: Work, decisions: readonly GroundDecision[], now = new Date()): string | null {
   const candidate = work.candidate;
-  if (!candidate || !work.submission || work.stage === 'done' || work.observation?.merged) return null;
+  if (!candidate || !work.submission || work.reworkRequested || work.stage === 'done' || work.observation?.merged) return null;
   const head = candidate.sha.slice(0, 12);
   const failed = [...mechanicalVerdicts(work, [work], now).filter(verdict => verdict.outcome === 'failed'), ...producerManualFailures(work, [work], now)];
   if (failed.length) return `a trusted proof failed on candidate ${head} (${[...new Set(failed.map(verdict => verdict.proof))].sort().join(', ')})`;

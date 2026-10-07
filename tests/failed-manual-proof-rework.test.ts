@@ -184,6 +184,11 @@ test('unit:rework-ground-recorded — a trusted failure, a refused attestation o
     assert.equal(reworkGround(conflicting({ baseRefresh: { ...refresh!, ...stale } as Work['baseRefresh'] }), []), null, `a test merge of another head, tip or revision, or a clean one: ${JSON.stringify(stale)}`);
   // A delivered head, or one no longer submitted, has no ground.
   assert.equal(reworkGround(item([{ executed: 3 }], { stage: 'done' }), []), null);
+  // A head already returned to a worker has spent its ground: the failure stays on record until a
+  // new head is submitted, but a later rework (the retry cap's, GY-885) waits for its approver.
+  assert.equal(reworkGround(item([{ executed: 3 }], { reworkRequested: true }), []), null, 'a returned head\u2019s failed proof');
+  assert.equal(reworkGround(item([{}], { reworkRequested: true }), [refusedAttest()]), null, 'a returned head\u2019s refused attestation');
+  assert.equal(reworkGround(conflicting({ reworkRequested: true, baseRefresh: refresh }), []), null, 'a returned head\u2019s test-merge conflict');
   assert.equal(laneApprover, 'graphyard-risk-lane');
 });
 
