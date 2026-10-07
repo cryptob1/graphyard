@@ -4,7 +4,8 @@ import { defineRoutes, parseJson, type RouteContext } from '../routes.js';
 
 /**
  * Goals (GY-1417): `graphyard goal FILE` records one, the acceptance role drafts its outcomes and
- * cases, an independent approver judges the draft, the master records its pull request merged, and
+ * cases, an independent approver judges the draft, the loop records its pull request merged (or
+ * closed unmerged, which returns the goal to drafting), and
  * case changes after that are judged by an approver who is neither their requester nor an
  * implementer of their item. This module authorizes its callers itself, so it is matched ahead of
  * the operator-agent route guard: an operator agent records intent with `intent:create` and judges
@@ -18,7 +19,7 @@ function allow({ actor, services }: RouteContext, roles: Principal['role'][], ca
 }
 /** Who may run each command on an existing goal. A case change is asked by whoever works on the item. */
 const permitted: Record<Exclude<GoalCommand, 'record'>, (context: RouteContext) => void> = {
-  draft: intent, approve: judge, refuse: judge, merged: intent, deliver: intent, 'case-change-approve': judge, 'case-change-refuse': judge,
+  draft: intent, approve: judge, refuse: judge, merged: intent, closed: intent, deliver: intent, 'case-change-approve': judge, 'case-change-refuse': judge,
   'case-change': context => demand(!['reader', 'producer'].includes(context.actor.role), 'A reader or producer cannot request a case change', 403),
 };
 const find = (goals: Goal[], ref: string) => goals.find(goal => goal.key === ref || goal.id === ref);
@@ -55,7 +56,7 @@ export const goalRoutes = defineRoutes('goals', [
     },
   },
   {
-    method: 'POST', path: /^\/api\/goals\/([^/]+)\/(draft|approve|refuse|merged|deliver|case-change|case-change-approve|case-change-refuse)$/,
+    method: 'POST', path: /^\/api\/goals\/([^/]+)\/(draft|approve|refuse|merged|closed|deliver|case-change|case-change-approve|case-change-refuse)$/,
     async handle(context, [ref, verb]) {
       const command = verb as Exclude<GoalCommand, 'record'>;
       permitted[command](context);

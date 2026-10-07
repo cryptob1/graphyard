@@ -41,7 +41,7 @@ A flaky required case blocks promotion until an `evidence` decision accepts it: 
 
 ## Goals and acceptance
 
-`graphyard goal FILE` (an operator, or the master's identity) records a goal from JSON: `statement`, `users`, `constraints`, `deployTarget`. The loop launches the `acceptance` role on it, on the diagnostician's models unless the registry's `acceptance` role names accounts: it drafts plain-language outcomes, one required `uat` case per outcome, and their contract bindings, opened as one pull request. Its author never approves it; `goal approve|refuse GOAL-N -- REASON` by another identity does. After the merge (`goal merged`), `complete` refuses a candidate that modifies or deletes a protected case or `e2e/contract.json`, unless `goal case-change` was approved by neither its requester nor an item implementer. `goal list` and `master status` show each open goal's stage.
+`graphyard goal FILE` records a goal: `statement`, `users`, `constraints`, `deployTarget`. The loop's `acceptance` role (diagnostician models unless the registry names accounts) drafts plain-language outcomes, one required `uat` case each, and their contract bindings as one pull request. A headless run on the approver identity, never the author, judges it (or `goal approve|refuse GOAL-N -- REASON`). A refused draft's pull request is closed and redrafted, at most three times. The approved pull request auto-merges at its approved head; closed unmerged, the goal is redrafted. Once merged, `complete` refuses a candidate changing a protected case or `e2e/contract.json` without a `goal case-change` approved by neither requester nor implementer. `master status` lists open goals.
 
 ## Release holds
 

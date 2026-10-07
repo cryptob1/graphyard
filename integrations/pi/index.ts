@@ -154,6 +154,15 @@ export const acceptanceParameters: JsonSchema = {
   },
 };
 
+/** The approver's verdict on one acceptance draft (GY-1417, src/daemon/acceptance.ts judgementPayloadSchema). */
+export const acceptanceJudgementParameters: JsonSchema = {
+  type: 'object', additionalProperties: false, required: ['goal', 'verdict', 'reason'],
+  properties: {
+    goal: { type: 'string', pattern: '^GOAL-\\d+$', description: 'The goal whose draft you judged, exactly as given' },
+    verdict: { type: 'string', enum: ['approve', 'refuse'] }, reason: text(2000, 'Why; for a refusal, what the next draft must change'),
+  },
+};
+
 /** The triage judgement (GY-402, src/model/machine-backlog.ts triageJudgementSchema): release at a priority, close with a reason, or merge into another item. */
 export const triageParameters: JsonSchema = {
   type: 'object', additionalProperties: false, required: ['outcome', 'reason'],
@@ -219,6 +228,7 @@ export function graphyardTools(role: string | undefined = process.env.GRAPHYARD_
   // The research session's brief (GY-259), the diagnostician's diagnosis (GY-439) and the doctor's report (GY-711) are registered for their own roles only.
   if (role === 'diagnostician') return [tool('graphyard_diagnose', 'Graphyard diagnose', 'Record your diagnosis of the recurring fault or invariant violation you were asked to diagnose: its cause, the log lines and commands it rests on, its fault class, and either the existing open item that covers it or the fix item to file. Call it exactly once; it is your result.', diagnoseParameters, params => `diagnosis ${params.subject}`, true)];
   if (role === 'acceptance') return [tool('graphyard_acceptance', 'Graphyard acceptance', 'Record the acceptance draft for the goal you were asked to draft: each customer outcome in plain language with its criteria and the one required uat E2E case that proves it. Call it exactly once; it is your result.', acceptanceParameters, params => `acceptance ${params.goal}`, true)];
+  if (role === 'acceptance-judge') return [tool('graphyard_acceptance_judgement', 'Graphyard acceptance judgement', 'Record your verdict on the acceptance draft you were asked to judge: approve, or refuse naming what the next draft must change. Call it exactly once; it is your result.', acceptanceJudgementParameters, params => `judgement ${params.goal}`, true)];
   if (role === 'decomposition') return [tool('graphyard_decompose', 'Graphyard decompose', 'Record how the broad item you were asked to split divides into small child items, each with the parent criterion IDs it takes, its planned files and the earlier children it lands after; or an empty children list to keep it whole. Call it exactly once; it is your result.', decomposeParameters, () => 'the split', true)];
   if (role === 'doctor') return [tool(doctorReportToolName, 'Graphyard doctor report', 'Record the report of your doctor run: one entry per finding (what was stuck, under which check bound, and whether you could act), one per sanctioned command you ran and what it changed, and one per fault item to file for a finding no open item covers. Call it exactly once; it is your result.', doctorReportParameters, () => 'the doctor report', true)];
   if (role === 'research') return [tool('graphyard_research_brief', 'Graphyard research brief', 'Record the research brief for the item you were asked to research: existing code to reuse, patterns and prior art with sources, risks, the approach you recommend, and the operator\'s product questions with your recommended answers. Call it exactly once; it is your result.', researchParameters, () => 'the brief', true)];

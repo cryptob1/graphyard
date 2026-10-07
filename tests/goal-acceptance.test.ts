@@ -10,11 +10,11 @@ import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { Store } from '../src/store.js';
 import type { Observation, Principal, Work } from '../src/model.js';
-import { acceptanceDraftSchema, applyGoalCommand, draftFiles, protectedCaseRefusals, type Goal } from '../src/model/goal.js';
+import { acceptanceDraftSchema, applyGoalCommand, draftFiles, maxDraftRounds, protectedCaseRefusals, type Goal } from '../src/model/goal.js';
 import { registryRoles, roleSchema } from '../src/model/registry.js';
 import { checkContract, parseCase, parseContract } from '../src/e2e/case.js';
 import { goalCommands } from '../src/cli/goal.js';
-import { acceptanceStep, clearDrafts, draftsSettled, acceptanceTool, type AcceptanceEffects } from '../src/daemon/acceptance.js';
+import { acceptanceStep, clearDrafts, draftsSettled, acceptanceTool, acceptanceJudgementTool, type AcceptanceEffects } from '../src/daemon/acceptance.js';
 import { emptyDaemonState } from '../src/master-daemon.js';
 import { masterConfigSchema } from '../src/master.js';
 import { diagnosticianSettings } from '../src/runner/payloads.js';
@@ -22,7 +22,7 @@ import type { Cycle } from '../src/daemon/cycle.js';
 import type { RunOptions, RunResult, Runner } from '../src/runner/types.js';
 import type { CliContext } from '../src/cli/context.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-import { acceptanceParameters, graphyardTools as piTools, schemaErrors } from '../integrations/pi/index.js';
+import { acceptanceJudgementParameters, acceptanceParameters, graphyardTools as piTools, schemaErrors } from '../integrations/pi/index.js';
 
 // GY-1417: a goal becomes approved customer outcomes and required E2E cases before any code is
 // written, by an acceptance role whose author never approves its own draft, and once merged those
@@ -125,40 +125,63 @@ const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.ex
   githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-goals', autoMerge: true, mergeMethod: 'merge', workers: [] });
 
 test('unit:acceptance-role-drafts-and-approval — the loop launches the acceptance role on an open goal, opens its draft as one pull request, and only an approver who did not author it approves', async () => {
+  clearDrafts();
   assert.ok((registryRoles as readonly string[]).includes('acceptance'));
   assert.equal(roleSchema.parse({ name: 'acceptance', accounts: [], concurrency: 1 }).name, 'acceptance');
-  // On Pi, the role's one tool is its result, and a draft in the format the loop validates passes its schema.
+  // On Pi, each role's one tool is its result, and a draft in the format the loop validates passes its schema.
   assert.deepEqual(piTools('acceptance').map(tool => tool.name), [acceptanceTool]);
+  assert.deepEqual(piTools('acceptance-judge').map(tool => tool.name), [acceptanceJudgementTool]);
   assert.deepEqual(schemaErrors(acceptanceParameters, draftOf('GOAL-9', 'pi-outcome')), []);
+  assert.deepEqual(schemaErrors(acceptanceJudgementParameters, { goal: 'GOAL-9', verdict: 'refuse', reason: 'The case checks the wrong page' }), []);
   const goal: Goal = await ok(master, 'POST', 'goals', goalInput('Operators can sign up a repository in one step'));
-  const prompts: string[] = [], tools: string[] = [], opened: { goal: string; draft: unknown }[] = [];
+  const prompts: string[] = [], tools: string[] = [], opened: { goal: string; draft: unknown }[] = [], closes: number[] = [], enqueues: string[] = [];
   let respond: (prompt: string) => unknown = () => draftOf(goal.key, 'goal-signup');
-  let prState: 'open' | 'merged' = 'open';
+  let verdict: { verdict: 'approve' | 'refuse'; reason: string } = { verdict: 'refuse', reason: 'The case checks the board, not the sign-up the customer asked for' };
+  const prState = new Map<number, 'open' | 'closed' | 'merged'>();
+  let failOpen = 1, failPost = 1, reads = 0;
   const fx: AcceptanceEffects = {
     settings: diagnosticianSettings({}), cwd: root,
     goals: async () => (await ok(master, 'GET', 'goals?open=1')).goals.filter((entry: Goal) => entry.id === goal.id),
-    runner: async attempt => ({ runner: stubRunner(prompt => respond(prompt), prompts, tools), runtime: 'stub', model: attempt }),
-    open: async (target, draft) => { opened.push({ goal: target.key, draft }); return { pr: 700 + opened.length, branch: `graphyard/${target.key.toLowerCase()}-acceptance-${target.revision}` }; },
-    // The draft is posted by the identity that runs the role: its author.
-    draft: (target, input) => ok(author, 'POST', `goals/${target.key}/draft`, input),
-    pullRequest: async () => ({ state: prState, mergeSha: prState === 'merged' ? 'c'.repeat(40) : null }),
+    runner: async (role, attempt) => ({ runner: stubRunner(prompt => role === 'judge' ? { goal: goal.key, ...verdict } : respond(prompt), prompts, tools), runtime: 'stub', model: attempt }),
+    open: async (target, draft) => {
+      if (failOpen-- > 0) throw new Error('gh pr create: HTTP 502');
+      opened.push({ goal: target.key, draft }); prState.set(700 + opened.length, 'open');
+      return { pr: 700 + opened.length, branch: `graphyard/${target.key.toLowerCase()}-acceptance-${target.revision}`, head: String(opened.length).repeat(40) };
+    },
+    // The draft is posted by the identity that runs the role, its author; the verdict by the approver identity.
+    draft: async (target, input) => { if (failPost-- > 0) throw new Error('Graphyard refused goals (502)'); return ok(author, 'POST', `goals/${target.key}/draft`, input); },
+    judge: (target, judgement) => ok(approver, 'POST', `goals/${target.key}/${judgement.verdict}`, { reason: judgement.reason }),
+    pullRequest: async pr => { reads++; const state = prState.get(pr) ?? 'open'; return { state, mergeSha: state === 'merged' ? 'c'.repeat(40) : null, head: null }; },
+    enqueue: async (pr, head) => { enqueues.push(`${pr}@${head}`); },
+    close: async pr => { closes.push(pr); prState.set(pr, 'closed'); },
     merged: (target, pr, mergeSha) => ok(master, 'POST', `goals/${target.key}/merged`, { pr, mergeSha }),
+    closed: (target, pr, reason) => ok(master, 'POST', `goals/${target.key}/closed`, { pr, reason }),
   };
   const state = emptyDaemonState(config);
-  const cycle = () => ({ config, state, effects: { acceptance: fx, persist: async () => {} }, now: () => Date.now(), clock: Date.now(), performed: [], isolate: async (_k: string, _i: unknown, _n: string, body: () => Promise<unknown>) => body() }) as unknown as Cycle;
+  let clock = Date.parse('2026-10-07T00:00:00Z');
+  const cycle = async (advance = 6 * 60_000) => {
+    clock += advance;
+    await acceptanceStep({ config, state, effects: { acceptance: fx, persist: async () => {} }, now: () => clock, clock, performed: [], isolate: async (_k: string, _i: unknown, _n: string, body: () => Promise<unknown>) => body() } as unknown as Cycle);
+    await draftsSettled();
+  };
   const read = async () => (await ok(master, 'GET', `goals/${goal.key}`)).goal as Goal;
 
-  // Drafting: the role runs headless on the goal, and the next cycle opens its draft.
-  await acceptanceStep(cycle()); await draftsSettled();
+  // Drafting: the role runs headless on the goal once; a failed open and a failed post are retried with that same draft, never another run.
+  await cycle();
   assert.equal(prompts.length, 1);
   assert.deepEqual(tools, [`${acceptanceTool} acceptance`]);
   assert.match(prompts[0], /Operators can sign up a repository in one step/);
   assert.match(prompts[0], /"sign-in"/, 'the role is told the outcomes the repository already declares');
-  await acceptanceStep(cycle());
+  await cycle(); assert.equal(opened.length, 0, 'the open failed');
+  await cycle(60_000); assert.equal(opened.length, 0, 'a failed open waits its interval');
+  await cycle(10 * 60_000); assert.equal(opened.length, 1, 'the same draft is opened again'); assert.equal((await read()).stage, 'acceptance-drafting', 'its post failed');
+  await cycle(10 * 60_000);
+  assert.equal(opened.length, 1, 'the post reuses the pull request it opened');
+  assert.equal(prompts.length, 1, 'no failure ran the role again');
   let current = await read();
   assert.equal(current.stage, 'awaiting-approval');
   assert.equal(current.acceptance?.author, author.id);
-  assert.equal(current.acceptance?.pr, 701);
+  assert.equal(current.acceptance?.pr, 701); assert.equal(current.acceptance?.head, '1'.repeat(40));
   assert.deepEqual(current.acceptance?.outcomes.map(outcome => [outcome.id, outcome.case.id, outcome.case.required, outcome.case.target]), [['goal-signup', 'goal-signup', true, 'uat']]);
   // The pull request carries one case per outcome and the contract binding, which validate as the release check reads them.
   const files = draftFiles(acceptanceDraftSchema.parse(opened[0].draft), parseContract(await readFile(join(root, 'e2e/contract.json'), 'utf8')));
@@ -170,34 +193,59 @@ test('unit:acceptance-role-drafts-and-approval — the loop launches the accepta
   // A draft whose case is optional, or not on uat, is no acceptance draft.
   assert.throws(() => acceptanceDraftSchema.parse({ outcomes: draftOf(goal.key, 'loose', false).outcomes }), /must be required/);
 
-  // The author never judges its own draft; another identity refuses it, and the role drafts again answering the refusal.
+  // The author never judges its own draft; a worker cannot either.
   const self = await call(author, 'POST', `goals/${goal.key}/approve`, { reason: 'Looks right to me' });
   assert.equal(self.status, 403); assert.match(self.text, /Self-approval refused/);
   assert.equal((await call(worker, 'POST', `goals/${goal.key}/approve`, { reason: 'ship it' })).status, 403);
-  current = await ok(approver, 'POST', `goals/${goal.key}/refuse`, { reason: 'The case checks the board, not the sign-up the customer asked for' });
-  assert.equal(current.stage, 'acceptance-drafting');
-  respond = () => draftOf(goal.key, 'repository-signup');
-  await acceptanceStep(cycle()); await draftsSettled(); await acceptanceStep(cycle());
-  assert.match(prompts.at(-1)!, /not the sign-up the customer asked for/);
+  // The loop launches the approver's judgement, which refuses; its pull request is closed and the role drafts again answering the refusal.
+  await cycle();
+  assert.deepEqual(tools.at(-1), `${acceptanceJudgementTool} acceptance-judge`);
+  assert.match(prompts.at(-1)!, /You did not write it/);
+  await cycle();
   current = await read();
-  assert.equal(current.stage, 'awaiting-approval'); assert.equal(current.acceptance?.pr, 702);
-  current = await ok(approver, 'POST', `goals/${goal.key}/approve`, { reason: 'Each outcome is what an operator would ask for, and each case checks it' });
-  assert.equal(current.stage, 'planned'); assert.equal(current.approval?.by, approver.id);
+  assert.equal(current.stage, 'acceptance-drafting'); assert.equal(current.refusal?.by, approver.id); assert.equal(current.refusal?.pr, 701);
+  respond = () => draftOf(goal.key, 'repository-signup');
+  verdict = { verdict: 'approve', reason: 'Each outcome is what an operator would ask for, and each case checks it' };
+  await cycle();
+  assert.deepEqual(closes, [701], 'the refused pull request is closed before the next draft');
+  assert.match(prompts.at(-1)!, /not the sign-up the customer asked for/);
+  await cycle();
+  current = await read();
+  assert.equal(current.stage, 'awaiting-approval'); assert.equal(current.acceptance?.pr, 702); assert.equal(current.drafts, 2);
+  await cycle(); await cycle();
+  current = await read();
+  assert.equal(current.stage, 'planned'); assert.equal(current.approval?.by, approver.id); assert.equal(current.approval?.head, '2'.repeat(40));
 
-  // The approved pull request is recorded merged once GitHub merged it, and its cases are protected from then on.
-  await acceptanceStep(cycle());
+  // The approved pull request auto-merges at exactly its approved head, enabled once; it is recorded merged once GitHub merged it.
+  await cycle(); await cycle(60_000);
+  assert.deepEqual(enqueues, [`702@${'2'.repeat(40)}`]);
+  const polls = reads;
+  await cycle(60_000); await cycle(60_000);
+  assert.equal(reads, polls, 'the pull request is read at most once per poll interval');
   assert.equal((await read()).stage, 'planned');
-  prState = 'merged';
-  await acceptanceStep(cycle());
+  prState.set(702, 'merged');
+  await cycle();
   const delivering = await read();
   assert.equal(delivering.stage, 'delivering');
   assert.deepEqual(delivering.protected, { cases: ['repository-signup'], outcomes: ['repository-signup'] });
   const kinds = (await ok(master, 'GET', `goals/${goal.key}`)).history.map((entry: any) => `${entry.kind}:${entry.actor}`);
   assert.deepEqual(kinds, ['goal.recorded:goal-master', 'goal.draft:acceptance-author', 'goal.refuse:goal-approver', 'goal.draft:acceptance-author', 'goal.approve:goal-approver', 'goal.merged:goal-master']);
+  assert.equal(new Set(Object.keys(state.actions)).size, 1, 'one action per goal, its detail replaced as it moves');
   // A later goal cannot claim the cases this one protects.
   const other: Goal = await ok(master, 'POST', 'goals', goalInput('Another goal'));
-  const taken = await call(author, 'POST', `goals/${other.key}/draft`, { ...draftOf(other.key, 'repository-signup'), goal: undefined, pr: 900, branch: 'graphyard/other' });
+  const taken = await call(author, 'POST', `goals/${other.key}/draft`, { ...draftOf(other.key, 'repository-signup'), goal: undefined, pr: 900, branch: 'graphyard/other', head: 'e'.repeat(40) });
   assert.equal(taken.status, 422); assert.match(taken.text, new RegExp(`belongs to ${goal.key}`));
+
+  // An approved pull request closed unmerged is not left planned: the goal goes back to drafting with the reason, and the loop stops after its draft rounds.
+  const third: Goal = await ok(master, 'POST', 'goals', goalInput('A third goal'));
+  for (let round = 1; round <= maxDraftRounds; round++) {
+    await ok(author, 'POST', `goals/${third.key}/draft`, { outcomes: draftOf(third.key, `third-${round}`).outcomes, pr: 950 + round, branch: `graphyard/third-${round}`, head: 'f'.repeat(40) });
+    await ok(approver, 'POST', `goals/${third.key}/approve`, { reason: 'Right' });
+    const closed: Goal = await ok(master, 'POST', `goals/${third.key}/closed`, { pr: 950 + round, reason: 'closed without merging' });
+    assert.equal(closed.stage, 'acceptance-drafting'); assert.equal(closed.refusal?.reason, 'closed without merging'); assert.equal(closed.approval, null);
+  }
+  const held = (await ok(master, 'GET', 'goals?open=1&view=summary')).goals.find((entry: any) => entry.key === third.key);
+  assert.match(held.next.who, new RegExp(`${maxDraftRounds} acceptance drafts were refused or closed`));
 });
 
 /** A claimed item with its workspace, and the observation of a candidate changing `files` on its branch. */
@@ -217,7 +265,7 @@ const changed = (path: string, status: 'modified' | 'removed' | 'added' = 'modif
 test('unit:required-cases-protected — after the acceptance PR merges, a candidate that modifies or deletes a required case or binding is refused at complete, and only an independently approved case change lets it through', async () => {
   // A goal whose acceptance pull request merged: drafted by its author, approved by another identity.
   const recorded: Goal = await ok(master, 'POST', 'goals', goalInput('Operators can sign up a repository from the setup page'));
-  await ok(author, 'POST', `goals/${recorded.key}/draft`, { outcomes: draftOf(recorded.key, 'setup-signup').outcomes, pr: 811, branch: 'graphyard/setup-signup' });
+  await ok(author, 'POST', `goals/${recorded.key}/draft`, { outcomes: draftOf(recorded.key, 'setup-signup').outcomes, pr: 811, branch: 'graphyard/setup-signup', head: 'a'.repeat(40) });
   await ok(approver, 'POST', `goals/${recorded.key}/approve`, { reason: 'The case checks the outcome the customer asked for' });
   const goal: Goal = await ok(master, 'POST', `goals/${recorded.key}/merged`, { pr: 811 });
   assert.deepEqual(goal.protected, { cases: ['setup-signup'], outcomes: ['setup-signup'] });
@@ -230,6 +278,9 @@ test('unit:required-cases-protected — after the acceptance PR merges, a candid
   assert.match(String(modified), new RegExp(`Protected case: ${casePath} modifies required case setup-signup \\(outcome setup-signup of ${goal.key}\\)`));
   assert.match(String(await submit([changed(casePath, 'removed')])), /Protected case: .* deletes required case setup-signup/);
   assert.match(String(await submit([changed('e2e/contract.json')])), new RegExp(`Protected case: e2e/contract.json modifies the contract binding setup-signup of ${goal.key}`));
+  // Renaming the contract away deletes every binding it holds.
+  const renamed = { ...changed('e2e/release-contract.json'), status: 'renamed', previousPath: 'e2e/contract.json' };
+  assert.match(protectedCaseRefusals(work, observe([renamed] as never), [goal]).join('; '), new RegExp(`e2e/contract.json deletes the contract binding setup-signup of ${goal.key}`));
   // A new case, and a case no goal protects, are the implementation's own.
   assert.deepEqual(protectedCaseRefusals(work, observe([changed('e2e/cases/new-case.json', 'added'), changed('e2e/cases/board.json')] as never), [goal]), []);
 
@@ -246,6 +297,10 @@ test('unit:required-cases-protected — after the acceptance PR merges, a candid
   const approved: Goal = await ok(approver, 'POST', `goals/${goal.key}/case-change-approve`, { change: change.id, reason: 'The outcome is the same; only the path moved' });
   assert.equal(approved.caseChanges.at(-1)?.state, 'approved'); assert.equal(approved.caseChanges.at(-1)?.judgedBy, approver.id);
   assert.equal((await call(approver, 'POST', `goals/${goal.key}/case-change-approve`, { change: change.id, reason: 'again' })).status, 409);
+  // A grant for one case is no grant over the contract while the goal protects a binding nobody judged.
+  const wider: Goal = { ...approved, protected: { cases: ['setup-signup', 'setup-audit'], outcomes: ['setup-signup', 'setup-audit'] } };
+  assert.match(protectedCaseRefusals(work, observe([changed('e2e/contract.json')] as never), [wider]).join('; '), /no approved case change covers setup-audit/);
+  assert.deepEqual(protectedCaseRefusals(work, observe([changed(casePath)] as never), [wider]), [], 'the granted case itself passes');
   // With the approved change, the same candidate is accepted.
   assert.deepEqual(protectedCaseRefusals(work, observe([changed(casePath), changed('e2e/contract.json')] as never), [approved]), []);
   assert.equal(await submit([changed('src/feature.ts'), changed(casePath)]), null);

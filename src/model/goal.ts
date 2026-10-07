@@ -23,6 +23,8 @@ export const goalStages = ['acceptance-drafting', 'awaiting-approval', 'planned'
 export type GoalStage = typeof goalStages[number];
 /** The stages a goal's cases are protected in: its acceptance pull request merged. */
 export const protectingStages: readonly GoalStage[] = ['delivering', 'delivered'];
+/** Drafts the loop writes for one goal; past them a refused or closed draft is the master's to answer. */
+export const maxDraftRounds = 3;
 
 const line = (max: number) => z.string().trim().min(1).max(max).refine(value => !/[\u0000-\u0008\u000b-\u001f\u007f]/.test(value), 'Control characters are not allowed');
 const reason = line(2000);
@@ -55,14 +57,16 @@ export const acceptanceDraftSchema = z.object({ outcomes: z.array(acceptanceOutc
   });
 });
 export type AcceptanceDraft = z.infer<typeof acceptanceDraftSchema>;
-/** A posted draft: the outcomes and the pull request the loop opened them as. */
-export const draftInputSchema = z.object({ outcomes: z.unknown(), pr: z.number().int().positive(), branch: line(200) }).strict()
-  .transform(({ outcomes, pr, branch }) => ({ ...acceptanceDraftSchema.parse({ outcomes }), pr, branch }));
+const sha = z.string().regex(/^[0-9a-f]{40}$/);
+/** A posted draft: the outcomes and the pull request the loop opened them as, at its head. */
+export const draftInputSchema = z.object({ outcomes: z.unknown(), pr: z.number().int().positive(), branch: line(200), head: sha }).strict()
+  .transform(({ outcomes, pr, branch, head }) => ({ ...acceptanceDraftSchema.parse({ outcomes }), pr, branch, head }));
 
 export const goalCommandSchemas = {
   approve: z.object({ reason }).strict(),
   refuse: z.object({ reason }).strict(),
-  merged: z.object({ pr: z.number().int().positive(), mergeSha: z.string().regex(/^[0-9a-f]{40}$/).nullable().default(null) }).strict(),
+  merged: z.object({ pr: z.number().int().positive(), mergeSha: sha.nullable().default(null) }).strict(),
+  closed: z.object({ pr: z.number().int().positive(), reason }).strict(),
   deliver: z.object({ reason }).strict(),
   'case-change': z.object({ work: z.string().regex(/^[A-Z][A-Z0-9]*-\d+$/), cases: z.array(caseId).min(1).max(50), reason }).strict(),
   'case-change-approve': z.object({ change: z.string().uuid(), reason }).strict(),
@@ -78,11 +82,14 @@ export interface CaseChange {
 export interface Goal extends GoalInput {
   id: string; key: string; stage: GoalStage; revision: number;
   recordedBy: string; recordedAt: string; updatedAt: string;
-  /** The acceptance role's draft: who wrote it, its pull request and its outcomes with their cases. */
-  acceptance: { author: string; pr: number; branch: string; draftedAt: string; outcomes: AcceptanceOutcome[] } | null;
-  approval: { by: string; at: string; reason: string } | null;
-  /** The last refused draft, so the next draft can answer it. */
-  refusal: { by: string; at: string; reason: string; pr: number } | null;
+  /** The acceptance role's draft: who wrote it, its pull request at its head, and its outcomes with their cases. */
+  acceptance: { author: string; pr: number; branch: string; head: string; draftedAt: string; outcomes: AcceptanceOutcome[] } | null;
+  /** The approval binds the head it judged: the pull request merges only at that head. */
+  approval: { by: string; at: string; reason: string; head: string } | null;
+  /** The last refused (or closed unmerged) draft, so the next draft can answer it and the loop closes its pull request. */
+  refusal: { by: string; at: string; reason: string; pr: number; branch: string } | null;
+  /** How many drafts were posted; the loop drafts at most maxDraftRounds. */
+  drafts: number;
   merged: { at: string; by: string; pr: number; mergeSha: string | null } | null;
   /** What stays protected once the acceptance pull request merged: the case ids and outcome ids it added. */
   protected: { cases: string[]; outcomes: string[] };
@@ -115,7 +122,7 @@ export interface GoalContext {
 export function recordGoal(input: unknown, key: string, context: GoalContext): Goal {
   const data = goalInputSchema.parse(input);
   return { id: randomUUID(), key, ...data, stage: 'acceptance-drafting', revision: 1, recordedBy: context.actor.id, recordedAt: context.at, updatedAt: context.at,
-    acceptance: null, approval: null, refusal: null, merged: null, protected: { cases: [], outcomes: [] }, caseChanges: [] };
+    acceptance: null, approval: null, refusal: null, drafts: 0, merged: null, protected: { cases: [], outcomes: [] }, caseChanges: [] };
 }
 
 /**
@@ -133,14 +140,21 @@ export function applyGoalCommand(goal: Goal, command: Exclude<GoalCommand, 'reco
       ...(other.acceptance?.outcomes ?? []).flatMap(outcome => [[`outcome ${outcome.id}`, other.key] as const, [`case ${outcome.case.id}`, other.key] as const])]));
     const taken = data.outcomes.flatMap(outcome => [`outcome ${outcome.id}`, `case ${outcome.case.id}`]).filter(name => owned.has(name));
     demand(!taken.length, `${taken.map(name => `${name} belongs to ${owned.get(name)}`).join('; ')}; a draft names its own outcomes and cases`, 422);
-    next.acceptance = { author: actor.id, pr: data.pr, branch: data.branch, draftedAt: at, outcomes: data.outcomes };
-    next.approval = null; next.stage = 'awaiting-approval';
+    next.acceptance = { author: actor.id, pr: data.pr, branch: data.branch, head: data.head, draftedAt: at, outcomes: data.outcomes };
+    next.approval = null; next.stage = 'awaiting-approval'; next.drafts = (goal.drafts ?? 0) + 1;
   } else if (command === 'approve' || command === 'refuse') {
     const data = goalCommandSchemas[command].parse(input);
     demand(goal.stage === 'awaiting-approval' && goal.acceptance, `${goal.key} is ${goal.stage}; only a draft awaiting approval is judged`);
     demand(actor.id !== goal.acceptance.author, `Self-approval refused: ${actor.id} authored the acceptance draft of ${goal.key}; an approver on a different identity judges it`, 403);
-    if (command === 'approve') { next.approval = { by: actor.id, at, reason: data.reason }; next.stage = 'planned'; }
-    else { next.refusal = { by: actor.id, at, reason: data.reason, pr: goal.acceptance.pr }; next.acceptance = null; next.stage = 'acceptance-drafting'; }
+    if (command === 'approve') { next.approval = { by: actor.id, at, reason: data.reason, head: goal.acceptance.head }; next.stage = 'planned'; }
+    else { next.refusal = { by: actor.id, at, reason: data.reason, pr: goal.acceptance.pr, branch: goal.acceptance.branch }; next.acceptance = null; next.stage = 'acceptance-drafting'; }
+  } else if (command === 'closed') {
+    // A draft's pull request closed unmerged: the goal goes back to drafting with the reason recorded, so it is never left planned.
+    const data = goalCommandSchemas.closed.parse(input);
+    demand((goal.stage === 'awaiting-approval' || goal.stage === 'planned') && goal.acceptance, `${goal.key} is ${goal.stage}; only an open acceptance draft is recorded closed`);
+    demand(data.pr === goal.acceptance.pr, `${goal.key}'s acceptance pull request is #${goal.acceptance.pr}, not #${data.pr}`, 422);
+    next.refusal = { by: actor.id, at, reason: data.reason, pr: data.pr, branch: goal.acceptance.branch };
+    next.acceptance = null; next.approval = null; next.stage = 'acceptance-drafting';
   } else if (command === 'merged') {
     const data = goalCommandSchemas.merged.parse(input);
     demand(goal.stage === 'planned' && goal.acceptance && goal.approval, `${goal.key} is ${goal.stage}; only an approved acceptance draft is recorded merged`);
@@ -174,9 +188,10 @@ export function applyGoalCommand(goal: Goal, command: Exclude<GoalCommand, 'reco
 
 /** Who acts next on a goal, and with which command; null once it is delivered. */
 export function goalNext(goal: Goal): { who: string; command: string } | null {
+  if (goal.stage === 'acceptance-drafting' && (goal.drafts ?? 0) >= maxDraftRounds) return { who: `master: ${maxDraftRounds} acceptance drafts were refused or closed (last: ${goal.refusal?.reason ?? 'none recorded'}); the loop drafts no more`, command: `graphyard goal draft ${goal.key} DRAFT.json` };
   if (goal.stage === 'acceptance-drafting') return { who: 'acceptance role (the master loop launches it)', command: `graphyard goal draft ${goal.key} DRAFT.json` };
   if (goal.stage === 'awaiting-approval') return { who: `an approver other than ${goal.acceptance!.author}`, command: `graphyard goal approve ${goal.key} -- REASON (or goal refuse)` };
-  if (goal.stage === 'planned') return { who: 'master: merge the approved acceptance pull request', command: `graphyard goal merged ${goal.key} ${goal.acceptance!.pr}` };
+  if (goal.stage === 'planned') return { who: `the loop: auto-merge of acceptance pull request #${goal.acceptance!.pr} at its approved head, once its required checks pass`, command: `graphyard goal merged ${goal.key} ${goal.acceptance!.pr}` };
   if (goal.stage === 'delivering') return { who: 'master: create and deliver the implementation items', command: `graphyard goal deliver ${goal.key} -- REASON` };
   return null;
 }
@@ -192,15 +207,16 @@ const touches = (file: Pick<ScopeFile, 'status' | 'baseSha' | 'sha'>) => file.st
 /**
  * Pure, at `complete` (and on every observation that re-derives it): the protected cases and
  * contract bindings the candidate modifies or deletes, each refusal naming the case, the outcome and
- * the goal. A change the item holds an approved case change for passes; e2e/contract.json passes
- * only with an approved case change, since bindings are read from its whole text.
+ * the goal. A change the item holds an approved case change for passes. e2e/contract.json — changed,
+ * deleted or renamed away — passes only when the item's approved case changes cover every case the
+ * goal protects, since the observation carries no contents to tell which binding moved.
  */
 export function protectedCaseRefusals(work: { key: string }, observation: Pick<Observation, 'files' | 'scopeFiles'> | null, goals: readonly Goal[]): string[] {
   if (!observation) return [];
   const guarding = goals.filter(goal => protectingStages.includes(goal.stage) && goal.protected.cases.length);
   if (!guarding.length) return [];
   const files: Pick<ScopeFile, 'path' | 'status' | 'baseSha' | 'sha' | 'previousPath'>[] = observation.scopeFiles ?? observation.files.map(path => ({ path, status: 'changed' as const, sha: null }));
-  const granted = (goal: Goal, id: string | null) => goal.caseChanges.some(change => change.state === 'approved' && change.work === work.key && (id === null || change.cases.includes(id)));
+  const granted = (goal: Goal, id: string) => goal.caseChanges.some(change => change.state === 'approved' && change.work === work.key && change.cases.includes(id));
   const refusals: string[] = [];
   const how = (goal: Goal) => `change it only through an approved case change: graphyard goal case-change ${goal.key} ${work.key} CASE -- REASON, judged by an approver who is neither the requester nor an implementer of ${work.key}`;
   for (const file of files) {
@@ -213,14 +229,17 @@ export function protectedCaseRefusals(work: { key: string }, observation: Pick<O
         refusals.push(`Protected case: ${path} ${file.status === 'removed' || moved ? 'deletes' : 'modifies'} required case ${id} (outcome ${outcome} of ${goal.key}); ${how(goal)}`);
       }
     }
-    if (file.path === contractFile && touches(file)) for (const goal of guarding) if (!granted(goal, null))
-      refusals.push(`Protected case: ${contractFile} ${file.status === 'removed' ? 'deletes' : 'modifies'} the contract binding${goal.protected.outcomes.length === 1 ? '' : 's'} ${goal.protected.outcomes.join(', ')} of ${goal.key}; ${how(goal)}`);
+    const renamedAway = file.status === 'renamed' && file.previousPath === contractFile && file.path !== contractFile;
+    if ((file.path === contractFile && touches(file)) || renamedAway) for (const goal of guarding) {
+      const ungranted = goal.protected.cases.filter(id => !granted(goal, id));
+      if (ungranted.length) refusals.push(`Protected case: ${contractFile} ${file.status === 'removed' || renamedAway ? 'deletes' : 'modifies'} the contract binding${goal.protected.outcomes.length === 1 ? '' : 's'} ${goal.protected.outcomes.join(', ')} of ${goal.key}, and no approved case change covers ${ungranted.join(', ')}; ${how(goal)}`);
+    }
   }
   return refusals;
 }
 
 // ---- The ledger: one event per change, each carrying the whole goal ------------------------------
-export const goalEventKinds = ['goal.recorded', 'goal.draft', 'goal.approve', 'goal.refuse', 'goal.merged', 'goal.deliver', 'goal.case-change', 'goal.case-change-approve', 'goal.case-change-refuse'] as const;
+export const goalEventKinds = ['goal.recorded', 'goal.draft', 'goal.approve', 'goal.refuse', 'goal.closed', 'goal.merged', 'goal.deliver', 'goal.case-change', 'goal.case-change-approve', 'goal.case-change-refuse'] as const;
 interface Queryable { query(sql: string, params?: unknown[]): Promise<{ rows: any[] }> }
 /** Every goal's record, newest first: the newest event of each. */
 export async function readGoals(db: Queryable): Promise<Goal[]> {
