@@ -413,6 +413,32 @@ export async function decisionGroundsMovedSince(db: { query: (text: string, valu
 }
 
 /**
+ * The decision as its approval judges and applies it (GY-1296, GY-1463): a release, an unblock, a
+ * diagnostician's closure or a resolve without a pin is bound to the item revision it was requested
+ * at. When the revision moved only in changes that cannot affect its grounds — the loop's
+ * bookkeeping, lease renewals, liveness, observations, session records — it is rebased to the
+ * current revision; when another decision was applied since, or anything else moved
+ * (`decisionGroundsChange`), `change` names it and the decision is returned as it is. A resumption
+ * applies the same (GY-1300).
+ */
+export async function revisionRebase<D extends Pick<Decision, 'id' | 'action' | 'input'> & { pin: unknown }>(db: { query: (text: string, values: unknown[]) => Promise<{ rows: any[] }> }, decision: D, work: Work): Promise<{ judged: D; change: string | null }> {
+  const revisionPinned = decision.action === 'release' || decision.action === 'unblock' || (decision.action === 'resolve' && !decision.pin)
+    || (decision.action === 'close' && decision.input.triageAt === undefined && decision.input.expectedRevision !== undefined);
+  if (!revisionPinned || decision.input.expectedRevision === work.revision) return { judged: decision, change: null };
+  const change = await decisionAppliedSince(db, work, decision.id) ?? await decisionGroundsMovedSince(db, work, decision.input.expectedRevision);
+  return change ? { judged: decision, change } : { judged: { ...decision, input: { ...decision.input, expectedRevision: work.revision } }, change: null };
+}
+/** Another decision on the item applied after this one was requested, named, or null. */
+async function decisionAppliedSince(db: { query: (text: string, values: unknown[]) => Promise<{ rows: any[] }> }, work: Work, id: string): Promise<string | null> {
+  const row = (await db.query(`SELECT applied.payload->>'id' AS id, requested.payload->>'action' AS action FROM events applied
+    JOIN events requested ON requested.work_id=applied.work_id AND requested.kind='decision.requested' AND requested.payload->>'id'=applied.payload->>'id'
+    WHERE applied.work_id=$1 AND applied.kind='decision.applied' AND applied.payload->>'id'<>$2
+      AND applied.seq > (SELECT seq FROM events WHERE work_id=$1 AND kind='decision.requested' AND payload->>'id'=$2 ORDER BY seq LIMIT 1)
+    ORDER BY applied.seq LIMIT 1`, [work.id, id])).rows[0];
+  return row ? `another applied decision (${row.action} ${row.id})` : null;
+}
+
+/**
  * How a delivery that recovered from that violation was judged (GY-92): the two-party merge
  * decision it rests on, the cutoff the history was re-checked at, and the judgement itself.
  * Recorded on the delivery beside the snapshot revision and evidence instant it cites.
