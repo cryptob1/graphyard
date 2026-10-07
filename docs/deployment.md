@@ -39,7 +39,7 @@ After the loop verifies a deployment it records GY-87's throughput claim itself,
 
 ### Deployment incident
 
-Railway auto-deploys `release/production` within about a minute of promotion, but the GitHub deployment record it reports can lag or name an older commit. Compare the `/healthz` `commit` with the `release/production` tip first. When it serves the tip, run `graphyard master verify-deployment GY-N` for each pending delivery. When it does not, `railway deployment list --service graphyard` shows whether the build failed; redeploy the tip from the Railway dashboard (or the [manual fallback](#manual-fallback) from a clean checkout of it), wait until `/healthz` reports it, then verify.
+Railway auto-deploys `release/production` within a minute of promotion; the GitHub deployment record it reports can lag or name an older commit. First compare the `/healthz` `commit` with the tip. When it serves the tip, run `graphyard master verify-deployment GY-N` for each pending delivery. When it does not, `railway deployment list --service graphyard --environment production` shows whether the build failed; redeploy the tip from the Railway dashboard or the [manual fallback](#manual-fallback), wait until `/healthz` reports it, then verify.
 
 ## Backup, upgrade, rollback
 
@@ -51,5 +51,5 @@ Otherwise set the variables table by hand, then `node "$GRAPHYARD_CLI" github-se
 
 - Compose: `cp .env.example .env`, replace secrets, `docker compose --profile full up -d`; TLS on 4310, Postgres private.
 - Kubernetes: `helm install graphyard deploy/helm/graphyard --set secrets.existingSecret=graphyard-credentials …`.
-- Railway: `railway init`, `railway add --database postgres`, set variables, `railway up`.
+- Railway: `railway init`, `railway add --database postgres`, set variables, `railway up`. Redeploying production: never `init`; from a clean tip checkout, `railway link --project graphyard --environment production --service graphyard`, then `railway up`.
 - Railway revert approver: `node scripts/provision-railway.mjs` sets the three `GRAPHYARD_REVERT_APPROVER_*` variables from `.graphyard/revert-approver.json` (mode 0600; `{"appId", "installationId", "privateKey"}` or `"privateKeyFile"`) or `--revert-approver-stdin`, sends the key over stdin, prints none, and refuses an armed guard without them. On a running control plane add `--revert-approver-only`: it sets those three variables and nothing else (the reviewer App's record under `~/.config/graphyard/reviewers/` serves as the input), while a full run refuses when the deployment's `GRAPHYARD_PRINCIPALS` holds principals `credentials.json` lacks, naming them instead of dropping them, or when Railway's variable list cannot be read. Then `railway redeploy --service graphyard -y`; `GRAPHYARD_URL=… node scripts/provision-railway.mjs --verify` exits 0 once the live guard names that App.
