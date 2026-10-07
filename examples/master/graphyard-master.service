@@ -6,7 +6,13 @@
 #   # edit WorkingDirectory and ExecStart to your checkout and CLI path
 #   systemctl --user daemon-reload
 #   systemctl --user enable --now graphyard-master
+#   loginctl enable-linger   # start the user manager, and so this unit, at boot without a login
+#   systemctl --user show-environment   # must answer: the loop's supervision probe runs this
 #   journalctl --user -u graphyard-master -f
+#
+# Stop any hand-started `master run` first: it holds the loop lock, and the unit's loop would refuse
+# to start beside it. A loop this unit does not run re-executes itself onto the checkout after a
+# verified deployment, but nothing restarts it after a crash or a reboot.
 #
 # The loop authenticates with the coordinator credential stored by `master init` outside the
 # repository. Do not add a worker, producer, or operator credential here: the coordinator must not
