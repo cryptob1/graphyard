@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { checklistGreen, goalLimits, goalWorkItem, requestedView, setupChecklist, type SetupItem } from '../../src/model/setup-checklist';
+import { checklistGreen, goalLimits, goalSubmission, requestedView, setupChecklist, type SetupItem } from '../../src/model/setup-checklist';
 import { PageHeader, PageSection } from '../components/page-layout';
 import type { Dashboard } from './dashboard';
 
@@ -44,7 +44,7 @@ export function SetupChecklist({ items, onConnect }: { items: SetupItem[]; onCon
 
 export function GoalForm({ onSubmit, busy, error, submitted }: { onSubmit: (text: string) => void; busy?: boolean; error?: string; submitted?: string | null }) {
   const [text, setText] = useState('');
-  if (submitted) return <p className="notice" data-goal-submitted>Thanks — your goal is on the board as {submitted}. Graphyard plans it and starts building.</p>;
+  if (submitted) return <p className="notice" data-goal-submitted>Thanks — your goal is recorded as {submitted}. Graphyard drafts how it will be accepted, plans it and starts building.</p>;
   return <form aria-label="Describe what you want built" onSubmit={event => { event.preventDefault(); onSubmit(text); }}>
     <label>Describe what you want built<textarea name="goal" rows={5} minLength={goalLimits.min} maxLength={goalLimits.max} required value={text} onChange={event => setText(event.target.value)} placeholder="For example: a sign-up page that sends a welcome email"/></label>
     {error && <p role="alert" className="amber">{error}</p>}
@@ -64,13 +64,19 @@ export function SetupView({ status, onConnect, onSubmitGoal, busy, error, submit
   </>;
 }
 
+/** The goal box's submit (GY-1443): a goal record through the goals API, as `graphyard goal` records one, never a plain work item. */
+export async function submitGoal(api: Dashboard['api'], text: string): Promise<string> {
+  const created = await api('goals', goalSubmission(text));
+  return created?.key ?? 'a new goal';
+}
+
 export default function SetupPage({ status, api, setView }: Pick<Dashboard, 'status' | 'api' | 'setView'>) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [submitted, setSubmitted] = useState<string | null>(null);
   const submit = async (text: string) => {
     setBusy(true); setError('');
-    try { const created = await api('work', goalWorkItem(text)); setSubmitted(created?.key ?? 'a new item'); }
+    try { setSubmitted(await submitGoal(api, text)); }
     catch (failure) { setError((failure as Error).message); }
     finally { setBusy(false); }
   };
