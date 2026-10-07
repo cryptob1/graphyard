@@ -4,6 +4,7 @@ import { type Work } from '../model.js';
 import { mergedWithoutAuthorization, unauthorizedMergeViolation } from '../merge-queue.js';
 import { boundDeployment, type DaemonAction, deploymentObservationSchema, maxProofAttempts, message, retainedActions } from './state.js';
 import { candidateKey } from './reconcile.js';
+import { createHash } from 'node:crypto';
 import { readyToRetry } from './sessions.js';
 import { detailChanged, exhaustedProofEscalation, exhaustedProofKey, githubPause, observationWakeDue, standingVerdict } from './decisions.js';
 import { record } from './effects.js';
@@ -291,8 +292,9 @@ export function throughputEscalatedAt(actions: Record<string, DaemonAction>, own
  * GY-1438: the item that owns GY-87's verification on the serving release, every cycle the
  * deployment verified. An open owner is closed once the release's answer verified the claim or its
  * needs-decision was answered (`throughputOwnerClosure`), and never otherwise. With none open, an
- * unverified answer files one, once per release: a release whose owner was closed on an answered
- * decision is not given a second, and the next release files afresh. A measurement showing the
+ * unverified answer files one, once per release: a release whose owner was closed (on an answered
+ * decision, or by anyone) is not given a second unless a needs-decision still stands on its newest
+ * measurement (GY-1465), and the next release files afresh. A measurement showing the
  * population cannot accumulate raises the typed needs-decision on the owner once per owner: it
  * stands until answered, so a re-measure that finds the same — or more of the same — never raises
  * it again. Filing and closing go through the operator-agent; a failure backs off on the action.
@@ -312,11 +314,20 @@ async function throughputOwnerStep(cycle: Pick<Cycle, 'state' | 'effects' | 'now
       } catch (error) { performed.push(await note(owner.key, 'failed', `Could not close ${owner.key}: ${message(error)}`)); }
       return;
     }
-  } else if (verdict === 'unverified' && effects.fileThroughputOwner && ownerAction?.state !== 'done' && readyToRetry(ownerAction, state.cycle)) {
+  } else if (verdict === 'unverified' && effects.fileThroughputOwner) {
+    // GY-1465: once an owner of this release was filed (and closed, by the loop on an answered
+    // decision or by anyone), a needs-decision that still stands on the newest measurement files
+    // another within the cycle, so the attention is never left with no item to decide on.
+    if (ownerAction?.state === 'done') stall ??= await effects.standingThroughputStall?.(revision).catch(() => null) ?? null;
+    if (ownerAction?.state === 'done' ? !stall : !readyToRetry(ownerAction, state.cycle)) return;
+    // The key binds the owner it succeeds and the exact input, so a retry after a lost reply returns
+    // the item already filed, while a later filing for the same release is neither refused as a
+    // reused key (409) nor answered with the closed predecessor.
+    const input = throughputOwnerItem(revision, stall?.admitted ?? null), predecessor = ownerAction?.work ?? null;
     try {
-      const filed = await effects.fileThroughputOwner(throughputOwnerItem(revision, stall?.admitted ?? null), `throughput-owner:${revision}`);
-      if (filed) { owner = filed; performed.push(await note(filed.key, 'done', `Filed ${filed.key} to own GY-87's throughput verification on ${revision.slice(0, 12)}; it closes once the claim verifies or its needs-decision is answered`)); }
-    } catch (error) { performed.push(await note(null, 'failed', `Could not file the item that owns GY-87's throughput verification on ${revision.slice(0, 12)}: ${message(error)}`)); }
+      const filed = await effects.fileThroughputOwner(input, `throughput-owner:${revision}:${predecessor ? `${predecessor}:` : ''}${createHash('sha256').update(JSON.stringify(input)).digest('hex').slice(0, 16)}`);
+      if (filed) { owner = filed; performed.push(await note(filed.key, 'done', `Filed ${filed.key} to own GY-87's throughput verification on ${revision.slice(0, 12)}${stall ? ' and the needs-decision standing on it' : ''}; it closes once the claim verifies or its needs-decision is answered`)); }
+    } catch (error) { performed.push(await note(predecessor, 'failed', `Could not file the item that owns GY-87's throughput verification on ${revision.slice(0, 12)}: ${message(error)}`)); }
   }
   if (!stall || !owner || throughputEscalatedAt(state.actions, owner) !== null) return;
   performed.push(await record(state, throughputEscalationKey(owner.key, owner.policyRevision), { kind: 'escalation', work: owner.key, principal: null, state: 'done', detail: throughputStallText({ ...stall, owner: owner.key }), attempts: 1, cycle: state.cycle }, now(), effects.persist));
