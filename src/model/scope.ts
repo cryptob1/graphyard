@@ -104,7 +104,9 @@ export const itemDocumentationPaths = (item: { documentation?: ItemDocumentation
  */
 export const documentationConsumerScopes = ['web/', 'browser-tests/', 'integrations/'] as const;
 
-const pathToken = /(?:[A-Za-z0-9_.-]+\/)+[A-Za-z0-9_.*-]*|[A-Za-z0-9_-]+\.[A-Za-z0-9]{1,5}/g;
+// A root dotfile (`.gitignore`, `.env.example`) is a path too (GY-1479): a dot that starts a word, never one inside it.
+const pathToken = /(?:[A-Za-z0-9_.-]+\/)+[A-Za-z0-9_.*-]*|[A-Za-z0-9_-]+\.[A-Za-z0-9]{1,5}|(?<![\w./-])\.[A-Za-z_][\w.-]*/g;
+const fileToken = /^[\w-]+\.[A-Za-z0-9]{1,5}$|^\.[A-Za-z_][\w.-]*$/;
 export const wellFormed = (path: string) => {
   const segments = pathScope(path).path.split('/');
   return segments.length > 0 && segments.every((segment, index) => segment !== '.' && segment !== '..' && (segment !== '' || index === segments.length - 1));
@@ -115,7 +117,7 @@ export const wellFormed = (path: string) => {
  * as one — a token that matches nothing the request asks for simply never implies anything.
  */
 export function namedPaths(text: string) {
-  return [...new Set((text.match(pathToken) ?? []).map(token => token.replace(/[.,;:)\]]+$/, '')).filter(token => token.includes('/') || /^[\w-]+\.[A-Za-z0-9]{1,5}$/.test(token)).filter(wellFormed))];
+  return [...new Set((text.match(pathToken) ?? []).map(token => token.replace(/[.,;:)\]]+$/, '')).filter(token => token.includes('/') || fileToken.test(token)).filter(wellFormed))];
 }
 export interface ScopeImplication { scope: string; kind: 'criteria' | 'documentation' | 'documentation-consumer' | 'companion' | 'timing-companion'; why: string }
 /**

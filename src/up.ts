@@ -11,7 +11,7 @@ import { masterCredential, planeRequest } from './setup-from-zero.js';
 
 /**
  * `graphyard up` (GY-1419): every machine step of a first installation, in order — preflight,
- * control plane, host supervisor and Herdr, onboarding, agent accounts, harness, master loop — and
+ * control plane, host supervisor and Herdr, the master's agent identities (GY-1479), onboarding, agent accounts, harness, master loop — and
  * a wait on the first-run checklist (src/model/setup-checklist.ts) wherever a person must act.
  * Each step is an existing idempotent command run as a child of this CLI, and each completed step
  * is recorded in .graphyard/up.json, so a rerun after any interruption skips what is done and never
@@ -30,7 +30,7 @@ import { masterCredential, planeRequest } from './setup-from-zero.js';
  * no browser profile stops before anything runs: App creation is never handed to a person.
  */
 
-export const upSteps = ['preflight', 'control-plane', 'host-supervisor', 'onboarding', 'accounts', 'harness', 'master-loop', 'goal'] as const;
+export const upSteps = ['preflight', 'control-plane', 'host-supervisor', 'master-autonomy', 'onboarding', 'accounts', 'harness', 'master-loop', 'goal'] as const;
 export type UpStep = typeof upSteps[number];
 
 export interface UpRequest {
@@ -92,6 +92,8 @@ export interface UpDependencies {
    * credential in OPERATOR_TOKEN_FILE, or null when none can be minted (no such file on this machine).
    */
   signIn?(operatorTokenFile: string | null): Promise<string | null>;
+  /** The operator's admin credential read from OPERATOR_TOKEN_FILE, or null when this machine holds none (GY-1479). */
+  operatorToken?(operatorTokenFile: string | null): Promise<string | null>;
   emit(event: UpEvent): void;
   sleep(ms: number): Promise<void>;
   now(): number;
@@ -341,6 +343,18 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
       const token = await deps.masterToken();
       if (!token) throw new UpStop('host-supervisor: no master credential is recorded for the installed control plane', upExitCodes.failed);
       await run('host-supervisor', ['master', 'init', '--token-stdin', ...(request.browserProfile ? ['--browser-profile', request.browserProfile] : [])], { stdin: token });
+    });
+
+    // GY-1479: the master's operator-agent and approver identities (`master autonomy --apply`), provisioned
+    // with the admin credential the install saved, so the new master creates, releases and unblocks work
+    // with no further command. That credential is never something an agent session may read.
+    await step('master-autonomy', async () => {
+      const admin = await deps.operatorToken?.(state.operatorTokenFile ?? null).catch(() => null) ?? null;
+      // An install whose operator already ran the command keeps that identity; the admin credential only refreshes it.
+      if (!admin && (await readFile(resolve(deps.root, '.graphyard/master.json'), 'utf8').then(text => parseJson(text)?.operatorAgent, () => null))) return 'the master\'s operator-agent identity was already provisioned';
+      if (!admin) throw new UpStop(`master-autonomy: the operator's admin credential is not on this machine${state.operatorTokenFile ? ` (${state.operatorTokenFile} is unreadable)` : ''}, so the master's agent identities cannot be provisioned; pipe it to graphyard master autonomy --admin-token-stdin --apply here, then rerun ${rerun()}`, upExitCodes.prerequisite);
+      await run('master-autonomy', ['master', 'autonomy', '--admin-token-stdin', '--apply', '--harness', request.master], { stdin: admin });
+      return 'the master creates, releases and unblocks work with its own operator-agent identity';
     });
 
     await step('onboarding', async () => {
@@ -732,6 +746,7 @@ export function upDependencies(root: string, cliPath: string, request: UpRequest
     publishOnboarding: () => publishOnboarding(root, request.repository, (program, args, env) => execFileSync(program, args, { cwd: root, encoding: 'utf8', timeout: 120_000, stdio: ['ignore', 'pipe', 'pipe'], ...(env ? { env: { ...process.env, ...env } } : {}) })),
     onboardingMerged: async url => execFileSync('gh', ['pr', 'view', url, '--json', 'state', '--jq', '.state'], { encoding: 'utf8', timeout: 60_000 }).trim() === 'MERGED',
     signIn: async file => { const url = await serverUrl(); return url ? mintSignIn(url, file) : null; },
+    operatorToken: async file => { if (!file) return null; try { const token = (await readFile(file, 'utf8')).trim(); return token.length >= 32 ? token : null; } catch { return null; } },
     sleep: ms => new Promise(accept => setTimeout(accept, ms)), now: () => Date.now(),
     cli: (args, options = {}) => new Promise((accept, reject) => {
       const child = spawn(process.execPath, [cliPath, ...args], { cwd: root, stdio: ['pipe', 'pipe', 'pipe'], ...(options.signal ? { signal: options.signal } : {}), ...(options.env ? { env: { ...process.env, ...options.env } } : {}) });
