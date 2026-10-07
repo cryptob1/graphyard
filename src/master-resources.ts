@@ -7,7 +7,7 @@ import { agentOwner, atomicPrivateWrite, closeHerdrPane, diskThresholdBytes, isP
 import { pinnedSessionRecords, readReviewLedger, sessionLedgerBound, SessionLedgerFullError, sessionLedgerRefusal, terminalSessionStates, updateReviewLedger, type ReviewRecord } from './reviewer.js';
 import { readProducerLedger, saveProducerLedger, type ProducerRecord } from './producer.js';
 import { describeTmpReclaim, hostTmpRoots, reclaimTmpDirectories, testTempMinAgeMs, testTempPatterns, tmpReclaimLimitPerCycle, tmpReclaimWorkMsPerCycle, type TmpReclaimOptions, type TmpReclaimReport } from './tmp-reclaim.js';
-import { alignKey, fleetWaitMs, upgradeTouchesCode } from './daemon/upgrade.js';
+import { alignKey, upgradeTouchesCode } from './daemon/upgrade.js';
 import type { UpgradeStall } from './daemon/state.js';
 import { workerReclaimBoundMs, workerSubmissionBoundMs } from './model/attempt-bound.js';
 import { describePromotion, promotionHolds, promotionWait, type PromotionWait } from './master/release-lag.js';
@@ -373,7 +373,7 @@ export const resourceRegistry: ResourceDefinition[] = [
     id: 'loaded-revision', title: 'Loop loaded-code revision', unit: 'commits behind',
     bound: 'zero: the loop must run the code its checkout holds',
     usage: 'commits the coordinator checkout moved past the one the running loop process loaded, from the checkout\'s HEAD reflog and the process start time; a move that touches no loaded code (src/, scripts/, bin/, package.json) counts none, as the self-upgrade restarts nothing for it', owner: 'the master loop process and the coordinator checkout',
-    reclaim: `the between-cycles self-upgrade restarts the loop onto the checkout's revision; a move it has not loaded within ${selfUpgradeBoundMs / 60_000} minutes counts, unless the restart it owes onto that revision was attempted within the same bound (retried each cycle while an executor's claim refuses the fleet restart, whether or not production is verified; the loop re-executes onto it by itself once that refusal has stood ${fleetWaitMs / 60_000} minutes), or the loop runs the verified release production serves and what it has not loaded waits on a promotion not yet due or in validation`,
+    reclaim: `the between-cycles self-upgrade restarts the loop onto the checkout's revision; a move it has not loaded within ${selfUpgradeBoundMs / 60_000} minutes counts, unless the restart it owes onto that revision was attempted within the same bound (retried each cycle while an executor's claim refuses the fleet restart, whether or not production is verified; the loop re-executes onto it by itself once that refusal has stood ${selfUpgradeBoundMs / 2 / 60_000} minutes, the self-upgrade's fleet wait), or the loop runs the verified release production serves and what it has not loaded waits on a promotion not yet due or in validation`,
     remedy: 'graphyard master restart so the loop runs the code the checkout holds',
     warnBelow: () => 0, symptoms: [],
     // A move the self-upgrade is still within its bound for is the upgrade under way (GY-1196):

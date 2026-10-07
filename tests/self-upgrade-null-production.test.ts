@@ -3,9 +3,9 @@ import assert from 'node:assert/strict';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import type { Work } from '../src/model.js';
 import { emptyDaemonState, type DaemonState } from '../src/master-daemon.js';
-import { performSelfUpgrade, upgradeTouchesCode, type SelfUpgradeDeps } from '../src/daemon/upgrade.js';
+import { fleetWaitMs, performSelfUpgrade, upgradeTouchesCode, type SelfUpgradeDeps } from '../src/daemon/upgrade.js';
 import { coordinatorCheckoutGuard } from '../src/daemon/run.js';
-import { loadedRevision as revisionOf, owedUpgrade, readResources, resourceAttention, type ResourceInputs } from '../src/master-resources.js';
+import { loadedRevision as revisionOf, owedUpgrade, selfUpgradeBoundMs, readResources, resourceAttention, type ResourceInputs } from '../src/master-resources.js';
 import type { ExecutorRestartResult } from '../src/executor-fleet.js';
 
 /**
@@ -541,6 +541,7 @@ test('integration:self-upgrade-with-claim-loads — with an executor claim held 
     agents: async () => [], snapshot: async () => ({ work: [] as Work[], now: iso(clock.now) }), persist: async () => {}, now: () => clock.now, log: () => {}, applies: () => true,
   });
   assert.equal(await guard.start(stale), null);
+  assert.equal(fleetWaitMs, selfUpgradeBoundMs / 2, 'the fleet wait is half the loaded-revision bound, as its reclaim text says');
   const movedAt = clock.now, cycleMs = 5 * minute;
   const outcomes: string[] = [];
   // Every cycle for an hour, the claim held throughout.
