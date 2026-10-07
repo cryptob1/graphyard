@@ -681,7 +681,7 @@ export interface AutonomyDependencies {
    * Refuses a `decide` the caller does not own (GY-175), judged on the exact work document and
    * snapshot clock the decision is then built from, so a later read cannot move the item under it.
    */
-  assertDecision?: (work: Work, action: string, input: unknown, now: number) => void | Promise<void>;
+  assertDecision?: (work: Work, action: string, input: unknown, now: number, flags: { precedent?: string }) => void | Promise<void>;
 }
 const words = (args: string[]) => args.join(' ').trim();
 async function jsonArgument(value: string) { return JSON.parse(value.startsWith('@') ? await readFile(value.slice(1), 'utf8') : value); }
@@ -745,7 +745,7 @@ export async function runAutonomyCommand(root: string, config: MasterConfig, id:
     }
     const explicit = rest[0] && /^[{@]/.test(rest[0]);
     const input = explicit ? await jsonArgument(rest[0]) : {};
-    await deps.assertDecision?.(work, action, input, now);
+    await deps.assertDecision?.(work, action, input, now, { precedent: flags.precedent });
     return call(await operator(), `work/${work.id}/decide`, { action, input: decisionInput(action, work, input), reason: reason(rest.slice(explicit ? 1 : 0)),
       ...(flags.precedent ? { precedent: flags.precedent.split(',').map(value => value.trim()).filter(Boolean) } : {}), ...(flags.context ? { context: flags.context } : {}) });
   }

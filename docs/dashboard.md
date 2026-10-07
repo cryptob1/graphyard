@@ -33,4 +33,4 @@ Rows: **Build, Validate, Test, Review, Prove, Merge, Deploy**, then *Merged*, *L
 
 ## Insights
 
-**Flow** (landed/day, merges/hour, waits); **Show details**: shipping pulse, PR-to-production (`POST /api/production-observations`), flow analytics, conflict hotspots. **Shipped**: **Interventions** ([retro](operations-reference.md#retro-synthesis); repeats are filed as `bug` items unless `GRAPHYARD_INTERVENTION_PATTERNS=0`), **Validation**, **Releases**.
+**Flow** (landed/day, merges/hour, waits); **Show details**: shipping pulse, PR-to-production (`POST /api/production-observations`), flow analytics, conflict hotspots. **Shipped**: **Interventions** ([retro](operations-reference.md#retro-synthesis); repeats are filed as `bug` items unless `GRAPHYARD_INTERVENTION_PATTERNS=0`; a rework the loop requested on recorded grounds — a change request, failed check, conflict or mechanical finding — that the risk lane or an operator agent applied is a review round, not an intervention; one requested, approved or applied by hand still counts), **Validation**, **Releases**.

@@ -9,6 +9,7 @@ import { derivedIntent } from '../planned-files-intent.js';
 import { readSecretFromStdin } from '../context.js';
 import { closeRequest } from '../master-close.js';
 import { assertHandAction, handDecision } from '../hand-actions.js';
+import { assertHandRework } from '../hand-rework.js';
 import { unhandled, type MasterSession } from './session.js';
 
 /** The master's own intent (create, requirements, scope) and the decisions it requests, withdraws or refuses. */
@@ -17,7 +18,9 @@ export async function intentCommand(session: MasterSession): Promise<unknown> {
   if (id === 'create' || id === 'requirements') return print(await derivedIntent(root, master, id, args, { coordinator: masterApi, mutate: masterMutation, token: () => agentToken(root, master, 'operatorAgent') }));
   // Evidence and merge decisions on a system-driven item are the loop's to request (GY-175),
   // judged on the same work document the decision is built from.
-  const assertDecision = async (work: any, action: string, input: unknown, now: number) => {
+  // A rework the loop requests itself on its recorded grounds is its round, not the master's (GY-1389).
+  const assertDecision = async (work: any, action: string, input: unknown, now: number, flags: { precedent?: string }) => {
+    assertHandRework(work, action, input, master, { now, requestsDecisions: !!master.operatorAgent, precedent: flags.precedent });
     const loop = { sessions: (await readProducerLedger(root)).producers, failures: (await readDispatchCursor(root, master)).failures, now, requestsDecisions: !!master.operatorAgent };
     const owned = handDecision(work, action, input, loop); if (owned) assertHandAction(work, owned);
   };
