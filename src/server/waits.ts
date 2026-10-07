@@ -73,6 +73,7 @@ export async function requestHumanDecision(services: Services, actor: Principal,
     demand(!work!.humanRequest, `${work!.key} already waits on human request ${work!.humanRequest?.id}; answer it before recording another`);
     // The requester's choices are kept as they chose them; a request without any offers its kind's defaults (`requestChoices`).
     const request: HumanRequest = { id: randomUUID(), kind: data.kind, reason: data.reason, needed: data.needed, requestedBy: actor.id, epoch: data.epoch, at: now.toISOString(),
+      ...(data.ask ? { ask: data.ask } : {}), ...(data.steps ? { steps: data.steps } : {}), ...(data.why ? { why: data.why } : {}),
       ...(data.choices ? { choices: data.choices } : {}), ...(data.sealTo ? { sealTo: data.sealTo } : {}) };
     work!.humanRequest = request;
     work!.blocker = describeHumanRequest(request);
