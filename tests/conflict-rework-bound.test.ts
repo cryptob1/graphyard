@@ -5,7 +5,7 @@ import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-da
 import { buildMasterStatus, masterConfigSchema, type MasterConfig } from '../src/master.js';
 import type { Observation, Work } from '../src/model.js';
 import type { BaseRefresh } from '../src/merge-queue.js';
-import { docsSyncRoute } from '../src/daemon/docs-sync-route.js';
+import { docsSyncRoute, docsSyncCutoffLeadMs } from '../src/daemon/docs-sync-route.js';
 import { routineDecision } from '../src/daemon/decisions.js';
 import { docsSyncSessionName, type DocsSyncPlan } from '../src/docs-sync.js';
 import { loopRework } from '../src/cli/hand-rework.js';
@@ -72,7 +72,7 @@ function launch(record: { synced: DocsSyncPlan[]; agents: string[] }) {
   };
 }
 
-test('unit:system-driven-conflict-rework-requested — a docs-sync holds a system-driven conflict only inside the rework\'s 10-minute bound, then gives it up in the same cycle', async () => {
+test('unit:system-driven-conflict-rework-requested — a docs-sync holds a system-driven conflict only until a cutoff ahead of the rework\'s 10-minute bound, is stopped there, and gives the conflict up on a reading taken since, never over a push it missed', async () => {
   const { conflictReworkBoundMs, conflictReworkDue } = await bound10();
   // The bound: one decision cycle after the grounds, at most ten minutes from the conflict first recorded on the head.
   assert.equal(conflictReworkBoundMs, 10 * minute);
@@ -83,7 +83,8 @@ test('unit:system-driven-conflict-rework-requested — a docs-sync holds a syste
   assert.equal(conflictReworkDue({ ...gy1419(tips.third, at('08:07:30')), reworkRequested: true }, at('08:07:30')), null, 'a requested round owes nothing');
   assert.deepEqual(routineDecision(gy1419(tips.first, at('07:42:30')), config(), at('07:42:30'))?.binding, `${head}:conflict`, 'the item calls for the loop\'s conflict rework');
 
-  const state = emptyDaemonState(config()), record = { synced: [] as DocsSyncPlan[], agents: [] as string[] }, notes: string[] = [];
+  assert.equal(docsSyncCutoffLeadMs, 2 * minute, 'a docs-sync is stopped two minutes ahead of the bound');
+  const state = emptyDaemonState(config()), record = { synced: [] as DocsSyncPlan[], agents: [] as string[] }, notes: string[] = [], observed: number[] = [];
   const route = (work: Work, now: number) => docsSyncRoute({ config: { baseBranch: 'main' }, state, snapshot: { work: [work] }, stamp: iso(now), clock: now, inventorySpent: () => {},
     effects: { docsSync: launch(record), conflictPaths: async () => paths, persist: async () => {}, closeSession: async () => { record.agents.length = 0; } },
     sessions: async () => ({ agents: record.agents.map(name => ({ name, pane_id: 'pane-s', agent_status: 'working' }) as any), available: true }),
@@ -93,11 +94,34 @@ test('unit:system-driven-conflict-rework-requested — a docs-sync holds a syste
   assert.equal(record.synced.length, 1);
   // 07:47:30, the second tip: the running session still holds the item (GY-1423).
   assert.equal(await route(gy1419(tips.second, at('07:47:20')), at('07:47:30')).holds(gy1419(tips.second, at('07:47:20'))), true);
-  // 07:52:10, past the bound, the session still running and the head unmoved: given up at once, no observation waited for.
-  assert.equal(await route(gy1419(tips.second, at('07:51:50')), at('07:52:10')).holds(gy1419(tips.second, at('07:51:50'))), false, 'the docs-sync releases the conflict to the rework');
-  assert.match(notes.at(-1)!, /^failed: GY-1419: docs-sync session gy-docs-sync-gy-1419-69dcd41 had not moved 69dcd419da45 when the rework's bound passed: the conflict was first recorded on 69dcd419da45 at 2026-10-07T07:42:04.000Z, and the loop requests its rework within 10 minutes of that \(due at 2026-10-07T07:52:04.000Z\), so the conflict returns to a worker$/);
-  assert.equal(record.agents.length, 0, 'its session is closed');
+  // 07:50:10, past the cutoff (07:50:04): the session is stopped at once, and the give-up waits for a reading taken
+  // since. None lands this cycle, so the item is still held rather than reworked on the 07:49:50 reading.
+  const unobserved = async () => { observed.push(at('07:50:10')); return null; };
+  assert.equal(await route(gy1419(tips.second, at('07:49:50')), at('07:50:10')).holds(gy1419(tips.second, at('07:49:50')), unobserved), true, 'a reading older than the stop decides nothing');
+  assert.equal(record.agents.length, 0, 'its session is closed at the cutoff, so nothing it does lands later');
+  assert.equal(observed.length, 1, 'and the step was asked to wake a reading');
+  assert.equal(state.conflicts[0].route, 'docs-sync');
+  // 07:51:10: the reading woken this cycle, taken after the stop, shows the head unmoved: the conflict is given up.
+  const fresh = async () => gy1419(tips.second, at('07:51:11'));
+  assert.equal(await route(gy1419(tips.second, at('07:50:00')), at('07:51:10')).holds(gy1419(tips.second, at('07:50:00')), fresh), false, 'the docs-sync releases the conflict to the rework');
+  assert.match(notes.at(-1)!, /^failed: GY-1419: docs-sync session gy-docs-sync-gy-1419-69dcd41 was stopped at 2026-10-07T07:50:10\.000Z without having moved 69dcd419da45, as an observation at 2026-10-07T07:51:11\.000Z shows: the conflict was first recorded on 69dcd419da45 at 2026-10-07T07:42:04\.000Z, and the loop requests its rework within 10 minutes of that \(due at 2026-10-07T07:52:04\.000Z\), stopping a docs-sync 2 minutes before, so the conflict returns to a worker$/);
   assert.equal(state.conflicts[0].route, 'rework', 'and the routed conflict is counted as sent back');
+
+  // A push that landed just before the cutoff, which the last reading missed, is observed and adopted — never reworked.
+  const pushed = emptyDaemonState(config()), pushRecord = { synced: [] as DocsSyncPlan[], agents: [] as string[] }, pushNotes: string[] = [];
+  const pushRoute = (work: Work, now: number) => docsSyncRoute({ config: { baseBranch: 'main' }, state: pushed, snapshot: { work: [work] }, stamp: iso(now), clock: now, inventorySpent: () => {},
+    effects: { docsSync: launch(pushRecord), conflictPaths: async () => paths, persist: async () => {}, closeSession: async () => { pushRecord.agents.length = 0; } },
+    sessions: async () => ({ agents: pushRecord.agents.map(name => ({ name, pane_id: 'pane-s', agent_status: 'working' }) as any), available: true }),
+    note: async (_key, _item, _kind, outcome, detail) => { pushNotes.push(`${outcome}: ${detail}`); } });
+  assert.equal(await pushRoute(gy1419(tips.first, at('07:42:20')), at('07:42:30')).holds(gy1419(tips.first, at('07:42:20'))), true);
+  const synced = { ...gy1419(tips.second, at('07:50:12')), candidate: { sha: 'd0c5' + '1'.repeat(36), baseSha: tips.second, pr: 904, branch: 'graphyard/gy-1419-1', author: 'docs-sync' } } as Work;
+  synced.observation = { ...synced.observation!, candidate: synced.candidate! };
+  // 07:50:01 the docs-sync pushed; the 07:49:50 reading predates it, and at 07:50:10 the woken reading shows the new head.
+  assert.equal(await pushRoute(gy1419(tips.second, at('07:49:50')), at('07:50:10')).holds(gy1419(tips.second, at('07:49:50')), async () => synced), true, 'the pushed head holds the item for its adoption');
+  assert.deepEqual(pushNotes.filter(note => note.startsWith('failed')), [], 'no give-up is recorded');
+  assert.deepEqual(pushed.conflicts.map(entry => entry.route), ['docs-sync'], 'and the conflict is not counted as sent back');
+  await pushRoute(synced, at('07:51:10')).sweep();
+  assert.ok(Object.values(pushed.docsSyncs).every(watch => watch.settledAt && !watch.failed), 'the sweep settles the docs-sync as moved off the head');
 
   // A conflict first classified past the bound launches no docs-sync at all.
   const late = emptyDaemonState(config()), none = { synced: [] as DocsSyncPlan[], agents: [] as string[] };
@@ -117,7 +141,7 @@ test('unit:system-driven-conflict-rework-requested — a docs-sync holds a syste
   assert.equal(await handRoute(at('07:52:10')).holds(gy1419(tips.second, at('07:51:50'), false)), true);
 });
 
-test('integration:conflict-rework-decision-cycle — replaying GY-1419 through the loop\'s cycles, the rework is requested in the first cycle past the bound, not after the docs-sync\'s 30 minutes', async () => {
+test('integration:conflict-rework-decision-cycle — replaying GY-1419 through the loop\'s cycles, the rework is requested in the first cycle past the docs-sync\'s cutoff, inside the 10-minute bound, not after the docs-sync\'s 30 minutes', async () => {
   const { conflictReworkBoundMs } = await bound10();
   const decided: { action: string; binding: unknown; at: number }[] = [], record = { synced: [] as DocsSyncPlan[], agents: [] as string[] };
   let item = gy1419(tips.first, at('07:42:20')), now = at('07:42:30');
@@ -133,6 +157,8 @@ test('integration:conflict-rework-decision-cycle — replaying GY-1419 through t
     approver: async () => ({ agentName: 'gy-approver-gy-1419', pane: 'pane-a' }),
     docsSync: launch(record),
     conflictPaths: async () => paths,
+    // The decisions step's woken reading: taken now, after the docs-sync was stopped.
+    observe: async () => { item = gy1419(item.baseRefresh!.base, now + 1_000); return item; },
     persist: async () => {},
   });
   const state = emptyDaemonState(config());
@@ -142,11 +168,11 @@ test('integration:conflict-rework-decision-cycle — replaying GY-1419 through t
   await cycle('07:47:30', tips.second);
   await cycle('07:50:00', tips.second);
   assert.equal(decided.length, 0, 'inside the bound the docs-sync holds the item');
-  const past = await cycle('07:52:10', tips.second);
+  const past = await cycle('07:51:00', tips.second);
   assert.deepEqual(decided.map(entry => [entry.action, entry.binding]), [['rework', `${head}:conflict`]], 'the loop requests the conflict rework itself on its grounds binding');
-  assert.ok(decided[0].at - Date.parse(since) <= conflictReworkBoundMs + minute, 'within one decision cycle of the bound');
+  assert.ok(decided[0].at - Date.parse(since) <= conflictReworkBoundMs, 'inside the bound: the docs-sync is stopped ahead of it and its give-up observed in the same cycle');
   assert.ok(decided[0].at < at('08:07:01'), 'long before the third tip, where GY-1419 still had none');
-  assert.ok(past.actions.some(action => action.work === 'GY-1419' && /when the rework's bound passed/.test(action.detail)));
+  assert.ok(past.actions.some(action => action.work === 'GY-1419' && /was stopped at 2026-10-07T07:51:00\.000Z without having moved/.test(action.detail)), JSON.stringify(past.actions.map(action => action.detail)));
   assert.equal(record.synced.length, 1, 'no second docs-sync');
 });
 

@@ -21,6 +21,8 @@ import { laneApprover } from '../src/server/decisions.js';
 import { doctorRunEvent } from '../src/server/routes/status.js';
 import { MANUAL, api, basePlan, blockedMergeItem, coordinatorRoot, diagnosisLimit, principals, remedyItem, soakConfig, soakControlPlanes, store } from './helpers/soak-plane.js';
 import { assertLaunchesConfined, memoryDay, simulateDay } from './helpers/soak-simulation.js';
+import { conflictReworkBoundMs } from '../src/model/approval.js';
+import { docsSyncCutoffLeadMs } from '../src/daemon/docs-sync-route.js';
 
 /**
  * The main day and the whole-loop days: fifteen items delivered with every invariant holding, the
@@ -617,6 +619,39 @@ test('unit:soak-invariants-hold — a loop change that breaks an invariant fails
   assert.ok(violations.every(line => /lingering-sessions/.test(line)), `nothing else is violated: ${violations.filter(line => !/lingering-sessions/.test(line)).slice(0, 3).join('\n')}`);
   // The violation is a fault of its class on the loop's record, which files one item when it recurs.
   assert.equal(state.faults.instances.filter(instance => instance.kind === 'invariant:lingering-sessions' && instance.faultClass === 'session-liveness').length, 1);
+});
+
+test('unit:soak-invariants-hold — a system-driven docs conflict whose docs-sync outlasts the loop-owned rework\'s 10-minute bound is stopped at its cutoff and reworked once inside the bound, while one that pushes just before the cutoff is adopted and never reworked, with every invariant holding', { timeout: 600_000 }, async () => {
+  // GY-1434. The bound runs from the conflict first recorded on the head; the docs-sync is stopped
+  // docsSyncCutoffLeadMs ahead of it and gives the conflict up only on a reading taken since.
+  for (const [syncMs, outcome] of [[30 * minute, 'stopped'], [conflictReworkBoundMs - docsSyncCutoffLeadMs - 2 * minute, 'pushed']] as const) {
+    const day = await simulateDay({ hours: 4, plan: { docsConflict: { ...basePlan.docsConflict, syncMs } } });
+    assertLaunchesConfined(day, coordinatorRoot!);
+    const { violations, failures, state, docsSyncRuns, final, herdr, decideCalls, items } = day;
+    assert.deepEqual(violations, [], `every system invariant holds (docs-sync for ${syncMs / minute} minutes)`);
+    assert.deepEqual(failures, [], 'no cycle failed');
+    const conflicted = items[basePlan.docsConflict.item - 1].key, item = final.find(entry => entry.key === conflicted)!;
+    assert.deepEqual(docsSyncRuns.map(run => [run.plan.key, run.outcome]), [[conflicted, outcome]], 'one docs-sync session, which pushed or was stopped');
+    assert.ok(docsSyncRuns.every(run => herdr.closed.includes(run.pane)) && Object.values(state.docsSyncs).every(watch => watch.settledAt), 'its session is closed and its record settled');
+    const reworks = decideCalls.filter(call => call.key === conflicted && call.action === 'rework');
+    const giveUps = Object.values(state.actions).filter(action => action.work === conflicted && /docs-sync session .* was stopped at .* without having moved/.test(action.detail));
+    if (outcome === 'pushed') {
+      // The push landed before the cutoff: it is adopted, and no rework round is spent on the head it replaced.
+      assert.deepEqual(reworks, [], 'a docs-sync that pushed is never reworked');
+      assert.deepEqual(giveUps, [], 'and never given up');
+      assert.equal(item.pipeline?.reworkRounds ?? 0, 0);
+      assert.deepEqual(state.conflicts.filter(entry => entry.work === conflicted).map(entry => entry.route), ['docs-sync']);
+    } else {
+      // Stopped at its cutoff: one give-up for the head, and the loop's own rework requested once, inside the bound.
+      assert.equal(giveUps.length, 1, `the conflicting head settles exactly one give-up: ${JSON.stringify(giveUps.map(action => action.detail))}`);
+      const head = docsSyncRuns[0].plan.head, round = reworks.filter(call => (call.input as { binding?: string } | undefined)?.binding === `${head}:conflict`);
+      assert.equal(round.length, 1, `the loop requested the conflict rework once: ${JSON.stringify(reworks)}`);
+      const since = Date.parse(state.conflicts.find(entry => entry.work === conflicted)!.at), requested = Object.entries(state.actions).find(([key]) => key.startsWith('decision:rework:') && key.includes(`:${head}:conflict:`))?.[1];
+      assert.ok(requested && Date.parse(requested.at) - since <= conflictReworkBoundMs, `requested inside the bound: ${requested ? (Date.parse(requested.at) - since) / minute : 'never'} minutes after the conflict was routed`);
+    }
+    // No stalled-step attention stands for the item once its round is requested (or was never owed).
+    assert.ok(!state.faults.instances.some(instance => instance.kind === 'stalled-step' && instance.subject === conflicted), 'no stalled step is left on the item');
+  }
 });
 
 test('unit:soak-invariants-hold — broad items are split before dispatch with bounded decomposition concurrency, child items merge, parents are delivered, and every system invariant holds', { timeout: 360_000 }, async () => {

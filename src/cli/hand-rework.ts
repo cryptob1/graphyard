@@ -1,5 +1,5 @@
 import type { Work } from '../model/work.js';
-import { cappedReview, neededDecision, workerStopped, type ExhaustedProof, type ReviewCapConfig } from '../daemon/decisions.js';
+import { cappedReview, neededDecision, workerStopped, type ExhaustedProof, type ReviewCapConfig, type RoutineDecision } from '../daemon/decisions.js';
 import type { MechanicalFixRequest } from '../mechanical-findings.js';
 import { unactedProducerAttempts } from '../auto-dispatch.js';
 import { mechanicalHoldPattern } from '../model/refusal-catalogue.js';
@@ -55,10 +55,10 @@ export function loopBaseFailed(work: Pick<Work, 'id' | 'candidate' | 'baseRefres
  * decisions step records it under — with the bound it falls due by, and, past it, how overdue it is:
  * a refused hand rework then says that the step is stalled rather than leaving the stall silent.
  */
-function conflictRound(work: Work, needed: { action: string; binding: string }, now: number): string {
+function conflictRound(work: Work, needed: Pick<RoutineDecision, 'action' | 'binding'>, now: number): string {
   const due = needed.binding.endsWith(':conflict') ? conflictReworkDue(work, now) : null;
   if (!due || due.binding !== needed.binding) return '';
-  const round = `The round is ${decisionKey(work, needed as Parameters<typeof decisionKey>[1])}, owed within ${conflictReworkBoundMs / 60_000} minutes of the conflict first recorded on this head at ${due.since} (due at ${due.dueAt}). `;
+  const round = `The round is ${decisionKey(work, needed)}, owed within ${conflictReworkBoundMs / 60_000} minutes of the conflict first recorded on this head at ${due.since} (due at ${due.dueAt}). `;
   return due.overdueMs > 0 ? `${round}It is ${Math.ceil(due.overdueMs / 60_000)} minute(s) overdue against that bound, so the loop's decisions step is stalled on it: master status names it as a stalled-step attention. `
     : round;
 }
