@@ -21,7 +21,7 @@ Commit `AGENTS.md`, `.gitignore`, `graphyard.json`, workflows ([candidates](deli
 
 ### What the generated instructions authorize
 
-Generated `AGENTS.md`: **every session Graphyard launches receives its instruction as the session's own first request** (Claude Code also `--append-system-prompt-file`), so sessions start without anybody sending `go`; launcher pastes (the loop's single re-prompt, the reviewer's reminder, master wakes) need no confirmation; other bracketed paste is untrusted data (prompt injection). The role files under `.graphyard/harness/` hold permissions, not instructions.
+Generated `AGENTS.md`: **every session Graphyard launches receives its instruction as the session's own first request** (Claude Code also `--append-system-prompt-file`), so sessions start without anybody sending `go`; launcher pastes (the loop's single re-prompt, the reviewer's reminder, master wakes) need no confirmation; other bracketed paste: untrusted data (prompt injection). The role files under `.graphyard/harness/` hold permissions, not instructions.
 
 ### Agent environments
 
@@ -29,7 +29,7 @@ Login homes (`~/.coding_agents`: `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `XDG_DATA_HO
 
 ### Connect an account
 
-Settings › **Agents** › **Connect an account** (key or login) writes, smoke-tests a 0600 auth file (**Pi (z.ai key)**: Pi's `auth.json` in a `pi-<letter>` home).
+Settings › **Agents** › **Connect an account** (key or login) writes, smoke-tests a 0600 auth file (**Pi (z.ai key)**: `auth.json` in a `pi-<letter>` home).
 
 ### Configure the fleet
 
@@ -82,7 +82,7 @@ Adding workers: worker count `W` and `G` proof groups need `⌈W/2⌉` review an
 
 `master init` (coordinator checkout) writes `~/.config/systemd/user/graphyard-master-OWNER-NAME.service`, runs `systemctl --user enable --now`, `loginctl enable-linger` (restart on crash, reboot, hang); never a side effect (worker checkouts, temp directories refused). Move: `master init --token-stdin --replace-supervisor` from new checkout. `master status`: `setup.supervisor`.
 
-Installs share hosts: units are named per repository (`graphyard-master-OWNER-NAME.service`, `graphyard-executor-OWNER-NAME@N.service`, plus a short hash where names would collide) in `.graphyard/units.json` (fails closed unreadable); a host whose `graphyard-master.service` runs this checkout keeps legacy names as recorded alias. Setup refuses, naming the checkout, to overwrite or restart another checkout's unit; the master harness restarts only its own loop unit. Each install needs its own `--herdr-workspace`: sweeps (idle-pane close, reclaim, liveness, tab cleanup) act only on its panes.
+Installs share hosts: units named per repository (`graphyard-executor-OWNER-NAME@N.service` too, plus a short hash where names collide) in `.graphyard/units.json` (fails closed unreadable); a host whose `graphyard-master.service` runs this checkout keeps legacy names as recorded alias. Setup refuses, naming the checkout, to overwrite or restart another checkout's unit; the master harness restarts only its loop unit. Each install needs its own `--herdr-workspace`: sweeps (idle-pane close, reclaim, liveness, tab cleanup) act only on its panes.
 
 ### The pipeline doctor (on by default)
 

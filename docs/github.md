@@ -32,19 +32,19 @@ Refused workflow syncs: `sync GY-N --push-via-control-plane COMMIT` (`POST /api/
 
 ## Require the check
 
-Require `Graphyard / merge`, `graphyard/landable` ([landability](coordination.md)) from the control-plane App: `strict` **off**, admin-enforced, no force push/deletion (`master protection --apply`, `master browser protection`). GitHub merges only mergeable non-draft PRs whose approved head is green on `GITHUB_CI_APP_IDS`, required checks ([one delivery path](delivery.md#one-delivery-path)); restrict other merge identities (lease-less workers still push).
+Require `Graphyard / merge`, `graphyard/landable` ([landability](coordination.md)) from control-plane App: `strict` **off**, admin-enforced, no force push/deletion (`master protection --apply`, `master browser protection`). GitHub merges only mergeable non-draft PRs whose approved head is green on `GITHUB_CI_APP_IDS`, required checks ([one delivery path](delivery.md#one-delivery-path)); restrict other merge identities (lease-less workers still push).
 
 ## Failed checks
 
-No merge queue (`master tip-cleanup --apply` deletes leftover `refs/graphyard/queue/*`). A failed required check reruns once on the unchanged head after its run completes (owed meanwhile); second fails test gate (rework). A 403 quotes GitHub (or, no permission missing, preflight's reading). Tests (`graphyard-failed-tests:`) old base broke, fixed on tip, refresh (`baseBreak`), not rework.
+No merge queue (`master tip-cleanup --apply` deletes leftover `refs/graphyard/queue/*`). A failed required check reruns once on unchanged head after its run completes (owed meanwhile); second fails test gate (rework). A 403 quotes GitHub (or, no permission missing, preflight's reading). Tests (`graphyard-failed-tests:`) old base broke, fixed on tip, refresh (`baseBreak`), not rework.
 
 ### Bindings and carry
 
-Reviews and proofs bind head, base, policy revision; a moved base carries all if merge kept patch-id, else approval if no reviewed file changed, disjoint-`scopeFiles` proofs. Carried approvals aren't re-posted or merge-requested.
+Reviews and proofs bind head, base, policy revision; moved base carries all if merge kept patch-id, else approval if no reviewed file changed, disjoint-`scopeFiles` proofs. Carried approvals aren't re-posted or merge-requested.
 
 ### Proofs in CI
 
-Protected `pull_request_target` workflow per `graphyard/*` push: **plan** finds `unit:*`/`integration:*` proofs; **exercise** runs one secret-free job on base-merged candidate; **publish** via `ciRun`-bound [CI producer](deployment.md#ci-producer). Dependencies, database image, candidate layers cached. Manual proofs stay producer sessions. `"deploySmoke": true` smoke-installs once the release serves the merge; failure: [delivered with failure](operations-reference.md#delivered-with-a-failed-smoke-proof).
+Protected `pull_request_target` workflow per `graphyard/*` push: **plan** finds `unit:*`/`integration:*` proofs; **exercise** runs one secret-free job on base-merged candidate; **publish** via `ciRun`-bound [CI producer](deployment.md#ci-producer). Dependencies, database image, candidate layers cached. Manual proofs stay producer sessions. `"deploySmoke": true` smoke-installs once release serves merge; failure: [delivered with failure](operations-reference.md#delivered-with-a-failed-smoke-proof).
 
 ## Identity-bound agent review
 
