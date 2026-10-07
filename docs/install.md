@@ -22,7 +22,7 @@ Node 24, `OWNER/REPO` checkout, `export GRAPHYARD_CLI=/abs/path/graphyard/bin/gr
 - `railway`: `npm i -g @railway/cli`, `railway login`.
 - `hetzner`: `brew install hcloud`, `hcloud context create graphyard`; `--ssh-key NAME`, `--domain`. `manual:host-install-live` or `manual:…install…-live` coordinators need `HCLOUD_TOKEN`, `HETZNER_SPEND_CAP_USD_MONTHLY` in repo-root `.env` (`0600`, uncommitted); optional `HETZNER_SSH_KEY` names registered key (else throwaway).
 - `docker-host`: `ssh USER@HOST 'curl -fsSL https://get.docker.com | sh'`; `--ssh-host`, `--domain`.
-- `compose` (local): `curl -fsSL https://get.docker.com | sh`. It polls GitHub: its App has no webhook (GitHub refuses a loopback or private hook URL), so webhook steps are skipped.
+- `compose` (local): `curl -fsSL https://get.docker.com | sh`. It polls GitHub: its Apps have no webhook or reviewer events (GitHub refuses a loopback or private hook URL), so webhook steps are skipped.
 
 ## Step 1: plan and approve
 
@@ -42,7 +42,7 @@ Writes credentials, [variables](deployment.md#variables); deploys; [protects](gi
 
 ## Step 3: App confirmation
 
-`--apply` serves and prints `http://127.0.0.1:4311` (no browser) for 900 s; human installs the App; **Verify** *App registered and installation verified*. Master configuration, profiles precede it (`master environments`, `master harness` work). Unconfirmed: exit 1, JSON summary `completed`, `github.app` `pending` (credentials saved only if GitHub returned them), `credentials.principals` (self-contained: host token directory), `stack.stop`, `resume` (exact rerun, every flag, keeping pre-App steps).
+`--apply` serves and prints `http://127.0.0.1:4311` (no browser) for 900 s; human installs the App; one installed elsewhere (a phone) is found through the App's own lookup and recorded, as is a saved App missing its installation, so no Install step or page appears. App names over 34 characters fall back to the repository name. **Verify** *App registered and installation verified*. Master configuration, profiles precede it (`master environments`, `master harness` work). Unconfirmed: exit 1, JSON summary `completed`, `github.app` `pending` (credentials saved only if GitHub returned them), `credentials.principals` (self-contained: host token directory), `stack.stop`, `resume` (exact rerun, every flag, keeping pre-App steps).
 
 ## Step 4: summary
 
