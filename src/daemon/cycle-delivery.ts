@@ -1,4 +1,5 @@
 // Concern: cycle steps 5–7 — shepherd reviews, reconcile what GitHub merged, deployment verification.
+import { createHash } from 'node:crypto';
 import { reviewProviderOf, reviewerProfileFor, exhaustedReviewerProfiles, deploySmokeRequired, deliveryState, rollbackGuidance } from '../model.js';
 import { type Work } from '../model.js';
 import { mergedWithoutAuthorization, unauthorizedMergeViolation } from '../merge-queue.js';
@@ -277,6 +278,8 @@ export function answeredVerdict(answer: DaemonAction | undefined): 'verified' | 
  * needs-decision asked on an owner, keyed by the owner's requirements revision when it was raised,
  * so only a revision applied after it answers it (`throughputOwnerAnswered`).
  */
+/** How many closed owners of one release a single filing follows to reach (or file) the open one. */
+export const throughputOwnerSuccessions = 8;
 export const throughputOwnerKey = (revision: string) => `throughput:owner:${revision}`;
 export const throughputEscalationKey = (owner: string, policyRevision: number) => `escalation:throughput:${owner}:${policyRevision}`;
 /** The owner's requirements revision at which the loop raised its needs-decision (the earliest, should a key repeat), or null when it raised none. */
@@ -291,9 +294,11 @@ export function throughputEscalatedAt(actions: Record<string, DaemonAction>, own
  * GY-1438: the item that owns GY-87's verification on the serving release, every cycle the
  * deployment verified. An open owner is closed once the release's answer verified the claim or its
  * needs-decision was answered (`throughputOwnerClosure`), and never otherwise. With none open, an
- * unverified answer files one, once per release: a release whose owner was closed on an answered
- * decision is not given a second, and the next release files afresh. A measurement showing the
- * population cannot accumulate raises the typed needs-decision on the owner once per owner: it
+ * unverified answer files one, once per release: a release whose owner was closed (on an answered
+ * decision, or by anyone) is not given a second unless a needs-decision still stands on its newest
+ * measurement (GY-1465), which files one even when the latest ask failed, and the next release
+ * files afresh. A measurement showing the population cannot accumulate raises the typed
+ * needs-decision on the owner once per owner: it
  * stands until answered, so a re-measure that finds the same — or more of the same — never raises
  * it again. Filing and closing go through the operator-agent; a failure backs off on the action.
  */
@@ -312,11 +317,33 @@ async function throughputOwnerStep(cycle: Pick<Cycle, 'state' | 'effects' | 'now
       } catch (error) { performed.push(await note(owner.key, 'failed', `Could not close ${owner.key}: ${message(error)}`)); }
       return;
     }
-  } else if (verdict === 'unverified' && effects.fileThroughputOwner && ownerAction?.state !== 'done' && readyToRetry(ownerAction, state.cycle)) {
+  } else if (verdict !== 'verified' && effects.fileThroughputOwner) {
+    // GY-1465: with no owner open, a needs-decision that still stands on the newest measurement
+    // files one within the cycle, whether or not the record of an earlier owner was retained and
+    // whatever the latest ask answered — a failed re-measure or a wait on the plane leaves the
+    // recorded measurement, and its needs-decision, standing — so the attention is never left with
+    // no item to decide on. Without an unverified answer only a standing decision files one.
+    stall ??= await effects.standingThroughputStall?.(revision).catch(() => null) ?? null;
+    if (verdict !== 'unverified' && !stall) return;
+    if (ownerAction?.state === 'done' ? !stall : !readyToRetry(ownerAction, state.cycle)) return;
+    // The key binds the owner it succeeds, the measurement the decision stands on and the exact
+    // input, so a retry after a lost reply returns the item already filed, while a later filing for
+    // the same release is neither refused as a reused key (409) nor answered with a closed predecessor.
+    const input = throughputOwnerItem(revision, stall?.admitted ?? null), digest = createHash('sha256').update(JSON.stringify(input)).digest('hex').slice(0, 16);
+    const file = (predecessor: string | null) => effects.fileThroughputOwner!(input, `throughput-owner:${revision}:${predecessor ? `${predecessor}:` : ''}${stall ? `${stall.measuredAt}:` : ''}${digest}`);
+    let predecessor = ownerAction?.work ?? null;
     try {
-      const filed = await effects.fileThroughputOwner(throughputOwnerItem(revision, stall?.admitted ?? null), `throughput-owner:${revision}`);
-      if (filed) { owner = filed; performed.push(await note(filed.key, 'done', `Filed ${filed.key} to own GY-87's throughput verification on ${revision.slice(0, 12)}; it closes once the claim verifies or its needs-decision is answered`)); }
-    } catch (error) { performed.push(await note(null, 'failed', `Could not file the item that owns GY-87's throughput verification on ${revision.slice(0, 12)}: ${message(error)}`)); }
+      let filed = await file(predecessor);
+      // A key whose record was pruned is answered with the owner it filed before, since closed: that
+      // one is the predecessor, never the new owner, and is succeeded only while a decision stands.
+      // Each succession key answers the owner filed after it, so the chain is followed to its open end.
+      for (let hop = 0; filed && !openThroughputOwner([filed]); hop++) {
+        predecessor = filed.key;
+        filed = stall && hop < throughputOwnerSuccessions ? await file(predecessor) : null;
+        if (!filed) { performed.push(await note(predecessor, 'done', `${predecessor} already owned GY-87's throughput verification on ${revision.slice(0, 12)} and is closed${stall ? '; the needs-decision standing on it files its successor next cycle' : ''}`)); return; }
+      }
+      if (filed) { owner = filed; performed.push(await note(filed.key, 'done', `Filed ${filed.key} to own GY-87's throughput verification on ${revision.slice(0, 12)}${stall ? ' and the needs-decision standing on it' : ''}; it closes once the claim verifies or its needs-decision is answered`)); }
+    } catch (error) { performed.push(await note(predecessor, 'failed', `Could not file the item that owns GY-87's throughput verification on ${revision.slice(0, 12)}: ${message(error)}`)); }
   }
   if (!stall || !owner || throughputEscalatedAt(state.actions, owner) !== null) return;
   performed.push(await record(state, throughputEscalationKey(owner.key, owner.policyRevision), { kind: 'escalation', work: owner.key, principal: null, state: 'done', detail: throughputStallText({ ...stall, owner: owner.key }), attempts: 1, cycle: state.cycle }, now(), effects.persist));

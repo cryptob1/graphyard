@@ -3,7 +3,7 @@ import type { ChildRun } from '../child-runner.js';
 import type { ControlPlaneStatus, MasterConfig } from '../master.js';
 import type { Work } from '../model.js';
 import { localAncestry } from './deployment.js';
-import { loopThroughputMeasurement, type LoopThroughputOutcome, type throughputOwnerItem } from '../throughput.js';
+import { loopThroughputMeasurement, readThroughputMeasurement, throughputStall, type LoopThroughputOutcome, type ThroughputStall, type throughputOwnerItem } from '../throughput.js';
 
 export interface ThroughputEffects {
   /**
@@ -19,6 +19,11 @@ export interface ThroughputEffects {
    * operator-agent identity is not provisioned: nothing is filed, and the attention says no item owns it.
    */
   fileThroughputOwner?: (input: ReturnType<typeof throughputOwnerItem>, key: string) => Promise<Work | null>;
+  /**
+   * The needs-decision standing on the newest recorded measurement of `revision` (`throughputStall`,
+   * as master status judges it), or null; read when no owner is open after one was filed (GY-1465).
+   */
+  standingThroughputStall?: (revision: string) => Promise<ThroughputStall | null>;
   /** Closes the owner item as the operator-agent once the claim verifies or its needs-decision is answered; null, closing nothing, without that identity. */
   closeThroughputOwner?: (owner: Work, reason: string, key: string) => Promise<Work | null>;
 }
@@ -34,9 +39,16 @@ export function throughputEffects(root: string, current: () => MasterConfig, run
     // The identity is read on each call, as a configuration reload may provision it after the loop starts.
     fileThroughputOwner: async (input, key) => current().operatorAgent ? asOperatorAgent('POST', 'work', input, key) as Promise<Work> : null,
     closeThroughputOwner: async (owner, reason, key) => current().operatorAgent ? asOperatorAgent('POST', `work/${owner.id}/close`, { kind: 'obsolete', reason }, key) as Promise<Work> : null,
+    standingThroughputStall: standingThroughputStall(root),
     measureThroughput: (work, observedSha) => loopThroughputMeasurement(root, { work, observedSha, now: () => Date.now(), origin: new URL(current().url).origin,
       status: () => asCoordinator('status') as Promise<ControlPlaneStatus & Record<string, unknown>>,
       readItem: id => asCoordinator(`work/${encodeURIComponent(id)}`) as Promise<Work>,
       contains: localAncestry(root, current().baseBranch, run).contains }),
   };
 }
+
+/** The needs-decision standing on the newest measurement recorded under `root` when it measured `revision` (`throughputStall`), else null. */
+export const standingThroughputStall = (root: string) => async (revision: string): Promise<ThroughputStall | null> => {
+  const newest = await readThroughputMeasurement(root);
+  return newest?.report.deployed?.revision === revision ? throughputStall(newest.report) : null;
+};
