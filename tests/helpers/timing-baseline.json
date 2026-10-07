@@ -481,6 +481,7 @@
     "tests/planned-files-derived.test.ts": 1268,
     "tests/pr-links.test.ts": 261,
     "tests/producer-environment.test.ts": 2661,
+    "tests/production-watch-build-serving.test.ts": 400,
     "tests/production-watch.test.ts": 1915,
     "tests/project-memory-followups.test.ts": 1092,
     "tests/project-memory.test.ts": 950,
