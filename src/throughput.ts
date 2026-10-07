@@ -493,8 +493,18 @@ export function throughputOwnerItem(revision: string, admitted: number | null) {
  */
 export function throughputOwnerClosure(owner: Pick<Work, 'key' | 'policyRevision'>, serving: { revision: string; verdict: ThroughputReport['verdict'] | null }, raisedAt: number | null): string | null {
   if (serving.verdict === 'verified') return `${throughputClaim.item}'s throughput claim verified on the serving release ${serving.revision}; the loop closes ${owner.key}, which owned that verification`;
-  if (throughputOwnerAnswered(owner, raisedAt)) return `${owner.key}'s needs-decision (raised at its requirements revision ${raisedAt}) was answered by its requirements revision ${owner.policyRevision}; the loop closes it, and files a second owner for ${serving.revision.slice(0, 12)} only while a measurement of it under the applied rule still shows a needs-decision standing: the next release it measures unverified files a new one`;
+  if (throughputOwnerAnswered(owner, raisedAt)) return `${owner.key}'s needs-decision (raised at its requirements revision ${raisedAt}) was answered by its requirements revision ${owner.policyRevision}; the loop closes it, and files a second owner for ${serving.revision.slice(0, 12)} only while a measurement of it under the applied rule still shows a needs-decision standing, in this same cycle: the next release it measures unverified files a new one`;
   return null;
+}
+
+/**
+ * The requirements revision that answered a closed owner's needs-decision, read back from the reason
+ * the loop closed it with (`throughputOwnerClosure`), or null for an owner closed any other way: a
+ * successor's idempotency key names it, so one is filed per (release, answered revision) (GY-1467).
+ */
+export function throughputOwnerAnsweredBy(owner: Pick<Work, 'closure'> | undefined): number | null {
+  const answered = /needs-decision \(raised at its requirements revision \d+\) was answered by its requirements revision (\d+)/.exec(owner?.closure?.reason ?? '');
+  return answered ? Number(answered[1]) : null;
 }
 
 /**

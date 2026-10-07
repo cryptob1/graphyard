@@ -27,8 +27,9 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
  *   the population cannot accumulate: the needs-decision is raised once on the one owner, and while
  *   it stands unanswered the loop re-measures hourly (GY-1458) but raises nothing more, however the
  *   finding grows; once it is answered the loop closes the owner and, while the newest measurement
- *   still shows the needs-decision, files one successor in the next cycle and raises it there once
- *   (GY-1465: never masterless); once deliveries are made session-free again and its answer closes
+ *   still shows the needs-decision, files one successor in that same cycle, keyed by the answered
+ *   revision, and raises it there once (GY-1465: never masterless; GY-1467: one successor per
+ *   (release, answered revision), never a cycle unowned); once deliveries are made session-free again and its answer closes
  *   that one too, nothing stands and no further owner is filed.
  */
 const minute = 60_000, hour = 60 * minute, day = 24 * hour, start = Date.parse('2026-10-07T00:00:00.000Z');
@@ -58,7 +59,7 @@ async function world(root: string, initiallyBlocked: boolean) {
   claim.delivery!.deployment = { sha: serving, mergeSha: claim.delivery!.mergeSha, source: 'endpoint', observedAt: new Date(start - hour).toISOString(), covers: 'exact', at: new Date(start - hour).toISOString(), observer: 'coordinator-1' } as never;
   const work: Work[] = [claim];
   let next = 2;
-  const asks: { cycle: number; at: number; outcome: string }[] = [], filed: string[] = [], closed: string[] = [], counts = { statusReads: 0 };
+  const asks: { cycle: number; at: number; outcome: string }[] = [], keys: string[] = [], filed: string[] = [], closed: string[] = [], counts = { statusReads: 0 };
   const effects: DaemonEffects = {
     agents: () => [], credentials: async profiles => Object.fromEntries(profiles.map(item => [item.name, { available: true, reason: null }])),
     snapshot: async () => ({ work: work.map(item => ({ ...item })), now: new Date(now).toISOString() }), closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
@@ -73,7 +74,8 @@ async function world(root: string, initiallyBlocked: boolean) {
       asks.push({ cycle: state.cycle, at: now, outcome: outcome.outcome });
       return outcome;
     },
-    fileThroughputOwner: async input => {
+    fileThroughputOwner: async (input, key) => {
+      keys.push(key);
       const owner = { ...delivery(next++, now, false), title: input.title, description: input.description, criteria: input.criteria, stage: 'backlog', ready: false, delivery: undefined, policyRevision: 1 } as unknown as Work;
       filed.push(owner.key); work.push(owner); return owner;
     },
@@ -96,7 +98,7 @@ async function world(root: string, initiallyBlocked: boolean) {
   const throughputActions = () => Object.keys(state.actions).filter(key => key.includes('throughput'));
   const escalations = () => Object.entries(state.actions).filter(([key]) => key.startsWith('escalation:throughput:'));
   const unblock = () => { blocked = false; };
-  return { state, work, asks, filed, closed, counts, cycles, throughputActions, escalations, unblock };
+  return { state, work, asks, filed, closed, counts, cycles, throughputActions, escalations, unblock, keys };
 }
 
 test('unit:soak-throughput-remeasure — over a simulated day of one unverified release whose population may yet accumulate, re-measures stay spaced and bounded, one owner item is filed and stays open, and nothing escalates', { timeout: 300_000 }, async () => {
@@ -143,7 +145,7 @@ test('unit:soak-throughput-stall — over a simulated day whose every delivery c
     assert.deepEqual(closed, [], 'still open: neither verified nor answered');
 
     // The answer: an approved requirements revision applied to the owner. The loop closes it; the newest
-    // measurement still shows the needs-decision, so the next cycle files one successor and raises it there once.
+    // measurement still shows the needs-decision, so that same cycle files one successor and raises it there once.
     owner.policyRevision = 2;
     await stalled.cycles(start + day + 4 * hour);
     assert.deepEqual(closed, [owner.key]);
@@ -152,8 +154,11 @@ test('unit:soak-throughput-stall — over a simulated day whose every delivery c
     assert.deepEqual(filed, [owner.key, successor.key], 'one successor for the closure, while the needs-decision stands');
     const succeeded = Object.values(stalled.state.actions).filter(action => action.detail.startsWith(`Filed ${successor.key} `));
     assert.equal(succeeded.length, 1);
-    // The answer closes the owner in the first cycle past the day (+1 min); the successor is filed in the next.
-    assert.equal(Date.parse(succeeded[0].at), start + day + 2 * minute, 'filed within one cycle of the closure');
+    // The answer closes the owner in the first cycle past the day (+1 min), and the successor is filed in that cycle.
+    assert.equal(Date.parse(work.find(item => item.key === owner.key)!.closure!.at), start + day + minute);
+    assert.equal(Date.parse(succeeded[0].at), start + day + minute, 'filed in the cycle that closed its predecessor');
+    assert.equal(stalled.keys.length, 2, 'one filing each, never retried once filed');
+    assert.ok(stalled.keys[1].startsWith(`throughput-owner:${serving}:${owner.key}:2:`), `keyed by the predecessor and the revision that answered it: ${stalled.keys[1]}`);
     assert.deepEqual(stalled.escalations().map(([, action]) => action.work), [owner.key, successor.key], 'escalations stay bounded: one per owner');
 
     // Deliveries become session-free again; the hourly re-measure finds nothing standing, and the successor's answer closes it with no third owner.
