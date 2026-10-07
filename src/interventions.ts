@@ -8,7 +8,7 @@ import { boundedSnapshot } from './store/bounded-snapshot.js';
 import { applyWorkDelta, type DeltaOp } from './store/snapshot-delta.js';
 import { workIdByRef } from './store/locked-read.js';
 import { containmentGraceMs, containmentSettleWaitBoundMs } from './model/containment.js';
-import { routedWideningRequest, wideningSettlement } from './model/scope-provenance.js';
+import { routedWideningDecision, wideningSettlement } from './model/scope-provenance.js';
 
 /**
  * Interventions read from the ledger (GY-98; see model/interventions.ts for the concept).
@@ -299,7 +299,7 @@ export function foldInterventions(rows: InterventionLedgerRow[], work: readonly 
       }
       case 'decision.requested': {
         if (row.payload?.action === 'rework') entry.reworkDecision = { seq: row.seq, at: row.at, id: row.payload.id, stage };
-        if (row.payload?.action === 'requirements' && routedWideningRequest(row.payload.reason)) entry.routed = [...entry.routed.slice(-4), row.payload.reason];
+        if (routedWideningDecision(row.payload) && typeof row.payload.reason === 'string') entry.routed = [...entry.routed.slice(-4), row.payload.reason];
         break;
       }
       case 'decision.failed': case 'decision.withdrawn': case 'decision.stale': {
