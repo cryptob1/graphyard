@@ -12,13 +12,13 @@ git clone https://github.com/cryptob1/graphyard.git ~/graphyard && (cd ~/graphya
 cd /path/to/REPO && node ~/graphyard/bin/graphyard.mjs up --repo OWNER/REPO   # --provider compose (default), railway or hetzner
 ```
 
-A new Hetzner server waits (exit 3) for price approval: rerun with `--confirm-price X` or `--max-monthly N` and `--ssh-key NAME`.
+A new Hetzner server waits (exit 3) for price approval; rerun: `--confirm-price X` or `--max-monthly N` and `--ssh-key NAME`.
 
 `up` runs, in order: preflight, control plane, host supervisor and Herdr, onboarding, accounts, harness, master loop. Onboarding files its `graphyard/onboarding` pull request for the loop to review and merge (a host install leaves it to a person); goals wait while `up` prints its wait. `.graphyard/up.json` records finished steps; a rerun skips them, reusing its `--repo`/`--provider`. Ctrl-C stops the install child. A Herdr plugin bound elsewhere stays (`--no-herdr`). A preflight failure (exit 2) names the [prerequisite](#1-machine-prerequisites).
 
 ## The Setup page
 
-A step needing a person prints one link (`SERVER/#sign-in=CODE&setup` from the operator credential, or a host install's `#claim=CODE&setup`) and waits until green; it signs you in once (within 10 minutes) to the Setup page (also Settings → Agents): each live item has a sentence and button:
+A step needing a person prints one link (`SERVER/#sign-in=CODE&setup` from the operator credential, or a host install's `#claim=CODE&setup`) and waits until green; it signs you in once (within 10 minutes) to the Setup page (also Settings → Agents): each live item has a sentence, button:
 
 | Item | Button
 | --- | ---
@@ -27,7 +27,7 @@ A step needing a person prints one link (`SERVER/#sign-in=CODE&setup` from the o
 | Branch protection, coordinator running | none (automatic)
 | Onboarding change: its wait | **Open the change**
 
-Once green (onboarding change merged), **Describe what you want built** records a goal, like `graphyard goal`.
+Once green (onboarding merged), **Describe what you want built** records a goal, like `graphyard goal`.
 
 ## Agent setup: up --agent
 
