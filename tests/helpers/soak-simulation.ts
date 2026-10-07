@@ -71,7 +71,6 @@ import { type MechanicalFixRequest, appliedMechanicalRework, freshReadFor, mecha
 import { mechanicalHoldPattern } from '../../src/model/refusal-catalogue.js';
 import { type InterventionRecordInput } from '../../src/model/interventions.js';
 import { RefusedResponse } from '../../src/model/refusal.js';
-import { workerNoSubmissionBoundMs, workerNoSubmissionRenewalBounds } from '../../src/model/escalation.js';
 import { type DiagnosisRun, type Failover, MANUAL, type MainGuardDay, PROOF, api, basePlan, blockerPlan, bulk18, coordinatorRoot, diagnosisRunner, engine, everyone, extraFile, extraWorkers, file, files, fixture, id, loopAgent, padded, principals, remedyItem, repository, reviewerApps, scopePlan, sideDayLeftovers, soakConfig, soakSessionDirectory, soakWorktreeRoot, store, token, url, workers } from './soak-plane.js';
 
 /**
@@ -134,7 +133,7 @@ import { type DiagnosisRun, type Failover, MANUAL, type MainGuardDay, PROOF, api
  * approver refuses the capped rework request of each of `refused` (GY-1389).
  */
 export let days = 0;
-export async function simulateDay(options: { hours: number; backlog?: boolean; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number; working?: { from: number; retryAt: number } }; regression?: ('approvers-left-open' | 'docs-syncs-left-open')[]; headless?: boolean; handApprovers?: boolean; stranded?: boolean | 'resume'; staleRework?: boolean; staleMerge?: number; capacityWait?: { from: number; to: number }; diagnosisLimit?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; workspaceFailure?: { item: number; until: number }; credentialBlocked?: { recovers: number; never: number }; blockers?: boolean; retrying?: { worker: number; approver: number }; starved?: { items: number[]; dropFirst: number }; docs?: { budget: { total: number; perPage: number } }; dispatchFailing?: { constant: number; changing: number; refuseBlocks: number; unblockAfterMs: number }; mainGuard?: MainGuardDay; containment?: { failUntil: number; slowUntil: number; refuseSettle?: number }; mechanical?: { applied: number; rejected: number }; slowDecisions?: { from: number; to: number; ms: number }; slowObservation?: { from: number; to: number; attentionMs: number }; slowDeployment?: { from: number; to: number; observationMs: number }; selfProvision?: { redeployFails: { from: number; to: number } }; plan?: Partial<typeof basePlan>; github806?: boolean; remedies?: boolean;
+export async function simulateDay(options: { hours: number; backlog?: boolean; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number; working?: { from: number; retryAt: number } }; regression?: ('approvers-left-open' | 'docs-syncs-left-open')[]; headless?: boolean; handApprovers?: boolean; stranded?: boolean | 'resume'; staleRework?: boolean; staleMerge?: number; capacityWait?: { from: number; to: number }; diagnosisLimit?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; workspaceFailure?: { item: number; until: number }; credentialBlocked?: { recovers: number; never: number }; blockers?: boolean; retrying?: { worker: number; approver: number }; unbounded?: { stuck: number; progressing: number; pushedOnce: number; rework: number }; starved?: { items: number[]; dropFirst: number }; docs?: { budget: { total: number; perPage: number } }; dispatchFailing?: { constant: number; changing: number; refuseBlocks: number; unblockAfterMs: number }; mainGuard?: MainGuardDay; containment?: { failUntil: number; slowUntil: number; refuseSettle?: number }; mechanical?: { applied: number; rejected: number }; slowDecisions?: { from: number; to: number; ms: number }; slowObservation?: { from: number; to: number; attentionMs: number }; slowDeployment?: { from: number; to: number; observationMs: number }; selfProvision?: { redeployFails: { from: number; to: number } }; plan?: Partial<typeof basePlan>; github806?: boolean; remedies?: boolean;
   decomposition?: { broadItems: number[]; concurrency?: number };
   /** GY-1294: the loop's own write moves a diagnosed item's revision before its approver reads the diagnosis decision, so the decision settles stale. */
   staleDiagnosis?: boolean;
@@ -166,12 +165,6 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
    * day's clock. From `crashLoop.from` to `.to` slot 1 crashes half a minute after each start.
    */
   hostSupervision?: { managerDown: { from: number; to: number }; crashLoop: { from: number; to: number } };
-  /**
-   * GY-1462: these items' first attempts work for ever — `working` to Herdr, renewing their leases,
-   * never pushing or submitting — so the worker no-submission bound faults them and then refuses
-   * their renewals; the attempt each one is handed next works and submits as any other.
-   */
-  unsubmitted?: number[];
   /** GY-1417: record three goals and wire the acceptance role (acceptanceWorld below). */
   acceptance?: boolean;
   /** GY-1418: with `acceptance`, also wire the planner role over the same goals (tests/helpers/soak-planner.ts). */
@@ -529,11 +522,11 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   };
 
   // ---- Workers: the loop dispatches, the simulated session claims, works, pushes and submits (or dies). ----
-  interface Session { work: string; key: string; branch: string; profile: WorkerProfile; epoch: number; attempt: number; pane: string; pushAt: number; diesAt: number | null; exitsAt: number | null; dispatchAt: number; state: 'working' | 'submitted' | 'dead' | 'exited' | 'idling' | 'reclaimed' | 'credential-blocked' | 'blocked' | 'failed-over' | 'bounded'; syncs: number; syncedFor?: string; refusedSince?: number;
-    scopeAt: number | null; misreadAt: number | null; misread: boolean; credentialAt: number | null; blockAt: number | null; retryingAt: number | null; settlementToken?: string; files?: string[]; bot?: MechanicalFixRequest; unsubmitted?: true }
+  interface Session { work: string; key: string; branch: string; profile: WorkerProfile; epoch: number; attempt: number; pane: string; pushAt: number; diesAt: number | null; exitsAt: number | null; dispatchAt: number; state: 'working' | 'submitted' | 'dead' | 'exited' | 'idling' | 'reclaimed' | 'credential-blocked' | 'blocked' | 'failed-over'; syncs: number; syncedFor?: string; refusedSince?: number;
+    scopeAt: number | null; misreadAt: number | null; misread: boolean; credentialAt: number | null; blockAt: number | null; retryingAt: number | null; settlementToken?: string; files?: string[]; bot?: MechanicalFixRequest;
+    /** GY-1460: the unbounded day's attempt that renews without submitting (a first attempt, or a rework on the linked pull request), the one that pushes once and stalls, or the long one that pushes as it goes, and when it last pushed. */
+    unbounded?: 'stuck' | 'progressing' | 'pushed-once'; pushedAt?: number }
   const sessions: Session[] = [], lost: string[] = [], launches: number[] = [];
-  // GY-1462: each attempt the no-submission bound ended — its renewal refused, its supervisor stopped — and every attempt it preserved.
-  const bounded: { key: string; epoch: number; elapsed: number; claimedAt: number; refusal: string }[] = [], preservedAttempts: { key: string; epoch: number; elapsed: number }[] = [];
   // GY-973: what each pane's screen tail shows, where it is not a session at work, and the
   // accounts the loop held. OpenCode 1.18 on a spent account prints its limit banner with a retry
   // marker and retries for ever, so Herdr keeps the session `working` and only the screen tells.
@@ -565,6 +558,13 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     return done;
   };
   const attempts = new Map<string, number>();
+  // GY-1460: the unbounded day. The stuck attempts stay `working` and renewing for ever without a
+  // submission — a first attempt, a rework attempt on its item's open pull request (polled every
+  // cycle), and one that bound its session to a pushed head once and stalled (its handle rewritten
+  // on every session report);
+  // submission; the progressing one runs well past both bounds but pushes as it goes, then submits.
+  const unboundedPlan = { progressingMs: 150 * minute, pushEveryMs: 10 * minute };
+  const unboundedDay = { stops: [] as { key: string; epoch: number; elapsed: number; unit: string }[], pushes: [] as { key: string; epoch: number; elapsed: number }[] };
   // GY-1322: the finished sessions dispatches closed to launch over, the most live panes any one
   // profile name had at once, the dispatch blocks the loop asked for, and the seeded blocker's life.
   const drain = { reclaimed: [] as { key: string; profile: string; pane: string; status: string; at: number }[], peakPerName: 0, blocks: [] as string[],
@@ -666,10 +666,14 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     // GY-811: the containment day's supervisor fences its session as `watch` does — a quarantine
     // whose settlement token only it holds, acknowledged by the launch — and lowers the fence
     // itself when the session ends on its own; a session that dies leaves it for the loop.
-    const settlementToken = options.containment ? createHash('sha256').update(`settle\0${key}\0${epoch}`).digest('hex') : undefined;
+    // GY-1460: the unbounded day's attempts run fenced under a supervisor scope the loop can stop,
+    // as a supervised launch records it: the first attempts, and the rework item's second.
+    const plain = options.unbounded && !attempts.has(key), reworked = options.unbounded && attempts.get(key) === 1 && n === options.unbounded.rework;
+    const unbounded = !options.unbounded ? undefined : reworked || (plain && n === options.unbounded.stuck) ? 'stuck' as const : plain && n === options.unbounded.progressing ? 'progressing' as const : plain && n === options.unbounded.pushedOnce ? 'pushed-once' as const : undefined;
+    const settlementToken = options.containment || unbounded ? createHash('sha256').update(`settle\0${key}\0${epoch}`).digest('hex') : undefined;
     if (settlementToken) {
       const settlementHash = createHash('sha256').update(settlementToken).digest('hex');
-      await engine.execute(principal, 'quarantine', work.id, { epoch, settlementHash }, id());
+      await engine.execute(principal, 'quarantine', work.id, { epoch, settlementHash, ...(unbounded ? { scope: { unit: `graphyard-watch-${key.toLowerCase()}-${epoch}.scope`, pid: 7000 + n } } : {}) }, id());
       await engine.execute(principal, 'launch', work.id, { epoch, settlementHash }, id());
     }
     const attempt = (attempts.get(key) ?? 0) + 1; attempts.set(key, attempt);
@@ -701,8 +705,6 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     // GY-852: the reassigned item's first session takes the lease and then sits at its prompt for
     // ever, as an idle worker does, so the loop's idle re-prompt and reclaim run against it.
     const idling = options.reassigned === n && attempt === 1;
-    // GY-1462: an unsubmitted item's first session works for ever and never pushes.
-    const unsubmitted = !!options.unsubmitted?.includes(n) && attempt === 1;
     // GY-999: a session whose push is refused for want of a valid GitHub login blocks on it. The
     // recovering item's first two attempts do; the other item's every attempt does — a failure no
     // freshly minted credential cures, which the retry ladder must bound.
@@ -713,13 +715,14 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     const fastPush = baseBreakDay && plan.baseBreak.item === n && baseBreakFrom === null && !(options.remedies && n === remedyItem && attempt === 1);
     if (fastPush) baseBreakFrom = clock.now();
     const pushAfterMs = fastPush ? plan.baseBreak.pushAfterMs : plan.workMs;
-    sessions.push({ work: work.id, key, branch, profile, epoch, attempt, pane, pushAt: idling || unsubmitted ? Number.MAX_SAFE_INTEGER : clock.now() + pushAfterMs,
+    sessions.push({ work: work.id, key, branch, profile, epoch, attempt, pane, unbounded, pushedAt: undefined,
+      pushAt: idling || unbounded === 'stuck' || unbounded === 'pushed-once' ? Number.MAX_SAFE_INTEGER : unbounded === 'progressing' ? clock.now() + unboundedPlan.progressingMs : clock.now() + pushAfterMs,
       diesAt: !options.capacityWait && !idling && plan.deaths.has(n) && attempt === 1 ? clock.now() + plan.deathAfterMs : null,
       exitsAt: !idling && plan.exits.has(n) && attempt === 1 ? clock.now() + plan.exitAfterMs : null, dispatchAt: clock.now(), state: idling ? 'idling' : 'working', syncs: 0,
       scopeAt: !idling && plan.scoped.has(n) && attempt === 1 ? clock.now() + plan.scopeAfterMs : null, misreadAt: !idling && plan.misread.has(n) && attempt === 1 ? clock.now() + plan.misreadAfterMs : null, misread: false,
       // GY-1008: the blocked day's first attempts record their blocker; the repeating item's every attempt does.
       blockAt: options.blockers && blockerPlan.classes[n] && (attempt === 1 || n === blockerPlan.repeating) ? clock.now() + blockerPlan.blockAfterMs : null,
-      credentialAt: credentialBlocks ? clock.now() + 5 * minute : null, retryingAt: options.retrying?.worker === n && attempt === 1 ? clock.now() + 5 * minute : null, settlementToken, files: sessionFiles, ...(bot ? { bot } : {}), ...(unsubmitted ? { unsubmitted: true as const } : {}) });
+      credentialAt: credentialBlocks ? clock.now() + 5 * minute : null, retryingAt: options.retrying?.worker === n && attempt === 1 ? clock.now() + 5 * minute : null, settlementToken, files: sessionFiles, ...(bot ? { bot } : {}) });
     // A scope scenario asks the moment it holds the lease, as a worker does, and keeps working
     // while the control plane decides. An ask carries at most fifty paths, so a wide ask is
     // filed in batches, which one open request of the attempt merges.
@@ -817,6 +820,15 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
       }
       // The unrepresentable item's worker stays live on its refused ask: the item is blocked on
       // scope, so it neither pushes nor submits.
+      // GY-1460: the long attempt pushes a commit every few minutes and binds its session to it,
+      // the submission progress that keeps the loop from stopping it however long it runs.
+      // The pushed-once attempt binds one head ten minutes in and never moves it again.
+      if ((session.unbounded === 'progressing' || (session.unbounded === 'pushed-once' && session.pushedAt === undefined)) && now < session.pushAt && now - (session.pushedAt ?? session.dispatchAt) >= unboundedPlan.pushEveryMs) {
+        session.pushedAt = now;
+        const head = sha('progress', session.key, session.epoch, now);
+        await engine.execute(principal, 'session', session.work, { id: `${principal.id}:${session.epoch}`, kind: 'implementation', epoch: session.epoch, runtime: 'claude', host: config.hostId, subject: `${session.key}: long work`, head }, id());
+        unboundedDay.pushes.push({ key: session.key, epoch: session.epoch, elapsed: now - dayStart });
+      }
       if (now < session.pushAt || hold.has(session.key)) {
         // A renewal refused is lease loss: the supervisor stops the session, as `watch` does. An
         // idling session whose lease the loop itself ended is not lost — it was reclaimed (GY-852).
@@ -824,21 +836,14 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
         catch (error) {
           if (!(error instanceof Refusal)) throw error;
           herdr.kill(session.pane);
-          // GY-1462: the no-submission bound refused the renewal, or the loop already ended the attempt
-          // past it; either way the supervisor stops the session and the attempt ends by design.
-          if (session.unsubmitted || /past the worker no-submission bound/.test(error.message)) {
-            bounded.push({ key: session.key, epoch: session.epoch, elapsed: now - dayStart, claimedAt: session.dispatchAt - dayStart, refusal: error.message });
-            session.state = 'bounded'; continue;
-          }
           if (session.state === 'idling') { session.state = 'reclaimed'; continue; }
           // The loop failed the retrying session over, ending its lease: its supervisor stops it.
           if (screens.has(session.pane)) { session.state = 'failed-over'; continue; }
           session.state = 'dead'; lost.push(`${session.key} epoch ${session.epoch}: ${error.message}`);
         }
         // The refused ask stands for hours; near the day's end the worker releases the item with
-        // the refusal standing, ending its attempt cleanly instead of lapsing in a later day — or
-        // before the no-submission bound would refuse its renewals, whichever comes first (GY-1462).
-        if (hold.has(session.key) && now >= Math.min(dayStart + options.hours * hour - 20 * minute, session.dispatchAt + workerNoSubmissionRenewalBounds * workerNoSubmissionBoundMs - 10 * minute)) {
+        // the refusal standing, ending its attempt cleanly instead of lapsing in a later day.
+        if (hold.has(session.key) && now >= dayStart + options.hours * hour - 20 * minute) {
           await engine.execute(principal, 'release', session.work, { epoch: session.epoch }, id());
           await lowerFence(session);
           herdr.status(session.pane, 'done');
@@ -1174,7 +1179,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   // containment day (GY-811) runs last and reads only its own items too, so its cycles do not pay
   // for every earlier day's delivered work; the failover day (GY-417) reads only its own as well. The mechanical day (GY-971) starts a plane of its own
   // and keeps the filter so it does not depend on where it falls in the file.
-  const ownItems = options.reassigned || options.headless || options.blockers || options.credentialBlocked || options.dispatchFailing || options.drained || options.containment || options.mechanical || failover ? new Set(items.map(item => item.id)) : null;
+  const ownItems = options.reassigned || options.headless || options.blockers || options.credentialBlocked || options.dispatchFailing || options.drained || options.containment || options.mechanical || options.unbounded || failover ? new Set(items.map(item => item.id)) : null;
   const snapshot = async () => { const read = await store.coordinationSnapshot(); return { work: ownItems ? read.work.filter(item => ownItems.has(item.id)) : read.work, now: read.now, jobs: read.jobs }; };
   // ---- Host memory (GY-612): below its floor the loop launches nothing, recording the crossing once each way. ----
   const dip = plan.memoryDip;
@@ -1238,7 +1243,9 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     return Object.fromEntries(work.filter(item => item.containmentQuarantine && containmentPhase(item, now)?.state !== 'live').map(item => {
       const fence = item.containmentQuarantine!, workspace = item.workspaces.find(entry => entry.epoch === fence.epoch)!;
       const verification = containmentVerificationSchema.parse({ method: 'linux-proc-systemd', host: workspace.host, uid: 1000, platform: 'linux', workspacePath: workspace.path,
-        observedAt: observed.now, clockOffset: { min: 0, max: 0 }, processes: [], scopes: [], inaccessible: 0, unverifiable: [] });
+        observedAt: observed.now, clockOffset: { min: 0, max: 0 }, processes: [], scopes: [], inaccessible: 0, unverifiable: [],
+        // A supervisor scope the launch recorded (GY-1460's day) is inspected and found stopped.
+        ...(fence.scope ? { recordedScope: { ...fence.scope, activeState: 'inactive' } } : {}) });
       const refusals = containmentSettlementRefusals(item, verification, { now });
       return [item.id, { key: item.key, id: item.id, epoch: fence.epoch, owner: fence.owner, at: fence.at, host: workspace.host, workspacePath: workspace.path, scope: fence.scope ?? null,
         settleable: !refusals.length, refusals, attestation: 'soak', verification }];
@@ -1440,12 +1447,19 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
       selectedAccount: async (role: string, profile: string) => role === 'worker' ? { environment: `account-${profile}`, kind: null } : null,
       holdAccount: async (account: string, observed: { resetsAt: string | null }) => { heldAccounts.set(account, { resetsAt: observed.resetsAt }); },
     } : {}),
-    ...(options.reassigned || options.credentialBlocked || options.retrying || options.unsubmitted ? {
+    // GY-1460: stopping a supervisor stops its session, so the lease it renewed lapses.
+    ...(options.unbounded ? {
+      stopSupervisor: async (orphan: { key: string; epoch: number; scope?: { unit: string } | null }) => {
+        const session = sessions.find(entry => entry.key === orphan.key && entry.epoch === orphan.epoch);
+        unboundedDay.stops.push({ key: orphan.key, epoch: orphan.epoch, elapsed: clock.now() - dayStart, unit: orphan.scope?.unit ?? '' });
+        if (session && (session.state === 'working' || session.state === 'idling')) { herdr.kill(session.pane); session.state = 'reclaimed'; }
+      },
+    } : {}),
+    ...(options.reassigned || options.credentialBlocked || options.retrying || options.unbounded ? {
       reportCapacity: async (work: Work, event: Record<string, unknown>) => api(principals.coordinator, 'POST', `work/${work.id}/capacity`, event),
       preserveWork: async (work: Work, epoch: number) => {
         const current = (await store.list()).find(item => item.id === work.id)!;
         const workspace = current.workspaces.find(entry => entry.epoch === epoch);
-        preservedAttempts.push({ key: work.key, epoch, elapsed: clock.now() - dayStart });
         return workspace ? { state: 'committed' as const, commit: sha('wip', work.key, epoch), branch: workspace.branch, detail: 'kept as WIP' } : { state: 'not-applicable' as const, detail: 'this world records no worktree' };
       },
     } : {}),
@@ -2447,11 +2461,11 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   const tmp = { root: tmpRoot, backlog, deadOwned, cache, heldDirectory, liveOwned, hourly, passes: tmpPasses, peak: tmpPeak, reports: await readReclaimReports(reclaimRoot), left: readdirSync(tmpRoot) };
   if (process.env.SOAK_TRACE) console.error(`landing: ${github.landingChecks} checks over ${github.landingBases.size} bases, ${github.ancestorCompares} ancestor compares, ${github.blindCompares} blind compares; false landing refusals: ${landingRefusals.map(entry => `${entry.key}@+${Math.round(entry.elapsed / minute)}min ${entry.sha.slice(0, 12)}`).join(', ') || 'none'}`);
   engine.execute = executeAll;
-  return { provisionDay, promotion, throughput, reconciled, outside, items, final, github, sessions, docsSyncRuns, docsSyncRoot, lost, launches, violations, faulted, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, headless, herdr, hand, stranded, withdrawals, resumes, strandedLaunches, escalations, spent, attestations, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, guardReads, checkout, landingRefusals, foreignPane, previousWorktrees, closedLeased,
+  return { unboundedDay, provisionDay, promotion, throughput, reconciled, outside, items, final, github, sessions, docsSyncRuns, docsSyncRoot, lost, launches, violations, faulted, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, headless, herdr, hand, stranded, withdrawals, resumes, strandedLaunches, escalations, spent, attestations, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, guardReads, checkout, landingRefusals, foreignPane, previousWorktrees, closedLeased,
     mergeQueuePosts, config, refused, decideCalls, restarted, approverPanes, failing, herdrClosed: herdr.closed, diagnosisModel: settings.model, diagnosisRuns: diagnosed, baseBreak, capacityRefused, capacityLaunched, capacityWaiters,
     decided, misreads, prompts, screens, heldAccounts, approverAccounts, retryReset, exitedLive, exitedClosed, exitedRowsSeen, reassign, workspaceFailures, workspaceCooled, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, fenced, mergeStallSightings, master, baseFailure,
     blockerEvents, blockerProbes, blockerDecisions, blockerActions, blockerKeysPeak, attempts, lanesSeen, laneApplications, approverWorks, approverDecisions, failover, webhook, remedies, observeRequests, starvation, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size }, mechanical: { ledger, botRounds, misclassified, reviewHolds }, shared, charges: { ...charged, b: charged.b.length, instancesSeen: [...charged.instancesSeen], restarts: chargeRestarts },
-    wakes, staleMerges, restartLog, hostDay, guardDay, budgetDay, observationDay, deploymentDay, decompositionDay: decompositionHistory, diagnosisRaces, diagnosisRequestRaces, transientRefused, lateReads, staleReleaseDay, drain, bounded, preservedAttempts, acceptanceDay: acceptance?.day ?? null, plannerDay: planner?.day ?? null };
+    wakes, staleMerges, restartLog, hostDay, guardDay, budgetDay, observationDay, deploymentDay, decompositionDay: decompositionHistory, diagnosisRaces, diagnosisRequestRaces, transientRefused, lateReads, staleReleaseDay, drain, acceptanceDay: acceptance?.day ?? null, plannerDay: planner?.day ?? null };
 }
 
 /**

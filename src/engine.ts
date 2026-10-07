@@ -15,7 +15,6 @@ import { Refusal, demandWork } from './model/refusal.js';
 import { resourceConflicts } from './coordination.js';
 import { containmentAttestation, containmentSettlementRefusals, containmentVerificationSchema } from './quarantine.js';
 import { containmentPhase } from './model/containment.js';
-import { unsubmittedPastBound, workerNoSubmissionRefusalMs } from './model/fault-classes.js';
 import { activeEngineers, delegationLimits, implementerIdentities, leadMay, producerIndependenceRefusal, sessionKind } from './delegation.js';
 import { unauthorizedMergeViolation } from './merge-queue.js';
 import { conflictSince, requestedBaseRefresh, disprovedConflict, withDisprovedConflict, dismissedApproval, onto, reconciliationRefusalPrefix, reconcileCheckReruns, rerunFailedChecksEvent, checkRerunLimit, owedRerunAfter, type BaseRefresh, type CheckRerun, type OwedRerunOutcome, type GitHubMergeQueueState, type MergeEnqueueRequest, type MergeQueueAction, type RestoredApproval } from './merge-queue.js';
@@ -44,6 +43,8 @@ import { claimAction, openActions, reconcileActions, renewClaim, settleAction, s
 import { livenessFallback, livenessOf, livenessRepairEntry } from './model/liveness.js';
 import { agentRequestSchema, boundedAgentRequests, deciderFor, expireAgentRequests, leaseHeldRequestTypes, requestResolutionRefusal, resolveSatisfiedScopeRequests, type AgentRequest } from './model/agent-requests.js';
 import { recordSession, sessionHandleSchema, sessionObservationFields } from './model/sessions.js';
+import { observeHead } from './model/attempt-bound.js';
+import { noSubmissionRenewalRefused, workerNoSubmissionRefusalMs } from './model/escalation.js';
 import { blockedAttemptMarker, partialWorkSchema, retainedExhaustions, type ExhaustionRecord } from './model/capacity.js';
 import { credentialBlockedReason, credentialFailure } from './worker-credential.js';
 import { beginAttempt, endAttempt, endLapsedAttempt, pipelineTimeline, recordIntervention, recordRework, recordSubmission } from './pipeline-speed.js';
@@ -2150,9 +2151,9 @@ export class Engine {
   private renewLease(work: Work, actor: Principal, epoch: number, now: Date) {
     endedBySubmission(work, epoch);
     activeLease(work, actor, epoch, now);
-    // GY-1462: the backstop to the loop's end at two no-submission bounds: an attempt held unsubmitted
-    // past workerNoSubmissionRefusalMs is not renewed, so its lease lapses into containment and reclaim.
-    demand(!unsubmittedPastBound(work, now.getTime(), workerNoSubmissionRefusalMs),
+    // GY-1462: the backstop to the loop's end past the reclaim bound (GY-1460): an attempt held
+    // unsubmitted past workerNoSubmissionRefusalMs is not renewed, so its lease lapses into containment and reclaim.
+    demand(!noSubmissionRenewalRefused(work, now.getTime()),
       `Implementation lease for epoch ${epoch} of ${work.key} is not renewed: no submission in ${workerNoSubmissionRefusalMs / 60_000} minutes, past the worker no-submission bound; the attempt ends and its branch is kept for the next`);
     work.lease!.expiresAt = new Date(now.getTime() + this.leaseSeconds * 1000).toISOString();
     delete (work.lease as GracedLease).renewalFault;
@@ -2582,6 +2583,8 @@ export class Engine {
       // GitHub's queue state is read after the observation, by the check publication; it is kept
       // across observations of the same pull request until that read replaces it.
       if (observation.githubQueue === undefined && previousObservation?.githubQueue && previousObservation.candidate?.pr === observation.candidate.pr) observation.githubQueue = previousObservation.githubQueue;
+      // When this pull request's head was first observed (GY-1460): the worker bound reads a push from it, never a poll.
+      observeHead(work, observation.candidate, observation.at);
       work.candidate = observation.candidate;
       // A conflict the control plane's own test merge of this head onto this tip found clean is
       // GitHub's stale reading (GY-375): it is stored disproved — the head merges cleanly, which is

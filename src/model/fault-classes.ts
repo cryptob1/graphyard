@@ -3,8 +3,9 @@ import { isClosed } from './closure.js';
 import { standingCapacity } from './capacity.js';
 import { routableScopeRequest, scopeBlockedBudgetMs, scopeRefusalBlocker } from './scope.js';
 import { containmentPhase } from './containment.js';
-import { attemptClaimedAt, lapsedBeforeStart, submittedEpoch, workerNoSubmissionBoundMs, workerNoSubmissionRefusalMs, workerNoSubmissionRenewalBounds } from './escalation.js';
+import { lapsedBeforeStart } from './escalation.js';
 import { blockerKind } from './blocker-kind.js';
+import { unsubmittedAttempt, unsubmittedAttemptText } from './attempt-bound.js';
 export { blockerKind };
 // Types only from work.ts: work.ts reaches this module through the origin schema (interventions.ts),
 // so a value import back would read work.ts before it has evaluated.
@@ -164,24 +165,6 @@ export function groupFaults(items: readonly { subject: string; kind: FaultKind; 
   return [...groups.values()].sort((a, b) => b.count - a.count || faultClasses.indexOf(a.faultClass) - faultClasses.indexOf(b.faultClass));
 }
 
-// The worker no-submission bound (GY-1462) is declared once in escalation.ts, beside the lease-lapse
-// causes it explains; this re-export is where the loop's fault, the doctor's checklist and the
-// server's renewal refusal import it from.
-export { workerNoSubmissionBoundMs, workerNoSubmissionRefusalMs, workerNoSubmissionRenewalBounds };
-/**
- * The live attempt `work` holds without a submission for its epoch, and for how long, or null: no
- * lease, a submitted epoch, or a claim the record cannot date (attemptClaimedAt).
- */
-export function unsubmittedAttempt(work: Pick<Work, 'lease' | 'submission' | 'lastAssignment'> & { pipeline?: { attempts?: { epoch: number; claimedAt: string }[] } }, now: number): { epoch: number; owner: string; claimedAt: string; heldMs: number } | null {
-  const lease = work.lease;
-  if (!lease || submittedEpoch(work, lease.epoch)) return null;
-  const claimedAt = attemptClaimedAt(work, lease.epoch);
-  return claimedAt ? { epoch: lease.epoch, owner: lease.owner, claimedAt, heldMs: Math.max(0, now - Date.parse(claimedAt)) } : null;
-}
-/** Whether `work`'s attempt has held its lease unsubmitted for `heldMs` or more (one no-submission bound by default). */
-export const unsubmittedPastBound = (work: Parameters<typeof unsubmittedAttempt>[0], now: number, heldMs = workerNoSubmissionBoundMs) =>
-  (unsubmittedAttempt(work, now)?.heldMs ?? -1) >= heldMs;
-
 /** One fault standing on a work item, read from the item's own record. */
 export interface FaultObservation extends Classified { subject: string; text: string }
 const observe = (kind: FaultKind, subject: string, text: string): FaultObservation => ({ ...classified(kind), subject, text: text.slice(0, 500) });
@@ -217,12 +200,10 @@ export function workFaults(work: Work, now: number, routes = true): FaultObserva
   if (work.proofGaps?.length) found.push(observe('proof-gap', work.key, `No principal is authorized to produce ${work.proofGaps.join(', ')}`));
   if (standingCapacity(work).length) found.push(observe('role-capacity', work.key, `${work.key} waits on a provider account out of quota`));
   if (work.violations.length) found.push(observe('scope-violation', work.key, work.violations[0]));
-  const unsubmitted = unsubmittedAttempt(work, now);
-  // GY-1462: renewal and session activity are no motion against the bound; a lapsed lease is held by nobody.
-  if (unsubmitted && unsubmitted.heldMs >= workerNoSubmissionBoundMs && Date.parse(work.lease!.expiresAt) > now)
-    found.push(observe('unsubmitted-attempt', work.key, `${work.key} epoch ${unsubmitted.epoch} (${unsubmitted.owner}) has held its lease ${Math.floor(unsubmitted.heldMs / 60_000)} min since ${unsubmitted.claimedAt} with no submission, past the ${workerNoSubmissionBoundMs / 60_000}-minute worker no-submission bound; the loop ends it at ${workerNoSubmissionRenewalBounds * workerNoSubmissionBoundMs / 60_000} min and its renewals are refused from ${workerNoSubmissionRefusalMs / 60_000} min`));
   const restated = /* a blocker restating a typed fault is that fault: a human-only park's wait, a refused scope request */ (work.humanRequest && !work.humanRequest.answer) || (work.scopeRequest && work.blocker?.startsWith(scopeRefusalBlocker));
   if (work.blocker && !restated) found.push(observe(blockerKind(work.blocker), work.key, work.blocker));
+  const unsubmitted = unsubmittedAttempt(work, now);
+  if (unsubmitted) found.push(observe('unsubmitted-attempt', work.key, unsubmittedAttemptText(unsubmitted)));
   return found;
 }
 

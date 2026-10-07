@@ -4,13 +4,12 @@ import type { WorkerProfile } from '../master.js';
 import { message, type DaemonAction } from './state.js';
 import { boundDetail } from './decisions.js';
 import { readyToRetry } from './sessions.js';
-import { clearedBefore, clearedBlockerKey, failedAttemptCount, overlongKey, overlongMarker, overlongReason, reblockedKey, reblockedMarker, reblockedReason } from './reblocked-attempts.js';
+import { clearedBefore, clearedBlockerKey, failedAttemptCount, overlongKey, overlongReason, reblockedKey, reblockedMarker, reblockedReason } from './reblocked-attempts.js';
 import { launchAppearanceMs, preserveInterruptedAttempt, record } from './effects.js';
 import { roleSessionMaximumMs } from '../model/sessions.js';
-import { unsubmittedAttempt, workerNoSubmissionBoundMs, workerNoSubmissionRenewalBounds } from '../model/fault-classes.js';
 import { credentialBlockedKey, credentialBlockedReason, credentialFailure } from '../worker-credential.js';
 import type { Cycle } from './cycle.js';
-import { settleEndedAttemptFence } from './cycle-reclaim.js';
+import { settleEndedAttemptFence, supervisorStillRunning } from './cycle-reclaim.js';
 
 /** A worker's implementation handle, written by the loop: the one record `master status` and the item's history show of it. */
 export function workerHandle(cycle: Cycle, item: Work, profile: WorkerProfile, epoch: number, pane: string | null, outcome: string, finished: boolean) {
@@ -27,17 +26,27 @@ export function workerHandle(cycle: Cycle, item: Work, profile: WorkerProfile, e
  * (which ends the lease, so the dispatch step claims the item again next cycle and the next
  * attempt's request names that commit), its supervisor is stopped and its pane closed.
  */
-export async function endWorkerAttempt(cycle: Cycle, item: Work, profile: WorkerProfile, epoch: number, pane: string | null, reason: string, observed: string, options: { endsBlocker?: true } = {}) {
+export async function endWorkerAttempt(cycle: Cycle, item: Work, profile: WorkerProfile, epoch: number, pane: string | null, reason: string, observed: string, options: { endsBlocker?: true; stopFirst?: true } = {}) {
   const { state, effects, now, performed } = cycle;
-  const preserved = await preserveInterruptedAttempt(state, effects, item, epoch, profile, observed, now, performed, options);
-  if (preserved && preserved.state !== 'done') throw new Error(`its attempt could not be ended on the record: ${preserved.detail}`);
   const scope = item.containmentQuarantine?.epoch === epoch && item.containmentQuarantine.owner === profile.principal ? item.containmentQuarantine.scope : undefined;
   let stop = 'its supervisor stops on the ended lease';
-  try {
-    if (scope && effects.stopSupervisor) { await effects.stopSupervisor({ id: item.id, key: item.key, epoch, owner: profile.principal, profile: profile.name, agentName: profile.agentName, scope, leaseExpiresAt: item.lease!.expiresAt }, 'SIGTERM'); stop = `its supervisor (pid ${scope.pid}) was stopped through ${scope.unit}`; }
-  } catch (error) { stop = `its supervisor could not be signalled (${message(error)}) and stops on the ended lease`; }
-  // A session already gone from Herdr has no pane left to close (GY-867 ends such attempts too).
-  if (pane) await effects.closeSession(pane);
+  const halt = async () => {
+    try {
+      if (scope && effects.stopSupervisor) { await effects.stopSupervisor({ id: item.id, key: item.key, epoch, owner: profile.principal, profile: profile.name, agentName: profile.agentName, scope, leaseExpiresAt: item.lease!.expiresAt }, 'SIGTERM'); stop = `its supervisor (pid ${scope.pid}) was stopped through ${scope.unit}`; }
+    } catch (error) { stop = `its supervisor could not be signalled (${message(error)}) and stops on the ended lease`; }
+    // A session already gone from Herdr has no pane left to close (GY-867 ends such attempts too).
+    if (pane) await effects.closeSession(pane);
+  };
+  // GY-1460: a session still at work is stopped, and verified gone, before its worktree is kept, so
+  // the snapshot never races an agent still editing or running git there.
+  if (options.stopFirst) {
+    await halt();
+    const running = await supervisorStillRunning(cycle, item, { epoch, owner: profile.principal });
+    if (running) throw new Error(`${stop}, but it is not yet verified gone, so its worktree is not kept yet: ${running}`);
+  }
+  const preserved = await preserveInterruptedAttempt(state, effects, item, epoch, profile, observed, now, performed, options.endsBlocker ? { endsBlocker: true } : {});
+  if (preserved && preserved.state !== 'done') throw new Error(`its attempt could not be ended on the record: ${preserved.detail}`);
+  if (!options.stopFirst) await halt();
   await workerHandle(cycle, item, profile, epoch, pane ?? 'none', `closed as failed: ${reason}`, true);
   // GY-1155: the ending is on the record and the supervisor was stopped, so the fence is settled
   // in this same action once the host verifies it gone, rather than waiting out the grace window.
@@ -63,8 +72,6 @@ const idleRemainingMinutes = (now: number, idleAt: string) => Math.max(idleRepro
 /** What a live attempt waits on — its blocker, its scope request — and when its session was last seen active; each a `waiting` action the loop keeps while it stands. */
 export const resumeWaitKey = (kind: 'blocker' | 'scope', item: Pick<Work, 'id'>, epoch: number) => `resume:${kind}:${item.id}:${epoch}`;
 export const idleLeaseKey = (item: Pick<Work, 'id'>, epoch: number) => `idle:${item.id}:${epoch}`;
-/** The action that ends an attempt past the worker no-submission renewal bound (GY-1462). */
-export const noSubmissionKey = (item: Pick<Work, 'id'>, epoch: number) => `resume:nosubmission:${item.id}:${epoch}`;
 const waitPrefixes = ['resume:blocker:', 'resume:scope:', 'idle:'];
 const blockerMarker = 'is re-prompted once it is cleared: ';
 
@@ -242,30 +249,6 @@ export async function resumeStep(cycle: Cycle, failedOver: Set<string>, listingL
           }
         }
       }
-    }
-
-    // GY-1462: an attempt held two no-submission bounds unsubmitted is ended through the reclaim path
-    // in the cycle that sees it, so its work is kept on its branch once and the item is dispatched
-    // again; the server's refusal of its renewals ten minutes later is only the backstop. The end
-    // leads with the overlong marker, so repeated unsubmitted attempts climb the GY-885 retry ladder.
-    const unsubmitted = unsubmittedAttempt(item, clock);
-    if (unsubmitted && unsubmitted.epoch === epoch && unsubmitted.heldMs >= workerNoSubmissionRenewalBounds * workerNoSubmissionBoundMs) {
-      const key = noSubmissionKey(item, epoch), previous = state.actions[key];
-      if (previous?.state === 'done' || (previous && !readyToRetry(previous, state.cycle))) return;
-      const reason = `${overlongMarker} on epoch ${epoch}: held its lease ${Math.floor(unsubmitted.heldMs / 60_000)} min since ${unsubmitted.claimedAt} with no submission, past ${workerNoSubmissionRenewalBounds} worker no-submission bounds of ${workerNoSubmissionBoundMs / 60_000} min`;
-      const attempts = (previous?.attempts ?? 0) + 1;
-      await entry(key, 'started', `${profile.agentName} on ${item.key} ${reason}; ending the attempt`, attempts);
-      try {
-        // Only a pane that is still this attempt's is closed: the agent name a handle with no pane
-        // recorded falls back to may belong to another item's session now (GY-940).
-        const closePane = checkPaneStillBelongs(item, handleId, pane ?? undefined) ? null : pane;
-        const next = await endWorkerAttempt(cycle, item, profile, epoch, closePane, reason, reason);
-        performed.push(await entry(key, 'done', `${profile.agentName} on ${item.key} ${reason}; ${next}, keeping the attempt's branch`, attempts));
-        await drop(keys.blocker, keys.scope, keys.idle);
-      } catch (error) {
-        performed.push(await entry(key, 'failed', `${profile.agentName} on ${item.key} ${reason}, but its attempt could not be ended: ${message(error)}`, attempts));
-      }
-      return;
     }
 
     if (item.blocker || request) { await drop(keys.idle); return; }

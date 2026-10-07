@@ -121,6 +121,55 @@ test('unit:soak-invariants-hold — a worker idle past its bound whose pane died
   assert.equal(final.find(item => item.key === items[n - 1].key)!.stage, 'done', 'the item was delivered by its next attempt');
 });
 
+test('unit:soak-invariants-hold — a worker that stays working and renews its lease without ever submitting is faulted once past the 60-minute bound and stopped once past 120, then requeued with its worktree kept and delivered — a first attempt, a rework attempt on an open pull request and one that pushed once and stalled alike; a long worker that pushes as it goes is never stopped, and every invariant holds', { timeout: 600_000 }, async () => {
+  // GY-1460: GY-1457's shape. Each stuck item's session stays `working` to Herdr and its supervisor
+  // renews the lease every cycle, so no idle or lapse path ever sees it: the first attempt of item 2;
+  // item 5's rework attempt, whose branch carries the pull request every cycle polls; and item 4's
+  // first attempt, which bound its session to a pushed head ten minutes in and stalled while the
+  // loop rewrote its handle on every session report. Neither a poll nor a rewrite is progress. The
+  // progressing item's first session runs 150 minutes but pushes a head every ten. All run fenced
+  // under a supervisor scope, as supervised launches are.
+  const stuck = 2, progressing = 3, pushedOnce = 4, rework = 5;
+  const { items, final, violations, failures, lost, state, sessions, unboundedDay, dayStart } = await simulateDay({
+    hours: 8, unbounded: { stuck, progressing, pushedOnce, rework },
+    plan: { items: 6, leftovers: 2, slowRecompute: 0, workMs: 15 * minute, rework: new Set([rework]), deaths: new Set(), flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set(), misread: new Set(), exits: new Set(), spentProducer: 0, lostRuns: 0, outOfQueue: { item: 6, afterMs: 99 * hour }, blind: { from: 99 * hour, to: 100 * hour }, split: { at: 99 * hour, item: 6 } },
+  });
+  const long = items[progressing - 1];
+  assert.deepEqual(violations, [], 'every system invariant holds across the faults, the stops and the reclaims');
+  assert.deepEqual(failures, [], 'no cycle failed');
+  assert.deepEqual(lost, [], 'no lease was lost: each stopped attempt ended on the record and was reclaimed by the loop');
+  assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}`), [], 'every item is delivered, each stuck one by its next attempt');
+  const stuckAttempts = [[stuck, 1], [pushedOnce, 1], [rework, 2]].map(([n, attempt]) => sessions.find(session => session.key === items[n - 1].key && session.attempt === attempt)!);
+  assert.ok(stuckAttempts.every(Boolean), 'every stuck attempt ran');
+  assert.ok(unboundedDay.pushes.some(push => push.key === items[pushedOnce - 1].key), 'the pushed-once attempt bound its session to a head');
+  // The fault opened once per stuck attempt, and closed once each item was requeued.
+  const faults = state.faults.instances.filter(instance => instance.kind === 'unsubmitted-attempt');
+  assert.deepEqual(faults.map(instance => [instance.subject, instance.faultClass]).sort(), stuckAttempts.map(session => [session.key, 'stalled-gate']).sort(), `one fault instance per stuck attempt: ${JSON.stringify(faults)}`);
+  for (const session of stuckAttempts)
+    assert.match(faults.find(instance => instance.subject === session.key)!.text, new RegExp(`^${session.key} epoch ${session.epoch} \\(.+\\) has held its lease \\d+ minutes past the 60-minute worker bound without a submission`));
+  assert.ok(!Object.keys(state.faults.open).some(key => key.startsWith('unsubmitted-attempt|')), 'the faults closed once the items were back in the queue');
+  // The supervisor was stopped exactly once per stuck attempt, through its recorded scope, past the reclaim bound.
+  assert.deepEqual(unboundedDay.stops.map(stop => [stop.key, stop.epoch, stop.unit]).sort(), stuckAttempts.map(session => [session.key, session.epoch, `graphyard-watch-${session.key.toLowerCase()}-${session.epoch}.scope`]).sort(), `one stop each: ${JSON.stringify(unboundedDay.stops)}`);
+  for (const session of stuckAttempts) {
+    const stop = unboundedDay.stops.find(entry => entry.key === session.key)!, stoppedAfter = dayStart + stop.elapsed - session.dispatchAt;
+    assert.ok(stoppedAfter > 120 * minute && stoppedAfter < 135 * minute, `${session.key} stopped just past the 120-minute reclaim bound, not before: ${stoppedAfter / minute} minutes in`);
+    const action = state.actions[`unbounded:${session.work}:${session.epoch}`];
+    assert.equal(action?.state, 'done', `${session.key}: the stop is on the record`);
+    assert.equal(action.attempts, 1, `${session.key}: made once, never retried`);
+    assert.match(action.detail, /held its lease past the 120-minute reclaim bound without a submission .*; the loop stopped renewing it: the attempt ended on the record, its supervisor \(pid \d+\) was stopped through graphyard-watch-.+\.scope, .* with its worktree kept$/);
+    assert.equal(session.state, 'reclaimed');
+    // The stopped attempt's worktree was kept, and a later attempt delivered the item.
+    const later = sessions.filter(entry => entry.key === session.key && entry.attempt > session.attempt);
+    assert.ok(later.length && later.at(-1)!.state === 'submitted', `a later attempt delivered ${session.key}: ${later.map(entry => `${entry.epoch}:${entry.state}`).join(', ')}`);
+    assert.ok(final.find(item => item.id === session.work)!.workspaces.some(workspace => workspace.epoch === session.epoch), `${session.key}: the stopped attempt's worktree stays on the record`);
+  }
+  // The long attempt ran past both bounds, pushing as it went, and was never stopped or faulted.
+  const longAttempt = sessions.find(session => session.key === long.key && session.attempt === 1)!;
+  assert.equal(longAttempt.state, 'submitted', 'the long attempt submitted its own work');
+  assert.ok(unboundedDay.pushes.filter(push => push.key === long.key).length >= 12, `it pushed every ten minutes: ${unboundedDay.pushes.length}`);
+  assert.ok(!Object.keys(state.actions).some(key => key.startsWith(`unbounded:${long.id}:`)), 'nothing stopped the progressing attempt');
+});
+
 test('unit:soak-invariants-hold — headless approver runs through loop restarts (GY-453): each adopted and applied exactly once, lost ones retried within a bound, the run registry bounded', { timeout: 480_000 }, async () => {
   const { items, final, violations, failures, state, headless } = await simulateDay({ hours: 6, headless: true });
   const { pi, root, applied, submitted, runs, restarts, adoptedLive, adoptedEnded } = headless!;
