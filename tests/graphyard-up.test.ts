@@ -610,7 +610,7 @@ function onboardingLoop(w: World) {
         polls++;
         if (polls === 2) item.gates = gates(true, false);
         if (polls === 3) item.gates = gates(true, true);
-        if (polls === 4) { item.stage = 'done'; w.onboardingMerged = true; }
+        if (polls === 4) { item.stage = 'done'; item.delivery = { mergedAt: new Date(0).toISOString(), mergeSha: 'a'.repeat(40) }; w.onboardingMerged = true; }
       }
       return item ? [{ key: 'GY-3', title: 'Something else', workspaces: [] }, item] : [];
     },
@@ -665,26 +665,44 @@ test('unit:onboarding-pr-self-merges — up files the onboarding pull request as
     mergeGate: { preMerge: [{ check: 'test', command: 'npm test', source: 'script', reason: 'fast unit tests' }, { check: 'lint', command: 'npm run lint', source: 'script', reason: 'static analysis' }],
       perCandidate: [{ check: 'e2e', command: 'npm run e2e', source: 'script', reason: 'long suite' }] } } }));
   const checks = await onboardingChecks(checkout);
-  const posted: { path: string; key: string | null; auth: string | null; body: any }[] = [];
+  // The item as GET /api/work/:id reads it between the release and the claim; the claim answers the next epoch.
+  let stored: any = { id: 'w-1', key: 'GY-7', epoch: 0, lease: null, submission: null };
+  const posted: { method: string; path: string; key: string | null; auth: string | null; body: any }[] = [];
   const fetcher = (async (input: any, init: any) => {
     const path = new URL(String(input)).pathname, headers = init.headers as Record<string, string>;
-    posted.push({ path, key: headers['Idempotency-Key'], auth: headers.Authorization, body: JSON.parse(init.body) });
-    const answer = path === '/api/work' ? { id: 'w-1', key: 'GY-7' } : path.endsWith('/claim') ? { id: 'w-1', key: 'GY-7', lease: { epoch: 1 } } : { id: 'w-1', key: 'GY-7' };
+    posted.push({ method: init.method, path, key: headers['Idempotency-Key'] ?? null, auth: headers.Authorization, body: init.body ? JSON.parse(init.body) : null });
+    const answer = path === '/api/work' ? { id: 'w-1', key: 'GY-7' } : path === '/api/work/w-1' ? stored
+      : path.endsWith('/claim') ? { id: 'w-1', key: 'GY-7', lease: { epoch: stored.epoch + 1 } } : { id: 'w-1', key: 'GY-7' };
     return new Response(JSON.stringify(answer), { status: 200, headers: { 'Content-Type': 'application/json' } });
   }) as typeof fetch;
-  const token = 'a'.repeat(40);
-  const filed = await fileOnboardingWork({ server: SERVER, token, url: 'https://github.com/acme/shop/pull/1', checks, host: 'laptop', path: '/repo/.graphyard/onboarding', requestId: 'r-1' }, fetcher);
+  const token = 'a'.repeat(40), clock = Date.parse('2026-10-07T10:00:00Z');
+  const fileWith = () => fileOnboardingWork({ server: SERVER, token, url: 'https://github.com/acme/shop/pull/1', checks, host: 'laptop', path: '/repo/.graphyard/onboarding', requestId: 'r-1' }, fetcher, () => clock);
+  const filed = await fileWith();
   assert.deepEqual(filed, { key: 'GY-7', id: 'w-1' });
-  assert.deepEqual(posted.map(entry => entry.path), ['/api/work', '/api/work/w-1/ready', '/api/work/w-1/claim', '/api/work/w-1/workspace', '/api/work/w-1/submit']);
-  assert.deepEqual(posted.map(entry => entry.key), ['r-1-create', 'r-1-ready', 'r-1-claim', 'r-1-workspace', 'r-1-submit']);
+  assert.deepEqual(posted.map(entry => `${entry.method} ${entry.path}`), ['POST /api/work', 'POST /api/work/w-1/ready', 'GET /api/work/w-1', 'POST /api/work/w-1/claim', 'POST /api/work/w-1/workspace', 'POST /api/work/w-1/submit']);
+  assert.deepEqual(posted.map(entry => entry.key), ['r-1-create', 'r-1-ready', null, 'r-1-claim-0', 'r-1-workspace-1', 'r-1-submit-1']);
   assert.ok(posted.every(entry => entry.auth === `Bearer ${token}`));
+  const first = [...posted];
+  // A rerun after the earlier try's lease lapsed claims a new epoch, not the expired claim's receipt.
+  posted.length = 0; stored = { ...stored, epoch: 1, lease: { owner: 'operator', epoch: 1, expiresAt: new Date(clock - 1).toISOString() } };
+  await fileWith();
+  assert.deepEqual(posted.map(entry => entry.key), ['r-1-create', 'r-1-ready', null, 'r-1-claim-1', 'r-1-workspace-2', 'r-1-submit-2']);
+  assert.deepEqual(posted.at(-1)?.body, { epoch: 2, pr: 1 });
+  // A rerun within the earlier try's live lease acts under it; one after the submission files nothing more.
+  posted.length = 0; stored = { ...stored, lease: { owner: 'operator', epoch: 1, expiresAt: new Date(clock + 60_000).toISOString() } };
+  await fileWith();
+  assert.deepEqual(posted.map(entry => entry.key), ['r-1-create', 'r-1-ready', null, 'r-1-workspace-1', 'r-1-submit-1']);
+  posted.length = 0; stored = { ...stored, lease: null, submission: { epoch: 1, pr: 1 } };
+  assert.deepEqual(await fileWith(), { key: 'GY-7', id: 'w-1' });
+  assert.deepEqual(posted.map(entry => entry.path), ['/api/work', '/api/work/w-1/ready', '/api/work/w-1']);
+  posted.splice(0, posted.length, ...first);
   const created = posted[0].body;
   assert.equal(created.title, 'Add Graphyard onboarding');
   assert.equal(created.type, 'chore', 'no documentation obligation: it changes no documented behaviour');
   assert.deepEqual(created.policy, { checks: ['test', 'lint'], review: true }, 'independent review and the checks branch protection requires');
   assert.match(created.description, /^https:\/\/github\.com\/acme\/shop\/pull\/1\n/);
-  assert.deepEqual(posted[3].body, { epoch: 1, host: 'laptop', path: '/repo/.graphyard/onboarding', branch: 'graphyard/onboarding' });
-  assert.deepEqual(posted[4].body, { epoch: 1, pr: 1 });
+  assert.deepEqual(posted[4].body, { epoch: 1, host: 'laptop', path: '/repo/.graphyard/onboarding', branch: 'graphyard/onboarding' });
+  assert.deepEqual(posted[5].body, { epoch: 1, pr: 1 });
   // The item is valid input to the control plane's create.
   const { createSchema } = await import('../src/model/work.js');
   assert.ok(createSchema.safeParse(created).success, JSON.stringify(createSchema.safeParse(created).error?.issues));
@@ -708,7 +726,7 @@ test('unit:onboarding-pr-visible — while the onboarding pull request is open, 
     fleet: { roles: [{ role: 'worker', accounts: ['claude-a'] }, { role: 'reviewer', accounts: ['claude-a'] }], accounts: [{ name: 'claude-a', enabled: true, loggedIn: true, smoke: { result: 'pass' } }] },
     setup: { protection: 'complete', loop: true } };
   const { SetupView } = await import('../web/pages/setup.js');
-  const page = (work: any[]) => renderToStaticMarkup(createElement(SetupView, { status: green, work, now, onConnect: () => {}, onSubmitGoal: () => {} }));
+  const page = (work: any[] | null, workUnread = false) => renderToStaticMarkup(createElement(SetupView, { status: green, work, workUnread, now, onConnect: () => {}, onSubmitGoal: () => {} }));
   const open = page([{ key: 'GY-3', title: 'Other', workspaces: [] }, item]);
   assert.match(open, /<li data-setup-item="onboarding" data-done="no" data-waiting-for="review" aria-current="step">/);
   assert.match(open, /<a [^>]*data-setup-action="onboarding"[^>]*href="https:\/\/github\.com\/acme\/shop\/pull\/1"[^>]*>Open the change<\/a>/);
@@ -717,9 +735,22 @@ test('unit:onboarding-pr-visible — while the onboarding pull request is open, 
   assert.match(text, /1 of 7 steps left/);
   assert.doesNotMatch(open, /Describe what you want built/, 'the goal waits for the merge, as up does');
   for (const [what, pattern] of JARGON) assert.doesNotMatch(text, pattern, `the onboarding step shows no ${what}`);
-  // Merged: the step is done and the goal box is offered.
-  const merged = page([{ ...item, stage: 'done' }]);
+  // Merged, on merge evidence: the step is done and the goal box is offered.
+  const delivered = { ...item, stage: 'done', delivery: { mergedAt: new Date(now).toISOString(), mergeSha: 'a'.repeat(40) } };
+  const merged = page([delivered]);
   assert.match(merged, /data-setup-item="onboarding" data-done="yes"/);
   assert.match(merged, /<form aria-label="Describe what you want built"/);
   assert.match(visible(merged), /Everything is ready\./);
+  // Closed without merging (done with a closure): the workflows never landed, so it is not merged and the goal box stays closed.
+  const closedWait = onboardingWait({ ...item, stage: 'done', closure: { kind: 'superseded' } }, now);
+  assert.deepEqual({ merged: closedWait.merged, closed: closedWait.closed, waitingFor: closedWait.waitingFor }, { merged: false, closed: true, waitingFor: [] });
+  const closed = page([{ ...item, stage: 'done', closure: { kind: 'superseded' } }]);
+  assert.match(closed, /data-setup-item="onboarding" data-done="no"/);
+  assert.match(visible(closed), /closed without merging/);
+  assert.doesNotMatch(closed, /Describe what you want built/);
+  assert.match(describeUpEvent({ kind: 'onboarding', wait: closedWait }), /^· onboarding: GY-7: .*closed without merging/);
+  // Until the work items are read (or while the read fails), whether it merged is unknown: no goal box.
+  const unread = page(null, true);
+  assert.doesNotMatch(unread, /Describe what you want built/);
+  assert.match(visible(unread), /Checking whether the onboarding change has merged/);
 });

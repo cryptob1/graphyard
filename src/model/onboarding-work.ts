@@ -58,9 +58,11 @@ export function waitedFor(ms: number) {
 export type OnboardingWaitingFor = 'checks' | 'review' | 'merge';
 export interface OnboardingWait {
   key: string; url: string | null;
-  /** What the pull request still waits for; empty once it merged. */
+  /** What the pull request still waits for; empty once it merged or was closed. */
   waitingFor: OnboardingWaitingFor[];
   merged: boolean;
+  /** Closed without merging (duplicate, superseded, abandoned): the base branch still lacks the workflows. */
+  closed: boolean;
   /** When the wait started (the item was filed) and how long it has lasted. */
   since: string; waitedMs: number;
   /** One plain sentence with no command, sha or file path: the Setup page's checklist line. */
@@ -74,14 +76,18 @@ export interface OnboardingWait {
 export function onboardingWait(work: any, now: number, repository?: string | null): OnboardingWait {
   const url = pullRequestUrl.exec(String(work?.description ?? ''))?.[0]
     ?? (repository && work?.submission?.pr ? `https://github.com/${repository}/pull/${work.submission.pr}` : null);
+  // The `test` gate is every required check at once: the policy's and those branch protection adds (gates.ts).
   const passed = (name: string) => (work?.gates ?? []).find((gate: any) => gate?.name === name)?.passed === true;
-  const merged = work?.stage === 'done' || work?.observation?.merged === true;
-  const waitingFor: OnboardingWaitingFor[] = merged ? [] : [...(passed('test') ? [] : ['checks' as const]), ...(passed('review') ? [] : ['review' as const])];
-  if (!merged && !waitingFor.length) waitingFor.push('merge');
+  // Merged only on merge evidence: a closed item is done too, without its pull request merging.
+  const closed = work?.stage === 'done' && !!work?.closure;
+  const merged = !closed && (work?.observation?.merged === true || (work?.stage === 'done' && !!work?.delivery?.mergedAt));
+  const waitingFor: OnboardingWaitingFor[] = merged || closed ? [] : [...(passed('test') ? [] : ['checks' as const]), ...(passed('review') ? [] : ['review' as const])];
+  if (!merged && !closed && !waitingFor.length) waitingFor.push('merge');
   const since = typeof work?.createdAt === 'string' && Number.isFinite(Date.parse(work.createdAt)) ? work.createdAt : new Date(now).toISOString();
   const waitedMs = Math.max(0, now - Date.parse(since));
   const what = waitingFor.map(entry => entry === 'checks' ? 'its tests to pass' : entry === 'review' ? 'an independent review' : 'the merge').join(' and ');
   const line = merged ? 'The change that adds Graphyard\'s delivery workflows to your repository is merged.'
+    : closed ? 'The change that adds Graphyard\'s delivery workflows to your repository was closed without merging, so your repository still lacks them.'
     : `The change that adds Graphyard's delivery workflows to your repository is waiting for ${what}. It has waited ${waitedFor(waitedMs)} and merges by itself; nothing is needed from you.`;
-  return { key: String(work?.key ?? ''), url, waitingFor, merged, since, waitedMs, line };
+  return { key: String(work?.key ?? ''), url, waitingFor, merged, closed, since, waitedMs, line };
 }

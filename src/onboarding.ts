@@ -451,7 +451,6 @@ export async function installedOnboarding(root: string, repository: string, url:
   return { directory, url: record.url, githubApp: { appId: record.github.appId, slug: record.github.slug } };
 }
 
-
 // --- Filing the onboarding pull request as a work item (GY-1478) -----------------------------------
 
 /**
@@ -484,24 +483,31 @@ export interface OnboardingFiling {
  * Submitted, it holds no lease and the loop owns it: the reviewer reviews it, the checks run and the
  * control plane merges it under the normal gates.
  */
-export async function fileOnboardingWork(filing: OnboardingFiling, fetcher: typeof fetch = fetch): Promise<{ key: string; id: string }> {
+export async function fileOnboardingWork(filing: OnboardingFiling, fetcher: typeof fetch = fetch, now: () => number = Date.now): Promise<{ key: string; id: string }> {
   const pr = pullRequestNumber(filing.url);
   if (!pr) throw new Error(`${filing.url} names no pull request`);
-  const post = async (path: string, step: string, body: unknown) => {
-    const response = await fetcher(`${filing.server.replace(/\/+$/, '')}/api/${path}`, { method: 'POST', body: JSON.stringify(body), signal: AbortSignal.timeout(60_000),
-      headers: { Authorization: `Bearer ${filing.token}`, 'Content-Type': 'application/json', 'Idempotency-Key': `${filing.requestId}-${step}` } });
+  const call = async (path: string, step: string, body?: unknown) => {
+    const response = await fetcher(`${filing.server.replace(/\/+$/, '')}/api/${path}`, { method: body === undefined ? 'GET' : 'POST', signal: AbortSignal.timeout(60_000),
+      ...(body === undefined ? { headers: { Authorization: `Bearer ${filing.token}` } }
+        : { body: JSON.stringify(body), headers: { Authorization: `Bearer ${filing.token}`, 'Content-Type': 'application/json', 'Idempotency-Key': `${filing.requestId}-${step}` } }) });
     const answer = await response.json().catch(() => null) as any;
     if (!response.ok) throw new Error(`the control plane refused the onboarding item's ${step}: ${String(answer?.error ?? answer?.message ?? response.status).slice(0, 300)}`);
     return answer;
   };
-  const created = await post('work', 'create', onboardingWorkRequest(filing.url, filing.checks));
+  const created = await call('work', 'create', onboardingWorkRequest(filing.url, filing.checks));
   const id = typeof created?.id === 'string' ? created.id : '', key = typeof created?.key === 'string' ? created.key : '';
   if (!id || !key) throw new Error('the control plane named no work item for the onboarding pull request');
-  await post(`work/${id}/ready`, 'ready', {});
-  const claimed = await post(`work/${id}/claim`, 'claim', {});
-  const epoch = Number(claimed?.lease?.epoch ?? claimed?.epoch);
+  await call(`work/${id}/ready`, 'ready', {});
+  // The lease-bound steps are keyed by the epoch they act under, read afresh: a rerun after an
+  // earlier try's lease lapsed claims a new epoch instead of replaying the expired claim's receipt.
+  const item = await call(`work/${id}`, 'read');
+  if (item?.submission) return { key, id };
+  const live = item?.lease && Date.parse(item.lease.expiresAt) > now() ? Number(item.lease.epoch) : null;
+  const claim = live === null ? await call(`work/${id}/claim`, `claim-${Number(item?.epoch) || 0}`, {}) : null;
+  const claimed = live ?? claim?.lease?.epoch ?? claim?.epoch;
+  const epoch = Number(claimed);
   if (!Number.isSafeInteger(epoch) || epoch <= 0) throw new Error(`claiming ${key} named no epoch`);
-  await post(`work/${id}/workspace`, 'workspace', { epoch, host: filing.host, path: filing.path, branch: onboardingBranch });
-  await post(`work/${id}/submit`, 'submit', { epoch, pr });
+  await call(`work/${id}/workspace`, `workspace-${epoch}`, { epoch, host: filing.host, path: filing.path, branch: onboardingBranch });
+  await call(`work/${id}/submit`, `submit-${epoch}`, { epoch, pr });
   return { key, id };
 }

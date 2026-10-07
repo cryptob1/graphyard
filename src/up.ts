@@ -413,6 +413,7 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
         if (work) {
           onboarding = onboardingWait(work, deps.now(), request.repository);
           if (onboarding.waitingFor.join() !== shown) { shown = onboarding.waitingFor.join(); deps.emit({ kind: 'onboarding', wait: onboarding }); }
+          if (onboarding.closed) throw new UpStop(`onboarding: ${onboarding.key} (${pullRequest}) was closed without merging, so the base branch lacks Graphyard's delivery workflows; reopen and merge it, or publish them again, then rerun ${rerun()}`, upExitCodes.failed);
         }
         if (deps.now() >= deadline) throw new UpStop(`Still waiting for the onboarding pull request ${pullRequest} to merge${onboarding ? ` (${onboarding.key} waits for ${onboarding.waitingFor.join(' and ')}, ${waitedFor(onboarding.waitedMs)} so far)` : ''}; rerun ${rerun()} to resume`, upExitCodes.waiting);
         await deps.sleep(pollMs);
@@ -807,7 +808,7 @@ export function upDependencies(root: string, cliPath: string, request: UpRequest
 export function describeUpEvent(event: UpEvent) {
   if (event.kind === 'step') return event.state === 'start' ? `→ ${event.step}` : `${event.state === 'done' ? '✓' : '·'} ${event.step}${event.detail ? `: ${event.detail}` : ''}`;
   if (event.kind === 'waiting') return `\n${event.sentence}\n`;
-  if (event.kind === 'onboarding') return `· onboarding: ${event.wait.key} (${event.wait.url ?? 'its pull request'}) waits for ${event.wait.waitingFor.join(' and ')}, ${waitedFor(event.wait.waitedMs)} so far; the loop reviews and merges it`;
+  if (event.kind === 'onboarding') return !event.wait.waitingFor.length ? `· onboarding: ${event.wait.key}: ${event.wait.line}` : `· onboarding: ${event.wait.key} (${event.wait.url ?? 'its pull request'}) waits for ${event.wait.waitingFor.join(' and ')}, ${waitedFor(event.wait.waitedMs)} so far; the loop reviews and merges it`;
   if (event.kind === 'handoff') return `NEEDS YOU: ${event.sentence}${event.code ? ` (code ${event.code})` : ''}${event.url ? ` — ${event.url}` : ''}`;
   return event.text;
 }
