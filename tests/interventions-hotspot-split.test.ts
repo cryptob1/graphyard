@@ -4,7 +4,6 @@ import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as interventions from '../src/interventions.js';
-import { foldRules } from '../src/interventions/fold-rules.js';
 
 // GY-1447: src/interventions.ts caused 5 merge conflicts in 24h, each sending an item back to a
 // worker, because every intervention fix reworded the same page. It is now a re-export barrel over
@@ -41,6 +40,8 @@ test('unit:interventions-hotspot-split — the barrel only re-exports, and each 
 });
 
 test('unit:interventions-hotspot-split — the fold reads each ledger kind through its own rule, not a shared switch', async () => {
+  // Imported here, so a tree without the rule table fails this case rather than the whole file.
+  const { foldRules } = await import('../src/interventions/fold-rules.js');
   const folded = interventions.interventionLedgerKinds.filter(kind => kind !== 'intervention.recorded' && kind !== 'judgement.recorded');
   assert.deepEqual(Object.keys(foldRules).sort(), [...folded].sort(), 'one rule per ledger kind the fold reads');
   assert.ok(Object.values(foldRules).every(rule => typeof rule === 'function'));
