@@ -341,9 +341,11 @@ export async function captureSudoForms(page: BrowserPage, directory: string, opt
   };
   try { await keep('landing'); } catch (error) { failed('landing', error); }
   const offered = offeredSudoMethods(text);
+  // A view link the capture follows counts as offering that view, whatever the page's prose says.
+  const linked = (view: 'authenticator' | 'email') => sudoViewLinks[view].some(label => text.toLowerCase().includes(label.toLowerCase()));
   let moved = false;
   for (const view of ['authenticator', 'email'] as const) {
-    if (!offered[view]) continue;
+    if (!offered[view] && !linked(view)) continue;
     if (now().getTime() - started >= budgetMs) { failed(view, `capture budget of ${Math.round(budgetMs / 1000)}s spent`); break; }
     try {
       if (moved) { page.open(landing); moved = false; }
@@ -356,8 +358,25 @@ export async function captureSudoForms(page: BrowserPage, directory: string, opt
       await keep(view);
     } catch (error) { failed(view, error); }
   }
-  if (moved) { try { page.open(landing); } catch (error) { failed('landing', error); } }
+  if (moved) restoreSudoLanding(page, landing, text, failed);
   return captured;
+}
+/**
+ * Reopen a Confirm-access page's landing view after a capture moved off it, retrying once, until it
+ * shows the same address and the same offered methods as before; each failed try is noted as a
+ * `restore` step. True when the landing view shows again.
+ */
+export function restoreSudoLanding(page: BrowserPage, landing: string, text: string, failed: (view: string, error: unknown) => void, tries = 2) {
+  const methods = JSON.stringify(offeredSudoMethods(text));
+  const shown = () => { try { return page.url() === landing && JSON.stringify(offeredSudoMethods(page.text())) === methods; } catch { return false; } };
+  for (let attempt = 1; attempt <= tries; attempt += 1) {
+    try {
+      page.open(landing);
+      if (shown()) return true;
+      throw new Error('the reopened page does not show the landing view');
+    } catch (error) { failed('restore', error); }
+  }
+  return false;
 }
 
 // ---- Sudo codes ------------------------------------------------------------------------------
@@ -432,8 +451,15 @@ export async function passSudo(page: BrowserPage, options: SudoOptions) {
   const now = options.now ?? (() => new Date()), sleep = options.sleep ?? (ms => new Promise<void>(accept => setTimeout(accept, ms)));
   // GY-1461: a Confirm-access page keeps its forms' markup before any wait starts, so the capture
   // never eats into the deadline; a failed capture is recorded and the pass proceeds unchanged.
-  if (options.capture && detectSudo(page.url(), page.text()).sudo) {
-    try { await options.capture(page); } catch (error) { page.note?.('sudo-form-capture', ['all', `failed: ${error instanceof Error ? error.message : String(error)}`]); }
+  const landing = options.capture ? page.url() : '', landingText = options.capture ? page.text() : '';
+  if (options.capture && detectSudo(landing, landingText).sudo) {
+    const failed = (view: string, error: unknown) => page.note?.('sudo-form-capture', [view, `failed: ${error instanceof Error ? error.message : String(error)}`]);
+    try { await options.capture(page); } catch (error) { failed('all', error); }
+    // Whatever the capture left open, the pass starts from the view the page landed on, with the
+    // methods it offered there: one more reopen when the capture could not restore it.
+    let current: string, shown: string;
+    try { current = page.url(); shown = page.text(); } catch { current = ''; shown = ''; }
+    if (current !== landing || JSON.stringify(offeredSudoMethods(shown)) !== JSON.stringify(offeredSudoMethods(landingText))) restoreSudoLanding(page, landing, landingText, failed, 1);
   }
   const timeoutMs = options.timeoutMs ?? 180_000, pollMs = options.pollMs ?? 3_000, maxAttempts = options.maxAttempts ?? 3;
   const started = now().getTime(), deadline = new Date(started + timeoutMs).toISOString();
@@ -441,6 +467,7 @@ export async function passSudo(page: BrowserPage, options: SudoOptions) {
   let attempt = 0; let state = null as SudoState | null;
   // The methods the page offered, kept from its first render: the code view hides them.
   const offered = new Set<SudoMethod>();
+  if (landingText) { const methods = offeredSudoMethods(landingText); for (const method of sudoMethods) if (methods[method]) offered.add(method); }
   const listed = () => sudoMethods.filter(method => offered.has(method));
   let lastReload = started;
   const waiting = (fields: Pick<SudoState, 'code' | 'method'> & Partial<SudoState>): SudoState => ({ flow: options.flow, record: options.record, issuedAt: now().toISOString(), attempt: Math.max(attempt, 1), deadline, state: 'waiting', ...fields });

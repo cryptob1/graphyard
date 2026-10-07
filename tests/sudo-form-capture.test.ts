@@ -64,12 +64,19 @@ class ConfirmAccessPage {
   markup: Partial<Record<'landing' | 'authenticator' | 'email', string | null>> = { ...MARKUP };
   links: Record<string, Located | null> = { 'Use your authenticator app': located('#totp', 'Use your authenticator app'), 'Use email': located('#email-view', 'Use email') };
   failClick = new Set<string>();
+  // Opens made while the page shows the email view that fail with a page error, leaving it there.
+  failOpensFromEmail = 0;
+  landingText = LANDING_TEXT;
   page(): BrowserPage {
     const self = this;
     return {
-      open(url) { self.opened.push(url); assert.equal(url, UPDATE, 'only the flow\'s own page is opened'); self.view = self.granted ? 'update' : 'landing'; },
+      open(url) {
+        self.opened.push(url); assert.equal(url, UPDATE, 'only the flow\'s own page is opened');
+        if (self.view === 'email' && self.failOpensFromEmail > 0) { self.failOpensFromEmail -= 1; throw new Error('agent-browser open failed: net::ERR_CONNECTION_RESET'); }
+        self.view = self.granted ? 'update' : 'landing';
+      },
       url: () => UPDATE,
-      text: () => self.view === 'update' ? 'Review permission request\nAccept new permissions' : self.view === 'landing' ? LANDING_TEXT : self.view === 'authenticator' ? 'Confirm access\nAuthentication code\nVerify' : 'Confirm access\nEmail code\nVerify',
+      text: () => self.view === 'update' ? 'Review permission request\nAccept new permissions' : self.view === 'landing' ? self.landingText : self.view === 'authenticator' ? 'Confirm access\nAuthentication code\nVerify' : 'Confirm access\nEmail code\nVerify',
       meta: name => name === 'user-login' ? 'operator' : null,
       locate(kind, text) {
         if (self.view === 'update') return kind === 'button' && text === 'Accept new permissions' ? located('#accept', text, { tag: 'button' }) : null;
@@ -198,6 +205,29 @@ test('unit:sudo-form-capture-nonfatal — a missing form, an absent link, a page
       assert.deepEqual(notes.at(-1), ['email', 'failed: capture budget of 30s spent']);
       assert.equal(slow.view, 'landing', 'the landing view is reopened after the capture');
     } finally { await rm(directory, { recursive: true, force: true }); }
+
+    // The reopen of the landing view fails after a code view was opened: the capture retries it,
+    // and when both of its tries fail the pass reopens it once more, so the flow still issues
+    // GitHub Mobile from the landing view and completes.
+    for (const failures of [1, 2]) {
+      const stranded = new ConfirmAccessPage();
+      stranded.failOpensFromEmail = failures;
+      const restored = await run(stranded, root, config);
+      assert.equal(restored.result.outcome, 'applied'); assert.equal(stranded.accepted, true);
+      assert.deepEqual(restored.result.sudo, { attempts: 1, code: null }, `with ${failures} failed reopen(s) the flow passed sudo through GitHub Mobile`);
+      assert.deepEqual(restored.record.sudoForms.map((form: { view: string }) => form.view), ['landing', 'authenticator', 'email']);
+      assert.deepEqual(captureSteps(restored.steps).filter(([view]) => view === 'restore'), Array.from({ length: failures }, () => ['restore', 'failed: agent-browser open failed: net::ERR_CONNECTION_RESET']));
+    }
+
+    // A page that offers its email view only through a "Use email" link has that view captured too.
+    const linkOnly = new ConfirmAccessPage();
+    linkOnly.landingText = LANDING_TEXT.replace('\nSend a code via email', '\nUse email');
+    const linkDirectory = await temporaryDirectory('sudo-form-link');
+    try {
+      const kept = await captureSudoForms(linkOnly.page(), linkDirectory);
+      assert.deepEqual(kept.map(form => form.view), ['landing', 'authenticator', 'email']);
+      assert.equal(linkOnly.view, 'landing');
+    } finally { await rm(linkDirectory, { recursive: true, force: true }); }
 
     // A capture that throws outright is recorded and the wait proceeds unchanged.
     const throwing = new ConfirmAccessPage();
