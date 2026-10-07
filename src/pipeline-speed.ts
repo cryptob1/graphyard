@@ -386,3 +386,27 @@ export function pipelineSpeedSummary(work: Work[], now: number, options: { since
       executionMs: speed.executionMs, waitMs: speed.waitMs, reworkRounds: speed.reworkRounds, interventions: speed.interventions, routine: speed.routine })) };
 }
 const minutes = (ms: number) => `${Math.round(ms / 6000) / 10} min`;
+
+/** One item's stored timeline as `GET /api/pipeline-timelines` answers it (an unfinished backfill's `resume` left out). */
+export interface StoredTimeline { id: string; pipeline: PipelineTimeline }
+/**
+ * Give a coordination snapshot its timelines back. The coordination view `master status` reads
+ * drops every document's `pipeline` (store/coordination-sql.ts), so without this every delivery
+ * reads as unmeasured; the timelines come from their own small read and are attached by id, a
+ * document that already carries one keeping it. Returns how many items gained one.
+ */
+export function attachTimelines(work: Work[], timelines: readonly StoredTimeline[]) {
+  const byId = new Map(timelines.map(entry => [entry.id, entry.pipeline]));
+  let attached = 0;
+  for (const item of work) {
+    const pipeline = byId.get(item.id);
+    if (pipeline && typeof pipeline === 'object' && !item.pipeline) { item.pipeline = pipeline; attached++; }
+  }
+  return attached;
+}
+/** Read the timelines through the plane and attach them; a failed read leaves the snapshot as it was and is the caller's to report. */
+export async function withPipelineTimelines(work: Work[], read: (path: string) => Promise<any>) {
+  const answer = await read('pipeline-timelines');
+  const timelines: StoredTimeline[] = Array.isArray(answer?.timelines) ? answer.timelines : [];
+  return { read: timelines.length, attached: attachTimelines(work, timelines) };
+}
