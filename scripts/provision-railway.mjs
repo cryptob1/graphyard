@@ -4,6 +4,11 @@
 // currently runs with before setting the corrected values. It also carries the main guard's
 // revert approver App (GY-1353) and refuses to provision an armed guard without one; after the
 // redeploy, `--verify` confirms the live deployment reports that approver.
+//
+// A full run writes GRAPHYARD_PRINCIPALS from credentials.json, so on a deployment whose principal
+// set has since grown (installers and `graphyard principals` add to the deployment, not to this
+// file) it refuses rather than drop them (GY-1365). `--revert-approver-only` sets the three
+// approver variables and nothing else, which is the step a running control plane needs.
 import { randomBytes } from 'node:crypto';
 import { mkdir, writeFile, readFile } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
@@ -49,6 +54,24 @@ export function verifyRevertApprover(live, appId) {
   return { ok: true, line: `The deployment's main guard reports revert approver App ${guard.revertApprover}; graphyard doctor lists revert-approver ready` };
 }
 
+/**
+ * The principals the deployment runs with that `principals` (credentials.json) lacks: a full run
+ * would replace GRAPHYARD_PRINCIPALS with the file and drop them, so it refuses naming their ids
+ * (never a token). Null when nothing would be dropped: an empty service or an unparsable value
+ * holds no principal that runs. When Railway's variable list itself could not be read (null) the
+ * comparison cannot be made, so the full run refuses rather than overwrite the set blind.
+ */
+export function principalNarrowing(principals, deployed) {
+  if (deployed === null || deployed === undefined) return `Railway did not answer \`variable list\` for the service, so the deployment's GRAPHYARD_PRINCIPALS cannot be compared with .graphyard/credentials.json; a full run would overwrite it blind and nothing was set. Check \`railway status\` and the login, then rerun.`;
+  let running;
+  try { running = JSON.parse(deployed?.GRAPHYARD_PRINCIPALS ?? '[]'); } catch { return null; }
+  if (!Array.isArray(running)) return null;
+  const kept = new Set(principals.map(principal => principal.id));
+  const dropped = running.map(principal => principal?.id).filter(id => typeof id === 'string' && !kept.has(id));
+  if (!dropped.length) return null;
+  return `The deployment's GRAPHYARD_PRINCIPALS holds ${dropped.length} principal${dropped.length === 1 ? '' : 's'} that .graphyard/credentials.json does not (${dropped.join(', ')}); a full run would drop them and nothing was set. Add them to credentials.json first, or set only the main guard's revert approver with --revert-approver-only.`;
+}
+
 // The service's variables, read without printing them; null when Railway cannot answer. An empty
 // answer is a service with no variables set yet.
 function railwayVariables(railway) {
@@ -78,29 +101,30 @@ async function readStdin() {
 
 async function main(args) {
   register();
-  const { delegationLimitAssignments, readDeployedDelegationLimits } = await import('../src/install/limits.ts');
-  const { generatedFilesAssignment } = await import('../src/install/generated-files.ts');
   const root = fileURLToPath(new URL('../', import.meta.url));
   const directory = new URL('../.graphyard/', import.meta.url);
+  const approverOnly = args.includes('--revert-approver-only');
   await mkdir(directory, { recursive: true, mode: 0o700 });
   const file = new URL('credentials.json', directory);
-  let principals;
+  let principals = null;
   try { principals = JSON.parse(await readFile(file, 'utf8')); }
   catch (error) {
     if (error.code !== 'ENOENT') throw error;
-    principals = [
-      { id: 'operator', role: 'admin', token: randomBytes(32).toString('hex') },
-      { id: 'herdr-worker-1', role: 'worker', token: randomBytes(32).toString('hex') },
-      { id: 'dashboard', role: 'reader', token: randomBytes(32).toString('hex') },
-    ];
-    await writeFile(file, JSON.stringify(principals, null, 2), { mode: 0o600, flag: 'wx' });
+    // The approver-only run provisions no principal, so it generates none either.
+    if (!approverOnly) {
+      principals = [
+        { id: 'operator', role: 'admin', token: randomBytes(32).toString('hex') },
+        { id: 'herdr-worker-1', role: 'worker', token: randomBytes(32).toString('hex') },
+        { id: 'dashboard', role: 'reader', token: randomBytes(32).toString('hex') },
+      ];
+      await writeFile(file, JSON.stringify(principals, null, 2), { mode: 0o600, flag: 'wx' });
+    }
   }
   const railway = ['--yes', '--cache', '/tmp/graphyard-npm-cache', '@railway/cli'];
   // What the deployment runs with now, read from the live server when the operator credential
   // can reach it (GRAPHYARD_URL); the drift report is the difference from the principal set.
-  let deployed = null;
   const url = process.env.GRAPHYARD_URL?.replace(/\/$/, '');
-  const operator = principals.find(principal => principal.role === 'admin');
+  const operator = principals?.find(principal => principal.role === 'admin');
   const live = url && operator ? await liveStatus(url, operator.token) : null;
   // The revert approver record, from the operator's 0600 file or stdin; never printed.
   let record = null;
@@ -116,8 +140,19 @@ async function main(args) {
     process.exitCode = verdict.ok ? 0 : 1;
     return;
   }
-  const approver = await revertApproverAssignment(record, live, undefined, live?.mainGuard ? null : railwayVariables(railway));
+  const variables = railwayVariables(railway);
+  const approver = await revertApproverAssignment(record, live, undefined, live?.mainGuard ? null : variables);
   if (approver.error) { console.error(approver.error); process.exitCode = 1; return; }
+  if (approverOnly) {
+    if (approver.variables) setRevertApproverVariables(railway, approver);
+    console.log(approver.variables ? `Revert approver App ${approver.appId} set on the service and nothing else touched; no credentials printed. Redeploy the service, then run with --verify.` : `Revert approver: ${approver.note}. Nothing was set.`);
+    return;
+  }
+  const narrowing = principalNarrowing(principals, variables);
+  if (narrowing) { console.error(narrowing); process.exitCode = 1; return; }
+  const { delegationLimitAssignments, readDeployedDelegationLimits } = await import('../src/install/limits.ts');
+  const { generatedFilesAssignment } = await import('../src/install/generated-files.ts');
+  let deployed = null;
   if (url && operator) {
     const read = await readDeployedDelegationLimits(url, operator.token);
     if (read.error) console.error(read.error);
@@ -130,11 +165,16 @@ async function main(args) {
   const generated = generatedFilesAssignment(root);
   for (const entry of limits.drift) console.error(`Drift: ${entry.reason}`);
   execFileSync('npx', [...railway, 'variable', 'set', '--service', 'graphyard', '--skip-deploys', '--stdin', 'GRAPHYARD_PRINCIPALS'], { input: JSON.stringify(principals), stdio: ['pipe', 'ignore', 'inherit'] });
-  if (approver.variables) execFileSync('npx', [...railway, 'variable', 'set', '--service', 'graphyard', '--skip-deploys', '--stdin', 'GRAPHYARD_REVERT_APPROVER_PRIVATE_KEY'], { input: approver.variables.GRAPHYARD_REVERT_APPROVER_PRIVATE_KEY, stdio: ['pipe', 'ignore', 'inherit'] });
-  const approverLines = approver.variables ? revertApproverVariables.slice(0, 2).map(name => `${name}=${approver.variables[name]}`) : [];
-  execFileSync('npx', [...railway, 'variable', 'set', '--service', 'graphyard', '--skip-deploys', 'DATABASE_URL=${{Postgres.DATABASE_URL}}', 'HOST=0.0.0.0', 'PORT=4310', 'GITHUB_REPOSITORY=cryptob1/graphyard', ...limits.lines, ...(generated ? [generated.line] : []), ...approverLines], { stdio: ['ignore', 'ignore', 'inherit'] });
+  if (approver.variables) setRevertApproverVariables(railway, approver);
+  execFileSync('npx', [...railway, 'variable', 'set', '--service', 'graphyard', '--skip-deploys', 'DATABASE_URL=${{Postgres.DATABASE_URL}}', 'HOST=0.0.0.0', 'PORT=4310', 'GITHUB_REPOSITORY=cryptob1/graphyard', ...limits.lines, ...(generated ? [generated.line] : [])], { stdio: ['ignore', 'ignore', 'inherit'] });
   const approverNote = approver.variables ? ` Revert approver App ${approver.appId} set; after the redeploy run with --verify.` : ` Revert approver: ${approver.note}.`;
   console.log(`Railway configured with ${[...limits.lines, ...(generated ? [generated.line] : [])].join(' ')}${limits.drift.length ? ` (corrected ${limits.drift.map(entry => entry.variable).join(', ')})` : ''}. Credentials saved to .graphyard/credentials.json (mode 0600); no credentials printed.${approverNote} Redeploy the service for the variables to take effect.`);
+}
+
+/** Sets exactly the three revert approver variables on the service: the key over stdin, the two ids as arguments. */
+export function setRevertApproverVariables(railway, approver, exec = execFileSync) {
+  exec('npx', [...railway, 'variable', 'set', '--service', 'graphyard', '--skip-deploys', '--stdin', 'GRAPHYARD_REVERT_APPROVER_PRIVATE_KEY'], { input: approver.variables.GRAPHYARD_REVERT_APPROVER_PRIVATE_KEY, stdio: ['pipe', 'ignore', 'inherit'] });
+  exec('npx', [...railway, 'variable', 'set', '--service', 'graphyard', '--skip-deploys', ...revertApproverVariables.slice(0, 2).map(name => `${name}=${approver.variables[name]}`)], { stdio: ['ignore', 'ignore', 'inherit'] });
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main(process.argv.slice(2)).catch(error => { console.error(error.message); process.exitCode = 1; });

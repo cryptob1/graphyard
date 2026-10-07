@@ -13,7 +13,7 @@ import { capacityForPrincipals } from '../src/cli/install.js';
 import { controlPlaneAttention } from '../src/master.js';
 import { revertApproverVariables } from '../src/main-guard.js';
 // @ts-expect-error Dependency-free provisioning script.
-import { revertApproverAssignment, revertApproverVariables as provisionedApproverVariables, verifyRevertApprover } from '../scripts/provision-railway.mjs';
+import { principalNarrowing, revertApproverAssignment, revertApproverVariables as provisionedApproverVariables, setRevertApproverVariables, verifyRevertApprover } from '../scripts/provision-railway.mjs';
 import type { Principal } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -183,6 +183,35 @@ test('unit:provision-names-missing-revert-approver — with the guard armed and 
   const adapter = await readFile(new URL('../scripts/provision-railway.mjs', import.meta.url), 'utf8');
   assert.ok(adapter.indexOf('if (approver.error)') < adapter.indexOf("'variable', 'set'"), 'the failure precedes every railway variable set');
   assert.match(adapter, /'variable', 'list', '--service', 'graphyard', '--json'\], \{ encoding: 'utf8', stdio: \['ignore', 'pipe', 'ignore'\] \}/, 'the deployed variables are read, never printed');
+});
+
+// GY-1365: the running control plane's principal set outgrows credentials.json, so the approver
+// step must set its three variables alone, and a full run must refuse to drop deployed principals.
+test('unit:provision-revert-approver-only — the approver-only run sets exactly the three variables with the key over stdin, and a full run refuses to narrow the deployed principal set or to overwrite it while Railway\'s variable list is unreadable', async () => {
+  const calls: { args: string[]; input: string | undefined }[] = [];
+  const approver = await revertApproverAssignment({ appId: 200, installationId: 300, privateKey: pem }, armedLive(null));
+  setRevertApproverVariables(['@railway/cli'], approver, ((_: string, args: string[], options: { input?: string }) => { calls.push({ args, input: options.input }); }) as never);
+  assert.deepEqual(calls.map(call => call.args.slice(1)), [
+    ['variable', 'set', '--service', 'graphyard', '--skip-deploys', '--stdin', 'GRAPHYARD_REVERT_APPROVER_PRIVATE_KEY'],
+    ['variable', 'set', '--service', 'graphyard', '--skip-deploys', 'GRAPHYARD_REVERT_APPROVER_APP_ID=200', 'GRAPHYARD_REVERT_APPROVER_INSTALLATION_ID=300'],
+  ]);
+  assert.deepEqual(calls.map(call => call.input), [pem, undefined], 'the key travels over stdin only');
+  const local = [{ id: 'operator', role: 'admin' }, { id: 'herdr-worker-1', role: 'worker' }];
+  const deployed = JSON.stringify([...local, { id: 'graphyard-master', role: 'coordinator', token: 'secret-token' }, { id: 'graphyard-claude-1', role: 'worker', token: 'secret-token' }]);
+  const refusal = principalNarrowing(local, { GRAPHYARD_PRINCIPALS: deployed })!;
+  assert.match(refusal, /holds 2 principals that \.graphyard\/credentials\.json does not \(graphyard-master, graphyard-claude-1\); a full run would drop them and nothing was set/);
+  assert.match(refusal, /--revert-approver-only/); assert.doesNotMatch(refusal, /secret-token/);
+  assert.equal(principalNarrowing(local, { GRAPHYARD_PRINCIPALS: JSON.stringify(local) }), null);
+  assert.equal(principalNarrowing(local, {}), null, 'a service with no variables yet drops nothing'); assert.equal(principalNarrowing(local, { GRAPHYARD_PRINCIPALS: 'not json' }), null, 'an unparsable value holds no principal that runs');
+  assert.match(principalNarrowing(local, null)!, /did not answer `variable list`.*cannot be compared.*nothing was set/, 'an unreadable list refuses instead of overwriting the set blind');
+  // The script: the approver-only run writes no credentials file and sets nothing but the approver; the full run refuses before its first variable set.
+  const adapter = await readFile(new URL('../scripts/provision-railway.mjs', import.meta.url), 'utf8');
+  assert.match(adapter, /const approverOnly = args\.includes\('--revert-approver-only'\)/);
+  assert.match(adapter, /if \(!approverOnly\) \{\s*principals = \[/);
+  const only = adapter.indexOf('if (approverOnly) {'), narrowing = adapter.indexOf('const narrowing = principalNarrowing(principals, variables)');
+  assert.ok(only > 0 && only < narrowing && narrowing < adapter.indexOf("'--stdin', 'GRAPHYARD_PRINCIPALS'"), 'approver-only returns, then the narrowing refusal, before GRAPHYARD_PRINCIPALS is set');
+  assert.match(adapter.slice(only, narrowing), /setRevertApproverVariables\(railway, approver\)/);
+  assert.doesNotMatch(adapter.slice(only, narrowing), /GRAPHYARD_PRINCIPALS|limits|generated/);
 });
 
 test('manual:deploy-limit-docs — the deployment, install, operations and master guides document the variables, derivation, drift and observation', async () => {
