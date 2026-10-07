@@ -15,7 +15,7 @@ import { systemInvariants } from '../src/model/invariants.js';
 import { tmpReclaimLimitPerCycle } from '../src/tmp-reclaim.js';
 import { lostRunReason, requestAttemptLimit } from '../src/producer.js';
 import { loopWatchdogSeconds } from '../src/supervisor.js';
-import { throughputStatus } from '../src/throughput.js';
+import { throughputRemeasureMs, throughputStatus } from '../src/throughput.js';
 import { blockedMergeMs, brokenBaseTest, clock, hour, minute, protectionOnlyCheck, statusContext } from './helpers/soak-world.js';
 import { laneApprover } from '../src/server/decisions.js';
 import { doctorRunEvent } from '../src/server/routes/status.js';
@@ -191,21 +191,27 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   assert.equal(reportedDispatches, sessions.length, 'each settled dispatch launch was reported to a cycle');
   assert.equal(production.deploys.length, basePlan.deploys.length, 'two production deploys');
   // GY-1385: after each verified deployment the loop itself recorded GY-87's throughput measurement
-  // for the release the plane served, exactly once per release, under one action per observed
-  // release. The plane's status named each deploy only three minutes after the loop first asked: it waited on the
-  // backoff — a handful of asks, one status read each, never one per cycle — recorded once the
-  // release served, and never asked for that release again. Each measurement read whole only the
-  // deliveries in its window, which grows with the day, never the ledger; master status reads the
-  // newest back for the release serving.
+  // for the release the plane served, under one action per observed release. The plane's status
+  // named each deploy only three minutes after the loop first asked: it waited on the backoff — a
+  // handful of asks, one status read each, never one per cycle — and recorded once the release
+  // served. GY-1438: a release left unverified is measured again as deliveries merge, each re-measure
+  // at least throughputRemeasureMs after the one before, never once per cycle. Each measurement read
+  // whole only the deliveries in its window, which grows with the day, never the ledger; master status
+  // reads the newest back for the release serving.
   const { throughput } = day;
   const recorded = throughput.asks.filter(ask => ask.outcome === 'recorded');
-  assert.deepEqual(recorded.map(ask => ask.revision), production.deploys.map(deploy => deploy.sha), `one measurement per deploy, for the release the plane served: ${JSON.stringify(throughput.asks)}`);
+  assert.deepEqual([...new Set(recorded.map(ask => ask.revision))], production.deploys.map(deploy => deploy.sha), `measurements of each deploy in turn, for the release the plane served: ${JSON.stringify(throughput.asks)}`);
   assert.deepEqual([...actionKeys].filter(key => key.startsWith('throughput:')).length, production.deploys.length + 1, 'one action per observed release: the day\'s first and each deploy');
   for (const deploy of production.deploys) {
     const asks = throughput.asks.filter(ask => ask.sha === deploy.sha), waits = asks.filter(ask => ask.outcome === 'waiting');
     assert.ok(waits.length >= 1 && waits.length <= 3, `the plane's lag was waited out on the backoff, not once per cycle: ${waits.length} waits for ${deploy.sha.slice(0, 12)} deployed at +${Math.round((deploy.at - dayStart) / minute)} min; asks: ${JSON.stringify(throughput.asks.map(ask => ({ ...ask, sha: ask.sha.slice(0, 8), revision: ask.revision?.slice(0, 8), elapsed: Math.round(ask.elapsed / minute) })))}`);
     assert.ok(waits.every(ask => ask.elapsed < throughput.firstAsk.get(deploy.sha)! - dayStart + throughput.statusLagMs), 'every wait fell inside the lag');
-    assert.deepEqual(asks.map(ask => ask.outcome).slice(waits.length), ['recorded'], `recorded once the release served, then never asked again: ${asks.map(ask => ask.outcome).join(', ')}`);
+    const served = asks.slice(waits.length);
+    assert.equal(served[0]?.outcome, 'recorded', `recorded once the release served: ${asks.map(ask => ask.outcome).join(', ')}`);
+    assert.ok(served.every(ask => ask.outcome === 'recorded' || ask.outcome === 'current'), `after it served, only re-measures: ${asks.map(ask => ask.outcome).join(', ')}`);
+    const measured = served.filter(ask => ask.outcome === 'recorded');
+    for (let index = 1; index < measured.length; index++) assert.ok(measured[index].elapsed - measured[index - 1].elapsed >= throughputRemeasureMs,
+      `re-measures of ${deploy.sha.slice(0, 12)} at least ${throughputRemeasureMs / minute} min apart: ${measured.map(ask => Math.round(ask.elapsed / minute)).join(', ')} min`);
   }
   assert.ok(throughput.statusReads <= throughput.asks.length, 'at most one status read per ask');
   assert.ok(recorded.every(ask => ask.read >= 1 && ask.read <= github.merges.filter(entry => entry.at <= dayStart + ask.elapsed).length), 'each measurement read whole at most the deliveries merged so far');

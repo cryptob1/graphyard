@@ -817,7 +817,8 @@ test('integration:throughput-remeasure-unverified — while the serving release\
     assert.equal(asked.length, 1);
     // A delivery merged after the answer: asked once, and the fresh answer restarts the spacing.
     state.actions[key].at = answered;
-    delivered = [...delivered, { ...delivered[0], id: 'merged-since', key: 'GY-9999', delivery: { ...delivered[0].delivery!, mergedAt: new Date(Date.now() - minute).toISOString() } }];
+    const since = new Date(Date.now() - minute).toISOString();
+    delivered = [...delivered, { ...delivered[0], id: 'merged-since', key: 'GY-9999', delivery: { ...delivered[0].delivery!, mergedAt: since, mergedAtRepository: since } }];
     await runCycle(master, state, effects, () => Date.now());
     await runCycle(master, state, effects, () => Date.now());
     assert.equal(asked.length, 2, 'asked once for the deliveries merged since, not on every cycle');
@@ -830,10 +831,22 @@ test('integration:throughput-remeasure-unverified — while the serving release\
     await runCycle(master, state, effects, () => Date.now());
     assert.equal(asked.length, 3, 'a verified answer is final');
   } finally { await rm(directory, { recursive: true, force: true }); }
+
+  // The answer is written when the step ends, after the measurement read its window: a delivery that
+  // merged inside that slack (the step's budget) is compared too, so it is never missed; one merged
+  // before the slack is not new. Merges are read at the repository's merge instant.
+  const { throughputRemeasureAsk } = await import('../src/daemon/cycle-delivery.js');
+  const template = (await store.list()).find(item => item.stage === 'done')!, slack = 60_000, answeredAt = Date.now() - throughputRemeasureMs - minute;
+  const answer = { kind: 'deployment' as const, work: null, principal: null, state: 'done' as const, detail: 'Recorded: unverified: short', attempts: 1, epoch: null, cycle: 1, at: new Date(answeredAt).toISOString() };
+  const mergedAtRepository = (offset: number) => [{ ...template, delivery: { ...template.delivery!, mergedAt: new Date(answeredAt + 10 * minute).toISOString(), mergedAtRepository: new Date(answeredAt + offset).toISOString() } }];
+  assert.equal(throughputRemeasureAsk(answer, mergedAtRepository(-slack / 2), Date.now(), slack), true, 'merged inside the slack: asked');
+  assert.equal(throughputRemeasureAsk(answer, mergedAtRepository(-2 * slack), Date.now(), slack), false, 'merged before the slack, whatever the mirrored mergedAt says: not new');
+  assert.equal(throughputRemeasureAsk({ ...answer, detail: 'Recorded: verified: holds' }, mergedAtRepository(minute), Date.now(), slack), false, 'a verified answer is final');
+  assert.equal(throughputRemeasureAsk({ ...answer, detail: 'GY-87 is not delivered here, so there is no throughput claim to measure' }, mergedAtRepository(minute), Date.now(), slack), false, 'an answer naming no verdict is not re-asked');
 });
 
 test('integration:throughput-attention-retires — once a recorded measurement of the serving release verifies the claim, the throughput attention retires and master status reports the claim verified against that revision', async () => {
-  const { throughputOwner, throughputRemeasureMs } = await owned();
+  const { throughputOwnerTitle, throughputRemeasureMs } = await owned();
   const root = await temporaryDirectory('throughput-retires');
   try {
     const now = Date.now(), windowStart = new Date(now - 60 * minute).toISOString();
@@ -843,11 +856,17 @@ test('integration:throughput-attention-retires — once a recorded measurement o
     let clock = now + 20 * minute;
     const input = () => loopInput(() => items, claimItem.key, () => clock);
     const serving = { release: { version: '0.9.1', revision: deployedRevision } };
+    // The open item the loop filed to own the verification: master status names it.
+    const owner = { ...claimItem, id: randomUUID(), key: 'GY-7001', title: `${throughputOwnerTitle}: ${deployedRevision.slice(0, 12)}`, stage: 'backlog' as const, delivery: undefined, policyRevision: 1 };
+    const throughputOwner = owner.key, withOwner = () => [...items, owner];
 
     const short = await loopThroughputMeasurement(root, input());
     assert.equal(short.outcome, 'recorded'); assert.equal(short.verdict, 'unverified');
     assert.equal(short.report!.population.admitted, 9);
-    const standing = await throughputStatus(root, serving, items);
+    const unowned = await throughputStatus(root, serving, items);
+    assert.equal(unowned.owner.item, null);
+    assert.match(unowned.attention!.text, /No open item owns the verification yet \(the loop files one after its next unverified measurement\): 9 admitted of 10/);
+    const standing = await throughputStatus(root, serving, withOwner());
     assert.equal(standing.verdict, 'unverified'); assert.ok(standing.attention);
     assert.deepEqual(standing.owner, { item: throughputOwner, admitted: 9, needed: throughputClaim.minimumDeliveries, measuredAt: short.report!.measuredAt });
     assert.match(standing.attention!.text, new RegExp(`${throughputOwner} owns the verification: 9 admitted of 10 in the newest recorded measurement`));
@@ -862,7 +881,7 @@ test('integration:throughput-attention-retires — once a recorded measurement o
     assert.equal(verified.verdict, 'verified', verified.report!.reason);
     assert.equal(verified.stall, null);
 
-    const retired = await throughputStatus(root, serving, items);
+    const retired = await throughputStatus(root, serving, withOwner());
     assert.equal(retired.verdict, 'verified');
     assert.equal(retired.attention, null, 'the attention retires');
     assert.equal(retired.measurement!.deployedRevision, deployedRevision);
@@ -876,8 +895,30 @@ test('integration:throughput-attention-retires — once a recorded measurement o
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+/**
+ * The loop's owner-item effects over a list the test holds: a filed owner joins the snapshot in
+ * the backlog at policy revision 1, and a close marks it closed, as the control plane would.
+ */
+function ownerEffects(work: Work[], template: Work) {
+  const filed: { input: { title: string; criteria: unknown[] }; key: string }[] = [], closed: { key: string; reason: string }[] = [];
+  let next = 7100;
+  return { filed, closed, effects: {
+    fileThroughputOwner: async (input: { title: string; description: string; criteria: Work['criteria'] }, key: string) => {
+      filed.push({ input, key });
+      const owner = { ...template, id: randomUUID(), key: `GY-${next++}`, title: input.title, description: input.description, criteria: input.criteria, stage: 'backlog', ready: false, delivery: undefined, policyRevision: 1, revision: 1 } as Work;
+      work.push(owner); return owner;
+    },
+    closeThroughputOwner: async (owner: Work, reason: string) => {
+      closed.push({ key: owner.key, reason });
+      const held = work.find(item => item.id === owner.id)!;
+      Object.assign(held, { stage: 'done', closure: { kind: 'obsolete', reason, ref: null, by: 'operator-agent', at: new Date().toISOString(), from: held.stage } });
+      return held;
+    },
+  } satisfies Pick<DaemonEffects, 'fileThroughputOwner' | 'closeThroughputOwner'> };
+}
+
 test('integration:throughput-stall-escalates — when every delivery in a window past the bound carries a coordinator fingerprint, the loop raises a typed needs-decision naming the population rule and the counts instead of leaving the attention to age', async () => {
-  const { throughputOwner, throughputRemeasureMs, throughputStall, throughputStallBound } = await owned();
+  const { throughputRemeasureMs, throughputStall, throughputStallBound } = await owned();
   const root = await temporaryDirectory('throughput-stall');
   try {
     const now = Date.now(), windowStart = new Date(now - 60 * minute).toISOString();
@@ -906,7 +947,7 @@ test('integration:throughput-stall-escalates — when every delivery in a window
     assert.equal(stalled.outcome, 'recorded');
     const stall = stalled.stall!;
     assert.equal(stall.kind, 'needs-decision');
-    assert.equal(stall.owner, throughputOwner);
+    assert.equal(stall.owner, null, 'the measurement names no owner; the loop asks it on the one it filed');
     assert.equal(stall.rule, populationRule);
     assert.equal(stall.admitted, 0); assert.equal(stall.delivered, throughputStallBound); assert.equal(stall.bound, throughputStallBound);
     assert.deepEqual(stall.reasons, [
@@ -916,31 +957,120 @@ test('integration:throughput-stall-escalates — when every delivery in a window
     assert.match(stall.text, new RegExp(`0 admitted of ${throughputStallBound} deliveries`));
     assert.match(stall.text, /15 × a blocked report handed it to a master or operator to clear; 5 × a requirements revision/);
     assert.ok(stall.text.includes(populationRule), 'the needs-decision names the population rule');
-
-    // master status carries it as the typed needs-decision, owned by the master and its approver on the owner item.
-    const visible = await throughputStatus(root, { release: { version: '0.9.1', revision: deployedRevision } }, items);
-    assert.deepEqual(visible.stall, stall);
-    assert.match(visible.attention!.text, new RegExp(`needs decision on ${throughputOwner}: session-free deliveries cannot accumulate`));
-    assert.equal(visible.attention!.role, 'master'); assert.equal(visible.attention!.approvedBy, 'approver'); assert.equal(visible.attention!.human, false);
-    assert.match(visible.attention!.next, new RegExp(`graphyard master decide ${throughputOwner} requirements .* graphyard master approver ${throughputOwner} DECISION`));
+    assert.doesNotMatch(stall.finding, /\d{4}-\d{2}-\d{2}T/, 'the finding carries no timestamp, so the same finding re-measured is the same finding');
+    // A release not shown to contain the claim is unverified for that reason, never a population stall.
+    for (const containsClaim of [false, null]) assert.equal(throughputStall({ ...stalled.report!, deployed: { ...stalled.report!.deployed, containsClaim } }), null);
     // A window whose deliveries are excluded for a reason no coordinator left may still accumulate: no stall.
     const report = stalled.report!;
     const plain = { ...report, excluded: report.excluded.map((record, index) => index ? record : { ...record, exclusions: ['its timeline records no submission (none), so submit→merge cannot be measured for it'] }) };
     assert.equal(throughputStall(plain), null);
 
-    // The loop raises it as an escalation once per finding, not every cycle.
+    // The loop files the owner item and raises the needs-decision on it, once.
     const directory = await temporaryDirectory('throughput-stall-cycle');
     try {
       const { master, state } = await throughputCycle(directory);
-      const effects = cycleEffects(() => items, deployedRevision, (work, sha) => loopThroughputMeasurement(root, { ...loopInput(() => items, claimItem.key, () => clock), observedSha: sha }));
+      const owners = ownerEffects(items, claimItem);
+      let measures = 0;
+      const effects = { ...cycleEffects(() => items, deployedRevision, (work, sha) => { measures++; return loopThroughputMeasurement(root, { ...loopInput(() => items, claimItem.key, () => clock), observedSha: sha }); }), ...owners.effects };
       const first = await runCycle(master, state, effects, () => Date.now());
-      const escalation = state.actions[`escalation:throughput:${deployedRevision}`];
-      assert.equal(escalation.kind, 'escalation'); assert.equal(escalation.work, throughputOwner);
-      assert.equal(escalation.detail, stall.text);
+      assert.equal(owners.filed.length, 1, 'one owner filed for the unverified release');
+      const owner = items.at(-1)!;
+      assert.equal(owner.stage, 'backlog'); assert.equal(owner.ready, false, 'filed in the backlog, never released to a worker');
+      const escalationKey = `escalation:throughput:${owner.key}`, escalation = state.actions[escalationKey];
+      assert.equal(escalation.kind, 'escalation'); assert.equal(escalation.work, owner.key);
+      assert.match(escalation.detail, new RegExp(`^needs decision on ${owner.key}: ${stall.finding.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
       assert.ok(first.actions.some(action => action.kind === 'escalation'));
-      const second = await runCycle(master, state, effects, () => Date.now());
-      assert.ok(!second.actions.some(action => action.kind === 'escalation'), 'raised once, not every cycle');
-      assert.equal(state.actions[`escalation:throughput:${deployedRevision}`].attempts, 1);
+
+      // master status carries it as the typed needs-decision on the open owner, for the master and its approver.
+      const visible = await throughputStatus(root, { release: { version: '0.9.1', revision: deployedRevision } }, items);
+      assert.equal(visible.stall!.owner, owner.key); assert.equal(visible.stall!.finding, stall.finding);
+      assert.match(visible.attention!.text, new RegExp(`needs decision on ${owner.key}: session-free deliveries cannot accumulate`));
+      assert.equal(visible.attention!.role, 'master'); assert.equal(visible.attention!.approvedBy, 'approver'); assert.equal(visible.attention!.human, false);
+      assert.match(visible.attention!.next, new RegExp(`graphyard master decide ${owner.key} requirements .* graphyard master approver ${owner.key} DECISION; the loop closes ${owner.key} once it is applied`));
+
+      // While it stands unanswered, deliveries keep merging (each fingerprinted: a changed finding) past
+      // the spacing: the loop neither re-measures nor raises it again, and the owner stays open.
+      const answeredAt = () => { state.actions[`throughput:${deployedRevision}`].at = new Date(Date.now() - throughputRemeasureMs - minute).toISOString(); };
+      for (let round = 0; round < 3; round++) {
+        items.push(await mergedAt(await fingerprinted(100 + round), new Date(Date.now() - minute).toISOString()));
+        clock += throughputRemeasureMs + minute; answeredAt();
+        const cycle = await runCycle(master, state, effects, () => Date.now());
+        assert.ok(!cycle.actions.some(action => action.kind === 'escalation'), 'raised once, not every cycle or every re-measure');
+      }
+      assert.equal(measures, 1, 'no re-measure while the needs-decision stands unanswered');
+      assert.equal(state.actions[escalationKey].attempts, 1);
+      assert.equal(owners.closed.length, 0, 'the owner never closes before the claim verifies or its decision is answered');
+
+      // The decision is answered — an approved requirements revision applied to the owner — and the loop closes it, filing no second owner for this release.
+      owner.policyRevision = 2;
+      await runCycle(master, state, effects, () => Date.now());
+      assert.deepEqual(owners.closed.map(entry => entry.key), [owner.key]);
+      assert.match(owners.closed[0].reason, new RegExp(`${owner.key}'s needs-decision was answered by its requirements revision 2`));
+      await runCycle(master, state, effects, () => Date.now());
+      assert.equal(owners.filed.length, 1, 'a release whose owner closed on an answered decision is not given a second');
     } finally { await rm(directory, { recursive: true, force: true }); }
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('integration:throughput-owner-item — the loop files one open owner item for an unverified serving release, names it with its progress, and closes it only once a recorded measurement of the serving release verifies the claim or its needs-decision is answered', async () => {
+  const { openThroughputOwner, throughputOwnerClosure, throughputOwnerItem, throughputOwnerTitle } = await owned();
+  // The filed item: in the backlog's title family, one criterion, nothing for a worker to build.
+  const filedInput = throughputOwnerItem(deployedRevision, 3);
+  assert.ok(filedInput.title.startsWith(throughputOwnerTitle)); assert.match(filedInput.description, /never released to a worker/);
+  assert.match(filedInput.description, /3 of the 10 session-free deliveries/);
+  // The pure rule: open while unverified and unanswered, whatever the answer's state; closed on either condition.
+  const owner = { key: 'GY-7200', policyRevision: 1 };
+  for (const verdict of ['unverified', null] as const) assert.equal(throughputOwnerClosure(owner, { revision: deployedRevision, verdict }), null, `${verdict}: stays open`);
+  assert.match(throughputOwnerClosure(owner, { revision: deployedRevision, verdict: 'verified' })!, new RegExp(`verified on the serving release ${deployedRevision}`));
+  assert.match(throughputOwnerClosure({ ...owner, policyRevision: 2 }, { revision: deployedRevision, verdict: 'unverified' })!, /needs-decision was answered/);
+  // A closed or delivered owner owns nothing.
+  const template = (await store.list()).find(item => item.stage === 'done')!;
+  const open = { ...template, key: 'GY-7201', title: `${throughputOwnerTitle}: x`, stage: 'backlog' as const };
+  assert.equal(openThroughputOwner([template, open])?.key, 'GY-7201');
+  assert.equal(openThroughputOwner([{ ...open, stage: 'done', closure: { kind: 'obsolete' } }]), null);
+
+  // The loop: one filing per unverified release, retried on the backoff after a failure; open through
+  // unverified re-measures; closed once the answer verifies. Without the operator-agent it files nothing.
+  const directory = await temporaryDirectory('throughput-owner-cycle');
+  try {
+    const { master, state } = await throughputCycle(directory);
+    const sha = commit('owner-served'), key = `throughput:${sha}`;
+    const work: Work[] = [template];
+    const owners = ownerEffects(work, template);
+    let verdict: 'verified' | 'unverified' = 'unverified', fail = true;
+    const measure: DaemonEffects['measureThroughput'] = async () => ({ outcome: 'recorded', revision: sha, verdict, detail: `Recorded for ${sha.slice(0, 12)}: ${verdict}: the claim` });
+    const unprovisioned = { ...cycleEffects(() => work, sha, measure), fileThroughputOwner: async () => null };
+    await runCycle(master, state, unprovisioned, () => Date.now());
+    assert.equal(openThroughputOwner(work), null, 'no operator-agent: nothing filed');
+    assert.equal(state.actions[`throughput:owner:${sha}`], undefined, 'and nothing recorded as a fault');
+    const effects = { ...cycleEffects(() => work, sha, measure), ...owners.effects,
+      fileThroughputOwner: async (input: Parameters<typeof owners.effects.fileThroughputOwner>[0], idempotency: string) => {
+        if (fail) { fail = false; throw new Error('control plane unavailable'); }
+        return owners.effects.fileThroughputOwner(input, idempotency);
+      } };
+    await runCycle(master, state, effects, () => Date.now());
+    assert.equal(state.actions[`throughput:owner:${sha}`].state, 'failed');
+    for (let cycle = 0; cycle < 8 && !openThroughputOwner(work); cycle++) await runCycle(master, state, effects, () => Date.now());
+    const owner = openThroughputOwner(work)!;
+    assert.ok(owner, 'filed on the backoff after the failure');
+    assert.deepEqual(owners.filed.map(entry => entry.key), [`throughput-owner:${sha}`], 'filed once, under the release\'s idempotency key');
+    for (let cycle = 0; cycle < 3; cycle++) await runCycle(master, state, effects, () => Date.now());
+    assert.equal(owners.filed.length, 1, 'never filed again while it is open');
+    assert.equal(owners.closed.length, 0, 'open while the claim is unverified');
+    // master status names it with its progress.
+    const visible = throughputClaimVisibility(null, { revision: sha, version: '0.9.1' }, 3, owner);
+    assert.equal(visible.owner.item, owner.key);
+    assert.match(visible.attention!.text, new RegExp(`${owner.key} owns the verification: 0 admitted of 10, nothing measured yet`));
+    // A re-measure verifies the claim: the loop closes the owner.
+    verdict = 'verified';
+    state.actions[key].at = new Date(Date.now() - 31 * minute).toISOString();
+    work.push({ ...template, id: randomUUID(), key: 'GY-7299', delivery: { ...template.delivery!, mergedAt: new Date(Date.now() - minute).toISOString(), mergedAtRepository: new Date(Date.now() - minute).toISOString() } });
+    await runCycle(master, state, effects, () => Date.now());
+    assert.match(state.actions[key].detail, /: verified:/);
+    assert.deepEqual(owners.closed.map(entry => entry.key), [owner.key]);
+    assert.match(owners.closed[0].reason, new RegExp(`verified on the serving release ${sha}`));
+    assert.equal(openThroughputOwner(work), null);
+    await runCycle(master, state, effects, () => Date.now());
+    assert.equal(owners.filed.length, 1, 'a verified release files nothing');
+  } finally { await rm(directory, { recursive: true, force: true }); }
 });

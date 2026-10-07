@@ -10,7 +10,8 @@ import { record } from './effects.js';
 import type { Cycle } from './cycle.js';
 import { defaultDeploymentReuseMinutes, defaultPromoteEveryMinutes, deploymentDetail, deploymentStepBudgetMs, promotionCycle, promotionWorkflow, reusableDeployment, stillVerifying, withinDeploymentBudget } from './deployment.js';
 import { mainGuardAttention } from '../main-guard.js';
-import { throughputRemeasureMs } from '../throughput.js';
+import { openThroughputOwner, throughputOwnerAnswered, throughputOwnerClosure, throughputOwnerItem, throughputRemeasureMs, throughputStallText, type ThroughputStall } from '../throughput.js';
+import { acceptedMergeAt } from '../pipeline-speed.js';
 
 /**
  * GY-710. Wake the item's observation job for a step refused on a stale observation — a rework —
@@ -159,22 +160,23 @@ export async function deploymentStep(cycle: Cycle) {
   }
 
   // 7a'''. GY-1385: GY-87's throughput claim is measured, not asserted. After a verified deployment
-  //        the loop records a measurement for the release the control plane serves, once per
-  //        release while it verifies, with its own coordinator credential, reading only the window's deliveries
-  //        whole; master status reads it back as verified or with its shortfall. One action per
-  //        observed release: a plane that does not serve it yet answers `waiting`, asked again on
-  //        the failure backoff (one status read per ask, never one per cycle) until it serves or a
-  //        newer observation supersedes the key; a failure backs off the same way. It follows a
-  //        verification: a cycle whose observation is still in flight (cut by the budget) starts
-  //        no measurement, so the step never holds two reads in flight. GY-1438: a measurement that
-  //        left the claim unverified is asked again once a delivery merged after it and
-  //        throughputRemeasureMs have passed (`throughputRemeasureAsk`), so the serving release's
-  //        record refreshes as deliveries accumulate; one whose population cannot accumulate raises
-  //        the typed needs-decision once per changed finding.
+  //        the loop records a measurement for the release the control plane serves, with its own
+  //        coordinator credential, reading only the window's deliveries whole; master status reads
+  //        it back as verified or with its shortfall. One action per observed release: a plane that
+  //        does not serve it yet answers `waiting`, asked again on the failure backoff (one status
+  //        read per ask, never one per cycle) until it serves or a newer observation supersedes the
+  //        key; a failure backs off the same way. It follows a verification: a cycle whose
+  //        observation is still in flight (cut by the budget) starts no measurement, so the step
+  //        never holds two reads in flight. GY-1438: the verification is owned and live — an
+  //        unverified answer is asked again once a delivery merged after it and throughputRemeasureMs
+  //        have passed (`throughputRemeasureAsk`), except while the owner's needs-decision stands
+  //        unanswered; throughputOwnerStep files and closes the owner item and raises that decision.
   const verified = observed !== stillVerifying && observed.ok ? state.deployment : null, measure = effects.measureThroughput;
   if (measure && verified && verified.source !== 'unavailable' && verified.sha) {
-    const key = `throughput:${verified.sha}`, previous = state.actions[key];
-    if (throughputAskDue(previous, state.cycle) || throughputRemeasureAsk(previous, delivered, now())) {
+    const key = `throughput:${verified.sha}`, previous = state.actions[key], owner = openThroughputOwner(snapshot.work);
+    const standing = owner && throughputOwnerStanding(state.actions[throughputEscalationKey(owner.key)], owner);
+    let stall: ThroughputStall | null = null;
+    if (throughputAskDue(previous, state.cycle) || (!standing && throughputRemeasureAsk(previous, delivered, now(), budgetMs))) {
       const measured = await withinDeploymentBudget(state, 'throughput', () => measure(snapshot.work, verified.sha!), deadline, now);
       if (measured === stillVerifying) deferred.push('the throughput measurement');
       else {
@@ -184,13 +186,10 @@ export async function deploymentStep(cycle: Cycle) {
         // Every ask is recorded, so the backoff counts them; a wait whose reason stands is not reported again.
         const entry = await record(state, key, { kind: 'deployment', work: null, principal: null, state: entryState, detail, attempts: (previous?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist);
         if (entryState !== 'waiting' || detailChanged(previous, detail)) performed.push(entry);
-        const stall = outcome?.stall;
-        if (stall) {
-          const escalationKey = `escalation:throughput:${stall.revision ?? verified.sha}`;
-          if (detailChanged(state.actions[escalationKey], stall.text)) performed.push(await record(state, escalationKey, { kind: 'escalation', work: stall.owner, principal: null, state: 'done', detail: stall.text, attempts: (state.actions[escalationKey]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
-        }
+        stall = outcome?.stall ?? null;
       }
     }
+    await throughputOwnerStep(cycle, verified.sha, owner, stall);
   }
 
   // 7b. The second confidence layer. For each delivery whose policy asks for a smoke proof: record
@@ -255,15 +254,70 @@ export function throughputAskDue(previous: DaemonAction | undefined, cycle: numb
 }
 
 /**
- * GY-1438: whether a release measured unverified is asked again. Its recorded answer (`done`)
- * names the verdict; one that says unverified is re-asked once a delivery merged after the
- * answer and `throughputRemeasureMs` have passed since it, so the re-measure costs one bounded
- * read per spacing rather than one per merge or per cycle. A verified answer is final.
+ * GY-1438: the verdict the release's recorded answer (`done`) names — the first verdict word of a
+ * `recorded` or `current` answer — or null for any other answer (a wait, a failure, a skip names none).
  */
-export function throughputRemeasureAsk(previous: DaemonAction | undefined, delivered: Work[], now: number) {
-  if (previous?.state !== 'done' || !/\bunverified\b/.test(previous.detail)) return false;
-  const answered = Date.parse(previous.at), newest = Date.parse(delivered.at(-1)?.delivery?.mergedAt ?? '');
-  return Number.isFinite(answered) && now - answered >= throughputRemeasureMs && Number.isFinite(newest) && newest > answered;
+export function answeredVerdict(answer: DaemonAction | undefined): 'verified' | 'unverified' | null {
+  const named = answer?.state === 'done' ? /\b(unverified|verified)\b/.exec(answer.detail) : null;
+  return named ? named[1] as 'verified' | 'unverified' : null;
+}
+
+/**
+ * GY-1438: whether a release measured unverified is asked again: once a delivery merged after the
+ * measurement and `throughputRemeasureMs` have passed since the answer, so the re-measure costs one
+ * bounded read per spacing rather than one per merge or per cycle. The answer is recorded when the
+ * step ends, up to `slackMs` (the step's budget) after the measurement read its window, so a merge
+ * inside that slack is compared too and asks once more; the measurement itself compares merges with
+ * the instant it recorded (`throughputRemeasureDue`) and answers `current` when nothing it missed is
+ * new. Merges are read at the repository's merge instant, as the measurement reads them.
+ */
+export function throughputRemeasureAsk(previous: DaemonAction | undefined, delivered: Work[], now: number, slackMs: number) {
+  if (answeredVerdict(previous) !== 'unverified') return false;
+  const answered = Date.parse(previous!.at);
+  if (!Number.isFinite(answered) || now - answered < throughputRemeasureMs) return false;
+  return delivered.some(item => (Date.parse(acceptedMergeAt(item) ?? '') || -Infinity) > answered - slackMs);
+}
+
+/** The loop's action keys for the owner item of a release (filed once per release) and for the needs-decision asked on an owner. */
+export const throughputOwnerKey = (revision: string) => `throughput:owner:${revision}`;
+export const throughputEscalationKey = (owner: string) => `escalation:throughput:${owner}`;
+/** The owner's needs-decision was raised and is not answered yet: no further escalation, and no re-measure, until it is. */
+export const throughputOwnerStanding = (escalation: DaemonAction | undefined, owner: Pick<Work, 'key' | 'policyRevision'>) =>
+  escalation?.state === 'done' && escalation.work === owner.key && !throughputOwnerAnswered(owner);
+
+/**
+ * GY-1438: the item that owns GY-87's verification on the serving release, every cycle the
+ * deployment verified. An open owner is closed once the release's answer verified the claim or its
+ * needs-decision was answered (`throughputOwnerClosure`), and never otherwise. With none open, an
+ * unverified answer files one, once per release: a release whose owner was closed on an answered
+ * decision is not given a second, and the next release files afresh. A measurement showing the
+ * population cannot accumulate raises the typed needs-decision on the owner once per owner: it
+ * stands until answered, so a re-measure that finds the same — or more of the same — never raises
+ * it again. Filing and closing go through the operator-agent; a failure backs off on the action.
+ */
+async function throughputOwnerStep(cycle: Pick<Cycle, 'state' | 'effects' | 'now' | 'performed'>, revision: string, open: Work | null, stall: ThroughputStall | null) {
+  const { state, effects, now, performed } = cycle, answer = state.actions[`throughput:${revision}`];
+  const verdict = answeredVerdict(answer);
+  const ownerKey = throughputOwnerKey(revision), ownerAction = state.actions[ownerKey];
+  const note = (work: string | null, outcome: DaemonAction['state'], detail: string) => record(state, ownerKey, { kind: 'deployment', work, principal: null, state: outcome, detail, attempts: (ownerAction?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist);
+  let owner = open;
+  if (owner) {
+    // Without a reason it stays open: the claim is not verified and its needs-decision is not answered.
+    const reason = throughputOwnerClosure(owner, { revision, verdict });
+    if (reason) {
+      if (effects.closeThroughputOwner && (ownerAction?.state !== 'failed' || readyToRetry(ownerAction, state.cycle))) try {
+        if (await effects.closeThroughputOwner(owner, reason, `throughput-owner:close:${owner.id}:${owner.revision}`)) performed.push(await note(owner.key, 'done', `Closed ${owner.key}: ${reason}`));
+      } catch (error) { performed.push(await note(owner.key, 'failed', `Could not close ${owner.key}: ${message(error)}`)); }
+      return;
+    }
+  } else if (verdict === 'unverified' && effects.fileThroughputOwner && ownerAction?.state !== 'done' && readyToRetry(ownerAction, state.cycle)) {
+    try {
+      const filed = await effects.fileThroughputOwner(throughputOwnerItem(revision, stall?.admitted ?? null), `throughput-owner:${revision}`);
+      if (filed) { owner = filed; performed.push(await note(filed.key, 'done', `Filed ${filed.key} to own GY-87's throughput verification on ${revision.slice(0, 12)}; it closes once the claim verifies or its needs-decision is answered`)); }
+    } catch (error) { performed.push(await note(null, 'failed', `Could not file the item that owns GY-87's throughput verification on ${revision.slice(0, 12)}: ${message(error)}`)); }
+  }
+  if (!stall || !owner || state.actions[throughputEscalationKey(owner.key)]?.state === 'done') return;
+  performed.push(await record(state, throughputEscalationKey(owner.key), { kind: 'escalation', work: owner.key, principal: null, state: 'done', detail: throughputStallText({ ...stall, owner: owner.key }), attempts: 1, cycle: state.cycle }, now(), effects.persist));
 }
 
 /** Record a budget-cut step, so the journal and `master status` say verification is in flight rather than blind; a full step supersedes the last cut once. */
