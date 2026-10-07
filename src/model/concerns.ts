@@ -47,8 +47,11 @@ export const escalationResolution = (key: string, trigger: string) =>
  */
 export function humanNeeded(action: NextAction): HumanNeeded | null {
   if (actionJudgment[action.kind] !== 'in-step') return null;
+  // A required check that failed on the head is the loop's own rework round (failedCheckRework):
+  // it requests the decision and supervises its approver, so a master deciding it by hand only
+  // races the loop and is an intervention nobody needed (GY-1387). The hand command is the fallback.
   if (action.kind === 'request-rework') return { decision: `a new head for ${action.key}`,
-    resolve: `graphyard master decide ${action.key} rework REASON, then graphyard master approver ${action.key} DECISION` };
+    resolve: `${action.gate === 'test' ? `the loop requests this rework for the failed required check itself and supervises its approver; only once it is still owed past 30 minutes: ` : ''}graphyard master decide ${action.key} rework REASON, then graphyard master approver ${action.key} DECISION` };
   const trigger = action.inputs.kind === 'escalate' ? action.inputs.trigger : 'refusal';
   const standing = (escalationTriggers as readonly string[]).includes(trigger);
   const detail = action.inputs.kind === 'escalate' ? action.inputs.detail : action.reason;

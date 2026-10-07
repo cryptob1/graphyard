@@ -173,7 +173,7 @@ interface Ask { seq: number; at: string; stage: Stage | null; kind: 'scope-reque
 interface WorkState {
   key: string | null; title: string | null; stage: Stage | null; plannedFiles: string[] | null;
   asks: Ask[];
-  reworkDecision: { seq: number; at: string; id: string; stage: Stage | null; grounded: boolean; approvedBy: string | null } | null;
+  reworkDecision: { seq: number; at: string; id: string; stage: Stage | null; binding: string | null; approvedBy: string | null } | null;
   bypass: { seq: number; at: string; mergeSha: string; blocked: string; stage: Stage | null } | null;
   quarantine: { seq: number; at: string; epoch: number; concernAt: string | null; stage: Stage | null } | null;
   escalations: Map<string, { seq: number; at: string; reason: string; actor: string; stage: Stage | null }>;
@@ -182,6 +182,18 @@ interface WorkState {
 const stageOf = (value: unknown): Stage | null => typeof value === 'string' ? value as Stage : null;
 const ms = (from: string, to: string) => Math.max(0, Date.parse(to) - Date.parse(from));
 const text = (value: unknown, fallback = '') => typeof value === 'string' && value ? value : fallback;
+/**
+ * Whether a rework decision is the loop's own round for required checks that failed on the head
+ * it returns (GY-1387): its grounds binding names that head and the failed checks
+ * (`failedCheckRework`, `<sha>:ci:<checks>`), and the head is the candidate the rework sent back.
+ * CI found a defect and the control plane returned the head to a worker by itself, as it applies
+ * a scope widening the implication rule approved; nobody stepped in, so it is no signal. A rework
+ * a master asked for by hand, on any grounds, still is.
+ */
+const failedCheckRound = (binding: string | null, candidate: { sha: string } | null | undefined) => {
+  const match = binding ? /^([a-f0-9]{40}):ci:.+$/.exec(binding) : null;
+  return !!match && match[1] === candidate?.sha;
+};
 
 /**
  * Fold the ledger rows into interventions and judgements. `work` is the current snapshot: it
@@ -297,7 +309,7 @@ export function foldInterventions(rows: InterventionLedgerRow[], work: readonly 
       case 'decision.requested': {
         // A request carrying a grounds binding is the loop's own (GY-407): it names the recorded fact —
         // a standing change request, a failed check, a base conflict, a mechanical finding — it rests on.
-        if (row.payload?.action === 'rework') entry.reworkDecision = { seq: row.seq, at: row.at, id: row.payload.id, stage, grounded: typeof row.payload.input?.binding === 'string' && !!row.payload.input.binding, approvedBy: null };
+        if (row.payload?.action === 'rework') entry.reworkDecision = { seq: row.seq, at: row.at, id: row.payload.id, stage, binding: typeof row.payload.input?.binding === 'string' && row.payload.input.binding ? row.payload.input.binding : null, approvedBy: null };
         break;
       }
       case 'decision.approved': {
@@ -314,11 +326,11 @@ export function foldInterventions(rows: InterventionLedgerRow[], work: readonly 
         // GY-1389. A rework the loop requested on its recorded grounds and its own approver applied is
         // the review round working as designed — the reviewer asked for changes, CI failed, the base
         // moved — not somebody stepping in. It is no signal, as an autoscope approval is none.
-        const routine = !!entry.reworkDecision?.grounded && !!entry.reworkDecision.approvedBy && !entry.asks.length;
+        const candidate = row.work?.candidate, submission = row.work?.submission;
+        const routine = !entry.asks.length && (!!entry.reworkDecision?.binding && !!entry.reworkDecision.approvedBy || failedCheckRound(entry.reworkDecision?.binding ?? null, candidate));
         if (!routine) {
           const sources = [...entry.asks.flatMap(ask => ask.sources), ...(entry.reworkDecision ? [{ seq: entry.reworkDecision.seq, kind: 'decision.requested' }] : []), source];
           const opened = [entry.reworkDecision?.at, ...entry.asks.map(ask => ask.at)].filter((at): at is string => !!at).sort()[0] ?? row.at;
-          const candidate = row.work?.candidate, submission = row.work?.submission;
           const blocked = candidate ? `candidate ${candidate.sha.slice(0, 12)} (PR #${candidate.pr})` : submission ? `PR #${submission.pr}` : `attempt ${row.work?.epoch ?? '?'}`;
           emit(row, 'rework', { id: entry.reworkDecision ? `rework:${row.workId}:${entry.reworkDecision.id}` : undefined, requestedAt: opened, blocked, stage: entry.asks[0]?.stage ?? entry.reworkDecision?.stage ?? stage, resolvedAt: row.at, resolvedBy: row.actor, resolution: text(details.reason ?? details.intent?.reason, 'rework authorized'), trigger: entry.asks[0]?.kind ?? (entry.reworkDecision ? 'decision' : 'direct'), sources });
         }
@@ -397,7 +409,7 @@ export function foldInterventions(rows: InterventionLedgerRow[], work: readonly 
       open(ask.kind === 'scope-request' ? 'scope-widening' : 'escalation', { requestedAt: ask.at, blocked: ask.blocked, stage: ask.stage, resolvedAt: null, resolvedBy: null, resolution: null, trigger: ask.trigger ?? ask.kind, sources: ask.sources });
     }
     // The loop's own grounded request waits on its own approver; a stalled one is a decision fault, not an intervention.
-    if (entry.reworkDecision && !entry.reworkDecision.grounded) open('rework', { id: `rework:${id}:${entry.reworkDecision.id}`, requestedAt: entry.reworkDecision.at, blocked: item.candidate ? `candidate ${item.candidate.sha.slice(0, 12)} (PR #${item.candidate.pr})` : `attempt ${item.epoch}`, stage: entry.reworkDecision.stage, resolvedAt: null, resolvedBy: null, resolution: null, trigger: 'decision', sources: [{ seq: entry.reworkDecision.seq, kind: 'decision.requested' }] });
+    if (entry.reworkDecision && !entry.reworkDecision.binding) open('rework', { id: `rework:${id}:${entry.reworkDecision.id}`, requestedAt: entry.reworkDecision.at, blocked: item.candidate ? `candidate ${item.candidate.sha.slice(0, 12)} (PR #${item.candidate.pr})` : `attempt ${item.epoch}`, stage: entry.reworkDecision.stage, resolvedAt: null, resolvedBy: null, resolution: null, trigger: 'decision', sources: [{ seq: entry.reworkDecision.seq, kind: 'decision.requested' }] });
     if (entry.bypass) open('bypass', { requestedAt: entry.bypass.at, blocked: entry.bypass.blocked, stage: entry.bypass.stage, resolvedAt: null, resolvedBy: null, resolution: null, trigger: 'refused-reconciliation', sources: [{ seq: entry.bypass.seq, kind: 'merge.reconciliation.refused' }] });
     if (entry.quarantine?.concernAt && item.containmentQuarantine) open('containment-settlement', { requestedAt: entry.quarantine.concernAt, blocked: `containment fence of epoch ${entry.quarantine.epoch}`, stage: entry.quarantine.stage, resolvedAt: null, resolvedBy: null, resolution: null, trigger: 'unsettled', sources: [{ seq: entry.quarantine.seq, kind: 'quarantine' }] });
     for (const escalation of standingEscalations(item)) {
