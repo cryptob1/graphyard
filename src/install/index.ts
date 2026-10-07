@@ -20,6 +20,7 @@ import { AppStepPending, readAppFile, readSavedApp, type SavedApp } from './mani
 import { appRoles, importApp, listApps, reuseExistingApp, savedRegistrations, type AppCredentials, type AppRole, type SavedRegistration } from '../github-setup.js';
 import { herdrBoundElsewhere, herdrPluginBinding, herdrRebindRefusal } from '../repository-setup.js';
 import { localTransport, sshTransport, type Transport } from './transport.js';
+import { durableCheckoutPreflight, underTestRunner } from '../supervisor.js';
 import { installIdFor, providers, REDACTED, SERVER_PORT, type EnvValue, type InstallInputs, type InstallPlan, type PlanAction, type PlanDrift, type PlanValue, type PlannedPrincipal, type PreflightItem, type Provider } from './types.js';
 
 export * from './types.js';
@@ -684,6 +685,10 @@ export async function buildPlan(session: InstallSession): Promise<InstallPlan> {
   const gh = githubCli(context.transport);
   const ghStatus = await gh(['auth', 'status'], { allowFailure: true });
   preflight.push(githubCliPreflight(context.provider, ghStatus, session.inputs.repository));
+  // The master loop runs from this checkout and its unit refuses a temporary directory: say so
+  // before anything is created (GY-1457). A host install runs its loop on the host instead. The
+  // test suite's checkouts are all temporary, so it checks durableCheckoutPreflight directly.
+  if (!context.host && !underTestRunner()) preflight.push(durableCheckoutPreflight(session.root));
   // Branch protection is what makes `Graphyard / merge` a gate; a repository that cannot have it
   // fails here, before the App, the reviewer App and onboarding are done for nothing (GY-1413).
   const protectionGate = ghStatus.code === 0 ? await protectionAvailability(gh, session.inputs.repository, session.inputs.baseBranch) : null;

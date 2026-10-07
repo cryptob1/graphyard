@@ -5,7 +5,8 @@ import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, relative, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { goalSubmission, setupAddress, setupChecklist, type SetupItem, type SetupItemId } from './model/setup-checklist.js';
-import { actionsDirectory, agentBrowserPage, passSudo, recordingPage, submitSudoCode, sudoInstruction, takeSudoCode, type BrowserPage, type RecordedStep, type SudoOptions } from './master-browser.js';
+import { actionsDirectory, agentBrowserPage, browserProfileMode, passSudo, recordingPage, submitSudoCode, sudoInstruction, sudoStateSchema, takeSudoCode, type BrowserPage, type BrowserProfileMode, type RecordedStep, type SudoOptions, type SudoState } from './master-browser.js';
+import { appImportRoute } from './github-setup.js';
 import { masterCredential, planeRequest } from './setup-from-zero.js';
 
 /**
@@ -56,7 +57,15 @@ export interface UpRequest {
    * Mobile first when the operator chose it (`--github-mobile`).
    */
   sudo?: SudoOptions['prefer'];
+  /** GY-1457: how long each wait on a person lasts (`--wait MINUTES`), the browser's Confirm access included; upWaitMs when omitted. */
+  waitMs?: number | null;
+  /** GY-1457: at Confirm access, exit 3 with the App-import route instead of waiting (`--no-wait`). */
+  noWait?: boolean;
 }
+/** Agent mode's default wait on a person: 20 minutes, the time the Confirm-access handoff asks for (GY-1457). */
+export const upAgentWaitMs = 1_200_000;
+/** How long each wait on a person lasts: --wait, else 20 minutes in agent mode, else no bound. */
+export const upWaitMs = (request: Pick<UpRequest, 'agent' | 'waitMs'>) => request.waitMs ?? (request.agent ? upAgentWaitMs : Infinity);
 
 export type UpEvent =
   | { kind: 'step'; step: UpStep; state: 'start' | 'done' | 'skipped'; detail?: string }
@@ -65,13 +74,13 @@ export type UpEvent =
   | { kind: 'note'; text: string };
 
 /** What a device step hands to a person, or that it completed. */
-export type DriveOutcome = { state: 'done' } | { state: 'failed'; reason: string };
+export type DriveOutcome = { state: 'done' } | { state: 'failed'; reason: string } | { state: 'waiting'; next: string };
 export type Handoff = (sentence: string, link: { url?: string | null; code?: string | null }) => void;
 
 export interface UpDependencies {
   root: string;
   /** Runs one graphyard command; stderr lines go to onLine as they arrive. */
-  cli(args: string[], options?: { stdin?: string; env?: Record<string, string>; onLine?: (line: string) => void }): Promise<{ code: number; stdout: string }>;
+  cli(args: string[], options?: { stdin?: string; env?: Record<string, string>; onLine?: (line: string) => void; signal?: AbortSignal }): Promise<{ code: number; stdout: string }>;
   /** The control plane's /api/status as the recorded master identity, or null while none answers. */
   status(): Promise<any | null>;
   /** The control plane's address once the install recorded it. */
@@ -121,6 +130,8 @@ export interface UpResult {
 export const upExitCodes = { green: 0, failed: 1, prerequisite: 2, waiting: 3 } as const;
 
 class UpStop extends Error { constructor(message: string, readonly exitCode: number) { super(message); } }
+/** The drive met Confirm access under --no-wait: it stops there, naming the next step (GY-1457). */
+class SudoNoWait extends Error {}
 
 interface UpState {
   version: 1; repository: string; provider: string; completed: UpStep[]; noHerdr: boolean; goal: string | null;
@@ -176,7 +187,7 @@ async function rememberSignIn(root: string, state: UpState, stdout: string) {
 export async function runUp(request: UpRequest, deps: UpDependencies): Promise<UpResult> {
   const state = await readState(deps.root, request);
   const pollMs = deps.pollMs ?? 5_000;
-  const humanWaitMs = deps.humanWaitMs ?? (request.agent ? 3_600_000 : Infinity);
+  const humanWaitMs = deps.humanWaitMs ?? upWaitMs(request);
   const machineWaitMs = deps.machineWaitMs ?? 600_000;
   let setupUrl: string | null = null, prompts = 0, last: SetupItem[] = setupChecklist(null), claim: string | null = null;
   const handoffs: UpResult['handoffs'] = [];
@@ -277,9 +288,13 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
     });
 
     await step('control-plane', async () => {
-      // The install waits on the App pages itself; it pauses (exit 1) after 900 s and a rerun resumes it.
+      // The install waits on the App pages itself, as long as this run waits on a person (900 s
+      // without a bound); it then pauses (exit 1) and a rerun resumes it.
       const deadline = deps.now() + humanWaitMs;
+      const appWait = Number.isFinite(humanWaitMs) ? { GRAPHYARD_APP_WAIT_MS: String(humanWaitMs) } : null;
       for (;;) {
+        // A drive that stops at Confirm access under --no-wait ends the install it drives too.
+        const stopped = new AbortController();
         // One browser drive at a time, in the order the installer serves its App pages; every outcome is reported.
         let drives: Promise<DriveOutcome[]> = Promise.resolve([]);
         let running = true;
@@ -291,13 +306,21 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
             await deps.sleep(pollMs);
           }
         })();
-        const result = await deps.cli(installArgs('--apply'), { onLine: line => {
+        const result = await deps.cli(installArgs('--apply'), { ...(appWait ? { env: appWait } : {}), signal: stopped.signal, onLine: line => {
           const url = manifestUrl(line);
           if (!url || !request.agent || !deps.driveApp) return;
-          drives = drives.then(async outcomes => [...outcomes, await deps.driveApp!(url, handoff('control-plane'))]);
-        } }).finally(() => { running = false; });
+          drives = drives.then(async outcomes => {
+            if (stopped.signal.aborted) return outcomes;
+            const outcome = await deps.driveApp!(url, handoff('control-plane'));
+            if (outcome.state === 'waiting') stopped.abort();
+            return [...outcomes, outcome];
+          });
+        } }).catch(error => { if (stopped.signal.aborted) return { code: 1, stdout: '' }; throw error; }).finally(() => { running = false; });
         await watcher;
-        const failed = (await drives).filter((outcome): outcome is Extract<DriveOutcome, { state: 'failed' }> => outcome.state === 'failed');
+        const outcomes = await drives;
+        const waiting = outcomes.find((outcome): outcome is Extract<DriveOutcome, { state: 'waiting' }> => outcome.state === 'waiting');
+        if (waiting) throw new UpStop(waiting.next, upExitCodes.waiting);
+        const failed = outcomes.filter((outcome): outcome is Extract<DriveOutcome, { state: 'failed' }> => outcome.state === 'failed');
         claim = await rememberSignIn(deps.root, state, result.stdout) ?? claim;
         if (result.code === 0) return 'control plane installed with its GitHub Apps';
         if (failed.length) throw new UpStop(`control-plane: the browser could not finish the App page (${failed.map(outcome => outcome.reason).join('; ')}); its record is under .graphyard/master-actions, and rerunning graphyard up --agent resumes`, upExitCodes.failed);
@@ -392,12 +415,15 @@ export async function upSudoCode(root: string, args: string[]) {
 export function upRequestFromArgs(args: string[]): UpRequest {
   const { values } = parseArgs({ args, options: { repo: { type: 'string' }, provider: { type: 'string' }, agent: { type: 'boolean' }, json: { type: 'boolean' }, reviewer: { type: 'string' }, master: { type: 'string' }, goal: { type: 'string' }, 'browser-profile': { type: 'string' },
     'confirm-price': { type: 'string' }, 'max-monthly': { type: 'string' }, 'ssh-key': { type: 'string' }, 'ssh-host': { type: 'string' }, 'ssh-user': { type: 'string' },
-    'reuse-app': { type: 'string', multiple: true }, 'github-mobile': { type: 'boolean' } }, allowPositionals: false });
+    'reuse-app': { type: 'string', multiple: true }, 'github-mobile': { type: 'boolean' }, wait: { type: 'string' }, 'no-wait': { type: 'boolean' } }, allowPositionals: false });
   if (!values.repo || !/^[\w.-]+\/[\w.-]+$/.test(values.repo)) throw new Error('Use graphyard up --repo OWNER/NAME [--provider compose|railway|hetzner] [--agent]');
+  const minutes = values.wait === undefined ? null : Number(values.wait);
+  if (minutes !== null && (!Number.isSafeInteger(minutes) || minutes < 1 || minutes > 1_440)) throw new Error('Use --wait with whole minutes from 1 to 1440');
   return { repository: values.repo, provider: values.provider ?? 'compose', agent: !!values.agent, reviewer: values.reviewer ?? 'claude', master: values.master ?? 'claude',
     goalFile: values.goal ?? null, browserProfile: values['browser-profile'] ?? null,
     install: { confirmPrice: values['confirm-price'] ?? null, maxMonthly: values['max-monthly'] ?? null, sshKey: values['ssh-key'] ?? null, sshHost: values['ssh-host'] ?? null, sshUser: values['ssh-user'] ?? null },
-    ...(values['reuse-app']?.length ? { reuseApps: values['reuse-app'] } : {}), ...(values['github-mobile'] ? { sudo: 'mobile' as const } : {}) };
+    ...(values['reuse-app']?.length ? { reuseApps: values['reuse-app'] } : {}), ...(values['github-mobile'] ? { sudo: 'mobile' as const } : {}),
+    ...(minutes !== null ? { waitMs: minutes * 60_000 } : {}), ...(values['no-wait'] ? { noWait: true } : {}) };
 }
 
 /**
@@ -412,18 +438,42 @@ export function upRequestFromArgs(args: string[]): UpRequest {
  * a Mobile code unapproved for a minute is handed off again with the passkey or password link.
  * A re-check that reloads the App creation page drops the manifest, so once access is confirmed
  * the manifest is submitted again from the setup page.
+ *
+ * GY-1457: the Confirm-access wait is up's own wait (TIMEOUTMS, upWaitMs), not a shorter one of its
+ * own. The handoff says whether the drive shares the operator's live Chrome session (PROFILE) and
+ * always ends with the App-import route that needs no live moment. A pending confirmation is kept
+ * (REMEMBER) so a rerun meeting the same page resumes it (PENDING, ONRESUME) instead of handing it
+ * off again; NOWAIT ends the drive at the handoff with that route as the next step.
  */
-export function browserAppDriver(options: { page: BrowserPage; repository: string; ids: () => { owner: number; repository: number }; sleep: (ms: number) => Promise<void>; now?: () => Date; timeoutMs?: number; record?: string; sudo?: SudoOptions['prefer']; readCode?: SudoOptions['readCode']; onClose?: (outcome: DriveOutcome) => Promise<void> | void }) {
+export function browserAppDriver(options: { page: BrowserPage; repository: string; ids: () => { owner: number; repository: number }; sleep: (ms: number) => Promise<void>; now?: () => Date; timeoutMs?: number; record?: string; sudo?: SudoOptions['prefer']; readCode?: SudoOptions['readCode']; onClose?: (outcome: DriveOutcome) => Promise<void> | void;
+  profile?: { mode: BrowserProfileMode; name: string } | null; noWait?: boolean; rerun?: string;
+  pending?: () => Promise<SudoState | null> | SudoState | null; remember?: (state: SudoState | null) => Promise<void> | void; onResume?: (state: SudoState) => void }) {
   const { page } = options;
   const owner = options.repository.split('/')[0];
-  let setupPage: string | null = null;
+  const rerun = options.rerun ?? 'graphyard up --agent';
+  let setupPage: string | null = null, resumeChecked = false;
   const awaitSudo = async (handoff: Handoff) => {
+    const onCode = async (state: SudoState) => {
+      // The first confirmation a rerun meets resumes the one handed off before (within a day), when it is the same page method.
+      const before = resumeChecked ? null : await options.pending?.() ?? null;
+      resumeChecked = true;
+      const now = (options.now ?? (() => new Date()))().getTime();
+      const resumed = before && before.method && before.method !== 'mobile' && before.method === state.method && now - Date.parse(before.issuedAt) < 86_400_000 ? before : null;
+      await options.remember?.(resumed ? { ...state, issuedAt: resumed.issuedAt } : state);
+      if (resumed) options.onResume?.(resumed);
+      else handoff([sudoInstruction(state, 'your phone', { ...(options.readCode ? { page: setupPage, command: 'graphyard up --sudo-code' } : {}), profile: options.profile ?? null }), appImportRoute].join('\n'),
+        { url: state.fallback?.url ?? state.url ?? page.url(), code: state.code });
+      if (options.noWait) throw new SudoNoWait(`GitHub asks to confirm access before it creates the App, and --no-wait does not wait for it. ${appImportRoute}; or rerun ${rerun} without --no-wait to wait for the confirmation.`);
+    };
     // passSudo's flow names the closest master browser flow; its rerun advice is this command's.
     try {
-      const passed = await passSudo(page, { flow: 'installation-accept', record: options.record ?? 'graphyard up', sleep: options.sleep, now: options.now, timeoutMs: options.timeoutMs ?? 600_000, prefer: options.sudo ?? 'passkey-or-password', readCode: options.readCode,
-        onCode: state => handoff(sudoInstruction(state, 'your phone', options.readCode ? { page: setupPage, command: 'graphyard up --sudo-code' } : {}), { url: state.fallback?.url ?? state.url ?? page.url(), code: state.code }) });
+      const passed = await passSudo(page, { flow: 'installation-accept', record: options.record ?? 'graphyard up', sleep: options.sleep, now: options.now, timeoutMs: options.timeoutMs ?? upAgentWaitMs, prefer: options.sudo ?? 'passkey-or-password', readCode: options.readCode,
+        onCode, onSettled: state => options.remember?.(state.state === 'approved' ? null : state) });
       return passed.passed;
-    } catch (error: any) { throw new Error(String(error?.message ?? error).replace(/rerun master browser installation-accept/g, 'rerun graphyard up --agent')); }
+    } catch (error: any) {
+      if (error instanceof SudoNoWait) throw error;
+      throw new Error(String(error?.message ?? error).replace(/rerun master browser installation-accept/g, `rerun ${rerun}`));
+    }
   };
   const press = async (kind: 'button' | 'link', text: string, handoff: Handoff) => {
     await awaitSudo(handoff);
@@ -455,7 +505,7 @@ export function browserAppDriver(options: { page: BrowserPage; repository: strin
         await press('button', 'Install', handoff);
       }
       outcome = { state: 'done' };
-    } catch (error: any) { outcome = { state: 'failed', reason: String(error?.message ?? error).split('\n')[0] }; }
+    } catch (error: any) { outcome = error instanceof SudoNoWait ? { state: 'waiting', next: error.message } : { state: 'failed', reason: String(error?.message ?? error).split('\n')[0] }; }
     try { page.close(); } catch { /* recorded on the step */ }
     await options.onClose?.(outcome);
     return outcome;
@@ -477,7 +527,8 @@ export function upBrowserProfile(root: string, request: UpRequest): { profile: s
  * a screenshot after each mutation land in .graphyard/master-actions/<stamp>-app-create-<id>/,
  * with record.json written when the drive ends, as every master browser flow records its run.
  */
-export function recordedAppDriver(root: string, request: UpRequest, browser: { profile: string; executable?: string }, page: (session: string) => BrowserPage = session => agentBrowserPage(browser, session)) {
+export function recordedAppDriver(root: string, request: UpRequest, browser: { profile: string; executable?: string }, page: (session: string) => BrowserPage = session => agentBrowserPage(browser, session),
+  clock: { sleep?: (ms: number) => Promise<void>; now?: () => Date; emit?: (event: UpEvent) => void } = {}) {
   const startedAt = new Date(), id = randomUUID();
   const directory = resolve(actionsDirectory(root), `${startedAt.toISOString().replace(/[:.]/g, '-')}-app-create-${id.slice(0, 8)}`);
   const steps: RecordedStep[] = [];
@@ -486,8 +537,14 @@ export function recordedAppDriver(root: string, request: UpRequest, browser: { p
   const recorded = recordingPage(page(session), { directory, steps, now: () => new Date() });
   const drive = browserAppDriver({
     page: { ...recorded, open: url => { if (!created) { created = true; mkdirSync(directory, { recursive: true, mode: 0o700 }); } return recorded.open(url); } },
-    repository: request.repository, record: relative(root, directory), sleep: ms => new Promise(accept => setTimeout(accept, ms)), sudo: request.sudo,
+    repository: request.repository, record: relative(root, directory), sleep: clock.sleep ?? (ms => new Promise(accept => setTimeout(accept, ms))), now: clock.now, sudo: request.sudo,
     readCode: () => takeSudoCode(root),
+    // GY-1457: up's own wait, the profile's sharing said in the handoff, and the pending confirmation kept for a rerun.
+    timeoutMs: Number.isFinite(upWaitMs(request)) ? upWaitMs(request) : upAgentWaitMs, noWait: request.noWait,
+    profile: { mode: browserProfileMode(browser.profile), name: browser.profile },
+    rerun: `graphyard up --repo ${request.repository} --provider ${request.provider} --agent`,
+    pending: () => readPendingSudo(root), remember: state => rememberPendingSudo(root, state),
+    onResume: state => clock.emit?.({ kind: 'note', text: `Resuming the Confirm access handed off at ${state.issuedAt}; no new handoff: confirm it as asked then, or pass a code with graphyard up --sudo-code` }),
     ids: () => {
       const repo = JSON.parse(execFileSync('gh', ['api', `repos/${request.repository}`], { encoding: 'utf8', timeout: 30_000 }));
       return { owner: Number(repo.owner?.id), repository: Number(repo.id) };
@@ -498,6 +555,19 @@ export function recordedAppDriver(root: string, request: UpRequest, browser: { p
     },
   });
   return { directory, drive };
+}
+
+/** The Confirm access an App drive handed off and is waiting on (GY-1457), so a rerun resumes it. */
+const pendingSudoFile = (root: string) => resolve(actionsDirectory(root), 'up-sudo.json');
+export async function readPendingSudo(root: string): Promise<SudoState | null> {
+  try { return sudoStateSchema.parse(JSON.parse(await readFile(pendingSudoFile(root), 'utf8'))); } catch { return null; }
+}
+export async function rememberPendingSudo(root: string, state: SudoState | null) {
+  const file = pendingSudoFile(root);
+  if (!state) { await rm(file, { force: true }); return; }
+  await mkdir(dirname(file), { recursive: true, mode: 0o700 });
+  await writeFile(`${file}.${process.pid}.tmp`, `${JSON.stringify(state)}\n`, { mode: 0o600 });
+  await rename(`${file}.${process.pid}.tmp`, file);
 }
 
 /** A one-time dashboard sign-in address minted with the operator's admin credential in FILE (as `graphyard login` mints it). */
@@ -558,7 +628,7 @@ export function upDependencies(root: string, cliPath: string, request: UpRequest
     signIn: async file => { const url = await serverUrl(); return url ? mintSignIn(url, file) : null; },
     sleep: ms => new Promise(accept => setTimeout(accept, ms)), now: () => Date.now(),
     cli: (args, options = {}) => new Promise((accept, reject) => {
-      const child = spawn(process.execPath, [cliPath, ...args], { cwd: root, stdio: ['pipe', 'pipe', 'pipe'], ...(options.env ? { env: { ...process.env, ...options.env } } : {}) });
+      const child = spawn(process.execPath, [cliPath, ...args], { cwd: root, stdio: ['pipe', 'pipe', 'pipe'], ...(options.signal ? { signal: options.signal } : {}), ...(options.env ? { env: { ...process.env, ...options.env } } : {}) });
       let stdout = '', pending = '';
       child.stdout.on('data', chunk => { stdout += chunk; });
       child.stderr.on('data', chunk => {
@@ -575,7 +645,7 @@ export function upDependencies(root: string, cliPath: string, request: UpRequest
       return url && token ? planeRequest(url, token)('status') : null;
     },
     // Each App page gets its own recorded drive, so each has its own record directory.
-    ...(browser ? { driveApp: (url: string, handoff: Handoff) => recordedAppDriver(root, request, browser).drive(url, handoff) } : {}),
+    ...(browser ? { driveApp: (url: string, handoff: Handoff) => recordedAppDriver(root, request, browser, undefined, { emit }).drive(url, handoff) } : {}),
   };
 }
 

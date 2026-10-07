@@ -408,7 +408,12 @@ export async function appPagePortFree(port = 4311) {
  * page asks for, when it offers an authenticator app or an email code: six digits, or a request
  * that GitHub email one. The drive types the code into the page; it is never shown or logged.
  */
-const sudoForm = (state: string) => `<h2>GitHub asking to confirm access?</h2><p>Confirming once in your own Chrome on any sudo-protected GitHub page (such as https://github.com/settings/apps/new) lets setup continue by itself. Or hand it the 6-digit code from your authenticator app or an email:</p><form method="post" action="/sudo-code"><input type="hidden" name="state" value="${state}"><input name="code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code" aria-label="6-digit code" required> <button>Send code</button></form><form method="post" action="/sudo-code"><input type="hidden" name="state" value="${state}"><input type="hidden" name="email" value="1"><button>Email me a code</button></form>`;
+/**
+ * The App route that needs no live Confirm-access moment (GY-1457): the operator creates the App by
+ * hand whenever convenient, imports it (`app import`, GY-1451) and setup reuses it (`--reuse-app`).
+ */
+export const appImportRoute = 'To need no live confirmation at all, create the App at github.com/settings/apps/new whenever convenient, then run `graphyard app import --app-id ID --key-file PEM` and `graphyard up --reuse-app SLUG`';
+const sudoForm = (state: string) => `<h2>GitHub asking to confirm access?</h2><p>Confirming once in your own Chrome on any sudo-protected GitHub page (such as https://github.com/settings/apps/new) lets setup continue by itself. Or hand it the 6-digit code from your authenticator app or an email:</p><form method="post" action="/sudo-code"><input type="hidden" name="state" value="${state}"><input name="code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code" aria-label="6-digit code" required> <button>Send code</button></form><form method="post" action="/sudo-code"><input type="hidden" name="state" value="${state}"><input type="hidden" name="email" value="1"><button>Email me a code</button></form><p>${escape(appImportRoute).replace(/`([^`]+)`/g, '<code>$1</code>')}.</p>`;
 
 export async function startGithubSetup(root: string, repository: string, deployment: string, port = 4311, dependencies: {
   convert?: (code: string) => Promise<any>;

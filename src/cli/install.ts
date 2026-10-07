@@ -18,6 +18,15 @@ import { agentEnvironmentRoot } from '../master/environments.js';
 import { masterCredential, planeAnswers, planeRequest, setupFromZeroChecks, setupLine, setupNext } from '../setup-from-zero.js';
 import { describeUpEvent, runUp, upDependencies, upRequestFromArgs, upSudoCode } from '../up.js';
 
+/**
+ * How long the App page is served (GY-1457): `graphyard up` sets GRAPHYARD_APP_WAIT_MS to its own
+ * wait, so the page outlives the browser drive's Confirm-access wait; otherwise the 900 s default.
+ */
+export function appStepWait(env: NodeJS.ProcessEnv) {
+  const ms = Number(env.GRAPHYARD_APP_WAIT_MS);
+  return Number.isSafeInteger(ms) && ms > 0 ? { timeoutMs: ms } : {};
+}
+
 const interactiveGithubSetup = (root: string) => async (repository: string, deployment: string) => {
   const setup = await startGithubSetup(root, repository, deployment);
   console.log(`Open ${setup.url} in your browser. On SSH, forward port 4311 to this machine first. Credentials stay in .graphyard/github-app.json; do not share that file. Setup finishes automatically once the App is installed; press Ctrl+C to finish later and rerun init --scan --apply.`);
@@ -60,7 +69,7 @@ export const installCommands = defineCommands([
       '  up --repo OWNER/NAME [--provider compose|railway|hetzner] [--reviewer NAME]',
       '     [--master claude|codex] [--agent] [--goal FILE] [--browser-profile PROFILE]',
       '     [--confirm-price X | --max-monthly N] [--ssh-key NAME] [--ssh-host HOST] [--ssh-user USER]',
-      '     [--reuse-app SLUG]... [--github-mobile]',
+      '     [--reuse-app SLUG]... [--github-mobile] [--wait MINUTES] [--no-wait]',
       '  up --sudo-code CODE|email',
       '                                First-run setup in one command: preflight, control plane,',
       '                                host supervisor and Herdr, onboarding, agent accounts,',
@@ -75,6 +84,10 @@ export const installCommands = defineCommands([
       '                                (confirm in your Chrome, or --sudo-code a 6-digit authenticator/email code;',
       '                                email: GitHub sends one); --github-mobile: Mobile first, password link after',
       '                                60 s. --reuse-app passes to install. Exit 0 green, 1 failed, 2 prereq, 3 waiting.',
+      '                                --wait MINUTES bounds each wait on a person (agent default 20), the browser\'s',
+      '                                Confirm access and the App page included; a rerun resumes a pending Confirm',
+      '                                access without a new handoff. The handoff says whether the profile is a copy',
+      '                                and offers app import + --reuse-app; --no-wait exits 3 with that instead.',
     ],
     // `up` installs the control plane and records the connection; it never reads a stale one.
     readsConnection: () => false,
@@ -117,8 +130,9 @@ export const installCommands = defineCommands([
       '                                production resources that cost money are created only with',
       '                                --create-environments. A Herdr graphyard plugin bound to',
       '                                another server is repointed only with --herdr-rebind.',
-      '                                An App step nobody confirms within 900 s exits 1 with a',
-      '                                JSON summary and the exact resume command.',
+      '                                An App step nobody confirms within 900 s (under graphyard',
+      '                                up: up\'s --wait) exits 1 with a JSON summary and the exact',
+      '                                resume command.',
       '                                See docs/install.md for the agent-executable runbook.',
     ],
     // The installer creates the connection file; it must never read a stale one.
@@ -127,7 +141,7 @@ export const installCommands = defineCommands([
       const { values, request: inputs } = installRequestFromArgs(context.rest);
       const session = await prepareInstall(process.cwd(), inputs, {
         cliPath: await context.activeCliPath(), hostId: context.individualHostId(), log: line => console.error(line),
-        githubApp: request => runManifestFlow(request.root, request.repository, request.origin, { reviewer: request.reviewer, announce: line => console.error(line), dependencies: { file: request.file, ...(request.reuse ? { reusable: request.reuse.slugs, reuse: request.reuse.adopt } : {}) } }),
+        githubApp: request => runManifestFlow(request.root, request.repository, request.origin, { reviewer: request.reviewer, announce: line => console.error(line), ...appStepWait(process.env), dependencies: { file: request.file, ...(request.reuse ? { reusable: request.reuse.slugs, reuse: request.reuse.adopt } : {}) } }),
       }, values.apply ? 'apply' : 'plan');
       if (values.logs) return console.log(await session.adapter.logs(session.context));
       const plan = await buildPlan(session);

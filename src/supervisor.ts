@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { existsSync, readdirSync, readFileSync, readlinkSync, realpathSync, statSync } from 'node:fs';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir, userInfo } from 'node:os';
-import { isAbsolute, join, resolve, sep } from 'node:path';
+import { basename, isAbsolute, join, resolve, sep } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { clearConsentHold, consentHoldSuffix, consentHoldVerdict, detectConsentPrompt, readConsentHolds, reclassifyConsentHold, writeConsentHold, type ConsentAnswer } from './consent-prompt.js';
 import { unknownWorkCode } from './model/refusal.js';
@@ -818,6 +818,18 @@ const within = (path: string, parent: string) => path === parent || path.startsW
  * its WorkingDirectory crash-looped 233 times in 40 minutes after that checkout was deleted.
  */
 export const temporaryDirectories = () => [...new Set([tmpdir(), '/tmp', '/var/tmp'].map(canonical))];
+/**
+ * Host preflight (GY-1457): the loop unit refuses a coordinator checkout under a temporary
+ * directory (assertCoordinatorCheckout), so setup says so before it starts, naming the directory
+ * and a durable place to clone the repository instead.
+ */
+export function durableCheckoutPreflight(root: string, temporary: string[] = temporaryDirectories(), home = homedir()) {
+  const checkout = canonical(root);
+  const under = temporary.map(canonical).find(directory => within(checkout, directory));
+  if (!under) return { name: 'Durable checkout', ok: true, detail: `${root} is not under a temporary directory` };
+  return { name: 'Durable checkout', ok: false, detail: `${root} is under the temporary directory ${under}, where the master loop's unit refuses to run`,
+    fix: `Clone the repository on durable storage, such as ${join(home, 'code', basename(checkout))}, and run setup from there` };
+}
 
 /**
  * Whether this process is the test suite. Node's test runner marks every process it runs a test

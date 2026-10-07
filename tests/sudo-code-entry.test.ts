@@ -258,3 +258,156 @@ test('unit:sudo-code-entry — no screenshot is recorded while the code field ho
     }
   }
 });
+
+/**
+ * GY-1457: setup no longer depends on a live Confirm-access moment.
+ *
+ * unit:sudo-wait-matches-up — agent mode's Confirm-access wait is up's own wait (20 minutes, or
+ * --wait), so a recorded page confirmed after 700 s still finishes; a rerun resumes the pending
+ * confirmation without a new handoff.
+ *
+ * unit:sudo-handoff-profile-mode — the handoff says whether the drive shares the live Chrome
+ * session; the own-Chrome route only when it does, the code methods otherwise.
+ *
+ * unit:sudo-offers-import-route — the handoff and the local App setup page offer the App-import
+ * route, and `up --no-wait` exits with it instead of waiting.
+ */
+const IMPORT_ROUTE = /create the App at github\.com\/settings\/apps\/new whenever convenient, then run `graphyard app import --app-id ID --key-file PEM` and `graphyard up --reuse-app SLUG`/;
+/** The local App page, then GitHub's Confirm access until the clock reaches GRANTAT, then the new-App form; no install link, so no repository ids are read. */
+function appDrivePage(clock: { t: number }, grantAt: number) {
+  let view: 'local' | 'sudo' | 'form' | 'manifest' | 'done' = 'local';
+  const granted = () => clock.t >= grantAt;
+  const page: BrowserPage = { ...noop,
+    open(url) { if (url === LOCAL) view = view === 'done' ? 'done' : 'local'; else if (url === NEW_APP && view === 'sudo' && granted()) view = 'form'; },
+    url: () => view === 'local' || view === 'done' ? LOCAL : NEW_APP,
+    text: () => view === 'sudo' ? PASSKEY_PAGE : view === 'form' ? 'Register new GitHub App' : view === 'manifest' ? 'Create GitHub App for acme' : '',
+    locate(kind, text) {
+      if (view === 'local' && kind === 'button' && text === 'Register Graphyard App →') return located('#register', text);
+      if (view === 'manifest' && kind === 'button' && text === 'Create GitHub App for acme') return located('#create', text);
+      return null;
+    },
+    click(selector) { if (selector === '#register') view = granted() ? 'manifest' : 'sudo'; if (selector === '#create') view = 'done'; },
+  };
+  return page;
+}
+const upRequest = async (...extra: string[]) => (await import('../src/up.js')).upRequestFromArgs(['--repo', 'acme/shop', '--agent', ...extra]);
+
+test('unit:sudo-wait-matches-up — the drive waits at Confirm access as long as up does, past 600 s, and a rerun resumes the pending confirmation without a new handoff', async () => {
+  const { recordedAppDriver, upWaitMs, upRequestFromArgs, readPendingSudo } = await import('../src/up.js');
+  assert.equal(upWaitMs(await upRequest()), 1_200_000, "agent mode's wait on a person is 20 minutes");
+  assert.equal(upWaitMs(await upRequest('--wait', '45')), 2_700_000, '--wait MINUTES sets it');
+  assert.throws(() => upRequestFromArgs(['--repo', 'acme/shop', '--wait', '0']), /whole minutes/);
+
+  const root = await temporaryDirectory('sudo-wait-up');
+  const clock = { t: 0 };
+  const timing = { now: () => new Date(clock.t), sleep: async (ms: number) => { clock.t += ms; } };
+  const handed: string[] = [];
+  const confirmedAt = 700_000;
+  const { drive } = recordedAppDriver(root, await upRequest(), { profile: 'Default' }, () => appDrivePage(clock, confirmedAt), timing);
+  assert.deepEqual(await drive(LOCAL, sentence => { handed.push(sentence); }), { state: 'done' }, 'confirmed after 700 s, the drive finished instead of giving up at 600 s');
+  assert.ok(clock.t >= confirmedAt, `the drive was still waiting at ${clock.t} ms`);
+  assert.equal(handed.length, 1);
+  assert.equal(await readPendingSudo(root), null, 'an approved confirmation leaves nothing pending');
+
+  // A run whose wait (--wait 1) ends first leaves the confirmation pending; the rerun resumes it.
+  const rerunRoot = await temporaryDirectory('sudo-wait-rerun');
+  const first: string[] = [];
+  const short = recordedAppDriver(rerunRoot, await upRequest('--wait', '1'), { profile: 'Default' }, () => appDrivePage(clock, Infinity), timing);
+  const gaveUp = await short.drive(LOCAL, sentence => { first.push(sentence); });
+  assert.equal(gaveUp.state, 'failed');
+  assert.match(gaveUp.state === 'failed' ? gaveUp.reason : '', /not approved within 60s.*rerun graphyard up --repo acme\/shop --provider compose --agent/);
+  assert.equal(first.length, 1);
+  const pending = await readPendingSudo(rerunRoot);
+  assert.equal(pending?.method, 'passkey', 'the handed-off confirmation is kept for the rerun');
+  const second: string[] = [], notes: string[] = [];
+  const resumeAt = clock.t + 300_000;
+  const rerun = recordedAppDriver(rerunRoot, await upRequest(), { profile: 'Default' }, () => appDrivePage(clock, resumeAt), { ...timing, emit: event => { if (event.kind === 'note') notes.push(event.text); } });
+  assert.deepEqual(await rerun.drive(LOCAL, sentence => { second.push(sentence); }), { state: 'done' });
+  assert.deepEqual(second, [], 'the rerun issued no new handoff');
+  assert.equal(notes.length, 1); assert.match(notes[0], new RegExp(`^Resuming the Confirm access handed off at ${pending!.issuedAt}`));
+  assert.equal(await readPendingSudo(rerunRoot), null);
+});
+
+test('unit:sudo-handoff-profile-mode — the handoff says whether the drive shares the live Chrome session, and offers confirming in your own Chrome only when it does', async () => {
+  const { browserProfileMode, sudoInstruction } = await browser();
+  assert.equal(browserProfileMode('Default'), 'copy', 'a profile named by its name is opened as a copy');
+  assert.equal(browserProfileMode('/home/operator/.config/google-chrome'), 'shared', 'a profile directory named by its path is opened as itself');
+  const state = { code: null, method: 'passkey' as const, url: 'https://github.com/sessions/sudo', offered: ['passkey'] as SudoMethod[] };
+  const route = { page: LOCAL, command: 'graphyard up --sudo-code' };
+  const shared = sudoInstruction(state, 'your phone', { ...route, profile: { mode: 'shared', name: '/home/operator/chrome' } }).split('\n');
+  assert.equal(shared[0], 'The drive uses your live Chrome session (profile /home/operator/chrome), so a confirmation in your own Chrome reaches it');
+  assert.equal(shared[1], FIRST_LINE, 'shared: confirming in your own Chrome is offered');
+  const copy = sudoInstruction(state, 'your phone', { ...route, profile: { mode: 'copy', name: 'Default' } }).split('\n');
+  assert.equal(copy[0], 'The drive runs on a copy of your Chrome profile Default, not your live session, so a confirmation in your own Chrome does not reach it: use a code below');
+  assert.ok(!copy.some(line => /in your own Chrome at/.test(line)), 'copy: confirming in your own Chrome is not offered');
+  assert.ok(copy.includes(`For your authenticator app, enter its 6-digit code at ${LOCAL} or with graphyard up --sudo-code CODE`), 'copy: the authenticator code is offered');
+  assert.ok(copy.some(line => line.startsWith('For an email code, ask for it')), 'copy: the email code is offered');
+
+  // The drive names its own profile's mode.
+  const { recordedAppDriver } = await import('../src/up.js');
+  for (const [profile, said] of [['Default', /^The drive runs on a copy of your Chrome profile Default/], ['/home/operator/chrome', /^The drive uses your live Chrome session/]] as const) {
+    const clock = { t: 0 }, handed: string[] = [];
+    const { drive } = recordedAppDriver(await temporaryDirectory('sudo-profile-mode'), await upRequest(), { profile }, () => appDrivePage(clock, 30_000), { now: () => new Date(clock.t), sleep: async ms => { clock.t += ms; } });
+    assert.deepEqual(await drive(LOCAL, sentence => { handed.push(sentence); }), { state: 'done' });
+    assert.match(handed[0], said, profile);
+  }
+});
+
+test('unit:sudo-offers-import-route — the handoff and the local setup page offer the App-import route, and up --no-wait exits with it instead of waiting', async () => {
+  const { recordedAppDriver, runUp, upRequestFromArgs } = await import('../src/up.js');
+  const clock = { t: 0 };
+  const timing = { now: () => new Date(clock.t), sleep: async (ms: number) => { clock.t += ms; } };
+  const handed: string[] = [];
+  const { drive } = recordedAppDriver(await temporaryDirectory('sudo-import-route'), await upRequest(), { profile: 'Default' }, () => appDrivePage(clock, 30_000), timing);
+  assert.deepEqual(await drive(LOCAL, sentence => { handed.push(sentence); }), { state: 'done' });
+  assert.match(handed[0].split('\n').at(-1)!, IMPORT_ROUTE, 'the handoff ends with the route that needs no live moment');
+
+  const { startGithubSetup } = await import('../src/github-setup.js');
+  const pageRoot = await temporaryDirectory('sudo-import-page');
+  execFileSync('git', ['init', '-q'], { cwd: pageRoot });
+  const setup = await startGithubSetup(pageRoot, 'acme/shop', 'http://127.0.0.1:4320', 0);
+  try { assert.match((await (await fetch(setup.url)).text()).replace(/<\/?code>/g, '`'), IMPORT_ROUTE, 'the local setup page offers it'); }
+  finally { await new Promise<void>(accept => setup.http.close(() => accept())); }
+
+  // --no-wait: the drive meets Confirm access, up ends the install it drives and exits 3 with the route.
+  const root = await temporaryDirectory('sudo-no-wait');
+  const request = upRequestFromArgs(['--repo', 'acme/shop', '--agent', '--no-wait', '--browser-profile', 'Default']);
+  assert.equal(request.noWait, true);
+  const runClock = { t: 0 };
+  const noWait = recordedAppDriver(root, request, { profile: 'Default' }, () => appDrivePage(runClock, Infinity), { now: () => new Date(runClock.t), sleep: async ms => { runClock.t += ms; } });
+  const events: { kind: string }[] = [];
+  let aborted = false, installEnv: Record<string, string> | undefined;
+  const result = await runUp(request, {
+    root, pollMs: 1, emit: event => { events.push(event); }, now: () => runClock.t, sleep: async ms => { runClock.t += ms; await new Promise(accept => setImmediate(accept)); },
+    serverUrl: async () => null, masterToken: async () => null, status: async () => null,
+    publishOnboarding: async () => null, onboardingMerged: async () => true, driveApp: noWait.drive,
+    cli: async (args, options = {}) => {
+      if (args.includes('--plan')) return { code: 0, stdout: JSON.stringify({ preflight: [{ name: 'GitHub CLI', ok: true }] }) };
+      installEnv = options.env;
+      options.onLine?.('Open http://127.0.0.1:4311 in a browser on this machine and confirm the Graphyard App');
+      // The install serves its App page until up ends it.
+      await new Promise<void>(accept => options.signal?.addEventListener('abort', () => { aborted = true; accept(); }));
+      throw Object.assign(new Error('The operation was aborted'), { name: 'AbortError' });
+    },
+  });
+  assert.equal(result.exitCode, 3, 'waiting on a person, resumable');
+  assert.match(result.next, /--no-wait does not wait for it/);
+  assert.match(result.next, IMPORT_ROUTE, 'the next step is the App-import route');
+  assert.ok(aborted, 'the install serving the App page was ended');
+  assert.equal(installEnv?.GRAPHYARD_APP_WAIT_MS, '1200000', "the App page is served as long as up's wait");
+  assert.equal(result.handoffs.length, 1);
+});
+
+test('unit:preflight-durable-checkout — host preflight names a checkout under a temporary directory, which the loop unit would refuse, and a durable place instead', async () => {
+  const { durableCheckoutPreflight } = await import('../src/supervisor.js');
+  const scratch = await temporaryDirectory('durable-checkout');
+  const checkout = `${scratch}/pilot`;
+  const refused = durableCheckoutPreflight(checkout, ['/nonexistent-tmp', scratch], '/home/operator');
+  assert.equal(refused.name, 'Durable checkout');
+  assert.equal(refused.ok, false, 'a checkout under a temporary directory fails preflight before setup starts');
+  assert.match(refused.detail, new RegExp(`^${checkout.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')} is under the temporary directory .+, where the master loop's unit refuses to run$`));
+  assert.equal(refused.fix, 'Clone the repository on durable storage, such as /home/operator/code/pilot, and run setup from there');
+  for (const temporary of ['/var/tmp', '/tmp']) assert.equal(durableCheckoutPreflight(`${temporary}/graphyard-game-pilot`, [temporary], '/home/operator').ok, false, `${temporary} is temporary`);
+  const durable = durableCheckoutPreflight('/home/operator/code/pilot', ['/tmp', '/var/tmp'], '/home/operator');
+  assert.deepEqual({ ok: durable.ok, name: durable.name }, { ok: true, name: 'Durable checkout' });
+});
