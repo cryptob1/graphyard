@@ -15,12 +15,15 @@ import { systemInvariants } from '../src/model/invariants.js';
 import { tmpReclaimLimitPerCycle } from '../src/tmp-reclaim.js';
 import { lostRunReason, requestAttemptLimit } from '../src/producer.js';
 import { loopWatchdogSeconds } from '../src/supervisor.js';
-import { throughputStatus } from '../src/throughput.js';
+import { throughputMeasurementDirectory, throughputMeasurementRetention, throughputRemeasureMs, throughputStatus } from '../src/throughput.js';
+import { readThroughputLedger, throughputLedgerFile, throughputLedgerRetention } from '../src/throughput-ledger.js';
 import { blockedMergeMs, brokenBaseTest, clock, hour, minute, protectionOnlyCheck, statusContext } from './helpers/soak-world.js';
 import { laneApprover } from '../src/server/decisions.js';
 import { doctorRunEvent } from '../src/server/routes/status.js';
 import { MANUAL, api, basePlan, blockedMergeItem, coordinatorRoot, diagnosisLimit, principals, remedyItem, soakConfig, soakControlPlanes, store } from './helpers/soak-plane.js';
 import { assertLaunchesConfined, memoryDay, simulateDay } from './helpers/soak-simulation.js';
+import { conflictReworkBoundMs } from '../src/model/approval.js';
+import { docsSyncCutoffLeadMs } from '../src/daemon/docs-sync-route.js';
 
 /**
  * The main day and the whole-loop days: fifteen items delivered with every invariant holding, the
@@ -190,23 +193,45 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   // per session, none lost between the hand-off and the drain.
   assert.equal(reportedDispatches, sessions.length, 'each settled dispatch launch was reported to a cycle');
   assert.equal(production.deploys.length, basePlan.deploys.length, 'two production deploys');
-  // GY-1385: after each verified deployment the loop itself recorded GY-87's throughput measurement
-  // for the release the plane served, exactly once per release, under one action per observed
-  // release. The plane's status named each deploy only three minutes after the loop first asked: it waited on the
-  // backoff — a handful of asks, one status read each, never one per cycle — recorded once the
-  // release served, and never asked for that release again. Each measurement read whole only the
-  // deliveries in its window, which grows with the day, never the ledger; master status reads the
-  // newest back for the release serving.
+  // GY-1385, GY-1437: after each verified deployment the loop itself measured GY-87's throughput
+  // claim for the release the plane served, under one action per observed release. The plane's
+  // status named each deploy only three minutes after the loop first asked: it waited on the
+  // backoff — a handful of asks, one status read each, never one per cycle — and recorded once the
+  // release served. The day's claim reads unverified (its deliveries ran beside a coordinator), so
+  // the serving release stays asked on the failure backoff, never on consecutive cycles, and is
+  // re-measured at most once per throughputRemeasureMs; a superseded or verified release is never
+  // asked again. Each measurement read whole only the deliveries in its window, which grows with
+  // the day, never the ledger; master status reads the newest back for the release serving.
   const { throughput } = day;
   const recorded = throughput.asks.filter(ask => ask.outcome === 'recorded');
-  assert.deepEqual(recorded.map(ask => ask.revision), production.deploys.map(deploy => deploy.sha), `one measurement per deploy, for the release the plane served: ${JSON.stringify(throughput.asks)}`);
+  const trace = () => JSON.stringify(throughput.asks.map(ask => ({ ...ask, sha: ask.sha.slice(0, 8), revision: ask.revision?.slice(0, 8), elapsed: Math.round(ask.elapsed / minute) })));
+  assert.deepEqual([...new Set(recorded.map(ask => ask.revision))], production.deploys.map(deploy => deploy.sha), `measurements only of each deploy, for the release the plane served: ${trace()}`);
   assert.deepEqual([...actionKeys].filter(key => key.startsWith('throughput:')).length, production.deploys.length + 1, 'one action per observed release: the day\'s first and each deploy');
-  for (const deploy of production.deploys) {
+  for (const [index, deploy] of production.deploys.entries()) {
     const asks = throughput.asks.filter(ask => ask.sha === deploy.sha), waits = asks.filter(ask => ask.outcome === 'waiting');
-    assert.ok(waits.length >= 1 && waits.length <= 3, `the plane's lag was waited out on the backoff, not once per cycle: ${waits.length} waits for ${deploy.sha.slice(0, 12)} deployed at +${Math.round((deploy.at - dayStart) / minute)} min; asks: ${JSON.stringify(throughput.asks.map(ask => ({ ...ask, sha: ask.sha.slice(0, 8), revision: ask.revision?.slice(0, 8), elapsed: Math.round(ask.elapsed / minute) })))}`);
+    assert.ok(waits.length >= 1 && waits.length <= 3, `the plane's lag was waited out on the backoff, not once per cycle: ${waits.length} waits for ${deploy.sha.slice(0, 12)} deployed at +${Math.round((deploy.at - dayStart) / minute)} min; asks: ${trace()}`);
     assert.ok(waits.every(ask => ask.elapsed < throughput.firstAsk.get(deploy.sha)! - dayStart + throughput.statusLagMs), 'every wait fell inside the lag');
-    assert.deepEqual(asks.map(ask => ask.outcome).slice(waits.length), ['recorded'], `recorded once the release served, then never asked again: ${asks.map(ask => ask.outcome).join(', ')}`);
+    const served = asks.slice(waits.length);
+    assert.equal(served[0]?.outcome, 'recorded', `recorded once the release served: ${asks.map(ask => ask.outcome).join(', ')}`);
+    assert.ok(served.every(ask => ask.outcome === 'recorded' || ask.outcome === 'current'), `once served it is only measured or found current: ${asks.map(ask => ask.outcome).join(', ')}`);
+    // The backoff doubles from one cycle: past the second ask no two asks are on consecutive cycles.
+    for (let at = 2; at < asks.length; at++) assert.ok(asks[at].cycle - asks[at - 1].cycle >= 2, `asked on the backoff, never once per cycle: ${trace()}`);
+    const records = served.filter(ask => ask.outcome === 'recorded');
+    for (let at = 1; at < records.length; at++) assert.ok(records[at].elapsed - records[at - 1].elapsed >= throughputRemeasureMs, `re-measured at most once per ${throughputRemeasureMs / minute} min: ${trace()}`);
+    const settled = records.findIndex(ask => ask.verdict === 'verified');
+    if (settled >= 0) assert.equal(served.at(-1), records[settled], 'a release measured verified is never asked again');
+    else assert.ok(records.length >= 2 || records[0].elapsed + 2 * throughputRemeasureMs > hours * hour, `an unverified release is re-measured as the day goes on, not frozen at its first count: ${trace()}`);
+    const next = production.deploys[index + 1];
+    if (next) assert.ok(asks.every(ask => ask.elapsed < throughput.firstAsk.get(next.sha)! - dayStart), `a superseded release is never asked again: ${trace()}`);
   }
+  assert.ok(recorded.length >= production.deploys.length + 1, `the unverified claim was re-measured on the day: ${recorded.length} records`);
+  // Records and ledger stay within their retention however long the release stays unverified.
+  const measurements = join(throughput.root, throughputMeasurementDirectory);
+  assert.ok(readdirSync(measurements).filter(name => name.endsWith('.json') && name !== throughputLedgerFile).length <= throughputMeasurementRetention, 'measurement records stay within their retention');
+  const throughputLedger = await readThroughputLedger(measurements);
+  assert.equal(throughputLedger.entries.length, Math.min(recorded.length, throughputLedgerRetention), 'every recorded attempt is in the ledger, within its retention');
+  assert.ok(throughputLedger.entries.every(entry => entry.source === 'loop' && entry.outcome === 'recorded' && entry.window?.since && entry.output), 'each entry keeps its window and output');
+  if (recorded.some(ask => ask.verdict !== 'verified')) assert.ok(throughputLedger.openedAt || recorded.at(-1)!.verdict === 'verified', 'an unverified claim keeps the pursuit open');
   assert.ok(throughput.statusReads <= throughput.asks.length, 'at most one status read per ask');
   assert.ok(recorded.every(ask => ask.read >= 1 && ask.read <= github.merges.filter(entry => entry.at <= dayStart + ask.elapsed).length), 'each measurement read whole at most the deliveries merged so far');
   assert.ok(recorded[1].read > recorded[0].read, `the second measurement read the grown window: ${recorded.map(ask => ask.read).join(' then ')}`);
@@ -617,6 +642,39 @@ test('unit:soak-invariants-hold — a loop change that breaks an invariant fails
   assert.ok(violations.every(line => /lingering-sessions/.test(line)), `nothing else is violated: ${violations.filter(line => !/lingering-sessions/.test(line)).slice(0, 3).join('\n')}`);
   // The violation is a fault of its class on the loop's record, which files one item when it recurs.
   assert.equal(state.faults.instances.filter(instance => instance.kind === 'invariant:lingering-sessions' && instance.faultClass === 'session-liveness').length, 1);
+});
+
+test('unit:soak-invariants-hold — a system-driven docs conflict whose docs-sync outlasts the loop-owned rework\'s 10-minute bound is stopped at its cutoff and reworked once inside the bound, while one that pushes just before the cutoff is adopted and never reworked, with every invariant holding', { timeout: 600_000 }, async () => {
+  // GY-1434. The bound runs from the conflict first recorded on the head; the docs-sync is stopped
+  // docsSyncCutoffLeadMs ahead of it and gives the conflict up only on a reading taken since.
+  for (const [syncMs, outcome] of [[30 * minute, 'stopped'], [conflictReworkBoundMs - docsSyncCutoffLeadMs - 2 * minute, 'pushed']] as const) {
+    const day = await simulateDay({ hours: 4, plan: { docsConflict: { ...basePlan.docsConflict, syncMs } } });
+    assertLaunchesConfined(day, coordinatorRoot!);
+    const { violations, failures, state, docsSyncRuns, final, herdr, decideCalls, items } = day;
+    assert.deepEqual(violations, [], `every system invariant holds (docs-sync for ${syncMs / minute} minutes)`);
+    assert.deepEqual(failures, [], 'no cycle failed');
+    const conflicted = items[basePlan.docsConflict.item - 1].key, item = final.find(entry => entry.key === conflicted)!;
+    assert.deepEqual(docsSyncRuns.map(run => [run.plan.key, run.outcome]), [[conflicted, outcome]], 'one docs-sync session, which pushed or was stopped');
+    assert.ok(docsSyncRuns.every(run => herdr.closed.includes(run.pane)) && Object.values(state.docsSyncs).every(watch => watch.settledAt), 'its session is closed and its record settled');
+    const reworks = decideCalls.filter(call => call.key === conflicted && call.action === 'rework');
+    const giveUps = Object.values(state.actions).filter(action => action.work === conflicted && /docs-sync session .* was stopped at .* without having moved/.test(action.detail));
+    if (outcome === 'pushed') {
+      // The push landed before the cutoff: it is adopted, and no rework round is spent on the head it replaced.
+      assert.deepEqual(reworks, [], 'a docs-sync that pushed is never reworked');
+      assert.deepEqual(giveUps, [], 'and never given up');
+      assert.equal(item.pipeline?.reworkRounds ?? 0, 0);
+      assert.deepEqual(state.conflicts.filter(entry => entry.work === conflicted).map(entry => entry.route), ['docs-sync']);
+    } else {
+      // Stopped at its cutoff: one give-up for the head, and the loop's own rework requested once, inside the bound.
+      assert.equal(giveUps.length, 1, `the conflicting head settles exactly one give-up: ${JSON.stringify(giveUps.map(action => action.detail))}`);
+      const head = docsSyncRuns[0].plan.head, round = reworks.filter(call => (call.input as { binding?: string } | undefined)?.binding === `${head}:conflict`);
+      assert.equal(round.length, 1, `the loop requested the conflict rework once: ${JSON.stringify(reworks)}`);
+      const since = Date.parse(state.conflicts.find(entry => entry.work === conflicted)!.at), requested = Object.entries(state.actions).find(([key]) => key.startsWith('decision:rework:') && key.includes(`:${head}:conflict:`))?.[1];
+      assert.ok(requested && Date.parse(requested.at) - since <= conflictReworkBoundMs, `requested inside the bound: ${requested ? (Date.parse(requested.at) - since) / minute : 'never'} minutes after the conflict was routed`);
+    }
+    // No stalled-step attention stands for the item once its round is requested (or was never owed).
+    assert.ok(!state.faults.instances.some(instance => instance.kind === 'stalled-step' && instance.subject === conflicted), 'no stalled step is left on the item');
+  }
 });
 
 test('unit:soak-invariants-hold — broad items are split before dispatch with bounded decomposition concurrency, child items merge, parents are delivered, and every system invariant holds', { timeout: 360_000 }, async () => {

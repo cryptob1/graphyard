@@ -26,11 +26,11 @@ When a step needs a person, `up` prints one link and waits until the step is gre
 | An account that writes code, one that reviews | **Connect an account**: Settings → Agents → Connect (an API key, or a subscription sign-in) |
 | Branch protection, coordinator running | none: Graphyard does these |
 
-When all are green, **Describe what you want built** submits a first work item the master refines. Once the first pull request reports `Graphyard / merge`, rerun `up` to require it.
+When all are green, **Describe what you want built** records a goal, like `graphyard goal`. Once the first pull request reports `Graphyard / merge`, rerun `up` to require it.
 
 ## Agent setup: graphyard up --agent
 
-An agent sets Graphyard up with `graphyard up --agent --repo OWNER/REPO [--goal FILE] [--browser-profile PROFILE]`: JSON events on stderr, summary on stdout, exit `0` green, `1` failed, `2` prerequisite, `3` still waiting (rerun resumes). It creates the Apps in a Chrome profile signed in to GitHub (passed, else the master's; with neither it exits `2` first), recorded under `.graphyard/master-actions/`; connects accounts logged in on the host; sets deployment variables from saved credentials; submits the goal from FILE once. Only a person's own device is handed off (GitHub Mobile, passkey, a subscription login's browser approval): a `handoff` event with one sentence and a link or code; the run then resumes.
+An agent sets Graphyard up with `graphyard up --agent --repo OWNER/REPO [--goal FILE] [--browser-profile PROFILE]`: JSON events on stderr, summary on stdout, exit `0` green, `1` failed, `2` prerequisite, `3` still waiting (rerun resumes). It creates the Apps in a Chrome profile signed in to GitHub (passed, else the master's; with neither it exits `2` first), recorded under `.graphyard/master-actions/`; connects accounts logged in on the host; sets deployment variables from saved credentials; records FILE as a goal once, likewise. Only a person's own device is handed off (GitHub Mobile, passkey, a subscription login's browser approval): a `handoff` event with one sentence and a link or code; the run then resumes.
 
 ## Troubleshooting: the manual steps
 

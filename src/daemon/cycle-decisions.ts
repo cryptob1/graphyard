@@ -434,7 +434,12 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     }
     let key = decisionKey(item, decision); if (routinePass.over()) { needed.add(key); budget.defer(item); return; }
     // A confirmed conflict confined to docs pages is a docs-sync's, not a worker's (GY-566).
-    if (decision.action === 'rework' && !state.approvals[key] && baseRefreshConflict(item) && decision.binding === `${item.candidate!.sha}:conflict` && await docsSync.holds(item)) return;
+    // A docs-sync stopped at the loop-owned rework's cutoff (GY-1434) gives the conflict up on a reading taken since: woken here at
+    // once, or by the observation job for the next cycle. That reading is the one the rework is then decided from.
+    const synced: { work: Work | null } = { work: null };
+    const observe = async (work: Work) => { synced.work = wake ? await wake(work, clock) : null; if (!synced.work) await wakeObservationJob(cycle, work, 'docs-sync give-up'); return synced.work; };
+    if (decision.action === 'rework' && !state.approvals[key] && baseRefreshConflict(item) && decision.binding === `${item.candidate!.sha}:conflict` && await docsSync.holds(item, observe)) return;
+    if (synced.work && synced.work.candidate?.sha === item.candidate?.sha && synced.work.policyRevision === item.policyRevision) item = synced.work;
     needed.add(key);
     // Rework waits for an observation that still describes the item (GY-144); the step wakes it unless paused (GY-793) and re-decides.
     // The loop's own landed wake of the submitted head counts as that observation, whatever its age (GY-1266, GY-1257).

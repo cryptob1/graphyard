@@ -13,7 +13,10 @@
 // `--record DIR` appends the report as one timestamped JSON file (never overwriting one recorded in
 // the same millisecond, and keeping the newest 30 of its own records; other files in DIR are left alone), which is what `master status` reads to say
 // whether the claim is verified against the release now serving. The loop records one itself after
-// each verified deployment (GY-1385); this script is the by-hand run. The arithmetic, the population
+// each verified deployment (GY-1385); this script is the by-hand run. Every `--record` run, measured
+// or failed, is also appended to DIR/ledger.json with its per-delivery list, timestamps and printed
+// output (GY-1437); a run that cannot read the plane records which blocker stopped it — missing
+// credentials or an unreachable URL — so the 48-hour escalation can name it. The arithmetic, the population
 // rule and the recorder are the module master status uses (src/throughput.ts), loaded through tsx,
 // so the measurement and the report can never disagree.
 import { spawnSync } from 'node:child_process';
@@ -58,13 +61,28 @@ export function claimContainment({ revision, mergeSha, claim, repository }, run 
 }
 
 async function readToken(env) {
-  if (env.GRAPHYARD_TOKEN_FILE) return (await readFile(resolve(env.GRAPHYARD_TOKEN_FILE), 'utf8')).trim();
+  if (env.GRAPHYARD_TOKEN_FILE) {
+    try { return (await readFile(resolve(env.GRAPHYARD_TOKEN_FILE), 'utf8')).trim(); }
+    catch (error) { throw new Error(`GRAPHYARD_TOKEN_FILE ${env.GRAPHYARD_TOKEN_FILE} cannot be read as the credential: ${error.message}`); }
+  }
   if (env.GRAPHYARD_TOKEN) return env.GRAPHYARD_TOKEN;
   throw new Error('Set GRAPHYARD_TOKEN or GRAPHYARD_TOKEN_FILE to a credential that can read the work snapshot (coordinator, reader or operator)');
 }
 
 export async function main(argv = process.argv.slice(2), env = process.env, deps = {}) {
   const options = parseArguments(argv);
+  if (!options.record) return measure(options, env, deps);
+  const ledger = deps.ledger ?? await ledgerModule();
+  try { return await measure(options, env, deps, ledger); }
+  catch (error) {
+    // The failure is the run's finding too: recorded with its blocker, then reported as before.
+    try { await ledger.appendThroughputLedger(resolve(options.record), ledger.failedEntry(error, { source: 'script', needed: (await module_()).throughputClaim.minimumDeliveries, at: new Date().toISOString() })); }
+    catch { /* an unwritable ledger never hides the measurement's own error */ }
+    throw error;
+  }
+}
+
+async function measure(options, env, deps, ledger = null) {
   const base = env.GRAPHYARD_URL;
   if (!base) throw new Error('Set GRAPHYARD_URL to the control plane origin');
   const fetcher = deps.fetcher ?? fetch;
@@ -100,7 +118,9 @@ export async function main(argv = process.argv.slice(2), env = process.env, deps
     report.recorded = join(options.record, await recordThroughputMeasurement(resolve(options.record), report, '.'));
   }
   const { renderThroughput } = deps.render ? { renderThroughput: deps.render } : await module_();
-  console.log(options.json ? JSON.stringify(report, null, 2) : renderThroughput(report) + (report.recorded ? `\nRecorded ${report.recorded}` : ''));
+  const output = options.json ? JSON.stringify(report, null, 2) : renderThroughput(report) + (report.recorded ? `\nRecorded ${report.recorded}` : '');
+  if (ledger) await ledger.appendThroughputLedger(resolve(options.record), ledger.recordedEntry(report, { source: 'script', file: report.recorded, output }));
+  console.log(output);
   // An unverified claim is not an error — it is the measurement's finding — but the exit status
   // says so, so a scheduled run cannot report a miss as a quiet success.
   if (report.verdict !== 'verified') process.exitCode = 2;
@@ -109,5 +129,6 @@ export async function main(argv = process.argv.slice(2), env = process.env, deps
 
 /** The verification module is TypeScript; tsx is a runtime dependency of the CLI already. */
 const module_ = async () => { const { tsImport } = await import('tsx/esm/api'); return tsImport('../src/throughput.ts', import.meta.url); };
+const ledgerModule = async () => { const { tsImport } = await import('tsx/esm/api'); return tsImport('../src/throughput-ledger.ts', import.meta.url); };
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main().catch(error => { console.error(error.message); process.exitCode = 1; });

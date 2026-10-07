@@ -41,7 +41,7 @@ interface World {
   ticks: number;
   /** The credential files the run minted a sign-in link from. */
   signIns: (string | null)[];
-  /** The request id of each goal create. */
+  /** The request id of each goal record (`graphyard goal FILE`). */
   creates: (string | null)[];
   /** The onboarding pull request once published, and whether it has merged. */
   onboardingPullRequest: string | null; onboardingMerged: boolean;
@@ -76,7 +76,7 @@ function dependencies(w: World, root: string, events: UpEvent[], extra: Partial<
     async cli(args, options = {}) {
       w.calls.push(args);
       const joined = args.join(' ');
-      if (args[0] === 'master' && args[1] === 'create') w.creates.push(options.env?.GRAPHYARD_REQUEST_ID ?? null);
+      if (args[0] === 'goal') w.creates.push(options.env?.GRAPHYARD_REQUEST_ID ?? null);
       for (const prefix of w.failOnce) if (joined.startsWith(prefix)) { w.failOnce.delete(prefix); return { code: 1, stdout: '{"error":"interrupted"}' }; }
       if (args[0] === 'install' && args.includes('--plan')) {
         return { code: 0, stdout: JSON.stringify({ installId: 'acme-shop', installDirectory: '/install/acme-shop', ...(w.host ? { host: { units: [] } } : {}), principals: [{ id: 'acme-shop-operator', role: 'admin', sessionKind: 'human' }, { id: 'acme-shop-master', role: 'coordinator', sessionKind: 'ai' }],
@@ -90,7 +90,7 @@ function dependencies(w: World, root: string, events: UpEvent[], extra: Partial<
       }
       if (joined === 'master registry propose --apply') { w.accounts = true; return { code: 0, stdout: '{}' }; }
       if (joined === 'master restart') { w.loop = true; return { code: 0, stdout: '{}' }; }
-      if (args[0] === 'master' && args[1] === 'create') return { code: 0, stdout: JSON.stringify({ key: 'GY-1', title: 'goal' }) };
+      if (args[0] === 'goal') return { code: 0, stdout: JSON.stringify({ key: 'GOAL-1', stage: 'acceptance-drafting' }) };
       return { code: 0, stdout: '{}' };
     },
     ...extra,
@@ -258,10 +258,10 @@ test('unit:graphyard-up-agent-mode — up --agent reaches a green checklist with
   assert.equal(result.prompts, 0, 'agent mode never prints the Setup address and waits');
   assert.deepEqual(result.handoffs, [], 'nothing is handed to a person');
   assert.ok(quiet.calls.some(args => args.join(' ') === 'master registry propose --apply'), 'accounts come from login homes on the host');
-  const create = quiet.calls.find(args => args[0] === 'master' && args[1] === 'create')!;
+  const create = quiet.calls.find(args => args[0] === 'goal')!;
   assert.ok(create, 'the goal is submitted');
-  assert.equal(result.goal, 'GY-1');
-  assert.ok(quiet.calls.findIndex(args => args[0] === 'master' && args[1] === 'create') > quiet.calls.findLastIndex(args => args[0] === 'onboarding-merged?'), 'the goal is submitted only once the onboarding pull request has merged');
+  assert.equal(result.goal, 'GOAL-1');
+  assert.ok(quiet.calls.findIndex(args => args[0] === 'goal') > quiet.calls.findLastIndex(args => args[0] === 'onboarding-merged?'), 'the goal is submitted only once the onboarding pull request has merged');
   assert.ok(result.completed.includes('goal'));
   assert.ok(events.every(event => JSON.parse(JSON.stringify(event)).kind), 'every event is JSON');
 
@@ -296,7 +296,7 @@ test('unit:graphyard-up-agent-mode — up --agent reaches a green checklist with
   // An interrupted goal submission replays the same request id, so the control plane creates the goal once.
   const goalRoot = await temporaryDirectory('graphyard-up-goal');
   await writeFile(join(goalRoot, 'goal.txt'), 'A sign-up page that sends a welcome email');
-  const goalWorld = world({ app: true, reviewer: true, accounts: true, failOnce: new Set(['master create']) });
+  const goalWorld = world({ app: true, reviewer: true, accounts: true, failOnce: new Set(['goal']) });
   const goalDeps = () => dependencies(goalWorld, goalRoot, [], { driveApp: async () => ({ state: 'done' }) });
   assert.equal((await runUp(request({ agent: true, goalFile: 'goal.txt' }), goalDeps())).exitCode, 1);
   assert.equal((await runUp(request({ agent: true, goalFile: 'goal.txt' }), goalDeps())).exitCode, 0);
@@ -376,7 +376,7 @@ const JARGON: [string, RegExp][] = [
 ];
 
 test('unit:setup-wizard-states — the Setup page shows each checklist state with its one action, offers the goal box only when every item is green, and shows no command, sha or file path', async () => {
-  const { goalWorkItem, setupChecklist } = await checklistModule();
+  const { setupChecklist } = await checklistModule();
   const green = { github: true, githubRepository: 'acme/shop', appPermissions: { missing: [] }, reviewerApps: [{ id: 'claude', appId: 9 }],
     fleet: { roles: [{ role: 'worker', accounts: ['claude-a'] }, { role: 'reviewer', accounts: ['claude-a'] }], accounts: [{ name: 'claude-a', enabled: true, loggedIn: true, smoke: { result: 'pass' } }] },
     setup: { protection: 'complete', loop: true } };
@@ -416,10 +416,41 @@ test('unit:setup-wizard-states — the Setup page shows each checklist state wit
   assert.doesNotMatch(fleetPage(), /data-open-setup/, 'only for the admin');
   // Partially protected (the repository's checks only) is enough to start; the line says what follows.
   assert.equal(setupChecklist({ ...green, setup: { protection: 'checks', loop: true } }).find(item => item.id === 'branch-protection')!.done, true);
-  // The goal becomes a first work item the master refines.
-  const goal = goalWorkItem('  A sign-up page that sends a welcome email\nUse the existing mailer.  ');
-  assert.equal(goal.title, 'A sign-up page that sends a welcome email');
-  assert.match(goal.description, /Use the existing mailer\.$/);
-  assert.deepEqual(goal.criteria.map(criterion => criterion.proofs), [['manual:goal-delivered']]);
-  assert.throws(() => goalWorkItem('short'), /at least 10 characters/);
+});
+
+test('unit:up-goal-uses-pipeline — `up --goal FILE` and the Setup page submit a goal record through the goals API, as `graphyard goal` does, and create no plain work item', async () => {
+  const { runUp } = await up();
+  const { goalSubmission } = await checklistModule();
+  const { goalInputSchema, recordGoal } = await import('../src/model/goal.js');
+  const { submitGoal } = await import('../web/pages/setup.js');
+  const text = '  A sign-up page that sends a welcome email\r\nUse the existing mailer.  ';
+
+  // The goal box's text becomes a goal input the goals API accepts: the acceptance role drafts it.
+  const input = goalSubmission(text);
+  assert.equal(input.statement, 'A sign-up page that sends a welcome email\nUse the existing mailer.');
+  const recorded = recordGoal(goalInputSchema.parse(input), 'GOAL-1', { actor: { id: 'acme-shop-operator', role: 'admin' } as any, at: new Date(0).toISOString() });
+  assert.equal(recorded.key, 'GOAL-1');
+  assert.equal(recorded.stage, 'acceptance-drafting', 'a recorded goal waits on the acceptance role');
+  assert.throws(() => goalSubmission('short'), /at least 10 characters/);
+  assert.throws(() => goalSubmission('x'.repeat(2001)), /under 2000 characters/);
+  assert.doesNotThrow(() => goalInputSchema.parse(goalSubmission('x'.repeat(2000))), 'the box\'s limit fits a goal statement');
+
+  // `up --goal FILE` runs `graphyard goal FILE` with that input, never a work item create.
+  const root = await temporaryDirectory('graphyard-up-goal-pipeline');
+  await writeFile(join(root, 'goal.txt'), text);
+  const w = world({ app: true, reviewer: true, accounts: true });
+  const result = await runUp(request({ agent: true, goalFile: 'goal.txt' }), dependencies(w, root, [], { driveApp: async () => ({ state: 'done' }) }));
+  assert.equal(result.exitCode, 0, result.next);
+  assert.equal(result.goal, 'GOAL-1');
+  const goals = w.calls.filter(args => args[0] === 'goal');
+  assert.equal(goals.length, 1, 'one goal record');
+  assert.deepEqual(goalInputSchema.parse(JSON.parse(await readFile(goals[0][1], 'utf8'))), input, 'the file holds the goal input `graphyard goal` reads');
+  assert.equal(w.calls.filter(args => args.includes('create') || args[0] === 'work').length, 0, 'no plain work item');
+
+  // The Setup page's 'Describe what you want built' posts to the goals API, never to work.
+  const posts: { path: string; body: unknown }[] = [];
+  const key = await submitGoal(async (path: string, body?: unknown) => { posts.push({ path, body }); return { key: 'GOAL-2', stage: 'acceptance-drafting' }; }, text);
+  assert.equal(key, 'GOAL-2');
+  assert.deepEqual(posts, [{ path: 'goals', body: input }]);
+  assert.doesNotThrow(() => goalInputSchema.parse(posts[0].body));
 });

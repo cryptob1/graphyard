@@ -15,6 +15,7 @@ import { masterStatusReport } from '../src/cli/master-status.js';
 import { actionRetryDelay } from '../src/model/actions.js';
 import { emptyDaemonState, runCycle, writeDaemonState, type DaemonEffects } from '../src/master-daemon.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
+import { readThroughputLedger, throughputLedgerFile } from '../src/throughput-ledger.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 // @ts-expect-error Dependency-free measurement script.
 import { claimContainment, main as measureMain, parseArguments } from '../scripts/measure-throughput.mjs';
@@ -340,8 +341,12 @@ test('integration:live-throughput-population — the population rule reads the r
     assert.equal(recorded.deployed.revision, deployedRevision, 'the measurement names the deployed commit it observed');
     assert.equal(recorded.deployed.origin, environment.GRAPHYARD_URL);
     assert.equal(recorded.population.admitted, 10, 'the live read counts every executor-driven delivery in the window');
-    const files = await readdir(directory);
+    const files = (await readdir(directory)).filter(name => name !== throughputLedgerFile);
     assert.equal(files.length, 1);
+    // The run is also in the ledger (GY-1437): its per-delivery list and the output it printed.
+    const [entry] = (await readThroughputLedger(directory)).entries;
+    assert.equal(entry.verdict, 'verified'); assert.equal(entry.deliveries.filter(delivery => delivery.admitted).length, 10);
+    assert.equal(entry.output, logged.join('\n'));
     assert.deepEqual((JSON.parse(await readFile(join(directory, files[0]), 'utf8')) as ThroughputReport).population, recorded.population);
     assert.match(logged.join('\n'), /throughput claim: VERIFIED/);
     assert.match(logged.join('\n'), /Excluded:/);
@@ -515,6 +520,8 @@ test('unit:throughput-bounded-read — the measurement chooses its window from s
 
 test('unit:throughput-recorded-by-loop — after a verified deployment the loop records one throughput measurement for the release now serving, at most once per release, with its coordinator credential, and master status reads it back', async () => {
   const root = await temporaryDirectory('throughput-loop');
+  // The measurement records, without the ledger beside them (GY-1437).
+  const records = async () => (await readdir(join(root, throughputMeasurementDirectory))).filter(name => name !== throughputLedgerFile);
   try {
     // GY-87 itself, delivered and observed serving, and the deliveries made since.
     const windowStart = '2100-01-01T00:00:00.000Z', at = (minutes: number) => new Date(Date.parse(windowStart) + minutes * minute).toISOString();
@@ -559,11 +566,11 @@ test('unit:throughput-recorded-by-loop — after a verified deployment the loop 
     if (visible.verdict === 'unverified') assert.ok(visible.shortfall, 'an unverified measurement names its shortfall');
     assert.doesNotMatch(visible.reason, /no post-deploy measurement has ever been recorded/);
 
-    // The same release is never measured twice.
+    // The same release is not measured again while its record is fresh (an unverified one is re-read hourly, GY-1437).
     read.length = 0;
     const again = await loopThroughputMeasurement(root, input(deployedRevision));
     assert.equal(again.outcome, 'current'); assert.deepEqual(read, []);
-    assert.equal((await readdir(join(root, throughputMeasurementDirectory))).length, 1);
+    assert.equal((await records()).length, 1);
     // A deployment the plane does not serve yet is waited for, not measured as the old release.
     const next = commit('next-release');
     assert.equal((await loopThroughputMeasurement(root, input(next))).outcome, 'waiting');
@@ -572,7 +579,7 @@ test('unit:throughput-recorded-by-loop — after a verified deployment the loop 
     revision = next;
     const moved = await loopThroughputMeasurement(root, input(next));
     assert.equal(moved.outcome, 'recorded'); assert.equal(moved.report!.deployed.revision, next);
-    assert.equal((await readdir(join(root, throughputMeasurementDirectory))).length, 2);
+    assert.equal((await records()).length, 2);
     // Ancestry git cannot answer stays unknown and keeps the claim unverified.
     revision = commit('third-release');
     const unknown = await loopThroughputMeasurement(root, { ...input(revision), contains: async () => null });
@@ -586,11 +593,11 @@ test('unit:throughput-recorded-by-loop — after a verified deployment the loop 
     const named = await loopThroughputMeasurement(root, { ...input(revision), work: (await store.list()).map(summary), claimKey: claimed.key });
     assert.equal(named.outcome, 'recorded'); assert.equal(named.report!.window.basis, 'deployment-observation');
     // The record stays bounded: past the retention the oldest files are retired and the newest still reads back.
-    const before = (await readdir(join(root, throughputMeasurementDirectory))).sort();
+    const before = (await records()).sort();
     assert.equal(before.length, 4);
     const newest = { ...named.report!, measuredAt: new Date(Date.now() + 60_000).toISOString() };
     const kept = await recordThroughputMeasurement(root, newest, undefined, 2);
-    const after = (await readdir(join(root, throughputMeasurementDirectory))).sort();
+    const after = (await records()).sort();
     assert.deepEqual(after, [before[3], kept.split('/').pop()], 'the two newest files remain');
     assert.equal((await readThroughputMeasurement(root))!.report.measuredAt, newest.measuredAt);
   } finally { await rm(root, { recursive: true, force: true }); }
@@ -708,7 +715,7 @@ test('unit:throughput-same-millisecond-records — measurements recorded in the 
     const foreign = ['delivery-causes.json', 'pipeline-speed.json', '0000-report.json', '9999-12-31T23-59-59-999Z.backup.json'];
     for (const name of foreign) await writeFile(join(directory, name), JSON.stringify({ reason: `foreign ${name}` }));
     await recordThroughputMeasurement(root, report('2026-10-07T04:40:49.000Z', 200), undefined, 1);
-    assert.deepEqual((await readdir(directory)).sort(), [...foreign, '2026-10-07T04-40-49-000Z.json'].sort(), 'only the recorder\'s own files are retired');
+    assert.deepEqual((await readdir(directory)).sort(), [...foreign, throughputLedgerFile, '2026-10-07T04-40-49-000Z.json'].sort(), 'only the recorder\'s own files are retired, and the by-hand runs\' ledger stays');
     assert.equal((await readThroughputMeasurement(root))!.report.reason, 'record 200');
     // Past retention in one millisecond, a later record still takes a suffix above every one recorded,
     // so it orders newest and survives instead of reusing the retired unsuffixed name.
