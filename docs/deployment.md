@@ -35,6 +35,8 @@ Unserved five minutes after a new `GRAPHYARD_BUILD_SHA`, merge is a `delivery.de
 
 The loop (coordinator credential) records GY-87's throughput claim per verified served release in `.graphyard/measurements/throughput` (newest 30), backing off on failure while another revision serves, reading only deliveries since; `master status` reports it verified or the shortfall (`scripts/measure-throughput.mjs --record` by hand).
 
+Deliveries awaiting a not-yet-due or validating [promotion](delivery.md) are the promotion window: release lag and the `loaded-revision` [resource](operations-reference.md#control-plane-resources) skip them, naming `nextDueAt`, owing no restart; unavailable observations grant no grace. Sandboxed `systemctl --user` probes read supervision unverified, not absent, given the cursor's packaged unit.
+
 ## Backup, upgrade, rollback
 
 **Backup:** `graphyard db backup ./graphyard.json` (with `DATABASE_URL`), `graphyard db verify FILE`; `graphyard db fence` before move (`--release` undoes). **Upgrade:** back up, deploy, check `/healthz` `commit`, run any [App-permission migration](install.md#upgrading-an-existing-installation); **rollback** only to same-schema-generation image. **Restore:** `graphyard db migrate` an empty database, then `graphyard db restore FILE`.
