@@ -768,7 +768,16 @@ export interface LoopSupervision {
   reason: string | null;
   /** What the operator must run to keep the loop alive where Graphyard cannot supervise it. */
   instruction: string | null;
+  /** Unsupported only because this process's `systemctl --user` probe could not reach the user manager (GY-1400): a sandbox masks it. */
+  unreachable?: boolean;
 }
+
+/**
+ * What the daemon cursor records of the loop's own supervision (GY-1400): the supervisor unit the
+ * loop runs under, read from its cgroup, and whether its last self-upgrade re-executed it through
+ * that unit. Either is the host's supervisor answering, whatever this vantage can reach.
+ */
+export interface LoopSupervisorEvidence { unit: string | null; reexecuted: boolean }
 export interface LoopSupervisorInstallation extends LoopSupervision {
   /** `refused`: nothing was written or enabled; `refused` below says why and `instruction` what to run. */
   wrote: 'created' | 'updated' | 'unchanged' | 'none' | 'refused';
@@ -929,11 +938,12 @@ WantedBy=default.target
 }
 
 /** Whether this host can be given a supervisor at all, and why not when it cannot. */
-export function supervisorSupport(host: LoopSupervisorHost = {}): { supported: boolean; reason: string | null } {
+/** `unreachable`: the platform has systemd, but this process's `systemctl --user` probe could not reach the user manager (GY-1400). */
+export function supervisorSupport(host: LoopSupervisorHost = {}): { supported: boolean; reason: string | null; unreachable?: boolean } {
   const platform = host.platform ?? process.platform;
   if (platform !== 'linux') return { supported: false, reason: `Graphyard supervises the loop with a systemd user unit, and this host reports ${platform}` };
   try { supervisorRun(host)('systemctl', ['--user', 'show-environment']); return { supported: true, reason: null }; }
-  catch (error) { return { supported: false, reason: `This host has no reachable systemd user manager, so no unit can be installed or enabled: ${detail(error)}` }; }
+  catch (error) { return { supported: false, unreachable: true, reason: `This host has no reachable systemd user manager, so no unit can be installed or enabled: ${detail(error)}` }; }
 }
 
 /**
@@ -1061,7 +1071,7 @@ export async function loopSupervision(input: Pick<LoopUnitInput, 'root' | 'cliPa
   const support = supervisorSupport(host);
   const unitPath = join(loopUnitDirectory(host), loopUnitName);
   if (!support.supported) return { supported: false, unit: loopUnitName, unitPath: null, installed: false, enabled: null, active: null, linger: null,
-    reason: support.reason, instruction: unsupervisedInstruction(input) };
+    reason: support.reason, instruction: unsupervisedInstruction(input), ...(support.unreachable ? { unreachable: true } : {}) };
   const run = supervisorRun(host);
   // Reading supervision must never be able to fail a report: an unreadable unit file is one signal
   // missing, and systemd's own answer below still decides whether a unit is installed.
@@ -1085,8 +1095,14 @@ export async function loopSupervision(input: Pick<LoopUnitInput, 'root' | 'cliPa
  * Verified rather than assumed: a loop nobody restarts is named here while the pipeline still
  * looks busy, which is the whole gap between GY-84's promise and what it delivered.
  */
-export function loopSupervisionAttention(supervision: LoopSupervision): { text: string; next: string }[] {
+export function loopSupervisionAttention(supervision: LoopSupervision, evidence?: LoopSupervisorEvidence | null): { text: string; next: string }[] {
   const reinstall = 'graphyard master init --token-stdin on this host reinstalls and enables the loop unit; repository setup is what installs it';
+  // A probe that cannot reach the user manager — inside a worker's or the doctor's sandbox, where
+  // the user bus is masked — says nothing about the host while the cursor records the loop running
+  // under its unit (GY-1400): it is a vantage that could not verify, never a host-supervision fault.
+  if (!supervision.supported && supervision.unreachable && (evidence?.unit || evidence?.reexecuted))
+    return [{ text: `Whether the master loop is supervised could not be verified from this vantage: ${supervision.reason}. The daemon cursor records the loop running under ${evidence.unit ?? supervision.unit}${evidence.reexecuted ? ' (its last self-upgrade re-executed it through that unit)' : ''}, so this is the reading process's sandbox, not the host`,
+      next: `systemctl --user status ${evidence.unit ?? supervision.unit} from a host shell outside any sandbox` }];
   if (!supervision.supported) return [{ text: `The master loop is not supervised on this host: ${supervision.reason}. A crash or a reboot leaves it down until somebody starts it`, next: supervision.instruction! }];
   if (!supervision.installed) return [{ text: `The master loop has no supervisor installed on this host (${supervision.unit} is not present), so nothing restarts it after a crash or a reboot and its own restart attention item has nobody to act on it`, next: reinstall }];
   const items: { text: string; next: string }[] = [];
