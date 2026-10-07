@@ -2080,11 +2080,15 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     await this.request(`/actions/runs/${job.run_id}/rerun-failed-jobs`, 'POST', {});
     return named;
   }
-  /** The workflow run of the Actions job behind check run `checkRunId`, and that job's attempt (GY-1468). */
-  async jobRun(checkRunId: number): Promise<{ id: number; attempt: number | null }> {
+  /**
+   * The workflow run of the Actions job behind check run `checkRunId`, that job's attempt, and the
+   * step it stopped in — its first step that did not succeed or skip — so a fault names where (GY-1468).
+   */
+  async jobRun(checkRunId: number): Promise<{ id: number; attempt: number | null; step: string | null }> {
     const job = await this.request(`/actions/jobs/${checkRunId}`);
     demand(Number.isSafeInteger(job?.run_id), `Check run ${checkRunId} is not a GitHub Actions job; it cannot be rerun`);
-    return { id: job.run_id, attempt: Number.isSafeInteger(job.run_attempt) ? job.run_attempt : null };
+    const stopped = (Array.isArray(job.steps) ? job.steps : []).find((step: any) => !['success', 'skipped'].includes(step?.conclusion));
+    return { id: job.run_id, attempt: Number.isSafeInteger(job.run_attempt) ? job.run_attempt : null, step: typeof stopped?.name === 'string' ? stopped.name.slice(0, 120) : null };
   }
   /**
    * The workflow run a rerun was requested on (GY-1096): its status (`queued`, `waiting`,

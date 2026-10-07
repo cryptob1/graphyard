@@ -620,22 +620,28 @@ test('unit:main-guard-cancel-bound-escalates a run still cancelled past the reru
   fake.checks.set(base, green);
   const options = { required, ciAppIds: [ci], now: new Date(at), cancelled: new Set<string>() };
   // Every attempt is cancelled again: the guard reruns up to the bound, then reports.
-  let attempt = 1; const reruns: number[] = [];
-  fake.ports.cancelledRun = async () => ({ id: 4242, attempt });
+  let attempt = 1, reads = 0, recordFails = 1; const reruns: number[] = [];
+  fake.ports.cancelledRun = async () => { reads++; return { id: 4242, attempt, step: 'Install bubblewrap (the confinement suite runs real namespaces)' }; };
   fake.ports.rerunCancelled = async checkRun => { reruns.push(checkRun); attempt += 1; return 'requested'; };
-  for (let tick = 0; tick < limit + 3; tick++) {
+  // The first durable record fails: the fault is not marked seen, so the next tick records it.
+  const record = fake.ports.record;
+  fake.ports.record = async (work, revert) => { if (revert.cause === 'cancelled' && recordFails-- > 0) throw new Error('database unavailable'); return record(work, revert); };
+  const errors: string[] = [];
+  for (let tick = 0; tick < limit + 6; tick++) {
     fake.checks.set(A, cancelledRun(1000 * attempt));
     const result = await runMainGuard(fake.ports, options);
     assert.equal(result.main.state, 'pending', 'a cancelled main is never broken');
-    assert.deepEqual(result.errors, []);
+    errors.push(...result.errors);
   }
   assert.equal(reruns.length, limit, 'reruns stop at the bound');
+  assert.equal(errors.length, 1); assert.match(errors[0], /database unavailable/);
+  assert.equal(reads, limit + 2, 'one job read per rerun, one for the failed record and one for the recorded fault; none once it is reported');
   assert.deepEqual(fake.calls.opened, [], 'nothing is reverted');
   assert.equal(itemA.stage, 'done'); assert.equal(itemA.delivery?.mergeSha, A);
   assert.equal(itemA.mainGuardReverts?.length, 1, 'reported once');
   const fault = itemA.mainGuardReverts![0];
   assert.equal(fault.cause, 'cancelled'); assert.equal(fault.revert, null); assert.deepEqual(fault.run, { id: 4242, attempt: limit + 1 });
-  assert.match(fault.reason!, /infrastructure fault: CI run 4242 on main's merge/);
+  assert.match(fault.reason!, /infrastructure fault: CI run 4242 on main's merge .*stopped in step "Install bubblewrap/);
   const lines = mainGuardAttention(fake.items);
   assert.equal(lines.length, 1);
   assert.deepEqual(lines[0].red, [], 'raised once, not every cycle');
