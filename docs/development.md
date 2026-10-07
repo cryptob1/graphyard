@@ -31,6 +31,10 @@ A required check failure the base branch head fails too is a base failure: the l
 
 Candidates conflicting only in `docs/**/*.md` get docs-sync, not rework: base merges in keeping both sides, and approval stays if the non-docs diff is unchanged. A Claude docs-sync session loads only user settings plus its own role file (`.graphyard/harness/docs-sync-*.json`, removed when the session settles), never the master's push deny: it may push its merge only as `git push origin HEAD:refs/heads/BRANCH`. A docs-sync session already running in Herdr is adopted, never relaunched; its hold is the item's recorded wait, bounded by the 10-minute blocked bound (attention naming the session at half), and is re-classified when the base moves (no longer docs-only: rework); one stopped 3 minutes without pushing, gone or past its bound gets its observation woken and rework next, and stays ended if the session reappears. On a system-driven item that rework is the loop's own round, due 10 minutes after the conflict is first recorded on the head: a docs-sync launches only before a cutoff 2 minutes ahead of it, is stopped at the cutoff, and gives the conflict up once an observation taken since shows the head unmoved; a push that landed first is adopted, never reworked. Past it, `master status` raises a `stalled-step` attention (`loop` class) on the item, and a refused hand `master decide GY-N rework` names the loop's round and how overdue it is.
 
+### Known hotspot: src/interventions.ts
+
+`src/interventions.ts` caused 5 merge conflicts in 24 hours, each sending an item back to a worker. It now only re-exports modules under `src/interventions/`, one per concern, and `tests/interventions-hotspot-split.test.ts` holds each to the module size budget. An item touching it, or this page, appends a self-contained paragraph or rule (one ledger kind's reading is one entry in `src/interventions/fold-rules.ts`) rather than rewording shared sentences.
+
 ## Trusted contracts
 
 Trusted CI runs only protected source, refusing candidates whose base lacks the contract: land harness and `scripts/contracts.mjs` entry before requiring its proof.
