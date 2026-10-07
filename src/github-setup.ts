@@ -32,7 +32,11 @@ export function publiclyReachable(origin: string) {
     return !(a === 0 || a === 10 || a === 127 || (a === 100 && b >= 64 && b <= 127) || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168));
   }
   if (host.includes(':')) {
-    const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(host)?.[1];
+    // URL serialises an IPv4-mapped host as hex groups (::ffff:127.0.0.1 → ::ffff:7f00:1), so the
+    // last 32 bits are decoded and judged as the IPv4 address they carry.
+    const dotted = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(host)?.[1];
+    const hex = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(host)?.slice(1).map(group => parseInt(group, 16));
+    const mapped = dotted ?? (hex && [hex[0] >> 8, hex[0] & 255, hex[1] >> 8, hex[1] & 255].join('.'));
     if (mapped) return publiclyReachable(`http://${mapped}`);
     return !(host === '::' || host === '::1' || /^f[cd]/.test(host) || /^fe[89ab]/.test(host));
   }
@@ -466,7 +470,7 @@ export async function startGithubSetup(root: string, repository: string, deploym
 } = {}, reviewer?: string) {
   if (reviewer !== undefined && !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(reviewer)) throw new Error('Reviewer name must be a lowercase identifier');
   // Refused before the page opens, not when the human first loads it.
-  manifestOrigin(repository, deployment);
+  const hooked = publiclyReachable(manifestOrigin(repository, deployment));
   await localDirectory(root);
   const file = dependencies.file ?? credentialFile(root, reviewer);
   let app: AppCredentials | undefined;
@@ -559,8 +563,11 @@ export async function startGithubSetup(root: string, repository: string, deploym
         if (!code || !/^[a-zA-Z0-9_-]{1,200}$/.test(code)) return html(400, '<p>Missing GitHub registration code.</p>');
         exchanging = true;
         const result = await convert(code);
-        if (!Number.isSafeInteger(result.id) || !result.slug || !result.pem || !(reviewer || result.webhook_secret)) throw new Error('GitHub returned incomplete App credentials');
-        const next: AppCredentials = { appId: result.id, slug: result.slug, privateKey: result.pem, webhookSecret: result.webhook_secret ?? '', repository };
+        // Only a manifest with hook_attributes gets a webhook secret back. A webhook-less control-plane
+        // App (a local origin, GY-1474) still needs GITHUB_WEBHOOK_SECRET, so it gets a local one.
+        if (!Number.isSafeInteger(result.id) || !result.slug || !result.pem || !(reviewer || !hooked || result.webhook_secret)) throw new Error('GitHub returned incomplete App credentials');
+        const webhookSecret = result.webhook_secret || (reviewer ? '' : randomBytes(32).toString('hex'));
+        const next: AppCredentials = { appId: result.id, slug: result.slug, privateKey: result.pem, webhookSecret, repository };
         if (reviewer) {
           const bot = await resolveBot(result.slug);
           if (!Number.isSafeInteger(bot?.id) || bot.id <= 0 || bot.type !== 'Bot') throw new Error('GitHub did not return a usable reviewer bot identity');
