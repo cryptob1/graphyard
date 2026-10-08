@@ -454,6 +454,7 @@
     "tests/machine-backlog-triage.test.ts": 1111,
     "tests/main-guard.test.ts": 2132,
     "tests/main-watch.test.ts": 3000,
+    "tests/main-watch-docs-wording.test.ts": 500,
     "tests/managed-worktree-root.test.ts": 3667,
     "tests/manual-proof-scoring.test.ts": 504,
     "tests/master-agent-envs.test.ts": 2965,
