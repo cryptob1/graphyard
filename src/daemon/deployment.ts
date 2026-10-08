@@ -6,6 +6,8 @@ import { productionEnvironmentFromEnv } from '../flow-analytics.js';
 import type { ChildRun } from '../child-runner.js';
 import type { Work } from '../model.js';
 import type { MasterConfig } from '../master.js';
+import type { MergerMode } from '../merger-mode.js';
+import { localPromotionCycle, type LocalReleasePorts, type LocalRunOutcome } from './promotion-local.js';
 import { actionableIntervalMs } from './liveness.js';
 import { boundDeployment, type ContainmentRetention, type DeploymentObservation, deploymentObservationSchema, message, type PromotionState, retainedContainments } from './state.js';
 
@@ -440,6 +442,17 @@ export interface PromotionReads {
   dispatch: () => Promise<void>;
   /** The soak workflow's recent runs, newest first; absent where the repository has no soak workflow. */
   soaks?: () => Promise<SoakRun[]>;
+  /** GY-1526: the install's recorded merger; absent, or failing to read (an older server), the drive runs in github mode. */
+  merger?: () => Promise<MergerMode>;
+  /** GY-1526: the local port set control-plane mode runs candidates through (promotion-local.ts); null where the loop's environment names no UAT. */
+  local?: LocalReleasePorts | null;
+}
+/** The reason control-plane mode reports when the loop's environment gives it no local release ports. */
+export const noLocalPortsReason = 'The recorded merger is control-plane, so the loop cuts and promotes candidates itself, but its environment names no UAT: set GRAPHYARD_UAT_URL, GRAPHYARD_UAT_TOKEN and GRAPHYARD_PRODUCTION_URL for the loop';
+/** The mode the drive runs in: control-plane only when the merger reads so; an unreadable merger is github's, as it is for an older server. */
+export async function promotionMode(reads: Pick<PromotionReads, 'merger'>): Promise<MergerMode> {
+  if (!reads.merger) return 'github';
+  try { return await reads.merger(); } catch { return 'github'; }
 }
 
 /**
@@ -476,7 +489,7 @@ const later = (...times: (string | null | undefined)[]) => times.filter((time): 
  * fails (or that GitHub accepted before `gh` failed) counts toward the gap and is never
  * repeated cycle after cycle.
  */
-export async function promotionCycle(previous: PromotionState | null, reads: PromotionReads, options: PromotionOptions): Promise<{ state: PromotionState; dispatched: boolean; failure: string | null }> {
+export async function promotionCycle(previous: PromotionState | null, reads: PromotionReads, options: PromotionOptions): Promise<{ state: PromotionState; dispatched: boolean; failure: string | null; /** GY-1526: what the local run did, in control-plane mode. */ run?: LocalRunOutcome }> {
   const at = new Date(options.now).toISOString(), everyMs = options.everyMinutes * 60_000, windows = promotionReadWindows(options.intervalMs ?? 0);
   const settle = (state: Omit<PromotionState, 'nextDueAt' | 'reason'>, reason: string, due: boolean) => ({ ...state, reason: reason.slice(0, 500),
     nextDueAt: due && state.lastDispatchAt ? new Date(Math.max(options.now, Date.parse(state.lastDispatchAt) + everyMs)).toISOString() : due ? at : null });
@@ -488,6 +501,11 @@ export async function promotionCycle(previous: PromotionState | null, reads: Pro
     ...(previous?.candidateAtDispatch !== undefined ? { candidateAtDispatch: previous.candidateAtDispatch } : {}) };
   // Off reads nothing at all: no fetch, no GitHub request.
   if (options.everyMinutes <= 0) return done({ checkedAt: at, ...kept, ...carried }, 'Promotion by the loop is off (run.promoteEveryMinutes is 0)', false);
+  // GY-1526: under a control-plane merger the loop runs the candidate itself through its local ports; the workflow is neither read nor dispatched.
+  if (await promotionMode(reads) === 'control-plane') {
+    if (!reads.local) return done({ checkedAt: at, ...kept, ...carried }, noLocalPortsReason, false);
+    return localPromotionCycle(previous, { ...reads, local: reads.local }, options);
+  }
   let ledger = kept;
   if (!kept.ledgerReadAt || options.now - Date.parse(kept.ledgerReadAt) >= windows.ledgerMs) {
     try { ledger = { ...await readLedger(), ledgerReadAt: at }; } catch (error) {
@@ -591,11 +609,14 @@ function soakOf(soaks: PromotionState['soaks'], candidate: PromotionCandidate) {
 /** A soak run's conclusion in the record's words: success is passed, failure failed; the rest stand. */
 const soakVerdict = (conclusion: string) => conclusion === 'success' ? 'passed' : conclusion === 'failure' ? 'failed' : conclusion;
 
-/** The promotion reads over the managed checkout and GitHub; null when the repository has no release-candidate workflow to dispatch. */
-export function promotionReads(config: MasterConfig, root: string, run: ChildRun, workflowExists: boolean, soakExists = existsSync(join(root, '.github', 'workflows', soakWorkflow))): PromotionReads | null {
-  if (!workflowExists) return null;
+/** The promotion reads over the managed checkout and GitHub; null when the repository has no release-candidate workflow to dispatch and no local ports (GY-1526). */
+export function promotionReads(config: MasterConfig, root: string, run: ChildRun, workflowExists: boolean, soakExists = existsSync(join(root, '.github', 'workflows', soakWorkflow)),
+  options: { merger?: () => Promise<MergerMode>; local?: LocalReleasePorts | null } = {}): PromotionReads | null {
+  // GY-1526: without the workflow there is nothing to dispatch in github mode, but control-plane mode needs only the local ports.
+  if (!workflowExists && !options.local) return null;
   const git = (...args: string[]) => run('git', ['-C', root, ...args]);
   return {
+    ...(options.merger ? { merger: options.merger } : {}), ...(options.local !== undefined ? { local: options.local } : {}),
     ledger: async () => {
       await git('fetch', '--quiet', '--no-tags', 'origin', `+refs/heads/${config.baseBranch}:refs/remotes/origin/${config.baseBranch}`, '+refs/tags/rc-production/*:refs/tags/rc-production/*', '+refs/tags/rc/*:refs/tags/rc/*', '+refs/tags/rc-soak/*:refs/tags/rc-soak/*');
       const mainSha = (await git('rev-parse', `refs/remotes/origin/${config.baseBranch}^{commit}`)).trim().toLowerCase() || null;
