@@ -3,6 +3,7 @@ import { SERVER_CONTAINER_UID, shellQuote, type Transport } from './transport.js
 import { SERVER_PORT, type EnvValue, type PlanAction, type PreflightItem, type Provider } from './types.js';
 import { packageVersion } from '../release.js';
 import { hetznerQuote, spendConsent, type PriceQuote, type QuoteResult } from './pricing.js';
+import { localAdapter } from './local.js';
 
 /** The versioned release image for the checkout's own version, as .github/workflows/release.yml publishes it. */
 export const DEFAULT_IMAGE = `ghcr.io/cryptob1/graphyard:${packageVersion}`;
@@ -29,7 +30,10 @@ export interface AdapterContext {
   plannedAgents: number;
   location: string;
   databasePassword: string;
+  /** The loopback port a Compose install publishes; its preflight moves it off a port another process holds (GY-1509). */
   port: number;
+  /** The port was given with --port: preflight refuses it when taken instead of choosing another. */
+  portExplicit?: boolean;
   /** Absolute path of an attached data disk; when set, Postgres stores its data there. */
   dataPath: string | null;
   /**
@@ -41,6 +45,8 @@ export interface AdapterContext {
   railwayDir: string;
   /** The self-contained host settings (GY-717); null for a server-only install. */
   host: import('./host.js').HostSettings | null;
+  /** The local provider's cluster, unit and supervisor (GY-1500); absent for every other provider. */
+  local?: import('./local.js').LocalSettings | null;
   /** Spend consent for a server this install creates: a monthly cap, or the exact price confirmed. */
   spend: { maxMonthly: number | null; confirmPrice: number | null };
   wait: (ms: number) => Promise<void>;
@@ -247,13 +253,53 @@ function composeActions(ctx: AdapterContext, observation: AdapterObservation, la
 // compose — one machine, loopback only
 // ---------------------------------------------------------------------------
 
+/** How many ports, from SERVER_PORT upward, a Compose install tries before its preflight gives up. */
+export const PORT_CANDIDATES = 20;
+
+/** Whether 127.0.0.1:PORT can be bound on the transport's machine: a listener opened and closed again. */
+export async function loopbackPortFree(transport: Transport, port: number) {
+  const probe = `require('net').createServer().once('error',()=>process.exit(1)).listen(${port},'127.0.0.1',function(){this.close()})`;
+  return (await transport.exec(process.execPath, ['-e', probe], { allowFailure: true, timeout: 30_000 })).code === 0;
+}
+
+/** The loopback port an existing Compose bundle publishes the server on, or null. */
+export const publishedPort = (bundle: string | null) => {
+  const match = bundle && new RegExp(`127\\.0\\.0\\.1:(\\d+):${SERVER_PORT}`).exec(bundle);
+  return match ? Number(match[1]) : null;
+};
+
+/**
+ * GY-1509: the port a Compose install publishes must be free, or be this install's own running
+ * server. A taken port the operator did not choose moves to the first free one from SERVER_PORT
+ * upward (PORT_CANDIDATES tried); ctx.port then carries it to the bundle, the URL and the record.
+ */
+export async function composePort(ctx: AdapterContext): Promise<PreflightItem> {
+  const name = 'Server port';
+  // The bundle a previous apply wrote is this install's state too: a run whose record predates the
+  // port keeps the one its server already publishes.
+  const published = publishedPort(await readRemote(ctx.transport, `${ctx.workdir}/compose.yaml`));
+  if (!ctx.portExplicit && published) ctx.port = published;
+  if (published === ctx.port && (await composeRunning(ctx.transport, ctx)).app) return { name, ok: true, detail: `127.0.0.1:${ctx.port} serves this installation` };
+  if (await loopbackPortFree(ctx.transport, ctx.port)) return { name, ok: true, detail: `127.0.0.1:${ctx.port} is free` };
+  const taken = ctx.port;
+  if (ctx.portExplicit) return { name, ok: false, detail: `127.0.0.1:${taken} is taken by another process`, fix: 'Rerun with a free --port N, or without --port to let the installer choose one' };
+  for (let port = SERVER_PORT; port < SERVER_PORT + PORT_CANDIDATES; port++) {
+    if (port === taken || !await loopbackPortFree(ctx.transport, port)) continue;
+    ctx.port = port;
+    return { name, ok: true, detail: `127.0.0.1:${taken} is taken by another process; this installation publishes 127.0.0.1:${port}` };
+  }
+  return { name, ok: false, detail: `127.0.0.1:${SERVER_PORT}-${SERVER_PORT + PORT_CANDIDATES - 1} are all taken`, fix: 'Free one of those ports, or rerun with a free --port N' };
+}
+
 export const composeAdapter: ProviderAdapter = {
   provider: 'compose',
   async preflight(ctx) {
-    return [
+    const items = [
       await tool(ctx, ctx.transport, 'docker', ['version', '--format', '{{.Server.Version}}'], 'Docker Engine', 'Install Docker Engine and start its daemon, then rerun the installer'),
       await tool(ctx, ctx.transport, 'docker', ['compose', 'version', '--short'], 'Docker Compose', 'Install the Docker Compose plugin (docker compose version), then rerun the installer'),
     ];
+    if (items.every(item => item.ok)) items.push(await composePort(ctx));
+    return items;
   },
   async observe(ctx) {
     const observation = emptyObservation();
@@ -679,7 +725,8 @@ export const adapters: Partial<Record<Provider, ProviderAdapter>> = {
 };
 
 export const adapterFor = (provider: Provider) => {
-  const adapter = adapters[provider];
+  // Looked up when called: local.ts imports this module, so a record entry would read it before it is defined.
+  const adapter = provider === 'local' ? localAdapter : adapters[provider];
   // `host` exists only as a self-contained install; src/install/host.ts wraps it.
   if (!adapter) throw new Error(`The ${provider} target is installed by the self-contained host adapter (src/install/host.ts)`);
   return adapter;

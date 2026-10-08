@@ -18,6 +18,7 @@ import { hostSupervisionStep } from './cycle-host.js';
 import { dispatchStep } from './cycle-dispatch.js';
 import { decisionStep } from './cycle-decisions.js';
 import { baseFailureStep } from './cycle-base-failures.js';
+import { flakeStep } from './cycle-flakes.js';
 import { reviewCapStep } from './cycle-review-cap.js';
 import { deploymentStep, mergeStep, shepherdStep } from './cycle-delivery.js';
 import { faultStep } from './faults.js';
@@ -234,6 +235,8 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
   // 3a. A required check that fails on the base head too is set aside before anything decides on
   //     the item (GY-528): the decisions and the approver capacity dispatch counts read it.
   cycle.baseFailed = await timings.step('base failures', () => baseFailureStep(cycle));
+  // 3b. Pass-on-rerun outcomes go to the flake ledger, and a repeatedly flaky test gets one fix item (GY-1498); no gate reads it.
+  await timings.step('flakes', () => cycle.isolate('fault', null, 'flake ledger', () => flakeStep(cycle)));
   spent('decisions');
 
   const capacity = await timings.step('dispatch', () => dispatchStep(cycle, health, assessments));

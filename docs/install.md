@@ -15,14 +15,15 @@ Ask only: **Which provider**; **Provider login**; **GitHub App confirmation clic
 
 ## Preconditions
 
-Node 24, `OWNER/REPO` checkout, `export GRAPHYARD_CLI=/abs/path/graphyard/bin/graphyard.mjs`, admin `gh auth status` with scope `repo` (and `admin:repo_hook`, except compose; preflight checks); worker and non-Actions unit-proof hosts pass [`bwrap` probe](setup-from-zero.md#1-machine-prerequisites).
+Node 24, `OWNER/REPO` checkout, `export GRAPHYARD_CLI=/abs/path/graphyard/bin/graphyard.mjs`, admin `gh auth status` with scope `repo` (and `admin:repo_hook`, except compose and local; preflight checks); worker and non-Actions unit-proof hosts pass [`bwrap` probe](setup-from-zero.md#1-machine-prerequisites).
 
 ### Providers
 
 - `railway`: `npm i -g @railway/cli`, `railway login`.
 - `hetzner`: `brew install hcloud`, `hcloud context create graphyard`; `--ssh-key NAME`, `--domain`. `manual:host-install-live` or `manual:…install…-live` coordinators need `HCLOUD_TOKEN`, `HETZNER_SPEND_CAP_USD_MONTHLY` in repo-root `.env` (`0600`, uncommitted); optional `HETZNER_SSH_KEY` names registered key (else throwaway).
 - `docker-host`: `ssh USER@HOST 'curl -fsSL https://get.docker.com | sh'`; `--ssh-host`, `--domain`.
-- `compose` (local): `curl -fsSL https://get.docker.com | sh`. It polls GitHub: its Apps have no webhook and subscribe to no events (GitHub refuses a loopback or private hook URL, and events without a hook), so webhook steps are skipped.
+- `compose` (local): `curl -fsSL https://get.docker.com | sh`. It polls GitHub: its Apps have no webhook and subscribe to no events (GitHub refuses a loopback or private hook URL, and events without a hook), so webhook steps are skipped. It publishes `127.0.0.1:4310`; held by another process (a second install), preflight *Server port* takes the first free one up to 4329, kept on reruns (its `compose.yaml`), and URL, connection and sign-in links use it. A taken `--port N` fails preflight. Under `graphyard up`, a failed step's `next` names it and carries the failed command's last 20 output lines, credentials redacted.
+- `local` (`graphyard up --local`, refused beside another `--provider`): no Docker. Same server and Store on embedded Postgres (`npm install` without `--omit=optional`); preflight checks Node 24, the binaries, free loopback ports. Cluster in `INSTALL/postgres` (`0700`, `password` `0600`), variables `INSTALL/local-server.json` (`0600`), `127.0.0.1:--port`. User unit `graphyard-local-INSTALL.service` starts the cluster, migrates as `db migrate`, serves, restarts; on stop closes the store before the cluster. Without systemd the plan prints the foreground command. Polls GitHub like compose; reruns change nothing.
 
 ## Step 1: plan and approve
 
@@ -46,7 +47,7 @@ Writes credentials, [variables](deployment.md#variables); deploys; [protects](gi
 
 ## Step 4: summary
 
-**Verify** `health`, `webhook.delivered` (compose: `webhook.skipped`), `profiles.master.configured`, `status.role` `admin`; follow `nextSteps`, never read `tokenFile`.
+**Verify** `health`, `webhook.delivered` (compose, local: `webhook.skipped`), `profiles.master.configured`, `status.role` `admin`; follow `nextSteps`, never read `tokenFile`.
 
 ## Step 5: first pull request
 

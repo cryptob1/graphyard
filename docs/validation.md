@@ -22,6 +22,10 @@ Flaky required cases block promotion until `evidence` decision (`{"case":ID,"run
 
 `e2e/contract.json` lists required customer outcomes: `id`, `title`, optional `criteria`, proving `cases` (shareable). Pre-cut `graphyard release contract` refuses `release cut`, naming outcome, case, when bound case is missing, invalid, not `uat`-targeted or optional, or required case proves nothing.
 
+## Flake ledger
+
+A required check failing then passing its one rerun at the same SHA (PR `checkReruns` `passed`, main `mainGuardFlakes`) is a flake: the loop reads that failed job's log once into `.graphyard/flake-ledger.json` (mode 0600; `{test, check, sha, pr, source, failedRunId, at}`, `test` null when the log names none; ≤500 entries, 30 days). A test leading with a proof id and flaking 3+ times on 2+ SHAs in 7 days gets one P1 `Flaky test: NAME` item (operator-agent) naming that proof, planned on its test file; none more while open or 7 days after closing. Gates never read it: one rerun stays, nothing is skipped or quarantined.
+
 ## Goals and acceptance
 
 `graphyard goal FILE` records goal (`statement`, `users`, `constraints`, `deployTarget`); `master status` lists open goals. With both master identities, loop's `acceptance` role (`run.diagnostician` models) drafts outcomes, one required `uat` case each, contract bindings in one pull request, judged by approver identity (never author), redrafted if refused (≤3). Merged at approved head once CI passes (`goal land`), else redrafted. `complete` and later heads refuse changes to protected case or `e2e/contract.json` lacking that item's `goal case-change`, approved by neither requester nor implementer. [Planner](how-graphyard-works.md#from-goal-to-work-items) plans items; `goal deliver` needs each done and served in production.

@@ -33,7 +33,7 @@ export const installRecordSchema = z.object({
   version: z.literal(1),
   installId: z.string().min(1),
   repository: z.string().min(1),
-  provider: z.enum(['railway', 'hetzner', 'docker-host', 'compose', 'host']),
+  provider: z.enum(['railway', 'hetzner', 'docker-host', 'compose', 'host', 'local']),
   /** The installation runs everything on its host (GY-717); its credentials live there, not here. */
   selfContained: z.boolean().default(false),
   /** The installation this one was moved from with --migrate, by fingerprint only. */
