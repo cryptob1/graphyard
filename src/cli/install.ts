@@ -16,7 +16,7 @@ import { readSecretFromStdin } from './context.js';
 import { documentationDrift } from '../model/documentation.js';
 import { agentEnvironmentRoot } from '../master/environments.js';
 import { masterCredential, planeAnswers, planeRequest, setupFromZeroChecks, setupLine, setupNext } from '../setup-from-zero.js';
-import { mergerDoctorLine } from './merger.js'; import { upCommand, upHelpRequested, upUsage } from '../up.js';
+import { mergerDoctorLine } from './merger.js'; import { upCommand, upHelpRequested, upUsage } from '../up.js'; import { mergerFromStatus } from './install-merger.js';
 
 const interactiveGithubSetup = (root: string) => async (repository: string, deployment: string) => {
   const setup = await startGithubSetup(root, repository, deployment);
@@ -32,15 +32,6 @@ const interactiveGithubSetup = (root: string) => async (repository: string, depl
     } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
   }
 };
-/**
- * GY-1553: the merge writer `/api/status` reports for `init --apply`. A failed or empty read
- * leaves the AGENTS.md worker block on the GitHub pull-request text (never invents control-plane).
- */
-export async function mergerFromStatus(status: () => Promise<any>): Promise<string | null> {
-  try { return (await status())?.mergeWriter?.merger ?? null; }
-  catch { return null; }
-}
-
 /**
  * The capacity variables that accompany the principals `init --apply` registers: derived from
  * the roster in .graphyard/principals.json, and — when the operator credential reaches the
@@ -59,7 +50,6 @@ export async function capacityForPrincipals(principalsFile: string, status: () =
   return { variables: limits.variables, lines: limits.lines, drift: limits.drift,
     next: `Set ${limits.lines.join(' ')} beside GRAPHYARD_PRINCIPALS on the Graphyard deployment${limits.drift.length ? ` (drift: ${limits.drift.map(entry => entry.reason).join(' ')})` : error ? `; no drift can be reported because ${error}` : ''}` };
 }
-
 /** Repository onboarding: install a control plane, propose and apply the delivery workflow, register Apps, inspect readiness. */
 export const installCommands = defineCommands([
   {
@@ -186,7 +176,6 @@ export const installCommands = defineCommands([
           if (differences.length) throw new Error(`${differences.join('; ')}. Rerun init --scan, review the refreshed proposal, then apply it again. The stored proposal was left unchanged.`);
           const url = selected ?? installed?.url;
           if (!url) throw new Error('Applying requires the Graphyard server URL; pass --url');
-          // GY-1553: thread the recorded merger so control-plane apply writes `complete … --head SHA`.
           const merger = await mergerFromStatus(() => context.api('status'));
           if (installed) {
             const result = await applyProposal(root, stored.proposal, { url, installed, github: protectionRun, merger });

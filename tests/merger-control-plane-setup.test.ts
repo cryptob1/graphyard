@@ -8,7 +8,7 @@ import { setupMaster } from '../src/master.js';
 import * as checklist from '../src/model/setup-checklist.js';
 import { setupChecklist } from '../src/model/setup-checklist.js';
 import { setupFromZeroChecks, setupLine, setupSteps } from '../src/setup-from-zero.js';
-import * as installCli from '../src/cli/install.js';
+import { mergerFromStatus } from '../src/cli/install-merger.js';
 import { applyProposal, managedInstructions, scanProposal, setupRepository } from '../src/repository-setup.js';
 import { managedServerUrl } from '../src/sync.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -24,7 +24,6 @@ const notRequired = ['github-app', 'reviewer-app', 'branch-protection'] as const
 // Namespace reads, so a test against code without these symbols fails as a test case, not at load.
 const mergerNotRequired: string = (checklist as any).mergerNotRequired;
 const statusControlPlaneMerger = (status: any) => (checklist as any).statusControlPlaneMerger(status);
-const mergerFromStatus = (status: () => Promise<any>) => (installCli as any).mergerFromStatus(status);
 /** A fresh install with no App, no reviewer App and no protection, only a worker account. */
 const bare = (merger: 'github' | 'control-plane' | null) => ({
   actor: { role: 'admin' }, github: false, githubAppId: null, githubRepository: null, baseBranch: 'main', reviewerApps: [],
@@ -155,7 +154,7 @@ test('unit:agents-block-control-plane — worker init (setupRepository) passes t
 });
 
 test('unit:agents-block-control-plane — init --apply (applyProposal) writes the worker block from the merger its caller passes: --head SHA under control-plane, the pull-request text otherwise; mergerFromStatus reads /api/status and defaults to null on failure', async () => {
-  assert.equal(typeof (installCli as any).mergerFromStatus, 'function', 'init --apply exports mergerFromStatus so a control-plane apply can thread the recorded merger');
+  assert.match(await readFile(new URL('../src/cli/install.ts', import.meta.url), 'utf8'), /mergerFromStatus\(\(\) => context\.api\('status'\)\)/, 'init --apply reads the recorded merger so a control-plane apply can thread it');
   assert.equal(await mergerFromStatus(async () => ({ mergeWriter: { merger: 'control-plane' } })), 'control-plane');
   assert.equal(await mergerFromStatus(async () => ({ mergeWriter: { merger: 'github' } })), 'github');
   assert.equal(await mergerFromStatus(async () => ({})), null);
