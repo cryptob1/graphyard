@@ -11,6 +11,7 @@ import { record } from './effects.js';
 import type { Cycle } from './cycle.js';
 import { defaultDeploymentReuseMinutes, defaultPromoteEveryMinutes, deploymentDetail, deploymentStepBudgetMs, promotionCycle, promotionWorkflow, reusableDeployment, stillVerifying, withinDeploymentBudget } from './deployment.js';
 import { mainGuardAttention } from '../main-guard.js';
+import { promotionFreeze } from './main-watch.js';
 import { openThroughputOwner, throughputOwnerAnsweredBy, throughputOwnerClosure, throughputOwnerItem, throughputRemeasureAt, throughputStallText, type ThroughputStall } from '../throughput.js';
 
 /**
@@ -146,7 +147,7 @@ export async function deploymentStep(cycle: Cycle) {
   //       cycle's read and dispatch stamps are kept, so a failure never repeats every cycle.
   const promotion = effects.promotion, promotionFailure = 'promotion:failed';
   if (promotion && readyToRetry(state.actions[promotionFailure], state.cycle)) {
-    const checked = await withinDeploymentBudget(state, 'promotion', () => promotionCycle(state.promotion ?? null, promotion, { now: now(), everyMinutes: config.run.promoteEveryMinutes ?? defaultPromoteEveryMinutes, intervalMs: config.run.intervalSeconds * 1000 }), deadline, now);
+    const checked = await withinDeploymentBudget(state, 'promotion', () => promotionCycle(state.promotion ?? null, promotion, { now: now(), everyMinutes: config.run.promoteEveryMinutes ?? defaultPromoteEveryMinutes, intervalMs: config.run.intervalSeconds * 1000, ...promotionFreeze(effects.mainWatch?.freeze ?? false, state.mainWatch) }), deadline, now);
     if (checked === stillVerifying) deferred.push('the promotion check');
     else {
       if (!checked.ok) throw checked.error;
