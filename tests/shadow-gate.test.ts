@@ -4,8 +4,8 @@ import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import EmbeddedPostgres from 'embedded-postgres';
-import { daemonStateSchema, emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
-import { shadowKeptVerdicts, shadowReads, shadowIdle, shadowReportKey, shadowReportText, shadowStateSchema } from '../src/daemon/cycle-shadow.js';
+import { daemonStateSchema, daemonSummary, emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
+import { keepVerdicts, shadowKeptVerdicts, shadowReads, shadowIdle, shadowStateSchema } from '../src/daemon/cycle-shadow.js';
 import { compareVerdicts, githubOutcome, shadowDue, shadowReport, type ShadowVerdict } from '../src/merge-writer/shadow.js';
 import { shadowGateSettings, shadowGateSettingsSchema } from '../src/master/merge-writer-settings.js';
 import { masterConfigSchema } from '../src/master.js';
@@ -33,6 +33,40 @@ const item = (fields: Record<string, unknown>) => ({
 const submitted = (n: number, minutesAgo: number, fields: Record<string, unknown> = {}) => item({ id: `w${n}`, key: `GY-${n}`, stageEnteredAt: iso(start - minutesAgo * minute),
   submission: { epoch: 1, pr: n }, candidate: { sha: sha(`head${n}`), baseSha: sha('base'), pr: n, branch: `graphyard/gy-${n}-1`, author: 'worker' }, ...fields });
 const tip = sha('main-tip');
+const pipelined = (n: number, submittedAt: number, fields: Record<string, unknown> = {}) => submitted(n, 0, { pipeline: { submittedAt: iso(submittedAt), resubmittedAt: null }, ...fields });
+
+test('unit:shadow-due-selection — submission time orders the trials, not stage entry; a head GitHub already merged has no turn, and only a delivery of this very head counts for GitHub', () => {
+  const late = pipelined(1, start - 5 * minute, { stageEnteredAt: iso(start - 90 * minute) }), early = pipelined(2, start - 50 * minute, { stageEnteredAt: iso(start - 10 * minute) });
+  assert.equal(shadowDue([late, early], [], tip)?.key, 'GY-2', 'the earlier submission goes first even though its stage was entered later');
+  const resubmitted = pipelined(3, start - 80 * minute, { pipeline: { submittedAt: iso(start - 80 * minute), resubmittedAt: iso(start - 1 * minute) } });
+  assert.equal(shadowDue([resubmitted, late], [], tip)?.key, 'GY-1', 'a resubmitted head is as old as its resubmission');
+  const merged = pipelined(4, start - 99 * minute, { observation: { merged: true, candidate: { sha: sha('head4') }, checks: [] } });
+  assert.equal(shadowDue([merged, late], [], tip)?.key, 'GY-1', 'GitHub merged GY-4 before its turn');
+  const earlier = sha('old-head'), delivered = item({ id: 'd', key: 'GY-7', stage: 'done', candidate: { sha: sha('final') }, delivery: { mergedAt: iso(start), mergeSha: sha('d'), authorizationRevision: 1 } });
+  assert.equal(githubOutcome(delivered, sha('final')), 'merged');
+  assert.equal(githubOutcome(delivered, earlier), 'pending', 'an earlier reworked head was never what GitHub merged');
+});
+
+test('unit:shadow-step-records-verdict — a verdict the coordinator refuses is retried under the same key before the pair counts as tried, and eviction spares still-open pairs', async () => {
+  const git = recordingGit(), now = () => start;
+  let failing = 2;
+  const posts: string[] = [];
+  const reads = shadowReads(config, '/coordinator', git.run, { base: '/w', trial: async () => trialRun, record: async (work, entry) => { posts.push(`${work.id}:${entry.head}`); if (failing-- > 0) throw new Error('route down'); } });
+  const work = [submitted(1, 30), submitted(2, 20)];
+  const state = emptyDaemonState(config), effects = effectsFor({ work: () => work, now, shadow: reads });
+  await runCycle(config, state, effects, now); await shadowIdle(state);
+  await runCycle(config, state, effects, now);
+  assert.deepEqual([state.shadow.length, posts.length], [0, 1], 'a refused post leaves the pair untried');
+  await runCycle(config, state, effects, now);
+  assert.deepEqual([state.shadow.length, posts.length], [0, 2], 'retried next cycle, no new trial started meanwhile');
+  await runCycle(config, state, effects, now);
+  assert.deepEqual([state.shadow.map(entry => entry.key), new Set(posts).size], [['GY-1'], 1], 'recorded on the third attempt, one head throughout');
+  const many = Array.from({ length: shadowKeptVerdicts + 5 }, (_, index) => ({ ...verdict(`GY-${index}`), id: `w${index}` }));
+  const stillOpen = submitted(0, 1, { id: 'w0', key: 'GY-0', candidate: { sha: many[0]!.head, branch: 'b' } });
+  const kept = keepVerdicts(many, [stillOpen]);
+  assert.equal(kept.length, shadowKeptVerdicts);
+  assert.ok(kept.some(entry => entry.key === 'GY-0'), 'the oldest verdict survives because its item is still open at that head');
+});
 
 test('unit:shadow-due-selection — shadowDue picks the submitted head with the oldest submission that lacks a verdict for (head, main tip), one per cycle; delivered, unsubmitted and already-tried heads are skipped, and a moved tip makes a head due again', () => {
   const work = [submitted(3, 5), submitted(1, 30), submitted(2, 20), item({ id: 'w4', key: 'GY-4' }), submitted(5, 60, { stage: 'done' })];
@@ -54,12 +88,12 @@ test('unit:shadow-compare — compareVerdicts gives agree-pass, agree-fail, shad
   assert.deepEqual([compareVerdicts(fail, 'merged'), compareVerdicts(fail, 'failed'), compareVerdicts(fail, 'reverted'), compareVerdicts(fail, 'pending')], ['shadow-only-fail', 'agree-fail', 'agree-fail', 'pending']);
   assert.equal(compareVerdicts(conflicted, 'merged'), 'shadow-only-fail', 'a conflict GitHub merged anyway is a shadow-only failure');
   assert.equal(compareVerdicts(verdict('GY-4', { build: 'fail' }), 'failed'), 'agree-fail');
-  const delivered = item({ id: 'd', key: 'GY-1', stage: 'done', delivery: { mergedAt: iso(start), mergeSha: sha('d'), authorizationRevision: 1 } });
-  const reverted = item({ id: 'r', key: 'GY-5', stage: 'done', delivery: { mergedAt: iso(start), mergeSha: sha('r'), authorizationRevision: 1 }, mainGuardReverts: [{ mergeSha: sha('r'), pr: 5, failing: ['test'], revert: null, state: 'merged', at: iso(start), settledAt: iso(start), revertSha: sha('rr'), reason: null }] });
+  const delivered = item({ id: 'd', key: 'GY-1', stage: 'done', candidate: { sha: pass.head }, delivery: { mergedAt: iso(start), mergeSha: sha('d'), authorizationRevision: 1 } });
+  const reverted = item({ id: 'r', key: 'GY-5', stage: 'done', candidate: { sha: pass.head }, delivery: { mergedAt: iso(start), mergeSha: sha('r'), authorizationRevision: 1 }, mainGuardReverts: [{ mergeSha: sha('r'), pr: 5, failing: ['test'], revert: null, state: 'merged', at: iso(start), settledAt: iso(start), revertSha: sha('rr'), reason: null }] });
   const red = submitted(6, 1, { observation: { candidate: { sha: sha('head6') }, checks: [{ name: 'test', result: 'failure', appId: 15368 }] } });
   assert.deepEqual([githubOutcome(delivered, pass.head), githubOutcome(reverted, pass.head), githubOutcome(red, sha('head6')), githubOutcome(red, sha('older')), githubOutcome(undefined, pass.head)], ['merged', 'reverted', 'failed', 'pending', 'pending']);
   const many = Array.from({ length: 12 }, (_, index) => verdict(`GY-${100 + index}`, { tests: failedTests, at: iso(start + index * minute), durationMs: (index + 1) * 1000, id: `w${index}` }));
-  const work = many.map((entry, index) => item({ id: `w${index}`, key: entry.key, stage: 'done', delivery: { mergedAt: iso(start), mergeSha: sha(`x${index}`), authorizationRevision: 1 } }));
+  const work = many.map((entry, index) => item({ id: `w${index}`, key: entry.key, stage: 'done', candidate: { sha: entry.head }, delivery: { mergedAt: iso(start), mergeSha: sha(`x${index}`), authorizationRevision: 1 } }));
   const report = shadowReport([pass, ...many], work);
   assert.equal(report.total, 13);
   assert.deepEqual(report.counts, { 'agree-pass': 0, 'agree-fail': 0, 'shadow-only-fail': 12, 'shadow-missed': 0, pending: 1 }, 'a verdict whose item is not in the snapshot keeps its recorded outcome');
@@ -169,7 +203,7 @@ test('unit:shadow-status — master status lists the gate report and, for each i
   const entries = [verdict('GY-1', { outcome: 'agree-pass' }), verdict('GY-2', { outcome: 'shadow-only-fail', tests: failedTests }), verdict('GY-3', { outcome: 'shadow-missed' })];
   const summary = shadowReport(entries, []);
   assert.deepEqual(summary.counts, { 'agree-pass': 1, 'agree-fail': 0, 'shadow-only-fail': 1, 'shadow-missed': 1, pending: 0 });
-  assert.match(shadowReportText(summary), /^3 verdicts \(agree-pass 1, agree-fail 0, shadow-only-fail 1, shadow-missed 1, pending 0\); trial p50 1s, p90 1s; newest disagreements: GY-\d/);
+  assert.deepEqual([summary.total, summary.p50Ms, summary.p90Ms, summary.disagreements.map(entry => entry.key).sort()], [3, 1000, 1000, ['GY-2', 'GY-3']]);
   // The step raises each disagreement once, however many cycles follow.
   const git = recordingGit(), now = () => start;
   let delivered = false;
@@ -184,8 +218,9 @@ test('unit:shadow-status — master status lists the gate report and, for each i
   for (let cycle = 0; cycle < 3; cycle++) raised.push(...(await runCycle(config, state, effects, now)).actions.filter(action => action.detail.startsWith('Shadow merge gate:')).map(action => action.detail));
   assert.equal(state.shadow[0]?.outcome, 'shadow-only-fail');
   assert.equal(raised.length, 1, 'raised once');
-  const row = state.actions[shadowReportKey];
-  assert.ok(row?.kind === 'escalation' && /shadow-only-fail 1/.test(row.detail) && /newest disagreements: GY-1 /.test(row.detail), 'master status lists the report among the loop\'s escalations');
+  const section = daemonSummary(state, now(), config.run.intervalSeconds * 1000, config.hostId).shadowGate;
+  assert.equal(section.counts['shadow-only-fail'], 1);
+  assert.deepEqual(section.disagreements.map(entry => entry.key), ['GY-1'], 'master status carries the shadowGate section with the report');
   const docs = readFileSync(fileURLToPath(new URL('../docs/delivery-redesign.md', import.meta.url)), 'utf8');
   const rollout = docs.split(/^## Rollout\s*$/m)[1]!.split(/\n## /)[0]!;
   for (const field of ['shadow gate report', 'agree-pass', 'agree-fail', 'shadow-only-fail', 'shadow-missed', 'pending', 'p50/p90', 'newest ten']) assert.ok(rollout.includes(field), `Rollout names ${field}`);

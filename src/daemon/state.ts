@@ -482,14 +482,10 @@ export const daemonStateSchema = z.object({
   profiles: z.record(z.string(), z.object({ failures: z.number().int().min(0), reason: z.string().max(500).nullable(), cooldownUntil: z.string().nullable() }).strict()).default({}),
   metrics: z.array(cycleMetricsSchema).default([]),
   deployment: deploymentObservationSchema.nullable().default(null),
-  /** The loop's promotion drive (GY-1302). */
-  promotion: promotionStateSchema.nullable().default(null),
-  /** The main watch (GY-1519, main-watch.ts): main's unknown commits and the promotion freeze. Lazy: main-watch.ts imports this module. */
-  mainWatch: z.lazy(() => mainWatchStateSchema).nullable().default(null),
-  /** The shadow merge gate's last 200 verdicts (GY-1522, cycle-shadow.ts). Lazy: cycle-shadow.ts imports this module. */
-  shadow: z.lazy(() => shadowStateSchema).default([]),
-  /** The release the running loop process loaded, recorded by each process at its startup (GY-437). */
-  release: loopReleaseSchema.nullable().default(null),
+  promotion: promotionStateSchema.nullable().default(null), // The loop's promotion drive (GY-1302).
+  mainWatch: z.lazy(() => mainWatchStateSchema).nullable().default(null), // GY-1519: main's unknown commits and the promotion freeze. Lazy: main-watch.ts imports this module.
+  shadow: z.lazy(() => shadowStateSchema).default([]), // GY-1522: the shadow merge gate's last 200 verdicts. Lazy: cycle-shadow.ts imports this module.
+  release: loopReleaseSchema.nullable().default(null), // The release the running loop process loaded, recorded by each process at its startup (GY-437).
   /** The between-cycles self-upgrade's progress (GY-437). */
   upgrade: upgradeStateSchema,
   /** The last reload of .graphyard/master.json: what the running loop adopted, or why it refused. */

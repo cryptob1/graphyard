@@ -1,5 +1,6 @@
 // Concern: the shadow merge gate's pure parts — which head is tried next, how a shadow verdict compares with GitHub's, and the report.
 import type { Work } from '../model.js';
+import { ownHeads } from '../merge-queue.js';
 
 export const shadowOutcomes = ['agree-pass', 'agree-fail', 'shadow-only-fail', 'shadow-missed', 'pending'] as const;
 export type ShadowOutcome = typeof shadowOutcomes[number];
@@ -15,20 +16,31 @@ export type GithubOutcome = 'pending' | 'merged' | 'reverted' | 'failed';
 /** Whether the trial passed: it merged cleanly, built, and every affected test passed. */
 export const shadowPassed = (verdict: Pick<ShadowVerdict, 'build' | 'tests' | 'conflict'>) => !verdict.conflict.length && verdict.build === 'pass' && !verdict.tests.failed.length;
 
+/** When the item's current head was handed in: the pipeline timeline's resubmission, else its submission, else the stage entry. */
+export function submittedAtOf(item: Pick<Work, 'stageEnteredAt'>): number {
+  const pipeline = (item as { pipeline?: { submittedAt?: string | null; resubmittedAt?: string | null } }).pipeline;
+  for (const at of [pipeline?.resubmittedAt, pipeline?.submittedAt, item.stageEnteredAt]) if (at && Number.isFinite(Date.parse(at))) return Date.parse(at);
+  return 0;
+}
+/** A head GitHub has already merged (or whose item is done) has no turn left: GitHub's gate decided it first. */
+const landed = (item: Pick<Work, 'stage' | 'observation'>) => item.stage === 'done' || !!item.observation?.merged;
+
 /**
- * The heads still owed a trial: submitted (a pull request and a candidate), not delivered, with no
- * verdict for this head against this main tip. Oldest submission first, and only one per cycle.
+ * The heads still owed a trial: submitted (a pull request and a candidate), not yet merged by
+ * GitHub, with no verdict for this head against this main tip. Oldest submission first, and only
+ * one per cycle.
  */
 export function shadowDue(work: readonly Work[], verdicts: readonly Pick<ShadowVerdict, 'head' | 'baseTip'>[], mainTip: string): Work | null {
   const tried = new Set(verdicts.map(verdict => `${verdict.head}:${verdict.baseTip}`));
-  const owed = work.filter(item => item.stage !== 'done' && item.submission && item.candidate && !tried.has(`${item.candidate.sha.toLowerCase()}:${mainTip.toLowerCase()}`));
-  return owed.sort((a, b) => Date.parse(a.stageEnteredAt) - Date.parse(b.stageEnteredAt))[0] ?? null;
+  const owed = work.filter(item => !landed(item) && item.submission && item.candidate && !tried.has(`${item.candidate.sha.toLowerCase()}:${mainTip.toLowerCase()}`));
+  return owed.sort((a, b) => submittedAtOf(a) - submittedAtOf(b) || a.key.localeCompare(b.key))[0] ?? null;
 }
 
-/** GitHub's side of the comparison for a verdict's head, from the item as the snapshot holds it. */
-export function githubOutcome(item: Pick<Work, 'stage' | 'candidate' | 'delivery' | 'mainGuardReverts' | 'observation' | 'policy'> | undefined, head: string): GithubOutcome {
+/** GitHub's side of the comparison for a verdict's head, from the item as the snapshot holds it. Only a delivery of this very head counts: an earlier, reworked head that a later one superseded was never merged. */
+export function githubOutcome(item: Pick<Work, 'stage' | 'candidate' | 'baseRefresh' | 'delivery' | 'mainGuardReverts' | 'observation' | 'policy'> | undefined, head: string): GithubOutcome {
   if (!item) return 'pending';
-  if (item.stage === 'done' && item.delivery) return item.mainGuardReverts?.length ? 'reverted' : 'merged';
+  const own = ownHeads(item).includes(head.toLowerCase());
+  if (item.stage === 'done' && item.delivery) return !own ? 'pending' : item.mainGuardReverts?.length ? 'reverted' : 'merged';
   if (item.candidate?.sha.toLowerCase() !== head.toLowerCase()) return 'pending';
   const observed = item.observation;
   if (observed?.candidate.sha.toLowerCase() !== head.toLowerCase()) return 'pending';

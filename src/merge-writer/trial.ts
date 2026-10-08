@@ -1,11 +1,11 @@
 // Concern: the shadow gate's trial merge — the exact merge commit of a head onto main, and its build and affected tests in a credential-free checkout.
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { symlink, writeFile } from 'node:fs/promises';
+import { readFile, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { defaultChildRun, type ChildRun } from '../child-runner.js';
 import { allocateSessionCheckout, removeSessionCheckout } from '../install/worktree-root.js';
-import { isolatedTestEnvironment } from '../cli/test-isolation.js';
+import { isolatedTestEnvironment, npmCiArgs, npmCiEnvironment } from '../cli/test-isolation.js';
 
 /** One git call in the coordinator's object store: the arguments after `git -C <root>`, the child's stdout. */
 export type TrialGit = (args: string[], env?: Record<string, string>) => Promise<string>;
@@ -93,8 +93,18 @@ export async function runTrial(input: RunTrialInput): Promise<TrialRun> {
   const finish = (build: TrialRun['build'], tests: TrialRun['tests']): TrialRun => ({ build, tests, durationMs: Math.max(0, now() - startedAt), logTail: log.join('\n').slice(-tailLength) });
   try {
     await run('git', ['-C', input.root, 'worktree', 'add', '--detach', checkout.worktree, input.mergeSha], { timeoutMs: remaining() });
-    // The checkout resolves the install the coordinator already has for this lockfile.
-    if (existsSync(join(input.root, 'node_modules'))) await symlink(join(input.root, 'node_modules'), join(checkout.worktree, 'node_modules')).catch(() => {});
+    // The merge builds against its own dependencies: the coordinator's install when its lockfile is byte-identical to the merge's, else an `npm ci` of the merge's lockfile.
+    const lockfile = (dir: string) => readFile(join(dir, 'package-lock.json'), 'utf8').catch(() => null);
+    const [own, merged] = await Promise.all([lockfile(input.root), lockfile(checkout.worktree)]);
+    if (existsSync(join(input.root, 'node_modules')) && own !== null && own === merged) await symlink(join(input.root, 'node_modules'), join(checkout.worktree, 'node_modules'));
+    else {
+      try { log.push(`$ npm ci\n${String(await run('npm', npmCiArgs, { cwd: checkout.worktree, env: npmCiEnvironment(env) as Record<string, string>, timeoutMs: remaining() }))}`); }
+      catch (error) {
+        const failed = error as { stdout?: unknown; stderr?: unknown; message?: string };
+        log.push(`$ npm ci\n${`${typeof failed.stdout === 'string' ? failed.stdout : ''}${typeof failed.stderr === 'string' ? failed.stderr : ''}` || String(failed.message ?? error)}`);
+        return finish('fail', { passed: 0, failed: [], files: 0 });
+      }
+    }
     const built = await child('npm', ['run', 'build']);
     if (!built.ok) return finish('fail', { passed: 0, failed: [], files: 0 });
     const selection = await child('node', ['scripts/ci-tests.mjs', 'affected', ...input.changedFiles]);

@@ -73,6 +73,7 @@ test('unit:trial-merge-conflict-reported — a head that conflicts with the base
 const fixtureFiles = {
   '.gitignore': 'node_modules\n',
   'package.json': JSON.stringify({ name: 'fixture', scripts: { build: 'node build.js' } }),
+  'package-lock.json': '{"lockfileVersion":3}\n',
   'build.js': "const { existsSync } = require('node:fs'); console.log('ENV:' + JSON.stringify({ keys: Object.keys(process.env), global: process.env.GIT_CONFIG_GLOBAL, nosystem: process.env.GIT_CONFIG_NOSYSTEM })); if (existsSync('break-build')) { console.error('build broke'); process.exit(1); }\n",
   'scripts/ci-tests.mjs': "const files = process.argv.slice(3); console.log('affected: selected'); for (const file of files) if (file.startsWith('tests/')) console.log(file);\n",
   'tests/helpers/run-tests.ts': "import { readFileSync } from 'node:fs'; const list = process.argv[process.argv.indexOf('--files-from') + 1]; const files = readFileSync(list, 'utf8').split('\\n').filter(Boolean); for (const file of files) console.log((file.includes('bad') ? 'not ok - ' : 'ok - ') + file); if (files.some(file => file.includes('bad'))) process.exit(1);\n",
@@ -132,4 +133,24 @@ test('unit:trial-run-credential-free — the trial child sees none of GH_CONFIG_
   for (const name of [...withheldTrialVariables, 'GRAPHYARD_TOKEN', 'GRAPHYARD_URL', 'GRAPHYARD_TIMING_RECORD', 'HERDR_PANE_ID', 'HERDR_SOCKET_PATH']) assert.ok(!seen.keys.includes(name), `the child saw ${name}`);
   assert.ok(seen.keys.includes('KEPT'));
   assert.deepEqual([seen.global, seen.nosystem], ['/dev/null', '1']);
+});
+
+test('integration:trial-run-build-and-tests — a merge that changes the lockfile installs its own dependencies with npm ci, and one that leaves it alone reuses the coordinator\'s install', async () => {
+  const repo = await fixture();
+  const same = repo.commitOnBase({ 'src/a.ts': 'export {};\n' }, 'no dependency change');
+  const changed = repo.commitOnBase({ 'package-lock.json': '{"lockfileVersion":3,"packages":{"x":{}}}\n' }, 'new lockfile');
+  const commands: string[] = [];
+  const run = ((command: string, args: string[], options: { cwd?: string }) => {
+    commands.push(`${command} ${args[0]}`);
+    if (command === 'npm' && args[0] === 'ci') { assert.ok(!existsSync(join(options.cwd!, 'node_modules')), 'npm ci installs into a checkout holding no borrowed install'); return 'installed'; }
+    return defaultChildRun(command, args, options as never);
+  }) as never;
+  for (const head of [same, changed]) {
+    const merged = await trialMerge(gitFor(repo.root), { head, baseTip: repo.base });
+    assert.ok('mergeSha' in merged);
+    const base = await temporaryDirectory('trial-merge-root');
+    const result = await runTrial({ root: repo.root, base, mergeSha: merged.mergeSha, changedFiles: [], timeoutMs: 120_000, key: 'GY-9', environment: { PATH: process.env.PATH! }, run });
+    assert.equal(result.build, 'pass', result.logTail);
+  }
+  assert.equal(commands.filter(command => command === 'npm ci').length, 1, 'only the changed lockfile installs');
 });

@@ -75,8 +75,25 @@ const loopReads = new WeakMap<DaemonState, ShadowReads>();
 
 interface Flight { key: string; head: string; baseTip: string; settled: { error: unknown } | { verdict: Omit<ShadowVerdict, 'outcome'>; work: Work } | null }
 const flights = new WeakMap<DaemonState, Flight>();
+/** A settled trial whose verdict the coordinator has not yet recorded; at most one per loop, since one trial runs at a time. */
+const unrecorded = new WeakMap<DaemonState, { verdict: Omit<ShadowVerdict, 'outcome'>; work: Work }>();
 /** Resolves once the trial in flight for `state` has settled; for the step's tests. */
 export const shadowIdle = async (state: DaemonState) => { for (let waited = 0; flights.get(state) && !flights.get(state)!.settled && waited < 600_000; waited += 5) await new Promise(resolve => setTimeout(resolve, 5)); };
+
+/**
+ * The cursor keeps the newest `shadowKeptVerdicts`. When over, verdicts of items no longer open at
+ * that head go first, so a still-open (head, tip) pair is never evicted and tried again while
+ * anything else can make room.
+ */
+export function keepVerdicts<T extends Pick<ShadowVerdict, 'id' | 'head'>>(verdicts: T[], work: readonly Work[]): T[] {
+  let excess = verdicts.length - shadowKeptVerdicts;
+  if (excess <= 0) return verdicts;
+  const open = (verdict: Pick<ShadowVerdict, 'id' | 'head'>) => work.some(item => item.id === verdict.id && item.stage !== 'done' && item.candidate?.sha.toLowerCase() === verdict.head);
+  const evicted = new Set<T>();
+  for (const verdict of verdicts) if (excess > 0 && !open(verdict)) { evicted.add(verdict); excess -= 1; }
+  for (const verdict of verdicts) if (excess > 0 && !evicted.has(verdict)) { evicted.add(verdict); excess -= 1; }
+  return verdicts.filter(verdict => !evicted.has(verdict));
+}
 
 const shadowAttentionKey = (key: string) => `shadow:${key}`;
 const disagreement = (outcome: string) => outcome === 'shadow-only-fail' || outcome === 'shadow-missed';
@@ -100,11 +117,19 @@ export async function shadowStep(cycle: Cycle) {
     if ('error' in flight.settled) {
       const reason = flight.settled.error instanceof Error ? flight.settled.error.message : String(flight.settled.error);
       performed.push(storeAction(state, `shadow-error:${flight.head}:${flight.baseTip}`, { kind: 'merge', work: flight.key, principal: null, state: 'failed', detail: `Shadow trial of ${flight.key} head ${flight.head} on ${flight.baseTip} could not run, so no verdict was recorded: ${reason}`.slice(0, 1900), attempts: 1, epoch: null, cycle: state.cycle, at: new Date(now()).toISOString() }, null));
-    } else {
-      const { verdict, work } = flight.settled;
-      state.shadow = [...state.shadow, { ...verdict, outcome: 'pending' as const }].slice(-shadowKeptVerdicts);
+    } else unrecorded.set(state, flight.settled);
+  }
+  // A settled verdict joins the cursor only once the coordinator has recorded it: a refused or
+  // dropped post is retried next cycle under the same idempotency key, and no new trial starts meanwhile.
+  const owed = unrecorded.get(state);
+  if (owed) {
+    try {
+      await reads.record(owed.work, owed.verdict);
+      unrecorded.delete(state);
+      state.shadow = keepVerdicts([...state.shadow, { ...owed.verdict, outcome: 'pending' as const }], snapshot.work);
       changed = true;
-      await reads.record(work, verdict).catch(error => { performed.push(storeAction(state, `shadow-record:${verdict.head}`, { kind: 'merge', work: verdict.key, principal: null, state: 'failed', detail: `The shadow verdict for ${verdict.key} was kept in the cursor but the coordinator did not record it: ${error instanceof Error ? error.message : String(error)}`.slice(0, 1900), attempts: 1, epoch: null, cycle: state.cycle, at: new Date(now()).toISOString() }, null)); });
+    } catch (error) {
+      performed.push(storeAction(state, `shadow-record:${owed.verdict.head}:${owed.verdict.baseTip}`, { kind: 'merge', work: owed.verdict.key, principal: null, state: 'failed', detail: `The shadow verdict for ${owed.verdict.key} is not yet recorded by the coordinator and is retried next cycle: ${error instanceof Error ? error.message : String(error)}`.slice(0, 1900), attempts: 1, epoch: null, cycle: state.cycle, at: new Date(now()).toISOString() }, null));
     }
   }
   // Outcomes follow GitHub's gate as the snapshot shows it; a disagreement is raised once per item.
@@ -116,7 +141,7 @@ export async function shadowStep(cycle: Cycle) {
     const key = shadowAttentionKey(verdict.key);
     if (disagreement(verdict.outcome) && !state.actions[key]) performed.push(storeAction(state, key, { kind: 'escalation', work: verdict.key, principal: null, state: 'done', detail: shadowDisagreementDetail(verdict), attempts: 1, epoch: null, cycle: state.cycle, at: new Date(now()).toISOString() }, null));
   }
-  if (!flights.has(state)) {
+  if (!flights.has(state) && !unrecorded.has(state)) {
     const tip = await reads.mainTip();
     // A head whose trial could not run against this tip is not tried again against it.
     const open = snapshot.work.filter(item => !item.candidate || !state.actions[`shadow-error:${item.candidate.sha.toLowerCase()}:${tip}`]);
@@ -134,23 +159,11 @@ export async function shadowStep(cycle: Cycle) {
       })().then(verdict => { entry.settled = { verdict, work: due }; }, error => { entry.settled = { error }; });
     }
   }
-  // `master status` lists the loop's escalations: the gate's report rides on one row, rewritten only when it changes.
-  const report = `Shadow merge gate report: ${shadowReportText(shadowReport(state.shadow, snapshot.work))}`;
-  if (state.shadow.length && state.actions[shadowReportKey]?.detail !== report) {
-    performed.push(storeAction(state, shadowReportKey, { kind: 'escalation', work: null, principal: null, state: 'done', detail: report.slice(0, 1900), attempts: 1, epoch: null, cycle: state.cycle, at: new Date(now()).toISOString() }, null));
-    changed = true;
-  }
   if (changed) await effects.persist(state);
 }
 
-export const shadowReportKey = 'shadow-gate:report';
-/** The report as one line: counts per outcome, trial time p50/p90 and the newest disagreements. */
-export function shadowReportText(report: ReturnType<typeof shadowReport>) {
-  const counts = shadowOutcomes.map(outcome => `${outcome} ${report.counts[outcome]}`).join(', ');
-  const seconds = (ms: number | null) => ms === null ? 'n/a' : `${Math.round(ms / 1000)}s`;
-  const newest = report.disagreements.map(entry => `${entry.key} ${entry.head.slice(0, 12)} ${entry.mergeSha?.slice(0, 12) ?? 'conflict'} (${entry.outcome})`).join('; ');
-  return `${report.total} verdicts (${counts}); trial p50 ${seconds(report.p50Ms)}, p90 ${seconds(report.p90Ms)}${newest ? `; newest disagreements: ${newest}` : ''}`;
-}
+/** The `shadowGate` section of `master status`: the report over the cursor's recorded outcomes (the step re-judges them every cycle). */
+export const shadowGateSummary = (shadow: readonly ShadowVerdict[]) => shadowReport(shadow, []);
 
 export function shadowDisagreementDetail(verdict: Pick<ShadowVerdict, 'key' | 'head' | 'mergeSha' | 'outcome'>) {
   return `Shadow merge gate: ${verdict.key} head ${verdict.head} is ${verdict.outcome} (trial merge ${verdict.mergeSha ?? 'none: it conflicts'}); `
