@@ -12,8 +12,9 @@ import type { AgentRegistry, FleetAccountInput, FleetModel, FleetRole, FleetRole
 import type { ProfileRegistration } from './index.js';
 import { suffixedSessionName } from '../session-name.js';
 import { herdrBoundElsewhere, herdrPluginBinding } from '../repository-setup.js';
-import { HerdrSetupFailure, herdrServerUnit, herdrServerUnitText, herdrViaEnv, installHerdrInstance, type HerdrInstance } from '../master/herdr.js';
-import { herdrConnectCommands } from '../model/setup-checklist.js';
+import { herdrViaEnv, installHerdrInstance, type HerdrInstance } from '../master/herdr.js';
+import { HerdrSetupFailure, herdrServerUnit, herdrServerUnitText } from '../herdr-host.js';
+import { herdrConnectCommands } from '../herdr-connect.js';
 import { executorGlob, executorInstance, installUnitsFile, type InstallUnits, legacyExecutorTemplate, legacyLoopUnit, parseInstallUnits, perInstallUnits, readInstallUnits, unrecordedInstallUnits } from './units.js';
 
 /**

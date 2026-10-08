@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
-import { checklistGreen, goalLimits, goalSubmission, herdrConnectCommands, herdrWatch, requestedView, setupChecklist, type HerdrWatch, type SetupItem } from '../../src/model/setup-checklist';
+import { checklistGreen, goalLimits, goalSubmission, paneServer, requestedView, setupChecklist, statusSupervised, type SetupItem } from '../../src/model/setup-checklist';
+import { herdrConnectCommands, type HerdrWatch } from '../../src/herdr-connect';
 import { CopyButton } from './workers';
 import { findOnboardingWork, onboardingWait, type OnboardingWait } from '../../src/model/onboarding-work';
 import { PageHeader, PageSection } from '../components/page-layout';
@@ -96,7 +97,8 @@ export function GoalForm({ onSubmit, busy, error, submitted }: { onSubmit: (text
  * read failed), so whether the change merged is unknown and the goal box stays closed.
  */
 export function SetupView({ status, work, workUnread, now, onConnect, onSubmitGoal, busy, error, submitted }: { status: any; work?: readonly any[] | null; workUnread?: boolean; now?: number; onConnect: () => void; onSubmitGoal: (text: string) => void; busy?: boolean; error?: string; submitted?: string | null }) {
-  const items = setupChecklist(status);
+  // A supervised install (GY-1501) has no reviewer App or reviewing account to set up: the person reviews each change.
+  const supervised = statusSupervised(status), items = setupChecklist(status, { supervised });
   const item = findOnboardingWork(work);
   const onboarding = item ? onboardingWait(item, now ?? Date.now(), status?.githubRepository?.fullName ?? status?.githubRepository ?? null) : null;
   const open = onboarding && !onboarding.merged ? 1 : 0;
@@ -104,8 +106,9 @@ export function SetupView({ status, work, workUnread, now, onConnect, onSubmitGo
   const total = items.length + (onboarding ? 1 : 0), left = items.filter(entry => !entry.done).length + open;
   return <>
     <PageHeader title="Set up Graphyard">{green ? 'Everything is ready.' : !left ? 'Checking whether the onboarding change has merged. This page updates by itself.' : `${left} of ${total} steps left. This page updates by itself as each one finishes.`}</PageHeader>
+    {supervised && <p className="notice" data-supervised>You review and merge each change on GitHub; no agent reviews or approves on your behalf.</p>}
     <PageSection title="Checklist" label="Setup checklist"><SetupChecklist items={items} onConnect={onConnect} onboarding={onboarding}/></PageSection>
-    <PageSection title="Watch your agents in Herdr" label="Watch your agents in Herdr"><HerdrConnect watch={herdrWatch(status)}/></PageSection>
+    <PageSection title="Watch your agents in Herdr" label="Watch your agents in Herdr"><HerdrConnect watch={paneServer(status)}/></PageSection>
     {green && <PageSection title="Your first goal" label="First goal"><GoalForm onSubmit={onSubmitGoal} busy={busy} error={error} submitted={submitted}/></PageSection>}
   </>;
 }

@@ -70,7 +70,15 @@ function roleReady(fleet: any, role: RequiredSetupRole) {
  * The checklist for STATUS (the control plane's `/api/status` answer, or null while it does not
  * answer). Items stay in the order a new installation completes them.
  */
-export function setupChecklist(status: any | null, options: { appSetupUrl?: string } = {}): SetupItem[] {
+/**
+ * SUPERVISED (GY-1501, `up --local`): the operator reviews and merges on GitHub, so the reviewer App
+ * and the reviewing agent account are not part of this installation and are never reported missing.
+ * `graphyard up` says so itself; the dashboard reads it from the status (`setup.supervision`, as the
+ * live loop names it).
+ */
+export const statusSupervised = (status: any | null) => status?.setup?.supervision === 'supervised';
+export function setupChecklist(status: any | null, options: { appSetupUrl?: string; supervised?: boolean } = {}): SetupItem[] {
+  const supervised = options.supervised ?? statusSupervised(status);
   const appUrl = options.appSetupUrl ?? defaultAppSetupUrl;
   const repository = status?.githubRepository?.fullName ?? status?.githubRepository ?? status?.repository ?? null;
   const missing: unknown[] = status?.appPermissions?.missing ?? [];
@@ -84,10 +92,11 @@ export function setupChecklist(status: any | null, options: { appSetupUrl?: stri
     action: appDone ? null : appBound && status?.appPermissions?.installationUrl ? { kind: 'link', label: 'Accept the new permissions', href: status.appPermissions.installationUrl }
       : { kind: 'link', label: 'Create the GitHub App', href: appUrl } });
   const reviewerDone = Array.isArray(status?.reviewerApps) && status.reviewerApps.length > 0;
-  items.push({ id: 'reviewer-app', title: 'Reviewer App', done: reviewerDone, human: true,
+  if (!supervised) items.push({ id: 'reviewer-app', title: 'Reviewer App', done: reviewerDone, human: true,
     line: reviewerDone ? 'A second App signs the independent code reviews.' : 'Create a second App so every change is reviewed by someone other than its author.',
     action: reviewerDone ? null : appBound ? { kind: 'link', label: 'Create the reviewer App', href: appUrl } : { kind: 'wait', label: 'Waiting for the GitHub App' } });
   for (const role of requiredSetupRoles) {
+    if (supervised && role === 'reviewer') continue;
     const done = roleReady(status?.fleet, role);
     items.push({ id: `account:${role}`, title: roleTitle[role], done, human: true,
       line: done ? 'Connected and signed in.' : role === 'worker' ? 'Connect an AI coding account (an API key or a subscription sign-in) to write the code.' : 'Connect an AI coding account to review the code. It may be the same account.',
@@ -108,32 +117,18 @@ export function setupChecklist(status: any | null, options: { appSetupUrl?: stri
 }
 
 /**
- * The Herdr server that holds this install's agents, as the master loop reports it (GY-1511):
- * its own instance (an XDG_CONFIG_HOME and a session name) when the host's default one serves
- * another install, else the default (both null); the host the loop runs on, when recorded; and
- * whether the loop last reached that server (null while unknown).
+ * The pane server that holds this install's agent sessions, as the master loop reports it (GY-1511):
+ * its own instance (a config home and a session name) when the host's default one serves another
+ * install, else the default (both null); the host the loop runs on, when recorded; and whether the
+ * loop last reached that server (null while unknown). A sibling module outside the model turns it into commands.
  */
-export interface HerdrWatch { configHome: string | null; session: string | null; host: string | null; running: boolean | null }
-/** The value `status.setup.herdr` carries, or the default instance on an unknown host when it carries none. */
-export function herdrWatch(status: any | null): HerdrWatch {
-  const reported = status?.setup?.herdr;
+export interface PaneServer { configHome: string | null; session: string | null; host: string | null; running: boolean | null }
+/** The value `status.setup.panes` carries, or the default instance on an unknown host when it carries none. */
+export function paneServer(status: any | null): PaneServer {
+  const reported = status?.setup?.panes;
   const text = (value: unknown) => typeof value === 'string' && value.trim() ? value.trim() : null;
   const configHome = text(reported?.configHome), session = text(reported?.session);
   return { configHome: configHome && session ? configHome : null, session: configHome && session ? session : null, host: text(reported?.host), running: typeof reported?.running === 'boolean' ? reported.running : null };
-}
-const shellWord = (value: string) => /^[\w@%+=:,./-]+$/.test(value) ? value : `'${value.replaceAll("'", "'\\''")}'`;
-/** Where a remote command names a host it does not know: the operator puts their own in. */
-export const herdrHostPlaceholder = 'HOST';
-/**
- * The commands that open this install's agents in Herdr (GY-1511): on this host, through SSH, and
- * through Herdr's own remote attach. Its own instance is attached by its XDG_CONFIG_HOME and session
- * name; the default instance by plain `herdr`.
- */
-export function herdrConnectCommands(watch: Pick<HerdrWatch, 'configHome' | 'session' | 'host'>) {
-  const host = shellWord(watch.host ?? herdrHostPlaceholder);
-  const own = watch.configHome && watch.session ? { configHome: watch.configHome, session: watch.session } : null;
-  const local = own ? `XDG_CONFIG_HOME=${shellWord(own.configHome)} herdr session attach ${shellWord(own.session)}` : 'herdr';
-  return { local, ssh: `ssh -t ${host} ${shellWord(local)}`, remote: own ? `herdr --remote ${host} --session ${shellWord(own.session)}` : `herdr --remote ${host}` };
 }
 
 export const checklistGreen = (items: readonly SetupItem[]) => items.every(item => item.done);

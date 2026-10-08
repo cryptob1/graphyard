@@ -19,7 +19,8 @@ import { assertOutsideRepository, configHome, ensureTokens, fingerprint, install
 import { AppStepPending, readAppFile, readSavedApp, readUninstalledApp, type SavedApp } from './manifest.js';
 import { appRoles, importApp, listApps, publiclyReachable, reuseExistingApp, savedRegistrations, type AppCredentials, type AppRole, type SavedRegistration } from '../github-setup.js';
 import { herdrBoundElsewhere, herdrPluginBinding, herdrRebindRefusal } from '../repository-setup.js';
-import { HerdrSetupFailure, herdrViaEnv, installHerdrInstance, type HerdrInstance } from '../master/herdr.js';
+import { herdrViaEnv, installHerdrInstance, type HerdrInstance } from '../master/herdr.js';
+import { HerdrSetupFailure } from '../herdr-host.js';
 import { localTransport, sshTransport, type Transport } from './transport.js';
 import { localDatabaseVariable, localSettings, type LocalSupervisor } from './local.js';
 import { localPaths } from './local-runtime.js';

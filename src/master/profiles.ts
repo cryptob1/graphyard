@@ -315,8 +315,22 @@ export const agentIdentitySchema = z.object({ id: z.string().regex(/^[a-zA-Z0-9]
 export const defaultRerunFailedChecks = 1;
 // The most reruns per sha and check master config and the control plane accept.
 export const maxRerunFailedChecks = 3;
+/**
+ * Who reviews and merges (GY-1501). `autonomous`, the default every existing install keeps: the
+ * reviewer App reviews and the master's operator-agent and approver identities decide. `supervised`,
+ * where `up --local` starts: the operator reviews each pull request on GitHub (a non-author approval of
+ * the exact head) and GitHub auto-merge merges it; the loop launches no reviewer, approver or
+ * escalation session and the master claims no autonomy. `master autonomy --apply` promotes it.
+ */
+export const supervisionModes = ['autonomous', 'supervised'] as const;
+export type Supervision = typeof supervisionModes[number];
+export const promotionCommand = 'graphyard master reviewer setup, then graphyard master autonomy --admin-token-stdin --apply';
 export const masterConfigSchema = z.object({
   version: z.literal(1),
+  // Absent is autonomous, so every existing master.json loads and is written back unchanged.
+  supervision: z.enum(supervisionModes).optional(),
+  // The operator's own GitHub login (supervised mode): a candidate it authored cannot be independently approved by it.
+  operatorLogin: z.string().trim().min(1).max(100).optional(),
   url: z.string(),
   credentialFile: z.string(),
   cliPath: z.string(),
@@ -386,7 +400,17 @@ export function withProducerDefaults<T extends Pick<MasterConfig, 'producers'>>(
   if (!config.producers.some(profile => profile.concurrency === undefined)) return config;
   return { ...config, producers: config.producers.map(profile => profile.concurrency === undefined ? { ...profile, concurrency: automaticProducerConcurrency } : profile) };
 }
-export const withRoleDefaults = <T extends Pick<MasterConfig, 'reviewers' | 'producers' | 'run'>>(config: T): T => withProducerDefaults(withReviewerDefaults(config));
+/**
+ * The config as a supervised install runs it (GY-1501): no reviewer App, operator-agent or approver
+ * identity, whatever master.json still records, so the loop launches no reviewer, approver or
+ * escalation session and the master requests no two-party decision. Autonomous configs pass unchanged.
+ */
+export function withSupervision<T extends { supervision?: Supervision; reviewer?: unknown; operatorAgent?: unknown; approver?: unknown }>(config: T): T {
+  if (config.supervision !== 'supervised') return config;
+  const { reviewer: _reviewer, operatorAgent: _operatorAgent, approver: _approver, ...kept } = config;
+  return kept as T;
+}
+export const withRoleDefaults = <T extends Pick<MasterConfig, 'reviewers' | 'producers' | 'run'> & { supervision?: Supervision; reviewer?: unknown; operatorAgent?: unknown; approver?: unknown }>(config: T): T => withSupervision(withProducerDefaults(withReviewerDefaults(config)));
 /** Reruns of a failed required check per sha under this master config: `mergeQueue.rerunFailedChecks`, or the product default of 1. */
 export function rerunFailedChecks(config: Pick<MasterConfig, 'mergeQueue'> | null | undefined): number {
   return config?.mergeQueue?.rerunFailedChecks ?? defaultRerunFailedChecks;

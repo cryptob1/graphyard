@@ -7,7 +7,8 @@ import { fileURLToPath } from 'node:url';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import type { UpDependencies, UpEvent, UpHerdr, UpRequest } from '../src/up.js';
-import type { HerdrHostDeps, HerdrInstance } from '../src/master/herdr.js';
+import type { HerdrInstance } from '../src/master/herdr.js';
+import type { HerdrHostDeps } from '../src/herdr-host.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
@@ -18,7 +19,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
  * unit:herdr-calls-target-install-instance, unit:herdr-attach-command-shown,
  * unit:up-sets-up-herdr-from-scratch and unit:setup-page-herdr-connect-instructions.
  */
-const herdr = () => import('../src/master/herdr.js');
+const herdr = async () => ({ ...await import('../src/master/herdr.js'), ...await import('../src/herdr-host.js') });
 const up = () => import('../src/up.js');
 const SERVER = 'http://127.0.0.1:4310';
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
@@ -195,7 +196,7 @@ test('unit:up-sets-up-herdr-from-scratch — a self-contained host is set up aga
   const { installHerdrInstance } = await herdr();
   const { harness } = await import('./install-harness.js');
   const { installHerdrOnly, prepareInstall } = await import('../src/install/index.js');
-  const { herdrConnectCommands } = await import('../src/model/setup-checklist.js');
+  const { herdrConnectCommands } = await import('../src/herdr-connect.js');
   const own = installHerdrInstance('owner-project', '/home/graphyard');
   const seed = new Map([[hostPlugin('/home/graphyard/.config'), { content: JSON.stringify({ url: 'https://other.example' }), mode: 0o600 }], [hostMaster, { content: JSON.stringify({ version: 1 }), mode: 0o600 }]]);
   const first = await hostInstall(seed);
@@ -619,9 +620,10 @@ test('unit:up-sets-up-herdr-from-scratch — every up sets Herdr up with no flag
 
 test('unit:setup-page-herdr-connect-instructions — the Setup page shows copyable local, SSH and Herdr remote attach commands, and whether the Herdr server runs, for an install with its own instance and one on the default instance', async () => {
   const { SetupView } = await import('../web/pages/setup.js');
-  const { herdrConnectCommands, herdrWatch } = await import('../src/model/setup-checklist.js');
-  const { loopHerdr, encodeLoopHerdr, LoopRegistry } = await import('../src/model/executor-presence.js');
-  const page = (herdrReport: unknown) => renderToStaticMarkup(createElement(SetupView, { status: { setup: { protection: 'off', loop: true, herdr: herdrReport } }, onConnect: () => {}, onSubmitGoal: () => {} }));
+  const { paneServer } = await import('../src/model/setup-checklist.js');
+  const { herdrConnectCommands } = await import('../src/herdr-connect.js');
+  const { loopPanes, encodeLoopPanes, LoopRegistry } = await import('../src/model/executor-presence.js');
+  const page = (herdrReport: unknown) => renderToStaticMarkup(createElement(SetupView, { status: { setup: { protection: 'off', loop: true, panes: herdrReport } }, onConnect: () => {}, onSubmitGoal: () => {} }));
   const decode = (html: string) => html.replaceAll('&#x27;', '\'').replaceAll('&quot;', '"').replaceAll('&amp;', '&');
 
   const own = { configHome: '/home/op/.config/graphyard/acme-shop/herdr', session: 'graphyard-acme-shop', host: 'shop-box.tail1234.ts.net', running: true };
@@ -639,13 +641,13 @@ test('unit:setup-page-herdr-connect-instructions — the Setup page shows copyab
   assert.match(fallback, /Replace HOST/);
   // Before any loop reported: shown, its state unknown.
   assert.match(page(undefined), /data-herdr-running="unknown"/);
-  assert.deepEqual(herdrConnectCommands(herdrWatch(null)), { local: 'herdr', ssh: 'ssh -t HOST herdr', remote: 'herdr --remote HOST' });
+  assert.deepEqual(herdrConnectCommands(paneServer(null)), { local: 'herdr', ssh: 'ssh -t HOST herdr', remote: 'herdr --remote HOST' });
 
   // The loop names its server on its reads; the control plane keeps it with the loop's presence for /api/status.
-  const header = encodeLoopHerdr(own);
-  assert.deepEqual(loopHerdr(header), own);
-  assert.equal(loopHerdr('%7Bnot json'), null);
+  const header = encodeLoopPanes(own);
+  assert.deepEqual(loopPanes(header), own);
+  assert.equal(loopPanes('%7Bnot json'), null);
   const registry = new LoopRegistry(), now = new Date();
-  registry.observe({ principal: 'coordinator-1', intervalSeconds: 20, herdr: loopHerdr(header) }, now);
-  assert.deepEqual(registry.live(now)?.herdr, own);
+  registry.observe({ principal: 'coordinator-1', intervalSeconds: 20, panes: loopPanes(header) }, now);
+  assert.deepEqual(registry.live(now)?.panes, own);
 });

@@ -14,7 +14,8 @@ import { deliveryPolicySchema, generatedWorkflowFiles, requiredPullRequestChecks
 import { renderReleasePipeline } from './install/release-pipeline.js';
 import { assertUnitOwned, executorGlob, executorInstance, executorInstancePattern, legacyExecutorTemplate, legacyInstallUnits, readInstallUnits, resolveInstallUnits, type InstallUnits } from './install/units.js';
 import { containedInstall, npmCiEnvironment } from './cli/test-isolation.js';
-import { herdrSync, herdrTarget, type HerdrInstance } from './master/herdr.js';
+import { herdrTarget, type HerdrInstance } from './master/herdr.js';
+import { herdrSync } from './herdr-host.js';
 
 export const hostIdSchema = z.string().trim().min(1).max(200);
 export const connectionSchema = z.object({ url: z.string(), cliPath: z.string(), hostId: hostIdSchema, token: z.string().min(32).optional(), principal: z.string().optional() }).strict();

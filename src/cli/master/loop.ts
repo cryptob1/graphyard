@@ -4,14 +4,14 @@ import { liveMasterConfig } from '../../master.js';
 import { daemonEffects, readDaemonState, retriedSnapshot, runDaemon } from '../../master-daemon.js';
 import { dispatchEffects, dispatchReadTimeoutMs, readDispatchCursor, runAutoDispatch } from '../../auto-dispatch.js';
 import { coordinationViewHeader } from '../../server/work-view.js';
-import { encodeLoopHerdr, loopHerdrHeader, loopPresenceHeader } from '../../model/executor-presence.js';
+import { encodeLoopPanes, loopPanesHeader, loopPresenceHeader, loopSupervisionHeader } from '../../model/executor-presence.js';
 import { herdrServerSeen, herdrTarget } from '../../master/herdr.js';
 import { LoopWake, loopWakeSubjects } from '../../daemon/loop-wake.js';
 import { unhandled, type MasterSession } from './session.js';
 
 /** The durable coordination loop and the dispatcher beside it, until stopped. */
 /** The Herdr server the loop names on each read (GY-1511): the instance its herdr calls target, its host, and whether it last answered. */
-export const loopHerdrReport = (host: string | null) => encodeLoopHerdr({ configHome: herdrTarget()?.configHome ?? null, session: herdrTarget()?.session ?? null, host, running: herdrServerSeen() });
+export const loopHerdrReport = (host: string | null) => encodeLoopPanes({ configHome: herdrTarget()?.configHome ?? null, session: herdrTarget()?.session ?? null, host, running: herdrServerSeen() });
 
 export async function loopCommand(session: MasterSession): Promise<unknown> {
   const { id, args, print, root, master, masterToken, masterApi, masterMutation, coordinator, assertProtocol } = session;
@@ -27,10 +27,11 @@ export async function loopCommand(session: MasterSession): Promise<unknown> {
     // The cycle and the dispatcher poll the bounded coordination view (by header, so an older
     // server answers with whole documents). GitHub merges; the loop runs no merge of its own.
     const live = liveMasterConfig(root, master), current = () => live.current, reload = () => live.reload();
-    // Each read also names the loop to the control plane (GY-916), which then knows the merger lives.
+    // Each read also names the loop to the control plane (GY-916), which then knows the merger lives,
+    // and who reviews and merges (GY-1501), which the dashboard's Setup checklist reads.
     const loopInterval = () => values.interval ? intervalSeconds : current().run.intervalSeconds;
     // GY-1511: and names the Herdr server holding the install's agents, for the Setup page.
-    const coordinationSnapshot = (timeoutMs?: number) => masterApi('work-snapshot', masterToken, timeoutMs, { [coordinationViewHeader]: 'coordination', [loopPresenceHeader]: String(loopInterval()), [loopHerdrHeader]: loopHerdrReport(current().hostId) });
+    const coordinationSnapshot = (timeoutMs?: number) => masterApi('work-snapshot', masterToken, timeoutMs, { [coordinationViewHeader]: 'coordination', [loopPresenceHeader]: String(loopInterval()), [loopSupervisionHeader]: current().supervision ?? 'autonomous', [loopPanesHeader]: loopHerdrReport(current().hostId) });
     const effects = daemonEffects(root, current, { snapshot: retriedSnapshot(() => coordinationSnapshot()), mutate: masterMutation });
     // Automatic dispatch runs beside the cycle on a shorter cadence; it stops with the daemon. Its
     // snapshot fetch is bounded by the tick's own read bound, which grows while ticks fail (GY-1373).

@@ -11,6 +11,7 @@ import { GitHubChargeLedger } from '../../src/github-charges.js';
 import { type Principal, Refusal, type Work } from '../../src/model.js';
 import * as deploymentStep from '../../src/daemon/deployment.js';
 import { DispatchReservedError, type HerdrAgent, type MasterConfig, type WorkerProfile, approverSessionName, assessContainment, containmentPhase, containmentQuarantines, decisionInput, dispatchWork, masterConfigSchema, reclaimableAgent } from '../../src/master.js';
+import { withSupervision } from '../../src/master/profiles.js';
 import { readAccountStartFailures, workerLaunchStatus, worktreeFailure } from '../../src/master/dispatch.js';
 import { readControlPlaneClock } from '../../src/master/containment.js';
 import { containmentSettlementRefusals, containmentVerificationSchema, loopEndedAttempt } from '../../src/quarantine.js';
@@ -135,6 +136,12 @@ import { type DiagnosisRun, type Failover, MANUAL, type MainGuardDay, PROOF, api
  * approver refuses the capped rework request of each of `refused` (GY-1389).
  */
 export let days = 0;
+/**
+ * GY-1501: the effects `daemonEffects` leaves absent on a supervised install, whose config carries no
+ * operator-agent, approver or reviewer identity: every decision, approver, escalation and reviewer
+ * effect. tests/soak-supervised.test.ts checks the real effects leave each of them absent.
+ */
+export const supervisedAbsentEffects = ['decide', 'approver', 'docsSync', 'withdraw', 'resume', 'decisions', 'decisionChanges', 'replan', 'widenScope', 'withdrawReview', 'diagnostician', 'acceptance', 'planner', 'fileFaultClass', 'unblock', 'doctor'] as const;
 export async function simulateDay(options: { hours: number; backlog?: boolean; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number; working?: { from: number; retryAt: number } }; regression?: ('approvers-left-open' | 'docs-syncs-left-open')[]; headless?: boolean; handApprovers?: boolean; stranded?: boolean | 'resume'; staleRework?: boolean; staleMerge?: number; capacityWait?: { from: number; to: number }; diagnosisLimit?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; workspaceFailure?: { item: number; until: number }; credentialBlocked?: { recovers: number; never: number }; blockers?: boolean; retrying?: { worker: number; approver: number }; unbounded?: { stuck: number; progressing: number; pushedOnce: number; rework: number }; starved?: { items: number[]; dropFirst: number }; docs?: { budget: { total: number; perPage: number } }; dispatchFailing?: { constant: number; changing: number; refuseBlocks: number; unblockAfterMs: number }; mainGuard?: MainGuardDay; containment?: { failUntil: number; slowUntil: number; refuseSettle?: number }; mechanical?: { applied: number; rejected: number }; slowDecisions?: { from: number; to: number; ms: number }; slowObservation?: { from: number; to: number; attentionMs: number }; slowDeployment?: { from: number; to: number; observationMs: number }; selfProvision?: { redeployFails: { from: number; to: number } }; plan?: Partial<typeof basePlan>; github806?: boolean; remedies?: boolean;
   decomposition?: { broadItems: number[]; concurrency?: number };
   /** GY-1294: the loop's own write moves a diagnosed item's revision before its approver reads the diagnosis decision, so the decision settles stale. */
@@ -183,7 +190,15 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
    * watches, half the loop's own) whose registry sessions aged out of the registry's history, so
    * every end of one answers 404 Unknown session. Each such end call is counted per session.
    */
-  stuckWatches?: number }) {
+  stuckWatches?: number;
+  /**
+   * GY-1501: a supervised install. master.json records `supervised`, so the loop runs without the
+   * reviewer App, operator-agent and approver identities and every effect they gate is absent, as
+   * `daemonEffects` leaves it (`supervisedAbsentEffects`). The operator's GitHub login posts every
+   * review; it never reviews the `withheld` items, and approves only an earlier head of `stale.item`
+   * until `stale.untilMs` into the day.
+   */
+  supervised?: { operator: string; withheld: number[]; stale: { item: number; untilMs: number } } }) {
   const dayStart = clock.now();
   // A day may restage the shared scenario: the day-scoped view of the plan is what every fault
   // below arms from, while each test's own assertions still read the shared base plan.
@@ -198,11 +213,12 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     : options.decomposition ? masterConfigSchema.parse({ ...soakConfig, run: { ...soakConfig.run, research: { command: 'pi', model: 'research-pi-model' }, decomposition: { concurrency: options.decomposition.concurrency ?? 2 } } })
     : options.reviewCap ? masterConfigSchema.parse({ ...soakConfig, reviewRoundCap: options.reviewCap.cap })
     : options.loopWake ? masterConfigSchema.parse({ ...soakConfig, run: { ...soakConfig.run, intervalSeconds: options.loopWake.intervalSeconds } })
+    : options.supervised ? withSupervision(masterConfigSchema.parse({ ...soakConfig, supervision: 'supervised', operatorLogin: options.supervised.operator }))
     : soakConfig;
   // The spent producer request (GY-496) is a main-day fault, like the blind window and the split:
   // the hand-approver, documentation and regression days exercise their own faults and would only
   // inherit this one's rework round.
-  const mainDay = !options.handApprovers && !options.stranded && !options.regression && !options.scope && !options.headless && !options.blockers && !options.starved && !options.decomposition && !options.staleRelease;
+  const mainDay = !options.handApprovers && !options.stranded && !options.regression && !options.scope && !options.headless && !options.blockers && !options.starved && !options.decomposition && !options.staleRelease && !options.supervised;
   // GY-793's base breakage runs only on the day that asserts it (`github806`): on any other day it
   // would reshape that day's own scenario (a rework or fenced item doubling as the broken one).
   const baseBreakDay = mainDay && !!options.github806;
@@ -439,6 +455,13 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   }
   const numberOf = (work: Pick<Work, 'key'>) => items.findIndex(item => item.key === work.key) + 1;
   for (const n of plan.rework) github.verdicts.set(items[n - 1].key, ['CHANGES_REQUESTED']);
+  // Per cycle: the loop's rows for the withheld items with their attempts, the panes Herdr holds, and every agent name seen.
+  const supervisedDay = options.supervised && { cycles: [] as { elapsed: number; withheld: string[]; agents: number }[], agentNames: new Set<string>() };
+  if (options.supervised) {
+    github.reviewer = options.supervised.operator;
+    for (const n of options.supervised.withheld) github.withheld.add(items[n - 1].key);
+    github.staleUntil.set(items[options.supervised.stale.item - 1].key, dayStart + options.supervised.stale.untilMs);
+  }
   // GY-1389: a change request on every head through the first past the cap, each naming a blocking finding.
   const cappedDay = options.reviewCap;
   if (cappedDay) {
@@ -1583,6 +1606,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
       research: { cwd: coordinatorRoot ?? process.cwd(), runner: fakeDecompositionRunner },
     } : {}),
   };
+  if (supervisedDay) for (const key of supervisedAbsentEffects) delete (effects as unknown as Record<string, unknown>)[key];
   // ---- The loop's own master session (GY-898): launched on the registry's master role, woken on
   // ---- material events, killed mid-day while the registry refuses to end sessions, rotated at its
   // ---- budget. Every launch, wake, registry end and refused end is recorded against the day's
@@ -2416,6 +2440,12 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
         if (options.workspaceFailure) for (const [name, entry] of Object.entries(state.profiles)) if (/worktree/.test(entry.reason ?? '')) workspaceCooled.push(`+${Math.round(elapsed / minute)} min ${name}: ${entry.reason}`);
         reportedDispatches += result.actions.filter(action => action.kind === 'dispatch' && action.state === 'done').length;
         escalations.push(...result.actions.filter(action => action.kind === 'escalation').map(action => action.detail));
+        if (supervisedDay) {
+          for (const agent of herdr.list()) if (agent.name) supervisedDay.agentNames.add(agent.name);
+          const withheldIds = options.supervised!.withheld.map(n => items[n - 1].id);
+          supervisedDay.cycles.push({ elapsed, agents: herdr.list().length,
+            withheld: Object.entries(state.actions).filter(([key]) => withheldIds.some(id => key.includes(id))).map(([key, row]) => `${key} ${row.state} ${row.attempts}`).sort() });
+        }
         // GY-1250: once the abandoned revert's line is raised as recovered (GY-1332: it repeats while
         // main is red), a busy cycle's resolved rows retire its row from the cursor, so "never raised
         // again" must hold without it.
@@ -2554,7 +2584,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   const tmp = { root: tmpRoot, backlog, deadOwned, cache, heldDirectory, liveOwned, hourly, passes: tmpPasses, peak: tmpPeak, reports: await readReclaimReports(reclaimRoot), left: readdirSync(tmpRoot) };
   if (process.env.SOAK_TRACE) console.error(`landing: ${github.landingChecks} checks over ${github.landingBases.size} bases, ${github.ancestorCompares} ancestor compares, ${github.blindCompares} blind compares; false landing refusals: ${landingRefusals.map(entry => `${entry.key}@+${Math.round(entry.elapsed / minute)}min ${entry.sha.slice(0, 12)}`).join(', ') || 'none'}`);
   engine.execute = executeAll;
-  return { stuck, unboundedDay, provisionDay, promotion, throughput, reconciled, outside, items, final, github, sessions, docsSyncRuns, docsSyncRoot, lost, launches, violations, faulted, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, headless, herdr, hand, stranded, withdrawals, resumes, strandedLaunches, escalations, spent, attestations, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, guardReads, checkout, landingRefusals, foreignPane, previousWorktrees, closedLeased,
+  return { supervisedDay, stuck, unboundedDay, provisionDay, promotion, throughput, reconciled, outside, items, final, github, sessions, docsSyncRuns, docsSyncRoot, lost, launches, violations, faulted, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, headless, herdr, hand, stranded, withdrawals, resumes, strandedLaunches, escalations, spent, attestations, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, guardReads, checkout, landingRefusals, foreignPane, previousWorktrees, closedLeased,
     mergeQueuePosts, config, refused, decideCalls, restarted, approverPanes, failing, herdrClosed: herdr.closed, diagnosisModel: settings.model, diagnosisRuns: diagnosed, baseBreak, capacityRefused, capacityLaunched, capacityWaiters,
     decided, misreads, prompts, screens, heldAccounts, approverAccounts, retryReset, exitedLive, exitedClosed, exitedRowsSeen, reassign, workspaceFailures, workspaceCooled, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, fenced, mergeStallSightings, master, baseFailure,
     blockerEvents, blockerProbes, blockerDecisions, blockerActions, blockerKeysPeak, attempts, lanesSeen, laneApplications, approverWorks, approverDecisions, failover, webhook, remedies, observeRequests, starvation, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size }, mechanical: { ledger, botRounds, misclassified, reviewHolds }, shared, charges: { ...charged, b: charged.b.length, instancesSeen: [...charged.instancesSeen], restarts: chargeRestarts },
