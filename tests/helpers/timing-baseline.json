@@ -685,6 +685,9 @@
     "tests/worktree-hold-followups.test.ts": 1952,
     "tests/worktree-preserved-aside.test.ts": 1442,
     "tests/worktree-reclaim.test.ts": 3054,
-    "tests/zero-touch-onboarding.test.ts": 5900
+    "tests/zero-touch-onboarding.test.ts": 5900,
+    "tests/shadow-gate.test.ts": 2153,
+    "tests/trial-merge.test.ts": 2528,
+    "tests/soak-shadow-gate.test.ts": 5943
   }
 }

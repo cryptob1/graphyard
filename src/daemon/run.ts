@@ -22,6 +22,7 @@ import { describeSelfUpgrade, type SelfUpgradeOutcome } from './upgrade.js';
 import { describeTimings } from '../master/timings.js';
 import { stopDoctorRuns, doctorReport } from './doctor.js';
 import { mainWatchSummary } from './main-watch.js';
+import { shadowGateSummary } from './cycle-shadow.js';
 import { detachRuns } from '../runner/registry.js';
 import type { LoopWake } from './loop-wake.js';
 
@@ -59,6 +60,8 @@ export function daemonSummary(state: DaemonState, now: number, intervalMs: numbe
     deployment: state.deployment,
     // The main watch (GY-1519): unknown commits on main, the newest, and whether promotion is frozen on one.
     mainWatch: mainWatchSummary(state.mainWatch),
+    // The shadow merge gate's report (GY-1522): outcome counts, trial p50/p90 and the newest disagreements.
+    shadowGate: shadowGateSummary(state.shadow),
     // The release this process loaded, and what the between-cycles self-upgrade has done (GY-437).
     release: state.release,
     upgrade: state.upgrade,

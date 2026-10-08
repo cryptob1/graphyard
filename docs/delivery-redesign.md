@@ -28,7 +28,7 @@ Kept: leases and epochs, the transactional ledger, two risk lanes, UAT serving a
 
 ## Rollout
 
-1. **Shadow mode**: every head is trial-merged and fast-tested beside the GitHub gate, verdicts recorded, nothing written. Switch criterion: two weeks with no shadow-passed head reverted by the main guard and every shadow-only failure explained.
+1. **Shadow mode**: heads are trial-merged and fast-tested beside the GitHub gate, nothing written; `master status` `shadowGate` counts agree-pass, agree-fail, shadow-only-fail, shadow-missed, pending; p50/p90; newest ten disagreements. Switch criterion: two weeks with no shadow-passed head reverted by the main guard and every shadow-only failure explained.
 2. **Switch** `control-plane`.
 3. **Run the Snake pilot.**
 4. **After a week**, delete the github-mode gate code.
