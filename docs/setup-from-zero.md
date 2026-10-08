@@ -9,8 +9,10 @@ The setup agent acts as the **master** identity `install --apply` records; the o
 
 ```sh
 git clone https://github.com/cryptob1/graphyard.git ~/graphyard && (cd ~/graphyard && npm ci)
-cd /path/to/REPO && node ~/graphyard/bin/graphyard.mjs up --repo OWNER/REPO   # --provider compose (default), railway or hetzner
+cd /path/to/REPO && node ~/graphyard/bin/graphyard.mjs up --agent --repo OWNER/REPO   # --provider compose (default), railway or hetzner
 ```
+
+Its only human step: approving a GitHub Mobile prompt; `--help` lists options.
 
 A new Hetzner server waits (exit 3) for price approval; rerun: `--confirm-price X` or `--max-monthly N` and `--ssh-key NAME`.
 
@@ -31,7 +33,7 @@ Once green (onboarding merged), **Describe what you want built** records a goal 
 
 ## Agent setup: up --agent
 
-Agents run `graphyard up --agent --repo OWNER/REPO [--goal FILE] [--browser-profile PROFILE]`: JSON events on stderr, summary stdout; exit `0` green, `1` failed, `2` prerequisite, `3` waiting. It creates the Apps in a GitHub-signed-in Chrome profile (passed, else the master's; neither, without `--reuse-app` or saved Apps for both: exit `2`), recorded under `.graphyard/master-actions/`; sets deployment variables from saved credentials, records FILE as one goal. Only a device step becomes a `handoff`: a subscription login's approval, or *Confirm access*, saying if the drive shares your live Chrome (profile path) or a copy (profile name), offering: confirm in your Chrome on the named page (shared only; re-checked every 10 s); a code via the App page or `up --sudo-code CODE|email` (never recorded); `--github-mobile` (password link after 60 s); or, with no live moment, create both Apps at github.com/settings/apps/new as listed (no webhook URL), `graphyard app import` each, then `up --reuse-app SLUG --reuse-app REVIEWER_SLUG` (`--no-wait` exits `3` here). A drive giving up hands off the still-served App page. Human waits last `--wait MINUTES` (default 20); a same-repository/provider/profile rerun resumes pending *Confirm access*. Preflight refuses `/tmp` and `/var/tmp` checkouts.
+`up --agent` takes `[--goal FILE] [--browser-profile PROFILE]`: JSON events on stderr, summary stdout; exit `0` green, `1` failed (quoting GitHub's rejection), `2` prerequisite, `3` waiting. It creates the Apps in a GitHub-signed-in Chrome profile (passed, else the master's, else a same-login install's here; none, without `--reuse-app` or saved Apps for both: exit `2`), recorded under `.graphyard/master-actions/`; sets deployment variables from saved credentials, FILE is one goal. Only a device step becomes a `handoff`: a subscription login's approval, or *Confirm access*: a GitHub Mobile number (up to 3 fresh prompts; password link after 60 s). Without Mobile, it offers: confirm in your Chrome on the named page (shared profile); a code via the App page or `up --sudo-code CODE|email` (never recorded); or create both Apps at github.com/settings/apps/new (no webhook URL), `graphyard app import` each, then `up --reuse-app SLUG --reuse-app REVIEWER_SLUG` (`--no-wait` exits `3` here). A drive giving up hands off the still-served page. Human waits last `--wait MINUTES` (default 20); a same-repository/provider/profile rerun resumes pending *Confirm access*. Preflight refuses `/tmp`, `/var/tmp` checkouts.
 
 ## Troubleshooting: manual steps
 
