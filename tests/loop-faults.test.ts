@@ -1554,12 +1554,78 @@ test('unit:upgrade-head-divergence-recovers — drift raised before the recovery
   const { guard, restarts } = recoveringGuard(repo.root, state);
   await guard.start(repo.loaded);
   repo.git('checkout', '--quiet', '--detach', repo.successor);
-  // A cycle with the self-upgrade off (the loop stopping) only reports the drift.
+  // A cycle with the self-upgrade unavailable only reports the drift.
   assert.match((await guard.betweenCycles()).refusal ?? '', /moved from/);
   assert.equal(state.actions['escalation:dirty-checkout']?.state, 'failed');
   assert.equal((await guard.betweenCycles(skippedUpgrade)).upgraded?.outcome, 'upgraded');
   assert.equal(restarts.self, 1);
   assert.equal(state.actions['escalation:dirty-checkout']?.state, 'done', 'the recovery settles the attention the drift raised');
+});
+
+// ---- GY-1531: the stop before a restart is no drift, and the restart's adoption is said ---------
+//
+// Instance 2026-10-08T04:11:19Z: the operator moved the coordinator checkout's HEAD forward onto main
+// (3192ee7c -> 6f0f2413) and restarted the loop with systemctl. The loop, already stopping for that
+// restart, ran its between-cycles read with the self-upgrade off and recorded escalation:dirty-
+// checkout — "refuses to restart or self-upgrade" — for the very HEAD the restart then loaded 20s
+// later; the start settled it silently, so the journal held the refusal and never the remedy.
+
+test('manual:coordinator-checkout-restored-and-loop-restarted — a loop stopping records no dirty-checkout refusal for a moved HEAD, which the restart adopts, and says so when a standing one ends', async () => {
+  for (const move of ['forward', 'foreign'] as const) {
+    const repo = await divergence(), lines: string[] = [];
+    const state = serving(emptyDaemonState(config()), repo.successor);
+    const guard = coordinatorCheckoutGuard({ state: () => state, read: () => readCoordinatorCheckout(repo.root), agents: async () => [], snapshot: async () => ({ work: [] as Work[], now: iso(Date.now()) }),
+      persist: async () => {}, now: () => Date.parse('2026-10-08T04:11:19.754Z'), log: line => lines.push(line), applies: () => true });
+    assert.equal(await guard.start(repo.loaded), null);
+    repo.git('checkout', '--quiet', '--detach', move === 'forward' ? repo.successor : repo.foreign);
+    // The supervisor's stop (a restart) has reached the loop: the self-upgrade is off, the loop is ending.
+    const { refusal, upgraded } = await guard.betweenCycles(undefined, undefined, { stopping: true });
+    assert.match(refusal ?? '', /moved from/, `${move}: the drift is still reported to the caller`);
+    assert.equal(upgraded, null);
+    assert.equal(state.actions['escalation:dirty-checkout'], undefined, `${move}: no escalation:dirty-checkout is recorded by a loop that is stopping`);
+    assert.ok(lines.some(line => /stopping with the coordinator checkout's HEAD at .*the next loop runs the checkout's HEAD, so no dirty-checkout refusal is recorded/.test(line)), `${move}: the stop says why: ${lines.join(' | ')}`);
+    // The restarted loop loads the checkout's HEAD: that HEAD is the commit it runs, with nothing to refuse.
+    const restarted = coordinatorCheckoutGuard({ state: () => state, read: () => readCoordinatorCheckout(repo.root), agents: async () => [], snapshot: async () => ({ work: [] as Work[], now: iso(Date.now()) }),
+      persist: async () => {}, now: () => Date.parse('2026-10-08T04:11:39.126Z'), log: line => lines.push(line), applies: () => true });
+    assert.equal(await restarted.start(repo.git('rev-parse', 'HEAD')), null, `${move}: the restarted loop refuses nothing`);
+    assert.equal(restarted.expected(), move === 'forward' ? repo.successor : repo.foreign, `${move}: the checkout's HEAD is the commit the restarted loop runs`);
+    assert.equal((await restarted.betweenCycles(skippedUpgrade)).refusal, null);
+    assert.equal(state.actions['escalation:dirty-checkout'], undefined);
+  }
+});
+
+test('manual:coordinator-checkout-restored-and-loop-restarted — a dirty tree still refuses while the loop stops, and the remedy a standing drift refusal names ends it audibly', async () => {
+  const repo = await divergence(), lines: string[] = [];
+  const state = serving(emptyDaemonState(config()), repo.successor);
+  const deps = { state: () => state, read: () => readCoordinatorCheckout(repo.root), agents: async () => [], snapshot: async () => ({ work: [] as Work[], now: iso(Date.now()) }), persist: async () => {}, now: () => Date.parse('2026-10-08T01:09:13.454Z'), log: (line: string) => lines.push(line), applies: () => true };
+  const guard = coordinatorCheckoutGuard(deps);
+  await guard.start(repo.loaded);
+  // Instance 2026-10-08T01:09:13Z: HEAD moved sideways, not forward, while the loop ran (not stopping).
+  repo.git('checkout', '--quiet', '--detach', repo.foreign);
+  const drift = (await guard.betweenCycles(skippedUpgrade)).refusal ?? '';
+  assert.match(drift, /refuses to restart or self-upgrade/);
+  assert.match(drift, new RegExp(`restore the checkout with git -C ${repo.root} checkout --detach ${repo.loaded.slice(0, 12)} and restart the loop, or leave it at ${repo.foreign.slice(0, 12)} and restart the loop onto that HEAD \\(systemctl --user restart graphyard-master\\)`), 'the refusal names both remedies');
+  assert.equal(state.actions['escalation:dirty-checkout']?.state, 'failed');
+  // Uncommitted work on top: stopping or not, the tree refuses — the next loop would refuse it at startup too.
+  writeFileSync(join(repo.root, 'src', 'loop.ts'), 'export const version = 9;\n');
+  const dirty = (await guard.betweenCycles(undefined, undefined, { stopping: true })).refusal ?? '';
+  assert.match(dirty, /uncommitted|dirty|holds/i, `the dirty tree refuses while stopping: ${dirty}`);
+  assert.equal(state.actions['escalation:dirty-checkout']?.state, 'failed');
+  assert.match(state.actions['escalation:dirty-checkout']?.detail ?? '', /src\/loop\.ts/, 'the standing refusal names the dirty path');
+  // The first remedy: the checkout restored to the loaded commit, the work dropped.
+  repo.git('checkout', '--quiet', '--', 'src/loop.ts');
+  repo.git('checkout', '--quiet', '--detach', repo.loaded);
+  assert.equal((await guard.betweenCycles(skippedUpgrade)).refusal, null);
+  assert.equal(state.actions['escalation:dirty-checkout']?.state, 'done', 'the restore ends the refusal');
+  assert.ok(lines.some(line => line.startsWith('[graphyard-master] escalation done: the coordinator checkout at') && line.includes(`is clean again at ${repo.loaded.slice(0, 12)}, the commit the loop runs`)), `the clearance is in the journal: ${lines.join(' | ')}`);
+  // The second remedy, from a standing refusal: leave HEAD where it moved and restart the loop onto it.
+  repo.git('checkout', '--quiet', '--detach', repo.foreign);
+  assert.match((await guard.betweenCycles(skippedUpgrade)).refusal ?? '', /refuses to restart/);
+  const restarted = coordinatorCheckoutGuard({ ...deps, now: () => Date.parse('2026-10-08T01:09:22.000Z') });
+  assert.equal(await restarted.start(repo.foreign), null, 'the restarted loop runs the checkout\'s HEAD');
+  assert.equal(state.actions['escalation:dirty-checkout']?.state, 'done', 'the restart ends the refusal');
+  assert.equal(state.actions['escalation:dirty-checkout']?.at, '2026-10-08T01:09:22.000Z');
+  assert.equal(lines.filter(line => line.startsWith('[graphyard-master] escalation done:')).length, 2);
 });
 
 test('unit:upgrade-head-divergence-recovers — a move that is not a clean detached descendant on the base branch still stands down, and is tried once', async () => {

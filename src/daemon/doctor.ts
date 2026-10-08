@@ -273,6 +273,41 @@ export function doctorFileItem(entry: DoctorFile, reason: string): DoctorFileInp
   return { ...input, reason: guardBroadScope(input, reason, { allow: false, command: 'master create' }) };
 }
 
+/** The reason a doctor filing carries: the class and the doctor's own evidence. */
+const filingReason = (file: DoctorFile) => `The pipeline doctor found a ${file.faultClass} fault no open item covers: ${file.description.slice(0, 1500)}`;
+
+/** The scenario a create refusal names as unregistered (src/engine.ts: "Register E2E scenario X before creating work that requires it"), or null. */
+export function unregisteredScenarioOf(error: unknown): string | null {
+  return /Register E2E scenario (\S+) before creating work/.exec(message(error))?.[1] ?? null;
+}
+
+/** The filing with every criterion's `e2e:<scenario>` proof made the manual proof of the same name. */
+export function withoutScenario(file: DoctorFile, scenario: string): DoctorFile {
+  return { ...file, criteria: file.criteria.map(criterion => ({ ...criterion, proofs: [...new Set(criterion.proofs.map(proof => doctorProofId(proof) === `e2e:${scenario}` ? `manual:${scenario}` : proof))] })) };
+}
+
+/**
+ * Files one doctor item, mending the one refusal the filing itself can mend (GY-1531). A criterion
+ * the doctor wrote against `e2e:<scenario>` with no scenario registered by that name is refused by
+ * create on every attempt — no loop path registers a scenario — so the pending filing failed again
+ * cycle after cycle and the fault class stayed unfiled. That proof becomes `manual:<scenario>` and
+ * the filing is sent again at once; `file` is the filing as last sent, the one a later retry keeps.
+ */
+export async function fileDoctorItem(file: DoctorFile, key: string, send: DoctorEffects['file']): Promise<{ work: Work | null; file: DoctorFile; mended: string[]; error?: unknown }> {
+  const mended: string[] = [];
+  for (;;) {
+    try { return { work: await send(doctorFileItem(file, filingReason(file)), key), file, mended }; }
+    catch (error) {
+      const scenario = unregisteredScenarioOf(error);
+      if (!scenario || mended.includes(scenario)) return { work: null, file, mended, error };
+      mended.push(scenario);
+      file = withoutScenario(file, scenario);
+    }
+  }
+}
+/** The clause a filing's record carries for the proofs it mended, or nothing. */
+const mendedClause = (mended: readonly string[]) => mended.length ? `; ${mended.map(scenario => `e2e:${scenario}`).join(', ')} named no registered scenario and was filed as ${mended.map(scenario => `manual:${scenario}`).join(', ')}` : '';
+
 /**
  * A filing the create checks refuse even normalised is the doctor's malformed output, not the loop
  * failing: no retry can mend it, so it is raised as an escalation for the master to file by hand.
@@ -316,23 +351,22 @@ export async function applyDoctorRun(cycle: Cycle, effects: DoctorEffects, run: 
       await note('installation', `Not filing "${file.title}" yet: the open items could not be read when the run settled, so it is filed on a later cycle if no open item covers the ${file.faultClass} fault class`);
       continue;
     }
-    let input: DoctorFileInput;
-    try { input = doctorFileItem(file, `The pipeline doctor found a ${file.faultClass} fault no open item covers: ${file.description.slice(0, 1500)}`); }
+    try { doctorFileItem(file, filingReason(file)); }
     catch (error) { await note('installation', invalidFiling(file, error), 'done', 'escalation'); continue; }
-    try {
-      const filedItem = await effects.file(input, filingKey);
+    const filed = await fileDoctorItem(file, filingKey, effects.file);
+    if (filed.work) {
       // Filed: any pending retry of the same filing is dropped before the cursor is persisted.
       state.doctor.pendingFiles = state.doctor.pendingFiles.filter(entry => entry.key !== filingKey);
-      run.filed.push({ faultClass: file.faultClass, title: file.title, work: filedItem.key, deduplicated: false });
-      await note(filedItem.key, `Filed ${filedItem.key} (P${file.priority}) for the ${file.faultClass} fault no open item covered: ${file.title}`);
-    } catch (error) {
+      run.filed.push({ faultClass: file.faultClass, title: file.title, work: filed.work.key, deduplicated: false });
+      await note(filed.work.key, `Filed ${filed.work.key} (P${file.priority}) for the ${file.faultClass} fault no open item covered: ${file.title}${mendedClause(filed.mended)}`);
+    } else {
       // A filing the control plane would not take is kept on the cursor — before the failed record
       // persists it — so a later cycle files it again under the same stable key; a control plane
       // that was only briefly unreachable loses no P0/P1 fault item (GY-711).
       // GY-1336: queued for that retry, the refusal is handled by design — still failed, but no fault
       // kind, so no loop fault instance (as GY-1295 and GY-1318 did); a retry that fails again is one.
-      state.doctor.pendingFiles = [...state.doctor.pendingFiles.filter(entry => entry.key !== filingKey), { key: filingKey, at: run.at, file }].slice(-40);
-      performed.push(await record(state, filingKey, { kind: 'fault', work: null, principal: null, state: 'failed', detail: `Could not file "${file.title}"; it is filed again on a later cycle: ${message(error)}`.slice(0, 2000), attempts: (state.actions[filingKey]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), daemon.persist, null));
+      state.doctor.pendingFiles = [...state.doctor.pendingFiles.filter(entry => entry.key !== filingKey), { key: filingKey, at: run.at, file: filed.file }].slice(-40);
+      performed.push(await record(state, filingKey, { kind: 'fault', work: null, principal: null, state: 'failed', detail: `Could not file "${file.title}"; it is filed again on a later cycle: ${message(filed.error)}`.slice(0, 2000), attempts: (state.actions[filingKey]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), daemon.persist, null));
     }
   }
   run.state = 'reported';
@@ -381,20 +415,18 @@ export async function retryDoctorFile(cycle: Cycle, effects: DoctorEffects, pend
     await record(state, pending.key, { kind: 'fault', work, principal: null, state: outcome, detail: detail.slice(0, 2000), attempts, cycle: state.cycle }, now(), daemon.persist);
   };
   if (openFaultClassItem(snapshot.work, pending.file.faultClass)) return drop(`Not filing "${pending.file.title}" on retry: the ${pending.file.faultClass} fault class is now covered by an open item`, null, 'done');
-  let input: DoctorFileInput;
-  try { input = doctorFileItem(pending.file, `The pipeline doctor found a ${pending.file.faultClass} fault no open item covers: ${pending.file.description.slice(0, 1500)}`); }
+  try { doctorFileItem(pending.file, filingReason(pending.file)); }
   catch (error) {
     // Refused by the checks themselves, the filing would be refused the same way on every retry.
     state.doctor.pendingFiles = state.doctor.pendingFiles.filter(entry => entry.key !== pending.key);
     await record(state, pending.key, { kind: 'escalation', work: null, principal: null, state: 'done', detail: invalidFiling(pending.file, error), attempts, cycle: state.cycle }, now(), daemon.persist);
     return;
   }
-  try {
-    const filedItem = await effects.file(input, pending.key);
-    await drop(`Filed ${filedItem.key} (P${pending.file.priority}) for the ${pending.file.faultClass} fault on a later cycle: ${pending.file.title}`, filedItem.key, 'done');
-  } catch (error) {
-    await record(state, pending.key, { kind: 'fault', work: null, principal: null, state: 'failed', detail: `Still could not file "${pending.file.title}": ${message(error)}`.slice(0, 2000), attempts, cycle: state.cycle }, now(), daemon.persist);
-  }
+  const filed = await fileDoctorItem(pending.file, pending.key, effects.file);
+  if (filed.work) return drop(`Filed ${filed.work.key} (P${pending.file.priority}) for the ${pending.file.faultClass} fault on a later cycle: ${pending.file.title}${mendedClause(filed.mended)}`, filed.work.key, 'done');
+  // The filing as last sent is what the next cycle retries: a proof mended here is not refused again.
+  state.doctor.pendingFiles = state.doctor.pendingFiles.map(entry => entry.key === pending.key ? { ...entry, file: filed.file } : entry);
+  await record(state, pending.key, { kind: 'fault', work: null, principal: null, state: 'failed', detail: `Still could not file "${pending.file.title}": ${message(filed.error)}`.slice(0, 2000), attempts, cycle: state.cycle }, now(), daemon.persist);
 }
 
 /**
