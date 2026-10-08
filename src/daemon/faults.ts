@@ -2,12 +2,14 @@
 // structural item filed per recurring class.
 import { createHash } from 'node:crypto';
 import type { Work } from '../model.js';
-import { classified, classifyAttention, faultClasses, faultClassItem, faultClassPolicyFromEnv, recurringClasses, standingScopeRequest, statusFaults, trackFaults, workFaults, type FaultClassPolicy, type FaultKind, type FaultObservation } from '../model/fault-classes.js';
+import { classified, classifyAttention, faultClasses, faultClassItem, faultClassPolicyFromEnv, recurringClasses, standingScopeRequest, statusFaults, trackFaults, unboundedAttemptKey, workFaults, type FaultClassPolicy, type FaultKind, type FaultObservation } from '../model/fault-classes.js';
 import { buildMasterStatus, diskThresholdBytes, type AttentionItem, type ContainmentAssessment, type ControlPlaneStatus, type HerdrAgent, type MasterConfig } from '../master.js';
 import { worktreeRootMinFreeBytes } from '../install/worktree-root.js';
 import { hostMemoryAttention } from '../master-resources.js';
 import { qualifyTimingFailures, type CheckAnnotations } from '../cli/timing-failures.js';
 import { type DaemonAction, type DaemonState, faultActionKey, message } from './state.js';
+export { unboundedAttemptKey };
+import type { UnsubmittedAttempt } from '../model/attempt-bound.js';
 import { readyToRetry } from './sessions.js';
 import { type DaemonEffects, record } from './effects.js';
 import { actionableIntervalMs, loopAttention } from './liveness.js';
@@ -76,7 +78,8 @@ export function cycleFaults(state: DaemonState, snapshot: Work[], now: number, s
   // A fence the loop settled — this cycle's reclaim step included — is gone, though the snapshot the cycle began with still shows it (GY-1299).
   const work = snapshot.map(item => fenceSettled(state, item) ? { ...item, containmentQuarantine: null } : item);
   const byKey = new Map(work.map(item => [item.key, item]));
-  const recorded = work.flatMap(item => workFaults(item, now, routes)).filter(fault => !(containmentKinds.has(fault.kind) && containmentInMotion(byKey.get(fault.subject), now)));
+  // An attempt inside the loop's own reclaim bound is the record's to name, not this step's to count (attemptReclaimInMotion, GY-1557).
+  const recorded = work.flatMap(item => workFaults(item, now, routes, attempt => attemptReclaimInMotion(state, item, attempt))).filter(fault => !(containmentKinds.has(fault.kind) && containmentInMotion(byKey.get(fault.subject), now)));
   // A blocker inside its actor's turn is not counted, nor is a derived line restating it (`shown` below keeps it).
   const own = recorded.filter(fault => !(fault.kind === 'blocker' && blockerInMotion(byKey.get(fault.subject), now)));
   const derived: FaultObservation[] = [], attributed: FaultObservation[] = [];
@@ -148,6 +151,22 @@ export function blockerInMotion(work: Work | undefined, now: number): boolean {
     && (record.reason.startsWith(`${blockedAttemptMarker}${work.epoch}:`) || record.reason.startsWith(`${credentialBlockedMarker} on epoch ${work.epoch}:`))).at(-1);
   const since = raised ? Date.parse(raised.at) : Number.NaN;
   return Number.isFinite(since) && now - since <= masterTurnWaitBoundMs;
+}
+/**
+ * GY-1557. Whether an attempt held past the worker bound without a submission (one workFaults
+ * would observe) is still in motion: the loop's own remedy ends it at the reclaim bound
+ * (`workerReclaimBoundMs`, cycle-reclaim.ts stopUnboundedAttempts), one further bound after the
+ * record first names it, so an attempt inside that bound is the ordinary pace of work — on
+ * 8 October 2026 GY-1549 counted at 0 minutes past the worker bound, an hour before the remedy's
+ * turn. Past it, an attempt the loop ended this cycle is gone though the snapshot the cycle began
+ * with still shows its lease (the rule a settled fence keeps, `fenceSettled`); one it could not end
+ * counts, as the failed end is recorded. A lapsed lease belongs to the lapse-and-containment path,
+ * whose fence counts under its own kinds.
+ */
+export function attemptReclaimInMotion(state: Pick<DaemonState, 'actions' | 'cycle'>, work: Pick<Work, 'id'>, attempt: UnsubmittedAttempt): boolean {
+  if (!attempt.reclaim || !attempt.live) return true;
+  const ended = state.actions[unboundedAttemptKey(work, attempt.epoch)];
+  return ended?.state === 'done' && ended.cycle === state.cycle;
 }
 /** Whether the loop recorded the settlement of the item's standing fence: its settle action for the fence's epoch is done. */
 const fenceSettled = (state: Pick<DaemonState, 'actions'>, item: Work) =>
