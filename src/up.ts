@@ -11,6 +11,7 @@ import { appImportRoute } from './github-setup.js';
 import { masterCredential, planeRequest } from './setup-from-zero.js';
 import { fileOnboardingWork, onboardingChecks } from './onboarding.js';
 import { findOnboardingWork, onboardingBranch, onboardingWait, waitedFor, type OnboardingWait } from './model/onboarding-work.js';
+import { coordinatorCheckoutRefusal, coordinatorCheckoutRoot, dirtyCheckoutPaths, readCoordinatorCheckout } from './master/profiles.js';
 
 /**
  * `graphyard up` (GY-1419): every machine step of a first installation, in order — preflight,
@@ -114,9 +115,10 @@ export interface UpDependencies {
   /**
    * Publish the onboarding files `init --scan --apply` wrote (AGENTS.md, .gitignore, graphyard.json,
    * .github/workflows) as a pull request against the base branch, reusing one already open; null when
-   * the base branch already holds them.
+   * the base branch already holds them. WORKFLOWS are the workflow files the apply reported writing:
+   * a publish missing any of them, or AGENTS.md or graphyard.json, refuses naming the file (GY-1480).
    */
-  publishOnboarding(): Promise<{ pullRequest: string } | null>;
+  publishOnboarding(workflows: string[]): Promise<{ pullRequest: string } | null>;
   /** Whether the onboarding pull request at URL has merged, so the base branch carries the delivery workflows. */
   onboardingMerged(url: string): Promise<boolean>;
   /**
@@ -128,6 +130,13 @@ export interface UpDependencies {
   fileOnboarding?(url: string, operatorTokenFile: string | null, requestId: string): Promise<{ key: string } | null>;
   /** The control plane's work items, as the master identity reads them; null while none answers. */
   work?(): Promise<any[] | null>;
+  /**
+   * GY-1480: the CLI checkout the master loop will run from, and the paths that make it dirty (empty
+   * when clean). The loop refuses to start from a dirty one, so preflight refuses first.
+   */
+  cliCheckout?(): Promise<{ root: string; dirty: string[] }>;
+  /** GY-1480: why the master loop refuses to run, as the loop itself words it, or null while nothing stops it. */
+  loopRefusal?(): Promise<string | null>;
   /** Agent mode: drive the App manifest page at URL in the master's browser profile, recorded as a master browser flow. */
   driveApp?(url: string, handoff: Handoff): Promise<DriveOutcome>;
   /** GY-1477: this host's Tailscale node (its MagicDNS name and tailnet address), or null without a running Tailscale. */
@@ -378,6 +387,17 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
   };
 
   try {
+    // GY-1480: the loop refuses to start from a CLI checkout holding uncommitted work, so that is
+    // found here, before anything is installed, rather than as a loop that never cycles.
+    const cleanCli = async (name: UpStep) => {
+      const checkout = await deps.cliCheckout?.();
+      if (checkout?.dirty.length) throw new UpStop(`${name}: the Graphyard CLI checkout the master loop runs from (${checkout.root}) holds uncommitted work, and the loop refuses to start from it: ${checkout.dirty.slice(0, 20).join(', ')}${checkout.dirty.length > 20 ? ` and ${checkout.dirty.length - 20} more` : ''}. Commit or discard these paths, then rerun ${rerun()}; nothing further was installed.`, upExitCodes.prerequisite);
+    };
+
+    // Checked on every run, outside the resumable step: a checkout dirtied since an earlier run's
+    // preflight passed is refused here too, before a resumed run installs anything from it.
+    await cleanCli('preflight');
+
     // Agent mode creates the Apps in a browser; without a profile it would hand the whole App
     // creation to a person, which only a device approval may be. It stops before anything runs.
     // A reused App (GY-1442) or one saved on this machine (GY-1476) needs no browser, so agent mode
@@ -486,12 +506,16 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
     await step('onboarding', async () => {
       await run('onboarding', ['init', '--scan']);
       const url = await deps.serverUrl();
-      await run('onboarding', ['init', '--scan', '--apply', ...(url ? ['--url', url] : [])]);
+      const applied = parseJson(await run('onboarding', ['init', '--scan', '--apply', ...(url ? ['--url', url] : [])]));
+      // GY-1480: only the workflows the apply reports writing are claimed, and the publish refuses
+      // when any of them is not on disk, so a change never says it carries a workflow it lacks.
+      const workflows: string[] = Array.isArray(applied?.delivery?.workflows) ? applied.delivery.workflows.filter((path: unknown) => typeof path === 'string') : [];
       // The files are written to this checkout only; the base branch needs them before any work is
       // delivered, so they are published as a pull request (the base is protected, never pushed to).
-      const published = await deps.publishOnboarding().catch((error: any) => { throw new UpStop(`onboarding: publishing the onboarding files failed: ${String(error?.message ?? error).split('\n')[0].slice(0, 400)}; rerun graphyard up to retry`, upExitCodes.failed); });
+      const published = await deps.publishOnboarding(workflows).catch((error: any) => { throw new UpStop(`onboarding: publishing the onboarding files failed: ${String(error?.message ?? error).split('\n')[0].slice(0, 400)}; rerun graphyard up to retry`, upExitCodes.failed); });
       state.onboardingPullRequest = published?.pullRequest ?? null;
-      if (!published) return 'delivery workflow applied; the base branch already holds it';
+      const carried = workflows.length ? `onboarding files with ${workflows.join(', ')}` : 'onboarding files (no delivery workflow was written)';
+      if (!published) return `${carried}: the base branch already holds them`;
       // GY-1478: the pull request is filed as a work item the loop owns, so its reviewer reviews it,
       // the checks run and it merges under the normal gates; branch protection never waits on a person.
       if (!state.onboardingWork) {
@@ -499,7 +523,7 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
         const filed = await (deps.fileOnboarding?.(published.pullRequest, state.operatorTokenFile ?? null, state.onboardingRequest) ?? Promise.resolve(null)).catch((error: any) => { throw new UpStop(`onboarding: filing ${published.pullRequest} as a work item failed: ${String(error?.message ?? error).split('\n')[0].slice(0, 400)}; rerun graphyard up to retry`, upExitCodes.failed); });
         state.onboardingWork = filed?.key ?? null;
       }
-      return `delivery workflow applied and published in ${published.pullRequest}${state.onboardingWork ? `, filed as ${state.onboardingWork} for the loop to review and merge` : ''}`;
+      return `${carried} published in ${published.pullRequest}${state.onboardingWork ? `, filed as ${state.onboardingWork} for the loop to review and merge` : ''}`;
     });
 
     await step('accounts', async () => {
@@ -516,8 +540,15 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
     await step('harness', async () => { await run('harness', ['master', 'harness', request.master, '--apply']); });
 
     await step('master-loop', async () => {
+      await cleanCli('master-loop');
       if (!(await checklist()).find(item => item.id === 'master-loop')?.done) await run('master-loop', ['master', 'restart']);
-      await waitGreen(['master-loop'], false);
+      // A loop that refuses to run is a failed setup step naming its cause, never a wait that stalls.
+      const refused = async () => {
+        const reason = await deps.loopRefusal?.();
+        if (reason) throw new UpStop(`master-loop: the master loop refuses to run: ${reason}`, upExitCodes.failed);
+      };
+      await waitGreen(['master-loop'], false, refused);
+      await refused();
     });
 
     await waitGreen(last.map(item => item.id), true);
@@ -839,16 +870,22 @@ export async function redeemSignInClaim(link: string, fetcher: typeof fetch = fe
 /** What `init --scan --apply` writes and the manual flow commits (docs/setup-from-zero.md, step 6). */
 export const onboardingFiles = ['AGENTS.md', '.gitignore', 'graphyard.json', '.github/workflows'] as const;
 export { onboardingBranch };
+/** The onboarding files every apply writes; a publish without one refuses (GY-1480). */
+export const onboardingRequiredFiles = ['AGENTS.md', 'graphyard.json'] as const;
 
 /**
  * Publish the onboarding files as one commit on the base branch's tip, on `graphyard/onboarding`,
  * and a pull request for it. The commit is built in a scratch index, so the operator's checkout,
- * branch and staged changes are untouched. Rerun, it reuses the open pull request; when the base
- * branch already holds exactly these files, nothing is published.
+ * branch and staged changes are untouched. Rerun, it reuses the open pull request, first
+ * force-pushing its branch when it does not carry exactly these files; when the base branch already
+ * holds them, nothing is published.
  */
-export async function publishOnboarding(root: string, repository: string, run: (program: string, args: string[], env?: Record<string, string>) => string): Promise<{ pullRequest: string } | null> {
+export async function publishOnboarding(root: string, repository: string, run: (program: string, args: string[], env?: Record<string, string>) => string, workflows: readonly string[] = []): Promise<{ pullRequest: string } | null> {
+  // GY-1480: every file the publish means to carry must be on disk; one that is not is refused by
+  // name, never skipped, so the pull request never claims a file it does not hold.
+  const missing = [...onboardingRequiredFiles, ...workflows].filter(file => !existsSync(resolve(root, file)));
+  if (missing.length) throw new Error(`publishOnboarding refuses: ${missing.join(', ')} ${missing.length === 1 ? 'is' : 'are'} missing from ${root}; rerun graphyard init --scan --apply, then graphyard up`);
   const open = run('gh', ['pr', 'list', '--repo', repository, '--head', onboardingBranch, '--state', 'open', '--json', 'url', '--jq', '.[0].url // ""']).trim();
-  if (open) return { pullRequest: open };
   const base = run('gh', ['repo', 'view', repository, '--json', 'defaultBranchRef', '--jq', '.defaultBranchRef.name']).trim();
   run('git', ['fetch', '--quiet', 'origin', base]);
   const baseCommit = run('git', ['rev-parse', 'FETCH_HEAD']).trim();
@@ -857,16 +894,25 @@ export async function publishOnboarding(root: string, repository: string, run: (
   try {
     const env = { GIT_INDEX_FILE: index };
     run('git', ['read-tree', baseCommit], env);
-    const present = onboardingFiles.filter(file => existsSync(resolve(root, file)));
+    const present = [...new Set([...onboardingFiles, ...workflows])].filter(file => existsSync(resolve(root, file)));
     if (present.length) run('git', ['add', '--', ...present], env);
     const tree = run('git', ['write-tree'], env).trim();
     if (tree === run('git', ['rev-parse', `${baseCommit}^{tree}`]).trim()) return null;
+    // GY-1480: an open pull request is reused only when its branch carries exactly these files; one an
+    // earlier run or an older CLI opened without them (the delivery workflow above all) is replaced.
+    if (open) {
+      let branchTree: string | null = null;
+      try { run('git', ['fetch', '--quiet', 'origin', onboardingBranch]); branchTree = run('git', ['rev-parse', 'FETCH_HEAD^{tree}']).trim(); } catch { /* the branch is gone: push it again */ }
+      if (branchTree === tree) return { pullRequest: open };
+    }
     const commit = run('git', ['commit-tree', tree, '-p', baseCommit, '-m', 'Add Graphyard onboarding: coordination instructions, configuration and delivery workflows'], env).trim();
     // The branch is this command's own: an earlier, interrupted publish is replaced, never merged into.
     run('git', ['push', '--force', 'origin', `${commit}:refs/heads/${onboardingBranch}`]);
   } finally { await rm(index, { force: true }); }
+  if (open) return { pullRequest: open };
+  const carried = onboardingFiles.filter(file => existsSync(resolve(root, file)));
   const created = run('gh', ['pr', 'create', '--repo', repository, '--base', base, '--head', onboardingBranch, '--title', 'Add Graphyard onboarding',
-    '--body', `The files graphyard up wrote while onboarding this repository: ${onboardingFiles.join(', ')}. Merging it puts Graphyard's delivery workflows on ${base}.`]).trim();
+    '--body', `The files graphyard up wrote while onboarding this repository: ${carried.join(', ')}.${workflows.length ? ` Merging it puts Graphyard's delivery workflows (${workflows.join(', ')}) on ${base}.` : ''}`]).trim();
   return { pullRequest: created.split('\n').filter(Boolean).pop()! };
 }
 
@@ -902,9 +948,17 @@ export function upDependencies(root: string, cliPath: string, request: UpRequest
   const serverUrl = async () => { try { return String(JSON.parse(await readFile(resolve(root, '.graphyard/master.json'), 'utf8')).url ?? '') || null; } catch { return null; } };
   const masterToken = async () => { const url = await serverUrl(); return url ? (await masterCredential(root, url))?.token ?? null : null; };
   const browser = request.agent ? upBrowserProfile(root, request) : null;
+  // The loop runs from the checkout of the CLI master init recorded, which is this CLI until it has.
+  const loopCheckout = async () => {
+    let recorded: unknown = null;
+    try { recorded = JSON.parse(await readFile(resolve(root, '.graphyard/master.json'), 'utf8')).cliPath; } catch { /* not initialised yet */ }
+    return readCoordinatorCheckout(coordinatorCheckoutRoot(typeof recorded === 'string' && recorded ? recorded : cliPath));
+  };
   return {
     root, emit, serverUrl, masterToken, children,
-    publishOnboarding: () => publishOnboarding(root, request.repository, (program, args, env) => execFileSync(program, args, { cwd: root, encoding: 'utf8', timeout: 120_000, stdio: ['ignore', 'pipe', 'pipe'], ...(env ? { env: { ...process.env, ...env } } : {}) })),
+    publishOnboarding: workflows => publishOnboarding(root, request.repository, (program, args, env) => execFileSync(program, args, { cwd: root, encoding: 'utf8', timeout: 120_000, stdio: ['ignore', 'pipe', 'pipe'], ...(env ? { env: { ...process.env, ...env } } : {}) }), workflows),
+    cliCheckout: async () => { const checkout = await loopCheckout(); return { root: checkout.root, dirty: dirtyCheckoutPaths(checkout) }; },
+    loopRefusal: async () => coordinatorCheckoutRefusal(await loopCheckout(), 'the master loop'),
     onboardingMerged: async url => execFileSync('gh', ['pr', 'view', url, '--json', 'state', '--jq', '.state'], { encoding: 'utf8', timeout: 60_000 }).trim() === 'MERGED',
     fileOnboarding: async (url, operatorTokenFile, requestId) => {
       const server = await serverUrl();

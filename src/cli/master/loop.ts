@@ -33,7 +33,7 @@ export async function loopCommand(session: MasterSession): Promise<unknown> {
     const stopping = new AbortController();
     // GY-1490: the dispatcher's tick wakes the loop's sleep for anything new its next cycle acts on.
     const wake = new LoopWake();
-    const daemonRun = runDaemon(master, state, effects, { once: values.once, intervalMs: values.interval ? intervalSeconds * 1000 : () => current().run.intervalSeconds * 1000, identity: { pid: process.pid, host: master.hostId }, reload, wake }).finally(() => stopping.abort());
+    const daemonRun = runDaemon(master, state, effects, { once: values.once, intervalMs: values.interval ? intervalSeconds * 1000 : () => current().run.intervalSeconds * 1000, identity: { pid: process.pid, host: master.hostId }, reload, repository: root, wake }).finally(() => stopping.abort());
     const dispatching = { ...dispatchEffects(root, current, { snapshot: (timeoutMs = dispatchReadTimeoutMs) => coordinationSnapshot(timeoutMs) }),
       observeLoopSubjects: (work: Parameters<typeof loopWakeSubjects>[0], agents: Parameters<typeof loopWakeSubjects>[3], clock: number) => { wake.observe(loopWakeSubjects(work, current(), clock, agents)); } };
     const dispatchRun = runAutoDispatch(master, dispatchCursor, dispatching, { once: values.once, intervalMs: () => current().run.dispatchIntervalSeconds * 1000, signal: stopping.signal, reload });

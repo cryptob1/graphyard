@@ -1,13 +1,13 @@
 import { execFileSync } from 'node:child_process';
 import { accessSync, constants as fsConstants } from 'node:fs';
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import { z } from 'zod';
 import { configHome } from './install/secrets.js';
 import { sessionNameField, suffixedSessionName } from './session-name.js';
 import { installDirectory, readInstallRecord } from './install/secrets.js';
 import { installIdFor } from './install/types.js';
-import { defaultCandidateSchedule, deliveryPolicySchema, generatedWorkflowFiles, requiredPullRequestChecks, type DeliveryMode, type DeliveryPolicy, type GateCheck } from './model/delivery-policy.js';
+import { defaultCandidateSchedule, deliveryPolicySchema, generatedWorkflowFiles, requiredPullRequestChecks, type DeliveryMode, type DeliveryPolicy, type GateCheck, type MergeGate } from './model/delivery-policy.js';
 import { onboardingBranch, onboardingWorkRequest, pullRequestNumber } from './model/onboarding-work.js';
 
 export function repositoryFromRemote(remote: string) {
@@ -103,7 +103,7 @@ export async function collectScanInput(root: string): Promise<ScanInput> {
       files.push(path);
       // The workflows `init --apply` generates are Graphyard's output, never an input to the next
       // scan: reading them back would make every apply change the scan it was applied from.
-      if ((generatedWorkflowFiles as readonly string[]).includes(path)) continue;
+      if ((generatedWorkflowFiles as readonly string[]).includes(path) || path === deliveryWorkflowFile) continue;
       if (scanInteresting.some(pattern => pattern.test(path))) {
         const bytes = await readFile(resolve(root, path)).catch((error: any) => { if (error.code === 'ENOENT') return null; throw error; });
         if (bytes && bytes.length <= scanLimits.bytes) contents[path] = bytes.toString('utf8');
@@ -163,22 +163,24 @@ export function detectStack(input: ScanInput): StackDetection {
   return { name: 'unknown', evidence: [], frameworks: [], testLayout: [], commands: [] };
 }
 
+/** Whether a workflow's `on:` triggers on pull requests: the inline list, inline scalar or block form. */
+const triggersPullRequest = (raw: string) => {
+  const inlineList = /^on:\s*\[([^\]]*)\]/m.exec(raw);
+  if (inlineList) return /\bpull_request\b/.test(inlineList[1]);
+  const inline = /^on:\s+(\S.*)$/m.exec(raw);
+  if (inline) return /\bpull_request\b/.test(inline[1]);
+  let inOn = false;
+  for (const line of raw.split('\n')) {
+    if (/^\S/.test(line)) inOn = line.startsWith('on:');
+    else if (inOn && /^  pull_request(?:\s*:|$)/.test(line)) return true;
+  }
+  return false;
+};
+
 /** Required-check candidates from workflow job ids and their explicit `name:` overrides. */
 export function workflowCheckNames(input: ScanInput, options: { onlyPullRequest?: boolean } = {}): string[] {
   const names: string[] = [];
   const record = (name: string) => { if (!names.includes(name)) names.push(name); };
-  const triggersPullRequest = (raw: string) => {
-    const inlineList = /^on:\s*\[([^\]]*)\]/m.exec(raw);
-    if (inlineList) return /\bpull_request\b/.test(inlineList[1]);
-    const inline = /^on:\s+(\S.*)$/m.exec(raw);
-    if (inline) return /\bpull_request\b/.test(inline[1]);
-    let inOn = false;
-    for (const line of raw.split('\n')) {
-      if (/^\S/.test(line)) inOn = line.startsWith('on:');
-      else if (inOn && /^  pull_request(?:\s*:|$)/.test(line)) return true;
-    }
-    return false;
-  };
   for (const [path, raw] of Object.entries(input.contents)) {
     if (!/^\.github\/workflows\/[^/]+\.ya?ml$/.test(path)) continue;
     if (options.onlyPullRequest && !triggersPullRequest(raw)) continue;
@@ -197,6 +199,108 @@ export function workflowCheckNames(input: ScanInput, options: { onlyPullRequest?
     }
   }
   return names.slice(0, 10);
+}
+
+/**
+ * GY-1480: the delivery workflow `init --scan --apply` writes for a repository with no CI of its
+ * own, so the onboarding change gives the base branch a pull-request check from the first merge.
+ * It is Graphyard's output like the candidate workflows, so a rescan never reads it back as the
+ * repository's own CI: the repository still has none, and the apply renders it unchanged.
+ */
+export const deliveryWorkflowFile = '.github/workflows/graphyard-delivery.yml';
+/** The job of the delivery workflow a pull request is gated on: it passes only when build and test both passed. */
+export const deliveryGateJob = 'graphyard-gate';
+
+/**
+ * Whether the scan found no CI of the repository's own: no workflow of its own runs on pull requests.
+ * A stale-issue bot, a labeler or a push-only deploy reports no check a pull request could wait on,
+ * so it does not count; Graphyard's generated workflows never count (the scan never reads them).
+ */
+export const hasNoCi = (input: ScanInput) =>
+  !Object.entries(input.contents).some(([path, raw]) => /^\.github\/workflows\/[^/]+\.ya?ml$/.test(path) && path !== deliveryWorkflowFile
+    && !(generatedWorkflowFiles as readonly string[]).includes(path) && triggersPullRequest(raw));
+
+/** The branch origin's HEAD names, else main: where the delivery workflow's push runs. */
+const originBase = (root: string) => {
+  try { return execFileSync('git', ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim().replace(/^origin\//, '') || 'main'; }
+  catch { return 'main'; }
+};
+
+/**
+ * GY-1480: write the delivery workflow into a checkout whose scan finds no CI of its own; null when
+ * it has CI. Unchanged content is left alone, so a rerun is idempotent, and a file that differs from
+ * the render — an operator's edit — is kept and reported as drift, never overwritten. The caller
+ * publishes the path with the other onboarding files, so the onboarding change carries it.
+ */
+export async function writeDeliveryWorkflow(root: string, base = originBase(root)): Promise<{ path: string; state: 'written' | 'unchanged' | 'drift' } | null> {
+  const input = await collectScanInput(root);
+  if (!hasNoCi(input)) return null;
+  const workflow = renderDeliveryWorkflow(detectStack(input), base);
+  const target = resolve(root, workflow.path);
+  let current: string | null = null;
+  try { current = await readFile(target, 'utf8'); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
+  if (current === workflow.content) return { path: workflow.path, state: 'unchanged' };
+  if (current !== null) return { path: workflow.path, state: 'drift' };
+  await mkdir(dirname(target), { recursive: true });
+  await writeFile(target, workflow.content, { mode: 0o644 });
+  return { path: workflow.path, state: 'written' };
+}
+
+/**
+ * The minimal delivery workflow for the detected stack: a build job and a test job, then Graphyard's
+ * gate job, which fails unless both passed, so one check name gates a pull request whatever the
+ * stack later adds. Superseded pull-request runs are cancelled; runs on the base never are.
+ */
+export function renderDeliveryWorkflow(stack: Pick<StackDetection, 'name' | 'frameworks' | 'commands'>, base = 'main'): { path: string; content: string } {
+  const has = (check: string) => stack.commands.some(command => command.check === check);
+  const setup = stack.name === 'node'
+    ? `      - uses: actions/setup-node@v4
+        with: { node-version: '24' }
+      - run: if [ -f package-lock.json ]; then npm ci; else npm install; fi`
+    : stack.name === 'python'
+      ? `      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - run: if [ -f requirements.txt ]; then pip install -r requirements.txt; elif [ -f pyproject.toml ]; then pip install -e .; fi${stack.frameworks.includes('pytest') ? ' && pip install pytest' : ''}`
+      : '';
+  const nothing = (what: string) => `echo "No ${what} step was detected for this repository; replace this line with its ${what} command"`;
+  const build = stack.name === 'node'
+    ? [has('build') ? 'npm run build' : null, has('typecheck') ? 'npm run typecheck' : null, has('lint') ? 'npm run lint' : null].filter(Boolean).join(' && ') || nothing('build')
+    : stack.name === 'python' ? 'python -m compileall -q .' : nothing('build');
+  const testCommand = stack.name === 'node'
+    ? has('test') ? 'npm test' : nothing('test')
+    : stack.name === 'python'
+      ? stack.frameworks.includes('pytest') ? 'python -m pytest -q' : 'python -m unittest discover || [ $? -eq 5 ]'
+      : nothing('test');
+  const job = (name: string, command: string) => `  ${name}:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+${setup ? `${setup}
+` : ''}      - run: ${command}
+`;
+  return { path: deliveryWorkflowFile, content: `name: Graphyard delivery
+# Written by graphyard init --scan --apply because no workflow of this repository ran on pull requests.
+# Edit the build and test commands freely (a rerun keeps your edits); ${deliveryGateJob} passes only when both jobs passed.
+on:
+  pull_request:
+  push:
+    branches: [${JSON.stringify(base)}]
+permissions:
+  contents: read
+concurrency:
+  group: \${{ github.workflow }}-\${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: \${{ github.event_name == 'pull_request' }}
+jobs:
+${job('build', build)}${job('test', testCommand)}  ${deliveryGateJob}:
+    needs: [build, test]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: test "$BUILD" = success && test "$TEST" = success
+        env:
+          BUILD: \${{ needs.build.result }}
+          TEST: \${{ needs.test.result }}
+` };
 }
 
 export type DeployTarget = 'railway' | 'vercel' | 'fly' | 'github-pages' | 'container-registry' | 'none';
@@ -298,6 +402,20 @@ export function classifyChecks(input: ScanInput, stack: StackDetection = detectS
 }
 
 /**
+ * GY-1480: the merge gate of a repository whose only CI is the generated delivery workflow. The
+ * workflow's jobs are build, test and the gate job, so pull requests require the gate job, the one
+ * check that workflow reports for every stack; a check named after a script (typecheck, lint,
+ * pytest) would never report. Long suites with a command stay per candidate, where the candidate
+ * workflow runs them; under per-pr no workflow would run them on a pull request, so none is required.
+ */
+export function deliveryWorkflowGate(classified: MergeGate, mode: DeliveryMode): MergeGate {
+  return {
+    preMerge: [{ check: deliveryGateJob, command: null, source: 'workflow', reason: `Graphyard's generated delivery workflow (${deliveryWorkflowFile}): passes only when its build and test jobs passed` }],
+    perCandidate: mode === 'per-pr' ? [] : classified.perCandidate.filter(entry => entry.command),
+  };
+}
+
+/**
  * The repository's delivery policy as a scan proposes it: the committed graphyard.json `delivery`
  * when the repository has one (its own reviewed choice, which a rescan must not undo), otherwise
  * the classified split, the adapter the deploy target implies, and the default cadence. Explicit
@@ -307,11 +425,12 @@ export function proposeDelivery(input: ScanInput, deploy: DeployDetection, stack
   let committed: DeliveryPolicy | null = null;
   const parsed = deliveryPolicySchema.safeParse(parseJson(input, 'graphyard.json')?.delivery);
   if (parsed.success) committed = parsed.data;
-  const mergeGate = committed?.mergeGate ?? classifyChecks(input, stack);
+  // A repository with no deploy target has no UAT or production to promote a candidate to, so
+  // each pull request is its own delivery and merged is its end state (setup-from-zero step 12).
+  const mode = overrides.mode ?? committed?.mode ?? (deploy.target === 'none' ? 'per-pr' : 'release-candidate');
+  const mergeGate = committed?.mergeGate ?? (hasNoCi(input) ? deliveryWorkflowGate(classifyChecks(input, stack), mode) : classifyChecks(input, stack));
   return deliveryPolicySchema.parse({
-    // A repository with no deploy target has no UAT or production to promote a candidate to, so
-    // each pull request is its own delivery and merged is its end state (setup-from-zero step 12).
-    mode: overrides.mode ?? committed?.mode ?? (deploy.target === 'none' ? 'per-pr' : 'release-candidate'),
+    mode,
     mergeGate,
     candidateSchedule: overrides.candidateSchedule !== undefined ? overrides.candidateSchedule : committed ? committed.candidateSchedule : defaultCandidateSchedule,
     deploy: committed?.deploy ?? { adapter: deploy.target === 'railway' ? 'railway' : 'command', project: null, uat: null, production: null },
@@ -394,8 +513,10 @@ export function buildProposal(input: ScanInput, options: { repository?: string |
   const fallbackJobs = prJobs.length ? prJobs : jobs;
   const checks = [...new Set([...stack.commands.map(command => command.check), ...(stack.commands.length ? [] : fallbackJobs)])].slice(0, 12);
   const delivery = proposeDelivery(input, deploy, stack, options.delivery);
-  // Under the candidate model a pull request waits only for the pre-merge set.
-  const policyChecks = delivery.mode === 'per-pr' ? checks : checks.filter(check => delivery.mergeGate.preMerge.some(entry => entry.check === check));
+  // Under the candidate model a pull request waits only for the pre-merge set. A repository with no
+  // CI waits for what the generated delivery workflow reports (GY-1480), never a script's name.
+  const policyChecks = hasNoCi(input) ? requiredPullRequestChecks(delivery).slice(0, 12)
+    : delivery.mode === 'per-pr' ? checks : checks.filter(check => delivery.mergeGate.preMerge.some(entry => entry.check === check));
   const proofs = [
     ...stack.commands.filter(command => command.purpose !== 'build').map(command => ({ name: proofName(command.purpose, command.check), command: command.command, check: command.check })),
     { name: deploy.proofName, command: null, check: null },

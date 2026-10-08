@@ -13,7 +13,7 @@ Per concurrent session: worker identity, host ID (`install --workers`) or:
 node "$GRAPHYARD_CLI" init --url https://YOUR-GRAPHYARD-HOST --herdr --host-id UNIQUE_MACHINE_NAME --token-stdin
 ```
 
-Commit `AGENTS.md`, `.gitignore`, `graphyard.json`, workflows ([candidates](delivery.md#managed-repositories)), never `.graphyard/`; masterless: `graphyard watch GY-1 EPOCH -- COMMAND` ([worker](protocol/leases.md#watch)).
+Commit `AGENTS.md`, `.gitignore`, `graphyard.json`, workflows ([candidates](delivery.md#managed-repositories); with no workflow on `pull_request`, `graphyard-delivery.yml`: build, test, `graphyard-gate`, the only required check; edits are kept as drift), never `.graphyard/`; masterless: `graphyard watch GY-1 EPOCH -- COMMAND` ([worker](protocol/leases.md#watch)).
 
 ### Documentation policy
 
@@ -80,7 +80,7 @@ Adding workers: worker count `W` and `G` proof groups need `⌈W/2⌉` review an
 
 ### The loop must be supervised
 
-`master init` (coordinator checkout) writes `~/.config/systemd/user/graphyard-master-OWNER-NAME.service`, runs `systemctl --user enable --now`, `loginctl enable-linger` (restart on crash, reboot, hang); never a side effect (worker checkouts, temp directories refused). Move: `master init --token-stdin --replace-supervisor` from new checkout. `master status`: `setup.supervisor`.
+`master init` (coordinator checkout) writes `~/.config/systemd/user/graphyard-master-OWNER-NAME.service`, runs `systemctl --user enable --now`, `loginctl enable-linger` (restart on crash, reboot, hang); never a side effect (worker checkouts, temp directories refused). Move: `master init --token-stdin --replace-supervisor` from new checkout. `master status`: `setup.supervisor`. The loop refuses a dirty CLI checkout; `graphyard up` preflight refuses one first, resumed runs too (exit 2, naming its paths), and a refusing loop fails `up`'s `master-loop` step with its reason. The loop's research scratch is a worktree of the managed repository, never of the CLI checkout.
 
 Installs share hosts: units named per repository (`graphyard-executor-OWNER-NAME@N.service` too; short-hashed where names collide) in `.graphyard/units.json` (fails closed unreadable); a host whose `graphyard-master.service` runs this checkout keeps legacy names as recorded alias. With no record, legacy unit running another checkout makes every unit-name read refuse, naming unit and checkout, until `master init` records this install's own. Setup refuses, naming checkout, to overwrite or restart another checkout's unit; master harness restarts only its loop unit. Each install needs its own `--herdr-workspace`: sweeps (idle-pane close, reclaim, liveness, tab cleanup) act only on its panes.
 

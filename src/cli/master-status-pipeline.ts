@@ -8,6 +8,7 @@ import { qualifyTimingFailures, ghCheckAnnotations } from './timing-failures.js'
 import { routedScopeStatus } from './owed-report.js';
 import { speedSections } from '../flow-analytics.js';
 import { timedStep } from '../master/timings.js';
+import { withPipelineTimelines } from '../pipeline-speed.js';
 import type { ReportSections } from '../master/sections.js';
 import { readReviewLedger, reconcileReviews, summarizeReviews } from '../reviewer.js';
 import { readProducerLedger, reconcileProducers, sessionRetries, summarizeProducers } from '../producer.js';
@@ -41,6 +42,9 @@ export async function buildPipelineStatus(
   masterApi: (path: string, credential?: string, timeoutMs?: number) => Promise<any>,
   sections: ReportSections,
 ) {
+  // The coordination view drops every timeline, so speed would measure nothing (GY-1489): read them
+  // on their own and attach them first; a failed read marks the section and leaves speed unmeasured.
+  await timedStep('timelines', () => withPipelineTimelines(snapshot.work, masterApi)).catch(error => sections.mark('speed', 'GET /api/pipeline-timelines', error));
   const probe = await timedStep('conflicts', () => probeCandidateConflictsWithBudget(root, snapshot.work, dataDirectory()));
   const sessions = await timedStep('build status', async () => nameOrphanSupervisors(nameUnresolvedThreads(buildMasterStatus(snapshot, master.workers, runtime.agents, credentials, containment, reviews, master.baseBranch, coordinator, { producers, failures, retries }, probe, { reviewers: master.reviewers, producers: master.producers }, master.cliPath, daemonState), snapshot.work, agentOwner),
     snapshot.work, master.workers, runtime, Date.parse(snapshot.now)));
