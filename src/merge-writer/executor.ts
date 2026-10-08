@@ -5,7 +5,7 @@ import { mergeLedgerKinds, type MergeLedgerState } from '../model/merge-ledger.j
 import { trialFailurePrefix } from '../model/rework-ground.js';
 import { defaultChildRun, type ChildRun } from '../child-runner.js';
 import { submittedAtOf } from './shadow.js';
-import { runTrial, trialEnvironment, TrialCleanupError, type RunTrialInput, type TrialRun } from './trial.js';
+import { runTrial, TrialCleanupError, type RunTrialInput, type TrialRun } from './trial.js';
 
 /**
  * A proof's cases in a TAP stream, attributed by title prefix, as `graphyard verify` counts them
@@ -101,16 +101,40 @@ export const unpushedIntentReason = (mergeSha: string, base: string) => `intent 
 /** The SSH command the push child runs: the deploy key alone, no agent identities, new hosts accepted on first contact. */
 export const deployKeySshCommand = (deployKeyFile: string) => `ssh -i ${deployKeyFile} -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new`;
 /**
- * The push child's environment (AC-2): the trial's credential-free environment — every GRAPHYARD_*
- * and HERDR_* variable, GH_TOKEN, GITHUB_TOKEN, SSH_AUTH_SOCK and the caller's own GIT_SSH_COMMAND
- * withheld, git's global configuration off — plus the one credential, the deploy key, as GIT_SSH_COMMAND.
+ * The variables the push child inherits, and nothing else (AC-2): what `git` and `ssh` need to find
+ * their binaries, the known-hosts file and a locale. An allowlist, not a denylist: a credential
+ * under any other name (GIT_ASKPASS, AWS_SECRET_ACCESS_KEY, GH_ENTERPRISE_TOKEN, …) never reaches it.
  */
-export const pushEnvironment = (deployKeyFile: string, environment: NodeJS.ProcessEnv = process.env): Record<string, string> =>
-  ({ ...trialEnvironment(environment), GIT_SSH_COMMAND: deployKeySshCommand(deployKeyFile) });
+export const pushInheritedVariables = ['PATH', 'HOME', 'USER', 'LOGNAME', 'LANG', 'LC_ALL', 'LC_CTYPE', 'TZ', 'TMPDIR'] as const;
+/**
+ * The push child's environment (AC-2): the allowlisted variables above, git's global and system
+ * configuration off, no terminal prompt, and the one credential, the deploy key, as GIT_SSH_COMMAND.
+ */
+export function pushEnvironment(deployKeyFile: string, environment: NodeJS.ProcessEnv = process.env): Record<string, string> {
+  const kept = Object.fromEntries(pushInheritedVariables.flatMap(name => typeof environment[name] === 'string' ? [[name, environment[name]!] as const] : []));
+  return { ...kept, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_TERMINAL_PROMPT: '0', GIT_SSH_COMMAND: deployKeySshCommand(deployKeyFile) };
+}
 /** `git push origin --force-with-lease=refs/heads/BASE:<baseTip> <mergeSha>:refs/heads/BASE`: the merge commit lands only on the tip it was tested on. */
 export const pushArgs = (base: string, baseTip: string, mergeSha: string) => ['push', 'origin', `--force-with-lease=refs/heads/${base}:${baseTip}`, `${mergeSha}:refs/heads/${base}`];
 /** Whether a failed push was rejected because the tip moved under its lease, as git words it, rather than failing for any other cause. */
 export const staleLeaseRejection = (output: string) => /stale info|rejected|fetch first|non-fast-forward|force-with-lease/i.test(output);
+
+/**
+ * Whether the base branch's first-parent history holds `sha`, exactly and unbounded (AC-5): the
+ * first-parent walk from `ref` down to the first ancestor of `sha` (`git rev-list --first-parent
+ * REF ^SHA`) ends right above `sha` when, and only when, `sha` is on that chain — then the oldest
+ * commit listed has `sha` as its first parent, or nothing is listed because the tip is `sha`
+ * itself. A commit merged in as a second parent, or unknown to the checkout, is not held.
+ */
+export async function firstParentHolds(git: (args: string[]) => Promise<string>, ref: string, sha: string): Promise<boolean> {
+  const wanted = sha.toLowerCase();
+  let listed: string[];
+  try { listed = (await git(['rev-list', '--first-parent', ref, `^${wanted}`])).split('\n').map(line => line.trim().toLowerCase()).filter(Boolean); }
+  catch { return false; }
+  if (!listed.length) return (await git(['rev-parse', '--verify', '--quiet', `${ref}^{commit}`])).trim().toLowerCase() === wanted;
+  try { return (await git(['rev-parse', '--verify', '--quiet', `${listed[listed.length - 1]}^1`])).trim().toLowerCase() === wanted; }
+  catch { return false; }
+}
 
 // ---- The trial on the merged tree ------------------------------------------------------------------
 

@@ -22,7 +22,9 @@ import type { Services } from './routes.js';
  * saves the item. A `reconciled` delivers the item exactly as a direct merge does (direct-merge.ts
  * `sweepDirectMerges`): stage done, the delivery, `settleDelivered`, `deliverSplitParent`, the jobs
  * row gone, all in the one transaction, saved as `merge-writer.delivered`; one for a merge commit
- * the base branch does not hold is refused, since nothing landed.
+ * the base branch does not hold is refused, since nothing landed, and so is one (or a `pushed`)
+ * for a merge commit the item's own open intent of its submitted head does not name, since a
+ * commit main holds for another item or none delivers nothing here.
  */
 const sha = z.string().regex(/^[0-9a-f]{40}$/i).transform(value => value.toLowerCase());
 const instant = z.string().max(64).refine(value => Number.isFinite(Date.parse(value)), 'an ISO 8601 instant');
@@ -40,6 +42,10 @@ export type MergeRecordBody = z.infer<typeof mergeRecordBodySchema>;
 export const deliveredReason = 'merge-writer.delivered';
 /** The refusal of a reconciliation naming a merge commit the base branch does not hold. */
 export const unheldShaRefusal = (mergeSha: string, base: string) => `${base} does not hold ${mergeSha.slice(0, 12)}; a merge is reconciled only once the base branch holds its merge commit`;
+/** The refusal of a push or reconciliation naming a merge commit the item's own ledger never intended (AC-4): main holding a commit is not this item's merge. */
+export const unintendedShaRefusal = (key: string, mergeSha: string, intended: string | null) => `${key}'s ledger ${intended ? `intends ${intended.slice(0, 12)}, not` : 'holds no open intent for'} ${mergeSha.slice(0, 12)}; a merge is recorded pushed or reconciled only under the intent that opened it`;
+/** The refusal of a record naming a head other than the item's submitted candidate. */
+export const otherHeadRefusal = (key: string, head: string, candidate: string | null) => `${key}'s submitted head is ${candidate ? candidate.slice(0, 12) : 'none'}, not ${head.slice(0, 12)}; the merge writer records only the candidate it merges`;
 
 /** The engine's git runner over the coordinator checkout, made on first use as the head observation makes it (engine.ts). */
 function gitRunner(engine: Engine): GitRunner {
@@ -74,11 +80,19 @@ export async function recordMergeEvent(services: Services, actor: Principal, id:
     const work = all.find(item => item.id === id || item.key === id); demand(work, 'Work item not found', 404);
     const receipt = async (result: unknown) => { await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]); return result; };
     const answer = () => ({ recorded: true, key: work!.key, kind: data.kind, stage: work!.stage, mergeLedger: work!.mergeLedger ?? null, delivery: work!.delivery ?? null });
-    if (data.kind === 'reconciled') {
-      demand(held, unheldShaRefusal(data.mergeSha, base), 409);
+    const candidate = work!.candidate?.sha.toLowerCase() ?? null;
+    // Every record is about the item's own submitted head (AC-4): an intent, a trial or a refusal
+    // names it; a push or a reconciliation names the merge commit the item's open intent of that
+    // head intends. Main holding some commit never delivers an item whose ledger did not intend it.
+    if ('head' in data) demand(data.head === candidate, otherHeadRefusal(work!.key, data.head, candidate), 409);
+    else {
       // The merge already delivered under this very commit: a record whose receipt was lost, answered as it stands.
       if (work!.stage === 'done' && work!.delivery?.mergeSha.toLowerCase() === data.mergeSha) return receipt(answer());
       demand(work!.stage !== 'done', `${work!.key} is already done, so ${data.mergeSha.slice(0, 12)} delivers nothing`, 409);
+      const ledger = await foldItemLedger(db, work!, data);
+      const intended = ledger && ledger.state !== 'refused' && ledger.head === candidate ? ledger.mergeSha : null;
+      demand(intended === data.mergeSha, unintendedShaRefusal(work!.key, data.mergeSha, intended), 409);
+      if (data.kind === 'reconciled') demand(held, unheldShaRefusal(data.mergeSha, base), 409);
     }
     const { kind, ...fields } = data;
     const event: MergeRecordEvent = data;

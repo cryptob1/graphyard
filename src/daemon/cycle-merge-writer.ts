@@ -9,19 +9,28 @@ import { mergeWriterTrialGround } from '../model/rework-ground.js';
 import { installIdFor } from '../install/types.js';
 import { mergeWriterSettings, shadowGateSettings } from '../master/merge-writer-settings.js';
 import { trialMerge, TrialTimeoutError } from '../merge-writer/trial.js';
-import { criterionProofs, mergeOne, mergeQueue, proofTestFiles, pushArgs, pushEnvironment, reconcileIntents, runMergeTrial, staleLeaseRejection, type MergeOutcome, type MergePorts, type MergeRecordEvent } from '../merge-writer/executor.js';
+import { criterionProofs, firstParentHolds, mergeOne, mergeQueue, proofTestFiles, pushArgs, pushEnvironment, reconcileIntents, runMergeTrial, staleLeaseRejection, type MergeOutcome, type MergePorts, type MergeRecordEvent } from '../merge-writer/executor.js';
 import { storeAction, type DaemonState } from './state.js';
 import type { Cycle } from './cycle.js';
 
-/** How many queued heads and how many refusals `state.mergeWriter` keeps. */
-export const mergeWriterKeptQueue = 50, mergeWriterKeptRefusals = 20;
+/** How many queued heads, how many refusals and how many pending rework requests `state.mergeWriter` keeps. */
+export const mergeWriterKeptQueue = 50, mergeWriterKeptRefusals = 20, mergeWriterKeptReworks = 50;
 const shaField = z.string().max(64), instant = z.string().max(64);
-/** `state.mergeWriter`: when the writer last delivered, the heads owed a merge oldest first, the merge in flight, and the newest refusals. */
+/**
+ * A rework a failed trial grounds that the server has not yet confirmed (AC-3): kept until the
+ * decision request succeeds or the snapshot shows the item reworked, moved to a new head or done,
+ * and requested again every cycle until then. A refused head leaves the queue, so nothing but this
+ * record would ask again.
+ */
+export const pendingReworkSchema = z.object({ key: z.string().max(100), id: z.string().max(100), head: shaField, reason: z.string().max(2000), refusedAt: instant, attempts: z.number().int().min(0).max(100_000), lastError: z.string().max(2000).nullable() }).strict();
+export type PendingRework = z.infer<typeof pendingReworkSchema>;
+/** `state.mergeWriter`: when the writer last delivered, the heads owed a merge oldest first, the merge in flight, the newest refusals, and the reworks still to be confirmed. */
 export const mergeWriterStateSchema = z.object({
   lastMergeAt: instant.nullable().default(null),
   queue: z.array(z.object({ key: z.string().max(100), id: z.string().max(100), head: shaField, submittedAt: instant, waitingMs: z.number().int().min(0) }).strict()).max(mergeWriterKeptQueue).default([]),
   inFlight: z.object({ key: z.string().max(100), id: z.string().max(100), head: shaField, startedAt: instant }).strict().nullable().default(null),
   refusals: z.array(z.object({ key: z.string().max(100), head: shaField, reason: z.string().max(2000), at: instant }).strict()).max(mergeWriterKeptRefusals).default([]),
+  reworks: z.array(pendingReworkSchema).max(mergeWriterKeptReworks).default([]),
 }).strict();
 export type MergeWriterState = z.infer<typeof mergeWriterStateSchema>;
 export const emptyMergeWriterState = (): MergeWriterState => mergeWriterStateSchema.parse({});
@@ -71,7 +80,8 @@ export function mergeWriterReads(config: Pick<MasterConfig, 'baseBranch' | 'run'
       try { await run('git', ['-C', root, ...pushArgs(base, baseTip, mergeSha)], { env: pushEnvironment(settings.deployKeyFile, options.environment) }); return 'pushed'; }
       catch (error) { if (staleLeaseRejection(output(error))) return 'rejected'; throw error; }
     },
-    holds: async sha => (await git('rev-list', '--first-parent', '--max-count=2000', ref)).split('\n').map(line => line.trim().toLowerCase()).includes(sha.toLowerCase()),
+    // The whole first-parent history, not a window of it: an intent older than any bound is still a push (AC-5).
+    holds: sha => firstParentHolds(args => git(...args), ref, sha),
   };
 }
 
@@ -89,12 +99,49 @@ export const trialFailureRework = (work: Work, head: string, reason: string) => 
   input: { previousWorkerStopped: true as const, binding: `${head}:${mergeWriterTrialGround}` },
 });
 
+/** The action key a pending rework of `key`'s `head` is recorded under. */
+export const mergeWriterReworkKey = (key: string, head: string) => `${mergeWriterActionKey(key, head)}:rework`;
+/**
+ * Every rework the writer still owes (AC-3), asked for again this cycle. One the snapshot shows
+ * applied — the item reworked, on a new head, or done — is settled without a request: the server
+ * applied it, whatever became of the answer. Otherwise the decision is requested; a request that
+ * fails (the plane down, a refusal) keeps the record for the next cycle and is counted, so a
+ * transient failure never loses the rework. Without the decision effects the record waits, named
+ * for the operator. Answers whether the state changed.
+ */
+export async function requestPendingReworks(cycle: Pick<Cycle, 'state' | 'effects' | 'now' | 'snapshot' | 'performed'>): Promise<boolean> {
+  const { state, effects, now, snapshot, performed } = cycle;
+  const writer = state.mergeWriter;
+  if (!writer.reworks.length) return false;
+  const at = () => new Date(now()).toISOString();
+  const kept: PendingRework[] = [];
+  for (const pending of writer.reworks) {
+    const key = mergeWriterReworkKey(pending.key, pending.head);
+    const item = snapshot.work.find(entry => entry.key === pending.key);
+    const applied = !item || item.stage === 'done' || item.reworkRequested || item.candidate?.sha.toLowerCase() !== pending.head;
+    const action = (actionState: 'done' | 'failed', detail: string) => performed.push(storeAction(state, key, { kind: 'decision', work: pending.key, principal: null, state: actionState, detail: detail.slice(0, 1900), attempts: pending.attempts + 1, epoch: null, cycle: state.cycle, at: at() }, actionState === 'done' ? undefined : null));
+    if (applied) { action('done', `The rework the merge writer's refusal of ${pending.key} head ${pending.head} grounds is applied: the snapshot shows the item ${!item || item.stage === 'done' ? 'done' : item.reworkRequested ? 'returned to a worker' : 'on a new head'}`); continue; }
+    if (!effects.decide) { kept.push({ ...pending, attempts: pending.attempts + 1, lastError: 'this loop runs without the decision effects' }); action('failed', `The rework the merge writer's refusal of ${pending.key} head ${pending.head} grounds waits: this loop runs without the decision effects, so request it with graphyard master decide ${pending.key} rework '${JSON.stringify(trialFailureRework(item, pending.head, pending.reason).input)}' REASON`); continue; }
+    const rework = trialFailureRework(item, pending.head, pending.reason);
+    try {
+      const decided = await effects.decide(item, 'rework', rework.reason, rework.input);
+      action('done', `Requested the rework the merge writer's refusal of ${pending.key} head ${pending.head} grounds (decision ${decided.id}); the server applies it with the writer as its approver`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      kept.push({ ...pending, attempts: pending.attempts + 1, lastError: message.slice(0, 2000) });
+      action('failed', `The rework the merge writer's refusal of ${pending.key} head ${pending.head} grounds was not requested (attempt ${pending.attempts + 1}); it is asked for again next cycle: ${message}`);
+    }
+  }
+  writer.reworks = kept;
+  return true;
+}
+
 /**
  * Cycle step 6b' (right after the merge step). Active only while the recorded merger is
  * `control-plane` (AC-6); without `effects.mergeWriter` (a loop wired without the reads, or a
  * test) it does nothing. Each cycle: the merge that settled since the last one is recorded
- * (delivered, refused, re-queued or failed), and a trial failure's rework is requested with the
- * writer's ground; then, with nothing in flight, every intent a crash left open is reconciled
+ * (delivered, refused, re-queued or failed), and every rework a trial failure grounds is requested
+ * until the server confirms it (AC-3); then, with nothing in flight, every intent a crash left open is reconciled
  * against the base (AC-5) before anything new; then the queue is read from the snapshot and its
  * oldest head is merged beside the cycle, one at a time (AC-1). A timeout measures the host, not
  * the merge: the head stays queued and is tried again.
@@ -126,15 +173,14 @@ export async function mergeWriterStep(cycle: Cycle) {
         writer.refusals = [...writer.refusals, { key: flight.key, head: flight.head, reason: outcome.reason.slice(0, 2000), at: at() }].slice(-mergeWriterKeptRefusals);
         action('failed', outcome.outcome === 'requeued' ? `Merge of ${flight.key} head ${flight.head} refused: ${outcome.reason} (${outcome.pushes} leased pushes rejected); the head stays queued`
           : `Merge of ${flight.key} head ${flight.head} refused: ${outcome.reason}; the refusal is recorded on the ledger and the rework it grounds is requested`);
-        // The trial failed the head (AC-3): the loop requests the rework; the server applies it with the writer as its approver.
-        if (outcome.outcome === 'refused' && effects.decide) {
-          const rework = trialFailureRework(work, flight.head, outcome.reason);
-          try { await effects.decide(work, 'rework', rework.reason, rework.input); }
-          catch (error) { performed.push(storeAction(state, `${key}:rework`, { kind: 'decision', work: flight.key, principal: null, state: 'failed', detail: `The rework the merge writer's refusal of ${flight.key} head ${flight.head} grounds was not requested: ${error instanceof Error ? error.message : String(error)}`.slice(0, 1900), attempts: 1, epoch: null, cycle: state.cycle, at: at() })); }
+        // The trial failed the head (AC-3): the rework is owed until the server confirms it, and asked for below.
+        if (outcome.outcome === 'refused' && !writer.reworks.some(entry => entry.key === flight.key && entry.head === flight.head)) {
+          writer.reworks = [...writer.reworks, { key: flight.key, id: flight.id, head: flight.head, reason: outcome.reason.slice(0, 2000), refusedAt: at(), attempts: 0, lastError: null }].slice(-mergeWriterKeptReworks);
         }
       }
     }
   }
+  if (await requestPendingReworks(cycle)) changed = true;
   if (!flights.has(state)) {
     if ((await reads.merger()) !== 'control-plane') {
       if (writer.queue.length) { writer.queue = []; changed = true; }
@@ -153,7 +199,8 @@ export async function mergeWriterStep(cycle: Cycle) {
         const queue = mergeQueue(snapshot.work, ledger, now());
         const summary = queue.queue.slice(0, mergeWriterKeptQueue);
         if (JSON.stringify(summary) !== JSON.stringify(writer.queue)) { writer.queue = summary; changed = true; }
-        const due = queue.next;
+        // At the cap of unconfirmed reworks nothing new starts: the plane is not taking the writer's decisions.
+        const due = writer.reworks.length >= mergeWriterKeptReworks ? null : queue.next;
         if (due?.candidate) {
           const head = due.candidate.sha.toLowerCase();
           const entry: Flight = { key: due.key, id: due.id, head, startedAt: at(), settled: null };
@@ -167,7 +214,7 @@ export async function mergeWriterStep(cycle: Cycle) {
   if (changed) await effects.persist(state);
 }
 
-/** The `mergeWriter` section of `master status` and the daemon summary: the queue, the merge in flight, the last delivery and the newest refusals. */
+/** The `mergeWriter` section of `master status` and the daemon summary: the queue, the merge in flight, the last delivery, the newest refusals and the reworks still owed. */
 export const mergeWriterSummary = (writer: MergeWriterState | null | undefined) =>
-  writer ? { queue: writer.queue, inFlight: writer.inFlight, lastMergeAt: writer.lastMergeAt, refusals: writer.refusals } : { queue: [], inFlight: null, lastMergeAt: null, refusals: [] };
+  writer ? { queue: writer.queue, inFlight: writer.inFlight, lastMergeAt: writer.lastMergeAt, refusals: writer.refusals, reworks: writer.reworks } : { queue: [], inFlight: null, lastMergeAt: null, refusals: [], reworks: [] };
 export type { MergeRecordEvent };

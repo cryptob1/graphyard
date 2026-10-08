@@ -7,7 +7,7 @@ An AI `slice-lead` (`product`, `infrastructure`, `docs-experience`) rules on pla
 
 ## Reviewer provider diversity
 
-The registry picks a `reviewer` account whose model provider (model `provider`, else launch kind) differs from the item's newest `worker` session's; same-provider accounts are `skipped` (`shares the implementer's provider P on GY-N`). One at its session limit is waited for; otherwise the first eligible same-provider account serves, recording `no reviewer account outside provider P can serve GY-N`.
+The registry picks a `reviewer` account whose model provider (`provider`, else launch kind) differs from the item's newest `worker` session's; same-provider accounts are `skipped` (`shares the implementer's provider P on GY-N`), one at its session limit waited for; else the first eligible same-provider account serves (`no reviewer account outside provider P can serve GY-N`).
 
 ## Escalation
 
@@ -18,13 +18,13 @@ The registry picks a `reviewer` account whose model provider (model `provider`, 
 | `security-concern` | A lead's `escalate` ruling
 | `requirement-weakening` | A revision retires a criterion, narrows proofs
 
-Unresolved triggers refuse merging; replacements may claim. Explained lapses: `lease.expired` with a [cause](protocol/leases.md#how-a-lease-ends) (`submitted`, `blocked-awaiting-operator`, `stopped-by-attestation`, `exhausted-capacity`, `no-submission-bound`); later-explained or superseded `lease-loss` auto-settles (`escalation.auto-settled`: `auto-settled: blocked report for epoch N explains the lapse`, `auto-settled: stopped-worker attestation for epoch N explains the lapse`).
+Unresolved triggers refuse merging; replacements may claim. Explained lapses: `lease.expired` with a [cause](protocol/leases.md#how-a-lease-ends) (`submitted`, `blocked-awaiting-operator`, `stopped-by-attestation`, `exhausted-capacity`, `no-submission-bound`); a later-explained or superseded `lease-loss` auto-settles (`escalation.auto-settled`: `auto-settled: blocked report for epoch N explains the lapse`, `auto-settled: stopped-worker attestation for epoch N explains the lapse`).
 
 ### Who may settle what
 
 `escalation.resolved` records each:
 
 - Explained `lease-loss`: reconciliation, or `admin` `resolve GY-N lease-loss --attestation blocked|stopped-worker "reason"`.
-- Superseded-epoch `lease-loss`: reconciliation; one whose attempts all ended unfenced: after 5 min.
+- Superseded-epoch `lease-loss`: reconciliation; all attempts ended unfenced: after 5 min.
 - `security-concern`, `requirement-weakening`, `evidence-policy-conflict`, lead-raised `lease-loss`: master-requested two-party decision or declared human session (`sessionKind: "human"`).
 - `requirement-weakening` from an approved `requirements` decision: settled by that approval, citing its approver; no `scope` fault.
