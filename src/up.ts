@@ -16,10 +16,14 @@ import { redactString } from './evidence-replay.js';
 import { recordSupervision } from './master/config.js';
 import { unitCheckout, userUnitDirectory } from './install/units.js';
 import { installIdFor } from './install/types.js';
+import { installDirectory } from './install/secrets.js';
+import { ensureDeployKey } from './install/deploy-key.js';
+import type { GitHubCli } from './install/github.js';
 import { herdrAttachCommand, installHerdrInstance, type HerdrInstance } from './master/herdr.js';
 import { ensureHerdrBinary, ensureHerdrServer, ensureHerdrWorkspace, HerdrSetupFailure, herdrSync, hostHerdrDeps, prepareHerdrInstance, withLocalBin, type HerdrHostDeps } from './herdr-host.js';
 import { herdrBoundElsewhere, herdrPluginBinding, herdrPluginEnabled } from './repository-setup.js';
 import { recordHerdrInstance } from './master/config.js';
+import { mergerModes, type MergerMode } from './merger-mode.js';
 
 /**
  * `graphyard up` (GY-1419): every machine step of a first installation, in order — preflight,
@@ -45,12 +49,23 @@ import { recordHerdrInstance } from './master/config.js';
  * `up --local` sets up supervised mode (GY-1501): no reviewer App, no master-autonomy identities, and
  * master.json records `supervision: supervised` with the operator's GitHub login, so the operator
  * reviews and merges each pull request on GitHub and nothing claims autonomy.
+ *
+ * `up --merger control-plane` (GY-1552): no GitHub Apps and no browser profile; `install --no-github-app`,
+ * a deploy key from the operator's `gh` login, `POST /api/merger` as admin, then the same autonomy,
+ * onboarding, accounts, harness, master-loop and goal steps. The github-mode step list is unchanged.
  */
 
 /** `up --local` installs supervised (GY-1501): the operator reviews and merges on GitHub. */
 export const upSupervised = (request: Pick<UpRequest, 'provider'>) => request.provider === 'local';
+/** GY-1552: `up --merger control-plane` — the control plane is the merge writer, with no GitHub Apps. */
+export const upMergerControlPlane = (request: Pick<UpRequest, 'merger'>) => request.merger === 'control-plane';
+/** GitHub-mode step list (unchanged by GY-1552). */
 export const upSteps = ['preflight', 'control-plane', 'host-supervisor', 'master-autonomy', 'onboarding', 'accounts', 'harness', 'master-loop', 'goal'] as const;
-export type UpStep = typeof upSteps[number];
+/** Control-plane merger step list: deploy-key and merger-setting between host-supervisor and master-autonomy. */
+export const upControlPlaneSteps = ['preflight', 'control-plane', 'host-supervisor', 'deploy-key', 'merger-setting', 'master-autonomy', 'onboarding', 'accounts', 'harness', 'master-loop', 'goal'] as const;
+export type UpStep = typeof upControlPlaneSteps[number];
+/** The resumable steps for REQUEST: control-plane merger or the github-mode list. */
+export const upStepsFor = (request: Pick<UpRequest, 'merger'>) => upMergerControlPlane(request) ? upControlPlaneSteps : upSteps;
 
 export interface UpRequest {
   repository: string;
@@ -64,6 +79,11 @@ export interface UpRequest {
   goalFile: string | null;
   /** The Chrome profile signed in to GitHub that drives the App manifest in agent mode; the master's recorded one when omitted. */
   browserProfile: string | null;
+  /**
+   * GY-1552: which writer lands heads — omit or `github` for the App-based path; `control-plane` for
+   * `up --merger control-plane` (no Apps, deploy key + merger setting).
+   */
+  merger?: MergerMode;
   /**
    * Passed on to `graphyard install` unchanged: the operator's consent to a created server's monthly
    * price (`--confirm-price X` or `--max-monthly N`) and the SSH key or machine it is reached with.
@@ -167,6 +187,20 @@ export interface UpDependencies {
   applyTailnet?(command: string[]): Promise<{ ok: boolean; detail?: string }>;
   /** GY-1511: Herdr on this host (master/herdr.ts); absent, up leaves Herdr to the install alone. */
   herdr?: UpHerdr;
+  /**
+   * GY-1552: run `gh` with ARGS (repository view/create and deploy-key registration). Absent under
+   * the github-mode path, which never creates a repository or deploy key here.
+   */
+  gh?(args: string[]): Promise<{ code: number; stdout: string; stderr?: string }>;
+  /** GY-1552: the install directory that holds the deploy key; defaults to `~/.config/graphyard/<installId>`. */
+  installDirectory?(): string;
+  /** GY-1552: ensure the install's deploy key on REPOSITORY; defaults to ensureDeployKey. */
+  ensureDeployKey?(installDir: string, repository: string): Promise<string>;
+  /**
+   * GY-1552: `POST /api/merger` as admin to set the control-plane writer. Defaults to
+   * `master merger control-plane` with the admin credential.
+   */
+  setMerger?(adminToken: string, requestId: string): Promise<void>;
   pollMs?: number;
   /** How long a step waits on a person before the run stops (resumable); Infinity interactively. */
   humanWaitMs?: number;
@@ -229,10 +263,14 @@ class SudoNoWait extends Error {}
 
 interface UpState {
   version: 1; repository: string; provider: string; completed: UpStep[]; noHerdr: boolean; goal: string | null;
+  /** GY-1552: which merger path this run recorded; omitted means github (the default before the field existed). */
+  merger?: MergerMode;
   /** Where the install saved the operator's admin credential (a path, never the secret): what mints the sign-in link. */
   operatorTokenFile?: string | null;
   /** The goal's request id, fixed before the first try so a rerun after an interruption never creates it twice. */
   goalRequest?: string | null;
+  /** GY-1552: idempotency key for `POST /api/merger`, fixed across reruns so the setting is written once. */
+  mergerRequest?: string | null;
   /** The pull request that publishes the onboarding files, until it merges. */
   onboardingPullRequest?: string | null;
   /** The work item that pull request is filed as (GY-1478), and the request id that files it once. */
@@ -248,14 +286,19 @@ interface UpState {
   herdrFailure?: string | null;
 }
 export const upStateFile = (root: string) => resolve(root, '.graphyard/up.json');
+const knownUpSteps = upControlPlaneSteps as readonly string[];
 
 async function readState(root: string, request: UpRequest): Promise<UpState> {
+  const merger = request.merger ?? 'github';
   try {
     const state = JSON.parse(await readFile(upStateFile(root), 'utf8'));
-    // A run for another repository or provider starts over: its steps say nothing about this one.
-    if (state?.version === 1 && state.repository === request.repository && state.provider === request.provider) return { ...state, completed: (state.completed ?? []).filter((step: string) => (upSteps as readonly string[]).includes(step)) };
+    // A run for another repository, provider or merger starts over: its steps say nothing about this one.
+    if (state?.version === 1 && state.repository === request.repository && state.provider === request.provider
+      && (state.merger ?? 'github') === merger) {
+      return { ...state, merger, completed: (state.completed ?? []).filter((step: string) => knownUpSteps.includes(step)) };
+    }
   } catch (error: any) { if (error.code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error; }
-  return { version: 1, repository: request.repository, provider: request.provider, completed: [], noHerdr: false, goal: null };
+  return { version: 1, repository: request.repository, provider: request.provider, merger, completed: [], noHerdr: false, goal: null };
 }
 async function writeState(root: string, state: UpState) {
   const file = upStateFile(root);
@@ -350,7 +393,8 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
   const machineWaitMs = deps.machineWaitMs ?? 600_000;
   let herdrAttach: string | null = null;
   const supervised = upSupervised(request);
-  let setupUrl: string | null = null, prompts = 0, last: SetupItem[] = setupChecklist(null, { supervised }), claim: string | null = null, operator: string | null = null, onboarding: OnboardingWait | null = null, signIn: string | null = null;
+  const controlPlaneMerger = upMergerControlPlane(request);
+  let setupUrl: string | null = null, prompts = 0, last: SetupItem[] = setupChecklist(null, { supervised, ...(controlPlaneMerger ? { merger: 'control-plane' as const } : {}) }), claim: string | null = null, operator: string | null = null, onboarding: OnboardingWait | null = null, signIn: string | null = null;
   const handoffs: UpResult['handoffs'] = [];
   const handedOff = new Set<string>();
   const handoff = (step: UpStep): Handoff => (sentence, link) => {
@@ -360,7 +404,7 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
     const entry = { step, sentence, url: link.url ?? null, code: link.code ?? null };
     handoffs.push(entry); deps.emit({ kind: 'handoff', ...entry });
   };
-  const checklist = async () => (last = setupChecklist(await deps.status().catch(() => null), { supervised }));
+  const checklist = async () => (last = setupChecklist(await deps.status().catch(() => null), { supervised, ...(controlPlaneMerger ? { merger: 'control-plane' as const } : {}) }));
   let reached = false;
   /**
    * GY-1477: the dashboard's address from the operator's other devices, worked out once a server is
@@ -446,10 +490,20 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
   };
   const passed = request.install ?? {};
   // Supervised installs register no reviewer App (GY-1501): the operator is the reviewer.
-  const installArgs = (mode: '--plan' | '--apply') => ['install', '--provider', request.provider, '--repo', request.repository, ...(supervised ? [] : ['--reviewer', request.reviewer]), mode, ...(state.noHerdr ? ['--no-herdr'] : state.herdrInstance ? ['--herdr-instance'] : []),
+  // Control-plane merger (GY-1552) registers no App at all: install --no-github-app, no --reviewer.
+  const installArgs = (mode: '--plan' | '--apply') => ['install', '--provider', request.provider, '--repo', request.repository, ...(controlPlaneMerger ? ['--no-github-app'] : supervised ? [] : ['--reviewer', request.reviewer]), mode, ...(state.noHerdr ? ['--no-herdr'] : state.herdrInstance ? ['--herdr-instance'] : []),
     ...([['--confirm-price', passed.confirmPrice], ['--max-monthly', passed.maxMonthly], ['--ssh-key', passed.sshKey], ['--ssh-host', passed.sshHost], ['--ssh-user', passed.sshUser]] as const).flatMap(([flag, value]) => value ? [flag, value] : []),
-    ...(request.reuseApps ?? []).flatMap(slug => ['--reuse-app', slug])];
-  const rerun = () => `graphyard up --repo ${request.repository} --provider ${request.provider}${request.agent ? ' --agent' : ''}`;
+    ...(controlPlaneMerger ? [] : (request.reuseApps ?? []).flatMap(slug => ['--reuse-app', slug]))];
+  const rerun = () => `graphyard up --repo ${request.repository} --provider ${request.provider}${controlPlaneMerger ? ' --merger control-plane' : ''}${request.agent ? ' --agent' : ''}`;
+  /** GY-1552: create OWNER/NAME with the operator's gh login when it does not exist yet. */
+  const ensureRepository = async () => {
+    if (!deps.gh) throw new UpStop('preflight: control-plane merger needs gh on this machine to create the repository when it is missing', upExitCodes.prerequisite);
+    const view = await deps.gh(['repo', 'view', request.repository, '--json', 'name']);
+    if (view.code === 0) return;
+    const created = await deps.gh(['repo', 'create', request.repository, '--private', '--source', '.', '--push']);
+    if (created.code !== 0) throw new UpStop(`preflight: gh repo create ${request.repository} --source . --push exited ${created.code}${created.stderr ? `: ${created.stderr.split('\n')[0].slice(0, 300)}` : ''}; create it under the operator's gh login, then rerun ${rerun()}`, upExitCodes.prerequisite);
+    deps.emit({ kind: 'note', text: `Created private repository ${request.repository} with gh repo create (operator's gh login).` });
+  };
   const step = async (name: UpStep, body: () => Promise<string | void>) => {
     if (state.completed.includes(name)) { deps.emit({ kind: 'step', step: name, state: 'skipped', detail: 'done by an earlier run' }); return; }
     deps.emit({ kind: 'step', step: name, state: 'start' });
@@ -499,8 +553,9 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
     // A reused App (GY-1442) or one saved on this machine (GY-1476) needs no browser, so agent mode
     // starts without one only when the install's read-only plan says no App is left to create in a
     // browser: install reuses a saved App before any App page is driven.
+    // Control-plane merger (GY-1552) registers no App, so agent mode needs no browser profile.
     const noProfile = 'Agent mode creates the GitHub Apps in a Chrome profile signed in to GitHub, and none is given or recorded, here or by another Graphyard install on this host for the same GitHub login: pass --browser-profile PROFILE and rerun graphyard up --agent.';
-    if (request.agent && !state.completed.includes('control-plane') && !deps.driveApp) {
+    if (request.agent && !controlPlaneMerger && !state.completed.includes('control-plane') && !deps.driveApp) {
       const browserApps: unknown = parseJson(await run('preflight', installArgs('--plan')))?.browserApps;
       const left = Array.isArray(browserApps) ? browserApps.map(String) : ['control-plane', 'reviewer'];
       const apps = left.map(role => role === 'reviewer' ? `reviewer App "${request.reviewer}"` : 'control-plane App').join(' and ');
@@ -508,6 +563,8 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
     }
 
     await step('preflight', async () => {
+      // GY-1552: the repository must exist for deploy-key registration; create it under the operator's gh login when missing.
+      if (controlPlaneMerger) await ensureRepository();
       for (let attempt = 0; attempt < 2; attempt++) {
         const planned = await run('preflight', installArgs('--plan'));
         const plan = parseJson(planned);
@@ -541,6 +598,13 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
     }
 
     const controlPlane = () => step('control-plane', async () => {
+      // GY-1552: control-plane merger installs with --no-github-app; no App page is served or driven.
+      if (controlPlaneMerger) {
+        const result = await deps.cli(installArgs('--apply'));
+        claim = await rememberSignIn(deps.root, state, result.stdout) ?? claim;
+        if (result.code !== 0) throw new UpStop(childFailure('control-plane', ['install'], result), upExitCodes.failed);
+        return 'control plane installed without a GitHub App (--no-github-app)';
+      }
       // The install waits on the App pages itself, as long as this run waits on a person (900 s
       // without a bound); it then pauses (exit 1) and a rerun resumes it. The page's clock starts
       // before the drive reaches Confirm access, so it gets a minute more than the drive waits.
@@ -655,9 +719,42 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
       deps.emit({ kind: 'note', text: `Supervised mode: you review and merge each pull request on GitHub${operatorLogin ? ` (as ${operatorLogin}; a pull request your own login opens needs another person's approval)` : ''}; no agent reviewer or approver runs.` });
     }
 
+    // GY-1552: deploy key under the install directory, then POST /api/merger as admin so the checklist
+    // treats App and protection items as not required. Github mode never runs these steps.
+    if (controlPlaneMerger) {
+      await step('deploy-key', async () => {
+        const directory = deps.installDirectory?.() ?? installDirectory(installIdFor(request.repository));
+        const ensure = deps.ensureDeployKey ?? (async (installDir, repository) => {
+          if (!deps.gh) throw new UpStop('deploy-key: control-plane merger needs gh on this machine to register the deploy key', upExitCodes.prerequisite);
+          const gh: GitHubCli = async (args, options) => {
+            const result = await deps.gh!(args);
+            if (result.code !== 0 && !options?.allowFailure) throw new Error(`gh ${args.join(' ')} exited ${result.code}${result.stderr ? `: ${result.stderr.split('\n')[0].slice(0, 200)}` : ''}`);
+            return { stdout: result.stdout, stderr: result.stderr ?? '', code: result.code };
+          };
+          return ensureDeployKey(installDir, repository, gh);
+        });
+        await ensure(directory, request.repository);
+        return 'deploy key registered read-write for the merge writer';
+      });
+      await step('merger-setting', async () => {
+        const current = await deps.status().catch(() => null);
+        if (current?.mergeWriter?.merger === 'control-plane') return 'merger already control-plane';
+        const admin = await deps.operatorToken?.(state.operatorTokenFile ?? null).catch(() => null) ?? null;
+        if (!admin) throw new UpStop(`merger-setting: the operator's admin credential is not on this machine${state.operatorTokenFile ? ` (${state.operatorTokenFile} is unreadable)` : ''}, so POST /api/merger cannot set the control-plane writer; place it and rerun ${rerun()}`, upExitCodes.prerequisite);
+        if (!state.mergerRequest) { state.mergerRequest = randomUUID(); await writeState(deps.root, state); }
+        if (deps.setMerger) await deps.setMerger(admin, state.mergerRequest);
+        else {
+          const result = await deps.cli(['master', 'merger', 'control-plane', '--reason', 'graphyard up --merger control-plane'], { env: { GRAPHYARD_TOKEN: admin, GRAPHYARD_REQUEST_ID: state.mergerRequest } });
+          if (result.code !== 0) throw new UpStop(childFailure('merger-setting', ['master', 'merger'], result), upExitCodes.failed);
+        }
+        return 'POST /api/merger set the control-plane writer';
+      });
+    }
+
     // GY-1479: the master's operator-agent and approver identities (`master autonomy --apply`), provisioned
     // with the admin credential the install saved, so the new master creates, releases and unblocks work
     // with no further command. That credential is never something an agent session may read.
+    // Control-plane merger (GY-1552) still provisions them: no reviewer App, but the master decides with its own identities.
     if (supervised) deps.emit({ kind: 'step', step: 'master-autonomy', state: 'skipped', detail: 'supervised: the operator reviews and merges, so no operator-agent or approver identity is provisioned' });
     else await step('master-autonomy', async () => {
       // A host install provisions them on the host, where its loop runs and the admin credential stays.
@@ -796,10 +893,11 @@ export const upUsage = [
   '  --provider NAME            compose (default), railway, hetzner or local',
   '  --local                    --provider local: embedded Postgres on this machine, no Docker',
   '  --agent                    run every step non-interactively, JSON events on stderr; hand off only device approvals',
-  '  --reviewer NAME            the reviewer App and agent runtime (default claude)',
+  '  --merger github|control-plane  who merges heads: github Apps (default) or the control plane (no Apps, deploy key)',
+  '  --reviewer NAME            the reviewer App and agent runtime (default claude); unused with --merger control-plane',
   '  --master NAME              the master agent runtime, claude or codex (default claude)',
   '  --goal FILE                submit the goal in FILE once the checklist is green',
-  "  --browser-profile PROFILE  the Chrome profile signed in to GitHub (default: the master's, else another install's for the same login)",
+  "  --browser-profile PROFILE  the Chrome profile signed in to GitHub (default: the master's, else another install's for the same login); unused with --merger control-plane",
   '  --github-mobile            approve Confirm access with GitHub Mobile (the default whenever the page offers it)',
   '  --sudo-code CODE|email     hand the waiting run a 6-digit Confirm-access code, or ask GitHub to email one',
   '  --confirm-price X          consent to a created server\'s monthly price (passed to install)',
@@ -838,10 +936,11 @@ const shellWord = (value: string) => /^[\w@%+=:,./-]+$/.test(value) ? value : `'
 export function upCommandFlags(request: UpRequest) {
   const flags: string[] = ['--provider', request.provider, ...(request.agent ? ['--agent'] : [])];
   const option = (name: string, value: string | null | undefined) => { if (value) flags.push(name, value); };
-  if (request.reviewer !== 'claude') option('--reviewer', request.reviewer);
+  if (request.merger && request.merger !== 'github') option('--merger', request.merger);
+  if (request.reviewer !== 'claude' && !upMergerControlPlane(request)) option('--reviewer', request.reviewer);
   if (request.master !== 'claude') option('--master', request.master);
   option('--goal', request.goalFile);
-  option('--browser-profile', request.browserProfile);
+  if (!upMergerControlPlane(request)) option('--browser-profile', request.browserProfile);
   option('--confirm-price', request.install?.confirmPrice);
   option('--max-monthly', request.install?.maxMonthly);
   option('--ssh-key', request.install?.sshKey);
@@ -854,18 +953,20 @@ export function upCommandFlags(request: UpRequest) {
 }
 
 /**
- * The repository and provider an earlier run recorded in .graphyard/up.json (GY-1466), so a resumed
- * `up` needs neither flag again; null when no run is recorded here.
+ * The repository, provider and merger an earlier run recorded in .graphyard/up.json (GY-1466), so a
+ * resumed `up` needs those flags again only when they differ; null when no run is recorded here.
  */
-export function recordedUp(root: string): { repository: string; provider: string } | null {
+export function recordedUp(root: string): { repository: string; provider: string; merger?: MergerMode } | null {
   try {
     const state = JSON.parse(readFileSync(upStateFile(root), 'utf8'));
-    return state?.version === 1 && typeof state.repository === 'string' && typeof state.provider === 'string' ? { repository: state.repository, provider: state.provider } : null;
+    if (state?.version !== 1 || typeof state.repository !== 'string' || typeof state.provider !== 'string') return null;
+    const merger = state.merger === 'control-plane' || state.merger === 'github' ? state.merger as MergerMode : undefined;
+    return { repository: state.repository, provider: state.provider, ...(merger ? { merger } : {}) };
   } catch (error: any) { if (error.code === 'ENOENT' || error instanceof SyntaxError) return null; throw error; }
 }
 
 /** The options `graphyard up` parses; upUsage gives each one line (GY-1510), and --sudo-code is read before them. */
-export const upOptions = { repo: { type: 'string' }, provider: { type: 'string' }, agent: { type: 'boolean' }, json: { type: 'boolean' }, reviewer: { type: 'string' }, master: { type: 'string' }, goal: { type: 'string' }, 'browser-profile': { type: 'string' },
+export const upOptions = { repo: { type: 'string' }, provider: { type: 'string' }, agent: { type: 'boolean' }, json: { type: 'boolean' }, merger: { type: 'string' }, reviewer: { type: 'string' }, master: { type: 'string' }, goal: { type: 'string' }, 'browser-profile': { type: 'string' },
   'confirm-price': { type: 'string' }, 'max-monthly': { type: 'string' }, 'ssh-key': { type: 'string' }, 'ssh-host': { type: 'string' }, 'ssh-user': { type: 'string' },
   'reuse-app': { type: 'string', multiple: true }, 'github-mobile': { type: 'boolean' }, wait: { type: 'string' }, 'no-wait': { type: 'boolean' }, 'share-tailnet': { type: 'boolean' }, local: { type: 'boolean' } } as const;
 
@@ -873,20 +974,24 @@ export const upOptions = { repo: { type: 'string' }, provider: { type: 'string' 
  * `graphyard up`'s flags. With a run RECORDED in this checkout, an omitted --repo or --provider is
  * the recorded one, and one that differs is refused, naming both: its steps say nothing about it.
  */
-export function upRequestFromArgs(args: string[], recorded: { repository: string; provider: string } | null = null): UpRequest {
+export function upRequestFromArgs(args: string[], recorded: { repository: string; provider: string; merger?: MergerMode } | null = null): UpRequest {
   const { values } = parseArgs({ args, options: upOptions, allowPositionals: false });
   // --local is --provider local (GY-1500): the control plane on embedded Postgres on this machine, no Docker.
   if (values.local && values.provider !== undefined && values.provider !== 'local') throw new Error(`graphyard up --local means --provider local; it cannot be combined with --provider ${values.provider}`);
   const provider = values.local ? 'local' : values.provider;
-  for (const [flag, given, kept] of [['--repo', values.repo, recorded?.repository], ['--provider', provider, recorded?.provider]] as const) {
+  const mergerFlag = values.merger;
+  if (mergerFlag !== undefined && !(mergerModes as readonly string[]).includes(mergerFlag)) throw new Error(`Use --merger ${mergerModes.join('|')}`);
+  const merger = (mergerFlag ?? recorded?.merger) as MergerMode | undefined;
+  if (merger === 'control-plane' && (provider ?? recorded?.provider) === 'local') throw new Error('graphyard up --merger control-plane cannot be combined with --local: supervised mode provisions no operator-agent or approver identity');
+  for (const [flag, given, kept] of [['--repo', values.repo, recorded?.repository], ['--provider', provider, recorded?.provider], ['--merger', mergerFlag, recorded?.merger]] as const) {
     if (given !== undefined && kept !== undefined && given !== kept) throw new Error(`graphyard up ${flag} ${given} conflicts with ${kept}, which the run recorded in .graphyard/up.json resumes; omit ${flag} (or pass ${kept}) to resume it, or remove .graphyard/up.json to start over for ${given}`);
   }
   const repository = values.repo ?? recorded?.repository;
-  if (!repository || !/^[\w.-]+\/[\w.-]+$/.test(repository)) throw new Error('Use graphyard up --repo OWNER/NAME [--provider compose|railway|hetzner|local | --local] [--agent]');
+  if (!repository || !/^[\w.-]+\/[\w.-]+$/.test(repository)) throw new Error('Use graphyard up --repo OWNER/NAME [--provider compose|railway|hetzner|local | --local] [--merger github|control-plane] [--agent]');
   const minutes = values.wait === undefined ? null : Number(values.wait);
   if (minutes !== null && (!Number.isSafeInteger(minutes) || minutes < 1 || minutes > 1_440)) throw new Error('Use --wait with whole minutes from 1 to 1440');
   return { repository, provider: provider ?? recorded?.provider ?? 'compose', agent: !!values.agent, reviewer: values.reviewer ?? 'claude', master: values.master ?? 'claude',
-    goalFile: values.goal ?? null, browserProfile: values['browser-profile'] ?? null,
+    goalFile: values.goal ?? null, browserProfile: values['browser-profile'] ?? null, ...(merger ? { merger } : {}),
     install: { confirmPrice: values['confirm-price'] ?? null, maxMonthly: values['max-monthly'] ?? null, sshKey: values['ssh-key'] ?? null, sshHost: values['ssh-host'] ?? null, sshUser: values['ssh-user'] ?? null },
     ...(values['reuse-app']?.length ? { reuseApps: values['reuse-app'] } : {}), ...(values['github-mobile'] ? { sudo: 'mobile' as const } : {}),
     ...(minutes !== null ? { waitMs: minutes * 60_000 } : {}), ...(values['no-wait'] ? { noWait: true } : {}), ...(values['share-tailnet'] ? { shareTailnet: true } : {}) };
@@ -1332,8 +1437,21 @@ export function upDependencies(root: string, cliPath: string, request: UpRequest
       const recorded = await recordSupervision(root, 'supervised', login);
       return { operatorLogin: recorded.operatorLogin };
     },
+    // GY-1552: control-plane merger creates the repository and registers the deploy key through gh.
+    ...(upMergerControlPlane(request) ? {
+      gh: (args: string[]) => new Promise<{ code: number; stdout: string; stderr?: string }>(accept => {
+        const child = spawn('gh', args, { cwd: root, stdio: ['ignore', 'pipe', 'pipe'] });
+        let stdout = '', stderr = '';
+        child.stdout.on('data', chunk => { stdout += chunk; });
+        child.stderr.on('data', chunk => { stderr += chunk; });
+        child.on('error', error => accept({ code: 1, stdout, stderr: String(error.message ?? error) }));
+        child.on('close', code => accept({ code: code ?? 1, stdout, stderr }));
+      }),
+      installDirectory: () => installDirectory(installIdFor(request.repository)),
+    } : {}),
     // Each App page gets its own recorded drive, so each has its own record directory.
-    ...(browser ? { driveApp: (url: string, handoff: Handoff) => recordedAppDriver(root, request, { profile: browser.profile, ...(browser.executable ? { executable: browser.executable } : {}) }, undefined, { emit }).drive(url, handoff) } : {}),
+    // Control-plane merger needs no App browser drive.
+    ...(!upMergerControlPlane(request) && browser ? { driveApp: (url: string, handoff: Handoff) => recordedAppDriver(root, request, { profile: browser.profile, ...(browser.executable ? { executable: browser.executable } : {}) }, undefined, { emit }).drive(url, handoff) } : {}),
   };
 }
 
