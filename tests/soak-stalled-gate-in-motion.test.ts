@@ -7,6 +7,8 @@ import { cycleFaults, emptyDaemonState } from '../src/master-daemon.js';
 import { actorlessSubmissions } from '../src/cli/actorless-submissions.js';
 import { unboundedAttemptKey } from '../src/daemon/cycle-reclaim.js';
 import { hour, minute } from './helpers/soak-world.js';
+import { basePlan, coordinatorRoot, soakControlPlanes } from './helpers/soak-plane.js';
+import { assertLaunchesConfined, simulateDay } from './helpers/soak-simulation.js';
 
 /**
  * GY-1557 (manual:fault-class-stalled-gate): recurring stalled-gate decisions across a simulated
@@ -15,6 +17,8 @@ import { hour, minute } from './helpers/soak-world.js';
  * counted only past the reclaim bound, and a reclaim that ends the attempt opens none. The
  * real-loop reclaim day that stops those attempts lives in soak-sessions.test.ts.
  */
+
+soakControlPlanes('soak-stalled-gate-in-motion', 417);
 
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 const config = (): MasterConfig => masterConfigSchema.parse({
@@ -126,3 +130,19 @@ test('unit:soak-invariants-hold — across a simulated day of observations and b
   };
   assert.deepEqual(stalledKinds([overdue], late, state), [], 'a successful reclaim this cycle opens no unsubmitted-attempt instance');
 });
+
+for (const [name, syncMs] of [['a docs-sync that lands within a few cycles', 4 * minute], ['a docs-sync that outlasts the hold bound', 40 * minute]] as const) {
+  test(`unit:soak-invariants-hold — the real loop over simulated hours, main rewrites a docs page under an approved head and the base moves while ${name}: observation and base-move cycles re-read the hold, and no actorless stalled-gate instance is filed for the held head, and every invariant holds`, { timeout: 600_000 }, async () => {
+    const day = await simulateDay({ hours: 5, plan: { docsConflict: { ...basePlan.docsConflict, syncMs } } });
+    assertLaunchesConfined(day, coordinatorRoot!);
+    const { violations, failures, state, items, final, docsSyncRuns } = day;
+    assert.deepEqual(violations, [], 'every system invariant holds');
+    assert.deepEqual(failures, [], 'no cycle failed');
+    const held = items[basePlan.docsConflict.item - 1].key;
+    assert.ok(docsSyncRuns.some(run => run.plan.key === held), 'the loop took the held head through its own docs-sync remedy');
+    const stalled = state.faults.instances.filter(instance => instance.faultClass === 'stalled-gate');
+    assert.deepEqual(stalled.filter(instance => instance.subject === held && instance.kind === 'actorless').map(instance => instance.text), [], 'no actorless stalled-gate instance is filed for the held head while its remedy is in motion');
+    assert.ok(stalled.length <= 3, `stalled-gate instances stay bounded across the day, not one per cycle or head: ${stalled.map(instance => `${instance.kind}|${instance.subject}`)}`);
+    assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}`), [], 'every item is delivered');
+  });
+}
