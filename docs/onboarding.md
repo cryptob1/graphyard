@@ -90,7 +90,7 @@ Every `run.doctor.intervalMinutes` (10) a Pi **doctor** fixes stuck, overdue wor
 
 ### Supervised mode (up --local)
 
-`graphyard up --local` writes `"supervision": "supervised"` and your login (`operatorLogin`) to `master.json`; absent is autonomous. It registers no reviewer App and skips `master autonomy`; the Setup checklist omits the reviewer App and reviewing account. Items keep `review: true`: your GitHub approval of the exact head passes the review gate and auto-merge lands it. The loop launches no reviewer, approver or escalation session; the master requests no two-party decision. `gh` serves setup only, never a role credential; `master status` prints one `supervision` line and flags pull requests your login authored (your approval would not be independent). Promote: `master reviewer setup`, then `master autonomy --admin-token-stdin --apply` (writes `autonomous`).
+`graphyard up --local` writes `"supervision": "supervised"` and your login (`operatorLogin`) to `master.json`; absent is autonomous. It registers no reviewer App and skips `master autonomy`; the Setup checklist (`up`'s, and the dashboard's once the loop runs: it names its mode to `/api/status`) omits the reviewer App and reviewing account. Items keep `review: true`: your GitHub approval of the exact head passes the review gate and auto-merge lands it. The loop launches no reviewer, approver or escalation session; the master requests no two-party decision. `gh` serves setup only, never a role credential; `master status` prints one `supervision` line and flags pull requests your login authored (your approval would not be independent). Promote: `master reviewer setup`, then `master autonomy --admin-token-stdin --apply` (writes `autonomous`).
 
 ## 4. Prove the first PR
 

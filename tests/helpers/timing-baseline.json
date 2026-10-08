@@ -605,6 +605,7 @@
     "tests/soak-main-guard.test.ts": 31000,
     "tests/soak-review.test.ts": 35617,
     "tests/soak-sessions.test.ts": 156501,
+    "tests/soak-supervised.test.ts": 17000,
     "tests/speed-metric.test.ts": 4808,
     "tests/stable-json.test.ts": 217,
     "tests/stale-dismissal.test.ts": 987,

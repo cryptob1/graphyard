@@ -4,6 +4,8 @@ import { execFileSync } from 'node:child_process';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createElement } from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
 import type { UpDependencies, UpEvent, UpRequest } from '../src/up.js';
 import type { MasterConfig } from '../src/master/profiles.js';
 import type { Observation, Work } from '../src/model.js';
@@ -89,6 +91,26 @@ test('unit:supervised-setup-skips-autonomy — supervision defaults to autonomou
   const autonomous = setupChecklist(bare);
   assert.deepEqual(autonomous.map(item => item.id), ['github-app', 'reviewer-app', 'account:worker', 'account:reviewer', 'branch-protection', 'master-loop']);
   assert.deepEqual(autonomous.filter(item => !item.done).map(item => item.id), ['reviewer-app', 'account:reviewer'], 'autonomous mode still reports them missing');
+
+  // The dashboard's caller: /api/status names the live loop's supervision (`setup.supervision`, from
+  // the header on its coordination read), and the Setup page judges the same checklist from it.
+  const { LoopRegistry, loopSupervision } = await import('../src/model/executor-presence.js');
+  assert.equal(loopSupervision('supervised'), 'supervised'); assert.equal(loopSupervision('autonomous'), 'autonomous');
+  assert.equal(loopSupervision(undefined), null); assert.equal(loopSupervision('unattended'), null);
+  const registry = new LoopRegistry(), seen = new Date('2026-10-08T00:00:00.000Z');
+  registry.observe({ principal: 'graphyard-master', intervalSeconds: 20, supervision: loopSupervision('supervised') }, seen);
+  assert.equal(registry.live(seen)?.supervision, 'supervised');
+  registry.observe({ principal: 'graphyard-master', intervalSeconds: 20, supervision: loopSupervision(undefined) }, seen);
+  assert.equal(registry.live(seen)?.supervision, undefined, 'an older loop that names none is not read as supervised');
+  const dashboard = { ...bare!, setup: { ...bare!.setup, supervision: 'supervised' } };
+  assert.deepEqual(setupChecklist(dashboard).map(item => item.id), supervisedIds, 'the status alone makes the checklist supervised');
+  assert.deepEqual(setupChecklist({ ...bare!, setup: { ...bare!.setup, supervision: 'autonomous' } }).map(item => item.id), autonomous.map(item => item.id));
+  const { SetupView } = await import('../web/pages/setup.js');
+  const page = (state: any) => renderToStaticMarkup(createElement(SetupView, { status: state, work: [], onConnect: () => {}, onSubmitGoal: () => {} }));
+  const supervisedPage = page(dashboard), autonomousPage = page(bare);
+  assert.ok(!/Reviewer App|reviews code/.test(supervisedPage), 'the Setup page asks for no reviewer App or reviewing account');
+  assert.match(supervisedPage, /data-supervised/); assert.match(supervisedPage, /data-goal-submit/, 'a supervised install with a worker account is green, so the first-goal form shows');
+  assert.match(autonomousPage, /Reviewer App/); assert.ok(!/data-supervised|data-goal-submit/.test(autonomousPage), 'autonomous mode still waits for the reviewer');
 
   // up --local, end to end against a simulated local host.
   const root = await temporaryDirectory('supervised-up');

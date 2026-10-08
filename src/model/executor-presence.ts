@@ -78,7 +78,14 @@ export interface ReportedLoopMerger { live: boolean; name: string }
  * in whole seconds. Only a coordinator's read counts; the loop is the one coordinator that sends it.
  */
 export const loopPresenceHeader = 'X-Graphyard-Loop-Interval';
-export interface LoopPresence { principal: string; intervalSeconds: number; seenAt: string }
+/**
+ * The header beside it naming who reviews and merges on this installation (GY-1501): the loop's
+ * master.json `supervision`, so the dashboard's Setup checklist judges a supervised install as
+ * `graphyard up` does. A read without it (an older loop) names none.
+ */
+export const loopSupervisionHeader = 'X-Graphyard-Loop-Supervision';
+export type LoopSupervision = 'supervised' | 'autonomous';
+export interface LoopPresence { principal: string; intervalSeconds: number; seenAt: string; supervision?: LoopSupervision }
 /**
  * How long one read keeps the loop live: three of its cycles, never under an executor's window —
  * the rule `daemonSummary` applies to the loop's own cursor. The dispatcher beside the cycle reads
@@ -89,8 +96,8 @@ export const loopPresenceLiveMs = (intervalSeconds: number) => Math.max(3 * inte
 /** The loop as the control plane last saw it read, in memory beside the engine like executor presence. */
 export class LoopRegistry {
   private latest: LoopPresence | null = null;
-  observe(poll: { principal: string; intervalSeconds: number }, now: Date) {
-    this.latest = { principal: poll.principal, intervalSeconds: poll.intervalSeconds, seenAt: now.toISOString() };
+  observe(poll: { principal: string; intervalSeconds: number; supervision?: LoopSupervision | null }, now: Date) {
+    this.latest = { principal: poll.principal, intervalSeconds: poll.intervalSeconds, seenAt: now.toISOString(), ...(poll.supervision ? { supervision: poll.supervision } : {}) };
   }
   /** Whether this process has ever seen the loop read: once it has, a lapse means the loop stopped. */
   get observed(): boolean { return this.latest !== null; }
@@ -109,6 +116,12 @@ export function loopRegistry(owner: object): LoopRegistry {
 export function loopPresenceInterval(header: string | string[] | undefined): number | null {
   const value = Number(Array.isArray(header) ? header[0] : header);
   return Number.isInteger(value) && value >= 5 && value <= 900 ? value : null;
+}
+
+/** The supervision a coordination read names, or null when it names none or another value. */
+export function loopSupervision(header: string | string[] | undefined): LoopSupervision | null {
+  const value = Array.isArray(header) ? header[0] : header;
+  return value === 'supervised' || value === 'autonomous' ? value : null;
 }
 
 /**
