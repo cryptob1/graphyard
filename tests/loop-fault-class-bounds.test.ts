@@ -4,7 +4,6 @@ import { emptyDaemonState } from '../src/master-daemon.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import type { Observation, Work } from '../src/model.js';
 import { docsSyncRoute } from '../src/daemon/docs-sync-route.js';
-import { conflictReworkOverdue, reworkObservationWait } from '../src/daemon/decisions.js';
 import { docsSyncSessionName, type DocsSyncPlan } from '../src/docs-sync.js';
 import { checkInvariants, emptyInvariantRecord } from '../src/model/invariants.js';
 
@@ -51,7 +50,8 @@ test(`manual:fault-class-loop — stalled-step ${key}: past the 10-minute bound 
   // 06:01:56, past the bound (06:01:01) with no reading since the stop: the conflict returns to a worker.
   assert.equal(await route(stale, at('06:01:56')).holds(stale, async () => null), false, 'the bound is kept without a fresh reading');
   assert.match(notes.at(-1)!, new RegExp(`^failed: ${key}: .*no observation since landed inside the loop-owned bound`));
-  // The rework request itself: stale observation, overdue conflict round.
+  // The rework request itself: stale observation, overdue conflict round. Loaded here so the base, which lacks the export, fails at the hold above.
+  const { conflictReworkOverdue, reworkObservationWait } = await import('../src/daemon/decisions.js');
   const decision = { action: 'rework' as const, binding: `${head}:conflict` };
   assert.equal(reworkObservationWait(stale, at('06:01:56'), null) !== null, true, 'the observation is stale');
   assert.equal(conflictReworkOverdue(stale, decision, at('06:01:56')), true, 'and the round is overdue, so it does not wait');
@@ -60,12 +60,12 @@ test(`manual:fault-class-loop — stalled-step ${key}: past the 10-minute bound 
   assert.equal(conflictReworkOverdue(stale, { action: 'merge', binding: `${head}:conflict` }, at('06:01:56')), false);
 });
 
-for (const instant of [Date.parse('2026-10-07T22:05:07.171Z'), Date.parse('2026-10-08T05:30:41.190Z')])
+for (const [instant, wall, work] of [[Date.parse('2026-10-07T22:05:07.171Z'), 62_000, 3_000], [Date.parse('2026-10-08T05:30:41.190Z'), 120_000, 5_000]] as const)
 test(`manual:fault-class-loop — invariant:cycle-p90 at ${new Date(instant).toISOString()}: a cycle is judged on its own work, not the child and control-plane waits it spent`, () => {
   const now = instant, metric = (index: number, durationMs: number, workMs?: number) => ({ at: iso(now - index * 3 * minute), durationMs, ...(workMs === undefined ? {} : { workMs }) });
   const check = (metrics: ReturnType<typeof metric>[]) => checkInvariants(emptyInvariantRecord(), { work: [], now, metrics }).find(entry => entry.invariant === 'cycle-p90')!;
-  const waiting = Array.from({ length: 10 }, (_, index) => metric(index, 90_000, 4_000));
-  assert.equal(check(waiting).holds, true, '90 s of wall time that was 4 s of work and 86 s of waits is a slow provider, not a slow loop');
+  const waiting = Array.from({ length: 10 }, (_, index) => metric(index, wall, work));
+  assert.equal(check(waiting).holds, true, `${wall / 1000} s of wall time that was ${work / 1000} s of work and the rest waits is a slow provider, not a slow loop`);
   assert.equal(check(Array.from({ length: 10 }, (_, index) => metric(index, 90_000, 80_000))).holds, false, 'a loop that worked for 80 s violates');
   assert.equal(check(Array.from({ length: 10 }, (_, index) => metric(index, 90_000))).holds, false, 'a cycle with no recorded split is judged on its wall time');
 });
