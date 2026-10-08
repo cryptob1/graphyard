@@ -84,7 +84,7 @@ export interface InvariantInput {
   now: number;
   thresholds?: Partial<InvariantThresholds>;
   /** The loop's retained cycle measures: when each ran and how long it took. */
-  metrics?: readonly { at: string; durationMs: number; workMs?: number }[];
+  metrics?: readonly { at: string; durationMs: number }[];
   /** The decisions the loop put to approvers: which session judged each and when it settled. */
   approvals?: Readonly<Record<string, { work: string; agentName: string | null; pane: string | null; settledAt: string | null }>>;
   /** The docs-sync sessions the loop launched for docs-only conflicts (GY-566), and when each settled. */
@@ -213,10 +213,9 @@ export function checkInvariants(record: InvariantRecord, input: InvariantInput):
   judge('merge-stall', `no merge-stage item mergeable ${limits.mergeableWithoutRefusalMinutes} min without a recorded refusal`,
     stalled.length ? `${stalled.length} item(s) mergeable and unmerged with nothing refusing them, the longest ${stalled[0].key} for ${minutes(Math.max(...stalled.map(entry => entry.ms)))}` : `${waiting.size} mergeable item(s), none past the bound`, !stalled.length, stalled.map(entry => entry.key));
 
-  // 5. The loop's cycle p90 over the window stays under its bound (GY-377). A cycle is judged on its own work (GY-1537), net of the child and
-  // control-plane waits liveness.ts already separates: a slow provider is not a slow loop, and the decisions step bounds its own share.
+  // 5. The loop's cycle p90 over the window stays under its bound (GY-377).
   const from = now - limits.cycleWindowMinutes * 60_000;
-  const durations = (input.metrics ?? []).filter(metric => (time(metric.at) ?? -Infinity) >= from).map(metric => metric.workMs ?? metric.durationMs);
+  const durations = (input.metrics ?? []).filter(metric => (time(metric.at) ?? -Infinity) >= from).map(metric => metric.durationMs);
   const p90 = percentile(durations, 0.9);
   if (p90 === null) judge('cycle-p90', `p90 under ${limits.cycleP90Seconds} s over ${limits.cycleWindowMinutes} min`, 'no cycle measured in the window', true, [], false);
   else judge('cycle-p90', `p90 under ${limits.cycleP90Seconds} s over ${limits.cycleWindowMinutes} min`, `p90 ${(p90 / 1000).toFixed(1)} s over ${durations.length} cycle(s)`, p90 < limits.cycleP90Seconds * 1000);
