@@ -25,6 +25,7 @@ import { faultStep } from './faults.js';
 import { doctorStep } from './doctor.js';
 import { triageBacklogStep } from './cycle-triage.js';
 import { remedyStep } from './cycle-remedies.js';
+import { mainWatchStep } from './main-watch.js';
 import { Timings, withTimings, withoutTimings } from '../master/timings.js';
 import { syncProjectMemory } from '../project-memory.js';
 import { planeUnavailable } from '../model/refusal.js';
@@ -264,6 +265,10 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
   spent('merge');
 
   await timings.step('deployment verification', () => deploymentStep(cycle));
+  // 7a''''. The main watch (GY-1519): main's first-parent history since the last promotion, read from
+  //         the coordinator checkout, classified against the merge ledger, deliveries, reverts and
+  //         direct-merge windows; an unknown commit is reported once, and freezes promotion when asked.
+  await timings.step('main watch', () => cycle.isolate('deployment', null, 'main watch', () => mainWatchStep(cycle)));
   // 7b. Classify what is wrong and file one item per recurring class (GY-173). It shares the
   //     deployment step's clock: it reads the same snapshot and makes at most one call per class.
   await timings.step('faults', () => faultStep(cycle, assessments));
