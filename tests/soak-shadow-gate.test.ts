@@ -2,7 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { daemonSummary, emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
-import { shadowIdle, shadowKeptVerdicts, shadowReads } from '../src/daemon/cycle-shadow.js';
+import { shadowIdle, shadowKeptVerdicts, shadowReads, shadowStateSchema } from '../src/daemon/cycle-shadow.js';
+import { trialLogTailLength } from '../src/merge-writer/shadow.js';
 import { masterConfigSchema } from '../src/master.js';
 import type { Work } from '../src/model.js';
 
@@ -11,7 +12,9 @@ import type { Work } from '../src/model.js';
  * day of cycles with items submitted every few minutes, GitHub merging each after a delay, main's
  * tip moving and a coordinator that refuses some posts, the gate runs at most one trial at a time,
  * tries each (head, tip) pair at most once, keeps at most 200 verdicts, raises one attention line
- * per disagreeing item, and never stalls delivery (it only reads).
+ * per disagreeing item, and never stalls delivery (it only reads). GY-1549: every failing verdict it
+ * posts carries the trial's log tail, bounded to `trialLogTailLength`, through every retry of a
+ * refused post; a passing verdict posts none; and the loop's cursor never holds one.
  */
 const minute = 60_000;
 const start = Date.parse('2030-03-01T00:00:00Z');
@@ -29,11 +32,14 @@ const work = (n: number, submittedAt: number, mergedAt: number, now: number): Wo
   ...(now >= mergedAt ? { stage: 'done', delivery: { mergedAt: iso(mergedAt), mergeSha: sha(`merge${n}`), authorizationRevision: 1 } } : { stage: 'review' }),
 }) as unknown as Work;
 
-test('unit:soak-shadow-gate — a simulated day: bounded trials, one verdict per (head, tip), at most 200 kept, one attention line per disagreeing item, delivery unaffected', { timeout: 300_000 }, async () => {
+test('unit:soak-shadow-gate — a simulated day: bounded trials, one verdict per (head, tip), at most 200 kept, one attention line per disagreeing item, delivery unaffected, every failing post carries a bounded log tail and no passing post or cursor entry does', { timeout: 300_000 }, async () => {
   const cycles = 24 * 60 / 2, items = 150;
   let now = start, tipIndex = 0, failPosts = 0, running = 0, widest = 0;
   const tip = () => sha(`tip${tipIndex}`);
+  // Every trial's output outgrows the tail a verdict may carry, so a bounded tail is a cut, never the whole.
+  const output = Array.from({ length: 400 }, (_, line) => `trial output line ${line}`).join('\n');
   const trials: string[] = [], posts: string[] = [];
+  const attempts: { pair: string; failed: boolean; refused: boolean; logTail: string | undefined }[] = [];
   const git = ((command: string, args: string[]) => {
     assert.equal(command, 'git');
     const [, , sub] = args;
@@ -45,14 +51,19 @@ test('unit:soak-shadow-gate — a simulated day: bounded trials, one verdict per
     return '';
   }) as never;
   const reads = shadowReads(config, '/coordinator', git, { base: '/w', record: async (item, verdict) => {
-    if (failPosts-- > 0) throw new Error('route down');
+    // The coordinator refuses the scheduled posts, and the first post of every failing verdict: a retry carries the whole verdict again, log included.
+    const pair = `${item.key}:${verdict.head}:${verdict.baseTip}`, failed = verdict.tests.failed.length > 0;
+    const refused = failPosts-- > 0 || (failed && !attempts.some(attempt => attempt.pair === pair));
+    attempts.push({ pair, failed, refused, logTail: verdict.logTail });
+    if (refused) throw new Error('route down');
     posts.push(`${item.key}:${verdict.head}:${verdict.baseTip}`);
   }, trial: async input => {
     running += 1; widest = Math.max(widest, running); trials.push(input.mergeSha);
     await new Promise(resolve => setTimeout(resolve, 1));
     running -= 1;
-    // Every seventh trial fails its tests: GitHub merges those anyway, a disagreement.
-    return { build: 'pass', tests: { passed: 1, failed: trials.length % 7 === 0 ? ['tests/x.test.ts'] : [], files: 1 }, durationMs: 1000, logTail: '' };
+    // Every seventh trial fails its tests: GitHub merges those anyway, a disagreement. Every trial's full output comes back; the step decides what the verdict carries.
+    const failed = trials.length % 7 === 0;
+    return { build: 'pass', tests: { passed: failed ? 0 : 1, failed: failed ? ['tests/x.test.ts'] : [], files: 1 }, durationMs: 1000, logTail: output, runnerExit: failed ? 1 : 0 };
   } });
   const submittedAt = (n: number) => start + n * 7 * minute, mergedAt = (n: number) => submittedAt(n) + 25 * minute;
   const effects = { agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
@@ -72,10 +83,24 @@ test('unit:soak-shadow-gate — a simulated day: bounded trials, one verdict per
     await shadowIdle(state);
     assert.ok(state.shadow.length <= shadowKeptVerdicts, `cycle ${cycle}: ${state.shadow.length} verdicts kept`);
     assert.ok(widest <= 1, 'one trial at a time');
+    // The cursor keeps no log: the recorded event holds it, and the persisted state parses under the strict schema that has no room for one.
+    assert.ok(state.shadow.every(verdict => !('logTail' in verdict)), `cycle ${cycle}: the cursor holds a log tail`);
+    assert.doesNotThrow(() => shadowStateSchema.parse(state.shadow), `cycle ${cycle}: the cursor does not parse as persisted state`);
   }
   assert.ok(trials.length > 20, `the gate made progress: ${trials.length} trials`);
   assert.ok(trials.length <= cycles, 'at most one trial per cycle');
   assert.equal(new Set(posts).size, posts.length, 'each (head, tip) pair was recorded once, however many posts failed along the way');
+  // Every failing verdict posted the last trialLogTailLength characters of its trial's output, on the first post and on every retry of a refused one; no passing verdict posted any.
+  const failing = attempts.filter(attempt => attempt.failed), passing = attempts.filter(attempt => !attempt.failed), refused = attempts.filter(attempt => attempt.refused);
+  assert.ok(failing.length >= 10 && passing.length >= 50 && refused.length >= 5, `the day posted ${failing.length} failing, ${passing.length} passing and retried ${refused.length} refused verdicts`);
+  for (const attempt of failing) { assert.equal(attempt.logTail?.length, trialLogTailLength, `${attempt.pair} posted a bounded log tail`); assert.equal(attempt.logTail, output.slice(-trialLogTailLength), `${attempt.pair} posted the end of its trial's output`); }
+  for (const attempt of passing) assert.equal(attempt.logTail, undefined, `${attempt.pair} passed and posted no log tail`);
+  assert.ok(refused.some(attempt => !attempt.failed) && failing.every(attempt => attempts.some(other => other.pair === attempt.pair && other.refused)), 'every failing verdict and some passing ones were refused once');
+  for (const attempt of refused) {
+    const retried = attempts.filter(other => other.pair === attempt.pair && !other.refused);
+    assert.equal(retried.length, 1, `${attempt.pair} was recorded once after its refusal`);
+    assert.equal(retried[0]!.logTail, attempt.logTail, `${attempt.pair} retried the same post, log tail included`);
+  }
   assert.ok([...raised.values()].every(count => count === 1), `one attention line per item: ${JSON.stringify([...raised])}`);
   assert.ok(raised.size > 0, 'a disagreement was raised');
   const section = daemonSummary(state, now, config.run.intervalSeconds * 1000, config.hostId).shadowGate;
