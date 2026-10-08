@@ -761,21 +761,29 @@ test('unit:release-candidate-pr-cap — a backlog of 23 merges is cut into candi
   // A capped candidate concludes with main unmoved since its dispatch: the queued merges are dispatched at once rather than waiting for a new merge.
   const T = Date.parse('2026-10-07T16:00:00Z'), min = 60_000, iso = (at: number) => new Date(at).toISOString();
   const MAIN = promoSha('e'), CAPPED = promoSha('f');
+  const older = { id: '20261007T120000Z', sha: promoSha('d'), cutAt: iso(T - 4 * 60 * min), prs: 10, queued: 23 };
+  // The runner stamps cutAt by its own clock: one behind the loop's dispatch stamp changes nothing, as the candidate is told by its id.
   const cappedLedger = (cutAt: number): PromotionLedger => ({ mainSha: MAIN, promotedSha: promoSha('a'), promotedAt: null, behind: 23,
-    candidates: [{ id: '20261007T160100Z', sha: CAPPED, cutAt: iso(cutAt), prs: 10, queued: 13 }] });
-  const { state: stub, reads: loopReads } = promotionStub(cappedLedger(T + min), [{ status: 'in_progress', createdAt: iso(T), event: 'workflow_dispatch', headSha: MAIN }]);
+    candidates: [{ id: '20261007T160100Z', sha: CAPPED, cutAt: iso(cutAt), prs: 10, queued: 13 }, older] });
+  const { state: stub, reads: loopReads } = promotionStub(cappedLedger(T - 5 * min), [{ status: 'in_progress', createdAt: iso(T), event: 'workflow_dispatch', headSha: MAIN }]);
   const previous = promotionStateSchema.parse({ checkedAt: iso(T), mainSha: MAIN, promotedSha: promoSha('a'), promotedAt: null, behind: 23, ledgerReadAt: iso(T), inFlight: true,
-    runsReadAt: iso(T), dispatchedAt: iso(T), lastDispatchAt: iso(T), cutSha: MAIN, candidates: [], nextDueAt: null, reason: null });
+    runsReadAt: iso(T), dispatchedAt: iso(T), lastDispatchAt: iso(T), cutSha: MAIN, candidates: [older], candidateAtDispatch: older.id, nextDueAt: null, reason: null });
   stub.runs = [{ ...stub.runs[0], status: 'completed' }];
   const concluded = await promotionCycle(previous, loopReads, { now: T + 30 * min, everyMinutes: 10, intervalMs: 20_000 });
   assert.equal(concluded.dispatched, true, 'the merges queued behind a capped candidate go out once it concludes');
   assert.match(concluded.state.reason ?? '', /13 merge\(s\) queued behind candidate 20261007T160100Z/);
   const report = promotionStatus(promotionStateSchema.parse(concluded.state));
-  assert.deepEqual(report.candidates, [{ id: '20261007T160100Z', sha: CAPPED, prs: 10, queued: 13 }]);
+  assert.deepEqual(report.candidates, [{ id: '20261007T160100Z', sha: CAPPED, prs: 10, queued: 13 }, { id: older.id, sha: older.sha, prs: 10, queued: 23 }]);
+  assert.equal(concluded.state.candidateAtDispatch, '20261007T160100Z', 'the dispatch records the candidate it follows');
   // An older candidate's queue is not this run's: a run that cut nothing waits for main to move, as before.
-  stub.ledger = cappedLedger(T - 60 * min);
+  stub.ledger = { ...cappedLedger(T), candidates: [older] };
   stub.runs = [{ status: 'completed', createdAt: iso(T), event: 'workflow_dispatch', headSha: MAIN }];
   const uncut = await promotionCycle(previous, loopReads, { now: T + 30 * min, everyMinutes: 10, intervalMs: 20_000 });
   assert.equal(uncut.dispatched, false);
   assert.match(uncut.state.reason ?? '', /did not promote it/);
+  // Nor does the queued run's own conclusion chain another dispatch when that run too cut nothing.
+  stub.ledger = cappedLedger(T);
+  stub.runs = [{ status: 'completed', createdAt: iso(T + 30 * min), event: 'workflow_dispatch', headSha: MAIN }];
+  const settled = await promotionCycle({ ...promotionStateSchema.parse(concluded.state), inFlight: true }, loopReads, { now: T + 130 * min, everyMinutes: 10, intervalMs: 20_000 });
+  assert.equal(settled.dispatched, false, 'the candidate the last dispatch followed is not followed twice');
 });

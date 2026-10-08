@@ -292,7 +292,10 @@ export function cut(git: Git, options: { base: string; trigger: CutTrigger; now:
   const ledger = readLedger(git);
   const promoted = latestPromoted(ledger), latest = ledger.candidates[0] ?? null;
   const maxPrs = options.maxPrs ?? maxPrsFrom(process.env.GRAPHYARD_RC_MAX_PRS);
-  const result = cutCandidate({ tip, now: options.now, trigger: options.trigger, latest, promoted, maxPrs, commits: firstParentCommits(git, tip, promoted?.sha ?? null) });
+  let commits = firstParentCommits(git, tip, promoted?.sha ?? null);
+  // Never promoted, the read is bounded to the newest 200: a latest candidate older than that is read up to, so the cap counts from it rather than from the window's edge.
+  if (!promoted && latest && !commits.some(commit => commit.sha === latest.sha)) commits = [...firstParentCommits(git, tip, latest.sha), ...firstParentCommits(git, latest.sha, null)];
+  const result = cutCandidate({ tip, now: options.now, trigger: options.trigger, latest, promoted, maxPrs, commits });
   if (result.cut) writeRecord(git, `${candidateTagPrefix}${result.candidate.id}`, result.candidate.sha, result.candidate, options.push);
   return result;
 }

@@ -151,6 +151,7 @@ export type DeploymentObservation = z.infer<typeof deploymentObservationSchema>;
  * `dispatchedAt` is the loop's own last dispatch, so a run GitHub has not listed is never dispatched
  * twice; `lastDispatchAt`, the later of it and the newest listed cut, starts the `promoteEveryMinutes`
  * gap. GY-1488: `cutSha` is the tip the newest candidate cut; one concluded unpromoted is not re-cut.
+ * GY-1491: `candidates`, the newest (merges each carries, merges on main behind it); `candidateAtDispatch`, the newest at the last dispatch.
  */
 export const promotionStateSchema = z.object({
   checkedAt: z.string(),
@@ -161,16 +162,10 @@ export const promotionStateSchema = z.object({
   behind: z.number().int().min(0).nullable(),
   /** When the base branch tip and the promotion record were last fetched; reused for `promotionLedgerReadMs`. */
   ledgerReadAt: z.string().nullable().default(null),
-  inFlight: z.boolean(),
-  runsReadAt: z.string().nullable(),
-  dispatchedAt: z.string().nullable(),
-  lastDispatchAt: z.string().nullable(),
-  cutSha: z.string().nullable().optional(),
-  /** GY-1491: the newest release candidates, each with the merges it carries and those on main behind it. */
-  candidates: z.array(z.object({
-    id: z.string().max(100), sha: z.string().max(64), cutAt: z.string().max(64),
-    prs: z.number().int().min(0).nullable(), queued: z.number().int().min(0).nullable(),
-  }).strict()).max(5).optional(),
+  inFlight: z.boolean(), runsReadAt: z.string().nullable(),
+  dispatchedAt: z.string().nullable(), lastDispatchAt: z.string().nullable(),
+  cutSha: z.string().nullable().optional(), candidateAtDispatch: z.string().max(100).nullable().optional(),
+  candidates: z.array(z.object({ id: z.string().max(100), sha: z.string().max(64), cutAt: z.string().max(64), prs: z.number().int().min(0).nullable(), queued: z.number().int().min(0).nullable() }).strict()).max(5).optional(),
   nextDueAt: z.string().nullable(),
   reason: z.string().max(500).nullable(),
 }).strict();

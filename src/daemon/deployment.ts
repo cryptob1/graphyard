@@ -443,7 +443,8 @@ export async function promotionCycle(previous: PromotionState | null, reads: Pro
   const failed = (state: Omit<PromotionState, 'nextDueAt' | 'reason'>, failure: string) => ({ state: settle(state, failure, true), dispatched: false, failure });
   const kept = { mainSha: previous?.mainSha ?? null, promotedSha: previous?.promotedSha ?? null, promotedAt: previous?.promotedAt ?? null, behind: previous?.behind ?? null, candidates: previous?.candidates ?? [], ledgerReadAt: previous?.ledgerReadAt ?? null };
   const readLedger = async () => { const read = await reads.ledger(); return { ...read, candidates: read.candidates ?? [] }; };
-  const carried = { inFlight: previous?.inFlight ?? false, runsReadAt: previous?.runsReadAt ?? null, dispatchedAt: previous?.dispatchedAt ?? null, lastDispatchAt: previous?.lastDispatchAt ?? null, cutSha: previous?.cutSha ?? null };
+  const carried = { inFlight: previous?.inFlight ?? false, runsReadAt: previous?.runsReadAt ?? null, dispatchedAt: previous?.dispatchedAt ?? null, lastDispatchAt: previous?.lastDispatchAt ?? null, cutSha: previous?.cutSha ?? null,
+    ...(previous?.candidateAtDispatch !== undefined ? { candidateAtDispatch: previous.candidateAtDispatch } : {}) };
   // Off reads nothing at all: no fetch, no GitHub request.
   if (options.everyMinutes <= 0) return done({ checkedAt: at, ...kept, ...carried }, 'Promotion by the loop is off (run.promoteEveryMinutes is 0)', false);
   let ledger = kept;
@@ -482,16 +483,18 @@ export async function promotionCycle(previous: PromotionState | null, reads: Pro
   }
   if (state.inFlight) return done(state, 'A release candidate is still in validation; the next promotion is dispatched as soon as it concludes', true);
   // The candidate the last run cut, when it stopped short of main's tip at the PR cap: the merges queued behind it need no new merge to go out.
+  // It is told by its id differing from the newest candidate at the loop's last dispatch, not by clocks, so a run that cut nothing re-dispatches nothing.
   const newest = state.candidates?.[0];
-  const queued = newest && state.lastDispatchAt && Date.parse(newest.cutAt) >= Date.parse(state.lastDispatchAt) && newest.sha !== state.mainSha && (newest.queued ?? 0) > 0 ? newest : null;
+  const queued = newest && state.candidateAtDispatch !== undefined && newest.id !== state.candidateAtDispatch && newest.sha !== state.mainSha && (newest.queued ?? 0) > 0 ? newest : null;
   if (state.cutSha && state.cutSha === state.mainSha && !queued) return done(state, `The last release candidate cut ${state.cutSha.slice(0, 12)} and did not promote it; the next is dispatched as soon as main moves past it`, false);
   const mainSha = state.mainSha!;
   // The attempt is stamped before it is made: whatever the dispatch's outcome, the next waits out the gap.
-  const attempted = { ...state, dispatchedAt: at, lastDispatchAt: at, runsReadAt: at, cutSha: mainSha };
+  // A refused dispatch keeps the cut and the candidate it would have followed, so merges queued behind that candidate are retried after the gap.
+  const attempted = { ...state, dispatchedAt: at, lastDispatchAt: at, runsReadAt: at };
   try { await reads.dispatch(); } catch (error) {
-    return failed({ ...attempted, cutSha: state.cutSha }, `Dispatching ${promotionWorkflow} with promote=true failed; the next attempt is due ${options.everyMinutes} minute(s) after this one: ${message(error)}`);
+    return failed(attempted, `Dispatching ${promotionWorkflow} with promote=true failed; the next attempt is due ${options.everyMinutes} minute(s) after this one: ${message(error)}`);
   }
-  return done({ ...attempted, inFlight: true }, queued ? `Dispatched ${promotionWorkflow} with promote=true for the ${queued.queued} merge(s) queued behind candidate ${queued.id}`
+  return done({ ...attempted, cutSha: mainSha, candidateAtDispatch: newest?.id ?? null, inFlight: true }, queued ? `Dispatched ${promotionWorkflow} with promote=true for the ${queued.queued} merge(s) queued behind candidate ${queued.id}`
     : `Dispatched ${promotionWorkflow} with promote=true to carry ${mainSha.slice(0, 12)} to production`, true, true);
 }
 
