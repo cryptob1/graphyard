@@ -681,8 +681,19 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     get promotion() { const config = current(); return promotionReads(config, root, run, existsSync(join(root, '.github', 'workflows', promotionWorkflow)), undefined, { merger: recordedMerger, local: localReleasePorts(config, root, run, { base: worktreeRoot(root, config), record: (work, event) => mutate(`work/${work.id}/merge-record`, event, revertRecordKey(work, event)) }) }); },
     // GY-1519: the watch reads history from this checkout and its policy from the control plane; the freeze is the environment's ask.
     get mainWatch() { return mainWatchReads(current(), root, run, { policy: () => asCoordinator('main-watch'), freeze: mainWatchFreezeFromEnv() }); },
-    // GY-1522: the gate trial-merges in this checkout's object store under the managed worktree root and records each verdict as the coordinator, one idempotency key per (head, tip).
-    get shadow() { const config = current(); return shadowReads(config, root, run, { base: worktreeRoot(root, config), record: (work, verdict) => mutate(`work/${work.id}/shadow-verdict`, shadowVerdictBody(verdict), shadowVerdictKey(work, verdict)) }); },
+    // GY-1522 / GY-1560: the gate trial-merges in this checkout's object store under the managed worktree root, records each verdict as the coordinator (one idempotency key per (head, tip)), and reads disagreement explanations so explaining clears the cursor's standing action.
+    get shadow() {
+      const config = current();
+      return shadowReads(config, root, run, {
+        base: worktreeRoot(root, config),
+        record: (work, verdict) => mutate(`work/${work.id}/shadow-verdict`, shadowVerdictBody(verdict), shadowVerdictKey(work, verdict)),
+        explanations: async pairs => {
+          const query = pairs.map(pair => `pair=${encodeURIComponent(`${pair.key}:${pair.head}:${pair.baseTip}`)}`).join('&');
+          const body = await asCoordinator(`shadow-explanations?${query}`) as { explanations?: { key: string; head: string; baseTip: string }[] };
+          return body?.explanations ?? [];
+        },
+      });
+    },
     // GY-1524: the executor merges in this checkout's object store, pushes with the install's deploy key alone, records each step as the coordinator under one key per (step, commits), and acts only while the recorded merger is control-plane (read before every merge decision).
     get mergeWriter() { const config = current(); return mergeWriterReads(config, root, run, { base: worktreeRoot(root, config), record: (work, event) => mutate(`work/${work.id}/merge-record`, event, mergeRecordKey(work, event)), merger: recordedMerger }); },
     publishProductionEnvironment: async () => {
