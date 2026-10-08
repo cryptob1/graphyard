@@ -61,11 +61,11 @@ The repository needs a GitHub `origin` and an Actions `pull_request` test workfl
 
 ### Control-plane merger
 
-`up --merger control-plane` creates an ed25519 deploy key, registers it read-write on OWNER/REPO through your `gh` login and sets the merger (`POST /api/merger`); the [merge writer](delivery-redesign.md#the-merger-setting) pushes with that key. It registers no App: steps 5 (`--reviewer claude`'s reviewer and revert-approver Apps) and 7 (`--apply`'s base-branch protection) are GitHub merger only. **Verify:** `reviewer-app` and `branch-protection` print `PASS ... not required (merger: control-plane)`.
+`up --merger control-plane` creates an ed25519 deploy key, registers it read-write on OWNER/REPO through your `gh` login and sets the [merger](delivery-redesign.md#the-merger-setting) (`POST /api/merger`); the merge writer pushes with that key; no App, no branch protection. **Verify:** `github-app`, `reviewer-app` and `branch-protection` print `PASS ... not required (merger: control-plane)`.
 
 ## 4. Register the GitHub App
 
-GitHub merger only (`control-plane`: `PASS github-app: not required (merger: control-plane)`). `--apply` serves `http://127.0.0.1:4311` and prints it; it opens no browser ([900 s, then `resume`](install.md#step-3-app-confirmation)). **HUMAN:** create the App, install it on OWNER/REPO only. **Verify:** `github-app` passes; on `missing permissions`, `gy github-setup --update-permissions --wait 600` ([permissions](github.md#app-permissions)).
+GitHub merger only. `--apply` serves `http://127.0.0.1:4311` and prints it; it opens no browser ([900 s, then `resume`](install.md#step-3-app-confirmation)). **HUMAN:** create the App, install it on OWNER/REPO only. **Verify:** `github-app` passes; on `missing permissions`, `gy github-setup --update-permissions --wait 600` ([permissions](github.md#app-permissions)). Reviewer and revert-approver Apps: `--reviewer claude` registers both (else `gy master reviewer setup`); **Verify:** `reviewer-app`. Branch protection: `--apply` protects the base; rerun once `Graphyard / merge` appears to require it; **Verify:** `branch-protection`.
 
 ## 6. Onboard the checkout
 
