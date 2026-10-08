@@ -597,7 +597,7 @@ test('unit:worktree-orphan-reclaimed — a delivered item\'s directory Git no lo
 // `reclaim:trees` action, a resources fault. A refused tree was never remembered as held, so a
 // backlog that ran the pass every cycle re-ran the same refused command and recorded a fresh
 // failure, one instance per cycle, while nothing about the tree had changed.
-test('manual:fault-class-resources — GY-1515 reclaim: a tree Git refuses is one failed pass, then held and kept like a dirty tree while the backlog drains, and tried again after a day', async () => {
+test('manual:fault-class-resources — GY-1515 reclaim: a tree Git refuses is one failed pass, then held and kept like a dirty tree while the backlog drains, and tried again after a day without a second fault', async () => {
   const root = await host(false), credentials = await temporaryDirectory('reclaim-refusal');
   try {
     const token = join(credentials, 'coordinator.token'); await writeFile(token, coordinatorToken, { mode: 0o600 });
@@ -644,7 +644,8 @@ test('manual:fault-class-resources — GY-1515 reclaim: a tree Git refuses is on
     assert.deepEqual(third3.removed.map(entry => entry.key), ['GY-202']); assert.deepEqual(third3.errors, []); assert.equal(revLists.length, 1);
     const retried = (await reclaim(snapshot, Date.now() + worktreeRefusalRetryMs + 1_000)).trees;
     assert.equal(revLists.length, 2, 'after the retry bound the tree is examined again');
-    assert.match(retried.errors[0], /GY-200-1: .*rev-list/, 'a refusal that stands is reported again, once more');
+    assert.deepEqual(retried.errors, [], 'a refusal that stands across the retry is held again, never reported as a new failure');
+    assert.match(retried.held.find(entry => entry.path === refused.path)!.reason, /^Git refused: .*rev-list.*; tried again after \d{4}-/);
     assert.equal(await exists(refused.path), true, 'the refused tree is never removed');
   } finally { await rm(root, { recursive: true, force: true }); await rm(credentials, { recursive: true, force: true }); }
 });
