@@ -1,4 +1,5 @@
 import type { Work } from './work.js';
+import type { PipelineTimeline } from '../pipeline-speed.js';
 import { attachCommand, endedRuntimeStates, runtimeSessionOf, sessionRole, type LivenessOptions, type ObservedSessionState, type RuntimeSession, type RuntimeStates, type SessionHandle, type SessionHandleInput, type SessionKind } from './sessions.js';
 
 /**
@@ -37,11 +38,14 @@ export interface SessionView {
   /** For an open record not shown running, how long since it was last seen; null otherwise. */
   unseenMs: number | null;
 }
-export function sessionView(handle: Pick<SessionHandle, 'state' | 'updatedAt' | 'observed' | 'observedAt'>, now: Date, freshMs = sessionObservationFreshMs): SessionView {
+export function sessionView(handle: Pick<SessionHandle, 'state' | 'updatedAt' | 'observed' | 'observedAt'> & Partial<Pick<SessionHandle, 'missedReports'>>, now: Date, freshMs = sessionObservationFreshMs): SessionView {
   const latest = latestObservation(handle);
   const at = Date.parse(latest?.at ?? '');
   const ageMs = Number.isFinite(at) ? Math.max(0, now.getTime() - at) : null;
-  const live = handle.state === 'running' && !!latest && (latest.state === 'working' || latest.state === 'idle') && ageMs !== null && ageMs <= freshMs;
+  // A handle `lostAfterReports` consecutive reports have missed is not shown running either
+  // (GY-1532): its record is held open until the item's own facts end it, but no reader counts a
+  // session nobody can see, and it was last seen at its last observation.
+  const live = handle.state === 'running' && !!latest && (latest.state === 'working' || latest.state === 'idle') && ageMs !== null && ageMs <= freshMs && (handle.missedReports ?? 0) < lostAfterReports;
   return { observed: latest?.state ?? null, seenAt: latest?.at ?? null, live, unseenMs: handle.state === 'running' && !live ? ageMs ?? 0 : null };
 }
 
@@ -80,20 +84,33 @@ export function unseenSessions(all: Work[], now: Date) {
  * - listed with an agent in the pane: `working` when the runtime says so, `idle` for any at-prompt
  *   state (`idle`, `done`, `blocked`), and `ended` for a state the runtime reserves for an exit;
  * - listed with no agent in the pane (the agent exited to a shell): `ended`;
- * - not listed: one missed report; absent from `lostAfterReports` consecutive reports, `lost`;
- * - no coordinate to match (its launcher never wrote the pane or name): missed like one not listed;
- * - not listed, and its purpose over by the item's own facts (`settledPurpose`): `ended` at once.
+ * - not listed, and its purpose over by the item's own facts (`settledPurpose`): `ended` at once,
+ *   with that fact as the reason;
+ * - not listed while its purpose stands, and ended by the item's facts in time (`endedByFact`: a
+ *   worker handle with an epoch, a reviewer's or producer's that a dispatch request names): one
+ *   missed report, counted and held, never `lost` (GY-1532). What ends it is the fact — the watch
+ *   supervisor releases the lease once the runtime drops its pane or its agent exits, the loop
+ *   keeps the work of a worker whose supervisor died with it, the lease lapses, the reviewer or
+ *   producer reconcile fails and relaunches an unanswered request — and the next report records
+ *   that end.
+ *   From `lostAfterReports` misses on, no reader shows it running;
+ * - not listed, and ended by no fact (a coordination handle, a review session no request names):
+ *   one missed report; absent from `lostAfterReports` consecutive reports, `lost`;
+ * - no coordinate to match (its launcher never wrote the pane or name): missed like one not listed.
  * `ended` and `lost` close the record with the reason. A runtime that could not be read is a gap,
  * not a report: nothing is counted against any session. A handle nothing has observed yet is left
  * alone through `sessionLaunchGraceMs`, because a session is registered before its runtime starts,
  * and so is a worker handle with no coordinate yet whose attempt's lease stands (`launchHeldByLease`).
  *
  * The loop computes a report on every tick and writes a handle when its observation changes, a
- * report missed it, or its last observation is older than `sessionObservationRefreshMs` — so the
- * record stays fresh inside `sessionObservationFreshMs` while a steady session costs one write per
- * refresh interval rather than one per tick.
+ * report missed it (each miss up to `lostAfterReports`; a held handle is not rewritten after), or
+ * its last observation is older than `sessionObservationRefreshMs` — so the record stays fresh
+ * inside `sessionObservationFreshMs` while a steady session costs one write per refresh interval
+ * rather than one per tick.
  */
 export const lostAfterReports = 2, sessionLaunchGraceMs = 3 * 60_000, sessionObservationRefreshMs = 5 * 60_000;
+/** The most misses a record counts: the handle schema's ceiling on `missedReports`. */
+export const missedReportsCeiling = 1000;
 /** What one listed runtime entry says about the session in it. */
 export function observedRuntimeState(entry: RuntimeSession, runtime: string, states: RuntimeStates = defaultStates): 'working' | 'idle' | 'ended' {
   if (entry.agent === null || entry.agent === '') return 'ended';
@@ -143,30 +160,54 @@ export function launchingSession(work: Pick<Work, 'lease'>, handle: Pick<Session
 }
 /**
  * GY-1532. Why the item's own facts say a session's purpose is over, or null while it stands: an
- * implementation session whose attempt has ended — submitted, released, blocked, parked or lapsed,
- * so the lease it ran under is gone or another epoch's — or a review or proof session whose
- * dispatch request was satisfied or cancelled. On 8 October 2026 every worker and reviewer session
- * on vishrog closed as "vanished … so the session is lost" within a minute of its work landing:
- * the loop had closed the pane itself once the attempt was submitted or the verdict read, and the
- * report, judging absence alone, counted two missed reports and lost it — six losses in forty
- * minutes, each a deliberate close. A session whose purpose is over is ended on the first report
- * that no longer lists it, with that fact as the reason, so a close never reads as a loss; one the
- * runtime still lists is observed as before, since its supervisor may still be stopping it.
+ * implementation session whose attempt has ended — submitted, released (by its worker, by its
+ * watch supervisor once the runtime dropped its pane or its agent exited, or by the loop keeping
+ * the work of a worker whose supervisor died with it), lapsed or reworked, so the lease it ran
+ * under is gone or a later epoch's — or a review or proof session whose dispatch request was
+ * satisfied or cancelled. On 8 October 2026 every worker and reviewer session on vishrog closed as "vanished
+ * … so the session is lost" within a minute of its work landing: the loop had closed the pane
+ * itself once the attempt was submitted or the verdict read, and the report, judging absence
+ * alone, counted two missed reports and lost it — six losses in forty minutes, each a deliberate
+ * close. A session whose purpose is over is ended on the first report that no longer lists it,
+ * with that fact as the reason, so a close never reads as a loss; one the runtime still lists is
+ * observed as before, since its supervisor may still be stopping it. The fact names the attempt's
+ * recorded end (its pipeline timeline), the cause the loop kept its interrupted work for, and the
+ * fresh lease a later attempt runs under — the relaunch a genuine disappearance ends in.
  */
-export function settledPurpose(work: Pick<Work, 'key' | 'lease' | 'submission' | 'autoDispatch'>, handle: Pick<SessionHandle, 'id' | 'kind' | 'epoch'>, clock: number): string | null {
+export function settledPurpose(work: Pick<Work, 'key' | 'lease' | 'submission' | 'autoDispatch' | 'capacity'> & { pipeline?: PipelineTimeline }, handle: Pick<SessionHandle, 'id' | 'kind' | 'epoch'>, clock: number): string | null {
   if (handle.kind === 'implementation') {
     const epoch = handleEpoch(handle), lease = work.lease;
     if (!Number.isFinite(epoch) || (lease && lease.epoch === epoch && Date.parse(lease.expiresAt) > clock)) return null;
-    if (work.submission?.epoch === epoch) return `attempt ${epoch} of ${work.key} was submitted as pull request #${work.submission.pr}`;
-    if (lease && lease.epoch !== epoch) return `attempt ${epoch} of ${work.key} ended and epoch ${lease.epoch} is held by ${lease.owner}`;
-    return lease ? `attempt ${epoch} of ${work.key} ended with its lease expired at ${lease.expiresAt}` : `attempt ${epoch} of ${work.key} ended (released, blocked, parked or lapsed) and ${work.key} holds no lease`;
+    const attempt = [...(work.pipeline?.attempts ?? [])].reverse().find(entry => entry.epoch === epoch && entry.endedAt && entry.end);
+    const kept = work.capacity?.exhaustions.find(entry => entry.role === 'worker' && entry.epoch === epoch);
+    const fresh = lease && lease.epoch !== epoch && Date.parse(lease.expiresAt) > clock ? `; attempt ${lease.epoch} runs under a fresh lease held by ${lease.owner}` : '';
+    const end = work.submission?.epoch === epoch ? `was submitted as pull request #${work.submission.pr}`
+      : attempt?.end === 'released' ? `was released at ${attempt.endedAt}${kept ? ` (${kept.reason.slice(0, 200)})` : ''}`
+      : attempt?.end === 'expired' ? `ended when its lease lapsed at ${attempt.endedAt}`
+      : attempt?.end === 'reworked' ? `was returned for rework at ${attempt.endedAt}`
+      : lease && lease.epoch !== epoch ? (fresh ? 'ended' : `ended, and attempt ${lease.epoch}'s lease lapsed at ${lease.expiresAt}`)
+      : lease ? `ended with its lease expired at ${lease.expiresAt}` : `ended (released, blocked, parked or lapsed) and ${work.key} holds no lease`;
+    return `attempt ${epoch} of ${work.key} ${end}${fresh}`;
   }
-  if (handle.kind !== 'review' && handle.kind !== 'proof') return null;
-  const dispatch = work.autoDispatch;
-  const request = [dispatch?.review, ...(dispatch?.producers ?? []), ...(dispatch?.history ?? [])].find(entry => entry?.id === handle.id);
+  const request = dispatchRequestOf(work, handle);
   if (!request || request.state === 'requested') return null;
   return `its ${request.kind} request was ${request.state}${request.resolvedAt ? ` at ${request.resolvedAt}` : ''}${request.resolution ? ` (${request.resolution.slice(0, 160)})` : ''}`;
 }
+/** The dispatch request a review or proof session was launched for: the one its handle's id names. */
+function dispatchRequestOf(work: Pick<Work, 'autoDispatch'>, handle: Pick<SessionHandle, 'id' | 'kind'>) {
+  if (handle.kind !== 'review' && handle.kind !== 'proof') return undefined;
+  const dispatch = work.autoDispatch;
+  return [dispatch?.review, ...(dispatch?.producers ?? []), ...(dispatch?.history ?? [])].find(entry => entry?.id === handle.id);
+}
+/**
+ * Whether the item's own facts end this handle in time, so absence alone never has to (GY-1532): a
+ * worker handle with an epoch ends with its attempt — every lease lapses, and every attempt ends on
+ * the record — and a reviewer's or producer's that a dispatch request names ends with that request.
+ * A coordination handle, or a review session no request names (`master review` by hand), answers
+ * to the runtime alone and is lost when absent.
+ */
+export const endedByFact = (work: Pick<Work, 'autoDispatch'>, handle: Pick<SessionHandle, 'id' | 'kind' | 'epoch'>) =>
+  handle.kind === 'implementation' ? Number.isFinite(handleEpoch(handle)) : !!dispatchRequestOf(work, handle);
 export function observeSessions(all: Work[], runtime: RuntimeSession[] | null, now: Date, options: ObserveOptions = {}): SessionReport {
   const entries: SessionReportEntry[] = [], missing: Record<string, string> = {};
   // A runtime that could not be read is a gap in the reports, not a report of absence.
@@ -200,27 +241,31 @@ export function observeSessions(all: Work[], runtime: RuntimeSession[] | null, n
       entries.push({ ...base, observed: state, observedAt: at, missedReports: 0, closed: state === 'ended' ? 'ended' : null, outcome, changed });
       continue;
     }
+    const key = handleKey(work.id, handle.id);
+    const first = Date.parse(options.firstMissed?.[key] ?? '');
     // GY-1532: a session the runtime no longer lists whose purpose the item says is over ended
-    // deliberately — the loop closed its pane, or its supervisor stopped it — so this report ends it
-    // with that fact, launch grace or not, and counts nothing towards a loss.
+    // deliberately — the loop closed its pane, its supervisor stopped it, or the loss already ended
+    // its attempt or request — so this report ends it with that fact, launch grace or not, and
+    // counts nothing towards a loss. One held through earlier misses says for how long.
     if (over) {
+      const held = Number.isFinite(first) ? ` (unlisted for ${Math.round((clock - Math.min(first, clock)) / 1000)}s)` : handle.missedReports ? ` (unlisted for ${handle.missedReports} session reports)` : '';
       entries.push({ ...base, observed: 'ended', observedAt: at, missedReports: 0, closed: 'ended', changed: true,
-        outcome: `the ${handle.runtime} runtime on ${handle.host} no longer reports ${where}: ${over}, so the session is over` });
+        outcome: `the ${handle.runtime} runtime on ${handle.host} no longer reports ${where}${held}: ${over}, so the session is over` });
       continue;
     }
     if (young || launchHeldByLease(work, handle, clock)) continue;
-    const key = handleKey(work.id, handle.id);
-    const first = Date.parse(options.firstMissed?.[key] ?? '');
     const firstMissedAt = Number.isFinite(first) ? Math.min(first, clock) : clock;
     missing[key] = new Date(firstMissedAt).toISOString();
     // Consecutive misses as the record counts them, or as the previous report left them where the
     // record could not take the count (a write that failed).
     const missed = Math.max((handle.missedReports ?? 0) + 1, Number.isFinite(first) ? 2 : 1);
     const lastSeen = handle.observedAt ?? handle.updatedAt, lastAt = Date.parse(lastSeen);
-    if (missed < lostAfterReports) {
+    if (missed < lostAfterReports || endedByFact(work, handle)) {
       // The last sighting is carried as it was: for a handle nothing has observed yet that is its
-      // launcher's record, which the write of this miss would otherwise move to now.
-      entries.push({ ...base, observed: handle.observed ?? null, observedAt: handle.observedAt ?? lastSeen, missedReports: missed, closed: null, outcome: null, changed: true });
+      // launcher's record, which the write of this miss would otherwise move to now. A handle the
+      // item's facts will end is held here, miss after miss, until they do: the count is written
+      // up to `lostAfterReports`, from which no reader shows it running, and not again after.
+      entries.push({ ...base, observed: handle.observed ?? null, observedAt: handle.observedAt ?? lastSeen, missedReports: Math.min(missed, missedReportsCeiling), closed: null, outcome: null, changed: missed <= lostAfterReports });
       continue;
     }
     entries.push({ ...base, observed: 'lost', observedAt: handle.observedAt ?? lastSeen, missedReports: missed, closed: 'lost', changed: true,
@@ -235,50 +280,4 @@ export function reportedHandle(entry: SessionReportEntry): SessionHandleInput {
     ...(entry.observed ? { observed: entry.observed } : {}), ...(entry.observedAt ? { observedAt: entry.observedAt } : {}), missedReports: entry.missedReports };
 }
 
-/**
- * Every path that starts a session registers it first (GY-172 AC-2): the loop's worker dispatch,
- * the executors, `master approver`, `master review`, escalation handlers and every reviewer and
- * producer launch go through this one helper, so each session exists on the record before its
- * runtime does and is observed and closed by the report above like any other. The registration
- * names the session by the runtime name its launcher gives it; the coordinates the launch returns
- * (the pane, and the name when the launcher chose one) are written over it once the runtime has
- * started, and a launch that fails ends the registration with the reason rather than leaving an
- * open record for the report to lose.
- *
- * A registration that cannot be written does not refuse the launch, any more than a handle that
- * could not be written ever failed one: the coordinates are written again once it has started,
- * retried `coordinateAttempts` times, and a launch is never lost to a control plane that was
- * briefly unreachable. Should every attempt fail, the handle has no coordinate the report can
- * match, and the report loses and closes it after the launch grace rather than leaving it open.
- */
-export const coordinateAttempts = 3, coordinateRetryMs = 500;
-export interface LaunchedCoordinates { pane?: string | null; agentName?: string | null }
-export async function registeredLaunch<T>(record: ((handle: SessionHandleInput) => Promise<unknown>) | undefined, handle: SessionHandleInput,
-  start: () => Promise<T>, coordinates: (launched: T) => LaunchedCoordinates | undefined = launched => launched as LaunchedCoordinates | undefined,
-  attach?: (pane: string) => string): Promise<T> {
-  if (!record) return start();
-  // Every write carries this attempt's token, so the control plane refuses one that would register
-  // over, close or re-coordinate a running handle another attempt holds (`engine.ts`): two launches
-  // racing for one request from the same snapshot cannot end the session the other one started.
-  const launch = globalThis.crypto.randomUUID().replaceAll('-', '');
-  const registered = await record({ ...handle, launch, state: 'running' }).then(() => true, () => false);
-  let launched: T;
-  try { launched = await start(); }
-  catch (error) {
-    // Refused when the handle is another attempt's: only a registration this attempt holds is closed.
-    await record({ ...handle, launch, state: 'finished', outcome: `the launch failed before the session started: ${error instanceof Error ? error.message : String(error)}`.slice(0, 500) }).catch(() => {});
-    throw error;
-  }
-  const where = coordinates(launched);
-  const pane = where?.pane ?? null, agentName = where?.agentName ?? null;
-  if (!registered || pane || (agentName && agentName !== handle.agentName)) {
-    // A registration that was refused or never written is taken over now: this attempt's runtime
-    // started, so the launcher let it run and it is the session the record must describe.
-    const coordinated = { ...handle, launch, ...(registered ? {} : { supersede: true }), state: 'running' as const, ...(agentName ? { agentName } : {}), ...(pane ? { pane, ...(attach ? { attach: attach(pane) } : {}) } : {}) };
-    for (let attempt = 1; attempt <= coordinateAttempts; attempt++) {
-      if (await record(coordinated).then(() => true, () => false)) break;
-      if (attempt < coordinateAttempts) await new Promise(done => setTimeout(done, coordinateRetryMs * attempt));
-    }
-  }
-  return launched;
-}
+export { coordinateAttempts, coordinateRetryMs, registeredLaunch, type LaunchedCoordinates } from './session-launch.js';

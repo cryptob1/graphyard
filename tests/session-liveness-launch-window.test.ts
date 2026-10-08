@@ -184,8 +184,10 @@ test('unit:launch-held-session — GY-1235 instance 4: a worker handle with no p
   assert.equal(over.entries[0]?.closed, 'ended', 'the base closed GY-1235\'s handle as lost; its attempt holding no lease now ends it');
   assert.match(over.entries[0]!.outcome!, /no longer reports session graphyard-cursor-1:1 \(registered with no pane or name to match\): attempt 1 of GY-1235 ended \(released, blocked, parked or lapsed\) and GY-1235 holds no lease, so the session is over$/);
   assert.equal(lostAfterReports, 2);
-  // A handle its live lease does not hold — it has a pane the runtime never lists — is still missed and lost after two reports.
-  assert.equal(twice(work(leased, [{ ...handle, pane: 'w1V:p1' }])).entries[0]?.closed, 'lost', 'a live attempt whose pane stays unlisted is lost as before');
+  // A handle its live lease does not hold — it has a pane the runtime never lists — is missed and held
+  // (GY-1532): counted, not shown running, and ended by its attempt's end rather than lost.
+  const unlisted = twice(work(leased, [{ ...handle, pane: 'w1V:p1' }])).entries[0];
+  assert.deepEqual([unlisted?.missedReports, unlisted?.closed], [lostAfterReports, null], 'a live attempt whose pane stays unlisted is held, never lost');
   // Candidate: the attempt's live lease under the handle's principal and epoch holds it open.
   assert.deepEqual(twice(work(leased)).entries, [], 'a launch held by its lease is not missed');
   assert.equal(launchHeldByLease({ lease: leased }, handle, clock), true);
