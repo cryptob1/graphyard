@@ -644,7 +644,8 @@ test('integration:merge-record-delivers-in-one-transaction — POST /api/work/:i
   const mergeSha = (merged as { mergeSha: string }).mergeSha;
   const intent = await request(token(coordinator), `work/${w.id}/merge-record`, { ...body, baseTip: currentTip, mergeSha }, 'k-intent');
   assert.equal(intent.status, 200, JSON.stringify(intent.body));
-  assert.deepEqual([intent.body.recorded, intent.body.kind, intent.body.stage, intent.body.mergeLedger.state], [true, 'intent', 'review', 'intent'], 'the intent passes the test gate, so the item moves on to review');
+  // Review by risk (GY-1525): the fixture's delta touches no sensitive path, so its review comes after the merge and the review gate already passes.
+  assert.deepEqual([intent.body.recorded, intent.body.kind, intent.body.stage, intent.body.mergeLedger.state], [true, 'intent', 'merge', 'intent'], 'the intent passes the test gate, so the normal-risk item moves on to merge');
   let doc = await document(w.id);
   assert.deepEqual(doc.gates.find(gate => gate.name === 'test')!.reasons, [], 'the intent on this head and tip is the passing trial the test gate wants');
   assert.ok(doc.gates.find(gate => gate.name === 'merge')!.reasons.includes(pushRefusal(heads[5]!)));
@@ -655,7 +656,7 @@ test('integration:merge-record-delivers-in-one-transaction — POST /api/work/:i
   assert.equal(await reads.fetch(), mergeSha);
   assert.equal((await request(token(coordinator), `work/${w.id}/merge-record`, { kind: 'pushed', mergeSha, pushedAt: iso(start + minute) })).status, 200);
   doc = await document(w.id);
-  assert.deepEqual([doc.mergeLedger?.state, doc.mergeLedger?.pushedAt, doc.stage], ['pushed', iso(start + minute), 'review'], 'pushed but not reconciled, the item is not yet done');
+  assert.deepEqual([doc.mergeLedger?.state, doc.mergeLedger?.pushedAt, doc.stage], ['pushed', iso(start + minute), 'merge'], 'pushed but not reconciled, the item is not yet done');
   await store.pool.query('INSERT INTO jobs(work_id) VALUES($1) ON CONFLICT (work_id) DO NOTHING', [w.id]);
   const before = (await store.pool.query('SELECT count(*)::int AS n FROM events WHERE work_id=$1', [w.id])).rows[0].n as number;
   const reconciled = await request(token(coordinator), `work/${w.id}/merge-record`, { kind: 'reconciled', mergeSha, observedTip: mergeSha }, 'k-reconciled');
@@ -697,7 +698,8 @@ test('integration:merge-record-refuses-unheld-sha — a reconciled naming a merg
   // Another item's held merge commit still delivers nothing, intent or no intent: the ledger intends heads[4]'s merge, not it.
   assert.equal((await request(token(coordinator), `work/${w.id}/merge-record`, { kind: 'reconciled', mergeSha: held, observedTip: held })).body.error, unintendedShaRefusal(w.key, held, heads[4]!));
   const after = await document(w.id);
-  assert.deepEqual([after.stage, after.delivery ?? null, after.mergeLedger?.state], [before.stage, null, 'intent'], 'nothing delivered');
+  // The intent passed the test gate and the normal-risk delta owes its review after the merge (GY-1525), so the stage is merge: still nothing delivered.
+  assert.deepEqual([before.stage, after.stage, after.delivery ?? null, after.mergeLedger?.state], ['test', 'merge', null, 'intent'], 'nothing delivered');
   assert.deepEqual(await ledgerKinds(w.id), [...events, 'merge.intent', 'merge-writer.intent'], 'only the intent was written');
   // A commit that exists only in the object store, never on main, is refused the same way; an unknown sha too.
   assert.equal((await request(token(coordinator), `work/${w.id}/merge-record`, { kind: 'reconciled', mergeSha: 'a'.repeat(40), observedTip: 'a'.repeat(40) })).status, 409);

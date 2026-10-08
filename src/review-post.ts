@@ -3,6 +3,10 @@
 // mergeability recompute, the closing thread lines — is checked here against the launch's own
 // binding before exactly one review is posted with the session's own GH_CONFIG_DIR credential.
 // The command needs no Graphyard credential and the reviewer token is not widened.
+// In control-plane mode (GY-1525) there is no pull request: the launch binds a one-time verdict
+// token, and the same command sends the verdict to `POST /api/work/:id/review-verdict` as that
+// token, never running `gh`; the server records it on the item's observation (server/review-verdict.ts).
+import { randomUUID } from 'node:crypto';
 import { chmod, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
@@ -17,6 +21,9 @@ export type ReviewEvent = typeof reviewEvents[number];
 export const mergeablePollMs = 5_000, mergeablePollBoundMs = 120_000;
 
 const sha = z.string().regex(/^[0-9a-f]{40}$/);
+/** The verdict token a control-plane launch binds: 32 random bytes, hex; only its sha256 is kept anywhere but the binding. */
+export const verdictTokenSchema = z.string().regex(/^[0-9a-f]{64}$/);
+export const reviewBindingModes = ['github', 'control-plane'] as const;
 export const reviewBindingSchema = z.object({
   repository: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/),
   key: z.string().min(1).max(100), pr: z.number().int().positive(), sha, baseSha: sha, policyRevision: z.number().int().nonnegative(),
@@ -24,7 +31,13 @@ export const reviewBindingSchema = z.object({
   threadsListed: z.array(z.string().min(1).max(200)).max(listedThreadLimit).optional(),
   threadAliases: z.record(z.string().min(1).max(200), z.array(z.string().min(1).max(200)).max(threadAliasLimit * 2)).optional(),
   threadReadFailure: z.string().min(1).max(500).optional(),
-}).strict().refine(binding => !(binding.threadReadFailure && binding.threadsListed), 'A binding records either the listed threads or the failed read, never both');
+  /** Absent on a github-mode binding (unchanged since GY-1492); `control-plane` posts to the API with the token (GY-1525). */
+  mode: z.enum(reviewBindingModes).optional(),
+  /** Control-plane mode: the head and base tip the session judges (the item's candidate, or a delivered merge commit and its first parent) and the one-time verdict token. */
+  head: sha.optional(), baseTip: sha.optional(), verdictToken: verdictTokenSchema.optional(),
+}).strict().refine(binding => !(binding.threadReadFailure && binding.threadsListed), 'A binding records either the listed threads or the failed read, never both')
+  .refine(binding => binding.mode !== 'control-plane' || (!!binding.head && !!binding.baseTip && !!binding.verdictToken), 'A control-plane binding carries head, baseTip and verdictToken')
+  .refine(binding => binding.mode === 'control-plane' || (binding.head === undefined && binding.baseTip === undefined && binding.verdictToken === undefined), 'Only a control-plane binding carries head, baseTip or verdictToken');
 export type ReviewPostBinding = z.infer<typeof reviewBindingSchema>;
 
 /** Written once, private, before the session's runtime starts; a launch that cannot write it starts nothing. */
@@ -87,7 +100,12 @@ export interface ReviewPostDependencies {
   run: ChildRun;
   sleep?: (ms: number) => Promise<void>;
   now?: () => number;
+  /** How a control-plane verdict reaches the API; global fetch by default. Never called in github mode. */
+  fetch?: typeof fetch;
 }
+
+/** The GitHub review state a verdict event records as (the form `exactApproval` and the review gate read). */
+export const verdictStateOf = (event: ReviewEvent) => event === 'APPROVE' ? 'APPROVED' : event === 'REQUEST_CHANGES' ? 'CHANGES_REQUESTED' : 'COMMENTED';
 
 /**
  * Check, then post exactly one review. `environment` is the session's own: GH_CONFIG_DIR names the
@@ -108,6 +126,22 @@ export async function postReview(input: { event: string | undefined; body: strin
   if (!body) refuse('the review body is empty');
   const lines = threadLineRefusals(event!, body, bound);
   if (lines.length) refuse(lines.join('; '));
+  // Control-plane mode (GY-1525): the verdict goes to the API as the launch's one-time token, bound
+  // to the registered head; nothing here runs gh, and the server judges the rest.
+  if (bound.mode === 'control-plane') {
+    const base = input.environment.GRAPHYARD_URL;
+    if (!base) refuse('GRAPHYARD_URL is unset; a control-plane reviewer session is launched with the control plane\'s address');
+    const post = dependencies.fetch ?? fetch;
+    let response: Response;
+    try {
+      response = await post(`${base!.replace(/\/$/, '')}/api/work/${encodeURIComponent(bound.key)}/review-verdict`, { method: 'POST', headers: { Authorization: `Bearer ${bound.verdictToken}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() },
+        body: JSON.stringify({ event, body, sha: bound.head, token: bound.verdictToken }), signal: AbortSignal.timeout(120_000) });
+    } catch (error) { return refuse(`the control plane at ${base} could not be reached (${(error instanceof Error ? error.message : String(error)).split('\n')[0]}); retry the same command`); }
+    const answer = await response.json().catch(() => ({})) as { error?: string; reviewId?: number };
+    if (response.status === 401) refuse(`this launch's verdict token is spent or expired (${answer?.error ?? 'not accepted'}): a verdict was already posted for it, or the launch expired and the loop launches the review again; post nothing further and stop`);
+    if (!response.ok) refuse(`the control plane refused the verdict (${response.status}): ${answer?.error ?? 'no reason given'}`);
+    return { reviewId: answer.reviewId ?? null, event: event!, key: bound.key, pr: bound.pr, sha: bound.head!, recorded: 'control-plane' as const };
+  }
   const sleep = dependencies.sleep ?? (ms => new Promise<void>(done => setTimeout(done, ms)));
   const now = dependencies.now ?? Date.now;
   const env = { ...input.environment };
