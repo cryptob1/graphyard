@@ -12,7 +12,8 @@ import { Engine } from '../../src/engine.js';
 import { server } from '../../src/server.js';
 import { type Principal, deploySmokeProof } from '../../src/model.js';
 import { type MasterConfig, type WorkerProfile, atomicPrivateWrite, dispatchWork, loadMasterConfig, masterConfigSchema, setupMaster } from '../../src/master.js';
-import { readAccountStartFailures, workerLaunchStatus } from '../../src/master/dispatch.js';
+import { type CredentialMinter, MergeWriterUnreadError, readAccountStartFailures, workerLaunchStatus } from '../../src/master/dispatch.js';
+import type { MergerMode } from '../../src/merger-mode.js';
 import { paneSweepLimit } from '../../src/daemon/cycle-reclaim.js';
 import { plannedFilesMax } from '../../src/model/scope.js';
 import { type RunOptions, type RunResult, type Runner } from '../../src/runner/types.js';
@@ -190,7 +191,9 @@ export interface DiagnosisRun { subject: string; attempt: 'primary' | 'fallback'
 export interface LaunchSample { key: string; failures: Awaited<ReturnType<typeof readAccountStartFailures>>; attention: Awaited<ReturnType<typeof workerLaunchStatus>> }
 export type Dispatched = Awaited<ReturnType<typeof dispatchWork>>;
 /** The failover day's inputs and outputs, threaded through `simulateDay` and back to the test. */
-export interface Failover { root: string; master: MasterConfig; world: FailoverWorld; dispatches: Dispatched[]; samples: LaunchSample[] }
+export interface Failover { root: string; master: MasterConfig; world: FailoverWorld; dispatches: Dispatched[]; samples: LaunchSample[];
+  /** GY-1523: every real dispatch the launcher refused before claiming, with the day's instant and the launcher's words. */
+  refused?: { key: string; at: number; error: string }[] }
 
 /**
  * The Herdr side of the failover day: the panes the real `dispatchWork` creates live in the same
@@ -211,8 +214,25 @@ export class FailoverWorld {
   private panes = 0;
   /** The launcher's own start clock: its waits at the start bound pass here, not on the day's. */
   now = clock.now();
-  constructor(private broken: Set<string>) {}
+  /** GY-1523: how many times the real launcher read the merger — one per dispatch, before it claims, and never otherwise. */
+  reads = 0;
+  /** GY-1523: every push credential the real launcher minted; none under the control-plane merger. */
+  minted: { key: string; epoch: number }[] = [];
+  /**
+   * `merger` is what the day's control plane records as its merge writer, answered to every read;
+   * `unreadable` holds the ordinals (from 1) of the reads the plane fails with a 503 instead, as a
+   * status read meets while the plane restarts.
+   */
+  constructor(private broken: Set<string>, readonly merger: MergerMode = 'github', private readonly unreadable: Set<number> = new Set()) {}
   healthyEverywhere() { this.broken.clear(); }
+  /** The launcher's merger read (DispatchOptions.readMergeWriter): counted, and refused on the scheduled ordinals exactly as readMergeWriter refuses a 503. */
+  readMergeWriter = async (config: MasterConfig): Promise<MergerMode> => {
+    this.reads += 1;
+    if (this.unreadable.has(this.reads)) throw new MergeWriterUnreadError(`${config.url}/api/status`, 'HTTP 503');
+    return this.merger;
+  };
+  /** The launcher's push-credential minter: records the attempt it minted for and makes the credential home, as the real minter does. */
+  mint: CredentialMinter = async (_root, input) => { this.minted.push({ key: input.key, epoch: input.epoch }); await mkdir(input.directory, { recursive: true }); };
   wait = (ms: number) => { this.now += ms; };
   bounds() { return { clock: () => this.now, wait: this.wait }; }
   run = (command: string, args: string[]): string => {

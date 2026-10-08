@@ -62,6 +62,8 @@ export function missingSubmoduleCommits(git: Git, baseTip: string, refused: read
 export async function restoreAndReport(git: Git, print: (value: unknown) => void, sync: {
   work: { key: string; plannedFiles?: string[] }; baseBranch: string; baseTip: string; regenerated: string[]; generated: string[]; refused: readonly string[];
   read?: (sha: string) => Promise<string | null>;
+  /** GY-1523: the control plane is the merge writer, so the restore commit is submitted with `complete --head` and nothing is pushed. */
+  controlPlane?: boolean;
 }): Promise<void> {
   const { work, baseBranch, baseTip, regenerated, generated } = sync;
   const missing = missingSubmoduleCommits(git, baseTip, sync.refused);
@@ -78,6 +80,8 @@ export async function restoreAndReport(git: Git, print: (value: unknown) => void
   print({ key: work.key, base: `origin/${baseBranch}`, baseTip, head: git('rev-parse', 'HEAD'), merged: true, regenerated, generated, plannedFiles: work.plannedFiles, ok: !still.length,
     restored, files: after, refused: still.map(finding => `${finding.path}: ${finding.detail}`),
     next: still.length ? `Some files outside plannedFiles still differ from origin/${baseBranch} after the restore commit; rerun sync ${work.key} --restore. A force push is never needed or allowed.`
-      : `Restored ${restored.length} file${restored.length === 1 ? '' : 's'} to origin/${baseBranch} in one new commit. Push with a plain git push (a force push is never needed or allowed), then complete ${work.key} EPOCH PR.` });
+      : `Restored ${restored.length} file${restored.length === 1 ? '' : 's'} to origin/${baseBranch} in one new commit. ${sync.controlPlane
+        ? `Nothing is pushed while the control plane is the merge writer: complete ${work.key} EPOCH --head submits the restore commit from the shared object store.`
+        : `Push with a plain git push (a force push is never needed or allowed), then complete ${work.key} EPOCH PR.`}` });
   if (still.length) process.exitCode = 1;
 }

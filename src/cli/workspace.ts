@@ -22,13 +22,18 @@ export { installUnderLease };
 
 const quietBranch = () => spawnSync('git', ['symbolic-ref', '--short', 'HEAD'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).stdout.trim();
 
-async function syncWork({ api, print, base: serverUrl, args }: CliContext, work: any) {
+export async function syncWork({ api, print, base: serverUrl, args }: CliContext, work: any) {
   // The canonical way to take the base branch: a merge keeps the worker's history and makes every
   // resolution visible, and the same classifier the control plane applies at complete runs here,
   // against the fetched tip, before anything is pushed. Files the repository declares generated
   // are rendered afresh from the merged sources rather than merged by hand; every other conflict
   // is the worker's, reported with the shipped items that landed it.
-  const baseBranch = String((await api('status')).baseBranch ?? 'main');
+  const status = await api('status');
+  const baseBranch = String(status.baseBranch ?? 'main');
+  // GY-1523: while the control plane is the merge writer, the shared refs/remotes/origin/BASE the
+  // confinement re-exposes is the writer's own tip, advanced by the writer: nothing is fetched and
+  // nothing is pushed. An older server, or one that reports no merger, syncs as GitHub's.
+  const controlPlane = status.mergeWriter?.merger === 'control-plane';
   const cwd = process.cwd();
   // Git's own diagnostics still reach the worker, and a failure carries them, so a refused write names its path.
   const git = (...gitArgs: string[]) => {
@@ -47,7 +52,7 @@ async function syncWork({ api, print, base: serverUrl, args }: CliContext, work:
   let baseTip: string, mergeBase: string, detail = '';
   if (continuing) { baseTip = git('rev-parse', 'MERGE_HEAD'); mergeBase = git('merge-base', 'HEAD', baseTip); }
   else {
-    git('fetch', '--quiet', '--no-tags', 'origin');
+    if (!controlPlane) git('fetch', '--quiet', '--no-tags', 'origin');
     baseTip = git('rev-parse', `refs/remotes/origin/${baseBranch}`); mergeBase = git('merge-base', 'HEAD', baseTip);
     const merge = quietly('merge', '--no-commit', '--no-edit', `refs/remotes/origin/${baseBranch}`);
     detail = `${merge.stdout}${merge.stderr}`.trim();
@@ -97,13 +102,17 @@ async function syncWork({ api, print, base: serverUrl, args }: CliContext, work:
   const read = async (sha: string) => { const blob = quietly('cat-file', 'blob', sha); return blob.status === 0 ? blob.stdout : null; };
   const findings = await localScopeFindings(work.plannedFiles ?? [], raw, numstat, generated?.files ?? [], read);
   const refused = findings.filter(finding => finding.refused);
-  // `--restore` takes the remedy itself (GY-859): one plain commit, so a plain push updates the PR.
-  if (args.includes('--restore') && refused.length) return restoreAndReport(git, print, { work, baseBranch, baseTip, regenerated, generated: generated?.files ?? [], refused: refused.map(finding => finding.path), read });
-
-  print({ key: work.key, base: `origin/${baseBranch}`, baseTip, head: git('rev-parse', 'HEAD'), merged: true, regenerated, generated: generated?.files ?? [], plannedFiles: work.plannedFiles, ok: !refused.length,
+  // `--restore` takes the remedy itself (GY-859): one plain commit, so a plain push updates the PR —
+  // or, with the control plane as merge writer, one `complete --head` submits it (GY-1523).
+  if (args.includes('--restore') && refused.length) return restoreAndReport(git, print, { work, baseBranch, baseTip, regenerated, generated: generated?.files ?? [], refused: refused.map(finding => finding.path), read, controlPlane });
+  // The repair's hand-off follows the merge writer: a GitHub worker pushes the plain commit, a
+  // control-plane worker has no push credential and submits it with complete --head.
+  const afterRepair = controlPlane ? `complete ${work.key} EPOCH --head submits it from the shared object store; nothing is pushed` : 'a plain push updates the PR';
+  print({ key: work.key, base: `origin/${baseBranch}`, baseTip, head: git('rev-parse', 'HEAD'), merged: true, fetched: !controlPlane, regenerated, generated: generated?.files ?? [], plannedFiles: work.plannedFiles, ok: !refused.length,
     files: findings, refused: refused.map(finding => `${finding.path}: ${finding.detail}`),
-    next: refused.length ? `Run sync ${work.key} --restore: it restores each listed file to origin/${baseBranch} in one new commit naming them (by hand: git checkout ${baseTip.slice(0, 12)} -- PATH for each, restoring a rename's original path, then commit), so a plain push updates the PR; a force push is never needed or allowed. Do not push until it reports ok. Only an operator can widen plannedFiles, through an audited requirements revision.`
-      : `Every file outside plannedFiles matches origin/${baseBranch}. Push, then complete ${work.key} EPOCH PR.` });
+    next: refused.length ? `Run sync ${work.key} --restore: it restores each listed file to origin/${baseBranch} in one new commit naming them (by hand: git checkout ${baseTip.slice(0, 12)} -- PATH for each, restoring a rename's original path, then commit), so ${afterRepair}; a force push is never needed or allowed. Do not ${controlPlane ? 'complete' : 'push'} until it reports ok. Only an operator can widen plannedFiles, through an audited requirements revision.`
+      : controlPlane ? `Every file outside plannedFiles matches origin/${baseBranch}. Nothing is pushed while the control plane is the merge writer: complete ${work.key} EPOCH --head submits the commit the shared object store already holds.`
+        : `Every file outside plannedFiles matches origin/${baseBranch}. Push, then complete ${work.key} EPOCH PR.` });
   if (refused.length) process.exitCode = 1;
 }
 
@@ -117,7 +126,9 @@ export const workspaceCommands = defineCommands([
       '                                (docs indexes, AGENTS.md blocks) instead of hand-merging them,',
       '                                name the shipped items behind each remaining conflict, and',
       '                                list every file outside plannedFiles that no longer matches',
-      '                                the base; run before every push',
+      '                                the base; run before every push. While the control plane is',
+      '                                the merge writer it fetches nothing: the shared origin/BASE',
+      '                                is the writer\'s tip, and complete --head follows',
       '  sync GY-N --restore           The same, then restore every such file to the base in one new',
       '                                commit naming them; push it plainly. A force push is never',
       '                                needed or allowed',

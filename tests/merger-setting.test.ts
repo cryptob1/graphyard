@@ -12,7 +12,7 @@ import { unhandled, type MasterSession } from '../src/cli/master/session.js';
 import type { Observation, Principal } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
-/** The merger install setting: `policy.merger.set` on the ledger, admin-only, surfaced as mergeWriter, and read by nothing yet. */
+/** The merger install setting: `policy.merger.set` on the ledger, admin-only, surfaced as mergeWriter; the submit command reads it (GY-1523). */
 const repository = 'owner/project';
 const operator: Principal = { id: 'human-operator', role: 'admin', sessionKind: 'human' };
 const coordinator: Principal = { id: 'graphyard-master', role: 'coordinator' };
@@ -95,6 +95,12 @@ async function scenario(n: number) {
   const pulled = await engine.pullAssignment(worker, { work: w.id }, randomUUID());
   assert.equal(pulled.assigned?.id, w.id, JSON.stringify(pulled.refused)); w = pulled.assigned!;
   w = await engine.execute(worker, 'workspace', w.id, { epoch: 1, host: 'test', path: `/tmp/merger-${n}`, branch: `graphyard/merger-${n}` }, randomUUID());
+  const dispatchView = { offered: pulled.offered, refused: pulled.refused, lease: !!pulled.assigned?.lease, epoch: pulled.assigned?.lease?.epoch };
+  // GY-1523: a pull request is a github-mode submission; under the control plane it is refused, naming the head form.
+  if ((await recordedMergerMode(store.pool)).merger === 'control-plane') {
+    await assert.rejects(engine.execute(worker, 'submit', w.id, { epoch: 1, pr: 900 + n }, randomUUID()), /A pull request is submitted only while GitHub is the merge writer; this install's merger is control-plane, so complete GY-\d+ 1 --head instead/);
+    return { dispatched: dispatchView, submitted: null, observed: null };
+  }
   w = await engine.execute(worker, 'submit', w.id, { epoch: 1, pr: 900 + n }, randomUUID());
   const observation: Observation = { clockOffset: { min: 0, max: 0 }, candidate: { sha: sha('merger-scenario'), baseSha: 'b'.repeat(40), pr: 900 + n, branch: w.workspaces[0].branch, author: 'implementer' },
     checks: [], reviews: [], protected: true, mergeable: true, merged: false, prState: 'open', mergeSha: null, mergedAt: null, baseTip: 'b'.repeat(40), baseTree: '7e'.repeat(20), files: [], scopeFiles: [], at: new Date().toISOString() };
@@ -103,16 +109,18 @@ async function scenario(n: number) {
   const dispatched = (item: typeof observed) => [item.autoDispatch?.review, ...(item.autoDispatch?.producers ?? [])].filter(Boolean).map((request: any) => ({ kind: request.kind, state: request.state, sha: request.sha, proofs: request.proofs ?? null }));
   const view = (item: typeof observed) => JSON.parse(JSON.stringify({ stage: item.stage, ready: item.ready, violations: item.violations, gates: item.gates.map(gate => ({ name: gate.name, passed: gate.passed, reasons: gate.reasons })), nextAction: item.nextAction ?? null, dispatch: dispatched(item) })
     .replace(/"requestId":"[0-9a-f]{32}"/g, '"requestId":"R"').split(item.key).join('GY-N').split(item.id).join('ID').split(`"pr":${900 + n}`).join('"pr":0'));
-  return { dispatched: { offered: pulled.offered, refused: pulled.refused, lease: !!pulled.assigned?.lease, epoch: pulled.assigned?.lease?.epoch }, submitted: view(w), observed: view(observed) };
+  return { dispatched: dispatchView, submitted: view(w), observed: view(observed) };
 }
 
-test('integration:merger-setting-no-behaviour-change — the same submit, observe, evaluate and dispatch scenario gives identical results with the setting recorded github and control-plane', async () => {
+test('integration:merger-setting-dispatch-unchanged — create, release, dispatch and workspace give identical results with the setting recorded github and control-plane; only the submission form differs (GY-1523), the pull request refused under the control plane', async () => {
   assert.equal((await recordedMergerMode(store.pool)).merger, 'github');
   const github = await scenario(1);
+  assert.ok(github.submitted && github.observed, 'the github scenario submits and observes a pull request');
   assert.equal((await request(token(operator), 'merger', { merger: 'control-plane', reason: 'Compare behaviour' })).status, 200);
   assert.equal((await recordedMergerMode(store.pool)).merger, 'control-plane');
   const control = await scenario(2);
-  assert.deepEqual(control, github);
+  assert.deepEqual(control.dispatched, github.dispatched);
+  assert.equal(control.submitted, null, 'the pull request submission was refused');
   assert.equal((await request(token(operator), 'merger', { merger: 'github', reason: 'Done comparing' })).status, 200);
 });
 
