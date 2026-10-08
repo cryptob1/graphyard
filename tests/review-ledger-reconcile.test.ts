@@ -125,7 +125,7 @@ test('integration:review-ledger-reconcile — a session that stops before postin
     assert.equal(first.reviews[0].idleSince, new Date(start + 1000).toISOString());
     const prompts = calls.filter(args => args[0] === 'agent' && args[1] === 'prompt' && String(args[3]).startsWith('You stopped before posting'));
     assert.equal(prompts.length, 1);
-    assert.match(prompts[0][3], new RegExp(`gh api --method POST repos/owner/project/pulls/${record.pr}/reviews -f commit_id=${record.sha}`));
+    assert.ok(prompts[0][3].includes(`node ${config.cliPath} review post --event APPROVE`), 'the retry prompt posts through review post (GY-1492)');
     assert.match(prompts[0][3], /Do not ask for confirmation/);
     // Still within the grace: no second prompt, no failure, the session may still post.
     const waiting = await reconcileReviews(root, config, { run, observe: () => null, work: [item], agents: blocked, now: () => new Date(start + 60_000) });
@@ -140,12 +140,12 @@ test('integration:review-ledger-reconcile — a session that stops before postin
 });
 
 test('integration:reviewer-posts-autonomously — the launch grants the post as part of the role in settings and prompt, and the dispatch loop itself retries a session that ends without posting', async () => {
-  // Settings: the role allows exactly the one review POST for the launched pull request.
+  // Settings: the role allows its one verdict through review post (GY-1492), and denies a raw review call.
   const input = { cliPath: launcher, repository: 'owner/project', baseBranch: 'main', credentialHome: '/home/x/.config/graphyard', credentialDirectories: ['/home/x/.config/graphyard/masters'] };
   const reviewer = sessionHarnessPlan({ ...input, role: 'reviewer', kind: 'claude', pr: 64 });
-  const post = 'gh api --method POST repos/owner/project/pulls/64/reviews -f commit_id=abc -f event=APPROVE -f body=judged';
-  assert.ok(reviewer.allow.some(entry => entry.rule === 'Bash(gh api --method POST repos/owner/project/pulls/64/reviews*)'));
-  assert.equal(reviewer.deny.some(entry => entry.rule.includes('reviews')), false, 'the reviewer role denies no review call');
+  const post = `node ${launcher} review post --event APPROVE --body judged`;
+  assert.ok(reviewer.allow.some(entry => entry.rule === `Bash(node ${launcher} review post:*)`));
+  assert.deepEqual(reviewer.deny.filter(entry => entry.rule.includes('reviews')).map(entry => entry.rule), ['Bash(gh api *pulls/*/reviews*)'], 'the only review rule the reviewer is denied is the raw call');
   const denied = (command: string) => reviewer.deny.some(entry => {
     const body = entry.rule.match(/^Bash\((.*)\)$/)?.[1]; if (!body) return false;
     return new RegExp(`^${body.split('*').map(part => part.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('.*')}$`).test(command);
@@ -156,7 +156,7 @@ test('integration:reviewer-posts-autonomously — the launch grants the post as 
   const prompt = reviewPrompt({ repository: 'owner/project' } as MasterConfig, binding);
   assert.match(prompt, /Posting that review is granted to this session's role, not a permission to request/);
   assert.match(prompt, /without asking for confirmation/);
-  assert.match(reviewRetryPrompt('owner/project', { key: 'GY-64', pr: 64, sha: H }), new RegExp(`gh api --method POST repos/owner/project/pulls/64/reviews -f commit_id=${H}`));
+  assert.ok(reviewRetryPrompt('owner/project', { key: 'GY-64', pr: 64, sha: H }, undefined, launcher).includes(`node ${launcher} review post --event APPROVE`));
   assert.match(reviewRetryPrompt('owner/project', { key: 'GY-64', pr: 64, sha: H }), /Do not ask for confirmation/);
 
   // The dispatch loop itself: it prompts the ended session, and relaunches the request once the
