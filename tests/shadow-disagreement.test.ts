@@ -5,11 +5,12 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import EmbeddedPostgres from 'embedded-postgres';
-import { shadowGateSummary } from '../src/daemon/cycle-shadow.js';
+import { keepVerdicts, shadowGateSummary, shadowKeptVerdicts } from '../src/daemon/cycle-shadow.js';
 import {
   isPlaceholderVerdict, placeholderRunnerFailure, shadowDisagreementDetail, shadowGateAttention,
   shadowReportWithExplanations, type ShadowVerdict,
 } from '../src/merge-writer/shadow.js';
+import type { Work } from '../src/model.js';
 import { MergerSettings } from '../src/merger-mode.js';
 import type { Principal } from '../src/model.js';
 import { Store } from '../src/store.js';
@@ -133,6 +134,10 @@ test('unit:attention-omits-explained — master status shadowGate attention list
     { key: 'GY-1', head: a.head, baseTip: tip },
     { key: 'GY-2', head: b.head, baseTip: tip },
   ]), []);
+  // A later agree-pass on a new head of the same item does not drop an earlier unexplained disagreement.
+  const later = verdict('GY-1', { head: sha('h1-later'), baseTip: tip, outcome: 'agree-pass', at: iso(start + 60_000), tests: { passed: 3, failed: [], files: 3 } });
+  assert.deepEqual(shadowGateAttention([a, later]).map(line => line.text.match(/GY-\d+/)?.[0]), ['GY-1']);
+  assert.equal(shadowGateAttention([a, later], [{ key: 'GY-1', head: a.head, baseTip: tip }]).length, 0);
 });
 
 test('unit:docs-word-budget — docs/delivery-redesign.md states the merger refuses while a shadow disagreement stands unexplained in at most 25 net words', () => {
@@ -144,6 +149,22 @@ test('unit:docs-word-budget — docs/delivery-redesign.md states the merger refu
   }).find(text => text !== null) ?? null;
   const words = (text: string) => text.split(/\s+/).filter(Boolean).length;
   if (base) assert.ok(words(docs) - words(base) <= 25, `delivery-redesign grew by ${words(docs) - words(base)} words, at most 25`);
+});
+
+test('unit:keep-verdicts-prefer-disagreements — keepVerdicts evicts non-disagreements before a standing shadow-only-fail or shadow-missed', () => {
+  const open = {
+    id: 'w-open', key: 'GY-open', stage: 'build', candidate: { sha: sha('open-head') },
+  } as unknown as Work;
+  const disagreement = verdict('GY-old', { id: 'w-old', head: sha('old-head'), outcome: 'shadow-only-fail' });
+  const filler = Array.from({ length: shadowKeptVerdicts }, (_, index) => verdict(`GY-f${index}`, {
+    id: `w-f${index}`, head: sha(`f${index}`), outcome: 'agree-pass', tests: { passed: 1, failed: [], files: 1 },
+  }));
+  const kept = keepVerdicts([disagreement, ...filler, {
+    ...verdict('GY-open', { id: 'w-open', head: sha('open-head'), outcome: 'pending' }),
+  }], [open]);
+  assert.equal(kept.length, shadowKeptVerdicts);
+  assert.ok(kept.some(entry => entry.key === 'GY-old' && entry.outcome === 'shadow-only-fail'), 'a standing disagreement survives while agree-pass rows make room');
+  assert.ok(kept.some(entry => entry.key === 'GY-open'), 'an open head also survives');
 });
 
 test('integration:shadowgate-report-splits-explained — the shadowGate report separates unexplained from explained disagreement counts', () => {
@@ -238,6 +259,8 @@ test('manual:explain-standing-disagreements — the two standing disagreements (
 test('integration:merger-refused-unexplained — POST /api/merger control-plane is refused while an unexplained shadow disagreement stands, naming the keys; setting github is never refused', async () => {
   const head = sha('refuse-head'), baseTip = sha('refuse-tip');
   const { id, key } = await deliveredDisagreement(head, baseTip, { passed: 1, failed: ['tests/z.test.ts'], files: 2 });
+  const listing = await request(token(coordinator), 'shadow-disagreements');
+  assert.ok((listing.body.disagreements as { key: string; explained: boolean }[]).some(entry => entry.key === key && !entry.explained));
   const refused = await request(token(admin), 'merger', { merger: 'control-plane', reason: 'Switch while unexplained' });
   assert.equal(refused.status, 409, JSON.stringify(refused.body));
   assert.match(JSON.stringify(refused.body), new RegExp(`unexplained shadow disagreements stand:.*${key}`));
@@ -245,6 +268,49 @@ test('integration:merger-refused-unexplained — POST /api/merger control-plane 
   const settings = new MergerSettings(store);
   await assert.rejects(settings.change(admin, { merger: 'github', reason: 'already' }, randomUUID()), /already github/);
   await request(token(admin), `work/${id}/shadow-explain`, { head, baseTip, reason: 'Explained so merger-refused test cleans up' });
+});
+
+test('integration:merger-refused-reopened-shadow-missed — a shadow-passed head whose merge was reverted and the item reopened still refuses control-plane until explained (delivered merge recovered from the ledger)', async () => {
+  const head = sha('missed-head'), baseTip = sha('missed-tip'), deliverySha = sha('missed-delivery');
+  const id = randomUUID(), itemKey = `GY-${++keySerial}`;
+  const document = {
+    id, key: itemKey, title: itemKey, description: '', type: 'bug', priority: 1, dependencies: [],
+    criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:claim-safety'] }],
+    policy: { checks: ['test', 'typecheck'], review: true }, plannedFiles: ['src/a.ts'], revision: 1, policyRevision: 1,
+    createdAt: iso(start), updatedAt: iso(start), stageEnteredAt: iso(start), ready: true, epoch: 1, lease: null,
+    workspaces: [], submission: null, candidate: null, reworkRequested: false, scenarioRequirements: [], evidence: [],
+    observation: null, blocker: null, violations: [], gates: [], stage: 'ready', delivery: null,
+    mainGuardReverts: [{
+      mergeSha: deliverySha, pr: keySerial, failing: ['test'], revert: null, state: 'merged',
+      at: iso(start), settledAt: iso(start), revertSha: sha(`revert-${head}`), reason: 'broke main',
+    }],
+  };
+  await store.pool.query('INSERT INTO work_items(id, document) VALUES ($1,$2)', [id, JSON.stringify(document)]);
+  // Historical delivery of this head (cleared from the document on reopen) stays on the ledger.
+  await store.pool.query(
+    `INSERT INTO events(work_id, actor, kind, payload) VALUES ($1,$2,'github.observed',$3)`,
+    [id, coordinator.id, JSON.stringify({
+      work: {
+        candidate: { sha: head, baseSha: baseTip, pr: keySerial, branch: `graphyard/${itemKey}-1`, author: 'implementer' },
+        delivery: { mergedAt: iso(start), mergeSha: deliverySha, authorizationRevision: 1 },
+      },
+    })],
+  );
+  const recorded = await request(token(coordinator), `work/${id}/shadow-verdict`, {
+    head, baseTip, mergeSha: sha(`trial-${head}`), risk: 'normal', build: 'pass',
+    tests: { passed: 4, failed: [], files: 4 }, conflict: [], durationMs: 500,
+  });
+  assert.equal(recorded.status, 200, JSON.stringify(recorded.body));
+  const standing = await request(token(reader), 'shadow-disagreements');
+  assert.ok((standing.body.disagreements as { key: string; outcome: string; explained: boolean }[])
+    .some(entry => entry.key === itemKey && entry.outcome === 'shadow-missed' && !entry.explained),
+  JSON.stringify(standing.body.disagreements));
+  const refused = await request(token(admin), 'merger', { merger: 'control-plane', reason: 'Must refuse reopened shadow-missed' });
+  assert.equal(refused.status, 409, JSON.stringify(refused.body));
+  assert.match(JSON.stringify(refused.body), new RegExp(itemKey));
+  await request(token(admin), `work/${id}/shadow-explain`, {
+    head, baseTip, reason: `${itemKey} shadow-missed: main guard reverted delivery ${deliverySha}; explained for test cleanup`,
+  });
 });
 
 test('integration:merger-applies-when-explained — POST /api/merger control-plane applies once every disagreement is explained; github is never refused', async () => {

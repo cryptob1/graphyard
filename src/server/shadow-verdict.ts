@@ -3,9 +3,10 @@ import type pg from 'pg';
 import { z } from 'zod';
 import { demand, type Principal, type Work } from '../model.js';
 import {
-  compareVerdicts, githubOutcome, isPlaceholderVerdict, placeholderRunnerFailure, shadowDisagreement,
-  trialLogTailLength, type ShadowVerdict,
+  compareVerdicts, deliveredMerge, githubOutcome, isPlaceholderVerdict, placeholderRunnerFailure, shadowDisagreement,
+  shadowDisagreementPair, trialLogTailLength, type ShadowVerdict,
 } from '../merge-writer/shadow.js';
+import { DELIVERY_EVENT_PREDICATE } from '../store/tables/production.js';
 import { defineRoutes, parseJson, type Services } from './routes.js';
 
 /**
@@ -161,36 +162,78 @@ function verdictFromEvent(payload: Record<string, unknown>, key: string): Pick<S
 }
 
 /**
- * Every shadow-only-fail or shadow-missed verdict on the ledger that has no explanation, re-judged
- * against the work items' deliveries. Used by the merger switch (GY-1560).
+ * The merge commit GitHub made of `head`, recovered when the item was later reopened and its
+ * delivery/candidate cleared (GY-1560): the current document first, then the newest delivery event
+ * on the ledger for that head (`github.observed` with a recorded delivery).
  */
-export async function unexplainedShadowDisagreements(db: Queryable, work: readonly Work[]): Promise<{ key: string; head: string; baseTip: string; outcome: string }[]> {
+async function recoveredDeliveredMerge(db: Queryable, item: Work | undefined, key: string, head: string): Promise<string | null> {
+  const current = item ? deliveredMerge(item, head) : null;
+  if (current) return current;
+  const row = (await db.query(
+    `SELECT lower(e.payload->'work'->'delivery'->>'mergeSha') AS merge_sha
+     FROM events e JOIN work_index i ON i.id = e.work_id
+     WHERE i.key = $1 AND ${DELIVERY_EVENT_PREDICATE}
+       AND lower(e.payload->'work'->'candidate'->>'sha') = $2
+     ORDER BY e.seq DESC LIMIT 1`,
+    [key, head.toLowerCase()],
+  )).rows[0] as { merge_sha: string | null } | undefined;
+  return row?.merge_sha ?? null;
+}
+
+/** One standing shadow disagreement as the status and merger switch read it. */
+export interface StandingShadowDisagreement {
+  key: string; head: string; baseTip: string; outcome: 'shadow-only-fail' | 'shadow-missed';
+  mergeSha: string | null; build: 'pass' | 'fail'; tests: ShadowVerdict['tests']; at: string; explained: boolean;
+}
+
+/**
+ * Every shadow-only-fail or shadow-missed verdict on the ledger, re-judged with the delivered merge
+ * identity recovered when the item was reopened. Used by the merger switch and master status (GY-1560).
+ */
+export async function standingShadowDisagreements(db: Queryable, work: readonly Work[]): Promise<StandingShadowDisagreement[]> {
   const rows = (await db.query(
     `SELECT i.key, e.payload FROM events e JOIN work_index i ON i.id = e.work_id WHERE e.kind=$1 ORDER BY e.seq`,
     [shadowVerdictEvent],
   )).rows as { key: string; payload: Record<string, unknown> }[];
   const explained = new Set((await listShadowDisagreementExplanations(db)).map(pairKey));
-  const newest = new Map<string, ReturnType<typeof verdictFromEvent>>();
+  const newest = new Map<string, NonNullable<ReturnType<typeof verdictFromEvent>>>();
   for (const row of rows) {
     const verdict = verdictFromEvent(row.payload, row.key);
     if (!verdict) continue;
     newest.set(pairKey({ key: row.key, head: verdict.head, baseTip: verdict.baseTip }), verdict);
   }
-  const unexplained: { key: string; head: string; baseTip: string; outcome: string }[] = [];
+  const standing: StandingShadowDisagreement[] = [];
   for (const verdict of newest.values()) {
-    if (!verdict) continue;
     const item = work.find(candidate => candidate.key === verdict.key);
-    const outcome = compareVerdicts(verdict, githubOutcome(item, verdict.head, item ? undefined : null));
-    if (!shadowDisagreement(outcome)) continue;
-    if (explained.has(pairKey(verdict))) continue;
-    unexplained.push({ key: verdict.key, head: verdict.head, baseTip: verdict.baseTip, outcome });
+    const mergeSha = await recoveredDeliveredMerge(db, item, verdict.key, verdict.head);
+    const delivered = mergeSha ? { mergeSha } : null;
+    const outcome = compareVerdicts(verdict, githubOutcome(item, verdict.head, delivered));
+    if (outcome !== 'shadow-only-fail' && outcome !== 'shadow-missed') continue;
+    standing.push({
+      key: verdict.key, head: verdict.head, baseTip: verdict.baseTip, outcome,
+      mergeSha: verdict.mergeSha, build: verdict.build, tests: verdict.tests, at: verdict.at,
+      explained: explained.has(shadowDisagreementPair(verdict)),
+    });
   }
-  return unexplained;
+  return standing;
 }
 
-/** Read path for the loop and merger status: every explanation, plus the fabricated-runner placeholder name. */
-export async function shadowDisagreementStatus(db: Queryable) {
-  return { explanations: await listShadowDisagreementExplanations(db), placeholderFailure: placeholderRunnerFailure };
+/**
+ * Every shadow-only-fail or shadow-missed verdict on the ledger that has no explanation, re-judged
+ * against recovered deliveries. Used by the merger switch (GY-1560).
+ */
+export async function unexplainedShadowDisagreements(db: Queryable, work: readonly Work[]): Promise<{ key: string; head: string; baseTip: string; outcome: string }[]> {
+  return (await standingShadowDisagreements(db, work)).filter(entry => !entry.explained)
+    .map(entry => ({ key: entry.key, head: entry.head, baseTip: entry.baseTip, outcome: entry.outcome }));
+}
+
+/** Read path for the loop and merger status: explanations, standing disagreements, and the placeholder name. */
+export async function shadowDisagreementStatus(db: Queryable, work: readonly Work[]) {
+  const [explanations, disagreements] = await Promise.all([
+    listShadowDisagreementExplanations(db),
+    standingShadowDisagreements(db, work),
+  ]);
+  return { explanations, disagreements, placeholderFailure: placeholderRunnerFailure };
 }
 
 /**
@@ -202,7 +245,7 @@ export const shadowDisagreementRoutes = defineRoutes('shadow-disagreements', [
     method: 'GET', path: '/api/shadow-disagreements',
     async handle({ actor, services }) {
       demand(['admin', 'coordinator', 'reader', 'operator-agent'].includes(actor.role), 'Shadow disagreement explanations are readable by admin, coordinator, reader and operator-agent identities', 403);
-      return shadowDisagreementStatus(services.engine.store.pool);
+      return shadowDisagreementStatus(services.engine.store.pool, await services.engine.store.list());
     },
   },
   {

@@ -132,18 +132,24 @@ export const isPlaceholderVerdict = (verdict: Pick<ShadowVerdict, 'build' | 'tes
 /** One explanation of a (key, head, baseTip) disagreement, as the ledger and the status read it. */
 export interface ShadowExplanationRef { key: string; head: string; baseTip: string }
 
-const explainedPair = (entry: ShadowExplanationRef) => `${entry.key}:${entry.head.toLowerCase()}:${entry.baseTip.toLowerCase()}`;
-const isExplained = (verdict: Pick<ShadowVerdict, 'key' | 'head' | 'baseTip'>, explanations: readonly ShadowExplanationRef[]) =>
-  explanations.some(entry => explainedPair(entry) === explainedPair(verdict));
+/** The (work key, head, baseTip) pair an explanation and a standing disagreement share. */
+export const shadowDisagreementPair = (entry: Pick<ShadowExplanationRef, 'key' | 'head' | 'baseTip'>) =>
+  `${entry.key}:${entry.head.toLowerCase()}:${entry.baseTip.toLowerCase()}`;
+/** Whether an explanation stands for this verdict's (key, head, baseTip). */
+export const shadowPairExplained = (verdict: Pick<ShadowVerdict, 'key' | 'head' | 'baseTip'>, explanations: readonly ShadowExplanationRef[]) =>
+  explanations.some(entry => shadowDisagreementPair(entry) === shadowDisagreementPair(verdict));
 
 /**
- * `master status` attention: one line per item whose newest verdict disagrees with GitHub and has
- * no explanation yet (GY-1560); report only until explained.
+ * `master status` attention: one line per standing (key, head, baseTip) disagreement that has no
+ * explanation yet (GY-1560). A later head of the same item does not drop an earlier unexplained
+ * pair; only an explanation does. Report only until explained.
  */
 export function shadowGateAttention(verdicts: readonly ShadowVerdict[], explanations: readonly ShadowExplanationRef[] = []): AttentionItem[] {
   const newest = new Map<string, ShadowVerdict>();
-  for (const verdict of [...verdicts].sort((a, b) => Date.parse(a.at) - Date.parse(b.at))) newest.set(verdict.key, verdict);
-  return [...newest.values()].filter(verdict => shadowDisagreement(verdict.outcome) && !isExplained(verdict, explanations)).map(verdict => ({
+  for (const verdict of [...verdicts].sort((a, b) => Date.parse(a.at) - Date.parse(b.at))) {
+    newest.set(shadowDisagreementPair(verdict), verdict);
+  }
+  return [...newest.values()].filter(verdict => shadowDisagreement(verdict.outcome) && !shadowPairExplained(verdict, explanations)).map(verdict => ({
     subject: 'shadow-gate', text: shadowDisagreementDetail(verdict),
     role: 'master' as const, approvedBy: null, human: false, humanOnly: null, next: `Explain the disagreement on ${verdict.key} before the switch to control-plane merging; nothing is changed`,
   }));
@@ -173,7 +179,7 @@ export function shadowReportWithExplanations(
   const judged = judgedVerdicts(verdicts, work).filter(verdict => shadowDisagreement(verdict.outcome));
   let explainedDisagreements = 0, unexplainedDisagreements = 0;
   for (const verdict of judged) {
-    if (isExplained(verdict, explanations)) explainedDisagreements += 1;
+    if (shadowPairExplained(verdict, explanations)) explainedDisagreements += 1;
     else unexplainedDisagreements += 1;
   }
   return { ...report, unexplainedDisagreements, explainedDisagreements };

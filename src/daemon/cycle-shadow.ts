@@ -6,7 +6,7 @@ import type { Work } from '../model.js';
 import { classifyRisk } from '../model/risk-class.js';
 import { shadowGateSettings } from '../master/merge-writer-settings.js';
 import { runTrial, trialMerge, trialNeedsLog, TrialCleanupError, TrialRunnerError, TrialTimeoutError, type TrialRun } from '../merge-writer/trial.js';
-import { judgedVerdicts, shadowDisagreement, shadowDisagreementDetail, shadowOutcomes, shadowDue, shadowReportWithExplanations, trialLogTailLength, type ShadowExplanationRef, type ShadowVerdict } from '../merge-writer/shadow.js';
+import { judgedVerdicts, shadowDisagreement, shadowDisagreementDetail, shadowOutcomes, shadowDue, shadowPairExplained, shadowReportWithExplanations, trialLogTailLength, type ShadowExplanationRef, type ShadowVerdict } from '../merge-writer/shadow.js';
 import { storeAction, type DaemonState } from './state.js';
 import type { Cycle } from './cycle.js';
 
@@ -32,6 +32,11 @@ export interface ShadowReads {
   trial(head: string, baseTip: string, key: string): Promise<{ mergeSha: string | null; conflict: string[]; files: string[]; run: TrialRun | null; leftover?: string }>;
   /** Posts the verdict to the coordinator (`POST /api/work/:id/shadow-verdict`). */
   record(work: Work, verdict: Omit<ShadowVerdict, 'outcome'>): Promise<void>;
+  /**
+   * GY-1560: every recorded disagreement explanation (`GET /api/shadow-disagreements`), so the
+   * cursor clears a standing disagreement once explained. Absent, the step raises and never clears.
+   */
+  explanations?(): Promise<ShadowExplanationRef[]>;
 }
 
 /** The body `POST /api/work/:id/shadow-verdict` takes (with the log tail when the verdict carries one), and the idempotency key one (head, baseTip) pair keeps across retries. */
@@ -43,12 +48,12 @@ export const shadowVerdictKey = (work: Pick<Work, 'id'>, verdict: Pick<ShadowVer
  * commit). Git writes are limited to the trial ref; a trial checkout under `base` is the only
  * worktree made. The loop wires them in effects.ts; a test hands its own through `effects.shadow`.
  */
-export function shadowReads(config: Pick<MasterConfig, 'baseBranch' | 'run'>, root: string, run: ChildRun, options: { base: string; record: ShadowReads['record']; trial?: typeof runTrial }): ShadowReads {
+export function shadowReads(config: Pick<MasterConfig, 'baseBranch' | 'run'>, root: string, run: ChildRun, options: { base: string; record: ShadowReads['record']; explanations?: ShadowReads['explanations']; trial?: typeof runTrial }): ShadowReads {
   const git = async (...args: string[]) => String(await run('git', ['-C', root, ...args]));
   const gitAs = async (args: string[], env?: Record<string, string>) => String(await run('git', ['-C', root, ...args], env ? { env: { ...process.env, ...env } } : undefined));
   const settings = shadowGateSettings(config.run);
   return {
-    enabled: settings.enabled, record: options.record,
+    enabled: settings.enabled, record: options.record, ...(options.explanations ? { explanations: options.explanations } : {}),
     mainTip: async () => {
       for (const ref of [`refs/remotes/origin/${config.baseBranch}`, `refs/heads/${config.baseBranch}`]) {
         try { const tip = (await git('rev-parse', '--verify', '--quiet', `${ref}^{commit}`)).trim().toLowerCase(); if (tip) return tip; } catch { /* the next ref */ }
@@ -78,16 +83,20 @@ const unrecorded = new WeakMap<DaemonState, { verdict: Omit<ShadowVerdict, 'outc
 export const shadowIdle = async (state: DaemonState) => { for (let waited = 0; flights.get(state) && !flights.get(state)!.settled && waited < 600_000; waited += 5) await new Promise(resolve => setTimeout(resolve, 5)); };
 
 /**
- * The cursor keeps the newest `shadowKeptVerdicts`. When over, verdicts of items no longer open at
- * that head go first, so a still-open (head, tip) pair is never evicted and tried again while
- * anything else can make room.
+ * The cursor keeps the newest `shadowKeptVerdicts`. When over, non-disagreement verdicts of items
+ * no longer open at that head go first, then other non-disagreements, then open heads, and only
+ * then a standing disagreement (GY-1560): an unexplained shadow-only-fail or shadow-missed is not
+ * dropped while anything else can make room, so attention and the switch criterion still see it.
  */
-export function keepVerdicts<T extends Pick<ShadowVerdict, 'id' | 'head'>>(verdicts: T[], work: readonly Work[]): T[] {
+export function keepVerdicts<T extends Pick<ShadowVerdict, 'id' | 'head' | 'outcome'>>(verdicts: T[], work: readonly Work[]): T[] {
   let excess = verdicts.length - shadowKeptVerdicts;
   if (excess <= 0) return verdicts;
   const open = (verdict: Pick<ShadowVerdict, 'id' | 'head'>) => work.some(item => item.id === verdict.id && item.stage !== 'done' && item.candidate?.sha.toLowerCase() === verdict.head);
+  const disagreement = (verdict: Pick<ShadowVerdict, 'outcome'>) => shadowDisagreement(verdict.outcome);
   const evicted = new Set<T>();
-  for (const verdict of verdicts) if (excess > 0 && !open(verdict)) { evicted.add(verdict); excess -= 1; }
+  for (const verdict of verdicts) if (excess > 0 && !open(verdict) && !disagreement(verdict)) { evicted.add(verdict); excess -= 1; }
+  for (const verdict of verdicts) if (excess > 0 && !evicted.has(verdict) && !disagreement(verdict)) { evicted.add(verdict); excess -= 1; }
+  for (const verdict of verdicts) if (excess > 0 && !evicted.has(verdict) && !open(verdict)) { evicted.add(verdict); excess -= 1; }
   for (const verdict of verdicts) if (excess > 0 && !evicted.has(verdict)) { evicted.add(verdict); excess -= 1; }
   return verdicts.filter(verdict => !evicted.has(verdict));
 }
@@ -183,7 +192,9 @@ export async function shadowStep(cycle: Cycle) {
     }
   }
   // Outcomes follow GitHub's gate as the snapshot shows it, and a verdict keeps the merge GitHub
-  // made of its head (the revert of a reopened item is matched by it); a disagreement is raised once per item.
+  // made of its head (the revert of a reopened item is matched by it); a disagreement is raised once
+  // per item until an explanation stands for every unexplained pair on that item (GY-1560).
+  const explanations = reads.explanations ? await reads.explanations() : [];
   const judged = judgedVerdicts(state.shadow, snapshot.work);
   for (const [index, verdict] of judged.entries()) {
     const current = state.shadow[index]!;
@@ -192,7 +203,27 @@ export async function shadowStep(cycle: Cycle) {
     changed = true;
     if (verdict.outcome === current.outcome) continue;
     const key = shadowAttentionKey(verdict.key);
-    if (shadowDisagreement(verdict.outcome) && !state.actions[key]) performed.push(storeAction(state, key, { kind: 'escalation', work: verdict.key, principal: null, state: 'done', detail: shadowDisagreementDetail(verdict), attempts: 1, epoch: null, cycle: state.cycle, at: new Date(now()).toISOString() }, null));
+    if (shadowDisagreement(verdict.outcome) && !shadowPairExplained(verdict, explanations) && !state.actions[key]) {
+      performed.push(storeAction(state, key, { kind: 'escalation', work: verdict.key, principal: null, state: 'done', detail: shadowDisagreementDetail(verdict), attempts: 1, epoch: null, cycle: state.cycle, at: new Date(now()).toISOString() }, null));
+    }
+  }
+  // Clear `shadow:GY-N` once every disagreement still in the cursor for that item is explained, or
+  // none remain (re-judged to agree). Unexplained rows are prefer-kept by keepVerdicts, so eviction
+  // alone does not clear the action while a non-disagreement can make room.
+  const attentionKeys = new Set([
+    ...judged.map(verdict => verdict.key),
+    ...Object.keys(state.actions).flatMap(name => {
+      if (!name.startsWith('shadow:') || name.slice('shadow:'.length).includes(':')) return [];
+      return [name.slice('shadow:'.length)];
+    }),
+  ]);
+  for (const workKey of attentionKeys) {
+    const actionKey = shadowAttentionKey(workKey);
+    if (!state.actions[actionKey]) continue;
+    const unexplained = judged.filter(verdict => verdict.key === workKey && shadowDisagreement(verdict.outcome) && !shadowPairExplained(verdict, explanations));
+    if (unexplained.length) continue;
+    delete state.actions[actionKey];
+    changed = true;
   }
   if (!flights.has(state) && !unrecorded.has(state)) {
     const tip = await reads.mainTip();

@@ -41,14 +41,16 @@ Unacted producer requests (never started, launch refused, exited at launch) rela
 
 ## Fault classes
 
-`faultClass` (`master status` `faults`): recurring classes file one item; a resource at bound one `resource:ID` fault; `fleet-capacity`, workless sessions; `unanswered-request`, settled requests unanswered past `settledAnswerGraceMs` (5min); `configuration`, sandbox or `workflows`-permission refusals; `decision-unanswered` (`decision`), not `loop-silence`, decision silently awaiting approver; failed `action:fault`/`action:diagnosis`: `unclassified` unless site names cause (`plane-unavailable`, `fix-item`, `decision-stale`, `overlong-session`). Review unlaunched 15min: `concurrency-starved` (capacity) if every reviewer profile busy, `review-settlement` (review-convergence) if one answered, else `launch-review`. Unanswering planes (502-504, refused, timeout) raise one `plane-unavailable` (`deployment`) fault, the rest retrying faultlessly; `planeWaitMs` isn't `loop-cost`.
+`faultClass` (`master status` `faults`): recurring classes file one item; a resource at bound one `resource:ID` fault; `fleet-capacity`, workless sessions; `unanswered-request`, settled requests unanswered past `settledAnswerGraceMs` (5min); `configuration`, sandbox or `workflows`-permission refusals; `decision-unanswered` (`decision`), not `loop-silence`, decision silently awaiting approver; failed `action:fault`/`action:diagnosis`: `unclassified` unless site names cause (`plane-unavailable`, `fix-item`, `decision-stale`, `overlong-session`). Review unlaunched 15min: `concurrency-starved` (capacity) if every reviewer profile busy, `review-settlement` (review-convergence) if one answered, else `launch-review`. Unanswering planes (502-504, refused, timeout) raise one `plane-unavailable` (`deployment`) fault; others retry faultlessly; `planeWaitMs` isn't `loop-cost`.
 
 ## Shadow merge gate
 
-`run.shadowGate` (`enabled`, default true; `timeoutMinutes`, default 20): each cycle trial-merges the oldest untried submitted head, builds and affected-tests it in a credential-free `trial` checkout (no TMPDIR), pushes nothing; `shadow.verdict` (failing: `logTail`, its last 4000 characters) joins GitHub's outcome in `master status` `shadowGate` (`shadow-only-fail`/`shadow-missed`: one report-only line each); errors and timeouts record nothing; the third timeout per tip gets one line.
+`run.shadowGate` (`enabled`, default true; `timeoutMinutes`, default 20): each cycle trial-merges the oldest untried submitted head, builds and affected-tests it in a credential-free `trial` checkout (no TMPDIR), pushes nothing; `shadow.verdict` (failing: `logTail`, last 4000 characters) joins GitHub's outcome in `master status` `shadowGate` (`shadow-only-fail`/`shadow-missed`: one line each until explained); errors and timeouts record nothing; third timeout per tip gets one line. Explain via `GET /api/shadow-disagreements` and `POST /api/work/:id/shadow-explain` (coordinator/admin; `{head,baseTip,reason}`; `Idempotency-Key`).
+
 
 ## Pipeline speed
 
 Target (10+ deliveries): submit→merge p50 ≤30 minutes, p90 ≤60 minutes. Row `speed`: `executionMs`, `waitMs`, `reworkRounds`, `interventions`; verdict `speed.submitToMerge`; `node scripts/measure-pipeline-speed.mjs` records what `manual:speed-target-met` reads.
 
 Loop's decisions step stays within 10 s a cycle: one `decision.*` ledger read names moved items; a history whose ledger has not moved is kept, not read. Widenings refused by 5xx or stale revision and timed-out decision history reads retry next cycle (twice: fault) unless moot (delivered, answered, lease ended, head moved).
+

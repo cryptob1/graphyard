@@ -34,16 +34,30 @@ export async function operationsCommand(session: MasterSession): Promise<unknown
     // An installed harness that differs from the current plan is drift the master repairs (GY-1217).
     const harness = await masterHarnessDrift(root, master);
     // GY-1519: each commit on the base branch the main watch cannot explain is one attention line, report-only.
-    // GY-1522 / GY-1560: each unexplained shadow-only-fail or shadow-missed is one attention line; explained ones drop out.
-    const explanations = await masterApi('shadow-disagreements').then(
-      (body: { explanations?: { key: string; head: string; baseTip: string }[] }) => body?.explanations ?? [],
-      () => [] as { key: string; head: string; baseTip: string }[],
+    // GY-1522 / GY-1560: each unexplained shadow-only-fail or shadow-missed is one attention line until explained;
+    // the ledger's standing list covers pairs the cursor may have dropped, and a later head of the same item does not.
+    type Standing = { key: string; head: string; baseTip: string; outcome: 'shadow-only-fail' | 'shadow-missed'; mergeSha: string | null; build: 'pass' | 'fail'; tests: { passed: number; failed: string[]; files: number }; at: string; explained: boolean };
+    const shadowStatus = await masterApi('shadow-disagreements').then(
+      (body: { explanations?: { key: string; head: string; baseTip: string }[]; disagreements?: Standing[] }) => body ?? {},
+      () => ({} as { explanations?: { key: string; head: string; baseTip: string }[]; disagreements?: Standing[] }),
     );
-    const added = [...(harness ? [harness] : []), ...mainWatchAttention(state?.mainWatch ?? null, master.baseBranch), ...shadowGateAttention(state?.shadow ?? [], explanations)];
+    const explanations = shadowStatus.explanations ?? [];
+    const standing = shadowStatus.disagreements ?? [];
+    const standingVerdicts = standing.map(entry => ({
+      key: entry.key, id: entry.key, head: entry.head, baseTip: entry.baseTip, mergeSha: entry.mergeSha, risk: 'normal' as const,
+      build: entry.build, tests: entry.tests, conflict: [] as string[], durationMs: 0, at: entry.at, outcome: entry.outcome,
+    }));
+    const shadowAttention = shadowGateAttention([...(state?.shadow ?? []), ...standingVerdicts], explanations);
+    const added = [...(harness ? [harness] : []), ...mainWatchAttention(state?.mainWatch ?? null, master.baseBranch), ...shadowAttention];
     const attention = added.length ? { attentionItems: [...report.attentionItems, ...added], counts: { ...report.counts, attention: report.counts.attention + added.length } } : {};
-    // `shadowGate`: the shadow merge gate's report (counts per outcome, trial p50/p90, newest disagreements, explained vs unexplained) the switch decision reads.
+    // `shadowGate`: outcome counts and trial times from the cursor; unexplained/explained counts from the ledger so eviction cannot hide a standing pair.
     // `mergeWriter` (GY-1524): the control-plane merge executor's queue (oldest first), the merge in flight, its last delivery and newest refusals.
-    return print({ ...report, ...attention, harnessDrift: harness?.drift ?? null, shadowGate: shadowGateSummary(state?.shadow ?? [], explanations), mergeWriter: mergeWriterSummary(state?.mergeWriter), daemon: { ...report.daemon, cycleBudget: state ? cycleBudget(state, master.run.intervalSeconds * 1000) : null, ...(master2 ? { master: master2 } : {}) } });
+    const shadowGate = {
+      ...shadowGateSummary(state?.shadow ?? [], explanations),
+      unexplainedDisagreements: standing.filter(entry => !entry.explained).length,
+      explainedDisagreements: standing.filter(entry => entry.explained).length,
+    };
+    return print({ ...report, ...attention, harnessDrift: harness?.drift ?? null, shadowGate, mergeWriter: mergeWriterSummary(state?.mergeWriter), daemon: { ...report.daemon, cycleBudget: state ? cycleBudget(state, master.run.intervalSeconds * 1000) : null, ...(master2 ? { master: master2 } : {}) } });
   }
   if (id === 'settle-containment') {
     if (!args[0] || !args.slice(1).join(' ').trim()) throw new Error('Use master settle-containment GY-N REASON');
