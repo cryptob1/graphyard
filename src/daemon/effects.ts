@@ -43,6 +43,7 @@ import { onceAnnotations, timingFaultAttention, type ReportedAttention } from '.
 import { type BaseFailureEffects, baseFailureEffects } from './base-failure-effects.js';
 import type { daemonSummary } from './run.js';
 import { observeDeployment, promotionReads, promotionWorkflow, type PromotionReads } from './deployment.js';
+import { mainWatchFreezeFromEnv, mainWatchReads, type MainWatchReads } from './main-watch.js';
 import { throughputEffects, type ThroughputEffects } from './throughput-effect.js';
 import { alignRunningLoopUnit, awaitSupervisorRestart, detectLoopSupervisorUnit, performSelfUpgrade, recoverMovedHead, type SelfUpgradeDeps, type SelfUpgradeOutcome } from './upgrade.js';
 import { readRelease, restartExecutors } from '../executor-fleet.js';
@@ -138,6 +139,8 @@ export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffec
    * when the repository has no such workflow, absent on a loop wired without it.
    */
   promotion?: PromotionReads | null;
+  /** The main watch's reads (GY-1519, main-watch.ts): the checkout's history and the control plane's acknowledgements; absent, the watch does not run. */
+  mainWatch?: MainWatchReads | null;
   /** Publishes `mergeQueue.rerunFailedChecks` to the control plane, which reruns a failed required check by it (GY-516); sent only on a change, and read at the start of every cycle so a reconfiguration applies before the next observation. */
   publishMergeSettings?: () => Promise<unknown>;
   /** GY-1416: the loop's setup step, `master setup --apply` beside the cycle at most hourly; it sets derived deployment variables only where the provider adapter applies them in place. */
@@ -699,6 +702,8 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     // `root` is this checkout: containment is derived from its object store, never from the forge.
     observeDeployment: (delivered, retained) => observeDeployment(current(), delivered, run, fetcher, () => Date.now(), { root, retained }),
     get promotion() { return promotionReads(current(), root, run, existsSync(join(root, '.github', 'workflows', promotionWorkflow))); },
+    // GY-1519: the watch reads history from this checkout and its policy from the control plane; the freeze is the environment's ask.
+    get mainWatch() { return mainWatchReads(current(), root, run, { policy: () => asCoordinator('main-watch'), freeze: mainWatchFreezeFromEnv() }); },
     publishProductionEnvironment: async () => {
       const environment = current().run.productionEnvironment ?? productionEnvironmentFromEnv();
       if (environment === publishedEnvironment) return;

@@ -22,6 +22,7 @@ import { healthRoutes } from './routes/health.js';
 import { signinClaimFromEnv, signinRoutes } from './routes/signin.js';
 import { githubRoutes } from './routes/github.js';
 import { operatorAgentRoutes } from './routes/operator-agents.js';
+import { mainWatchRoutes } from './routes/main-watch.js';
 import { proofGrantRoutes } from './routes/proof-grants.js';
 import { agentRegistryRoutes } from './routes/agent-registry.js';
 import { delegationRoutes } from './routes/delegation.js';
@@ -46,7 +47,7 @@ export const publicRoutes: readonly RouteModule[] = [healthRoutes, githubRoutes,
  * modules ahead of the operator-agent guard authorize their callers themselves.
  */
 export const apiRoutes: readonly RouteModule[] = [
-  operatorAgentRoutes, proofGrantRoutes, goalRoutes,
+  operatorAgentRoutes, proofGrantRoutes, goalRoutes, mainWatchRoutes,
   { name: 'operator-agent-scope', routes: [operatorAgentRouteGuard] },
   agentRegistryRoutes, delegationRoutes, validationRoutes, deliveryRoutes, shippingPulseRoutes, flowAnalyticsRoutes, attributionRoutes, scenarioRoutes, interventionRoutes, actionRoutes, statusRoutes, workRoutes,
 ];
@@ -72,9 +73,8 @@ export function assembleServices(engine: Engine, credentials: Credential[], gith
   const env = options.env ?? process.env;
   const delegationLimits = assembleDelegationLimits(credentials, env, options.knownPrincipals);
   const principals = credentials.map(({ token, ...actor }) => ({ actor, hash: createHash('sha256').update(token).digest() }));
-  // The engine is constructed with the repository this control plane is authorized to coordinate.
-  // GITHUB_REPOSITORY is merely a process default (set to the CI checkout), so it
-  // must not override an explicit engine binding or scope validation becomes environment-dependent.
+  // The engine is constructed with the repository this control plane coordinates; GITHUB_REPOSITORY is
+  // only a process default (the CI checkout) and never overrides an explicit engine binding.
   const repository = engine.repository || github?.config.repository || process.env.GITHUB_REPOSITORY || '';
   demand(!engine.repository || !github || engine.repository.toLowerCase() === github.config.repository.toLowerCase(),
     'Engine and GitHub repositories must match');
