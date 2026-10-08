@@ -8,7 +8,7 @@ Only Graphyard writes to main.
 ## Flow
 
 1. **Head submission under a lease.** A worker submits a commit (`complete GY-N EPOCH --head SHA`); the lease ends in the same transaction.
-2. **One serial merge writer** trial-merges the head, runs build and fast tests on the merged tree, records merge intent, then pushes the exact tested merge commit with the install's deploy key, leased on the tested tip.
+2. **One serial merge writer** trial-merges the head, records merge intent, runs build and fast tests on the merged tree, then pushes the exact tested merge commit with the install's deploy key, leased on the tested tip.
 3. **Candidates every ~10 merges or 15 quiet minutes.** UAT serves it, E2E runs; the exact tested commit is promoted. On E2E failure the newest item related to the failing cases is reverted.
 4. **One independent reviewer per item.** Sensitive diffs get a blocking review before step 2; the rest a non-blocking review after merge.
 
