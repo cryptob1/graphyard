@@ -206,11 +206,19 @@ export interface StandingShadowDisagreement {
   mergeSha: string | null; build: 'pass' | 'fail'; tests: ShadowVerdict['tests']; at: string; explained: boolean;
 }
 
+/** The documents of the named work items alone, by key: a bounded read safe under the coordination lock. */
+async function workByKeys(db: Queryable, keys: readonly string[]): Promise<Work[]> {
+  if (!keys.length) return [];
+  return ((await db.query('SELECT w.document FROM work_items w JOIN work_index i ON i.id = w.id WHERE i.key = ANY($1::text[])', [[...keys]])).rows as { document: Work }[]).map(row => row.document);
+}
+
 /**
  * Every shadow-only-fail or shadow-missed verdict on the ledger, re-judged with the delivered merge
  * identity recovered when the item was reopened. Used by the merger switch and master status (GY-1560).
+ * Without `work`, only the items that carry a verdict are read, so the merger switch's transaction
+ * never reads the whole board.
  */
-export async function standingShadowDisagreements(db: Queryable, work: readonly Work[]): Promise<StandingShadowDisagreement[]> {
+export async function standingShadowDisagreements(db: Queryable, work?: readonly Work[]): Promise<StandingShadowDisagreement[]> {
   const rows = (await db.query(
     `SELECT i.key, e.payload FROM events e JOIN work_index i ON i.id = e.work_id WHERE e.kind=$1 ORDER BY e.seq`,
     [shadowVerdictEvent],
@@ -222,7 +230,8 @@ export async function standingShadowDisagreements(db: Queryable, work: readonly 
     if (!verdict) continue;
     newest.set(pairKey({ key: row.key, head: verdict.head, baseTip: verdict.baseTip }), verdict);
   }
-  const byKey = new Map(work.map(item => [item.key, item]));
+  const items = work ?? await workByKeys(db, [...new Set([...newest.values()].map(verdict => verdict.key))]);
+  const byKey = new Map(items.map(item => [item.key, item]));
   // The current document judges most verdicts; only those it cannot judge (a reopened item whose
   // delivery of that head was cleared) recover the delivered merge, in one batched query.
   const judged = [...newest.values()].map(verdict => ({ verdict, item: byKey.get(verdict.key), outcome: compareVerdicts(verdict, githubOutcome(byKey.get(verdict.key), verdict.head)) }));
@@ -246,7 +255,7 @@ export async function standingShadowDisagreements(db: Queryable, work: readonly 
  * Every shadow-only-fail or shadow-missed verdict on the ledger that has no explanation, re-judged
  * against recovered deliveries. Used by the merger switch (GY-1560).
  */
-export async function unexplainedShadowDisagreements(db: Queryable, work: readonly Work[]): Promise<{ key: string; head: string; baseTip: string; outcome: string }[]> {
+export async function unexplainedShadowDisagreements(db: Queryable, work?: readonly Work[]): Promise<{ key: string; head: string; baseTip: string; outcome: string }[]> {
   return (await standingShadowDisagreements(db, work)).filter(entry => !entry.explained)
     .map(entry => ({ key: entry.key, head: entry.head, baseTip: entry.baseTip, outcome: entry.outcome }));
 }

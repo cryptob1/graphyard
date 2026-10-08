@@ -62,7 +62,7 @@ export class MergerSettings {
       demand(current.merger !== data.merger, `The merger is already ${current.merger}`, 409);
       // GY-1560: control-plane is refused while any shadow disagreement stands unexplained; github never is.
       if (data.merger === 'control-plane') {
-        const unexplained = await unexplainedShadowDisagreements(db, await this.store.list());
+        const unexplained = await unexplainedShadowDisagreements(db);
         demand(!unexplained.length, `Control-plane merger refused while unexplained shadow disagreements stand: ${[...new Set(unexplained.map(entry => entry.key))].join(', ')}`, 409);
       }
       await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', [actor.id, mergerEventKind, JSON.stringify({ merger: data.merger, reason: data.reason, previous: current.merger })]);
