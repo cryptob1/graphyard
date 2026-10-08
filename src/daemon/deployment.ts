@@ -442,18 +442,6 @@ export interface PromotionReads {
   soaks?: () => Promise<SoakRun[]>;
 }
 
-/**
- * GY-1519: `frozen` is the main watch's freeze — the commit on main nothing Graphyard recorded
- * explains — and while it stands nothing is dispatched; the reason names the commit and the
- * acknowledgement that lifts it. `watchedTip` is the tip the watch last classified: given, a tip
- * the watch has not seen yet is not promoted either, so a foreign commit fetched this cycle waits
- * for the watch's verdict next cycle rather than riding a candidate before it. Both are left out
- * by a caller that did not ask for the freeze, and promotion runs as before.
- */
-export interface PromotionOptions { now: number; everyMinutes: number; intervalMs?: number; frozen?: { sha: string; since: string } | null; watchedTip?: string | null }
-export const promotionFrozenReason = (frozen: { sha: string; since: string }) =>
-  `Promotion is frozen since ${frozen.since}: commit ${frozen.sha} on the base branch is explained by no merge ledger entry, delivery, revert or direct-merge window; an admin lifts it with graphyard master main-watch acknowledge ${frozen.sha} --reason TEXT --admin-token-stdin`;
-
 const later = (...times: (string | null | undefined)[]) => times.filter((time): time is string => !!time && Number.isFinite(Date.parse(time)))
   .sort((a, b) => Date.parse(b) - Date.parse(a))[0] ?? null;
 
@@ -476,7 +464,7 @@ const later = (...times: (string | null | undefined)[]) => times.filter((time): 
  * fails (or that GitHub accepted before `gh` failed) counts toward the gap and is never
  * repeated cycle after cycle.
  */
-export async function promotionCycle(previous: PromotionState | null, reads: PromotionReads, options: PromotionOptions): Promise<{ state: PromotionState; dispatched: boolean; failure: string | null }> {
+export async function promotionCycle(previous: PromotionState | null, reads: PromotionReads, options: { now: number; everyMinutes: number; intervalMs?: number }): Promise<{ state: PromotionState; dispatched: boolean; failure: string | null }> {
   const at = new Date(options.now).toISOString(), everyMs = options.everyMinutes * 60_000, windows = promotionReadWindows(options.intervalMs ?? 0);
   const settle = (state: Omit<PromotionState, 'nextDueAt' | 'reason'>, reason: string, due: boolean) => ({ ...state, reason: reason.slice(0, 500),
     nextDueAt: due && state.lastDispatchAt ? new Date(Math.max(options.now, Date.parse(state.lastDispatchAt) + everyMs)).toISOString() : due ? at : null });
@@ -497,9 +485,6 @@ export async function promotionCycle(previous: PromotionState | null, reads: Pro
   const base = { checkedAt: at, ...ledger, ...carried, ...await soakRefresh(carried, ledger.candidates ?? [], reads, options.now, windows.runsMs) };
   if (!ledger.mainSha) return done(base, 'The base branch tip could not be read, so nothing is promoted', false);
   if (ledger.mainSha === ledger.promotedSha) return done(base, 'Production runs the base branch tip; nothing to promote', false);
-  // GY-1519: the main watch's freeze holds every dispatch; a tip it has not classified waits for it.
-  if (options.frozen) return done(base, promotionFrozenReason(options.frozen), false);
-  if (options.watchedTip !== undefined && options.watchedTip !== ledger.mainSha) return done(base, `The main watch has not classified the base branch tip ${ledger.mainSha.slice(0, 12)} yet; promotion waits for its verdict`, true);
   const sinceLast = base.lastDispatchAt ? options.now - Date.parse(base.lastDispatchAt) : Number.POSITIVE_INFINITY;
   const gapReason = (since: number) => `The last promotion was dispatched ${Math.round(since / 60_000)} minute(s) ago; the next is due no sooner than ${options.everyMinutes} minute(s) after it`;
   // GY-1513: in flight, the runs are read once an interval, so the conclusion the next dispatch waits for is seen within one.
