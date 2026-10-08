@@ -12,6 +12,7 @@ import { masterConfigSchema } from '../src/master.js';
 import { emptyDaemonState, runCycle, storeAction, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { postRun } from '../src/daemon/doctor.js';
 import { clearDiagnoses, diagnosesSettled, type DiagnosticianEffects } from '../src/daemon/diagnosis.js';
+import { RefusedResponse } from '../src/model/refusal.js';
 import { maxDecisionRequests } from '../src/daemon/decisions.js';
 import type { Cycle } from '../src/daemon/cycle.js';
 import type { DoctorRunRecord } from '../src/daemon/state.js';
@@ -250,5 +251,43 @@ test('manual:fault-class-unclassified — GY-1402: the doctor-run timeout, the G
   assert.ok(planeWideRefusal(new Error('The operation was aborted due to timeout')));
   for (const [index, line] of gy1402.entries()) storeAction(state, line.key, { kind: line.kind, work: null, principal: null, state: 'failed', detail: line.detail, attempts: 1, epoch: null, cycle: index, at: iso(index * 60_000) }, line.site);
   assert.deepEqual(state.faults.instances.map(entry => [entry.subject, entry.faultClass]), gy1402.map(line => [line.key, line.expected]));
+  assert.deepEqual(recurringClasses(state.faults.instances, [], { threshold: 3, windowHours: 24 }, gy1402Clock + day / 2).filter(entry => entry.faultClass === 'unclassified'), [], 'no unclassified recurrence is filed');
+});
+
+// GY-1516, 2026-10-08: three unclassified faults in 24 hours, each a failed maintenance action the
+// loop classified only by its step, though the loop knew the cause:
+// - diagnosis:GY-1430 — both diagnostician runs were stopped at their 1200s bound (overlong-session);
+// - isolated:diagnosis:GY-1473 — the create route refused the diagnostician's fix item (409) and the
+//   refusal was thrown on to cycle.isolate (fix-item);
+// - the doctor's filing of the same content, kept pending and refused again every cycle (fix-item).
+// Both refusals name e2e:self-upgrade-loaded-revision-clears, a scenario nothing registers: scenarios
+// register only from e2e/cases files, so no retry could ever clear it. GY-1530 has the sites pass
+// their cause, drops the dead filing with an escalation naming the scenario, and settles the diagnosis.
+const scenarioRefusal = 'Graphyard refused work (409): Register E2E scenario self-upgrade-loaded-revision-clears before creating work that requires it';
+const gy1516 = [
+  { key: 'diagnosis:GY-1430', kind: 'diagnosis', expected: 'session-liveness', site: 'overlong-session',
+    detail: 'The diagnostician returned no diagnosis of GY-1430: zai/glm-5.3-flash timeout: no terminal event within 1200s; the run was stopped; zai/glm-5.3 timeout: no terminal event within 1200s; the run was stopped' },
+  { key: 'isolated:diagnosis:GY-1473', kind: 'diagnosis', expected: 'proof', site: 'fix-item',
+    detail: `Handling the diagnosis of GY-1473 in the diagnosis step threw, so only its own action failed and the cycle went on with every other item: ${scenarioRefusal}` },
+  { key: 'doctor:3379f2b6c361998f7abec8ee:file:loop', kind: 'fault', expected: 'proof', site: 'fix-item',
+    detail: `Still could not file "Master loop cannot restart or self-upgrade: coordinator checkout HEAD moves under the running loop, so the dirty-checkout guard stands for hours (instances 2026-10-08T01:09Z and 04:11Z)": ${scenarioRefusal}` },
+] as const;
+
+test('manual:fault-class-unclassified — GY-1516: the stopped diagnosis of GY-1430 and the two refused filings open session-liveness and proof instances, none unclassified, and the refusal is read as a create refusal naming its scenario', async () => {
+  // Dynamic: on the base tree these symbols are absent, and the proof's exercise must run this case rather than fail the file at load.
+  const { createRefused, unregisteredScenario } = await import('../src/daemon/doctor.js');
+  const { noDiagnosisKind } = await import('../src/daemon/diagnosis.js');
+  assert.equal(noDiagnosisKind([{ runtime: 'pi', result: 'timeout' }, { runtime: 'pi', result: 'timeout' }]), gy1516[0].site, 'the stopped diagnosis names its site kind');
+  // The refusal as the operator-agent post throws it, and as plain text: a 409 of the create route, naming the unregistered scenario.
+  for (const error of [new RefusedResponse(scenarioRefusal, 409, { error: scenarioRefusal.slice(scenarioRefusal.indexOf(': ') + 2) }), new Error(scenarioRefusal)]) {
+    assert.ok(createRefused(error), 'a 409 is the create route refusing the content');
+    assert.equal(unregisteredScenario(error), 'self-upgrade-loaded-revision-clears');
+  }
+  assert.ok(!createRefused(new Error('Graphyard refused work (503): the control plane is unavailable')), 'a plane that did not answer is no content refusal');
+  assert.ok(!createRefused(new RefusedResponse('Graphyard refused work (502): Application failed to respond', 502, null)));
+  assert.equal(unregisteredScenario(new Error('Graphyard refused work (409): Idempotency key reused with different input')), null);
+  const state = emptyDaemonState(gy1402Config());
+  for (const [index, line] of gy1516.entries()) storeAction(state, line.key, { kind: line.kind, work: null, principal: null, state: 'failed', detail: line.detail, attempts: 1, epoch: null, cycle: index, at: iso(index * 60_000) }, line.site);
+  assert.deepEqual(state.faults.instances.map(entry => [entry.subject, entry.faultClass]), gy1516.map(line => [line.key, line.expected]));
   assert.deepEqual(recurringClasses(state.faults.instances, [], { threshold: 3, windowHours: 24 }, gy1402Clock + day / 2).filter(entry => entry.faultClass === 'unclassified'), [], 'no unclassified recurrence is filed');
 });

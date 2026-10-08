@@ -12,6 +12,7 @@ import { diagnosisPayloadSchema, diagnosisSettled, graphyardTools, type Diagnosi
 import type { Runner } from '../runner/types.js';
 import { type DaemonAction, type DaemonState, message } from './state.js';
 import { record } from './effects.js';
+import { createRefused } from './doctor.js';
 import { maxDecisionRequests } from './decisions.js';
 import type { Cycle } from './cycle.js';
 
@@ -254,6 +255,16 @@ async function runDiagnosis(diagnostician: DiagnosticianEffects, subject: Diagno
 }
 
 const iso = (at: number) => new Date(at).toISOString();
+/**
+ * GY-1530: the cause of a diagnosis no run answered, by how its runs ended. Every run that started
+ * stopped at its bound (the runner's "no terminal event within Ns; the run was stopped", GY-1516's
+ * two 1200s runs on GY-1430) is a session that ran past its bound: session-liveness's
+ * `overlong-session`. Any other mix names no single cause and keeps the step's own kind.
+ */
+export function noDiagnosisKind(runs: readonly { runtime: string; result: string }[]): FaultKind | undefined {
+  const started = runs.filter(run => run.runtime !== 'none');
+  return started.length && started.every(run => run.result === 'timeout') ? 'overlong-session' : undefined;
+}
 const diagnosisKey = (subject: string) => `diagnosis:${createHash('sha256').update(subject).digest('hex').slice(0, 24)}`;
 /** How long past its bound a run recorded as running, with no run in this process, is waited for before it is recorded as lost. */
 export const diagnosisLostGraceMs = 5 * 60_000;
@@ -364,7 +375,7 @@ async function advance(cycle: Cycle, diagnostician: DiagnosticianEffects, entry:
       await note(entry, 'waiting', `The diagnostician's provider refused the diagnosis of ${entry.subject} for its quota or rate limit (${outcome.limit.reason}); it is diagnosed again at ${entry.retryAt}, and no other diagnosis is launched before then`, null);
       return;
     }
-    if (!outcome.diagnosis) { entry.state = 'failed'; await note(entry, 'failed', `The diagnostician returned no diagnosis of ${entry.subject}: ${outcome.runs.map(run => `${run.model} ${run.result}: ${run.detail}`).join('; ')}`); return; }
+    if (!outcome.diagnosis) { entry.state = 'failed'; await note(entry, 'failed', `The diagnostician returned no diagnosis of ${entry.subject}: ${outcome.runs.map(run => `${run.model} ${run.result}: ${run.detail}`).join('; ')}`, noDiagnosisKind(outcome.runs)); return; }
     entry.diagnosis = outcome.diagnosis; entry.state = 'diagnosed';
     await note(entry, 'done', `Diagnosed ${entry.subject} as ${outcome.diagnosis.faultClass}: ${outcome.diagnosis.cause}`);
   }
@@ -399,7 +410,19 @@ async function advance(cycle: Cycle, diagnostician: DiagnosticianEffects, entry:
     let input: FixInput;
     try { input = fixItem(entry, diagnosis); }
     catch (error) { entry.state = 'failed'; await note(entry, 'failed', `The diagnostician's fix item for ${entry.subject} fails the checks master create applies: ${message(error)}`, 'fix-item'); return; }
-    const fix = await diagnostician.file(input, `${diagnosisKey(entry.subject)}:fix`);
+    let fix: Work;
+    try { fix = await diagnostician.file(input, `${diagnosisKey(entry.subject)}:fix`); }
+    catch (error) {
+      // GY-1530: the create route's own refusal (a 409: an e2e proof naming a scenario nothing
+      // registered, GY-1516's "Register E2E scenario … before creating work that requires it") is the
+      // same malformed fix as one the local checks refuse, and settles the entry the same way, under
+      // the proof class's fix-item; thrown on, it reached cycle.isolate as an unclassified
+      // action:diagnosis. A plane-wide failure still throws to ridePlane, and the next cycle files again.
+      if (!createRefused(error)) throw error;
+      entry.state = 'failed';
+      await note(entry, 'failed', `The control plane refused the diagnostician's fix item for ${entry.subject} as written, so it is not filed again; the diagnosis stands for the master to file by hand: ${message(error)}`, 'fix-item');
+      return;
+    }
     entry.fix = fix.key;
     await note(entry, 'done', `Filed ${fix.key} (priority ${fix.priority}) for the root cause of ${entry.subject}: ${diagnosis.cause}`);
     return request(cycle, diagnostician, entry, fix, 'release', {}, `Release ${fix.key}, the root-cause fix the diagnostician found for ${entry.subject}, at priority ${fix.priority}. Cause: ${diagnosis.cause}`, note);

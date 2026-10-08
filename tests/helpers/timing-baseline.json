@@ -610,6 +610,7 @@
     "tests/soak-day.test.ts": 112848,
     "tests/soak-decisions.test.ts": 227396,
     "tests/soak-dispatch.test.ts": 23662,
+    "tests/soak-doctor.test.ts": 20000,
     "tests/soak-flake-ledger.test.ts": 1100,
     "tests/soak-loop-wake.test.ts": 34070,
     "tests/soak-main-guard.test.ts": 31000,

@@ -164,3 +164,56 @@ test('manual:fault-class-decision — action:decision|GY-1417|2026-10-07T07:06:0
   await runCycle(config(), other, effects(() => item, () => clock, { agents: [] }, decided, { decide: refusedOn(submitted, 'f'.repeat(40)) }), () => clock);
   assert.equal(decisionFaults(other).length, 1, 'a refusal of a rework bound to another head is a fault');
 });
+
+/**
+ * GY-1541 names this file for its proof: manual:fault-class-decision. The loop filed 3 decision
+ * faults on 8 October 2026: GY-1515 and GY-1530 (06:02Z) from the docs-sync cutoff give-up, the
+ * loop's own GY-1434 route, and isolated:decision:agent-registry (07:13Z) from a plane deploy's
+ * startup-readiness 503, which the isolate() catch did not know as plane-wide (GY-1375).
+ */
+for (const [key, instance] of [['GY-1515', '2026-10-08T06:02:22.347Z'], ['GY-1530', '2026-10-08T06:02:30.923Z']] as const) test(`manual:fault-class-decision — action:decision|${key}|${instance}: the cutoff give-up returns the conflict to a worker with no fault`, async () => {
+  const head = '9237f0b41c14b6d51bd44d0bc13de137b35541aa', bound = '059bf0f2b05b4274811a1e65d548a2fa891b362a', tip = '2cca02cd2424cdacbbad18484b5590f61150cc3e';
+  const launchedAt = Date.parse('2026-10-08T05:52:00Z'), decided: string[] = [], herdr = { agents: [] as { name: string; status: string }[] };
+  let at = launchedAt;
+  // The conflict was first recorded at 05:51:01Z; its rework is due ten minutes later, the cutoff two minutes before.
+  const item = () => { const work = conflicted(key, head, bound, tip, new Date(at - 1_000).toISOString());
+    return { ...work, systemDriven: true, baseRefresh: { ...work.baseRefresh!, conflictSince: '2026-10-08T05:51:01.988Z' } } as Work; };
+  const state = emptyDaemonState(config());
+  const fx = effects(item, () => at, herdr, decided);
+  await runCycle(config(), state, fx, () => at);
+  assert.equal(herdr.agents.length, 1, 'the docs-sync is launched');
+  for (at = launchedAt + minute; at <= launchedAt + 15 * minute && !decided.includes('rework'); at += 20_000) await runCycle(config(), state, fx, () => at);
+  assert.deepEqual(decided, ['rework'], 'the conflict returns to a worker');
+  assert.match(Object.values(state.docsSyncs)[0].failed ?? '', /was stopped at .* without having moved/);
+  assert.deepEqual(decisionFaults(state), [], 'the loop\'s own cutoff stop is no decision fault');
+});
+
+test('manual:fault-class-decision — action:decision|isolated:decision:agent-registry|2026-10-08T07:13:09.435Z: a registry 503 during a plane deploy is retried next cycle, no fault', async () => {
+  const { FleetUnreachableError } = await import('../src/fleet.js');
+  const clock = Date.parse('2026-10-08T07:13:00Z'), decided: string[] = [];
+  const failing = (text: string) => ({ reconcileSessions: async () => { throw new FleetUnreachableError(text); } });
+  const state = emptyDaemonState(config());
+  const result = await runCycle(config(), state, effects(() => conflicted('GY-1541', 'a'.repeat(40), 'b'.repeat(40), 'c'.repeat(40), new Date(clock).toISOString()), () => clock, { agents: [] }, decided,
+    failing('The agent registry at https://graphyard-production.up.railway.app answered 503: Startup validation has not completed; retry shortly')), () => clock);
+  assert.ok(result.actions.some(action => action.work === null && /registry/.test(action.detail) || /did not answer/.test(action.detail)), JSON.stringify(result.actions.map(action => action.detail)));
+  assert.deepEqual(decisionFaults(state).filter(fault => fault.kind === 'action:decision'), [], 'a deploy\'s readiness 503 judged nothing');
+
+  // An item-specific registry failure is still a fault.
+  const other = emptyDaemonState(config());
+  await runCycle(config(), other, effects(() => conflicted('GY-1541', 'a'.repeat(40), 'b'.repeat(40), 'c'.repeat(40), new Date(clock).toISOString()), () => clock, { agents: [] }, decided,
+    failing('The agent registry at https://graphyard.example answered 400: malformed session')), () => clock);
+  assert.equal(decisionFaults(other).filter(fault => fault.kind === 'action:decision').length, 1);
+});
+
+test('manual:fault-class-decision — action:decision|isolated:decision:agent-registry|2026-10-08T07:13:09.435Z: repeated readiness 503s over many cycles record no fault and the loop recovers when the plane answers', async () => {
+  const { FleetUnreachableError } = await import('../src/fleet.js');
+  let clock = Date.parse('2026-10-08T07:13:00Z'), down = true;
+  const decided: string[] = [], state = emptyDaemonState(config());
+  const reconcile = { reconcileSessions: async () => { if (down) throw new FleetUnreachableError('The agent registry at https://graphyard-production.up.railway.app answered 503: Startup validation has not completed; retry shortly'); return []; } };
+  const fx = effects(() => conflicted('GY-1541', 'a'.repeat(40), 'b'.repeat(40), 'c'.repeat(40), new Date(clock).toISOString()), () => clock, { agents: [] }, decided, reconcile);
+  for (let cycle = 0; cycle < 6; cycle += 1, clock += minute) await runCycle(config(), state, fx, () => clock);
+  assert.deepEqual(decisionFaults(state), [], 'six cycles of a deploy\'s readiness 503 file no decision fault');
+  down = false;
+  for (let cycle = 0; cycle < 3; cycle += 1, clock += minute) await runCycle(config(), state, fx, () => clock);
+  assert.deepEqual(decisionFaults(state), [], 'and none once the plane answers again');
+});
