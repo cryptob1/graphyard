@@ -27,7 +27,7 @@ Minutely scan (`GET /api/interventions` → `scan`; `GRAPHYARD_INTERVENTION_PATT
 
 ## Flaky CI check
 
-[Reruns once](github.md#failed-checks) (`mergeQueue.rerunFailedChecks`, 0 disables); pass clears it. On main the main guard judges no later merge until reruns conclude. A run failing only through cancelled or timed-out jobs reruns them up to 3 times; still cancelled, one `escalation:main-guard:SHA` infrastructure fault names the run and stopped step, reverting nothing. A real failure reruns once: passing, it is appended to the item's `mainGuardFlakes` (last 20); failing again, refused, or unconcluded within the hour, it is reverted.
+[Reruns once](github.md#failed-checks) (`mergeQueue.rerunFailedChecks`, 0 disables); pass clears it. On main the main guard judges no later merge until reruns conclude. Cancelled or timed-out jobs rerun up to 3 times; still cancelled, one `escalation:main-guard:SHA` infrastructure fault names the run and step, reverting nothing. A real failure reruns once: a pass is appended to `mainGuardFlakes` (last 20); a second failure, refusal or no conclusion within the hour reverts it.
 
 ## Accepted evidence turns out to be wrong
 
@@ -72,7 +72,7 @@ Silent webhook hour: `master status` cites `https://github.com/settings/apps/APP
 
 ## Control-plane resources
 
-`resources` remedies: ledgers, `graphyard master run --once`; `agent-names:PROFILE`, `herdr pane close PANE`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow volume and `GRAPHYARD_DATABASE_MAX_BYTES` (10GiB); `tmp-inodes`, free `TMPDIR`/`/tmp` (the pass deletes this user's `tsx-<uid>` compile-cache files older than 6 h, ≤100 per cycle); `loaded-revision` counts code moves. No fault while remedy acts: owed restart retried within bound, pane unowned <10min, `/tmp` >10% free after pass within 30min.
+`resources` remedies: ledgers, `graphyard master run --once`; `agent-names:PROFILE`, `herdr pane close PANE`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow volume and `GRAPHYARD_DATABASE_MAX_BYTES` (10GiB); `tmp-inodes`, free `TMPDIR`/`/tmp` (old `tsx-<uid>` compile-cache files); `loaded-revision` counts code moves. No fault while remedy acts: owed restart retried within bound, pane unowned <10min, `/tmp` >10% free after pass within 30min.
 
 Session-started `npm test`, `test:browser`, typecheck, `tsc --noEmit` take one of max(2, floor(GB/8)) slots (`GRAPHYARD_VERIFICATION_SLOTS`; managed root's `.verification-slots`); CI unbounded. Under max(10% RAM, 4GB) available, launches defer (`escalation:dispatch:memory`; one `memory-pressure` fault per dip) until 1GB above.
 

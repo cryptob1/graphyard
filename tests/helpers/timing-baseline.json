@@ -301,6 +301,7 @@
     "tests/delivered-attention.test.ts": 380,
     "tests/delivery-causes.test.ts": 365,
     "tests/delivery-docs.test.ts": 369,
+    "tests/delivery-redesign-doc.test.ts": 450,
     "tests/delivery-setup.test.ts": 1855,
     "tests/delivery.test.ts": 2631,
     "tests/deploy-limits.test.ts": 2761,

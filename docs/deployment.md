@@ -17,8 +17,6 @@ One stateless container, Postgres: `node "$GRAPHYARD_CLI" install --provider rai
 | `GRAPHYARD_MIN_REVIEWERS` | Reviewers with a lead (1)
 | `GRAPHYARD_MAX_REVIEWERS` | ≥ `producer` count (2)
 
-Installers derive limits; unset ones are `delegationLimits` drift.
-
 ### CI producer
 
 [CI proofs](github.md#proofs-in-ci) publish via one principal (`manual:*`, `e2e:*` refused):
@@ -31,9 +29,9 @@ Installers derive limits; unset ones are `delegationLimits` drift.
 
 ### Production deployment observation
 
-A merge unserved five minutes after new `GRAPHYARD_BUILD_SHA` is `delivery.deployment-incident`; until then, or with provider attempt past serving commit in flight, `production` shows `aheadBy`, `rollingOut: true`, no "main is N commits ahead of production" attention. With `release/production` (`GRAPHYARD_PRODUCTION_BRANCH`) production is measured against it (unpromoted merges: pipeline lag). Deployments: Railway's API (`RAILWAY_API_TOKEN`/`RAILWAY_TOKEN`), else App-read GitHub deployments under [production environment name](#production-environment-name); in-flight holds incident, failed names log URL. A lagging list yields to a fresh `master verify-deployment` endpoint observation (`servingSource: endpoint`); the running build's `/healthz` commit outranks both (`servingSource: build`). Probe: `master init --deployment-url https://YOUR-DOMAIN/healthz --deployment-sha-field commit`. Loop reuses last verified observation for `run.deploymentReuseMinutes` (15; `master config deploymentReuseMinutes=N`, `0` reads every cycle) while nothing is pending.
+A merge unserved five minutes after new `GRAPHYARD_BUILD_SHA` is `delivery.deployment-incident`; before then, or with a provider attempt in flight, `production` shows `aheadBy`, `rollingOut: true` and no "main is N commits ahead of production" attention. With `release/production` (`GRAPHYARD_PRODUCTION_BRANCH`) production is measured against it (unpromoted merges are pipeline lag). Deployments: Railway's API (`RAILWAY_API_TOKEN`/`RAILWAY_TOKEN`), else App-read GitHub deployments under [production environment name](#production-environment-name); in-flight holds the incident; a failed one names its log URL. A fresh `master verify-deployment` endpoint observation (`servingSource: endpoint`) outranks a lagging list; the running build's `/healthz` commit outranks both (`servingSource: build`). Probe: `master init --deployment-url https://YOUR-DOMAIN/healthz --deployment-sha-field commit`. Loop reuses last verified observation for `run.deploymentReuseMinutes` (15; `master config deploymentReuseMinutes=N`, `0` reads every cycle) while nothing is pending.
 
-Deliveries awaiting not-yet-due or validating [promotion](delivery.md) are skipped by release lag and the `loaded-revision` [resource](operations-reference.md#control-plane-resources), naming `nextDueAt`.
+Deliveries awaiting not-yet-due or validating [promotion](delivery.md) are skipped by release lag and the `loaded-revision` [resource](operations-reference.md#control-plane-resources).
 
 After a verified deployment the loop measures served-release throughput into `.graphyard/measurements/throughput` (`scripts/measure-throughput.mjs --record` too), excluding deliveries a master, operator or human hand touched; all ≥20 window deliveries excluded raises `escalation:throughput:GY-N:REV` once and files an owner item.
 
@@ -56,5 +54,5 @@ Set the variables table by hand, then `node "$GRAPHYARD_CLI" github-setup https:
 - Compose: `cp .env.example .env`, replace secrets, `docker compose --profile full up -d`; TLS on 4310, Postgres private.
 - Kubernetes: `helm install graphyard deploy/helm/graphyard --set secrets.existingSecret=graphyard-credentials …`.
 - Railway: `railway init`, `railway add --database postgres`, variables, `railway up`. Production redeploy: never `init`; clean tip checkout, `railway link --project graphyard --environment production --service graphyard`, `railway up`.
-- Existing installs: `graphyard master setup` plans missing variables saved credentials derive; `--apply` sets them via adapter (Railway: `variable set --stdin`), printing fingerprints, auditing each (`.graphyard/setup-audit.jsonl`). No install record: `--provider railway --service graphyard --link-dir DIR`. Loop applies it hourly. `park` refuses host-doable asks (repository gh login administers, derived variable, held credential).
+- Existing installs: `graphyard master setup` plans missing variables saved credentials derive; `--apply` sets them via adapter (Railway: `variable set --stdin`), printing fingerprints, auditing each (`.graphyard/setup-audit.jsonl`). No install record: `--provider railway --service graphyard --link-dir DIR`. `park` refuses host-doable asks (repository gh login administers, derived variable, held credential).
 - Railway revert approver by hand: `node scripts/provision-railway.mjs` sets `GRAPHYARD_REVERT_APPROVER_*` from `.graphyard/revert-approver.json` (0600) or `--revert-approver-stdin` (`--revert-approver-only` sets only those, from the reviewer App's record). Redeploy; `--verify` (with `GRAPHYARD_URL`) exits 0 once the live guard names that App.
