@@ -10,7 +10,7 @@ import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { createSchema, type Evidence, type Observation, type Principal, type Work } from '../src/model.js';
 import { automatableProof, dispatchIneligibility, dispatchRequestsFor, reconcileAutoDispatch, reviewNeed, type DispatchRequest } from '../src/model/dispatch.js';
-import { buildMasterStatus, loadMasterConfig, managedMasterInstructions, masterConfigSchema, observedExhaustions, paneLastLine, producerProfileSchema, readEnvironmentLog, saveProducerProfile, SessionStartError, setupMaster, type MasterConfig, type MasterRun } from '../src/master.js';
+import { buildMasterStatus, loadMasterConfig, masterInstructions, masterConfigSchema, observedExhaustions, paneLastLine, producerProfileSchema, readEnvironmentLog, saveProducerProfile, SessionStartError, setupMaster, type MasterConfig, type MasterRun } from '../src/master.js';
 import { expandTypedCommand, startedAtOnce } from './helpers/launch-shell.js';
 import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, saveReviewerProfile, saveReviewLedger, staleReviewReason, summarizeReviews } from '../src/reviewer.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
@@ -393,7 +393,7 @@ test('manual:auto-dispatch-status — the master guide, the generated instructio
   const read = async (name: string) => readFile(new URL(`../${name}`, import.meta.url), 'utf8');
   const [masterAgent, coordination, workCommands, webhook, readEndpoints, help] = await Promise.all([readMasterGuide(), read('docs/coordination.md'), read('docs/protocol/work-commands.md'), read('docs/protocol/github-webhook.md'), read('docs/protocol/read-endpoints.md'), read('src/cli/master.ts')]);
   for (const fragment of ['## Automatic dispatch at submit', 'master producer add', 'within 30 seconds', 'never launches reviews or producers by hand', 'producerProofs', '.graphyard/producers.json', 'run.reviewerProfile', 'dispatchIntervalSeconds', 'one producer session per proof group', 'examples/master/claude-producer.json', 'autoDispatch']) assert.ok(masterAgent.includes(fragment), `docs/master-agent.md must document: ${fragment}`);
-  const instructions = managedMasterInstructions('');
+  const instructions = masterInstructions;
   for (const fragment of ['within\n30 seconds', 'never launch reviews or producers by hand', 'what is requested, what is running and since when', 'Keep cycling: status, dispatch ready work, shepherd review, reconcile what GitHub\nmerged']) assert.ok(instructions.includes(fragment), `the generated instructions must state: ${fragment}`);
   assert.ok(coordination.includes('producerProofs') && coordination.includes('producer-runnable'), 'the coordination guide explains how an item marks a manual proof producer-runnable');
   assert.ok(workCommands.includes('producerProofs'), 'the work-commands page documents producerProofs');

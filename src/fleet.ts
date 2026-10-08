@@ -53,6 +53,13 @@ export interface FleetLaunchAccount { name: string; kind: string; home: string |
 
 export class FleetUnreachableError extends Error {}
 /**
+ * Whether `error` is the registry's definitive answer that it does not know a session (GY-1504): it
+ * keeps only its last `sessionHistoryLimit` ended sessions, so one that aged out answers 404 Unknown
+ * session forever. Such a session holds no role slot in the registry's own accounting, so the caller
+ * takes it as ended; a refusal the plane's outage or restart caused is no such answer and is retried.
+ */
+export const unknownRegistrySession = (error: unknown) => error instanceof FleetUnreachableError && /^The agent registry at \S+ answered 404: Unknown session$/.test(error.message);
+/**
  * A launch the registry refused only because its role is at its concurrency limit (GY-190). It is
  * not a fault of any account and not a decision to give up on: the launch waits for a slot, and the
  * loop makes it again on the first cycle after one frees.
