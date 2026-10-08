@@ -37,12 +37,12 @@ export type ProcessRunner = (command: string, args: string[], options: { cwd: st
 
 /** Run one process, both streams interleaved, killed outright at its timeout; only the last ~4 MB of output is kept. */
 export const runProcess: ProcessRunner = (command, args, options) => new Promise(resolve => {
-  const child = spawn(command, args, { cwd: options.cwd, env: options.env, shell: options.shell, stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn(command, args, { cwd: options.cwd, env: options.env, shell: options.shell, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
   const chunks: Buffer[] = [];
   let timedOut = false, size = 0;
   const keep = (chunk: Buffer) => { chunks.push(chunk); size += chunk.length; while (size - chunks[0].length >= 4_000_000) size -= chunks.shift()!.length; };
   child.stdout.on('data', keep); child.stderr.on('data', keep);
-  const timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, options.timeoutMs);
+  const timer = setTimeout(() => { timedOut = true; try { process.kill(-child.pid!, 'SIGKILL'); } catch { child.kill('SIGKILL'); } }, options.timeoutMs);
   child.on('error', error => { clearTimeout(timer); resolve({ code: null, output: `${Buffer.concat(chunks).toString('utf8')}${error.message}`, timedOut }); });
   child.on('close', code => { clearTimeout(timer); resolve({ code, output: Buffer.concat(chunks).toString('utf8'), timedOut }); });
 });
