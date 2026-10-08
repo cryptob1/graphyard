@@ -1,35 +1,10 @@
 import type { Work } from './work.js';
-import type {} from './merge-ledger.js'; // Work.mergeLedger
 import type { Decision } from './approval.js';
 import { mechanicalVerdicts, producerManualFailures } from './mechanical-proofs.js';
 import { baseRefreshConflict } from '../merge-queue.js';
 
 /** The ledger's approver of a rework the control plane applied itself: by its risk lane (GY-883) or on its recorded ground. */
 export const laneApprover = 'graphyard-risk-lane';
-/** The ledger's approver of a rework the merge writer's own failed trial grounds (GY-1524 AC-3). */
-export const mergeWriterApprover = 'graphyard-merge-writer';
-/** The ground's name, as the approval records it and the binding of the rework the loop requests names it (`<head>:merge-writer-trial-failed`). */
-export const mergeWriterTrialGround = 'merge-writer-trial-failed';
-/**
- * How the merge writer's `merge.refused` reason opens when the trial of the head failed (a conflict,
- * a failed build step or failing tests), as against a push the base moved under (`base moved N
- * times`), which refuses nothing about the head and leaves it queued.
- */
-export const trialFailurePrefix = 'trial failed';
-
-/**
- * GY-1524. The ground a failed trial of the current head gives: the control plane's own merge
- * writer trial-merged exactly this candidate onto the base tip, built and ran its tests, and
- * recorded `merge.refused` naming what failed (model/merge-ledger.ts). Nothing but a new head can
- * pass that trial, so the rework needs no approver: the writer is its approver (`mergeWriterApprover`).
- * A refusal for another head, a revert refusal, or a `base moved` refusal grounds nothing.
- */
-export function trialFailedGround(work: Pick<Work, 'candidate' | 'mergeLedger'>): string | null {
-  const ledger = work.mergeLedger, candidate = work.candidate;
-  if (!ledger || !candidate || ledger.state !== 'refused' || !ledger.refusal || ledger.refusal.kind !== 'merge') return null;
-  if (ledger.head?.toLowerCase() !== candidate.sha.toLowerCase() || !ledger.refusal.reason.startsWith(trialFailurePrefix)) return null;
-  return `the merge writer's trial of candidate ${candidate.sha.slice(0, 12)} failed (${ledger.refusal.reason})`;
-}
 
 /**
  * GY-1394. The ground on which a rework of the current head needs no approver decision, or null.
@@ -64,9 +39,6 @@ export function reworkGround(work: Work, decisions: readonly GroundDecision[], n
   const head = candidate.sha.slice(0, 12);
   const failed = [...mechanicalVerdicts(work, [work], now).filter(verdict => verdict.outcome === 'failed'), ...producerManualFailures(work, [work], now)];
   if (failed.length) return `a trusted proof failed on candidate ${head} (${[...new Set(failed.map(verdict => verdict.proof))].sort().join(', ')})`;
-  // GY-1524: the merge writer's own trial of the head failed; the writer is the rework's approver (lane-rework.ts).
-  const trial = trialFailedGround(work);
-  if (trial) return trial;
   const refused = refusedAttestation(work, decisions);
   if (refused) return `${refused.refusal?.approver ?? 'an approver'} refused the attestation of ${refused.input.proof} on candidate ${head} (decision ${refused.id})`;
   const observation = work.observation;

@@ -1,7 +1,7 @@
 import type pg from 'pg';
 import { endedLeaseLoss, leaseLossSettleMs, type Escalation, type Stage, type Work } from './model.js';
 import { containmentGraceMs, containmentSettleWaitBoundMs } from './model/containment.js';
-import { laneApprover, mergeWriterApprover } from './model/rework-ground.js';
+import { laneApprover } from './model/rework-ground.js';
 import { routedWideningDecision, wideningSettlement } from './model/scope-provenance.js';
 import { reworkGroundFields, routineReworkGround as routineGround, type ReworkGroundsWork } from './rework-grounds.js';
 import { applyWorkDelta, type DeltaOp } from './store/snapshot-delta.js';
@@ -96,16 +96,15 @@ export const routedReason = (payload: any): string | null => routedWideningDecis
 /**
  * Record on an open rework decision who approved it. Approved by the control plane on a ground the
  * record shows on the exact head (GY-1394), it is `self`: a lane approval with no recorded ground
- * still counts, and so does the merge writer's on its failed trial (GY-1524). `approvedBy` names the
- * product's own approvers — the risk lane (GY-883), the merge writer and an
+ * still counts. `approvedBy` names the product's own approvers — the risk lane (GY-883) and an
  * operator agent the loop launched; a person approving the loop's request did the approver's job,
  * and leaves it unset.
  */
 export function approvedRework(decision: ReworkDecision | null, row: { actor: string; payload?: any }) {
   if (!decision || decision.id !== row.payload?.id) return;
-  if ((row.actor === laneApprover || row.actor === mergeWriterApprover) && typeof row.payload?.ground === 'string' && row.payload.ground) decision.self = true;
+  if (row.actor === laneApprover && typeof row.payload?.ground === 'string' && row.payload.ground) decision.self = true;
   const approver = row.payload?.approver ?? {};
-  if (approver.role === 'risk-lane' || approver.role === 'merge-writer' || approver.role === 'operator-agent') decision.approvedBy = row.actor;
+  if (approver.role === 'risk-lane' || approver.role === 'operator-agent') decision.approvedBy = row.actor;
 }
 
 /**
