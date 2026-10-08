@@ -643,6 +643,7 @@
     "tests/upgrade-slot-restart.test.ts": 1800,
     "tests/user-manager-faults.test.ts": 9309,
     "tests/validation.test.ts": 34631,
+    "tests/verification-maps.test.ts": 400,
     "tests/verify-base-exercise-followups.test.ts": 2122,
     "tests/verify-base-exercise.test.ts": 1376,
     "tests/verify-before-review.test.ts": 6361,

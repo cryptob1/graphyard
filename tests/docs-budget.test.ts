@@ -98,6 +98,8 @@ test('unit:docs-word-budget — the pages graphyard.json budgets (README.md and 
   assert.ok(budget, 'graphyard.json configures documentation.wordBudget');
   assert.deepEqual({ total: budget.total, perPage: budget.perPage, paths: budget.paths }, CONFIGURED_BUDGET, 'graphyard.json budgets 16,000 words, 1,200 per page, over README.md and docs/');
   assert.match(read('docs/development.md'), /`wordBudget` \(16,000 words, 1,200 per page;/, 'docs/development.md states the configured budget');
+  // Verification maps (GY-1495) carry their own 250-word cap (tests/verification-maps.test.ts), never the docs budget.
+  for (const map of readdirSync(`${root}verification`).filter(name => name.endsWith('.md'))) assert.ok(!budgetedPage(`verification/${map}`, budget), `verification/${map} is outside the docs budget`);
   assert.equal(words('one  two\tthree\n\nfour — `five six` [seven](eight.md)'), 8, 'words are whitespace-separated runs, as wc -w counts them');
   const wc = spawnSync('wc', ['-w', 'README.md'], { cwd: root, encoding: 'utf8' });
   if (wc.status === 0) assert.equal(Number(wc.stdout.trim().split(/\s+/)[0]), words(read('README.md')), 'the count agrees with wc -w');
