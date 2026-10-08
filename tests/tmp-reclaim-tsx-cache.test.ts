@@ -5,7 +5,7 @@ import { existsSync } from 'node:fs';
 import { lstat, mkdir, utimes, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { join } from 'node:path';
-import { reclaimTmpDirectories, tmpReclaimMinAgeMs, tsxCacheName } from '../src/tmp-reclaim.js';
+import { reclaimTmpDirectories, tmpReclaimMinAgeMs } from '../src/tmp-reclaim.js';
 import { readResources, readTmpInodes, type ResourceInputs } from '../src/master-resources.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -15,7 +15,8 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 // files one by one instead, and the tmp-inodes reading names the cache among this user's entries.
 
 const backdate = (path: string, ageMs: number, now = Date.now()) => utimes(path, new Date(now - ageMs), new Date(now - ageMs));
-const ownCache = () => tsxCacheName();
+/** This user's tsx cache name, spelled here so the file loads on a base without the change and fails there as test cases. */
+const ownCache = () => { const uid = process.getuid?.(); return uid === undefined ? null : `tsx-${uid}`; };
 
 test('unit:tmp-reclaim-tsx-cache — the pass removes old regular files under this user\'s tsx cache, keeps fresh files, sockets and directories, and stays within its per-cycle limit', { skip: ownCache() === null ? 'no uids on this platform' : false }, async () => {
   const tmp = await temporaryDirectory('tsx-cache-reclaim');
