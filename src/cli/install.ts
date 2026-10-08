@@ -32,7 +32,6 @@ const interactiveGithubSetup = (root: string) => async (repository: string, depl
     } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
   }
 };
-
 /**
  * The capacity variables that accompany the principals `init --apply` registers: derived from
  * the roster in .graphyard/principals.json, and — when the operator credential reaches the
@@ -266,7 +265,8 @@ export const installCommands = defineCommands([
         : delegationLimits?.drift?.length ? `Set ${delegationLimits.drift.map((entry: any) => `${entry.variable}=${entry.required}`).join(' ')} on the deployment: ${delegationLimits.drift[0].reason}`
         : documentation.drift ? documentation.drift
         : production?.incidents?.length ? `Production has not deployed ${production.incidents.map((incident: any) => incident.key).join(', ')}: ${production.incidents[0].reason}`
-        : readiness.next; console.error(mergerDoctorLine(live?.mergeWriter));
+        : readiness.next;
+      console.error(mergerDoctorLine(live?.mergeWriter));
       return context.print({ discovered, server: base, cliPath: await context.activeCliPath(), hostId: context.individualHostId(), connected: !!live, githubConfigured: !!live?.github, role: live?.actor?.role, release: live?.release ?? null, failure,
         setup,
         appPermissions: appPermissions ? { verifiedAt: appPermissions.verifiedAt, missing: appPermissions.missing, attention: appPermissions.attention, installationUrl: appPermissions.installationUrl } : null,
