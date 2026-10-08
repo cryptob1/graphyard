@@ -12,6 +12,7 @@ import { escalationTriggers, type Evidence, type Observation, type Work } from '
 import { nameUnobtainableReviews, requestAttemptLimit, settledAnswerGraceMs, unansweredRequest, type DispatchRequest, type RequestProgress } from '../src/model/dispatch.js';
 import { applyRegistryMutation, emptyRegistry, fleetRoles, fleetView, proposedRuntimes, type AgentRegistry, type FleetSession } from '../src/model/registry.js';
 import { agentOwner, buildMasterStatus, controlPlaneAttention, installationSources, masterConfigSchema, workAttentionCauses, type AttentionItem, type MasterConfig } from '../src/master.js';
+import { noDiagnosisKind } from '../src/daemon/diagnosis.js';
 import { containmentSettleWaitBoundMs, cycleFailureAttentionAfter, cycleFaults, daemonActionFaultKind, daemonActionKinds, daemonEffects, daemonSummary, emptyDaemonState, endFailingRuns, fileRecurringFaultClasses, herdrFaultKinds, loopAttention, loopLiveness, noteConfigReload, noteCycleFailure, noteWatchdog, onceAnnotations, faultObservationIntervalMs, deploymentObservationSchema, pruneDaemonState, reconcilePendingActions, retainedActions, runCycle, storeAction, timingFaultAttention, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { attributeAttention, derivedAttention, faulted } from '../src/master-status.js';
 import { sessionRetries } from '../src/producer.js';
@@ -266,6 +267,22 @@ test('unit:fault-catalogue-action-kinds — a failed fault or diagnosis action i
   // A plane-wide one names its cause, and so leaves unclassified.
   await postRun({ state: posting, effects: { persist: async () => {} } } as unknown as Cycle, { recordRun: async () => { throw new Error('The operation was aborted due to timeout'); } }, { ...run, at: iso(1) }, () => clock);
   assert.deepEqual(posting.faults.instances.map(entry => [entry.kind, entry.faultClass]), [['action:fault', 'unclassified'], ['plane-unavailable', 'deployment']]);
+});
+
+test('unit:fault-classes-catalogue-total — after GY-1530 every source\'s kind is still listed exactly once, the step kinds action:fault/action:diagnosis stay parked under unclassified for emitters that pass no cause, and the causes the doctor and the diagnosis step now pass are catalogued under their classes', () => {
+  const listed = faultClasses.flatMap(faultClass => faultCatalogue[faultClass].map(kind => ({ kind, faultClass })));
+  for (const { kind } of listed) assert.equal(listed.filter(entry => entry.kind === kind).length, 1, `${kind} is listed under exactly one class`);
+  assert.equal(new Set(faultKinds).size, faultKinds.length, 'no kind is listed twice');
+  assert.deepEqual(new Set(faultKinds), new Set(listed.map(entry => entry.kind)));
+  for (const kind of [...workAttentionCauses, ...installationSources, ...escalationTriggers.map(escalationFaultKind), ...daemonActionKinds.map(daemonActionFaultKind)]) assert.ok(isFaultKind(kind), `${kind} is catalogued`);
+  // The step kinds name no cause (GY-1338): an emitter that still passes none lands here, never in loop or elsewhere.
+  assert.deepEqual([...faultCatalogue.unclassified], ['unclassified', 'action:fault', 'action:diagnosis']);
+  for (const kind of ['action:fault', 'action:diagnosis']) assert.equal(storeAction(emptyDaemonState(config()), kind, { kind: kind.slice(7) as 'fault' | 'diagnosis', work: null, principal: null, state: 'failed', detail: 'no cause passed', attempts: 1, epoch: null, cycle: 1, at: iso(0) }).faultClass, 'unclassified');
+  // GY-1530's causes: a filing or fix item create refuses is the proof class's fix-item; a diagnostician whose runs were stopped at their bound is session-liveness's overlong-session.
+  assert.equal(faultClassOf('fix-item'), 'proof');
+  assert.equal(faultClassOf('overlong-session'), 'session-liveness');
+  assert.equal(faultClassOf(noDiagnosisKind([{ runtime: 'pi', result: 'timeout' }, { runtime: 'pi', result: 'timeout' }])!), 'session-liveness');
+  assert.equal(faultClassOf('plane-unavailable'), 'deployment');
 });
 
 test('unit:fault-classes — the fix-item kind a diagnosis\'s refused fix item carries is listed exactly once, under proof', () => {

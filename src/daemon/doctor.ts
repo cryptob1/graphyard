@@ -5,6 +5,7 @@ import type { Work } from '../model.js';
 import { createSchema } from '../model.js';
 import { isClosed } from '../model/closure.js';
 import { planeWideRefusal } from '../model/blocker-class.js';
+import { RefusedResponse } from '../model/refusal.js';
 import { openFaultClassItem } from '../model/fault-classes.js';
 import { workerSubmissionBoundMs } from '../model/attempt-bound.js';
 import { scopeRefusalBlocker, unplannedPaths } from '../model/scope.js';
@@ -281,6 +282,40 @@ const invalidFiling = (file: DoctorFile, error: unknown) =>
   `The doctor asked to file "${file.title}" (${file.faultClass}, P${file.priority}), but the filing fails the checks master create applies, so it is not filed; file it by hand with master create: ${message(error)}`.slice(0, 2000);
 
 /**
+ * GY-1530: whether the control plane's create route refused the filing itself — a 409, the status
+ * every `demand` of create answers with — rather than failing to answer. The content is what it
+ * refused, so a retry of the same content is refused the same way, for ever: GY-1516's doctor re-filed
+ * one dead filing every cycle for hours. Read structurally from the response, else from the text the
+ * operator-agent post wraps the status in. The diagnosis step reads its fix item's refusal by the same rule.
+ */
+export const createRefused = (error: unknown) => error instanceof RefusedResponse ? error.status === 409 : /^Graphyard refused \S+ \(409\)/.test(message(error));
+/**
+ * The scenario a create refusal names as unregistered (src/engine.ts's "Register E2E scenario NAME
+ * before creating work that requires it"), else null. Scenarios register only from the repository's
+ * e2e/cases files (`graphyard e2e sync`) or an admin's defineScenario; a filing that cites one by a
+ * name nothing registers is malformed, as a proof ID the checks refuse is, and can never be filed as written.
+ */
+export const unregisteredScenario = (error: unknown) => /Register E2E scenario (\S+) (?:before creating work that requires it|first)\b/.exec(message(error))?.[1] ?? null;
+
+/**
+ * A filing create refused (GY-1530): the content is malformed as far as the control plane is
+ * concerned, so it is dropped from the pending files — never re-filed — and recorded failed under
+ * the proof class's `fix-item` ("a fix item create refuses"), the cause, instead of the doctor step's
+ * own kind. The escalation beside it names what the master must mend by hand: the scenario the
+ * filing cites with no registered revision, or the refusal itself.
+ */
+async function dropRefusedFiling(cycle: Pick<Cycle, 'state' | 'effects' | 'performed'>, key: string, file: DoctorFile, error: unknown, attempts: number, now: () => number) {
+  const { state, effects: daemon, performed } = cycle;
+  state.doctor.pendingFiles = state.doctor.pendingFiles.filter(entry => entry.key !== key);
+  const scenario = unregisteredScenario(error);
+  performed.push(await record(state, key, { kind: 'fault', work: null, principal: null, state: 'failed', detail: `Could not file "${file.title}", and it is not filed again: master create refused the filing itself${scenario ? ` for the e2e proof it cites, whose scenario ${scenario} has no registered revision` : ''}: ${message(error)}`.slice(0, 2000), attempts, cycle: state.cycle }, now(), daemon.persist, 'fix-item'));
+  const mend = scenario
+    ? `the filing cites e2e:${scenario}, and no scenario ${scenario} is registered (scenarios register only from e2e/cases files via graphyard e2e sync or an admin's defineScenario); register it, or file the item by hand with master create under a proof that exists`
+    : `master create refused it (${message(error)}); file it by hand with master create once mended`;
+  performed.push(await record(state, `escalation:doctor-filing:${key}`, { kind: 'escalation', work: null, principal: null, state: 'done', detail: `The doctor asked to file "${file.title}" (${file.faultClass}, P${file.priority}), but ${mend}`.slice(0, 2000), attempts: 1, cycle: state.cycle }, now(), daemon.persist));
+}
+
+/**
  * Apply one settled doctor run: record one event per item the run found or acted on, deduplicate
  * and file what it asked filed, and keep one run summary — what was stuck, why, what it did, what
  * it filed — on the cursor and the control plane.
@@ -326,6 +361,8 @@ export async function applyDoctorRun(cycle: Cycle, effects: DoctorEffects, run: 
       run.filed.push({ faultClass: file.faultClass, title: file.title, work: filedItem.key, deduplicated: false });
       await note(filedItem.key, `Filed ${filedItem.key} (P${file.priority}) for the ${file.faultClass} fault no open item covered: ${file.title}`);
     } catch (error) {
+      // GY-1530: a refusal of the filing itself is never mended by a retry; it is dropped and classified.
+      if (createRefused(error)) { await dropRefusedFiling(cycle, filingKey, file, error, (state.actions[filingKey]?.attempts ?? 0) + 1, now); continue; }
       // A filing the control plane would not take is kept on the cursor — before the failed record
       // persists it — so a later cycle files it again under the same stable key; a control plane
       // that was only briefly unreachable loses no P0/P1 fault item (GY-711).
@@ -369,9 +406,9 @@ const retainedRuns = 20;
 
 /**
  * A filing the control plane did not accept when its run applied is filed again on a later cycle,
- * under the same stable key, until the control plane takes it or an open item comes to cover the
- * class. The cursor is updated before the outcome is recorded, so an abrupt exit between the two
- * leaves the filing pending rather than lost.
+ * under the same stable key, until the control plane takes it, refuses it as written (GY-1530) or an
+ * open item comes to cover the class. The cursor is updated before the outcome is recorded, so an
+ * abrupt exit between the two leaves the filing pending rather than lost.
  */
 export async function retryDoctorFile(cycle: Cycle, effects: DoctorEffects, pending: DoctorPendingFile, now: () => number) {
   const { state, effects: daemon, snapshot } = cycle;
@@ -393,7 +430,9 @@ export async function retryDoctorFile(cycle: Cycle, effects: DoctorEffects, pend
     const filedItem = await effects.file(input, pending.key);
     await drop(`Filed ${filedItem.key} (P${pending.file.priority}) for the ${pending.file.faultClass} fault on a later cycle: ${pending.file.title}`, filedItem.key, 'done');
   } catch (error) {
-    await record(state, pending.key, { kind: 'fault', work: null, principal: null, state: 'failed', detail: `Still could not file "${pending.file.title}": ${message(error)}`.slice(0, 2000), attempts, cycle: state.cycle }, now(), daemon.persist);
+    if (createRefused(error)) return dropRefusedFiling(cycle, pending.key, pending.file, error, attempts, now);
+    // Refused again, the retry is a fault: the plane not answering is the plane's (GY-1404), any other the step's own.
+    await record(state, pending.key, { kind: 'fault', work: null, principal: null, state: 'failed', detail: `Still could not file "${pending.file.title}": ${message(error)}`.slice(0, 2000), attempts, cycle: state.cycle }, now(), daemon.persist, planeWideRefusal(error) ? 'plane-unavailable' : undefined);
   }
 }
 
