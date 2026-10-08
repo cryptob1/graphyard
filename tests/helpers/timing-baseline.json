@@ -515,6 +515,7 @@
     "tests/quarantine.test.ts": 276,
     "tests/queue-carry.test.ts": 460,
     "tests/readiness.test.ts": 391,
+    "tests/readme.test.ts": 120,
     "tests/ready-scope-widening.test.ts": 2200,
     "tests/reblocked-attempt.test.ts": 2905,
     "tests/receipt-retention.test.ts": 2749,
