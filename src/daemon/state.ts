@@ -389,6 +389,8 @@ export const loopReleaseSchema = z.object({ commit: z.string().regex(/^[0-9a-f]{
 export type LoopRelease = z.infer<typeof loopReleaseSchema>;
 
 /** The causes an owed self-upgrade restart stalls on (GY-1445). */
+/** How many refused filings' digests the ledger keeps (32 characters each): far past the distinct malformed filings a doctor reports between repeats of one. */
+export const refusedFilingsBound = 1000;
 export const upgradeStallCauses = ['executors-refused', 'executors-unavailable', 'supervisor-unreachable', 'checkout-dirty', 'checkout-not-detached', 'fetch-failed', 'checkout-failed'] as const;
 export type UpgradeStallCause = typeof upgradeStallCauses[number];
 export const upgradeStallSchema = z.object({ cause: z.enum(upgradeStallCauses), reason: z.string().max(500), since: z.string(), at: z.string() }).strict();
@@ -536,8 +538,8 @@ export const daemonStateSchema = z.object({
     unposted: z.array(z.string().max(40)).max(40).default([]),
     /** Filings the control plane did not accept when their run applied: filed again on later cycles, under the same key, until one is. */
     pendingFiles: z.array(doctorPendingFileSchema).max(40).default([]),
-    /** GY-1530: digests of filings the create route refused as written, newest last: a later run reporting the same content is not filed again. */
-    refusedFilings: z.array(z.string().max(80)).max(40).default([]),
+    /** GY-1530: digests of filings the create route refused as written, least recently seen first: a later run reporting the same content is not filed again. A digest is renewed each time its filing is reported, so only one the doctor has not reported for a whole bound of other refused filings leaves. */
+    refusedFilings: z.array(z.string().max(80)).max(refusedFilingsBound).default([]),
     /** When the approver remedy last read each open item's decision history, by item id. */
     decisionsCheckedAt: z.record(z.string(), z.string()).default({}),
   }).strict().default(() => ({ runs: [], unposted: [], pendingFiles: [], refusedFilings: [], decisionsCheckedAt: {} })),

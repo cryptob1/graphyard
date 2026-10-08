@@ -12,7 +12,7 @@ import { applyDoctorRun, doctorTool } from '../src/daemon/doctor.js';
 import { loopAttention, type LoopLiveness } from '../src/daemon/liveness.js';
 import { silenceBudgetMs, type SilenceEntry } from '../src/daemon/metrics.js';
 import { faultClassOf } from '../src/model/fault-classes.js';
-import { doctorRunRecordSchema, type DoctorRunRecord } from '../src/daemon/state.js';
+import { doctorRunRecordSchema, refusedFilingsBound, type DoctorRunRecord } from '../src/daemon/state.js';
 import { doctorSettingsSchema } from '../src/master/doctor-settings.js';
 import graphyardExtension, { doctorSanctionedCommands as piSanctioned, doctorRedirects, doctorSegmentAllowed, graphyardTools as piTools } from '../integrations/pi/index.js';
 import { statusRoutes, doctorFindingEvent, doctorRunEvent } from '../src/server/routes/status.js';
@@ -1015,5 +1015,24 @@ test('unit:doctor-e2e-scenario-refusal-drops-pending-file — a pending filing w
   for (let round = 1; round <= 8; round++) { state.cycle += 1 << round; await doctorStep(cycle([item()], { doctor, state })); }
   assert.deepEqual(filed, [key], 'never re-filed');
   assert.equal(state.faults.instances.length, 1, 'one refusal, one instance');
+  clearDoctorRuns();
+});
+
+test('unit:doctor-refused-filing-survives-history-bound — a refused filing the doctor keeps reporting stays refused across more distinct refusals than the ledger keeps, and is never submitted to create again', async () => {
+  clearDoctorRuns();
+  const filed: string[] = [];
+  const doctor: DoctorEffects = { ...filingDoctor([], async (input, key) => { filed.push(input.title); throw scenarioRefusal('no-such-scenario'); }), settings: doctorSettingsSchema.parse({ enabled: false }) as DoctorEffects['settings'] };
+  const state = emptyDaemonState(config());
+  const first = selfUpgradeFiling(['e2e:no-such-scenario']);
+  const retry = async (file: ReturnType<typeof selfUpgradeFiling>, n: number) => { state.cycle += 1; state.doctor.pendingFiles = [{ key: `doctor:k${n}:file:loop`, at: observedAt, file }]; await doctorStep(cycle([item()], { doctor, state })); };
+  await retry(first, 0);
+  assert.deepEqual(filed, [first.title], 'refused once');
+  // More distinct refusals than the bound keeps, the first filing reported again every hundred.
+  for (let n = 1; n <= refusedFilingsBound + 50; n++) {
+    await retry({ ...selfUpgradeFiling(['e2e:no-such-scenario']), title: `Other malformed filing ${n}` }, n);
+    if (n % 100 === 0) await retry(first, 10_000 + n);
+  }
+  assert.equal(state.doctor.refusedFilings.length, refusedFilingsBound, 'the ledger stays bounded');
+  assert.equal(filed.filter(title => title === first.title).length, 1, 'the first filing was submitted to create exactly once');
   clearDoctorRuns();
 });
