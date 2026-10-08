@@ -320,7 +320,7 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
       // fed on each poll so that wait is not mistaken for a hung loop (GY-916).
       const keepAlive = watchdog.supervised ? async () => { try { await effects.notify?.('alive'); } catch (error) { log(`[graphyard-master] supervisor notification failed: ${message(error)}`); } } : undefined;
       const selfUpgrade = effects.selfUpgrade;
-      await guard.betweenCycles(stopping || !selfUpgrade ? undefined : current => selfUpgrade(current, keepAlive), stopping ? undefined : keepAlive);
+      await guard.betweenCycles(stopping || !selfUpgrade ? undefined : current => selfUpgrade(current, keepAlive), stopping ? undefined : keepAlive, { stopping });
       // The keep-alive says the process is alive, which a failed cycle leaves true: the watchdog
       // is for a cycle that hangs, and a thrown one has just proved it did not.
       if (watchdog.supervised) { try { await effects.notify?.('alive'); } catch (error) { log(`[graphyard-master] supervisor notification failed: ${message(error)}`); } }
@@ -383,7 +383,7 @@ export function coordinatorCheckoutGuard(deps: {
     const from = expectedHead.slice(0, 12), to = checkout.commit.slice(0, 12), unrecovered = forward.get(checkout.commit);
     return unrecovered
       ? `the master loop cannot recover onto the coordinator checkout at ${checkout.root} by itself: its HEAD moved from ${from} forward to ${to}, merged code, while the loop was running, and ${unrecovered}. It keeps running the code it loaded; leave the checkout at ${to} and restart the loop onto its own HEAD (systemctl --user restart graphyard-master)`
-      : `the master loop refuses to restart or self-upgrade from the coordinator checkout at ${checkout.root}: its HEAD moved from ${from} to ${to} while the loop was running, so HEAD is not the commit it runs. It keeps running the code it loaded; restore the checkout with git -C ${checkout.root} checkout --detach ${from}, then restart the loop`;
+      : `the master loop refuses to restart or self-upgrade from the coordinator checkout at ${checkout.root}: its HEAD moved from ${from} to ${to} while the loop was running, so HEAD is not the commit it runs. It keeps running the code it loaded; either remedy ends this refusal (GY-1531): restore the checkout with git -C ${checkout.root} checkout --detach ${from} and restart the loop, or leave it at ${to} and restart the loop onto that HEAD (systemctl --user restart graphyard-master), which loads it`;
   };
   // The sessions working where they started, the ones to close first. Graphyard's own managed area
   // under `.graphyard/` is not the checkout's working files and is never named. An inventory that
@@ -430,8 +430,11 @@ export function coordinatorCheckoutGuard(deps: {
       // A checkout clean again and back at the commit the loop runs settles the attention it raised.
       const state = deps.state(), raised = state.actions[escalationKey];
       if (raised?.state === 'failed') {
-        storeAction(state, escalationKey, { ...raised, state: 'done', detail: `the coordinator checkout at ${checkout.root} is clean again at ${(checkout.commit ?? 'an unreadable HEAD').slice(0, 12)}, the commit the loop runs`, cycle: state.cycle, at: new Date(deps.now()).toISOString() }, 'action:config');
+        const detail = `the coordinator checkout at ${checkout.root} is clean again at ${(checkout.commit ?? 'an unreadable HEAD').slice(0, 12)}, the commit the loop runs`;
+        storeAction(state, escalationKey, { ...raised, state: 'done', detail, cycle: state.cycle, at: new Date(deps.now()).toISOString() }, 'action:config');
         await deps.persist(state);
+        // Said in the journal too (GY-1531): the remedy the refusal named ended it, visibly beside it.
+        deps.log(`[graphyard-master] escalation done: ${detail}`);
       }
       return null;
     }
@@ -469,9 +472,21 @@ export function coordinatorCheckoutGuard(deps: {
     /**
      * The between-cycles read, then the self-upgrade only when the checkout stands clean and at
      * the commit the loop runs. The loop's own alignment is the one move it sanctions.
+     * `stopping`: the loop is ending this process (its supervisor's stop or restart), so the
+     * self-upgrade is off and the next loop loads whatever HEAD the checkout holds — a HEAD that
+     * moved is what that restart adopts, not drift to refuse (GY-1531: a loop stopping for its own
+     * restart onto a forward HEAD recorded the refusal that restart was the remedy for). A dirty
+     * tree still refuses: the next loop would refuse it at startup too.
      */
-    async betweenCycles(selfUpgrade?: (state: DaemonState) => Promise<SelfUpgradeOutcome>, keepAlive?: () => Promise<void>) {
+    async betweenCycles(selfUpgrade?: (state: DaemonState) => Promise<SelfUpgradeOutcome>, keepAlive?: () => Promise<void>, options: { stopping?: boolean } = {}) {
       const checkout = await deps.read();
+      if (options.stopping && applies(checkout.root) && !coordinatorCheckoutRefusal(checkout, 'the master loop')) {
+        const drift = headDrift(checkout);
+        if (drift) {
+          deps.log(`[graphyard-master] stopping with the coordinator checkout's HEAD at ${(checkout.commit ?? '').slice(0, 12)}, not ${(expectedHead ?? '').slice(0, 12)} the loop loaded: the next loop runs the checkout's HEAD, so no dirty-checkout refusal is recorded`);
+          return { refusal: drift, upgraded: null };
+        }
+      }
       // A forward move adopted here settles any drift attention it raised, and is this cycle's upgrade.
       const recovered = selfUpgrade ? await recoverDrift(checkout, keepAlive) : null;
       if (recovered) { await escalate(checkout); return { refusal: null, upgraded: recovered }; }
