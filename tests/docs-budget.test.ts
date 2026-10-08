@@ -75,6 +75,10 @@ function baseCount(): DocsBudgetBase {
 const REQUIRED_STATEMENTS: [string, RegExp][] = [
   ['docs/master-agent-reference.md', /decisions step stays within 10 s a cycle/],
   ['docs/master-agent-reference.md', /history whose ledger has not moved is kept, not read/],
+  // GY-1536 AC-4: the general E2E step kinds, declared secrets and the env file, with one example of each kind.
+  ['docs/validation.md', /`command`: `run` in the checkout with `TARGET_URL`.*`{"kind":"command","run":"npx playwright test"}`/],
+  ['docs/validation.md', /`agent`: agent-browser pursues `goal` at `path` until `success` holds, ending `VERDICT: PASS\|FAIL - reason`.*"goal":"Win tic-tac-toe"/],
+  ['docs/validation.md', /`secrets: \["NAME"\]` from `~\/\.config\/graphyard\/INSTALL\/e2e-secrets\.TARGET\.env` \(0600, uncommitted\) as variables and `\{\{secret:NAME\}\}`, redacted/],
 ];
 
 test('unit:docs-word-budget — the pages graphyard.json budgets (README.md and every docs page) keep every page within its per-page budget and 200 words under it, counted as wc -w counts them; a total within 3% of the budget fails a change that adds to it and warns otherwise', () => {
