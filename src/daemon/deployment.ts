@@ -382,7 +382,12 @@ export const promotionSoaksListed = 10;
  * a candidate that promoted is followed as soon as its run concludes (GY-1513).
  */
 export const defaultPromoteEveryMinutes = 10;
-/** How long a read of the workflow's runs is reused, so a candidate in UAT for hours costs one GitHub request a minute, not one a cycle. */
+/**
+ * How long a read of the workflow's runs is reused while no candidate is in validation, so a gap or a
+ * moving main costs one GitHub request a minute, not one a cycle. While one is in validation the runs
+ * are read once an interval instead (GY-1513): its conclusion is what the next dispatch waits for, and
+ * a candidate that promoted is followed within one loop interval of its run concluding.
+ */
 export const promotionRunsReadMs = 60_000;
 /**
  * How long a read of the base branch tip and the last promotion record is reused. That read fetches
@@ -394,11 +399,12 @@ export const promotionLedgerReadMs = 5 * 60_000;
 /**
  * GY-1398: the promotion reads' reuse windows at a loop interval. A window at or under the interval
  * is no window at all — every cycle reads — so at 300s both reads ran each cycle. The ledger is
- * reused for max(5 min, 3 intervals) and the run list for max(60 s, one interval); a promotion then
- * waits at most three intervals for a move of main.
+ * reused for max(5 min, 3 intervals) and the run list for max(60 s, one interval) while nothing is in
+ * validation, one interval (`inFlightMs`) while a candidate is (GY-1513); a promotion then waits at
+ * most three intervals for a move of main and one for the conclusion of the candidate before it.
  */
 export function promotionReadWindows(intervalMs: number) {
-  return { ledgerMs: Math.max(promotionLedgerReadMs, 3 * intervalMs), runsMs: Math.max(promotionRunsReadMs, intervalMs) };
+  return { ledgerMs: Math.max(promotionLedgerReadMs, 3 * intervalMs), runsMs: Math.max(promotionRunsReadMs, intervalMs), inFlightMs: intervalMs };
 }
 /**
  * GY-1488: how long the loop's own dispatch that GitHub does not list yet counts as a candidate in
@@ -409,8 +415,10 @@ export const promotionUnlistedMs = 15 * 60_000;
 /** Run states of a release candidate still being cut or validated. */
 const runningStates = new Set(['queued', 'in_progress', 'waiting', 'pending', 'requested']);
 
-/** GY-1491: one release candidate as the loop reads it: the merges it carries and those on main behind it now. */
-export interface PromotionCandidate { id: string; sha: string; cutAt: string; prs: number | null; queued: number | null }
+/** GY-1513: a candidate's recorded soak verdict (`rc-soak/ID`): passed, failed or cancelled, when, and the soak run that recorded it. */
+export interface CandidateSoak { result: string; at: string; run: string | null }
+/** GY-1491: one release candidate as the loop reads it: the merges it carries, those on main behind it now and its recorded soak verdict, if any (GY-1513). */
+export interface PromotionCandidate { id: string; sha: string; cutAt: string; prs: number | null; queued: number | null; soak?: CandidateSoak | null }
 /** How many of the newest candidates the loop reads and `master status` lists. */
 export const promotionCandidatesListed = 5;
 export interface PromotionLedger { mainSha: string | null; promotedSha: string | null; promotedAt: string | null; behind: number | null; candidates?: PromotionCandidate[] }
@@ -473,8 +481,9 @@ export async function promotionCycle(previous: PromotionState | null, reads: Pro
   if (ledger.mainSha === ledger.promotedSha) return done(base, 'Production runs the base branch tip; nothing to promote', false);
   const sinceLast = base.lastDispatchAt ? options.now - Date.parse(base.lastDispatchAt) : Number.POSITIVE_INFINITY;
   const gapReason = (since: number) => `The last promotion was dispatched ${Math.round(since / 60_000)} minute(s) ago; the next is due no sooner than ${options.everyMinutes} minute(s) after it`;
-  const runsDue = !base.runsReadAt || options.now - Date.parse(base.runsReadAt) >= windows.runsMs;
-  // While a candidate is in flight its runs are still read each window, so a promotion it made inside the gap is seen (GY-1513).
+  // GY-1513: in flight, the runs are read once an interval, so the conclusion the next dispatch waits for is seen within one.
+  const runsDue = !base.runsReadAt || options.now - Date.parse(base.runsReadAt) >= (base.inFlight ? windows.inFlightMs : windows.runsMs);
+  // While a candidate is in flight its runs are still read, so a promotion it made inside the gap is seen (GY-1513).
   if (sinceLast < everyMs && !(base.inFlight && runsDue)) return done(base, gapReason(sinceLast), true);
   let state = base;
   if (runsDue) {
@@ -528,7 +537,7 @@ export async function promotionCycle(previous: PromotionState | null, reads: Pro
 export function promotionStatus(state: PromotionState | null | undefined) {
   if (!state) return { lastPromotedSha: null, promotedAt: null, behind: null, nextDueAt: null, inFlight: false, checkedAt: null, candidates: [], reason: 'The loop has not checked promotion yet' };
   return { lastPromotedSha: state.promotedSha, promotedAt: state.promotedAt, behind: state.behind, nextDueAt: state.nextDueAt, inFlight: state.inFlight, checkedAt: state.checkedAt,
-    candidates: (state.candidates ?? []).map(({ id, sha, prs, queued }) => ({ id, sha, prs, queued, soak: soakOf(state.soaks, sha) })), reason: state.reason };
+    candidates: (state.candidates ?? []).map(candidate => ({ id: candidate.id, sha: candidate.sha, prs: candidate.prs, queued: candidate.queued, soak: soakOf(state.soaks, candidate) })), reason: state.reason };
 }
 
 /**
@@ -540,7 +549,7 @@ export function promotionStatus(state: PromotionState | null | undefined) {
 async function soakRefresh(carried: Pick<PromotionState, 'soaks' | 'soaksReadAt'>, candidates: PromotionCandidate[], reads: PromotionReads, now: number, windowMs: number) {
   if (!reads.soaks || (carried.soaksReadAt && now - Date.parse(carried.soaksReadAt) < windowMs)) return {};
   const newest = candidates[0], soaks = carried.soaks ?? [];
-  const awaited = !!newest && now - Date.parse(newest.cutAt) < soakAwaitedMs && !soaks.some(run => run.sha === newest.sha);
+  const awaited = !!newest && !newest.soak && now - Date.parse(newest.cutAt) < soakAwaitedMs && !soaks.some(run => run.sha === newest.sha);
   if (!awaited && !soaks.some(run => runningStates.has(run.status))) return {};
   const soaksReadAt = new Date(now).toISOString();
   try { return { soaks: (await reads.soaks()).slice(0, promotionSoaksListed), soaksReadAt }; } catch { return { soaksReadAt }; }
@@ -548,11 +557,18 @@ async function soakRefresh(carried: Pick<PromotionState, 'soaks' | 'soaksReadAt'
 /** How long after its cut a candidate's soak is looked for before the loop stops reading for it. */
 export const soakAwaitedMs = 90 * 60_000;
 
-/** The newest soak run of a SHA, as `master status` shows it. */
-function soakOf(soaks: PromotionState['soaks'], sha: string) {
-  const run = soaks?.find(entry => entry.sha === sha.toLowerCase());
-  return run ? { state: runningStates.has(run.status) ? 'running' : run.conclusion ?? run.status, startedAt: run.createdAt, url: run.url } : null;
+/**
+ * A candidate's soak as `master status` shows it: `running` while its newest soak run is, else the
+ * verdict its record carries (passed, failed, cancelled), else that run's conclusion in the same words.
+ */
+function soakOf(soaks: PromotionState['soaks'], candidate: PromotionCandidate) {
+  const run = soaks?.find(entry => entry.sha === candidate.sha.toLowerCase());
+  if (run && runningStates.has(run.status)) return { state: 'running', startedAt: run.createdAt, url: run.url };
+  if (candidate.soak) return { state: candidate.soak.result, at: candidate.soak.at, url: candidate.soak.run };
+  return run ? { state: soakVerdict(run.conclusion ?? run.status), startedAt: run.createdAt, url: run.url } : null;
 }
+/** A soak run's conclusion in the record's words: success is passed, failure failed; the rest stand. */
+const soakVerdict = (conclusion: string) => conclusion === 'success' ? 'passed' : conclusion === 'failure' ? 'failed' : conclusion;
 
 /** The promotion reads over the managed checkout and GitHub; null when the repository has no release-candidate workflow to dispatch. */
 export function promotionReads(config: MasterConfig, root: string, run: ChildRun, workflowExists: boolean, soakExists = existsSync(join(root, '.github', 'workflows', soakWorkflow))): PromotionReads | null {
@@ -560,7 +576,7 @@ export function promotionReads(config: MasterConfig, root: string, run: ChildRun
   const git = (...args: string[]) => run('git', ['-C', root, ...args]);
   return {
     ledger: async () => {
-      await git('fetch', '--quiet', '--no-tags', 'origin', `+refs/heads/${config.baseBranch}:refs/remotes/origin/${config.baseBranch}`, '+refs/tags/rc-production/*:refs/tags/rc-production/*', '+refs/tags/rc/*:refs/tags/rc/*');
+      await git('fetch', '--quiet', '--no-tags', 'origin', `+refs/heads/${config.baseBranch}:refs/remotes/origin/${config.baseBranch}`, '+refs/tags/rc-production/*:refs/tags/rc-production/*', '+refs/tags/rc/*:refs/tags/rc/*', '+refs/tags/rc-soak/*:refs/tags/rc-soak/*');
       const mainSha = (await git('rev-parse', `refs/remotes/origin/${config.baseBranch}^{commit}`)).trim().toLowerCase() || null;
       let promotedSha: string | null = null, promotedAt: string | null = null;
       try {
@@ -574,16 +590,16 @@ export function promotionReads(config: MasterConfig, root: string, run: ChildRun
         if (!Number.isInteger(behind)) behind = null;
       }
       const candidates: PromotionCandidate[] = [];
-      let listed = '';
-      try { listed = await git('for-each-ref', '--sort=-refname', `--count=${promotionCandidatesListed}`, '--format=%(contents)%00', 'refs/tags/rc/'); } catch { /* no candidate yet */ }
-      for (const body of listed.split('\0')) {
-        let record: any;
-        try { record = JSON.parse(body.trim()); } catch { continue; }
+      // GY-1513: the recorded soak verdicts, by candidate; the soak workflow records one per candidate once its run concludes.
+      const soaked = new Map<string, CandidateSoak>();
+      for (const record of await tagRecords(git, 'refs/tags/rc-soak/', 2 * promotionCandidatesListed))
+        if (typeof record?.id === 'string' && typeof record?.result === 'string') soaked.set(record.id, { result: record.result, at: typeof record.at === 'string' ? record.at : '', run: typeof record.run === 'string' ? record.run : null });
+      for (const record of await tagRecords(git, 'refs/tags/rc/', promotionCandidatesListed)) {
         if (typeof record?.id !== 'string' || typeof record?.sha !== 'string' || typeof record?.cutAt !== 'string') continue;
         const sha = record.sha.toLowerCase();
         let queued: number | null = null;
         if (mainSha) try { queued = Number((await git('rev-list', '--first-parent', '--count', `${sha}..${mainSha}`)).trim()); } catch { queued = null; }
-        candidates.push({ id: record.id, sha, cutAt: record.cutAt, prs: Number.isInteger(record.prs) ? record.prs : null, queued: Number.isInteger(queued) ? queued : null });
+        candidates.push({ id: record.id, sha, cutAt: record.cutAt, prs: Number.isInteger(record.prs) ? record.prs : null, queued: Number.isInteger(queued) ? queued : null, soak: soaked.get(record.id) ?? null });
       }
       return { mainSha, promotedSha, promotedAt, behind, candidates };
     },
@@ -594,6 +610,13 @@ export function promotionReads(config: MasterConfig, root: string, run: ChildRun
     dispatch: async () => { await run('gh', ['workflow', 'run', promotionWorkflow, '--repo', config.repository, '--ref', config.baseBranch, '-f', 'promote=true']); },
     ...(soakExists ? { soaks: async () => soakRuns(JSON.parse(await run('gh', ['run', 'list', '--repo', config.repository, '--workflow', soakWorkflow, '--limit', '20', '--json', 'status,conclusion,createdAt,displayTitle,url']))) } : {}),
   };
+}
+
+/** The newest `count` records under a ledger tag prefix, as the annotated tags' JSON messages; unparsable ones are skipped. */
+async function tagRecords(git: (...args: string[]) => string | Promise<string>, prefix: string, count: number): Promise<any[]> {
+  let listed = '';
+  try { listed = await git('for-each-ref', '--sort=-refname', `--count=${count}`, '--format=%(contents)%00', prefix); } catch { /* no record yet */ }
+  return listed.split('\0').flatMap(body => { try { return [JSON.parse(body.trim())]; } catch { return []; } });
 }
 
 /** Soak runs as `gh run list` lists them, newest first, each with the SHA its run name (`Soak ID SHA`) carries; a run naming none is skipped. */

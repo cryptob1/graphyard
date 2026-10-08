@@ -6,13 +6,13 @@ import { resolveWork } from './context.js';
 import { releaseLeaseCommand } from './lease.js';
 import {
   apiSuite, assessProductionServing, awaitServing, commandSuite, cut, deployToUat, endpointSuite, findCandidate, followUpItem, followUpRequestId, gitIn,
-  ledgerStatus, maxPrsFrom, promote, readLedger, readRecords, readServed, syncLedger, unacceptedFlaky, validateAndRecord, writeRecord, type CutTrigger, type FlakyAcceptance, type Suite,
+  ledgerStatus, maxPrsFrom, promote, readLedger, readRecords, readServed, recordSoak, syncLedger, unacceptedFlaky, validateAndRecord, writeRecord, type CutTrigger, type FlakyAcceptance, type SoakRecord, type Suite,
 } from '../release-candidate.js';
 import { acceptancesFrom, foldHolds, foldRecord, holdItemsFor, holdTag, holdTagPrefix, releaseHolds, type HoldRecord } from '../release-holds.js';
 import { checkRepositoryContract, contractFile, loadContract } from '../e2e/case.js';
 
 const switches = new Set(['no-push', 'api']);
-const subcommands = new Set(['contract', 'cut', 'status', 'uat', 'validate', 'follow-up', 'holds', 'fold', 'promote', 'verify']);
+const subcommands = new Set(['contract', 'cut', 'status', 'uat', 'validate', 'follow-up', 'holds', 'fold', 'promote', 'verify', 'soak']);
 /** Flags after the subcommand: `--name value` pairs, repeatable, and bare `--flag` switches. */
 function flags(args: string[]) {
   const values = new Map<string, string[]>(); const positional: string[] = [];
@@ -27,7 +27,7 @@ function flags(args: string[]) {
 }
 
 const workKey = (created: any) => String(created?.key ?? created?.work?.key ?? created?.id);
-const usage = 'Use release contract | release cut [--trigger schedule|manual] [--max-prs N] | release status | release uat ID | release validate ID --url URL [--api] [--check PATH]... [--suite NAME=COMMAND]... [--e2e-report FILE] | release follow-up ID | release holds | release fold OUTCOME --decision ID | release promote ID | release verify --url URL';
+const usage = 'Use release contract | release cut [--trigger schedule|manual] [--max-prs N] | release status | release uat ID | release validate ID --url URL [--api] [--check PATH]... [--suite NAME=COMMAND]... [--e2e-report FILE] | release follow-up ID | release holds | release fold OUTCOME --decision ID | release promote ID | release verify --url URL | release soak ID --sha SHA --result success|failure|cancelled [--run URL] [--report NAME]';
 
 /** Every applied evidence decision on the hold items the candidate's failures landed in (GY-1378). */
 async function acceptancesOf(api: (path: string) => Promise<any>, git: ReturnType<typeof gitIn>, candidate: string): Promise<FlakyAcceptance[]> {
@@ -66,6 +66,10 @@ export const releaseCommands = defineCommands([
       '                                flaky required cases need applied evidence decisions at that SHA',
       '  release verify --url URL [--wait SECONDS]',
       '                                Check production serves a promoted candidate and name it',
+      '  release soak ID --sha SHA --result success|failure|cancelled [--run URL] [--report NAME]',
+      "                                Record the advisory soak's verdict for the candidate (tag",
+      '                                rc-soak/ID on its exact SHA) with the soak run and its timing',
+      '                                report; it never decides promotion',
     ],
     async run(context) {
       const { id, args, api, print, repositoryRoot } = context;
@@ -100,6 +104,13 @@ export const releaseCommands = defineCommands([
       }
       if (id === 'status' || !id) { syncLedger(git, base); return print(ledgerStatus(readLedger(git))); }
       if (id === 'uat') return print(deployToUat(git, target, base));
+      if (id === 'soak') {
+        const sha = options.one('sha'), result = options.one('result');
+        if (!sha || !result) throw new Error(usage);
+        // The soak job's result as the workflow reports it: success, failure, cancelled (or skipped).
+        const verdict: SoakRecord['result'] = result === 'success' || result === 'passed' ? 'passed' : result === 'cancelled' ? 'cancelled' : 'failed';
+        return print(recordSoak(git, target, { sha, result: verdict, run: options.one('run') ?? null, report: options.one('report') ?? null, base, now: new Date(), push }));
+      }
       if (id === 'promote') {
         syncLedger(git, base);
         const ledger = readLedger(git), candidate = findCandidate(ledger, target), uat = ledger.uat.find(record => record.id === candidate.id);

@@ -3,8 +3,9 @@ name: Release candidate soak
 # release-candidate.yml run dispatches this with the exact SHA it cut or pinned, so the suites run
 # against that commit and nothing else, never on a pull request and never as a required check. They
 # run in a run of their own so the release run concludes when promote does: the loop cuts the next
-# candidate while this one is still soaking. The verdict decides nothing; `master status` lists it
-# beside the candidate whose SHA the run name carries.
+# candidate while this one is still soaking. The verdict decides nothing: the record job writes it,
+# with this run and its timing report, onto the candidate's ledger record (rc-soak/ID), which
+# `release status` and `master status` list beside the candidate (running, while this run is).
 run-name: Soak ${{ inputs.candidate || 'pinned' }} ${{ inputs.sha }}
 on:
   workflow_dispatch:
@@ -70,3 +71,24 @@ jobs:
           name: graphyard-release-candidate-timing
           path: ${{ runner.temp }}/timing/
           if-no-files-found: ignore
+  record:
+    name: record the verdict on the candidate
+    needs: long-suites
+    # Whatever the suites' verdict, and only for a cut candidate: a pinned SHA has no record to carry it.
+    if: ${{ always() && inputs.candidate != '' }}
+    env:
+      CANDIDATE_SHA: ${{ inputs.sha }}
+      SOAK_RESULT: ${{ needs.long-suites.result }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      # The ledger is written by the current release tooling, as promote does, not by the candidate's checkout.
+      - uses: actions/checkout@v4
+        with: { ref: main, fetch-depth: 0 }
+      - uses: actions/setup-node@v4
+        with: { node-version: '24', cache: npm }
+      - run: npm ci
+      - name: Record the advisory verdict, this run and its timing report as rc-soak/ID on the candidate's SHA
+        run: node bin/graphyard.mjs release soak "${{ inputs.candidate }}" --sha "$CANDIDATE_SHA" --result "$SOAK_RESULT" --run "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" --report graphyard-release-candidate-timing

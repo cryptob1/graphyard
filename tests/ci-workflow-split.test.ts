@@ -124,7 +124,8 @@ test('unit:long-suites-on-candidate — the excluded suites run in release-candi
     assert.ok(job.timeout, `${id} declares timeout-minutes`);
     if (id === 'soak' || id.startsWith('soak:')) {
       assert.match(job.text, id === 'soak' ? /^ {6}CANDIDATE_SHA: \$\{\{ needs\.candidate\.outputs\.sha \}\}$/m : /^ {6}CANDIDATE_SHA: \$\{\{ inputs\.sha \}\}$/m, `${id} soaks the candidate job's pinned SHA`);
-      if (id === 'soak') continue;
+      // The starter checks nothing out; the record job writes the ledger from main's tooling, as promote does, naming the soaked SHA.
+      if (id === 'soak' || id === 'soak:record') continue;
     } else if (!longSuites.includes(id) && id !== 'uat') continue;
     else assert.match(job.text, /^ {6}CANDIDATE_SHA: \$\{\{ needs\.candidate\.outputs\.sha \}\}$/m, `${id} validates the candidate job's pinned SHA`);
     const checkouts = [...job.text.matchAll(/uses: actions\/checkout@v4\n\s+with: (.*)$/gm)];
@@ -140,7 +141,9 @@ test('unit:long-suites-on-candidate — the excluded suites run in release-candi
 
   // Every suite the pre-merge gate excludes runs here.
   assert.deepEqual([...jobs.keys()].sort(), ['candidate', 'chart', 'container-acceptance', 'container-recovery', 'promote', 'soak', 'uat']);
-  assert.deepEqual([...soakJobs.keys()], ['long-suites']);
+  assert.deepEqual([...soakJobs.keys()], ['long-suites', 'record']);
+  assert.deepEqual(soakJobs.get('record')!.needs, ['long-suites'], 'the verdict is recorded after the suites, whatever their outcome');
+  assert.match(soakJobs.get('record')!.text, /release soak "\$\{\{ inputs\.candidate \}\}" --sha "\$CANDIDATE_SHA" --result "\$SOAK_RESULT"/);
   // The timing budgets run first, one file at a time, and the soak after them (GY-1440): a budget
   // measured beside another suite's load measures that load. Both run whatever the other's verdict.
   const suitesStep = soakJobs.get('long-suites')!.text;

@@ -9,7 +9,7 @@ import railway, { releaseBranches } from '../.railway/railway.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { commands } from '../src/cli/index.js';
 import {
-  apiSuite, assessProductionServing, commandSuite, cut, deployToUat, endpointSuite, gitIn, itemsFromCommits, ledgerStatus, productionBranch, promote, readLedger,
+  apiSuite, assessProductionServing, assessPromotion, commandSuite, cut, deployToUat, endpointSuite, gitIn, itemsFromCommits, ledgerStatus, productionBranch, promote, readLedger,
   runZeroTouchSuite, servedRevision, uatBranch, validateAndRecord, zeroTouchScenario, type ReleaseCandidate, type Suite,
 } from '../src/release-candidate.js';
 import { loadCases, parseCase, type ReleaseContract } from '../src/e2e/case.js';
@@ -794,6 +794,10 @@ test('unit:release-candidate-pr-cap — a backlog of 23 merges is cut into candi
 /** One soak run as the loop keeps it; imported lazily below so this file still loads without GY-1513. */
 type SoakRun = { sha: string; status: string; conclusion: string | null; createdAt: string; url: string | null };
 const soakExports = async () => await import('../src/daemon/deployment.js') as unknown as { soakWorkflow: string; soakRuns: (listed: unknown) => SoakRun[] };
+/** The soak's ledger record (rc-soak/ID) as src/release-candidate.ts keeps it, imported lazily for the same reason. */
+type LedgerSoakRecord = { id: string; sha: string; result: 'passed' | 'failed' | 'cancelled'; at: string; run: string | null; report: string | null };
+const ledgerExports = async () => await import('../src/release-candidate.js') as unknown as { soakTagPrefix: string;
+  recordSoak: (git: ReturnType<typeof gitIn>, id: string, input: { sha: string; result: LedgerSoakRecord['result']; run: string | null; report: string | null; base: string; now: Date; push: boolean }) => { recorded: boolean; record: LedgerSoakRecord } };
 const workflowJob = (workflow: string, id: string) => {
   const start = workflow.indexOf(`\n  ${id}:\n`);
   assert.ok(start >= 0, `the workflow declares job ${id}`);
@@ -839,7 +843,7 @@ test('unit:soak-runs-outside-release-run — release-candidate-soak.yml runs the
   assert.match(job, /^ {4}timeout-minutes: 60$/m);
 });
 
-test('unit:soak-verdict-still-recorded — the soak\'s verdict and timing report stay advisory, reported on its run and listed by master status beside the candidate whose SHA it soaked: running while it runs, its conclusion after', async () => {
+test('unit:soak-verdict-still-recorded — the soak\'s verdict and timing report stay advisory: its run records them on the candidate\'s ledger record (rc-soak/ID), release status and master status list them beside the candidate, running while the run is, and promotion never reads them', async () => {
   const { soakWorkflow, soakRuns } = await soakExports();
   const release = await readFile(new URL('../.github/workflows/release-candidate.yml', import.meta.url), 'utf8');
   const soak = await readFile(new URL(`../.github/workflows/${soakWorkflow}`, import.meta.url), 'utf8');
@@ -848,6 +852,35 @@ test('unit:soak-verdict-still-recorded — the soak\'s verdict and timing report
   // The timing report and its artifact are on the soak's run, whatever the suites' verdict.
   assert.match(soak, /- name: Summarise the timing-dependent assertions\n {8}if: always\(\)\n {8}run: npx tsx tests\/helpers\/timing-report\.ts/);
   assert.match(soak, /name: graphyard-release-candidate-timing/);
+  // The soak run then records its verdict, itself and the report's name on the candidate's record, whatever the verdict, for a cut candidate only.
+  const record = workflowJob(soak, 'record');
+  assert.match(record, /^ {4}needs: long-suites$/m);
+  assert.match(record, /^ {4}if: \$\{\{ always\(\) && inputs\.candidate != '' \}\}$/m);
+  assert.match(record, /^ {6}SOAK_RESULT: \$\{\{ needs\.long-suites\.result \}\}$/m);
+  assert.match(record, /^ {6}contents: write$/m, 'the record is a tag pushed to the repository');
+  assert.match(record, /node bin\/graphyard\.mjs release soak "\$\{\{ inputs\.candidate \}\}" --sha "\$CANDIDATE_SHA" --result "\$SOAK_RESULT" --run "\$GITHUB_SERVER_URL\/\$GITHUB_REPOSITORY\/actions\/runs\/\$GITHUB_RUN_ID" --report graphyard-release-candidate-timing/);
+  assert.match((await readFile(new URL('../src/cli/release.ts', import.meta.url), 'utf8')), /release soak ID --sha SHA --result success\|failure\|cancelled \[--run URL\] \[--report NAME\]/, 'the release CLI documents the subcommand');
+
+  // The record on the ledger: the candidate's exact SHA, once, never a promotion input.
+  const { recordSoak, soakTagPrefix } = await ledgerExports();
+  const repo = await repository();
+  repo.merge('GY-51', 501);
+  const cutResult = cut(repo.git, { base: 'main', trigger: 'manual', now: new Date('2026-10-08T03:00:00Z'), push: true }) as any;
+  const candidate = cutResult.candidate, runUrl = 'https://github.test/owner/repo/actions/runs/77';
+  assert.throws(() => recordSoak(repo.git, candidate.id, { sha: promoSha('9'), result: 'passed', run: runUrl, report: null, base: 'main', now: new Date(), push: true }), /not the soaked/);
+  const recorded = recordSoak(repo.git, candidate.id, { sha: candidate.sha, result: 'failed', run: runUrl, report: 'graphyard-release-candidate-timing', base: 'main', now: new Date('2026-10-08T03:30:00Z'), push: true });
+  assert.equal(recorded.recorded, true);
+  assert.deepEqual(readRecords<LedgerSoakRecord>(repo.git, soakTagPrefix), [{ id: candidate.id, sha: candidate.sha, result: 'failed', at: '2026-10-08T03:30:00.000Z', run: runUrl, report: 'graphyard-release-candidate-timing' }]);
+  assert.equal(remoteRef(repo.origin, `refs/tags/${soakTagPrefix}${candidate.id}^{commit}`), candidate.sha, 'the record is pushed, on the candidate\'s commit');
+  assert.equal(recordSoak(repo.git, candidate.id, { sha: candidate.sha, result: 'passed', run: null, report: null, base: 'main', now: new Date(), push: true }).recorded, false, 'a re-run records nothing over the first verdict');
+  assert.deepEqual(ledgerStatus(readLedger(repo.git))[0].soak, { result: 'failed', at: '2026-10-08T03:30:00.000Z', run: runUrl, report: 'graphyard-release-candidate-timing' }, 'release status lists it');
+  assert.doesNotMatch(assessPromotion(candidate, null, null).refusals.join('; '), /soak/i, 'promotion reads the UAT record and nothing of the soak');
+  // The loop's ledger read carries the record to master status, which shows it once no run of that SHA is running — and after the run has rolled off GitHub's list.
+  const gitReads = promotionReads({ repository: 'owner/repo', baseBranch: 'main' } as MasterConfig, repo.work, (command, args) => execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }), true)!;
+  const ledgerRead = await gitReads.ledger();
+  assert.deepEqual(ledgerRead.candidates![0].soak, { result: 'failed', at: '2026-10-08T03:30:00.000Z', run: runUrl });
+  const fromRecord = promotionStatus(promotionStateSchema.parse((await promotionCycle(null, { ...gitReads, runs: async () => [], dispatch: async () => {}, soaks: async () => [] }, { now: Date.parse('2026-10-08T04:00:00Z'), everyMinutes: 10 })).state));
+  assert.deepEqual(fromRecord.candidates[0].soak, { state: 'failed', at: '2026-10-08T03:30:00.000Z', url: runUrl });
 
   // The soak runs, as gh lists them, by the SHA their run name carries.
   const T = Date.parse('2026-10-08T03:00:00Z'), min = 60_000, iso = (at: number) => new Date(at).toISOString();
@@ -868,12 +901,16 @@ test('unit:soak-verdict-still-recorded — the soak\'s verdict and timing report
   let state = promotionStateSchema.parse((await promotionCycle(null, reads, { now: T + 18 * min, everyMinutes: 10, intervalMs: 20_000 })).state);
   let status = promotionStatus(state);
   assert.equal(status.inFlight, false, 'the soak is not a candidate in validation');
-  assert.deepEqual(status.candidates.map(candidate => [candidate.id, candidate.soak?.state ?? null]), [['20261008T0309Z', 'running'], ['20261008T0300Z', 'failure']]);
+  assert.deepEqual(status.candidates.map(candidate => [candidate.id, candidate.soak?.state ?? null]), [['20261008T0309Z', 'running'], ['20261008T0300Z', 'failed']]);
   assert.equal(status.candidates[0].soak?.url, 'https://github.test/runs/2');
   // It is re-read while it runs, so its conclusion shows even with nothing left to promote.
   soaks[0] = { ...soaks[0], status: 'completed', conclusion: 'success' };
   state = promotionStateSchema.parse((await promotionCycle(state, reads, { now: T + 40 * min, everyMinutes: 10, intervalMs: 20_000 })).state);
-  assert.equal(promotionStatus(state).candidates[0].soak?.state, 'success');
+  assert.equal(promotionStatus(state).candidates[0].soak?.state, 'passed');
+  // A running run outranks the record (a re-run of the same SHA); the record outranks a concluded run's own words.
+  const withRecord = { ...state, candidates: state.candidates!.map((candidate, index) => index === 0 ? { ...candidate, soak: { result: 'failed', at: iso(T + 35 * min), run: 'https://github.test/runs/9' } } : candidate) };
+  assert.deepEqual(promotionStatus(promotionStateSchema.parse(withRecord)).candidates[0].soak, { state: 'failed', at: iso(T + 35 * min), url: 'https://github.test/runs/9' });
+  assert.equal(promotionStatus(promotionStateSchema.parse({ ...withRecord, soaks: [{ ...soaks[0], status: 'in_progress', conclusion: null }] })).candidates[0].soak?.state, 'running');
   // Once none runs and every recent candidate has its soak, the loop stops reading them.
   const settled = soakReads;
   state = promotionStateSchema.parse((await promotionCycle(state, reads, { now: T + 60 * min, everyMinutes: 10, intervalMs: 20_000 })).state);
@@ -917,17 +954,23 @@ test('unit:promotion-ignores-running-soak — with main ahead of production, the
     assert.equal(result.dispatched, false, 'held while the release run validates A');
   }
   assert.equal(state.inFlight, true);
-  // The release run concludes at promote; A's soak runs on for another ~17 minutes.
-  const concluded = now;
+  // In flight, the runs are read once an interval (GY-1513), not once a minute: the conclusion is what the next dispatch waits for.
+  assert.equal(promotionReadWindows(interval).inFlightMs, interval);
+  assert.equal(promotionReadWindows(interval).runsMs, 60_000, 'nothing in flight, once a minute still');
+  const lastRead = now - interval;
+  assert.equal(state.runsReadAt, iso(lastRead), 'the last cycle read the runs');
+  // The release run concludes at promote one second after that read; A's soak runs on for another ~17 minutes.
+  const concluded = lastRead + 1_000;
   stub.runs = [{ ...stub.runs[0], status: 'completed' }];
   stub.ledger = { ...stub.ledger, promotedSha: A, promotedAt: iso(concluded), behind: 1 };
   let dispatchedAt: number | null = null;
-  for (; now < concluded + 25 * min && dispatchedAt === null; now += interval) {
+  for (now = lastRead + interval; now < concluded + 25 * min && dispatchedAt === null; now += interval) {
     result = await cycle(state, now); state = result.state;
     if (result.dispatched) dispatchedAt = now;
   }
   assert.ok(dispatchedAt !== null, 'the next candidate is dispatched while A soaks');
-  assert.ok(dispatchedAt - concluded <= Math.max(interval, promotionReadWindows(interval).runsMs), `dispatched within one run-read window of the release run concluding (${(dispatchedAt - concluded) / 1000}s)`);
+  assert.ok(dispatchedAt - concluded <= interval, `dispatched within one loop interval of the release run concluding (${(dispatchedAt - concluded) / 1000}s)`);
+  assert.ok(dispatchedAt - Date.parse(state.lastDispatchAt!) < defaultPromoteEveryMinutes * min || state.lastDispatchAt === iso(dispatchedAt), 'inside the minimum gap: a promoting run is followed at once');
   assert.equal(soaks[0].status, 'in_progress', 'A\'s soak was still running');
   assert.equal(state.cutSha, B);
   assert.equal(stub.dispatches, 2);
