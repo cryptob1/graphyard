@@ -572,6 +572,7 @@
     "tests/runtime-screens.test.ts": 2426,
     "tests/scope-approver-routine.test.ts": 5558,
     "tests/scope-directory-collapse.test.ts": 3251,
+    "tests/scope-guard.test.ts": 8000,
     "tests/scope-request-flags.test.ts": 3225,
     "tests/scope-rule-implied.test.ts": 1044,
     "tests/scope-widening-provenance.test.ts": 470,

@@ -386,7 +386,7 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
     const mechanical = await mechanicalRound(root, config, work);
     const prompt = workerPrompt(config, work, profile, prepared.epoch, prepared.dependencies ?? null, memory, prepared.base, mechanical);
     // The worker loads its own role rules, never the master's: it may push its assigned branch.
-    const sessionHarness = await prepareSessionHarness(root, config, { role: 'worker', kind: launch.kind, profile: profile.name, branch: prepared.branch ?? `graphyard/${work.key.toLowerCase()}-${prepared.epoch}`, credentialFiles: [profile.credentialFile!] });
+    const sessionHarness = await prepareSessionHarness(root, config, { role: 'worker', kind: launch.kind, profile: profile.name, branch: prepared.branch ?? `graphyard/${work.key.toLowerCase()}-${prepared.epoch}`, key: work.key, epoch: prepared.epoch, credentialFiles: [profile.credentialFile!] });
     let pane: string | undefined, tabId: string | undefined, sandbox: ReturnType<typeof verifyWorkerSandbox> | null = null, ran = false;
     try {
       // Minted before anything starts: a launch that cannot get one is refused and its claim
