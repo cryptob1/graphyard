@@ -1,18 +1,19 @@
 import { randomUUID } from 'node:crypto';
 import { spawn, execFileSync, type ChildProcess } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync } from 'node:fs';
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
-import { hostname } from 'node:os';
+import { hostname, tmpdir } from 'node:os';
 import { dirname, relative, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { goalSubmission, setupAddress, setupChecklist, type SetupItem, type SetupItemId } from './model/setup-checklist.js';
-import { actionsDirectory, agentBrowserPage, browserProfileMode, passSudo, recordingPage, submitSudoCode, sudoInstruction, sudoProtectedPage, sudoStateSchema, takeSudoCode, type BrowserPage, type BrowserProfileMode, type RecordedStep, type SudoOptions, type SudoState } from './master-browser.js';
+import { actionsDirectory, agentBrowserPage, browserProfileMode, offeredSudoMethods, passSudo, recordingPage, submitSudoCode, sudoInstruction, sudoProtectedPage, sudoStateSchema, takeSudoCode, type BrowserPage, type BrowserProfileMode, type RecordedStep, type SudoOptions, type SudoState } from './master-browser.js';
 import { appImportRoute } from './github-setup.js';
 import { masterCredential, planeRequest } from './setup-from-zero.js';
 import { fileOnboardingWork, onboardingChecks } from './onboarding.js';
 import { findOnboardingWork, onboardingBranch, onboardingWait, waitedFor, type OnboardingWait } from './model/onboarding-work.js';
 import { coordinatorCheckoutRefusal, coordinatorCheckoutRoot, dirtyCheckoutPaths, readCoordinatorCheckout } from './master/profiles.js';
 import { redactString } from './evidence-replay.js';
+import { unitCheckout, userUnitDirectory } from './install/units.js';
 
 /**
  * `graphyard up` (GY-1419): every machine step of a first installation, in order — preflight,
@@ -83,7 +84,9 @@ export type UpEvent =
   | { kind: 'note'; text: string };
 
 /** What a device step hands to a person, or that it completed. */
-export type DriveOutcome = { state: 'done' } | { state: 'failed'; reason: string } | { state: 'waiting'; next: string };
+export type DriveOutcome = { state: 'done' } | { state: 'failed'; reason: string } | { state: 'waiting'; next: string }
+  /** GY-1510: GitHub rejected the App (manifest or form), with GitHub's own error text. */
+  | { state: 'rejected'; error: string };
 export type Handoff = (sentence: string, link: { url?: string | null; code?: string | null }) => void;
 
 export interface UpDependencies {
@@ -421,7 +424,7 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
     // A reused App (GY-1442) or one saved on this machine (GY-1476) needs no browser, so agent mode
     // starts without one only when the install's read-only plan says no App is left to create in a
     // browser: install reuses a saved App before any App page is driven.
-    const noProfile = 'Agent mode creates the GitHub Apps in a Chrome profile signed in to GitHub, and none is given or recorded: pass --browser-profile PROFILE and rerun graphyard up --agent.';
+    const noProfile = 'Agent mode creates the GitHub Apps in a Chrome profile signed in to GitHub, and none is given or recorded, here or by another Graphyard install on this host for the same GitHub login: pass --browser-profile PROFILE and rerun graphyard up --agent.';
     if (request.agent && !state.completed.includes('control-plane') && !deps.driveApp) {
       const browserApps: unknown = parseJson(await run('preflight', installArgs('--plan')))?.browserApps;
       const left = Array.isArray(browserApps) ? browserApps.map(String) : ['control-plane', 'reviewer'];
@@ -464,7 +467,7 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
       for (;;) {
         // A drive that stops at Confirm access under --no-wait ends the install it drives too.
         const stopped = new AbortController();
-        const waiting: string[] = [];
+        const waiting: string[] = [], refused: string[] = [];
         // One browser drive at a time, in the order the installer serves its App pages.
         let drives: Promise<void> = Promise.resolve();
         let running = true;
@@ -484,11 +487,14 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
             if (gaveUp.length) return manual(url);
             const outcome = await deps.driveApp!(url, handoff('control-plane'));
             if (outcome.state === 'waiting') { waiting.push(outcome.next); stopped.abort(); }
+            // GY-1510: a rejection is no wait on a person; the install it drives stops, and up fails quoting GitHub.
+            if (outcome.state === 'rejected') { refused.push(outcome.error); stopped.abort(); }
             if (outcome.state === 'failed') { gaveUp.push(outcome.reason); manual(url); }
           });
         } }).catch(error => { if (stopped.signal.aborted) return { code: 1, stdout: '' }; throw error; }).finally(() => { running = false; });
         await watcher;
         await drives;
+        if (refused.length) throw new UpStop(`GitHub rejected the App: "${refused[0]}". control-plane failed: GitHub refused the App page the install served, so the install was stopped; this is GitHub's answer, not a wait on a person.`, upExitCodes.failed);
         if (waiting.length) throw new UpStop(waiting[0], upExitCodes.waiting);
         claim = await rememberSignIn(deps.root, state, result.stdout) ?? claim;
         if (result.code === 0) return 'control plane installed with its GitHub Apps';
@@ -635,6 +641,41 @@ export async function upCommand(root: string, cliPath: () => Promise<string>, ar
   return runUp(request, dependencies).finally(release);
 }
 
+/** `graphyard up --help` (GY-1510): up's usage, one line for each option. */
+export const upUsage = [
+  'Usage: graphyard up --repo OWNER/NAME [options]',
+  '       graphyard up --sudo-code CODE|email',
+  '',
+  'First-run setup in one command, resumable: a rerun skips what is done (.graphyard/up.json).',
+  '',
+  'Options:',
+  '  --repo OWNER/NAME          the repository to set up; a rerun reuses the recorded one',
+  '  --provider NAME            compose (default), railway, hetzner or local',
+  '  --local                    --provider local: embedded Postgres on this machine, no Docker',
+  '  --agent                    run every step non-interactively, JSON events on stderr; hand off only device approvals',
+  '  --reviewer NAME            the reviewer App and agent runtime (default claude)',
+  '  --master NAME              the master agent runtime, claude or codex (default claude)',
+  '  --goal FILE                submit the goal in FILE once the checklist is green',
+  "  --browser-profile PROFILE  the Chrome profile signed in to GitHub (default: the master's, else another install's for the same login)",
+  '  --github-mobile            approve Confirm access with GitHub Mobile (the default whenever the page offers it)',
+  '  --sudo-code CODE|email     hand the waiting run a 6-digit Confirm-access code, or ask GitHub to email one',
+  '  --confirm-price X          consent to a created server\'s monthly price (passed to install)',
+  '  --max-monthly N            consent to any monthly price up to N (passed to install)',
+  '  --ssh-key NAME             the SSH key a created server is reached with (passed to install)',
+  '  --ssh-host HOST            the machine to install on over SSH (passed to install)',
+  '  --ssh-user USER            the SSH user on that machine (passed to install)',
+  '  --reuse-app SLUG           reuse an App already installed on the account (repeatable)',
+  '  --wait MINUTES             how long each wait on a person lasts (agent default 20)',
+  '  --no-wait                  at Confirm access, exit 3 with the App-import route instead of waiting',
+  "  --share-tailnet            serve the dashboard on this host's tailnet (never publicly)",
+  '  --json                     print the result as JSON',
+  '  -h, --help                 print this help and exit',
+  '',
+  'Exit codes: 0 green, 1 a step failed, 2 a machine prerequisite needs a person, 3 still waiting on a person.',
+].join('\n');
+/** Whether ARGS ask for up's usage. */
+export const upHelpRequested = (args: readonly (string | undefined)[]) => args.includes('--help') || args.includes('-h');
+
 /** `graphyard up --sudo-code CODE|email` (GY-1450): hands the run waiting at Confirm access a code, never echoing it; null without the flag. */
 export async function upSudoCode(root: string, args: string[]) {
   const at = args.findIndex(arg => arg === '--sudo-code' || arg.startsWith('--sudo-code='));
@@ -680,14 +721,17 @@ export function recordedUp(root: string): { repository: string; provider: string
   } catch (error: any) { if (error.code === 'ENOENT' || error instanceof SyntaxError) return null; throw error; }
 }
 
+/** The options `graphyard up` parses; upUsage gives each one line (GY-1510), and --sudo-code is read before them. */
+export const upOptions = { repo: { type: 'string' }, provider: { type: 'string' }, agent: { type: 'boolean' }, json: { type: 'boolean' }, reviewer: { type: 'string' }, master: { type: 'string' }, goal: { type: 'string' }, 'browser-profile': { type: 'string' },
+  'confirm-price': { type: 'string' }, 'max-monthly': { type: 'string' }, 'ssh-key': { type: 'string' }, 'ssh-host': { type: 'string' }, 'ssh-user': { type: 'string' },
+  'reuse-app': { type: 'string', multiple: true }, 'github-mobile': { type: 'boolean' }, wait: { type: 'string' }, 'no-wait': { type: 'boolean' }, 'share-tailnet': { type: 'boolean' }, local: { type: 'boolean' } } as const;
+
 /**
  * `graphyard up`'s flags. With a run RECORDED in this checkout, an omitted --repo or --provider is
  * the recorded one, and one that differs is refused, naming both: its steps say nothing about it.
  */
 export function upRequestFromArgs(args: string[], recorded: { repository: string; provider: string } | null = null): UpRequest {
-  const { values } = parseArgs({ args, options: { repo: { type: 'string' }, provider: { type: 'string' }, agent: { type: 'boolean' }, json: { type: 'boolean' }, reviewer: { type: 'string' }, master: { type: 'string' }, goal: { type: 'string' }, 'browser-profile': { type: 'string' },
-    'confirm-price': { type: 'string' }, 'max-monthly': { type: 'string' }, 'ssh-key': { type: 'string' }, 'ssh-host': { type: 'string' }, 'ssh-user': { type: 'string' },
-    'reuse-app': { type: 'string', multiple: true }, 'github-mobile': { type: 'boolean' }, wait: { type: 'string' }, 'no-wait': { type: 'boolean' }, 'share-tailnet': { type: 'boolean' }, local: { type: 'boolean' } }, allowPositionals: false });
+  const { values } = parseArgs({ args, options: upOptions, allowPositionals: false });
   // --local is --provider local (GY-1500): the control plane on embedded Postgres on this machine, no Docker.
   if (values.local && values.provider !== undefined && values.provider !== 'local') throw new Error(`graphyard up --local means --provider local; it cannot be combined with --provider ${values.provider}`);
   const provider = values.local ? 'local' : values.provider;
@@ -705,6 +749,22 @@ export function upRequestFromArgs(args: string[], recorded: { repository: string
     ...(minutes !== null ? { waitMs: minutes * 60_000 } : {}), ...(values['no-wait'] ? { noWait: true } : {}), ...(values['share-tailnet'] ? { shareTailnet: true } : {}) };
 }
 
+/** How many fresh GitHub Mobile prompts a drive requests after one expires unapproved (GY-1510). */
+export const upMobileReprompts = 3;
+
+/**
+ * GitHub's own error text on an App page (GY-1510): the validation lines a rejected manifest or App
+ * form shows ("Hook url cannot be blank"), joined; null when the page shows none.
+ */
+export function githubAppError(text: string): string | null {
+  const lines = text.split(/\r?\n/).map(line => line.trim()).filter(line => line && line.length <= 300 && (
+    /\b(?:can(?:no|')t be blank|is invalid|is not (?:a )?valid|has already been taken|is too (?:long|short)|is reserved|is not included in the list)\b/i.test(line)
+    || /^(?:invalid (?:github app )?(?:manifest|configuration)|there (?:was|were) (?:an )?errors?\b|error:|something went wrong)/i.test(line)));
+  return lines.length ? [...new Set(lines)].join('; ') : null;
+}
+/** The drive met GitHub's rejection of the App: its message is GitHub's own text. */
+class AppRejected extends Error {}
+
 /**
  * Agent mode's App step (AC-5): the installer's manifest page, driven in the master's browser
  * profile — register the App, then install it on the repository alone (GitHub preselects it from
@@ -712,9 +772,13 @@ export function upRequestFromArgs(args: string[], recorded: { repository: string
  * first (GY-1442): the handoff names a sudo-protected page to confirm access on once in the
  * operator's own Chrome, which the shared GitHub session then carries, and every method the page
  * offers; the drive re-checks every 10 s and types in an authenticator or email code handed over
- * on the manifest page or with `graphyard up --sudo-code` (GY-1450). GitHub Mobile is triggered only
- * when the page offers nothing else or the operator chose it (`--github-mobile`, `sudo: 'mobile'`);
- * a Mobile code unapproved for a minute is handed off again with the passkey or password link.
+ * on the manifest page or with `graphyard up --sudo-code` (GY-1450). GY-1510: GitHub Mobile is
+ * triggered whenever the page offers it (a passkey or code only when it does not, or when the
+ * operator chose `sudo: 'passkey-or-password'`), handed off as one sentence naming its number; a
+ * prompt that expires unapproved is requested afresh up to upMobileReprompts times, each new number
+ * handed off; a Mobile code unapproved for a minute is handed off again with the passkey or password link.
+ * When GitHub rejects the manifest or shows an error on the App page, the drive ends `rejected`
+ * quoting GitHub's own error text (githubAppError).
  * A re-check that reloads the App creation page drops the manifest, so once access is confirmed
  * the manifest is submitted again from the setup page.
  *
@@ -742,13 +806,19 @@ export function browserAppDriver(options: { page: BrowserPage; repository: strin
       const resumed = before && before.method && before.method !== 'mobile' && before.method === state.method && now - Date.parse(before.issuedAt) < 86_400_000 ? before : null;
       await options.remember?.(resumed ? { ...state, issuedAt: resumed.issuedAt } : state);
       if (resumed) options.onResume?.(resumed);
-      else handoff([sudoInstruction(state, 'your phone', { ...(options.readCode ? { page: setupPage, command: 'graphyard up --sudo-code' } : {}), profile: options.profile ?? null }), importRoute].join('\n'),
+      // GY-1510: a GitHub Mobile prompt is handed off as one plain sentence naming its number.
+      else handoff(state.method === 'mobile' ? sudoInstruction(state, 'your phone') : [sudoInstruction(state, 'your phone', { ...(options.readCode ? { page: setupPage, command: 'graphyard up --sudo-code' } : {}), profile: options.profile ?? null }), importRoute].join('\n'),
         { url: state.fallback?.url ?? state.url ?? page.url(), code: state.code });
       if (options.noWait) throw new SudoNoWait(`GitHub asks to confirm access before it creates the App, and --no-wait does not wait for it. ${importRoute}; or rerun ${rerun} without --no-wait to wait for the confirmation.`);
     };
     // passSudo's flow names the closest master browser flow; its rerun advice is this command's.
     try {
-      const passed = await passSudo(page, { flow: 'installation-accept', record: options.record ?? 'graphyard up', sleep: options.sleep, now: options.now, timeoutMs: options.timeoutMs ?? upAgentWaitMs, prefer: options.sudo ?? 'passkey-or-password', readCode: options.readCode,
+      // GY-1510: GitHub Mobile whenever the page offers it (named, with a control to request it), unless
+      // the operator chose otherwise; the page's own confirmation or a code only when it offers none.
+      const mobile = () => offeredSudoMethods(page.text()).mobile && !!(page.locate('button', 'Use GitHub Mobile') ?? page.locate('link', 'Use GitHub Mobile'));
+      const prefer = options.sudo ?? (mobile() ? 'mobile' : 'passkey-or-password');
+      const passed = await passSudo(page, { flow: 'installation-accept', record: options.record ?? 'graphyard up', sleep: options.sleep, now: options.now, timeoutMs: options.timeoutMs ?? upAgentWaitMs, prefer, readCode: options.readCode,
+        maxAttempts: 1 + upMobileReprompts,
         onCode, onSettled: state => options.remember?.(state.state === 'approved' ? null : state) });
       return passed.passed;
     } catch (error: any) {
@@ -758,12 +828,15 @@ export function browserAppDriver(options: { page: BrowserPage; repository: strin
       throw new Error(options.profile?.mode === 'copy' ? reason.replace(`, or once in your own Chrome at ${sudoProtectedPage}`, '') : reason);
     }
   };
-  const press = async (kind: 'button' | 'link', text: string, handoff: Handoff) => {
+  // GitHub's rejection of the manifest or App form, when the page shows one (GY-1510).
+  const rejected = () => { if (!/^https:\/\/github\.com\//.test(page.url())) return; const error = githubAppError(page.text()); if (error) throw new AppRejected(error); };
+  const press = async (kind: 'button' | 'link', text: string, handoff: Handoff, after = false) => {
     await awaitSudo(handoff);
     const control = page.locate(kind, text);
-    if (!control) throw new Error(`the page offers no "${text}" ${kind}`);
+    if (!control) { rejected(); throw new Error(`the page offers no "${text}" ${kind}`); }
     page.click(control.selector); page.wait(2_000);
     await awaitSudo(handoff);
+    if (after) rejected();
   };
   return async (url: string, handoff: Handoff): Promise<DriveOutcome> => {
     let outcome: DriveOutcome;
@@ -777,7 +850,7 @@ export function browserAppDriver(options: { page: BrowserPage; repository: strin
         const confirmed = await awaitSudo(handoff);
         // Confirmed on a reloaded page: GitHub shows the plain new-App form, so submit the manifest again.
         if (confirmed && submissions === 0 && !page.locate('button', `Create GitHub App for ${owner}`)) continue;
-        await press('button', `Create GitHub App for ${owner}`, handoff);
+        await press('button', `Create GitHub App for ${owner}`, handoff, true);
         break;
       }
       page.open(url);
@@ -788,7 +861,9 @@ export function browserAppDriver(options: { page: BrowserPage; repository: strin
         await press('button', 'Install', handoff);
       }
       outcome = { state: 'done' };
-    } catch (error: any) { outcome = error instanceof SudoNoWait ? { state: 'waiting', next: error.message } : { state: 'failed', reason: String(error?.message ?? error).split('\n')[0] }; }
+    } catch (error: any) {
+      outcome = error instanceof SudoNoWait ? { state: 'waiting', next: error.message } : error instanceof AppRejected ? { state: 'rejected', error: error.message } : { state: 'failed', reason: String(error?.message ?? error).split('\n')[0] };
+    }
     try { page.close(); } catch { /* recorded on the step */ }
     await options.onClose?.(outcome);
     return outcome;
@@ -797,12 +872,84 @@ export function browserAppDriver(options: { page: BrowserPage; repository: strin
 
 /**
  * The browser profile agent mode drives the App pages in: the one passed, else the one the master
- * recorded (`master init --browser-profile`), else none, and agent mode stops before it starts.
+ * recorded (`master init --browser-profile`), else (GY-1510) the one another Graphyard install on this
+ * host recorded in its .graphyard/master.json, when that profile's GitHub login is LOGIN, the login
+ * this host's gh is authenticated as; FROM names that install. A profile's login is the browser login
+ * its install's administration ledger (.graphyard/master-actions/ledger.json) last observed signed in
+ * to it; an entry that never read the browser's login (a no-op or dry run, which records only the gh
+ * login) says nothing about the profile. A profile no entry observed is asked: DISCOVER opens GitHub
+ * in it and reads the signed-in login. A profile with no login found, or no login here, is never
+ * borrowed, and agent mode stops before it starts.
+ * INSTALLS are the other installs' checkouts, hostInstallRoots by default.
  */
-export function upBrowserProfile(root: string, request: UpRequest): { profile: string; executable?: string } | null {
+export function upBrowserProfile(root: string, request: UpRequest, installs: string[] = hostInstallRoots(), login: () => string | null = hostGithubLogin,
+  discover: (browser: { profile: string; executable?: string }) => string | null = hostProfileLogin): { profile: string; executable?: string; from?: string; login?: string } | null {
   if (request.browserProfile) return { profile: request.browserProfile };
-  try { const browser = JSON.parse(readFileSync(resolve(root, '.graphyard/master.json'), 'utf8')).browser; return typeof browser?.profile === 'string' && browser.profile ? browser : null; }
-  catch { return null; }
+  const recorded = (checkout: string) => {
+    try { const config = JSON.parse(readFileSync(resolve(checkout, '.graphyard/master.json'), 'utf8')); return typeof config?.browser?.profile === 'string' && config.browser.profile ? config : null; }
+    catch { return null; }
+  };
+  const own = recorded(root);
+  if (own) return own.browser;
+  const self = canonicalPath(root);
+  let mine: string | null | undefined;
+  for (const checkout of installs) {
+    if (canonicalPath(checkout) === self) continue;
+    const config = recorded(checkout);
+    if (!config) continue;
+    if (mine === undefined) mine = login()?.toLowerCase() ?? null;
+    if (!mine) return null;
+    const { profile, executable } = config.browser;
+    const browser = { profile, ...(typeof executable === 'string' && executable ? { executable } : {}) };
+    let theirs = observedProfileLogin(checkout, profile);
+    if (!theirs) { try { theirs = discover(browser); } catch { theirs = null; } }
+    if (theirs && theirs.toLowerCase() === mine) return { ...browser, from: checkout, login: theirs };
+  }
+  return null;
+}
+/** The GitHub login CHECKOUT's administration ledger last observed signed in to PROFILE's browser; entries that never read it (actor.browser null) are skipped. */
+function observedProfileLogin(checkout: string, profile: string): string | null {
+  let entries: unknown[];
+  try { entries = JSON.parse(readFileSync(resolve(actionsDirectory(checkout), 'ledger.json'), 'utf8'))?.entries; } catch { return null; }
+  if (!Array.isArray(entries)) return null;
+  for (const entry of [...entries].reverse()) {
+    const actor = (entry as any)?.actor;
+    if (actor?.profile === profile && typeof actor.browser === 'string' && actor.browser) return actor.browser;
+  }
+  return null;
+}
+/**
+ * The GitHub login signed in to BROWSER's profile, read as the master's browser flows read it: GitHub's
+ * user-login meta tag on github.com, in a session of its own. Null when it is signed out or cannot be opened.
+ */
+export function browserProfileLogin(browser: { profile: string; executable?: string }, page: (session: string) => BrowserPage = session => agentBrowserPage(browser, session)): string | null {
+  let opened: BrowserPage | null = null;
+  try {
+    opened = page(`graphyard-up-login-${browser.profile.replace(/[^a-zA-Z0-9]/g, '-').toLowerCase()}`);
+    opened.open('https://github.com/');
+    return opened.meta('user-login');
+  } catch { return null; }
+  finally { try { opened?.close(); } catch { /* the session may already be gone */ } }
+}
+const underTestRunner = () => !!process.env.NODE_TEST_CONTEXT || process.execArgv.includes('--test') || process.env.npm_lifecycle_event === 'test';
+/** browserProfileLogin, except that under the test runner no real browser is opened. */
+const hostProfileLogin = (browser: { profile: string; executable?: string }) => underTestRunner() ? null : browserProfileLogin(browser);
+/** The GitHub login this host's gh is authenticated as, or null when gh is not signed in. */
+export function hostGithubLogin(): string | null {
+  try { return execFileSync('gh', ['api', 'user', '--jq', '.login'], { encoding: 'utf8', timeout: 30_000, stdio: ['ignore', 'pipe', 'ignore'] }).trim() || null; } catch { return null; }
+}
+const canonicalPath = (path: string) => { try { return realpathSync(path); } catch { return resolve(path); } };
+/**
+ * The checkouts the Graphyard master loops installed on this host run from: each graphyard-master*.service
+ * unit's WorkingDirectory. Under the test runner only a directory under the system temporary directory
+ * is read, as legacyUnitFiles reads one: the operator's real installs belong to no test.
+ */
+export function hostInstallRoots(unitDirectory = userUnitDirectory()): string[] {
+  if (underTestRunner() && !`${canonicalPath(unitDirectory)}/`.startsWith(`${canonicalPath(tmpdir())}/`)) return [];
+  let names: string[];
+  try { names = readdirSync(unitDirectory).filter(name => /^graphyard-master.*\.service$/.test(name)).sort(); } catch { return []; }
+  const roots = names.flatMap(name => { try { const working = unitCheckout(readFileSync(resolve(unitDirectory, name), 'utf8')).workingDirectory; return working ? [working] : []; } catch { return []; } });
+  return [...new Set(roots)];
 }
 
 /**
@@ -835,7 +982,7 @@ export function recordedAppDriver(root: string, request: UpRequest, browser: { p
     },
     onClose: async outcome => {
       if (!created) return;
-      await writeFile(resolve(directory, 'record.json'), `${JSON.stringify({ id, flow: 'app-create', startedAt: startedAt.toISOString(), completedAt: new Date().toISOString(), actor: { profile: browser.profile }, target: { repository: request.repository }, outcome: outcome.state === 'done' ? 'applied' : 'refused', ...(outcome.state === 'failed' ? { reason: outcome.reason } : {}), screenshots: steps.filter(step => step.screenshot).length, steps }, null, 2)}\n`, { mode: 0o600 });
+      await writeFile(resolve(directory, 'record.json'), `${JSON.stringify({ id, flow: 'app-create', startedAt: startedAt.toISOString(), completedAt: new Date().toISOString(), actor: { profile: browser.profile }, target: { repository: request.repository }, outcome: outcome.state === 'done' ? 'applied' : 'refused', ...(outcome.state === 'failed' ? { reason: outcome.reason } : outcome.state === 'rejected' ? { reason: outcome.error } : {}), screenshots: steps.filter(step => step.screenshot).length, steps }, null, 2)}\n`, { mode: 0o600 });
     },
   });
   return { directory, drive };
@@ -963,12 +1110,14 @@ export function forwardSignals(children: Set<ChildProcess>, options: { exit?: (c
 }
 
 /** The real dependencies: this CLI's own commands as children, the master identity's status read. */
-export function upDependencies(root: string, cliPath: string, request: UpRequest, emit: (event: UpEvent) => void): UpDependencies & { children: Set<ChildProcess> } {
+export function upDependencies(root: string, cliPath: string, request: UpRequest, emit: (event: UpEvent) => void, githubLogin: () => string | null = hostGithubLogin,
+  discoverLogin: (browser: { profile: string; executable?: string }) => string | null = hostProfileLogin): UpDependencies & { children: Set<ChildProcess> } {
   // The children still running, for forwardSignals.
   const children = new Set<ChildProcess>();
   const serverUrl = async () => { try { return String(JSON.parse(await readFile(resolve(root, '.graphyard/master.json'), 'utf8')).url ?? '') || null; } catch { return null; } };
   const masterToken = async () => { const url = await serverUrl(); return url ? (await masterCredential(root, url))?.token ?? null : null; };
-  const browser = request.agent ? upBrowserProfile(root, request) : null;
+  const browser = request.agent ? upBrowserProfile(root, request, hostInstallRoots(), githubLogin, discoverLogin) : null;
+  if (browser?.from) emit({ kind: 'note', text: `No --browser-profile given: the App pages are driven in Chrome profile ${browser.profile}, which the Graphyard install at ${browser.from} uses, signed in to GitHub as ${browser.login}, the login gh uses here; pass --browser-profile to use another.` });
   // The loop runs from the checkout of the CLI master init recorded, which is this CLI until it has.
   const loopCheckout = async () => {
     let recorded: unknown = null;
@@ -1032,7 +1181,7 @@ export function upDependencies(root: string, cliPath: string, request: UpRequest
       return url && token ? planeRequest(url, token)('status') : null;
     },
     // Each App page gets its own recorded drive, so each has its own record directory.
-    ...(browser ? { driveApp: (url: string, handoff: Handoff) => recordedAppDriver(root, request, browser, undefined, { emit }).drive(url, handoff) } : {}),
+    ...(browser ? { driveApp: (url: string, handoff: Handoff) => recordedAppDriver(root, request, { profile: browser.profile, ...(browser.executable ? { executable: browser.executable } : {}) }, undefined, { emit }).drive(url, handoff) } : {}),
   };
 }
 

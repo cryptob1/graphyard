@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { connect } from 'node:net';
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
@@ -376,12 +377,13 @@ test('unit:graphyard-up-agent-mode — up --agent reaches a green checklist with
   const drive = browserAppDriver({ page, repository: 'acme/shop', ids: () => ({ owner: 11, repository: 22 }), sleep: async () => { if (sudoPolls) sudoPolls++; } });
   assert.deepEqual(await drive('http://127.0.0.1:4311', sentence => { if (!handed.includes(sentence)) handed.push(sentence); }), { state: 'done' });
   // GY-1457: every Confirm-access handoff ends with the App-import route that needs no live moment.
-  assert.deepEqual(handed, [`Approve the GitHub Mobile prompt on your phone and choose 42\n${(await import('../src/github-setup.js')).appImportRoute('acme/shop', ' --agent')}`]);
+  // GY-1510: a GitHub Mobile prompt is handed off as one plain sentence naming its number.
+  assert.deepEqual(handed, ['Approve the GitHub Mobile prompt on your phone and choose 42']);
   assert.deepEqual(clicked, ['#register', '#create', '#install']);
   assert.ok(opened.includes('https://github.com/apps/graphyard-acme-shop/installations/new/permissions?suggested_target_id=11&repository_ids[]=22'), 'installs on the one repository');
 
-  // GitHub's passkey-first Confirm-access page (GY-1442): the drive hands off the passkey or password
-  // confirmation at the page's link and waits for it, never triggering GitHub Mobile on its own.
+  // GitHub's passkey-first Confirm-access page (GY-1442), with the passkey route chosen: the drive hands
+  // off the passkey or password confirmation at the page's link and waits for it, never triggering GitHub Mobile.
   let mobile = false, approved = false, polls = 0;
   const passkey: BrowserPage = {
     ...page, url: () => approved ? 'https://github.com/settings/apps' : 'https://github.com/sessions/sudo',
@@ -390,7 +392,7 @@ test('unit:graphyard-up-agent-mode — up --agent reaches a green checklist with
     click: selector => { if (selector === '#mobile') mobile = true; },
   };
   const passkeyHanded: { sentence: string; url: string | null; code: string | null }[] = [];
-  const passkeyDrive = browserAppDriver({ page: passkey, repository: 'acme/shop', ids: () => ({ owner: 11, repository: 22 }), sleep: async () => { if (++polls === 2) approved = true; } });
+  const passkeyDrive = browserAppDriver({ page: passkey, repository: 'acme/shop', ids: () => ({ owner: 11, repository: 22 }), sudo: 'passkey-or-password', sleep: async () => { if (++polls === 2) approved = true; } });
   assert.deepEqual(await passkeyDrive('http://127.0.0.1:4311', (sentence, link) => { passkeyHanded.push({ sentence, url: link.url ?? null, code: link.code ?? null }); }), { state: 'done' });
   assert.equal(mobile, false, 'GitHub Mobile is not triggered while the page offers a passkey');
   const importRoute = (await import('../src/github-setup.js')).appImportRoute('acme/shop', ' --agent');
@@ -401,7 +403,7 @@ test('unit:graphyard-up-agent-mode — up --agent reaches a green checklist with
   const mobileDrive = browserAppDriver({ page: passkey, repository: 'acme/shop', ids: () => ({ owner: 11, repository: 22 }), sudo: 'mobile', sleep: async () => { if (mobile && ++polls === 2) approved = true; } });
   assert.deepEqual(await mobileDrive('http://127.0.0.1:4311', (sentence, link) => { mobileHanded.push({ sentence, code: link.code ?? null }); }), { state: 'done' });
   assert.ok(mobile, 'GitHub Mobile was triggered');
-  assert.deepEqual(mobileHanded, [{ sentence: 'Approve the GitHub Mobile prompt on your phone and choose 37\n' + importRoute, code: '37' }]);
+  assert.deepEqual(mobileHanded, [{ sentence: 'Approve the GitHub Mobile prompt on your phone and choose 37', code: '37' }]);
   assert.equal(upRequestFromArgs(['--repo', 'acme/shop', '--github-mobile', '--reuse-app', 'graphyard-acme-api']).sudo, 'mobile');
   assert.deepEqual(upRequestFromArgs(['--repo', 'acme/shop', '--reuse-app', 'graphyard-acme-api']).reuseApps, ['graphyard-acme-api']);
 
@@ -1282,4 +1284,222 @@ test('unit:up-uses-chosen-port — the connection, the Setup address and the sig
   assert.equal(result.signIn, `${chosen}/#sign-in=${CODE}&setup`);
   assert.ok(result.next.includes(`${chosen}/#sign-in=${CODE}`), result.next);
   assert.ok(!JSON.stringify(result).includes('127.0.0.1:4310'), 'nothing up records or prints names the port another install holds');
+});
+
+/** GY-1510: a Confirm-access drive's page. The sudo page appears on "Create GitHub App"; CODES are the Mobile numbers each prompt shows, a prompt expiring after EXPIREAFTER polls unless the one at index APPROVEDAT is approved. */
+function mobilePage(options: { landing: string; codes?: string[]; expireAfter?: number; approvedAt?: number; error?: string }) {
+  let phase: 'app' | 'landing' | 'code' | 'expired' | 'done' = 'app', prompt = -1, polls = 0;
+  const clicked: string[] = [];
+  const located = (selector: string, text: string, href?: string): Located => ({ selector, tag: href ? 'a' : 'button', checked: null, value: null, text, ...(href ? { href } : {}) });
+  const issue = () => { prompt += 1; polls = 0; phase = 'code'; };
+  const page: BrowserPage = {
+    open: () => { if (phase === 'done') phase = 'done'; },
+    url: () => ['landing', 'code', 'expired'].includes(phase) ? 'https://github.com/sessions/sudo' : 'https://github.com/settings/apps/new',
+    text: () => phase === 'landing' ? options.landing : phase === 'code' ? `Confirm access\nGitHub Mobile\n${options.codes![prompt]}` : phase === 'expired' ? 'Confirm access\nGitHub Mobile\nThe request expired. Try again' : phase === 'app' && options.error ? options.error : '',
+    meta: () => null,
+    locate: (kind, text) => {
+      if (phase === 'app' && kind === 'button' && text === 'Register Graphyard App →') return located('#register', text);
+      if (phase === 'app' && !options.error && kind === 'button' && text === 'Create GitHub App for acme') return located('#create', text);
+      if (phase === 'landing' && text === 'Use GitHub Mobile' && /Use GitHub Mobile/.test(options.landing)) return located('#mobile', text, 'https://github.com/sessions/sudo?mobile=1');
+      if (phase === 'expired' && kind === 'button' && text === 'Try again') return located('#again', text);
+      return null;
+    },
+    click: selector => { clicked.push(selector); if (selector === '#create') phase = 'landing'; if (selector === '#mobile' || selector === '#again') issue(); },
+    setChecked: () => {}, select: () => {}, screenshot: () => {}, wait: () => {}, close: () => {},
+  };
+  // A fake clock, so a drive that never sees its approval gives up at its timeout instead of waiting in real time.
+  const clock = { t: 0 };
+  const sleep = async (ms = 1_000) => {
+    clock.t += ms;
+    if (phase !== 'code') return;
+    polls += 1;
+    if (prompt === options.approvedAt && polls >= 1) phase = 'done';
+    else if (polls >= (options.expireAfter ?? 2)) phase = 'expired';
+  };
+  return { page, sleep, clicked, now: () => new Date(clock.t), timeoutMs: 600_000 };
+}
+
+/** CHECKOUT's administration ledger, oldest first, with one entry per LOGINS recording the GitHub logins PROFILE was driven as. */
+async function recordProfileLogin(checkout: string, profile: string, ...logins: { browser: string | null; cli: string | null }[]) {
+  await mkdir(join(checkout, '.graphyard/master-actions'), { recursive: true });
+  const entries = logins.map(each => ({ id: randomUUID(), flow: 'protection', actor: { ...each, profile, os: 'operator', host: 'host', coordinator: null } }));
+  await writeFile(join(checkout, '.graphyard/master-actions/ledger.json'), JSON.stringify({ version: 1, entries }));
+}
+
+test('unit:up-agent-defaults-browser-profile — with no --browser-profile, agent mode drives the profile another install on this host recorded for the same GitHub login and says so; with none, it refuses as before', async () => {
+  const { hostInstallRoots, runUp, upBrowserProfile, upDependencies } = await up();
+  const config = await temporaryDirectory('graphyard-up-other-config');
+  const units = join(config, 'systemd', 'user');
+  const other = await temporaryDirectory('graphyard-up-other-install'), stranger = await temporaryDirectory('graphyard-up-stranger-install');
+  const fresh = await temporaryDirectory('graphyard-up-fresh');
+  await mkdir(units, { recursive: true });
+  await mkdir(join(other, '.graphyard'), { recursive: true }); await mkdir(join(stranger, '.graphyard'), { recursive: true });
+  await writeFile(join(stranger, '.graphyard/master.json'), JSON.stringify({ repository: 'someone/else', browser: { profile: 'Theirs' } }));
+  await writeFile(join(other, '.graphyard/master.json'), JSON.stringify({ repository: 'Acme/api', browser: { profile: 'Default', executable: '/usr/bin/google-chrome-stable' } }));
+  await writeFile(join(units, 'graphyard-master-someone-else.service'), `[Service]\nWorkingDirectory=${stranger}\n`);
+  await writeFile(join(units, 'graphyard-master.service'), `[Service]\nWorkingDirectory=${other}\nExecStart=/usr/bin/node x\n`);
+  await writeFile(join(units, 'graphyard-executor@.service'), `[Service]\nWorkingDirectory=/elsewhere\n`);
+  assert.deepEqual(hostInstallRoots(units), [stranger, other], 'every master loop unit names its install');
+
+  // Each install's ledger records the GitHub login its profile's browser was observed signed in as.
+  // A later no-op entry, which never read the browser and records only the gh login, says nothing about the profile.
+  await recordProfileLogin(other, 'Default', { browser: 'Acme', cli: 'Acme' }, { browser: null, cli: 'someone' });
+  await recordProfileLogin(stranger, 'Theirs', { browser: 'someone', cli: 'Acme' });
+  const neverAsked = () => { throw new Error('an observed profile is not opened'); };
+  // The other install's profile, for the same login (case aside) though its repository has another owner, naming where it came from.
+  assert.deepEqual(upBrowserProfile(fresh, request({ agent: true, repository: 'org-b/service' }), [stranger, other], () => 'acme', neverAsked), { profile: 'Default', executable: '/usr/bin/google-chrome-stable', from: other, login: 'Acme' });
+  assert.equal(upBrowserProfile(fresh, request({ agent: true, repository: 'org-b/service' }), [other], () => 'someone', neverAsked), null, 'the no-op entry\'s gh login never claims the profile');
+  // An explicit or own recorded profile still wins; another login's install is never borrowed, whatever its repository's owner.
+  assert.deepEqual(upBrowserProfile(fresh, request({ agent: true, browserProfile: 'Work' }), [other], () => { throw new Error('not asked'); }), { profile: 'Work' });
+  assert.equal(upBrowserProfile(fresh, request({ agent: true, repository: 'Acme/shop' }), [stranger, other], () => 'someone-else', neverAsked), null);
+  assert.equal(upBrowserProfile(fresh, request({ agent: true }), [stranger, other], () => null, neverAsked), null, 'no login on this host: nothing is borrowed');
+  // The browser's observed login decides, not the gh login that drove it: stranger's profile is someone's.
+  assert.equal(upBrowserProfile(fresh, request({ agent: true }), [stranger], () => 'acme', neverAsked), null);
+  assert.equal(upBrowserProfile(fresh, request({ agent: true }), [stranger], () => 'Someone', neverAsked)?.profile, 'Theirs');
+  // A profile no entry observed (none, or only gh logins) is opened to read who is signed in; signed out or unreadable, it is never borrowed.
+  const unobserved = await temporaryDirectory('graphyard-up-unobserved-install');
+  await mkdir(join(unobserved, '.graphyard'), { recursive: true });
+  await writeFile(join(unobserved, '.graphyard/master.json'), JSON.stringify({ repository: 'Acme/api', browser: { profile: 'Other' } }));
+  await recordProfileLogin(unobserved, 'Other', { browser: null, cli: 'acme' });
+  const asked: string[] = [];
+  assert.equal(upBrowserProfile(fresh, request({ agent: true }), [unobserved], () => 'acme', ({ profile }) => { asked.push(profile); return 'bob'; }), null, 'signed in as bob: not acme\'s, whatever gh drove it as');
+  assert.deepEqual(asked, ['Other']);
+  assert.deepEqual(upBrowserProfile(fresh, request({ agent: true }), [unobserved], () => 'acme', () => 'ACME'), { profile: 'Other', from: unobserved, login: 'ACME' });
+  assert.equal(upBrowserProfile(fresh, request({ agent: true }), [unobserved], () => 'acme', () => null), null, 'signed out');
+  assert.equal(upBrowserProfile(fresh, request({ agent: true }), [unobserved], () => 'acme', () => { throw new Error('profile locked'); }), null, 'cannot be opened');
+  // Reading the login opens GitHub in the profile and reads its user-login tag, then closes the session.
+  const { browserProfileLogin } = await up();
+  const calls: string[] = [];
+  const fake = (login: string | null) => (session: string) => ({ open: (url: string) => { calls.push(`${session} open ${url}`); }, meta: (name: string) => { calls.push(`meta ${name}`); return login; }, close: () => { calls.push('close'); } }) as any;
+  assert.equal(browserProfileLogin({ profile: 'Profile 1' }, fake('acme')), 'acme');
+  assert.deepEqual(calls, ['graphyard-up-login-profile-1 open https://github.com/', 'meta user-login', 'close']);
+  assert.equal(browserProfileLogin({ profile: 'Default' }, fake(null)), null);
+
+  // The real dependencies read this host's installs and say which profile drives the App pages.
+  const previous = process.env.XDG_CONFIG_HOME;
+  process.env.XDG_CONFIG_HOME = config;
+  try {
+    const notes: UpEvent[] = [];
+    const deps = upDependencies(fresh, '/nonexistent/graphyard.mjs', request({ agent: true, repository: 'org-b/service' }), event => { notes.push(event); }, () => 'acme', neverAsked);
+    assert.equal(typeof deps.driveApp, 'function', 'agent mode drives the App pages in the borrowed profile');
+    assert.deepEqual(notes.map(event => event.kind === 'note' ? event.text : ''), [`No --browser-profile given: the App pages are driven in Chrome profile Default, which the Graphyard install at ${other} uses, signed in to GitHub as Acme, the login gh uses here; pass --browser-profile to use another.`]);
+    // No install for this login: no drive, so agent mode refuses as it did before.
+    const none: UpEvent[] = [];
+    const refusedDeps = upDependencies(fresh, '/nonexistent/graphyard.mjs', request({ agent: true }), event => { none.push(event); }, () => 'nobody', () => null);
+    assert.equal(refusedDeps.driveApp, undefined);
+    assert.deepEqual(none, []);
+  } finally { if (previous === undefined) delete process.env.XDG_CONFIG_HOME; else process.env.XDG_CONFIG_HOME = previous; }
+  const bare = world();
+  const refused = await runUp(request({ agent: true, repository: 'other/shop' }), dependencies(bare, await temporaryDirectory('graphyard-up-no-profile'), []));
+  assert.equal(refused.exitCode, 2);
+  assert.match(refused.next, /none is given or recorded, here or by another Graphyard install on this host for the same GitHub login: pass --browser-profile PROFILE/);
+});
+
+test('unit:up-agent-mobile-default — in agent mode a Confirm-access page offering GitHub Mobile gets the Mobile prompt without --github-mobile, handed off as one sentence naming its number; a page with no Mobile option gets the code route', async () => {
+  const { browserAppDriver } = await up();
+  const ids = () => ({ owner: 11, repository: 22 });
+  // GitHub's passkey-first page hides Mobile under "Having problems?": it is still the method used.
+  const offered = mobilePage({ landing: 'Confirm access\nUse your passkey\nHaving problems?\nUse GitHub Mobile', codes: ['37'], approvedAt: 0 });
+  const handed: { sentence: string; code: string | null }[] = [];
+  assert.deepEqual(await browserAppDriver({ page: offered.page, repository: 'acme/shop', ids, sleep: offered.sleep, now: offered.now, timeoutMs: offered.timeoutMs })('http://127.0.0.1:4311', (sentence, link) => { handed.push({ sentence, code: link.code ?? null }); }), { state: 'done' });
+  assert.ok(offered.clicked.includes('#mobile'), 'the Mobile prompt was requested');
+  assert.deepEqual(handed, [{ sentence: 'Approve the GitHub Mobile prompt on your phone and choose 37', code: '37' }]);
+  assert.equal(handed[0].sentence.split(/(?<=[.!?])\s+/).length, 1, 'one plain sentence');
+  assert.doesNotMatch(handed[0].sentence, /\n/);
+
+  // No Mobile on the page: a code is the route, and Mobile is never requested.
+  const codes = mobilePage({ landing: 'Confirm access\nUse your passkey\nEnter the code from your authenticator app' });
+  const codeHanded: string[] = [];
+  let polls = 0;
+  const codeDrive = browserAppDriver({ page: codes.page, repository: 'acme/shop', ids, timeoutMs: 1, now: () => new Date(Date.UTC(2026, 9, 8, 0, 0, polls)), sleep: async () => { polls += 1; }, readCode: () => null });
+  const outcome = await codeDrive('http://127.0.0.1:4311', sentence => { codeHanded.push(sentence); });
+  assert.equal(outcome.state, 'failed');
+  assert.ok(!codes.clicked.includes('#mobile'));
+  assert.equal(codeHanded.length, 1);
+  assert.match(codeHanded[0], /offers: passkey, authenticator app/);
+  assert.match(codeHanded[0], /authenticator app, enter its 6-digit code/);
+  assert.doesNotMatch(codeHanded[0], /GitHub Mobile prompt/);
+});
+
+test('unit:up-mobile-reprompt — a GitHub Mobile prompt that expires unapproved is requested afresh up to 3 times, each new number handed off; the drive gives up after the third', async () => {
+  const { browserAppDriver, upMobileReprompts } = await up();
+  assert.equal(upMobileReprompts, 3);
+  const ids = () => ({ owner: 11, repository: 22 });
+  const landing = 'Confirm access\nUse GitHub Mobile';
+  // Approved on the second fresh prompt: three numbers handed off, the drive finishes.
+  const late = mobilePage({ landing, codes: ['11', '12', '13', '14'], approvedAt: 2 });
+  const lateHanded: string[] = [];
+  assert.deepEqual(await browserAppDriver({ page: late.page, repository: 'acme/shop', ids, sleep: late.sleep, now: late.now, timeoutMs: late.timeoutMs })('http://127.0.0.1:4311', sentence => { lateHanded.push(sentence); }), { state: 'done' });
+  assert.deepEqual(lateHanded, ['11', '12', '13'].map(code => `Approve the GitHub Mobile prompt on your phone and choose ${code}`));
+  // Never approved: the first prompt and 3 fresh ones, each number handed off, then the drive gives up.
+  const never = mobilePage({ landing, codes: ['11', '12', '13', '14', '15'] });
+  const neverHanded: string[] = [];
+  const outcome = await browserAppDriver({ page: never.page, repository: 'acme/shop', ids, sleep: never.sleep, now: never.now, timeoutMs: never.timeoutMs })('http://127.0.0.1:4311', sentence => { neverHanded.push(sentence); });
+  assert.deepEqual(neverHanded, ['11', '12', '13', '14'].map(code => `Approve the GitHub Mobile prompt on your phone and choose ${code}`));
+  assert.equal(never.clicked.filter(selector => selector === '#mobile' || selector === '#again').length, 1 + upMobileReprompts);
+  assert.equal(outcome.state, 'failed');
+  assert.match(outcome.state === 'failed' ? outcome.reason : '', /re-issued 4 times without approval/);
+});
+
+test('unit:up-help — graphyard up --help and -h print up\'s usage, every option on one line, and exit 0', async () => {
+  const { upOptions, upUsage, upHelpRequested } = await up();
+  assert.ok(upHelpRequested(['--help']) && upHelpRequested(['--repo', 'acme/shop', '-h']) && !upHelpRequested(['--repo', 'acme/shop']));
+  const lines = upUsage.split('\n');
+  for (const option of [...Object.keys(upOptions), 'sudo-code', 'help']) {
+    assert.equal(lines.filter(line => new RegExp(`^\\s+(?:-h, )?--${option}\\b`).test(line)).length, 1, `--${option} has one line`);
+  }
+  for (const flag of ['--help', '-h']) {
+    const printed = execFileSync(process.execPath, [resolve('bin/graphyard.mjs'), 'up', flag], { encoding: 'utf8', env: { ...process.env, GRAPHYARD_URL: '', GRAPHYARD_TOKEN: '' } });
+    assert.equal(printed.trim(), upUsage.trim(), `${flag} prints up's usage and exits 0`);
+  }
+});
+
+test('unit:setup-docs-one-command — the one-command line in docs/setup-from-zero.md is the agent command that runs on a host whose other install recorded a browser profile, and it names approving a GitHub Mobile prompt as the only human step', async () => {
+  const { upBrowserProfile, upRequestFromArgs } = await up();
+  const page = await readFile(resolve('docs/setup-from-zero.md'), 'utf8');
+  const section = page.slice(page.indexOf('## One command'), page.indexOf('## The Setup page'));
+  const line = section.split('\n').find(text => text.startsWith('cd /path/to/REPO && '))!;
+  assert.ok(line, 'the one-command line');
+  const command = line.split('#')[0].trim();
+  assert.equal(command, 'cd /path/to/REPO && node ~/graphyard/bin/graphyard.mjs up --agent --repo OWNER/REPO');
+  const args = command.split(' up ')[1].split(/\s+/);
+  const parsed = upRequestFromArgs(args);
+  assert.equal(parsed.agent, true);
+  assert.equal(parsed.browserProfile, null, 'no --browser-profile in the documented command');
+  // On a host whose other install recorded a profile for this login, that command has a browser to drive.
+  const other = await temporaryDirectory('graphyard-up-docs-other');
+  await mkdir(join(other, '.graphyard'), { recursive: true });
+  await writeFile(join(other, '.graphyard/master.json'), JSON.stringify({ repository: 'ELSEWHERE/graphyard', browser: { profile: 'Default' } }));
+  await recordProfileLogin(other, 'Default', { browser: 'operator', cli: 'operator' });
+  assert.equal(upBrowserProfile(await temporaryDirectory('graphyard-up-docs-fresh'), { ...parsed, repository: 'OWNER/REPO' }, [other], () => 'operator')?.profile, 'Default');
+  // A profile its install never observed is opened to read its login, so the same command works there too.
+  const unobserved = await temporaryDirectory('graphyard-up-docs-unobserved');
+  await mkdir(join(unobserved, '.graphyard'), { recursive: true });
+  await writeFile(join(unobserved, '.graphyard/master.json'), JSON.stringify({ repository: 'ELSEWHERE/graphyard', browser: { profile: 'Default' } }));
+  await recordProfileLogin(unobserved, 'Default', { browser: null, cli: 'operator' });
+  assert.equal(upBrowserProfile(await temporaryDirectory('graphyard-up-docs-fresh'), { ...parsed, repository: 'OWNER/REPO' }, [unobserved], () => 'operator', () => 'operator')?.profile, 'Default');
+  assert.match(section, /only human step: approving a GitHub Mobile prompt/i);
+  // Net growth of the page is at most 20 words over its 999 words before GY-1510.
+  assert.ok(page.split(/\s+/).filter(Boolean).length <= 999 + 20, 'docs/setup-from-zero.md grew by at most 20 words');
+});
+
+test('unit:up-app-page-rejection-fails — GitHub rejecting the App manifest, or an App page showing a GitHub error, ends up with exit 1 quoting GitHub\'s own error, not a missing button or a resumable wait', async () => {
+  const { browserAppDriver, githubAppError, runUp } = await up();
+  assert.equal(githubAppError('Invalid GitHub App configuration\nHook url cannot be blank'), 'Invalid GitHub App configuration; Hook url cannot be blank');
+  assert.equal(githubAppError('Name has already been taken'), 'Name has already been taken');
+  assert.equal(githubAppError('Register new GitHub App\nGitHub App name\nWebhook'), null);
+  // The manifest page itself shows GitHub's error and no create button.
+  const rejected = mobilePage({ landing: '', error: 'Invalid GitHub App configuration\nHook url cannot be blank' });
+  const outcome = await browserAppDriver({ page: rejected.page, repository: 'acme/shop', ids: () => ({ owner: 11, repository: 22 }), sleep: rejected.sleep, now: rejected.now, timeoutMs: rejected.timeoutMs })('http://127.0.0.1:4311', () => {});
+  assert.deepEqual(outcome, { state: 'rejected', error: 'Invalid GitHub App configuration; Hook url cannot be blank' });
+
+  // up fails (exit 1, not 3), its next line quoting GitHub, and stops the install it drove.
+  const w = world({ pauseAfter: 20 });
+  const result = await runUp(request({ agent: true }), dependencies(w, await temporaryDirectory('graphyard-up-rejected'), [], { humanWaitMs: 1_000, driveApp: async () => ({ state: 'rejected', error: 'Hook url cannot be blank' }) }));
+  assert.equal(result.exitCode, 1, result.next);
+  const next = result.next.split('\n')[0];
+  assert.match(next, /^GitHub rejected the App: "Hook url cannot be blank"/);
+  assert.doesNotMatch(result.next, /offers no|create button|rerun|resume/i);
+  assert.deepEqual(result.handoffs, [], 'a rejection is handed to no person');
+  assert.ok(!result.completed.includes('control-plane'));
 });
