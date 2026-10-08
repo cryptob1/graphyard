@@ -15,6 +15,7 @@ import { emptyInvariantRecord, invariantRecordSchema } from '../model/invariants
 import { emptyProjectMemory, projectMemorySchema, type ProjectMemory } from '../model/project-memory.js';
 import { itemClockSchema, latencySampleSchema } from './latency-clock.js';
 import { mainWatchStateSchema } from './main-watch.js';
+import { shadowStateSchema } from './cycle-shadow.js';
 
 export const daemonActionKinds = ['close', 'dispatch', 'review', 'refresh', 'proof', 'merge', 'deployment', 'smoke', 'escalation', 'config', 'session', 'reclaim', 'decision', 'scope', 'settle', 'failover', 'capacity', 'human', 'preserve', 'fault', 'diagnosis', 'wake', 'blocker'] as const;
 export type DaemonActionKind = typeof daemonActionKinds[number];
@@ -485,6 +486,8 @@ export const daemonStateSchema = z.object({
   promotion: promotionStateSchema.nullable().default(null),
   /** The main watch (GY-1519, main-watch.ts): main's unknown commits and the promotion freeze. Lazy: main-watch.ts imports this module. */
   mainWatch: z.lazy(() => mainWatchStateSchema).nullable().default(null),
+  /** The shadow merge gate's last 200 verdicts (GY-1522, cycle-shadow.ts). Lazy: cycle-shadow.ts imports this module. */
+  shadow: z.lazy(() => shadowStateSchema).default([]),
   /** The release the running loop process loaded, recorded by each process at its startup (GY-437). */
   release: loopReleaseSchema.nullable().default(null),
   /** The between-cycles self-upgrade's progress (GY-437). */

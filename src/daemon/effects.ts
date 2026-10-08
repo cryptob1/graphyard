@@ -43,6 +43,8 @@ import { onceAnnotations, timingFaultAttention, type ReportedAttention } from '.
 import { type BaseFailureEffects, baseFailureEffects } from './base-failure-effects.js';
 import type { daemonSummary } from './run.js';
 import { observeDeployment, promotionReads, promotionWorkflow, type PromotionReads } from './deployment.js';
+import { shadowReads, type ShadowReads } from './cycle-shadow.js';
+import { worktreeRoot } from '../install/worktree-root.js';
 import { mainWatchFreezeFromEnv, mainWatchReads, type MainWatchReads } from './main-watch.js';
 import { throughputEffects, type ThroughputEffects } from './throughput-effect.js';
 import { alignRunningLoopUnit, awaitSupervisorRestart, detectLoopSupervisorUnit, performSelfUpgrade, recoverMovedHead, type SelfUpgradeDeps, type SelfUpgradeOutcome } from './upgrade.js';
@@ -141,6 +143,8 @@ export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffec
   promotion?: PromotionReads | null;
   /** The main watch's reads (GY-1519, main-watch.ts): the checkout's history and the control plane's acknowledgements; absent, the watch does not run. */
   mainWatch?: MainWatchReads | null;
+  /** The shadow merge gate's reads and its one record (GY-1522, cycle-shadow.ts); absent, the gate does not run. */
+  shadow?: ShadowReads | null;
   /** Publishes `mergeQueue.rerunFailedChecks` to the control plane, which reruns a failed required check by it (GY-516); sent only on a change, and read at the start of every cycle so a reconfiguration applies before the next observation. */
   publishMergeSettings?: () => Promise<unknown>;
   /** GY-1416: the loop's setup step, `master setup --apply` beside the cycle at most hourly; it sets derived deployment variables only where the provider adapter applies them in place. */
@@ -668,6 +672,14 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     get promotion() { return promotionReads(current(), root, run, existsSync(join(root, '.github', 'workflows', promotionWorkflow))); },
     // GY-1519: the watch reads history from this checkout and its policy from the control plane; the freeze is the environment's ask.
     get mainWatch() { return mainWatchReads(current(), root, run, { policy: () => asCoordinator('main-watch'), freeze: mainWatchFreezeFromEnv() }); },
+    // GY-1522: trial merges in a credential-free checkout under the managed worktree root; the verdict is the coordinator's to record.
+    get shadow() {
+      return shadowReads(current(), root, run, { base: worktreeRoot(root, current()), record: async (work, verdict) => {
+        const config = current();
+        const response = await fetcher(`${config.url}/api/work/${work.id}/shadow-verdict`, { method: 'POST', headers: { Authorization: `Bearer ${await readCredentialFile(config.credentialFile)}`, 'Content-Type': 'application/json', 'Idempotency-Key': `shadow:${work.id}:${verdict.head}:${verdict.baseTip}` }, body: JSON.stringify({ head: verdict.head, baseTip: verdict.baseTip, mergeSha: verdict.mergeSha, risk: verdict.risk, build: verdict.build, tests: verdict.tests, conflict: verdict.conflict, durationMs: verdict.durationMs }), signal: AbortSignal.timeout(30_000) });
+        if (!response.ok) throw new Error(`Graphyard refused shadow-verdict (${response.status}): ${(await response.json().catch(() => null))?.error ?? 'no reason given'}`);
+      } });
+    },
     publishProductionEnvironment: async () => {
       const environment = current().run.productionEnvironment ?? productionEnvironmentFromEnv();
       if (environment === publishedEnvironment) return;
