@@ -26,25 +26,25 @@ A reviewer App is never granted Contents: write, Checks, or Administration; work
 | Metadata | Read | read the managed repository (repository access) |
 | Pull requests | Read and write | post the verdict comment (review dispatch) |
 
-`master reviewer setup` creates it (Pull requests write; tokens last one hour); `SLUG[bot]` head approval satisfies both. Shortfalls (`appPermissions`; `github-setup --update-permissions` lists them) hold jobs, **not retried** (`integration-held`), until `master browser app-permissions` or `master browser installation-accept`.
+`master reviewer setup` creates it (Pull requests write; tokens last one hour); `SLUG[bot]` head approval satisfies both. Shortfalls (`appPermissions`; `github-setup --update-permissions` lists `Actions: write (failed CI reruns)`) hold jobs, **not retried** (`integration-held`), until `master browser app-permissions` or `master browser installation-accept`.
 
 ## Reusing an App without sudo
 
-GitHub returns an App's private key once, so `--reuse-app SLUG` needs a key saved locally: generate one on its settings page, then `graphyard app import --app-id ID --key-file PEM [--role control-plane|reviewer|revert-approver] [--repo OWNER/NAME]` proves it by App JWT and saves it `0600` as `imported-app-SLUG.json` in the install directory, never printed. A reused `revert-approver` replaces the reviewer as revert approver; `graphyard app list` reads saved Apps by JWT plus organization installations via `gh`.
+GitHub returns an App's private key once: `--reuse-app SLUG` needs a key saved locally. An App created elsewhere: generate a key on its settings page, then `graphyard app import --app-id ID --key-file PEM [--role control-plane|reviewer|revert-approver] [--repo OWNER/NAME]` proves the key by an App JWT and saves the App `0600` as `imported-app-SLUG.json` in the install directory, never printing the key; a control-plane App whose webhook serves another install is refused. `graphyard app list` names each saved App's reusable roles or why not.
 
 Refused workflow syncs: `sync GY-N --push-via-control-plane COMMIT` (`POST /api/work/:id/sync-push`) pushes COMMIT, fast-forwarding and merging `origin/BASE` (`sync.workflow-push`).
 
 ## Require the check
 
-Require `Graphyard / merge` and `graphyard/landable` ([landability](coordination.md)) from the control-plane App, `strict` **off**, admin-enforced, no force push or deletion (`master protection --apply`, `master browser protection`); restrict other merge identities. GitHub merges only mergeable non-draft PRs whose approved head is green on `GITHUB_CI_APP_IDS` ([one delivery path](delivery.md#one-delivery-path)).
+Require `Graphyard / merge`, `graphyard/landable` ([landability](coordination.md)) from control-plane App: `strict` **off**, admin-enforced, no force push/deletion (`master protection --apply`, `master browser protection`). GitHub merges only mergeable non-draft PRs whose approved head is green on `GITHUB_CI_APP_IDS`, required checks ([one delivery path](delivery.md#one-delivery-path)); restrict other merge identities (lease-less workers still push).
 
 ## Failed checks
 
-[Reruns, flakes and reverts](operations-reference.md#flaky-ci-check); [base failures](development.md#base-failures); leftover `refs/graphyard/queue/*`: `master tip-cleanup --apply`.
+Rework rules and the base-break exception: [work commands](protocol/work-commands.md), [leases](protocol/leases.md). `master tip-cleanup --apply` deletes leftover `refs/graphyard/queue/*`.
 
 ### Bindings and carry
 
-[Approvals across base moves](master-agent-reference.md#conflict-avoidance); [delivery redesign](delivery-redesign.md).
+Binding and carry rules: [leases](protocol/leases.md), [webhook](protocol/github-webhook.md).
 
 ### Proofs in CI
 

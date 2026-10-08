@@ -16,7 +16,7 @@ Values: `{{token}}`, `{{run}}`, `{{case}}`, saved. `graphyard e2e list` refuses 
 
 ## Release verdicts
 
-One retry: **passed**; **failed** (both); **flaky** (retry passed at same served SHA; `RUN:attempt-1`, `RUN:attempt-2` recorded); **unrun** (stopped by failed required case, which report names; listed apart, uncounted). Only failed or unaccepted flaky required cases block; optional ones marked on **Tests**. At unreported commit, pass-after-failure is failed.
+One retry: **passed**; **failed** (both); **flaky** (retry passed at same served SHA; `RUN:attempt-1`, `RUN:attempt-2` recorded); **unrun** (stopped by a failed required case; listed apart, uncounted). Only failed or unaccepted flaky required cases block; optional ones marked on **Tests**.
 
 Flaky required cases block promotion until `evidence` decision (`{"case":ID,"runId":RUN,"sha":FULL_SHA}` on hold item, another agent approving) accepts; refused unless both attempts recorded at that SHA. `release promote` reads only that run's and SHA's applied decisions. Workflow's `release promote ID` (`GRAPHYARD_URL`, `GRAPHYARD_TOKEN`) promotes only passing UATs.
 
@@ -24,11 +24,11 @@ Flaky required cases block promotion until `evidence` decision (`{"case":ID,"run
 
 ## Flake ledger
 
-A required check failing then passing its one rerun at the same SHA (PR `checkReruns` `passed`, main `mainGuardFlakes`) is a flake: the loop reads that failed job's log once into `.graphyard/flake-ledger.json` (mode 0600; `{test, check, sha, pr, source, failedRunId, at}`, `test` null when the log names none; ≤500 entries, 30 days). A test leading with a proof id and flaking 3+ times on 2+ SHAs in 7 days gets one P1 `Flaky test: NAME` item (operator-agent) naming that proof, planned on its test file; none more while open or 7 days after closing. Gates never read it: one rerun stays, nothing is skipped or quarantined.
+A required check failing then passing its one rerun at the same SHA (PR `checkReruns` `passed`, main `mainGuardFlakes`) is a flake: the loop reads that failed job's log once into `.graphyard/flake-ledger.json` (mode 0600; ≤500 entries, 30 days). A test leading with a proof id (`unit:`/`integration:`) and flaking 3+ times on 2+ SHAs in 7 days gets one P1 `Flaky test: NAME` item naming its proof, planned on its test file; none more while open or 7 days after closing. Gates never read it: nothing is skipped or quarantined.
 
 ## Goals and acceptance
 
-`graphyard goal FILE` records goal (`statement`, `users`, `constraints`, `deployTarget`); `master status` lists open goals. With both master identities, loop's `acceptance` role (`run.diagnostician` models) drafts outcomes, one required `uat` case each, contract bindings in one pull request, judged by approver identity (never author), redrafted if refused (≤3). Merged at approved head once CI passes (`goal land`), else redrafted. `complete` and later heads refuse changes to protected case or `e2e/contract.json` lacking that item's `goal case-change`, approved by neither requester nor implementer. [Planner](how-graphyard-works.md#from-goal-to-work-items) plans items; `goal deliver` needs each done and served in production.
+`graphyard goal FILE` records goal (`statement`, `users`, `constraints`, `deployTarget`); `master status` lists open goals. The loop's `acceptance` role (`run.diagnostician` models) drafts outcomes, one required `uat` case each, and contract bindings in one pull request, judged by the approver identity (never author), redrafted if refused (≤3). Merged at approved head once CI passes (`goal land`), else redrafted. `complete` and later heads refuse changes to protected case or `e2e/contract.json` lacking that item's `goal case-change`, approved by neither requester nor implementer. [Planner](how-graphyard-works.md#from-goal-to-work-items) plans items; `goal deliver` needs each done and served in production.
 
 ## Release holds
 
@@ -36,4 +36,4 @@ One hold per failed outcome (not suite or case): item tagged `rc-hold/OUTCOME/CA
 
 ## Candidates, requests, reports
 
-`kind: bundle` pins `scenario`, `scenarioRevision`, `scenarioHash`, `digest`, `runnerImageDigest`, `reportFormat` (`graphyard-playwright-v1`/`junit-xml-v1`; skips, retries, timeouts, miscounts fail; `graphyard runner verify-report junit-xml-v1 inventory.json report.xml` previews). Operators create candidates from build attestations; requests bind observed targets. Runners `ack` within 30 s, heartbeat every 20 s; passes need `matched` target, verified artifacts, settled run; recover: `cancel`, `settle`, `retry`; `graphyard validation capacity` [diagnoses](recovery.md#runner-capacity-and-request-diagnostics) stalls.
+`kind: bundle` pins `scenario`, `scenarioRevision`, `scenarioHash`, `digest`, `runnerImageDigest`, `reportFormat` (`graphyard-playwright-v1`/`junit-xml-v1`; skips, retries, timeouts, miscounts fail; `graphyard runner verify-report junit-xml-v1 inventory.json report.xml` previews). Runners `ack` within 30 s, heartbeat every 20 s; passes need `matched` target, verified artifacts, settled run; recover: `cancel`, `settle`, `retry`; `graphyard validation capacity` [diagnoses](recovery.md#runner-capacity-and-request-diagnostics) stalls.

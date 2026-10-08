@@ -5,7 +5,7 @@ Sidebar: **Work**, **Workers**, **Shipped**, **Tests**, **Insights**, **Settings
 
 ## From your phone
 
-A local (compose) dashboard listens on `127.0.0.1:4310`, or the free port its install chose ([install](install.md)). With Tailscale, `graphyard up` prints `tailscale serve --bg --http=4310 http://127.0.0.1:4310` and its tailnet URL; `--share-tailnet` runs it, keeps it in `up.json` (`reachableUrl`) and its sign-in links use it: tailnet-only, never `tailscale funnel`; an unallowed serve is reported, not waited on. A green `up` ends with one single-use sign-in link (`signIn`, 10 minutes).
+A local (compose) dashboard listens on `127.0.0.1:4310`, or the free port its install chose ([install](install.md)). With Tailscale, `graphyard up` prints `tailscale serve --bg --http=4310 http://127.0.0.1:4310` and its tailnet URL; `--share-tailnet` runs it, keeps it in `up.json` (`reachableUrl`) and its sign-in links use it: tailnet-only, never `tailscale funnel`. A green `up` ends with one single-use sign-in link (`signIn`, 10 minutes).
 
 ## Work
 
@@ -31,4 +31,4 @@ Cards: ask, **Recommended** choice (or safest way), one-line why, numbered steps
 
 ## Insights
 
-**Flow** (landed/day, merges/hour, waits); **Show details**: shipping pulse, PR-to-production (`POST /api/production-observations`), flow analytics, conflict hotspots. **Shipped**: **Interventions** ([retro](operations-reference.md#retro-synthesis); repeats filed `bug` unless `GRAPHYARD_INTERVENTION_PATTERNS=0`), **Validation**, **Releases**. Reworks on loop-handled ground (base conflict, failed required check, change request, merge refusal, failed proof) aren't interventions, whoever asked, until approver declines one; nor are loop operator agent's recorded-ground rounds (capped change requests to its approver included) applied by risk lane or operator agent; hand-approved or hand-applied ones count; pre-window decision counts only for in-window outcome naming it.
+**Flow** (landed/day, merges/hour, waits); **Show details**: shipping pulse, PR-to-production (`POST /api/production-observations`), flow analytics, conflict hotspots. **Shipped**: **Interventions** ([retro](operations-reference.md#retro-synthesis); repeats filed `bug` unless `GRAPHYARD_INTERVENTION_PATTERNS=0`), **Validation**, **Releases**. Reworks on loop-handled ground (base conflict, failed required check, change request, merge refusal, failed proof) aren't interventions, whoever asked, until approver declines one; hand-approved or hand-applied ones count.

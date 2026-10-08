@@ -13,11 +13,11 @@ Per concurrent session: worker identity, host ID (`install --workers`) or:
 node "$GRAPHYARD_CLI" init --url https://YOUR-GRAPHYARD-HOST --herdr --host-id UNIQUE_MACHINE_NAME --token-stdin
 ```
 
-Commit `AGENTS.md`, `.gitignore`, `graphyard.json`, workflows ([candidates](delivery.md#managed-repositories); without a `pull_request` workflow, `graphyard-delivery.yml` (build, test, `graphyard-gate`) is the only required check; edits are kept as drift), never `.graphyard/`; masterless: `graphyard watch GY-1 EPOCH -- COMMAND` ([worker](protocol/leases.md#watch)).
+Commit `AGENTS.md`, `.gitignore`, `graphyard.json`, workflows ([candidates](delivery.md#managed-repositories); with no workflow on `pull_request`, `graphyard-delivery.yml`: build, test, `graphyard-gate`, the only required check; edits are kept as drift), never `.graphyard/`; masterless: `graphyard watch GY-1 EPOCH -- COMMAND` ([worker](protocol/leases.md#watch)).
 
 ### Documentation policy
 
-`init --scan --apply` records found `docs/`, `site/`, `README*`, `CHANGELOG*` as `{"documentation":{"paths":["site/"],"changelog":"CHANGELOG.md"}}`; deploy printed `GRAPHYARD_DOCUMENTATION`. Features and `bug`s owe *Documentation reflects this change* (docs diff or `complete --no-docs "WHY"`); optional `"wordBudget":{"total":N,"perPage":N}` ([counted](development.md#documentation)).
+`init --scan --apply` records found `docs/`, `site/`, `README*`, `CHANGELOG*` as `{"documentation":{"paths":["site/"],"changelog":"CHANGELOG.md"}}`; deploy printed `GRAPHYARD_DOCUMENTATION` (differing: `doctor`'s `documentation.drift`). Features and `bug`s owe *Documentation reflects this change* (docs diff or `complete --no-docs "WHY"`); optional `"wordBudget":{"total":N,"perPage":N}` ([counted](development.md#documentation)).
 
 ### What the generated instructions authorize
 
@@ -25,11 +25,11 @@ Generated `AGENTS.md`: **every session Graphyard launches receives its instructi
 
 ### Agent environments
 
-Login homes (`~/.coding_agents`, or `GRAPHYARD_AGENT_ENVIRONMENTS`: `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `XDG_DATA_HOME`, `CURSOR_CONFIG_DIR`): `master environments --create claude,codex --apply`, log in, rerun `master environments --apply`. Profiles default to [`"approvals": "auto"`](master-agent-sessions.md#approval-modes) (trade-off: unattended); `"prompt"` refused at launch.
+Login homes (`~/.coding_agents`, or `GRAPHYARD_AGENT_ENVIRONMENTS`: `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `XDG_DATA_HOME`, `CURSOR_CONFIG_DIR`): `master environments --create claude,codex --apply`, log in, rerun `master environments --apply` ([step 8](setup-from-zero.md#8-agent-environments)). Profiles default to [`"approvals": "auto"`](master-agent-sessions.md#approval-modes) (trade-off: unattended); `"prompt"` refused at launch.
 
 ### Connect an account
 
-Settings › **Agents** › **Connect an account** (key or login) writes, smoke-tests 0600 auth file.
+Settings › **Agents** › **Connect an account** (key or login) writes, smoke-tests 0600 auth file (**Pi (z.ai key)**: `auth.json` in `pi-<letter>` home).
 
 ### Configure the fleet
 
@@ -59,7 +59,7 @@ node "$GRAPHYARD_CLI" master registry account set claude-b --runtime claude --mo
 node "$GRAPHYARD_CLI" master registry account quota opencode-a exhausted --resets-at 2026-09-22T00:00:00Z --reason "Exhausted"
 ```
 
-`--plan NAME` groups accounts under one provider quota (`none` clears); `--key-file zai.key --key-variable ZAI_API_KEY` exports 0600 key file per run; pasted keys refused.
+`--plan NAME` groups accounts under one provider quota (`none` clears; inferred from host+home or Z.AI keys; `auth.json`-only logins need it); `--key-file zai.key --key-variable ZAI_API_KEY` exports 0600 key file per run; pasted keys refused.
 
 ### Add a role
 
@@ -80,17 +80,17 @@ Adding workers: worker count `W` and `G` proof groups need `⌈W/2⌉` review an
 
 ### The loop must be supervised
 
-`master init` (coordinator checkout) writes `~/.config/systemd/user/graphyard-master-OWNER-NAME.service`, runs `systemctl --user enable --now`, `loginctl enable-linger` (restart on crash, reboot, hang); never a side effect (worker checkouts, temp directories refused). Move: `master init --token-stdin --replace-supervisor` from new checkout. `master status`: `setup.supervisor`. The loop refuses a dirty CLI checkout; so does `graphyard up` preflight (exit 2, naming its paths).
+`master init` (coordinator checkout) writes `~/.config/systemd/user/graphyard-master-OWNER-NAME.service`, runs `systemctl --user enable --now`, `loginctl enable-linger` (restart on crash, reboot, hang); never a side effect (worker checkouts, temp directories refused). Move: `master init --token-stdin --replace-supervisor` from new checkout. `master status`: `setup.supervisor`. The loop refuses a dirty CLI checkout; so does `graphyard up` preflight (exit 2, naming its paths). The loop's research scratch is a worktree of the managed repository, never of the CLI checkout.
 
-Units are named per repository (`graphyard-executor-OWNER-NAME@N.service` too) in `.graphyard/units.json` (legacy `graphyard-master.service` kept as alias); setup never touches another checkout's unit. Each install needs its own `--herdr-workspace`: sweeps act only on its panes.
+Installs share hosts: units are named per repository (`graphyard-executor-OWNER-NAME@N.service` too) in `.graphyard/units.json` (legacy `graphyard-master.service` kept as recorded alias); setup never touches another checkout's unit. Each install needs its own `--herdr-workspace`: sweeps act only on its panes.
 
 ### The pipeline doctor (on by default)
 
-Every `run.doctor.intervalMinutes` (10) a Pi **doctor** fixes stuck, overdue work via `master scope`, `requirements`, `unblock`, `decide`+`approver`, `settle-containment`, `close`, `create`, `release`; posts findings, summary (`master status` `doctor`); escalates the rest or files fault items, deduplicated against open ones at settle. Off: `run.doctor.enabled=false`.
+Every `run.doctor.intervalMinutes` (10) a Pi **doctor** fixes stuck, overdue work via `master scope`, `requirements`, `unblock`, `decide`+`approver`, `settle-containment`, `close`, `create`, `release` (never merging, dispatching or evidencing); posts findings, summary (`master status` `doctor`); escalates the rest or files fault items, deduplicated against open ones. Off: `run.doctor.enabled=false`.
 
 ### Supervised mode (up --local)
 
-`graphyard up --local` writes `"supervision": "supervised"` and your login (`operatorLogin`) to `master.json`; absent is autonomous. It registers no reviewer App, skips `master autonomy`, and the Setup checklist (`up`'s and the dashboard's; the loop names its mode to `/api/status`) omits the reviewer App and reviewing account. Items keep `review: true`: your GitHub approval of the exact head passes the review gate and auto-merge lands it. The loop launches no reviewer, approver or escalation session and requests no two-party decision. `gh` serves setup only; `master status` prints one `supervision` line and flags pull requests your login authored (not independent). Promote: `master reviewer setup`, `master reviewer add`, then `master promote --admin-token-stdin` ([promotion](master-agent-reference.md#promotion-to-autonomy)).
+`graphyard up --local` writes `"supervision": "supervised"` and your login (`operatorLogin`) to `master.json`; absent is autonomous. It registers no reviewer App and skips `master autonomy`; the Setup checklist omits the reviewer App and reviewing account. Items keep `review: true`: your GitHub approval of the exact head passes the review gate and auto-merge lands it. The loop launches no reviewer, approver or escalation session and requests no two-party decision. `master status` prints one `supervision` line and flags pull requests your login authored (your approval would not be independent). Promote: `master reviewer setup`, `master reviewer add`, then `master promote --admin-token-stdin` ([promotion](master-agent-reference.md#promotion-to-autonomy)).
 
 ## 4. Prove the first PR
 

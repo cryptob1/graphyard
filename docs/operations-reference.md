@@ -7,7 +7,7 @@
 
 ### Perpetual master loop
 
-`master verify-deployment GY-N` emits instructions from served-commit checkout, refusing *unobserved*, *stale* (rerun), merge-missing or already-recorded releases; without `--deployment-url`, newest successful [`productionEnvironment`](deployment.md#production-environment-name) deployment counts.
+`master verify-deployment GY-N` emits instructions from served-commit checkout, refusing *unobserved*, *stale* (rerun), merge-missing or already-recorded releases; without `--deployment-url`, newest successful [`productionEnvironment`](deployment.md#production-environment-name) (Railway: `<project> / production`) deployment counts.
 
 ## Lost worker before submission
 
@@ -23,11 +23,11 @@ Stop worker; `graphyard rework GY-N --previous-worker-stopped "reason"`; next re
 
 ## Retro synthesis
 
-Minutely scan (`GET /api/interventions` → `scan`; `GRAPHYARD_INTERVENTION_PATTERNS=0` disables, `master status` then flags crossed patterns as configuration faults) files item per crossed pattern, drafting `retro.drafted` changes per recurring refusal or rework cause; non-drafting AI operator agent [approves](protocol/work-commands.md) (`decision:approve`)/refuses each. Approved: [`retroStanding`](protocol/read-endpoints.md) in `graphyard status GY-N`; checks refuse failing `complete`.
+Minutely scan (`GET /api/interventions` → `scan`; `GRAPHYARD_INTERVENTION_PATTERNS=0` disables) files item per crossed pattern, drafting `retro.drafted` changes per recurring refusal or rework cause; non-drafting AI operator agent [approves](protocol/work-commands.md) (`decision:approve`)/refuses each. Approved: [`retroStanding`](protocol/read-endpoints.md) in `graphyard status GY-N`; checks refuse failing `complete`.
 
 ## Flaky CI check
 
-[Reruns once](github.md#failed-checks) (`mergeQueue.rerunFailedChecks`, 0 disables); pass clears it. On main the guard keeps main pending until reruns conclude: cancelled or timed-out jobs (the `test` aggregate included) rerun up to 3 times, then one `escalation:main-guard:SHA` infrastructure fault names the run and step, reverting nothing; a real failure reruns once, a pass appending `{mergeSha, check, failedRunId, rerunRunId, at}` to the item's `mainGuardFlakes` (last 20), a second failure, refusal or unconcluded hour reverting it.
+[Reruns once](github.md#failed-checks) (`mergeQueue.rerunFailedChecks`, 0 disables); pass clears it. On main the main guard judges no later merge until reruns conclude. Cancelled or timed-out jobs rerun up to 3 times; still cancelled, one `escalation:main-guard:SHA` infrastructure fault names the run and step, reverting nothing. A real failure reruns once: a pass is appended to `mainGuardFlakes` (last 20); a second failure, refusal or no conclusion within the hour reverts it.
 
 ## Accepted evidence turns out to be wrong
 
@@ -45,8 +45,8 @@ Minutely scan (`GET /api/interventions` → `scan`; `GRAPHYARD_INTERVENTION_PATT
 | --- | ---
 | `merge` | gates pass, GitHub may merge: 20s
 | `active` | awaiting check, review, base refresh, rework: 1min
-| `steady` | unchanged: 5min, stretched by fleet bound
-| `idle` | awaiting dispatch/escalation: 5min
+| `steady` | unchanged: 5min, stretched by fleet bound; review requests ≤10min
+| `idle` | awaiting dispatch/escalation: 5min, stretched if unchanged
 
 Unchanged non-merge candidates spend **at most 40%** (`steadyStateShare`).
 
@@ -72,9 +72,9 @@ Silent webhook hour: `master status` cites `https://github.com/settings/apps/APP
 
 ## Control-plane resources
 
-`resources` remedies: ledgers, `graphyard master run --once`; `agent-names:PROFILE`, `herdr pane close PANE`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow volume and `GRAPHYARD_DATABASE_MAX_BYTES` (10GiB); `tmp-inodes`, free `TMPDIR`/`/tmp` (the pass deletes this user's `tsx-<uid>` cache files older than 6 h, ≤100 per cycle, never directories or sockets); `loaded-revision` counts code moves. No fault while remedy acts: owed restart retried within bound, pane unowned <10min, loop's lag, `/tmp` >10% free after pass within 30min.
+`resources` remedies: ledgers, `graphyard master run --once`; `agent-names:PROFILE`, `herdr pane close PANE`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow volume and `GRAPHYARD_DATABASE_MAX_BYTES` (10GiB); `tmp-inodes`, free `TMPDIR`/`/tmp` (the pass deletes this user's `tsx-<uid>` compile-cache files older than 6 h, ≤100 per cycle); `loaded-revision` counts code moves. No fault while remedy acts: owed restart retried within bound, pane unowned <10min, `/tmp` >10% free after pass within 30min.
 
-Session-started `npm test`, `test:browser` and typecheck take one of max(2, floor(GB/8)) slots (`GRAPHYARD_VERIFICATION_SLOTS`; managed root's `.verification-slots`); CI unbounded. Under max(10% RAM, 4GB) available, launches defer (`escalation:dispatch:memory`; item `memory` names top consumers; one `memory-pressure` fault per dip) until 1GB above.
+Session-started `npm test`, `test:browser`, typecheck, `tsc --noEmit` take one of max(2, floor(GB/8)) slots (`GRAPHYARD_VERIFICATION_SLOTS`; managed root's `.verification-slots`); CI unbounded. Under max(10% RAM, 4GB) available, launches defer (`escalation:dispatch:memory`; one `memory-pressure` fault per dip) until 1GB above.
 
 ## Storage retention
 
@@ -111,8 +111,8 @@ Only `admin` grants/revokes, to `producer` principals: exact name, `kind:*` or p
 
 ## Scale limits
 
-`GRAPHYARD_RECONCILE_BATCH_MS` (250) sizes batches; `GRAPHYARD_OBSERVATION_CONCURRENCY` workers (8; `GRAPHYARD_DATABASE_POOL_SIZE` 16, ≥2× workers) pace per token, merge path first (`observationThroughput`). Heartbeat, claim, `complete`, `blocked` own lease pool (`leaseHealth`). Reconcile evaluates moved rows, all every `GRAPHYARD_RECONCILE_FULL_MS` (2000..300000ms, default 10000). Until startup validation ends, `/healthz` reports `readiness: false`, `/healthz?ready` 503.
+`GRAPHYARD_RECONCILE_BATCH_MS` (250) sizes batches; `GRAPHYARD_OBSERVATION_CONCURRENCY` workers (8; `GRAPHYARD_DATABASE_POOL_SIZE` 16, ≥2× workers) pace per token, merge path first (`observationThroughput`). Heartbeat, claim, `complete`, `blocked` own a lease pool (`leaseHealth`). Reconcile evaluates moved rows, all every `GRAPHYARD_RECONCILE_FULL_MS` (default 10000). Until startup validation ends, `/healthz` reports `readiness: false`, `/healthz?ready` 503.
 
 ### Concurrent reconciliation
 
-A 2s tick over 5s logs `reconciliation tick took N ms` (writes, longest lock wait). Batches evaluate ≤250ms lock-free, then write each item in one transaction under the coordination lock (≤500ms wait) and its row lock (`FOR NO KEY UPDATE`); three expired lock waits defer the tick's unwritten items. Writes read only their item, overlaps and dependencies; heartbeats lock only their item, and reconciliation yields to pending requests, so renewal waits ≤1s.
+A 2s tick over 5s logs `reconciliation tick took N ms`. Batches evaluate lock-free, then write each item in its own transaction under the coordination lock and its row lock; expired lock waits defer the tick's unwritten items. Heartbeats lock only their item, so renewal waits ≤1s.
