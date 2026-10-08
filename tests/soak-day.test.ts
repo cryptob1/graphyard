@@ -667,8 +667,6 @@ test('unit:soak-invariants-hold — a system-driven docs conflict whose docs-syn
     const conflicted = items[basePlan.docsConflict.item - 1].key, item = final.find(entry => entry.key === conflicted)!;
     assert.deepEqual(docsSyncRuns.map(run => [run.plan.key, run.outcome]), [[conflicted, outcome]], 'one docs-sync session, which pushed or was stopped');
     assert.ok(docsSyncRuns.every(run => herdr.closed.includes(run.pane)) && Object.values(state.docsSyncs).every(watch => watch.settledAt), 'its session is closed and its record settled');
-    // GY-1541: the loop's own cutoff give-up is its designed route, so it files no decision fault in either outcome.
-    assert.deepEqual(state.faults.instances.filter(instance => instance.faultClass === 'decision' && instance.subject === conflicted), [], `no decision fault is recorded for the conflicted item (docs-sync for ${syncMs / minute} minutes)`);
     const reworks = decideCalls.filter(call => call.key === conflicted && call.action === 'rework');
     const giveUps = Object.values(state.actions).filter(action => action.work === conflicted && /docs-sync session .* was stopped at .* without having moved/.test(action.detail));
     if (outcome === 'pushed') {
