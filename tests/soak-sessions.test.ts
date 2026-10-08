@@ -121,7 +121,7 @@ test('unit:soak-invariants-hold — a worker idle past its bound whose pane died
   assert.equal(final.find(item => item.key === items[n - 1].key)!.stage, 'done', 'the item was delivered by its next attempt');
 });
 
-test('unit:soak-invariants-hold — a worker that stays working and renews its lease without ever submitting is faulted once past the 60-minute bound and stopped once past 120, then requeued with its worktree kept and delivered — a first attempt, a rework attempt on an open pull request and one that pushed once and stalled alike; a long worker that pushes as it goes is never stopped, and every invariant holds', { timeout: 600_000 }, async () => {
+test('unit:soak-invariants-hold — a worker that stays working and renews its lease without ever submitting is stopped once past the 120-minute reclaim bound with no unsubmitted-attempt fault filed, then requeued with its worktree kept and delivered — a first attempt, a rework attempt on an open pull request and one that pushed once and stalled alike; a long worker that pushes as it goes is never stopped, and every invariant holds', { timeout: 600_000 }, async () => {
   // GY-1460: GY-1457's shape. Each stuck item's session stays `working` to Herdr and its supervisor
   // renews the lease every cycle, so no idle or lapse path ever sees it: the first attempt of item 2;
   // item 5's rework attempt, whose branch carries the pull request every cycle polls; and item 4's
@@ -142,12 +142,12 @@ test('unit:soak-invariants-hold — a worker that stays working and renews its l
   const stuckAttempts = [[stuck, 1], [pushedOnce, 1], [rework, 2]].map(([n, attempt]) => sessions.find(session => session.key === items[n - 1].key && session.attempt === attempt)!);
   assert.ok(stuckAttempts.every(Boolean), 'every stuck attempt ran');
   assert.ok(unboundedDay.pushes.some(push => push.key === items[pushedOnce - 1].key), 'the pushed-once attempt bound its session to a head');
-  // The fault opened once per stuck attempt, and closed once each item was requeued.
+  // GY-1557: an attempt inside the reclaim bound is the record's to name, not the loop's to count;
+  // past it a reclaim that ends the attempt this cycle opens none. The stuck attempts here are each
+  // stopped just past 120 minutes and requeued, so no unsubmitted-attempt instance is filed.
   const faults = state.faults.instances.filter(instance => instance.kind === 'unsubmitted-attempt');
-  assert.deepEqual(faults.map(instance => [instance.subject, instance.faultClass]).sort(), stuckAttempts.map(session => [session.key, 'stalled-gate']).sort(), `one fault instance per stuck attempt: ${JSON.stringify(faults)}`);
-  for (const session of stuckAttempts)
-    assert.match(faults.find(instance => instance.subject === session.key)!.text, new RegExp(`^${session.key} epoch ${session.epoch} \\(.+\\) has held its lease \\d+ minutes past the 60-minute worker bound without a submission`));
-  assert.ok(!Object.keys(state.faults.open).some(key => key.startsWith('unsubmitted-attempt|')), 'the faults closed once the items were back in the queue');
+  assert.deepEqual(faults, [], `a successful reclaim opens no unsubmitted-attempt instance: ${JSON.stringify(faults)}`);
+  assert.ok(!Object.keys(state.faults.open).some(key => key.startsWith('unsubmitted-attempt|')), 'no unsubmitted-attempt fault stands open');
   // The supervisor was stopped exactly once per stuck attempt, through its recorded scope, past the reclaim bound.
   assert.deepEqual(unboundedDay.stops.map(stop => [stop.key, stop.epoch, stop.unit]).sort(), stuckAttempts.map(session => [session.key, session.epoch, `graphyard-watch-${session.key.toLowerCase()}-${session.epoch}.scope`]).sort(), `one stop each: ${JSON.stringify(unboundedDay.stops)}`);
   for (const session of stuckAttempts) {
