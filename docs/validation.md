@@ -24,7 +24,7 @@ Flaky required cases block promotion until `evidence` decision (`{"case":ID,"run
 
 ## Flake ledger
 
-A required check failing then passing its one rerun at the same SHA (PR `checkReruns` `passed`, main `mainGuardFlakes`) is a flake: the loop reads that failed job's log once into `.graphyard/flake-ledger.json` (mode 0600; ≤500 entries, 30 days). A test flaking 3+ times on 2+ SHAs in 7 days gets one P1 `Flaky test: NAME` item naming its proof, planned on its test file; none more while open or 7 days after closing. Gates never read it: nothing is skipped or quarantined.
+A required check failing then passing its one rerun at the same SHA (PR `checkReruns` `passed`, main `mainGuardFlakes`) is a flake: the loop reads that failed job's log once into `.graphyard/flake-ledger.json` (mode 0600; ≤500 entries, 30 days). A test leading with a proof id (`unit:`/`integration:`) and flaking 3+ times on 2+ SHAs in 7 days gets one P1 `Flaky test: NAME` item naming its proof, planned on its test file; none more while open or 7 days after closing. Gates never read it: nothing is skipped or quarantined.
 
 ## Goals and acceptance
 
