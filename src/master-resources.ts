@@ -4,6 +4,7 @@ import { lstat, mkdir, readdir, readFile, realpath, rename, rm, stat, statfs, wr
 import { tmpdir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { agentOwner, atomicPrivateWrite, closeHerdrPane, diskThresholdBytes, isProfileSession, neverStartedReason, privateFile, profileConcurrency, worktreesDirectory, type AttentionItem, type HerdrAgent, type MasterConfig } from './master.js';
+import type { HerdrPane } from './master/herdr.js';
 import { pinnedSessionRecords, readReviewLedger, sessionLedgerBound, SessionLedgerFullError, sessionLedgerRefusal, terminalSessionStates, updateReviewLedger, type ReviewRecord } from './reviewer.js';
 import { readProducerLedger, saveProducerLedger, type ProducerRecord } from './producer.js';
 import { describeTmpReclaim, hostTmpRoots, reclaimTmpDirectories, testTempMinAgeMs, testTempPatterns, tmpReclaimLimitPerCycle, tmpReclaimMinAgeMs, tmpReclaimWorkMsPerCycle, tsxCacheName, type TmpReclaimOptions, type TmpReclaimReport } from './tmp-reclaim.js';
@@ -1034,8 +1035,18 @@ export function describeReclaim(report: ResourceReclaimReport) {
 
 // ---- The host's panes (GY-842) -----------------------------------------------------------------
 
-/** The count of agentless panes a Graphyard launch opened past which attention is raised (GY-842). */
+/** The count of agentless panes standing in Graphyard worktrees past which attention is raised (GY-842). */
 export const agentlessPaneAttentionBound = 20;
+
+/**
+ * The item key and attempt epoch a Graphyard worktree path names (…/.graphyard/worktrees/GY-N-EPOCH,
+ * or anywhere beneath it), or null for any other directory. A worktree removed under its shell
+ * reads with Linux's ` (deleted)` suffix, which is kept apart as `deleted`.
+ */
+export function graphyardWorktree(cwd: string | undefined): { key: string; epoch: number; deleted: boolean } | null {
+  const match = /\/\.graphyard\/worktrees\/([A-Za-z][A-Za-z0-9]*-\d+)-(\d+)(?:\/[^]*?)?( \(deleted\))?\s*$/.exec(cwd ?? '');
+  return match ? { key: match[1], epoch: Number(match[2]), deleted: !!match[3] } : null;
+}
 
 export interface PaneReclaimStatus {
   at: string;
@@ -1043,45 +1054,53 @@ export interface PaneReclaimStatus {
   panes: number | null;
   /** Panes a Graphyard launch opened: the pane ids its sessions recorded. */
   launched: number;
-  /** Launched panes holding no agent — a runtime that exited and left its shell behind. */
+  /** Agentless panes standing in Graphyard worktrees, recorded by a session or not: what the sweep will close. */
   agentless: number;
-  /** The oldest agentless launched pane, by the start its session recorded. */
+  /** The longest-standing agentless pane, by its session's recorded start or, unrecorded, its first sighting. */
   oldest: { pane: string; work: string; kind: string; launchedAt: string } | null;
   /** One attention item once agentless panes pass the bound, naming the counts and the remedy. */
   attention: AttentionItem | null;
 }
 
 /**
- * The pane picture of this host (GY-842): how many panes the runtime holds, how many a Graphyard
- * launch opened, and how many of those stand agentless — the runtime exited and left its shell,
- * which holds a pty, a process and memory whether or not anything runs in it. Herdr held 621 panes
- * on 26 September 2026, 584 of them Graphyard's, agentless; the host throttled and every session
- * and test run on it slowed. A pane counts as agentless only when the runtime reports the pane
- * with no agent in it, and only a pane a Graphyard session recorded is Graphyard's — a pane the
- * operator or another tool opened is never counted, and never closed. Only the handles `hostId`
- * recorded count: the reading is this host's, and a remote handle naming the same pane coordinate
- * is another host's launch, not this host's pane.
+ * The pane picture of this host (GY-842, GY-1533): how many panes the runtime holds, how many a
+ * Graphyard launch recorded, and how many stand agentless in Graphyard worktrees — the runtime
+ * exited and left its shell, which holds a pty, a process and memory whether or not anything runs
+ * in it. Herdr held 621 panes on 26 September 2026, 584 of them Graphyard's, agentless; the host
+ * throttled and every session and test run on it slowed. On 7 October 246 bare shells in deleted
+ * worktrees stood for over a day while this reading said 6: it counted only the panes a session
+ * recorded, and the agent inventory it read never carries a bare shell. The reading is now the
+ * pane inventory's, exactly as the sweep's candidates are: every pane it reports with no agent
+ * whose cwd is a Graphyard worktree (present or deleted), recorded or not, except one whose exact
+ * item and epoch holds a live lease. A pane outside the worktrees is never counted, and never
+ * closed. Only the handles `hostId` recorded count as launched: a remote handle naming the same
+ * pane coordinate is another host's launch. The agentless count is 0 while the inventory cannot be
+ * read, since nothing can be seen or closed on it.
  */
-export function paneReclaimStatus(panes: { pane_id?: string }[] | null, work: Work[], agents: HerdrAgent[] | null, now: number, hostId: string): PaneReclaimStatus {
-  // Every pane on the host, from the pane inventory; the agent inventory stands in for presence
-  // when the pane list could not be read, since it lists a session's pane while the pane exists.
+export function paneReclaimStatus(panes: HerdrPane[] | null, work: Work[], agents: HerdrAgent[] | null, now: number, hostId: string, sighted: Record<string, string> = {}): PaneReclaimStatus {
   const listed = new Set((panes ?? []).map(pane => pane.pane_id).filter((id): id is string => !!id));
   // A launch's own record of its pane (GY-172): the handle every launcher registers, whatever its role.
-  const recorded = new Map<string, { work: Work; kind: string; launchedAt: string | null; running: boolean }>();
+  const recorded = new Map<string, { work: Work; kind: string; launchedAt: string | null }>();
   for (const item of work) for (const handle of item.sessions ?? []) if (handle.pane && handle.host === hostId)
-    recorded.set(handle.pane, { work: item, kind: handle.kind, launchedAt: Number.isFinite(Date.parse(handle.startedAt)) ? handle.startedAt : null, running: handle.state === 'running' });
-  // A pane with an agent in it is a live session, whatever its state: the inventory detects the agent.
+    recorded.set(handle.pane, { work: item, kind: handle.kind, launchedAt: Number.isFinite(Date.parse(handle.startedAt)) ? handle.startedAt : null });
+  // A pane with an agent in it is a live session by either inventory, whatever its state.
   const withAgent = new Set((agents ?? []).filter(agent => !!agent.agent && !!agent.pane_id).map(agent => agent.pane_id!));
-  const seenByRuntime = new Set((agents ?? []).map(agent => agent.pane_id).filter((id): id is string => !!id));
-  const present = (pane: string) => listed.has(pane) || (panes === null && seenByRuntime.has(pane));
-  const agentless = [...recorded.entries()].filter(([pane, record]) => present(pane) && !withAgent.has(pane));
-  const oldest = agentless.length
-    ? agentless.reduce((earliest, entry) => Date.parse(entry[1].launchedAt ?? '') < Date.parse(earliest[1].launchedAt ?? '') ? entry : earliest, agentless[0])
-    : null;
+  const leased = (tree: { key: string; epoch: number }) => work.some(item => item.key === tree.key && !!item.lease && item.lease.epoch === tree.epoch && Date.parse(item.lease.expiresAt) > now);
+  const agentless: { pane: string; work: string; kind: string; since: string | null }[] = [];
+  for (const pane of panes ?? []) {
+    if (!pane.pane_id || pane.agent || withAgent.has(pane.pane_id)) continue;
+    const tree = graphyardWorktree(pane.cwd);
+    if (!tree || leased(tree)) continue;
+    const record = recorded.get(pane.pane_id);
+    agentless.push({ pane: pane.pane_id, work: record?.work.key ?? tree.key, kind: record?.kind ?? 'unrecorded', since: record?.launchedAt ?? sighted[pane.pane_id] ?? null });
+  }
+  // The longest-standing: the earliest known start; a pane whose standing is undated ranks after every dated one.
+  const standing = (entry: { since: string | null }) => entry.since === null ? Number.POSITIVE_INFINITY : Date.parse(entry.since);
+  const oldest = agentless.length ? agentless.reduce((earliest, entry) => standing(entry) < standing(earliest) ? entry : earliest, agentless[0]) : null;
   const reading = { panes: panes === null ? null : listed.size, launched: recorded.size, agentless: agentless.length,
-    oldest: oldest ? { pane: oldest[0], work: oldest[1].work.key, kind: oldest[1].kind, launchedAt: oldest[1].launchedAt ?? 'an unrecorded time' } : null };
+    oldest: oldest ? { pane: oldest.pane, work: oldest.work, kind: oldest.kind, launchedAt: oldest.since ?? 'an unrecorded time' } : null };
   const attention: AttentionItem[] = agentless.length > agentlessPaneAttentionBound ? [{ subject: 'agentless panes',
-    text: `Herdr holds ${reading.panes ?? 'an unknown number of'} pane(s) on this host and ${agentless.length} of the panes Graphyard launched stand agentless (past the ${agentlessPaneAttentionBound}-pane attention bound), the oldest pane ${reading.oldest!.pane} of ${reading.oldest!.work} (${reading.oldest!.kind}), launched ${reading.oldest!.launchedAt}. Each is a shell holding a pty and memory, and enough of them slow every session and test run on the host`,
+    text: `Herdr holds ${reading.panes ?? 'an unknown number of'} pane(s) on this host and ${agentless.length} of them stand agentless in Graphyard worktrees (past the ${agentlessPaneAttentionBound}-pane attention bound), the oldest pane ${reading.oldest!.pane} of ${reading.oldest!.work} (${reading.oldest!.kind}), standing since ${reading.oldest!.launchedAt}. Each is a shell holding a pty and memory, and enough of them slow every session and test run on the host`,
     ...agentOwner('master', 'the loop sweeps them itself, a bounded number per cycle, once agentless past its launch bound; graphyard master run --once runs a pass now') }] : [];
   return { ...reading, at: new Date(now).toISOString(), attention: attention[0] ?? null };
 }
