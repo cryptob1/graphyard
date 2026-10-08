@@ -28,6 +28,7 @@ import { remedyStep } from './cycle-remedies.js';
 import { Timings, withTimings, withoutTimings } from '../master/timings.js';
 import { syncProjectMemory } from '../project-memory.js';
 import { planeUnavailable } from '../model/refusal.js';
+import { planeWideRefusal } from '../model/blocker-class.js';
 
 /** How many session launches the launcher runs at once when master.json sets no `run.launchConcurrency` (GY-616). */
 export const defaultLaunchConcurrency = 3;
@@ -139,7 +140,8 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
     catch (error) {
       const key = `isolated:${kind}:${item?.id ?? name}`;
       // GY-1344: a control plane that did not answer judged nothing; it is retried next cycle and is no fault of the step's.
-      const unanswered = planeUnavailable(error);
+      // GY-1541: nor did one that answered "Startup validation has not completed" (a deploy's 503, GY-1375) or any other plane-wide failure.
+      const unanswered = planeUnavailable(error) || planeWideRefusal(error);
       performed.push(await record(state, key, { kind, work: item?.key ?? null, principal: null, state: 'failed', epoch: item?.epoch ?? null,
         detail: unanswered ? `Handling ${name} in the ${kind} step met a control plane that did not answer, so it is retried next cycle: ${message(error)}`
           : `Handling ${name} in the ${kind} step threw, so only its own action failed and the cycle went on with every other item: ${message(error)}`,
