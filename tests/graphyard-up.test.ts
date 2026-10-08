@@ -865,7 +865,7 @@ test('unit:onboarding-generates-workflow — onboarding a repository with no CI 
   assert.ok(applied.applied.includes(deliveryWorkflowFile));
   const workflow = await readFile(join(checkout, deliveryWorkflowFile), 'utf8');
   assert.equal(workflow, renderDeliveryWorkflow({ name: 'node', frameworks: ['node:test'], commands: proposal.commands }).content);
-  assert.match(workflow, /^on:\n  pull_request:\n  push:\n    branches: \[main\]\n/m);
+  assert.match(workflow, /^on:\n  pull_request:\n  push:\n    branches: \["main"\]\n/m);
   assert.match(workflow, /  build:\n[\s\S]*npm ci; else npm install[\s\S]*- run: npm run build\n/);
   assert.match(workflow, /  test:\n[\s\S]*- run: npm test\n/);
   assert.match(workflow, new RegExp(`  ${deliveryGateJob}:\\n    needs: \\[build, test\\]\\n    if: always\\(\\)`));
@@ -881,6 +881,25 @@ test('unit:onboarding-generates-workflow — onboarding a repository with no CI 
   await mkdir(join(ciRepo, '.github/workflows'), { recursive: true });
   await writeFile(join(ciRepo, '.github/workflows/ci.yml'), 'on: [pull_request]\n');
   assert.equal(await writeDeliveryWorkflow(ciRepo, 'main'), null);
+  // A workflow that never runs on pull requests (a stale-issue bot, a push-only deploy) is not CI: a pull
+  // request could wait on none of its checks, so the repository still gets the delivery workflow and its gate.
+  const botsOnly = { files: ['package.json', '.github/workflows/stale.yml', '.github/workflows/deploy.yml'], contents: {
+    'package.json': '{"scripts":{"test":"node --test"}}',
+    '.github/workflows/stale.yml': 'on:\n  schedule:\n    - cron: "0 0 * * *"\njobs:\n  stale:\n    runs-on: ubuntu-latest\n',
+    '.github/workflows/deploy.yml': 'on:\n  push:\n    branches: [main]\njobs:\n  deploy:\n    runs-on: ubuntu-latest\n' } };
+  assert.equal(hasNoCi(botsOnly), true);
+  assert.deepEqual(buildProposal(botsOnly, { repository: 'acme/game' }).policy.checks, [deliveryGateJob], 'work items wait for the gate job, not checks no pull request reports');
+  await writeFile(join(ciRepo, '.github/workflows/ci.yml'), 'on:\n  push:\n');
+  assert.deepEqual(await writeDeliveryWorkflow(ciRepo, 'main'), { path: deliveryWorkflowFile, state: 'written' });
+  // An operator's edit to the generated workflow is kept and reported as drift, never overwritten by a rerun.
+  const edited = workflow.replace(/- run: npm test\n/, '- run: npm test -- --coverage\n');
+  await writeFile(join(checkout, deliveryWorkflowFile), edited);
+  const reapplied = await applyProposal(checkout, proposal, applyDeps);
+  assert.equal(await readFile(join(checkout, deliveryWorkflowFile), 'utf8'), edited);
+  assert.ok(reapplied.drift.some(line => line.startsWith(`${deliveryWorkflowFile} differs from the generated workflow`)), reapplied.drift.join('; '));
+  assert.ok(!reapplied.applied.includes(deliveryWorkflowFile));
+  assert.deepEqual(reapplied.delivery!.workflows, [deliveryWorkflowFile], 'the kept workflow is still published');
+  await writeFile(join(checkout, deliveryWorkflowFile), workflow);
   // Other stacks still get a build and a test job.
   assert.match(renderDeliveryWorkflow({ name: 'python', frameworks: ['pytest'], commands: [] }).content, /- run: python -m pytest -q\n/);
   assert.match(renderDeliveryWorkflow({ name: 'unknown', frameworks: [], commands: [] }).content, /No test step was detected/);

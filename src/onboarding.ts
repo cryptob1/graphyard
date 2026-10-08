@@ -163,22 +163,24 @@ export function detectStack(input: ScanInput): StackDetection {
   return { name: 'unknown', evidence: [], frameworks: [], testLayout: [], commands: [] };
 }
 
+/** Whether a workflow's `on:` triggers on pull requests: the inline list, inline scalar or block form. */
+const triggersPullRequest = (raw: string) => {
+  const inlineList = /^on:\s*\[([^\]]*)\]/m.exec(raw);
+  if (inlineList) return /\bpull_request\b/.test(inlineList[1]);
+  const inline = /^on:\s+(\S.*)$/m.exec(raw);
+  if (inline) return /\bpull_request\b/.test(inline[1]);
+  let inOn = false;
+  for (const line of raw.split('\n')) {
+    if (/^\S/.test(line)) inOn = line.startsWith('on:');
+    else if (inOn && /^  pull_request(?:\s*:|$)/.test(line)) return true;
+  }
+  return false;
+};
+
 /** Required-check candidates from workflow job ids and their explicit `name:` overrides. */
 export function workflowCheckNames(input: ScanInput, options: { onlyPullRequest?: boolean } = {}): string[] {
   const names: string[] = [];
   const record = (name: string) => { if (!names.includes(name)) names.push(name); };
-  const triggersPullRequest = (raw: string) => {
-    const inlineList = /^on:\s*\[([^\]]*)\]/m.exec(raw);
-    if (inlineList) return /\bpull_request\b/.test(inlineList[1]);
-    const inline = /^on:\s+(\S.*)$/m.exec(raw);
-    if (inline) return /\bpull_request\b/.test(inline[1]);
-    let inOn = false;
-    for (const line of raw.split('\n')) {
-      if (/^\S/.test(line)) inOn = line.startsWith('on:');
-      else if (inOn && /^  pull_request(?:\s*:|$)/.test(line)) return true;
-    }
-    return false;
-  };
   for (const [path, raw] of Object.entries(input.contents)) {
     if (!/^\.github\/workflows\/[^/]+\.ya?ml$/.test(path)) continue;
     if (options.onlyPullRequest && !triggersPullRequest(raw)) continue;
@@ -209,9 +211,14 @@ export const deliveryWorkflowFile = '.github/workflows/graphyard-delivery.yml';
 /** The job of the delivery workflow a pull request is gated on: it passes only when build and test both passed. */
 export const deliveryGateJob = 'graphyard-gate';
 
-/** Whether the scan found no CI workflow of the repository's own (Graphyard's generated ones never count). */
-export const hasNoCi = (input: Pick<ScanInput, 'files'>) =>
-  !input.files.some(path => /^\.github\/workflows\/[^/]+\.ya?ml$/.test(path) && path !== deliveryWorkflowFile && !(generatedWorkflowFiles as readonly string[]).includes(path));
+/**
+ * Whether the scan found no CI of the repository's own: no workflow of its own runs on pull requests.
+ * A stale-issue bot, a labeler or a push-only deploy reports no check a pull request could wait on,
+ * so it does not count; Graphyard's generated workflows never count (the scan never reads them).
+ */
+export const hasNoCi = (input: ScanInput) =>
+  !Object.entries(input.contents).some(([path, raw]) => /^\.github\/workflows\/[^/]+\.ya?ml$/.test(path) && path !== deliveryWorkflowFile
+    && !(generatedWorkflowFiles as readonly string[]).includes(path) && triggersPullRequest(raw));
 
 /** The branch origin's HEAD names, else main: where the delivery workflow's push runs. */
 const originBase = (root: string) => {
@@ -221,10 +228,11 @@ const originBase = (root: string) => {
 
 /**
  * GY-1480: write the delivery workflow into a checkout whose scan finds no CI of its own; null when
- * it has CI. Unchanged content is left alone, so a rerun is idempotent. The caller publishes the
- * path with the other onboarding files, so the onboarding change carries it.
+ * it has CI. Unchanged content is left alone, so a rerun is idempotent, and a file that differs from
+ * the render — an operator's edit — is kept and reported as drift, never overwritten. The caller
+ * publishes the path with the other onboarding files, so the onboarding change carries it.
  */
-export async function writeDeliveryWorkflow(root: string, base = originBase(root)): Promise<{ path: string; state: 'written' | 'unchanged' } | null> {
+export async function writeDeliveryWorkflow(root: string, base = originBase(root)): Promise<{ path: string; state: 'written' | 'unchanged' | 'drift' } | null> {
   const input = await collectScanInput(root);
   if (!hasNoCi(input)) return null;
   const workflow = renderDeliveryWorkflow(detectStack(input), base);
@@ -232,6 +240,7 @@ export async function writeDeliveryWorkflow(root: string, base = originBase(root
   let current: string | null = null;
   try { current = await readFile(target, 'utf8'); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
   if (current === workflow.content) return { path: workflow.path, state: 'unchanged' };
+  if (current !== null) return { path: workflow.path, state: 'drift' };
   await mkdir(dirname(target), { recursive: true });
   await writeFile(target, workflow.content, { mode: 0o644 });
   return { path: workflow.path, state: 'written' };
@@ -270,12 +279,12 @@ ${setup ? `${setup}
 ` : ''}      - run: ${command}
 `;
   return { path: deliveryWorkflowFile, content: `name: Graphyard delivery
-# Written by graphyard init --scan --apply because this repository had no CI workflow of its own.
-# Edit the build and test commands freely; ${deliveryGateJob} passes only when both jobs passed.
+# Written by graphyard init --scan --apply because no workflow of this repository ran on pull requests.
+# Edit the build and test commands freely (a rerun keeps your edits); ${deliveryGateJob} passes only when both jobs passed.
 on:
   pull_request:
   push:
-    branches: [${base}]
+    branches: [${JSON.stringify(base)}]
 permissions:
   contents: read
 concurrency:

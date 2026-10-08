@@ -405,7 +405,12 @@ export async function applyProposal(root: string, proposalInput: unknown, depend
   // workflows only once it is on disk. It decides "no CI" itself, so a rerun that finds only
   // Graphyard's own workflows still reports it, matching the gate the proposed policy requires.
   const deliveryWorkflow = delivery ? await writeDeliveryWorkflow(root) : null;
-  if (delivery && deliveryWorkflow) { (deliveryWorkflow.state === 'written' ? applied : unchanged).push(deliveryWorkflow.path); delivery.workflows.push(deliveryWorkflow.path); }
+  // An operator's edit to it is drift: the edited file is kept, and still published as the workflow.
+  if (delivery && deliveryWorkflow) {
+    if (deliveryWorkflow.state === 'drift') drift.push(`${deliveryWorkflow.path} differs from the generated workflow; the edited file was kept`);
+    else (deliveryWorkflow.state === 'written' ? applied : unchanged).push(deliveryWorkflow.path);
+    delivery.workflows.push(deliveryWorkflow.path);
+  }
 
   const randomToken = dependencies.token ?? (() => randomBytes(32).toString('base64url'));
   const grants = proposal.proofs.filter(proof => proof.command).map(proof => proof.name);
