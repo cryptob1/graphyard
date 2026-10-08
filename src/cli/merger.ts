@@ -1,7 +1,8 @@
 import { parseArgs } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import { mergerModes } from '../merger-mode.js';
-import { unhandled, type MasterSession } from './master/session.js';
+import type { CliCommand } from './registry.js';
+import { openMasterSession, unhandled, type MasterSession } from './master/session.js';
 
 /** The one line `graphyard doctor` prints for the merger setting (src/merger-mode.ts), from /api/status `mergeWriter`. */
 export const mergerDoctorLine = (mergeWriter: { merger: string; since: string | null; setBy: string | null } | null | undefined) =>
@@ -19,3 +20,16 @@ export async function mergerCommand(session: MasterSession, env: NodeJS.ProcessE
   // Changing the setting needs an admin credential: the operator's GRAPHYARD_TOKEN, since the master's own is coordinator.
   return print(await masterMutation('merger', { merger: mode, reason: values.reason.trim() }, env.GRAPHYARD_REQUEST_ID ?? randomUUID(), env.GRAPHYARD_TOKEN?.trim() || masterToken));
 }
+
+/**
+ * `master merger` is answered here, ahead of the `master` entry, which handles every other
+ * subcommand; the registry keeps one entry per name, so the entry is wrapped, not duplicated.
+ */
+export const withMerger = (all: readonly CliCommand[]): readonly CliCommand[] => all.map(entry => entry.name !== 'master' ? entry : {
+  ...entry,
+  help: [...entry.help, '  master merger [github|control-plane --reason TEXT]', '                                Show the merger setting and history; set it (admin credential)'],
+  async run(context, work) {
+    if (context.id === 'merger') { await mergerCommand(await openMasterSession(context, context.repositoryRoot())); return; }
+    return entry.run(context, work);
+  },
+});

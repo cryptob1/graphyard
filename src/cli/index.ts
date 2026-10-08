@@ -3,6 +3,7 @@ import type { CliCommand } from './registry.js';
 import { installCommands } from './install.js';
 import { dbCommands } from './db.js';
 import { masterCommands } from './master.js';
+import { withMerger } from './merger.js';
 import { workCommands } from './work.js';
 import { policyCommands } from './policy.js';
 import { validationCommands } from './validation.js';
@@ -23,12 +24,12 @@ import { scopeGuardCommands } from './scope-guard.js';
  * Every command the launcher answers to, in help order. A feature adds its commands to
  * one module, or adds a module here; nothing else in the launcher changes.
  */
-export const commands: readonly CliCommand[] = [
+export const commands: readonly CliCommand[] = withMerger([
   ...installCommands, ...dbCommands, ...masterCommands, ...workCommands, ...policyCommands,
   ...validationCommands, ...deliveryCommands, ...releaseCommands, ...runnerCommands, ...scenarioCommands,
   ...grantsCommands, ...operatorAgentCommands, ...operatorCommands, ...leaseCommands, ...workspaceCommands,
   ...goalCommands, ...reviewCommands, ...scopeGuardCommands,
-];
+]);
 
 export function renderHelp() {
   return `Graphyard 0.1 — distributed work, explicit proof
