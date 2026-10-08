@@ -1,5 +1,5 @@
 // Concern: report section assembly, service profiles, ledgers and runtime environment formatting for the master status report.
-import { directMergeLine, docsBudgetAttention } from './status-attention.js';
+import { directMergeLine, docsBudgetAttention, mergeWriterLine } from './status-attention.js';
 import { masterBoard } from '../model/board.js';
 import { humanOnlyStatusRow, type HumanRequestRow } from '../model/human-request.js';
 import { branchReport, mergeProtocolSkew, profileConcurrency, reclaimIdleMs, type AttentionItem, type MasterConfig } from '../master.js';
@@ -67,6 +67,7 @@ export async function assembleStatusSections<
 
   return {
     ...directMergeLine(coordinator),
+    ...mergeWriterLine(coordinator),
     board: await timedStep('board', () => masterBoard(masterApi, snapshot, coordinator, decisions.unanswered)),
     humanOnly: humanOnly.map(humanOnlyStatusRow),
     conflictHotspots: hs.report,
