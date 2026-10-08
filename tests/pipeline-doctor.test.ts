@@ -8,7 +8,7 @@ import { Timings } from '../src/master/timings.js';
 import { approverSessionName } from '../src/master/autonomy.js';
 import { workerSubmissionBoundMs } from '../src/model/attempt-bound.js';
 import { clearDoctorRuns, clearCoveredBlockers, coveredScopePaths, decisionCheckMs, doctorBounds, doctorDue, doctorIntervalMs, doctorPrompt, doctorReportPayloadSchema, doctorRunsSettled, doctorSanctionedCommands, doctorSessionArgs, doctorSessionTools, doctorStep, relaunchUnansweredApprovers, settleSubmittedContainment, stopDoctorRuns, unansweredDecisionMs, type DoctorEffects } from '../src/daemon/doctor.js';
-import { applyDoctorRun, doctorTool, unregisteredScenarioOf, withoutScenario } from '../src/daemon/doctor.js';
+import { applyDoctorRun, doctorTool, filingDigest } from '../src/daemon/doctor.js';
 import { loopAttention, type LoopLiveness } from '../src/daemon/liveness.js';
 import { silenceBudgetMs, type SilenceEntry } from '../src/daemon/metrics.js';
 import { faultClassOf } from '../src/model/fault-classes.js';
@@ -21,6 +21,7 @@ import type { Work } from '../src/model.js';
 import { operatorAgentRouteGuard } from '../src/server/auth.js';
 import { Next } from '../src/server/routes.js';
 import { containmentSettlementRefusals, containmentVerificationSchema } from '../src/quarantine.js';
+import { RefusedResponse } from '../src/model/refusal.js';
 
 // Each test is named for the proof it produces (GY-711): unit:doctor-scheduled-and-scoped,
 // unit:doctor-run-recorded and unit:loop-applies-routine-remedies.
@@ -815,7 +816,7 @@ test(`manual:fault-class-loop — GY-1336 ${gy1336Doctor.filing}: a refused fili
   assert.deepEqual(loopFaultsOf(replay.state), [], 'queued for the retry, it is no loop fault');
   replay.state.cycle += 1;
   await doctorStep(cycle([item()], { doctor, state: replay.state }));
-  assert.deepEqual(replay.state.faults.instances.map(entry => [entry.kind, entry.faultClass]), [['action:fault', 'unclassified']], 'a retry refused again is still a fault, unclassified since GY-1338');
+  assert.deepEqual(replay.state.faults.instances.map(entry => [entry.kind, entry.faultClass]), [['plane-unavailable', 'deployment']], 'a retry refused again is still a fault: the plane not answering is the plane\'s (GY-1404, GY-1530), never a loop fault');
   clearDoctorRuns();
 
   // A post-merge proof no normalising can mend: the create checks refuse it on every attempt.
@@ -828,94 +829,6 @@ test(`manual:fault-class-loop — GY-1336 ${gy1336Doctor.filing}: a refused fili
   assert.equal(escalations.length, 1, 'it is raised for the master instead');
   assert.match(escalations[0].detail, /fails the checks master create applies, so it is not filed; file it by hand/);
   assert.deepEqual(loopFaultsOf(refused.state), [], 'no loop fault instance');
-  clearDoctorRuns();
-});
-
-// ---- GY-1531: a filing refused for an unregistered e2e scenario is mended, not retried for ever --
-//
-// 2026-10-08T04:54:24Z: the doctor's filing for the loop class carried a criterion proved by
-// e2e:self-upgrade-loaded-revision-clears, a scenario nothing had registered; create refused it
-// (409: "Register E2E scenario ... before creating work that requires it") and the retry re-sent
-// the same proof every cycle — "Still could not file" — so the class stayed unfiled.
-const gy1531 = { scenario: 'self-upgrade-loaded-revision-clears', refusal: 'Graphyard refused work (409): Register E2E scenario self-upgrade-loaded-revision-clears before creating work that requires it' };
-const loopGuardFiling = (proofs: string[]) => ({ faultClass: 'loop' as const, priority: 1, plannedFiles: ['src/daemon/run.ts'],
-  title: 'Master loop strands its self-upgrade when the checkout HEAD moves while it runs: the dirty-checkout guard refuses the restart it owes, leaving the loop on stale code',
-  description: 'evidence', criteria: [{ id: 'AC-1', text: 'Restored and restarted', proofs: ['manual:dirty-checkout-detach-restart'] }, { id: 'AC-2', text: 'The loaded revision clears', proofs }] });
-/** A control plane that refuses, as the engine does, any criterion proved by an unregistered e2e scenario, and takes the rest. */
-function scenarioRefusingPlane(registered: string[] = []) {
-  const sent: string[][][] = [];
-  const file: DoctorEffects['file'] = async (input, _key) => {
-    sent.push(input.criteria.map(criterion => criterion.proofs));
-    const missing = input.criteria.flatMap(criterion => criterion.proofs).find(proof => proof.startsWith('e2e:') && !registered.includes(proof.slice(4)));
-    if (missing) throw new Error(`Graphyard refused work (409): Register E2E scenario ${missing.slice(4)} before creating work that requires it`);
-    return item({ id: 'id-GY-1531', key: 'GY-1531', title: input.title });
-  };
-  return { sent, file };
-}
-
-test('manual:fault-filing-dirty-checkout-succeeds-after-scenario-fix — the refusal names the scenario, and the filing loses only that proof', () => {
-  assert.equal(unregisteredScenarioOf(new Error(gy1531.refusal)), gy1531.scenario);
-  assert.equal(unregisteredScenarioOf(new Error('Graphyard refused work (503): the control plane is unavailable')), null);
-  const mended = withoutScenario(loopGuardFiling([`e2e:${gy1531.scenario}`, 'unit:self-upgrade-moved-head-detaches-loaded-commit', 'e2e:loop-restart']), gy1531.scenario);
-  assert.deepEqual(mended.criteria.map(criterion => criterion.proofs), [['manual:dirty-checkout-detach-restart'], [`manual:${gy1531.scenario}`, 'unit:self-upgrade-moved-head-detaches-loaded-commit', 'e2e:loop-restart']], 'the named scenario becomes a manual proof; every other proof stands');
-});
-
-test('manual:fault-filing-dirty-checkout-succeeds-after-scenario-fix — a settled run whose filing names an unregistered scenario is filed at once with that proof manual', async () => {
-  clearDoctorRuns();
-  const plane = scenarioRefusingPlane();
-  const replay = cycle([item()], { doctor: filingDoctor([loopGuardFiling([`e2e:${gy1531.scenario}`, 'unit:self-upgrade-moved-head-detaches-loaded-commit'])], plane.file) });
-  await doctorStep(replay);
-  await doctorRunsSettled();
-  assert.deepEqual(plane.sent, [
-    [['manual:dirty-checkout-detach-restart'], [`e2e:${gy1531.scenario}`, 'unit:self-upgrade-moved-head-detaches-loaded-commit']],
-    [['manual:dirty-checkout-detach-restart'], [`manual:${gy1531.scenario}`, 'unit:self-upgrade-moved-head-detaches-loaded-commit']],
-  ], 'the refused filing is sent again at once with the scenario proof manual');
-  assert.deepEqual(replay.state.doctor.pendingFiles, [], 'nothing is left to retry');
-  assert.deepEqual(Object.values(replay.state.actions).filter(action => action.state === 'failed'), [], 'no failed action');
-  assert.deepEqual(loopFaultsOf(replay.state), [], 'no loop fault instance');
-  const filed = Object.values(replay.state.actions).find(action => /^Filed GY-1531 \(P1\) for the loop fault no open item covered/.test(action.detail));
-  assert.match(filed?.detail ?? '', new RegExp(`e2e:${gy1531.scenario} named no registered scenario and was filed as manual:${gy1531.scenario}`), 'the record says what was mended');
-  assert.equal(replay.state.doctor.runs[0].filed[0]?.work, 'GY-1531');
-  clearDoctorRuns();
-});
-
-test('manual:fault-filing-dirty-checkout-succeeds-after-scenario-fix — a pending filing the plane refused for its scenario is mended on its retry and accepted, never re-sent unmended', async () => {
-  clearDoctorRuns();
-  // The run settles while the plane is away: the filing is queued as the doctor wrote it.
-  let away = true;
-  const plane = scenarioRefusingPlane();
-  const doctor = filingDoctor([loopGuardFiling([`e2e:${gy1531.scenario}`])], async (input, key) => { if (away) throw new Error('Graphyard refused work (503): the control plane is unavailable'); return plane.file(input, key); });
-  const replay = cycle([item()], { doctor });
-  await doctorStep(replay);
-  await doctorRunsSettled();
-  assert.equal(replay.state.doctor.pendingFiles.length, 1);
-  assert.deepEqual(replay.state.doctor.pendingFiles[0].file.criteria[1].proofs, [`e2e:${gy1531.scenario}`]);
-  // The retry: the plane is back and refuses the scenario, once.
-  away = false;
-  replay.state.cycle += 1;
-  await doctorStep(cycle([item()], { doctor, state: replay.state }));
-  assert.deepEqual(plane.sent.map(criteria => criteria[1]), [[`e2e:${gy1531.scenario}`], [`manual:${gy1531.scenario}`]], 'refused once, mended, accepted');
-  assert.deepEqual(replay.state.doctor.pendingFiles, [], 'the filing is no longer pending');
-  const pendingKey = Object.keys(replay.state.actions).find(key => /:file:loop$/.test(key))!;
-  assert.equal(replay.state.actions[pendingKey].state, 'done');
-  assert.match(replay.state.actions[pendingKey].detail, /^Filed GY-1531 \(P1\) for the loop fault on a later cycle: .*; e2e:self-upgrade-loaded-revision-clears named no registered scenario and was filed as manual:self-upgrade-loaded-revision-clears$/);
-  assert.deepEqual(loopFaultsOf(replay.state), [], 'a retry that is accepted is no loop fault');
-  clearDoctorRuns();
-});
-
-test('manual:fault-filing-dirty-checkout-succeeds-after-scenario-fix — a filing refused for a scenario and then for another cause keeps the mended proof for its next retry', async () => {
-  clearDoctorRuns();
-  const sent: string[][] = [];
-  const doctor = filingDoctor([loopGuardFiling([`e2e:${gy1531.scenario}`])], async input => {
-    sent.push(input.criteria[1].proofs);
-    throw new Error(sent.length === 1 ? gy1531.refusal : 'Graphyard refused work (503): the control plane is unavailable');
-  });
-  const replay = cycle([item()], { doctor });
-  await doctorStep(replay);
-  await doctorRunsSettled();
-  assert.deepEqual(sent, [[`e2e:${gy1531.scenario}`], [`manual:${gy1531.scenario}`]]);
-  assert.deepEqual(replay.state.doctor.pendingFiles.map(entry => entry.file.criteria[1].proofs), [[`manual:${gy1531.scenario}`]], 'the pending filing is the mended one');
-  assert.deepEqual(loopFaultsOf(replay.state), [], 'queued for the retry, it is no loop fault');
   clearDoctorRuns();
 });
 
@@ -1016,4 +929,116 @@ test('manual:doctor-launch-fails-fast — a run a killed loop process left runni
   await doctorStep(later);
   assert.equal(running.doctor.runs[0].state, 'running', 'the run in flight in this process is left to settle');
   clearDoctorRuns();
+});
+
+// ---- GY-1530: a filing create refuses is classified and never re-filed ---------------------------
+//
+// GY-1516's two doctor instances were one filing — "Master loop cannot restart or self-upgrade: …" —
+// whose criterion cited e2e:self-upgrade-loaded-revision-clears. master create refused it (409,
+// "Register E2E scenario self-upgrade-loaded-revision-clears before creating work that requires it"):
+// scenarios register only from e2e/cases files, and none by that name exists, so the refusal could
+// never clear; yet the doctor kept the filing pending and re-filed it every cycle, recording each
+// refusal as an unclassified action:fault.
+const gy1516 = { scenario: 'self-upgrade-loaded-revision-clears', title: 'Master loop cannot restart or self-upgrade: coordinator checkout HEAD moves under the running loop, so the dirty-checkout guard stands for hours (instances 2026-10-08T01:09Z and 04:11Z)' };
+/** The create route's refusal as the operator-agent post throws it: status and body kept on the error. */
+const scenarioRefusal = (scenario: string) => new RefusedResponse(`Graphyard refused work (409): Register E2E scenario ${scenario} before creating work that requires it`, 409, { error: `Register E2E scenario ${scenario} before creating work that requires it` });
+const selfUpgradeFiling = (proofs: string[]) => ({ faultClass: 'loop' as const, priority: 1, plannedFiles: ['src/daemon/self-upgrade.ts'], title: gy1516.title, description: 'evidence',
+  criteria: [{ id: 'AC-1', text: 'The loop restarts onto the checkout revision', proofs }] });
+const instanceKinds = (state: DaemonState) => state.faults.instances.map(entry => [entry.kind, entry.faultClass]);
+const escalationsOf = (state: DaemonState) => Object.values(state.actions).filter(action => action.kind === 'escalation');
+
+test('unit:doctor-filing-refusal-fix-item-kind — a filing master create refuses (any 409) is recorded failed under fix-item (proof), never action:fault, and is not kept for a retry; a plane that did not answer still queues it, and its retry refused plane-wide is the plane\'s fault', async () => {
+  clearDoctorRuns();
+  // Structural: the operator-agent post's RefusedResponse, here naming an unregistered scenario.
+  const filed: string[] = [];
+  const refusing = filingDoctor([selfUpgradeFiling([`e2e:${gy1516.scenario}`])], async (_input, key) => { filed.push(key); throw scenarioRefusal(gy1516.scenario); });
+  const replay = cycle([item()], { doctor: refusing });
+  await doctorStep(replay);
+  await doctorRunsSettled();
+  assert.equal(filed.length, 1, 'filed once');
+  assert.deepEqual(instanceKinds(replay.state), [['fix-item', 'proof']]);
+  assert.match(replay.state.faults.instances[0].text, /^Could not file ".+", and it is not filed again: master create refused the filing itself for the e2e proof it cites, whose scenario self-upgrade-loaded-revision-clears has no registered revision: Graphyard refused work \(409\): Register E2E scenario/);
+  assert.equal(replay.state.actions[filed[0]].state, 'failed');
+  assert.deepEqual(replay.state.doctor.pendingFiles, [], 'not kept for a retry');
+  assert.deepEqual(loopFaultsOf(replay.state), [], 'no loop fault');
+  assert.equal(replay.state.doctor.runs[0].state, 'reported', 'the run itself applied');
+  clearDoctorRuns();
+  // Textual: a 409 the post wrapped in plain text, for any other refusal, is the same class, and its escalation names the refusal for the master to mend.
+  const other = filingDoctor([selfUpgradeFiling(['unit:self-upgrade'])], async () => { throw new Error('Graphyard refused work (409): Idempotency key reused with different input'); });
+  const textual = cycle([item()], { doctor: other });
+  await doctorStep(textual);
+  await doctorRunsSettled();
+  assert.deepEqual(instanceKinds(textual.state), [['fix-item', 'proof']]);
+  assert.deepEqual(textual.state.doctor.pendingFiles, []);
+  assert.equal(escalationsOf(textual.state).length, 1);
+  assert.match(escalationsOf(textual.state)[0].detail, /^The doctor asked to file ".+" \(loop, P1\), but master create refused it \(Graphyard refused work \(409\): Idempotency key reused with different input\); file it by hand with master create once mended$/);
+  clearDoctorRuns();
+  // A plane that did not answer is queued for the retry with no fault (GY-1336); the retry refused plane-wide is plane-unavailable, not unclassified.
+  const outage = filingDoctor([selfUpgradeFiling(['unit:self-upgrade'])], async () => { throw new Error('Graphyard refused work (503): the control plane is unavailable'); });
+  const queued = cycle([item()], { doctor: outage });
+  await doctorStep(queued);
+  await doctorRunsSettled();
+  assert.equal(queued.state.doctor.pendingFiles.length, 1, 'kept for the retry');
+  assert.deepEqual(instanceKinds(queued.state), [], 'queued, no fault');
+  queued.state.cycle += 1;
+  await doctorStep(cycle([item()], { doctor: outage, state: queued.state }));
+  assert.deepEqual(instanceKinds(queued.state), [['plane-unavailable', 'deployment']]);
+  assert.equal(queued.state.doctor.pendingFiles.length, 1, 'still kept: the plane may answer later');
+  // The plane back, the create route refuses the content: the plane's run on the key is over, so the refusal opens its own proof instance, and the filing is dropped.
+  const mended = { ...outage, file: async () => { throw new Error('Graphyard refused work (409): Idempotency key reused with different input'); } };
+  queued.state.cycle += 2;
+  await doctorStep(cycle([item()], { doctor: mended, state: queued.state }));
+  assert.deepEqual(instanceKinds(queued.state), [['plane-unavailable', 'deployment'], ['fix-item', 'proof']], 'the outage and the refusal are two causes, two instances');
+  assert.deepEqual(queued.state.doctor.pendingFiles, [], 'dropped once the plane refused the content');
+  clearDoctorRuns();
+});
+
+test('unit:doctor-e2e-scenario-refusal-drops-pending-file — a pending filing whose e2e proof names an unregistered scenario is dropped on its retry, escalated naming the scenario for the master to file by hand, and never re-filed', async () => {
+  clearDoctorRuns();
+  const filed: string[] = [];
+  // No doctor run launches here: only the pending retry, which runs whether or not the doctor is due.
+  const doctor: DoctorEffects = { ...filingDoctor([], async (_input, key) => { filed.push(key); throw scenarioRefusal(gy1516.scenario); }), settings: doctorSettingsSchema.parse({ enabled: false }) as DoctorEffects['settings'] };
+  const state = emptyDaemonState(config());
+  const key = 'doctor:3379f2b6c361998f7abec8ee:file:loop';
+  state.doctor.pendingFiles = [{ key, at: observedAt, file: selfUpgradeFiling([`e2e:${gy1516.scenario}`]) }];
+  await doctorStep(cycle([item()], { doctor, state }));
+  assert.deepEqual(filed, [key], 'the retry reaches the control plane once, under the filing\'s stable key');
+  assert.deepEqual(state.doctor.pendingFiles, [], 'dropped');
+  assert.deepEqual(instanceKinds(state), [['fix-item', 'proof']]);
+  assert.equal(state.actions[key].state, 'failed');
+  assert.match(state.actions[key].detail, /whose scenario self-upgrade-loaded-revision-clears has no registered revision/);
+  const escalations = escalationsOf(state);
+  assert.equal(escalations.length, 1, 'raised for the master');
+  assert.match(escalations[0].detail, /^The doctor asked to file ".+" \(loop, P1\), but the filing cites e2e:self-upgrade-loaded-revision-clears, and no scenario self-upgrade-loaded-revision-clears is registered \(scenarios register only from e2e\/cases files via graphyard e2e sync or an admin's defineScenario\); register it, or file the item by hand with master create under a proof that exists$/);
+  assert.equal(escalations[0].state, 'done', 'an escalation, not a second fault');
+  // Every later cycle, past every backoff the retry would have waited: nothing is filed again.
+  for (let round = 1; round <= 8; round++) { state.cycle += 1 << round; await doctorStep(cycle([item()], { doctor, state })); }
+  assert.deepEqual(filed, [key], 'never re-filed');
+  assert.equal(state.faults.instances.length, 1, 'one refusal, one instance');
+  clearDoctorRuns();
+});
+
+test('unit:doctor-refused-filing-survives-history-bound — a refused filing stays refused across any number of other distinct refusals, and is never submitted to create again', async () => {
+  clearDoctorRuns();
+  const filed: string[] = [];
+  const doctor: DoctorEffects = { ...filingDoctor([], async (input, key) => { filed.push(input.title); throw scenarioRefusal('no-such-scenario'); }), settings: doctorSettingsSchema.parse({ enabled: false }) as DoctorEffects['settings'] };
+  const state = emptyDaemonState(config());
+  const historyBound = 1000, first = selfUpgradeFiling(['e2e:no-such-scenario']);
+  const retry = async (file: ReturnType<typeof selfUpgradeFiling>, n: number) => { state.cycle += 1; state.doctor.pendingFiles = [{ key: `doctor:k${n}:file:loop`, at: observedAt, file }]; await doctorStep(cycle([item()], { doctor, state })); };
+  await retry(first, 0);
+  assert.deepEqual(filed, [first.title], 'refused once');
+  // Many distinct refusals: the first filing recurs only after all of them, when a count-bounded ledger would have evicted it.
+  for (let n = 1; n <= historyBound + 50; n++) await retry({ ...selfUpgradeFiling(['e2e:no-such-scenario']), title: `Other malformed filing ${n}` }, n);
+  await retry(first, 20_000);
+  assert.equal(state.doctor.refusedFilings.length, historyBound + 51, 'no refusal is evicted by the others');
+  assert.equal(filed.filter(title => title === first.title).length, 1, 'the first filing was submitted to create exactly once');
+  clearDoctorRuns();
+});
+
+test('unit:doctor-refusal-digest-is-normalised — reports whose create input is identical share one refusal digest, however the proof IDs and criterion IDs were spelled', () => {
+  const a = selfUpgradeFiling(['e2e:missing scenario']), b = selfUpgradeFiling(['e2e:missing-scenario']);
+  const spelled = (file: typeof a, id: string) => ({ ...file, criteria: file.criteria.map(criterion => ({ ...criterion, id })) });
+  assert.equal(filingDigest(a), filingDigest(b), 'proof IDs that normalise alike');
+  assert.equal(filingDigest(spelled(a, 'C1')), filingDigest(spelled(b, 'second')), 'criterion IDs create renumbers');
+  assert.notEqual(filingDigest(a), filingDigest(selfUpgradeFiling(['e2e:another-scenario'])), 'different content is not conflated');
 });
