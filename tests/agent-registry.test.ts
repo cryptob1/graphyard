@@ -640,3 +640,32 @@ test('unit:settled-sessions-end-without-a-launch — the loop\'s registry read r
     assert.equal((await ok('agent-registry/history?limit=500', auditor)).length, history.length, 'an ended session is recorded once');
   } finally { await fleet.cleanup(); }
 });
+
+test('integration:reviewer-provider-diversity — the select route reads the implementer\'s provider from the retained worker session, else the ledger\'s selected events, and records the reviewer choice', async () => {
+  await reset();
+  for (const name of ['claude', 'codex']) await ok('agent-registry/runtimes', operator, { runtime: runtimeNamed(name), reason: 'register' });
+  await ok('agent-registry/models', operator, { model: { name: 'opus', provider: 'anthropic' }, reason: 'model' });
+  await ok('agent-registry/models', operator, { model: { name: 'gpt', provider: 'openai' }, reason: 'model' });
+  await ok('agent-registry/accounts', operator, { account: { name: 'codex-r', runtime: 'codex', model: 'gpt', credential: { host: HOST, home: null } }, reason: 'account' });
+  await ok('agent-registry/accounts', operator, { account: { name: 'claude-r', runtime: 'claude', model: 'opus', credential: { host: HOST, home: null } }, reason: 'account' });
+  await ok('agent-registry/roles', operator, { role: { name: 'worker', accounts: ['codex-r'], concurrency: 5 }, reason: 'role' });
+  await ok('agent-registry/roles', operator, { role: { name: 'reviewer', accounts: ['codex-r', 'claude-r'], concurrency: 5 }, reason: 'role' });
+  const select = (role: string, work: string) => ok('agent-registry/select', coordinator, { role, host: HOST, work, principal: role === 'worker' ? 'implementer' : null, observations: [] });
+
+  // A retained worker session on openai: the reviewer passes over codex-r for claude-r.
+  assert.equal((await select('worker', 'GY-7001')).session.account, 'codex-r');
+  const review = await select('reviewer', 'GY-7001');
+  assert.equal(review.session.account, 'claude-r');
+  assert.deepEqual(review.session.skipped, [{ account: 'codex-r', reason: "codex-r shares the implementer's provider openai on GY-7001" }]);
+  assert.match(review.session.reason, /claude-r is the first eligible account for reviewer \(preference 2 of 2; .*\) on provider anthropic, not the implementer's openai/);
+
+  // A worker session the registry no longer retains is read from the ledger's agent-registry.selected events.
+  const current = await readRegistry(store.pool);
+  const ledgerSession = { id: randomUUID(), role: 'worker', account: 'codex-r', runtime: 'codex', model: 'gpt', host: HOST, work: 'GY-7002', principal: 'implementer', selectedAt: new Date().toISOString(), selectedBy: 'master', reason: 'earlier', skipped: [], endedAt: null, endReason: null };
+  await store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', ['master', 'agent-registry.selected', JSON.stringify({ change: { session: ledgerSession }, registry: current })]);
+  assert.equal((await select('reviewer', 'GY-7002')).session.account, 'claude-r');
+
+  // An implementer provider that is unknown chooses exactly as before.
+  const unknown = await select('reviewer', 'GY-7003');
+  assert.equal(unknown.session.account, 'codex-r'); assert.deepEqual(unknown.session.skipped, []);
+});
