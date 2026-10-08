@@ -439,6 +439,11 @@ export interface DispatchEffects {
    * without it leaves the reading to that cadence.
    */
   wakeObservation?: (work: Work) => Promise<unknown>;
+  /**
+   * Hands the tick's snapshot and agent list to the loop beside it (GY-1490, daemon/loop-wake.ts),
+   * which wakes its sleep for anything new its next cycle acts on. It never fails the tick.
+   */
+  observeLoopSubjects?: (work: Work[], agents: HerdrAgent[] | null, clock: number) => void;
   persist: (cursor: DispatchCursor) => Promise<void>;
 }
 
@@ -723,6 +728,8 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
   const clock = Number.isFinite(Date.parse(observedAt)) ? Date.parse(observedAt) : now();
   const tick: DispatchTick = { at: new Date(clock).toISOString(), launched: [], refused: [], waiting: [], skipped: 0, closed: [], closeFailures: [] };
   const herdr = await timings.step('herdr', () => effects.agents());
+  // GY-1490: the loop sleeping beside this tick is woken for what its next cycle acts on, within one tick of it appearing.
+  try { effects.observeLoopSubjects?.(snapshot.work, herdr, clock); } catch { /* a wake that cannot be judged leaves the loop to its interval */ }
   const { reviews, threads, released } = await timings.step('reconcile reviews', () => effects.reconcileReviews(snapshot.work, herdr));
   if (threads?.length) tick.threads = threads;
   const { producers } = await timings.step('reconcile producers', () => effects.reconcileProducers(snapshot.work, herdr));

@@ -491,6 +491,7 @@
     "tests/pi-runner.test.ts": 1021,
     "tests/pipeline-doctor.test.ts": 1087,
     "tests/pipeline-speed.test.ts": 5207,
+    "tests/pipeline-wait-hotspots.test.ts": 944,
     "tests/plane-load.test.ts": 615867,
     "tests/planned-files-derived.test.ts": 1268,
     "tests/pr-links.test.ts": 261,
