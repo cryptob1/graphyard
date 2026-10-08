@@ -139,7 +139,9 @@ export function sessionHarnessPlan(input: SessionHarnessInput): HarnessPlan {
     allow = [
       { rule: 'Bash(gh pr diff:*)', why: 'Read the candidate diff.' },
       { rule: 'Bash(gh pr view:*)', why: 'Read the pull request and poll its mergeability before posting.' },
-      ...(input.pr ? [{ rule: `Bash(gh api --method POST repos/${input.repository}/pulls/${input.pr}/reviews*)`, why: 'Post the one verdict this session was launched for; the master itself is denied every review call.' }] : []),
+      // GY-1492: the verdict goes through review post, which checks the launch's binding, the head,
+      // mergeability and the thread lines before its one POST; a raw review call is denied below.
+      { rule: `Bash(${cli} review post:*)`, why: 'Post the one verdict this session was launched for, checked against its launch binding; the master itself is denied every review call.' },
       // Surrounding code is read from a detached checkout under the managed worktree root, which
       // Graphyard allocates for the session and removes when it ends.
       ...(input.checkout ? [{ rule: 'Bash(git fetch:*)', why: 'Fetch the exact head under review.' },
@@ -147,6 +149,7 @@ export function sessionHarnessPlan(input: SessionHarnessInput): HarnessPlan {
     ];
     deny = [...secrets, ...noPush,
       { rule: `Bash(${cli} evidence:*)`, why: 'A reviewer never submits evidence.' },
+      { rule: 'Bash(gh api *pulls/*/reviews*)', why: 'The verdict is posted only through review post, which checks it first.' },
       { rule: 'Edit(./**)', why: 'The review session is read-only.' },
       { rule: 'Write(./**)', why: 'The review session is read-only.' },
     ];
