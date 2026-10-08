@@ -25,7 +25,7 @@ CI runs full suite; workers run build, `graphyard verify GY-N` (own proofs), sub
 
 ### Generated files never conflict
 
-`GRAPHYARD_GENERATED_FILES=docs/protocol.md,docs/README.md` paths are `generated`: only deletion refuses.
+`GRAPHYARD_GENERATED_FILES=docs/protocol.md,docs/README.md` paths are `generated`: only deletion refuses; `sync` regenerates.
 
 ## Ship in under thirty minutes
 
