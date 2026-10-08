@@ -589,7 +589,15 @@ export async function readDaemonState(root: string, config: MasterConfig): Promi
   let raw: string;
   try { raw = await readFile(file, 'utf8'); }
   catch (error: any) { if (error.code === 'ENOENT') return emptyDaemonState(config); throw error; }
-  const state = daemonStateSchema.parse(JSON.parse(raw));
+  const stored = JSON.parse(raw);
+  // A cursor written by newer code and then reverted carries top-level keys this schema does not declare (GY-1542);
+  // rejecting them bricked the loop on every start. Drop them, say so once, and validate every declared field strictly.
+  if (stored && typeof stored === 'object' && !Array.isArray(stored)) {
+    const dropped = Object.keys(stored).filter(key => !(key in daemonStateSchema.shape));
+    for (const key of dropped) delete stored[key];
+    if (dropped.length) console.error(`Master daemon cursor: ignored top-level keys this version does not declare: ${dropped.join(', ')}`);
+  }
+  const state = daemonStateSchema.parse(stored);
   if (state.url !== config.url || state.repository.toLowerCase() !== config.repository.toLowerCase()) throw new Error('Master daemon state belongs to another Graphyard server or repository; remove it before running the loop');
   return state;
 }
