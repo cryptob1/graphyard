@@ -5,6 +5,17 @@ import { acknowledgeContainment, establishContainment } from '../src/quarantine.
 import { restartTolerantApi, supervise, throughRestart, transientControlPlaneFailure } from '../src/supervisor.js';
 import { checkInvariants, emptyInvariantRecord } from '../src/model/invariants.js';
 import type { Work } from '../src/model.js';
+import type { SessionHandle } from '../src/model/sessions.js';
+import { awaitRuntimeStart, buildMasterStatus, SessionStartError, type WorkerProfile } from '../src/master.js';
+// A namespace import, so the proof producer's run of this file at the base, which has no screenDialog,
+// fails only the case that reads it.
+import * as consent from '../src/consent-prompt.js';
+const { detectConsentPrompt } = consent;
+const screenDialog = (screen: string) => consent.screenDialog?.(screen);
+import { trackFaults, type FaultRecord } from '../src/model/fault-classes.js';
+// @ts-expect-error Dependency-free fixture and screenshot script.
+import { fixtureWork } from '../scripts/dashboard-fixture.mjs';
+import { live } from '../browser-tests/ui-board.js';
 
 // GY-1506 names this file for its proof: manual:fault-class-session-liveness. The master loop
 // filed 5 session-liveness faults in 24 hours; the host journal names the two shapes they share.
@@ -175,4 +186,114 @@ test('integration:fault-class-session-liveness invariant:deploy-lease-loss — t
   assert.deepEqual(base.subjects, ['GY-1493', 'GY-1505']);
   const candidate = await lossesOf(true);
   assert.equal(candidate.holds, true, candidate.line);
+});
+
+// GY-1561 names this file for its proof too: the loop filed 3 session-liveness faults in 24 hours, all
+// on GY-1525, and all one incident. Epochs 14 and 16 of GY-1525 launched into a dialog Herdr reported
+// blocked; the pane last showed "Enter to confirm · Esc to cancel", and the launch was refused naming
+// Herdr's state rather than the dialog (the action:dispatch instance, 22:32:24Z). Each launch ended its
+// session record "the launch failed before the session started" with no pane, and for the minute its
+// attempt's lease outlived that record master status raised "Assigned worker session is ended" — the
+// two session instances (22:31:07Z for epoch 14, 22:34:54Z for epoch 16) counting the same failed
+// launches again. The dialog is Claude Code 2.1.292's folder-trust dialog as it draws today (captured
+// from the runtime in a tmux pane, below at two widths): it asks "Is this a project you created or one
+// you trust?", which no consent kind read as a trust question, and at 60 columns that question wraps
+// above the five lines read for it. At the base, detectConsentPrompt reads neither as a prompt and the
+// launch is refused as "Herdr reports it blocked"; the candidate names it a workspace-trust prompt,
+// names any other unrecognised dialog by its text, and counts the failed launch only as its dispatch's.
+
+/** Claude Code 2.1.292's folder-trust dialog in a pane `width` columns wide, as the runtime drew it. */
+const folderTrust = (width: 60 | 100) => (width === 60 ? [
+  '────────────────────────────────────────────────────────────',
+  ' Accessing workspace:', '',
+  ' /home/vish/code/graphyard/.graphyard/worktrees/GY-1525-14', '',
+  ' Quick safety check: Is this a project you created or one',
+  ' you trust? (Like your own code, a well-known open source',
+  ' project, or work from your team). If not, take a moment to',
+  " review what's in this folder first.", '',
+  " Claude Code'll be able to read, edit, and execute files",
+  ' here.', '',
+  ' Security guide', '',
+  ' ❯ No, exit',
+  '   Yes, I trust this folder', '',
+  ' Enter to confirm · Esc to cancel', '',
+] : [
+  '────────────────────────────────────────────────────────────────────────────────────────────────────',
+  ' Accessing workspace:', '',
+  ' /home/vish/code/graphyard/.graphyard/worktrees/GY-1525-14', '',
+  ' Quick safety check: Is this a project you created or one you trust? (Like your own code, a',
+  " well-known open source project, or work from your team). If not, take a moment to review what's in",
+  ' this folder first.', '',
+  " Claude Code'll be able to read, edit, and execute files here.", '',
+  ' Security guide', '',
+  ' ❯ No, exit',
+  '   Yes, I trust this folder', '',
+  ' Enter to confirm · Esc to cancel', '',
+]).join('\n');
+
+/** A Herdr pane on a virtual clock whose claude runtime shows `screen` and reports `status`. */
+function blockedPane(screen: string, status = 'blocked') {
+  let now = Date.parse('2026-10-08T22:30:17.082Z');
+  const sent: string[][] = [];
+  const run = (_command: string, args: string[]) => {
+    const json = (result: unknown) => JSON.stringify({ result });
+    if (args[0] === 'pane' && args[1] === 'send-keys') sent.push(args);
+    if (args[0] === 'pane' && args[1] === 'read') return screen;
+    if (args[0] === 'agent' && args[1] === 'get') return json({ agent: { agent: 'claude', agent_status: status, pane_id: args[2] } });
+    return json({});
+  };
+  return { run, sent, bounds: { clock: () => now, wait: (ms: number) => { now += ms; } } };
+}
+
+test('unit:fault-class-session-liveness GY-1525 action:dispatch — a launch blocked on Claude Code\'s folder-trust dialog is refused naming it, never as only "Herdr reports it blocked"', async () => {
+  for (const width of [60, 100] as const) {
+    const screen = folderTrust(width);
+    const prompt = detectConsentPrompt(screen);
+    assert.equal(prompt?.kind, 'folder', `${width} columns: the dialog is a workspace-trust prompt (the base read no prompt here)`);
+    assert.equal(prompt?.rule, null, 'and no rule answers it: trusting a folder is never the launcher\'s answer');
+    assert.match(prompt!.text, /Yes, I trust this folder/);
+    const pane = blockedPane(screen);
+    await assert.rejects(awaitRuntimeStart('w1V:pMHS', 'claude', 'GY=/w/t; claude', pane.run, pane.bounds),
+      (error: unknown) => error instanceof SessionStartError && error.startCase === 'awaiting consent' && /workspace-trust prompt/.test(error.message)
+        && /Yes, I trust this folder/.test(error.message) && !/Herdr reports it blocked/.test(error.message), `${width} columns`);
+    assert.deepEqual(pane.sent, [], 'no key is sent into the dialog');
+  }
+});
+
+test('unit:fault-class-session-liveness — any other dialog a launch is blocked on is named by what it asks, not by its key hint', async () => {
+  const other = [' Use the new default model for this account?', '', ' ❯ 1. Yes, switch', '   2. No, keep the current model', '', ' Enter to confirm · Esc to cancel'].join('\n');
+  assert.equal(detectConsentPrompt(other), null, 'not a consent kind the launcher knows');
+  assert.equal(screenDialog(other), 'Use the new default model for this account? / ❯ 1. Yes, switch / 2. No, keep the current model');
+  const pane = blockedPane(other);
+  await assert.rejects(awaitRuntimeStart('w1V:pMHV', 'claude', 'GY=/w/t; claude', pane.run, pane.bounds),
+    (error: unknown) => error instanceof SessionStartError && error.startCase === 'blocked'
+      && error.message.includes('Herdr reports it blocked on a dialog the launcher does not recognise: "Use the new default model for this account? / ❯ 1. Yes, switch / 2. No, keep the current model"'));
+  assert.equal(screenDialog('● Done.\n❯ \n'), null, 'a screen not ending on a menu names no dialog');
+});
+
+test('unit:fault-class-session-liveness GY-1525 session — a launch that failed before its session started is its dispatch\'s one fault, not also an ended session while its lease runs out', () => {
+  const NOW = Date.parse('2026-10-08T22:31:07.080Z'), at = (ms: number) => new Date(NOW + ms).toISOString();
+  const worker = { name: 'claude-primary', principal: 'graphyard-claude-1', agentName: 'graphyard-claude-1', mode: 'launch', kind: 'claude', credentialFile: '/outside/c1.token', agentArgs: [], environment: {} } as unknown as WorkerProfile;
+  const item = (fixtureWork() as unknown as Work[]).map(live)[0];
+  const session = (fields: Partial<SessionHandle>): SessionHandle => ({ id: 'graphyard-claude-1:14', kind: 'implementation', principal: 'graphyard-claude-1', epoch: null, runtime: 'claude', host: 'vishrog', workspace: 'w1V', tab: null,
+    pane: null, agentName: 'graphyard-claude-1', role: null, head: null, attach: null, transcript: null, subject: 'GY-1525', startedAt: at(-50_000), updatedAt: at(-28_000), endedAt: at(-28_000), state: 'finished', outcome: null, ...fields } as SessionHandle);
+  const held = (handle: SessionHandle): Work => ({ ...item, key: 'GY-1525', stage: 'build', lease: { owner: 'graphyard-claude-1', epoch: 14, expiresAt: at(90_000) }, sessions: [handle] } as Work);
+  const status = (handle: SessionHandle) => buildMasterStatus({ work: [held(handle)], now: at(0) }, [worker], []);
+  const failed = session({ outcome: 'the launch failed before the session started: the claude runtime is blocked before it is ready in pane w1V:pMHS (Herdr reports it blocked); the pane last showed: "Enter to confirm · Esc to cancel"' });
+
+  const report = status(failed);
+  assert.doesNotMatch(report.work[0].attention ?? '', /Assigned worker session/, 'the base raised "Assigned worker session is ended" here');
+  assert.ok(!report.attentionItems.some(entry => entry.kind === 'session'), 'no session fault for the failed launch');
+
+  // The loop's record across the incident: the launch fails (its dispatch action fails: one instance)
+  // while the epoch's lease still runs, for two cycles. The base recorded the session line as a second
+  // instance; the candidate records only the dispatch's.
+  const record: FaultRecord = { instances: [], open: {}, failing: {} };
+  for (const offset of [0, 60_000]) trackFaults(record, status(failed).attentionItems.map(entry => ({ kind: entry.kind!, faultClass: entry.faultClass!, subject: entry.subject, text: entry.text })), at(offset));
+  assert.equal(record.instances.filter(entry => entry.faultClass === 'session-liveness').length, 0);
+
+  // A session that did start and then ended under a live lease is still the fault it was.
+  const started = status(session({ pane: 'w1V:pMHS', observed: 'ended', observedAt: at(-28_000), outcome: 'the agent process exited (code 0) while its lease was live' }));
+  assert.equal(started.work[0].attention, 'Assigned worker session is ended');
+  assert.ok(started.attentionItems.some(entry => entry.kind === 'session' && entry.faultClass === 'session-liveness'));
 });

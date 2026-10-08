@@ -242,14 +242,18 @@ test('unit:start-bound-reads-the-pane — before a start is declared failed the 
     const banner = new FakePane(elapsed => elapsed < 40_000 ? { screen: ' ▐▛███▛█   Claude Code v2.1.278\n▝▜██████▀  Fable 5.1 · Claude Max\n' } : readyAtOnce());
     assert.match((await awaitRuntimeStart('w1V:pR6', 'claude', 'GY=/s; claude', banner.run, banner.bounds())).extended!, /^the claude banner is on screen at 30 s/);
     // A runtime at work on its request has started: no wait past the first sighting. One blocked
-    // before it is ready sits at a dialog no launcher answers, and is refused at once with the dialog.
+    // before it is ready sits at a dialog no launcher answers, and is refused at once naming the
+    // dialog: Claude Code's folder-trust menu is a workspace-trust prompt by its options (GY-1561).
     for (const status of ['working', 'done', 'idle']) {
       const quick = new FakePane(() => ({ agent: { agent: 'claude', agent_status: status } }));
       assert.equal((await awaitRuntimeStart('w1V:pR6', 'claude', 'GY=/s; claude', quick.run, quick.bounds())).waitedMs, 0, status);
     }
     const dialog = new FakePane(() => ({ agent: { agent: 'claude', agent_status: 'blocked' }, screen: ' ❯ No, exit\n   Yes, I trust this folder\n' }));
     const blocked = await caught(awaitRuntimeStart('w1V:pR6', 'claude', 'GY=/s; claude', dialog.run, dialog.bounds()), SessionStartError);
-    assert.equal(blocked.startCase, 'blocked'); assert.equal(blocked.message, 'the claude runtime is blocked before it is ready in pane w1V:pR6 (Herdr reports it blocked); the pane last showed: "Yes, I trust this folder"'); assert.equal(blocked.waitedMs, 0);
+    assert.equal(blocked.startCase, 'awaiting consent'); assert.match(blocked.message, /^the claude runtime stopped at a workspace-trust prompt in pane w1V:pR6 .*"❯ No, exit \/ Yes, I trust this folder"$/); assert.equal(blocked.waitedMs, 0);
+    const unknown = new FakePane(() => ({ agent: { agent: 'claude', agent_status: 'blocked' }, screen: ' Continue?\n ❯ 1. Yes\n   2. No\n' }));
+    const named = await caught(awaitRuntimeStart('w1V:pR6', 'claude', 'GY=/s; claude', unknown.run, unknown.bounds()), SessionStartError);
+    assert.equal(named.startCase, 'blocked'); assert.equal(named.message, 'the claude runtime is blocked before it is ready in pane w1V:pR6 (Herdr reports it blocked on a dialog the launcher does not recognise: "Continue? / ❯ 1. Yes / 2. No"); the pane last showed: "2. No"'); assert.equal(named.waitedMs, 0);
 
     // Never starts: the command is still echoing at 30 s. The refusal names the case and the pane's last line, not Herdr's agent_not_found.
     const echoing = new FakePane(() => ({ screen: `Last login: Mon Sep 22 05:27:00 2026\n${echoLine}\n` }));
