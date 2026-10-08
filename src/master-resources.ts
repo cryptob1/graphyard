@@ -6,7 +6,7 @@ import { dirname, resolve } from 'node:path';
 import { agentOwner, atomicPrivateWrite, closeHerdrPane, diskThresholdBytes, isProfileSession, neverStartedReason, privateFile, profileConcurrency, worktreesDirectory, type AttentionItem, type HerdrAgent, type MasterConfig } from './master.js';
 import { pinnedSessionRecords, readReviewLedger, sessionLedgerBound, SessionLedgerFullError, sessionLedgerRefusal, terminalSessionStates, updateReviewLedger, type ReviewRecord } from './reviewer.js';
 import { readProducerLedger, saveProducerLedger, type ProducerRecord } from './producer.js';
-import { describeTmpReclaim, hostTmpRoots, reclaimTmpDirectories, testTempMinAgeMs, testTempPatterns, tmpReclaimLimitPerCycle, tmpReclaimWorkMsPerCycle, type TmpReclaimOptions, type TmpReclaimReport } from './tmp-reclaim.js';
+import { describeTmpReclaim, hostTmpRoots, reclaimTmpDirectories, testTempMinAgeMs, testTempPatterns, tmpReclaimLimitPerCycle, tmpReclaimMinAgeMs, tmpReclaimWorkMsPerCycle, tsxCacheName, type TmpReclaimOptions, type TmpReclaimReport } from './tmp-reclaim.js';
 import { alignKey, upgradeTouchesCode } from './daemon/upgrade.js';
 import type { UpgradeStall } from './daemon/state.js';
 import { workerReclaimBoundMs, workerSubmissionBoundMs } from './model/attempt-bound.js';
@@ -106,9 +106,11 @@ export interface TmpInodes {
   /**
    * This user's own top-level entries in the directory, and how many carry a test temp name
    * (GY-1081): the per-user quota is not readable without quotactl, so this is what the reading can
-   * show of this user's share. `capped` when the count stopped at `ownEntriesScanBound`.
+   * show of this user's share. `capped` when the count stopped at `ownEntriesScanBound`. `tsxCache`
+   * names this user's tsx compile cache and the entries under it, which `entries` includes (GY-1512):
+   * one top-level directory that held 89,896 of them on 8 October 2026.
    */
-  own?: { entries: number; testTemp: number; capped: boolean } | null;
+  own?: { entries: number; testTemp: number; capped: boolean; tsxCache?: { name: string; entries: number } } | null;
 }
 
 export interface ResourceDefinition {
@@ -429,7 +431,7 @@ export const resourceRegistry: ResourceDefinition[] = [
     // not readable without quotactl, so the reading warns early rather than claiming to track it.
     bound: 'the inode count of the filesystem holding the host temporary directory (filesystem-wide, not the per-user quota, which can break shells first), so it warns at a quarter free',
     usage: 'statfs of the host temporary directory (os.tmpdir() of the reading process)', owner: 'test runs and sessions on the coordinator host, and the loop\'s /tmp reclaim pass (src/tmp-reclaim.ts)',
-    reclaim: `the loop's reclaim pass scans its own tmpdir and /tmp, each once, and removes this user's test temp entries (${testTempPatterns.map(pattern => `${pattern.source.slice(1)}*`).join(', ')}) older than ${testTempMinAgeMs / 3_600_000} hours that no live process holds, at most ${tmpReclaimLimitPerCycle} per cycle`,
+    reclaim: `the loop's reclaim pass scans its own tmpdir and /tmp, each once, and removes this user's test temp entries (${testTempPatterns.map(pattern => `${pattern.source.slice(1)}*`).join(', ')}) older than ${testTempMinAgeMs / 3_600_000} hours, and the regular files in this user's tsx compile cache (tsx-<uid>) older than ${tmpReclaimMinAgeMs / 3_600_000} hours, that no live process holds, at most ${tmpReclaimLimitPerCycle} per cycle`,
     remedy: 'graphyard master run --once reclaims now; find what else fills /tmp (ls /tmp | sort | uniq -c) and stop the process leaking it',
     warnBelow: bound => Math.ceil(bound / 4), symptoms: [],
     // The quarter-free line is an early warning on a filesystem-wide count every process on the host
@@ -458,7 +460,7 @@ const entries = (count: number) => `${count} entr${count === 1 ? 'y' : 'ies'}`;
 /** The tmp-inodes detail: free inodes, this user's share, the latest pass's count and the last count that was not 0. */
 function describeTmpInodes(tmp: TmpInodes) {
   const parts = [`measured ${tmp.path}: ${tmp.freeInodes} of ${tmp.totalInodes} inodes free`];
-  if (tmp.own) parts.push(`${tmp.own.capped ? 'at least ' : ''}${entries(tmp.own.entries)} at its top level are this user's (${tmp.own.testTemp} with test temp names); the per-user quota itself is not readable`);
+  if (tmp.own) parts.push(`${tmp.own.capped ? 'at least ' : ''}${entries(tmp.own.entries)} are this user's (${tmp.own.testTemp} top-level with test temp names${tmp.own.tsxCache ? `, ${entries(tmp.own.tsxCache.entries)} under its tsx compile cache ${tmp.own.tsxCache.name}` : ''}); the per-user quota itself is not readable`);
   if (tmp.latest) parts.push(`the loop's latest /tmp pass removed ${entries(tmp.latest.removed)} at ${tmp.latest.at}${tmp.latest.roots ? `, scanning ${tmp.latest.roots.join(' and ')}` : ''}`);
   // A pass over another directory than the one warned about removes nothing here: say so (GY-1368).
   if (tmp.measuredScanned === false) parts.push(`that pass did not scan ${tmp.path}`);
@@ -671,16 +673,23 @@ export const ownEntriesScanBound = 20_000;
 /** This user's own top-level entries in `path`, and how many carry a test temp name; null where there are no uids. */
 export async function countOwnEntries(path: string, uid = process.getuid?.()): Promise<TmpInodes['own']> {
   if (uid === undefined) return null;
-  const names = await readdir(path);
-  let entries = 0, testTemp = 0;
+  const names = await readdir(path), cacheName = tsxCacheName(uid);
+  let entries = 0, testTemp = 0, tsxCache: { name: string; entries: number } | undefined;
   for (const name of names.slice(0, ownEntriesScanBound)) {
     let info;
     try { info = await lstat(resolve(path, name)); } catch { continue; }
     if (info.uid !== uid) continue;
     entries++;
     if (testTempPatterns.some(pattern => pattern.test(name))) testTemp++;
+    // The tsx cache is one top-level name over tens of thousands of inodes: its entries are counted
+    // by name alone, so the reading names it when it is what fills the volume.
+    if (name === cacheName && info.isDirectory()) {
+      const inside = (await readdir(resolve(path, name), { recursive: true }).catch(() => [] as string[])).length;
+      tsxCache = { name, entries: inside };
+      entries += inside;
+    }
   }
-  return { entries, testTemp, capped: names.length > ownEntriesScanBound };
+  return { entries, testTemp, capped: names.length > ownEntriesScanBound, ...(tsxCache ? { tsxCache } : {}) };
 }
 
 /**

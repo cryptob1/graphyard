@@ -486,7 +486,7 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   assert.ok(!existsSync(tmp.deadOwned) && !existsSync(`${tmp.deadOwned}.owner`), 'a dead run\'s directory goes at once, marker and all');
   assert.ok(existsSync(tmp.heldDirectory), 'a directory a live process holds open is kept all day');
   assert.ok(existsSync(tmp.liveOwned), 'a directory whose owner still runs is kept all day');
-  if (hours > 7) assert.ok(!existsSync(tmp.cache), 'a tsx cache left unwritten for six hours goes');
+  if (hours > 7) assert.ok(!existsSync(join(tmp.cache, 'data')) && existsSync(tmp.cache), 'a tsx cache\'s file left unwritten for six hours goes, and the cache directory stays (GY-1512)');
   const aged = tmp.hourly.filter(entry => entry.at <= (hours - 7) * hour), young = tmp.hourly.filter(entry => entry.at >= (hours - 5) * hour);
   assert.deepEqual(aged.filter(entry => existsSync(entry.directory)).map(entry => entry.directory), [], 'each leftover goes once it is past six hours old');
   assert.deepEqual(young.filter(entry => !existsSync(entry.directory)).map(entry => entry.directory), [], 'no leftover goes before it is six hours old');
