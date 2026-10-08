@@ -1,8 +1,8 @@
 // Concern: promoting a supervised install to autonomy (GY-1502) — its preconditions, the autonomy apply it reuses, the supervision flip and its audit entry.
-import { execFileSync } from 'node:child_process';
 import { appendFile, chmod, mkdir } from 'node:fs/promises';
 import { hostname, userInfo } from 'node:os';
 import { resolve } from 'node:path';
+import { runChild } from '../child-runner.js';
 import { actionsDirectory } from '../master-browser.js';
 import { loadStoredMasterConfig, recordSupervision } from './config.js';
 import { setupAutonomy } from './autonomy.js';
@@ -57,8 +57,8 @@ export function assertPromotionRoute(config: Pick<MasterConfig, 'supervision'>, 
 }
 
 /** The operator's GitHub login as gh reads it; only the name is read, gh's token stays in gh (GY-1501). */
-export function ghLogin(): string | null {
-  try { return execFileSync('gh', ['api', 'user', '--jq', '.login'], { encoding: 'utf8', timeout: 30_000, stdio: ['ignore', 'pipe', 'ignore'] }).trim() || null; } catch { return null; }
+export async function ghLogin(): Promise<string | null> {
+  try { return (await runChild('gh', ['api', 'user', '--jq', '.login'], { timeoutMs: 30_000 })).trim() || null; } catch { return null; }
 }
 
 /** A fetcher that records the promotion as the reason of every identity write the autonomy apply makes. */
