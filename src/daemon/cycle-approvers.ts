@@ -9,7 +9,7 @@ import { type DaemonEffects, failoverKey, record, stoppedStates } from './effect
 import { capacityRefusal } from '../fleet.js';
 import type { Cycle } from './cycle.js';
 import { sessionExhaustion } from './cycle-sessions.js';
-import { resumedApplication } from './decision-reads.js';
+import { decisionFailureKind, resumedApplication } from './decision-reads.js';
 import { planeWideRefusal } from '../model/blocker-class.js';
 import type { FaultKind } from '../model/fault-classes.js';
 
@@ -266,14 +266,14 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
       if (watch.capacity) capacityRelaunchHanded = true;
       const waited = watch.capacity ? 'waited for an approver slot' : 'had its last approver launch refused';
       try { await note(`${base}:launch:${watch.launches + 1}`, item, 'decision', 'done', `${item.key}'s ${watch.action} decision ${watch.decision} ${waited}; ${await launch(item, watch, false)}`); }
-      catch (error) { await note(`${base}:launch:${watch.launches + 1}`, item, 'decision', 'failed', `${item.key}'s ${watch.action} decision ${watch.decision} ${waited}; its approver session could not be launched: ${message(error)}`); }
+      catch (error) { const detail = `${item.key}'s ${watch.action} decision ${watch.decision} ${waited}; its approver session could not be launched: ${message(error)}`; await note(`${base}:launch:${watch.launches + 1}`, item, 'decision', 'failed', detail, undefined, decisionFailureKind(state, item.key, detail)); }
       return 'done';
     }
     recordWatchEnded(watch, step.detail);
     if (step.step === 'rerequest') return 'rerequest';
     if (step.step === 'exhausted') { await escalateUnjudged(item, watch, step.detail); return 'done'; }
     try { await note(`${base}:launch:${watch.launches + 1}`, item, 'decision', 'done', `${step.detail}; ${await launch(item, watch, false)}`); }
-    catch (error) { await note(`${base}:launch:${watch.launches + 1}`, item, 'decision', 'failed', `${step.detail}; a replacement approver session could not be launched: ${message(error)}`); }
+    catch (error) { const detail = `${step.detail}; a replacement approver session could not be launched: ${message(error)}`; await note(`${base}:launch:${watch.launches + 1}`, item, 'decision', 'failed', detail, undefined, decisionFailureKind(state, item.key, detail)); }
     return 'done';
   };
   /**

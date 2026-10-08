@@ -9,7 +9,7 @@ import { type ApprovalWatch, approvalWatchSchema, carriedSession, type DaemonAct
 import { decisionKey, scopeAnsweredAt, scopeKey, scopeOutcomeAnswered } from './reconcile.js';
 import { readyToRetry } from './sessions.js';
 import { approvalStep, recordWatchEnded, approverLaunchKey, attestDecisions, boundDetail, exhaustedProofKey, decisionReasonMax, detailChanged, fitDecisionReason, githubPause, handWatchPrefix, maxApproverCloses, maxRefusalAnswers, maxDecisionRequests, namePaths, neededDecision, observedFrom, overtakenDecision, resolveCovers, reworkDecisionReason, refusalNamedIn, standingNamedIn, adoptedOnRefusal, reworkObservationWait, routineDecision, type RoutineDecision, sameAnswers, scopeRoutineDecision, blockerScopeDecision, standingVerdict, uncountedScopeFailure, withheldDecision } from './decisions.js';
-import { candidateMovedMeanwhile, decisionReads, deliveredMeanwhile, lateDecisionRead, resumedApplication } from './decision-reads.js';
+import { candidateMovedMeanwhile, decisionFailureKind, decisionReads, deliveredMeanwhile, lateDecisionRead, resumedApplication, selfHealingDecisionFailure } from './decision-reads.js';
 import { refusedAttestationWatch, type RefusedAttestation } from '../model/rework-ground.js';
 import { record } from './effects.js';
 import type { FaultKind } from '../model/fault-classes.js';
@@ -261,11 +261,13 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       // A history read that only missed the step's deadline judged nothing (GY-1293): one alone is
       // no decision fault, and its request is asked again next cycle; the second in a row counts.
       // An item delivered after the snapshot needs no decision (GY-1405), and a rework bound to the
-      // snapshot's head once a new head was submitted describes nothing (GY-1430): no fault.
+      // snapshot's head once a new head was submitted describes nothing (GY-1430): no fault. A put the
+      // control plane did not answer, or a launch that lost the folder-trust race, heals itself on
+      // the next cycle: the first at its key is no fault, a second in a row counts (GY-1505).
       const detail = `Could not put the ${decision.action} decision for ${item.key} to an approver: ${message(error)}`;
       const moot = deliveredMeanwhile(detail), moved = !moot && candidateMovedMeanwhile(detail, item), late = lateDecisionRead(detail) && !(previous?.state === 'failed' && lateDecisionRead(previous.detail));
       const why = moot ? `; ${item.key} was delivered after this cycle's snapshot, so it needs no ${decision.action} decision` : moved ? `; ${item.key}'s candidate moved after this cycle's snapshot, so the next snapshot decides afresh` : '';
-      performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'failed', detail: `${detail}${why}`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist, late || moot || moved ? null : undefined));
+      performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'failed', detail: `${detail}${why}`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist, late || moot || moved ? null : decisionFailureKind(state, item.key, detail, previous)));
     }
   };
   /**
@@ -403,7 +405,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
   // A needed decision with no watch is requested once ready to retry, or escalated.
   const requestNeeded = async (item: Work, decision: RoutineDecision, key: string) => {
     const previous = state.actions[key];
-    if (previous?.state === 'failed' && !readyToRetry(previous, state.cycle) && !lateDecisionRead(previous.detail)) return;
+    if (previous?.state === 'failed' && !readyToRetry(previous, state.cycle) && !lateDecisionRead(previous.detail) && !selfHealingDecisionFailure(previous.detail)) return;
     if (effects.decide && effects.approver) return request(item, decision, key, null);
     const escalationKey = `escalation:decision:${item.id}:${decision.binding}`, input = decision.action === 'attest' ? ` '${JSON.stringify(decision.input)}'` : '';
     const detail = `${item.key} needs a${decision.action === 'attest' ? 'n' : ''} ${decision.action} decision: ${decision.reason} This loop runs without the decision effects, so it cannot request one: graphyard master decide ${item.key} ${decision.action}${input} REASON, then graphyard master approver ${item.key} DECISION`;
