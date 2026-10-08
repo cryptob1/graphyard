@@ -11,25 +11,33 @@ import type { Cycle } from './cycle.js';
 /**
  * The main watch reads the base branch's first-parent history from the coordinator checkout — as
  * the promotion ledger last fetched it, never through GitHub's API — since the last promoted
- * commit, and names every commit nothing Graphyard recorded explains: no merge ledger entry
- * (model/merge-ledger.ts), no delivery GitHub merged, no main guard revert, no candidate revert
- * and no direct-merge window. In report-only mode each such commit raises one attention item, once;
- * with the freeze on (`GRAPHYARD_MAIN_WATCH_FREEZE`), promotion is held until an admin acknowledges
- * the commit (`policy.main-watch.acknowledged`, routes/main-watch.ts). Nothing here reverts or reworks.
+ * commit, and names every commit nothing Graphyard recorded explains: no delivery GitHub merged,
+ * no merge ledger entry (model/merge-ledger.ts), no main guard revert, no candidate revert and no
+ * direct-merge window. In report-only mode each such commit raises one attention item, once; with
+ * the freeze on (`GRAPHYARD_MAIN_WATCH_FREEZE`), promotion is held until an admin acknowledges the
+ * commit (`policy.main-watch.acknowledged`, routes/main-watch.ts). Nothing here reverts or reworks.
+ *
+ * An unknown commit stays in `unknown` until it is acknowledged or explained, whether or not the
+ * history read still reaches it: the fallback window advancing past it, or a promotion moving the
+ * production record past it, neither drops the commit nor releases its freeze. That retained list
+ * is also what makes the report once per sha, across the cursor's action pruning and a restart.
  */
+/** How many unknown commits the state lists; past it the oldest leave the list (never the freeze, which is the newest). */
+export const mainWatchUnknownListed = 200;
 export const mainWatchStateSchema = z.object({
   checkedAt: z.string(),
-  /** The base branch tip the history was read at; null when the checkout holds no tip. */
+  /** The newest base branch commit the verdict covers: the tip, or the newest commit below the ones still settling; null when the checkout holds no tip. */
   tip: z.string().max(64).nullable(),
-  /** The commits nothing explains and no admin acknowledged, newest first. */
-  unknown: z.array(z.object({ sha: z.string().max(64), subject: z.string().max(200), author: z.string().max(100), at: z.string().max(64) }).strict()).max(200),
+  /** The commits nothing explains and no admin acknowledged, newest first; kept until acknowledged or explained. */
+  unknown: z.array(z.object({ sha: z.string().max(64), subject: z.string().max(200), author: z.string().max(100), at: z.string().max(64) }).strict()).max(mainWatchUnknownListed),
   /** The newest unacknowledged unknown commit promotion is frozen on, and since when; null while nothing freezes it. */
   frozen: z.object({ sha: z.string().max(64), since: z.string() }).strict().nullable(),
 }).strict();
 export type MainWatchState = z.infer<typeof mainWatchStateSchema>;
 export type MainWatchFreeze = NonNullable<MainWatchState['frozen']>;
+export type UnknownMainCommit = MainWatchState['unknown'][number];
 
-/** One commit of main's first-parent history, newest first. */
+/** One commit of main's first-parent history, newest first; `at` is the committer date, when it reached the branch. */
 export interface MainWatchCommit { sha: string; parents: string[]; subject: string; author: string; at: string }
 export interface MainWatchHistory { tip: string | null; since: string | null; commits: MainWatchCommit[] }
 /** What the control plane records about the watch: the admin acknowledgements and the direct-merge windows. */
@@ -41,13 +49,21 @@ export interface MainWatchReads {
   freeze: boolean;
 }
 
-/** How many commits the watch reads when no `rc-production/` record bounds the history, and the most it reads past one. */
+/** How many commits the watch reads when no `rc-production/` record bounds the history; past one it reads everything since the record. */
 export const mainWatchHistoryLimit = 200;
+/**
+ * A commit younger than this is still settling: a merge GitHub just performed reaches the checkout
+ * before the control plane records its delivery, so judging it at once would call every fresh
+ * merge unknown. The verdict covers it once it is this old; until then promotion (with the freeze
+ * on) waits for the verdict, as it does for any tip the watch has not classified.
+ */
+export const mainWatchSettleMs = 10 * 60_000;
 export const mainWatchFreezeVariable = 'GRAPHYARD_MAIN_WATCH_FREEZE';
 /** The freeze the deployment environment asks for: `GRAPHYARD_MAIN_WATCH_FREEZE=true` (or 1, yes, on). */
 export const mainWatchFreezeFromEnv = (env: NodeJS.ProcessEnv = process.env) => ['1', 'true', 'yes', 'on'].includes((env[mainWatchFreezeVariable] ?? '').trim().toLowerCase());
 export const mainWatchKey = (sha: string) => `main-watch:${sha.toLowerCase()}`;
-export const acknowledgeCommand = (sha: string) => `graphyard master main-watch acknowledge ${sha} --reason TEXT`;
+/** The acknowledgement an admin runs: the control plane records it with an admin credential only, read from stdin. */
+export const acknowledgeCommand = (sha: string) => `graphyard master main-watch acknowledge ${sha} --reason TEXT --admin-token-stdin`;
 
 const fullSha = /^[0-9a-f]{40}$/i;
 const parseLog = (log: string): MainWatchCommit[] => log.split('\x1e').flatMap(record => {
@@ -58,7 +74,7 @@ const parseLog = (log: string): MainWatchCommit[] => log.split('\x1e').flatMap(r
 /** The watch's reads over the coordinator checkout (git only; the policy read is the control plane's). */
 export function mainWatchReads(config: Pick<MasterConfig, 'baseBranch'>, root: string, run: ChildRun, options: { policy: () => Promise<MainWatchPolicy>; freeze: boolean }): MainWatchReads {
   const git = async (...args: string[]) => String(await run('git', ['-C', root, ...args]));
-  const format = '--format=%H%x1f%P%x1f%s%x1f%an%x1f%aI%x1e';
+  const format = '--format=%H%x1f%P%x1f%s%x1f%an%x1f%cI%x1e';
   return {
     freeze: options.freeze, policy: options.policy,
     history: async () => {
@@ -74,8 +90,10 @@ export function mainWatchReads(config: Pick<MasterConfig, 'baseBranch'>, root: s
         const record = JSON.parse((await git('for-each-ref', '--sort=-refname', '--count=1', '--format=%(contents)', 'refs/tags/rc-production/')).trim());
         since = typeof record?.sha === 'string' && fullSha.test(record.sha) ? record.sha.toLowerCase() : null;
       } catch { since = null; }
+      // Bounded by the production record, the read is everything since it, however many commits
+      // landed; only without a record is it the newest `mainWatchHistoryLimit` commits.
       let log = '';
-      if (since) { try { log = await git('log', '--first-parent', `--max-count=${mainWatchHistoryLimit}`, format, `${since}..${tip}`); } catch { since = null; } }
+      if (since) { try { log = await git('log', '--first-parent', format, `${since}..${tip}`); } catch { since = null; } }
       if (!since) log = await git('log', '--first-parent', `--max-count=${mainWatchHistoryLimit}`, format, tip);
       return { tip, since, commits: parseLog(log) };
     },
@@ -98,9 +116,10 @@ export interface MainWatchInputs {
 }
 
 /**
- * Label every first-parent commit by what explains it, in this order: a merge commit the ledger
- * names, a delivery's merge commit, a main guard revert, a candidate revert, a commit inside a
- * direct-merge window; a commit nothing explains is `unknown`.
+ * Label every first-parent commit by what explains it, in this order: a delivery's merge commit
+ * (`github-delivery`, whether or not the ledger names it too), a merge commit the ledger names, a
+ * main guard revert, a candidate revert, a commit inside a direct-merge window; a commit nothing
+ * explains is `unknown`.
  */
 export function classifyMainCommits(history: readonly MainWatchCommit[], inputs: MainWatchInputs): ClassifiedMainCommit[] {
   const ledger = ledgerMergeShas(inputs.ledger);
@@ -111,8 +130,8 @@ export function classifyMainCommits(history: readonly MainWatchCommit[], inputs:
   const window = (at: string) => { const time = Date.parse(at); return Number.isFinite(time) ? inputs.directMergeWindows.find(entry => Date.parse(entry.since) <= time && (!entry.until || time < Date.parse(entry.until))) ?? null : null; };
   return history.map(commit => {
     const sha = commit.sha.toLowerCase();
-    const label: MainCommitLabel = ledger.has(sha) ? 'ledger' : deliveries.has(sha) ? 'github-delivery' : reverts.has(sha) ? 'revert' : candidateReverts.has(sha) ? 'candidate-revert' : window(commit.at) ? 'direct-merge' : 'unknown';
-    const by = label === 'ledger' ? ledgerKey.get(sha) ?? null : label === 'github-delivery' ? deliveries.get(sha) ?? null : label === 'revert' ? reverts.get(sha) ?? null
+    const label: MainCommitLabel = deliveries.has(sha) ? 'github-delivery' : ledger.has(sha) ? 'ledger' : reverts.has(sha) ? 'revert' : candidateReverts.has(sha) ? 'candidate-revert' : window(commit.at) ? 'direct-merge' : 'unknown';
+    const by = label === 'github-delivery' ? deliveries.get(sha) ?? null : label === 'ledger' ? ledgerKey.get(sha) ?? null : label === 'revert' ? reverts.get(sha) ?? null
       : label === 'candidate-revert' ? candidateReverts.get(sha) ?? null : label === 'direct-merge' ? `direct-merge window since ${window(commit.at)!.since}` : null;
     return { ...commit, sha, label, by };
   });
@@ -131,8 +150,26 @@ export function mainWatchInputs(work: readonly Work[], directMergeWindows: MainW
 
 /** The attention line one unknown commit raises, naming its sha, subject and author, and what the watch does about it. */
 export function mainWatchDetail(commit: Pick<MainWatchCommit, 'sha' | 'subject' | 'author' | 'at'>, baseBranch: string, freeze: boolean) {
-  return `Main watch: commit ${commit.sha} on ${baseBranch} ("${commit.subject}" by ${commit.author} at ${commit.at}) is explained by no merge ledger entry, delivery, revert or direct-merge window. `
+  return `Main watch: commit ${commit.sha} on ${baseBranch} ("${commit.subject}" by ${commit.author} at ${commit.at}) is explained by no delivery, merge ledger entry, revert or direct-merge window. `
     + `${freeze ? 'Promotion is frozen until an admin acknowledges it' : 'Reported only: nothing is reverted or reworked'}; acknowledge it with ${acknowledgeCommand(commit.sha)}`;
+}
+
+/** A commit the verdict does not cover yet: younger than the settling bound at `now`. */
+const settling = (commit: Pick<MainWatchCommit, 'at'>, now: number) => { const at = Date.parse(commit.at); return Number.isFinite(at) && now - at < mainWatchSettleMs; };
+
+/**
+ * The verdict over one read: every commit the history holds or the state still carries, labelled;
+ * what is unknown (unacknowledged, settled) and what newest commit the verdict covers. Pure, so the
+ * step and its tests share it.
+ */
+export function mainWatchVerdict(history: MainWatchHistory, carried: readonly UnknownMainCommit[], inputs: MainWatchInputs, acknowledged: ReadonlySet<string>, now: number) {
+  const inHistory = new Set(history.commits.map(commit => commit.sha));
+  // The commits the last verdict held unknown that this read no longer reaches: judged again against today's records, never forgotten.
+  const retained = carried.filter(entry => !inHistory.has(entry.sha)).map(entry => ({ ...entry, parents: [] as string[] }));
+  const classified = classifyMainCommits([...history.commits, ...retained], inputs);
+  const unknown = classified.filter(commit => commit.label === 'unknown' && !acknowledged.has(commit.sha) && !settling(commit, now));
+  const covered = history.commits.find(commit => !settling(commit, now))?.sha ?? (history.commits.length ? history.since : history.tip);
+  return { classified, unknown, tip: covered };
 }
 
 /**
@@ -147,28 +184,31 @@ export async function mainWatchStep(cycle: Cycle) {
   if (!reads) return;
   const history = await reads.history();
   const inputs = mainWatchInputs(snapshot.work, []);
+  const previous = state.mainWatch, carried = previous?.unknown ?? [], moment = now();
   // The policy — acknowledgements and direct-merge windows — is read only once something on main is
   // unexplained by the snapshot alone, so a quiet loop asks the control plane nothing each cycle.
-  let classified = classifyMainCommits(history.commits, inputs), acknowledged = new Set<string>();
-  if (classified.some(commit => commit.label === 'unknown')) {
+  let verdict = mainWatchVerdict(history, carried, inputs, new Set(), moment);
+  if (verdict.unknown.length) {
     const policy = await reads.policy();
-    acknowledged = new Set(policy.acknowledged.map(entry => entry.sha.toLowerCase()));
-    classified = classifyMainCommits(history.commits, { ...inputs, directMergeWindows: policy.directMergeWindows });
+    verdict = mainWatchVerdict(history, carried, { ...inputs, directMergeWindows: policy.directMergeWindows }, new Set(policy.acknowledged.map(entry => entry.sha.toLowerCase())), moment);
   }
-  const unknown = classified.filter(commit => commit.label === 'unknown' && !acknowledged.has(commit.sha)).slice(0, 200)
+  const unknown: UnknownMainCommit[] = verdict.unknown.slice(0, mainWatchUnknownListed)
     .map(commit => ({ sha: commit.sha, subject: commit.subject.slice(0, 200), author: commit.author.slice(0, 100), at: commit.at.slice(0, 64) }));
-  const at = new Date(now()).toISOString();
+  const at = new Date(moment).toISOString();
   let changed = false;
+  // Reported once per sha: a commit the last verdict already held is not raised again, whatever
+  // the cursor's action pruning did to its row, and a restart reloads the same verdict.
+  const reported = new Set(carried.map(entry => entry.sha));
   for (const commit of unknown) {
     const key = mainWatchKey(commit.sha);
-    if (state.actions[key]) continue;
+    if (reported.has(commit.sha) || state.actions[key]) continue;
     performed.push(storeAction(state, key, { kind: 'escalation', work: null, principal: null, state: 'done', detail: mainWatchDetail(commit, config.baseBranch, reads.freeze), attempts: 1, epoch: null, cycle: state.cycle, at }));
     changed = true;
   }
-  const previous = state.mainWatch;
   const newest = unknown[0] ?? null;
-  const frozen = reads.freeze && newest ? { sha: newest.sha, since: previous?.frozen?.sha === newest.sha ? previous.frozen.since : at } : null;
-  const next = mainWatchStateSchema.parse({ checkedAt: at, tip: history.tip, unknown, frozen });
+  // A standing freeze keeps the time it began, whichever unknown commit heads it now.
+  const frozen = reads.freeze && newest ? { sha: newest.sha, since: previous?.frozen ? previous.frozen.since : at } : null;
+  const next = mainWatchStateSchema.parse({ checkedAt: at, tip: verdict.tip, unknown, frozen });
   if (!previous || previous.tip !== next.tip || previous.unknown.map(entry => entry.sha).join() !== next.unknown.map(entry => entry.sha).join() || (previous.frozen?.sha ?? null) !== (next.frozen?.sha ?? null)) changed = true;
   state.mainWatch = next;
   if (changed) await effects.persist(state);
@@ -176,7 +216,7 @@ export async function mainWatchStep(cycle: Cycle) {
 
 /**
  * The promotion drive's freeze inputs from the watch's state: with the freeze asked for, the commit
- * promotion is frozen on and the tip the watch last classified; off, nothing, and promotion runs as before.
+ * promotion is frozen on and the newest tip the verdict covers; off, nothing, and promotion runs as before.
  */
 export function promotionFreeze(freeze: boolean, mainWatch: DaemonState['mainWatch']): { frozen?: MainWatchFreeze | null; watchedTip?: string | null } {
   return freeze ? { frozen: mainWatch?.frozen ?? null, watchedTip: mainWatch?.tip ?? null } : {};

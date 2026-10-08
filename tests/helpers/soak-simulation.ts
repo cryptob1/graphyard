@@ -32,6 +32,7 @@ import { type DecidePayload, diagnosticianSettings } from '../../src/runner/payl
 import { clearDecompositionRuns } from '../../src/decomposition-step.js';
 import { type ScopeRequestState, scopeRefusalBlocker } from '../../src/model/scope.js';
 import { stoppedStates } from '../../src/daemon/effects.js';
+import { mainWatchHistoryLimit, type MainWatchCommit } from '../../src/daemon/main-watch.js';
 import { loopThroughputMeasurement, throughputClaim } from '../../src/throughput.js';
 import { type RunOptions, type RunRecord, type RunResult, type Runner } from '../../src/runner/types.js';
 import { type DiagnosticianEffects } from '../../src/daemon/diagnosis.js';
@@ -144,6 +145,14 @@ export let days = 0;
  */
 export interface PromotionDay { validationMs?: number; promoteAfterMs?: number | null; soakMs?: number }
 /**
+ * GY-1519: the main watch over the day's moving main. Each `foreign` commit is pushed straight onto
+ * main at `at` by `author`, and an admin acknowledges it through the real route `acknowledgeAfterMs`
+ * after it landed (null: never). With `freeze` the loop's promotion drive takes the watch's freeze.
+ * Once the watch has raised its first line, the day fills the cursor past its bound so
+ * `pruneDaemonState` really retires the line's row, as a busy day's would be.
+ */
+export interface MainWatchDay { freeze: boolean; foreign: { at: number; author: string; subject: string; acknowledgeAfterMs: number | null }[] }
+/**
  * GY-1501: the effects `daemonEffects` leaves absent on a supervised install, whose config carries no
  * operator-agent, approver or reviewer identity: every decision, approver, escalation and reviewer
  * effect. tests/soak-supervised.test.ts checks the real effects leave each of them absent.
@@ -175,6 +184,8 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
    * list, dispatch and (GY-1513) soak-run list; `true` is the main day's shape, an object another.
    */
   promotion?: boolean | PromotionDay;
+  /** GY-1519: wire the loop's main watch over the day's main, with foreign commits an admin acknowledges (MainWatchDay). */
+  mainWatch?: MainWatchDay;
   /** GY-1389: the review-round cap, the items whose change requests name a blocking finding past it, and those whose capped round the approver refuses. */
   reviewCap?: { cap: number; items: number[]; refused: number[] };
   /**
@@ -1428,6 +1439,51 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
       promotion.soaks.push({ id, sha, startedAt: now + promotion.listedAfterMs, endsAt: now + promotion.soakMs, result: promotion.soaks.length % 3 === 2 ? 'failure' : 'success' });
     },
   } : undefined;
+  // GY-1519: the loop's main watch. Its history read walks main's first parents in the simulated
+  // GitHub from the tip down to the promoted commit (the production record), never past the fallback
+  // bound; its policy read is the real control plane's. Foreign commits land straight on main at their
+  // time and are acknowledged by the admin through the real route, both inside the read, as the
+  // promotion day's landings are. The day counts every read and the largest history and unknown
+  // list the watch held, and whether the cursor's bound really pruned a raised line's row.
+  const mainWatchDay = options.mainWatch && { ...options.mainWatch, landed: [] as { sha: string; at: number; acknowledgeAt: number | null; acknowledgedAt: number | null }[],
+    historyReads: 0, policyReads: 0, largestHistory: 0, largestUnknown: 0, reports: [] as { sha: string; at: number; detail: string }[], filled: false, rowPruned: false, frozenAt: [] as number[], unfrozenAt: [] as number[],
+    observe(result: Awaited<ReturnType<typeof runCycle>>, at: number) {
+      for (const action of result.actions) if (action.detail.startsWith('Main watch:')) this.reports.push({ sha: action.detail.match(/commit ([0-9a-f]{40})/)?.[1] ?? '', at, detail: action.detail });
+      this.largestUnknown = Math.max(this.largestUnknown, state.mainWatch?.unknown.length ?? 0);
+      const frozen = !!state.mainWatch?.frozen, was = this.frozenAt.length > this.unfrozenAt.length;
+      if (frozen && !was) this.frozenAt.push(at); else if (!frozen && was) this.unfrozenAt.push(at);
+      const row = Object.keys(state.actions).find(key => key.startsWith('main-watch:'));
+      if (row && !this.filled) {
+        for (let index = 0; index < retainedActions + 20; index++) state.actions[`dispatch:filler:${index}`] = { kind: 'dispatch', work: null, principal: null, state: 'done', detail: 'filler', attempts: 1, epoch: null, cycle: state.cycle, at: new Date(clock.now() + index).toISOString() } as never;
+        this.filled = true;
+      } else if (this.filled && !row) this.rowPruned = true;
+    } };
+  const mainWatchEffect: DaemonEffects['mainWatch'] = mainWatchDay ? {
+    freeze: mainWatchDay.freeze,
+    history: async () => {
+      const now = clock.now();
+      mainWatchDay.foreign.forEach((foreign, index) => {
+        if (mainWatchDay.landed[index] || elapsed < foreign.at) return;
+        const commit = github.commit(foreign.subject, github.files, now);
+        mainWatchDay.landed[index] = { sha: commit.sha, at: now, acknowledgeAt: foreign.acknowledgeAfterMs === null ? null : now + foreign.acknowledgeAfterMs, acknowledgedAt: null };
+      });
+      for (const landed of mainWatchDay.landed) if (landed && landed.acknowledgedAt === null && landed.acknowledgeAt !== null && now >= landed.acknowledgeAt) {
+        await api(principals.operator, 'POST', 'main-watch/acknowledge', { sha: landed.sha, reason: 'landed by hand, reviewed on the host' });
+        landed.acknowledgedAt = now;
+      }
+      mainWatchDay.historyReads++;
+      const since = promotedSha(), commits: MainWatchCommit[] = [];
+      for (let at: string | undefined = github.tip; at && at !== since && commits.length < mainWatchHistoryLimit; at = github.commits.get(at)?.parents[0]) {
+        const commit = github.commits.get(at);
+        if (!commit) break;
+        const foreign = mainWatchDay.landed.find(entry => entry?.sha === commit.sha);
+        commits.push({ sha: commit.sha, parents: commit.parents, subject: commit.message, author: foreign ? mainWatchDay.foreign[mainWatchDay.landed.indexOf(foreign)].author : 'graphyard[bot]', at: new Date(commit.at).toISOString() });
+      }
+      mainWatchDay.largestHistory = Math.max(mainWatchDay.largestHistory, commits.length);
+      return { tip: github.tip, since, commits };
+    },
+    policy: async () => { mainWatchDay.policyReads++; return api(principals.coordinator, 'GET', 'main-watch'); },
+  } : undefined;
   // GY-1385: the loop's own throughput measurement after each verified deployment, through the
   // real loopThroughputMeasurement, recorded under a directory of this day's own. The plane's status
   // names a deployed release only statusLagMs after the loop first asks for it, as a rollout that
@@ -1472,6 +1528,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   };
   const effects: DaemonEffects = {
     ...(promotionEffect ? { promotion: promotionEffect } : {}),
+    ...(mainWatchEffect ? { mainWatch: mainWatchEffect } : {}),
     ...(hostDay ? { healHostSupervision: allow => healUserSupervision(hostDay.root, { systemctl: hostSystemctl, loginctl: hostLoginctl, masked: () => false, platform: 'linux',
       wait: async ms => { fenced.drift += ms; await moveClock(ms); } }, allow) } : {}),
     measureThroughput,
@@ -2511,6 +2568,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
             guardDay.filled = true;
           } else if (guardDay.filled && !lineKey) guardDay.linePruned = true;
         }
+        if (mainWatchDay) mainWatchDay.observe(result, elapsed);
         if (options.blockers) blockerActions.push(...result.actions.filter(action => action.kind === 'blocker').map(action => ({ elapsed, work: action.work, state: action.state, detail: action.detail })));
         if (options.master) {
           const after = clock.now() - dayStart;
@@ -2643,7 +2701,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     mergeQueuePosts, config, refused, decideCalls, restarted, approverPanes, failing, herdrClosed: herdr.closed, diagnosisModel: settings.model, diagnosisRuns: diagnosed, baseBreak, capacityRefused, capacityLaunched, capacityWaiters,
     decided, misreads, prompts, screens, heldAccounts, approverAccounts, retryReset, exitedLive, exitedClosed, exitedRowsSeen, reassign, workspaceFailures, workspaceCooled, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, fenced, mergeStallSightings, master, baseFailure,
     blockerEvents, blockerProbes, blockerDecisions, blockerActions, blockerKeysPeak, attempts, lanesSeen, laneApplications, approverWorks, approverDecisions, failover, webhook, remedies, observeRequests, starvation, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size }, mechanical: { ledger, botRounds, misclassified, reviewHolds }, shared, charges: { ...charged, b: charged.b.length, instancesSeen: [...charged.instancesSeen], restarts: chargeRestarts },
-    wakes, staleMerges, restartLog, hostDay, guardDay, budgetDay, observationDay, deploymentDay, decompositionDay: decompositionHistory, diagnosisRaces, diagnosisRequestRaces, transientRefused, lateReads, staleReleaseDay, drain, acceptanceDay: acceptance?.day ?? null, plannerDay: planner?.day ?? null, loopWakeDay: loopWakeDay || null };
+    wakes, staleMerges, restartLog, hostDay, guardDay, mainWatchDay, budgetDay, observationDay, deploymentDay, decompositionDay: decompositionHistory, diagnosisRaces, diagnosisRequestRaces, transientRefused, lateReads, staleReleaseDay, drain, acceptanceDay: acceptance?.day ?? null, plannerDay: planner?.day ?? null, loopWakeDay: loopWakeDay || null };
 }
 
 /**

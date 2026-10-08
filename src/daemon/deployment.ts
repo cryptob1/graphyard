@@ -452,7 +452,7 @@ export interface PromotionReads {
  */
 export interface PromotionOptions { now: number; everyMinutes: number; intervalMs?: number; frozen?: { sha: string; since: string } | null; watchedTip?: string | null }
 export const promotionFrozenReason = (frozen: { sha: string; since: string }) =>
-  `Promotion is frozen since ${frozen.since}: commit ${frozen.sha} on the base branch is explained by no merge ledger entry, delivery, revert or direct-merge window; an admin lifts it with graphyard master main-watch acknowledge ${frozen.sha} --reason TEXT`;
+  `Promotion is frozen since ${frozen.since}: commit ${frozen.sha} on the base branch is explained by no merge ledger entry, delivery, revert or direct-merge window; an admin lifts it with graphyard master main-watch acknowledge ${frozen.sha} --reason TEXT --admin-token-stdin`;
 
 const later = (...times: (string | null | undefined)[]) => times.filter((time): time is string => !!time && Number.isFinite(Date.parse(time)))
   .sort((a, b) => Date.parse(b) - Date.parse(a))[0] ?? null;

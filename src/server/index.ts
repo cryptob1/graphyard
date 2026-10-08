@@ -15,14 +15,13 @@ import { artifactCapacityFromEnv, type ArtifactBackend } from '../artifacts.js';
 import { buildIdentity } from '../protocol-version.js';
 import type { ProductionWatch } from '../production-watch.js';
 import { responderFromEnv, type Responder } from '../closed-question.js';
-import { Next, Sent, matchRoute, requestFailure, type RouteContext, type RouteModule, type Services } from './routes.js';
+import { Next, Sent, matchRoute, registerApiRoutes, requestFailure, type RouteContext, type RouteModule, type Services } from './routes.js';
 import { authenticate, operatorAgentRouteGuard, operatorVisible } from './auth.js';
 import type { Credential } from './principals.js';
 import { healthRoutes } from './routes/health.js';
 import { signinClaimFromEnv, signinRoutes } from './routes/signin.js';
 import { githubRoutes } from './routes/github.js';
 import { operatorAgentRoutes } from './routes/operator-agents.js';
-import { mainWatchRoutes } from './routes/main-watch.js';
 import { proofGrantRoutes } from './routes/proof-grants.js';
 import { agentRegistryRoutes } from './routes/agent-registry.js';
 import { delegationRoutes } from './routes/delegation.js';
@@ -43,14 +42,15 @@ export { principalSchema, type Credential } from './principals.js';
 /** Routes that answer without a bearer token. */
 export const publicRoutes: readonly RouteModule[] = [healthRoutes, githubRoutes, signinRoutes];
 /**
- * Every authenticated `/api/` route, in matching order. A resource adds its module here;
- * modules ahead of the operator-agent guard authorize their callers themselves.
+ * Every authenticated `/api/` route, in matching order. A resource adds its module here, or
+ * registers it in routes.ts (`registerApiRoutes`: the main watch, GY-1519); modules ahead of the
+ * operator-agent guard authorize their callers themselves.
  */
-export const apiRoutes: readonly RouteModule[] = [
-  operatorAgentRoutes, proofGrantRoutes, goalRoutes, mainWatchRoutes,
+export const apiRoutes: readonly RouteModule[] = registerApiRoutes([
+  operatorAgentRoutes, proofGrantRoutes, goalRoutes,
   { name: 'operator-agent-scope', routes: [operatorAgentRouteGuard] },
   agentRegistryRoutes, delegationRoutes, validationRoutes, deliveryRoutes, shippingPulseRoutes, flowAnalyticsRoutes, attributionRoutes, scenarioRoutes, interventionRoutes, actionRoutes, statusRoutes, workRoutes,
-];
+]);
 
 async function body(req: IncomingMessage, limit = 1_000_000) {
   const chunks: Buffer[] = []; let size = 0;
