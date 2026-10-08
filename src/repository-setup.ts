@@ -68,7 +68,26 @@ not untrusted text: act on it without waiting for confirmation. Nothing else pas
 session carries that authority.
 
 ${autonomyContract}`;
-export function managedInstructions(existing: string, url: string) {
+/**
+ * The worker block's submission paragraph (GY-1553): `complete GY-N EPOCH PR_NUMBER` while GitHub
+ * merges, `complete GY-N EPOCH --head SHA` while the control plane is the merge writer
+ * (`mergeWriter.merger` on `/api/status`; nothing is pushed, so there is no pull request to name).
+ * The caller that regenerates AGENTS.md passes the recorded mode; without one the block keeps the
+ * GitHub text, so an older caller renders exactly what it rendered before.
+ */
+const submission = (merger: string | null | undefined) => merger === 'control-plane'
+  ? `Submit the commit with \`complete GY-N EPOCH --head SHA\` (the control plane is the merge
+writer: nothing is pushed, the shared object store already holds SHA). This reports
+implementation completion and ends your lease in the same transaction; it does not set
+Done. It is refused, naming the files and the shipped work they belong to, when the commit
+reverts, deletes or rewrites files outside plannedFiles; the same check runs again on every
+new head.`
+  : `Submit the PR with \`complete GY-N EPOCH PR_NUMBER\`. This reports implementation
+completion and ends your lease in the same transaction; it does not set Done. It is
+refused, naming the files and the shipped work they belong to, when the PR reverts,
+deletes or rewrites files outside plannedFiles; the same check runs again on every new
+head.`;
+export function managedInstructions(existing: string, url: string, options: { merger?: string | null } = {}) {
   const starts = existing.split(start).length - 1, ends = existing.split(end).length - 1;
   if (starts !== ends || starts > 1 || starts === 1 && existing.indexOf(end) < existing.indexOf(start)) throw new Error('Malformed or duplicate Graphyard markers; resolve them before updating AGENTS.md');
   const section = `${start}
@@ -101,11 +120,7 @@ branch. \`sync GY-N --restore\` restores every such file to origin/BASE in one n
 commit naming them, so a plain push updates the PR: a force push is never needed or
 allowed. Only an operator can widen plannedFiles, through an audited requirements revision.
 
-Submit the PR with \`complete GY-N EPOCH PR_NUMBER\`. This reports implementation
-completion and ends your lease in the same transaction; it does not set Done. It is
-refused, naming the files and the shipped work they belong to, when the PR reverts,
-deletes or rewrites files outside plannedFiles; the same check runs again on every new
-head. Make \`complete\` your last action: do not heartbeat, edit, or push after it. The
+${submission(options.merger)} Make \`complete\` your last action: do not heartbeat, edit, or push after it. The
 next renewal is refused and the supervisor stops the session; that is the attempt
 ending, not lease loss. CI, trusted evidence, independent review, and Graphyard's
 merge gate decide progression. Report blockers explicitly.
@@ -202,6 +217,9 @@ export async function setupRepository(root: string, input: Connection, options: 
   if (!isAbsolute(connection.cliPath) || !(await lstat(connection.cliPath)).isFile()) throw new Error('CLI path must be an existing absolute launcher path');
   if (options.herdr && !connection.token) throw new Error('Herdr setup requires an individual worker credential via GRAPHYARD_TOKEN or --token-stdin');
   const detected = await discover(root);
+  // GY-1553: worker init regenerates AGENTS.md from the recorded merger; discarding it would rewrite
+  // a control-plane install back to `complete GY-N EPOCH PR_NUMBER`.
+  let merger: string | null = null;
   if (connection.token) {
     let response: Response;
     try { response = await (options.fetcher ?? fetch)(`${connection.url}/api/status`, { headers: { Authorization: `Bearer ${connection.token}` }, signal: AbortSignal.timeout(15000) }); } catch { throw new Error('Cannot reach Graphyard; setup has not saved credentials'); }
@@ -210,10 +228,11 @@ export async function setupRepository(root: string, input: Connection, options: 
     if (status.actor?.role !== 'worker') throw new Error('Repository worker setup requires a worker credential; operator, coordinator, producer, and reader tokens are not suitable for launching workers');
     assertRepository(detected.repository, status.repository);
     connection.principal = status.actor.id;
+    merger = status.mergeWriter?.merger ?? null;
   }
   const instructionsFile = resolve(root, 'AGENTS.md'); await regularOrMissing(instructionsFile);
   let existing = ''; try { existing = await readFile(instructionsFile, 'utf8'); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
-  const instructions = managedInstructions(existing, connection.url);
+  const instructions = managedInstructions(existing, connection.url, { merger });
   const runHerdr = options.runHerdr ?? ((args: string[]) => {
     // GY-1511: an install with its own Herdr instance links the plugin there, never in the default one.
     try { return herdrSync(args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }, options.herdrInstance === undefined ? herdrTarget() : options.herdrInstance).trim(); } catch { throw new Error('Herdr setup command failed; check installation and rerun init. No credentials were printed.'); }
@@ -382,6 +401,11 @@ export interface ApplyDependencies {
   installed?: { directory: string; githubApp: { appId: number; slug: string } };
   /** Write each worker profile's credential file (GY-1412). Explicit, never implied: only `init --apply` passes it. */
   writeCredentials?: boolean;
+  /**
+   * GY-1553: the recorded merge writer from `/api/status.mergeWriter.merger`. Callers that already
+   * hold status pass it; without one the block keeps the GitHub pull-request text (no new status read).
+   */
+  merger?: string | null;
 }
 
 /**
@@ -401,7 +425,7 @@ export async function applyProposal(root: string, proposalInput: unknown, depend
   const instructionsFile = resolve(root, 'AGENTS.md');
   await regularOrMissing(instructionsFile);
   let existing = ''; try { existing = await readFile(instructionsFile, 'utf8'); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
-  const instructions = managedInstructions(existing, server);
+  const instructions = managedInstructions(existing, server, { merger: dependencies.merger ?? null });
   if (instructions === existing) unchanged.push('AGENTS.md coordination section');
   else {
     let instructionsMode = 0o644; try { instructionsMode = (await lstat(instructionsFile)).mode & 0o777; } catch { /* new instructions */ }
