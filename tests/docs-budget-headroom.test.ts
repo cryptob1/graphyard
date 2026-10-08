@@ -34,6 +34,12 @@ test('unit:docs-headroom-kept — at 11,700 of 12,000 words master status raises
   assert.equal(status.attention.length, 1, 'within 3% of the budget raises one attention item');
   assert.equal(status.attention[0].subject, 'docs');
   assert.equal(status.attention[0].role, 'master');
+  // GY-1515: inside the band the line is attention the trim item answers, never a resources fault; over the budget it is one.
+  assert.equal(status.attention[0].kind, 'docs-headroom');
+  assert.equal(status.docs!.headroom.band, 11_640);
+  const overrun = await docsHeadroomStatus('/repository', 'main', () => counted({ ...main, 'docs/master-agent.md': 1_100 }));
+  assert.equal(overrun.attention[0].kind, 'resource-bound');
+  assert.match(overrun.attention[0].text, /12100 of its 12000-word budget \(over it by 100\): changes merged together overran the band the docs budget test holds/);
   assert.match(status.attention[0].text, /11700 of its 12000-word budget \(300 left, within 3% of it\).*Trim to 11400 or fewer; largest pages: docs\/master-agent\.md \(700\)/);
 
   const filed: { input: any; key: string }[] = [], work: Work[] = [];

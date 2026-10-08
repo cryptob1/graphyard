@@ -4,12 +4,12 @@
 ## Daily checklist
 
 - `/healthz` healthy at expected `commit`; `/api/status` without job errors, `delegationLimits.attention` or `production.incidents`.
-- `graphyard master status`: `daemon.liveness` `running`, attention owned; recent verified `graphyard db backup`.
+- `master status`: `daemon.liveness` `running`, attention owned; recent verified `graphyard db backup`.
 
 ## Incident decision tree
 
 - **Item not moving**: fix refusal's cause. Never weaken requirements.
-  - Escalation: declared human session runs `graphyard resolve GY-N TRIGGER "reason"`; explained `lease-loss` needs only `admin --attestation` ([who](delegation.md#who-may-settle-what)).
+  - Escalation: declared human session runs `graphyard resolve GY-N TRIGGER "reason"` ([settling](delegation.md#who-may-settle-what)).
   - Expired unsubmitted: [lost worker](operations-reference.md#lost-worker-before-submission); another attempt: [rework](operations-reference.md#submitted-implementation-needs-rework); fenced: [quarantine](operations-reference.md#supervisor-died-leaving-a-containment-quarantine).
   - Moving waits fault late: owed `request-rework` head (`owed-decision`) at 30min (`reworkDecisionWaitBoundMs`); lapsed containment fence 10min past grace (`containmentSettleWaitBoundMs`; not one settled that cycle; an owed line restating it counts as it); unanswered decision with watch launches left 15min after last approver launch (`approverRelaunchWaitBoundMs`); unwatched one, owed non-containment escalation (carried too), blocker 30min after request or raise (`masterTurnWaitBoundMs`); stale non-release decision 30min after staling; unre-asked refusal 30min after, once (`decision-refused`); `actorless` head behind base 30min after submission (`baseConflictWaitBoundMs`).
   - Plane-wide failures (502–504, startup 503, refused, timeout) retry: no `loop`/`session-liveness` fault or pre-launch lease loss; dispatch ticks read `plane-unavailable`, outside `dispatch-failures`, dispatch blocker. Faults/deployment steps fit interval/5: reads stop waiting (`faults:deferred`, `deployment:deferred`), rest carries (`faults:carried`); `loop-cost` names slowest step's share.
@@ -40,7 +40,7 @@ Confined masters, approvers, proof producers read their GitHub login (`gh auth g
 - Proof authority: live [grant](operations-reference.md#proof-authority-grants); `admin` attests only `manual:` proofs; operator agents only add requirements.
 - GitHub merges on passing gates: no bypass, no lifecycle-state endpoint.
 - Non-master sessions use own checkouts under `run.worktreeRoot`.
-- History is append-only; only routine rows past retention are [compacted](operations-reference.md#storage-retention), each batch audited.
+- History is append-only; only routine rows past retention are [compacted](operations-reference.md#storage-retention).
 
 ## Deeper references
 
@@ -48,6 +48,6 @@ Confined masters, approvers, proof producers read their GitHub login (`gh auth g
 
 ## Resources and disk
 
-`resourceRegistry` declares bounded resources (`resources`, [remedies](operations-reference.md#control-plane-resources)). Loop removes finished worktrees after `run.reclaimIdleHours` (never dirty/unpushed), stale test temp entries, idle unowned [panes](master-agent-sessions.md#panes-are-closed-and-reclaimed) seen twice; `disk` attention below `run.diskThresholdGb`. Clean detached coordinator HEAD moved forward onto verified-release-served base descendant self-recovers (`upgrade:recovered`: executors restart, loop re-executes); until then (no verified release or supervisor unit) `escalation:dirty-checkout` says restart onto it, never roll back. Dirty, non-detached or non-forward stays refused (naming paths, HEAD, sessions), blocking self-upgrade.
+`resourceRegistry` declares bounded resources (`resources`, [remedies](operations-reference.md#control-plane-resources)). Loop removes finished worktrees after `run.reclaimIdleHours` (never dirty/unpushed; one Git refuses is reported once, held a day), stale test temp entries, idle unowned [panes](master-agent-sessions.md#panes-are-closed-and-reclaimed) seen twice; `disk` attention below `run.diskThresholdGb`. Clean detached coordinator HEAD moved forward onto verified-release-served base descendant self-recovers (`upgrade:recovered`: executors restart, loop re-executes); until then (no verified release or supervisor unit) `escalation:dirty-checkout` says restart onto it, never roll back. Dirty, non-detached or non-forward stays refused (naming paths, HEAD, sessions), blocking self-upgrade; a non-forward refusal names both remedies (restore the loaded commit, or restart onto that HEAD), a loop already stopping records none, and the restart that loads the checkout's HEAD ends a standing one (journal `escalation done`).
 
-Main guard revert approver ([provisioning](deployment.md#manual-fallback)): redeploy; verify `/api/status` `mainGuard.revertApprover` names it, `mainGuard.attention` empty, `graphyard doctor` `revert-approver` ready.
+Main guard revert approver ([provisioning](deployment.md#manual-fallback)): redeploy; verify `/api/status` `mainGuard.revertApprover` names it, `mainGuard.attention` empty, `doctor` `revert-approver` ready.
