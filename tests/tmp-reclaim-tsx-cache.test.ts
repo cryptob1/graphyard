@@ -31,7 +31,9 @@ test('unit:tmp-reclaim-tsx-cache — the pass removes old regular files under th
     assert.ok((await lstat(socket)).isSocket(), 'the seeded IPC entry is a socket');
     const age = tmpReclaimMinAgeMs + 30 * 60_000;
     await backdate(old, age); await backdate(socket, age); await backdate(nested, age);
-    // The cache itself was written just now, as a cache in daily use is: the directory never goes whole.
+    // A cache in use is written all day, but even one gone quiet is never taken whole: the directory
+    // and every entry in it but the fresh file are past the bound, and only the old file goes.
+    await backdate(cache, age);
     const report = await reclaimTmpDirectories({ tmpRoot: tmp, held: new Set() });
     assert.deepEqual(report.errors, []);
     assert.deepEqual(report.removed.map(entry => entry.path), [old], 'only the old file is removed');
@@ -45,9 +47,11 @@ test('unit:tmp-reclaim-tsx-cache — the pass removes old regular files under th
     // The per-cycle entry limit bounds the cache's share: of three old files, a pass limited to two takes the two oldest.
     const files = [1, 2, 3].map(index => join(nested, `old-${index}`));
     for (const [index, path] of files.entries()) { await writeFile(path, 'x'); await backdate(path, age + (3 - index) * 60_000); }
+    await backdate(nested, age); await backdate(cache, age);
     const bounded = await reclaimTmpDirectories({ tmpRoot: tmp, held: new Set(), limit: 2 });
     assert.deepEqual(bounded.removed.map(entry => entry.path), files.slice(0, 2), 'the two oldest go first, and no more than the limit');
     assert.equal(existsSync(files[2]!), true, 'the file past the limit is the next pass\'s');
+    assert.ok(existsSync(socket) && existsSync(nested) && existsSync(cache), 'an aged cache whose files outnumber the limit is still never taken whole');
     // A file a live process holds open is kept, and a caller's own prefixes never sweep the cache.
     const held = await reclaimTmpDirectories({ tmpRoot: tmp, held: new Set([files[2]!]) });
     assert.deepEqual(held.removed, [], 'a held cache file stays');

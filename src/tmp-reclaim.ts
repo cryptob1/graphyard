@@ -185,7 +185,7 @@ export interface TmpReclaimOptions {
   tmpRoot?: string;
   /** The directories scanned, in place of `tmpRoot`: each once by realpath, sharing the pass's bounds (GY-1368). */
   tmpRoots?: readonly string[];
-  /** Entry-name prefixes considered, all judged by `maxAgeMs`; the default is `testTempPatterns` (by `testTempMinAgeMs`) and the tsx cache (by `tmpReclaimMinAgeMs`). */
+  /** Entry-name prefixes considered, all judged by `maxAgeMs`; the default is `testTempPatterns` (by `testTempMinAgeMs`) and the regular files in this user's tsx caches (by `tmpReclaimMinAgeMs`), which are never taken whole. */
   prefixes?: readonly string[];
   /** The most directories one pass removes; `tmpReclaimLimitPerCycle` by default. */
   limit?: number;
@@ -198,8 +198,10 @@ export interface TmpReclaimOptions {
   /** Entries an earlier pass failed to finish removing, retried ahead of their age bound (this process's own set by default), and how long one removal retries. */
   unfinished?: Set<string>; retryMs?: number;
 }
-/** The age an entry of this name must reach before the default pass removes it, or null when the name is not the pass's. */
-const defaultMinAge = (name: string) => testTempPatterns.some(pattern => pattern.test(name)) ? testTempMinAgeMs : /^tsx-\d+$/.test(name) ? tmpReclaimMinAgeMs : null;
+/** The age an entry of this name must reach before the default pass removes it whole, or null when the name is not the pass's. */
+const defaultMinAge = (name: string) => testTempPatterns.some(pattern => pattern.test(name)) ? testTempMinAgeMs : null;
+/** A tsx compile cache directory's name: never removed whole, only aged file by file (GY-1512). */
+const tsxCachePattern = /^tsx-\d+$/;
 
 /**
  * One bounded pass over the host's temporary directory, or each of `tmpRoots` once. Only this user's entries are considered —
@@ -221,17 +223,19 @@ export async function reclaimTmpDirectories(options: TmpReclaimOptions = {}): Pr
   // work bound is real elapsed time, not the caller's clock: a mocked `now` must not change how
   // long a cycle spends taking directories back. It bounds removing only, so its clock starts at the
   // pass's first removal: scanning a backlogged /tmp and /proc never spends it before anything goes.
-  const pass: PassState = { now, minAge, limit: options.limit ?? tmpReclaimLimitPerCycle, uid: process.getuid?.(), held: options.held ?? null,
+  // A caller's own prefixes never sweep the tsx cache; the default pass ages its files by the cache's bound.
+  const cacheAge = options.prefixes ? null : options.maxAgeMs ?? tmpReclaimMinAgeMs;
+  const pass: PassState = { now, minAge, cacheAge, limit: options.limit ?? tmpReclaimLimitPerCycle, uid: process.getuid?.(), held: options.held ?? null,
     workMs: options.workMs ?? Number.POSITIVE_INFINITY, deadline: null, unfinished: options.unfinished ?? unfinishedRemovals, retryMs: options.retryMs ?? tmpReclaimRetryMs };
   for (const path of pass.unfinished) if (!existsSync(path)) pass.unfinished.delete(path);
   for (const { path, real } of roots) {
     await reclaimRoot(path, real, pass, report);
-    await reclaimTsxCache(path, real, pass, report);
+    await reclaimTsxCaches(path, real, pass, report);
   }
   return report;
 }
 
-interface PassState { now: number; minAge: (name: string) => number | null; limit: number; uid: number | undefined; held: Set<string> | null; workMs: number; deadline: number | null; unfinished: Set<string>; retryMs: number }
+interface PassState { now: number; minAge: (name: string) => number | null; cacheAge: number | null; limit: number; uid: number | undefined; held: Set<string> | null; workMs: number; deadline: number | null; unfinished: Set<string>; retryMs: number }
 /** Remove `path` recursively, retrying while its tree refills or is still being released, for at most `retryMs`. */
 async function removeTree(path: string, retryMs: number) {
   const until = Date.now() + retryMs;
@@ -247,7 +251,8 @@ async function reclaimRoot(root: string, real: string, pass: PassState, report: 
   const { now, minAge, uid } = pass, limit = Math.max(0, pass.limit - report.removed.length), scannedBefore = report.scanned;
   const dirents = await readdir(root, { withFileTypes: true }).catch(() => [] as Dirent[]);
   // A marker goes with its directory, never as an entry of its own; a symlink is never followed or taken.
-  const candidate = (entry: Dirent) => (entry.isDirectory() || entry.isFile()) && !entry.name.endsWith('.owner') && minAge(entry.name) !== null;
+  // A tsx cache is never a whole-tree candidate, whatever a caller's prefixes: its sockets and per-cycle bound are the cache sweep's.
+  const candidate = (entry: Dirent) => (entry.isDirectory() || entry.isFile()) && !entry.name.endsWith('.owner') && !tsxCachePattern.test(entry.name) && minAge(entry.name) !== null;
   const removable: { path: string; mtime: number }[] = [];
   let held: Set<string> | null = null;
   for (const entry of dirents) {
@@ -325,31 +330,35 @@ async function cacheFiles(directory: string): Promise<string[]> {
   return files;
 }
 /**
- * One root's tsx compile cache, aged file by file (GY-1512). Test runs write content-hashed compile
- * files into `tsx-<uid>` all day, so the directory itself is never old enough to go whole: on
- * 8 October 2026 it held 89,896 entries, 8,174 of them from the previous 90 minutes. The pass takes
- * this user's regular files in it older than the cache's age bound, oldest first, within what the
- * pass's entry and work bounds have left; the directory, its subdirectories and the IPC sockets
- * live tsx processes listen on are never removed, nor a file a live process holds open.
+ * One root's tsx compile caches, aged file by file (GY-1512). Test runs write content-hashed compile
+ * files into `tsx-<uid>` all day, so a cache in use is never old enough to go whole: on 8 October
+ * 2026 it held 89,896 entries, 8,174 of them from the previous 90 minutes. The cache is also never
+ * taken whole once it does go quiet, since its sockets belong to tsx and a whole tree would pass
+ * the per-cycle bound as one removal. The pass takes this user's regular files in each `tsx-<n>`
+ * directory this user owns that are older than the cache's age bound, oldest first, within what
+ * the pass's entry and work bounds have left; the directory, its subdirectories and the IPC
+ * sockets live tsx processes listen on are never removed, nor a file a live process holds open.
  */
-async function reclaimTsxCache(root: string, real: string, pass: PassState, report: TmpReclaimReport) {
-  const name = tsxCacheName(pass.uid), limit = pass.limit - report.removed.length;
-  const maxAgeMs = name === null ? null : pass.minAge(name);
-  if (name === null || maxAgeMs === null || limit <= 0) return;
-  const cache = join(root, name);
-  const own = await lstat(cache).catch(() => null);
-  if (!own?.isDirectory() || own.uid !== pass.uid) return;
+async function reclaimTsxCaches(root: string, real: string, pass: PassState, report: TmpReclaimReport) {
+  const limit = pass.limit - report.removed.length, maxAgeMs = pass.cacheAge;
+  if (maxAgeMs === null || limit <= 0) return;
+  const names = (await readdir(root).catch(() => [] as string[])).filter(name => tsxCachePattern.test(name)).sort();
   const old: { path: string; mtime: number; bytes: number }[] = [];
-  for (const path of await cacheFiles(cache)) {
-    let info;
-    try { info = await lstat(path); } catch { continue; }
-    if (!info.isFile() || info.uid !== pass.uid || pass.now - info.mtimeMs < maxAgeMs) continue;
-    old.push({ path, mtime: info.mtimeMs, bytes: info.size });
+  for (const name of names) {
+    const own = await lstat(join(root, name)).catch(() => null);
+    if (!own?.isDirectory() || (pass.uid !== undefined && own.uid !== pass.uid)) continue;
+    for (const path of await cacheFiles(join(root, name))) {
+      let info;
+      try { info = await lstat(path); } catch { continue; }
+      if (!info.isFile() || (pass.uid !== undefined && info.uid !== pass.uid) || pass.now - info.mtimeMs < maxAgeMs) continue;
+      old.push({ path, mtime: info.mtimeMs, bytes: info.size });
+    }
   }
   if (!old.length) return;
   const held = pass.held ??= await heldOpenPaths();
   // /proc names a holder by its resolved path, so a root reached through a symlink is matched by its realpath.
   const removable = old.filter(file => !held.has(join(real, file.path.slice(root.length + 1)))).sort((first, second) => first.mtime - second.mtime);
+  report.kept += Math.max(0, removable.length - limit);
   for (const { path, bytes } of removable.slice(0, limit)) {
     const at = Date.now();
     pass.deadline ??= at + pass.workMs;

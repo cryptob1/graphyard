@@ -164,10 +164,10 @@ test('unit:tmp-reclaim: the loop\'s reclaim pass removes an old, unheld director
   // Old with a live owner: the marker names this process, so the age never applies.
   const mine = join(root, 'graphyard-live-owner');
   await mkdir(mine); await writeTempOwner(mine); await backdate(mine, 8);
-  // The tsx cache, stale: the same pass takes it.
+  // The tsx cache, stale: the same pass ages its old file, and the directory stays (GY-1512).
   const tsx = join(root, 'tsx-1000');
   await mkdir(tsx); await writeFile(join(tsx, 'chunk.js'), 'export {};\n'); await backdate(join(tsx, 'chunk.js'), 8); await backdate(tsx, 8);
-  // A tsx cache in use: its directory's own mtime is old, but tsx rewrote an entry a minute ago.
+  // A tsx cache in use: its directory's own mtime is old, tsx rewrote one entry a minute ago, and its stale entry goes.
   const busy = join(root, 'tsx-1001');
   await mkdir(busy); await writeFile(join(busy, 'stale.js'), 'export {};\n'); await backdate(join(busy, 'stale.js'), 8);
   await writeFile(join(busy, 'fresh.js'), 'export {};\n'); await backdate(busy, 8);
@@ -179,14 +179,15 @@ test('unit:tmp-reclaim: the loop\'s reclaim pass removes an old, unheld director
   await backdate(unverified, 9);
 
   const report = await reclaimTmpDirectories({ now: Date.now(), tmpRoot: root });
-  assert.deepEqual(report.removed.map(entry => entry.path), [unverified, old, tsx], 'the old unheld directories and the stale tsx cache go, oldest first');
-  assert.equal(existsSync(busy), true, 'a tsx cache with a freshly written entry stays, however old its directory');
+  assert.deepEqual(report.removed.map(entry => entry.path), [unverified, old, join(tsx, 'chunk.js'), join(busy, 'stale.js')], 'the old unheld directories go oldest first, then the tsx caches\' stale files');
+  assert.equal(existsSync(tsx), true, 'a stale tsx cache directory is never taken whole');
+  assert.equal(existsSync(join(busy, 'fresh.js')), true, 'a tsx cache\'s freshly written entry stays, however old its directory');
   assert.deepEqual(report.errors, []);
   assert.equal(existsSync(held), true, 'a directory a live process holds open stays');
   assert.equal(existsSync(young), true, 'a directory younger than the age bound stays');
   assert.equal(existsSync(mine), true, 'a directory whose owning process still runs stays, however old');
   assert.ok(report.bytes >= 4096 + 'export {};\n'.length, `the report carries the bytes freed (${report.bytes})`);
-  assert.match(describeTmpReclaim(report.removed.length, report.bytes) ?? '', /^freed .+ from 3 stale \/tmp entries$/);
+  assert.match(describeTmpReclaim(report.removed.length, report.bytes) ?? '', /^freed .+ from 4 stale \/tmp entries$/);
 
   // The holder alone kept it: once the process that held it exits, the next pass takes it.
   holder.kill('SIGKILL'); await once(holder, 'exit');
