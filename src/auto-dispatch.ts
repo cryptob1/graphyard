@@ -1636,11 +1636,10 @@ export async function runExecutorTick(identity: ExecutorIdentity, effects: Execu
   // A launch hold defers rows; it does not change what this executor serves. The claim names only
   // the kinds it may take now, and a claim is also presence, so the control plane would read the
   // held launching kinds as served by nobody and file the wait as a configuration fault (GY-1538).
-  // Presence names every kind this executor runs, sent after the claim, which would narrow it.
+  // The claim carries every kind this executor runs as serves, which the claim route records as presence; only a tick that sends no claim sends presence alone.
   const declarePresence = async () => { if (hold) await Promise.resolve(effects.present?.({ host: identity.host, executor: identity.id, kinds, serves: kinds })).catch(() => {}); };
   if (!claimable.length) { await declarePresence(); return step(null, 'idle', `claims nothing: ${hold}`); }
   const claimed = await effects.claim({ host: identity.host, executor: identity.id, kinds: claimable, serves: kinds });
-  await declarePresence();
   const action = claimed.action;
   if (!action) return step(null, 'idle', hold ? `the queue has no action this executor can run without launching a session, and it launches none: ${hold}` : 'the queue has no action this executor can run');
   // The handlers are not bounded by the claim lease: a dispatch prepares a worktree and waits on
