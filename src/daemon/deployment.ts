@@ -633,7 +633,7 @@ export function promotionReads(config: MasterConfig, root: string, run: ChildRun
         promotedAt = typeof record?.at === 'string' ? record.at : null;
       } catch { /* no production record yet */ }
       // GY-1529: a pin that failed after verification is retried here, every cycle, without repeating the promotion.
-      await retryPendingPin(known, run, promotedSha).catch(() => null);
+      await retryPendingPin(known, run).catch(() => null);
       let behind: number | null = null;
       if (mainSha && promotedSha) {
         try { behind = Number((await git('rev-list', '--first-parent', '--count', `${promotedSha}..${mainSha}`)).trim()); } catch { behind = null; }

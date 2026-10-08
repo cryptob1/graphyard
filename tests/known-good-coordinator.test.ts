@@ -208,15 +208,20 @@ test('unit:known-good-pending-retry — a pin that fails after verification is k
   assert.deepEqual([pendingPin(w.installDir)?.sha, pendingPin(w.installDir)?.attempts], [w.shas[1], 1]);
   const doctor = coordinatorDoctorLine(w.shas[0], w.shas[1], 1, pendingPin(w.installDir));
   assert.equal(doctor.ok, false); assert.match(doctor.line, /^FAIL .*has failed 1 time/);
-  assert.equal((await retryPendingPin(at(5), w.run, w.shas[1]))?.attempts, 1, 'inside the window nothing is attempted');
-  assert.equal((await retryPendingPin(at(11), w.run, w.shas[1]))?.attempts, 2, 'still failing is recorded');
-  assert.equal(await retryPendingPin(at(12), w.run, w.shas[2]), null, 'a newer promotion supersedes the pending pin');
-  assert.equal(pendingPin(w.installDir), null);
+  assert.equal((await retryPendingPin(at(5), w.run))?.attempts, 1, 'inside the window nothing is attempted');
+  assert.equal((await retryPendingPin(at(11), w.run))?.attempts, 2, 'still failing is recorded');
+  // A later release promoted but not verified serving (production still serves shas[1]) never discards the pending pin.
+  assert.equal((await retryPendingPin(at(22), w.run))?.attempts, 3, 'a newer unverified promotion keeps the pending pin retrying');
+  assert.equal(pendingPin(w.installDir)?.sha, w.shas[1]);
   w.failBuild(false);
-  w.failBuild(true);
-  await pinningVerify(at(30), w.run, async sha => ({ verified: true, served: sha }))(w.shas[1]);
-  w.failBuild(false);
-  assert.equal(await retryPendingPin(at(45), w.run, w.shas[1]), null);
+  assert.equal(await retryPendingPin(at(40), w.run), null);
   assert.equal(knownGoodState(w.installDir)!.sha, w.shas[1]);
+  assert.equal(pendingPin(w.installDir), null);
+  w.failBuild(true);
+  await pinningVerify(at(50), w.run, async sha => ({ verified: true, served: sha }))(w.shas[2]);
+  assert.equal(pendingPin(w.installDir)?.sha, w.shas[2], 'a later verified pin that fails replaces the pending one');
+  w.failBuild(false);
+  assert.equal(await retryPendingPin(at(65), w.run), null);
+  assert.equal(knownGoodState(w.installDir)!.sha, w.shas[2]);
   assert.equal(pendingPin(w.installDir), null);
 });

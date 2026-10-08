@@ -95,14 +95,15 @@ export async function pinKnownGood(git: KnownGoodGit, sha: string, run: ChildRun
 }
 
 /**
- * The loop's per-cycle retry of a pin that failed after verification. A pending pin for a SHA that is no
- * longer the promoted one is dropped (the newer promotion pins itself); one inside the retry window waits.
+ * The loop's per-cycle retry of a pin that failed after verification. A pending pin is verified serving
+ * state, so a newer promotion tag (written before its own verify) never discards it; only a successful pin
+ * of that SHA or of a later verified one (which clears the file) ends it. One inside the retry window waits.
  * Returns the pin still failing, or null.
  */
-export async function retryPendingPin(git: KnownGoodGit, run: ChildRun, promoted: string | null): Promise<PendingPin | null> {
+export async function retryPendingPin(git: KnownGoodGit, run: ChildRun): Promise<PendingPin | null> {
   const pending = pendingPin(git.installDir), now = git.now?.() ?? new Date();
   if (!pending) return null;
-  if (knownGoodState(git.installDir)?.sha === pending.sha || (promoted && promoted.toLowerCase() !== pending.sha)) { writePending(git.installDir, null); return null; }
+  if (knownGoodState(git.installDir)?.sha === pending.sha) { writePending(git.installDir, null); return null; }
   if (now.getTime() - Date.parse(pending.failedAt) < pinRetryMs) return pending;
   try { await pinKnownGood(git, pending.sha, run); return null; }
   catch (error) {
