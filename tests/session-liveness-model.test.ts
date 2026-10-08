@@ -8,6 +8,7 @@ import { Engine } from '../src/engine.js';
 import type { Principal, Work } from '../src/model.js';
 import { recordSession, type RuntimeSession, type SessionHandle, type SessionHandleInput } from '../src/model/sessions.js';
 import { endedByFact, lostAfterReports, observeSessions, observedRuntimeState, registeredLaunch, reportedHandle, sessionObservationFreshMs, sessionObservationRefreshMs, sessionView, settledPurpose, runningSessions } from '../src/model/session-state.js';
+import { reconcileAutoDispatch } from '../src/model/dispatch.js';
 import { reconciledClosure } from '../web/workers-view.js';
 import { dispatchEffects, emptyDispatchCursor, herdrSessionListing, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
 import { runtimeEndedStates } from '../src/harness.js';
@@ -396,4 +397,24 @@ test('unit:session-liveness-model — GY-1532: a launch registered over a held r
   assert.ok(Date.parse(fresh.startedAt) >= before, 'and started now, so its pane is young until its agent appears');
   const [listed] = observeSessions([await reload(item.id)], [{ pane_id: 'wF:p9', agent: null, agent_status: 'unknown' }], new Date(), { hostId: 'host-1' }).entries.filter(entry => entry.id === 'req-1');
   assert.equal(listed, undefined, 'the new pane, listed before its agent starts, does not end the session');
+});
+
+test('unit:session-liveness-model — GY-1532: after a hand-launched review of a standing head is ended for its silence, the dispatcher opens the review request that launches a reviewer under a fresh attempt', () => {
+  const now = new Date('2026-10-08T05:00:00.000Z'), ago = (ms: number) => new Date(now.getTime() - ms).toISOString();
+  const sha = 'a'.repeat(40), baseSha = 'b'.repeat(40);
+  const candidate = { sha, baseSha, pr: 995, branch: 'graphyard/gy-1532-1', author: 'implementer' };
+  const observation = { candidate, checks: [], reviews: [], merged: false, mergeSha: null, mergeable: true, protected: true, files: ['src/a.ts'], scopeFiles: [], at: ago(60_000),
+    prState: 'open', draft: false, baseTip: baseSha, baseTree: '7b'.padEnd(40, '0'), baseTipContained: true };
+  const hand = { id: `review:${sha}`, kind: 'review', principal: 'reviewer-a', epoch: null, runtime: 'codex', host: 'host-1', workspace: 'wF', tab: null, pane: 'wF:p2', agentName: 'review-codex', role: 'review', head: sha,
+    attach: null, transcript: null, subject: 'GY-1532: review', startedAt: ago(40 * 60_000), updatedAt: ago(20 * 60_000), endedAt: null, state: 'running', outcome: null, observed: 'working', observedAt: ago(20 * 60_000), missedReports: 1 } as unknown as SessionHandle;
+  const work = { id: 'w', key: 'GY-1532', title: 'Item', description: '', type: 'bug', priority: 0, dependencies: [], plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'Review', proofs: ['unit:x'] }],
+    policy: { checks: [], review: true, reviewProvider: 'github' }, stage: 'review', revision: 7, policyRevision: 4, createdAt: ago(3_600_000), updatedAt: ago(60_000), stageEnteredAt: ago(60_000), ready: true, epoch: 1, lease: null,
+    workspaces: [], candidate, submission: { epoch: 1, pr: 995 }, reworkRequested: false, scenarioRequirements: [], observation, blocker: null, violations: [], sessions: [hand], autoDispatch: null,
+    evidence: [{ id: 'e1', proof: 'unit:x', sha, baseSha, policyRevision: 4, producer: 'ci-runner', trusted: true, result: 'pass', executed: 3, skipped: 0, at: ago(120_000) }],
+    gates: [{ name: 'ready', passed: true, reasons: [] }, { name: 'build', passed: true, reasons: [] }, { name: 'review', passed: false, reasons: ['Independent approval of the current commit is required'] }] } as unknown as Work;
+  const [ended] = observeSessions([work], [], now, { hostId: 'host-1' }).entries;
+  assert.equal(ended.closed, 'ended', 'the silent hand-launched review is ended, never lost');
+  reconcileAutoDispatch(work, [work], now);
+  assert.equal(work.autoDispatch?.review?.state, 'requested', 'the standing head is requested afresh');
+  assert.equal(work.autoDispatch?.review?.sha, sha);
 });
