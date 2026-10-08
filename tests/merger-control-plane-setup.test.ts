@@ -5,7 +5,8 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setupMaster } from '../src/master.js';
-import { mergerNotRequired, setupChecklist, statusControlPlaneMerger } from '../src/model/setup-checklist.js';
+import * as checklist from '../src/model/setup-checklist.js';
+import { setupChecklist } from '../src/model/setup-checklist.js';
 import { setupFromZeroChecks, setupLine, setupSteps } from '../src/setup-from-zero.js';
 import { managedInstructions } from '../src/repository-setup.js';
 import { managedServerUrl } from '../src/sync.js';
@@ -19,6 +20,9 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
  * merger (or an older server that reports none) every one of them keeps its current text.
  */
 const notRequired = ['github-app', 'reviewer-app', 'branch-protection'] as const;
+// Namespace reads, so a test against code without these symbols fails as a test case, not at load.
+const mergerNotRequired: string = (checklist as any).mergerNotRequired;
+const statusControlPlaneMerger = (status: any) => (checklist as any).statusControlPlaneMerger(status);
 /** A fresh install with no App, no reviewer App and no protection, only a worker account. */
 const bare = (merger: 'github' | 'control-plane' | null) => ({
   actor: { role: 'admin' }, github: false, githubAppId: null, githubRepository: null, baseBranch: 'main', reviewerApps: [],
