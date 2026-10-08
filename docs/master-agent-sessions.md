@@ -19,7 +19,7 @@ Non-master launches get own checkouts, coordinator's unwritable (Codex `--sandbo
 
 #### Worker sandbox
 
-Codex `--add-dir` roots: `.git/worktrees/NAME` (index, HEAD, `FETCH_HEAD`), `objects`, `refs/remotes`, `refs/heads/graphyard`, `logs/`; never `.git` (read-only `.git/.git` mount kills every command). Failed (bubblewrap) write probes fail launch, naming path.
+Codex `--add-dir` roots: `.git/worktrees/NAME` (index, HEAD, `FETCH_HEAD`), `objects`, `refs/remotes`, `refs/heads/graphyard`, `logs/`; never `.git` (read-only `.git/.git` mount kills every command). Failed (bubblewrap) write probes fail launch, naming path. Reviewer and producer launches get the same Git grants and probe as workers, plus `.git/worktrees`, and fetch with `--no-write-fetch-head`.
 
 Profile `accounts` lists [agent environments](onboarding.md#agent-environments) (`master environments`) unless registry defines role. Launches take first account under `run.quotaCeilingPercent`, else (or failed start) **fail over** (`dispatch.accounts`). Runtime limit notices (never agent text; mid-session only beside `[retrying in 4s]`; agy `Individual quota reached`) commit unpushed `WIP:`, set `capacity.exhausted`, relaunch elsewhere/after reset. Reviewers/producers use only profile `kind` (others skipped `cross-runtime`; profile waits).
 
