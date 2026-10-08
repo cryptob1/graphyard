@@ -14,6 +14,7 @@ import type { ProductionWatch } from '../production-watch.js';
 import type { Principal } from '../model.js';
 import type { Responder } from '../closed-question.js';
 import type { InterventionPolicy } from '../model/interventions.js';
+import { mainWatchRoutes } from './routes/main-watch.js';
 
 /** Everything the assembled control plane owns, handed to every route. */
 export interface Services {
@@ -69,7 +70,19 @@ export interface Route {
 /** A resource's routes. The index lists modules in the order they are matched. */
 export interface RouteModule { name: string; routes: Route[] }
 
-export const defineRoutes = (name: string, routes: Route[]): RouteModule => ({ name, routes });
+// A function declaration, hoisted: a resource module evaluated inside this module's import cycle
+// (routes/main-watch.ts, registered below) calls it before this module finishes evaluating.
+export function defineRoutes(name: string, routes: Route[]): RouteModule { return { name, routes }; }
+
+/**
+ * The resources this module registers into the authenticated `/api/` table (GY-1519): the main
+ * watch's routes (routes/main-watch.ts) go ahead of the operator-agent guard, as they authorize
+ * their callers themselves. index.ts assembles the table through this at startup, once every
+ * module is loaded, so the registered module's binding is initialized when it is read.
+ */
+export function registerApiRoutes(modules: readonly RouteModule[]): readonly RouteModule[] {
+  return [mainWatchRoutes, ...modules];
+}
 
 /** Match one route against a request; `null` when it does not apply. */
 export function matchRoute(route: Route, method: string | undefined, pathname: string): string[] | null {
