@@ -6,6 +6,7 @@ import { protectionPlan, protectionRun, readProtection, type ProtectionRun } fro
 import { checkAgentEnvironment, discoverAgentEnvironments } from './master/environments.js';
 import type { AgentEnvironment } from './master/profiles.js';
 import { sharedGitPaths, workerPaths } from './worker-sandbox.js';
+import { mergerNotRequired, statusControlPlaneMerger } from './model/setup-checklist.js';
 
 /**
  * The prerequisites docs/setup-from-zero.md depends on that `graphyard doctor` can check from this
@@ -184,12 +185,18 @@ export async function setupFromZeroChecks(input: SetupFromZeroInput): Promise<Se
   lines.push({ id: 'control-plane', status: status ? 'pass' : 'fail', step: setupSteps.install,
     detail: status ? `answered as role ${status.actor?.role ?? 'unknown'}` : `${input.reachable ? `reachable, credential ${credential}` : 'not reachable'}: ${input.failure ?? 'no answer'}` });
   lines.push(await credentialsCheck(input.root, env, input.masterCredential));
-  const missing = status?.appPermissions?.missing ?? [];
-  const appBound = !!status?.github, verified = !!status?.appPermissions?.verifiedAt;
-  lines.push({ id: 'github-app', status: appBound && verified && !missing.length ? 'pass' : 'fail', step: setupSteps.app,
-    detail: !status ? 'depends on the control plane' : !appBound ? 'the server reports no bound GitHub App' : !verified ? 'the App-permission preflight has not run' : missing.length ? `missing permissions: ${missing.map((entry: any) => `${entry.permission} ${entry.required}`).join(', ')}` : `App ${status.githubAppId} is bound with every permission the plan needs` });
-  lines.push(await reviewerCheck(input.root, status));
-  lines.push(status ? protectionCheck(status, input.github ?? protectionRun) : { id: 'branch-protection', status: 'fail', detail: 'depends on the control plane', step: setupSteps.protection });
+  if (statusControlPlaneMerger(status)) {
+    // GY-1553: under the control-plane merger no App, reviewer App or branch protection is needed, so
+    // the three lines pass as not required, in the same words the Setup checklist uses.
+    for (const [id, step] of [['github-app', setupSteps.app], ['reviewer-app', setupSteps.reviewer], ['branch-protection', setupSteps.protection]] as const) lines.push({ id, status: 'pass', detail: mergerNotRequired, step });
+  } else {
+    const missing = status?.appPermissions?.missing ?? [];
+    const appBound = !!status?.github, verified = !!status?.appPermissions?.verifiedAt;
+    lines.push({ id: 'github-app', status: appBound && verified && !missing.length ? 'pass' : 'fail', step: setupSteps.app,
+      detail: !status ? 'depends on the control plane' : !appBound ? 'the server reports no bound GitHub App' : !verified ? 'the App-permission preflight has not run' : missing.length ? `missing permissions: ${missing.map((entry: any) => `${entry.permission} ${entry.required}`).join(', ')}` : `App ${status.githubAppId} is bound with every permission the plan needs` });
+    lines.push(await reviewerCheck(input.root, status));
+    lines.push(status ? protectionCheck(status, input.github ?? protectionRun) : { id: 'branch-protection', status: 'fail', detail: 'depends on the control plane', step: setupSteps.protection });
+  }
   lines.push(...await environmentChecks(input.environments));
   lines.push(await sandboxCheck(input.root, input.sandbox ?? bubblewrapProbe));
   return lines;

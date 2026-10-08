@@ -46,6 +46,11 @@ export const installRecordSchema = z.object({
   url: z.string().nullable().default(null),
   principals: z.array(principalRecordSchema).default([]),
   github: z.object({ appId: z.number().int().positive(), installationId: z.number().int().positive(), slug: z.string().min(1), webhookFingerprint: z.string().length(12), ciAppIds: z.array(z.number().int().positive()).default([]) }).nullable().default(null),
+  /**
+   * GY-1550: this installation was applied with `--no-github-app`. Master setup and
+   * `derivedVariables` must not push a saved App registration onto the deployment.
+   */
+  noGithubApp: z.boolean().default(false),
   reviewers: z.array(z.object({ name: z.string().min(1), appId: z.number().int().positive(), botUserId: z.number().int().positive() })).default([]),
   profiles: z.array(z.object({ name: z.string().min(1), principal: z.string().min(1), kind: z.string().min(1), role: z.enum(['worker', 'reviewer', 'master']) })).default([]),
   /** The release pipeline's deployment adapter and the plan actions --apply created for it (GY-1102). */
