@@ -102,12 +102,15 @@ export async function syncWork({ api, print, base: serverUrl, args }: CliContext
   const read = async (sha: string) => { const blob = quietly('cat-file', 'blob', sha); return blob.status === 0 ? blob.stdout : null; };
   const findings = await localScopeFindings(work.plannedFiles ?? [], raw, numstat, generated?.files ?? [], read);
   const refused = findings.filter(finding => finding.refused);
-  // `--restore` takes the remedy itself (GY-859): one plain commit, so a plain push updates the PR.
-  if (args.includes('--restore') && refused.length) return restoreAndReport(git, print, { work, baseBranch, baseTip, regenerated, generated: generated?.files ?? [], refused: refused.map(finding => finding.path), read });
-
+  // `--restore` takes the remedy itself (GY-859): one plain commit, so a plain push updates the PR —
+  // or, with the control plane as merge writer, one `complete --head` submits it (GY-1523).
+  if (args.includes('--restore') && refused.length) return restoreAndReport(git, print, { work, baseBranch, baseTip, regenerated, generated: generated?.files ?? [], refused: refused.map(finding => finding.path), read, controlPlane });
+  // The repair's hand-off follows the merge writer: a GitHub worker pushes the plain commit, a
+  // control-plane worker has no push credential and submits it with complete --head.
+  const afterRepair = controlPlane ? `complete ${work.key} EPOCH --head submits it from the shared object store; nothing is pushed` : 'a plain push updates the PR';
   print({ key: work.key, base: `origin/${baseBranch}`, baseTip, head: git('rev-parse', 'HEAD'), merged: true, fetched: !controlPlane, regenerated, generated: generated?.files ?? [], plannedFiles: work.plannedFiles, ok: !refused.length,
     files: findings, refused: refused.map(finding => `${finding.path}: ${finding.detail}`),
-    next: refused.length ? `Run sync ${work.key} --restore: it restores each listed file to origin/${baseBranch} in one new commit naming them (by hand: git checkout ${baseTip.slice(0, 12)} -- PATH for each, restoring a rename's original path, then commit), so a plain push updates the PR; a force push is never needed or allowed. Do not push until it reports ok. Only an operator can widen plannedFiles, through an audited requirements revision.`
+    next: refused.length ? `Run sync ${work.key} --restore: it restores each listed file to origin/${baseBranch} in one new commit naming them (by hand: git checkout ${baseTip.slice(0, 12)} -- PATH for each, restoring a rename's original path, then commit), so ${afterRepair}; a force push is never needed or allowed. Do not ${controlPlane ? 'complete' : 'push'} until it reports ok. Only an operator can widen plannedFiles, through an audited requirements revision.`
       : controlPlane ? `Every file outside plannedFiles matches origin/${baseBranch}. Nothing is pushed while the control plane is the merge writer: complete ${work.key} EPOCH --head submits the commit the shared object store already holds.`
         : `Every file outside plannedFiles matches origin/${baseBranch}. Push, then complete ${work.key} EPOCH PR.` });
   if (refused.length) process.exitCode = 1;

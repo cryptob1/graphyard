@@ -8,7 +8,8 @@ import { hostname } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { accountLaunch, dispatchWork, setupMaster, type WorkerProfile } from '../src/master.js';
-import { readMergeWriter, workerConfinementCredential } from '../src/master/dispatch.js';
+import { MergeWriterUnreadError, readMergeWriter, workerConfinementCredential } from '../src/master/dispatch.js';
+import { planeWideFailure } from '../src/model/blocker-class.js';
 import { coordinatorConfinement, readOnlyMountWrapper } from '../src/master/profiles.js';
 import { grantWorkerPaths, workerPaths, writablePaths } from '../src/worker-sandbox.js';
 import type { Work } from '../src/model.js';
@@ -110,7 +111,7 @@ test('unit:worker-launch-credential-free — secretsBus null binds the session b
   }
 });
 
-test('unit:worker-launch-credential-free — the merger is read from /api/status with the master credential; a missing field, a refused read or a failed one all read as github', async () => {
+test('unit:worker-launch-credential-free — the merger is read from /api/status with the master credential: a status without the field is an older server\'s github; a refused, failed, timed-out or unknown read refuses the launch as a plane-wide failure instead of guessing github', async () => {
   const directory = await temporaryDirectory('launch-control-plane-status');
   try {
     const credentialFile = join(directory, 'master.token'); await writeFile(credentialFile, coordinatorToken, { mode: 0o600 });
@@ -120,10 +121,38 @@ test('unit:worker-launch-credential-free — the merger is read from /api/status
     assert.equal(await readMergeWriter(config, answering(200, { mergeWriter: { merger: 'control-plane', line: 'x' } })), 'control-plane');
     assert.deepEqual(seen, [{ url: 'https://graphyard.example/api/status', authorization: `Bearer ${coordinatorToken}` }]);
     assert.equal(await readMergeWriter(config, answering(200, { mergeWriter: { merger: 'github', line: null } })), 'github');
-    assert.equal(await readMergeWriter(config, answering(200, { baseBranch: 'main' })), 'github', 'an older server without the field');
-    assert.equal(await readMergeWriter(config, answering(503, { error: 'down' })), 'github');
-    assert.equal(await readMergeWriter(config, (async () => { throw new Error('offline'); }) as typeof fetch), 'github');
+    assert.equal(await readMergeWriter(config, answering(200, { baseBranch: 'main' })), 'github', 'an older server without the field has only GitHub as its writer');
+    const refused = async (fetcher: typeof fetch, cause: RegExp, planeWide = true) => {
+      const error = await readMergeWriter(config, fetcher).then(() => null, (error: unknown) => error);
+      assert.ok(error instanceof MergeWriterUnreadError, `refused: ${String(error)}`);
+      assert.match(error.message, /^the merge writer could not be read from https:\/\/graphyard\.example\/api\/status \(/);
+      assert.match(error.cause, cause);
+      assert.match(error.message, /so the launch is refused before anything is claimed rather than minting a push credential the control plane may have retired; it is dispatched again once the status read succeeds$/);
+      assert.equal(planeWideFailure(error.message), planeWide, `the loop ${planeWide ? 'cools no profile for' : 'counts'} it: ${error.message}`);
+    };
+    await refused(answering(503, { error: 'down' }), /^HTTP 503$/);
+    await refused(answering(502, { error: 'Application failed to respond' }), /^HTTP 502$/);
+    await refused((async () => { throw new TypeError('fetch failed'); }) as typeof fetch, /^fetch failed$/);
+    await refused((async () => { throw new DOMException('The operation was aborted due to timeout', 'TimeoutError'); }) as typeof fetch, /^The operation was aborted due to timeout$/);
+    await refused((async () => new Response('not json', { status: 200 })) as typeof fetch, /JSON/, false);
+    await refused(answering(200, { mergeWriter: { merger: 'later-writer' } }), /^mergeWriter\.merger is "later-writer", which this launcher does not know$/, false);
+    await refused(answering(401, { error: 'bad credential' }), /^HTTP 401$/, false);
   } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('unit:worker-launch-credential-free — a launch whose merger read fails is refused before anything is claimed, reserved or minted; the reader given to dispatchWork is the launch\'s one switch between the two confinements', async () => {
+  const fixture = await dispatchFixture();
+  try {
+    let prepared = 0;
+    const prepare = async () => { prepared += 1; return fixture.prepare(); };
+    const unread = new MergeWriterUnreadError('https://graphyard.example/api/status', 'HTTP 503');
+    const launch = (readMergeWriter: () => Promise<'github' | 'control-plane'>) => dispatchWork(fixture.main, fixture.item, fixture.profile, [], fixture.herdr, [fixture.item], prepare, fixture.release, 1, new Date().toISOString(), { readMergeWriter, credential: fixture.minter });
+    await assert.rejects(launch(async () => { throw unread; }), (error: unknown) => error === unread);
+    assert.equal(prepared, 0, 'nothing was claimed'); assert.deepEqual(fixture.minted, [], 'nothing was minted'); assert.deepEqual(fixture.herdrCalls, [], 'no pane was opened'); assert.deepEqual(fixture.released, [], 'there was no claim to release');
+    const started = await launch(async () => 'control-plane');
+    assert.equal(prepared, 1); assert.equal(started.mergeWriter, 'control-plane'); assert.equal(started.pushCredential, 'none'); assert.deepEqual(fixture.minted, []);
+    assert.ok(!environmentOf(fixture.tabArgs()).some(entry => /^GH_CONFIG_DIR=/.test(entry)));
+  } finally { await fixture.cleanup(); }
 });
 
 /** The github-mode tab arguments with this host's paths, name, PATH and verification-slot settings replaced, so the record is stable across hosts. */

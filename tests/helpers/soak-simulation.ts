@@ -685,6 +685,9 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     world.launched += 1;
     if (world.launched === 4) world.healthyEverywhere();
     let epoch = 0, branch = '';
+    // GY-1523: the launcher reads the merger through the world (counted, refused on schedule) and
+    // mints through it (recorded), so the day asserts one read per dispatch and no push credential
+    // under the control-plane merger; a launch refused before any claim is kept with its words.
     const result = await dispatchWork(failover.root, work, profile, free, world.run, snapshot.work,
       async () => {
         const claimed = await engine.execute(principal, 'claim', work.id, {}, id());
@@ -694,7 +697,8 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
         return { epoch, path, base: github.tip };
       },
       async (_root, _key, claimedEpoch) => { await engine.execute(principal, 'release', work.id, { epoch: claimedEpoch }, id()); },
-      5_000, snapshot.now, { start: world.bounds(), agents: () => herdr.list(), supervisor: () => false, stopSupervisor: () => true });
+      5_000, snapshot.now, { start: world.bounds(), agents: () => herdr.list(), supervisor: () => false, stopSupervisor: () => true, readMergeWriter: world.readMergeWriter, credential: world.mint })
+      .catch((error: unknown) => { failover.refused?.push({ key: work.key, at: clock.now() - dayStart, error: error instanceof Error ? error.message : String(error) }); throw error; });
     failover.dispatches.push(result);
     failover.samples.push({ key: work.key, failures: await readAccountStartFailures(failover.master), attention: await workerLaunchStatus(failover.root, failover.master) });
     // The launched session works its request in the pane the launcher created and submits like

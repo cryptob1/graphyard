@@ -32,12 +32,16 @@ export const pushRefusal = (head: string) => `merge writer has not pushed ${head
  * The two control-plane refusals for `candidate` (GY-1523), read from the item's folded merge
  * ledger (model/merge-ledger.ts, GY-1519) alone. The writer records `merge.intent` for a head only
  * after its trial merge onto the base tip built and passed the fast tests, so a ledger state naming
- * exactly this head on exactly this base tip and not refused is the passing trial; `reconciled` is
- * the pushed merge read back from the base branch. An absent ledger is no trial and no push.
+ * exactly this head on exactly this base tip and not refused is the passing trial. The merge gate
+ * wants both `merge.pushed` and `merge.reconciled`: a state is `reconciled` with `pushedAt` null
+ * when the fold met a reconciliation straight after the intent (an older writer, or a push the
+ * ledger never saw), so the pushed event's own instant is required beside the reconciled state. An
+ * absent ledger is no trial and no push.
  */
 export function mergeLedgerRefusals(ledger: MergeLedgerState | null | undefined, candidate: { sha: string; baseSha: string }) {
   const trialled = !!ledger && ledger.head === candidate.sha && ledger.baseTip === candidate.baseSha && ledger.state !== 'refused';
-  return { test: trialled ? [] : [trialRefusal(candidate.sha, candidate.baseSha)], merge: trialled && ledger!.state === 'reconciled' ? [] : [pushRefusal(candidate.sha)] };
+  const pushed = trialled && ledger!.state === 'reconciled' && typeof ledger!.pushedAt === 'string' && Number.isFinite(Date.parse(ledger!.pushedAt));
+  return { test: trialled ? [] : [trialRefusal(candidate.sha, candidate.baseSha)], merge: pushed ? [] : [pushRefusal(candidate.sha)] };
 }
 
 /** The merge gate's refusal until GitHub has been read at exactly the current candidate. */

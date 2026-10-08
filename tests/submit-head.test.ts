@@ -198,7 +198,7 @@ function submittedWork(source: 'control-plane' | undefined, ledger: Work['mergeL
 }
 const reasonsOf = (work: Work) => Object.fromEntries(evaluate(work, [work], new Date('2026-10-08T12:30:00.000Z'), [15368]).gates.map(gate => [gate.name, gate.reasons]));
 
-test('unit:gates-control-plane-ledger — with observation.source control-plane the test gate waits on the merge ledger\'s trial of exactly this head on exactly this base tip and the merge gate on its reconciled push; no GitHub check or mergeability reason stands', () => {
+test('unit:gates-control-plane-ledger — with observation.source control-plane the test gate waits on the merge ledger\'s trial of exactly this head on exactly this base tip and the merge gate on both its pushed event and its reconciled state; no GitHub check or mergeability reason stands', () => {
   const sha = 'a'.repeat(40), base = 'b'.repeat(40);
   const none = reasonsOf(submittedWork('control-plane'));
   assert.deepEqual(none.test, [`merge writer has not trialled ${sha.slice(0, 12)} on ${base.slice(0, 12)}`]);
@@ -212,6 +212,9 @@ test('unit:gates-control-plane-ledger — with observation.source control-plane 
   assert.deepEqual(reasonsOf(submittedWork('control-plane', { ...state, state: 'intent', head: 'c'.repeat(40) })).test, [trialRefusal(sha, base)], 'a trial of another head does not count');
   assert.deepEqual(reasonsOf(submittedWork('control-plane', { ...state, state: 'refused', refusal: { kind: 'merge', reason: 'tests failed on the merged tree' } })).test, [trialRefusal(sha, base)], 'a refused merge is no passing trial');
   assert.ok(reasonsOf(submittedWork('control-plane', { ...state, state: 'pushed', pushedAt: '2026-10-08T12:20:00.000Z' })).merge.includes(pushRefusal(sha)), 'pushed but not yet reconciled');
+  // The fold reaches `reconciled` from an intent alone when the ledger never saw the push (merge-ledger.ts): without the pushed event's instant the merge gate still waits.
+  assert.ok(reasonsOf(submittedWork('control-plane', { ...state, state: 'reconciled', pushedAt: null, observedTip: 'f'.repeat(40) })).merge.includes(pushRefusal(sha)), 'reconciled without a recorded push is no push');
+  assert.ok(reasonsOf(submittedWork('control-plane', { ...state, state: 'reconciled', pushedAt: 'never', observedTip: 'f'.repeat(40) })).merge.includes(pushRefusal(sha)), 'a pushed instant that is no instant is no push');
   const reconciled = reasonsOf(submittedWork('control-plane', { ...state, state: 'reconciled', pushedAt: '2026-10-08T12:20:00.000Z', observedTip: 'f'.repeat(40) }));
   assert.deepEqual(reconciled.test, []); assert.ok(!reconciled.merge.includes(pushRefusal(sha)), JSON.stringify(reconciled.merge));
   assert.deepEqual(mergeLedgerRefusals(undefined, { sha, baseSha: base }), { test: [trialRefusal(sha, base)], merge: [pushRefusal(sha)] });
@@ -261,7 +264,7 @@ test('unit:complete-head-cli — complete GY-N EPOCH --head [SHA] sends {epoch, 
   assert.deepEqual(calls, [{ path: 'work/id-1/submit', body: { epoch: 1, pr: 77 } }]);
 });
 
-test('unit:sync-control-plane-no-fetch — sync reads mergeWriter from /api/status: under control-plane it fetches nothing and merges the shared refs/remotes/origin/BASE, listing plannedFiles as before and pointing at complete --head; under github or an older server without the field it fetches', async () => {
+test('unit:sync-control-plane-no-fetch — sync reads mergeWriter from /api/status: under control-plane it fetches nothing and merges the shared refs/remotes/origin/BASE, listing plannedFiles as before and pointing at complete --head, for a refused file and its --restore as much as for a clean tree; under github or an older server without the field it fetches', async () => {
   const root = await realpath(await temporaryDirectory('sync-control-plane'));
   const cwd = process.cwd();
   try {
@@ -273,18 +276,30 @@ test('unit:sync-control-plane-no-fetch — sync reads mergeWriter from /api/stat
     const sharedTip = git(clone, 'rev-parse', 'refs/remotes/origin/main');
     git(clone, 'checkout', '-q', '-b', 'graphyard/gy-9-1');
     await commit(clone, 'src/x.ts', 'export const x = 1;\n', 'work');
+    await commit(clone, 'README.md', '# Fixture\n\nOut of scope.\n', 'stray');
     // Origin moves on; the clone's refs/remotes/origin/main (the shared ref) still names the old tip.
     execFileSync('git', ['clone', '-q', origin, other], { stdio: 'ignore' });
     git(other, 'config', 'user.email', 't@example.com'); git(other, 'config', 'user.name', 'T');
     const moved = await commit(other, 'docs/new.md', 'new\n', 'advance'); git(other, 'push', '-q', 'origin', 'main');
     const work = { id: 'id-9', key: 'GY-9', plannedFiles: ['src/'], workspaces: [{ epoch: 1, branch: 'graphyard/gy-9-1', host: 'h', path: clone, owner: 'implementer' }], lease: null };
-    const run = async (status: Record<string, unknown>) => {
+    const run = async (status: Record<string, unknown>, args: string[] = []) => {
       const printed: any[] = [];
-      await syncWork({ api: async (path: string) => { assert.equal(path, 'status'); return status; }, print: (value: unknown) => printed.push(value), base: 'http://graphyard.test', args: [] } as unknown as CliContext, work);
+      await syncWork({ api: async (path: string) => { assert.equal(path, 'status'); return status; }, print: (value: unknown) => printed.push(value), base: 'http://graphyard.test', args } as unknown as CliContext, work);
       return printed[0];
     };
     process.chdir(clone);
-    const controlPlane = await run({ baseBranch: 'main', mergeWriter: { merger: 'control-plane', line: 'The control plane is the merge writer' } });
+    const controlPlaneStatus = { baseBranch: 'main', mergeWriter: { merger: 'control-plane', line: 'The control plane is the merge writer' } };
+    // A file outside plannedFiles no longer matching the base: the refusal and its --restore both hand off to complete --head, never to a push.
+    const refused = await run(controlPlaneStatus);
+    assert.equal(refused.fetched, false); assert.equal(refused.merged, true); assert.equal(refused.ok, false); assert.equal(process.exitCode, 1); process.exitCode = 0;
+    assert.deepEqual(refused.refused.map((line: string) => line.split(':')[0]), ['README.md']);
+    assert.match(refused.next, /^Run sync GY-9 --restore: .* so complete GY-9 EPOCH --head submits it from the shared object store; nothing is pushed; a force push is never needed or allowed\. Do not complete until it reports ok\./);
+    assert.ok(!/plain push|updates the PR|Do not push/.test(refused.next), refused.next);
+    const restored = await run(controlPlaneStatus, ['--restore']);
+    assert.equal(restored.ok, true); assert.deepEqual(restored.restored, ['README.md']);
+    assert.match(restored.next, /^Restored 1 file to origin\/main in one new commit\. Nothing is pushed while the control plane is the merge writer: complete GY-9 EPOCH --head submits the restore commit from the shared object store\.$/);
+    assert.equal(git(clone, 'rev-parse', 'refs/remotes/origin/main'), sharedTip, 'nothing was fetched for either');
+    const controlPlane = await run(controlPlaneStatus);
     assert.equal(controlPlane.fetched, false); assert.equal(controlPlane.merged, true); assert.equal(controlPlane.ok, true);
     assert.equal(controlPlane.baseTip, sharedTip, 'the shared ref was merged as it stood');
     assert.equal(git(clone, 'rev-parse', 'refs/remotes/origin/main'), sharedTip, 'nothing was fetched');

@@ -75,6 +75,12 @@ export interface DispatchOptions {
    * the shared object store by `complete --head`, so the session has nowhere to push.
    */
   mergeWriter?: MergerMode;
+  /**
+   * Reads the merger when `mergeWriter` is not given (GY-1523): the control plane's `/api/status`
+   * (readMergeWriter) for the worktree prepareWorkerLaunch creates, and `github` for one an injected
+   * preparer supplies. Given by the soak day, whose real launches count and answer the reads.
+   */
+  readMergeWriter?: (config: MasterConfig) => Promise<MergerMode>;
   /** The coordinator checkout the worker's session is confined against, for a launcher embedded outside the CLI (startAgentSession's `coordinatorRoot`). */
   coordinatorRoot?: string;
   /**
@@ -115,17 +121,36 @@ export function launchLeaseKeepAlive(renew: (() => Promise<unknown>) | null, int
   return { stop: async () => { stopped = true; clearInterval(timer); await pending; } };
 }
 /**
- * The recorded merger (GY-1523), read from the control plane with the master's credential: `github`
- * when the install has not recorded one, when the status carries no `mergeWriter` (an older server)
- * or when the read fails, since a launch that cannot learn the mode must still carry a push credential.
+ * A launch refused because the merger could not be read (GY-1523). The cause keeps the server's own
+ * words (an HTTP status, `fetch failed`, the timeout's text), so the loop classifies a plane-wide
+ * outage as one (model/blocker-class.ts planeWideFailure): it cools no profile, counts toward no
+ * dispatch-failure blocker, and the item is dispatched again once the plane answers.
+ */
+export class MergeWriterUnreadError extends Error {
+  constructor(readonly url: string, readonly cause: string) {
+    super(`the merge writer could not be read from ${url} (${cause}), so the launch is refused before anything is claimed rather than minting a push credential the control plane may have retired; it is dispatched again once the status read succeeds`);
+    this.name = 'MergeWriterUnreadError';
+  }
+}
+/**
+ * The recorded merger (GY-1523), read from the control plane with the master's credential. A status
+ * without the `mergeWriter` field is an older server's, which has only GitHub as its writer; a read
+ * that fails, times out, is refused or carries a merger this launcher does not know refuses the
+ * launch (MergeWriterUnreadError), never defaults: under a recorded `control-plane` merger a launch
+ * that guessed `github` would hand the worker a push credential the mode retired.
  */
 export async function readMergeWriter(config: Pick<MasterConfig, 'url' | 'credentialFile'>, fetcher: typeof fetch = fetch): Promise<MergerMode> {
+  const url = `${config.url}/api/status`;
+  let response: Response, status: { mergeWriter?: { merger?: unknown } };
   try {
-    const response = await fetcher(`${config.url}/api/status`, { headers: { Authorization: `Bearer ${await readCredentialFile(config.credentialFile)}` }, signal: AbortSignal.timeout(5_000) });
-    if (!response.ok) return 'github';
-    const merger = ((await response.json()) as { mergeWriter?: { merger?: unknown } }).mergeWriter?.merger;
-    return merger === 'control-plane' ? 'control-plane' : 'github';
-  } catch { return 'github'; }
+    response = await fetcher(url, { headers: { Authorization: `Bearer ${await readCredentialFile(config.credentialFile)}` }, signal: AbortSignal.timeout(5_000) });
+    if (!response.ok) throw new MergeWriterUnreadError(url, `HTTP ${response.status}`);
+    status = await response.json() as { mergeWriter?: { merger?: unknown } };
+  } catch (error) { throw error instanceof MergeWriterUnreadError ? error : new MergeWriterUnreadError(url, error instanceof Error ? error.message : String(error)); }
+  const merger = status.mergeWriter?.merger;
+  if (merger === undefined) return 'github';
+  if (merger === 'github' || merger === 'control-plane') return merger;
+  throw new MergeWriterUnreadError(url, `mergeWriter.merger is ${JSON.stringify(merger)}, which this launcher does not know`);
 }
 /**
  * How a worker session's confinement treats GitHub credentials (GY-1523): with GitHub as the merge
@@ -164,8 +189,10 @@ export function assertDispatchable(work: Work, allWork: Work[], observedAt: stri
 export async function dispatchWork(root: string, work: Work, profile: WorkerProfile, agents: HerdrAgent[], run?: ChildRun, allWork: Work[] = [work], prepare: WorkerPreparer = prepareWorkerLaunch, release: (root: string, key: string, epoch: number, profileName: string) => Promise<void> = releaseWorkerLaunch, agentTimeoutMs?: number, observedAt = new Date().toISOString(), options: DispatchOptions = {}) {
   assertDispatchable(work, allWork, observedAt);
   const config = await loadMasterConfig(root);
-  // GY-1523: a control-plane worker is launched with no push credential and no keyring proxy.
-  const mergeWriter = options.mergeWriter ?? (prepare === prepareWorkerLaunch ? await readMergeWriter(config) : 'github');
+  // GY-1523: a control-plane worker is launched with no push credential and no keyring proxy. The
+  // merger is read once per launch, before anything is claimed or reserved, and a read that fails
+  // refuses the launch (readMergeWriter): the mode is never guessed.
+  const mergeWriter = options.mergeWriter ?? await (options.readMergeWriter ?? (prepare === prepareWorkerLaunch ? readMergeWriter : async () => 'github' as const))(config);
   const credentialMint = mergeWriter === 'control-plane' ? null : options.credential ?? (prepare === prepareWorkerLaunch ? mintWorkerCredential : null);
   let target = agents.find(agent => agent.name === profile.agentName);
   let selected: Awaited<ReturnType<typeof selectAccount>> | undefined, launched: ReturnType<typeof accountLaunch> | undefined, relaunched = 0;
