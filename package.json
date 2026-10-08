@@ -20,6 +20,7 @@
     "test:browser": "node --import tsx tests/helpers/run-tests.ts --browser"
   },
   "dependencies": {
+    "embedded-postgres": "^18.4.0-beta.17",
     "pg": "8.22.0",
     "react": "19.2.7",
     "react-dom": "19.2.7",
@@ -34,7 +35,6 @@
     "@types/pg": "8.20.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
-    "embedded-postgres": "^18.4.0-beta.17",
     "railway": "^3.11.0",
     "typescript": "5.9.3",
     "vite": "^7.3.6"

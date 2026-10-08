@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { chmod, readdir, readFile, writeFile } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import { hostname } from 'node:os';
-import { resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { collectScanInput, detectDeploy, detectStack, discover, proposeDelivery } from '../onboarding.js';
@@ -20,6 +20,8 @@ import { AppStepPending, readAppFile, readSavedApp, readUninstalledApp, type Sav
 import { appRoles, importApp, listApps, publiclyReachable, reuseExistingApp, savedRegistrations, type AppCredentials, type AppRole, type SavedRegistration } from '../github-setup.js';
 import { herdrBoundElsewhere, herdrPluginBinding, herdrRebindRefusal } from '../repository-setup.js';
 import { localTransport, sshTransport, type Transport } from './transport.js';
+import { localDatabaseVariable, localSettings, type LocalSupervisor } from './local.js';
+import { localPaths } from './local-runtime.js';
 import { durableCheckoutPreflight, underTestRunner } from '../supervisor.js';
 import { installIdFor, providers, REDACTED, SERVER_PORT, type EnvValue, type InstallInputs, type InstallPlan, type PlanAction, type PlanDrift, type PlanValue, type PlannedPrincipal, type PreflightItem, type Provider } from './types.js';
 
@@ -56,6 +58,8 @@ export interface InstallDependencies {
   environment?: NodeJS.ProcessEnv;
   /** The Graphyard commit a self-contained host runs its loop and executors from (this checkout's HEAD by default). */
   graphyardRef?: string;
+  /** How the local provider keeps its runtime alive (a systemd user unit by default); a test runs it in-process. */
+  localSupervisor?: LocalSupervisor;
 }
 
 export interface ProfileRequest {
@@ -312,7 +316,7 @@ function pageReuse(session: InstallSession, role: AppRole, url: string): AppPage
 
 export async function prepareInstall(cwd: string, rawInputs: InstallRequest & ReuseChoice, dependencies: InstallDependencies = {}, mode: 'plan' | 'apply' = 'apply'): Promise<InstallSession> {
   const provider = rawInputs.provider;
-  if (!provider) throw new Error('Use --provider railway|hetzner|docker-host|compose, or --target host|hetzner');
+  if (!provider) throw new Error('Use --provider railway|hetzner|docker-host|compose|local, or --target host|hetzner');
   // A self-contained install puts the whole of Graphyard on one machine: an existing one (host) or
   // a Hetzner server it creates (GY-717).
   const selfContained = provider === 'host' || !!rawInputs.selfContained;
@@ -343,8 +347,10 @@ export async function prepareInstall(cwd: string, rawInputs: InstallRequest & Re
   // A self-hosted database password is generated once and reused, so re-apply never
   // rewrites a running database's credential out from under it. An installation that already
   // exists yields its real value here, which is what keeps drift reporting exact on re-apply.
-  const databasePassword = selfContained ? '' : vault.add(await stableDatabasePassword(directory, false));
-  const workdir = provider === 'compose' ? `${directory}/compose` : `/opt/graphyard/${installId}`;
+  // The local provider keeps it beside its cluster, in the 0700 postgres directory initdb reads it from.
+  const passwordFile = provider === 'local' ? localPaths(directory).passwordFile : undefined;
+  const databasePassword = selfContained ? '' : vault.add(await stableDatabasePassword(directory, false, passwordFile));
+  const workdir = provider === 'compose' ? `${directory}/compose` : provider === 'local' ? directory : `/opt/graphyard/${installId}`;
   const dataPath = provider === 'hetzner' ? '/mnt/graphyard' : provider === 'host' ? `/var/lib/graphyard/${installId}` : null;
   const workers = Math.min(Math.max(inputs.workers ?? 1, 1), 20);
   const migrationSource = inputs.migrate ? (dependencies.environment ?? process.env)[MIGRATE_SOURCE_VARIABLE] || null : null;
@@ -369,6 +375,7 @@ export async function prepareInstall(cwd: string, rawInputs: InstallRequest & Re
       ref: dependencies.graphyardRef ?? sourceCommit(dependencies.sourceRoot ?? fileURLToPath(new URL('../..', import.meta.url))),
       localCli: dependencies.cliPath ?? fileURLToPath(new URL('../../bin/graphyard.mjs', import.meta.url)), localNode: process.execPath, localDirectory: directory, localRoot: root, localHost: dependencies.hostId ?? hostname(),
     } : null,
+    local: provider === 'local' ? await localSettings(directory, installId, dependencies.localSupervisor) : null,
     spend: { maxMonthly: inputs.maxMonthly ?? null, confirmPrice: inputs.confirmPrice ?? null },
     wait: dependencies.wait ?? ((ms: number) => new Promise(accept => setTimeout(accept, ms))),
     transport, ssh, fetch: dependencies.fetch ?? fetch, vault,
@@ -424,7 +431,7 @@ export async function materializeInstall(session: InstallSession): Promise<Insta
   if (session.materialized) return session;
   await prepareInstallDirectory(session.directory, session.root);
   for (const [principal, token] of await ensureTokens(session.directory, session.principals, session.vault, true)) session.tokens.set(principal, token);
-  session.context.databasePassword = session.vault.add(await stableDatabasePassword(session.directory, true));
+  session.context.databasePassword = session.vault.add(await stableDatabasePassword(session.directory, true, session.context.local?.paths.passwordFile));
   session.materialized = session.tokens.size === session.principals.length && !!session.context.databasePassword;
   if (!session.materialized) throw new Error(`Could not generate one credential per principal under ${session.directory}`);
   return session;
@@ -437,12 +444,12 @@ function sourceCommit(root: string) {
 }
 
 /** Generated once and reused: a re-apply must not lock a running database out of itself. */
-async function stableDatabasePassword(directory: string, create: boolean) {
-  const { readFile, writeFile } = await import('node:fs/promises');
-  const file = `${directory}/database.password`;
+async function stableDatabasePassword(directory: string, create: boolean, file = `${directory}/database.password`) {
+  const { mkdir, readFile, writeFile } = await import('node:fs/promises');
   try { const value = (await readFile(file, 'utf8')).trim(); if (value.length >= 32) return value; }
   catch (error: any) { if (error.code !== 'ENOENT') throw error; }
   if (!create) return '';
+  await mkdir(dirname(file), { recursive: true, mode: 0o700 });
   const password = randomBytes(24).toString('base64url');
   await writeFile(file, `${password}\n`, { mode: 0o600 });
   return password;
@@ -454,11 +461,13 @@ async function stableDatabasePassword(directory: string, create: boolean) {
 
 export function coreEnv(session: InstallSession): EnvValue[] {
   const { context, inputs } = session;
-  const databaseUrl = context.provider === 'railway' ? '${{Postgres.DATABASE_URL}}' : `postgres://graphyard:${context.databasePassword}@db:5432/graphyard`;
+  // The local provider serves loopback only, on its own port, against the cluster it runs (GY-1500).
+  const local = context.provider === 'local';
+  const databaseUrl = context.provider === 'railway' ? '${{Postgres.DATABASE_URL}}' : local ? localDatabaseVariable(context) : `postgres://graphyard:${context.databasePassword}@db:5432/graphyard`;
   const capacity = delegationLimitAssignments(session.principals);
   return [
-    { name: 'HOST', value: '0.0.0.0', secret: false },
-    { name: 'PORT', value: String(SERVER_PORT), secret: false },
+    { name: 'HOST', value: local ? '127.0.0.1' : '0.0.0.0', secret: false },
+    { name: 'PORT', value: String(local ? context.port : SERVER_PORT), secret: false },
     { name: 'DATABASE_URL', value: databaseUrl, secret: carriesCredential('DATABASE_URL', databaseUrl) },
     { name: 'GRAPHYARD_PRINCIPALS', value: principalsVariable(session.principals, session.tokens), secret: true },
     { name: 'GITHUB_REPOSITORY', value: inputs.repository, secret: false },
@@ -674,11 +683,11 @@ function variableDrift(session: InstallSession, action: string, values: EnvValue
  * never through a webhook, so it needs no `admin:repo_hook`. A login whose scopes `gh` does not
  * list (a fine-grained token) is not refused for scopes it may hold.
  */
-export function githubCliScopes(provider: Provider) { return provider === 'compose' ? ['repo'] : ['repo', 'admin:repo_hook']; }
+export function githubCliScopes(provider: Provider) { return pollsGitHub(provider) ? ['repo'] : ['repo', 'admin:repo_hook']; }
 export function githubCliPreflight(provider: Provider, status: { code: number; stdout: string; stderr?: string }, repository: string): PreflightItem {
   const needed = githubCliScopes(provider);
   const login = `gh auth login --scopes ${needed.join(',')}`;
-  const note = provider === 'compose' ? '; compose polls GitHub, so it needs no admin:repo_hook' : '';
+  const note = pollsGitHub(provider) ? `; ${provider} polls GitHub, so it needs no admin:repo_hook` : '';
   if (status.code !== 0) return { name: 'GitHub CLI', ok: false, detail: 'gh is missing or not authenticated', fix: `Install GitHub CLI and run: ${login} (the account must administer ${repository})${note}` };
   const listed = /Token scopes:\s*(.*)/.exec(`${status.stdout}\n${status.stderr ?? ''}`)?.[1];
   const held = listed === undefined ? null : [...listed.matchAll(/[\w:-]+/g)].map(match => match[0]);
@@ -688,11 +697,11 @@ export function githubCliPreflight(provider: Provider, status: { code: number; s
 }
 
 /**
- * A local Compose install serves loopback only, so GitHub can never deliver to it (GY-1474): its App
+ * A local Compose or local-provider install serves loopback only, so GitHub can never deliver to it (GY-1474): its App
  * is registered without a webhook, the control plane polls GitHub, and every step that expects a
  * delivery is skipped rather than reported as failing.
  */
-export const pollsGitHub = (provider: Provider) => provider === 'compose';
+export function pollsGitHub(provider: Provider) { return provider === 'compose' || provider === 'local'; }
 export function webhookPreflight(provider: Provider): PreflightItem | null {
   return pollsGitHub(provider) ? { name: 'GitHub webhook', ok: true, detail: `${provider} is local: the control plane polls GitHub and registers no webhook, so webhook configuration and delivery verification are skipped` } : null;
 }
@@ -1177,7 +1186,8 @@ async function pausedSummary(session: InstallSession, plan: InstallPlan, url: st
   const controlPlaneApp = !pending.reviewer;
   const savedFile = controlPlaneApp ? pending.file : appCredentialFile(session);
   const resume = resumeCommand(session);
-  const stop = context.provider === 'compose' ? `docker compose --project-directory ${context.workdir} down` : null;
+  const stop = context.provider === 'compose' ? `docker compose --project-directory ${context.workdir} down`
+    : context.local ? (context.local.supervisor.systemd ? `systemctl --user stop ${context.local.unit}` : `kill $(cat ${context.local.paths.pid})`) : null;
   return {
     complete: false, repository: session.inputs.repository, provider: context.provider, installId: session.installId, installDirectory: session.directory,
     url, health,
