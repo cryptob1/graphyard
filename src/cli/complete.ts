@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import { parseArgs } from 'node:util';
 import { setTimeout as delay } from 'node:timers/promises';
 import { type CliCommand } from './registry.js';
@@ -38,8 +39,40 @@ export async function submitThroughPause<T>(submit: () => Promise<T>, options: P
   }
 }
 
+/** The commit the worktree at `root` has checked out, for `--head` with no SHA. */
+export function worktreeHead(root: string): string {
+  const result = spawnSync('git', ['-C', root, 'rev-parse', 'HEAD'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  if (result.status !== 0) throw new Error(`complete --head could not read the worktree's HEAD: ${result.stderr.trim() || result.error?.message || `git exited ${result.status}`}`);
+  return result.stdout.trim();
+}
 /**
- * `complete GY-N EPOCH PR`: submit the implementation and end the lease. Beside the control
+ * What `complete GY-N EPOCH ...` submits (GY-1523): `{epoch, pr}` for `PR`, exactly as before, or
+ * `{epoch, head}` for `--head [SHA]`, the SHA defaulting to the worktree's HEAD. parseArgs has no
+ * flag with an optional value, so `--head` and the SHA that follows it (unless the next word is a
+ * flag) are taken out before the positionals and `--no-docs` are parsed; without `--head` the
+ * arguments reach parseArgs untouched and the body is byte-identical to the PR form's.
+ */
+export function completionBody(args: readonly string[], headOf: () => string): { epoch: number; pr?: number; head?: string; documentation?: string } {
+  const rest: string[] = []; let head: string | undefined | null = null;
+  for (let index = 0; index < args.length; index++) {
+    const argument = args[index];
+    if (argument === '--head') { const next = args[index + 1]; if (next !== undefined && !next.startsWith('-')) { head = next; index++; } else head = undefined; continue; }
+    if (argument.startsWith('--head=')) { head = argument.slice('--head='.length); continue; }
+    rest.push(argument);
+  }
+  const { values, positionals } = parseArgs({ args: rest, options: { 'no-docs': { type: 'string' } }, allowPositionals: true });
+  const statement = values['no-docs']?.trim();
+  const documentation = statement ? { documentation: statement } : {};
+  if (head === null) return { epoch: Number(positionals[0]), pr: Number(positionals[1]), ...documentation };
+  if (positionals[1] !== undefined) throw new Error('complete takes either a PR number or --head [SHA], not both');
+  const sha = (head ?? headOf()).trim();
+  if (!/^[0-9a-f]{40}$/.test(sha)) throw new Error(`--head takes a 40-hex commit, or none for the worktree's HEAD; ${JSON.stringify(sha)} is neither`);
+  return { epoch: Number(positionals[0]), head: sha, ...documentation };
+}
+
+/**
+ * `complete GY-N EPOCH PR`, or `complete GY-N EPOCH --head [SHA]` while the control plane is the
+ * merge writer (GY-1523): submit the implementation and end the lease. Beside the control
  * plane's answer it reports the worker's own verification of HEAD (`graphyard verify GY-N`): which
  * mechanical proofs were run and their outcome, which proofs are outstanding, or that none was run.
  * The report never changes what is submitted — the gates decide from trusted evidence alone — but a
@@ -57,13 +90,15 @@ export const completeCommand: CliCommand = {
     '                                named reset and submits again (bounded)',
     '                                --no-docs STATEMENT states the change alters no documented',
     '                                behaviour, instead of a docs diff (the reviewer checks it)',
+    '  complete GY-N EPOCH --head [SHA]  While the control plane is the merge writer: submit the',
+    '                                commit (the worktree\'s HEAD when no SHA is given), which the',
+    '                                shared object store already holds, so nothing is pushed; the',
+    '                                control plane allocates its change number and ends the lease',
   ],
   run: async (context, work) => {
     let verification: Awaited<ReturnType<typeof selfVerification>> | { state: 'unavailable'; reason: string };
     try { verification = await selfVerification(context.repositoryRoot(), work.key); } catch (error: any) { verification = { state: 'unavailable', reason: `the worktree could not be read: ${error.message}` }; }
-    const { values, positionals } = parseArgs({ args: context.args, options: { 'no-docs': { type: 'string' } }, allowPositionals: true });
-    const statement = values['no-docs']?.trim();
-    const body = { epoch: Number(positionals[0]), pr: Number(positionals[1]), ...(statement ? { documentation: statement } : {}) }, requestId = process.env.GRAPHYARD_REQUEST_ID ?? randomUUID();
+    const body = completionBody(context.args, () => worktreeHead(context.repositoryRoot())), requestId = process.env.GRAPHYARD_REQUEST_ID ?? randomUUID();
     const submitted = await submitThroughPause(() => context.api(`work/${work.id}/submit`, body, requestId));
     context.print({ ...submitted, selfVerification: verification });
   },

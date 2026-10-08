@@ -20,6 +20,9 @@ import { unauthorizedMergeViolation } from './merge-queue.js';
 import { conflictSince, requestedBaseRefresh, disprovedConflict, withDisprovedConflict, dismissedApproval, onto, reconciliationRefusalPrefix, reconcileCheckReruns, rerunFailedChecksEvent, checkRerunLimit, owedRerunAfter, type BaseRefresh, type CheckRerun, type OwedRerunOutcome, type GitHubMergeQueueState, type MergeEnqueueRequest, type MergeQueueAction, type RestoredApproval } from './merge-queue.js';
 import { docsSyncCarry } from './model/docs-sync.js';
 import { githubFromEnv } from './github.js';
+import { recordedMergerMode } from './merger-mode.js';
+import { gitRunnerFor, observeHead as observeLocalHead, type GitRunner } from './merge-writer/local-observation.js';
+import { allocateChangeNumber } from './merge-writer/change-numbers.js';
 import { regressionRefusals } from './regression-guard.js';
 import { protectedCasePrefix, protectedCaseRefusals, readProtectingGoals } from './model/goal.js';
 import { retroCheckRefusals } from './model/retro-synthesis.js';
@@ -124,7 +127,10 @@ const commands = {
     preserved: z.object({ path: z.string().min(1).max(1000), head: z.string().regex(/^[0-9a-f]{40}$/i), branchTip: z.string().regex(/^[0-9a-f]{40}$/i), op: z.enum(['rebase', 'merge', 'cherry-pick']).nullable(), refs: z.string().max(20000), diff: z.string().max(100000), at: z.iso.datetime() }).strict().optional() }).strict(),
   // `documentation` is the worker's explicit statement that the change alters no documented
   // behaviour: the other way the standard documentation criterion is met (model/documentation.ts).
-  submit: z.object({ epoch, pr: z.number().int().positive(), documentation: z.string().trim().min(1).max(1000).optional() }).strict(),
+  // GY-1523: exactly one of `pr` (GitHub is the merge writer) or `head` (the control plane is); the
+  // transaction reads the recorded merger and refuses the other.
+  submit: z.object({ epoch, pr: z.number().int().positive().optional(), head: sha.optional(), documentation: z.string().trim().min(1).max(1000).optional() }).strict()
+    .superRefine((data, ctx) => { if ((data.pr === undefined) === (data.head === undefined)) ctx.addIssue({ code: 'custom', message: 'A submission names exactly one of pr (a pull request number) or head (a 40-hex commit)' }); }),
   // `partialWork` is how the worker's CLI kept what the attempt had not committed before the
   // blocker ended it (GY-1008): the same record an interrupted attempt carries.
   blocked: z.object({ epoch, reason: z.string().max(2000).nullable(), partialWork: partialWorkSchema.optional() }).strict(),
@@ -698,6 +704,14 @@ export class Engine {
    * disables the pre-check, and every later observation still re-derives the refusal.
    */
   submissionObserver: ((work: Work, peers?: Work[]) => Promise<Observation>) | null | undefined = undefined;
+  /**
+   * Reads a submitted head from the control plane's checkout (GY-1523) while the control plane is
+   * the merge writer. Left undefined, `git -C` GRAPHYARD_REPOSITORY_ROOT (else the working
+   * directory); null means no checkout, and every head submission is refused as unreadable.
+   */
+  gitRunner: GitRunner | null | undefined = undefined;
+  /** The base branch a submitted head is observed against (GY-1523): the deployment's GITHUB_BASE_BRANCH, else `main`. */
+  baseBranch = process.env.GITHUB_BASE_BRANCH ?? 'main';
   /** Whether this process has warmed the locked read's stand-in cache (`warmLockedReads`). */
   private lockedReadsWarm = false;
   // Auto-dispatch transitions the last evaluation of a document produced, written to the ledger
@@ -783,21 +797,43 @@ export class Engine {
   }
   // The launch fence is a deployment-independent safety default; only tests shorten it.
   constructor(public store: Store, public ciAppIds: number[] = [15368], public leaseSeconds = 120, public repository = process.env.GITHUB_REPOSITORY ?? '', public launchFence = launchFenceMs) {}
-  private async observeSubmission(actor: Principal, id: string | null, data: { epoch: number; pr: number }, key: string): Promise<Observation | null> {
+  private async observeSubmission(actor: Principal, id: string | null, data: { epoch: number; pr?: number; head?: string }, key: string): Promise<Observation | null> {
+    if (data.head !== undefined) return this.observeSubmittedHead(actor, id, { epoch: data.epoch, head: data.head }, key);
     if (this.submissionObserver === undefined) { const github = await githubFromEnv(); this.submissionObserver = github ? (probe, peers) => github.observe(probe, peers) : null; }
     if (!this.submissionObserver || !id) return null;
     // A replayed submission returns its receipt; it must not depend on the provider again.
     // `complete` is a lease command (GY-558): its reads take the lease pool, like its transaction.
     if ((await this.store.leasePool.query('SELECT 1 FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rowCount) return null;
+    // While the control plane is the merge writer the transaction refuses a pull request (GY-1523): GitHub is not asked about it.
+    if ((await recordedMergerMode(this.store.leasePool)).merger === 'control-plane') return null;
     // The landing check reads each open submitted peer's observation scope, which a projection leaves
     // out (GY-1042): those peers are read whole. This read holds no coordination lock.
     const all = await withWhole(this.store.leasePool, await lockedWork(this.store.leasePool, [id]), peer => peer.stage !== 'done' && !!peer.submission && !!peer.candidate);
     const work = all.find(w => w.id === id || w.key === id);
     if (!work || work.stage === 'done' || !work.workspaces.some(w => w.epoch === data.epoch)) return null;
     // Every item goes with it: the landing check reads other items' unlanded candidates (GY-97).
-    const observation = await this.submissionObserver({ ...work, submission: { epoch: data.epoch, pr: data.pr } }, all);
+    const observation = await this.submissionObserver({ ...work, submission: { epoch: data.epoch, pr: data.pr! } }, all);
     await this.reconcileLanded(observation, all);
     return observation;
+  }
+  /**
+   * GY-1523: the control plane's own observation of a head submitted with `complete --head`, read
+   * from the shared object store before the transaction, as GitHub is read for a pull request.
+   * Receipt first, so a replayed `complete` runs no git; nothing is read while GitHub is the merge
+   * writer, since the transaction refuses the head then. The candidate's change number is
+   * allocated inside the transaction, which binds it to this observation.
+   */
+  private async observeSubmittedHead(actor: Principal, id: string | null, data: { epoch: number; head: string }, key: string): Promise<Observation | null> {
+    if (!id) return null;
+    if ((await this.store.leasePool.query('SELECT 1 FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rowCount) return null;
+    if ((await recordedMergerMode(this.store.leasePool)).merger !== 'control-plane') return null;
+    // `complete` is a lease command (GY-558): its reads take the lease pool, like its transaction.
+    const work = (await lockedWork(this.store.leasePool, [id])).find(w => w.id === id || w.key === id);
+    const workspace = work?.workspaces.find(w => w.epoch === data.epoch);
+    if (!work || work.stage === 'done' || !workspace) return null;
+    if (this.gitRunner === undefined) this.gitRunner = gitRunnerFor(process.env.GRAPHYARD_REPOSITORY_ROOT ?? process.cwd());
+    demand(this.gitRunner, 'The control plane has no checkout to read a submitted head from; a head submission needs the merge writer checkout', 503);
+    return observeLocalHead(this.gitRunner, { head: data.head, base: this.baseBranch, branch: workspace.branch, author: actor.id });
   }
   /**
    * GY-744. Reconcile at once the merge of every peer an observation's landing check found already
@@ -1626,25 +1662,51 @@ export class Engine {
         if (data.preserved) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, actor.id, 'workspace.preserved', JSON.stringify({ details: { epoch: data.epoch, branch: data.branch, ...data.preserved } })]);
       }
       if (command === 'submit') {
-        demand(work.workspaces.some(w => w.epoch === data.epoch), 'Register the assignment workspace first');
+        const workspace = work.workspaces.find(w => w.epoch === data.epoch);
+        demand(workspace, 'Register the assignment workspace first');
         // A submission ends the run of blockers the loop cleared in a row (GY-1008).
         if (work.blockerProbe) work.blockerProbe = { ...work.blockerProbe, clears: 0 };
-        demand(!all.some(w => w.id !== work!.id && w.submission?.pr === data.pr), 'Pull request is already linked to another task');
-        demand(!work.submission || work.submission.pr === data.pr, 'A submitted task cannot switch pull requests');
-        if (observation) {
-          demand(observation.candidate.pr === data.pr, 'Observed pull request does not match the submission');
-          demand(work.workspaces.some(w => w.epoch === data.epoch && w.branch === observation.candidate.branch), 'PR branch does not match the assigned workspace');
-          const regressions = regressionRefusals(work, observation, all);
+        // GY-1523: the recorded merger decides, inside this transaction, which form a submission
+        // takes. A head is accepted only while the control plane is the merge writer; a pull request
+        // only while GitHub is. The mode read before the transaction chose what was observed, so a
+        // head whose observation is missing (the merger flipped between the two reads) is refused.
+        const merger = (await recordedMergerMode(db)).merger;
+        if (data.head !== undefined) demand(merger === 'control-plane', `A head is submitted only while the control plane is the merge writer; this install's merger is ${merger}, so push the branch and complete ${work.key} ${data.epoch} with its pull request number, or switch the writer with graphyard master merger`, 409);
+        else demand(merger !== 'control-plane', `A pull request is submitted only while GitHub is the merge writer; this install's merger is ${merger}, so complete ${work.key} ${data.epoch} --head instead`, 409);
+        let observed = observation, number: number;
+        if (data.head !== undefined) {
+          demand(observation?.source === 'control-plane' && observation.candidate.sha === data.head, `${data.head.slice(0, 12)} was not observed by the control plane (the merger changed while it was read); complete ${work.key} ${data.epoch} --head again`, 409);
+          // One change number per (item, head), allocated under the item lock this transaction holds:
+          // the candidate, the submission and the number commit together, and a retried or repeated
+          // submission of the same head reads the same number back.
+          number = await allocateChangeNumber(db, work.id, data.head);
+          observed = { ...observation!, candidate: { sha: data.head, baseSha: observation!.baseTip!, pr: number, branch: workspace!.branch, author: actor.id } };
+        } else {
+          number = data.pr;
+          demand(!all.some(w => w.id !== work!.id && w.submission?.pr === number), 'Pull request is already linked to another task');
+          demand(!work.submission || work.submission.pr === number, 'A submitted task cannot switch pull requests');
+        }
+        if (observed) {
+          demand(observed.candidate.pr === number, 'Observed pull request does not match the submission');
+          demand(work.workspaces.some(w => w.epoch === data.epoch && w.branch === observed!.candidate.branch), 'PR branch does not match the assigned workspace');
+          const regressions = regressionRefusals(work, observed, all);
           demand(!regressions.length, `Submission refused for ${work.key}: ${regressions.join('; ')}`);
           // Checks registered by approved retro artefacts (GY-970) run against the observed candidate.
-          const retroChecks = retroCheckRefusals(work, observation, await readAppliedRetroChecks(db));
+          const retroChecks = retroCheckRefusals(work, observed, await readAppliedRetroChecks(db));
           demand(!retroChecks.length, `Submission refused for ${work.key}: ${retroChecks.join('; ')}`);
           // The required cases and contract bindings a merged acceptance pull request protects (GY-1417).
-          const protectedCases = protectedCaseRefusals(work, observation, await readProtectingGoals(db));
+          const protectedCases = protectedCaseRefusals(work, observed, await readProtectingGoals(db));
           demand(!protectedCases.length, `Submission refused for ${work.key}: ${protectedCases.join('; ')}`);
         }
-        work.submission = { epoch: data.epoch, pr: data.pr };
-        if (work.documentation) work.documentation = { ...work.documentation, submission: recordDocumentationSubmission(work.documentation, work.submission, observation?.files ?? null, data.documentation, now) };
+        work.submission = { epoch: data.epoch, pr: number };
+        if (data.head !== undefined) {
+          // The control plane's reading is the candidate's observation from this instant (GY-1523): the
+          // minimal save `observe` makes for a provider reading, with nothing of GitHub's to carry.
+          observeHead(work, observed!.candidate, observed!.at);
+          work.candidate = observed!.candidate;
+          work.observation = observed!;
+        }
+        if (work.documentation) work.documentation = { ...work.documentation, submission: recordDocumentationSubmission(work.documentation, work.submission, observed?.files ?? null, data.documentation, now) };
         work.reworkRequested = false;
         recordSubmission(work, data.epoch, now);
         // Binding the candidate ends the implementation lease in the same transaction: submitted
@@ -2669,6 +2731,9 @@ export class Engine {
       demand(work.submission?.pr === observation.candidate.pr, 'Unassigned pull request');
       demand(work.workspaces.some(w => w.epoch === work.submission!.epoch && w.branch === observation.candidate.branch), 'PR branch does not match the assigned workspace');
       if (work.stage === 'done') return work;
+      // GY-1523: a candidate the control plane observed itself carries a change number, not a pull
+      // request number; a GitHub reading of the pull request that happens to bear it is not this candidate.
+      if (work.observation?.source === 'control-plane' && observation.source === undefined) return work;
       let authorizedSnapshot: Work | null = null; let authorizationRevision: number | null = null;
       // The instant the delivery was judged at: the last instant before the merge cutoff.
       let evidenceAsOf: string | null = null;

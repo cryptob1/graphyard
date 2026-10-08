@@ -3,6 +3,7 @@ import type { TableDefinition } from './tables.js';
 import { schemaVersion } from '../release.js';
 import { workTables } from './tables/work.js';
 import { workIndexTables } from './tables/work-index.js';
+import { mergesTables } from './tables/merges.js';
 import { delegationTables } from './tables/delegation.js';
 import { operatorAgentTables } from './tables/operator-agents.js';
 import { proofGrantTables } from './tables/proof-grants.js';
@@ -21,7 +22,7 @@ import { executorPresenceTables } from './tables/executor-presence.js';
  * appears after every table it references. A feature adds its tables to one module here.
  */
 export const tables: readonly TableDefinition[] = [
-  ...workTables, ...workIndexTables, ...delegationTables, ...operatorAgentTables, ...proofGrantTables,
+  ...workTables, ...mergesTables, ...workIndexTables, ...delegationTables, ...operatorAgentTables, ...proofGrantTables,
   ...validationTables, ...scenarioTables, ...deliveryTables, ...productionTables, ...flowTables, ...attributionTables,
   ...schemaGenerationTables, ...githubCacheTables, ...executorPresenceTables,
 ];

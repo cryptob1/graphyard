@@ -156,7 +156,7 @@ export function prepareConfinedGitPaths(root: string): void {
   if (!existsSync(fetchHead)) closeSync(openSync(fetchHead, 'a'));
 }
 /** The confinement the launch of `kind` carries, or null when nothing needs confining; throws the named refusal when the kind can carry none, or when the launcher's own checkout cannot be derived while running as the launcher. `coordinatorRoot` overrides the derived one, for a launcher embedded outside the CLI. The sandbox-claim check models the runtime's workspace root as its working directory (`cwd` when the pane starts elsewhere, GY-888); the read-only mount re-exposes the allocated `directory` separately, so a terminal reviewer or producer that starts from the coordinator root still gets its own checkout writable while the root stays read-only (GY-888, review finding). */
-export async function sessionConfinement(kind: string, args: readonly string[], options: { cwd?: string; directory: string; ownGitHubCredential?: boolean }, coordinatorRoot: string | null | undefined = undefined): Promise<CoordinatorConfinement | null> {
+export async function sessionConfinement(kind: string, args: readonly string[], options: { cwd?: string; directory: string; ownGitHubCredential?: boolean; secretsBus?: null }, coordinatorRoot: string | null | undefined = undefined): Promise<CoordinatorConfinement | null> {
   const root = coordinatorRoot !== undefined ? coordinatorRoot : launcherCoordinatorRoot();
   if (!root) {
     const undetermined = launcherRootUndetermined();
@@ -164,7 +164,7 @@ export async function sessionConfinement(kind: string, args: readonly string[], 
     return null;
   }
   const workspaceRoot = resolve(options.cwd ?? options.directory), allocated = resolve(options.directory);
-  const input: ConfinementInput = { kind, args, coordinatorRoot: root, sessionDirectory: workspaceRoot, ...(allocated === workspaceRoot ? {} : { allocatedDirectory: allocated }), ...(options.ownGitHubCredential ? { ownGitHubCredential: true } : {}) };
+  const input: ConfinementInput = { kind, args, coordinatorRoot: root, sessionDirectory: workspaceRoot, ...(allocated === workspaceRoot ? {} : { allocatedDirectory: allocated }), ...(options.ownGitHubCredential ? { ownGitHubCredential: true } : {}), ...(options.secretsBus === null ? { secretsBus: null } : {}) };
   const refusal = await coordinatorConfinementRefusal(input);
   if (refusal) throw new Error(refusal);
   prepareConfinedGitPaths(root);
@@ -474,6 +474,8 @@ export interface SessionStart extends PromptDelivery, StartBounds { directory: s
   coordinatorRoot?: string;
   /** The session carries a GitHub credential of its own (a reviewer's) or must never read the operator's (every worker, minted credential or not), so the confinement gives it no route to the operator's keyring (GY-1039). */
   ownGitHubCredential?: boolean;
+  /** An explicit null binds no keyring proxy for a session that carries no credential of its own: a worker launched while the control plane is the merge writer (GY-1523). */
+  secretsBus?: null;
   /** Judges the keyring endpoint the confinement binds (keyringEndpointWarning unless a caller supplies its own); `started` settles true once the launch succeeds, false when it fails. */
   keyringWarning?: (name: string, confinement: CoordinatorConfinement | null, started: Promise<boolean>) => Promise<string | null>;
   /** Called once the command line is in the pane: from then on a supervisor may be running there (GY-273). */ onRun?: () => void;

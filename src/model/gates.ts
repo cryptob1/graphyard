@@ -1,5 +1,6 @@
 import { conversationProtectionRefusal, failedCheckResults, requiredCheck, requiredCheckPassed, requiredCheckRun, requiredChecksOf, checkRerunStatus } from '../merge-queue.js';
 import type { Gate, Stage, Work } from './work.js';
+import type { MergeLedgerState } from './merge-ledger.js';
 import { escalationRefusals } from './escalation.js';
 import { ciCheckRefusal } from './ci-refusal.js';
 import { requiredCheckFailure } from './required-check-refusal.js';
@@ -18,7 +19,25 @@ declare module './work.js' {
     // the base moves. Unknown is neither mergeable nor conflicting; it is re-read on the next
     // observation rather than refused as not mergeable (GY-548). Recorded by github.ts `observe`.
     mergeabilityUnknown?: boolean;
+    /** `control-plane`: built from the coordinator's object store by the merge writer's observeHead (GY-1523); unset on an observation GitHub supplied. */
+    source?: 'control-plane';
   }
+}
+
+/** The control-plane test gate's refusal until the merge ledger holds a passing trial of exactly this head on exactly this base tip. */
+export const trialRefusal = (head: string, baseTip: string) => `merge writer has not trialled ${head.slice(0, 12)} on ${baseTip.slice(0, 12)}`;
+/** The control-plane merge gate's refusal until the merge ledger records this head pushed and the push reconciled. */
+export const pushRefusal = (head: string) => `merge writer has not pushed ${head.slice(0, 12)}`;
+/**
+ * The two control-plane refusals for `candidate` (GY-1523), read from the item's folded merge
+ * ledger (model/merge-ledger.ts, GY-1519) alone. The writer records `merge.intent` for a head only
+ * after its trial merge onto the base tip built and passed the fast tests, so a ledger state naming
+ * exactly this head on exactly this base tip and not refused is the passing trial; `reconciled` is
+ * the pushed merge read back from the base branch. An absent ledger is no trial and no push.
+ */
+export function mergeLedgerRefusals(ledger: MergeLedgerState | null | undefined, candidate: { sha: string; baseSha: string }) {
+  const trialled = !!ledger && ledger.head === candidate.sha && ledger.baseTip === candidate.baseSha && ledger.state !== 'refused';
+  return { test: trialled ? [] : [trialRefusal(candidate.sha, candidate.baseSha)], merge: trialled && ledger!.state === 'reconciled' ? [] : [pushRefusal(candidate.sha)] };
 }
 
 /** The merge gate's refusal until GitHub has been read at exactly the current candidate. */
@@ -86,7 +105,10 @@ export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[])
   ] : []);
   // The policy's checks and every other check the base branch's protection requires (GY-430):
   // GitHub refuses the merge while any of them has not passed, so none is left for it to find.
-  const checkReasons = requiredChecksOf(work).flatMap(check => {
+  // A head the control plane observed itself (GY-1523) has no GitHub checks and no GitHub
+  // mergeability: the merge writer's ledger stands in for both, and only for that source.
+  const ledger = obs?.source === 'control-plane' ? mergeLedgerRefusals(work.mergeLedger, obs!.candidate) : null;
+  const checkReasons = ledger ? ledger.test : requiredChecksOf(work).flatMap(check => {
     const run = check.policy ? requiredCheck(work, check.name, ciAppIds) : current ? requiredCheckRun(check, obs!.checks, ciAppIds) : undefined;
     if (requiredCheckPassed(check, run)) return [];
     return [!check.policy && run && failedCheckResults.includes(run.result)
@@ -110,7 +132,8 @@ export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[])
   const mergeability = obs?.mergeable || obs?.merged ? null
     : obs?.mergeabilityUnknown ? mergeabilityComputingRefusal
       : 'Pull request is not mergeable against the current base';
-  add('merge', [...(!current ? [githubUnobservedRefusal] : []), ...(mergeability ? [mergeability] : []), ...(threads ? [threads] : []), ...delivery]);
+  add('merge', ledger ? [...(!current ? [githubUnobservedRefusal] : []), ...ledger.merge, ...delivery]
+    : [...(!current ? [githubUnobservedRefusal] : []), ...(mergeability ? [mergeability] : []), ...(threads ? [threads] : []), ...delivery]);
   const first = gates.find(g => !g.passed);
   const violations = [...work.violations];
   let stage: Stage = !work.ready ? 'backlog' : !work.submission ? (work.lease && Date.parse(work.lease.expiresAt) > now.getTime() ? 'build' : 'ready') : (first?.name === 'ready' ? 'build' : first?.name as Stage ?? 'merge');
