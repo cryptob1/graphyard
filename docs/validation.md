@@ -16,9 +16,9 @@ Values: `{{token}}`, `{{run}}`, `{{case}}`, saved. `graphyard e2e list` refuses 
 
 ## Release verdicts
 
-One retry: **passed**; **failed** (both); **flaky** (retry passed at same served SHA; `RUN:attempt-1`, `RUN:attempt-2` recorded); **unrun** (stopped by failed required case, which report names; listed apart, uncounted). Only failed or unaccepted flaky required cases block; optional ones marked on **Tests**. At unreported commit, pass-after-failure is failed.
+One retry: **passed**; **failed** (both); **flaky** (retry passed at same served SHA; `RUN:attempt-1`, `RUN:attempt-2` recorded); **unrun** (stopped by failed required case, which report names; listed apart, uncounted). Only failed or unaccepted flaky required cases block promotion; optional ones marked on **Tests**. At unreported commit, pass-after-failure is failed.
 
-Flaky required cases block promotion until `evidence` decision (`{"case":ID,"runId":RUN,"sha":FULL_SHA}` on hold item, another agent approving) accepts; refused unless both attempts recorded at that SHA. `release promote` reads only that run's and SHA's applied decisions. Workflow's `release promote ID` (`GRAPHYARD_URL`, `GRAPHYARD_TOKEN`) promotes only passing UATs.
+Acceptance: an `evidence` decision (`{"case":ID,"runId":RUN,"sha":FULL_SHA}` on hold item, another agent approving), refused unless both attempts recorded at that SHA. `release promote` reads only that run's and SHA's applied decisions. Workflow's `release promote ID` (`GRAPHYARD_URL`, `GRAPHYARD_TOKEN`) promotes only passing UATs.
 
 `e2e/contract.json` lists required customer outcomes: `id`, `title`, optional `criteria`, proving `cases` (shareable). Pre-cut `graphyard release contract` refuses `release cut`, naming outcome, case, when bound case is missing, invalid, not `uat`-targeted or optional, or required case proves nothing.
 
@@ -32,7 +32,7 @@ A required check failing then passing its one rerun at the same SHA (PR `checkRe
 
 ## Release holds
 
-One hold per failed outcome (not suite or case): item tagged `rc-hold/OUTCOME/CANDIDATE` listing failed/flaky cases, failing steps, unmet criteria; later failures attach; clears once every attached case passes on newer candidate UAT serves at exact SHA (`graphyard release holds`). Folding: two-party `fold` decision (`{"outcome":A,"into":B}`), then `release fold A --decision ID`. Process/infrastructure incidents (freeze breaches, attestation delays, runner outages, deployment/container suites) file follow-ups.
+One hold per failed outcome: item tagged `rc-hold/OUTCOME/CANDIDATE` listing failed/flaky cases, failing steps, unmet criteria; later failures attach; clears once every attached case passes on newer candidate UAT serves at exact SHA (`graphyard release holds`). Folding: two-party `fold` decision (`{"outcome":A,"into":B}`), then `release fold A --decision ID`. Process/infrastructure incidents (freeze breaches, attestation delays, runner outages, deployment/container suites) file follow-ups.
 
 ## Candidates, requests, reports
 

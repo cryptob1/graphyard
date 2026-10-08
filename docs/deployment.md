@@ -35,7 +35,7 @@ A merge unserved five minutes after new `GRAPHYARD_BUILD_SHA` is `delivery.deplo
 
 Deliveries awaiting not-yet-due or validating [promotion](delivery.md) are skipped by release lag, `loaded-revision` [resource](operations-reference.md#control-plane-resources), naming `nextDueAt`, owing no restart; unavailable observations grant no grace. Sandboxed `systemctl --user` probes read supervision unverified, not absent.
 
-After a verified deployment the loop measures throughput on the served release into `.graphyard/measurements/throughput` (`scripts/measure-throughput.mjs --record` too), excluding deliveries a master, operator or human hand touched; all ≥20 window deliveries excluded raises `escalation:throughput:GY-N:REV` once, and the loop files an owner item.
+After a verified deployment the loop measures served-release throughput into `.graphyard/measurements/throughput` (`scripts/measure-throughput.mjs --record` too), excluding deliveries a master, operator or human hand touched; all ≥20 window deliveries excluded raises `escalation:throughput:GY-N:REV` once and files an owner item.
 
 ### Deployment incident
 
@@ -43,7 +43,7 @@ Railway deploys `release/production` within a minute of promotion. `/healthz` `c
 
 #### Production environment name
 
-Railway reports to GitHub as `<project> / production` (`graphyard / production`). Startup takes ledger's master-published `production.environment` (run field `productionEnvironment`), else `GRAPHYARD_PRODUCTION_ENVIRONMENT` (`.railway/railway.ts`), else `production`; changes apply at restart. Check: startup line `production observation via GitHub deployments to NAME`, `/api/status` `production.providerDescription`.
+Railway reports to GitHub as `<project> / production`. Startup takes ledger's master-published `production.environment` (run field `productionEnvironment`), else `GRAPHYARD_PRODUCTION_ENVIRONMENT` (`.railway/railway.ts`), else `production`; changes apply at restart. Check: startup line `production observation via GitHub deployments to NAME`, `/api/status` `production.providerDescription`.
 
 ## Backup, upgrade, rollback
 
