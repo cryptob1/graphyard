@@ -16,7 +16,7 @@ import { readSecretFromStdin } from './context.js';
 import { documentationDrift } from '../model/documentation.js';
 import { agentEnvironmentRoot } from '../master/environments.js';
 import { masterCredential, planeAnswers, planeRequest, setupFromZeroChecks, setupLine, setupNext } from '../setup-from-zero.js';
-import { coordinatorDoctorLine, knownGoodState, promotionsBehind } from '../master/known-good.js';
+import { coordinatorDoctorLine, knownGoodState, pendingPin, promotionsBehind } from '../master/known-good.js';
 import { installDirectory } from '../install/secrets.js'; import { installIdFor } from '../install/types.js';
 import { execFileSync } from 'node:child_process';
 import { mergerDoctorLine } from './merger.js'; import { upCommand, upHelpRequested, upUsage } from '../up.js'; import { mergerFromStatus } from './install-merger.js';
@@ -273,10 +273,10 @@ export const installCommands = defineCommands([
       // GY-1529: the pinned known-good coordinator against what production serves; FAIL when it is more than one promotion behind.
       const coordinator = (() => {
         try {
-          const pinned = knownGoodState(installDirectory(installIdFor(discovered.repository ?? ''))), serving = production?.serving ?? null;
-          if (!pinned && !serving) return null;
+          const installDir = installDirectory(installIdFor(discovered.repository ?? '')), pinned = knownGoodState(installDir), failing = pendingPin(installDir), serving = production?.serving ?? null;
+          if (!pinned && !serving && !failing) return null;
           const promoted = (() => { try { return execFileSync('git', ['-C', root, 'for-each-ref', '--sort=-refname', '--format=%(contents)%00', 'refs/tags/rc-production/'], { encoding: 'utf8', timeout: 10_000 }).split('\0').flatMap(body => { try { return [String(JSON.parse(body.trim()).sha).toLowerCase()]; } catch { return []; } }); } catch { return []; } })();
-          return coordinatorDoctorLine(pinned?.sha ?? null, serving, pinned ? promotionsBehind(pinned.sha, promoted) : null);
+          return coordinatorDoctorLine(pinned?.sha ?? null, serving, pinned ? promotionsBehind(pinned.sha, promoted) : null, failing);
         } catch { return null; }
       })();
       if (coordinator) { console.error(coordinator.line); if (!coordinator.ok) process.exitCode = 1; }

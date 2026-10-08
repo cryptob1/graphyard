@@ -9,7 +9,7 @@ import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import type { ChildRun } from '../src/child-runner.js';
-import { coordinatorDoctorLine, knownGoodCli, knownGoodDirectory, knownGoodState, pinAfterVerify, pinKnownGood, pinningVerify, promotionsBehind } from '../src/master/known-good.js';
+import { coordinatorDoctorLine, knownGoodCli, knownGoodDirectory, knownGoodState, launcher, pendingPin, pinAfterVerify, pinKnownGood, pinningVerify, promotionsBehind, retryPendingPin } from '../src/master/known-good.js';
 import { loopUnitText } from '../src/supervisor.js';
 import { operationsCommand } from '../src/cli/master/operations.js';
 import type { MasterSession } from '../src/cli/master/session.js';
@@ -186,3 +186,37 @@ async function withStdin<T>(secret: string, body: () => Promise<T>): Promise<T> 
   Object.defineProperty(process, 'stdin', { value: Object.assign(Readable.from([secret]), { isTTY: false }), configurable: true });
   try { return await body(); } finally { Object.defineProperty(process, 'stdin', descriptor); }
 }
+
+test('unit:known-good-launcher-parses — the fallback dist/cli.js is two real lines of valid JavaScript', async () => {
+  const w = await world();
+  await pinKnownGood(w.pin, w.shas[0], (command, args, options) => command === 'npm' ? '' : w.run(command, args, options));
+  const text = readFileSync(knownGoodCli(w.installDir), 'utf8');
+  assert.equal(text, launcher);
+  assert.ok(!text.includes('\\n'), 'no literal backslash-n');
+  assert.equal(text.split('\n').length, 3);
+  const file = join(w.installDir, 'launcher-check.mjs');
+  writeFileSync(file, text);
+  execFileSync(process.execPath, ['--check', file]);
+});
+
+test('unit:known-good-pending-retry — a pin that fails after verification is kept pending, shown by the doctor, retried after the window and cleared once it lands', async () => {
+  const w = await world();
+  await pinKnownGood(w.pin, w.shas[0], w.run);
+  const at = (minutes: number) => ({ ...w.pin, now: () => new Date(Date.UTC(2026, 9, 8, 0, minutes)) });
+  w.failBuild(true);
+  await pinningVerify(at(0), w.run, async sha => ({ verified: true, served: sha }))(w.shas[1]);
+  assert.deepEqual([pendingPin(w.installDir)?.sha, pendingPin(w.installDir)?.attempts], [w.shas[1], 1]);
+  const doctor = coordinatorDoctorLine(w.shas[0], w.shas[1], 1, pendingPin(w.installDir));
+  assert.equal(doctor.ok, false); assert.match(doctor.line, /^FAIL .*has failed 1 time/);
+  assert.equal((await retryPendingPin(at(5), w.run, w.shas[1]))?.attempts, 1, 'inside the window nothing is attempted');
+  assert.equal((await retryPendingPin(at(11), w.run, w.shas[1]))?.attempts, 2, 'still failing is recorded');
+  assert.equal(await retryPendingPin(at(12), w.run, w.shas[2]), null, 'a newer promotion supersedes the pending pin');
+  assert.equal(pendingPin(w.installDir), null);
+  w.failBuild(false);
+  w.failBuild(true);
+  await pinningVerify(at(30), w.run, async sha => ({ verified: true, served: sha }))(w.shas[1]);
+  w.failBuild(false);
+  assert.equal(await retryPendingPin(at(45), w.run, w.shas[1]), null);
+  assert.equal(knownGoodState(w.installDir)!.sha, w.shas[1]);
+  assert.equal(pendingPin(w.installDir), null);
+});

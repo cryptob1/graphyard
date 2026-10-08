@@ -9,7 +9,7 @@ import type { MasterConfig } from '../master.js';
 import type { MergerMode } from '../merger-mode.js';
 import { localPromotionCycle, type LocalReleasePorts, type LocalRunOutcome } from './promotion-local.js';
 import { actionableIntervalMs } from './liveness.js';
-import { pinningVerify } from '../master/known-good.js';
+import { pinningVerify, retryPendingPin } from '../master/known-good.js';
 import { installDirectory } from '../install/secrets.js';
 import { installIdFor } from '../install/types.js';
 import { boundDeployment, type ContainmentRetention, type DeploymentObservation, deploymentObservationSchema, message, type PromotionState, retainedContainments } from './state.js';
@@ -632,6 +632,8 @@ export function promotionReads(config: MasterConfig, root: string, run: ChildRun
         promotedSha = typeof record?.sha === 'string' ? record.sha.toLowerCase() : null;
         promotedAt = typeof record?.at === 'string' ? record.at : null;
       } catch { /* no production record yet */ }
+      // GY-1529: a pin that failed after verification is retried here, every cycle, without repeating the promotion.
+      await retryPendingPin(known, run, promotedSha).catch(() => null);
       let behind: number | null = null;
       if (mainSha && promotedSha) {
         try { behind = Number((await git('rev-list', '--first-parent', '--count', `${promotedSha}..${mainSha}`)).trim()); } catch { behind = null; }
