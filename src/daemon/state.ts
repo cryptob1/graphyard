@@ -15,7 +15,7 @@ import { emptyInvariantRecord, invariantRecordSchema } from '../model/invariants
 import { emptyProjectMemory, projectMemorySchema, type ProjectMemory } from '../model/project-memory.js';
 import { itemClockSchema, latencySampleSchema } from './latency-clock.js';
 import { mainWatchStateSchema } from './main-watch.js';
-import { shadowKeptVerdicts, shadowStateSchema } from './cycle-shadow.js';
+import { shadowKeptVerdicts, shadowStateSchema } from './cycle-shadow.js'; import { emptyMergeWriterState, mergeWriterStateSchema } from './cycle-merge-writer.js'; // both lazy: they import this module
 
 export const daemonActionKinds = ['close', 'dispatch', 'review', 'refresh', 'proof', 'merge', 'deployment', 'smoke', 'escalation', 'config', 'session', 'reclaim', 'decision', 'scope', 'settle', 'failover', 'capacity', 'human', 'preserve', 'fault', 'diagnosis', 'wake', 'blocker'] as const;
 export type DaemonActionKind = typeof daemonActionKinds[number];
@@ -470,8 +470,7 @@ export function masterSummary(master: MasterSessionState, now: number) {
     rotations: master.rotations, lastEnd: master.lastEnd, lastWake: master.lastWake, launching: master.launching };
 }
 
-export const dispatchFailureRunSchema = z.object({ key: z.string().max(100), cause: z.string().max(2000), count: z.number().int().min(1), epoch: z.number().int().min(0).default(0), firstAt: z.string(), lastAt: z.string() }).strict();
-export type DispatchFailureRun = z.infer<typeof dispatchFailureRunSchema>;
+export const dispatchFailureRunSchema = z.object({ key: z.string().max(100), cause: z.string().max(2000), count: z.number().int().min(1), epoch: z.number().int().min(0).default(0), firstAt: z.string(), lastAt: z.string() }).strict(); export type DispatchFailureRun = z.infer<typeof dispatchFailureRunSchema>;
 export const daemonStateSchema = z.object({
   version: z.literal(1), url: z.string(), repository: z.string(),
   /** `pidNamespace` (GY-1370): the PID namespace the pid was taken in, absent on a lock written before it was recorded. */
@@ -485,6 +484,7 @@ export const daemonStateSchema = z.object({
   promotion: promotionStateSchema.nullable().default(null), // the loop's promotion drive (GY-1302)
   mainWatch: z.lazy(() => mainWatchStateSchema).nullable().default(null), // GY-1519: unknown main commits and the promotion freeze; lazy as main-watch.ts imports this module
   shadow: z.lazy(() => shadowStateSchema).default([]), // GY-1522: the shadow merge gate's last 200 verdicts; lazy as cycle-shadow.ts imports this module
+  mergeWriter: z.lazy(() => mergeWriterStateSchema).default(() => emptyMergeWriterState()), // GY-1524: the control-plane merge executor's queue, flight, last delivery and refusals
   /** The release the running loop process loaded, recorded by each process at its startup (GY-437). */
   release: loopReleaseSchema.nullable().default(null),
   upgrade: upgradeStateSchema, // the between-cycles self-upgrade's progress (GY-437)
