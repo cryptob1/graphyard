@@ -170,7 +170,8 @@ export function docsSyncRoute({ config, state, effects, snapshot, sessions, note
       watch.settledAt = stamp;
       await settle(item, watch, watch.failed);
       markRework(item.key, head);
-      await note(`docs-sync:${key}`, item, 'decision', 'failed', `${item.key}: ${watch.failed}, so the conflict returns to a worker`);
+      // GY-1541: the cutoff stop is the loop's own designed route (GY-1434), as the own-accord stop below is: no decision fault.
+      await note(`docs-sync:${key}`, item, 'decision', 'failed', `${item.key}: ${watch.failed}, so the conflict returns to a worker`, undefined, null);
       return { held: false };
     }
     // A hold the loop found ended stays ended (GY-1436): a session Herdr lists working again before
