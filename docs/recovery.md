@@ -41,4 +41,4 @@ Executors claim (`POST /api/delivery/rollback-claim`), report `applied`/`failed`
 
 ## Main watch
 
-Unexplained main commits are reported once. `GRAPHYARD_MAIN_WATCH_FREEZE=true` freezes promotion until an admin runs `graphyard master main-watch acknowledge SHA --reason TEXT --admin-token-stdin` or `POST /api/main-watch/acknowledge` (`Idempotency-Key`).
+Unexplained main commits are reported once. Read them with `GET /api/main-watch` or `graphyard master main-watch status`. `GRAPHYARD_MAIN_WATCH_FREEZE=true` freezes promotion until an admin runs `graphyard master main-watch acknowledge SHA --reason TEXT --admin-token-stdin` or `POST /api/main-watch/acknowledge` (`Idempotency-Key`).
