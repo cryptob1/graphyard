@@ -82,6 +82,17 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   // deploy, so the loop cuts the next candidate as each ninety-minute validation concludes, and then has nothing to promote.
   assert.ok(promotion.dispatches.length >= 2 && promotion.dispatches.length <= Math.ceil(hours * hour / (90 * minute)), `the loop promoted as each candidate concluded while main moved: ${promotion.dispatches.length} over ${hours} h`);
   assert.deepEqual(promotion.violations, [], 'never inside the minimum gap, never while a candidate is in validation, never a tip cut twice, never when production runs main');
+  // GY-1491: the 23-merge backlog of hour eight went out ten at a time, one dispatch per capped
+  // candidate's conclusion with main idle; the run that cut nothing chained no dispatch, so the
+  // rest waited for hour sixteen's merge and then went out as 10 and 4, leaving nothing queued.
+  const backlog = promotion.candidates.filter(candidate => Date.parse(candidate.cutAt) + promotion.runnerSkewMs >= dayStart + promotion.landings[0].at);
+  // The backlog joins the day's own merges not yet cut, so the first candidate leaves at least 13 queued; hour sixteen adds one.
+  const waiting = backlog[0]?.queued ?? 0;
+  assert.ok(waiting >= 13, `the backlog was cut at the 10th merge: ${JSON.stringify(backlog)}`);
+  assert.deepEqual(backlog.map(candidate => [candidate.prs, candidate.queued]), [[10, waiting], [10, waiting + 1 - 10], [waiting + 1 - 10, 0]], `the backlog was cut into capped candidates: ${JSON.stringify(backlog)}`);
+  assert.equal(promotion.emptyRuns.length, 1);
+  assert.equal(promotion.backlogDispatches.filter(at => at > promotion.emptyRuns[0] && at < dayStart + promotion.landings[1].at).length, 0, 'a run that cut nothing is not re-dispatched while main stays put');
+  assert.equal(promotion.backlogDispatches.length, 4, `one dispatch per concluded capped candidate: ${promotion.backlogDispatches.map(at => Math.round((at - dayStart) / minute))}`);
   assert.ok(promotion.ledgerReads <= Math.ceil(hours * hour / (5 * minute)) + 2 * basePlan.loopRestarts.length + 2, `fetches once per five-minute read window (${promotion.ledgerReads} over ${cycles} cycles)`);
   assert.ok(promotion.runReads <= Math.ceil(hours * hour / minute) + 2 * basePlan.loopRestarts.length + 2 && promotion.runReads < cycles, `run reads at most once a minute (${promotion.runReads} over ${cycles} cycles)`);
   // A refused dispatch counts as an attempt: one per interval, not one per cycle, and the failed
