@@ -15,6 +15,7 @@ import { emptyInvariantRecord, invariantRecordSchema } from '../model/invariants
 import { emptyProjectMemory, projectMemorySchema, type ProjectMemory } from '../model/project-memory.js';
 import { itemClockSchema, latencySampleSchema } from './latency-clock.js';
 import { mainWatchStateSchema } from './main-watch.js';
+import { shadowKeptVerdicts, shadowStateSchema } from './cycle-shadow.js';
 
 export const daemonActionKinds = ['close', 'dispatch', 'review', 'refresh', 'proof', 'merge', 'deployment', 'smoke', 'escalation', 'config', 'session', 'reclaim', 'decision', 'scope', 'settle', 'failover', 'capacity', 'human', 'preserve', 'fault', 'diagnosis', 'wake', 'blocker'] as const;
 export type DaemonActionKind = typeof daemonActionKinds[number];
@@ -483,18 +484,16 @@ export const daemonStateSchema = z.object({
   deployment: deploymentObservationSchema.nullable().default(null),
   promotion: promotionStateSchema.nullable().default(null), // the loop's promotion drive (GY-1302)
   mainWatch: z.lazy(() => mainWatchStateSchema).nullable().default(null), // GY-1519: unknown main commits and the promotion freeze; lazy as main-watch.ts imports this module
+  shadow: z.lazy(() => shadowStateSchema).default([]), // GY-1522: the shadow merge gate's last 200 verdicts; lazy as cycle-shadow.ts imports this module
   /** The release the running loop process loaded, recorded by each process at its startup (GY-437). */
   release: loopReleaseSchema.nullable().default(null),
-  /** The between-cycles self-upgrade's progress (GY-437). */
-  upgrade: upgradeStateSchema,
+  upgrade: upgradeStateSchema, // the between-cycles self-upgrade's progress (GY-437)
   /** The last reload of .graphyard/master.json: what the running loop adopted, or why it refused. */
   config: z.object({ at: z.string(), changed: z.array(z.string().max(100)).max(100), refused: z.string().max(1000).nullable() }).strict().nullable().default(null),
-  /** The last worktree reclamation: what it removed and how much room the host has. */
-  reclaim: reclaimSummarySchema.nullable().default(null),
+  reclaim: reclaimSummarySchema.nullable().default(null), // the last worktree reclamation: what it removed and how much room the host has
   /** The host's memory as the last cycle read it, and whether launches are deferred on it. */
   memory: hostMemoryStateSchema.nullable().default(null),
-  /** Per-item passage clocks and the samples they produced; the loop's own latency measurement. */
-  clocks: z.record(z.string(), itemClockSchema).default({}),
+  clocks: z.record(z.string(), itemClockSchema).default({}), // per-item passage clocks and the samples they produced: the loop's own latency measurement
   latency: z.array(latencySampleSchema).default([]),
   /** What is actionable and how long it has gone without an action (see `silenceReport`). */
   silence: silenceSchema.default({ subjects: {}, lastActionAt: null }),
@@ -631,6 +630,7 @@ export function pruneDaemonState(state: DaemonState) {
   const clocks = Object.keys(state.clocks);
   if (clocks.length > retainedClocks) for (const id of clocks.slice(0, clocks.length - retainedClocks)) delete state.clocks[id];
   if (state.scope.length > retainedScopeDecisions) state.scope = state.scope.slice(-retainedScopeDecisions);
+  if (state.shadow.length > shadowKeptVerdicts) state.shadow = state.shadow.slice(-shadowKeptVerdicts); // GY-1522: the step evicts by openness; this is the bound on a read state
   // A watch is retired when its item moves on; this bound only catches items the loop stopped seeing.
   const watches = Object.entries(state.approvals).sort((a, b) => Date.parse(a[1].requestedAt) - Date.parse(b[1].requestedAt));
   if (watches.length > retainedClocks) for (const [key] of watches.slice(0, watches.length - retainedClocks)) delete state.approvals[key];

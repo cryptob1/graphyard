@@ -9,6 +9,7 @@ import { temporaryDirectories, underTestRunner } from '../supervisor.js';
 import { decompositionSettingsSchema, diagnosticianSettingsSchema, narrowRoleRuntimeSchema, piRuntimeSchema } from '../runner/payloads.js';
 import { researchSettingsSchema } from '../research.js';
 import { doctorSettingsSchema } from './doctor-settings.js';
+import { shadowGateSettingsSchema } from './merge-writer-settings.js';
 import { sessionNameField, sessionNameLimit, assertSessionName, sessionNameDigestLength, SessionNameRefusedError } from '../session-name.js';
 import { invariantThresholdsSchema } from '../model/invariants.js';
 import { runtimeSandboxes } from '../worker-sandbox.js';
@@ -299,6 +300,7 @@ export const masterRunSchema = z.object({
   // The diagnostician (GY-439): headless Pi session turning each recurring-fault item into its root
   // cause and fix item — its model, fallback, time limit, bound and log-reading commands.
   diagnostician: diagnosticianSettingsSchema.optional(),
+  shadowGate: shadowGateSettingsSchema.optional(),
 }).strict();
 export type MasterRun = z.infer<typeof masterRunSchema>;
 

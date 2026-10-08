@@ -26,6 +26,7 @@ import { doctorStep } from './doctor.js';
 import { triageBacklogStep } from './cycle-triage.js';
 import { remedyStep } from './cycle-remedies.js';
 import { mainWatchStep } from './main-watch.js';
+import { shadowStep } from './cycle-shadow.js';
 import { Timings, withTimings, withoutTimings } from '../master/timings.js';
 import { syncProjectMemory } from '../project-memory.js';
 import { planeUnavailable } from '../model/refusal.js';
@@ -262,6 +263,8 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
   spent('decisions');
 
   await timings.step('merges', () => mergeStep(cycle));
+  // 6c. The shadow merge gate (GY-1522): one head trial-merged and fast-tested beside GitHub's gate; it writes nothing.
+  await timings.step('shadow gate', () => cycle.isolate('merge', null, 'shadow gate', () => shadowStep(cycle)));
   spent('merge');
 
   await timings.step('deployment verification', () => deploymentStep(cycle));

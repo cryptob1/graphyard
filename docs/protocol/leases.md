@@ -1,11 +1,11 @@
 <!-- page: Agent protocol | 3 | leases, `watch`. -->
 # Leases and supervision
 
-Claims last 120 s, renewed every ≤30 s; owner mutations carry epoch (expired refused). Before submitting, register branch, path, host (`graphyard register GY-1 workspace.json`): branches (`graphyard/…`) unique, paths unique per host; `graphyard worktree` [frees the branch](../coordination.md#dispatch-optimistically-smallest-scope-first) first.
+Claims last 120s, renewed every ≤30s; owner mutations carry epoch (expired refused). Before submitting, register branch, path, host (`graphyard register GY-1 workspace.json`): branches (`graphyard/…`) unique, paths unique per host; `graphyard worktree` [frees the branch](../coordination.md#dispatch-optimistically-smallest-scope-first) first.
 
 ## `watch`
 
-`graphyard watch GY-N EPOCH -- COMMAND` strips Graphyard credentials; lease loss sends process group SIGTERM, then SIGKILL. Its launch calls, release and settlement retry 5xx/408/429, dropped connections and timeouts with backoff for 90 s, outlasting a deploy restart; refusals stop at once. An agent exiting, or a SIGTERM/SIGINT/SIGHUP to `watch`, before the lease ends releases it with the cause instead of lapsing into `lease-loss`. Contained launches' quarantine names systemd scope unit. A dead supervisor fences item until attested stop or `POST /api/work/UUID/autosettle` (`coordinator`/`admin`) proves authority expired 120+ s ago, nothing alive; loop-ended attempts (exhaustion, closed submitted session), supervisor verified gone, settle in ending action. Unsettled: supervisors record why. Loop settlements send `origin: "loop"` (server records `lapsedAt`); [interventions](../dashboard.md) count them only past grace plus 10 minutes, hand ones always.
+`graphyard watch GY-N EPOCH -- COMMAND` strips Graphyard credentials; lease loss sends process group SIGTERM, then SIGKILL. Its launch calls, release and settlement retry 5xx/408/429, dropped connections and timeouts with backoff for 90s, outlasting a deploy restart; refusals stop at once. An agent exiting, or a SIGTERM/SIGINT/SIGHUP to `watch`, before the lease ends releases it with the cause instead of lapsing into `lease-loss`. Contained launches' quarantine names systemd scope unit. A dead supervisor fences item until attested stop or `POST /api/work/UUID/autosettle` (`coordinator`/`admin`) proves authority expired 120+ s ago, nothing alive; loop-ended attempts (exhaustion, closed submitted session), supervisor verified gone, settle in ending action. Unsettled: supervisors record why. Loop settlements send `origin: "loop"` (server records `lapsedAt`); [interventions](../dashboard.md) count them only past grace plus 10 minutes, hand ones always.
 
 ### Push credential
 
