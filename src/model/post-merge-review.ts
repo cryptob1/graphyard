@@ -78,10 +78,10 @@ export const postMergeRequestId = (key: string, mergeSha: string) => `post-merge
 
 /**
  * One blocking finding of a post-merge verdict, with the first repository file it names and that
- * file's line: a token with an extension (`src/a.ts:12`, `.gitignore`), one followed
+ * file's line, and every file it names (`paths`, in order, the first one first): a token with an extension (`src/a.ts:12`, `.gitignore`), one followed
  * by a line (`Dockerfile:12`, `Makefile:3-9`), or a well-known extensionless file named alone.
  */
-export interface PostMergeFinding { text: string; path: string | null; line: number | null }
+export interface PostMergeFinding { text: string; path: string | null; line: number | null; paths: string[] }
 const extensionlessFiles = new Set(['Dockerfile', 'Containerfile', 'Makefile', 'GNUmakefile', 'Procfile', 'Gemfile', 'Rakefile', 'Jenkinsfile', 'Vagrantfile', 'Brewfile', 'Justfile', 'LICENSE', 'CODEOWNERS', 'VERSION']);
 const notFiles = new Set(['e.g', 'i.e', 'etc', 'vs']);
 function findingFile(token: string): { path: string; line: number | null } | null {
@@ -89,16 +89,15 @@ function findingFile(token: string): { path: string; line: number | null } | nul
   if (!match || token.includes('://')) return null;
   const path = match[1]!.replace(/[.,;]+$/, ''), line = match[2] ? Number(match[2]) : null;
   if (!path || notFiles.has(path.toLowerCase()) || /^AC-\d+$/i.test(path) || /^\.+$/.test(path) || /^[\d.]+$/.test(path)) return null;
-  const named = /\.[A-Za-z][A-Za-z0-9]*$/.test(path) || extensionlessFiles.has(path.split('/').pop()!) || (line !== null && /[A-Za-z]/.test(path));
+  // A camelCase suffix (`work.postMergeReview`) is a property, not a file's extension.
+  const named = /\.(?:[a-z][a-z0-9]*|[A-Z][A-Z0-9]*)$/.test(path) || extensionlessFiles.has(path.split('/').pop()!) || (line !== null && /[A-Za-z]/.test(path));
   return named ? { path: path.replace(/^\.\//, ''), line } : null;
 }
 export function parseFinding(text: string): PostMergeFinding {
   const trimmed = text.trim();
-  for (const token of trimmed.split(/[\s`'"()[\]{},]+/)) {
-    const file = findingFile(token.replace(/[.;:—–]+$/, ''));
-    if (file) return { text: trimmed, ...file };
-  }
-  return { text: trimmed, path: null, line: null };
+  const files = trimmed.split(/[\s`'"()[\]{},]+/).flatMap(token => findingFile(token.replace(/[.;:—–]+$/, '')) ?? []);
+  const paths = [...new Set(files.map(file => file.path))];
+  return files[0] ? { text: trimmed, ...files[0], paths } : { text: trimmed, path: null, line: null, paths };
 }
 
 /**
@@ -124,18 +123,19 @@ export function wholeFindings(rest: string, read: readonly string[], cut = 2000)
 
 /**
  * The follow-up item one BLOCKING finding of a post-merge review files (AC-4): a bug at priority 1,
- * its origin naming the delivered item and its merge commit, planned on the finding's file when it
- * names one, reviewed like any item. The delivered item itself is never reopened.
+ * its origin naming the delivered item and its merge commit, planned on every file the finding
+ * names, reviewed like any item. The delivered item itself is never reopened.
  */
 export function postMergeFollowUp(delivered: Pick<Work, 'key' | 'title' | 'policy'>, mergeSha: string, finding: PostMergeFinding, index: number) {
-  const where = finding.path ? ` in ${finding.path}${finding.line ? `:${finding.line}` : ''}` : '';
+  const others = finding.paths.filter(path => path !== finding.path);
+  const where = finding.path ? ` in ${finding.path}${finding.line ? `:${finding.line}` : ''}${others.length ? ` (also ${others.join(', ')})` : ''}` : '';
   return {
     title: `Post-merge review of ${delivered.key} (${mergeSha.slice(0, 12)}): ${finding.text.slice(0, 120)}`.slice(0, 200),
     description: `The post-merge review of ${delivered.key} ("${delivered.title}"), delivered as merge commit ${mergeSha}, found this BLOCKING${where}:\n\n${finding.text}\n\nFix it on its own head; the delivered item is not reopened.`,
     type: 'bug' as const, priority: 1,
     criteria: [{ id: 'AC-1', text: `The finding is fixed: ${finding.text.slice(0, 1500)}`, proofs: [`unit:post-merge-follow-up-${index + 1}`] }],
     policy: { checks: delivered.policy?.checks ?? ['test', 'typecheck'], review: true },
-    plannedFiles: finding.path ? [finding.path] : [],
+    plannedFiles: finding.paths,
     origin: { reviewFollowUps: { parent: delivered.key, findings: [{ path: finding.path, text: finding.text.slice(0, 2000), ref: mergeSha }] } },
   };
 }

@@ -83,15 +83,21 @@ test('unit:post-merge-review-owed — owed reviews are the merge writer\'s deliv
   assert.equal(posted[1]!.body.expectedRevision, 1, 'the release names the revision the creation returned');
   await assert.rejects(postFollowUpItem('https://cp.example', 't', {}, 'k', (async () => new Response(JSON.stringify({ error: 'Only unreleased backlog work can be released' }), { status: 409 })) as unknown as typeof fetch), /Only unreleased backlog work/);
   // The finding form: path and line when the line starts with them.
-  assert.deepEqual(parseFinding('src/feature.ts:12 — the flag is never read'), { text: 'src/feature.ts:12 — the flag is never read', path: 'src/feature.ts', line: 12 });
+  assert.deepEqual(parseFinding('src/feature.ts:12 — the flag is never read'), { text: 'src/feature.ts:12 — the flag is never read', path: 'src/feature.ts', line: 12, paths: ['src/feature.ts'] });
   assert.deepEqual(parseFinding('`src/other.ts` - the retry loop never ends').path, 'src/other.ts');
-  assert.deepEqual(parseFinding('the retry loop never ends'), { text: 'the retry loop never ends', path: null, line: null });
+  assert.deepEqual(parseFinding('the retry loop never ends'), { text: 'the retry loop never ends', path: null, line: null, paths: [] });
   // An extensionless file, or a file named after the criterion, is still the finding's file; prose is not.
-  assert.deepEqual(parseFinding('Dockerfile:12 — the base image is unpinned'), { text: 'Dockerfile:12 — the base image is unpinned', path: 'Dockerfile', line: 12 });
+  assert.deepEqual(parseFinding('Dockerfile:12 — the base image is unpinned'), { text: 'Dockerfile:12 — the base image is unpinned', path: 'Dockerfile', line: 12, paths: ['Dockerfile'] });
   assert.equal(parseFinding('Makefile — the test target skips the build').path, 'Makefile');
   assert.equal(postMergeFollowUp(owed, M, parseFinding('deploy/Containerfile has no healthcheck'), 0).plannedFiles[0], 'deploy/Containerfile');
-  assert.deepEqual(parseFinding('AC-4, src/model/post-merge-review.ts:80-84 and :100 — the path is lost'), { text: 'AC-4, src/model/post-merge-review.ts:80-84 and :100 — the path is lost', path: 'src/model/post-merge-review.ts', line: 80 });
+  assert.deepEqual(parseFinding('AC-4, src/model/post-merge-review.ts:80-84 and :100 — the path is lost'), { text: 'AC-4, src/model/post-merge-review.ts:80-84 and :100 — the path is lost', path: 'src/model/post-merge-review.ts', line: 80, paths: ['src/model/post-merge-review.ts'] });
   assert.equal(parseFinding('.gitignore misses dist').path, '.gitignore');
+  // A finding naming several files plans its follow-up on every one of them, so the fix may edit each.
+  const twoFiles = parseFinding('src/a.ts:12 and src/b.ts:20 — the two files disagree; see `src/a.ts` and Makefile, not work.postMergeReview');
+  assert.deepEqual([twoFiles.path, twoFiles.line, twoFiles.paths], ['src/a.ts', 12, ['src/a.ts', 'src/b.ts', 'Makefile']]);
+  const both = postMergeFollowUp(owed, M, twoFiles, 0);
+  assert.deepEqual(both.plannedFiles, ['src/a.ts', 'src/b.ts', 'Makefile']);
+  assert.match(both.description, /BLOCKING in src\/a\.ts:12 \(also src\/b\.ts, Makefile\)/);
   for (const prose of ['AC-4 — i.e. version 1.2 regressed', 'read/write races', 'see https://example.com/a.html']) assert.equal(parseFinding(prose).path, null, prose);
   const followUp = postMergeFollowUp(owed, M, parseFinding('src/feature.ts:12 — the flag is never read'), 0);
   assert.deepEqual([followUp.type, followUp.priority, followUp.plannedFiles, followUp.policy, followUp.origin], ['bug', 1, ['src/feature.ts'], { checks: ['test'], review: true }, { reviewFollowUps: { parent: 'GY-10', findings: [{ path: 'src/feature.ts', text: 'src/feature.ts:12 — the flag is never read', ref: M }] } }]);
