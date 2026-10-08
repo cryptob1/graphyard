@@ -117,7 +117,7 @@ test('manual:loaded-revision-equals-checkout-head-after-restart — the loaded-r
   assert.equal(foreignDay.state.release?.commit, to, 'the restarted process reports the checkout\'s revision as its release');
 });
 
-test('manual:fault-filing-dirty-checkout-succeeds-after-scenario-fix — over the same day the doctor files the guard fault as it wrote it: the loop class, refused by the real control plane for its unregistered e2e scenario, is re-sent once with that proof manual and accepted, one open item for the class; the configuration class is deduplicated against the open item already covering it; filings queued through a plane outage converge with bounded create attempts, nothing stays pending or failed, and later runs file nothing twice', { timeout: 600_000 }, async () => {
+test('manual:fault-filing-dirty-checkout-succeeds-after-scenario-fix — over the same day the doctor files the guard fault as it wrote it: the loop class, refused by the real control plane for its unregistered e2e scenario, is refused and dropped — recorded failed under fix-item and escalated by name for the master to file by hand, never re-filed; the configuration class is deduplicated against the open item already covering it; filings queued through a plane outage converge with bounded create attempts, nothing stays pending or failed, and the dropped filing is never kept for a retry', { timeout: 600_000 }, async () => {
   const day = await restartDay('foreign', true), r = day.restartDay!, { outage } = doctor;
   assert.deepEqual(day.violations, [], 'every system invariant holds after every cycle');
   assert.deepEqual(day.failures, [], 'no cycle failed');
@@ -129,34 +129,26 @@ test('manual:fault-filing-dirty-checkout-succeeds-after-scenario-fix — over th
   const pendingKeys = new Set(r.pending.flatMap(sample => sample.keys)), outageCycles = r.pending.filter(sample => sample.elapsed >= outage.from && sample.elapsed < outage.to).length;
   assert.ok(pendingKeys.size >= 1 && outageCreates.length <= pendingKeys.size * (1 + Math.ceil(Math.log2(Math.max(2, outageCycles)))), `${outageCreates.length} creates for ${pendingKeys.size} pending filing(s) over ${outageCycles} cycles: bounded by the retry backoff`);
   assert.ok(r.pending.some(sample => sample.elapsed >= outage.from && sample.elapsed < outage.to && sample.keys.length > 0), 'the filing stood pending through the outage');
-  // The plane back: the real engine refuses the unregistered scenario once, the loop re-sends the
-  // filing at once with that proof manual, and the plane accepts it — one item for the class.
+  // The plane back: the real engine refuses the unregistered scenario once with a 409; the filing is
+  // malformed, so it is dropped (GY-1530) and escalated by name, not mended and not retried.
   const afterOutage = r.creates.filter(create => create.elapsed >= outage.to);
-  assert.equal(afterOutage.length, 2, `after the outage the filing cost exactly two creates: ${JSON.stringify(afterOutage)}`);
-  const [refused, accepted] = afterOutage;
+  assert.ok(afterOutage.length >= 1 && afterOutage.every(create => /^refused: Graphyard refused work \(409\)/.test(create.outcome)), `after the outage every create was refused, none accepted: ${JSON.stringify(afterOutage)}`);
+  const [refused] = afterOutage;
   assert.match(refused.outcome, new RegExp(`^refused: Graphyard refused work \\(409\\): Register E2E scenario ${scenario} before creating work that requires it`), 'the control plane refuses the unregistered scenario');
   assert.deepEqual(refused.proofs, [['manual:dirty-checkout-detach-restart'], [`e2e:${scenario}`]]);
-  assert.equal(accepted.outcome, 'accepted');
-  assert.deepEqual(accepted.proofs, [['manual:dirty-checkout-detach-restart'], [`manual:${scenario}`]], 'the re-sent filing carries that proof as manual and every other proof as written');
-  assert.ok(accepted.elapsed - refused.elapsed < minute && accepted.faultClass === 'loop' && refused.faultClass === 'loop', 'the mended filing is re-sent in the same cycle');
   assert.ok(r.creates.every(create => create.faultClass === 'loop'), `the doctor's configuration filing never reached the plane: ${JSON.stringify(r.creates.filter(create => create.faultClass !== 'loop'))}`);
-  const items = await store.list(), loopItems = items.filter(item => closesFaultClass(item) === 'loop');
-  assert.equal(loopItems.length, 1, `one item for the loop class: ${loopItems.map(item => item.key).join(', ')}`);
-  assert.ok(loopItems[0].stage !== 'done' && !loopItems[0].closure, 'it stands open');
-  assert.deepEqual(loopItems[0].criteria.map(criterion => criterion.proofs), [['manual:dirty-checkout-detach-restart'], [`manual:${scenario}`]], 'the plane holds the filing as mended');
+  const items = await store.list();
+  assert.equal(items.filter(item => closesFaultClass(item) === 'loop').length, 0, 'the refused filing created no item');
   assert.ok(items.some(item => closesFaultClass(item) === 'configuration' && item.stage !== 'done'), 'the loop\'s own recurring-fault item already covers the configuration class');
-  const notes = Object.values(day.state.actions).map(action => action.detail);
+  const actions = Object.values(day.state.actions), notes = actions.map(action => action.detail);
   assert.ok(notes.some(detail => detail.startsWith('Not filing "Master loop cannot restart or self-upgrade: the dirty-checkout guard stands for hours": the configuration fault class is already covered by an open item')), 'the configuration filing is deduplicated against it');
-  assert.ok(notes.some(detail => new RegExp(`^Filed ${loopItems[0].key} \\(P1\\) for the loop fault on a later cycle: .*; e2e:${scenario} named no registered scenario and was filed as manual:${scenario}$`).test(detail)), `the filing's record says what was mended: ${notes.filter(detail => detail.startsWith('Filed ')).join(' | ')}`);
-  // Convergence: nothing stays pending or failed; the other filings queued during the outage were
-  // dropped on their retry as covered, and every later run deduplicates against the open item.
+  assert.ok(actions.some(action => action.state === 'failed' && /is not filed again/.test(action.detail) && action.detail.includes(scenario)), 'the refusal is recorded failed, naming the scenario');
+  assert.ok(day.state.faults.instances.some(instance => instance.kind === 'fix-item'), 'the refusal opened a fix-item (proof) instance');
+  assert.ok(actions.some(action => action.kind === 'escalation' && action.detail.includes(`e2e:${scenario}`) && /register it, or file the item by hand/.test(action.detail)), 'the escalation names the unregistered scenario for the master');
+  // Convergence: nothing stays pending, and the dropped filing is never kept for a retry.
   assert.deepEqual(r.pending.at(-1)!.keys, [], 'no filing is left pending at the end of the day');
-  assert.ok(r.pending.find(sample => sample.elapsed >= outage.to + 30 * minute)!.keys.length === 0, 'the queue drained within half an hour of the plane returning');
-  assert.deepEqual(Object.values(day.state.actions).filter(action => action.state === 'failed' && /could not file/i.test(action.detail)), [], 'no filing stands failed');
-  assert.ok(notes.filter(detail => /on retry: the loop fault class is now covered by an open item/.test(detail)).length >= 1, 'the duplicate queued filings were dropped as covered');
-  const retried = day.state.faults.instances.filter(instance => /could not file/i.test(instance.text));
-  assert.ok(retried.length >= 1 && retried.every(instance => Date.parse(instance.at) - day.dayStart < outage.to), `the only filing faults are the retries the outage refused again: ${retried.map(instance => `${instance.at} ${instance.text.slice(0, 80)}`).join(' | ')}`);
-  const laterRuns = day.state.doctor.runs.filter(run => Date.parse(run.at) - day.dayStart > accepted.elapsed);
-  assert.ok(laterRuns.length >= 6 && laterRuns.every(run => run.state === 'reported' && run.filed.every(entry => entry.deduplicated)), `every later doctor run (${laterRuns.length}) deduplicated its filings against the open items: ${JSON.stringify(laterRuns.filter(run => run.filed.some(entry => !entry.deduplicated)).map(run => run.filed))}`);
-  assert.equal(r.creates.filter(create => create.elapsed > accepted.elapsed).length, 0, 'no create after the class was filed');
+  // GY-1530: the refusal outlives its run. The simulated doctor re-emits the same filing every run, but the
+  // content create refused is remembered, so no later run submits it: exactly one create was refused.
+  assert.equal(afterOutage.length, 1, `submissions stop after the first content refusal: ${JSON.stringify(afterOutage)}`);
+  assert.equal(day.state.doctor.refusedFilings.length, 1, 'the refused content is remembered on the cursor');
 });

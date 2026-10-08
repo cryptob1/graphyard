@@ -268,6 +268,23 @@ test('unit:fault-catalogue-action-kinds — a failed fault or diagnosis action i
   assert.deepEqual(posting.faults.instances.map(entry => [entry.kind, entry.faultClass]), [['action:fault', 'unclassified'], ['plane-unavailable', 'deployment']]);
 });
 
+test('unit:fault-classes-catalogue-total — after GY-1530 every source\'s kind is still listed exactly once, the step kinds action:fault/action:diagnosis stay parked under unclassified for emitters that pass no cause, and the causes the doctor and the diagnosis step now pass are catalogued under their classes', async () => {
+  const { noDiagnosisKind } = await import('../src/daemon/diagnosis.js'); // dynamic: the exercise runs this case on the base tree, where the symbol is absent
+  const listed = faultClasses.flatMap(faultClass => faultCatalogue[faultClass].map(kind => ({ kind, faultClass })));
+  for (const { kind } of listed) assert.equal(listed.filter(entry => entry.kind === kind).length, 1, `${kind} is listed under exactly one class`);
+  assert.equal(new Set(faultKinds).size, faultKinds.length, 'no kind is listed twice');
+  assert.deepEqual(new Set(faultKinds), new Set(listed.map(entry => entry.kind)));
+  for (const kind of [...workAttentionCauses, ...installationSources, ...escalationTriggers.map(escalationFaultKind), ...daemonActionKinds.map(daemonActionFaultKind)]) assert.ok(isFaultKind(kind), `${kind} is catalogued`);
+  // The step kinds name no cause (GY-1338): an emitter that still passes none lands here, never in loop or elsewhere.
+  assert.deepEqual([...faultCatalogue.unclassified], ['unclassified', 'action:fault', 'action:diagnosis']);
+  for (const kind of ['action:fault', 'action:diagnosis']) assert.equal(storeAction(emptyDaemonState(config()), kind, { kind: kind.slice(7) as 'fault' | 'diagnosis', work: null, principal: null, state: 'failed', detail: 'no cause passed', attempts: 1, epoch: null, cycle: 1, at: iso(0) }).faultClass, 'unclassified');
+  // GY-1530's causes: a filing or fix item create refuses is the proof class's fix-item; a diagnostician whose runs were stopped at their bound is session-liveness's overlong-session.
+  assert.equal(faultClassOf('fix-item'), 'proof');
+  assert.equal(faultClassOf('overlong-session'), 'session-liveness');
+  assert.equal(faultClassOf(noDiagnosisKind([{ runtime: 'pi', result: 'timeout' }, { runtime: 'pi', result: 'timeout' }])!), 'session-liveness');
+  assert.equal(faultClassOf('plane-unavailable'), 'deployment');
+});
+
 test('unit:fault-classes — the fix-item kind a diagnosis\'s refused fix item carries is listed exactly once, under proof', () => {
   assert.equal(faultClasses.filter(name => (faultCatalogue[name] as readonly string[]).includes('fix-item')).join(), 'proof');
   assert.equal(faultKinds.filter(kind => kind === 'fix-item').length, 1);
