@@ -4,7 +4,7 @@ import { readFile, realpath, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import type { Work } from '../model.js';
-import { containmentFailureNote, setupLine, supervise, systemdContainment } from '../supervisor.js';
+import { containmentFailureNote, controlPlaneRestartWindowMs, restartTolerantApi, setupLine, supervise, systemdContainment } from '../supervisor.js';
 import { attributeConflicts, hasConflictMarkers, localScopeFindings, managedServerUrl, regenerateManagedBlocks } from '../sync.js';
 import { acknowledgeContainment, containmentCredentials, establishContainment, revalidateContainment, settleContainment } from '../quarantine.js';
 import { environmentBlocker, environmentFailure } from '../worker-sandbox.js';
@@ -159,10 +159,14 @@ export const workspaceCommands = defineCommands([
       const { id, args, api, base } = context; const epoch = Number(args[0]); const separator = args.indexOf('--');
       if (!id || !Number.isSafeInteger(epoch) || epoch <= 0 || separator < 0 || !args[separator + 1]) throw new Error('Usage: watch GY-N EPOCH -- command args');
       console.error(setupLine(id, epoch));
-      const work = await resolveWork(api, id);
+      // Every call the launch cannot do without rides out a control-plane restart (GY-1506): a
+      // deploy answering 502s or "retry shortly" for a minute must not end the attempt before it starts.
+      const setupUntil = performance.now() + controlPlaneRestartWindowMs;
+      const setupApi = restartTolerantApi(api, () => setupUntil);
+      const work = await resolveWork(setupApi, id);
       const workspace = work.workspaces.find((w: any) => w.epoch === epoch); const hostId = context.individualHostId();
       if (!workspace || workspace.host !== hostId || await realpath(process.cwd()) !== await realpath(workspace.path)) throw new Error('Run watch from the assigned workspace on its registered host');
-      const workerStatus = await api('status'); if (workerStatus.actor?.role !== 'worker') throw new Error('watch requires a worker credential; never pass operator or producer credentials to implementation processes');
+      const workerStatus = await setupApi('status'); if (workerStatus.actor?.role !== 'worker') throw new Error('watch requires a worker credential; never pass operator or producer credentials to implementation processes');
       const watchToken = await context.individualToken();
       process.env.GRAPHYARD_URL = base; process.env.GRAPHYARD_TOKEN = watchToken;
       process.env.GRAPHYARD_CLI = await context.activeCliPath(); process.env.GRAPHYARD_HOST_ID = hostId;
@@ -189,6 +193,9 @@ export const workspaceCommands = defineCommands([
           throw error;
         }
       };
+      // Settlement comes at shutdown, long after setup: its window opens at its first call.
+      let settleUntil = 0;
+      const settleApi = restartTolerantApi(api, () => settleUntil ||= performance.now() + controlPlaneRestartWindowMs);
       // The session's own push credential (GY-999), when the launcher minted one for this attempt:
       // refreshed after each renewal before GitHub's expiry, and withdrawn when the session ends.
       const mintPush = () => api(`work/${work.id}/push-credential`, { epoch }, randomUUID()) as Promise<MintedPushCredential>;
@@ -200,19 +207,19 @@ export const workspaceCommands = defineCommands([
             // The quarantine records the exact scope unit and supervisor pid the session is
             // launched in, and launch is refused unless the confirmed record names them.
             establish: () => establishContainment(
-              requestId => api(`work/${work.id}/quarantine`, { epoch, settlementHash: containment!.settlementHash, ...(scope ? { scope } : {}) }, requestId),
+              requestId => setupApi(`work/${work.id}/quarantine`, { epoch, settlementHash: containment!.settlementHash, ...(scope ? { scope } : {}) }, requestId),
               { epoch, settlementHash: containment!.settlementHash, exclusiveResources, requestId: containment!.requestId, ...(scope ? { scope } : {}) },
             ),
-            revalidate: async () => revalidateContainment(await api('work-snapshot?view=coordination'), {
+            revalidate: async () => revalidateContainment(await setupApi('work-snapshot?view=coordination'), {
               workId: work.id, principal: workerStatus.actor.id, epoch, settlementHash: containment!.settlementHash,
               exclusiveResources, workspace,
             }),
             acknowledge: () => acknowledgeContainment(
-              requestId => api(`work/${work.id}/launch`, { epoch, settlementHash: containment!.settlementHash }, requestId),
+              requestId => setupApi(`work/${work.id}/launch`, { epoch, settlementHash: containment!.settlementHash }, requestId),
               { principal: workerStatus.actor.id, epoch, settlementHash: containment!.settlementHash, exclusiveResources, requestId: launchRequestId },
             ),
             settle: () => settleContainment(
-              (requestId, body) => api(`work/${work.id}/settle`, body, requestId),
+              (requestId, body) => settleApi(`work/${work.id}/settle`, body, requestId),
               { epoch, settlementToken: containment!.settlementToken, settlementHash: containment!.settlementHash, exclusiveResources, requestId: settlementRequestId },
             ), report: failure => api(`work/${work.id}/request`, containmentFailureNote(epoch, failure), randomUUID()), // a fence it cannot lower goes on the record
           } : undefined,
