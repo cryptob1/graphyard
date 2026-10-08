@@ -123,10 +123,17 @@ function attentionLaunchKind(text: string): LedgerKind | null {
 export async function resourceStatus(root: string, master: MasterConfig, observed: {
   reviews: ReviewRecord[] | null; producers: ProducerRecord[] | null; agents: HerdrAgent[] | null; work: Work[];
   loop: (NonNullable<ResourceInputs['loop']> & { lock: { pid: number; host: string } | null }) | null;
-}, deps: { fetcher?: typeof fetch; run?: (command: string, args: string[]) => string; now?: number; cursor?: () => Promise<Parameters<typeof owedUpgrade>[0]> } = {}) {
+}, deps: { fetcher?: typeof fetch; run?: (command: string, args: string[]) => string;
+  /** The instant the readings are judged at: the snapshot's (GY-1379). */
+  now?: number;
+  /** The host's clock, for the age `ps` answers (GY-1547); a test's stand-in for Date.now. */
+  clock?: () => number;
+  cursor?: () => Promise<Parameters<typeof owedUpgrade>[0]> } = {}) {
   const now = deps.now ?? Date.now();
   const lock = observed.loop?.lock;
-  const revision = lock && lock.host === master.hostId ? loadedRevision(root, lock.pid, deps.run, now) : null;
+  // The loop's age is counted back from the host's clock as `ps` is asked, never from the snapshot's
+  // instant the readings judge at (GY-1547): the two can lie a cycle's steps apart.
+  const revision = lock && lock.host === master.hostId ? loadedRevision(root, lock.pid, deps.run, (deps.clock ?? Date.now)()) : null;
   // The remediation still in flight (GY-1198): the restart the self-upgrade owes, from the loop's
   // cursor, and the panes the reclaim pass has seen unowned, from its own record.
   const upgrade = owedUpgrade(await (deps.cursor ?? (() => readDaemonState(root, master)))().catch(() => null));

@@ -242,10 +242,13 @@ function liveOwner(profile: ReturnType<typeof roleProfiles>[number], name: strin
  * When the session last holding `name` settled: the newest ledger record on the name for a reviewer
  * or producer, the newest implementation session of the principal for a worker. Null when nothing
  * records one — a reviewer or producer record is written before its pane, so such a holder has none.
+ * A worker session that names its pane settles that pane alone (GY-1547): a pane launched after
+ * the snapshot was taken is named by no session in it, and the principal's sessions on other panes
+ * settle their own, never the new one. A session naming no pane settles the name as before.
  */
-function holderSettledAt(profile: ReturnType<typeof roleProfiles>[number], name: string, input: Pick<ResourceInputs, 'reviews' | 'producers' | 'work'>) {
+function holderSettledAt(profile: ReturnType<typeof roleProfiles>[number], name: string, input: Pick<ResourceInputs, 'reviews' | 'producers' | 'work'>, pane?: string | null) {
   if (profile.role === 'worker') {
-    const times = input.work.flatMap(item => (item.sessions ?? []).filter(handle => handle.kind === 'implementation' && handle.principal === profile.principal)
+    const times = input.work.flatMap(item => (item.sessions ?? []).filter(handle => handle.kind === 'implementation' && handle.principal === profile.principal && (!pane || !handle.pane || handle.pane === pane))
       .map(handle => Date.parse(handle.endedAt ?? handle.updatedAt))).filter(Number.isFinite);
     return times.length ? Math.max(...times) : null;
   }
@@ -309,14 +312,22 @@ export const resourceRegistry: ResourceDefinition[] = [
       // stood seen-unowned for the bound. A holder the pass has not seen, or with no pane it could
       // close, keeps the settling clock.
       const seenAt = (agent: HerdrAgent) => { const first = agent.pane_id ? input.reclaimSeen?.[agent.pane_id] : undefined; const at = first ? Date.parse(first) : NaN; return Number.isFinite(at) ? at : null; };
+      // A holder nothing in the snapshot settled — no record or session names it — whose status Herdr
+      // does not report as finished is a launch the snapshot predates (its session and lease land in
+      // the next one) or a pane only the reclaim pass judges, on its own clock, as a recordless launch
+      // that may be stuck before its record lands (GY-1192): it is overdue once that clock has run the
+      // bound, never at once (GY-1547). A finished holder nothing settled is still overdue at once.
+      const unplaced = (agent: HerdrAgent) => holderSettledAt(profile, agent.name!, input, agent.pane_id) === null && agent.agent_status !== 'idle' && agent.agent_status !== 'done';
       const overdue = stale.filter(agent => {
         const seen = seenAt(agent);
         if (seen !== null) return input.now - seen >= nameReclaimBoundMs;
-        const at = holderSettledAt(profile, agent.name!, input); return at === null || input.now - at >= nameReclaimBoundMs;
+        if (unplaced(agent)) return false;
+        const at = holderSettledAt(profile, agent.name!, input, agent.pane_id); return at === null || input.now - at >= nameReclaimBoundMs;
       });
       const late = (agent: HerdrAgent) => seenAt(agent) !== null ? `not reclaimed within ${nameReclaimBoundMs / 60_000} minutes of the reclaim pass first seeing it unowned` : `not reclaimed within ${nameReclaimBoundMs / 60_000} minutes of settling`;
+      const underWay = (agent: HerdrAgent) => seenAt(agent) !== null ? ` (seen unowned since ${new Date(seenAt(agent)!).toISOString()})` : unplaced(agent) ? ' (no session of this snapshot names the pane; the reclaim pass judges it on its own clock)' : '';
       return { id: profile.name, used: held.length, bound: profileConcurrency(profile), reclaimable: stale.length, overdue: overdue.length,
-        detail: held.length ? `${profile.role} profile ${profile.name}: ${held.map(agent => `${agent.name} (${agent.agent_status ?? 'unknown'}${overdue.includes(agent) ? `, no live session, ${late(agent)}` : stale.includes(agent) ? `, no live session, reclaim under way${seenAt(agent) !== null ? ` (seen unowned since ${new Date(seenAt(agent)!).toISOString()})` : ''}` : ''}${agent.pane_id ? `, pane ${agent.pane_id}` : ''})`).join(', ')}` : `${profile.role} profile ${profile.name}: no name held` };
+        detail: held.length ? `${profile.role} profile ${profile.name}: ${held.map(agent => `${agent.name} (${agent.agent_status ?? 'unknown'}${overdue.includes(agent) ? `, no live session, ${late(agent)}` : stale.includes(agent) ? `, no live session, reclaim under way${underWay(agent)}` : ''}${agent.pane_id ? `, pane ${agent.pane_id}` : ''})`).join(', ')}` : `${profile.role} profile ${profile.name}: no name held` };
     }),
   },
   {
@@ -625,11 +636,18 @@ const runCommand: Run = (command, args) => execFileSync(command, args, { encodin
  */
 const touchesCodeCache = new WeakMap<Run, Map<string, boolean>>();
 const touchesCodeCacheBound = 1_000;
-export function loadedRevision(root: string, pid: number, run: Run = runCommand, now = Date.now()) {
+/**
+ * `measuredAt` is the instant `ps` is asked, which the age it answers counts back from: the host's
+ * clock, never the instant a reading is judged at (GY-1547). A reading judges its snapshot at the
+ * snapshot's own instant (GY-1379), tens of seconds before the faults step asks `ps`; an age
+ * counted back from that earlier instant placed the loop's start before the checkout move its own
+ * restart had followed, so the reading named the revision before the move as loaded.
+ */
+export function loadedRevision(root: string, pid: number, run: Run = runCommand, measuredAt = Date.now()) {
   try {
     const elapsed = Number(run('ps', ['-o', 'etimes=', '-p', String(pid)]).trim());
     if (!Number.isFinite(elapsed)) return null;
-    const startedAt = Math.floor(now / 1000) - elapsed;
+    const startedAt = Math.floor(measuredAt / 1000) - elapsed;
     const checkout = run('git', ['-C', root, 'rev-parse', 'HEAD']).trim();
     // The reflog entry's own time (`%gd` under --date=unix is HEAD@{<seconds>}), not the commit's:
     // a checkout that fast-forwards onto an older commit moved after the process started.
@@ -921,6 +939,9 @@ export async function reclaimResources(root: string, config: Pick<ProfileSet, 'r
       if (!released && (!gates.reclaimable(agent) || wait === null || (settled && now - settledAt(settled) < finishedSessionGraceMs))) continue;
       const first = file.seen[agent.pane_id] ?? report.at;
       if (!released && now - Date.parse(first) < wait!) { seen[agent.pane_id] = first; continue; }
+      // The sighting stands through the close (GY-1547): a close that fails leaves the pane held, and
+      // the reading flags it once this clock has run the bound, instead of the clock starting over.
+      seen[agent.pane_id] = first;
       // A recordless pane that never finished is closed as never started, the cause the launcher's
       // retry policy keys on, rather than as a session that merely left no record.
       const neverStarted = !settled && wait !== finishedSessionGraceMs;
@@ -978,10 +999,11 @@ export async function reclaimResources(root: string, config: Pick<ProfileSet, 'r
       // `unownedPaneConfirmMs` and no launch of the principal is under way (GY-1166); only a running one is spared.
       const recognised = finished.includes(agent.agent_status ?? '');
       if (!gates.reclaimable(agent) || (!recognised && launchingWorker(worker.principal, observed.work, now))) continue;
-      const settled = holderSettledAt(profile, agent.name!, { reviews: [], producers: [], work: observed.work });
+      const settled = holderSettledAt(profile, agent.name!, { reviews: [], producers: [], work: observed.work }, agent.pane_id);
       if (settled !== null && now - settled < finishedSessionGraceMs) continue;
       const first = file.seen[agent.pane_id!] ?? report.at;
       if (now - Date.parse(first) < (recognised ? finishedSessionGraceMs : unownedPaneConfirmMs)) { seen[agent.pane_id!] = first; continue; }
+      seen[agent.pane_id!] = first; // kept through the close attempt (GY-1547), as in step 2
       try {
         await close(agent.pane_id!);
         report.closed.push({ name: agent.name!, pane: agent.pane_id!, reason: recognised ? 'its worker session finished and holds no active assignment' : `its worker session holds no active assignment and Herdr reports it ${agent.agent_status ?? 'with no status'}` });
