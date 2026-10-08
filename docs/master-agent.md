@@ -9,7 +9,7 @@ Keep cycling: `master status`; `master run` dispatches (`schedule.order`); merge
 
 `master run` is unit `graphyard-master.service` ([supervision](onboarding.md#the-loop-must-be-supervised)); on `daemon.liveness` `stalled`/`absent`: `systemctl --user restart graphyard-master`, never from a [dirty or non-forward checkout](master-agent-sessions.md#the-coordinator-checkout-is-confined-at-the-os-level).
 
-**Cycle cadence.** The loop sleeps `run.intervalSeconds`, at most 30 s while anything is actionable. The dispatcher tick wakes it early, once per new subject its next cycle acts on, no sooner than `run.dispatchIntervalSeconds` after the cycle (`woken Ns before the … wait ended: REASONS`), never cutting a failed cycle's backoff.
+**Cycle cadence.** The loop sleeps `run.intervalSeconds`, at most 30 s while anything is actionable. The dispatcher tick wakes it early, once per new subject, no sooner than `run.dispatchIntervalSeconds` after the cycle (`woken Ns before the … wait ended: REASONS`), never cutting a failed cycle's backoff.
 
 ### System-driven items
 

@@ -14,7 +14,7 @@ Only Graphyard writes to main.
 
 ## Merge writer
 
-Oldest head first, one in flight: `merge.intent`; trial on the merge commit (affected tests plus the item's proof files); `git push --force-with-lease` on the tested tip with `run.mergeWriter.deployKeyFile` (`~/.config/graphyard/<install>/deploy-key`) alone; `merge.pushed`; fetch; `merge.reconciled` delivers. A moved tip re-trials `retrials` (3) times; a failed trial reworks (`mergeWriter.reworks` until confirmed). Reconcile rule: before merging, an unpushed intent main's first parent holds delivers, else re-queues. `master status`: `mergeWriter.queue`.
+Oldest head first, one in flight: `merge.intent`; trial on the merge commit (affected tests plus the item's proof files); `git push --force-with-lease` on the tested tip with `run.mergeWriter.deployKeyFile` (`~/.config/graphyard/<install>/deploy-key`) alone; `merge.pushed`; fetch; `merge.reconciled` delivers. A moved tip re-trials `retrials` (3) times; a push rejected on an unmoved tip stays queued; a failed trial reworks (`mergeWriter.reworks` until confirmed). Reconcile rule: before merging, an unpushed intent main's first parent holds delivers, else re-queues. `master status`: `mergeWriter.queue`.
 
 ## Removed and kept
 
@@ -26,7 +26,7 @@ Kept: leases and epochs, the transactional ledger, two risk lanes, UAT on a pinn
 
 `merger` selects the mode per install, `github` (default) or `control-plane`: an admin-only ledger event, never read from graphyard.json. `graphyard master merger [MODE --reason TEXT]`, `/api/status` `mergeWriter`, `GET`/`POST /api/merger` (admin, `reason`, `Idempotency-Key`). Under `control-plane` launches get no push credential or keyring proxy; an unreadable merger refuses launch.
 
-`POST /api/work/:id/merge-record` (coordinator only, `Idempotency-Key`) appends one event per step (`intent`, `trial`, `pushed`, `reconciled`, `refused`) for the submitted head; `pushed`/`reconciled` name the open intent's merge commit, `reconciled` one main holds, else 409.
+`POST /api/work/:id/merge-record` (coordinator only, `Idempotency-Key`) appends one event per step (`intent`, `trial`, `pushed`, `reconciled`, `refused`); `pushed`/`reconciled` name the open intent's merge commit, `reconciled` one main holds, else 409.
 
 ## Rollout
 

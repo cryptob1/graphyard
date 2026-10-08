@@ -37,7 +37,7 @@ export const emptyMergeWriterState = (): MergeWriterState => mergeWriterStateSch
 
 /** The step's ports (merge-writer/executor.ts) and the one read that switches it on: the recorded merger. */
 export interface MergeWriterReads extends MergePorts {
-  /** The install's recorded merger (`/api/status` `mergeWriter.merger`); the step acts only under `control-plane`. */
+  /** The install's recorded merger (`/api/status` `mergeWriter.merger`), read afresh before every merge decision; the step acts only under `control-plane`. */
   merger(): Promise<MergerMode>;
 }
 /** The idempotency key one recorded step keeps across retries. */
@@ -76,6 +76,7 @@ export function mergeWriterReads(config: Pick<MasterConfig, 'baseBranch' | 'run'
       const proofFiles = await proofTestFiles(run, root, mergeSha, proofs);
       return (options.trial ?? runMergeTrial)({ root, base: options.base, mergeSha, changedFiles: files, proofs, proofFiles, timeoutMs: shadow.timeoutMinutes * 60_000, key: item.key, run, environment: options.environment });
     },
+    // Only git's own stale-lease wording is a rejection the executor re-reads the tip for; a remote's refusal (a branch rule, a hook) or a transport failure is thrown as it came.
     push: async (mergeSha, baseTip) => {
       try { await run('git', ['-C', root, ...pushArgs(base, baseTip, mergeSha)], { env: pushEnvironment(settings.deployKeyFile, options.environment) }); return 'pushed'; }
       catch (error) { if (staleLeaseRejection(output(error))) return 'rejected'; throw error; }
@@ -138,7 +139,8 @@ export async function requestPendingReworks(cycle: Pick<Cycle, 'state' | 'effect
 
 /**
  * Cycle step 6b' (right after the merge step). Active only while the recorded merger is
- * `control-plane` (AC-6); without `effects.mergeWriter` (a loop wired without the reads, or a
+ * `control-plane` (AC-6), read afresh each time a merge decision is due, so a switch to `github`
+ * stops the next merge; without `effects.mergeWriter` (a loop wired without the reads, or a
  * test) it does nothing. Each cycle: the merge that settled since the last one is recorded
  * (delivered, refused, re-queued or failed), and every rework a trial failure grounds is requested
  * until the server confirms it (AC-3); then, with nothing in flight, every intent a crash left open is reconciled
