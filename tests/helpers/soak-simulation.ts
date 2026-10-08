@@ -176,6 +176,13 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   staleRelease?: { item: number; racing: number; backlog: number; readMs: number };
   /** GY-1541: the agent registry answers the startup-readiness 503 of a deploying plane to the loop's every registry reconcile in this window (ms from the day's start), then answers. */
   readiness?: { from: number; to: number };
+  /**
+   * GY-1561: item `item`'s first `launches` launches are blocked on a dialog before the runtime starts. The
+   * loop's own `registeredLaunch` ends each one's record ("the launch failed before the session started",
+   * no pane), and its claim is renewed and released only `holdMs` later, so the loop's cycles meet the
+   * ended record under a live lease, as GY-1525's epochs 14 and 16 were met.
+   */
+  failedLaunch?: { item: number; launches: number; holdMs: number };
   /** GY-1329: item `item`'s flaky workflow run keeps running its other jobs for `ms` after its `test` check failed. */
   unfinishedRun?: { item: number; ms: number };
   /** GY-417: dispatch through the real `dispatchWork` on a real master root with a two-account launch profile. */
@@ -663,6 +670,8 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   // item fails four times, each for a different cause, then launches.
   const failing = { launches: [] as { key: string; epoch: number; at: number; failure: string | null }[], blocks: [] as { key: string; reason: string; at: number; refused: boolean }[],
     unblocked: null as number | null, blockedAt: null as number | null, blockerSeen: [] as { key: string; at: number }[] };
+  // GY-1561: the launches blocked before their runtime started, and the claims each left live.
+  const failedLaunches = { launches: [] as { key: string; epoch: number; at: number }[], held: [] as { work: string; epoch: number; principal: Principal; releaseAt: number }[] };
   const failureOf = (n: number, key: string, epoch: number): string | null => {
     if (!options.dispatchFailing) return null;
     const tries = failing.launches.filter(entry => entry.key === key).length;
@@ -732,6 +741,12 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
       workspaceFailures.push({ key, epoch, profile: profile.name, at: clock.now() - dayStart });
       throw new ChildProcessError(process.execPath, ['graphyard.mjs', 'worktree', key, String(epoch), 'main'], { stdout: '', status: 1, signal: null, timedOut: false,
         stderr: `${held}. The claim was released as a workspace failure, so the attempt costs nothing; inspect the event and repair the host before it redispatches.\n` });
+    }
+    if (options.failedLaunch?.item === n && failedLaunches.launches.filter(entry => entry.key === key).length < options.failedLaunch.launches) {
+      const blocked = `the claude runtime is blocked before it is ready in pane ${world}blocked${epoch} (Herdr reports it blocked); the pane last showed: "Enter to confirm · Esc to cancel"`;
+      failedLaunches.launches.push({ key, epoch, at: clock.now() - dayStart });
+      failedLaunches.held.push({ work: work.id, epoch, principal, releaseAt: clock.now() + options.failedLaunch.holdMs });
+      throw new Error(blocked);
     }
     const failure = failureOf(n, key, epoch);
     if (options.dispatchFailing) failing.launches.push({ key, epoch, at: clock.now(), failure });
@@ -844,6 +859,12 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     if (session.settlementToken) await engine.execute(principalOf(session.profile), 'settle', session.work, { epoch: session.epoch, settlementToken: session.settlementToken }, id());
   };
   const workersTick = async (now: number) => {
+    // The launcher's supervisor keeps each failed launch's claim renewed until it releases it.
+    for (const held of [...failedLaunches.held]) {
+      if (now < held.releaseAt) { await engine.execute(held.principal, 'heartbeat', held.work, { epoch: held.epoch }, id()); continue; }
+      failedLaunches.held.splice(failedLaunches.held.indexOf(held), 1);
+      await engine.execute(held.principal, 'release', held.work, { epoch: held.epoch }, id());
+    }
     for (const session of sessions.filter(entry => entry.state === 'working' || entry.state === 'idling' || entry.state === 'credential-blocked')) {
       if (session.diesAt !== null && now >= session.diesAt) { herdr.kill(session.pane); session.state = 'dead'; continue; }
       // GY-999: the push is refused for want of a GitHub login, and the session records the blocker
@@ -2855,7 +2876,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     decided, misreads, prompts, screens, heldAccounts, approverAccounts, retryReset, exitedLive, exitedClosed, exitedRowsSeen, reassign, workspaceFailures, workspaceCooled, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, fenced, mergeStallSightings, master, baseFailure,
     blockerEvents, blockerProbes, blockerDecisions, blockerActions, blockerKeysPeak, attempts, lanesSeen, laneApplications, approverWorks, approverDecisions, failover, webhook, remedies, observeRequests, starvation, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size }, mechanical: { ledger, botRounds, misclassified, reviewHolds }, shared, charges: { ...charged, b: charged.b.length, instancesSeen: [...charged.instancesSeen], restarts: chargeRestarts },
     wakes, lateReading, staleMerges, restartLog, hostDay, guardDay, mainWatchDay, budgetDay, observationDay, deploymentDay, decompositionDay: decompositionHistory, diagnosisRaces, diagnosisRequestRaces, transientRefused, lateReads, staleReleaseDay, drain, acceptanceDay: acceptance?.day ?? null, plannerDay: planner?.day ?? null, loopWakeDay: loopWakeDay || null,
-    restartDay: options.checkoutRestart ? restartDay : null };
+    restartDay: options.checkoutRestart ? restartDay : null, failedLaunches };
 }
 
 /**

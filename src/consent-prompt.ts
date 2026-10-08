@@ -87,11 +87,18 @@ export function detectConsentPrompt(screen: string | null | undefined): ConsentP
   const dialog = trailingDialog(tail);
   if (!dialog) return null;
   const { lines } = dialog, asked = dialog.question.join('\n'), bottom = lines.join('\n');
-  // The question decides the kind; the options only ever pick the answer.
-  const kind = promptKinds.find(([, asks]) => asks.test(asked))?.[0];
+  // The question decides the kind; the options only ever pick the answer. A question wrapped at a
+  // narrow pane can start above the lines read for it — Claude Code 2.1's folder-trust dialog asks
+  // "Is this a project you created or one you trust?" six lines above its options at 60 columns —
+  // so a question that names no kind is read from its options' labels ("Yes, I trust this folder")
+  // instead (GY-1561) — of a menu of two or more, never one such line under unrelated output. That
+  // only ever classifies: no rule answers a prompt off its options' words.
+  const fromQuestion = promptKinds.find(([, asks]) => asks.test(asked))?.[0], options = lines.slice(dialog.question.length);
+  const kind = fromQuestion ?? (options.filter(line => menuOption.test(line)).length >= 2 ? promptKinds.find(([, asks]) => asks.test(options.join('\n')))?.[0] : undefined);
   if (!kind) return null;
-  // The prompt's own text: from the first line that asks through the last option offered.
-  const first = lines.findIndex(line => promptKinds.some(([, asks]) => asks.test(line)));
+  // The prompt's own text: from the first line that asks (the whole question, when only an option
+  // named the kind) through the last option offered.
+  const first = fromQuestion ? lines.findIndex(line => promptKinds.some(([, asks]) => asks.test(line))) : 0;
   const shown = lines.slice(Math.max(0, first)).join(' / ');
   const text = shown.length > consentTextLimit ? `${shown.slice(0, consentTextLimit - 1)}…` : shown;
   if (neverAnswered.includes(kind)) return { kind, text, rule: null, keys: null };
@@ -101,6 +108,20 @@ export function detectConsentPrompt(screen: string | null | undefined): ConsentP
     if (option) return { kind: rule.kind, text, rule, keys: [option] };
   }
   return { kind, text, rule: null, keys: null };
+}
+
+/**
+ * The dialog a pane's screen ends on, as one line — its question and its options — whatever it
+ * asks, or null when the screen does not end on a menu. A launch Herdr reports blocked on a dialog
+ * no classifier above names is refused naming this text (GY-1561), never only the dialog's key hint
+ * ("Enter to confirm · Esc to cancel") and Herdr's state, which say nothing about what it asked.
+ */
+export function screenDialog(screen: string | null | undefined): string | null {
+  if (!screen) return null;
+  const dialog = trailingDialog(screen.split('\n').map(line => line.replace(/\s+/g, ' ').trim()).filter(Boolean).slice(-consentScreenLines));
+  if (!dialog) return null;
+  const shown = dialog.lines.join(' / ');
+  return shown.length > consentTextLimit ? `${shown.slice(0, consentTextLimit - 1)}…` : shown;
 }
 
 /**
