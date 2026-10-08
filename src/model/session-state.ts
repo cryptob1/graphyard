@@ -197,10 +197,9 @@ export function settledPurpose(work: Pick<Work, 'key' | 'lease' | 'submission' |
 /**
  * A review session no request names (`master review` by hand, under `review:SHA`) is over when the
  * head it reviews is no longer the candidate, when a request for that head was answered or
- * cancelled, or when the head's verdict is recorded; until one of those it is held, never lost.
+ * cancelled, or when the head's verdict is recorded; unlisted past the grace it is lost like any session no fact will end.
  */
 const reviewedHead = (handle: Pick<SessionHandle, 'id'> & { head?: string | null }) => handle.head ?? (handle.id.startsWith('review:') ? handle.id.slice(7) : null);
-export const handReviewHoldMs = 15 * 60_000;
 function handByHandPurpose(work: Parameters<typeof settledPurpose>[0], handle: Pick<SessionHandle, 'id' | 'kind'> & { head?: string | null; observedAt?: string | null; updatedAt?: string | null; startedAt?: string | null }, clock: number): string | null {
   if (handle.kind !== 'review') return null;
   const head = reviewedHead(handle);
@@ -210,10 +209,6 @@ function handByHandPurpose(work: Parameters<typeof settledPurpose>[0], handle: P
   if (answered) return `its review request for ${head.slice(0, 12)} was ${answered.state}${answered.resolvedAt ? ` at ${answered.resolvedAt}` : ''}`;
   if (work.reviewVerdicts?.sha === head && work.reviewVerdicts.verdicts.length) return `a review verdict for ${head.slice(0, 12)} is recorded`;
   if (work.candidate?.sha !== head) return `the candidate no longer is ${head.slice(0, 12)}${work.candidate ? ` (it is ${work.candidate.sha.slice(0, 12)})` : ''}`;
-  // Bounded: no request exists to relaunch it, so a hand-launched review the runtime has stopped listing for the hold
-  // ends with that fact, and the review request the loop makes for the standing candidate runs it afresh.
-  const seen = Date.parse(handle.observedAt ?? handle.updatedAt ?? handle.startedAt ?? '');
-  if (Number.isFinite(seen) && clock - seen >= handReviewHoldMs) return `its hand-launched review of ${head.slice(0, 12)} produced no verdict within ${Math.round(handReviewHoldMs / 60_000)} minutes of its last sighting at ${new Date(seen).toISOString()}; the review request for the standing candidate runs it afresh`;
   return null;
 }
 /** The dispatch request a review or proof session was launched for: the one its handle's id names. */
@@ -226,11 +221,10 @@ function dispatchRequestOf(work: Pick<Work, 'autoDispatch'>, handle: Pick<Sessio
  * Whether the item's own facts end this handle in time, so absence alone never has to (GY-1532): a
  * worker handle with an epoch ends with its attempt — every lease lapses, and every attempt ends on
  * the record — and a reviewer's or producer's that a dispatch request names ends with that request.
- * A review session no request names (`master review` by hand) ends with the head it reviews. A
- * coordination handle answers to the runtime alone and is lost when absent.
+ * A coordination handle, or a review session no request names (`master review` by hand), answers to the runtime alone and is lost when absent.
  */
 export const endedByFact = (work: Pick<Work, 'autoDispatch'>, handle: Pick<SessionHandle, 'id' | 'kind' | 'epoch'> & { head?: string | null }) =>
-  handle.kind === 'implementation' ? Number.isFinite(handleEpoch(handle)) : !!dispatchRequestOf(work, handle) || (handle.kind === 'review' && !!reviewedHead(handle));
+  handle.kind === 'implementation' ? Number.isFinite(handleEpoch(handle)) : !!dispatchRequestOf(work, handle);
 export function observeSessions(all: Work[], runtime: RuntimeSession[] | null, now: Date, options: ObserveOptions = {}): SessionReport {
   const entries: SessionReportEntry[] = [], missing: Record<string, string> = {};
   // A runtime that could not be read is a gap in the reports, not a report of absence.
