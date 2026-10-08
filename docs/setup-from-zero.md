@@ -59,13 +59,17 @@ The repository needs a GitHub `origin` and an Actions `pull_request` test workfl
 
 `gy install --provider compose --repo OWNER/REPO --reviewer claude --plan`, then `--apply` ([install](install.md); `gy` is `node ~/graphyard/bin/graphyard.mjs`). Before the App step, `--apply` records the master connection `.graphyard/master.json`, its `0600` credential under the plan's `installDirectory`; `gy doctor` reads as it; `GRAPHYARD_TOKEN_FILE` overrides it. **Verify:** `control-plane` and `credentials-file` pass.
 
+### Control-plane merger
+
+`up --merger control-plane` needs no GitHub Apps. It creates an ed25519 deploy key, registers it read-write on OWNER/REPO through your `gh` login, sets the merger (`POST /api/merger`); the [merge writer](delivery-redesign.md#the-merger-setting) pushes merges with that key. **Verify:** steps 4, 5 and 7 print `PASS ... not required`.
+
 ## 4. Register the GitHub App
 
 GitHub merger only (`control-plane`: `PASS github-app: not required (merger: control-plane)`). `--apply` serves `http://127.0.0.1:4311` and prints it; it opens no browser ([900 s, then `resume`](install.md#step-3-app-confirmation)). **HUMAN:** create the App, install it on OWNER/REPO only. **Verify:** `github-app` passes; on `missing permissions`, `gy github-setup --update-permissions --wait 600` ([permissions](github.md#app-permissions)).
 
 ## 5. Reviewer and revert-approver Apps
 
-GitHub merger only (`control-plane`: same PASS for `reviewer-app`). `--reviewer claude` registers the reviewer App and revert approver (`GRAPHYARD_REVERT_APPROVER_*`). **Verify:** `reviewer-app` and readiness `revert-approver` pass; outside `install`, `gy master reviewer setup` and [variables](deployment.md#variables).
+GitHub merger only. `--reviewer claude` registers the reviewer App and revert approver. **Verify:** `reviewer-app` and `revert-approver` pass.
 
 ## 6. Onboard the checkout
 
@@ -73,7 +77,7 @@ GitHub merger only (`control-plane`: same PASS for `reviewer-app`). `--reviewer 
 
 ## 7. Branch protection
 
-GitHub merger only (`control-plane`: same PASS for `branch-protection`). `--apply` protects the base branch; once the first pull request shows `Graphyard / merge`, rerun it (or `up`) to require that check. **Verify:** `branch-protection` passes.
+GitHub merger only. `--apply` protects the base branch; rerun it once a pull request shows `Graphyard / merge`. **Verify:** `branch-protection` passes.
 
 ## 8. Agent environments
 
