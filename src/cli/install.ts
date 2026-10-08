@@ -16,7 +16,7 @@ import { readSecretFromStdin } from './context.js';
 import { documentationDrift } from '../model/documentation.js';
 import { agentEnvironmentRoot } from '../master/environments.js';
 import { masterCredential, planeAnswers, planeRequest, setupFromZeroChecks, setupLine, setupNext } from '../setup-from-zero.js';
-import { mergerDoctorLine } from './merger.js'; import { upCommand, upHelpRequested, upUsage } from '../up.js'; import { mergerFromStatus } from './install-merger.js';
+import { mergerDoctorLine } from './merger.js'; import { upCommand, upHelpRequested, upUsage } from '../up.js'; import { mergerFromStatus } from './install-merger.js'; import { coordinatorDoctor } from '../master/known-good.js';
 
 const interactiveGithubSetup = (root: string) => async (repository: string, deployment: string) => {
   const setup = await startGithubSetup(root, repository, deployment);
@@ -240,8 +240,7 @@ export const installCommands = defineCommands([
       const committedDocumentation = await readDocumentationConfig(root).catch((error: any) => ({ error: error.message as string }));
       const documentation = committedDocumentation && 'error' in committedDocumentation ? { committed: null, deployed: live?.documentation ?? null, drift: null, error: committedDocumentation.error }
         : { committed: committedDocumentation, deployed: live?.documentation ?? null, drift: live?.documentation ? documentationDrift(committedDocumentation, live.documentation)?.attention ?? null : null };
-      // Capacity drift and production lag are the two installation facts a deploy can break
-      // silently; the server reports both and doctor repeats them beside the App preflight.
+      // Capacity drift and production lag, which a deploy can break silently: the server reports both.
       const delegationLimits = live?.delegationLimits ?? null, production = live?.production ?? null;
       // Validation definitions are readable by operators and readers; every other credential
       // leaves the runner-path items `unknown` with the command that reads them.
@@ -267,6 +266,7 @@ export const installCommands = defineCommands([
         : production?.incidents?.length ? `Production has not deployed ${production.incidents.map((incident: any) => incident.key).join(', ')}: ${production.incidents[0].reason}`
         : readiness.next;
       console.error(mergerDoctorLine(live?.mergeWriter));
+      await coordinatorDoctor(root, discovered.repository, production);
       return context.print({ discovered, server: base, cliPath: await context.activeCliPath(), hostId: context.individualHostId(), connected: !!live, githubConfigured: !!live?.github, role: live?.actor?.role, release: live?.release ?? null, failure,
         setup,
         appPermissions: appPermissions ? { verifiedAt: appPermissions.verifiedAt, missing: appPermissions.missing, attention: appPermissions.attention, installationUrl: appPermissions.installationUrl } : null,

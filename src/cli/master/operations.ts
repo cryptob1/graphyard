@@ -14,15 +14,28 @@ import { acknowledgeCommand, mainWatchAttention } from '../../daemon/main-watch.
 import { shadowGateSummary } from '../../daemon/cycle-shadow.js';
 import { shadowGateAttention } from '../../merge-writer/shadow.js';
 import { mergeWriterSummary } from '../../daemon/cycle-merge-writer.js';
+import { defaultChildRun } from '../../child-runner.js';
+import { installDirectory } from '../../install/secrets.js';
+import { installIdFor } from '../../install/types.js';
+import { knownGoodState, pinKnownGood } from '../../master/known-good.js';
+import { alignLoopUnit, loopUnitOf, type LoopSupervisorHost } from '../../supervisor.js';
+import type { ChildRun } from '../../child-runner.js';
 
 /** `master main-watch`: the watch's state and policy, or an admin's acknowledgement of one commit (GY-1519). */
 export const mainWatchUsage = 'Use master main-watch acknowledge SHA --reason TEXT --admin-token-stdin (the admin credential on stdin), or master main-watch status';
 
+/** `master recover`: repin the known-good coordinator (GY-1529). */
+export const recoverUsage = 'Use master recover [--to SHA] [--reason TEXT] --admin-token-stdin (the admin credential on stdin; the pin returns to the previous known-good SHA without --to)';
+
 /** What `graphyard master merge` answers: Graphyard runs no merge of its own. */
 export const githubMergesAnswer = 'GitHub merges: a pull request whose build, review and required checks pass on its head is merged by GitHub on its branch protection, and Graphyard records the delivery from the merged observation. There is no Graphyard merge to run.';
 
+/** What `master recover` does outside this process; a test hands in its own so no real unit is touched. */
+export interface RecoverEffects { run: ChildRun; host: LoopSupervisorHost; restart: (unit: string) => Promise<unknown> }
+const recoverEffects: RecoverEffects = { run: defaultChildRun, host: {}, restart: unit => defaultChildRun('systemctl', ['--user', 'restart', unit], { timeoutMs: 60_000 }) };
+
 /** Reading status and acting on one item: settle a quarantine, dispatch, merge, verify a deployment. */
-export async function operationsCommand(session: MasterSession): Promise<unknown> {
+export async function operationsCommand(session: MasterSession, effects: RecoverEffects = recoverEffects): Promise<unknown> {
   const { id, args, print, root, master, masterApi, masterMutation, coordinator, cli } = session;
   if (id === 'status') {
     // Sessions are counted as the reviewer and producer launchers count them: automatic profile defaults included (GY-1072, GY-1113).
@@ -106,6 +119,23 @@ export async function operationsCommand(session: MasterSession): Promise<unknown
     if (action !== 'acknowledge' || !sha || !values.reason?.trim()) throw new Error(mainWatchUsage);
     if (!values['admin-token-stdin']) throw new Error(`An acknowledgement is recorded with an admin credential, which the master does not hold: pipe one to ${acknowledgeCommand(sha)}`);
     return print(await masterMutation('main-watch/acknowledge', { sha, reason: values.reason.trim() }, undefined, await readSecretFromStdin(10_000)));
+  }
+  // GY-1529: repin the coordinator the loop runs from (previous known-good, or --to SHA), restart its unit, record the move.
+  if (id === 'recover') {
+    const { values } = parseArgs({ args, options: { to: { type: 'string' }, reason: { type: 'string' }, 'admin-token-stdin': { type: 'boolean' } }, allowPositionals: false });
+    if (!values['admin-token-stdin']) throw new Error(recoverUsage);
+    const installDir = installDirectory(installIdFor(master.repository)), before = knownGoodState(installDir);
+    const wanted = values.to ?? before?.previous;
+    if (!wanted) throw new Error(`There is no previous known-good SHA to return to: pass --to SHA. ${recoverUsage}`);
+    const to = (await effects.run('git', ['-C', root, 'rev-parse', '--verify', `${wanted}^{commit}`])).trim().toLowerCase();
+    const token = await readSecretFromStdin(10_000);
+    const pinned = await pinKnownGood({ installDir, repository: root }, to, effects.run);
+    const unit = await alignLoopUnit({ root, cliPath: master.cliPath, repository: master.repository, intervalSeconds: master.run.intervalSeconds, installDir }, effects.host);
+    if (unit.wrote === 'refused') throw new Error(`The coordinator was repinned to ${to}, but its unit was not rewritten: ${unit.reason}`);
+    await effects.restart(loopUnitOf(root, undefined, effects.host.home));
+    const reason = values.reason?.trim() || (values.to ? `recovered to ${to}` : 'recovered to the previous known-good SHA');
+    const event = await masterMutation('coordinator/recovered', { from: before?.sha ?? null, to, reason }, undefined, token);
+    return print({ recovered: true, from: before?.sha ?? null, to, previous: pinned.previous, unit: loopUnitOf(root, undefined, effects.host.home), unitFile: unit.wrote, event });
   }
   if (id === 'verify-deployment') {
     if (!args[0]) throw new Error('Use master verify-deployment GY-N');

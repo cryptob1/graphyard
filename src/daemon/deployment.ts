@@ -9,6 +9,9 @@ import type { MasterConfig } from '../master.js';
 import type { MergerMode } from '../merger-mode.js';
 import { localPromotionCycle, type LocalReleasePorts, type LocalRunOutcome } from './promotion-local.js';
 import { actionableIntervalMs } from './liveness.js';
+import { pinningVerify, retryPendingPin } from '../master/known-good.js';
+import { installDirectory } from '../install/secrets.js';
+import { installIdFor } from '../install/types.js';
 import { boundDeployment, type ContainmentRetention, type DeploymentObservation, deploymentObservationSchema, message, type PromotionState, retainedContainments } from './state.js';
 
 export function deploymentDetail(observation: DeploymentObservation) {
@@ -614,9 +617,12 @@ export function promotionReads(config: MasterConfig, root: string, run: ChildRun
   options: { merger?: () => Promise<MergerMode>; local?: LocalReleasePorts | null } = {}): PromotionReads | null {
   // GY-1526: without the workflow there is nothing to dispatch in github mode, but control-plane mode needs only the local ports.
   if (!workflowExists && !options.local) return null;
+  // GY-1529: production verified serving the promoted SHA is what moves the known-good coordinator pin; a failed verify pins nothing.
+  const known = { installDir: installDirectory(installIdFor(config.repository)), repository: root };
+  const local = options.local ? { ...options.local, verify: pinningVerify(known, run, options.local.verify) } : options.local;
   const git = (...args: string[]) => run('git', ['-C', root, ...args]);
   return {
-    ...(options.merger ? { merger: options.merger } : {}), ...(options.local !== undefined ? { local: options.local } : {}),
+    ...(options.merger ? { merger: options.merger } : {}), ...(local !== undefined ? { local } : {}),
     ledger: async () => {
       await git('fetch', '--quiet', '--no-tags', 'origin', `+refs/heads/${config.baseBranch}:refs/remotes/origin/${config.baseBranch}`, '+refs/tags/rc-production/*:refs/tags/rc-production/*', '+refs/tags/rc/*:refs/tags/rc/*', '+refs/tags/rc-soak/*:refs/tags/rc-soak/*');
       const mainSha = (await git('rev-parse', `refs/remotes/origin/${config.baseBranch}^{commit}`)).trim().toLowerCase() || null;
@@ -626,6 +632,8 @@ export function promotionReads(config: MasterConfig, root: string, run: ChildRun
         promotedSha = typeof record?.sha === 'string' ? record.sha.toLowerCase() : null;
         promotedAt = typeof record?.at === 'string' ? record.at : null;
       } catch { /* no production record yet */ }
+      // GY-1529: a pin that failed after verification is retried here, every cycle, without repeating the promotion.
+      await retryPendingPin(known, run).catch(() => null);
       let behind: number | null = null;
       if (mainSha && promotedSha) {
         try { behind = Number((await git('rev-list', '--first-parent', '--count', `${promotedSha}..${mainSha}`)).trim()); } catch { behind = null; }
