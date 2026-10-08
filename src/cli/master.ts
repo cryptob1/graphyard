@@ -14,7 +14,6 @@ import { intentCommand } from './master/intent.js';
 import { fleetCommand } from './master/fleet.js';
 import { operationsCommand } from './master/operations.js';
 import { loopCommand } from './master/loop.js';
-import { mergerCommand, mergerHelp } from './merger.js';
 
 /** Every master subcommand authenticates with the coordinator credential the master keeps for itself, never the repository connection file. */
 export const masterCommands = defineCommands([
@@ -89,7 +88,6 @@ export const masterCommands = defineCommands([
       '  master restart                Restart this host\'s master loop detached',
       '  master environments [--create KIND,…] [--apply]  Agent accounts, quota, profiles',
       '  master guide                  Print the complete master-agent operating guide',
-      ...mergerHelp,
       ...registryHelp,
       ...executorsHelp,
     ],
@@ -102,7 +100,7 @@ export const masterCommands = defineCommands([
       if (id === 'setup') return masterSetupCommand(context, root, await loadStoredMasterConfig(root));
       const session = await openMasterSession(context, root);
       // Each concern under ./master/ answers its own subcommands; the first that knows the id handles it.
-      for (const command of [intentCommand, fleetCommand, operationsCommand, loopCommand, mergerCommand]) if (await command(session) !== unhandled) return;
+      for (const command of [intentCommand, fleetCommand, operationsCommand, loopCommand]) if (await command(session) !== unhandled) return;
       throw new Error(`There is no master ${id}; use master guide for the subcommands`);
     },
   },

@@ -1,7 +1,9 @@
 import { parseArgs } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import { mergerModes } from '../merger-mode.js';
-import { unhandled, type MasterSession } from './master/session.js';
+import { defineCommands } from './registry.js';
+import { masterCommands } from './master.js';
+import { openMasterSession, unhandled, type MasterSession } from './master/session.js';
 
 /** The one line `graphyard doctor` prints for the merger setting (src/merger-mode.ts), from /api/status `mergeWriter`. */
 export const mergerDoctorLine = (mergeWriter: { merger: string; since: string | null; setBy: string | null } | null | undefined) =>
@@ -20,8 +22,21 @@ export async function mergerCommand(session: MasterSession, env: NodeJS.ProcessE
   return print(await masterMutation('merger', { merger: mode, reason: values.reason.trim() }, env.GRAPHYARD_REQUEST_ID ?? randomUUID(), env.GRAPHYARD_TOKEN?.trim() || masterToken));
 }
 
-/** The help lines `master` prints for the subcommand it answers through mergerCommand. */
-export const mergerHelp = [
-  '  master merger [github|control-plane --reason TEXT]',
-  '                                Show the merger setting and history; set it (admin credential)',
-];
+/**
+ * `master merger` is answered here, ahead of the `master` entry, which handles every other
+ * subcommand; the help lines sit in the master block.
+ */
+export const mergerCommands = defineCommands([
+  {
+    name: 'master',
+    readsConnection: () => false,
+    help: [
+      '  master merger [github|control-plane --reason TEXT]',
+      '                                Show the merger setting and history; set it (admin credential)',
+    ],
+    async run(context, work) {
+      if (context.id === 'merger') { await mergerCommand(await openMasterSession(context, context.repositoryRoot())); return; }
+      return masterCommands.find(entry => entry.name === 'master')!.run(context, work);
+    },
+  },
+]);
