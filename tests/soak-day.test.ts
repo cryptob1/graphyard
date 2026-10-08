@@ -73,15 +73,15 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   assert.deepEqual(failures, [], 'no cycle failed');
   assert.deepEqual(lost, [], 'no worker lost its lease: a dead worker lapses, it is not refused');
   assert.deepEqual([...observed].sort(), [...systemInvariants].sort(), 'every invariant was observed, not merely left unread');
-  // GY-1302: the loop drove promotion all day over a moving main: at most one dispatch per
-  // promoteEveryMinutes window, none while a candidate was in validation, and its fetches and run
+  // GY-1302, GY-1488: the loop drove promotion all day over a moving main: continuously, spaced by
+  // the minimum gap, none while a candidate was in validation, no tip cut twice, and its fetches and run
   // reads bounded by their read windows, not by the cycle count.
   const { promotion } = day;
   if (process.env.SOAK_TRACE) console.error(`promotion: ${JSON.stringify({ ...promotion, dispatches: promotion.dispatches.map(at => Math.round((at - dayStart) / minute)) })}`);
   // Main moves through the merges of the day's first hours and production catches it at the second
-  // deploy, so the loop promotes on that cadence and then has nothing to promote.
-  assert.ok(promotion.dispatches.length >= 2 && promotion.dispatches.length <= Math.ceil(hours / 2), `the loop promoted every two hours while main moved: ${promotion.dispatches.length} over ${hours} h`);
-  assert.deepEqual(promotion.violations, [], 'never twice in a window, never while a candidate is in validation, never when production runs main');
+  // deploy, so the loop cuts the next candidate as each ninety-minute validation concludes, and then has nothing to promote.
+  assert.ok(promotion.dispatches.length >= 2 && promotion.dispatches.length <= Math.ceil(hours * hour / (90 * minute)), `the loop promoted as each candidate concluded while main moved: ${promotion.dispatches.length} over ${hours} h`);
+  assert.deepEqual(promotion.violations, [], 'never inside the minimum gap, never while a candidate is in validation, never a tip cut twice, never when production runs main');
   assert.ok(promotion.ledgerReads <= Math.ceil(hours * hour / (5 * minute)) + 2 * basePlan.loopRestarts.length + 2, `fetches once per five-minute read window (${promotion.ledgerReads} over ${cycles} cycles)`);
   assert.ok(promotion.runReads <= Math.ceil(hours * hour / minute) + 2 * basePlan.loopRestarts.length + 2 && promotion.runReads < cycles, `run reads at most once a minute (${promotion.runReads} over ${cycles} cycles)`);
   // A refused dispatch counts as an attempt: one per interval, not one per cycle, and the failed

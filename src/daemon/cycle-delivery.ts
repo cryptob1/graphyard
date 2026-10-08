@@ -138,9 +138,10 @@ export async function deploymentStep(cycle: Cycle) {
   if (effects.publishProductionEnvironment) await effects.publishProductionEnvironment().catch(() => undefined);
 
   // 7a''. Promotion is the loop's, not GitHub's cron, which is best-effort and on 2026-10-05 dropped
-  //       four scheduled runs in a row (GY-1302): when the base branch has moved past the last
-  //       promoted SHA, no candidate is in validation and run.promoteEveryMinutes have passed since
-  //       the last dispatch, the release-candidate workflow is dispatched with promote=true.
+  //       four scheduled runs in a row (GY-1302): as soon as the base branch has moved past the last
+  //       promoted SHA and the last cut, no candidate is in validation and the run.promoteEveryMinutes
+  //       minimum gap has passed since the last dispatch (GY-1488), the release-candidate workflow is
+  //       dispatched with promote=true.
   //       A failed read or dispatch is recorded under one key and retried with backoff, and the
   //       cycle's read and dispatch stamps are kept, so a failure never repeats every cycle.
   const promotion = effects.promotion, promotionFailure = 'promotion:failed';

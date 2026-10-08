@@ -147,11 +147,10 @@ export const deploymentObservationSchema = z.object({
 export type DeploymentObservation = z.infer<typeof deploymentObservationSchema>;
 
 /**
- * GY-1302: the loop's promotion drive. GitHub's scheduled release-candidate runs are best-effort and
- * on 2026-10-05 four in a row never fired, so the loop dispatches the release-candidate workflow
- * itself (`promotionCycle`). `dispatchedAt` is the loop's own last dispatch, kept so a run GitHub
- * has not listed yet is never dispatched twice; `lastDispatchAt` is the later of it and the newest
- * cut run GitHub lists, from which `run.promoteEveryMinutes` is counted.
+ * GY-1302: the loop's promotion drive (`promotionCycle`), as GitHub's scheduled runs are best-effort.
+ * `dispatchedAt` is the loop's own last dispatch, so a run GitHub has not listed is never dispatched
+ * twice; `lastDispatchAt`, the later of it and the newest listed cut, starts the `promoteEveryMinutes`
+ * gap. GY-1488: `cutSha` is the tip the newest candidate cut; one concluded unpromoted is not re-cut.
  */
 export const promotionStateSchema = z.object({
   checkedAt: z.string(),
@@ -166,6 +165,7 @@ export const promotionStateSchema = z.object({
   runsReadAt: z.string().nullable(),
   dispatchedAt: z.string().nullable(),
   lastDispatchAt: z.string().nullable(),
+  cutSha: z.string().nullable().optional(),
   nextDueAt: z.string().nullable(),
   reason: z.string().max(500).nullable(),
 }).strict();

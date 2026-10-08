@@ -224,9 +224,9 @@ export const masterRunSchema = z.object({
   // (`graphyard / production`); unset, GRAPHYARD_PRODUCTION_ENVIRONMENT or `production` applies.
   productionEnvironment: z.string().trim().min(1).max(100).optional(),
   smokeWorkflow: z.string().trim().min(1).max(200).regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/, 'Name the trusted post-deployment smoke workflow file, such as deploy-smoke.yml').optional(),
-  // GY-1302: how often, at most, the loop dispatches .github/workflows/release-candidate.yml with
-  // promote=true when the base branch has moved past the last promoted SHA and no candidate is in
-  // validation. Unset: 120 (`defaultPromoteEveryMinutes`); 0 turns the loop's promotion off.
+  // GY-1302, GY-1488: the minimum gap between the loop's dispatches of .github/workflows/release-candidate.yml
+  // with promote=true, made as soon as the base branch has moved past the last promoted SHA and the
+  // last cut and no candidate is in validation. Unset: 10 (`defaultPromoteEveryMinutes`); 0 turns it off.
   promoteEveryMinutes: z.number().int().min(0).max(10080).optional(),
   // GY-1398: how long the deployment step reuses its last verified release observation while every
   // delivery is already served and none is pending, instead of reading GitHub every cycle. Unset: 15

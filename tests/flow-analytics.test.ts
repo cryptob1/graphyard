@@ -1509,13 +1509,14 @@ test('unit:delivery-speed-measured — master status reports ready→merged and 
   assert.equal(deliverySpeed([open], { now: deliveryNow }).readyToMerged['7d'].p90Ms, null);
 });
 
-test('unit:delivery-speed-attention — targets default to 2h and 8h, are configurable in master.json, and a breach is one attention line naming the slowest items', () => {
-  assert.deepEqual(defaultDeliverySpeedTargets, { readyToMergedP90Ms: 2 * hour, mergedToProductionP90Ms: 8 * hour });
+test('unit:delivery-speed-attention — targets default to 2h and 45 min, are configurable in master.json, and a breach is one attention line naming the slowest items', () => {
+  assert.deepEqual(defaultDeliverySpeedTargets, { readyToMergedP90Ms: 2 * hour, mergedToProductionP90Ms: 45 * 60_000 });
   const readyAt = new Map([['id-GY-B', at(2 * hour)]]);
-  // Defaults: ready→merged p90 8.4h breaches 2h; merged→production p90 1.9h is within 8h.
+  // Defaults: ready→merged p90 8.4h breaches 2h; merged→production p90 1.9h breaches GY-1488's 45 minutes.
   // The three-item fixture is judged with a minimum sample of one; the default minimum is GY-1275's.
   assert.deepEqual(deliverySpeedBreaches(deliverySpeed(deliveryItems(), { now: deliveryNow, readyAt }), 1).map(breach => breach.text),
-    ['Ready→merged into main p90 is 8.4h over 7 days (3 items), above the 2h target; slowest: GY-C 10h, GY-A 2h, GY-B 0.5h']);
+    ['Ready→merged into main p90 is 8.4h over 7 days (3 items), above the 2h target; slowest: GY-C 10h, GY-A 2h, GY-B 0.5h',
+      'Merged→promoted to production p90 is 1.9h over 7 days (2 items), above the 45 min target; slowest: GY-C 10h (pending), GY-A 2h, GY-B 1h']);
   // master.json's deliverySpeed overrides a target; the pending item counts among the slowest.
   const configured = masterConfigSchema.shape.deliverySpeed.parse({ readyToMergedP90Ms: 10 * hour, mergedToProductionP90Ms: hour });
   assert.deepEqual(deliverySpeedBreaches(deliverySpeed(deliveryItems(), { now: deliveryNow, readyAt, targets: configured }), 1).map(breach => breach.text),

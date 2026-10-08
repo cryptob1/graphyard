@@ -364,8 +364,13 @@ export function reusableDeployment(last: DeploymentObservation | null | undefine
 
 /** The workflow the loop dispatches with `promote=true`: it cuts main's tip, validates it in UAT, then promotes it. */
 export const promotionWorkflow = 'release-candidate.yml';
-/** How often, at most, the loop dispatches a promotion when main has moved; `run.promoteEveryMinutes`, 0 turns it off. */
-export const defaultPromoteEveryMinutes = 120;
+/**
+ * GY-1488: the minimum gap between two promotions the loop dispatches; `run.promoteEveryMinutes`, 0
+ * turns promotion by the loop off. The loop cuts the next candidate as soon as none is in flight and
+ * main has moved past both the last promoted SHA and the last cut, so this only spaces candidates
+ * that conclude fast (a cut that fails early), rather than setting a fixed cadence.
+ */
+export const defaultPromoteEveryMinutes = 10;
 /** How long a read of the workflow's runs is reused, so a candidate in UAT for hours costs one GitHub request a minute, not one a cycle. */
 export const promotionRunsReadMs = 60_000;
 /**
@@ -379,17 +384,23 @@ export const promotionLedgerReadMs = 5 * 60_000;
  * GY-1398: the promotion reads' reuse windows at a loop interval. A window at or under the interval
  * is no window at all — every cycle reads — so at 300s both reads ran each cycle. The ledger is
  * reused for max(5 min, 3 intervals) and the run list for max(60 s, one interval); a promotion then
- * waits at most three intervals for a move of main, inside the `promoteEveryMinutes` cadence.
+ * waits at most three intervals for a move of main.
  */
 export function promotionReadWindows(intervalMs: number) {
   return { ledgerMs: Math.max(promotionLedgerReadMs, 3 * intervalMs), runsMs: Math.max(promotionRunsReadMs, intervalMs) };
 }
+/**
+ * GY-1488: how long the loop's own dispatch that GitHub does not list yet counts as a candidate in
+ * flight. GitHub lists a dispatched run within seconds; past this a dispatch GitHub accepted but never
+ * ran no longer holds promotion back.
+ */
+export const promotionUnlistedMs = 15 * 60_000;
 /** Run states of a release candidate still being cut or validated. */
 const runningStates = new Set(['queued', 'in_progress', 'waiting', 'pending', 'requested']);
 
 export interface PromotionLedger { mainSha: string | null; promotedSha: string | null; promotedAt: string | null; behind: number | null }
-/** One run of the release-candidate workflow as `gh run list --json status,createdAt,event` lists it. */
-export interface PromotionRun { status: string; createdAt: string; event: string }
+/** One run of the release-candidate workflow as `gh run list --json status,createdAt,event,headSha` lists it. */
+export interface PromotionRun { status: string; createdAt: string; event: string; headSha?: string }
 export interface PromotionReads {
   /** The base branch's tip, the newest `rc-production/` record and the first-parent merges between them. */
   ledger: () => Promise<PromotionLedger>;
@@ -402,16 +413,20 @@ const later = (...times: (string | null | undefined)[]) => times.filter((time): 
   .sort((a, b) => Date.parse(b) - Date.parse(a))[0] ?? null;
 
 /**
- * One cycle of the promotion drive. The workflow is dispatched with `promote=true` exactly when the
- * base branch differs from the last promoted SHA, no release candidate is in validation, and
- * `everyMinutes` have passed since the last dispatch — the loop's own or a run GitHub lists (a
- * scheduled run that does fire counts too, so the cadence never doubles). Runs a pushed `rc-*` tag
- * starts validate one pinned commit and promote nothing, so they never hold a promotion back.
+ * One cycle of the promotion drive (GY-1488: continuous, not on a fixed cadence). The workflow is
+ * dispatched with `promote=true` as soon as the base branch differs from the last promoted SHA and
+ * from the SHA the last candidate cut, no release candidate is in validation, and `everyMinutes` (a
+ * minimum gap) have passed since the last dispatch — the loop's own or a run GitHub lists (a
+ * scheduled fallback run that does fire counts too). A candidate that concluded without promoting
+ * is never cut again: the next waits until main moves past it. When a candidate concludes, the
+ * ledger is re-read at once, so a promotion it just recorded or a merge since is seen without
+ * waiting out the read window. Runs a pushed `rc-*` tag starts validate one pinned commit and
+ * promote nothing, so they never hold a promotion back.
  *
  * It never throws. A failed read or dispatch comes back as `failure` with the cycle's stamps kept:
  * a failed ledger read waits out its window and a failed run read its own (`promotionReadWindows`)
  * like a successful one, and a dispatch attempt is stamped before it is made, so a dispatch that
- * fails (or that GitHub accepted before `gh` failed) counts toward the interval and is never
+ * fails (or that GitHub accepted before `gh` failed) counts toward the gap and is never
  * repeated cycle after cycle.
  */
 export async function promotionCycle(previous: PromotionState | null, reads: PromotionReads, options: { now: number; everyMinutes: number; intervalMs?: number }): Promise<{ state: PromotionState; dispatched: boolean; failure: string | null }> {
@@ -421,7 +436,7 @@ export async function promotionCycle(previous: PromotionState | null, reads: Pro
   const done = (state: Omit<PromotionState, 'nextDueAt' | 'reason'>, reason: string, due: boolean, dispatched = false) => ({ state: settle(state, reason, due), dispatched, failure: null });
   const failed = (state: Omit<PromotionState, 'nextDueAt' | 'reason'>, failure: string) => ({ state: settle(state, failure, true), dispatched: false, failure });
   const kept = { mainSha: previous?.mainSha ?? null, promotedSha: previous?.promotedSha ?? null, promotedAt: previous?.promotedAt ?? null, behind: previous?.behind ?? null, ledgerReadAt: previous?.ledgerReadAt ?? null };
-  const carried = { inFlight: previous?.inFlight ?? false, runsReadAt: previous?.runsReadAt ?? null, dispatchedAt: previous?.dispatchedAt ?? null, lastDispatchAt: previous?.lastDispatchAt ?? null };
+  const carried = { inFlight: previous?.inFlight ?? false, runsReadAt: previous?.runsReadAt ?? null, dispatchedAt: previous?.dispatchedAt ?? null, lastDispatchAt: previous?.lastDispatchAt ?? null, cutSha: previous?.cutSha ?? null };
   // Off reads nothing at all: no fetch, no GitHub request.
   if (options.everyMinutes <= 0) return done({ checkedAt: at, ...kept, ...carried }, 'Promotion by the loop is off (run.promoteEveryMinutes is 0)', false);
   let ledger = kept;
@@ -434,7 +449,7 @@ export async function promotionCycle(previous: PromotionState | null, reads: Pro
   if (!ledger.mainSha) return done(base, 'The base branch tip could not be read, so nothing is promoted', false);
   if (ledger.mainSha === ledger.promotedSha) return done(base, 'Production runs the base branch tip; nothing to promote', false);
   const sinceLast = base.lastDispatchAt ? options.now - Date.parse(base.lastDispatchAt) : Number.POSITIVE_INFINITY;
-  if (sinceLast < everyMs) return done(base, `The last promotion was dispatched ${Math.round(sinceLast / 60_000)} minute(s) ago; the next is due ${options.everyMinutes} minute(s) after it`, true);
+  if (sinceLast < everyMs) return done(base, `The last promotion was dispatched ${Math.round(sinceLast / 60_000)} minute(s) ago; the next is due no sooner than ${options.everyMinutes} minute(s) after it`, true);
   let state = base;
   if (!base.runsReadAt || options.now - Date.parse(base.runsReadAt) >= windows.runsMs) {
     let listed: PromotionRun[];
@@ -442,17 +457,31 @@ export async function promotionCycle(previous: PromotionState | null, reads: Pro
       return failed({ ...base, runsReadAt: at }, `The ${promotionWorkflow} runs could not be read: ${message(error)}`);
     }
     const cuts = listed.filter(run => run.event === 'workflow_dispatch' || run.event === 'schedule');
-    state = { ...base, runsReadAt: at, inFlight: cuts.some(run => runningStates.has(run.status)), lastDispatchAt: later(base.dispatchedAt, ...cuts.map(run => run.createdAt)) };
+    const newest = [...cuts].sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))[0];
+    // The newest listed cut names the SHA it covered, unless the loop's own later dispatch is not listed yet.
+    const listedCut = newest?.headSha && (!base.dispatchedAt || Date.parse(newest.createdAt) >= Date.parse(base.dispatchedAt)) ? newest.headSha.toLowerCase() : null;
+    const unlisted = !!base.dispatchedAt && (!newest || Date.parse(newest.createdAt) < Date.parse(base.dispatchedAt)) && options.now - Date.parse(base.dispatchedAt) < promotionUnlistedMs;
+    state = { ...base, runsReadAt: at, inFlight: unlisted || cuts.some(run => runningStates.has(run.status)), lastDispatchAt: later(base.dispatchedAt, ...cuts.map(run => run.createdAt)), cutSha: listedCut ?? base.cutSha };
     const since = state.lastDispatchAt ? options.now - Date.parse(state.lastDispatchAt) : Number.POSITIVE_INFINITY;
-    if (since < everyMs) return done(state, `A release candidate was started ${Math.round(since / 60_000)} minute(s) ago; the next promotion is due ${options.everyMinutes} minute(s) after it`, true);
+    if (since < everyMs) return done(state, `A release candidate was started ${Math.round(since / 60_000)} minute(s) ago; the next promotion is due no sooner than ${options.everyMinutes} minute(s) after it`, true);
+    if (base.inFlight && !state.inFlight && state.ledgerReadAt !== at) {
+      // The candidate just concluded: what it promoted, and any merge since, is read now rather than a window later.
+      try { state = { ...state, ...await reads.ledger(), ledgerReadAt: at }; } catch (error) {
+        return failed({ ...state, ledgerReadAt: at }, `The base branch and the promotion record could not be read: ${message(error)}`);
+      }
+      if (!state.mainSha) return done(state, 'The base branch tip could not be read, so nothing is promoted', false);
+      if (state.mainSha === state.promotedSha) return done(state, 'Production runs the base branch tip; nothing to promote', false);
+    }
   }
-  if (state.inFlight) return done(state, 'A release candidate is still in validation; the next promotion waits for it to conclude', true);
-  // The attempt is stamped before it is made: whatever the dispatch's outcome, the next is due an interval later.
-  const attempted = { ...state, dispatchedAt: at, lastDispatchAt: at, runsReadAt: at };
+  if (state.inFlight) return done(state, 'A release candidate is still in validation; the next promotion is dispatched as soon as it concludes', true);
+  if (state.cutSha && state.cutSha === state.mainSha) return done(state, `The last release candidate cut ${state.cutSha.slice(0, 12)} and did not promote it; the next is dispatched as soon as main moves past it`, false);
+  const mainSha = state.mainSha!;
+  // The attempt is stamped before it is made: whatever the dispatch's outcome, the next waits out the gap.
+  const attempted = { ...state, dispatchedAt: at, lastDispatchAt: at, runsReadAt: at, cutSha: mainSha };
   try { await reads.dispatch(); } catch (error) {
-    return failed(attempted, `Dispatching ${promotionWorkflow} with promote=true failed; the next attempt is due ${options.everyMinutes} minute(s) after this one: ${message(error)}`);
+    return failed({ ...attempted, cutSha: state.cutSha }, `Dispatching ${promotionWorkflow} with promote=true failed; the next attempt is due ${options.everyMinutes} minute(s) after this one: ${message(error)}`);
   }
-  return done({ ...attempted, inFlight: true }, `Dispatched ${promotionWorkflow} with promote=true to carry ${ledger.mainSha.slice(0, 12)} to production`, true, true);
+  return done({ ...attempted, inFlight: true }, `Dispatched ${promotionWorkflow} with promote=true to carry ${mainSha.slice(0, 12)} to production`, true, true);
 }
 
 /** What `master status` reports of the promotion drive: the last promoted SHA, how far production is behind, and when the next promotion is due. */
@@ -483,7 +512,7 @@ export function promotionReads(config: MasterConfig, root: string, run: ChildRun
       return { mainSha, promotedSha, promotedAt, behind };
     },
     runs: async () => {
-      const listed = JSON.parse(await run('gh', ['run', 'list', '--repo', config.repository, '--workflow', promotionWorkflow, '--limit', '50', '--json', 'status,createdAt,event']));
+      const listed = JSON.parse(await run('gh', ['run', 'list', '--repo', config.repository, '--workflow', promotionWorkflow, '--limit', '50', '--json', 'status,createdAt,event,headSha']));
       return Array.isArray(listed) ? listed.filter(entry => typeof entry?.status === 'string' && typeof entry?.createdAt === 'string' && typeof entry?.event === 'string') : [];
     },
     dispatch: async () => { await run('gh', ['workflow', 'run', promotionWorkflow, '--repo', config.repository, '--ref', config.baseBranch, '-f', 'promote=true']); },

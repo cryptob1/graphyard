@@ -1275,10 +1275,12 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   // GY-1302: the loop's promotion drive. Main moves with every merge of the day while production
   // moves only on its deploys, so a promotion is due all day; each dispatched candidate validates
   // for ninety minutes and GitHub lists it only two minutes after the dispatch, so the loop's own
-  // record of its dispatch is what holds the next one back meanwhile. For the day's first hour every
+  // record of its dispatch is what holds the next one back meanwhile. GY-1488: promotion is
+  // continuous, so a dispatch is spaced only by the ten-minute minimum gap, and a candidate that
+  // concluded without production moving to it is never cut again from the same tip. For the day's first hour every
   // dispatch is refused (a token without actions: write), and for the half hour after it the remote
   // cannot be fetched: neither failure is repeated every cycle.
-  const promotion = { ledgerReads: 0, runReads: 0, dispatches: [] as number[], violations: [] as string[], validationMs: 90 * minute, listedAfterMs: 2 * minute,
+  const promotion = { ledgerReads: 0, runReads: 0, dispatches: [] as number[], cuts: [] as string[], violations: [] as string[], validationMs: 90 * minute, listedAfterMs: 2 * minute,
     failDispatchUntil: hour, failLedger: [hour, hour + 30 * minute] as const, failedDispatches: [] as number[], failedLedgerReads: 0 };
   const promotionEffect: DaemonEffects['promotion'] = options.promotion ? {
     ledger: async () => {
@@ -1290,17 +1292,19 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     runs: async () => {
       promotion.runReads++;
       return promotion.dispatches.filter(at => clock.now() - at >= promotion.listedAfterMs).reverse()
-        .map(at => ({ status: clock.now() < at + promotion.validationMs ? 'in_progress' : 'completed', createdAt: new Date(at).toISOString(), event: 'workflow_dispatch' }));
+        .map(at => ({ status: clock.now() < at + promotion.validationMs ? 'in_progress' : 'completed', createdAt: new Date(at).toISOString(), event: 'workflow_dispatch', headSha: promotion.cuts[promotion.dispatches.indexOf(at)] }));
     },
     dispatch: async () => {
       const now = clock.now(), last = promotion.dispatches.at(-1);
       if (now - dayStart < promotion.failDispatchUntil) { promotion.failedDispatches.push(now); throw new Error('gh: HTTP 403: Resource not accessible by integration'); }
       if (github.tip === production.sha) promotion.violations.push(`+${Math.round((now - dayStart) / minute)} min: dispatched while production runs main`);
       if (last !== undefined && now < last + promotion.validationMs) promotion.violations.push(`+${Math.round((now - dayStart) / minute)} min: dispatched while the candidate of +${Math.round((last - dayStart) / minute)} min is in validation`);
-      if (last !== undefined && now - last < 120 * minute) promotion.violations.push(`+${Math.round((now - dayStart) / minute)} min: dispatched ${Math.round((now - last) / minute)} min after the last`);
+      const gap = deploymentStep.defaultPromoteEveryMinutes * minute;
+      if (last !== undefined && now - last < gap) promotion.violations.push(`+${Math.round((now - dayStart) / minute)} min: dispatched ${Math.round((now - last) / minute)} min after the last`);
       const refused = promotion.failedDispatches.at(-1);
-      if (refused !== undefined && now - refused < 120 * minute) promotion.violations.push(`+${Math.round((now - dayStart) / minute)} min: dispatched ${Math.round((now - refused) / minute)} min after a refused attempt`);
-      promotion.dispatches.push(now);
+      if (refused !== undefined && now - refused < gap) promotion.violations.push(`+${Math.round((now - dayStart) / minute)} min: dispatched ${Math.round((now - refused) / minute)} min after a refused attempt`);
+      if (promotion.cuts.includes(github.tip)) promotion.violations.push(`+${Math.round((now - dayStart) / minute)} min: cut ${github.tip.slice(0, 12)} again after its candidate concluded`);
+      promotion.dispatches.push(now); promotion.cuts.push(github.tip);
     },
   } : undefined;
   // GY-1385: the loop's own throughput measurement after each verified deployment, through the
