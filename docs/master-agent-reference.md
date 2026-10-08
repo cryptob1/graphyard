@@ -45,7 +45,7 @@ Unacted producer requests (never started, launch refused, exited at launch) rela
 
 ## Shadow merge gate
 
-`run.shadowGate` (`enabled`, default true; `timeoutMinutes`, default 20): each cycle trial-merges the oldest untried submitted head, builds and affected-tests it in a credential-free `trial` checkout (no TMPDIR), pushes nothing; `shadow.verdict` (failing: `logTail`, its last 4000 characters) joins GitHub's outcome in `master status` `shadowGate` (`shadow-only-fail`/`shadow-missed`: one report-only line each); errors and timeouts record nothing; the third timeout per tip gets one line.
+`run.shadowGate` (defaults: `enabled` true, `timeoutMinutes` 20): each cycle trial-merges, builds and affected-tests the oldest untried head in a credential-free checkout, pushing nothing; `shadow.verdict` (failing: 4000-character `logTail`) joins GitHub's outcome in `master status` `shadowGate` (`shadow-only-fail`/`shadow-missed`: one line each until explained); errors and timeouts record nothing, a tip's third timeout one line. Read: `GET /api/shadow-disagreements`, `/api/shadow-explanations?pair=KEY:HEAD:BASETIP` (≤50).
 
 ## Pipeline speed
 
