@@ -27,6 +27,8 @@ export const statusContext = 'ci/legacy';
 /** How long GitHub reports a `blockedMerge` item BLOCKED after its required check passed: past master status's ten-minute bound (GY-430). */
 export const blockedMergeMs = 14 * minute;
 export const sha = (...seed: (string | number)[]) => createHash('sha1').update(seed.join('\0')).digest('hex');
+/** GY-1501: the earlier head a stale approval names in place of HEAD: never the head itself. */
+export const staleSha = (head: string) => sha('stale-approval', head);
 /**
  * The test the briefly broken base branch fails (GY-793): CI names it in the failed-tests
  * annotation of the candidate pushed against the broken commit, of that commit's own run, and of
@@ -122,6 +124,14 @@ export class SimulatedGitHub {
   landedReports: string[] = [];
   /** Reviewers' plans per item: the verdict each successive review of it gives. */
   verdicts = new Map<string, ('APPROVED' | 'CHANGES_REQUESTED')[]>();
+  /** The GitHub login that posts each review: `reviewer`, or a supervised day's operator (GY-1501). */
+  reviewer = 'reviewer';
+  /**
+   * GY-1501. Items the reviewer never reviews (a supervised operator who has not approved them), and
+   * items whose reviewer approves an earlier head (`staleSha`) until the time given, approving the
+   * exact head only from then on.
+   */
+  withheld = new Set<string>(); staleUntil = new Map<string, number>();
   /** Reviewer profiles that are out of quota: a request dispatched to one is answered with a usage-limit verdict. */
   exhaustedProfiles = new Set<string>();
   /** Items whose GitHub merge state settles as UNSTABLE (a failing optional check), and those GitHub is slow to recompute after their required check passes. */
@@ -543,11 +553,14 @@ export class SimulatedGitHub {
       // The reviewer judges a head once CI reported on it; an item in `carriedOnly` is not asked
       // again for a Graphyard-authored base refresh, whose approval carries.
       const graphyardHead = this.carriedOnly.has(pr.key) && /^Graphyard /.test(this.commits.get(pr.head)?.message ?? '');
-      if (ciDone && !graphyardHead && now - pushedAt >= this.options.ciMs + this.options.reviewMs && !pr.reviews.some(review => review.sha === pr.head)) {
+      const reviewDue = ciDone && !graphyardHead && !this.withheld.has(pr.key) && now - pushedAt >= this.options.ciMs + this.options.reviewMs && !pr.reviews.some(review => review.sha === pr.head);
+      if (reviewDue && now < (this.staleUntil.get(pr.key) ?? 0)) {
+        if (!pr.reviews.some(review => review.sha === staleSha(pr.head))) pr.reviews.push({ reviewer: this.reviewer, sha: staleSha(pr.head), state: 'APPROVED', id: ++this.serial, submittedAt: new Date(now).toISOString() });
+      } else if (reviewDue) {
         const plan = this.verdicts.get(pr.key) ?? [];
         const state = plan.shift() ?? 'APPROVED';
         this.verdicts.set(pr.key, plan);
-        pr.reviews.push({ reviewer: 'reviewer', sha: pr.head, state, id: ++this.serial, submittedAt: new Date(now).toISOString() });
+        pr.reviews.push({ reviewer: this.reviewer, sha: pr.head, state, id: ++this.serial, submittedAt: new Date(now).toISOString() });
       }
       // A reviewer App answers the request it was dispatched: an exhausted profile with its usage-limit verdict.
       const request = pr.agentRequests.at(-1);

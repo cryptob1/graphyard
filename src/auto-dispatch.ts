@@ -329,11 +329,15 @@ export async function writeDispatchCursor(config: MasterConfig, cursor: Dispatch
   await rename(temporary, file); await chmod(file, 0o600);
 }
 
+/** Why a supervised install launches no reviewer (GY-1501). */
+export const supervisedReview = 'supervised: the operator reviews and approves each pull request on GitHub, so no reviewer session is launched';
 /**
  * The reviewer profile that answers automatic requests: the configured one, else the only one.
  * The configured one runs `automaticReviewerConcurrency` sessions when it declares none (GY-1072).
  */
 export function selectReviewerProfile(input: MasterConfig): { profile: ReviewerProfile | null; reason: string | null } {
+  // GY-1501: a supervised install's operator reviews on GitHub; no reviewer session is launched for it.
+  if (input.supervision === 'supervised') return { profile: null, reason: supervisedReview };
   const config = withReviewerDefaults(input);
   if (!config.reviewer) return { profile: null, reason: 'no reviewer identity is registered; run master reviewer setup or master reviewer bind' };
   if (config.run.reviewerProfile) {
@@ -1054,7 +1058,9 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
     return turn;
   };
   const dispatchReview = async (item: Work, review: DispatchRequest) => {
-    if (!session('review', item, review, reviews)) { /* settled, or waiting to relaunch */ }
+    // A supervised install's operator reviews on GitHub (GY-1501): no session and no wait to report.
+    if (config.supervision === 'supervised') { /* the operator's GitHub approval answers it */ }
+    else if (!session('review', item, review, reviews)) { /* settled, or waiting to relaunch */ }
     else if (!herdr) wait('review', item, review, 'Herdr session inventory is unavailable');
     else if (memoryDeferred) wait('review', item, review, memoryDeferred);
     else if (spent('review')) wait('review', item, review, capacityWait('review'));

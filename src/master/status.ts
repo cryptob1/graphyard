@@ -11,7 +11,7 @@ import { pendingBaseRefresh, baseRefreshConflict, currentBaseRefreshCarry, resto
 import { MERGE_PROTOCOL } from '../protocol-version.js';
 import { mergeBaseDismissal, mergeBaseDismissalAttention } from '../merge-base-ancestry.js';
 import { pipelineSpeed, pipelineSpeedSummary } from '../pipeline-speed.js';
-import { profileSessions, type WorkerProfile } from './profiles.js';
+import { profileSessions, promotionCommand, type Supervision, type WorkerProfile } from './profiles.js';
 import { sessionActivity } from './launch.js';
 import { launchingSession, sessionView } from '../model/session-state.js';
 import type { HerdrAgent } from './herdr.js';
@@ -125,6 +125,22 @@ export function roleConcurrency(role: 'reviewer' | 'producer', profiles: RolePro
   const longest = waiting[0] ?? null;
   return { role, limit, running, free: Math.max(0, limit - running), waiting: waiting.length, longestWaitMs: longest?.waitedMs ?? null, longest, starved: limit > 0 && running >= limit && waiting.length > 0, profiles: perProfile };
 }
+/** Who reviews and merges, as master status reads it (GY-1501): the config's supervision and the operator's GitHub login. */
+export interface SupervisionInput { mode?: Supervision; operatorLogin?: string | null }
+/**
+ * Supervised mode in master status (GY-1501): one line saying the operator reviews and merges each
+ * pull request and naming the promotion command, and an attention item for every open candidate the
+ * operator's own login authored, whose approval by that operator would not be independent. Null and
+ * none in autonomous mode.
+ */
+export function supervisionReport(supervision: SupervisionInput | undefined, work: readonly Work[]): { line: string | null; attentionItems: AttentionItem[] } {
+  if (supervision?.mode !== 'supervised') return { line: null, attentionItems: [] };
+  const login = supervision.operatorLogin?.toLowerCase() ?? null;
+  const own = login ? work.filter(item => !isClosed(item) && item.stage !== 'done' && item.candidate?.author?.toLowerCase() === login) : [];
+  return { line: `Supervised: the operator reviews and merges each pull request on GitHub; no agent reviewer or approver runs. Promote to autonomy with ${promotionCommand}.`,
+    attentionItems: own.map(item => ({ subject: item.key, text: `PR #${item.candidate!.pr} at ${item.candidate!.sha.slice(0, 12)} is authored by ${supervision.operatorLogin}, the operator's own login, so the operator's approval of it would not be independent and GitHub will not count it`, ...classified('gate'),
+      ...agentOwner('master', `Have someone other than ${supervision.operatorLogin} approve PR #${item.candidate!.pr} on GitHub, or release ${item.key} so a worker identity authors its pull request`) })) };
+}
 /** A starved role is attention for the master: the limit and the wait, with what raises the one. */
 export const concurrencyStarvedMs = 10 * 60_000;
 export function concurrencyAttention(reports: RoleConcurrencyReport[]): AttentionItem[] {
@@ -132,7 +148,8 @@ export function concurrencyAttention(reports: RoleConcurrencyReport[]): Attentio
     text: `${report.role} capacity is saturated: ${report.running} session${report.running === 1 ? '' : 's'} running against a limit of ${report.limit} (${report.profiles.map(entry => `${entry.profile} ${entry.running}/${entry.limit}`).join(', ')}), ${report.waiting} request${report.waiting === 1 ? '' : 's'} waiting for a slot, the longest (${report.longest!.work}${report.longest!.group ? ` ${report.longest!.group} proofs` : ''}) for ${Math.round(report.longestWaitMs! / 60_000)} minutes`,
     ...agentOwner('master', `Raise concurrency on a ${report.role} profile in .graphyard/master.json, or add a ${report.role} profile on another account (master ${report.role} add); master run adopts the change on its next tick and starts more sessions without a restart. See docs/onboarding.md#size-review-and-proof-capacity`) }));
 }
-export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profiles: WorkerProfile[], agents: HerdrAgent[], credentialHealth: Record<string, { available: boolean; reason: string | null }> = {}, containment: Record<string, ContainmentAssessment> = {}, reviews: { pending: any[]; completed: any[] } = { pending: [], completed: [] }, baseBranch = 'main', controlPlane?: ControlPlaneStatus, sessions: DispatchSessions = noSessions, candidateConflicts: { report: Record<string, ConflictReport>; available: boolean; reason: string | null } = { report: {}, available: false, reason: 'Candidate conflicts were not probed' }, roles?: RoleProfiles, cliPath = 'graphyard', loop?: { projectMemory?: ProjectMemory | null } | { error: string } | null) {
+export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profiles: WorkerProfile[], agents: HerdrAgent[], credentialHealth: Record<string, { available: boolean; reason: string | null }> = {}, containment: Record<string, ContainmentAssessment> = {}, reviews: { pending: any[]; completed: any[] } = { pending: [], completed: [] }, baseBranch = 'main', controlPlane?: ControlPlaneStatus, sessions: DispatchSessions = noSessions, candidateConflicts: { report: Record<string, ConflictReport>; available: boolean; reason: string | null } = { report: {}, available: false, reason: 'Candidate conflicts were not probed' }, roles?: RoleProfiles, cliPath = 'graphyard', loop?: { projectMemory?: ProjectMemory | null } | { error: string } | null, supervision?: SupervisionInput) {
+  const supervised = supervisionReport(supervision, snapshot.work);
   const now = Date.parse(snapshot.now);
   const scheduling = dispatchSchedule(snapshot.work, now);
   const installation = controlPlaneAttention(controlPlane), registry = fleetStatus(controlPlane?.fleet);
@@ -313,7 +330,7 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
   const remedyItems: AttentionItem[] = remedies.map(entry => ({ subject: entry.key, text: entry.text, ...classified('unrunnable-remedy'),
     ...agentOwner('master', `Create a work item that lets the ${entry.role} run \`${entry.command}\` (or has the control plane perform it); the ${entry.role} harness rule ${entry.rule} denies it`) }));
   return { observedAt: snapshot.now,
-    counts: { open: rows.length, ready: rows.filter(row => row.stage === 'ready').length, active: rows.filter(row => row.owner).length, attention: rows.filter(row => row.attention).length + remedyItems.length + capacityItems.length + concurrencyItems.length + installation.attention.length + registry.attentionItems.length, proofAuthorityGaps: rows.filter(row => row.proofGaps.length).length, mergeable: rows.filter(row => row.mergeable).length, reviewsPending: reviews.pending.length, producersPending: sessions.producers.pending.length,
+    counts: { open: rows.length, ready: rows.filter(row => row.stage === 'ready').length, active: rows.filter(row => row.owner).length, attention: rows.filter(row => row.attention).length + supervised.attentionItems.length + remedyItems.length + capacityItems.length + concurrencyItems.length + installation.attention.length + registry.attentionItems.length, proofAuthorityGaps: rows.filter(row => row.proofGaps.length).length, mergeable: rows.filter(row => row.mergeable).length, reviewsPending: reviews.pending.length, producersPending: sessions.producers.pending.length,
       // Candidates the guarded merge could take once their gates pass, and the items GitHub already
       // merged though their gates had not passed, which are never candidates and wait on a reconciliation.
       mergeCandidates: rows.filter(row => row.stage === 'merge' && !row.merged).length, mergedUnreconciled: rows.filter(row => row.merged && !row.merged.reverted).length, revertedDeliveries: rows.filter(row => row.merged?.reverted).length,
@@ -327,7 +344,9 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       // Closed without delivery (model/closure.ts): never open, never delivered, counted only here.
       closed: snapshot.work.filter(isClosed).length },
     // Every attention item with the role that resolves it and the next command, work items first.
-    attentionItems: [...rows.flatMap(row => row.attention && row.attentionOwner ? [{ subject: row.key, text: row.attention, ...row.attentionOwner, ...classified(causes.get(row.key) ?? 'gate') }] : []), ...remedyItems, ...capacityItems, ...concurrencyItems, ...installation.attentionItems, ...registry.attentionItems] as AttentionItem[],
+    attentionItems: [...rows.flatMap(row => row.attention && row.attentionOwner ? [{ subject: row.key, text: row.attention, ...row.attentionOwner, ...classified(causes.get(row.key) ?? 'gate') }] : []), ...supervised.attentionItems, ...remedyItems, ...capacityItems, ...concurrencyItems, ...installation.attentionItems, ...registry.attentionItems] as AttentionItem[],
+    // Who reviews and merges (GY-1501): one line in supervised mode, null in autonomous mode.
+    supervision: supervised.line,
     // What waits on the human, longest first, with how to answer; the roles out of capacity; each
     // role's sessions against its concurrency limit with the longest wait for a slot; the
     // fleet's concurrency — every open item in flight or dispatchable — beside its idle workers;

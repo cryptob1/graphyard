@@ -10,7 +10,7 @@ import { serverOrigin, loadConnection, managedInstructions } from '../repository
 import { launchPlan } from '../harness.js';
 import { type LoopSupervisorHost, type LoopSupervisorInstallation, installLoopSupervisor, loopUnitOf, unsupervisedInstruction, loopSupervisionAttention } from '../supervisor.js';
 import { type FilesystemProbe, worktreeRoot, verifyWorktreeRoot, worktreeRootMinFreeBytes } from '../install/worktree-root.js';
-import { APP_PENDING, type AgentEnvironment, type MasterBrowser, type MasterConfig, masterConfigSchema, type MasterRun, type ProducerProfile, producerProfileSchema, type WorkerProfile, workerProfileSchema, withReviewerDefaults, withRoleDefaults } from './profiles.js';
+import { APP_PENDING, type AgentEnvironment, type Supervision, type MasterBrowser, type MasterConfig, masterConfigSchema, type MasterRun, type ProducerProfile, producerProfileSchema, type WorkerProfile, workerProfileSchema, withReviewerDefaults, withRoleDefaults } from './profiles.js';
 import { withoutMasterInstructions } from './instructions.js';
 import { scopeHerdr } from './herdr.js';
 import { agentEnvironmentRoot, agentLaunchPlan, checkAgentEnvironment, discoverAgentEnvironments, type EnvironmentProbe, inspectProfileAccounts, type LaunchRole } from './environments.js';
@@ -191,7 +191,7 @@ export async function setupMaster(root: string, input: { url: string; token: str
   await assertOutsideWorktrees(root, credentialDirectory, 'Coordinator credential directory');
   const identity = createHash('sha256').update(`${url}\0${detected.repository}`).digest('hex').slice(0, 20);
   const credentialFile = resolve(credentialDirectory, `${identity}.token`);
-  const config = masterConfigSchema.parse({ version: 1, url, credentialFile, cliPath: resolve(input.cliPath), repository: detected.repository, baseBranch: status.baseBranch, githubAppId: appPending ? APP_PENDING : status.githubAppId, hostId: input.hostId ?? previous?.hostId ?? hostname(), herdrWorkspace: input.herdrWorkspace ?? previous?.herdrWorkspace, masterAgentName: previous?.masterAgentName ?? sessionName('graphyard-master', repositoryName), autoMerge: input.autoMerge ?? previous?.autoMerge ?? true, mergeMethod: input.mergeMethod ?? previous?.mergeMethod ?? 'merge', workers: previous?.workers ?? [], ...(previous?.reviewer ? { reviewer: previous.reviewer } : {}), reviewers: previous?.reviewers ?? [], producers: previous?.producers ?? [], run: { ...previous?.run, ...input.run }, ...(previous?.mergeQueue ? { mergeQueue: previous.mergeQueue } : {}), ...(input.browser ?? previous?.browser ? { browser: input.browser ?? previous?.browser } : {}) });
+  const config = masterConfigSchema.parse({ version: 1, url, credentialFile, cliPath: resolve(input.cliPath), repository: detected.repository, baseBranch: status.baseBranch, githubAppId: appPending ? APP_PENDING : status.githubAppId, hostId: input.hostId ?? previous?.hostId ?? hostname(), herdrWorkspace: input.herdrWorkspace ?? previous?.herdrWorkspace, masterAgentName: previous?.masterAgentName ?? sessionName('graphyard-master', repositoryName), ...(previous?.supervision ? { supervision: previous.supervision } : {}), ...(previous?.operatorLogin ? { operatorLogin: previous.operatorLogin } : {}), autoMerge: input.autoMerge ?? previous?.autoMerge ?? true, mergeMethod: input.mergeMethod ?? previous?.mergeMethod ?? 'merge', workers: previous?.workers ?? [], ...(previous?.reviewer ? { reviewer: previous.reviewer } : {}), reviewers: previous?.reviewers ?? [], producers: previous?.producers ?? [], run: { ...previous?.run, ...input.run }, ...(previous?.mergeQueue ? { mergeQueue: previous.mergeQueue } : {}), ...(input.browser ?? previous?.browser ? { browser: input.browser ?? previous?.browser } : {}) });
   const instructionsFile = resolve(root, 'AGENTS.md');
   let existing = ''; let mode = 0o644;
   try { const info = await lstat(instructionsFile); if (!info.isFile()) throw new Error('Refusing to replace a non-regular AGENTS.md'); mode = info.mode & 0o777; existing = await readFile(instructionsFile, 'utf8'); }
@@ -358,6 +358,17 @@ export async function saveMasterSettings(root: string, changes: MasterOwnedSetti
   const parsed = masterConfigSchema.parse({ ...config, run });
   await atomicPrivateWrite(resolve(root, '.graphyard/master.json'), parsed);
   return { changed, run: parsed.run, config: '.graphyard/master.json' };
+}
+
+/**
+ * Record who reviews and merges (GY-1501): `up --local` writes `supervised` with the operator's
+ * GitHub login (a name, never a credential) once master init wrote master.json. Idempotent.
+ */
+export async function recordSupervision(root: string, supervision: Supervision, operatorLogin?: string | null) {
+  const config = await loadStoredMasterConfig(root);
+  const next = masterConfigSchema.parse({ ...config, supervision, ...(operatorLogin ? { operatorLogin } : {}) });
+  if (next.supervision !== config.supervision || next.operatorLogin !== config.operatorLogin) await atomicPrivateWrite(resolve(await localDirectory(root), 'master.json'), next);
+  return { supervision: next.supervision, operatorLogin: next.operatorLogin ?? null };
 }
 
 /**
