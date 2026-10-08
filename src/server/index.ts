@@ -15,7 +15,7 @@ import { artifactCapacityFromEnv, type ArtifactBackend } from '../artifacts.js';
 import { buildIdentity } from '../protocol-version.js';
 import type { ProductionWatch } from '../production-watch.js';
 import { responderFromEnv, type Responder } from '../closed-question.js';
-import { Next, Sent, matchRoute, registerApiRoutes, requestFailure, type RouteContext, type RouteModule, type Services } from './routes.js';
+import { Next, Sent, matchRoute, requestFailure, type RouteContext, type RouteModule, type Services } from './routes.js';
 import { authenticate, operatorAgentRouteGuard, operatorVisible } from './auth.js';
 import type { Credential } from './principals.js';
 import { healthRoutes } from './routes/health.js';
@@ -42,15 +42,14 @@ export { principalSchema, type Credential } from './principals.js';
 /** Routes that answer without a bearer token. */
 export const publicRoutes: readonly RouteModule[] = [healthRoutes, githubRoutes, signinRoutes];
 /**
- * Every authenticated `/api/` route, in matching order. A resource adds its module here or in
- * routes.ts (`registerApiRoutes`); modules ahead of the operator-agent guard authorize their
- * callers themselves.
+ * Every authenticated `/api/` route, in matching order. A resource adds its module here;
+ * modules ahead of the operator-agent guard authorize their callers themselves.
  */
-export const apiRoutes: readonly RouteModule[] = registerApiRoutes([
+export const apiRoutes: readonly RouteModule[] = [
   operatorAgentRoutes, proofGrantRoutes, goalRoutes,
   { name: 'operator-agent-scope', routes: [operatorAgentRouteGuard] },
   agentRegistryRoutes, delegationRoutes, validationRoutes, deliveryRoutes, shippingPulseRoutes, flowAnalyticsRoutes, attributionRoutes, scenarioRoutes, interventionRoutes, actionRoutes, statusRoutes, workRoutes,
-]);
+];
 
 async function body(req: IncomingMessage, limit = 1_000_000) {
   const chunks: Buffer[] = []; let size = 0;
@@ -73,8 +72,9 @@ export function assembleServices(engine: Engine, credentials: Credential[], gith
   const env = options.env ?? process.env;
   const delegationLimits = assembleDelegationLimits(credentials, env, options.knownPrincipals);
   const principals = credentials.map(({ token, ...actor }) => ({ actor, hash: createHash('sha256').update(token).digest() }));
-  // The engine is constructed with the repository this control plane coordinates; GITHUB_REPOSITORY is
-  // only a process default (the CI checkout) and never overrides an explicit engine binding.
+  // The engine is constructed with the repository this control plane is authorized to coordinate.
+  // GITHUB_REPOSITORY is merely a process default (set to the CI checkout), so it
+  // must not override an explicit engine binding or scope validation becomes environment-dependent.
   const repository = engine.repository || github?.config.repository || process.env.GITHUB_REPOSITORY || '';
   demand(!engine.repository || !github || engine.repository.toLowerCase() === github.config.repository.toLowerCase(),
     'Engine and GitHub repositories must match');
