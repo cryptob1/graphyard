@@ -76,6 +76,11 @@ test('unit:agents-md-worker-block-only — sync regeneration renders the worker 
   const rendered = regenerateManagedBlocks(conflicted, text => renderers.managedInstructions(renderers.withoutMasterInstructions(text), url));
   assert.equal(rendered, `${clean}\n\n`, 'the worker block is rendered afresh and the master block is gone');
   assert.equal(regenerateManagedBlocks(`${clean}${legacyBlock}${legacyBlock}`, text => renderers.managedInstructions(renderers.withoutMasterInstructions(text), url)), null, 'duplicate master markers are left for the worker');
+  // A CLI released before GY-1493 probes the merged tree for managedMasterInstructions and runs it on
+  // a conflicted AGENTS.md that still carries the block: the tree's export drops that block only.
+  const { managedMasterInstructions } = await import('../src/master.js') as unknown as { managedMasterInstructions: (existing: string) => string };
+  const earlierCli = (text: string) => { const worker = renderers.managedInstructions(text, url); return worker.includes('<!-- graphyard-master -->') ? managedMasterInstructions(worker) : worker; };
+  assert.equal(regenerateManagedBlocks(conflicted, earlierCli), `${clean}\n\n`, 'an earlier CLI never turns AGENTS.md into the master text alone');
   const own = await readFile(join(repositoryRoot, 'AGENTS.md'), 'utf8');
   assert.doesNotMatch(own, /graphyard-master -->|## Graphyard master agent/);
 });

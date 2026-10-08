@@ -118,5 +118,10 @@ export function withoutMasterInstructions(existing: string) {
   return starts ? existing.slice(0, existing.indexOf(masterStart)) + existing.slice(existing.indexOf(masterEnd) + masterEnd.length) : existing;
 }
 
-/** @deprecated The master instructions under the name of the AGENTS.md block renderer they replaced; nothing is rendered into AGENTS.md any more. */
-export const managedMasterInstructions = (_existing = '') => masterInstructions;
+/**
+ * @deprecated The name of the AGENTS.md block renderer this replaced. A CLI released before GY-1493
+ * still loads it from the merged tree when sync regenerates a conflicted AGENTS.md carrying the master
+ * block, so text with master markers loses that block, never the rest of the file; text without them
+ * gets the master instructions.
+ */
+export const managedMasterInstructions = (existing = '') => existing.includes(masterStart) || existing.includes(masterEnd) ? withoutMasterInstructions(existing) : masterInstructions;

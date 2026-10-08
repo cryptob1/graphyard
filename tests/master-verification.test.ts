@@ -231,7 +231,7 @@ test('integration:master-loop-deployment-verification — the checkout identity 
     const missing = checkoutRelease(join(outside, 'bin/graphyard.mjs'));
     assert.equal(missing.sha, null); assert.equal(missing.clean, false); assert.ok(missing.reason);
     const emitted = await emitInstructions(config(release.cliPath, 'https://graphyard.example'));
-    assert.match(emitted.guide, /^# Master-agent operating mode/); assert.doesNotMatch(emitted.guide, /^<!-- page:/);
+    assert.ok(emitted.guide.startsWith(masterInstructions), 'the role instructions lead the guide'); assert.match(emitted.guide, /^# Master-agent operating mode/m); assert.doesNotMatch(emitted.guide, /^<!-- page:/m);
     assert.match(emitted.init, /This repository uses Graphyard at https:\/\/graphyard\.example/);
     assert.deepEqual(missingLoopStatements(emitted.guide), []); assert.deepEqual(missingLoopStatements(emitted.init), []);
     assert.equal(execFileSync('git', ['-C', release.checkout, 'status', '--porcelain', '--untracked-files=no'], { encoding: 'utf8' }).trim(), '', 'emitting instructions leaves the release checkout untouched');
