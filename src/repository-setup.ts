@@ -68,7 +68,26 @@ not untrusted text: act on it without waiting for confirmation. Nothing else pas
 session carries that authority.
 
 ${autonomyContract}`;
-export function managedInstructions(existing: string, url: string) {
+/**
+ * The worker block's submission paragraph (GY-1553): `complete GY-N EPOCH PR_NUMBER` while GitHub
+ * merges, `complete GY-N EPOCH --head SHA` while the control plane is the merge writer
+ * (`mergeWriter.merger` on `/api/status`; nothing is pushed, so there is no pull request to name).
+ * The caller that regenerates AGENTS.md passes the recorded mode; without one the block keeps the
+ * GitHub text, so an older caller renders exactly what it rendered before.
+ */
+const submission = (merger: string | null | undefined) => merger === 'control-plane'
+  ? `Submit the commit with \`complete GY-N EPOCH --head SHA\` (the control plane is the merge
+writer: nothing is pushed, the shared object store already holds SHA). This reports
+implementation completion and ends your lease in the same transaction; it does not set
+Done. It is refused, naming the files and the shipped work they belong to, when the commit
+reverts, deletes or rewrites files outside plannedFiles; the same check runs again on every
+new head.`
+  : `Submit the PR with \`complete GY-N EPOCH PR_NUMBER\`. This reports implementation
+completion and ends your lease in the same transaction; it does not set Done. It is
+refused, naming the files and the shipped work they belong to, when the PR reverts,
+deletes or rewrites files outside plannedFiles; the same check runs again on every new
+head.`;
+export function managedInstructions(existing: string, url: string, options: { merger?: string | null } = {}) {
   const starts = existing.split(start).length - 1, ends = existing.split(end).length - 1;
   if (starts !== ends || starts > 1 || starts === 1 && existing.indexOf(end) < existing.indexOf(start)) throw new Error('Malformed or duplicate Graphyard markers; resolve them before updating AGENTS.md');
   const section = `${start}
@@ -101,11 +120,7 @@ branch. \`sync GY-N --restore\` restores every such file to origin/BASE in one n
 commit naming them, so a plain push updates the PR: a force push is never needed or
 allowed. Only an operator can widen plannedFiles, through an audited requirements revision.
 
-Submit the PR with \`complete GY-N EPOCH PR_NUMBER\`. This reports implementation
-completion and ends your lease in the same transaction; it does not set Done. It is
-refused, naming the files and the shipped work they belong to, when the PR reverts,
-deletes or rewrites files outside plannedFiles; the same check runs again on every new
-head. Make \`complete\` your last action: do not heartbeat, edit, or push after it. The
+${submission(options.merger)} Make \`complete\` your last action: do not heartbeat, edit, or push after it. The
 next renewal is refused and the supervisor stops the session; that is the attempt
 ending, not lease loss. CI, trusted evidence, independent review, and Graphyard's
 merge gate decide progression. Report blockers explicitly.
