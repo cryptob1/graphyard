@@ -145,13 +145,8 @@ export async function observeHerdrAgents(run?: ChildRun, scope: string | null = 
   catch { return { agents: [] as HerdrAgent[], available: false, reason: 'Herdr session health is unavailable; Graphyard work state remains authoritative' }; }
 }
 
-/**
- * One pane the host's runtime holds, as `herdr pane list` reports it (GY-842): with or without an
- * agent in it. A bare shell reads with no `agent` and `agent_status` 'unknown', and its `cwd` names
- * the directory the shell sits in — with Linux's ` (deleted)` suffix once that directory is gone.
- * The agent list never carries a bare shell (GY-1533), so this inventory is the only place one shows.
- */
-export interface HerdrPane { pane_id?: string; tab_id?: string; workspace_id?: string; title?: string; agent?: string | null; agent_status?: string; cwd?: string; foreground_cwd?: string }
+/** One pane the host's runtime holds, as `herdr pane list` reports it (GY-842): with or without an agent in it. */
+export interface HerdrPane { pane_id?: string; tab_id?: string; workspace_id?: string; title?: string }
 /** Every pane in this install's scope (GY-842): the pane inventory the agent list does not stand in, since a pane a bare shell holds and a pane no session ever named are both real. */
 export async function listHerdrPanes(run?: ChildRun, scope: string | null = processScope): Promise<HerdrPane[]> {
   const result = await herdrJson(['pane', 'list'], run);
