@@ -36,9 +36,11 @@ const status = (w: World) => w.installed ? {
   setup: { protection: 'checks', loop: w.loop },
 } : null;
 function dependencies(w: World, root: string, events: UpEvent[]): UpDependencies {
-  let clock = 0;
+  let clock = 0, sleeps = 0;
   return {
-    root, pollMs: 1, emit: event => { events.push(event); }, now: () => clock, sleep: async ms => { clock += ms; },
+    root, pollMs: 1, emit: event => { events.push(event); }, now: () => clock,
+    // Bounded polling: an up that would wait forever on a step fails instead of spinning.
+    sleep: async ms => { clock += ms; if (++sleeps > 10_000) throw new Error('up polled 10,000 times without finishing'); },
     serverUrl: async () => w.installed ? SERVER : null, masterToken: async () => w.installed ? 'm'.repeat(40) : null,
     // The admin credential is on this machine: a supervised run still never provisions identities with it.
     operatorToken: async () => 'a'.repeat(40),
