@@ -1,7 +1,6 @@
 // Concern: the shadow merge gate's pure parts — which head is tried next, how a shadow verdict compares with GitHub's, and the report.
 import type { Work } from '../model.js';
 import type { AttentionItem } from '../master/attention.js';
-import { ownHeads } from '../merge-queue.js';
 
 export const shadowOutcomes = ['agree-pass', 'agree-fail', 'shadow-only-fail', 'shadow-missed', 'pending'] as const;
 export type ShadowOutcome = typeof shadowOutcomes[number];
@@ -45,9 +44,15 @@ export function shadowDue(work: readonly Work[], verdicts: readonly Pick<ShadowV
   return owed.sort((a, b) => submittedAtOf(a) - submittedAtOf(b) || a.key.localeCompare(b.key))[0] ?? null;
 }
 
-/** The merge commit GitHub made of this very head, as the snapshot holds it: a done item's delivery while its candidate is still this head. An earlier, reworked head that a later one superseded was never merged. */
-export const deliveredMerge = (item: Pick<Work, 'stage' | 'candidate' | 'baseRefresh' | 'delivery'>, head: string): string | null =>
-  item.stage === 'done' && item.delivery && ownHeads(item).includes(head.toLowerCase()) ? item.delivery.mergeSha.toLowerCase() : null;
+/**
+ * The merge commit GitHub made of this very head, as the snapshot holds it: a done item's delivery
+ * while its candidate is still this head. Only the candidate counts. A head a later one superseded
+ * was never merged, whether a worker reworked it or Graphyard refreshed it onto a newer base: the
+ * snapshot keeps the refreshed-away head as `baseRefresh.from.sha`, and the delivery is its
+ * successor's, not its own.
+ */
+export const deliveredMerge = (item: Pick<Work, 'stage' | 'candidate' | 'delivery'>, head: string): string | null =>
+  item.stage === 'done' && item.delivery && item.candidate?.sha.toLowerCase() === head.toLowerCase() ? item.delivery.mergeSha.toLowerCase() : null;
 
 /**
  * GitHub's side of the comparison for a verdict's head. The head's own merge decides, from the
@@ -58,7 +63,7 @@ export const deliveredMerge = (item: Pick<Work, 'stage' | 'candidate' | 'baseRef
  * redelivered under a new head, says nothing about this head. With no merge of this head, the
  * current candidate's failed required check is `failed`; everything else is still `pending`.
  */
-export function githubOutcome(item: Pick<Work, 'stage' | 'candidate' | 'baseRefresh' | 'delivery' | 'mainGuardReverts' | 'observation' | 'policy'> | undefined, head: string, delivered?: { mergeSha: string } | null): GithubOutcome {
+export function githubOutcome(item: Pick<Work, 'stage' | 'candidate' | 'delivery' | 'mainGuardReverts' | 'observation' | 'policy'> | undefined, head: string, delivered?: { mergeSha: string } | null): GithubOutcome {
   if (!item) return 'pending';
   const mergeSha = delivered?.mergeSha.toLowerCase() ?? deliveredMerge(item, head);
   if (mergeSha) return item.mainGuardReverts?.some(revert => revert.mergeSha.toLowerCase() === mergeSha && revert.cause !== 'cancelled') ? 'reverted' : 'merged';

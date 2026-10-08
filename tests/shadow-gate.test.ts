@@ -124,6 +124,18 @@ test('unit:shadow-compare — compareVerdicts gives agree-pass, agree-fail, shad
   const later = judgedVerdicts([...seen, verdict('GY-1', { head: newHead, at: iso(start + minute) })], [again]);
   assert.deepEqual(later.map(entry => [entry.outcome, entry.delivered?.mergeSha]), [['shadow-missed', first], ['agree-pass', second]], 'each head against its own merge');
   assert.deepEqual(shadowStateSchema.parse(later.map(entry => ({ ...entry }))), later, 'the remembered merge persists in the loop state');
+  // A base refresh replaces head H with its successor H2 and keeps H on the snapshot as baseRefresh.from.sha. GitHub merged H2,
+  // never H: H2's delivery is H2's outcome alone, H stays pending, and a main-guard revert of H2's merge misses only H2.
+  const refreshedAway = sha('refreshed-away'), successor = sha('successor'), successorMerge = sha('successor-merge');
+  const refresh = { at: iso(start), base: tip, baseTree: sha('tree'), from: { sha: refreshedAway, baseSha: sha('base') }, head: successor, carry: null, merge: null, trigger: 'behind base', policyRevision: 1 };
+  const refreshedDelivered = item({ id: 'rf', key: 'GY-12', stage: 'done', candidate: { sha: successor }, baseRefresh: refresh, delivery: delivery(successorMerge) });
+  assert.deepEqual([githubOutcome(refreshedDelivered, refreshedAway), githubOutcome(refreshedDelivered, successor)], ['pending', 'merged'], 'the delivery belongs to the refreshed head, not the one it replaced');
+  const oldVerdict = verdict('GY-12', { id: 'rf', head: refreshedAway, tests: failedTests }), newVerdict = verdict('GY-12', { id: 'rf', head: successor, at: iso(start + minute) });
+  const afterRefresh = judgedVerdicts([oldVerdict, newVerdict], [refreshedDelivered]);
+  assert.deepEqual(afterRefresh.map(entry => [entry.outcome, entry.delivered?.mergeSha ?? null]), [['pending', null], ['agree-pass', successorMerge]], 'the replaced head is not judged by its successor\'s merge');
+  const refreshedReverted = item({ id: 'rf', key: 'GY-12', stage: 'done', candidate: { sha: successor }, baseRefresh: refresh, delivery: delivery(successorMerge), mainGuardReverts: [revertOf(successorMerge, 'merged', { revertSha: sha('rr') })] });
+  assert.deepEqual(judgedVerdicts(afterRefresh, [refreshedReverted]).map(entry => entry.outcome), ['pending', 'shadow-missed'], 'a revert of the successor\'s merge does not miss the replaced head');
+  assert.deepEqual(shadowReport([oldVerdict, newVerdict], [refreshedDelivered]).counts, { 'agree-pass': 1, 'agree-fail': 0, 'shadow-only-fail': 0, 'shadow-missed': 0, pending: 1 }, 'the report counts the replaced head as pending, not as a shadow-only failure');
   const many = Array.from({ length: 12 }, (_, index) => verdict(`GY-${100 + index}`, { tests: failedTests, at: iso(start + index * minute), durationMs: (index + 1) * 1000, id: `w${index}` }));
   const work = many.map((entry, index) => item({ id: `w${index}`, key: entry.key, stage: 'done', candidate: { sha: entry.head }, delivery: { mergedAt: iso(start), mergeSha: sha(`x${index}`), authorizationRevision: 1 } }));
   const report = shadowReport([pass, ...many], work);
