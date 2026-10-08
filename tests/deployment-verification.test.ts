@@ -155,7 +155,7 @@ test('unit:loop-dispatches-promotion — the dispatch asks GitHub to run the rel
   const config = { repository: 'owner/repo', baseBranch: 'main' } as MasterConfig;
   assert.equal(promotionReads(config, '/repo', run, false), null, 'a repository without the workflow has nothing to dispatch');
   const reads = promotionReads(config, '/repo', run, true)!;
-  assert.deepEqual(await reads.ledger(), { mainSha: MAIN, promotedSha: PROMOTED, promotedAt: '2026-10-05T03:40:00.000Z', behind: 7 });
+  assert.deepEqual(await reads.ledger(), { mainSha: MAIN, promotedSha: PROMOTED, promotedAt: '2026-10-05T03:40:00.000Z', behind: 7, candidates: [] });
   assert.ok(calls.some(call => call.includes('rev-list') && call.includes(`${PROMOTED}..${MAIN}`) && call.includes('--first-parent')));
   assert.equal((await reads.runs()).length, 1);
   await reads.dispatch();

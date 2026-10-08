@@ -13,6 +13,7 @@ import { timingsSchema } from '../master/timings.js';
 import { docsSyncWatchSchema, routedConflictSchema } from '../model/docs-sync.js';
 import { emptyInvariantRecord, invariantRecordSchema } from '../model/invariants.js';
 import { emptyProjectMemory, projectMemorySchema, type ProjectMemory } from '../model/project-memory.js';
+import { itemClockSchema, latencySampleSchema } from './latency-clock.js';
 
 export const daemonActionKinds = ['close', 'dispatch', 'review', 'refresh', 'proof', 'merge', 'deployment', 'smoke', 'escalation', 'config', 'session', 'reclaim', 'decision', 'scope', 'settle', 'failover', 'capacity', 'human', 'preserve', 'fault', 'diagnosis', 'wake', 'blocker'] as const;
 export type DaemonActionKind = typeof daemonActionKinds[number];
@@ -151,6 +152,7 @@ export type DeploymentObservation = z.infer<typeof deploymentObservationSchema>;
  * `dispatchedAt` is the loop's own last dispatch, so a run GitHub has not listed is never dispatched
  * twice; `lastDispatchAt`, the later of it and the newest listed cut, starts the `promoteEveryMinutes`
  * gap. GY-1488: `cutSha` is the tip the newest candidate cut; one concluded unpromoted is not re-cut.
+ * GY-1491: `candidates`, the newest (merges each carries, merges on main behind it); `candidateAtDispatch`, the newest at the last dispatch.
  */
 export const promotionStateSchema = z.object({
   checkedAt: z.string(),
@@ -166,6 +168,14 @@ export const promotionStateSchema = z.object({
   dispatchedAt: z.string().nullable(),
   lastDispatchAt: z.string().nullable(),
   cutSha: z.string().nullable().optional(),
+  candidateAtDispatch: z.string().max(100).nullable().optional(),
+  candidates: z.array(z.object({
+    id: z.string().max(100),
+    sha: z.string().max(64),
+    cutAt: z.string().max(64),
+    prs: z.number().int().min(0).nullable(),
+    queued: z.number().int().min(0).nullable(),
+  }).strict()).max(5).optional(),
   nextDueAt: z.string().nullable(),
   reason: z.string().max(500).nullable(),
 }).strict();
@@ -198,34 +208,7 @@ export const scopeMeasurementSchema = z.object({
 }).strict();
 export type ScopeMeasurement = z.infer<typeof scopeMeasurementSchema>;
 
-/**
- * What the loop itself observed about one item's passage, so latency is measured against what the
- * loop acted on rather than reconstructed from a ledger afterwards. One entry per open item,
- * dropped once its delivery has been sampled.
- */
-export const itemClockSchema = z.object({
-  key: z.string().max(40), epoch: z.number().int().min(0),
-  /** First cycle that saw the item claimable — released, unclaimed, and not already submitted. */
-  readyAt: z.string().nullable().default(null),
-  claimedAt: z.string().nullable().default(null),
-  /** First candidate head of the current attempt: the worker's first push. */
-  pushedAt: z.string().nullable().default(null),
-  approvedAt: z.string().nullable().default(null),
-  /** First cycle that saw every gate green: when the candidate became mergeable. */
-  mergeableAt: z.string().nullable().default(null),
-}).strict();
-export type ItemClock = z.infer<typeof itemClockSchema>;
-
-/** One measured passage. A delivery fills the merge figures; a rework request fills its own. */
-export const latencySampleSchema = z.object({
-  work: z.string().max(40), at: z.string(),
-  readyToClaimMs: z.number().int().min(0).nullable().default(null),
-  readyToPushMs: z.number().int().min(0).nullable().default(null),
-  approvalToMergeMs: z.number().int().min(0).nullable().default(null),
-  mergeableToMergeMs: z.number().int().min(0).nullable().default(null),
-  verdictToReworkMs: z.number().int().min(0).nullable().default(null),
-}).strict();
-export type LatencySample = z.infer<typeof latencySampleSchema>;
+export { itemClockSchema, latencySampleSchema, type ItemClock, type LatencySample } from './latency-clock.js';
 
 /** Everything the loop could act on but has not, keyed by kind and item; `since` resets on every action. */
 export const silenceSchema = z.object({

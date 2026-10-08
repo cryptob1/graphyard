@@ -5,7 +5,8 @@ import { pendingBaseRefresh } from '../merge-queue.js';
 import { standingCapacity } from '../model/capacity.js';
 import { stalledItems } from '../model/action-account.js';
 import { type MasterConfig, type ContainmentAssessment, assertDispatchable, containmentPhase } from '../master.js';
-import { type ApprovalWatch, type DaemonAction, type DaemonActionKind, type DaemonState, type CycleMetrics, type ItemClock, itemClockSchema, type LatencySample, latencySampleSchema, type ScopeMeasurement } from './state.js';
+import { type ApprovalWatch, type DaemonAction, type DaemonActionKind, type DaemonState, type CycleMetrics, type ScopeMeasurement } from './state.js';
+import { type ItemClock, itemClockSchema, type LatencySample, latencySampleSchema } from './latency-clock.js';
 import { decisionKey } from './reconcile.js';
 import { docsSyncHolding } from '../model/docs-sync.js';
 import { approvedUnapplied, boundDetail, mergeableCandidate, namePaths, routineDecision, withheldDecision } from './decisions.js';
@@ -234,7 +235,7 @@ export function observeItemClock(state: DaemonState, work: Work, now: number): L
   // the moment the item becomes claimable again — and that moment is this cycle, not whenever the
   // stage last changed: a verdict or a conflict lands before the round it needs is approved, and
   // charging the worker for the decision in between would measure the wrong thing.
-  if (claimable && (clock.claimedAt || clock.pushedAt || clock.epoch !== work.epoch)) Object.assign(clock, { readyAt: at, claimedAt: null, pushedAt: null, approvedAt: null, mergeableAt: null });
+  if (claimable && (clock.claimedAt || clock.pushedAt || clock.epoch !== work.epoch)) Object.assign(clock, { readyAt: at, claimedAt: null, startedAt: null, pushedAt: null, approvedAt: null, mergeableAt: null });
   clock.epoch = work.epoch;
   // The first attempt's wait starts when the item was released, which may predate this loop.
   if (!clock.readyAt && claimable) clock.readyAt = new Date(time(work.stageEnteredAt) ?? now).toISOString();
@@ -242,6 +243,9 @@ export function observeItemClock(state: DaemonState, work: Work, now: number): L
   // submitted between two cycles still measured its wait, because the assignment recorded it.
   const assignment = work.lastAssignment?.epoch === work.epoch ? work.lastAssignment : work.lease ? { claimedAt: undefined } : null;
   if (!clock.claimedAt && assignment) clock.claimedAt = new Date(time(assignment.claimedAt) ?? now).toISOString();
+  // The session start the engine stamped at the epoch's first renewal (GY-1499); never guessed.
+  const startedAt = work.lastAssignment?.epoch === work.epoch ? time(work.lastAssignment.startedAt) : null;
+  if (!clock.startedAt && startedAt !== null) clock.startedAt = new Date(startedAt).toISOString();
   const readyMs = time(clock.readyAt);
   if (!clock.pushedAt && work.candidate) {
     // The provider's own creation time when it belongs to this attempt; otherwise the first cycle
@@ -256,16 +260,20 @@ export function observeItemClock(state: DaemonState, work: Work, now: number): L
   if (work.stage !== 'done') return null;
   const mergedAt = time(work.delivery?.mergedAtRepository ?? work.delivery?.mergedAt) ?? now;
   const since = (value: string | null) => { const start = time(value); return start === null ? null : Math.max(0, Math.round(mergedAt - start)); };
+  const between = (from: string | null, to: string | null) => { const start = time(from), end = time(to); return start === null || end === null ? null : Math.max(0, Math.round(end - start)); };
   delete state.clocks[work.id];
   return latencySampleSchema.parse({ work: work.key, at: new Date(mergedAt).toISOString(),
-    readyToClaimMs: clock.readyAt && clock.claimedAt ? Math.max(0, Math.round(Date.parse(clock.claimedAt) - Date.parse(clock.readyAt))) : null,
-    readyToPushMs: clock.readyAt && clock.pushedAt ? Math.max(0, Math.round(Date.parse(clock.pushedAt) - Date.parse(clock.readyAt))) : null,
+    readyToClaimMs: between(clock.readyAt, clock.claimedAt), readyToPushMs: between(clock.readyAt, clock.pushedAt),
+    claimToStartMs: between(clock.claimedAt, clock.startedAt), startToPushMs: between(clock.startedAt, clock.pushedAt),
     approvalToMergeMs: since(clock.approvedAt), mergeableToMergeMs: since(clock.mergeableAt) });
 }
 
 export interface LatencyBudget {
   target: typeof latencyTargets; deliveries: number;
-  readyToClaim: ReturnType<typeof percentiles>; readyToFirstPush: ReturnType<typeof percentiles>; approvalToMerge: ReturnType<typeof percentiles>;
+  readyToClaim: ReturnType<typeof percentiles>; readyToFirstPush: ReturnType<typeof percentiles>;
+  /** Ready→first push split at the session start: claim→start (launch) and start→first push (the agent's work). */
+  launchOverhead: ReturnType<typeof percentiles>; working: ReturnType<typeof percentiles>;
+  approvalToMerge: ReturnType<typeof percentiles>;
   mergeDwell: { count: number; worstMs: number; breaches: { work: string; ms: number }[] };
   reworkRequest: { count: number; worstMs: number; breaches: { work: string; ms: number }[] };
   met: boolean | null; reasons: string[];
@@ -284,17 +292,18 @@ export function latencyBudget(samples: LatencySample[]): LatencyBudget {
       breaches: measured.filter(sample => (sample[key] as number) > limit).map(sample => ({ work: sample.work, ms: sample[key] as number })) };
   };
   const readyToClaim = percentiles(value('readyToClaimMs')), readyToFirstPush = percentiles(value('readyToPushMs')), approvalToMerge = percentiles(value('approvalToMergeMs'));
+  const launchOverhead = percentiles(value('claimToStartMs')), working = percentiles(value('startToPushMs'));
   const mergeDwell = bound('mergeableToMergeMs', latencyTargets.mergeableToMergeMs), reworkRequest = bound('verdictToReworkMs', latencyTargets.verdictToReworkMs);
   const minutes = (ms: number) => `${Math.round(ms / 6000) / 10} min`;
   const reasons = [
     ...(readyToClaim.count && readyToClaim.p90Ms > latencyTargets.readyToClaimP90Ms ? [`ready→claim p90 ${minutes(readyToClaim.p90Ms)} exceeds ${minutes(latencyTargets.readyToClaimP90Ms)}`] : []),
-    ...(readyToFirstPush.count && readyToFirstPush.p90Ms > latencyTargets.readyToFirstPushP90Ms ? [`ready→first push p90 ${minutes(readyToFirstPush.p90Ms)} exceeds ${minutes(latencyTargets.readyToFirstPushP90Ms)}`] : []),
+    ...(readyToFirstPush.count && readyToFirstPush.p90Ms > latencyTargets.readyToFirstPushP90Ms ? [`ready→first push p90 ${minutes(readyToFirstPush.p90Ms)} exceeds ${minutes(latencyTargets.readyToFirstPushP90Ms)} (launch overhead p90 ${launchOverhead.count ? minutes(launchOverhead.p90Ms) : 'unmeasured'}, working p90 ${working.count ? minutes(working.p90Ms) : 'unmeasured'})`] : []),
     ...(approvalToMerge.count && approvalToMerge.p90Ms > latencyTargets.approvalToMergeP90Ms ? [`approval→merge p90 ${minutes(approvalToMerge.p90Ms)} exceeds ${minutes(latencyTargets.approvalToMergeP90Ms)}`] : []),
     ...mergeDwell.breaches.map(breach => `${breach.work} stayed mergeable for ${minutes(breach.ms)}, past the ${minutes(latencyTargets.mergeableToMergeMs)} bound`),
     ...reworkRequest.breaches.map(breach => `${breach.work} carried a standing verdict for ${minutes(breach.ms)} before rework was requested, past the ${minutes(latencyTargets.verdictToReworkMs)} bound`),
   ];
   const enough = deliveries >= latencyTargets.minimumDeliveries;
-  return { target: latencyTargets, deliveries, readyToClaim, readyToFirstPush, approvalToMerge, mergeDwell, reworkRequest,
+  return { target: latencyTargets, deliveries, readyToClaim, readyToFirstPush, launchOverhead, working, approvalToMerge, mergeDwell, reworkRequest,
     met: reasons.length ? false : enough ? true : null,
     reasons: reasons.length ? reasons : enough ? [] : [`${deliveries} deliver${deliveries === 1 ? 'y' : 'ies'} measured; the p90 targets are judged over at least ${latencyTargets.minimumDeliveries}`] };
 }
