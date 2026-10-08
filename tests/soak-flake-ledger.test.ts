@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
-import { emptyFlakeLedger, flakeLedgerLimit, type FlakeLedger } from '../src/model/flake-ledger.js';
+import type { FlakeLedger } from '../src/model/flake-ledger.js';
 import { masterConfigSchema } from '../src/master.js';
 import type { Work } from '../src/model.js';
 
@@ -23,11 +23,13 @@ const item = (fields: Record<string, unknown>) => ({
 }) as unknown as Work;
 
 test('unit:soak-flake-ledger — over a day of loop cycles with recurring flakes each failed job log is read once, at most one item is filed per test, and the ledger stays within its bound', async () => {
+  // Loaded here, so a loop without the flake ledger fails this case rather than the file.
+  const { flakeLedgerLimit } = await import('../src/model/flake-ledger.js').catch(() => ({ flakeLedgerLimit: 500 }));
   const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: '/bin/graphyard',
     repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', workers: [] });
   const state = emptyDaemonState(config);
   const work: Work[] = [], reads = new Map<number, number>(), filed: string[] = [];
-  let now = start, ledger: FlakeLedger = emptyFlakeLedger(), largest = 0, writes = 0;
+  let now = start, ledger: FlakeLedger = { version: 1, entries: [], read: {}, filed: {} }, largest = 0, writes = 0;
   const effects = {
     agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
     snapshot: async () => ({ work, now: iso(now) }),

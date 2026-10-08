@@ -3,11 +3,10 @@ import assert from 'node:assert/strict';
 import { statSync } from 'node:fs';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { emptyDaemonState } from '../src/master-daemon.js';
-import { flakeStep } from '../src/daemon/cycle-flakes.js';
 import type { Cycle } from '../src/daemon/cycle.js';
 import type { DaemonEffects } from '../src/daemon/effects.js';
-import { flakeLedgerPath, flakeLedgerStore, type FlakeLedgerStore } from '../src/flake-ledger.js';
-import { emptyFlakeLedger, flakeLedgerLimit, flakeSources, flakyItemTitle, recordFlake, type FlakeLedger } from '../src/model/flake-ledger.js';
+import type { FlakeLedgerStore } from '../src/flake-ledger.js';
+import type { FlakeLedger } from '../src/model/flake-ledger.js';
 import { proofTestFile } from '../src/model/scope-companions.js';
 import { mainFailedRerunLimit } from '../src/main-guard.js';
 import { checkRerunLimit } from '../src/merge-queue.js';
@@ -22,6 +21,9 @@ const clock = Date.parse('2030-01-10T12:00:00Z');
 const hour = 3_600_000, day = 24 * hour;
 const iso = (at: number) => new Date(at).toISOString();
 const sha = (n: number) => String(n).padStart(40, 'a');
+// The modules under test are loaded inside each test, so a change without them fails its cases rather than the file.
+const load = async () => ({ ...await import('../src/daemon/cycle-flakes.js'), ...await import('../src/flake-ledger.js'), ...await import('../src/model/flake-ledger.js') });
+const emptyLedger = (): FlakeLedger => ({ version: 1, entries: [], read: {}, filed: {} });
 const flaky = 'unit:fleet-panel-renders-registry — the fleet panel renders the registry';
 
 /** An item whose `test` check failed in job `job` on `head` and passed on its rerun, `ago` before the clock. */
@@ -34,7 +36,7 @@ function mainFlake(n: number, job: number | null, merge: string, ago: number): W
     mainGuardFlakes: [{ mergeSha: merge, check: 'test', failedRunId: job, rerunRunId: job === null ? null : job + 1, at: iso(clock - ago) }] } as unknown as Work;
 }
 function memoryStore(): FlakeLedgerStore & { ledger: FlakeLedger; writes: number } {
-  const store = { ledger: emptyFlakeLedger(), writes: 0, read: async () => structuredClone(store.ledger), write: async (ledger: FlakeLedger) => { store.ledger = structuredClone(ledger); store.writes += 1; } };
+  const store = { ledger: emptyLedger(), writes: 0, read: async () => structuredClone(store.ledger), write: async (ledger: FlakeLedger) => { store.ledger = structuredClone(ledger); store.writes += 1; } };
   return store;
 }
 interface Fake { work: Work[]; logs: Record<number, string[] | Error>; reads: number[]; filed: { title: string; priority: number; plannedFiles: string[]; proofs: string[]; key: string }[]; reruns: number[] }
@@ -57,6 +59,7 @@ function cycleOf(fake: Fake, store: FlakeLedgerStore, at = clock, file = true): 
 const fakeOf = (work: Work[], logs: Fake['logs'] = {}): Fake => ({ work, logs, reads: [], filed: [], reruns: [] });
 
 test('unit:flake-ledger-records — a passed PR rerun and a main guard flake are each read once, by failed run id, into the 0600 ledger file, bounded to 500 entries and 30 days', async () => {
+  const { flakeStep, flakeLedgerPath, flakeLedgerStore, emptyFlakeLedger, flakeLedgerLimit, recordFlake } = await load();
   const root = await temporaryDirectory('flake-ledger');
   const store = flakeLedgerStore(root);
   const fake = fakeOf([rerun(1, 501, sha(1), hour), mainFlake(2, 601, sha(2), 2 * hour)], { 501: [flaky], 601: [flaky, 'unit:other-proof — another'] });
@@ -85,6 +88,7 @@ test('unit:flake-ledger-records — a passed PR rerun and a main guard flake are
 });
 
 test('unit:flake-fix-item-filed-once — 3 flakes on 2 shas within 7 days file one P1 "Flaky test" item planned on its proof\'s file; nothing more while open or for 7 days after it closes', async () => {
+  const { flakeStep, flakyItemTitle } = await load();
   const store = memoryStore();
   // Two flakes on one sha: under the threshold, nothing filed.
   const fake = fakeOf([rerun(1, 501, sha(1), 3 * day), rerun(2, 502, sha(1), 2 * day)], { 501: [flaky], 502: [flaky], 503: [flaky], 504: [flaky], 505: [flaky], 506: [flaky] });
@@ -133,6 +137,7 @@ test('unit:flake-fix-item-filed-once — 3 flakes on 2 shas within 7 days file o
 });
 
 test('unit:flake-ledger-never-relaxes-gates — a log naming no test, or a test with no proof id, is recorded and files nothing; a failure with no passing rerun is never recorded; reruns and reverts are unchanged', async () => {
+  const { flakeStep, flakeSources } = await load();
   const store = memoryStore();
   const unnamed = 'the fleet panel renders without a proof id';
   const work = [
