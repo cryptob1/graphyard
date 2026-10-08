@@ -22,14 +22,12 @@ import type { Cycle } from './cycle.js';
  * production record past it, neither drops the commit nor releases its freeze. That retained list
  * is also what makes the report once per sha, across the cursor's action pruning and a restart.
  */
-/** How many unknown commits the state lists; past it the oldest leave the list (never the freeze, which is the newest). */
-export const mainWatchUnknownListed = 200;
 export const mainWatchStateSchema = z.object({
   checkedAt: z.string(),
   /** The newest base branch commit the verdict covers: the tip, or the newest commit below the ones still settling; null when the checkout holds no tip. */
   tip: z.string().max(64).nullable(),
   /** The commits nothing explains and no admin acknowledged, newest first; kept until acknowledged or explained. */
-  unknown: z.array(z.object({ sha: z.string().max(64), subject: z.string().max(200), author: z.string().max(100), at: z.string().max(64) }).strict()).max(mainWatchUnknownListed),
+  unknown: z.array(z.object({ sha: z.string().max(64), subject: z.string().max(200), author: z.string().max(100), at: z.string().max(64) }).strict()),
   /** The newest unacknowledged unknown commit promotion is frozen on, and since when; null while nothing freezes it. */
   frozen: z.object({ sha: z.string().max(64), since: z.string() }).strict().nullable(),
 }).strict();
@@ -196,7 +194,7 @@ export async function mainWatchStep(cycle: Cycle) {
     const policy = await reads.policy();
     verdict = mainWatchVerdict(history, carried, { ...inputs, directMergeWindows: policy.directMergeWindows }, new Set(policy.acknowledged.map(entry => entry.sha.toLowerCase())), moment);
   }
-  const unknown: UnknownMainCommit[] = verdict.unknown.slice(0, mainWatchUnknownListed)
+  const unknown: UnknownMainCommit[] = verdict.unknown
     .map(commit => ({ sha: commit.sha, subject: commit.subject.slice(0, 200), author: commit.author.slice(0, 100), at: commit.at.slice(0, 64) }));
   const at = new Date(moment).toISOString();
   let changed = false;
@@ -232,10 +230,10 @@ export function mainWatchSummary(mainWatch: DaemonState['mainWatch']) {
   return { checkedAt: mainWatch.checkedAt, tip: mainWatch.tip, unknown: mainWatch.unknown.length, newestUnknown: mainWatch.unknown[0]?.sha ?? null, frozen: mainWatch.frozen };
 }
 
-/** One attention item per unknown commit the watch holds (at most `limit`), each naming its sha, subject and author and the acknowledge command. */
-export function mainWatchAttention(mainWatch: DaemonState['mainWatch'], baseBranch: string, limit = 20): AttentionItem[] {
+/** One attention item per unknown commit the watch holds (none dropped), each naming its sha, subject and author and the acknowledge command. */
+export function mainWatchAttention(mainWatch: DaemonState['mainWatch'], baseBranch: string): AttentionItem[] {
   if (!mainWatch?.unknown.length) return [];
-  return mainWatch.unknown.slice(0, limit).map(commit => ({
+  return mainWatch.unknown.map(commit => ({
     subject: 'main-watch', text: mainWatchDetail(commit, baseBranch, mainWatch.frozen?.sha === commit.sha),
     role: 'master' as const, approvedBy: null, human: false, humanOnly: null, next: `Explain the commit, then ${acknowledgeCommand(commit.sha)}`,
   }));
