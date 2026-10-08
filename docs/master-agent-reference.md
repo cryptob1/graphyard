@@ -15,7 +15,7 @@ Dispatch is optimistic (overlap holds nothing), smallest planned scope first ([r
 
 ## GitHub administration through the browser
 
-`master protection --apply` reconciles protection; page-only flows, `master browser FLOW` (`master browser app-permissions`, `master browser installation-accept`, `master browser protection`), drive `master init --browser-profile` profile:
+`master protection --apply` reconciles protection; page-only flows (`master browser app-permissions`, `master browser installation-accept`, `master browser protection`) drive the `master init --browser-profile` profile:
 
 | Flow | Effect
 | --- | ---
@@ -27,7 +27,7 @@ Flows read `GET /api/github/installation`, recording `.graphyard/master-actions/
 
 ## Typed actions and executors
 
-`nextAction` (one per item): `dispatch`, `request-review`, `request-rework`, `approve-scope`, `resync`, `reclaim`, `merge`, `verify-deployment`, `escalate`; judgements (`escalate`, `request-rework`): `actions.needsHuman`. `graphyard init` starts `graphyard-executor@N` user units, `master executors restart` moves stale ones to current release; verified deployments move clean checkouts to base tip, stale executors, then loop (dirty: `upgrade` attention; executors refusing claims 15 min: loop re-executes alone); unverified owed restarts retry each cycle (stalling in `loaded-revision`). Fenced (`POST /api/actions/presence`) or claim-renewing executors live (never `Nothing can run KIND`); polls and renewals upsert `executor_presence` from `serves` (every handler kind); an empty fleet needs evidence (a poll, or rows older than 120s), not process age. `resync` (`POST /api/work/:id/resync` `{since}`) completes only on observation newer than claim. `dispatch`/`request-review` complete on a session already answering the head; standing verdicts block second reviewers until dismissed; busy/reserved profiles stall after 30 minutes. Three failures with an unchanged reason mark a row stalled rather than retrying (a fleet that looks idle): in no count and no list, but in `actions.stalled` and on the item's own card; backoff, doubling from one minute, never outlives it; eight escalate it. Ticks requeue ownerless items (`liveness.violations`).
+`nextAction` (one per item): `dispatch`, `request-review`, `request-rework`, `approve-scope`, `resync`, `reclaim`, `merge`, `verify-deployment`, `escalate`; judgements (`escalate`, `request-rework`): `actions.needsHuman`. `graphyard init` starts `graphyard-executor@N` user units, `master executors restart` moves stale ones to current release; verified deployments move clean checkouts to base tip, stale executors, then loop (dirty: `upgrade` attention; executors refusing claims 15 min: loop re-executes alone); unverified owed restarts retry each cycle (stalling in `loaded-revision`). Fenced (`POST /api/actions/presence`) or claim-renewing executors live (never `Nothing can run KIND`); polls and renewals upsert `executor_presence` from `serves` (every handler kind); an empty fleet needs evidence (a poll or rows older than 120s), not process age. `resync` (`POST /api/work/:id/resync` `{since}`) completes only on observation newer than claim. `dispatch`/`request-review` complete on a session already answering the head; standing verdicts block second reviewers until dismissed; busy/reserved profiles stall after 30 minutes. Three failures with an unchanged reason mark a row stalled rather than retrying (a fleet that looks idle): in no count and no list, but in `actions.stalled` and on the item's own card; backoff, doubling from one minute, never outlives it; eight escalate it. Ticks requeue ownerless items (`liveness.violations`).
 
 Declared slot not `active` (systemd, else `PRINCIPAL@HOST/N` presence): `resources` fault naming `journalctl --user -u graphyard-executor@N.service` unless stopped under 2 minutes. `graphyard-executor.mjs --install` needs `Restart=always`, `RestartSec` ≤60s. Worker starts fenced <2min retry after lapse; longer fail naming it.
 
@@ -45,7 +45,7 @@ Unacted producer requests (never started, launch refused, exited at launch) rela
 
 ## Shadow merge gate
 
-`run.shadowGate` (`enabled`, default true; `timeoutMinutes`, default 20): one submitted head per cycle, oldest first, trial-merged onto main, built and affected-tested in a credential-free `trial` checkout; `shadow.verdict` joins GitHub's outcome in `master status` `shadowGate` (`shadow-only-fail`/`shadow-missed`: one report-only attention line each); errors record nothing; a timeout records nothing and is retried behind untried heads, three times per tip, then one line names it; nothing pushed.
+`run.shadowGate` (`enabled`, default true; `timeoutMinutes`, default 20): each cycle trial-merges the oldest untried submitted head onto main, builds and affected-tests it in a credential-free `trial` checkout, pushes nothing; `shadow.verdict` joins GitHub's outcome in `master status` `shadowGate` (`shadow-only-fail`/`shadow-missed`: one report-only attention line each); errors and timeouts record nothing; timeouts retry three times per tip, then one line names it.
 
 ## Pipeline speed
 
