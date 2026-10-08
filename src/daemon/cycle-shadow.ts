@@ -5,8 +5,8 @@ import type { MasterConfig } from '../master.js';
 import type { Work } from '../model.js';
 import { classifyRisk } from '../model/risk-class.js';
 import { shadowGateSettings } from '../master/merge-writer-settings.js';
-import { runTrial, trialMerge, TrialCleanupError, TrialTimeoutError, type TrialRun } from '../merge-writer/trial.js';
-import { judgedVerdicts, shadowDisagreement, shadowDisagreementDetail, shadowOutcomes, shadowDue, shadowReport, type ShadowVerdict } from '../merge-writer/shadow.js';
+import { runTrial, trialMerge, trialNeedsLog, TrialCleanupError, TrialTimeoutError, type TrialRun } from '../merge-writer/trial.js';
+import { judgedVerdicts, shadowDisagreement, shadowDisagreementDetail, shadowOutcomes, shadowDue, shadowReport, trialLogTailLength, type ShadowVerdict } from '../merge-writer/shadow.js';
 import { storeAction, type DaemonState } from './state.js';
 import type { Cycle } from './cycle.js';
 
@@ -34,8 +34,8 @@ export interface ShadowReads {
   record(work: Work, verdict: Omit<ShadowVerdict, 'outcome'>): Promise<void>;
 }
 
-/** The body `POST /api/work/:id/shadow-verdict` takes, and the idempotency key one (head, baseTip) pair keeps across retries. */
-export const shadowVerdictBody = (verdict: Omit<ShadowVerdict, 'outcome'>) => ({ head: verdict.head, baseTip: verdict.baseTip, mergeSha: verdict.mergeSha, risk: verdict.risk, build: verdict.build, tests: verdict.tests, conflict: verdict.conflict, durationMs: verdict.durationMs });
+/** The body `POST /api/work/:id/shadow-verdict` takes (with the log tail when the verdict carries one), and the idempotency key one (head, baseTip) pair keeps across retries. */
+export const shadowVerdictBody = (verdict: Omit<ShadowVerdict, 'outcome'>) => ({ head: verdict.head, baseTip: verdict.baseTip, mergeSha: verdict.mergeSha, risk: verdict.risk, build: verdict.build, tests: verdict.tests, conflict: verdict.conflict, durationMs: verdict.durationMs, ...(verdict.logTail === undefined ? {} : { logTail: verdict.logTail }) });
 export const shadowVerdictKey = (work: Pick<Work, 'id'>, verdict: Pick<ShadowVerdict, 'head' | 'baseTip'>) => `shadow:${work.id}:${verdict.head}:${verdict.baseTip}`;
 
 /**
@@ -145,7 +145,9 @@ export async function shadowStep(cycle: Cycle) {
     try {
       await reads.record(owed.work, owed.verdict);
       unrecorded.delete(state);
-      state.shadow = keepVerdicts([...state.shadow, { ...owed.verdict, outcome: 'pending' as const }], snapshot.work);
+      // The cursor keeps the verdict without its log: the recorded event holds the log, and the cursor stays small.
+      const { logTail: _recorded, ...kept } = owed.verdict;
+      state.shadow = keepVerdicts([...state.shadow, { ...kept, outcome: 'pending' as const }], snapshot.work);
       changed = true;
     } catch (error) {
       performed.push(storeAction(state, `shadow-record:${owed.verdict.head}:${owed.verdict.baseTip}`, { kind: 'merge', work: owed.verdict.key, principal: null, state: 'failed', detail: `The shadow verdict for ${owed.verdict.key} is not yet recorded by the coordinator and is retried next cycle: ${error instanceof Error ? error.message : String(error)}`.slice(0, 1900), attempts: 1, epoch: null, cycle: state.cycle, at: new Date(now()).toISOString() }, null));
@@ -180,7 +182,9 @@ export async function shadowStep(cycle: Cycle) {
         const trial = await reads.trial(head, tip, due.key);
         const risk = classifyRisk(trial.files.map(path => ({ path }))).risk;
         const build = trial.run?.build ?? 'fail';
-        return { key: due.key, id: due.id, head, baseTip: tip, mergeSha: trial.mergeSha, risk, build, tests: trial.run?.tests ?? { passed: 0, failed: [], files: 0 }, conflict: trial.conflict, durationMs: trial.run?.durationMs ?? Math.max(0, now() - started), at: new Date(now()).toISOString(), leftover: trial.leftover };
+        // A trial that did not pass records the last `trialLogTailLength` characters of its output, so the verdict says why (GY-1549).
+        const logTail = trial.run && trialNeedsLog(trial.run) ? { logTail: trial.run.logTail.slice(-trialLogTailLength) } : {};
+        return { key: due.key, id: due.id, head, baseTip: tip, mergeSha: trial.mergeSha, risk, build, tests: trial.run?.tests ?? { passed: 0, failed: [], files: 0 }, conflict: trial.conflict, durationMs: trial.run?.durationMs ?? Math.max(0, now() - started), at: new Date(now()).toISOString(), leftover: trial.leftover, ...logTail };
       })().then(({ leftover, ...verdict }) => { entry.settled = { verdict, work: due, ...(leftover ? { leftover } : {}) }; }, error => { entry.settled = { error }; });
     }
   }

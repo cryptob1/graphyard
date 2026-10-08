@@ -1,9 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, readdirSync, symlinkSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readdirSync, symlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { createRequire } from 'node:module';
+import { tmpdir } from 'node:os';
+import { fileURLToPath } from 'node:url';
 import { defaultChildRun } from '../src/child-runner.js';
 import { runTrial, trialAuthor, trialEnvironment, trialMerge, trialRef, TrialCleanupError, TrialTimeoutError, withheldTrialVariables, type RunTrialInput } from '../src/merge-writer/trial.js';
 import { checkoutKinds } from '../src/install/worktree-root.js';
@@ -12,6 +14,9 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 // GY-1522: the shadow gate's trial merge — the exact merge commit made in the object store, and its
 // build and affected tests run in a detached, credential-free checkout that is always removed.
 
+// Every scratch directory here sits under the host's tmpdir without the `graphyard-` prefix: a trial takes seconds to
+// minutes, and a runner sweep by a session in another PID namespace (a confined worker beside this one) would take a
+// prefixed directory whose owner it cannot see out from under the running trial. The file's after hook removes them.
 const identity = { GIT_AUTHOR_NAME: 'Someone', GIT_AUTHOR_EMAIL: 'someone@example.com', GIT_COMMITTER_NAME: 'Someone', GIT_COMMITTER_EMAIL: 'someone@example.com', GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
 const gitIn = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8', env: { ...process.env, ...identity } }).trim();
 const gitFor = (root: string) => async (args: string[], env: Record<string, string> = {}) => String(await defaultChildRun('git', ['-C', root, ...args], { env: { ...process.env, ...identity, ...env } }));
@@ -19,7 +24,7 @@ const gitFor = (root: string) => async (args: string[], env: Record<string, stri
 const installedModules = resolve(dirname(createRequire(import.meta.url).resolve('tsx/package.json')), '..');
 
 async function repository(files: Record<string, string>) {
-  const root = await temporaryDirectory('trial-merge-repo');
+  const root = await temporaryDirectory('trial-merge-repo', tmpdir());
   gitIn(root, 'init', '-q', '-b', 'main');
   const write = (path: string, content: string) => { mkdirSync(dirname(join(root, path)), { recursive: true }); writeFileSync(join(root, path), content); };
   for (const [path, content] of Object.entries(files)) write(path, content);
@@ -74,7 +79,7 @@ const fixtureFiles = {
   '.gitignore': 'node_modules\n',
   'package.json': JSON.stringify({ name: 'fixture', scripts: { build: 'node build.js' } }),
   'package-lock.json': '{"lockfileVersion":3}\n',
-  'build.js': "const { existsSync } = require('node:fs'); console.log('ENV:' + JSON.stringify({ keys: Object.keys(process.env), global: process.env.GIT_CONFIG_GLOBAL, nosystem: process.env.GIT_CONFIG_NOSYSTEM })); if (existsSync('break-build')) { console.error('build broke'); process.exit(1); }\n",
+  'build.js': "const { existsSync } = require('node:fs'); console.log('ENV:' + JSON.stringify({ keys: Object.keys(process.env), global: process.env.GIT_CONFIG_GLOBAL, nosystem: process.env.GIT_CONFIG_NOSYSTEM, home: process.env.HOME, tmpdir: require('node:os').tmpdir() })); if (existsSync('break-build')) { console.error('build broke'); process.exit(1); }\n",
   // The stand-in for scripts/ci-tests.mjs: `affected` answers the changed test files, or a full selection (every pre-merge
   // file, never a soak) when package.json changed; with a `full-silent` marker it lists nothing for a full selection, as the
   // script did before GY-1522. `select` lists the pre-merge suite, as the real one does outside Actions.
@@ -92,7 +97,7 @@ const fixture = async () => {
 const trialOf = async (repo: Awaited<ReturnType<typeof fixture>>, head: string, changedFiles: string[], environment: NodeJS.ProcessEnv = { PATH: process.env.PATH! }, remove?: RunTrialInput['remove']) => {
   const merged = await trialMerge(gitFor(repo.root), { head, baseTip: repo.base });
   assert.ok('mergeSha' in merged);
-  const base = await temporaryDirectory('trial-merge-root');
+  const base = await temporaryDirectory('trial-merge-root', tmpdir());
   const result = await runTrial({ root: repo.root, base, mergeSha: merged.mergeSha, changedFiles, timeoutMs: 120_000, key: 'GY-9', environment, remove });
   return { result, base };
 };
@@ -153,26 +158,64 @@ test('integration:trial-run-build-and-tests — a trial checkout that cannot be 
   }) as never;
   const merged = await trialMerge(gitFor(repo.root), { head, baseTip: repo.base });
   assert.ok('mergeSha' in merged);
-  await assert.rejects(runTrial({ root: repo.root, base: await temporaryDirectory('trial-merge-root'), mergeSha: merged.mergeSha, changedFiles: [], timeoutMs: 120_000, key: 'GY-9', environment: { PATH: process.env.PATH! }, run, remove: stuck }),
+  await assert.rejects(runTrial({ root: repo.root, base: await temporaryDirectory('trial-merge-root', tmpdir()), mergeSha: merged.mergeSha, changedFiles: [], timeoutMs: 120_000, key: 'GY-9', environment: { PATH: process.env.PATH! }, run, remove: stuck }),
     (error: unknown) => error instanceof TrialCleanupError && error.verdict === null && /the trial itself failed: The trial timed out during its build/.test(error.message));
 });
 
-test('unit:trial-run-credential-free — the trial child sees none of GH_CONFIG_DIR, GH_TOKEN, GITHUB_TOKEN, SSH_AUTH_SOCK, GIT_SSH_COMMAND or any GRAPHYARD_*/HERDR_* variable, and git\'s global configuration is off', async () => {
-  const planted: NodeJS.ProcessEnv = { PATH: process.env.PATH!, GH_CONFIG_DIR: '/home/me/.config/gh', GH_TOKEN: 'gh-secret', GITHUB_TOKEN: 'github-secret', SSH_AUTH_SOCK: '/run/agent.sock', GIT_SSH_COMMAND: 'ssh -i key',
-    GRAPHYARD_TOKEN: 'graphyard-secret', GRAPHYARD_URL: 'https://example.test', GRAPHYARD_TIMING_RECORD: '/tmp/record', HERDR_PANE_ID: 'p1', HERDR_SOCKET_PATH: '/run/herdr.sock', GIT_CONFIG_GLOBAL: '/home/me/.gitconfig', KEPT: 'yes' };
+/** This repository's own trial: HEAD's tree with tests/ reduced to two fast, Postgres-free files, committed in a shared scratch clone that borrows this checkout's install. */
+async function ownRepositoryTrial(keep: readonly string[]) {
+  const own = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+  const scratch = await temporaryDirectory('trial-merge-own', tmpdir());
+  const root = join(scratch, 'repo');
+  execFileSync('git', ['clone', '-q', '--shared', '--no-checkout', own, root], { stdio: 'ignore' });
+  const head = gitIn(root, 'rev-parse', 'HEAD');
+  const indexed = (...args: string[]) => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', env: { ...process.env, ...identity, GIT_INDEX_FILE: join(scratch, 'index') } }).trim();
+  indexed('read-tree', head);
+  const dropped = gitIn(root, 'ls-tree', '--name-only', head, 'tests/').split('\n').filter(path => path.endsWith('.test.ts') && !keep.includes(path));
+  execFileSync('git', ['-C', root, 'update-index', '--force-remove', '--stdin'], { input: `${dropped.join('\n')}\n`, env: { ...process.env, ...identity, GIT_INDEX_FILE: join(scratch, 'index') } });
+  const mergeSha = gitIn(root, 'commit-tree', indexed('write-tree'), '-p', head, '-m', `Trial of ${keep.join(' and ')}`);
+  // The scratch root is the coordinator checkout: its lockfile is the merge's, so the trial borrows its install.
+  copyFileSync(join(own, 'package-lock.json'), join(root, 'package-lock.json'));
+  symlinkSync(installedModules, join(root, 'node_modules'));
+  return { root, base: join(scratch, 'root'), mergeSha, dropped: dropped.length };
+}
+
+test('unit:trial-credential-free-runner-exits-zero — this repository\'s own two-file fast selection, built and run by the real runner in a credential-free scratch checkout through runTrial\'s environment (GH_CONFIG_DIR, GH_TOKEN, GITHUB_TOKEN, SSH_AUTH_SOCK, GIT_SSH_COMMAND and every GRAPHYARD_*/HERDR_* variable removed, GIT_CONFIG_NOSYSTEM=1, GIT_CONFIG_GLOBAL=/dev/null), records no failed file and a runner exit code of 0 (GY-1549)', async () => {
+  const keep = ['tests/readme.test.ts', 'tests/stable-json.test.ts'];
+  const trial = await ownRepositoryTrial(keep);
+  assert.ok(trial.dropped > 100, `the scratch tree keeps only the two files (${trial.dropped} dropped)`);
+  const planted: NodeJS.ProcessEnv = { ...process.env, GH_CONFIG_DIR: '/nowhere/gh', GH_TOKEN: 'gh-secret', GITHUB_TOKEN: 'github-secret', SSH_AUTH_SOCK: '/nowhere/agent.sock', GIT_SSH_COMMAND: 'ssh -i /nowhere/key', GRAPHYARD_TOKEN: 'graphyard-secret', HERDR_PANE_ID: 'p1', GIT_CONFIG_GLOBAL: '/nowhere/.gitconfig' };
   const environment = trialEnvironment(planted);
-  for (const name of [...withheldTrialVariables, 'GRAPHYARD_TOKEN', 'GRAPHYARD_URL', 'GRAPHYARD_TIMING_RECORD', 'HERDR_PANE_ID', 'HERDR_SOCKET_PATH']) assert.ok(!(name in environment), `${name} is withheld`);
-  assert.equal(environment.KEPT, 'yes');
+  for (const name of [...withheldTrialVariables, 'GRAPHYARD_TOKEN', 'GRAPHYARD_TEST_PORT', 'HERDR_PANE_ID']) assert.ok(!(name in environment), `${name} is withheld from the trial`);
+  assert.deepEqual([environment.GIT_CONFIG_NOSYSTEM, environment.GIT_CONFIG_GLOBAL], ['1', '/dev/null']);
+  // The runner changed, so the selection is the full pre-merge suite of the scratch tree: exactly the two files.
+  const result = await runTrial({ root: trial.root, base: trial.base, mergeSha: trial.mergeSha, changedFiles: ['tests/helpers/run-tests.ts'], timeoutMs: 10 * 60_000, key: 'GY-1549', environment: planted });
+  assert.equal(result.build, 'pass', result.logTail);
+  assert.deepEqual(result.tests, { passed: 2, failed: [], files: 2 }, result.logTail);
+  assert.equal(result.runnerExit, 0, result.logTail);
+  assert.match(result.logTail, /run-tests\.ts --files-from/, 'the real runner ran the listed files');
+  assert.equal(existsSync(trial.base) ? readdirSync(trial.base).length : 0, 0, 'the trial checkout is removed');
+});
+
+test('unit:trial-run-credential-free — the trial child sees none of GH_CONFIG_DIR, GH_TOKEN, GITHUB_TOKEN, SSH_AUTH_SOCK, GIT_SSH_COMMAND, TMPDIR or any GRAPHYARD_*/HERDR_* variable, and git\'s global configuration is off', async () => {
+  const planted: NodeJS.ProcessEnv = { PATH: process.env.PATH!, HOME: '/home/me', GH_CONFIG_DIR: '/home/me/.config/gh', GH_TOKEN: 'gh-secret', GITHUB_TOKEN: 'github-secret', SSH_AUTH_SOCK: '/run/agent.sock', GIT_SSH_COMMAND: 'ssh -i key',
+    XDG_RUNTIME_DIR: '/run/user/1000', TMPDIR: '/var/tmp', TMP: '/var/tmp', TEMP: '/var/tmp',
+    GRAPHYARD_TOKEN: 'graphyard-secret', GRAPHYARD_URL: 'https://example.test', GRAPHYARD_TIMING_RECORD: '/tmp/record', HERDR_PANE_ID: 'p1', HERDR_SOCKET_PATH: '/run/herdr.sock', GIT_CONFIG_GLOBAL: '/home/me/.gitconfig', KEPT: 'yes' };
+  const withheld = [...withheldTrialVariables, 'GRAPHYARD_TOKEN', 'GRAPHYARD_URL', 'GRAPHYARD_TIMING_RECORD', 'HERDR_PANE_ID', 'HERDR_SOCKET_PATH'];
+  const environment = trialEnvironment(planted);
+  for (const name of withheld) assert.ok(!(name in environment), `${name} is withheld`);
+  assert.deepEqual([environment.KEPT, environment.XDG_RUNTIME_DIR, environment.HOME], ['yes', '/run/user/1000', '/home/me'], 'everything else, the home among it, stays');
   assert.equal(environment.GIT_CONFIG_NOSYSTEM, '1');
   assert.equal(environment.GIT_CONFIG_GLOBAL, '/dev/null');
-  // And the child that runs the build sees exactly that.
+  // And the child that runs the build sees exactly that, under the platform's temporary directory.
   const repo = await fixture();
   const head = repo.commitOnBase({ 'src/a.ts': 'export {};\n' }, 'head');
   const { result } = await trialOf(repo, head, ['src/a.ts'], planted);
-  const seen = JSON.parse(/ENV:(.*)/.exec(result.logTail)![1]!) as { keys: string[]; global: string; nosystem: string };
-  for (const name of [...withheldTrialVariables, 'GRAPHYARD_TOKEN', 'GRAPHYARD_URL', 'GRAPHYARD_TIMING_RECORD', 'HERDR_PANE_ID', 'HERDR_SOCKET_PATH']) assert.ok(!seen.keys.includes(name), `the child saw ${name}`);
+  const seen = JSON.parse(/ENV:(.*)/.exec(result.logTail)![1]!) as { keys: string[]; global: string; nosystem: string; home: string; tmpdir: string };
+  for (const name of withheld) assert.ok(!seen.keys.includes(name), `the child saw ${name}`);
   assert.ok(seen.keys.includes('KEPT'));
   assert.deepEqual([seen.global, seen.nosystem], ['/dev/null', '1']);
+  assert.deepEqual([seen.home, seen.tmpdir], ['/home/me', '/tmp'], 'the home stays; the suite runs under the platform\'s temporary directory, as CI does (GY-1549)');
 });
 
 test('integration:trial-run-build-and-tests — a merge that changes the lockfile installs its own dependencies with npm ci, and one that leaves it alone reuses the coordinator\'s install', async () => {
@@ -188,7 +231,7 @@ test('integration:trial-run-build-and-tests — a merge that changes the lockfil
   for (const head of [same, changed]) {
     const merged = await trialMerge(gitFor(repo.root), { head, baseTip: repo.base });
     assert.ok('mergeSha' in merged);
-    const base = await temporaryDirectory('trial-merge-root');
+    const base = await temporaryDirectory('trial-merge-root', tmpdir());
     const result = await runTrial({ root: repo.root, base, mergeSha: merged.mergeSha, changedFiles: [], timeoutMs: 120_000, key: 'GY-9', environment: { PATH: process.env.PATH! }, run });
     assert.equal(result.build, 'pass', result.logTail);
   }
@@ -200,7 +243,7 @@ test('integration:trial-run-build-and-tests — a trial that outruns its time bu
   const head = repo.commitOnBase({ 'src/a.ts': 'export {};\n' }, 'slow head');
   const merged = await trialMerge(gitFor(repo.root), { head, baseTip: repo.base });
   assert.ok('mergeSha' in merged);
-  const base = await temporaryDirectory('trial-merge-root');
+  const base = await temporaryDirectory('trial-merge-root', tmpdir());
   // The build child is killed at the deadline, as the child runner reports it.
   const run = ((command: string, args: string[], options: unknown) => {
     if (command === 'npm' && args[0] === 'run') throw Object.assign(new Error('npm run build did not finish within 1000ms and was killed'), { timedOut: true, stdout: 'building…', stderr: '' });

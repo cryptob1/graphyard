@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import type pg from 'pg';
 import { z } from 'zod';
 import { demand, type Principal } from '../model.js';
+import { trialLogTailLength } from '../merge-writer/shadow.js';
 import type { Services } from './routes.js';
 
 /**
@@ -15,6 +16,8 @@ export const shadowVerdictBodySchema = z.object({
   head: sha, baseTip: sha, mergeSha: sha.nullable(), risk: z.enum(['sensitive', 'normal']), build: z.enum(['pass', 'fail']),
   tests: z.object({ passed: z.number().int().min(0), failed: z.array(z.string().max(300)).max(100), files: z.number().int().min(0) }).strict(),
   conflict: z.array(z.string().max(500)).max(100).default([]), durationMs: z.number().int().min(0),
+  // The trial's log tail, present when the trial did not pass: the build, a test file, or the runner's exit (GY-1549).
+  logTail: z.string().max(trialLogTailLength).optional(),
 }).strict();
 export const shadowVerdictEvent = 'shadow.verdict';
 

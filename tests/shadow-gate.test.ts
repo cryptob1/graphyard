@@ -7,8 +7,8 @@ import { fileURLToPath } from 'node:url';
 import EmbeddedPostgres from 'embedded-postgres';
 import { daemonStateSchema, daemonSummary, emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { keepVerdicts, shadowErrorKey, shadowKeptVerdicts, shadowLeftoverKey, shadowReads, shadowIdle, shadowStateSchema, shadowTimeoutKey, shadowTimeoutRetries, shadowVerdictBody, shadowVerdictKey } from '../src/daemon/cycle-shadow.js';
-import { compareVerdicts, githubOutcome, judgedVerdicts, shadowDue, shadowGateAttention, shadowReport, submittedAtOf, type ShadowVerdict } from '../src/merge-writer/shadow.js';
-import { TrialCleanupError, TrialTimeoutError } from '../src/merge-writer/trial.js';
+import { compareVerdicts, githubOutcome, judgedVerdicts, shadowDue, shadowGateAttention, shadowReport, submittedAtOf, trialLogTailLength, type ShadowVerdict } from '../src/merge-writer/shadow.js';
+import { trialNeedsLog, TrialCleanupError, TrialTimeoutError, type TrialRun } from '../src/merge-writer/trial.js';
 import { daemonEffects } from '../src/daemon/effects.js';
 import { maxShadowTimeoutMinutes, shadowGateSettings, shadowGateSettingsSchema } from '../src/master/merge-writer-settings.js';
 import { masterConfigSchema } from '../src/master.js';
@@ -217,6 +217,36 @@ test('unit:shadow-step-records-verdict — one cycle starts the oldest owed tria
   assert.equal(masterConfigSchema.parse({ ...config, run: { shadowGate: { timeoutMinutes: 30 } } }).run.shadowGate?.timeoutMinutes, 30, 'run.shadowGate is a master.json setting');
 });
 
+test('unit:shadow-verdict-keeps-log-tail — a trial that did not pass (a failed build, a failing test file, or a runner that exited non-zero with every file passing) records the last 4000 characters of its output as logTail in the posted verdict and the route keeps it; a passing trial records none, and the loop\'s cursor never carries it', async () => {
+  const runs: TrialRun[] = [
+    { build: 'fail', tests: { passed: 0, failed: [], files: 0 }, durationMs: 1000, logTail: `$ npm run build\n${'x'.repeat(5000)}\nbuild broke\n[exit status 1]`, runnerExit: null },
+    { build: 'pass', tests: { passed: 1, failed: ['tests/bad.test.ts'], files: 2 }, durationMs: 2000, logTail: 'not ok 1 - tests/bad.test.ts', runnerExit: 1 },
+    { build: 'pass', tests: { passed: 3, failed: ['tests/helpers/run-tests.ts'], files: 3 }, durationMs: 3000, logTail: 'ok 3 - tests/c.test.ts\n[exit status 1]', runnerExit: 1 },
+    { build: 'pass', tests: { passed: 3, failed: [], files: 3 }, durationMs: 3000, logTail: 'ok 3 - tests/c.test.ts\n[exit signal SIGKILL: stdout exceeded 16777216 bytes]', runnerExit: 137 },
+    { build: 'pass', tests: { passed: 3, failed: [], files: 3 }, durationMs: 4000, logTail: 'ok 3 - tests/c.test.ts', runnerExit: 0 },
+    { build: 'pass', tests: { passed: 0, failed: [], files: 0 }, durationMs: 100, logTail: 'affected: nothing', runnerExit: null },
+  ];
+  assert.deepEqual(runs.map(trialNeedsLog), [true, true, true, true, false, false]);
+  const posted: Record<string, unknown>[] = [];
+  let clock = start;
+  const now = () => clock;
+  const work = runs.map((_, index) => submitted(index + 1, runs.length - index));
+  const reads = shadowReads(config, '/coordinator', recordingGit().run, { base: '/worktrees', record: async (_work, entry) => { posted.push(shadowVerdictBody(entry)); }, trial: async input => runs[work.findIndex(item => item.key === input.key)]! });
+  const state = emptyDaemonState(config);
+  const effects = effectsFor({ work: () => work, now, shadow: reads });
+  for (let cycle = 0; cycle < runs.length; cycle++) { await runCycle(config, state, effects, now); await shadowIdle(state); clock += minute; }
+  await runCycle(config, state, effects, now);
+  assert.deepEqual(posted.map(body => body.logTail), [runs[0]!.logTail.slice(-4000), runs[1]!.logTail, runs[2]!.logTail, runs[3]!.logTail, undefined, undefined], 'the posted verdict keeps the log tail exactly when the trial did not pass');
+  assert.equal((posted[0]!.logTail as string).length, 4000, 'the last 4000 characters');
+  assert.ok(!('logTail' in posted[4]!) && !('logTail' in posted[5]!), 'a passing verdict posts no logTail key');
+  assert.deepEqual(Object.keys(shadowVerdictBody({ ...verdict('GY-7'), logTail: 'tail' })).sort(), ['baseTip', 'build', 'conflict', 'durationMs', 'head', 'logTail', 'mergeSha', 'risk', 'tests']);
+  assert.equal(state.shadow.length, runs.length);
+  assert.ok(state.shadow.every(entry => !('logTail' in entry)), 'the cursor records the verdict without its log');
+  assert.deepEqual(shadowStateSchema.parse(JSON.parse(JSON.stringify(state.shadow))), state.shadow);
+  assert.deepEqual(state.shadow.map(entry => entry.tests.failed), runs.map(run => run.tests.failed));
+  assert.equal(trialLogTailLength, 4000);
+});
+
 test('unit:shadow-step-writes-nothing — across a conflicting head, a passing one and an infrastructure failure the step runs only git (fetch, rev-parse, merge-tree, commit-tree, update-ref on refs/graphyard/trial/*, diff), pushes nothing, moves no refs/heads/* and never touches the GitHub double', async () => {
   const git = recordingGit(), now = () => start;
   const inner = git.run as unknown as (command: string, args: string[]) => string;
@@ -356,11 +386,18 @@ test('integration:shadow-verdict-route-coordinator-only — POST /api/work/:id/s
   assert.equal(recordedOnce.status, 200, JSON.stringify(recordedOnce.body));
   assert.deepEqual(recordedOnce.body, { recorded: true, key: 'GY-9001', head: body.head, baseTip: tip });
   const event = (await store.pool.query("SELECT work_id, actor, payload FROM events WHERE kind='shadow.verdict'")).rows[0];
-  assert.deepEqual([event.work_id, event.actor, event.payload.mergeSha, event.payload.durationMs, event.payload.key], [id, coordinator.id, sha('merge'), 4200, 'GY-9001']);
+  assert.deepEqual([event.work_id, event.actor, event.payload.mergeSha, event.payload.durationMs, event.payload.key, 'logTail' in event.payload], [id, coordinator.id, sha('merge'), 4200, 'GY-9001', false]);
   assert.equal((await request(token(coordinator), `work/${id}/shadow-verdict`, body, key)).status, 200);
   assert.equal(await count(), 1, 'a retried key replays');
   assert.equal((await request(token(coordinator), `work/${id}/shadow-verdict`, { ...body, durationMs: 1 }, key)).status, 409, 'a key reused with other input is refused');
   assert.ok([400, 422].includes((await request(token(coordinator), `work/${id}/shadow-verdict`, { ...body, head: 'main' })).status));
   assert.equal((await request(token(coordinator), `work/${randomUUID()}/shadow-verdict`, body)).status, 404);
   assert.equal(await count(), 1);
+  // unit:shadow-verdict-keeps-log-tail: a failing verdict's log tail is kept in the event, up to 4000 characters.
+  const failing = { ...body, baseTip: sha('other-tip'), tests: { passed: 2, failed: ['tests/helpers/run-tests.ts'], files: 2 }, logTail: `ok 2 - tests/b.test.ts\n[exit status 1]` };
+  assert.equal((await request(token(coordinator), `work/${id}/shadow-verdict`, failing)).status, 200);
+  const kept = (await store.pool.query("SELECT payload FROM events WHERE kind='shadow.verdict' AND payload->>'baseTip'=$1", [sha('other-tip')])).rows[0];
+  assert.equal(kept.payload.logTail, failing.logTail);
+  assert.ok([400, 422].includes((await request(token(coordinator), `work/${id}/shadow-verdict`, { ...failing, logTail: 'x'.repeat(4001) })).status), 'a log tail over 4000 characters is refused');
+  assert.equal(await count(), 2);
 });

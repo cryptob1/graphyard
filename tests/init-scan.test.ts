@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, execFile } from 'node:child_process';
+import { createServer, type AddressInfo } from 'node:net';
 import { promisify } from 'node:util';
 import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
@@ -260,6 +261,20 @@ test('scan chooses and documents topology for three distinct stack fixtures', as
   assert.match(documented.join('\n'), /static -> github-pages -> ephemeral/);
 });
 
+/**
+ * A loopback URL nothing answers on: a port taken and released this instant. With every GRAPHYARD_*
+ * variable removed the CLI asks its default, http://127.0.0.1:4310, and a host that serves a control
+ * plane there (the loop's own host, GY-1549) made doctor report "reachable, credential missing" where
+ * this test asks about a doctor with no server to reach at all.
+ */
+async function unreachableUrl() {
+  const server = createServer();
+  await new Promise<void>((done, fail) => server.once('error', fail).listen(0, '127.0.0.1', () => done()));
+  const { port } = server.address() as AddressInfo;
+  await new Promise<void>(done => server.close(() => done()));
+  return `http://127.0.0.1:${port}`;
+}
+
 function runCli(cwd: string, args: string[], env: NodeJS.ProcessEnv) {
   return promisify(execFile)(process.execPath, [join(import.meta.dirname, '../bin/graphyard.mjs'), ...args], { cwd, env })
     .then(result => result.stdout, error => { throw new Error(String((error as any).stderr || error.message)); });
@@ -269,6 +284,7 @@ test('CLI init --scan applies nothing without approval and --apply enforces the 
   const root = await fixtureRepo(nodeRailway);
   const env = { ...process.env };
   for (const key of Object.keys(env)) if (key.startsWith('GRAPHYARD_')) delete env[key];
+  env.GRAPHYARD_URL = await unreachableUrl();
   try {
     await assert.rejects(runCli(root, ['init', '--scan', '--apply', '--url', 'https://graphyard.example'], env), /No stored setup proposal/);
     const scanned = JSON.parse(await runCli(root, ['init', '--scan'], env));
