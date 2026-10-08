@@ -13,6 +13,7 @@ import { readSecretFromStdin } from '../context.js';
 import { acknowledgeCommand, mainWatchAttention } from '../../daemon/main-watch.js';
 import { shadowGateSummary } from '../../daemon/cycle-shadow.js';
 import { shadowGateAttention } from '../../merge-writer/shadow.js';
+import { mergeWriterSummary } from '../../daemon/cycle-merge-writer.js';
 
 /** `master main-watch`: the watch's state and policy, or an admin's acknowledgement of one commit (GY-1519). */
 export const mainWatchUsage = 'Use master main-watch acknowledge SHA --reason TEXT --admin-token-stdin (the admin credential on stdin), or master main-watch status';
@@ -37,7 +38,8 @@ export async function operationsCommand(session: MasterSession): Promise<unknown
     const added = [...(harness ? [harness] : []), ...mainWatchAttention(state?.mainWatch ?? null, master.baseBranch), ...shadowGateAttention(state?.shadow ?? [])];
     const attention = added.length ? { attentionItems: [...report.attentionItems, ...added], counts: { ...report.counts, attention: report.counts.attention + added.length } } : {};
     // `shadowGate`: the shadow merge gate's report (counts per outcome, trial p50/p90, newest disagreements) the switch decision reads.
-    return print({ ...report, ...attention, harnessDrift: harness?.drift ?? null, shadowGate: shadowGateSummary(state?.shadow ?? []), daemon: { ...report.daemon, cycleBudget: state ? cycleBudget(state, master.run.intervalSeconds * 1000) : null, ...(master2 ? { master: master2 } : {}) } });
+    // `mergeWriter` (GY-1524): the control-plane merge executor's queue (oldest first), the merge in flight, its last delivery and newest refusals.
+    return print({ ...report, ...attention, harnessDrift: harness?.drift ?? null, shadowGate: shadowGateSummary(state?.shadow ?? []), mergeWriter: mergeWriterSummary(state?.mergeWriter), daemon: { ...report.daemon, cycleBudget: state ? cycleBudget(state, master.run.intervalSeconds * 1000) : null, ...(master2 ? { master: master2 } : {}) } });
   }
   if (id === 'settle-containment') {
     if (!args[0] || !args.slice(1).join(' ').trim()) throw new Error('Use master settle-containment GY-N REASON');
