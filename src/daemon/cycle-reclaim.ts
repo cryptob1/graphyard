@@ -355,7 +355,10 @@ export async function reclaimLaunchedPanes(cycle: Cycle) {
   // longest-standing pane whether or not a session recorded it.
   const sighted: Record<string, string> = {};
   for (const [key, action] of Object.entries(state.actions)) if (key.startsWith('sweep:pane:') && action.state === 'waiting') sighted[key.slice('sweep:pane:'.length)] = action.at;
-  const status = paneReclaimStatus(panes, snapshot.work, agents, now(), config.hostId, sighted);
+  // The reading is the host's after this pass: a pane closed here no longer stands, so the
+  // inventory is read again once anything closed, and a drained backlog reads as drained now.
+  const after = closed ? await effects.panes?.().catch(() => null) ?? null : inventory;
+  const status = paneReclaimStatus(after?.available ? after.panes : null, snapshot.work, agents, now(), config.hostId, sighted);
   const counts = `Herdr reports ${status.panes ?? 'an unknown number of'} pane(s) on this host, ${status.launched} opened by Graphyard launch(es), ${status.agentless} standing agentless${status.oldest ? `; the oldest is pane ${status.oldest.pane} of ${status.oldest.work} (${status.oldest.kind}), launched ${status.oldest.launchedAt}` : ''}`;
   const statusKey = 'sweep:panes:status';
   const previous = state.actions[statusKey], previousAgentless = Number(/(\d+) standing agentless/.exec(previous?.detail ?? '')?.[1] ?? 0);

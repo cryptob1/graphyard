@@ -490,14 +490,18 @@ test('unit:sweep-closes-unrecorded-worktree-shells — agentless shells in Graph
     assert.deepEqual([...closed].sort(), ['pane-old-epoch', 'pane-stuck', 'pane-unknown-item', 'pane-unrecorded'],
       'the unrecorded shells and the one whose handle stuck running under an expired lease close; the live lease\'s exact epoch keeps its panes');
     for (let at = clockStart + 330_000; at <= clockStart + 900_000; at += 130_000) await pass(at);
-    // The stuck handle's session is then ended by the loop's own implementation-session step
-    // (1g), whose close of the already-gone pane is that step's; the sweep closes each pane once.
+    // The stuck handle's pane is the implementation-session step's (1g): the agent list, which
+    // never carries a bare shell (GY-1533), lists no agent in it, so that step ends the session and
+    // closes the pane before the sweep sees it; the sweep closes each of the others exactly once.
     assert.deepEqual([...new Set(closed)].sort(), ['pane-old-epoch', 'pane-stuck', 'pane-unknown-item', 'pane-unrecorded'],
       'no pane outside .graphyard/worktrees, nor under the live lease, is ever closed');
     assert.deepEqual(Object.keys(state.actions).filter(key => key.startsWith('sweep:pane:') && state.actions[key].state === 'done').sort(),
-      ['sweep:pane:pane-old-epoch', 'sweep:pane:pane-stuck', 'sweep:pane:pane-unknown-item', 'sweep:pane:pane-unrecorded'], 'the sweep closed each once');
+      ['sweep:pane:pane-old-epoch', 'sweep:pane:pane-unknown-item', 'sweep:pane:pane-unrecorded'], 'the sweep closed each once');
     assert.match(state.actions['sweep:pane:pane-unrecorded'].detail, /GY-20 epoch 3, which holds no live lease and no Graphyard session recorded it/);
-    assert.match(state.actions['sweep:pane:pane-stuck'].detail, /implementation session worker-a:2 is still recorded running/);
+    const stuck = Object.entries(state.actions).find(([key]) => key.startsWith('close:implementation:work-GY-22:worker-a:2:'));
+    assert.equal(stuck?.[1].state, 'done', 'the stuck session is ended by the implementation-session step');
+    assert.match(stuck![1].detail, /Herdr lists no agent in it, so the agent has exited/);
+    assert.equal(closed.filter(pane => pane === 'pane-stuck').length, 1, 'its pane is closed once, by that step');
 
     // A sighting whose pane stops being a candidate — closed by another step or by hand — leaves no
     // waiting row behind, and a later pane at that coordinate waits out its own bound.
@@ -600,16 +604,16 @@ test('unit:pane-count-attention — master status counts the host\'s panes, the 
   const host = 'machine-a';
   /** The pane inventory: `recorded` worktree shells a session recorded, `unrecorded` ones none did, one live agent pane, and foreign panes up to `count`. */
   const paneList = (recorded: number, unrecorded: number, count: number): HerdrPane[] => [
-    ...Array.from({ length: recorded }, (_, index) => ({ pane_id: `pane-a-${index}`, agent_status: 'unknown', cwd: `${worktrees}/GY-A${index}-1` })),
-    ...Array.from({ length: unrecorded }, (_, index) => ({ pane_id: `pane-u-${index}`, agent_status: 'unknown', cwd: `${worktrees}/GY-U${index}-2 (deleted)` })),
-    { pane_id: 'pane-live', agent: 'claude', agent_status: 'idle', cwd: `${worktrees}/GY-B0-1` },
+    ...Array.from({ length: recorded }, (_, index) => ({ pane_id: `pane-a-${index}`, agent_status: 'unknown', cwd: `${worktrees}/GY-${100 + index}-1` })),
+    ...Array.from({ length: unrecorded }, (_, index) => ({ pane_id: `pane-u-${index}`, agent_status: 'unknown', cwd: `${worktrees}/GY-${200 + index}-2 (deleted)` })),
+    { pane_id: 'pane-live', agent: 'claude', agent_status: 'idle', cwd: `${worktrees}/GY-300-1` },
     ...Array.from({ length: Math.max(0, count - recorded - unrecorded - 1) }, (_, index) => ({ pane_id: `pane-foreign-${index}`, agent_status: 'unknown', cwd: '/home/vish' })),
   ];
   const recorded = (agentless: number, withAgent: number, closed: number) => {
     const items: Work[] = [];
-    for (let index = 0; index < agentless; index++) items.push(item(`GY-A${index}`, {}, [handle({ id: `h-a${index}`, kind: 'review', pane: `pane-a-${index}`, host, startedAt: new Date(clockStart - 3_600_000 + index * 1_000).toISOString() })]));
-    for (let index = 0; index < withAgent; index++) items.push(item(`GY-B${index}`, {}, [handle({ id: `h-b${index}`, kind: 'proof', pane: 'pane-live', host })]));
-    for (let index = 0; index < closed; index++) items.push(item(`GY-C${index}`, {}, [handle({ id: `h-c${index}`, kind: 'review', pane: `gone-${index}`, host })]));
+    for (let index = 0; index < agentless; index++) items.push(item(`GY-${100 + index}`, {}, [handle({ id: `h-a${index}`, kind: 'review', pane: `pane-a-${index}`, host, startedAt: new Date(clockStart - 3_600_000 + index * 1_000).toISOString() })]));
+    for (let index = 0; index < withAgent; index++) items.push(item(`GY-${300 + index}`, {}, [handle({ id: `h-b${index}`, kind: 'proof', pane: 'pane-live', host })]));
+    for (let index = 0; index < closed; index++) items.push(item(`GY-${400 + index}`, {}, [handle({ id: `h-c${index}`, kind: 'review', pane: `gone-${index}`, host })]));
     return items;
   };
   const agents = [{ name: 'graphyard-reviewer-x', pane_id: 'pane-live', agent: 'claude', agent_status: 'idle' }];
@@ -619,7 +623,7 @@ test('unit:pane-count-attention — master status counts the host\'s panes, the 
   // worktrees (the operator's own), and a recorded pane the runtime no longer holds, count for neither.
   const below = paneReclaimStatus(paneList(18, 0, 30), recorded(18, 1, 2), agents, clockStart, host);
   assert.deepEqual({ panes: below.panes, launched: below.launched, agentless: below.agentless }, { panes: 30, launched: 21, agentless: 18 });
-  assert.deepEqual(below.oldest, { pane: 'pane-a-0', work: 'GY-A0', kind: 'review', launchedAt: new Date(clockStart - 3_600_000).toISOString() });
+  assert.deepEqual(below.oldest, { pane: 'pane-a-0', work: 'GY-100', kind: 'review', launchedAt: new Date(clockStart - 3_600_000).toISOString() });
   assert.equal(below.attention, null, 'no attention under the bound');
 
   // The reading is this host's: handles another host recorded are not this host's launches, so a
@@ -634,7 +638,7 @@ test('unit:pane-count-attention — master status counts the host\'s panes, the 
   assert.equal(over.agentless, agentlessPaneAttentionBound + 2);
   assert.ok(over.attention, 'attention rises past the bound');
   assert.match(over.attention!.text, new RegExp(`${agentlessPaneAttentionBound + 2} of them stand agentless in Graphyard worktrees \\(past the ${agentlessPaneAttentionBound}-pane attention bound\\)`));
-  assert.match(over.attention!.text, /the oldest pane pane-a-0 of GY-A0 \(review\), standing since /, 'the oldest agentless pane is named');
+  assert.match(over.attention!.text, /the oldest pane pane-a-0 of GY-100 \(review\), standing since /, 'the oldest agentless pane is named');
   assert.match(over.attention!.text, /Herdr holds 30 pane\(s\) on this host/, 'the host pane count is on the item');
   assert.equal(over.attention!.next, 'the loop sweeps them itself, a bounded number per cycle, once agentless past its launch bound; graphyard master run --once runs a pass now');
 
@@ -763,4 +767,24 @@ test('unit:pane-reclaim-fixtures-use-pane-inventory — every fixture these proo
   soak.kill('w1:p1');
   assert.deepEqual(soak.list(), [], 'a killed runtime leaves the soak agent list');
   assert.equal(soak.paneList().find(pane => pane.pane_id === 'w1:p1')?.agent, undefined, 'and stands agentless in its pane inventory');
+  // The same inventory is what the sweep reads: a leftover the soak seeds this way is seen and closed
+  // past the launch bound, while the killed runtime's shell outside the worktrees is left alone.
+  const { config } = await launchedMaster();
+  const soakEffects = (at: number): DaemonEffects => ({
+    agents: () => soak.list(), credentials: async () => ({}),
+    snapshot: async () => ({ work: [], now: new Date(at).toISOString() }),
+    closeSession: pane => { soak.close(pane); },
+    herdr: async () => ({ agents: soak.list(), available: true }),
+    panes: async () => ({ panes: soak.paneList(), available: true }),
+    persist: async () => {}, recordSession: async () => {}, dispatch: async () => {}, requestProof: () => {},
+    merge: async () => ({ result: 'merged', merged: true }),
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date(at).toISOString(), reason: 'not configured', deployed: [], pending: [] }),
+    recordDeployment: async () => {}, requestSmoke: () => {},
+  } as DaemonEffects);
+  const state = emptyDaemonState(config);
+  await runCycle(config, state, soakEffects(clockStart), () => clockStart);
+  assert.deepEqual(soak.closed, [], 'the soak-seeded shell is sighted, not closed, on first sight');
+  const later = clockStart + launchAppearanceMs + 10_000;
+  await runCycle(config, state, soakEffects(later), () => later);
+  assert.deepEqual(soak.closed, ['w1:tree0'], 'the sweep closes the shell the soak seeded through the pane inventory, and never the shell outside the worktrees');
 });
