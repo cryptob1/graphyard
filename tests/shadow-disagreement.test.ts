@@ -223,6 +223,12 @@ test('integration:shadow-disagreement-explain-idempotent — a coordinator/admin
   const after = await request(token(reader), 'shadow-disagreements');
   assert.equal(after.body.explanations.length, 1);
   assert.equal(after.body.explanations[0].key, key);
+  // The loop's per-cycle read carries the explanations alone: no standing list, so no verdict history is read for it.
+  const loopRead = await request(token(coordinator), 'shadow-explanations');
+  assert.equal(loopRead.status, 200, JSON.stringify(loopRead.body));
+  assert.deepEqual(Object.keys(loopRead.body), ['explanations']);
+  assert.deepEqual(loopRead.body.explanations, after.body.explanations);
+  assert.equal((await request(token(worker), 'shadow-explanations')).status, 403);
 });
 
 test('manual:explain-standing-disagreements — the two standing disagreements (GY-1523 head 9b30324fc4f3, GY-1549 head d205ce97ea6e) are explainable through the mechanism without re-running any trial', async () => {

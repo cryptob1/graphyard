@@ -45,12 +45,10 @@ Unacted producer requests (never started, launch refused, exited at launch) rela
 
 ## Shadow merge gate
 
-`run.shadowGate` (`enabled`, default true; `timeoutMinutes`, default 20): each cycle trial-merges the oldest untried submitted head, builds and affected-tests it in a credential-free `trial` checkout (no TMPDIR), pushes nothing; `shadow.verdict` (failing: `logTail`, last 4000 characters) joins GitHub's outcome in `master status` `shadowGate` (`shadow-only-fail`/`shadow-missed`: one line each until explained); errors and timeouts record nothing; third timeout per tip gets one line. Explain via `GET /api/shadow-disagreements` and `POST /api/work/:id/shadow-explain` (coordinator/admin; `{head,baseTip,reason}`; `Idempotency-Key`).
-
+`run.shadowGate` (`enabled`, default true; `timeoutMinutes`, default 20): each cycle trial-merges the oldest untried submitted head, builds and affected-tests it in a credential-free `trial` checkout (no TMPDIR), pushes nothing; `shadow.verdict` (failing: `logTail`, last 4000 characters) joins GitHub's outcome in `master status` `shadowGate` (`shadow-only-fail`/`shadow-missed`: one line each until explained); errors and timeouts record nothing; third timeout per tip gets one line. Explain: `GET /api/shadow-disagreements` (loop: `/api/shadow-explanations`), `POST /api/work/:id/shadow-explain` (coordinator/admin; `{head,baseTip,reason}`; `Idempotency-Key`).
 
 ## Pipeline speed
 
 Target (10+ deliveries): submit→merge p50 ≤30 minutes, p90 ≤60 minutes. Row `speed`: `executionMs`, `waitMs`, `reworkRounds`, `interventions`; verdict `speed.submitToMerge`; `node scripts/measure-pipeline-speed.mjs` records what `manual:speed-target-met` reads.
 
 Loop's decisions step stays within 10 s a cycle: one `decision.*` ledger read names moved items; a history whose ledger has not moved is kept, not read. Widenings refused by 5xx or stale revision and timed-out decision history reads retry next cycle (twice: fault) unless moot (delivered, answered, lease ended, head moved).
-

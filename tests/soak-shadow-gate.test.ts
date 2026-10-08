@@ -123,3 +123,82 @@ test('unit:soak-shadow-gate — a simulated day: bounded trials, one verdict per
   assert.equal(section.total, state.shadow.length);
   assert.ok(section.disagreements.length <= 10);
 });
+
+test('unit:soak-shadow-explanations — a simulated day in which disagreements are raised, explained mid-run and cleared: an explained item is cleared once and never raised again, an unexplained one keeps its line, a failing explanations read stops no trial, and state stays bounded', { timeout: 300_000 }, async () => {
+  const cycles = 24 * 60 / 2, items = 150;
+  let now = start, tipIndex = 0, running = 0, widest = 0, readFails = false, explanationReads = 0;
+  const tip = () => sha(`tip${tipIndex}`);
+  const trials: string[] = [], explanations: { key: string; head: string; baseTip: string }[] = [];
+  const git = ((command: string, args: string[]) => {
+    assert.equal(command, 'git');
+    const [, , sub] = args;
+    if (sub === 'rev-parse') return `${tip()}\n`;
+    if (sub === 'merge-tree') return `${sha('tree')}\0`;
+    if (sub === 'commit-tree') return `${sha(`merge-${args.join(' ')}`)}\n`;
+    if (sub === 'diff') return 'src/a.ts\n';
+    return '';
+  }) as never;
+  const reads = shadowReads(config, '/coordinator', git, { base: '/w', record: async () => {}, explanations: async () => {
+    explanationReads += 1;
+    if (readFails) throw new Error('coordinator 503');
+    return explanations.map(entry => ({ ...entry }));
+  }, trial: async input => {
+    running += 1; widest = Math.max(widest, running); trials.push(input.mergeSha);
+    await new Promise(resolve => setTimeout(resolve, 1));
+    running -= 1;
+    // Every fifth trial fails its tests and GitHub merges it anyway: a shadow-only-fail.
+    const failed = trials.length % 5 === 0;
+    return { build: 'pass', tests: { passed: failed ? 0 : 1, failed: failed ? ['tests/x.test.ts'] : [], files: 1 }, durationMs: 1000, logTail: 'out', runnerExit: failed ? 1 : 0 };
+  } });
+  const submittedAt = (n: number) => start + n * 7 * minute, mergedAt = (n: number) => submittedAt(n) + 25 * minute;
+  const effects = { agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
+    snapshot: async () => ({ work: Array.from({ length: items }, (_, index) => index + 1).filter(n => submittedAt(n) <= now).map(n => work(n, submittedAt(n), mergedAt(n), now)), now: iso(now) }),
+    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }),
+    recordDeployment: async () => {}, requestSmoke: () => {}, decisions: async () => ({ decisions: [] }), persist: async () => {},
+    github: githubDouble, merge: githubDouble, shadow: reads } as unknown as DaemonEffects;
+  const state = emptyDaemonState(config);
+  const raised = new Map<string, number>(), raisedAt = new Map<string, number>(), explainedAt = new Map<string, number>(), cleared = new Set<string>();
+  let trialsDuringFailedReads = 0;
+  for (let cycle = 0; cycle < cycles; cycle++) {
+    now = start + cycle * 2 * minute;
+    if (cycle % 40 === 0) tipIndex += 1;
+    // The coordinator refuses the explanations read for six cycles in every hundred.
+    readFails = cycle % 100 >= 94;
+    const before = trials.length;
+    const result = await runCycle(config, state, effects, () => now);
+    if (readFails) trialsDuringFailedReads += trials.length - before;
+    for (const action of result.actions) if (action.detail.startsWith('Shadow merge gate:')) {
+      const key = action.work ?? '';
+      raised.set(key, (raised.get(key) ?? 0) + 1);
+      if (!raisedAt.has(key)) raisedAt.set(key, cycle);
+      assert.ok(!explainedAt.has(key), `cycle ${cycle}: ${key} was raised again after it was explained`);
+    }
+    await shadowIdle(state);
+    // An operator explains every disagreement of an even-numbered item ten cycles after its line is raised; odd-numbered items stay unexplained.
+    for (const [key, at] of raisedAt) {
+      if (explainedAt.has(key) || Number(key.slice(3)) % 2 || cycle - at < 10) continue;
+      for (const entry of state.shadow.filter(verdict => verdict.key === key && verdict.outcome === 'shadow-only-fail')) explanations.push({ key, head: entry.head, baseTip: entry.baseTip });
+      explainedAt.set(key, cycle);
+    }
+    for (const [key, at] of explainedAt) {
+      if (state.actions[`shadow:${key}`]) { assert.ok(cycle - at <= 8, `cycle ${cycle}: ${key} still standing ${cycle - at} cycles after its explanation`); continue; }
+      cleared.add(key);
+    }
+    assert.ok(state.shadow.length <= shadowKeptVerdicts, `cycle ${cycle}: ${state.shadow.length} verdicts kept`);
+    assert.ok(Object.keys(state.actions).filter(name => /^shadow:[^:]+$/.test(name)).length <= raised.size, `cycle ${cycle}: an attention line without a raise`);
+    assert.ok(widest <= 1, 'one trial at a time');
+    assert.doesNotThrow(() => shadowStateSchema.parse(state.shadow), `cycle ${cycle}: the cursor does not parse as persisted state`);
+  }
+  assert.ok(trials.length > 20, `the gate made progress: ${trials.length} trials`);
+  assert.ok(trialsDuringFailedReads > 0, 'trials went on while the explanations read failed');
+  assert.ok(explanationReads >= cycles - 1, `the loop read explanations every cycle: ${explanationReads}`);
+  assert.ok([...raised.values()].every(count => count === 1), `one attention line per item: ${JSON.stringify([...raised])}`);
+  assert.ok(explainedAt.size >= 3, `the day explained ${explainedAt.size} items`);
+  for (const key of explainedAt.keys()) assert.ok(cleared.has(key) && !state.actions[`shadow:${key}`], `${key} was explained and cleared`);
+  const unexplained = [...raised.keys()].filter(key => !explainedAt.has(key));
+  assert.ok(unexplained.length >= 3, `the day left ${unexplained.length} items unexplained`);
+  for (const key of unexplained) assert.ok(state.actions[`shadow:${key}`], `${key} is unexplained and keeps its line`);
+  const section = daemonSummary(state, now, config.run.intervalSeconds * 1000, config.hostId).shadowGate;
+  assert.equal(section.total, state.shadow.length);
+});

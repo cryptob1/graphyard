@@ -3,7 +3,7 @@ import type pg from 'pg';
 import { z } from 'zod';
 import { demand, type Principal, type Work } from '../model.js';
 import {
-  compareVerdicts, deliveredMerge, githubOutcome, isPlaceholderVerdict, placeholderRunnerFailure, shadowDisagreement,
+  compareVerdicts, githubOutcome, isPlaceholderVerdict, placeholderRunnerFailure, shadowDisagreement,
   shadowDisagreementPair, trialLogTailLength, type ShadowVerdict,
 } from '../merge-writer/shadow.js';
 import { DELIVERY_EVENT_PREDICATE } from '../store/tables/production.js';
@@ -162,22 +162,22 @@ function verdictFromEvent(payload: Record<string, unknown>, key: string): Pick<S
 }
 
 /**
- * The merge commit GitHub made of `head`, recovered when the item was later reopened and its
- * delivery/candidate cleared (GY-1560): the current document first, then the newest delivery event
- * on the ledger for that head (`github.observed` with a recorded delivery).
+ * The merge commits GitHub made of the given heads, recovered when an item was later reopened and its
+ * delivery/candidate cleared (GY-1560): the newest delivery event on the ledger (`github.observed`
+ * with a recorded delivery) for each (key, head), in one query whatever the number of pairs.
  */
-async function recoveredDeliveredMerge(db: Queryable, item: Work | undefined, key: string, head: string): Promise<string | null> {
-  const current = item ? deliveredMerge(item, head) : null;
-  if (current) return current;
-  const row = (await db.query(
-    `SELECT lower(e.payload->'work'->'delivery'->>'mergeSha') AS merge_sha
+async function recoveredDeliveredMerges(db: Queryable, pairs: readonly { key: string; head: string }[]): Promise<Map<string, string>> {
+  if (!pairs.length) return new Map();
+  const rows = (await db.query(
+    `SELECT DISTINCT ON (i.key, lower(e.payload->'work'->'candidate'->>'sha'))
+       i.key, lower(e.payload->'work'->'candidate'->>'sha') AS head, lower(e.payload->'work'->'delivery'->>'mergeSha') AS merge_sha
      FROM events e JOIN work_index i ON i.id = e.work_id
-     WHERE i.key = $1 AND ${DELIVERY_EVENT_PREDICATE}
-       AND lower(e.payload->'work'->'candidate'->>'sha') = $2
-     ORDER BY e.seq DESC LIMIT 1`,
-    [key, head.toLowerCase()],
-  )).rows[0] as { merge_sha: string | null } | undefined;
-  return row?.merge_sha ?? null;
+     JOIN unnest($1::text[], $2::text[]) AS wanted(key, head) ON wanted.key = i.key AND wanted.head = lower(e.payload->'work'->'candidate'->>'sha')
+     WHERE ${DELIVERY_EVENT_PREDICATE} AND e.payload->'work'->'delivery'->>'mergeSha' IS NOT NULL
+     ORDER BY i.key, lower(e.payload->'work'->'candidate'->>'sha'), e.seq DESC`,
+    [pairs.map(pair => pair.key), pairs.map(pair => pair.head.toLowerCase())],
+  )).rows as { key: string; head: string; merge_sha: string }[];
+  return new Map(rows.map(row => [`${row.key}:${row.head}`, row.merge_sha]));
 }
 
 /** One standing shadow disagreement as the status and merger switch read it. */
@@ -202,12 +202,16 @@ export async function standingShadowDisagreements(db: Queryable, work: readonly 
     if (!verdict) continue;
     newest.set(pairKey({ key: row.key, head: verdict.head, baseTip: verdict.baseTip }), verdict);
   }
+  const byKey = new Map(work.map(item => [item.key, item]));
+  // The current document judges most verdicts; only those it cannot judge (a reopened item whose
+  // delivery of that head was cleared) recover the delivered merge, in one batched query.
+  const judged = [...newest.values()].map(verdict => ({ verdict, item: byKey.get(verdict.key), outcome: compareVerdicts(verdict, githubOutcome(byKey.get(verdict.key), verdict.head)) }));
+  const unjudged = judged.filter(entry => entry.outcome === 'pending' && entry.item);
+  const recovered = await recoveredDeliveredMerges(db, unjudged.map(entry => ({ key: entry.verdict.key, head: entry.verdict.head })));
   const standing: StandingShadowDisagreement[] = [];
-  for (const verdict of newest.values()) {
-    const item = work.find(candidate => candidate.key === verdict.key);
-    const mergeSha = await recoveredDeliveredMerge(db, item, verdict.key, verdict.head);
-    const delivered = mergeSha ? { mergeSha } : null;
-    const outcome = compareVerdicts(verdict, githubOutcome(item, verdict.head, delivered));
+  for (const { verdict, item, outcome: current } of judged) {
+    const mergeSha = current === 'pending' ? recovered.get(`${verdict.key}:${verdict.head}`) : undefined;
+    const outcome = mergeSha ? compareVerdicts(verdict, githubOutcome(item, verdict.head, { mergeSha })) : current;
     if (outcome !== 'shadow-only-fail' && outcome !== 'shadow-missed') continue;
     standing.push({
       key: verdict.key, head: verdict.head, baseTip: verdict.baseTip, outcome,
@@ -237,7 +241,9 @@ export async function shadowDisagreementStatus(db: Queryable, work: readonly Wor
 }
 
 /**
- * GY-1560 routes: list explanations (loop + merger status), and record one per work item.
+ * GY-1560 routes: list explanations with the standing disagreements (master status), list the
+ * explanations alone (the loop, every cycle: it reads no verdict history, so its cost does not grow
+ * with the ledger), and record one per work item.
  * Registered ahead of the operator-agent guard like the main watch (routes.ts).
  */
 export const shadowDisagreementRoutes = defineRoutes('shadow-disagreements', [
@@ -246,6 +252,13 @@ export const shadowDisagreementRoutes = defineRoutes('shadow-disagreements', [
     async handle({ actor, services }) {
       demand(['admin', 'coordinator', 'reader', 'operator-agent'].includes(actor.role), 'Shadow disagreement explanations are readable by admin, coordinator, reader and operator-agent identities', 403);
       return shadowDisagreementStatus(services.engine.store.pool, await services.engine.store.list());
+    },
+  },
+  {
+    method: 'GET', path: '/api/shadow-explanations',
+    async handle({ actor, services }) {
+      demand(['admin', 'coordinator', 'reader', 'operator-agent'].includes(actor.role), 'Shadow disagreement explanations are readable by admin, coordinator, reader and operator-agent identities', 403);
+      return { explanations: await listShadowDisagreementExplanations(services.engine.store.pool) };
     },
   },
   {

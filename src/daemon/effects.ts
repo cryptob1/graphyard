@@ -688,7 +688,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
         base: worktreeRoot(root, config),
         record: (work, verdict) => mutate(`work/${work.id}/shadow-verdict`, shadowVerdictBody(verdict), shadowVerdictKey(work, verdict)),
         explanations: async () => {
-          const body = await asCoordinator('shadow-disagreements') as { explanations?: { key: string; head: string; baseTip: string }[] };
+          const body = await asCoordinator('shadow-explanations') as { explanations?: { key: string; head: string; baseTip: string }[] };
           return body?.explanations ?? [];
         },
       });

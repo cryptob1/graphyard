@@ -33,8 +33,9 @@ export interface ShadowReads {
   /** Posts the verdict to the coordinator (`POST /api/work/:id/shadow-verdict`). */
   record(work: Work, verdict: Omit<ShadowVerdict, 'outcome'>): Promise<void>;
   /**
-   * GY-1560: every recorded disagreement explanation (`GET /api/shadow-disagreements`), so the
-   * cursor clears a standing disagreement once explained. Absent, the step raises and never clears.
+   * GY-1560: every recorded disagreement explanation (`GET /api/shadow-explanations`, which reads
+   * no verdict history), so the cursor clears a standing disagreement once explained. Absent, the
+   * step raises and never clears; a failed read skips only that cycle's clearing.
    */
   explanations?(): Promise<ShadowExplanationRef[]>;
 }
@@ -194,7 +195,12 @@ export async function shadowStep(cycle: Cycle) {
   // Outcomes follow GitHub's gate as the snapshot shows it, and a verdict keeps the merge GitHub
   // made of its head (the revert of a reopened item is matched by it); a disagreement is raised once
   // per item until an explanation stands for every unexplained pair on that item (GY-1560).
-  const explanations = reads.explanations ? await reads.explanations() : [];
+  // A failed read of the explanations stops nothing: raising treats none as recorded, and the
+  // clearing step waits for a cycle whose read succeeds; trials and re-judgement go on.
+  let explanations: ShadowExplanationRef[] = [], explanationsRead = true;
+  if (reads.explanations) {
+    try { explanations = await reads.explanations(); } catch { explanationsRead = false; }
+  }
   const judged = judgedVerdicts(state.shadow, snapshot.work);
   for (const [index, verdict] of judged.entries()) {
     const current = state.shadow[index]!;
@@ -217,7 +223,7 @@ export async function shadowStep(cycle: Cycle) {
       return [name.slice('shadow:'.length)];
     }),
   ]);
-  for (const workKey of attentionKeys) {
+  for (const workKey of explanationsRead ? attentionKeys : []) {
     const actionKey = shadowAttentionKey(workKey);
     if (!state.actions[actionKey]) continue;
     const unexplained = judged.filter(verdict => verdict.key === workKey && shadowDisagreement(verdict.outcome) && !shadowPairExplained(verdict, explanations));
