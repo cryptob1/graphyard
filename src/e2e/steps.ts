@@ -35,12 +35,12 @@ export function stepEnvironment(url: string, secrets: Record<string, string>, ho
 export interface ProcessResult { code: number | null; output: string; timedOut: boolean }
 export type ProcessRunner = (command: string, args: string[], options: { cwd: string; env: Record<string, string>; timeoutMs: number; shell: boolean }) => Promise<ProcessResult>;
 
-/** Run one process, both streams interleaved, killed outright at its timeout. */
+/** Run one process, both streams interleaved, killed outright at its timeout; only the last ~4 MB of output is kept. */
 export const runProcess: ProcessRunner = (command, args, options) => new Promise(resolve => {
   const child = spawn(command, args, { cwd: options.cwd, env: options.env, shell: options.shell, stdio: ['ignore', 'pipe', 'pipe'] });
   const chunks: Buffer[] = [];
   let timedOut = false, size = 0;
-  const keep = (chunk: Buffer) => { if (size < 4_000_000) { chunks.push(chunk); size += chunk.length; } };
+  const keep = (chunk: Buffer) => { chunks.push(chunk); size += chunk.length; while (size - chunks[0].length >= 4_000_000) size -= chunks.shift()!.length; };
   child.stdout.on('data', keep); child.stderr.on('data', keep);
   const timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, options.timeoutMs);
   child.on('error', error => { clearTimeout(timer); resolve({ code: null, output: `${Buffer.concat(chunks).toString('utf8')}${error.message}`, timedOut }); });
@@ -116,7 +116,7 @@ export async function runAgentStep(step: Extract<E2eStep, { kind: 'agent' }>, co
       else {
         const judged = parseVerdict(chat.output);
         verdict = judged.verdict ?? undefined; reason = judged.reason;
-        if (chat.code !== 0 && !judged.verdict) reason = `agent-browser exited ${chat.code ?? 'by signal'} without a VERDICT line`;
+        if (chat.code !== 0 && (!judged.verdict || !reason)) reason = `agent-browser exited ${chat.code ?? 'by signal'}${judged.verdict ? ` after ${judged.verdict}` : ' without a VERDICT line'}`;
       }
       await mkdir(context.artifacts, { recursive: true });
       const file = join(context.artifacts, `${context.session}.png`);

@@ -16,7 +16,7 @@ import type { CaseRun } from '../src/scenarios.js';
 import { caseDirectory, loadCases, parseCase, scenarioDefinition, selectCases, syncCases, type CaseFile } from '../src/e2e/case.js';
 import { e2eSuite, recordRuns, runCases, substitute, summarize, type E2eLauncher, type E2ePage } from '../src/e2e/runner.js';
 import * as runner from '../src/e2e/runner.js';
-import { agentPrompt, hostPassthrough, lastLines, loadSecrets, parseVerdict, redact, secretsFileName, stepEnvironment } from '../src/e2e/steps.js';
+import { agentPrompt, hostPassthrough, lastLines, loadSecrets, parseVerdict, redact, runProcess, secretsFileName, stepEnvironment } from '../src/e2e/steps.js';
 import { assessPromotion, assessUat, type ReleaseCandidate } from '../src/release-candidate.js';
 import { commands } from '../src/cli/index.js';
 import { TestsView } from '../web/pages/tests.js';
@@ -512,6 +512,8 @@ test('unit:e2e-agent-step-verdict — an agent step opens the target URL plus pa
   assert.equal(silent.cases[0].failingStep!.reason, 'agent-browser ended without a VERDICT line');
   await fake.exit(2);
   assert.equal((await runCases(cases, { ...options, runId: 'run-4' })).cases[0].failingStep!.reason, 'agent-browser exited 2 without a VERDICT line');
+  await fake.reply('VERDICT: PASS\n');
+  assert.equal((await runCases(cases, { ...options, runId: 'run-4b' })).cases[0].failingStep!.reason, 'agent-browser exited 2 after VERDICT: PASS');
   await fake.exit(0);
   // A timeout is a failure, the session still closed.
   const hanging = await runCases(cases, { ...options, runId: 'run-5', processRunner: async (_command, args, { timeoutMs }) => args[2] === 'chat' ? { code: null, output: '', timedOut: true } : { code: 0, output: `${args[2]} ok ${timeoutMs}`, timedOut: false } });
@@ -597,4 +599,11 @@ test('unit:e2e-secrets-redacted — secret values never appear in recorded outpu
   assert.ok(!(await summarize(report)).includes('hunter2-value'));
   assert.equal(redact('hun hunter2-value', { SHORT: 'hun', PLAYER_PASSWORD: 'hunter2-value' }), '[secret:SHORT] [secret:PLAYER_PASSWORD]');
   assert.equal(redact('nothing', { EMPTY: '' }), 'nothing');
+});
+
+test('unit:e2e-command-step-runs — a process producing far more than the kept output still reports its true last lines', async () => {
+  const result = await runProcess('seq 1 1200000', [], { cwd: process.cwd(), env: { PATH: process.env.PATH ?? '' }, timeoutMs: 60_000, shell: true });
+  assert.equal(result.code, 0);
+  assert.deepEqual(lastLines(result.output).slice(-2), ['1199999', '1200000']);
+  assert.equal(lastLines(result.output).length, 50);
 });
