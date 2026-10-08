@@ -177,10 +177,15 @@ test('unit:launch-held-session — GY-1235 instance 4: a worker handle with no p
     const withMiss = all.map(entry => ({ ...entry, sessions: entry.sessions!.map(session => ({ ...session, missedReports: missed.find(row => row.id === session.id)?.missedReports ?? 0 })) })) as Work[];
     return observeSessions(withMiss, [], now, { hostId: 'vishrog', firstMissed: first.missing });
   };
-  // Base: with nothing holding it, the handle is past the launch grace and two reports close it as lost.
-  const lost = twice(work(null));
-  assert.equal(lost.entries[0]?.closed, 'lost', 'the base closed GY-1235\'s handle as lost');
+  // Base: with nothing holding it, the handle was past the launch grace and two reports closed it as
+  // lost. Since GY-1532 the item's own fact ends it instead, on the first report: an implementation
+  // handle whose attempt holds no lease is over, so it is ended with that reason rather than lost.
+  const over = observeSessions(work(null), [], new Date(clock - 40_000), { hostId: 'vishrog' });
+  assert.equal(over.entries[0]?.closed, 'ended', 'the base closed GY-1235\'s handle as lost; its attempt holding no lease now ends it');
+  assert.match(over.entries[0]!.outcome!, /no longer reports session graphyard-cursor-1:1 \(registered with no pane or name to match\): attempt 1 of GY-1235 ended \(released, blocked, parked or lapsed\) and GY-1235 holds no lease, so the session is over$/);
   assert.equal(lostAfterReports, 2);
+  // A handle its live lease does not hold — it has a pane the runtime never lists — is still missed and lost after two reports.
+  assert.equal(twice(work(leased, [{ ...handle, pane: 'w1V:p1' }])).entries[0]?.closed, 'lost', 'a live attempt whose pane stays unlisted is lost as before');
   // Candidate: the attempt's live lease under the handle's principal and epoch holds it open.
   assert.deepEqual(twice(work(leased)).entries, [], 'a launch held by its lease is not missed');
   assert.equal(launchHeldByLease({ lease: leased }, handle, clock), true);
@@ -193,5 +198,8 @@ test('unit:launch-held-session — GY-1235 instance 4: a worker handle with no p
     [leased, { ...handle, pane: 'w1V:p1' }],
     [leased, { ...handle, observed: 'working' }],
   ] as [Work['lease'], SessionHandle][]) assert.equal(launchHeldByLease({ lease }, other, clock), false, JSON.stringify({ lease, pane: other.pane, observed: other.observed }));
-  assert.equal(twice(work({ ...leased, expiresAt: new Date(clock - 60_000).toISOString() })).entries[0]?.closed, 'lost', 'once the lease is gone the handle is lost as before');
+  // Once the lease has lapsed the attempt is over (GY-1532): the first report ends the handle with the lapse, where the base lost it after two.
+  const lapsed = observeSessions(work({ ...leased, expiresAt: new Date(clock - 60_000).toISOString() }), [], now, { hostId: 'vishrog' });
+  assert.equal(lapsed.entries[0]?.closed, 'ended', 'once the lease is gone the handle is ended with the lapse');
+  assert.match(lapsed.entries[0]!.outcome!, /attempt 1 of GY-1235 ended with its lease expired at 2026-10-05T09:28:36\.650Z, so the session is over$/);
 });
