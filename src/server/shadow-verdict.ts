@@ -26,7 +26,8 @@ export async function recordShadowVerdict(services: Services, actor: Principal, 
     demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
     const replay = (await db.query('SELECT * FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];
     if (replay) { demand(replay.fingerprint === fingerprint, 'Idempotency key reused with different input'); return replay.result; }
-    const item = (await db.query("SELECT id, document->>'key' AS key FROM work_items WHERE id::text=$1 OR document->>'key'=$1", [id])).rows[0];
+    // The index resolves a key or id without reading a document (GY-1027); the verdict itself needs none.
+    const item = (await db.query('SELECT i.id::text AS id, i.key FROM work_index i WHERE i.id::text=$1 OR i.key=$1 ORDER BY i.number LIMIT 1', [id])).rows[0] as { id: string; key: string } | undefined;
     demand(item, 'Work item not found', 404);
     await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [item.id, actor.id, shadowVerdictEvent, JSON.stringify({ key: item.key, ...data })]);
     const result = { recorded: true, key: item.key, head: data.head, baseTip: data.baseTip };

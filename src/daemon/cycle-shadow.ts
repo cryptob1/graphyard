@@ -5,7 +5,7 @@ import type { MasterConfig } from '../master.js';
 import type { Work } from '../model.js';
 import { classifyRisk } from '../model/risk-class.js';
 import { shadowGateSettings } from '../master/merge-writer-settings.js';
-import { runTrial, trialMerge, TrialTimeoutError, type TrialRun } from '../merge-writer/trial.js';
+import { runTrial, trialMerge, TrialCleanupError, TrialTimeoutError, type TrialRun } from '../merge-writer/trial.js';
 import { judgedVerdicts, shadowDisagreement, shadowDisagreementDetail, shadowOutcomes, shadowDue, shadowReport, type ShadowVerdict } from '../merge-writer/shadow.js';
 import { storeAction, type DaemonState } from './state.js';
 import type { Cycle } from './cycle.js';
@@ -27,8 +27,8 @@ export interface ShadowReads {
   mainTip(): Promise<string | null>;
   /** Fetches the head's branch (and the base) into the coordinator checkout; moves no local branch. */
   fetch(branch: string): Promise<void>;
-  /** The trial of `head` on `baseTip`: its merge commit, the files the merge changes, and the build and test run. Rejects with TrialTimeoutError past the time budget. */
-  trial(head: string, baseTip: string, key: string): Promise<{ mergeSha: string | null; conflict: string[]; files: string[]; run: TrialRun | null }>;
+  /** The trial of `head` on `baseTip`: its merge commit, the files the merge changes, the build and test run, and the checkout left behind when its removal failed. Rejects with TrialTimeoutError past the time budget. */
+  trial(head: string, baseTip: string, key: string): Promise<{ mergeSha: string | null; conflict: string[]; files: string[]; run: TrialRun | null; leftover?: string }>;
   /** Posts the verdict to the coordinator (`POST /api/work/:id/shadow-verdict`). */
   record(work: Work, verdict: Omit<ShadowVerdict, 'outcome'>): Promise<void>;
 }
@@ -59,12 +59,17 @@ export function shadowReads(config: Pick<MasterConfig, 'baseBranch' | 'run'>, ro
       const merged = await trialMerge(gitAs, { head, baseTip });
       if ('conflict' in merged) return { mergeSha: null, conflict: merged.conflict, files: [], run: null };
       const files = (await git('diff', '--name-only', baseTip, merged.mergeSha)).split('\n').map(line => line.trim()).filter(Boolean);
-      return { mergeSha: merged.mergeSha, conflict: [], files, run: await (options.trial ?? runTrial)({ root, base: options.base, mergeSha: merged.mergeSha, changedFiles: files, timeoutMs: settings.timeoutMinutes * 60_000, key, run }) };
+      try { return { mergeSha: merged.mergeSha, conflict: [], files, run: await (options.trial ?? runTrial)({ root, base: options.base, mergeSha: merged.mergeSha, changedFiles: files, timeoutMs: settings.timeoutMinutes * 60_000, key, run }) }; }
+      catch (error) {
+        // A checkout that would not go is reported beside the verdict it reached, not in place of it.
+        if (error instanceof TrialCleanupError && error.verdict) return { mergeSha: merged.mergeSha, conflict: [], files, run: error.verdict, leftover: error.message };
+        throw error;
+      }
     },
   };
 }
 
-interface Flight { key: string; head: string; baseTip: string; settled: { error: unknown } | { verdict: Omit<ShadowVerdict, 'outcome'>; work: Work } | null }
+interface Flight { key: string; head: string; baseTip: string; settled: { error: unknown } | { verdict: Omit<ShadowVerdict, 'outcome'>; work: Work; leftover?: string } | null }
 const flights = new WeakMap<DaemonState, Flight>();
 /** A settled trial whose verdict the coordinator has not yet recorded; at most one per loop, since one trial runs at a time. */
 const unrecorded = new WeakMap<DaemonState, { verdict: Omit<ShadowVerdict, 'outcome'>; work: Work }>();
@@ -87,8 +92,15 @@ export function keepVerdicts<T extends Pick<ShadowVerdict, 'id' | 'head'>>(verdi
 }
 
 const shadowAttentionKey = (key: string) => `shadow:${key}`;
-/** The action key under which a trial that could not run (or timed out) against one tip is remembered, so it is not retried against that tip. */
+/** The action key under which a trial that could not run against one tip is remembered, so it is not retried against that tip. */
 export const shadowErrorKey = (head: string, baseTip: string) => `shadow-error:${head}:${baseTip}`;
+/** The action key counting a head's timed-out trials against one tip; the pair stays owed until `shadowTimeoutRetries` of them. */
+export const shadowTimeoutKey = (head: string, baseTip: string) => `shadow-timeout:${head}:${baseTip}`;
+/** How many trials of one (head, tip) pair may time out before the pair is given up against that tip and one attention line names it. */
+export const shadowTimeoutRetries = 3;
+/** The action key of a leftover trial checkout, recorded beside the verdict its trial reached. */
+export const shadowLeftoverKey = (head: string, baseTip: string) => `shadow-leftover:${head}:${baseTip}`;
+const timeouts = (state: DaemonState, head: string, baseTip: string) => { const action = state.actions[shadowTimeoutKey(head, baseTip)]; return action?.state === 'failed' ? action.attempts : 0; };
 
 /**
  * Cycle step 6b' (after the merge step). One trial runs at a time, beside the cycle: the step
@@ -96,8 +108,10 @@ export const shadowErrorKey = (head: string, baseTip: string) => `shadow-error:$
  * It makes no GitHub call, pushes nothing and moves no `refs/heads/*`. Outcomes are re-judged
  * against the snapshot every cycle, and a disagreement raises one escalation line per item, once.
  * Without `effects.shadow` (a loop wired without the reads, or a test) or with the gate off, the
- * step does nothing. A trial that errs or times out records no verdict: it is excluded from the
- * agreement counts and not retried against the same tip.
+ * step does nothing. A trial that errs records no verdict and is not retried against the same tip.
+ * A timeout measures the host, not the merge: it records no verdict either, and the pair stays
+ * owed, tried again once no other head is due, until `shadowTimeoutRetries` timeouts give it up
+ * against that tip under one attention line.
  */
 export async function shadowStep(cycle: Cycle) {
   const { state, effects, now, snapshot, performed } = cycle;
@@ -107,11 +121,21 @@ export async function shadowStep(cycle: Cycle) {
   const flight = flights.get(state);
   if (flight?.settled) {
     flights.delete(state);
+    const at = new Date(now()).toISOString();
     if ('error' in flight.settled) {
       const error = flight.settled.error;
-      const reason = error instanceof TrialTimeoutError ? `${error.message}; a timeout measures the host, not the merge, so it is no verdict` : error instanceof Error ? error.message : String(error);
-      performed.push(storeAction(state, shadowErrorKey(flight.head, flight.baseTip), { kind: 'merge', work: flight.key, principal: null, state: 'failed', detail: `Shadow trial of ${flight.key} head ${flight.head} on ${flight.baseTip} could not run, so no verdict was recorded: ${reason}`.slice(0, 1900), attempts: 1, epoch: null, cycle: state.cycle, at: new Date(now()).toISOString() }, null));
-    } else unrecorded.set(state, flight.settled);
+      if (error instanceof TrialTimeoutError) {
+        const attempts = timeouts(state, flight.head, flight.baseTip) + 1, given = attempts >= shadowTimeoutRetries;
+        performed.push(storeAction(state, shadowTimeoutKey(flight.head, flight.baseTip), { kind: 'merge', work: flight.key, principal: null, state: 'failed', detail: `Shadow trial of ${flight.key} head ${flight.head} on ${flight.baseTip} timed out (${attempts} of ${shadowTimeoutRetries}): ${error.message}; a timeout measures the host, not the merge, so it is no verdict and ${given ? 'the pair is given up against this tip' : 'the pair is tried again once no other head is due'}`.slice(0, 1900), attempts, epoch: null, cycle: state.cycle, at }, null));
+        if (given) performed.push(storeAction(state, `shadow-timeouts:${flight.key}:${flight.baseTip}`, { kind: 'escalation', work: flight.key, principal: null, state: 'done', detail: `Shadow merge gate timeouts: ${flight.key} head ${flight.head} timed out ${attempts} times on ${flight.baseTip}, so it has no verdict against this tip; a slow host or a slow merge, nothing is changed`.slice(0, 1900), attempts, epoch: null, cycle: state.cycle, at }, null));
+      } else {
+        const reason = error instanceof Error ? error.message : String(error);
+        performed.push(storeAction(state, shadowErrorKey(flight.head, flight.baseTip), { kind: 'merge', work: flight.key, principal: null, state: 'failed', detail: `Shadow trial of ${flight.key} head ${flight.head} on ${flight.baseTip} could not run, so no verdict was recorded: ${reason}`.slice(0, 1900), attempts: 1, epoch: null, cycle: state.cycle, at }, null));
+      }
+    } else {
+      if (flight.settled.leftover) performed.push(storeAction(state, shadowLeftoverKey(flight.head, flight.baseTip), { kind: 'merge', work: flight.key, principal: null, state: 'failed', detail: `Shadow trial of ${flight.key} head ${flight.head} on ${flight.baseTip} left its checkout behind; the verdict is recorded and the orphan reclaim removes the directory: ${flight.settled.leftover}`.slice(0, 1900), attempts: 1, epoch: null, cycle: state.cycle, at }, null));
+      unrecorded.set(state, flight.settled);
+    }
   }
   // A settled verdict joins the cursor only once the coordinator has recorded it: a refused or
   // dropped post is retried next cycle under the same idempotency key, and no new trial starts meanwhile.
@@ -137,9 +161,12 @@ export async function shadowStep(cycle: Cycle) {
   }
   if (!flights.has(state) && !unrecorded.has(state)) {
     const tip = await reads.mainTip();
-    // A head whose trial could not run against this tip is not tried again against it.
+    // A head whose trial could not run against this tip is not tried again against it; one that timed
+    // out waits its turn behind every head not yet tried, and is given up after `shadowTimeoutRetries`.
     const open = snapshot.work.filter(item => !item.candidate || !state.actions[shadowErrorKey(item.candidate.sha.toLowerCase(), tip ?? '')]);
-    const due = tip ? shadowDue(open, state.shadow, tip) : null;
+    const timedOut = (item: Work) => timeouts(state, item.candidate!.sha.toLowerCase(), tip ?? '');
+    const fresh = open.filter(item => !item.candidate || !timedOut(item)), retryable = open.filter(item => item.candidate && timedOut(item) && timedOut(item) < shadowTimeoutRetries);
+    const due = tip ? shadowDue(fresh, state.shadow, tip) ?? shadowDue(retryable, state.shadow, tip) : null;
     if (tip && due?.candidate) {
       const head = due.candidate.sha.toLowerCase(), branch = due.candidate.branch, started = now();
       const entry: Flight = { key: due.key, head, baseTip: tip, settled: null };
@@ -149,8 +176,8 @@ export async function shadowStep(cycle: Cycle) {
         const trial = await reads.trial(head, tip, due.key);
         const risk = classifyRisk(trial.files.map(path => ({ path }))).risk;
         const build = trial.run?.build ?? 'fail';
-        return { key: due.key, id: due.id, head, baseTip: tip, mergeSha: trial.mergeSha, risk, build, tests: trial.run?.tests ?? { passed: 0, failed: [], files: 0 }, conflict: trial.conflict, durationMs: trial.run?.durationMs ?? Math.max(0, now() - started), at: new Date(now()).toISOString() };
-      })().then(verdict => { entry.settled = { verdict, work: due }; }, error => { entry.settled = { error }; });
+        return { key: due.key, id: due.id, head, baseTip: tip, mergeSha: trial.mergeSha, risk, build, tests: trial.run?.tests ?? { passed: 0, failed: [], files: 0 }, conflict: trial.conflict, durationMs: trial.run?.durationMs ?? Math.max(0, now() - started), at: new Date(now()).toISOString(), leftover: trial.leftover };
+      })().then(({ leftover, ...verdict }) => { entry.settled = { verdict, work: due, ...(leftover ? { leftover } : {}) }; }, error => { entry.settled = { error }; });
     }
   }
   if (changed) await effects.persist(state);

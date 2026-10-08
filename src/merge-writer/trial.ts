@@ -66,6 +66,17 @@ export class TrialTimeoutError extends Error {
     this.name = 'TrialTimeoutError';
   }
 }
+/**
+ * The trial checkout could not be removed afterwards, so it is left behind under the managed root
+ * (the orphan reclaim removes it later). The verdict the trial reached, if it reached one, rides
+ * along so the failure is recorded beside it rather than in place of it.
+ */
+export class TrialCleanupError extends Error {
+  constructor(readonly directory: string, readonly verdict: TrialRun | null, readonly cause: unknown, outcome: string) {
+    super(`The trial checkout ${directory} was not removed (${cause instanceof Error ? cause.message : String(cause)}); ${outcome}`);
+    this.name = 'TrialCleanupError';
+  }
+}
 export interface RunTrialInput {
   /** The coordinator checkout whose object store holds the merge commit. */
   root: string;
@@ -78,15 +89,21 @@ export interface RunTrialInput {
   run?: ChildRun;
   environment?: NodeJS.ProcessEnv;
   now?: () => number;
+  /** Removes the trial checkout afterwards; the managed-root removal unless a test injects one. */
+  remove?: typeof removeSessionCheckout;
 }
 const tailLength = 4000;
 const testFile = /tests\/[\w./-]+\.test\.ts/g;
+const testFileLine = /^tests\/[\w./-]+\.test\.ts$/;
 
 /**
  * Check the merge commit out detached as a `trial` checkout, run `npm run build`, then the affected
  * pre-merge selection of scripts/ci-tests.mjs through tests/helpers/run-tests.ts, all under one
- * deadline and `trialEnvironment`. The checkout is removed afterwards, pass or fail. Past the
- * deadline it rejects with TrialTimeoutError: a timeout is no verdict against the merge.
+ * deadline and `trialEnvironment`. The runner always gets the selected file list, so a full
+ * selection runs every pre-merge file and never the release-candidate suites, and the verdict
+ * counts the files that ran. The checkout is removed afterwards, pass or fail; a removal that
+ * fails rejects with TrialCleanupError carrying the verdict. Past the deadline it rejects with
+ * TrialTimeoutError: a timeout is no verdict against the merge.
  */
 export async function runTrial(input: RunTrialInput): Promise<TrialRun> {
   const run = input.run ?? defaultChildRun, now = input.now ?? Date.now, startedAt = now(), deadline = startedAt + input.timeoutMs;
@@ -114,35 +131,49 @@ export async function runTrial(input: RunTrialInput): Promise<TrialRun> {
     return { ok: true, out };
   };
   const finish = (build: TrialRun['build'], tests: TrialRun['tests']): TrialRun => ({ build, tests, durationMs: Math.max(0, now() - startedAt), logTail: tail() });
-  try {
-    await run('git', ['-C', input.root, 'worktree', 'add', '--detach', checkout.worktree, input.mergeSha], { timeoutMs: remaining() });
-    // The merge builds against its own dependencies: the coordinator's install when its lockfile is byte-identical to the merge's, else an `npm ci` of the merge's lockfile.
-    const lockfile = (dir: string) => readFile(join(dir, 'package-lock.json'), 'utf8').catch(() => null);
-    const [own, merged] = await Promise.all([lockfile(input.root), lockfile(checkout.worktree)]);
-    if (existsSync(join(input.root, 'node_modules')) && own !== null && own === merged) await symlink(join(input.root, 'node_modules'), join(checkout.worktree, 'node_modules'));
-    else if (!(await child('install', 'npm', npmCiArgs, { env: npmCiEnvironment(env) })).ok) return finish('fail', { passed: 0, failed: [], files: 0 });
-    const built = await child('build', 'npm', ['run', 'build']);
-    if (!built.ok) return finish('fail', { passed: 0, failed: [], files: 0 });
-    const selection = await child('selection', 'node', ['scripts/ci-tests.mjs', 'affected', ...input.changedFiles]);
-    if (!selection.ok) return finish('pass', { passed: 0, failed: ['scripts/ci-tests.mjs affected'], files: 0 });
-    const lines = selection.out.split('\n').map(line => line.trim()).filter(Boolean);
-    const full = /^full:/.test(lines[0] ?? '');
-    const files = full ? [] : lines.slice(1).filter(line => /\.test\.ts$/.test(line));
-    const countOf = full ? 0 : files.length;
-    // An affected selection of nothing runs nothing; a full selection runs the runner's whole suite.
-    if (!full && !files.length) return finish('pass', { passed: 0, failed: [], files: 0 });
-    const list = join(checkout.directory, 'affected-tests.txt');
-    await writeFile(list, `${files.join('\n')}\n`);
-    const tests = await child('tests', 'node', ['--import', 'tsx', 'tests/helpers/run-tests.ts', ...(full ? [] : ['--files-from', list])]);
-    if (tests.ok) return finish('pass', { passed: countOf, failed: [], files: countOf });
-    const failing = [...new Set(tests.out.split('\n').filter(line => /not ok|✖|FAIL/.test(line)).flatMap(line => line.match(testFile) ?? []))];
-    return finish('pass', { passed: Math.max(0, countOf - failing.length), failed: failing.length ? failing : ['tests/helpers/run-tests.ts'], files: countOf });
-  } catch (error) {
-    if (error instanceof TrialTimeoutError) throw error;
-    log.push(`trial checkout failed: ${error instanceof Error ? error.message : String(error)}`);
-    if ((error as { timedOut?: boolean }).timedOut || now() >= deadline) throw new TrialTimeoutError('install', Math.max(0, now() - startedAt), tail());
-    return finish('fail', { passed: 0, failed: [], files: 0 });
-  } finally {
-    await removeSessionCheckout(input.root, input.base, checkout.directory, input.run).catch(() => {});
+  const listed = (out: string) => out.split('\n').map(line => line.trim()).filter(line => testFileLine.test(line));
+  const trial = async (): Promise<TrialRun> => {
+    try {
+      await run('git', ['-C', input.root, 'worktree', 'add', '--detach', checkout.worktree, input.mergeSha], { timeoutMs: remaining() });
+      // The merge builds against its own dependencies: the coordinator's install when its lockfile is byte-identical to the merge's, else an `npm ci` of the merge's lockfile.
+      const lockfile = (dir: string) => readFile(join(dir, 'package-lock.json'), 'utf8').catch(() => null);
+      const [own, merged] = await Promise.all([lockfile(input.root), lockfile(checkout.worktree)]);
+      if (existsSync(join(input.root, 'node_modules')) && own !== null && own === merged) await symlink(join(input.root, 'node_modules'), join(checkout.worktree, 'node_modules'));
+      else if (!(await child('install', 'npm', npmCiArgs, { env: npmCiEnvironment(env) })).ok) return finish('fail', { passed: 0, failed: [], files: 0 });
+      const built = await child('build', 'npm', ['run', 'build']);
+      if (!built.ok) return finish('fail', { passed: 0, failed: [], files: 0 });
+      const selection = await child('selection', 'node', ['scripts/ci-tests.mjs', 'affected', ...input.changedFiles]);
+      if (!selection.ok) return finish('pass', { passed: 0, failed: ['scripts/ci-tests.mjs affected'], files: 0 });
+      let files = listed(selection.out);
+      // A merge whose own ci-tests predates GY-1522 lists no files for a full selection; `select` outside Actions lists exactly the pre-merge suite.
+      if (!files.length && /^full:/.test(selection.out.trimStart())) {
+        const full = await child('selection', 'node', ['scripts/ci-tests.mjs', 'select']);
+        if (!full.ok) return finish('pass', { passed: 0, failed: ['scripts/ci-tests.mjs select'], files: 0 });
+        files = listed(full.out);
+      }
+      // An affected selection of nothing runs nothing.
+      if (!files.length) return finish('pass', { passed: 0, failed: [], files: 0 });
+      const list = join(checkout.directory, 'affected-tests.txt');
+      await writeFile(list, `${files.join('\n')}\n`);
+      const tests = await child('tests', 'node', ['--import', 'tsx', 'tests/helpers/run-tests.ts', '--files-from', list]);
+      if (tests.ok) return finish('pass', { passed: files.length, failed: [], files: files.length });
+      const failing = [...new Set(tests.out.split('\n').filter(line => /not ok|✖|FAIL/.test(line)).flatMap(line => line.match(testFile) ?? []))];
+      return finish('pass', { passed: Math.max(0, files.length - failing.length), failed: failing.length ? failing : ['tests/helpers/run-tests.ts'], files: files.length });
+    } catch (error) {
+      if (error instanceof TrialTimeoutError) throw error;
+      log.push(`trial checkout failed: ${error instanceof Error ? error.message : String(error)}`);
+      if ((error as { timedOut?: boolean }).timedOut || now() >= deadline) throw new TrialTimeoutError('install', Math.max(0, now() - startedAt), tail());
+      return finish('fail', { passed: 0, failed: [], files: 0 });
+    }
+  };
+  // The checkout goes whatever the trial did; a removal that fails is reported, never swallowed.
+  let settled: { verdict: TrialRun } | { error: unknown };
+  try { settled = { verdict: await trial() }; } catch (error) { settled = { error }; }
+  try { await (input.remove ?? removeSessionCheckout)(input.root, input.base, checkout.directory, input.run); }
+  catch (cause) {
+    const outcome = 'verdict' in settled ? `the trial itself answered build ${settled.verdict.build}, ${settled.verdict.tests.failed.length} failing test file(s)` : `the trial itself failed: ${settled.error instanceof Error ? settled.error.message : String(settled.error)}`;
+    throw new TrialCleanupError(checkout.directory, 'verdict' in settled ? settled.verdict : null, cause, outcome);
   }
+  if ('error' in settled) throw settled.error;
+  return settled.verdict;
 }

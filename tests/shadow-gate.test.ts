@@ -6,11 +6,11 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import EmbeddedPostgres from 'embedded-postgres';
 import { daemonStateSchema, daemonSummary, emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
-import { keepVerdicts, shadowErrorKey, shadowKeptVerdicts, shadowReads, shadowIdle, shadowStateSchema, shadowVerdictBody, shadowVerdictKey } from '../src/daemon/cycle-shadow.js';
+import { keepVerdicts, shadowErrorKey, shadowKeptVerdicts, shadowLeftoverKey, shadowReads, shadowIdle, shadowStateSchema, shadowTimeoutKey, shadowTimeoutRetries, shadowVerdictBody, shadowVerdictKey } from '../src/daemon/cycle-shadow.js';
 import { compareVerdicts, githubOutcome, shadowDue, shadowGateAttention, shadowReport, submittedAtOf, type ShadowVerdict } from '../src/merge-writer/shadow.js';
-import { TrialTimeoutError } from '../src/merge-writer/trial.js';
+import { TrialCleanupError, TrialTimeoutError } from '../src/merge-writer/trial.js';
 import { daemonEffects } from '../src/daemon/effects.js';
-import { shadowGateSettings, shadowGateSettingsSchema } from '../src/master/merge-writer-settings.js';
+import { maxShadowTimeoutMinutes, shadowGateSettings, shadowGateSettingsSchema } from '../src/master/merge-writer-settings.js';
 import { masterConfigSchema } from '../src/master.js';
 import type { Principal, Work } from '../src/model.js';
 import { Store } from '../src/store.js';
@@ -177,6 +177,8 @@ test('unit:shadow-step-records-verdict — one cycle starts the oldest owed tria
   assert.deepEqual([bare.shadow, off.shadow], [[], []]);
   assert.deepEqual([shadowGateSettings({}), shadowGateSettings({ shadowGate: { enabled: false, timeoutMinutes: 5 } })], [{ enabled: true, timeoutMinutes: 20 }, { enabled: false, timeoutMinutes: 5 }]);
   assert.throws(() => shadowGateSettingsSchema.parse({ timeoutMinutes: 0 }));
+  assert.throws(() => shadowGateSettingsSchema.parse({ timeoutMinutes: maxShadowTimeoutMinutes + 1 }), 'two hours is the longest trial an install may ask for');
+  assert.equal(maxShadowTimeoutMinutes, 120);
   assert.equal(masterConfigSchema.parse({ ...config, run: { shadowGate: { timeoutMinutes: 30 } } }).run.shadowGate?.timeoutMinutes, 30, 'run.shadowGate is a master.json setting');
 });
 
@@ -202,15 +204,25 @@ test('unit:shadow-step-writes-nothing — across a conflicting head, a passing o
   await runCycle(config, state, effects, now);
   assert.deepEqual(state.shadow.map(entry => entry.key), ['GY-1', 'GY-2'], 'a head whose trial could not run records no verdict');
   assert.match(state.actions[shadowErrorKey(sha('head3'), tip)]?.detail ?? '', /network down/);
-  // A trial past its time budget is no verdict either: excluded from the counts, not retried against this tip, and tried again once main moves.
-  const timing = shadowReads(config, '/coordinator', git.run, { base: '/w', record: async () => {}, trial: async () => { throw new TrialTimeoutError('tests', 1_200_000, 'ok - tests/a.test.ts'); } });
-  const slow = emptyDaemonState(config), slowEffects = effectsFor({ work: () => [submitted(4, 5)], now, shadow: timing });
-  await runCycle(config, slow, slowEffects, now); await shadowIdle(slow);
-  await runCycle(config, slow, slowEffects, now); await shadowIdle(slow);
-  await runCycle(config, slow, slowEffects, now);
-  assert.deepEqual(slow.shadow, [], 'a timeout records no verdict');
-  assert.match(slow.actions[shadowErrorKey(sha('head4'), tip)]?.detail ?? '', /timed out during its tests after 1200s; a timeout measures the host, not the merge/);
-  assert.equal(Object.keys(slow.actions).filter(key => key.startsWith('shadow-error:')).length, 1, 'and is not retried against the same tip');
+  // A trial past its time budget is no verdict either: excluded from the counts, and the pair stays owed. It waits behind every
+  // head not yet tried, is retried up to shadowTimeoutRetries times against this tip, then given up under one attention line.
+  const tried: string[] = [];
+  const timing = shadowReads(config, '/coordinator', git.run, { base: '/w', record: async () => {}, trial: async input => { tried.push(input.key!); if (input.key === 'GY-4') throw new TrialTimeoutError('tests', 1_200_000, 'ok - tests/a.test.ts'); return trialRun; } });
+  const slow = emptyDaemonState(config), slowEffects = effectsFor({ work: () => [submitted(4, 50), submitted(5, 5)], now, shadow: timing });
+  const lines: string[] = [];
+  for (let cycle = 0; cycle < 12; cycle++) { lines.push(...(await runCycle(config, slow, slowEffects, now)).actions.filter(action => action.detail.startsWith('Shadow merge gate timeouts:')).map(action => action.detail)); await shadowIdle(slow); }
+  assert.deepEqual(slow.shadow.map(entry => entry.key), ['GY-5'], 'a timeout records no verdict; the head that passed has one');
+  assert.deepEqual(tried, ['GY-4', 'GY-5', 'GY-4', 'GY-4'], 'the oldest head times out, the untried head goes next, then the timed-out pair is retried until given up');
+  assert.equal(slow.actions[shadowTimeoutKey(sha('head4'), tip)]?.attempts, shadowTimeoutRetries);
+  assert.match(slow.actions[shadowTimeoutKey(sha('head4'), tip)]?.detail ?? '', /timed out \(3 of 3\): The trial timed out during its tests after 1200s; a timeout measures the host, not the merge, so it is no verdict and the pair is given up/);
+  assert.deepEqual(lines.map(line => line.startsWith(`Shadow merge gate timeouts: GY-4 head ${sha('head4')} timed out 3 times on ${tip}`)), [true], 'one attention line, once');
+  assert.ok(!slow.actions[shadowErrorKey(sha('head4'), tip)], 'a timeout is not an error');
+  // A checkout the trial could not remove is recorded beside the verdict it reached, not instead of it.
+  const leftover = shadowReads(config, '/coordinator', git.run, { base: '/w', record: async () => {}, trial: async () => { throw new TrialCleanupError('/w/graphyard-trial-gy-6-abc', { ...trialRun, tests: failedTests }, new Error('EBUSY'), 'the trial itself answered build pass, 1 failing test file(s)'); } });
+  const stuck = emptyDaemonState(config), stuckEffects = effectsFor({ work: () => [submitted(6, 5)], now, shadow: leftover });
+  await runCycle(config, stuck, stuckEffects, now); await shadowIdle(stuck); await runCycle(config, stuck, stuckEffects, now);
+  assert.deepEqual(stuck.shadow.map(entry => [entry.key, entry.tests.failed]), [['GY-6', ['tests/x.test.ts']]], 'the verdict is kept');
+  assert.match(stuck.actions[shadowLeftoverKey(sha('head6'), tip)]?.detail ?? '', /left its checkout behind; the verdict is recorded and the orphan reclaim removes the directory: The trial checkout \/w\/graphyard-trial-gy-6-abc was not removed \(EBUSY\)/);
   const subcommands = new Set(git.calls.map(call => call[3]));
   for (const forbidden of ['push', 'branch', 'checkout', 'reset', 'commit', 'merge', 'tag', 'remote']) assert.ok(!subcommands.has(forbidden), `no git ${forbidden}`);
   assert.ok(['fetch', 'merge-tree'].every(name => subcommands.has(name)), git.calls.map(call => call.slice(3, 5).join(' ')).join(' / '));
@@ -256,7 +268,9 @@ test('unit:shadow-status — master status lists the gate report and, for each i
   const docs = readFileSync(fileURLToPath(new URL('../docs/delivery-redesign.md', import.meta.url)), 'utf8');
   const rollout = docs.split(/^## Rollout\s*$/m)[1]!.split(/\n## /)[0]!;
   for (const field of ['`shadowGate`', 'agree-pass', 'agree-fail', 'shadow-only-fail', 'shadow-missed', 'pending', 'p50/p90', 'newest ten']) assert.ok(rollout.includes(field), `Rollout names ${field}`);
-  const mainRollout = execFileSync('git', ['show', 'origin/main:docs/delivery-redesign.md'], { encoding: 'utf8' }).split(/^## Rollout\s*$/m)[1]?.split(/\n## /)[0];
+  // The base page: origin/main where the checkout has it, else the first parent (a pull request's CI checkout is the merge onto the base, fetched two deep).
+  const base = ['origin/main', 'HEAD^1'].map(ref => { try { return execFileSync('git', ['show', `${ref}:docs/delivery-redesign.md`], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }); } catch { return null; } }).find(text => text !== null) ?? null;
+  const mainRollout = base?.split(/^## Rollout\s*$/m)[1]?.split(/\n## /)[0];
   const words = (text: string) => text.split(/\s+/).filter(Boolean).length;
   if (mainRollout) assert.ok(words(rollout) - words(mainRollout) <= 50, `Rollout grew by ${words(rollout) - words(mainRollout)} words, at most 50`);
 });

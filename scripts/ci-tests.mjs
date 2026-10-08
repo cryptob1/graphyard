@@ -9,7 +9,8 @@
 //   node scripts/ci-tests.mjs release-candidate [--suite soak|timing-budget] --out FILE
 //                                                         the long suites only release-candidate validation runs
 //   node scripts/ci-tests.mjs shards [N]                  the balanced shards of the full suite
-//   node scripts/ci-tests.mjs affected FILE...            the selection for changed FILEs
+//   node scripts/ci-tests.mjs affected FILE...            the selection for changed FILEs: `mode: reason`, then
+//                                                         the pre-merge files it runs, one per line (every one when full)
 //   node scripts/ci-tests.mjs durations RECORD.jsonl...   write measured per-file durations into the baseline
 //
 // The dependency map is built from the source itself: every relative import, and every path a file
@@ -273,7 +274,8 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     console.log(`imbalance ${(shardImbalance(shards) * 100).toFixed(1)}%`);
   } else if (command === 'affected') {
     const selection = selectAffected(args, dependencyMap(), preMergeTestFiles());
-    console.log(`${selection.mode}: ${selection.reason}`); if (selection.mode === 'affected') console.log(selection.files.join('\n'));
+    // The files follow in both modes, so a caller (the shadow gate's trial) runs exactly the pre-merge selection and never the release-candidate suites.
+    console.log(`${selection.mode}: ${selection.reason}`); if (selection.files.length) console.log(selection.files.join('\n'));
   } else if (command === 'durations') {
     if (!args.length) throw new Error('Usage: ci-tests durations RECORD.jsonl...');
     const file = join(repositoryRoot, baselinePath);

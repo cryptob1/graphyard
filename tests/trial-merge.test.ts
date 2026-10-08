@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, readdirSync, symlinkSync, writeFileSync } from '
 import { dirname, join, resolve } from 'node:path';
 import { createRequire } from 'node:module';
 import { defaultChildRun } from '../src/child-runner.js';
-import { runTrial, trialAuthor, trialEnvironment, trialMerge, trialRef, TrialTimeoutError, withheldTrialVariables } from '../src/merge-writer/trial.js';
+import { runTrial, trialAuthor, trialEnvironment, trialMerge, trialRef, TrialCleanupError, TrialTimeoutError, withheldTrialVariables, type RunTrialInput } from '../src/merge-writer/trial.js';
 import { checkoutKinds } from '../src/install/worktree-root.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -75,8 +75,13 @@ const fixtureFiles = {
   'package.json': JSON.stringify({ name: 'fixture', scripts: { build: 'node build.js' } }),
   'package-lock.json': '{"lockfileVersion":3}\n',
   'build.js': "const { existsSync } = require('node:fs'); console.log('ENV:' + JSON.stringify({ keys: Object.keys(process.env), global: process.env.GIT_CONFIG_GLOBAL, nosystem: process.env.GIT_CONFIG_NOSYSTEM })); if (existsSync('break-build')) { console.error('build broke'); process.exit(1); }\n",
-  'scripts/ci-tests.mjs': "const files = process.argv.slice(3); console.log('affected: selected'); for (const file of files) if (file.startsWith('tests/')) console.log(file);\n",
-  'tests/helpers/run-tests.ts': "import { readFileSync } from 'node:fs'; const list = process.argv[process.argv.indexOf('--files-from') + 1]; const files = readFileSync(list, 'utf8').split('\\n').filter(Boolean); for (const file of files) console.log((file.includes('bad') ? 'not ok - ' : 'ok - ') + file); if (files.some(file => file.includes('bad'))) process.exit(1);\n",
+  // The stand-in for scripts/ci-tests.mjs: `affected` answers the changed test files, or a full selection (every pre-merge
+  // file, never a soak) when package.json changed; with a `full-silent` marker it lists nothing for a full selection, as the
+  // script did before GY-1522. `select` lists the pre-merge suite, as the real one does outside Actions.
+  'scripts/ci-tests.mjs': "import { existsSync, readdirSync } from 'node:fs'; const [command, ...files] = process.argv.slice(2); const suite = () => readdirSync('tests').filter(name => name.endsWith('.test.ts') && !name.startsWith('soak')).sort().map(name => 'tests/' + name);\n"
+    + "if (command === 'select') console.log(suite().join('\\n')); else if (files.includes('package.json')) { console.log('full: package.json changes the install'); if (!existsSync('full-silent')) console.log(suite().join('\\n')); } else { console.log('affected: selected'); for (const file of files) if (file.startsWith('tests/')) console.log(file); }\n",
+  // The stand-in runner: it runs only the listed files and refuses to run without a list.
+  'tests/helpers/run-tests.ts': "import { readFileSync } from 'node:fs'; const at = process.argv.indexOf('--files-from'); if (at < 0) { console.error('no --files-from: the runner would run every test file'); process.exit(2); } const files = readFileSync(process.argv[at + 1], 'utf8').split('\\n').filter(Boolean); for (const file of files) console.log((file.includes('bad') ? 'not ok - ' : 'ok - ') + file); if (files.some(file => file.includes('bad'))) process.exit(1);\n",
 };
 const fixture = async () => {
   const repo = await repository(fixtureFiles);
@@ -84,11 +89,11 @@ const fixture = async () => {
   gitIn(repo.root, 'config', 'user.name', 'x');
   return repo;
 };
-const trialOf = async (repo: Awaited<ReturnType<typeof fixture>>, head: string, changedFiles: string[], environment: NodeJS.ProcessEnv = { PATH: process.env.PATH! }) => {
+const trialOf = async (repo: Awaited<ReturnType<typeof fixture>>, head: string, changedFiles: string[], environment: NodeJS.ProcessEnv = { PATH: process.env.PATH! }, remove?: RunTrialInput['remove']) => {
   const merged = await trialMerge(gitFor(repo.root), { head, baseTip: repo.base });
   assert.ok('mergeSha' in merged);
   const base = await temporaryDirectory('trial-merge-root');
-  const result = await runTrial({ root: repo.root, base, mergeSha: merged.mergeSha, changedFiles, timeoutMs: 120_000, key: 'GY-9', environment });
+  const result = await runTrial({ root: repo.root, base, mergeSha: merged.mergeSha, changedFiles, timeoutMs: 120_000, key: 'GY-9', environment, remove });
   return { result, base };
 };
 
@@ -115,6 +120,41 @@ test('integration:trial-run-build-and-tests — the merge commit is checked out 
   assert.deepEqual(noBuild.result.tests, { passed: 0, failed: [], files: 0 }, 'no test runs after a failed build');
   assert.match(noBuild.result.logTail, /build broke/);
   assert.equal(existsSync(noBuild.base) ? readdirSync(noBuild.base).length : 0, 0, 'and after a failed build');
+});
+
+test('integration:trial-run-build-and-tests — a full selection runs exactly the pre-merge files ci-tests lists, never the release-candidate suites, and the verdict counts the files that ran; a merge whose own ci-tests lists none for a full selection gets them from `select`', async () => {
+  const repo = await fixture();
+  const suite = { 'tests/a.test.ts': 'x\n', 'tests/bad.test.ts': 'x\n', 'tests/soak-day.test.ts': 'x\n' };
+  const full = repo.commitOnBase({ ...suite, 'package.json': JSON.stringify({ name: 'fixture', version: '2', scripts: { build: 'node build.js' } }) }, 'install change');
+  const listed = await trialOf(repo, full, ['package.json', 'tests/a.test.ts']);
+  assert.equal(listed.result.build, 'pass', listed.result.logTail);
+  assert.deepEqual(listed.result.tests, { passed: 1, failed: ['tests/bad.test.ts'], files: 2 }, listed.result.logTail);
+  assert.match(listed.result.logTail, /--files-from/, 'the runner always gets the list');
+  assert.ok(!listed.result.logTail.includes('ok - tests/soak-day.test.ts'), `the soak never runs in a trial:\n${listed.result.logTail}`);
+  assert.equal(existsSync(listed.base) ? readdirSync(listed.base).length : 0, 0);
+  const silent = repo.commitOnBase({ ...suite, 'full-silent': '', 'package.json': JSON.stringify({ name: 'fixture', version: '3', scripts: { build: 'node build.js' } }) }, 'older ci-tests');
+  const selected = await trialOf(repo, silent, ['package.json']);
+  assert.deepEqual(selected.result.tests, { passed: 1, failed: ['tests/bad.test.ts'], files: 2 }, selected.result.logTail);
+  assert.match(selected.result.logTail, /ci-tests\.mjs select/, 'the pre-merge suite comes from `select` when `affected` names no file');
+});
+
+test('integration:trial-run-build-and-tests — a trial checkout that cannot be removed is reported: runTrial rejects with TrialCleanupError naming the directory and carrying the verdict it reached, or the failure it met', async () => {
+  const repo = await fixture();
+  const head = repo.commitOnBase({ 'tests/a.test.ts': 'x\n' }, 'head');
+  const stuck: RunTrialInput['remove'] = async () => { throw new Error('EBUSY: the checkout is in use'); };
+  await assert.rejects(trialOf(repo, head, ['tests/a.test.ts'], { PATH: process.env.PATH! }, stuck), (error: unknown) =>
+    error instanceof TrialCleanupError && /graphyard-trial-gy-9-/.test(error.directory) && /EBUSY/.test(error.message) && /answered build pass, 0 failing/.test(error.message)
+    && error.verdict?.build === 'pass' && error.verdict.tests.files === 1);
+  const broken = repo.commitOnBase({ 'break-build': '' }, 'breaks the build');
+  await assert.rejects(trialOf(repo, broken, [], { PATH: process.env.PATH! }, stuck), (error: unknown) => error instanceof TrialCleanupError && error.verdict?.build === 'fail');
+  const run = ((command: string, args: string[], options: unknown) => {
+    if (command === 'npm' && args[0] === 'run') throw Object.assign(new Error('killed'), { timedOut: true, stdout: '', stderr: '' });
+    return defaultChildRun(command, args, options as never);
+  }) as never;
+  const merged = await trialMerge(gitFor(repo.root), { head, baseTip: repo.base });
+  assert.ok('mergeSha' in merged);
+  await assert.rejects(runTrial({ root: repo.root, base: await temporaryDirectory('trial-merge-root'), mergeSha: merged.mergeSha, changedFiles: [], timeoutMs: 120_000, key: 'GY-9', environment: { PATH: process.env.PATH! }, run, remove: stuck }),
+    (error: unknown) => error instanceof TrialCleanupError && error.verdict === null && /the trial itself failed: The trial timed out during its build/.test(error.message));
 });
 
 test('unit:trial-run-credential-free — the trial child sees none of GH_CONFIG_DIR, GH_TOKEN, GITHUB_TOKEN, SSH_AUTH_SOCK, GIT_SSH_COMMAND or any GRAPHYARD_*/HERDR_* variable, and git\'s global configuration is off', async () => {

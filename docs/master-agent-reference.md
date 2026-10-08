@@ -45,7 +45,7 @@ Unacted producer requests (never started, launch refused, exited at launch) rela
 
 ## Shadow merge gate
 
-`run.shadowGate` (`enabled`, default true; `timeoutMinutes`, default 20): one submitted head per cycle, oldest first, trial-merged onto main, built and affected-tested in a credential-free `trial` checkout; `shadow.verdict` joins GitHub's outcome in `master status` `shadowGate` (`shadow-only-fail`/`shadow-missed`: one report-only attention line each); timeouts and errors record nothing; nothing pushed.
+`run.shadowGate` (`enabled`, default true; `timeoutMinutes`, default 20): one submitted head per cycle, oldest first, trial-merged onto main, built and affected-tested in a credential-free `trial` checkout; `shadow.verdict` joins GitHub's outcome in `master status` `shadowGate` (`shadow-only-fail`/`shadow-missed`: one report-only attention line each); errors record nothing; a timeout records nothing and is retried behind untried heads, three times per tip, then one line names it; nothing pushed.
 
 ## Pipeline speed
 
