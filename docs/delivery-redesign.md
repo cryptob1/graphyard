@@ -1,8 +1,6 @@
 <!-- page: Operate Graphyard | 6 | merge writer, rollout. -->
 # Delivery redesign
 
-Operator-approved 2026-10-08; github mode works until the [rollout](#rollout) retires it.
-
 ## One rule
 
 Only Graphyard writes to main; workers hold no credential that can, and no GitHub App, protection or Action sits in the merge path.
@@ -20,7 +18,7 @@ Steps (intent, trial, push, pushed, fetch, reconciled) are idempotent; the sha o
 
 ## Removed and kept
 
-Removed: GitHub Apps, branch protection, required checks, PR approval as merge token, the merge queue, plannedFiles with scope requests and sync-restore, proof-producer sessions, approver agents except for sensitive diffs and the three human decisions, docs and module budgets, auto-revert on main. Tests still run in a credential-free executor with criterion bindings. Pull requests and Actions stay optional.
+Removed: GitHub Apps, branch protection, required checks, PR approval as merge token, the merge queue, plannedFiles with scope requests and sync-restore, proof-producer sessions, approver agents except for sensitive diffs and the three human decisions, docs and module budgets, auto-revert on main. Pull requests and Actions stay optional.
 
 Kept: leases and epochs, the transactional ledger, two risk lanes from the diff, UAT serving a pinned commit, deployment verification, Herdr, the dashboard.
 
