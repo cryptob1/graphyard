@@ -597,7 +597,7 @@
     "tests/soak-decisions.test.ts": 227396,
     "tests/soak-dispatch.test.ts": 23662,
     "tests/soak-loop-wake.test.ts": 34070,
-    "tests/soak-main-guard.test.ts": 24000,
+    "tests/soak-main-guard.test.ts": 31000,
     "tests/soak-review.test.ts": 35617,
     "tests/soak-sessions.test.ts": 156501,
     "tests/speed-metric.test.ts": 4808,

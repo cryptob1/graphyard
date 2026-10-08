@@ -14,7 +14,7 @@ import { changedTestFiles, judgeTimingCompanion, timingBaselineCompanion, timing
 import type { GitHubCacheStore } from './github-cache.js';
 import type { GitHubChargeLedger } from './github-charges.js';
 import { nextAction } from './model/next-action.js';
-import { applyMainGuardRevert, mainGuardReadiness, runMainGuard, type CommitVerdict, type MainGuardReadiness, type FileChange, type MainCommit, type MainGuardRevert, type MainGuardTick } from './main-guard.js';
+import { applyMainGuardFlakes, applyMainGuardRevert, mainGuardReadiness, runMainGuard, type CommitVerdict, type MainGuardReadiness, type FileChange, type MainCommit, type MainGuardRevert, type MainGuardTick, type MainRerun } from './main-guard.js';
 import { lockedWork } from './store/locked-read.js';
 import { save } from './store/store.js';
 export { CHECK_NAME, LANDABLE_CHECK };
@@ -2643,7 +2643,7 @@ export const mainGuardIntervalMs = 30_000;
  * one whose delivery is the merge that broke main — and records each revert step on that item under
  * `main-guard.revert.<state>`, reopening it for rework when its revert merged.
  */
-export async function guardGitHubMain(engine: Pick<Engine, 'store' | 'ciAppIds' | 'evaluate'>, github: Pick<GitHub, 'mainHistory' | 'commitChecks' | 'openMainRevert' | 'revertPull' | 'mergeChanges' | 'revertChanges' | 'approveRevert' | 'mergeRevert' | 'closeRevert'> & Partial<Pick<GitHub, 'jobRun' | 'rerunFailedJobs'>>, now = new Date(), verdicts = new Map<string, CommitVerdict>(), approved = new Set<string>(), cancelled = new Set<string>()): Promise<MainGuardTick> {
+export async function guardGitHubMain(engine: Pick<Engine, 'store' | 'ciAppIds' | 'evaluate'>, github: Pick<GitHub, 'mainHistory' | 'commitChecks' | 'openMainRevert' | 'revertPull' | 'mergeChanges' | 'revertChanges' | 'approveRevert' | 'mergeRevert' | 'closeRevert'> & Partial<Pick<GitHub, 'jobRun' | 'rerunFailedJobs'>>, now = new Date(), verdicts = new Map<string, CommitVerdict>(), approved = new Set<string>(), cancelled = new Set<string>(), reruns = new Map<string, MainRerun>()): Promise<MainGuardTick> {
   const pool = engine.store.pool;
   const required = await mainGuardRequired(pool);
   return runMainGuard({
@@ -2658,11 +2658,12 @@ export async function guardGitHubMain(engine: Pick<Engine, 'store' | 'ciAppIds' 
     approveRevert: (pr, head, body) => github.approveRevert(pr, head, body),
     mergeRevert: (work, revert) => github.mergeRevert(work, revert),
     closeRevert: (pr, reason) => github.closeRevert(pr, reason),
-    // GY-1468: a run on main that concluded only cancelled is rerun, never reverted; GitHub refuses
-    // a rerun while the run is still in progress, which waits for the next tick.
+    // GY-1468: a run on main that concluded only cancelled is rerun, never reverted; GY-1497: a failed
+    // one is rerun once before it is reverted. GitHub refuses a rerun while the run is still in
+    // progress, which waits for the next tick.
     ...(typeof github.jobRun === 'function' && typeof github.rerunFailedJobs === 'function' ? {
-      cancelledRun: (checkRun: number) => github.jobRun!(checkRun),
-      rerunCancelled: async (checkRun: number, run: { id: number; attempt: number | null }) => {
+      jobRun: (checkRun: number) => github.jobRun!(checkRun),
+      rerunFailed: async (checkRun: number, run: { id: number; attempt: number | null }) => {
         try { await github.rerunFailedJobs!(checkRun, { run: { runId: run.id, ...(run.attempt !== null ? { attempt: run.attempt } : {}) } }); return 'requested' as const; }
         catch (error) { if (error instanceof RerunPending && !error.unreadable) return 'waiting' as const; throw error; }
       },
@@ -2674,9 +2675,15 @@ export async function guardGitHubMain(engine: Pick<Engine, 'store' | 'ciAppIds' 
       if (reopened) engine.evaluate(work, (await lockedWork(db, [work.id])).map(item => item.id === work.id ? work : item), at);
       await save(db, work, 'graphyard', `main-guard.revert.${revert.state}`, at, { revert, reopened });
     }),
-  }, { required, ciAppIds: engine.ciAppIds, now, verdicts, approved, cancelled });
+    recordFlakes: (snapshot, flakes) => engine.store.transaction(async (db, at) => {
+      const work: Work = (await db.query('SELECT document FROM work_items WHERE id=$1 FOR UPDATE', [snapshot.id])).rows[0]?.document;
+      demand(work, 'Work item not found', 404);
+      applyMainGuardFlakes(work, flakes);
+      await save(db, work, 'graphyard', 'main-guard.flake', at, { flakes });
+    }),
+  }, { required, ciAppIds: engine.ciAppIds, now, verdicts, approved, cancelled, reruns });
 }
-const mainGuardRead = new WeakMap<Engine, number>(), mainGuardVerdicts = new WeakMap<Engine, Map<string, CommitVerdict>>(), mainGuardApproved = new WeakMap<Engine, Set<string>>(), mainGuardCancelled = new WeakMap<Engine, Set<string>>(), mainGuardFailure = new WeakMap<Engine, string>();
+const mainGuardRead = new WeakMap<Engine, number>(), mainGuardVerdicts = new WeakMap<Engine, Map<string, CommitVerdict>>(), mainGuardApproved = new WeakMap<Engine, Set<string>>(), mainGuardCancelled = new WeakMap<Engine, Set<string>>(), mainGuardReruns = new WeakMap<Engine, Map<string, MainRerun>>(), mainGuardFailure = new WeakMap<Engine, string>();
 /** The revert approver App from `GRAPHYARD_REVERT_APPROVER_APP_ID`/`_INSTALLATION_ID`/`_PRIVATE_KEY` (or `_FILE`); undefined when unset. */
 export async function revertApproverFromEnv(env: NodeJS.ProcessEnv = process.env): Promise<RevertApprover | undefined> {
   if (!env.GRAPHYARD_REVERT_APPROVER_APP_ID) return undefined;
@@ -2821,7 +2828,11 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
     if (!mainGuardCancelled.has(engine)) mainGuardCancelled.set(engine, new Set());
     const cancelled = mainGuardCancelled.get(engine)!;
     if (cancelled.size > historyEntries) cancelled.clear();
-    const failed = await guardGitHubMain(engine, github, new Date(), verdicts, approved, cancelled).then(tick => tick.errors.join('; '), error => error instanceof Error ? error.message : String(error));
+    // A forgotten rerun is never requested twice: the job's attempt says it was rerun (GY-1497).
+    if (!mainGuardReruns.has(engine)) mainGuardReruns.set(engine, new Map());
+    const reruns = mainGuardReruns.get(engine)!;
+    if (reruns.size > historyEntries) reruns.clear();
+    const failed = await guardGitHubMain(engine, github, new Date(), verdicts, approved, cancelled, reruns).then(tick => tick.errors.join('; '), error => error instanceof Error ? error.message : String(error));
     if (failed && mainGuardFailure.get(engine) !== failed) await engine.store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', ['graphyard', 'main-guard.failed', JSON.stringify({ details: { error: failed, at: new Date().toISOString() } })]).catch(() => {});
     mainGuardFailure.set(engine, failed);
   }
