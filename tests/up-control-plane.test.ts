@@ -349,7 +349,7 @@ test('unit:up-control-plane-steps — up --merger control-plane runs preflight, 
   assert.ok(!world.calls.flat().includes('--reviewer'), 'no reviewer App flag');
   assert.ok(!world.calls.flat().some(arg => arg === '--reuse-app'), 'no App reuse');
   assert.deepEqual(world.ghCalls[0], ['repo', 'view', 'owner/project', '--json', 'name']);
-  assert.deepEqual(world.ghCalls[1], ['repo', 'create', 'owner/project', '--private']);
+  assert.deepEqual(world.ghCalls[1], ['repo', 'create', 'owner/project', '--private', '--source', '.', '--push']);
   assert.equal(world.deployKeys.length, 1);
   assert.match(world.deployKeys[0]!, /install-dir:owner\/project$/);
   assert.equal(world.mergers.length, 1);

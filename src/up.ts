@@ -500,8 +500,8 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
     if (!deps.gh) throw new UpStop('preflight: control-plane merger needs gh on this machine to create the repository when it is missing', upExitCodes.prerequisite);
     const view = await deps.gh(['repo', 'view', request.repository, '--json', 'name']);
     if (view.code === 0) return;
-    const created = await deps.gh(['repo', 'create', request.repository, '--private']);
-    if (created.code !== 0) throw new UpStop(`preflight: gh repo create ${request.repository} exited ${created.code}${created.stderr ? `: ${created.stderr.split('\n')[0].slice(0, 300)}` : ''}; create it under the operator's gh login, then rerun ${rerun()}`, upExitCodes.prerequisite);
+    const created = await deps.gh(['repo', 'create', request.repository, '--private', '--source', '.', '--push']);
+    if (created.code !== 0) throw new UpStop(`preflight: gh repo create ${request.repository} --source . --push exited ${created.code}${created.stderr ? `: ${created.stderr.split('\n')[0].slice(0, 300)}` : ''}; create it under the operator's gh login, then rerun ${rerun()}`, upExitCodes.prerequisite);
     deps.emit({ kind: 'note', text: `Created private repository ${request.repository} with gh repo create (operator's gh login).` });
   };
   const step = async (name: UpStep, body: () => Promise<string | void>) => {
