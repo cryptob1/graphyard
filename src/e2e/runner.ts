@@ -348,14 +348,18 @@ export const failureDetail = (report: E2eReport) => {
  * (a pass on the retry is flaky, never passed) and stops at the first required case that fails, so
  * the cases after it are unrun. Only the release verdict's blocking cases — required cases that
  * failed or were flaky — fail the suite; optional cases run and are recorded but never fail it
- * (GY-1378). The detail names each blocking case and step, then the unrun cases apart.
+ * (GY-1378). The detail names each blocking case and step, then the unrun cases apart. A managed
+ * repository's candidate (GY-1535, release-candidate.ts projectCaseSuite) selects every required
+ * case beside the uat ones.
  */
 export const releaseRetries = 1;
-export const e2eSuite = (cases: readonly CaseFile[], token: string, options: { fetcher?: typeof fetch; launcher?: E2eLauncher; stepTimeoutMs?: number; root?: string; report?: (report: E2eReport) => Promise<void> } = {}) => ({
+export const e2eSuite = (cases: readonly CaseFile[], token: string, options: { fetcher?: typeof fetch; launcher?: E2eLauncher; stepTimeoutMs?: number; root?: string; report?: (report: E2eReport) => void | Promise<void>;
+  /** Which cases run: those targeting uat by default; a managed repository's candidate (GY-1535) runs every required case too. */
+  select?: (entry: CaseFile) => boolean } = {}) => ({
   name: 'e2e',
   run: async (url: string, candidate: { id: string } | null) => {
-    const selected = cases.filter(entry => entry.definition.target === 'uat');
-    if (!selected.length) return { name: 'e2e', passed: false, detail: 'no E2E case targets uat, so the suite exercised nothing' };
+    const selected = cases.filter(options.select ?? (entry => entry.definition.target === 'uat'));
+    if (!selected.length) return { name: 'e2e', passed: false, detail: options.select ? 'no required or uat E2E case is in the checkout, so the suite exercised nothing' : 'no E2E case targets uat, so the suite exercised nothing' };
     const report = await runCases(selected, { url, token, environment: 'uat', runId: candidate ? `rc-${candidate.id}` : undefined, fetcher: options.fetcher, launcher: options.launcher, stepTimeoutMs: options.stepTimeoutMs,
       root: options.root, retries: releaseRetries, stopOnRequiredFailure: true });
     await options.report?.(report);

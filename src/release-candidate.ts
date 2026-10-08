@@ -1,7 +1,9 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { createServer } from 'node:http';
+import { readFile, realpath, stat } from 'node:fs/promises';
+import { extname, join, resolve, sep } from 'node:path';
 
 /**
  * Release candidates: one moving main, a frozen candidate, UAT, then that exact SHA in production.
@@ -716,3 +718,46 @@ export const ledgerStatus = (ledger: Ledger) => ledger.candidates.map(candidate 
     soak: soak ? { result: soak.result, at: soak.at, run: soak.run, report: soak.report } : null,
     production: ledger.production.find(record => record.id === candidate.id)?.at ?? null };
 });
+
+// ——— GY-1535: a managed repository's own E2E cases on every candidate. ———
+
+/** What the loopback static UAT serves each extension as; anything else is application/octet-stream. */
+const staticTypes: Record<string, string> = {
+  '.html': 'text/html; charset=utf-8', '.htm': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8', '.json': 'application/json', '.map': 'application/json', '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.ico': 'image/x-icon', '.txt': 'text/plain; charset=utf-8', '.wasm': 'application/wasm',
+  '.woff': 'font/woff', '.woff2': 'font/woff2', '.mp3': 'audio/mpeg', '.ogg': 'audio/ogg', '.wav': 'audio/wav',
+};
+export interface StaticUat { url: string; close(): Promise<void> }
+
+/**
+ * GY-1535: the UAT deployment of a static site (a GitHub Pages game, say) — the candidate's build
+ * output `directory` served on loopback, so its cases drive it in a browser like any deployment.
+ * `/healthz` answers the candidate's SHA as `commit`, so `validate` binds every verdict to it; a
+ * directory serves its `index.html`; nothing outside `directory` is ever read, and a missing build
+ * output answers 404 rather than failing the server. Only GET and HEAD are answered.
+ */
+export async function serveStaticSite(directory: string, sha: string): Promise<StaticUat> {
+  assertSha(sha, 'static UAT');
+  const root = resolve(directory);
+  const inside = (path: string) => path === root || path.startsWith(`${root}${sep}`);
+  const server = createServer(async (request, response) => {
+    const send = (status: number, type: string, body: string | Buffer) => { response.writeHead(status, { 'Content-Type': type, 'Cache-Control': 'no-store' }); response.end(request.method === 'HEAD' ? undefined : body); };
+    if (request.method !== 'GET' && request.method !== 'HEAD') return send(405, 'text/plain; charset=utf-8', 'Method not allowed\n');
+    let pathname: string;
+    try { pathname = decodeURIComponent(new URL(request.url ?? '/', 'http://uat.invalid').pathname); } catch { return send(400, 'text/plain; charset=utf-8', 'Bad path\n'); }
+    if (pathname === '/healthz') return send(200, 'application/json', JSON.stringify({ ok: true, commit: sha }));
+    let path = resolve(root, `.${pathname}`);
+    if (!inside(path)) return send(404, 'text/plain; charset=utf-8', 'Not found\n');
+    try {
+      if ((await stat(path)).isDirectory()) path = resolve(path, 'index.html');
+      // A symbolic link out of the build output is not served.
+      const real = await realpath(path), realRoot = await realpath(root);
+      if (real !== realRoot && !real.startsWith(`${realRoot}${sep}`)) return send(404, 'text/plain; charset=utf-8', 'Not found\n');
+      return send(200, staticTypes[extname(path).toLowerCase()] ?? 'application/octet-stream', await readFile(path));
+    } catch { return send(404, 'text/plain; charset=utf-8', 'Not found\n'); }
+  });
+  await new Promise<void>((accept, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', () => accept()); });
+  const { port } = server.address() as { port: number };
+  return { url: `http://127.0.0.1:${port}`, close: () => new Promise<void>(accept => { server.closeAllConnections?.(); server.close(() => accept()); }) };
+}

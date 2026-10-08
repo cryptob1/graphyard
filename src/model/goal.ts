@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { caseDirectory, caseId, caseSchema, contractFile, type ReleaseContract } from '../e2e/case.js';
+import { classifyRisk, sensitiveReason, type RiskVerdict } from './risk-class.js';
 import { applyPlanCommand, isPlanCommand, planCommandSchemas, planNext, type GoalPlan } from './goal-plan.js';
 import { demand } from './refusal.js';
 import type { Observation, Principal, ScopeFile, Work } from './work.js';
@@ -11,7 +12,8 @@ import type { Observation, Principal, ScopeFile, Work } from './work.js';
  * deployed. Before any code is written the `acceptance` role (src/daemon/acceptance.ts) turns it
  * into plain-language customer outcomes, one required uat E2E case per outcome (the GY-1351 case
  * format) and the release-contract bindings in e2e/contract.json, opened as one pull request linked
- * to the goal. An approver on another identity approves that draft — its author never can — and
+ * to the goal — or, under the control-plane merger (GY-1535), committed as one change the merge
+ * writer lands, with no pull request (`acceptance.pr` null). An approver on another identity approves that draft — its author never can — and
  * once the pull request merges the goal's cases and bindings are protected: an implementation
  * candidate that modifies or deletes one is refused at `complete`, and a change to one goes only
  * through an approved case change whose approver is neither its requester nor an implementer of
@@ -66,16 +68,17 @@ export const acceptanceDraftSchema = z.object({ outcomes: z.array(acceptanceOutc
 });
 export type AcceptanceDraft = z.infer<typeof acceptanceDraftSchema>;
 const sha = z.string().regex(/^[0-9a-f]{40}$/);
-/** A posted draft: the outcomes and the pull request the loop opened them as, at its head. */
-export const draftInputSchema = z.object({ outcomes: z.unknown(), pr: z.number().int().positive(), branch: line(200), head: sha }).strict()
+/** A posted draft: the outcomes and the pull request the loop opened them as (null for a merge-writer change), at its head. */
+export const draftInputSchema = z.object({ outcomes: z.unknown(), pr: z.number().int().positive().nullable(), branch: line(200), head: sha }).strict()
   .transform(({ outcomes, pr, branch, head }) => ({ ...acceptanceDraftSchema.parse({ outcomes }), pr, branch, head }));
 
 export const goalCommandSchemas = {
   approve: z.object({ reason }).strict(),
   refuse: z.object({ reason }).strict(),
-  merged: z.object({ pr: z.number().int().positive(), mergeSha: sha.nullable().default(null) }).strict(),
-  land: z.object({}).strict(),
-  closed: z.object({ pr: z.number().int().positive(), reason }).strict(),
+  merged: z.object({ pr: z.number().int().positive().nullable(), mergeSha: sha.nullable().default(null) }).strict(),
+  /** A merge-writer change names the merge commit the writer pushed onto the base; a pull request names nothing (GitHub reports the merge). */
+  land: z.object({ mergeSha: sha.optional() }).strict(),
+  closed: z.object({ pr: z.number().int().positive().nullable(), reason }).strict(),
   deliver: z.object({ items: z.array(z.string().regex(/^[A-Z][A-Z0-9]*-\d+$/)).min(1).max(100), reason }).strict(),
   ...planCommandSchemas,
   'case-change': z.object({ work: z.string().regex(/^[A-Z][A-Z0-9]*-\d+$/), cases: z.array(caseId).min(1).max(50), reason }).strict(),
@@ -92,15 +95,18 @@ export interface CaseChange {
 export interface Goal extends GoalInput {
   id: string; key: string; stage: GoalStage; revision: number;
   recordedBy: string; recordedAt: string; updatedAt: string;
-  /** The acceptance role's draft: who wrote it, its pull request at its head, and its outcomes with their cases. */
-  acceptance: { author: string; pr: number; branch: string; head: string; draftedAt: string; outcomes: AcceptanceOutcome[] } | null;
+  /**
+   * The acceptance role's draft: who wrote it, its pull request (null for a change the merge writer
+   * lands under the control-plane merger, GY-1535) at its head, and its outcomes with their cases.
+   */
+  acceptance: { author: string; pr: number | null; branch: string; head: string; draftedAt: string; outcomes: AcceptanceOutcome[] } | null;
   /** The approval binds the head it judged: the pull request merges only at that head. */
   approval: { by: string; at: string; reason: string; head: string } | null;
   /** The last refused (or closed unmerged) draft, so the next draft can answer it and the loop closes its pull request. */
-  refusal: { by: string; at: string; reason: string; pr: number; branch: string } | null;
+  refusal: { by: string; at: string; reason: string; pr: number | null; branch: string } | null;
   /** How many drafts were posted; the loop drafts at most maxDraftRounds. */
   drafts: number;
-  merged: { at: string; by: string; pr: number; mergeSha: string | null } | null;
+  merged: { at: string; by: string; pr: number | null; mergeSha: string | null } | null;
   /** What stays protected once the acceptance pull request merged: the case ids and outcome ids it added. */
   protected: { cases: string[]; outcomes: string[] };
   caseChanges: CaseChange[];
@@ -186,13 +192,15 @@ export function applyGoalCommand(goal: Goal, command: Exclude<GoalCommand, 'reco
     // A draft's pull request closed unmerged: the goal goes back to drafting with the reason recorded, so it is never left accepted.
     const data = goalCommandSchemas.closed.parse(input);
     demand((goal.stage === 'awaiting-approval' || goal.stage === 'accepted') && goal.acceptance, `${goal.key} is ${goal.stage}; only an open acceptance draft is recorded closed`);
-    demand(data.pr === goal.acceptance.pr, `${goal.key}'s acceptance pull request is #${goal.acceptance.pr}, not #${data.pr}`, 422);
+    demand(data.pr === goal.acceptance.pr, `${goal.key}'s acceptance is ${acceptanceName(goal)}, not ${data.pr === null ? 'a merge-writer change' : `#${data.pr}`}`, 422);
     next.refusal = { by: actor.id, at, reason: data.reason, pr: data.pr, branch: goal.acceptance.branch };
     next.acceptance = null; next.approval = null; next.stage = 'acceptance-drafting';
   } else if (command === 'merged') {
     const data = goalCommandSchemas.merged.parse(input);
     demand(goal.stage === 'accepted' && goal.acceptance && goal.approval, `${goal.key} is ${goal.stage}; only an approved acceptance draft is recorded merged`);
-    demand(data.pr === goal.acceptance.pr, `${goal.key}'s acceptance pull request is #${goal.acceptance.pr}, not #${data.pr}`, 422);
+    demand(data.pr === goal.acceptance.pr, `${goal.key}'s acceptance is ${acceptanceName(goal)}, not ${data.pr === null ? 'a merge-writer change' : `#${data.pr}`}`, 422);
+    // A merge-writer change is merged only as the merge commit the writer pushed: there is no pull request for GitHub to report.
+    demand(goal.acceptance.pr !== null || data.mergeSha, `${goal.key}'s acceptance change is recorded merged only with the merge commit the merge writer pushed`, 422);
     next.merged = { at, by: actor.id, pr: data.pr, mergeSha: data.mergeSha };
     next.protected = { cases: goal.acceptance.outcomes.map(outcome => outcome.case.id), outcomes: goal.acceptance.outcomes.map(outcome => outcome.id) };
     // The planner turns the merged acceptance into the items that deliver it (GY-1418).
@@ -227,14 +235,34 @@ export function applyGoalCommand(goal: Goal, command: Exclude<GoalCommand, 'reco
   return next;
 }
 
+/** How a goal's acceptance is named: its pull request, or the merge-writer change at its head (GY-1535). */
+export const acceptanceName = (goal: Pick<Goal, 'acceptance'>) => goal.acceptance?.pr != null ? `acceptance pull request #${goal.acceptance.pr}` : `acceptance change ${goal.acceptance?.head.slice(0, 12) ?? '(none)'}`;
+
+/** The rule every acceptance change is sensitive by, whatever paths it touches: it is the goal's customer contract. */
+export const acceptanceChangeRule = 'customer acceptance: required cases and contract bindings';
+/**
+ * The class of an acceptance change (GY-1535): always sensitive — it writes the required cases and
+ * contract bindings every later item is judged by — so the approver identity's verdict on its exact
+ * head is required before the merge writer lands it. Each path names the acceptance rule beside any
+ * rule risk-class.ts itself matches.
+ */
+export function acceptanceChangeRisk(paths: readonly string[]): RiskVerdict {
+  const verdict = classifyRisk(paths.map(path => ({ path })));
+  return { risk: 'sensitive', reasons: [...new Set([...verdict.reasons, ...paths.map(path => sensitiveReason(path, acceptanceChangeRule))])] };
+}
+
 /** Who acts next on a goal, and with which command; null once it is delivered. */
 export function goalNext(goal: Goal, now = Date.now()): { who: string; command: string } | null {
   if (goal.stage === 'acceptance-drafting' && (goal.drafts ?? 0) >= maxDraftRounds) return { who: `master: ${maxDraftRounds} acceptance drafts were refused or closed (last: ${goal.refusal?.reason ?? 'none recorded'}); the loop drafts no more`, command: `graphyard goal draft ${goal.key} DRAFT.json` };
   if (goal.stage === 'acceptance-drafting') return { who: 'acceptance role (the master loop launches it once its operator-agent and approver identities are provisioned)', command: `graphyard goal draft ${goal.key} DRAFT.json` };
   if (goal.stage === 'awaiting-approval') return { who: `an approver other than ${goal.acceptance!.author}`, command: `graphyard goal approve ${goal.key} -- REASON (or goal refuse)` };
   if (goal.stage === 'accepted' && goal.approval && now - Date.parse(goal.approval.at) > acceptanceStuckMs)
-    return { who: `master: acceptance pull request #${goal.acceptance!.pr} was approved ${goal.approval.at} and has not merged; read why on the pull request, then close it (the loop drafts again) or land it`, command: `graphyard goal closed ${goal.key} ${goal.acceptance!.pr} -- REASON` };
-  if (goal.stage === 'accepted') return { who: `the loop: Graphyard publishes its gate verdicts on acceptance pull request #${goal.acceptance!.pr} and merges it at its approved head, once its required checks pass`, command: `graphyard goal land ${goal.key}` };
+    return goal.acceptance!.pr === null
+      ? { who: `master: ${acceptanceName(goal)} was approved ${goal.approval.at} and the merge writer has not landed it; read the loop's acceptance action for why, then close it (the loop drafts again) or let the writer land it`, command: `graphyard goal closed ${goal.key} change -- REASON` }
+      : { who: `master: acceptance pull request #${goal.acceptance!.pr} was approved ${goal.approval.at} and has not merged; read why on the pull request, then close it (the loop drafts again) or land it`, command: `graphyard goal closed ${goal.key} ${goal.acceptance!.pr} -- REASON` };
+  if (goal.stage === 'accepted') return goal.acceptance!.pr === null
+    ? { who: `the loop: the merge writer merges ${acceptanceName(goal)} onto the base at its approved head and records it merged`, command: `graphyard goal land ${goal.key}` }
+    : { who: `the loop: Graphyard publishes its gate verdicts on acceptance pull request #${goal.acceptance!.pr} and merges it at its approved head, once its required checks pass`, command: `graphyard goal land ${goal.key}` };
   const planning = planNext(goal);
   if (planning) return planning;
   if (goal.stage === 'delivering') return { who: 'master: create and deliver the implementation items, then name them once every one has merged', command: `graphyard goal deliver ${goal.key} GY-N... -- REASON` };

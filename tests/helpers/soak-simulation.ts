@@ -2926,7 +2926,7 @@ export async function acceptanceWorld(dayStart: number) {
   // POST /api/goals/:key/land as the control plane answers it, its GitHub held here: the merge lands half an hour after it is
   // first asked; a person closes billing's first approved pull request instead, and audit's first conflicts with the base.
   const land = async (goal: Goal) => {
-    const pr = goal.acceptance!.pr, pull = day.pulls.get(pr)!;
+    const pr = goal.acceptance!.pr!, pull = day.pulls.get(pr)!;
     assert.equal(pull.head, goal.approval!.head, 'an acceptance pull request is landed only at its approved head');
     day.lands.push({ pr, at: clock.now() - dayStart });
     pull.autoAt ??= clock.now();

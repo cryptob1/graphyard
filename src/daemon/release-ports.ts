@@ -1,4 +1,5 @@
 // Concern: the local release ports of control-plane mode (GY-1526) — src/release-candidate.ts run from the coordinator checkout, pushes through the deploy key, the revert through the merge writer's steps.
+import { execFileSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import type { ChildRun } from '../child-runner.js';
@@ -12,14 +13,22 @@ import { deployKeySshCommand, firstParentHolds, pushArgs, pushEnvironment, runMe
 import { trialAuthor } from '../merge-writer/trial.js';
 import {
   awaitServing, cutAsync, deployToUatAsync, promoteAsync, readLedgerAsync, syncLedgerAsync, uatValidationWindowMs,
-  type AsyncGit, type ReleaseCandidate, type UatRecord,
+  findCandidate, readLedger, syncLedger, type AsyncGit, type Git, type ReleaseCandidate, type UatRecord,
 } from '../release-candidate.js';
+import { validateProjectCandidate } from '../release-project.js';
 import { revertCandidateItem, type CandidateItemDelta, type RevertContract, type RevertPorts, type RevertRecordEvent } from '../release-revert.js';
 import type { CutCommit } from './candidate-cut.js';
 import type { LocalCandidate, LocalReleasePorts, LocalValidation } from './promotion-local.js';
 
-/** The variables the loop's environment names UAT and production by in control-plane mode; the workflow's `vars.UAT_URL` and `vars.PRODUCTION_URL`. */
-export const localReleaseVariables = { uatUrl: 'GRAPHYARD_UAT_URL', uatToken: 'GRAPHYARD_UAT_TOKEN', productionUrl: 'GRAPHYARD_PRODUCTION_URL' } as const;
+/**
+ * The variables the loop's environment names UAT and production by in control-plane mode; the
+ * workflow's `vars.UAT_URL` and `vars.PRODUCTION_URL`. A static site (GY-1535) names no UAT URL:
+ * `GRAPHYARD_UAT_STATIC` names its build output in the candidate checkout, served on loopback as
+ * its UAT, and `GRAPHYARD_UAT_BUILD` the shell command that builds it there first.
+ */
+export const localReleaseVariables = { uatUrl: 'GRAPHYARD_UAT_URL', uatToken: 'GRAPHYARD_UAT_TOKEN', productionUrl: 'GRAPHYARD_PRODUCTION_URL', uatStatic: 'GRAPHYARD_UAT_STATIC', uatBuild: 'GRAPHYARD_UAT_BUILD' } as const;
+/** Whether `root` is Graphyard's own checkout, whose CLI composes the workflow's suites; a managed repository's is not (GY-1535). */
+export const graphyardCheckout = (root: string) => existsSync(join(root, 'bin', 'graphyard.mjs')) && existsSync(join(root, 'src', 'e2e', 'runner.ts'));
 /** How long `validate` waits for UAT to serve the candidate, and `verify` for production: the workflow's `--wait 1200`. */
 export const localServeWaitSeconds = 1200;
 /**
@@ -47,18 +56,24 @@ export function lastJson(output: string): unknown {
 }
 
 /**
- * The port set, or null when the loop's environment names no UAT (`GRAPHYARD_UAT_URL`): the
+ * The port set, or null when the loop's environment names no UAT (`GRAPHYARD_UAT_URL`, or a static
+ * site's `GRAPHYARD_UAT_STATIC`): the
  * release functions run in the coordinator checkout `root` with `GIT_SSH_COMMAND` set to the
  * install's deploy key, so every tag and branch push goes through it as the merge writer's do; the
  * UAT validation runs `release validate` as a child of this checkout, so its suites, holds and
- * follow-up are composed exactly as the workflow composed them; the revert is built in a trial
+ * follow-up are composed exactly as the workflow composed them. A managed repository has no such
+ * CLI (GY-1535): its candidate's own required cases run in-process through `validateProjectCandidate`
+ * from a checkout of the candidate SHA, against UAT or the static site's loopback server, and the
+ * follow-up is filed through `file`. The revert is built in a trial
  * checkout under `base` and landed through `revertCandidateItem`, recorded by `record`.
  */
 export function localReleasePorts(config: Pick<MasterConfig, 'baseBranch' | 'run' | 'repository' | 'credentialFile'>, root: string, run: ChildRun,
-  options: { base: string; record: (work: Pick<Work, 'id' | 'key'>, event: RevertRecordEvent) => Promise<unknown>; environment?: NodeJS.ProcessEnv; now?: () => number; trial?: RevertPorts['trial'] }): LocalReleasePorts | null {
+  options: { base: string; record: (work: Pick<Work, 'id' | 'key'>, event: RevertRecordEvent) => Promise<unknown>; environment?: NodeJS.ProcessEnv; now?: () => number; trial?: RevertPorts['trial'];
+    /** Files a failed managed candidate's follow-up or hold item, answering its key (GY-1535). */
+    file?: (item: object, requestId: string) => Promise<string> }): LocalReleasePorts | null {
   const environment = options.environment ?? process.env;
-  const uatUrl = environment[localReleaseVariables.uatUrl], productionUrl = environment[localReleaseVariables.productionUrl];
-  if (!uatUrl) return null;
+  const uatUrl = environment[localReleaseVariables.uatUrl], productionUrl = environment[localReleaseVariables.productionUrl], uatStatic = environment[localReleaseVariables.uatStatic];
+  if (!uatUrl && !uatStatic) return null;
   const settings = candidateSettings(config.run), writer = mergeWriterSettings(config.run, installIdFor(config.repository)), shadow = shadowGateSettings(config.run);
   const base = config.baseBranch, ref = `refs/remotes/origin/${base}`, now = options.now ?? Date.now;
   const env = { ...environment, GIT_SSH_COMMAND: deployKeySshCommand(writer.deployKeyFile) };
@@ -104,6 +119,22 @@ export function localReleasePorts(config: Pick<MasterConfig, 'baseBranch' | 'run
     },
     record: options.record,
   };
+  // GY-1535: a managed repository's candidate, validated in-process from a checkout of its exact SHA.
+  const ledgerGit: Git = args => execFileSync('git', args, { cwd: root, env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024 });
+  const validateManaged = async (id: string): Promise<LocalValidation> => {
+    syncLedger(ledgerGit, base);
+    const candidate = findCandidate(readLedger(ledgerGit), id);
+    const checkout = mkdtempSync(join(options.base, 'candidate-cases-'));
+    try {
+      await git(['worktree', 'add', '--detach', checkout, candidate.sha]);
+      const result = await validateProjectCandidate(ledgerGit, id, { checkout, base, push: true, timeoutMs: localServeWaitSeconds * 1000, file: options.file,
+        token: environment[localReleaseVariables.uatToken] ?? '',
+        uat: uatUrl ? { url: uatUrl } : { static: { directory: uatStatic!, build: environment[localReleaseVariables.uatBuild] ?? null } } });
+      return { record: result.record, followUp: result.followUp ?? null };
+    } finally {
+      try { await git(['worktree', 'remove', '--force', checkout]); } catch { rmSync(checkout, { recursive: true, force: true }); }
+    }
+  };
   return {
     settings,
     cut: async due => {
@@ -118,6 +149,7 @@ export function localReleasePorts(config: Pick<MasterConfig, 'baseBranch' | 'run
     },
     uat: async id => { const deployed = await deployToUatAsync(git, id, base, new Date(now())); return { sha: deployed.sha }; },
     validate: async id => {
+      if (!uatUrl || !graphyardCheckout(root)) return validateManaged(id);
       const scratch = mkdtempSync(join(options.base, 'candidate-validate-'));
       try {
         const output = await cli(localValidateArguments(id, uatUrl), { GRAPHYARD_E2E_REPORT: join(scratch, 'e2e-report.json'), GRAPHYARD_CANDIDATE_ID: id, GRAPHYARD_TOKEN_FILE: config.credentialFile });

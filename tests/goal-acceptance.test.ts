@@ -369,7 +369,7 @@ test('unit:acceptance-role-drafts-and-approval — the loop launches the accepta
   // A refused draft whose pull request could not be closed holds the next draft until the close succeeds.
   verdict = { verdict: 'refuse', reason: 'The case checks the wrong page' };
   await cycle(); await cycle();
-  const refusedPr = (await read(fifth.key)).refusal!.pr;
+  const refusedPr = (await read(fifth.key)).refusal!.pr!;
   const close = fx.close;
   let closeFails = 1;
   fx.close = async (pr, comment) => { if (closeFails-- > 0) throw new Error('gh pr close: HTTP 502'); return close(pr, comment); };
