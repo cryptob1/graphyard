@@ -873,11 +873,14 @@ export function browserAppDriver(options: { page: BrowserPage; repository: strin
 /**
  * The browser profile agent mode drives the App pages in: the one passed, else the one the master
  * recorded (`master init --browser-profile`), else (GY-1510) the one another Graphyard install on this
- * host recorded in its .graphyard/master.json for the same GitHub login (its `browser.login`, else its
- * repository's owner), with FROM naming that install; else none, and agent mode stops before it starts.
+ * host recorded in its .graphyard/master.json, when that profile's GitHub login is LOGIN, the login
+ * this host's gh is authenticated as; FROM names that install. A profile's login is the one its
+ * install's administration ledger (.graphyard/master-actions/ledger.json) last recorded for it: the
+ * login the browser was signed in as, else the gh login that drove it. A profile with no recorded
+ * login, or no login here, is never borrowed, and agent mode stops before it starts.
  * INSTALLS are the other installs' checkouts, hostInstallRoots by default.
  */
-export function upBrowserProfile(root: string, request: UpRequest, installs: string[] = hostInstallRoots()): { profile: string; executable?: string; from?: string; login?: string } | null {
+export function upBrowserProfile(root: string, request: UpRequest, installs: string[] = hostInstallRoots(), login: () => string | null = hostGithubLogin): { profile: string; executable?: string; from?: string; login?: string } | null {
   if (request.browserProfile) return { profile: request.browserProfile };
   const recorded = (checkout: string) => {
     try { const config = JSON.parse(readFileSync(resolve(checkout, '.graphyard/master.json'), 'utf8')); return typeof config?.browser?.profile === 'string' && config.browser.profile ? config : null; }
@@ -885,18 +888,38 @@ export function upBrowserProfile(root: string, request: UpRequest, installs: str
   };
   const own = recorded(root);
   if (own) return own.browser;
-  const login = request.repository.split('/')[0].toLowerCase();
   const self = canonicalPath(root);
+  let mine: string | null | undefined;
   for (const checkout of installs) {
     if (canonicalPath(checkout) === self) continue;
     const config = recorded(checkout);
-    const theirs = typeof config?.browser?.login === 'string' ? config.browser.login : typeof config?.repository === 'string' ? config.repository.split('/')[0] : '';
-    if (config && theirs.toLowerCase() === login) {
+    const theirs = config ? profileLogin(checkout, config.browser.profile) : null;
+    if (!theirs) continue;
+    if (mine === undefined) mine = login()?.toLowerCase() ?? null;
+    if (!mine) return null;
+    if (theirs.toLowerCase() === mine) {
       const { profile, executable } = config.browser;
       return { profile, ...(typeof executable === 'string' && executable ? { executable } : {}), from: checkout, login: theirs };
     }
   }
   return null;
+}
+/** The GitHub login CHECKOUT's administration ledger last recorded for PROFILE: the signed-in browser's, else the gh login that drove it. */
+function profileLogin(checkout: string, profile: string): string | null {
+  let entries: unknown[];
+  try { entries = JSON.parse(readFileSync(resolve(actionsDirectory(checkout), 'ledger.json'), 'utf8'))?.entries; } catch { return null; }
+  if (!Array.isArray(entries)) return null;
+  for (const entry of [...entries].reverse()) {
+    const actor = (entry as any)?.actor;
+    if (actor?.profile !== profile) continue;
+    const found = [actor.browser, actor.cli].find(value => typeof value === 'string' && value);
+    if (found) return found;
+  }
+  return null;
+}
+/** The GitHub login this host's gh is authenticated as, or null when gh is not signed in. */
+export function hostGithubLogin(): string | null {
+  try { return execFileSync('gh', ['api', 'user', '--jq', '.login'], { encoding: 'utf8', timeout: 30_000, stdio: ['ignore', 'pipe', 'ignore'] }).trim() || null; } catch { return null; }
 }
 const canonicalPath = (path: string) => { try { return realpathSync(path); } catch { return resolve(path); } };
 /**
@@ -1071,12 +1094,12 @@ export function forwardSignals(children: Set<ChildProcess>, options: { exit?: (c
 }
 
 /** The real dependencies: this CLI's own commands as children, the master identity's status read. */
-export function upDependencies(root: string, cliPath: string, request: UpRequest, emit: (event: UpEvent) => void): UpDependencies & { children: Set<ChildProcess> } {
+export function upDependencies(root: string, cliPath: string, request: UpRequest, emit: (event: UpEvent) => void, githubLogin: () => string | null = hostGithubLogin): UpDependencies & { children: Set<ChildProcess> } {
   // The children still running, for forwardSignals.
   const children = new Set<ChildProcess>();
   const serverUrl = async () => { try { return String(JSON.parse(await readFile(resolve(root, '.graphyard/master.json'), 'utf8')).url ?? '') || null; } catch { return null; } };
   const masterToken = async () => { const url = await serverUrl(); return url ? (await masterCredential(root, url))?.token ?? null : null; };
-  const browser = request.agent ? upBrowserProfile(root, request) : null;
+  const browser = request.agent ? upBrowserProfile(root, request, hostInstallRoots(), githubLogin) : null;
   if (browser?.from) emit({ kind: 'note', text: `No --browser-profile given: the App pages are driven in Chrome profile ${browser.profile}, which the Graphyard install at ${browser.from} recorded for the GitHub login ${browser.login}; pass --browser-profile to use another.` });
   // The loop runs from the checkout of the CLI master init recorded, which is this CLI until it has.
   const loopCheckout = async () => {
