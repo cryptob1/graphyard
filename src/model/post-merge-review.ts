@@ -102,6 +102,27 @@ export function parseFinding(text: string): PostMergeFinding {
 }
 
 /**
+ * The non-blocking findings of a post-merge verdict, every one and each whole: `read` is what
+ * review-cap.ts `followUpFindingsOf` found in `rest` (the body without its BLOCKING lines), which
+ * cuts each finding at 2,000 characters; a cut one is read again to the end of its line (a named
+ * `Follow-up finding:` line) or of its block. The API bounds the verdict body, so nothing is lost.
+ */
+export function wholeFindings(rest: string, read: readonly string[], cut = 2000): string[] {
+  const named = /^\s*(?:[-*]\s*)?\**FOLLOW-?UP/im.test(rest);
+  let from = 0;
+  return read.map(text => {
+    const at = rest.indexOf(text, from);
+    if (at < 0) return text;
+    from = at + text.length;
+    if (text.length < cut) return text;
+    const tail = rest.slice(at), end = tail.search(named ? /\n/ : /\n\s*\n|\n(?=\s*(?:[-*]|\d+\.)\s)/);
+    const whole = (end < 0 ? tail : tail.slice(0, end)).trim();
+    from = at + whole.length;
+    return whole;
+  });
+}
+
+/**
  * The follow-up item one BLOCKING finding of a post-merge review files (AC-4): a bug at priority 1,
  * its origin naming the delivered item and its merge commit, planned on the finding's file when it
  * names one, reviewed like any item. The delivered item itself is never reopened.

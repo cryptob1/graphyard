@@ -10,7 +10,7 @@ import { server } from '../src/server.js';
 import { masterConfigSchema } from '../src/master.js';
 import type { Principal, Work } from '../src/model.js';
 import { reconcileAutoDispatch } from '../src/model/dispatch.js';
-import { deliveredByMergeWriter, owedPostMergeReviews, parseFinding, postMergeFollowUp, postMergeRequestId, postMergeReviewMark } from '../src/model/post-merge-review.js';
+import { deliveredByMergeWriter, owedPostMergeReviews, parseFinding, postMergeFollowUp, postMergeRequestId, postMergeReviewMark, wholeFindings } from '../src/model/post-merge-review.js';
 import { dispatchEffects, emptyDispatchCursor, filePostMergeFollowUps, postFollowUpItem, postMergeRequest, postMergeWaitReason, reviewedAfterMerge, runDispatchTick, selectReviewerProfile, unknownParent, type DispatchEffects } from '../src/auto-dispatch.js';
 import { controlPlaneRefusal, controlPlaneVerdict, staleReviewReason, type ReviewRecord } from '../src/reviewer.js';
 import { readProjectMemory } from '../src/project-memory.js';
@@ -195,6 +195,8 @@ test('unit:post-merge-review-owed — owed reviews are the merge writer\'s deliv
   const allKept = await filePostMergeFollowUps(wordy, memoryFail, { recordFindings: async (_work, _record, findings) => { kept.push(findings); } }, new Date(clock));
   assert.equal(allKept!.memory, 25);
   assert.equal(kept[0]!.length, 25); assert.equal(kept[0]![24], long);
+  const named = `Follow-up finding: ${'n'.repeat(2_400)}`;
+  assert.deepEqual(wholeFindings(`${named}\nFollow-up finding: short`, [named.slice(19, 19 + 2_000), 'short']), [named.slice(19), 'short'], 'a cut named line is read to its end');
   const memoryRoot = await temporaryDirectory('post-merge-memory');
   try {
     await dispatchEffects(memoryRoot, config, { snapshot: async () => ({ work: [], now: at }) }).recordFindings!(wordy, memoryFail, kept[0]!);

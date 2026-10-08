@@ -19,7 +19,7 @@ import { herdrSubcommand, isHerdrCommand } from './master/herdr.js';
 import { boundedLaunch, launchBoundMs } from './master/launch-bound.js';
 import { capacityRefusal } from './fleet.js';
 import { answeredByPendingReview, postMergeFindingsMax, launchReview, reconcileReviews, reviewVerdictReminderMs, unpostedVerdict, updateReviewLedger, type ReviewRecord } from './reviewer.js';
-import { owedPostMergeReviews, parseFinding, postMergeFollowUp, postMergeRequestId } from './model/post-merge-review.js';
+import { owedPostMergeReviews, parseFinding, postMergeFollowUp, postMergeRequestId, wholeFindings } from './model/post-merge-review.js';
 import { riskOf } from './model/risk-class.js';
 import { blockingFindings, followUpFindingsOf } from './review-cap.js';
 import { readProjectMemory, recordDecisionInMemory, writeProjectMemory } from './project-memory.js';
@@ -752,7 +752,8 @@ export async function filePostMergeFollowUps(work: Work, record: ReviewRecord, e
   if (memory === undefined) {
     // Every finding that is no BLOCKING line: the body without those lines, read as a change request's
     // follow-ups are, but neither counted nor cut — the API bounds the verdict body, so every one is kept.
-    const nits = followUpFindingsOf(body.split('\n').filter(line => !/^\s*(?:[-*]\s*)?\**BLOCKING\**\s*:/i.test(line)).join('\n'), Infinity, Infinity);
+    const rest = body.split('\n').filter(line => !/^\s*(?:[-*]\s*)?\**BLOCKING\**\s*:/i.test(line)).join('\n');
+    const nits = wholeFindings(rest, followUpFindingsOf(rest, Infinity));
     if (nits.length && effects.recordFindings) {
       try { await effects.recordFindings(work, record, nits); memory = nits.length; }
       catch (error) {
