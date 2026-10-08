@@ -93,6 +93,8 @@ export function trialFailureReason(trial: { conflict?: readonly string[]; run?: 
 }
 /** The refusal of a head whose push the base tip moved under `times` times (AC-3); it leaves the head queued. */
 export const baseMovedReason = (times: number) => `base moved ${times} times`;
+/** The refusal of a push the remote rejected while the base tip stood still: not a moved tip, so no re-trial; the head stays queued for a later cycle. */
+export const unmovedTipReason = (base: string, baseTip: string) => `push rejected though ${base} still stood at ${baseTip.slice(0, 12)}`;
 /** The refusal of an intent a crash left open whose merge commit the base does not hold: the head is queued again (AC-5). */
 export const unpushedIntentReason = (mergeSha: string, base: string) => `intent ${mergeSha.slice(0, 12)} was never pushed: ${base} does not hold it, so the head is queued again`;
 
@@ -116,8 +118,13 @@ export function pushEnvironment(deployKeyFile: string, environment: NodeJS.Proce
 }
 /** `git push origin --force-with-lease=refs/heads/BASE:<baseTip> <mergeSha>:refs/heads/BASE`: the merge commit lands only on the tip it was tested on. */
 export const pushArgs = (base: string, baseTip: string, mergeSha: string) => ['push', 'origin', `--force-with-lease=refs/heads/${base}:${baseTip}`, `${mergeSha}:refs/heads/${base}`];
-/** Whether a failed push was rejected because the tip moved under its lease, as git words it, rather than failing for any other cause. */
-export const staleLeaseRejection = (output: string) => /stale info|rejected|fetch first|non-fast-forward|force-with-lease/i.test(output);
+/**
+ * Whether a failed push was rejected because the tip moved under its lease: git words exactly that
+ * `! [rejected] … (stale info)`. A remote's own refusal (`! [remote rejected] … (protected branch
+ * hook declined)`), a non-fast-forward without a lease or a transport failure is no stale lease,
+ * and never enters the re-trial path (AC-3).
+ */
+export const staleLeaseRejection = (output: string) => /\bstale info\b/i.test(output);
 
 /**
  * Whether the base branch's first-parent history holds `sha`, exactly and unbounded (AC-5): the
@@ -221,7 +228,7 @@ export interface MergePorts {
   merge(head: string, baseTip: string): Promise<MergeOutcomeOfTrial>;
   /** The build and tests on `mergeSha` (`runMergeTrial`), `files` being what the merge changes, with the item's proofs counted. */
   trial(mergeSha: string, files: readonly string[], item: Pick<Work, 'key' | 'criteria'>): Promise<MergeTrialRun>;
-  /** The leased push of `mergeSha` onto `baseTip`; `rejected` when the tip moved under the lease. */
+  /** The leased push of `mergeSha` onto `baseTip`; `rejected` when the remote reported a stale lease (`staleLeaseRejection`), any other failure thrown. */
   push(mergeSha: string, baseTip: string): Promise<'pushed' | 'rejected'>;
   /** Whether the base branch's first-parent history holds `sha`, as last fetched. */
   holds(sha: string): Promise<boolean>;
@@ -240,9 +247,11 @@ export type MergeOutcome =
  * pushed, or an open intent whose merge commit the base holds, is only fetched and reconciled,
  * never pushed again. Otherwise the head is trial-merged onto the fetched tip, the intent is
  * recorded before anything runs, the trial runs on the exact merge commit with the proof files
- * included, and the merge commit is pushed with a lease on the tip it was tested on. A push the tip
- * moved under re-reads the tip and re-trials, at most `retrials` times (AC-3); a failed trial or a
- * conflict is refused naming what failed, and the rework that refusal grounds is the loop's to request.
+ * included, and the merge commit is pushed with a lease on the tip it was tested on. A rejected push
+ * re-reads the tip: one that moved is re-trialled on the new tip, at most `retrials` times (AC-3);
+ * one that stood still was rejected for another cause and is refused `unmovedTipReason`, queued
+ * for a later cycle rather than re-trialled. A failed trial or a conflict is refused naming what
+ * failed, and the rework that refusal grounds is the loop's to request.
  */
 export async function mergeOne(ports: MergePorts, item: Work): Promise<MergeOutcome> {
   const candidate = item.candidate;
@@ -263,9 +272,8 @@ export async function mergeOne(ports: MergePorts, item: Work): Promise<MergeOutc
     }
     if (state.state === 'pushed') throw new Error(`${item.key}: ${state.mergeSha.slice(0, 12)} is recorded pushed but ${ports.baseBranch} does not hold it`);
   }
-  let pushes = 0;
+  let pushes = 0, baseTip = await ports.fetch();
   for (let attempt = 0; attempt <= ports.retrials; attempt++) {
-    const baseTip = await ports.fetch();
     const merged = await ports.merge(head, baseTip);
     if ('conflict' in merged) {
       const reason = trialFailureReason({ conflict: merged.conflict })!;
@@ -284,11 +292,20 @@ export async function mergeOne(ports: MergePorts, item: Work): Promise<MergeOutc
     }
     pushes += 1;
     const pushed = await ports.push(mergeSha, baseTip);
-    if (pushed === 'rejected') continue;
-    await ports.record(item, { kind: 'pushed', mergeSha, pushedAt: at() });
-    const observedTip = await ports.fetch();
-    await ports.record(item, { kind: 'reconciled', mergeSha, observedTip });
-    return { outcome: 'merged', mergeSha, baseTip, observedTip, pushes };
+    if (pushed === 'pushed') {
+      await ports.record(item, { kind: 'pushed', mergeSha, pushedAt: at() });
+      const observedTip = await ports.fetch();
+      await ports.record(item, { kind: 'reconciled', mergeSha, observedTip });
+      return { outcome: 'merged', mergeSha, baseTip, observedTip, pushes };
+    }
+    // Rejected: the re-trial path is only for a tip that moved (AC-3), confirmed by re-reading it, never for a remote's refusal of the same tip.
+    const movedTo = await ports.fetch();
+    if (movedTo === baseTip) {
+      const reason = unmovedTipReason(ports.baseBranch, baseTip);
+      await ports.record(item, { kind: 'refused', head, reason });
+      return { outcome: 'requeued', reason, pushes };
+    }
+    baseTip = movedTo;
   }
   const reason = baseMovedReason(pushes);
   await ports.record(item, { kind: 'refused', head, reason });
