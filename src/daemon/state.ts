@@ -536,9 +536,11 @@ export const daemonStateSchema = z.object({
     unposted: z.array(z.string().max(40)).max(40).default([]),
     /** Filings the control plane did not accept when their run applied: filed again on later cycles, under the same key, until one is. */
     pendingFiles: z.array(doctorPendingFileSchema).max(40).default([]),
+    /** GY-1530: digests of filings the create route refused as written, with when the doctor last reported each: a later run reporting the same content is not filed again. A digest is kept for good (only its last-reported time is renewed): neither other refusals nor the time since the doctor last reported it evict it. */
+    refusedFilings: z.array(z.object({ digest: z.string().max(80), at: z.number() }).strict()).default([]),
     /** When the approver remedy last read each open item's decision history, by item id. */
     decisionsCheckedAt: z.record(z.string(), z.string()).default({}),
-  }).strict().default(() => ({ runs: [], unposted: [], pendingFiles: [], decisionsCheckedAt: {} })),
+  }).strict().default(() => ({ runs: [], unposted: [], pendingFiles: [], refusedFilings: [], decisionsCheckedAt: {} })),
   /**
    * Per recurring-fault item key or invariant-violation instance id, the diagnostician run the loop
    * launched for it and what became of the diagnosis (GY-439, src/daemon/diagnosis.ts).

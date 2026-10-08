@@ -9,7 +9,7 @@ Keep cycling: `master status`; `master run` dispatches (`schedule.order`); merge
 
 `master run` is unit `graphyard-master.service` ([supervision](onboarding.md#the-loop-must-be-supervised)); on `daemon.liveness` `stalled`/`absent`: `systemctl --user restart graphyard-master`, never from a [dirty or non-forward checkout](master-agent-sessions.md#the-coordinator-checkout-is-confined-at-the-os-level).
 
-**Cycle cadence.** Between cycles the loop sleeps `run.intervalSeconds`, at most 30 s while anything is actionable. The dispatcher tick wakes it early, once per new subject its next cycle acts on (claimable item, freed launch profile, scope request on a live lease, routine decision), no sooner than one `run.dispatchIntervalSeconds` after the cycle, logged `woken Ns before the … wait ended: REASONS`; a failed cycle's backoff is never cut short.
+**Cycle cadence.** The loop sleeps `run.intervalSeconds`, at most 30 s while anything is actionable. The dispatcher tick wakes it early, once per new subject its next cycle acts on, no sooner than `run.dispatchIntervalSeconds` after the cycle, logged `woken Ns before the … wait ended: REASONS`; a failed cycle's backoff is not cut short.
 
 ### System-driven items
 
@@ -29,7 +29,7 @@ Per cycle (`daemon.invariants.lines`): `follow-ups-per-parent` (1 open), `linger
 
 ## Research and diagnosis
 
-`Recurring <class> faults` and `invariant:` faults past `invariantBoundMinutes` get a read-only diagnostician (`run.diagnostician`; human-only parks get no fix); quota refusals wait in `daemon.diagnoses` until `retryAt`, then probe; `stale`/`withdrawn` decisions, stale backlog releases: re-requested ≤3 times, then escalated (30m fault, `decision-stale`); raced, delivered, [plane-wide](operations.md#incident-decision-tree) requests retry faultless; no `loop` fault for restart-lost diagnoses or approver refusals, nor `merge` for base conflicts under 30m.
+`Recurring <class>` and `invariant:` faults past `invariantBoundMinutes` get a read-only diagnostician (`run.diagnostician`; none for human-only parks); quota refusals wait in `daemon.diagnoses` until `retryAt`; `stale`/`withdrawn` decisions, stale backlog releases: re-requested ≤3 times, then escalated (`decision-stale`); raced, delivered, [plane-wide](operations.md#incident-decision-tree) requests retry faultless; a refused fix `create` is `fix-item`, never re-filed; runs stopped at their bound: `overlong-session`; no `loop` fault for restart-lost diagnoses, approver refusals, nor `merge` for base conflicts under 30m.
 
 ## Machine-filed backlog
 

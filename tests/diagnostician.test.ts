@@ -16,6 +16,9 @@ import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { decisionInput } from '../src/master/autonomy.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { standingFaultClassItem, clearDiagnoses, diagnosesSettled, diagnosisStep, diagnosisSubjects, type DiagnosticianEffects, type DiagnosisContext, type DiagnosisSubject } from '../src/daemon/diagnosis.js';
+import { clearDoctorRuns, doctorStep, type DoctorEffects } from '../src/daemon/doctor.js';
+import { doctorSettingsSchema } from '../src/master/doctor-settings.js';
+import { RefusedResponse } from '../src/model/refusal.js';
 import type { Cycle } from '../src/daemon/cycle.js';
 import { diagnosisPayloadSchema, diagnosticianSettings, type DiagnosisPayload } from '../src/runner/payloads.js';
 import type { RunOptions, RunResult, Runner } from '../src/runner/types.js';
@@ -665,4 +668,106 @@ test('manual:fault-class-decision — decision-refused|GY-1367|2026-10-06T10:50:
   await step(state2, fx2, answered, clock);
   await step(state2, fx2, answered, clock + minute);
   assert.deepEqual(h2.requested.map(entry => entry.action), ['release']);
+});
+
+// ---- GY-1530: the diagnosis step names the cause when it fails ----------------------------------
+//
+// GY-1516's three unclassified instances were the loop's own maintenance actions classified only
+// by their step: the diagnosis of GY-1430 whose two runs were stopped at their 1200s bound, the
+// diagnosis of GY-1473 whose fix item the create route refused (thrown on to cycle.isolate), and the
+// doctor's filing of the same refused content, re-filed every cycle. Both filings cited
+// e2e:self-upgrade-loaded-revision-clears, a scenario nothing registers, so the 409 stood for ever.
+const stoppedAtBound = (seconds: number): RunResult<never> => ({ ok: false, failure: { reason: 'timeout', detail: `no terminal event within ${seconds}s; the run was stopped` }, payloads: [] });
+const failingRunner = (name: string, failure: () => RunResult<never>): Runner => ({ name, start: () => ({ id: randomUUID(), events: [], onEvent: () => () => {}, cancel() {}, result: async () => failure() }) });
+/** The instances the diagnosis action opened, beside the subject's own three. */
+const diagnosisInstances = (state: ReturnType<typeof emptyDaemonState>) => state.faults.instances.filter(entry => /diagnos/i.test(entry.text)).map(entry => [entry.kind, entry.faultClass, entry.text]);
+
+test('unit:diagnosis-no-terminal-event-fault-kind — a diagnosis whose runs were both stopped at their bound is recorded under overlong-session (session-liveness), never action:diagnosis; a mix naming no one cause keeps the step kind', async () => {
+  // Imported here, not at the top: on the base tree the symbol is absent, and the proof's exercise must run this case and fail it rather than fail the file at load.
+  const { noDiagnosisKind } = await import('../src/daemon/diagnosis.js');
+  const h = harness(() => null);
+  h.diagnostician.runner = async attempt => ({ runner: failingRunner(attempt, () => stoppedAtBound(1200)), runtime: 'pi', model: attempt === 'primary' ? 'zai/glm-5.3-flash' : 'zai/glm-5.3' });
+  const state = emptyDaemonState(config()), work = [recurring(state)];
+  await step(state, effects(h, () => work, () => clock), work, clock);
+  await step(state, effects(h, () => work, () => clock), work, clock + minute);
+  assert.equal(state.diagnoses['GY-101'].state, 'failed');
+  assert.deepEqual(state.diagnoses['GY-101'].runs.map(run => run.result), ['timeout', 'timeout']);
+  const faults = diagnosisInstances(state);
+  assert.equal(faults.length, 1, JSON.stringify(faults));
+  assert.deepEqual(faults[0].slice(0, 2), ['overlong-session', 'session-liveness']);
+  // GY-1516's instance line, word for word.
+  assert.equal(faults[0][2], 'The diagnostician returned no diagnosis of GY-101: zai/glm-5.3-flash timeout: no terminal event within 1200s; the run was stopped; zai/glm-5.3 timeout: no terminal event within 1200s; the run was stopped');
+  assert.equal(noDiagnosisKind(state.diagnoses['GY-101'].runs), 'overlong-session');
+  assert.equal(h.requested.length + h.filed.length, 0);
+
+  // A primary that ended without a call and a fallback stopped at its bound name no single cause: the step's own kind, parked under unclassified (GY-1338).
+  clearDiagnoses();
+  const mixed = harness(() => null);
+  mixed.diagnostician.runner = async attempt => attempt === 'primary' ? { runner: fakeRunner('pi', () => null, mixed.seen), runtime: 'pi', model: settings.model } : { runner: failingRunner('fallback', () => stoppedAtBound(1200)), runtime: 'pi', model: settings.fallbackModel };
+  const other = emptyDaemonState(config()), items = [recurring(other)];
+  await step(other, effects(mixed, () => items, () => clock), items, clock);
+  await step(other, effects(mixed, () => items, () => clock), items, clock + minute);
+  assert.deepEqual(other.diagnoses['GY-101'].runs.map(run => run.result), ['no-payload', 'timeout']);
+  assert.deepEqual(diagnosisInstances(other).map(entry => entry.slice(0, 2)), [['action:diagnosis', 'unclassified']]);
+  assert.equal(noDiagnosisKind([{ runtime: 'none', result: 'spawn' }]), undefined, 'a run nothing started is no session past its bound');
+  assert.equal(noDiagnosisKind([{ runtime: 'none', model: 'primary', result: 'spawn' }, { runtime: 'pi', model: 'zai/glm-5.3', result: 'timeout' }].map(({ runtime, result }) => ({ runtime, result }))), 'overlong-session', 'only the runs that started count');
+});
+
+/** The master's operator-agent filing as src/daemon/effects.ts posts it: a refusal keeps its status and body on the error. */
+const fileThroughServer = async (input: Record<string, unknown>, key: string): Promise<Work> => {
+  const response = await fetch(`${url}/api/work`, { method: 'POST', headers: { Authorization: `Bearer ${master.token}`, 'Content-Type': 'application/json', 'Idempotency-Key': key }, body: JSON.stringify(input) });
+  const result: any = await response.json();
+  if (!response.ok) throw new RefusedResponse(`Graphyard refused work (${response.status}): ${result?.error ?? JSON.stringify(result)}`, response.status, result);
+  return result as Work;
+};
+const unregistered = 'self-upgrade-loaded-revision-clears';
+
+test('integration:diagnosis-fix-item-refusal-classified — a fix item the real create route refuses for an unregistered e2e scenario settles the diagnosis failed under fix-item (proof) and is not rethrown to the diagnosis step\'s isolation record', async () => {
+  const title = 'Restart the loop onto the checkout revision once the dirty-checkout guard clears';
+  const h = harness(() => diagnosis('GY-101', { fix: { ...fix, title, criteria: [{ id: 'AC-1', text: 'The loop restarts onto the checkout revision, by a test', proofs: [`e2e:${unregistered}`] }] } }));
+  h.diagnostician.file = fileThroughServer;
+  const state = emptyDaemonState(config()), work = [recurring(state)];
+  const isolated: string[] = [];
+  const cycleOf = (at: number) => ({ config: config(), state, effects: effects(h, () => work, () => at), now: () => at, snapshot: { work, now: new Date(at).toISOString() }, clock: at, performed: [],
+    isolate: async (_kind: string, _item: unknown, name: string, body: () => Promise<unknown>) => { try { return await body(); } catch (error) { isolated.push(`${name}: ${String(error)}`); return undefined; } } } as unknown as Cycle);
+  await diagnosisStep(cycleOf(clock)); await diagnosesSettled();
+  await diagnosisStep(cycleOf(clock + minute)); await diagnosesSettled();
+  const entry = state.diagnoses['GY-101'];
+  assert.equal(entry.state, 'failed');
+  assert.equal(entry.detail, `The control plane refused the diagnostician's fix item for GY-101 as written, so it is not filed again; the diagnosis stands for the master to file by hand: Graphyard refused work (409): Register E2E scenario ${unregistered} before creating work that requires it`);
+  assert.deepEqual(isolated, [], 'nothing reached the diagnosis step\'s isolation record');
+  assert.deepEqual(diagnosisInstances(state).map(fault => fault.slice(0, 2)), [['fix-item', 'proof']]);
+  assert.equal(h.requested.length, 0, 'no release is requested');
+  // Settled, the next cycles file nothing again and the control plane holds no such item.
+  await diagnosisStep(cycleOf(clock + 2 * minute)); await diagnosesSettled();
+  await diagnosisStep(cycleOf(clock + 3 * minute)); await diagnosesSettled();
+  assert.equal(state.diagnoses['GY-101'].state, 'failed');
+  assert.equal(diagnosisInstances(state).length, 1);
+  assert.deepEqual((await store.list()).filter(candidate => candidate.title === title), [], 'nothing was created');
+});
+
+test('integration:doctor-pending-file-unregistered-scenario-escalates — the doctor\'s pending filing citing an unregistered e2e scenario is refused by the real create route once, escalated naming the scenario, dropped and never re-filed', async () => {
+  clearDoctorRuns();
+  const state = emptyDaemonState(config());
+  const key = 'doctor:3379f2b6c361998f7abec8ee:file:loop', title = 'Master loop cannot restart or self-upgrade: coordinator checkout HEAD moves under the running loop';
+  state.doctor.pendingFiles = [{ key, at: iso(-10 * minute), file: { faultClass: 'loop', priority: 1, title, description: 'evidence', plannedFiles: ['src/daemon/self-upgrade.ts'],
+    criteria: [{ id: 'AC-1', text: 'The loop restarts onto the checkout revision', proofs: [`e2e:${unregistered}`] }] } }];
+  let posts = 0;
+  // No doctor run launches (enabled: false): only the pending retry, which runs whether or not a run is due.
+  const doctor: DoctorEffects = { settings: { ...doctorSettingsSchema.parse({ enabled: false }), command: 'pi' }, cwd: '/checkout', env: {}, runner: async () => { throw new Error('no run is launched'); },
+    file: (input, idempotency) => { posts += 1; return fileThroughServer(input, idempotency); } };
+  const cycleOf = (at: number) => ({ config: config(), state, effects: { persist: async () => {}, snapshot: async () => ({ work: [], now: new Date(at).toISOString() }), doctor }, now: () => at, snapshot: { work: [], now: new Date(at).toISOString() }, clock: at, performed: [],
+    isolate: async (_kind: string, _item: unknown, _name: string, body: () => Promise<unknown>) => body() } as unknown as Cycle);
+  await doctorStep(cycleOf(clock));
+  assert.equal(posts, 1, 'the retry reaches the create route once');
+  assert.deepEqual(state.doctor.pendingFiles, [], 'dropped');
+  assert.deepEqual(state.faults.instances.map(entry => [entry.kind, entry.faultClass]), [['fix-item', 'proof']]);
+  assert.match(state.actions[key].detail, new RegExp(`^Could not file "${title}", and it is not filed again: master create refused the filing itself for the e2e proof it cites, whose scenario ${unregistered} has no registered revision: Graphyard refused work \\(409\\): Register E2E scenario ${unregistered} before creating work that requires it$`));
+  const escalations = Object.values(state.actions).filter(action => action.kind === 'escalation');
+  assert.equal(escalations.length, 1, 'raised for the master to file by hand');
+  assert.ok(escalations[0].detail.startsWith(`The doctor asked to file "${title}" (loop, P1), but the filing cites e2e:${unregistered}, and no scenario ${unregistered} is registered`), escalations[0].detail);
+  for (let round = 1; round <= 6; round++) { state.cycle += 1 << round; await doctorStep(cycleOf(clock + round * minute)); }
+  assert.equal(posts, 1, 'never re-filed');
+  assert.equal(state.faults.instances.length, 1, 'one refusal, one instance');
+  assert.deepEqual((await store.list()).filter(candidate => candidate.title === title), [], 'nothing was created');
 });
