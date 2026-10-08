@@ -22,7 +22,7 @@ import { readyToRetry } from './sessions.js';
 import { stoppedStates, record } from './effects.js';
 import { maxApproverLaunches } from './decisions.js';
 import { decisionReadConcurrency } from './decision-reads.js';
-import { message, refusedFilingsTtlMs, type DaemonAction, type DaemonState } from './state.js';
+import { message, type DaemonAction, type DaemonState } from './state.js';
 import type { Cycle } from './cycle.js';
 
 // ---------------------------------------------------------------------------
@@ -308,10 +308,10 @@ export const unregisteredScenario = (error: unknown) => /Register E2E scenario (
 export const filingDigest = (file: DoctorFile) => createHash('sha256').update(JSON.stringify([file.faultClass, file.title, file.plannedFiles, file.criteria])).digest('hex').slice(0, 32);
 
 /**
- * The digest as seen refusal at `at`. No count evicts a refusal: one leaves only after the doctor has not
- * reported that content for refusedFilingsTtlMs, so a filing that keeps recurring is never submitted again.
+ * The digest as seen refusal at `at`. Nothing evicts a refusal, neither a count nor an age: whenever
+ * the doctor reports that content again, however long after, it is not submitted to create again.
  */
-const renewRefusal = (refused: DaemonState['doctor']['refusedFilings'], digest: string, at: number) => [...refused.filter(entry => entry.digest !== digest && at - entry.at < refusedFilingsTtlMs), { digest, at }];
+const renewRefusal = (refused: DaemonState['doctor']['refusedFilings'], digest: string, at: number) => [...refused.filter(entry => entry.digest !== digest), { digest, at }];
 const isRefused = (refused: DaemonState['doctor']['refusedFilings'], digest: string) => refused.some(entry => entry.digest === digest);
 
 async function dropRefusedFiling(cycle: Pick<Cycle, 'state' | 'effects' | 'performed'>, key: string, file: DoctorFile, error: unknown, attempts: number, now: () => number) {
