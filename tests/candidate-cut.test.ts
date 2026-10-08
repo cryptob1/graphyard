@@ -300,3 +300,54 @@ test('unit:promotion-local-inflight — a cut stamps PromotionState.inFlight acr
   assert.equal(finished.run?.promoted, true);
   assert.ok(slow.calls.includes(`promote:${candidate.id}`));
 });
+
+test('unit:promotion-local-ports-fresh — like effects.promotion, a fresh LocalReleasePorts each cycle still runs exactly one uat/validate then promote or revert for the candidate', async () => {
+  // Shared backing store; each cycle builds a new port object the way the real getter does.
+  const calls: string[] = [];
+  let releaseValidate: () => void;
+  const gate = new Promise<void>(resolve => { releaseValidate = resolve; });
+  const build = (validation: LocalValidation): LocalReleasePorts => ({
+    settings: defaults,
+    history: async () => { calls.push('history'); return history(20); },
+    cut: async isDue => { calls.push(`cut:${isDue}`); return isDue ? { cut: true, candidate } : { cut: false, reason: 'not due' }; },
+    uat: async id => { calls.push(`uat:${id}`); return { sha: CUT }; },
+    validate: async id => { calls.push(`validate:${id}`); await gate; return validation; },
+    promote: async id => { calls.push(`promote:${id}`); return { promoted: true, sha: CUT }; },
+    verify: async shaValue => { calls.push(`verify:${shaValue.slice(0, 6)}`); return { served: shaValue, verified: true }; },
+    revertInputs: async () => { calls.push('revertInputs'); return { items: [{ key: 'GY-2', mergeSha: sha('merge-2'), files: ['src/server/routes/work.ts'] }], maps: [{ path: 'verification/server.md', paths: ['src/server/**'], sections: { Tests: 't', Drive: 'd', Invariants: 'i', Gotchas: 'g' } }], contract: { outcomes: [{ id: 'sign-in', cases: ['sign-in'] }], cases: [{ id: 'sign-in', tags: ['server'] }] } }; },
+    revert: async target => { calls.push(`revert:${target.key}`); return { outcome: 'reverted', revertSha: REVERT, baseTip: MAIN, observedTip: REVERT, pushes: 1 }; },
+  });
+  const ledgerValue = ledger();
+  const cut = await localPromotionCycle(null, { ...stubReads(ledgerValue, build(passed)).reads, local: build(passed) } as PromotionReads & { local: LocalReleasePorts }, { now: start, everyMinutes: 10, intervalMs: 20_000, frozen: null, watchedTip: MAIN });
+  assert.equal(cut.state.inFlight, true);
+  // Mid-validation cycle with a brand-new port object: no second uat/validate.
+  const mid = await localPromotionCycle(cut.state, { ...stubReads(ledgerValue, build(passed)).reads, local: build(passed) } as PromotionReads & { local: LocalReleasePorts }, { now: start + 20_000, everyMinutes: 10, intervalMs: 20_000, frozen: null, watchedTip: MAIN });
+  assert.equal(mid.state.inFlight, true);
+  assert.equal(calls.filter(call => call.startsWith('uat:')).length, 1);
+  assert.equal(calls.filter(call => call.startsWith('validate:')).length, 1);
+  releaseValidate!();
+  await localPromotionIdle();
+  const finished = await localPromotionCycle(mid.state, { ...stubReads(ledgerValue, build(passed)).reads, local: build(passed) } as PromotionReads & { local: LocalReleasePorts }, { now: start + minute, everyMinutes: 10, intervalMs: 20_000, frozen: null, watchedTip: MAIN });
+  assert.equal(finished.state.inFlight, false);
+  assert.equal(finished.run?.promoted, true);
+  assert.deepEqual(calls.filter(call => call.startsWith('uat:') || call.startsWith('validate:') || call.startsWith('promote:')), [`uat:${candidate.id}`, `validate:${candidate.id}`, `promote:${candidate.id}`]);
+  // Failing validation with fresh ports each cycle still reaches revert once.
+  calls.length = 0;
+  let releaseFail: () => void;
+  const failGate = new Promise<void>(resolve => { releaseFail = resolve; });
+  const buildFail = (): LocalReleasePorts => ({
+    ...build(failed),
+    validate: async id => { calls.push(`validate:${id}`); await failGate; return failed; },
+  });
+  const redCut = await localPromotionCycle(null, { ...stubReads(ledgerValue, buildFail()).reads, local: buildFail() } as PromotionReads & { local: LocalReleasePorts }, { now: start + 20 * minute, everyMinutes: 10, intervalMs: 20_000, frozen: null, watchedTip: MAIN });
+  assert.equal(redCut.state.inFlight, true);
+  await localPromotionCycle(redCut.state, { ...stubReads(ledgerValue, buildFail()).reads, local: buildFail() } as PromotionReads & { local: LocalReleasePorts }, { now: start + 20 * minute + 20_000, everyMinutes: 10, intervalMs: 20_000, frozen: null, watchedTip: MAIN });
+  releaseFail!();
+  await localPromotionIdle();
+  const redDone = await localPromotionCycle(redCut.state, { ...stubReads(ledgerValue, buildFail()).reads, local: buildFail() } as PromotionReads & { local: LocalReleasePorts }, { now: start + 21 * minute, everyMinutes: 10, intervalMs: 20_000, frozen: null, watchedTip: MAIN });
+  assert.equal(redDone.state.inFlight, false);
+  assert.equal(redDone.run?.revert?.target.key, 'GY-2');
+  assert.equal(calls.filter(call => call.startsWith('uat:')).length, 1);
+  assert.equal(calls.filter(call => call.startsWith('validate:')).length, 1);
+  assert.equal(calls.filter(call => call === 'revert:GY-2').length, 1);
+});

@@ -1,5 +1,4 @@
 // Concern: the local release ports of control-plane mode (GY-1526) — src/release-candidate.ts run from the coordinator checkout, pushes through the deploy key, the revert through the merge writer's steps.
-import { execFile, execFileSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import type { ChildRun } from '../child-runner.js';
@@ -11,7 +10,10 @@ import { parseVerificationMap, type VerificationMap } from '../model/verificatio
 import { contractFile, parseContract } from '../e2e/case.js';
 import { deployKeySshCommand, firstParentHolds, pushArgs, pushEnvironment, runMergeTrial, staleLeaseRejection } from '../merge-writer/executor.js';
 import { trialAuthor } from '../merge-writer/trial.js';
-import { awaitServing, cut, deployToUat, promote, readLedger, syncLedger, uatValidationWindowMs, type Git, type ReleaseCandidate, type UatRecord } from '../release-candidate.js';
+import {
+  awaitServing, cutAsync, deployToUatAsync, promoteAsync, readLedgerAsync, syncLedgerAsync, uatValidationWindowMs,
+  type AsyncGit, type ReleaseCandidate, type UatRecord,
+} from '../release-candidate.js';
 import { revertCandidateItem, type CandidateItemDelta, type RevertContract, type RevertPorts, type RevertRecordEvent } from '../release-revert.js';
 import type { CutCommit } from './candidate-cut.js';
 import type { LocalCandidate, LocalReleasePorts, LocalValidation } from './promotion-local.js';
@@ -60,12 +62,11 @@ export function localReleasePorts(config: Pick<MasterConfig, 'baseBranch' | 'run
   const settings = candidateSettings(config.run), writer = mergeWriterSettings(config.run, installIdFor(config.repository)), shadow = shadowGateSettings(config.run);
   const base = config.baseBranch, ref = `refs/remotes/origin/${base}`, now = options.now ?? Date.now;
   const env = { ...environment, GIT_SSH_COMMAND: deployKeySshCommand(writer.deployKeyFile) };
-  const git: Git = args => execFileSync('git', args, { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024, env });
-  const gitAsync = async (...args: string[]) => String(await run('git', ['-C', root, ...args]));
-  const cli = (args: string[], extra: Record<string, string>) => new Promise<string>((resolve, reject) => {
-    execFile(process.execPath, ['bin/graphyard.mjs', ...args], { cwd: root, env: { ...env, ...extra }, maxBuffer: 64 * 1024 * 1024, timeout: 4 * 3_600_000 },
-      (error, stdout, stderr) => { if (error && !stdout) reject(new Error(`${error.message}\n${stderr}`.trim())); else resolve(String(stdout)); });
-  });
+  const git: AsyncGit = async args => String(await run('git', args, { cwd: root, env, maxBuffer: 64 * 1024 * 1024, timeoutMs: 4 * 3_600_000 }));
+  const gitAsync = async (...args: string[]) => String(await run('git', ['-C', root, ...args], { env, maxBuffer: 64 * 1024 * 1024, timeoutMs: 4 * 3_600_000 }));
+  const cli = async (args: string[], extra: Record<string, string>) => String(await run(process.execPath, ['bin/graphyard.mjs', ...args], {
+    cwd: root, env: { ...env, ...extra }, maxBuffer: 64 * 1024 * 1024, timeoutMs: 4 * 3_600_000,
+  }));
   const revertPorts: RevertPorts = {
     baseBranch: base, retrials: writer.retrials, now,
     fetch: async () => {
@@ -78,19 +79,19 @@ export function localReleasePorts(config: Pick<MasterConfig, 'baseBranch' | 'run
     revert: async (mergeSha, baseTip) => {
       // The revert is built in a throwaway checkout of the tip under the managed worktree root, sharing this checkout's object store.
       const checkout = mkdtempSync(join(options.base, 'candidate-revert-'));
-      const at = (args: string[]) => execFileSync('git', ['-C', checkout, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env });
+      const at = async (...args: string[]) => String(await run('git', ['-C', checkout, ...args], { env, maxBuffer: 64 * 1024 * 1024, timeoutMs: 4 * 3_600_000 }));
       try {
-        git(['worktree', 'add', '--detach', checkout, baseTip]);
-        try { at(['-c', `user.name=${trialAuthor}`, '-c', `user.email=${trialAuthor}@graphyard.invalid`, 'revert', '-m', '1', '--no-edit', mergeSha]); }
+        await git(['worktree', 'add', '--detach', checkout, baseTip]);
+        try { await at('-c', `user.name=${trialAuthor}`, '-c', `user.email=${trialAuthor}@graphyard.invalid`, 'revert', '-m', '1', '--no-edit', mergeSha); }
         catch {
-          const conflict = at(['diff', '--name-only', '--diff-filter=U']).split('\n').map(line => line.trim()).filter(Boolean);
-          try { at(['revert', '--abort']); } catch { /* nothing to abort */ }
+          const conflict = (await at('diff', '--name-only', '--diff-filter=U')).split('\n').map(line => line.trim()).filter(Boolean);
+          try { await at('revert', '--abort'); } catch { /* nothing to abort */ }
           return { conflict: conflict.length ? conflict : ['(the revert could not be built)'] };
         }
-        const revertSha = at(['rev-parse', 'HEAD']).trim().toLowerCase();
-        return { revertSha, files: git(['diff', '--name-only', baseTip, revertSha]).split('\n').map(line => line.trim()).filter(Boolean) };
+        const revertSha = (await at('rev-parse', 'HEAD')).trim().toLowerCase();
+        return { revertSha, files: (await git(['diff', '--name-only', baseTip, revertSha])).split('\n').map(line => line.trim()).filter(Boolean) };
       } finally {
-        try { git(['worktree', 'remove', '--force', checkout]); } catch { rmSync(checkout, { recursive: true, force: true }); }
+        try { await git(['worktree', 'remove', '--force', checkout]); } catch { rmSync(checkout, { recursive: true, force: true }); }
       }
     },
     trial: options.trial ?? (async (revertSha, files) => {
@@ -106,16 +107,16 @@ export function localReleasePorts(config: Pick<MasterConfig, 'baseBranch' | 'run
   return {
     settings,
     cut: async due => {
-      syncLedger(git, base);
-      const ledger = readLedger(git), newest = ledger.candidates[0];
+      await syncLedgerAsync(git, base);
+      const ledger = await readLedgerAsync(git), newest = ledger.candidates[0];
       // A candidate cut and never judged — a run that crashed between the cut and its record — is resumed, not cut past.
       if (newest && !ledger.uat.some(record => record.id === newest.id) && now() - Date.parse(newest.cutAt) < uatValidationWindowMs) return { cut: false, resume: toCandidate(newest) };
       // The cut rule (candidate-cut.ts) alone decides a cut: not due, nothing is tagged or pushed.
       if (!due) return { cut: false, reason: `the cut rule is not due (${settings.everyMerges} merges or ${settings.idleMinutes} idle minutes)` };
-      const result = cut(git, { base, trigger: 'manual', now: new Date(now()), push: true, maxPrs: settings.everyMerges });
+      const result = await cutAsync(git, { base, trigger: 'manual', now: new Date(now()), push: true, maxPrs: settings.everyMerges });
       return result.cut ? { cut: true, candidate: toCandidate(result.candidate) } : { cut: false, reason: result.reason };
     },
-    uat: async id => { const deployed = deployToUat(git, id, base, new Date(now())); return { sha: deployed.sha }; },
+    uat: async id => { const deployed = await deployToUatAsync(git, id, base, new Date(now())); return { sha: deployed.sha }; },
     validate: async id => {
       const scratch = mkdtempSync(join(options.base, 'candidate-validate-'));
       try {
@@ -126,7 +127,7 @@ export function localReleasePorts(config: Pick<MasterConfig, 'baseBranch' | 'run
       } finally { rmSync(scratch, { recursive: true, force: true }); }
     },
     promote: async id => {
-      const result = promote(git, id, { base, push: true, now: new Date(now()) });
+      const result = await promoteAsync(git, id, { base, push: true, now: new Date(now()) });
       return result.promoted ? { promoted: true, sha: result.sha } : { promoted: false, refusals: result.refusals };
     },
     verify: async sha => {
@@ -145,8 +146,13 @@ export function localReleasePorts(config: Pick<MasterConfig, 'baseBranch' | 'run
       return log.split('\x1e').flatMap((record): CutCommit[] => { const [sha = '', at = ''] = record.replace(/^\n/, '').split('\x1f'); return fullSha.test(sha.trim()) ? [{ sha: sha.trim().toLowerCase(), at: at.trim() }] : []; });
     },
     revertInputs: async candidate => {
-      const items: CandidateItemDelta[] = candidate.items.map(item => ({ key: item.key, mergeSha: item.mergeSha,
-        files: (() => { try { return git(['diff', '--name-only', `${item.mergeSha}^1`, item.mergeSha]).split('\n').map(line => line.trim()).filter(Boolean); } catch { return []; } })() }));
+      const items: CandidateItemDelta[] = [];
+      for (const item of candidate.items) {
+        try {
+          const files = (await git(['diff', '--name-only', `${item.mergeSha}^1`, item.mergeSha])).split('\n').map(line => line.trim()).filter(Boolean);
+          items.push({ key: item.key, mergeSha: item.mergeSha, files });
+        } catch { items.push({ key: item.key, mergeSha: item.mergeSha, files: [] }); }
+      }
       const maps = readVerificationMaps(root);
       const contract: RevertContract = existsSync(join(root, contractFile)) ? { ...parseContract(readFileSync(join(root, contractFile), 'utf8')), cases: readCaseTags(root) } : { outcomes: [], cases: readCaseTags(root) };
       return { items, maps, contract };

@@ -10,10 +10,11 @@ import type { RevertOutcome } from '../src/release-revert.js';
 
 /**
  * GY-1526: control-plane release candidates over a simulated day of the real promotion cycle.
- * Main advances by merges; the local ports cut at the configured cadence, validate (sometimes
- * slowly, sometimes failing), promote or revert, and honour a freeze mid-day. Asserts system
- * invariants: at most one candidate in flight, bounded cuts and retries, no promote or revert
- * while frozen, and inFlight cleared only when a run settles.
+ * Like effects.promotion, every cycle rebuilds a fresh LocalReleasePorts object. Main advances by
+ * merges; the local ports cut at the configured cadence, validate (sometimes slowly, sometimes
+ * failing), promote or revert, and honour a freeze mid-day. Asserts: one UAT/validate per
+ * candidate, every settled candidate ends in promote or revert, no promote/revert while frozen,
+ * inFlight observed across cycles and cleared only on settle.
  */
 const minute = 60_000;
 const start = Date.parse('2030-06-01T00:00:00Z');
@@ -24,7 +25,7 @@ const hours = 6;
 const cycles = (hours * 60) / 2;
 const settings = candidateSettings({ candidates: { everyMerges: 3, idleMinutes: 20 } });
 
-test('unit:soak-local-promotion — a simulated day of control-plane release candidates: bounded cuts, one in flight, freeze blocks promote and revert, retries stay bounded', { timeout: 300_000 }, async () => {
+test('unit:soak-local-promotion — a simulated day of control-plane release candidates with a fresh port set each cycle: one UAT/validate per candidate, bounded cuts, freeze blocks promote and revert, inFlight cleared only on settle', { timeout: 300_000 }, async () => {
   let now = start;
   const merges: CutCommit[] = [];
   const candidates: LocalCandidate[] = [];
@@ -32,6 +33,8 @@ test('unit:soak-local-promotion — a simulated day of control-plane release can
   const promotions: string[] = [];
   const reverts: string[] = [];
   const freezes: string[] = [];
+  const uatById = new Map<string, number>();
+  const validateById = new Map<string, number>();
   let promotedSha = sha('initial-prod');
   let mainSha = sha('initial-main');
   let cutCount = 0;
@@ -39,7 +42,6 @@ test('unit:soak-local-promotion — a simulated day of control-plane release can
   let running = 0;
   let widest = 0;
   let frozen: { sha: string; since: string } | null = null;
-  // Script: merge every 4 minutes; freeze for 30 minutes in hour 2; every 4th candidate fails E2E; validation takes one cycle.
   const mergeEvery = 4 * minute;
   const freezeFrom = start + 2 * 60 * minute;
   const freezeUntil = freezeFrom + 30 * minute;
@@ -47,11 +49,11 @@ test('unit:soak-local-promotion — a simulated day of control-plane release can
   const history = (): CutCommit[] => [...merges].reverse();
   const ledger = (): PromotionLedger => ({
     mainSha, promotedSha, promotedAt: iso(start), behind: Math.max(0, merges.length),
-    // The promotion state keeps at most five candidates, newest first — match the real ledger bound.
     candidates: candidates.slice(-5).reverse().map(c => ({ id: c.id.replace(/:done$/, ''), sha: c.sha, cutAt: c.cutAt, prs: c.items.length, queued: 0 })),
   });
 
-  const local: LocalReleasePorts = {
+  /** Fresh port object each cycle, as effects.promotion rebuilds localReleasePorts every read. */
+  const buildLocal = (): LocalReleasePorts => ({
     settings,
     history: async () => { calls.push('history'); return history(); },
     cut: async due => {
@@ -69,17 +71,23 @@ test('unit:soak-local-promotion — a simulated day of control-plane release can
       candidates.push(candidate);
       return { cut: true, candidate };
     },
-    uat: async id => { calls.push(`uat:${id}`); return { sha: candidates.find(c => c.id === id)!.sha }; },
+    uat: async id => {
+      calls.push(`uat:${id}`);
+      uatById.set(id, (uatById.get(id) ?? 0) + 1);
+      return { sha: candidates.find(c => c.id === id || c.id === `${id}:done`)!.sha };
+    },
     validate: async id => {
       calls.push(`validate:${id}`);
+      validateById.set(id, (validateById.get(id) ?? 0) + 1);
       validateCount += 1; running += 1; widest = Math.max(widest, running);
       await new Promise(resolve => setTimeout(resolve, 1));
       running -= 1;
       const fail = validateCount % 4 === 0;
+      const candidate = candidates.find(c => c.id === id || c.id === `${id}:done`)!;
       const validation: LocalValidation = fail
-        ? { record: { result: 'failed', suites: [{ name: 'e2e', passed: false, detail: 'sign-in failed' }], followUp: `GY-9${validateCount}`, deployedSha: candidates.find(c => c.id === id)!.sha,
-            e2e: { runId: `rc-${id}`, sha: candidates.find(c => c.id === id)!.sha, blocking: ['sign-in'], cases: [{ case: 'sign-in', verdict: 'failed', required: true, attempts: 1, failingStep: { index: 1, name: 'open Work', reason: 'missing' } }] } }, followUp: `GY-9${validateCount}` }
-        : { record: { result: 'passed', suites: [{ name: 'e2e', passed: true, detail: 'ok' }], e2e: null, followUp: null, deployedSha: candidates.find(c => c.id === id)!.sha }, followUp: null };
+        ? { record: { result: 'failed', suites: [{ name: 'e2e', passed: false, detail: 'sign-in failed' }], followUp: `GY-9${validateCount}`, deployedSha: candidate.sha,
+            e2e: { runId: `rc-${id}`, sha: candidate.sha, blocking: ['sign-in'], cases: [{ case: 'sign-in', verdict: 'failed', required: true, attempts: 1, failingStep: { index: 1, name: 'open Work', reason: 'missing' } }] } }, followUp: `GY-9${validateCount}` }
+        : { record: { result: 'passed', suites: [{ name: 'e2e', passed: true, detail: 'ok' }], e2e: null, followUp: null, deployedSha: candidate.sha }, followUp: null };
       return validation;
     },
     promote: async id => {
@@ -109,15 +117,15 @@ test('unit:soak-local-promotion — a simulated day of control-plane release can
       const outcome: RevertOutcome = { outcome: 'reverted', revertSha: tip, baseTip: tip, observedTip: tip, pushes: 1 };
       return outcome;
     },
-  };
+  });
 
-  const reads: PromotionReads & { local: LocalReleasePorts } = {
+  const buildReads = (): PromotionReads & { local: LocalReleasePorts } => ({
     ledger: async () => ledger(),
     runs: async () => { throw new Error('github runs must not be read in control-plane soak'); },
     dispatch: async () => { throw new Error('github dispatch must not run in control-plane soak'); },
     merger: async () => 'control-plane',
-    local,
-  };
+    local: buildLocal(),
+  });
 
   let state: PromotionState | null = null;
   let inFlightCycles = 0;
@@ -127,7 +135,6 @@ test('unit:soak-local-promotion — a simulated day of control-plane release can
 
   for (let cycle = 0; cycle < cycles; cycle++) {
     now = start + cycle * cycleMs;
-    // Advance main with merges on the cadence.
     if (cycle > 0 && (now - start) % mergeEvery === 0) {
       const merge = { sha: sha(`merge-${merges.length + 1}`), at: iso(now) };
       merges.push(merge);
@@ -136,15 +143,15 @@ test('unit:soak-local-promotion — a simulated day of control-plane release can
     frozen = now >= freezeFrom && now < freezeUntil ? { sha: sha('foreign-main'), since: iso(freezeFrom) } : null;
     if (frozen) freezes.push(iso(now));
 
+    const reads = buildReads();
     const result = await promotionCycle(state, reads, { now, everyMinutes: 10, intervalMs: cycleMs, frozen, watchedTip: mainSha });
     state = promotionStateSchema.parse(result.state);
     reasons.push(state.reason ?? '');
     if (state.inFlight) { streak += 1; inFlightCycles += 1; maxInFlightStreak = Math.max(maxInFlightStreak, streak); }
     else streak = 0;
-    // Drain a settled validation on the next simulated ticks so the day makes progress inside the soak.
     if (state.inFlight) {
-      await localPromotionIdle(local);
-      const finish = await promotionCycle(state, reads, { now: now + 1_000, everyMinutes: 10, intervalMs: cycleMs, frozen, watchedTip: mainSha });
+      await localPromotionIdle();
+      const finish = await promotionCycle(state, buildReads(), { now: now + 1_000, everyMinutes: 10, intervalMs: cycleMs, frozen, watchedTip: mainSha });
       state = promotionStateSchema.parse(finish.state);
       if (!state.inFlight) streak = 0;
       else { streak += 1; maxInFlightStreak = Math.max(maxInFlightStreak, streak); }
@@ -159,16 +166,12 @@ test('unit:soak-local-promotion — a simulated day of control-plane release can
   assert.ok(inFlightCycles >= 4, `inFlight was observed across cycles: ${inFlightCycles}`);
   assert.ok(maxInFlightStreak >= 1 && maxInFlightStreak <= 40, `inFlight streaks stay bounded (${maxInFlightStreak})`);
   assert.ok(freezes.length >= 10, `the freeze window was active: ${freezes.length} cycles`);
-  // While frozen, no promote or revert call is recorded (the ports assert; the call list must agree).
-  const freezePromote = calls.filter(call => call.startsWith('promote:') && freezes.length);
-  assert.ok(promotions.every(id => {
-    const at = calls.findIndex(call => call === `promote:${id}`);
-    return at >= 0;
-  }), 'every promotion was requested through the port');
+  for (const [id, count] of uatById) assert.equal(count, 1, `candidate ${id} got exactly one UAT deploy`);
+  for (const [id, count] of validateById) assert.equal(count, 1, `candidate ${id} got exactly one validation`);
+  assert.equal(promotions.length + reverts.length, validateById.size, `every validated candidate promoted or reverted (promote=${promotions.length} revert=${reverts.length} validated=${validateById.size})`);
   assert.equal(state!.inFlight, false, 'the day ends with no candidate in flight');
   assert.ok(reasons.some(reason => /frozen since/.test(reason)), `freeze reasons were recorded: ${reasons.filter(r => /frozen/.test(r)).slice(0, 3)}`);
   assert.ok(cutCount <= merges.length, `cuts (${cutCount}) cannot exceed merges (${merges.length})`);
-  // Retries: a cut is attempted only when due or resuming; history reads stay under one per in-flight window plus idle polls.
   const historyReads = calls.filter(call => call === 'history').length;
   assert.ok(historyReads <= cycles + cutCount + 5, `history reads stay bounded (${historyReads} over ${cycles} cycles)`);
 });
