@@ -136,7 +136,7 @@ test('unit:known-good-doctor-line — doctor reads the install pin and the rc-pr
 let pg: EmbeddedPostgres, store: Store, http: ReturnType<typeof server>, url: string;
 const admin = { id: 'human-operator', role: 'admin' as const, sessionKind: 'human' as const, token: `human-operator-token-${'x'.repeat(32)}` };
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1529;
+  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 152;
   pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('known-good-pg'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('known_good_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/known_good_test`); await store.init();
