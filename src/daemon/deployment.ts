@@ -1,4 +1,6 @@
 // Concern: observing the deployed release and which deliveries it serves.
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import { ciReportingEnvironment } from '../install/ci-proofs.js';
 import { productionEnvironmentFromEnv } from '../flow-analytics.js';
 import type { ChildRun } from '../child-runner.js';
@@ -365,10 +367,19 @@ export function reusableDeployment(last: DeploymentObservation | null | undefine
 /** The workflow the loop dispatches with `promote=true`: it cuts a candidate of at most 10 merges (GY-1491), validates it in UAT, then promotes it. */
 export const promotionWorkflow = 'release-candidate.yml';
 /**
+ * GY-1513: the advisory soak and timing-budget suites each candidate's run dispatches. Its runs are
+ * never read as a candidate in validation, so the next candidate is cut while one soaks; they are
+ * read only so `master status` shows each candidate's soak, running or concluded.
+ */
+export const soakWorkflow = 'release-candidate-soak.yml';
+/** How many soak runs the loop keeps, newest first. */
+export const promotionSoaksListed = 10;
+/**
  * GY-1488: the minimum gap between two promotions the loop dispatches; `run.promoteEveryMinutes`, 0
  * turns promotion by the loop off. The loop cuts the next candidate as soon as none is in flight and
  * main has moved past both the last promoted SHA and the last cut, so this only spaces candidates
- * that conclude fast (a cut that fails early), rather than setting a fixed cadence.
+ * that conclude fast without promoting (a cut that fails early), rather than setting a fixed cadence;
+ * a candidate that promoted is followed as soon as its run concludes (GY-1513).
  */
 export const defaultPromoteEveryMinutes = 10;
 /** How long a read of the workflow's runs is reused, so a candidate in UAT for hours costs one GitHub request a minute, not one a cycle. */
@@ -405,12 +416,16 @@ export const promotionCandidatesListed = 5;
 export interface PromotionLedger { mainSha: string | null; promotedSha: string | null; promotedAt: string | null; behind: number | null; candidates?: PromotionCandidate[] }
 /** One run of the release-candidate workflow as `gh run list --json status,createdAt,event,headSha` lists it. */
 export interface PromotionRun { status: string; createdAt: string; event: string; headSha?: string }
+/** One run of the soak workflow: the SHA it soaks (from its run name), its status and, once concluded, its conclusion. */
+export interface SoakRun { sha: string; status: string; conclusion: string | null; createdAt: string; url: string | null }
 export interface PromotionReads {
   /** The base branch's tip, the newest `rc-production/` record, the first-parent merges between them and the newest `rc/` candidates. */
   ledger: () => Promise<PromotionLedger>;
   /** The workflow's recent runs, newest first. */
   runs: () => Promise<PromotionRun[]>;
   dispatch: () => Promise<void>;
+  /** The soak workflow's recent runs, newest first; absent where the repository has no soak workflow. */
+  soaks?: () => Promise<SoakRun[]>;
 }
 
 const later = (...times: (string | null | undefined)[]) => times.filter((time): time is string => !!time && Number.isFinite(Date.parse(time)))
@@ -443,7 +458,7 @@ export async function promotionCycle(previous: PromotionState | null, reads: Pro
   const failed = (state: Omit<PromotionState, 'nextDueAt' | 'reason'>, failure: string) => ({ state: settle(state, failure, true), dispatched: false, failure });
   const kept = { mainSha: previous?.mainSha ?? null, promotedSha: previous?.promotedSha ?? null, promotedAt: previous?.promotedAt ?? null, behind: previous?.behind ?? null, candidates: previous?.candidates ?? [], ledgerReadAt: previous?.ledgerReadAt ?? null };
   const readLedger = async () => { const read = await reads.ledger(); return { ...read, candidates: read.candidates ?? [] }; };
-  const carried = { inFlight: previous?.inFlight ?? false, runsReadAt: previous?.runsReadAt ?? null, dispatchedAt: previous?.dispatchedAt ?? null, lastDispatchAt: previous?.lastDispatchAt ?? null, cutSha: previous?.cutSha ?? null,
+  const carried = { ...(previous?.soaks ? { soaks: previous.soaks } : {}), ...(previous?.soaksReadAt ? { soaksReadAt: previous.soaksReadAt } : {}), inFlight: previous?.inFlight ?? false, runsReadAt: previous?.runsReadAt ?? null, dispatchedAt: previous?.dispatchedAt ?? null, lastDispatchAt: previous?.lastDispatchAt ?? null, cutSha: previous?.cutSha ?? null,
     ...(previous?.candidateAtDispatch !== undefined ? { candidateAtDispatch: previous.candidateAtDispatch } : {}) };
   // Off reads nothing at all: no fetch, no GitHub request.
   if (options.everyMinutes <= 0) return done({ checkedAt: at, ...kept, ...carried }, 'Promotion by the loop is off (run.promoteEveryMinutes is 0)', false);
@@ -453,13 +468,16 @@ export async function promotionCycle(previous: PromotionState | null, reads: Pro
       return failed({ checkedAt: at, ...kept, ledgerReadAt: at, ...carried }, `The base branch and the promotion record could not be read: ${message(error)}`);
     }
   }
-  const base = { checkedAt: at, ...ledger, ...carried };
+  const base = { checkedAt: at, ...ledger, ...carried, ...await soakRefresh(carried, ledger.candidates ?? [], reads, options.now, windows.runsMs) };
   if (!ledger.mainSha) return done(base, 'The base branch tip could not be read, so nothing is promoted', false);
   if (ledger.mainSha === ledger.promotedSha) return done(base, 'Production runs the base branch tip; nothing to promote', false);
   const sinceLast = base.lastDispatchAt ? options.now - Date.parse(base.lastDispatchAt) : Number.POSITIVE_INFINITY;
-  if (sinceLast < everyMs) return done(base, `The last promotion was dispatched ${Math.round(sinceLast / 60_000)} minute(s) ago; the next is due no sooner than ${options.everyMinutes} minute(s) after it`, true);
+  const gapReason = (since: number) => `The last promotion was dispatched ${Math.round(since / 60_000)} minute(s) ago; the next is due no sooner than ${options.everyMinutes} minute(s) after it`;
+  const runsDue = !base.runsReadAt || options.now - Date.parse(base.runsReadAt) >= windows.runsMs;
+  // While a candidate is in flight its runs are still read each window, so a promotion it made inside the gap is seen (GY-1513).
+  if (sinceLast < everyMs && !(base.inFlight && runsDue)) return done(base, gapReason(sinceLast), true);
   let state = base;
-  if (!base.runsReadAt || options.now - Date.parse(base.runsReadAt) >= windows.runsMs) {
+  if (runsDue) {
     let listed: PromotionRun[];
     try { listed = await reads.runs(); } catch (error) {
       return failed({ ...base, runsReadAt: at }, `The ${promotionWorkflow} runs could not be read: ${message(error)}`);
@@ -471,7 +489,6 @@ export async function promotionCycle(previous: PromotionState | null, reads: Pro
     const unlisted = !!base.dispatchedAt && (!newest || Date.parse(newest.createdAt) < Date.parse(base.dispatchedAt)) && options.now - Date.parse(base.dispatchedAt) < promotionUnlistedMs;
     state = { ...base, runsReadAt: at, inFlight: unlisted || cuts.some(run => runningStates.has(run.status)), lastDispatchAt: later(base.dispatchedAt, ...cuts.map(run => run.createdAt)), cutSha: listedCut ?? base.cutSha };
     const since = state.lastDispatchAt ? options.now - Date.parse(state.lastDispatchAt) : Number.POSITIVE_INFINITY;
-    if (since < everyMs) return done(state, `A release candidate was started ${Math.round(since / 60_000)} minute(s) ago; the next promotion is due no sooner than ${options.everyMinutes} minute(s) after it`, true);
     if (base.inFlight && !state.inFlight && state.ledgerReadAt !== at) {
       // The candidate just concluded: what it promoted, and any merge since, is read now rather than a window later.
       try { state = { ...state, ...await readLedger(), ledgerReadAt: at }; } catch (error) {
@@ -480,6 +497,10 @@ export async function promotionCycle(previous: PromotionState | null, reads: Pro
       if (!state.mainSha) return done(state, 'The base branch tip could not be read, so nothing is promoted', false);
       if (state.mainSha === state.promotedSha) return done(state, 'Production runs the base branch tip; nothing to promote', false);
     }
+    // GY-1513: the gap spaces candidates that fail fast; one that promoted since the last dispatch (about 8 minutes in, the soak no longer in its run) is followed at once.
+    const promotedSince = !state.inFlight && !!state.promotedAt && !!state.lastDispatchAt && Date.parse(state.promotedAt) >= Date.parse(state.lastDispatchAt);
+    if (since < everyMs && !promotedSince && state.lastDispatchAt === base.lastDispatchAt) return done(state, gapReason(since), true);
+    if (since < everyMs && !promotedSince) return done(state, `A release candidate was started ${Math.round(since / 60_000)} minute(s) ago; the next promotion is due no sooner than ${options.everyMinutes} minute(s) after it`, true);
   }
   if (state.inFlight) return done(state, 'A release candidate is still in validation; the next promotion is dispatched as soon as it concludes', true);
   // The candidate the last run cut, when it stopped short of main's tip at the PR cap: the merges queued behind it need no new merge to go out.
@@ -500,17 +521,41 @@ export async function promotionCycle(previous: PromotionState | null, reads: Pro
 
 /**
  * What `master status` reports of the promotion drive: the last promoted SHA, how far production is
- * behind, when the next promotion is due, and the newest candidates with each one's PR count and
- * the merges queued behind it.
+ * behind, when the next promotion is due, and the newest candidates with each one's PR count, the
+ * merges queued behind it and its advisory soak (GY-1513): `running` while its run is, else the
+ * run's conclusion; null when no soak run of that SHA has been read.
  */
 export function promotionStatus(state: PromotionState | null | undefined) {
   if (!state) return { lastPromotedSha: null, promotedAt: null, behind: null, nextDueAt: null, inFlight: false, checkedAt: null, candidates: [], reason: 'The loop has not checked promotion yet' };
   return { lastPromotedSha: state.promotedSha, promotedAt: state.promotedAt, behind: state.behind, nextDueAt: state.nextDueAt, inFlight: state.inFlight, checkedAt: state.checkedAt,
-    candidates: (state.candidates ?? []).map(({ id, sha, prs, queued }) => ({ id, sha, prs, queued })), reason: state.reason };
+    candidates: (state.candidates ?? []).map(({ id, sha, prs, queued }) => ({ id, sha, prs, queued, soak: soakOf(state.soaks, sha) })), reason: state.reason };
+}
+
+/**
+ * GY-1513: the soak runs, re-read once a run-read window while one is running or the newest
+ * candidate, cut within `soakAwaitedMs`, has none listed yet — so a soak that outlives its promotion
+ * is seen to conclude while the loop otherwise reads nothing. A failed read keeps the last one: the
+ * soak is advisory and never holds promotion back.
+ */
+async function soakRefresh(carried: Pick<PromotionState, 'soaks' | 'soaksReadAt'>, candidates: PromotionCandidate[], reads: PromotionReads, now: number, windowMs: number) {
+  if (!reads.soaks || (carried.soaksReadAt && now - Date.parse(carried.soaksReadAt) < windowMs)) return {};
+  const newest = candidates[0], soaks = carried.soaks ?? [];
+  const awaited = !!newest && now - Date.parse(newest.cutAt) < soakAwaitedMs && !soaks.some(run => run.sha === newest.sha);
+  if (!awaited && !soaks.some(run => runningStates.has(run.status))) return {};
+  const soaksReadAt = new Date(now).toISOString();
+  try { return { soaks: (await reads.soaks()).slice(0, promotionSoaksListed), soaksReadAt }; } catch { return { soaksReadAt }; }
+}
+/** How long after its cut a candidate's soak is looked for before the loop stops reading for it. */
+export const soakAwaitedMs = 90 * 60_000;
+
+/** The newest soak run of a SHA, as `master status` shows it. */
+function soakOf(soaks: PromotionState['soaks'], sha: string) {
+  const run = soaks?.find(entry => entry.sha === sha.toLowerCase());
+  return run ? { state: runningStates.has(run.status) ? 'running' : run.conclusion ?? run.status, startedAt: run.createdAt, url: run.url } : null;
 }
 
 /** The promotion reads over the managed checkout and GitHub; null when the repository has no release-candidate workflow to dispatch. */
-export function promotionReads(config: MasterConfig, root: string, run: ChildRun, workflowExists: boolean): PromotionReads | null {
+export function promotionReads(config: MasterConfig, root: string, run: ChildRun, workflowExists: boolean, soakExists = existsSync(join(root, '.github', 'workflows', soakWorkflow))): PromotionReads | null {
   if (!workflowExists) return null;
   const git = (...args: string[]) => run('git', ['-C', root, ...args]);
   return {
@@ -547,5 +592,16 @@ export function promotionReads(config: MasterConfig, root: string, run: ChildRun
       return Array.isArray(listed) ? listed.filter(entry => typeof entry?.status === 'string' && typeof entry?.createdAt === 'string' && typeof entry?.event === 'string') : [];
     },
     dispatch: async () => { await run('gh', ['workflow', 'run', promotionWorkflow, '--repo', config.repository, '--ref', config.baseBranch, '-f', 'promote=true']); },
+    ...(soakExists ? { soaks: async () => soakRuns(JSON.parse(await run('gh', ['run', 'list', '--repo', config.repository, '--workflow', soakWorkflow, '--limit', '20', '--json', 'status,conclusion,createdAt,displayTitle,url']))) } : {}),
   };
+}
+
+/** Soak runs as `gh run list` lists them, newest first, each with the SHA its run name (`Soak ID SHA`) carries; a run naming none is skipped. */
+export function soakRuns(listed: unknown): SoakRun[] {
+  if (!Array.isArray(listed)) return [];
+  return listed.flatMap(entry => {
+    const sha = typeof entry?.displayTitle === 'string' ? entry.displayTitle.match(/\b[0-9a-f]{40}\b/i)?.[0]?.toLowerCase() : undefined;
+    if (!sha || typeof entry.status !== 'string' || typeof entry.createdAt !== 'string') return [];
+    return [{ sha, status: entry.status, conclusion: typeof entry.conclusion === 'string' && entry.conclusion ? entry.conclusion : null, createdAt: entry.createdAt, url: typeof entry.url === 'string' ? entry.url : null }];
+  }).sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
 }

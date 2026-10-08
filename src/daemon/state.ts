@@ -176,6 +176,15 @@ export const promotionStateSchema = z.object({
     prs: z.number().int().min(0).nullable(),
     queued: z.number().int().min(0).nullable(),
   }).strict()).max(5).optional(),
+  /** GY-1513: the newest advisory soak runs (release-candidate-soak.yml), by the SHA each soaks; never holds promotion back. */
+  soaks: z.array(z.object({
+    sha: z.string().max(64),
+    status: z.string().max(32),
+    conclusion: z.string().max(32).nullable(),
+    createdAt: z.string().max(64),
+    url: z.string().max(500).nullable(),
+  }).strict()).max(10).optional(),
+  soaksReadAt: z.string().nullable().optional(),
   nextDueAt: z.string().nullable(),
   reason: z.string().max(500).nullable(),
 }).strict();

@@ -17,7 +17,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 // unit:ci-bubblewrap-install-resilient.
 
 const read = (path: string) => readFileSync(join(repositoryRoot, path), 'utf8');
-const ciPath = '.github/workflows/ci.yml', candidatePath = '.github/workflows/release-candidate.yml';
+const ciPath = '.github/workflows/ci.yml', candidatePath = '.github/workflows/release-candidate.yml', soakPath = '.github/workflows/release-candidate-soak.yml';
 
 /** Each job's id, its block of text, and the jobs it needs. */
 function jobsOf(text: string) {
@@ -55,7 +55,7 @@ test('unit:fast-gate-required-set — the required CI checks exclude the soak, c
   assert.deepEqual(required, ['test', 'typecheck'], 'the default required checks are test and typecheck');
   // Every workflow that runs on a pull request: only ci.yml (and the trusted acceptance harness,
   // which certifies an item's own proofs and is not a branch-protection check) may.
-  const workflows = ['ci.yml', 'acceptance.yml', 'deploy-smoke.yml', 'release.yml', 'release-candidate.yml'].map(name => `.github/workflows/${name}`).filter(path => existsSync(join(repositoryRoot, path)));
+  const workflows = ['ci.yml', 'acceptance.yml', 'deploy-smoke.yml', 'release.yml', 'release-candidate.yml', 'release-candidate-soak.yml'].map(name => `.github/workflows/${name}`).filter(path => existsSync(join(repositoryRoot, path)));
   assert.ok(!existsSync(join(repositoryRoot, '.github/workflows/helm.yml')), 'the chart no longer has a pull-request workflow of its own');
   for (const path of workflows.filter(path => path !== ciPath && path !== '.github/workflows/acceptance.yml'))
     assert.equal(readWorkflow(read(path)).pullRequest, false, `${path} never runs on a pull request`);
@@ -102,8 +102,12 @@ test('unit:fast-gate-required-set — the required CI checks exclude the soak, c
   for (const entry of shards) assert.ok(entry.durationMs < shard.timeout! * 60_000, `a shard's recorded files take ${Math.round(entry.durationMs / 1000)}s in series, within its ${shard.timeout}-minute bound`);
 });
 
-test('unit:long-suites-on-candidate — the excluded suites run in release-candidate.yml against a pinned SHA, by dispatch with a sha input or on push of an rc tag, never on a pull request', () => {
+test('unit:long-suites-on-candidate — the excluded suites run in release-candidate.yml (the soak in the release-candidate-soak.yml it dispatches) against a pinned SHA, by dispatch with a sha input or on push of an rc tag, never on a pull request', () => {
   const text = read(candidatePath), workflow = readWorkflow(text), jobs = jobsOf(text);
+  // GY-1513: the advisory soak and timing-budget suites run in a workflow of their own, dispatched with the candidate SHA.
+  const soakText = read(soakPath), soakJobs = jobsOf(soakText);
+  assert.equal(readWorkflow(soakText).pullRequest, false, 'the soak never runs on a pull request');
+  assert.match(jobs.get('soak')!.text, /gh workflow run release-candidate-soak\.yml .* -f sha="\$CANDIDATE_SHA"/);
   assert.equal(workflow.pullRequest, false, 'release-candidate validation never runs on a pull request');
   const on = text.slice(text.indexOf('\non:\n') + 1, text.indexOf('\npermissions:'));
   assert.match(on, /^ {2}workflow_dispatch:\n {4}inputs:\n {6}sha:\n/m, 'dispatch takes a sha input to validate one commit');
@@ -114,28 +118,32 @@ test('unit:long-suites-on-candidate — the excluded suites run in release-candi
   // Every long suite validates the pinned candidate — the cut tip, the dispatched SHA or the tagged commit — never the ref it was started from.
   assert.match(jobs.get('candidate')!.text, /^ {6}PINNED: \$\{\{ inputs\.sha \|\| \(github\.event_name == 'push' && github\.sha\) \|\| '' \}\}$/m);
   assert.match(jobs.get('candidate')!.text, /\^\[0-9a-f\]\{40\}\$/, 'a dispatched sha must be a full commit SHA');
-  const longSuites = ['chart', 'container-acceptance', 'container-recovery', 'long-suites'];
-  for (const [id, job] of jobs) {
+  const longSuites = ['chart', 'container-acceptance', 'container-recovery', 'soak'];
+  for (const [id, job] of [...jobs, ...[...soakJobs].map(([id, job]) => [`soak:${id}`, job] as const)]) {
     assert.doesNotMatch(job.text, /\$GITHUB_SHA/, `${id} stamps the candidate SHA, not the triggering ref's`);
     assert.ok(job.timeout, `${id} declares timeout-minutes`);
-    if (!longSuites.includes(id) && id !== 'uat') continue;
-    assert.match(job.text, /^ {6}CANDIDATE_SHA: \$\{\{ needs\.candidate\.outputs\.sha \}\}$/m, `${id} validates the candidate job's pinned SHA`);
+    if (id === 'soak' || id.startsWith('soak:')) {
+      assert.match(job.text, id === 'soak' ? /^ {6}CANDIDATE_SHA: \$\{\{ needs\.candidate\.outputs\.sha \}\}$/m : /^ {6}CANDIDATE_SHA: \$\{\{ inputs\.sha \}\}$/m, `${id} soaks the candidate job's pinned SHA`);
+      if (id === 'soak') continue;
+    } else if (!longSuites.includes(id) && id !== 'uat') continue;
+    else assert.match(job.text, /^ {6}CANDIDATE_SHA: \$\{\{ needs\.candidate\.outputs\.sha \}\}$/m, `${id} validates the candidate job's pinned SHA`);
     const checkouts = [...job.text.matchAll(/uses: actions\/checkout@v4\n\s+with: (.*)$/gm)];
     assert.ok(checkouts.length >= 1 && checkouts.every(match => match[1].includes("ref: '${{ env.CANDIDATE_SHA }}'")), `${id} checks out the candidate SHA`);
   }
   for (const id of longSuites) assert.deepEqual(jobs.get(id)!.needs, ['candidate'], `${id} waits only for the candidate to be pinned`);
   // A cut candidate's UAT record carries the container and chart verdicts, so a failure among them blocks
   // promotion; the soak and timing-budget suites are advisory and neither delay nor decide it.
-  const gating = longSuites.filter(id => id !== 'long-suites');
+  const gating = longSuites.filter(id => id !== 'soak');
   assert.deepEqual(jobs.get('uat')!.needs, ['candidate', 'container-acceptance', 'container-recovery', 'chart']);
   for (const id of gating) assert.match(jobs.get('uat')!.text, new RegExp(`--suite '${id}=test "\\$[A-Z_]+" = success'`), `the UAT record carries the ${id} verdict`);
-  assert.doesNotMatch(jobs.get('uat')!.text, /--suite 'long-suites=/, 'the soak verdict is advisory');
+  assert.doesNotMatch(jobs.get('uat')!.text, /--suite '(long-suites|soak)=/, 'the soak verdict is advisory');
 
   // Every suite the pre-merge gate excludes runs here.
-  assert.deepEqual([...jobs.keys()].sort(), ['candidate', 'chart', 'container-acceptance', 'container-recovery', 'long-suites', 'promote', 'uat']);
+  assert.deepEqual([...jobs.keys()].sort(), ['candidate', 'chart', 'container-acceptance', 'container-recovery', 'promote', 'soak', 'uat']);
+  assert.deepEqual([...soakJobs.keys()], ['long-suites']);
   // The timing budgets run first, one file at a time, and the soak after them (GY-1440): a budget
   // measured beside another suite's load measures that load. Both run whatever the other's verdict.
-  const suitesStep = jobs.get('long-suites')!.text;
+  const suitesStep = soakJobs.get('long-suites')!.text;
   assert.match(suitesStep, /node scripts\/ci-tests\.mjs release-candidate --suite timing-budget --out "\$RUNNER_TEMP\/timing-budget-tests\.txt"/);
   assert.match(suitesStep, /node scripts\/ci-tests\.mjs release-candidate --suite soak --out "\$RUNNER_TEMP\/soak-tests\.txt"/);
   const timingRun = suitesStep.indexOf('npm test -- --files-from "$RUNNER_TEMP/timing-budget-tests.txt" --test-concurrency=1 '), soakRun = suitesStep.indexOf('npm test -- --files-from "$RUNNER_TEMP/soak-tests.txt" ');
@@ -143,7 +151,7 @@ test('unit:long-suites-on-candidate — the excluded suites run in release-candi
   assert.equal([...suitesStep.matchAll(/npm test -- /g)].length, 2, 'no other run shares the runner with them');
   assert.equal([...suitesStep.matchAll(/ \|\| status=1$/gm)].length, 2, 'the soak runs whatever the timing budgets\' verdict, and the step fails on either');
   assert.match(suitesStep, /timing-report\.ts "\$RUNNER_TEMP\/timing\/release-candidate\.jsonl" "\$RUNNER_TEMP\/timing\/test-timing-budget\.log" "\$RUNNER_TEMP\/timing\/test-soak\.log"/, 'the report counts both runs\' failures');
-  assert.match(jobs.get('long-suites')!.text, /apt-get install -y -q bubblewrap/, 'the soak confines its launches in real namespaces');
+  assert.match(suitesStep, /apt-get install -y -q bubblewrap/, 'the soak confines its launches in real namespaces');
   assert.match(jobs.get('container-acceptance')!.text, /scripts\/run-acceptance\.mjs "\$RUNNER_TEMP\/candidate\.json" graphyard-ci "\$RUNNER_TEMP\/acceptance\.json"/);
   // GitHub merges under branch protection (GY-1235): Graphyard has no merge authorization left to exercise.
   assert.doesNotMatch(jobs.get('container-acceptance')!.text, /integration:merge-authorization/);
@@ -171,7 +179,7 @@ test('unit:long-suites-on-candidate — the excluded suites run in release-candi
   assert.deepEqual([...listed, ...preMergeTestFiles()].sort(), listTestFiles(), 'every test file runs in exactly one of the two gates');
   // No job here shares a name with a required check, so none can ever be required of a pull request.
   const required = policySchema.parse({}).checks;
-  for (const id of jobs.keys()) assert.ok(!required.includes(id), `${id} is not a required check`);
+  for (const id of [...jobs.keys(), ...soakJobs.keys()]) assert.ok(!required.includes(id), `${id} is not a required check`);
 });
 
 test('unit:ci-bubblewrap-install-resilient — the shards install bubblewrap with bounded, retried apt calls that fall back to other mirrors, and an install that fails every attempt concludes the shard timed out, which the main guard reruns and never reverts', () => {
