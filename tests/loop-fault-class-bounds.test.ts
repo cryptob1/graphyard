@@ -18,17 +18,17 @@ import { checkInvariants, emptyInvariantRecord } from '../src/model/invariants.j
 const at = (time: string) => Date.parse(`2026-10-08T${time}Z`);
 const iso = (ms: number) => new Date(ms).toISOString();
 const minute = 60_000;
-const head = '9237f0b41c1402ce368a69ea40c5b752b3ddde7d', base0 = '3aef49ab1c7ab0bf1ef8f2bb25ead6b09c39b1fa', tip = 'fbb3f3cbe31470ba3b7231a18b59aa650f60a187';
+const base0 = '3aef49ab1c7ab0bf1ef8f2bb25ead6b09c39b1fa', tip = 'fbb3f3cbe31470ba3b7231a18b59aa650f60a187';
 const paths = ['docs/coordination.md', 'docs/delivery.md'];
 
 const config = (): MasterConfig => masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: '/bin/true',
   repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [] });
 
-function gy1515(observedAt: number): Work {
-  const candidate = { sha: head, baseSha: base0, pr: 99, branch: 'graphyard/gy-1515-1', author: 'worker' };
+function conflicted(key: string, head: string, observedAt: number): Work {
+  const candidate = { sha: head, baseSha: base0, pr: 99, branch: `graphyard/${key.toLowerCase()}-1`, author: 'worker' };
   const observation = { clockOffset: { min: 0, max: 0 }, candidate, baseTip: tip, baseTipContained: false, conflicting: true, checks: [], reviews: [], protected: true, mergeable: false,
     merged: false, mergeSha: null, files: paths, scopeFiles: [], at: iso(observedAt), prState: 'open', draft: false } as unknown as Observation;
-  return { id: 'a8ec9c1d-2b3f-4362-8bd6-8a11ce8c63c7', key: 'GY-1515', title: 't', description: '', type: 'bug', priority: 1, dependencies: [], criteria: [], policy: { checks: ['test'], review: true },
+  return { id: `${key}-id`, key, title: 't', description: '', type: 'bug', priority: 1, dependencies: [], criteria: [], policy: { checks: ['test'], review: true },
     plannedFiles: paths, stage: 'build', revision: 1, policyRevision: 3, createdAt: iso(at('05:00:00')), updatedAt: iso(observedAt), stageEnteredAt: iso(at('05:51:01')), ready: true, epoch: 3,
     lease: null, workspaces: [], submission: { epoch: 3, pr: 99 }, systemDriven: true, candidate, reworkRequested: false, scenarioRequirements: [], evidence: [], observation,
     baseRefresh: { from: { sha: head, baseSha: base0 }, base: tip, baseTree: 'e'.repeat(40), policyRevision: 3, at: '2026-10-08T05:51:01.988Z', head: null, conflict: 'conflict', merge: null, carry: null,
@@ -36,20 +36,21 @@ function gy1515(observedAt: number): Work {
     gates: [{ name: 'build', passed: false, reasons: ['conflict'] }] } as unknown as Work;
 }
 
-test('manual:fault-class-loop — stalled-step GY-1515 and GY-1530: past the 10-minute bound the stopped docs-sync gives the conflict up without a fresh reading, and the rework no longer waits for one', async () => {
+for (const [key, head] of [['GY-1515', '9237f0b41c1402ce368a69ea40c5b752b3ddde7d'], ['GY-1530', 'bd9acb3e776cbffd5c84c8586ab865bacbb8b8ef']] as const)
+test(`manual:fault-class-loop — stalled-step ${key}: past the 10-minute bound the stopped docs-sync gives the conflict up without a fresh reading, and the rework no longer waits for one`, async () => {
   const state = emptyDaemonState(config()), agents: string[] = [], notes: string[] = [];
   const route = (work: Work, now: number) => docsSyncRoute({ config: { baseBranch: 'main' }, state, snapshot: { work: [work] }, stamp: iso(now), clock: now, inventorySpent: () => {},
     effects: { docsSync: async (_item: Work, plan: DocsSyncPlan) => { const name = docsSyncSessionName(plan); agents.push(name); return { agentName: name, pane: 'pane-s', account: 'a', runtime: 'claude' as const, session: null }; },
       conflictPaths: async () => paths, persist: async () => {}, closeSession: async () => { agents.length = 0; } },
     sessions: async () => ({ agents: agents.map(name => ({ name, pane_id: 'pane-s', agent_status: 'working' }) as any), available: true }),
     note: async (_key, _item, _kind, outcome, detail) => { notes.push(`${outcome}: ${detail}`); } });
-  const stale = gy1515(at('05:55:00'));
+  const stale = conflicted(key, head, at('05:55:00'));
   assert.equal(await route(stale, at('05:51:35')).holds(stale), true, 'the docs-page conflict is held by a docs-sync');
   // 05:59:30, past the cutoff and inside the bound: stopped, and still held for want of a reading.
   assert.equal(await route(stale, at('05:59:30')).holds(stale, async () => null), true);
   // 06:01:56, past the bound (06:01:01) with no reading since the stop: the conflict returns to a worker.
   assert.equal(await route(stale, at('06:01:56')).holds(stale, async () => null), false, 'the bound is kept without a fresh reading');
-  assert.match(notes.at(-1)!, /^failed: GY-1515: .*no observation since landed inside the loop-owned bound/);
+  assert.match(notes.at(-1)!, new RegExp(`^failed: ${key}: .*no observation since landed inside the loop-owned bound`));
   // The rework request itself: stale observation, overdue conflict round.
   const decision = { action: 'rework' as const, binding: `${head}:conflict` };
   assert.equal(reworkObservationWait(stale, at('06:01:56'), null) !== null, true, 'the observation is stale');
@@ -59,8 +60,9 @@ test('manual:fault-class-loop — stalled-step GY-1515 and GY-1530: past the 10-
   assert.equal(conflictReworkOverdue(stale, { action: 'merge', binding: `${head}:conflict` }, at('06:01:56')), false);
 });
 
-test('manual:fault-class-loop — invariant:cycle-p90: a cycle is judged on its own work, not the child and control-plane waits it spent', () => {
-  const now = at('22:05:00'), metric = (index: number, durationMs: number, workMs?: number) => ({ at: iso(now - index * 3 * minute), durationMs, ...(workMs === undefined ? {} : { workMs }) });
+for (const instant of [Date.parse('2026-10-07T22:05:07.171Z'), Date.parse('2026-10-08T05:30:41.190Z')])
+test(`manual:fault-class-loop — invariant:cycle-p90 at ${new Date(instant).toISOString()}: a cycle is judged on its own work, not the child and control-plane waits it spent`, () => {
+  const now = instant, metric = (index: number, durationMs: number, workMs?: number) => ({ at: iso(now - index * 3 * minute), durationMs, ...(workMs === undefined ? {} : { workMs }) });
   const check = (metrics: ReturnType<typeof metric>[]) => checkInvariants(emptyInvariantRecord(), { work: [], now, metrics }).find(entry => entry.invariant === 'cycle-p90')!;
   const waiting = Array.from({ length: 10 }, (_, index) => metric(index, 90_000, 4_000));
   assert.equal(check(waiting).holds, true, '90 s of wall time that was 4 s of work and 86 s of waits is a slow provider, not a slow loop');

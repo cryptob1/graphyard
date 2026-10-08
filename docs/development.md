@@ -27,7 +27,7 @@ A required check failing on base head too: no rework (waiting while base log is 
 
 ### Documentation that rarely conflicts
 
-Conflicts only in `docs/**/*.md` get docs-sync, not rework: base merges in keeping both sides; approval stays if non-docs diff holds. A Claude docs-sync session loads only user settings plus its role file (`.graphyard/harness/docs-sync-*.json`); it pushes only `git push origin HEAD:refs/heads/BRANCH`. One already in Herdr is adopted, never relaunched; one stopped 3 minutes unpushed, gone or past the 10-minute blocked bound is reworked. On system-driven items that rework is loop's round, due 10 minutes after the head's conflict is first recorded; past it the round is requested without waiting for a fresh GitHub reading; if still late: `stalled-step` attention (`loop` class) in `master status`; a refused hand `master decide GY-N rework` names round and lateness.
+Conflicts only in `docs/**/*.md` get docs-sync, not rework: base merges in keeping both sides; approval stays if non-docs diff holds. A Claude docs-sync session loads only user settings plus its role file (`.graphyard/harness/docs-sync-*.json`); it pushes only `git push origin HEAD:refs/heads/BRANCH`. One already in Herdr is adopted, never relaunched; one stopped 3 minutes unpushed, gone or past the 10-minute blocked bound is reworked. On system-driven items that rework is loop's round, due 10 minutes after the head's conflict is first recorded; past it the round is requested without waiting for a fresh GitHub reading; a request awaiting approval is in motion, an unrequested one is `stalled-step` attention (`loop` class) in `master status`; a refused hand `master decide GY-N rework` names round and lateness.
 
 ### Known hotspot: src/interventions.ts
 
