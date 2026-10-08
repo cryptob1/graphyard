@@ -42,3 +42,7 @@ Executors claim (`POST /api/delivery/rollback-claim`), report `applied`/`failed`
 ## Main watch
 
 `graphyard master main-watch status` prints the unexplained commits once each; `GET /api/main-watch` returns the acknowledgements and direct-merge windows. `GRAPHYARD_MAIN_WATCH_FREEZE=true` freezes promotion until an admin runs `graphyard master main-watch acknowledge SHA --reason TEXT --admin-token-stdin` or `POST /api/main-watch/acknowledge` (`Idempotency-Key`).
+
+## Coordinator recovery
+
+The loop runs from a pinned checkout, `<install dir>/coordinator/current`. If it stalls after a self-merge or the main watch freezes, run `graphyard master recover [--to SHA] --admin-token-stdin` (repins, restarts, records `policy.coordinator.recovered`); promotion resumes and repins.
