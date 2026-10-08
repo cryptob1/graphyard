@@ -5,9 +5,10 @@ import EmbeddedPostgres from 'embedded-postgres';
 import { Engine } from '../src/engine.js';
 import { Store } from '../src/store.js';
 import type { Principal, Work } from '../src/model.js';
-import { recordAssignmentStart } from '../src/pipeline-speed.js';
+// A namespace import and a dynamic one: on a tree without this change each case still runs, and fails as a case.
+import * as speed from '../src/pipeline-speed.js';
 import { latencyBudget, latencyTargets, observeItemClock, type DaemonState } from '../src/master-daemon.js';
-import { itemClockSchema, latencySampleSchema, type LatencySample } from '../src/daemon/latency-clock.js';
+import type { LatencySample } from '../src/daemon/latency-clock.js';
 import * as daemonState from '../src/daemon/state.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -63,10 +64,10 @@ test('unit:assignment-started-at — the first lease renewal of an epoch stamps 
   // The rule itself: a renewal of another epoch never sets the start, and an assignment carried
   // forward without its claim time was not watched from its claim, so its start stays unknown.
   const other = { lastAssignment: { owner: 'w', epoch: 3, claimedAt: '2031-01-01T00:00:00Z' } } as Work;
-  recordAssignmentStart(other, 2, new Date('2031-01-01T00:01:00Z'));
+  speed.recordAssignmentStart(other, 2, new Date('2031-01-01T00:01:00Z'));
   assert.equal(other.lastAssignment!.startedAt, undefined);
   const carried = { lastAssignment: { owner: 'w', epoch: 3 } } as Work;
-  recordAssignmentStart(carried, 3, new Date('2031-01-01T00:01:00Z'));
+  speed.recordAssignmentStart(carried, 3, new Date('2031-01-01T00:01:00Z'));
   assert.equal(carried.lastAssignment!.startedAt, undefined);
 });
 
@@ -81,7 +82,8 @@ function item(overrides: Partial<Work>): Work {
     gates: [], dependencies: [], plannedFiles: ['src/split.ts'], criteria: [], stageEnteredAt: iso(0), ...overrides } as unknown as Work;
 }
 
-test('unit:latency-sample-split — the schemas live in src/daemon/latency-clock.ts, the item clock captures the epoch\'s session start, and a delivery records claim→start and start→first push beside ready→first push, each null when an endpoint is unknown', () => {
+test('unit:latency-sample-split — the schemas live in src/daemon/latency-clock.ts, the item clock captures the epoch\'s session start, and a delivery records claim→start and start→first push beside ready→first push, each null when an endpoint is unknown', async () => {
+  const { itemClockSchema, latencySampleSchema } = await import('../src/daemon/latency-clock.js');
   // The schemas moved and src/daemon/state.ts uses them from there.
   assert.equal(daemonState.itemClockSchema, itemClockSchema);
   assert.equal(daemonState.latencySampleSchema, latencySampleSchema);
@@ -121,7 +123,8 @@ test('unit:latency-sample-split — the schemas live in src/daemon/latency-clock
   assert.deepEqual([unsplit.claimToStartMs, unsplit.startToPushMs], [null, null]);
 });
 
-test('unit:first-push-breakdown-reported — latencyBudget reports launch overhead and working percentiles, and the ready→first push breach names both p90s while every other reason and the met rule are unchanged', () => {
+test('unit:first-push-breakdown-reported — latencyBudget reports launch overhead and working percentiles, and the ready→first push breach names both p90s while every other reason and the met rule are unchanged', async () => {
+  const { latencySampleSchema } = await import('../src/daemon/latency-clock.js');
   const sample = (index: number, fields: Partial<LatencySample>) => latencySampleSchema.parse({ work: `GY-${index}`, at: iso(index * minute), approvalToMergeMs: minute, mergeableToMergeMs: minute, ...fields });
   // Ten deliveries: ready→first push 25 minutes, of which launch 10 and working 14 (claim 1).
   const slow = Array.from({ length: 10 }, (_, index) => sample(index, { readyToClaimMs: minute, readyToPushMs: 25 * minute, claimToStartMs: 10 * minute, startToPushMs: 14 * minute }));
