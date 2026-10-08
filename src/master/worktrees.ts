@@ -194,20 +194,9 @@ export async function reclaimWorktrees(root: string, work: Work[], options: { id
 export const defaultWorktreeRemovalLimit = 50;
 export const worktreeInventoryFile = (root: string) => resolve(root, '.graphyard/worktree-inventory.json');
 export const worktreeReclaimAuditFile = (root: string) => resolve(root, '.graphyard/worktree-reclaim.jsonl');
-/**
- * A tree the removal pass found dirty or holding unpushed commits, kept until its working tree
- * changes again or the refs that could hold its commits move: `refs` fingerprints the remote copies
- * of its branch, the base branch and the item's candidate head as that pass saw them, so a push re-examines it.
- */
-export interface HeldWorktree { path: string; activityAt: number; reason: string; refs?: string;
-  /** When a tree Git refused is examined again (GY-1515); a dirty or unpushed hold stands until the tree or its refs change. */
-  retryAt?: string }
-/**
- * How long a tree Git refused to judge or remove is held before the pass tries it again (GY-1515).
- * On 8 October 2026 one refused `rev-list` was re-run and re-reported as a failed reclaim on every
- * pass of a backlog that ran every cycle: the refusal is now one failure, held like a dirty tree.
- */
-export const worktreeRefusalRetryMs = 24 * 60 * 60_000;
+/** A tree found dirty or holding unpushed commits, kept until its tree changes or `refs` (the remote copies of its branch, the base and its candidate head) move. */
+export interface HeldWorktree { path: string; activityAt: number; reason: string; refs?: string; retryAt?: string }
+/** How long a tree Git refused is held before it is tried again (GY-1515): one failure, then kept like a dirty tree. */ export const worktreeRefusalRetryMs = 24 * 60 * 60_000;
 /** The inventory the reclaim step last took, so `master status` never walks every tree itself. */
 export interface WorktreeInventoryCache { at: string; entries: WorktreeEntry[]; held: HeldWorktree[] }
 export interface WorktreeRemoval { path: string; key: string | null; reason: string; head: string | null }
@@ -326,8 +315,8 @@ async function removeOrphan(root: string, path: string) {
 /**
  * Remove up to `limit` reclaimable worktrees, oldest first. Each is checked before it goes: a tree
  * with uncommitted changes, or whose HEAD holds commits no remote ref and no base branch has, is
- * reported and kept, and not looked at again until its working tree changes; one Git refuses is
- * reported once and kept until worktreeRefusalRetryMs passes. Git itself refuses a
+ * reported and kept, and not looked at again until its working tree changes (one Git refuses: until
+ * worktreeRefusalRetryMs passes). Git itself refuses a
  * dirty tree without --force, which is never passed. Every removal is appended to the audit log
  * with its path, item, reason and head; `git worktree prune` then drops what the registry still
  * lists for directories that are gone. A delivered or closed item's directory that Git no longer
@@ -415,11 +404,9 @@ export async function removeReclaimableWorktrees(root: string, work: Work[], opt
       await appendFile(worktreeReclaimAuditFile(root), `${JSON.stringify({ at, action: 'worktree-remove', ...removal })}\n`)
         .catch(error => errors.push(`${candidate.path}: removed, but the audit entry could not be written: ${failureText(error)}`));
     } catch (error) {
-      // Reported once, as this pass's failure, then held: Git will refuse the same way on the next
-      // pass, and a backlog runs one every cycle. Tried again after the bound, in case the refusal cleared.
-      const retryAt = new Date(now + worktreeRefusalRetryMs).toISOString();
-      held.push({ path: candidate.path, activityAt, reason: `Git refused: ${failureText(error).slice(0, 300)}; tried again after ${retryAt}`, refs, retryAt });
-      kept.push({ path: candidate.path, key: candidate.key, reason: `Git refused: ${failureText(error).slice(0, 300)}` });
+      const retryAt = new Date(now + worktreeRefusalRetryMs).toISOString(), refused = `Git refused: ${failureText(error).slice(0, 300)}`;
+      held.push({ path: candidate.path, activityAt, reason: `${refused}; tried again after ${retryAt}`, refs, retryAt });
+      kept.push({ path: candidate.path, key: candidate.key, reason: refused });
       errors.push(`${candidate.path}: ${writeFailure(error, 'Removing a finished worktree').message.slice(0, 400)}`);
     }
   }
