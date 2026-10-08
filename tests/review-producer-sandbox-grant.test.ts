@@ -9,7 +9,7 @@ import type { Work } from '../src/model.js';
 import { loadMasterConfig, saveProducerProfile, setupMaster } from '../src/master.js';
 import { launchProducer, readProducerLedger } from '../src/producer.js';
 import { bindReviewer, launchReview, readReviewLedger, saveReviewerProfile } from '../src/reviewer.js';
-import { sessionWritablePaths, type SandboxExec } from '../src/worker-sandbox.js';
+import type { SandboxExec } from '../src/worker-sandbox.js';
 import type { FilesystemProbe } from '../src/install/worktree-root.js';
 import { expandTypedCommand, startedAtOnce } from './helpers/launch-shell.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -92,7 +92,7 @@ test('unit:review-producer-launch-git-grant — reviewer and producer Codex laun
     // A linked-worktree checkout's own admin directory is granted, with objects, and the common directory is not.
     const linked = join(reviewed.checkout, 'checkout');
     git(main, 'worktree', 'add', '-q', '--detach', linked, 'HEAD');
-    const paths = sessionWritablePaths(linked, common);
+    const paths = (await import('../src/worker-sandbox.js')).sessionWritablePaths(linked, common);
     assert.ok(paths.includes(git(linked, 'rev-parse', '--absolute-git-dir')), `the checkout's own git dir is granted: ${paths.join(' ')}`);
     assert.ok(paths.includes(join(common, 'objects')));
     assert.ok(!paths.includes(common));
