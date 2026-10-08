@@ -39,6 +39,9 @@ test('unit:daemon-state-ignores-unknown-keys drops undeclared keys, still reject
     await writeFile(file, JSON.stringify({ ...base, mainWatch: {}, cycle: 'seven' }));
     await assert.rejects(readDaemonState(root, master));
 
+    await writeFile(file, JSON.stringify({ ...base, constructor: 1, toString: 2 }));
+    assert.equal((await readDaemonState(root, master)).cycle, 7);
+
     await writeFile(file, JSON.stringify({ ...base, mainWatch: { at: 'x' } }));
     await writeDaemonState(master, await readDaemonState(root, master));
     assert.equal('mainWatch' in JSON.parse(await readFile(file, 'utf8')), false);
