@@ -29,6 +29,6 @@ CI runs full suite; workers run build, `graphyard verify GY-N` (own proofs), sub
 
 ## Ship in under thirty minutes
 
-[Speed](master-agent-reference.md#pipeline-speed), [proofs in CI](github.md#proofs-in-ci). `graphyard diagnose GY-N` names holds; `base-behind`/`base-conflict`: rework or, docs-only, [docs-sync](development.md#documentation-that-rarely-conflicts) (own checkout). Polls save only on moved submission, candidate, policy or queue tip; three unsaved escalate once (`observation.no-save-escalated`, `observation-starved` attention, `/api/status` `starvedJobs`), retrying every 20s.
+[Speed](master-agent-reference.md#pipeline-speed), [proofs in CI](github.md#proofs-in-ci). `graphyard diagnose GY-N` names holds; `base-behind`/`base-conflict`: rework or, docs-only, [docs-sync](development.md#documentation-that-rarely-conflicts) (own checkout). Polls save only on moved submission, candidate, policy or queue tip; three unsaved escalate once (`observation.no-save-escalated`, `observation-starved` attention, `/api/status` `starvedJobs`).
 
-Stalled rows name remedies (`src/stall-remedies.ts`, else generic): App permission holds run `master browser installation-accept` (`app-permissions` first if needed) once per unchanged run (`POST /api/actions/:id/remedy`), refusals escalate once, unretried; full roles: `master registry role set ROLE ACCOUNT… --concurrency N` or session ending.
+Stalled rows name remedies (`src/stall-remedies.ts`, else generic): App permission holds run `master browser installation-accept` (`app-permissions` first if needed) once per unchanged run (`POST /api/actions/:id/remedy`); refusals escalate once; full roles: `master registry role set ROLE ACCOUNT… --concurrency N` or session ending.
