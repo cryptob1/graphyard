@@ -10,7 +10,7 @@ import EmbeddedPostgres from 'embedded-postgres';
 import { daemonStateSchema, daemonSummary, emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { daemonEffects } from '../src/daemon/effects.js';
 import { emptyMergeWriterState, mergeRecordKey, mergeWriterIdle, mergeWriterReads, mergeWriterReworkKey, mergeWriterStateSchema, mergeWriterSummary, snapshotLedger, trialFailureRework, type MergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
-import { baseMovedReason, countProofCases, criterionProofs, deployKeySshCommand, firstParentHolds, mergeOne, mergeQueue, nextToMerge, proofTestFiles, pushArgs, pushEnvironment, pushInheritedVariables, reconcileIntents, runMergeTrial, trialFailureReason, unpushedIntentReason, type MergePorts, type MergeRecordEvent, type MergeTrialRun } from '../src/merge-writer/executor.js';
+import { baseMovedReason, countProofCases, criterionProofs, deployKeySshCommand, firstParentHolds, mergeOne, mergeQueue, nextToMerge, proofTestFiles, pushArgs, pushEnvironment, pushInheritedVariables, reconcileIntents, runMergeTrial, staleLeaseRejection, trialFailureReason, unmovedTipReason, unpushedIntentReason, type MergePorts, type MergeRecordEvent, type MergeTrialRun } from '../src/merge-writer/executor.js';
 import { defaultDeployKeyFile, defaultMergeWriterRetrials, mergeWriterSettings, mergeWriterSettingsSchema } from '../src/master/merge-writer-settings.js';
 import { deliveredReason, otherHeadRefusal, unheldShaRefusal, unintendedShaRefusal } from '../src/server/merge-record.js';
 import { mergeWriterApprover, mergeWriterTrialGround, reworkGround, trialFailedGround, trialFailurePrefix } from '../src/model/rework-ground.js';
@@ -160,7 +160,7 @@ test('unit:executor-intent-recorded-before-push — mergeOne records intent, tri
   await assert.rejects(mergeOne(clean.ports, item({ id: 'w9', key: 'GY-9' })), /no submitted candidate/);
 });
 
-test('unit:executor-stale-retrial-bounded — a push the tip moved under re-reads the tip and re-trials the head on it, at most run.mergeWriter.retrials times, then records merge.refused `base moved N times` and leaves the head queued; one rejection followed by a success merges on the second tip', async () => {
+test('unit:executor-stale-retrial-bounded — a push the tip moved under re-reads the tip and re-trials the head on it, at most run.mergeWriter.retrials times, then records merge.refused `base moved N times` and leaves the head queued; one rejection followed by a success merges on the second tip; a rejection the re-read tip did not move under is no moved tip: it is refused naming the unmoved tip without a re-trial and stays queued', async () => {
   const work = submitted(1, 10);
   const stale = fakePorts({ pushes: ['rejected'], tips: [tip, newerTip, sha('tip3'), sha('tip4'), sha('tip5')] });
   const outcome = await mergeOne(stale.ports, work);
@@ -174,9 +174,19 @@ test('unit:executor-stale-retrial-bounded — a push the tip moved under re-read
   const refusedState = ledgerState('GY-1', 1, 'refused', { refusal: { kind: 'merge', reason: baseMovedReason(4) } });
   assert.equal(nextToMerge([work], { 'GY-1': refusedState }, start)?.key, 'GY-1');
   assert.equal(trialFailedGround({ ...work, mergeLedger: refusedState } as Work), null, 'a base-moved refusal grounds no rework');
-  // A bound of zero re-trials refuses on the first rejection.
-  const none = fakePorts({ pushes: ['rejected'] }); none.ports.retrials = 0;
+  // A bound of zero re-trials refuses on the first rejection the tip moved under.
+  const none = fakePorts({ pushes: ['rejected'], tips: [tip, newerTip] }); none.ports.retrials = 0;
   assert.deepEqual(await mergeOne(none.ports, work), { outcome: 'requeued', reason: baseMovedReason(1), pushes: 1 });
+  // A rejection while the tip stood still (a branch rule, a hook) is not a moved tip: no re-trial on the same tip, no `base moved`, the head queued for a later cycle.
+  const unmoved = fakePorts({ pushes: ['rejected'] });
+  assert.deepEqual(await mergeOne(unmoved.ports, work), { outcome: 'requeued', reason: unmovedTipReason('main', tip), pushes: 1 });
+  assert.deepEqual(unmoved.counts(), { trials: 1, pushes: 1 }, 'the unmoved tip is re-read, never re-trialled');
+  assert.deepEqual(unmoved.calls.filter(call => call !== 'fetch'), [`merge:${sha('head1').slice(0, 6)}:${tip.slice(0, 6)}`, 'record:intent', `trial:${sha(`merge:${sha('head1')}:${tip}`).slice(0, 6)}`, 'record:trial', `push:${sha(`merge:${sha('head1')}:${tip}`).slice(0, 6)}:${tip.slice(0, 6)}`, 'record:refused']);
+  assert.equal(unmoved.calls.filter(call => call === 'fetch').length, 2, 'the tip is read once before the merge and once after the rejection');
+  assert.match(unmovedTipReason('main', tip), /^push rejected though main still stood at /);
+  const unmovedState = ledgerState('GY-1', 1, 'refused', { refusal: { kind: 'merge', reason: unmovedTipReason('main', tip) } });
+  assert.equal(nextToMerge([work], { 'GY-1': unmovedState }, start)?.key, 'GY-1', 'the head stays queued');
+  assert.equal(trialFailedGround({ ...work, mergeLedger: unmovedState } as Work), null, 'an unmoved-tip refusal grounds no rework');
   // One rejection then a success: the merge lands on the second tip, with its lease on that tip.
   const once = fakePorts({ pushes: ['rejected', 'pushed'], tips: [tip, newerTip] });
   const merged = await mergeOne(once.ports, work);
@@ -193,7 +203,7 @@ function recordingRun(answers: (command: string, args: string[], options?: { env
 }
 const childFailure = (status: number, stdout: string, stderr: string) => Object.assign(new Error(`exit ${status}`), { status, stdout, stderr });
 
-test('unit:executor-push-leased-deploy-key-only — the push is `git push origin --force-with-lease=refs/heads/BASE:<baseTip> <mergeSha>:refs/heads/BASE` with GIT_SSH_COMMAND naming the deploy key alone (IdentitiesOnly, accept-new) and an allowlisted child environment: no token, askpass, cloud secret, agent socket or Graphyard variable reaches it; a stale-lease rejection answers rejected, any other failure throws', async () => {
+test('unit:executor-push-leased-deploy-key-only — the push is `git push origin --force-with-lease=refs/heads/BASE:<baseTip> <mergeSha>:refs/heads/BASE` with GIT_SSH_COMMAND naming the deploy key alone (IdentitiesOnly, accept-new) and an allowlisted child environment: no token, askpass, cloud secret, agent socket or Graphyard variable reaches it; only git\'s stale-lease wording (`stale info`) answers rejected, a remote\'s own rejection (a branch rule, a hook) and any other failure throw', async () => {
   const mergeSha = sha('merge1');
   const environment = { PATH: '/usr/bin', HOME: '/home/loop', LANG: 'C.UTF-8', GH_TOKEN: 'gh', GITHUB_TOKEN: 'ghs', GH_ENTERPRISE_TOKEN: 'ghe', GIT_ASKPASS: '/usr/bin/leak-askpass', AWS_SECRET_ACCESS_KEY: 'aws', NPM_TOKEN: 'npm', SSH_AUTH_SOCK: '/run/agent.sock', GIT_SSH_COMMAND: 'ssh -i /home/loop/.ssh/id_ed25519', GRAPHYARD_TOKEN_FILE: '/outside/token', GRAPHYARD_COORDINATOR_URL: 'https://x', HERDR_ENV: '1', GH_CONFIG_DIR: '/home/loop/.config/gh' };
   const env = pushEnvironment('/keys/deploy', environment);
@@ -204,9 +214,10 @@ test('unit:executor-push-leased-deploy-key-only — the push is `git push origin
   assert.ok(!pushInheritedVariables.some(name => /TOKEN|SECRET|KEY|PASS|SOCK|AUTH/i.test(name)), 'the allowlist names no credential-shaped variable');
   assert.equal(env.GIT_TERMINAL_PROMPT, '0', 'the child never prompts for a credential');
   assert.deepEqual(pushArgs('main', tip, mergeSha), ['push', 'origin', `--force-with-lease=refs/heads/main:${tip}`, `${mergeSha}:refs/heads/main`]);
-  let answer: 'ok' | 'stale' | 'broken' = 'ok';
+  let answer: 'ok' | 'stale' | 'broken' | 'rule' = 'ok';
+  const ruleRejection = `To github.com:owner/project.git\n ! [remote rejected] ${mergeSha.slice(0, 7)} -> main (protected branch hook declined)\nerror: failed to push some refs to 'github.com:owner/project.git'`;
   const git = recordingRun((command, args) => {
-    if (args.includes('push')) { if (answer === 'stale') throw childFailure(1, '', ` ! [rejected]        ${mergeSha.slice(0, 7)} -> main (stale info)\nerror: failed to push some refs to 'origin'`); if (answer === 'broken') throw childFailure(128, '', 'fatal: Could not read from remote repository.'); return ''; }
+    if (args.includes('push')) { if (answer === 'stale') throw childFailure(1, '', ` ! [rejected]        ${mergeSha.slice(0, 7)} -> main (stale info)\nerror: failed to push some refs to 'origin'`); if (answer === 'rule') throw childFailure(1, '', ruleRejection); if (answer === 'broken') throw childFailure(128, '', 'fatal: Could not read from remote repository.'); return ''; }
     if (args.includes('rev-parse')) return `${tip}\n`;
     return '';
   });
@@ -220,6 +231,10 @@ test('unit:executor-push-leased-deploy-key-only — the push is `git push origin
   assert.equal(await reads.push(mergeSha, tip), 'rejected', 'a lease the tip moved under is a rejection, not a failure');
   answer = 'broken';
   await assert.rejects(reads.push(mergeSha, tip), (error: { status?: number; stderr?: string }) => error.status === 128 && /Could not read from remote repository/.test(error.stderr ?? ''), 'any other failure is thrown as it came');
+  answer = 'rule';
+  await assert.rejects(reads.push(mergeSha, tip), (error: { status?: number; stderr?: string }) => error.status === 1 && /protected branch hook declined/.test(error.stderr ?? ''), "a remote's own rejection names no stale lease: it is thrown, never re-trialled as a moved tip");
+  assert.equal(staleLeaseRejection(` ! [rejected]        abc1234 -> main (stale info)\nerror: failed to push some refs`), true);
+  for (const other of [ruleRejection, ' ! [remote rejected] main -> main (pre-receive hook declined)', ' ! [rejected]        main -> main (fetch first)', ' ! [rejected]        main -> main (non-fast-forward)', 'fatal: Could not read from remote repository.', 'error: failed to push some refs: --force-with-lease']) assert.equal(staleLeaseRejection(other), false, `${other.split('\n')[0]} is no stale lease`);
   assert.equal(reads.retrials, 3); assert.equal(reads.baseBranch, 'main');
   assert.equal(await reads.fetch(), tip);
   const fetch = git.calls.find(call => call.args.includes('fetch'))!;
@@ -285,7 +300,7 @@ function effectsFor(world: { work: () => Work[] | Promise<Work[]>; now: () => nu
 /** Reads over fake ports, switched by `merger`. */
 const fakeReads = (ports: MergePorts, merger: () => Promise<'github' | 'control-plane'>): MergeWriterReads => ({ ...ports, merger });
 
-test('unit:merge-writer-step-off-in-github-mode — the step runs right after the merge step and does nothing while the recorded merger is github (no git, no push, an emptied queue) or without its reads; under control-plane it reconciles open intents, reports the queue and merges one head beside the cycle, then requests the rework a failed trial grounds', async () => {
+test('unit:merge-writer-step-off-in-github-mode — the step runs right after the merge step and does nothing while the recorded merger is github (no git, no push, an emptied queue) or without its reads; under control-plane it reconciles open intents, reports the queue and merges one head beside the cycle, then requests the rework a failed trial grounds; the merger is read afresh before every merge decision, so a switch to github stops the next merge', async () => {
   const work = [submitted(2, 5), submitted(1, 30)], now = () => start;
   const off = fakePorts();
   const state = emptyDaemonState(config);
@@ -337,11 +352,23 @@ test('unit:merge-writer-step-off-in-github-mode — the step runs right after th
   assert.deepEqual(reworked.mergeWriter.reworks, [], 'a confirmed request owes nothing');
   assert.ok(refusedCycle.actions.some(action => action.state === 'done' && /^Requested the rework the merge writer's refusal of GY-1 head/.test(action.detail)));
   // A base that moved past the bound leaves the head queued and asks for no rework.
-  const moved = fakePorts({ pushes: ['rejected'] });
+  const moved = fakePorts({ pushes: ['rejected'], tips: [tip, newerTip, sha('tip3'), sha('tip4'), sha('tip5')] });
   const requeued = emptyDaemonState(config); decided.length = 0;
   const movedEffects = effectsFor({ work: () => work, now, mergeWriter: fakeReads(moved.ports, async () => 'control-plane'), decide: async (target, action, reason, input) => { decided.push({ key: target.key, action, reason, input }); return { id: randomUUID() }; } });
   await runCycle(config, requeued, movedEffects, now); await mergeWriterIdle(requeued); await runCycle(config, requeued, movedEffects, now);
   assert.deepEqual([decided, requeued.mergeWriter.refusals[0]?.reason], [[], baseMovedReason(4)]);
+  // The recorded merger is read afresh for every merge decision: switched to github while a merge is in flight, the next cycle records that merge, empties the queue and starts no other.
+  const switching = fakePorts();
+  let merger: 'github' | 'control-plane' = 'control-plane';
+  const switched = emptyDaemonState(config);
+  const switchingEffects = effectsFor({ work: () => switching.world(work), now, mergeWriter: fakeReads(switching.ports, async () => merger) });
+  await runCycle(config, switched, switchingEffects, now);
+  assert.equal(inFlightKey(switched), 'GY-1');
+  await mergeWriterIdle(switched);
+  merger = 'github';
+  const afterSwitch = await runCycle(config, switched, switchingEffects, now);
+  assert.ok(afterSwitch.actions.some(action => action.state === 'done' && /^Merged GY-1 head/.test(action.detail)), 'the merge already in flight is recorded');
+  assert.deepEqual([switched.mergeWriter.queue, switched.mergeWriter.inFlight, switching.events.filter(event => event.kind === 'intent').length], [[], null, 1], 'no merge of GY-2 starts under the github merger, whatever the cycle before read');
 });
 
 test('integration:executor-trial-failure-rework-no-approver — a rework request the plane fails is kept on state.mergeWriter.reworks and asked for again every cycle until the server confirms it, exactly once; one the snapshot shows applied (the item reworked, on a new head or done) is settled without a request; without the decision effects it waits, naming the command', async () => {
@@ -405,9 +432,13 @@ test('unit:merge-writer-status — master status and the daemon summary show mer
   const git = recordingRun(() => `${tip}\n`);
   const credentialFile = join(await temporaryDirectory('merge-writer-credential'), 'coordinator.token');
   await writeFile(credentialFile, `${'c'.repeat(48)}\n`, { mode: 0o600 });
-  const wired = daemonEffects('/coordinator', { ...config, credentialFile }, { snapshot: async () => ({ work: [], now: iso(start) }), mutate: async (path, data, key) => { posted.push({ path, data, key }); return {}; }, run: git.run, fetcher: (async () => new Response(JSON.stringify({ mergeWriter: { merger: 'control-plane' } }), { status: 200 })) as typeof fetch });
+  let recordedMerger: 'github' | 'control-plane' = 'control-plane', modeReads = 0;
+  const wired = daemonEffects('/coordinator', { ...config, credentialFile }, { snapshot: async () => ({ work: [], now: iso(start) }), mutate: async (path, data, key) => { posted.push({ path, data, key }); return {}; }, run: git.run, fetcher: (async () => { modeReads++; return new Response(JSON.stringify({ mergeWriter: { merger: recordedMerger } }), { status: 200 }); }) as typeof fetch });
   assert.ok(wired.mergeWriter, 'the loop wires the merge writer reads');
   assert.equal(await wired.mergeWriter!.merger(), 'control-plane');
+  recordedMerger = 'github';
+  assert.equal(await wired.mergeWriter!.merger(), 'github', 'the recorded merger is read from the plane for every decision, never served from a cache');
+  assert.equal(modeReads, 2);
   const event: MergeRecordEvent = { kind: 'pushed', mergeSha: sha('merge1'), pushedAt: iso(start) };
   await wired.mergeWriter!.record(item({ id: 'w1', key: 'GY-1' }), event);
   assert.deepEqual(posted, [{ path: 'work/w1/merge-record', data: event, key: mergeRecordKey({ id: 'w1' }, event) }]);

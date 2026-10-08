@@ -9,7 +9,7 @@ Keep cycling: `master status`; `master run` dispatches (`schedule.order`); merge
 
 `master run` is unit `graphyard-master.service` ([supervision](onboarding.md#the-loop-must-be-supervised)); on `daemon.liveness` `stalled`/`absent`: `systemctl --user restart graphyard-master`, never from a [dirty or non-forward checkout](master-agent-sessions.md#the-coordinator-checkout-is-confined-at-the-os-level).
 
-**Cycle cadence.** The loop sleeps `run.intervalSeconds`, at most 30 s while anything is actionable. The dispatcher tick wakes it early, once per new subject its next cycle acts on, no sooner than `run.dispatchIntervalSeconds` after the cycle (`woken Ns before the … wait ended: REASONS`).
+**Cycle cadence.** The loop sleeps `run.intervalSeconds`, at most 30 s while anything is actionable. The dispatcher tick wakes it early, once per new subject, no sooner than `run.dispatchIntervalSeconds` after the cycle (`woken Ns before the … wait ended: REASONS`), never cutting a failed cycle's backoff.
 
 ### System-driven items
 
@@ -53,4 +53,4 @@ A passing producer records `"exercise"`: rerun without the criterion's behaviour
 
 GitHub merges heads whose gates pass under the `github` merger ([delivery](delivery.md#one-delivery-path)), the [merge writer](delivery-redesign.md#merge-writer) under `control-plane`; failing heads need two-party `master decide GY-N merge`; skew: `… deploy main first`; a check the base head fails too is a [base failure](development.md#base-failures). Unresolved review threads are the reviewer's inputs, not merge blockers (`reviewThreads`); approvals list each under `Resolved threads:`, `Follow-up threads:` or `Overridden threads:` ([rules](coordination.md#review-gate-verdicts-not-threads)).
 
-**Shadow gate failures.** Runner records name failing test files, failing the verdict; a runner exit naming none is a host failure: a diagnostic record, bounded retries, one attention line, never a failing verdict or `shadow-only-fail`. Groups of 40 files run the exact trial merge.
+**Shadow gate failures.** Runner records name failing test files, failing the verdict; a runner exit naming none is a host failure: diagnostic record, bounded retries, one attention line, never a failing verdict or `shadow-only-fail`. Groups of 40 files run the exact trial merge.
