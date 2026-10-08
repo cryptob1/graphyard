@@ -79,7 +79,9 @@ export function appManifest(repository: string, deployment: string, callback: st
     redirect_url: `${callback}/created`, setup_url: `${callback}/installed`,
     // Exactly the declared control-plane set; the merge queue's Contents: write lives there.
     default_permissions: requiredPermissions(controlPlanePermissions),
-    default_events: [...controlPlaneEvents] };
+    // GitHub refuses events without a hook ("Hook url cannot be blank"), so a local install's
+    // control-plane App subscribes to nothing and polls instead, like its reviewer (GY-1508).
+    default_events: publiclyReachable(url.origin) ? [...controlPlaneEvents] : [] };
 }
 export interface AppPermissionInspection {
   role: 'control-plane' | 'reviewer'; reviewer: string | null; appId: number; slug: string; installationId: number | null;

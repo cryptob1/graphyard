@@ -4,7 +4,7 @@ import { defineCommands } from './registry.js';
 import { cycleBudget } from './master-status.js';
 import { masterInit } from './master-init.js';
 import { masterSetupCommand } from './master-setup.js';
-import { loadStoredMasterConfig } from '../master.js';
+import { loadStoredMasterConfig, masterInstructions } from '../master.js';
 import { sessionCommands } from './session-commands.js';
 import { registryHelp } from './master-registry.js';
 import { executorsHelp } from './master-executors.js';
@@ -92,8 +92,8 @@ export const masterCommands = defineCommands([
     async run(context) {
       const { id } = context;
       const root = context.repositoryRoot();
-      // The guide's first line is its docs-index entry, not guide body.
-      if (id === 'guide') return console.log((await readFile(fileURLToPath(new URL('../../docs/master-agent.md', import.meta.url)), 'utf8')).replace(/^<!-- page:[^\n]*\n/, ''));
+      // The master's role instructions lead the guide; the guide file's first line is its docs-index entry, not guide body.
+      if (id === 'guide') return console.log(`${masterInstructions}\n` + (await readFile(fileURLToPath(new URL('../../docs/master-agent.md', import.meta.url)), 'utf8')).replace(/^<!-- page:[^\n]*\n/, ''));
       if (id === 'init') return masterInit(context, root);
       if (id === 'setup') return masterSetupCommand(context, root, await loadStoredMasterConfig(root));
       const session = await openMasterSession(context, root);
