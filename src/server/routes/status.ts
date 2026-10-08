@@ -251,7 +251,7 @@ export const statusRoutes = defineRoutes('status', [
       return { timelines: operatorVisible(await readPipelineTimelines(services.engine.store)) };
     },
   },
-  { method: 'GET', path: '/api/work', handle:async ({ services, operatorVisible }) => operatorVisible(await services.engine.store.list()) },
+  { method: 'GET', path: '/api/work', handle: async ({ services, operatorVisible }) => operatorVisible(await services.engine.store.list()) },
   {
     // One item's whole document, history included, by id or display key (GY-422): what a reader
     // asks for when the snapshot's summary of a settled delivery is not enough.
