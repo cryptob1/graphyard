@@ -568,6 +568,28 @@ test('unit:up-resume-from-state — a resumed up takes --repo and --provider fro
   assert.throws(() => upRequestFromArgs(['--provider', 'compose'], recordedUp(root)), /--provider compose conflicts with hetzner/);
 });
 
+test('unit:up-local-flag — up --local is --provider local, recorded in .graphyard/up.json and passed to install; it is refused beside a different --provider, and the default provider is unchanged', async () => {
+  const { recordedUp, runUp, upRequestFromArgs, upStateFile } = await up();
+  assert.equal(upRequestFromArgs(['--repo', 'acme/shop', '--local']).provider, 'local');
+  assert.equal(upRequestFromArgs(['--repo', 'acme/shop', '--local', '--provider', 'local']).provider, 'local', 'the same provider named twice is accepted');
+  assert.throws(() => upRequestFromArgs(['--repo', 'acme/shop', '--local', '--provider', 'compose']), /--local means --provider local; it cannot be combined with --provider compose/);
+  assert.equal(upRequestFromArgs(['--repo', 'acme/shop']).provider, 'compose', 'the default provider is unchanged');
+  assert.equal(upRequestFromArgs(['--repo', 'acme/shop', '--provider', 'hetzner']).provider, 'hetzner');
+
+  const root = await temporaryDirectory('graphyard-up-local');
+  const w = world({ app: true, reviewer: true, accounts: true, onboardingMerged: true });
+  const result = await runUp(upRequestFromArgs(['--repo', 'acme/shop', '--local']), dependencies(w, root, []));
+  assert.equal(result.exitCode, 0, result.next);
+  const installs = w.calls.filter(args => args[0] === 'install');
+  assert.ok(installs.length >= 2 && installs.every(args => args[args.indexOf('--provider') + 1] === 'local'), 'install --plan and --apply both run with --provider local');
+  assert.equal(JSON.parse(await readFile(upStateFile(root), 'utf8')).provider, 'local', 'recorded in .graphyard/up.json');
+  assert.deepEqual(recordedUp(root), { repository: 'acme/shop', provider: 'local' });
+  // A resumed run keeps it; --local again agrees with it, and another provider is refused against it.
+  assert.equal(upRequestFromArgs(['--local'], recordedUp(root)).provider, 'local');
+  assert.equal(upRequestFromArgs([], recordedUp(root)).provider, 'local');
+  assert.throws(() => upRequestFromArgs(['--provider', 'compose'], recordedUp(root)), /--provider compose conflicts with local/);
+});
+
 test('unit:up-signal-forwarding — SIGINT or SIGTERM to up reaches its install child; both exit and the App page port is freed', async () => {
   const root = await temporaryDirectory('graphyard-up-signals');
   // The stub stands in for `graphyard install`: its plan passes preflight; --apply serves an App page and waits forever.

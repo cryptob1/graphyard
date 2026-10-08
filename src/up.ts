@@ -650,7 +650,8 @@ export const upUsage = [
   '',
   'Options:',
   '  --repo OWNER/NAME          the repository to set up; a rerun reuses the recorded one',
-  '  --provider NAME            compose (default), railway or hetzner',
+  '  --provider NAME            compose (default), railway, hetzner or local',
+  '  --local                    --provider local: embedded Postgres on this machine, no Docker',
   '  --agent                    run every step non-interactively, JSON events on stderr; hand off only device approvals',
   '  --reviewer NAME            the reviewer App and agent runtime (default claude)',
   '  --master NAME              the master agent runtime, claude or codex (default claude)',
@@ -723,7 +724,7 @@ export function recordedUp(root: string): { repository: string; provider: string
 /** The options `graphyard up` parses; upUsage gives each one line (GY-1510), and --sudo-code is read before them. */
 export const upOptions = { repo: { type: 'string' }, provider: { type: 'string' }, agent: { type: 'boolean' }, json: { type: 'boolean' }, reviewer: { type: 'string' }, master: { type: 'string' }, goal: { type: 'string' }, 'browser-profile': { type: 'string' },
   'confirm-price': { type: 'string' }, 'max-monthly': { type: 'string' }, 'ssh-key': { type: 'string' }, 'ssh-host': { type: 'string' }, 'ssh-user': { type: 'string' },
-  'reuse-app': { type: 'string', multiple: true }, 'github-mobile': { type: 'boolean' }, wait: { type: 'string' }, 'no-wait': { type: 'boolean' }, 'share-tailnet': { type: 'boolean' } } as const;
+  'reuse-app': { type: 'string', multiple: true }, 'github-mobile': { type: 'boolean' }, wait: { type: 'string' }, 'no-wait': { type: 'boolean' }, 'share-tailnet': { type: 'boolean' }, local: { type: 'boolean' } } as const;
 
 /**
  * `graphyard up`'s flags. With a run RECORDED in this checkout, an omitted --repo or --provider is
@@ -731,14 +732,17 @@ export const upOptions = { repo: { type: 'string' }, provider: { type: 'string' 
  */
 export function upRequestFromArgs(args: string[], recorded: { repository: string; provider: string } | null = null): UpRequest {
   const { values } = parseArgs({ args, options: upOptions, allowPositionals: false });
-  for (const [flag, given, kept] of [['--repo', values.repo, recorded?.repository], ['--provider', values.provider, recorded?.provider]] as const) {
+  // --local is --provider local (GY-1500): the control plane on embedded Postgres on this machine, no Docker.
+  if (values.local && values.provider !== undefined && values.provider !== 'local') throw new Error(`graphyard up --local means --provider local; it cannot be combined with --provider ${values.provider}`);
+  const provider = values.local ? 'local' : values.provider;
+  for (const [flag, given, kept] of [['--repo', values.repo, recorded?.repository], ['--provider', provider, recorded?.provider]] as const) {
     if (given !== undefined && kept !== undefined && given !== kept) throw new Error(`graphyard up ${flag} ${given} conflicts with ${kept}, which the run recorded in .graphyard/up.json resumes; omit ${flag} (or pass ${kept}) to resume it, or remove .graphyard/up.json to start over for ${given}`);
   }
   const repository = values.repo ?? recorded?.repository;
-  if (!repository || !/^[\w.-]+\/[\w.-]+$/.test(repository)) throw new Error('Use graphyard up --repo OWNER/NAME [--provider compose|railway|hetzner] [--agent]');
+  if (!repository || !/^[\w.-]+\/[\w.-]+$/.test(repository)) throw new Error('Use graphyard up --repo OWNER/NAME [--provider compose|railway|hetzner|local | --local] [--agent]');
   const minutes = values.wait === undefined ? null : Number(values.wait);
   if (minutes !== null && (!Number.isSafeInteger(minutes) || minutes < 1 || minutes > 1_440)) throw new Error('Use --wait with whole minutes from 1 to 1440');
-  return { repository, provider: values.provider ?? recorded?.provider ?? 'compose', agent: !!values.agent, reviewer: values.reviewer ?? 'claude', master: values.master ?? 'claude',
+  return { repository, provider: provider ?? recorded?.provider ?? 'compose', agent: !!values.agent, reviewer: values.reviewer ?? 'claude', master: values.master ?? 'claude',
     goalFile: values.goal ?? null, browserProfile: values['browser-profile'] ?? null,
     install: { confirmPrice: values['confirm-price'] ?? null, maxMonthly: values['max-monthly'] ?? null, sshKey: values['ssh-key'] ?? null, sshHost: values['ssh-host'] ?? null, sshUser: values['ssh-user'] ?? null },
     ...(values['reuse-app']?.length ? { reuseApps: values['reuse-app'] } : {}), ...(values['github-mobile'] ? { sudo: 'mobile' as const } : {}),

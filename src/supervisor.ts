@@ -209,7 +209,8 @@ export function herdrSessionProbe(env: NodeJS.ProcessEnv = process.env, run: (co
 async function postAssignment(url: string, token: string, path: string, body: unknown) {
   const response = await fetch(`${url.replace(/\/+$/, '')}/api/${path}`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() }, body: JSON.stringify(body), signal: AbortSignal.timeout(15_000) });
   const text = await response.text();
-  if (!response.ok) throw new Error(`${path} refused: ${text.slice(0, 200)}`);
+  // The status rides on the error, so a refusal (a 409 after `complete`) is final and a deploy's 5xx is retried (GY-1506).
+  if (!response.ok) throw Object.assign(new Error(`${path} refused: ${text.slice(0, 200)}`), { status: response.status, confirmedRefusal: response.status < 500 && ![408, 429].includes(response.status) });
 }
 
 /**
@@ -230,7 +231,8 @@ export function assignmentSurrender(epoch: number, argv: string[] = process.argv
   const url = env.GRAPHYARD_URL, token = env.GRAPHYARD_TOKEN;
   if (!assignment || Number(assignment.epoch) !== epoch || !url || !token) return undefined;
   return async (cause: string) => {
-    await post(url, token, `work/${assignment.key}/release`, { epoch, cause: `Watch supervisor ended attempt ${epoch}: ${cause}`.slice(0, 2000) });
+    const body = { epoch, cause: `Watch supervisor ended attempt ${epoch}: ${cause}`.slice(0, 2000) };
+    await throughRestart(() => post(url, token, `work/${assignment.key}/release`, body), performance.now() + controlPlaneRestartWindowMs);
   };
 }
 
@@ -277,6 +279,54 @@ export function renewalGraceMs(error: unknown): number | null {
 }
 
 /**
+ * How long a supervisor keeps retrying a control-plane call it cannot do without — the item
+ * lookup, the containment quarantine and launch, the first renewal, the settlement — through a
+ * transient failure (GY-1506). A deploy restarts the server for about a minute, answering 502s,
+ * dropped connections and "Startup validation has not completed; retry shortly"; three tries
+ * 100 ms apart gave up inside it, the worker never launched and its lease lapsed as a loss.
+ */
+export const controlPlaneRestartWindowMs = 90_000;
+/**
+ * Whether a failed control-plane call is the restart a retry outlasts (GY-1506): a 5xx, 408 or 429,
+ * a 4xx without the server's own error body (a proxy's page), or a call that never got an answer —
+ * fetch's TypeError for a refused or dropped connection ("fetch failed", "terminated"), a timeout,
+ * or a body that was not the server's JSON. The server's own refusal, the 409 every lease refusal
+ * carries, a definite failure, or any other error is final.
+ */
+export function transientControlPlaneFailure(error: unknown) {
+  if (!error || typeof error !== 'object') return false;
+  const { confirmedRefusal, definite, status } = error as { confirmedRefusal?: unknown; definite?: unknown; status?: unknown };
+  if (definite === true || confirmedRefusal === true) return false;
+  if (typeof status === 'number') return status !== 409 && status >= 400;
+  return error instanceof TypeError || error instanceof SyntaxError || ['TimeoutError', 'AbortError'].includes((error as Error).name);
+}
+/**
+ * Run one control-plane call, retrying a transient failure with backoff until `until` (a
+ * `performance.now()` deadline) passes (GY-1506). Any other failure is thrown at once; the last
+ * transient one is thrown once the window closes.
+ */
+export async function throughRestart<T>(call: () => Promise<T>, until: number, options: { retryMs?: number; retryMaxMs?: number } = {}): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    try { return await call(); }
+    catch (error) {
+      const wait = Math.min((options.retryMs ?? 1000) * 2 ** attempt, options.retryMaxMs ?? 10_000, until - performance.now());
+      if (!transientControlPlaneFailure(error) || wait <= 0) throw error;
+      console.error(`Graphyard control plane is unavailable (${(error instanceof Error ? error.message : String(error)).slice(0, 300)}); retrying in ${Math.round(wait)} ms.`);
+      await delay(wait);
+    }
+  }
+}
+type ControlPlaneApi = (path: string, data?: unknown, requestId?: string) => Promise<any>;
+/**
+ * The CLI's `api` with each call retried through a control-plane restart until `until()` (GY-1506).
+ * A call keeps one idempotency key across its retries, so a mutation the server applied before the
+ * connection dropped is answered from its receipt rather than applied twice.
+ */
+export function restartTolerantApi(api: ControlPlaneApi, until: () => number, options: { retryMs?: number; retryMaxMs?: number } = {}): ControlPlaneApi {
+  return (path, data, requestId = process.env.GRAPHYARD_REQUEST_ID ?? randomUUID()) => throughRestart(() => api(path, data, requestId), until(), options);
+}
+
+/**
  * The one line `watch` (src/cli/workspace.ts) prints before its first control-plane call, naming the
  * item and epoch from its argv; the launcher quotes it as the starting detail of a supervisor still
  * setting up (GY-1033). \`supervise\` itself never prints it: it lives here, beside the supervisor the
@@ -302,7 +352,7 @@ export interface SupervisedQuarantine {
   report?: (failure: ContainmentShutdownFailure) => Promise<unknown>;
 }
 // The deadline uses elapsed local time and server-reported duration, not synchronized clocks.
-export async function supervise(command: string, args: string[], epoch: number, renew: () => Promise<Renewal>, options: { intervalMs?: number; graceMs?: number; shutdownPollMs?: number; shutdownTimeoutMs?: number; safetyMarginMs?: number; retryMs?: number; retryMaxMs?: number; detached?: boolean; containment?: Containment; platform?: NodeJS.Platform; session?: SupervisedSession; quarantine?: SupervisedQuarantine } = {}) {
+export async function supervise(command: string, args: string[], epoch: number, renew: () => Promise<Renewal>, options: { intervalMs?: number; graceMs?: number; shutdownPollMs?: number; shutdownTimeoutMs?: number; safetyMarginMs?: number; retryMs?: number; retryMaxMs?: number; startupWindowMs?: number; detached?: boolean; containment?: Containment; platform?: NodeJS.Platform; session?: SupervisedSession; quarantine?: SupervisedQuarantine } = {}) {
   let deadline = 0, granted = 0;
   async function heartbeat() {
     const started = performance.now();
@@ -356,7 +406,9 @@ export async function supervise(command: string, args: string[], epoch: number, 
       }
     }
   }
-  await heartbeat();
+  // The first renewal has no lease of its own to measure a retry window by, so it rides out a
+  // control-plane restart for the restart window instead (GY-1506); a definite refusal still stops it.
+  await throughRestart(heartbeat, performance.now() + (options.startupWindowMs ?? controlPlaneRestartWindowMs), { retryMs, retryMaxMs });
   const env = { ...process.env };
   for (const key of ['GRAPHYARD_PRINCIPALS', 'DATABASE_URL', 'GITHUB_PRIVATE_KEY', 'GITHUB_PRIVATE_KEY_FILE', 'GITHUB_WEBHOOK_SECRET']) delete env[key];
   const platform = options.platform ?? process.platform;
@@ -375,11 +427,13 @@ export async function supervise(command: string, args: string[], epoch: number, 
     let containmentFailure: unknown;
     let expiry: ReturnType<typeof setTimeout>;
     let timer: ReturnType<typeof setInterval>;
+    // The release of an attempt whose agent ended on its own, which the supervisor finishes before it exits.
+    let ending: Promise<void> | undefined;
     const finish = (error: unknown, code?: number) => {
       if (finished) return;
       finished = true;
-      process.off('SIGTERM', interrupted); process.off('SIGINT', interrupted);
-      if (error) reject(error); else resolve(code!);
+      process.off('SIGTERM', interrupted); process.off('SIGINT', interrupted); process.off('SIGHUP', interrupted);
+      void Promise.resolve(ending).then(() => { if (error) reject(error); else resolve(code!); });
     };
     const signalGroup = (signal: NodeJS.Signals) => {
       if (!child?.pid) return;
@@ -392,8 +446,9 @@ export async function supervise(command: string, args: string[], epoch: number, 
       const rows = processTable();
       signalTrackedProcesses(child.pid, supervisedPids, rows, signal);
     };
-    const interrupted = () => {
+    const interrupted = (signal: NodeJS.Signals) => {
       if (!child) { prelaunchInterrupted = true; return; }
+      endedOnItsOwn(`the supervisor received ${signal}`);
       stop(1);
     };
     function stop(code: number) {
@@ -467,7 +522,18 @@ export async function supervise(command: string, args: string[], epoch: number, 
       try { await surrender(cause); }
       catch (error) { console.error(`Graphyard could not release the lease after the worker session ended: ${error instanceof Error ? error.message : String(error)}`); }
     };
-    process.on('SIGTERM', interrupted); process.on('SIGINT', interrupted);
+    /**
+     * An agent that exited, or a supervisor told to stop, before the lease said so (GY-1506): the
+     * attempt is over, so its lease is released with the cause rather than left to lapse into a
+     * lease loss two minutes later. A supervisor already stopping — on a refused or lapsed lease,
+     * or an orphaned session it surrendered — has nothing left to release. After `complete` the
+     * release is refused, harmlessly: the lease it would end is already gone.
+     */
+    function endedOnItsOwn(cause: string) {
+      if (stopping || ending) return;
+      ending = surrenderAssignment(cause);
+    }
+    process.on('SIGTERM', interrupted); process.on('SIGINT', interrupted); process.on('SIGHUP', interrupted);
     void (async () => {
       try {
         if (containment) await options.quarantine!.establish();
@@ -507,7 +573,7 @@ export async function supervise(command: string, args: string[], epoch: number, 
           captureTrackedRoot(child.pid, supervisedPids, processRecord(child.pid));
         }
         child.on('error', error => { console.error(error.message); stop(1); });
-        child.on('exit', code => stop(code ?? 1));
+        child.on('exit', (code, signal) => { endedOnItsOwn(`the agent process exited (${signal ?? `code ${code}`}) while its lease was live`); stop(code ?? 1); });
         timer = setInterval(async () => {
           if (pending || stopping) return;
           pending = true;

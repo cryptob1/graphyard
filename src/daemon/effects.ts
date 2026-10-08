@@ -33,6 +33,7 @@ import { probeSupervisorAbsence } from '../containment-probe.js';
 import { httpFleetClient, reconcileFleetSessions, selectFleetSession, settledRecordSessions } from '../fleet.js';
 import { type ContainmentRetention, type DaemonAction, type DaemonState, type LoopRelease, storeAction, type DeploymentObservation, message, writeDaemonState } from './state.js';
 import { writeProjectMemory } from '../project-memory.js';
+import { flakeLedgerEffects, type FlakeLedgerEffects } from '../flake-ledger.js';
 import { answeringWidening } from './reconcile.js';
 import { type OrphanSupervisor, readyToRetry, stopWatchSupervisor } from './sessions.js';
 import { neededDecision, type ExhaustedProof, type RoutineDecisionAction } from './decisions.js';
@@ -83,7 +84,7 @@ export const promptTarget = (agent: Pick<HerdrAgent, 'name' | 'pane_id'>) => age
 
 /** An item the loop files as the operator-agent: a fault-class item, or the docs trim item (GY-574), which names no class. */
 export type LoopFiledItem = Omit<ReturnType<typeof faultClassItem>, 'origin'> & Partial<Pick<ReturnType<typeof faultClassItem>, 'origin'>>;
-export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffects>, ThroughputEffects {
+export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffects>, ThroughputEffects, FlakeLedgerEffects {
   closeSession: (pane: string) => void | Promise<void>;
   dispatch: (work: Work, profile: WorkerProfile, agents: HerdrAgent[], snapshot: { work: Work[]; now: string }) => Promise<unknown>;
   requestProof: (work: Work) => void | Promise<void>;
@@ -346,8 +347,7 @@ export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffec
    */
   followUpThreads?: (work: Work[], now: number) => Promise<Map<string, Set<string>>>;
   persist: (state: DaemonState) => Promise<void>;
-  /** Files the one backlog item a recurring fault class gets (GY-173), as the operator-agent identity, keyed by the class and its instances. */
-  // Absent while no such identity is provisioned: the classes are still recorded and reported.
+  /** Files the one backlog item a recurring fault class (GY-173) or a flaky test (GY-1498) gets, as the operator-agent, under the key; absent without that identity, they are still recorded and reported. */
   fileFaultClass?: (input: LoopFiledItem, key: string) => Promise<Work>;
   /** The pipeline doctor (GY-711, src/daemon/doctor.ts): absent while `run.doctor.enabled` is false or the operator-agent identity is missing, the loop then running only the deterministic remedies. */
   doctor?: DoctorEffects;
@@ -713,7 +713,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       await mutate('merge-queue', config);
       publishedMergeQueue = published;
     },
-    ...throughputEffects(root, current, run, asCoordinator, asOperatorAgent),
+    ...throughputEffects(root, current, run, asCoordinator, asOperatorAgent), ...flakeLedgerEffects(root),
     recordDeployment: (work, observation) => mutate(`work/${work.id}/deployment`, { sha: observation.sha, mergeSha: work.delivery!.mergeSha, source: observation.source, observedAt: observation.observedAt }),
     exhaustedProofs: async () => Object.entries((await readDispatchCursor(root, current(), () => {})).abandoned).filter(([, entry]) => entry.kind === 'producer')
       .map(([requestId, entry]) => ({ requestId, work: entry.work, sha: entry.sha, group: entry.group ?? null, proofs: entry.proofs ?? [], attempts: entry.attempts, reason: entry.reason })),
