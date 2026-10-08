@@ -92,6 +92,9 @@ const budgetJudgement = (counts: { page: string; words: number }[], { total: TOT
 const REQUIRED_STATEMENTS: [string, RegExp][] = [
   ['docs/master-agent-reference.md', /decisions step stays within 10 s a cycle/],
   ['docs/master-agent-reference.md', /history whose ledger has not moved is kept, not read/],
+  // GY-1518: the delivery redesign page keeps the merger setting's two values and the one rule.
+  ['docs/delivery-redesign.md', /`github` \(default\) or `control-plane`/],
+  ['docs/delivery-redesign.md', /Only Graphyard writes to main/],
 ];
 
 test('unit:docs-word-budget — the pages graphyard.json budgets (README.md and every docs page) keep every page within its per-page budget and 200 words under it, counted as wc -w counts them; a total over the budget or its headroom warns and passes', () => {

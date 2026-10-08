@@ -7,7 +7,7 @@
 
 ### Perpetual master loop
 
-`master verify-deployment GY-N` emits instructions from served-commit checkout, refusing *unobserved*, *stale* (rerun), merge-missing or already-recorded releases; without `--deployment-url`, newest successful [`productionEnvironment`](deployment.md#production-environment-name) (Railway: `<project> / production`) deployment counts.
+`master verify-deployment GY-N` emits instructions from served-commit checkout, refusing *unobserved*, *stale* (rerun), merge-missing or already-recorded releases; without `--deployment-url`, newest successful [`productionEnvironment`](deployment.md#production-environment-name) deployment counts.
 
 ## Lost worker before submission
 
@@ -27,7 +27,7 @@ Minutely scan (`GET /api/interventions` → `scan`; `GRAPHYARD_INTERVENTION_PATT
 
 ## Flaky CI check
 
-[Reruns once](github.md#failed-checks) (`mergeQueue.rerunFailedChecks`, 0 disables); pass clears it. On main the main guard keeps main pending, judging no later merge until reruns conclude. A run failing only through cancelled or timed-out jobs (the `test` aggregate included) reruns its failed jobs up to 3 times; still cancelled, one `escalation:main-guard:SHA` infrastructure fault names the run and stopped step, reverting nothing. A real failure reruns once: passing, it appends `{mergeSha, check, failedRunId, rerunRunId, at}` to the item's `mainGuardFlakes` (last 20); failing again, refused, or unconcluded within the hour, it is reverted.
+[Reruns once](github.md#failed-checks) (`mergeQueue.rerunFailedChecks`, 0 disables); pass clears it. On main the guard keeps main pending until reruns conclude: cancelled or timed-out jobs (the `test` aggregate included) rerun up to 3 times, then one `escalation:main-guard:SHA` infrastructure fault names the run and step, reverting nothing; a real failure reruns once, a pass appending `{mergeSha, check, failedRunId, rerunRunId, at}` to the item's `mainGuardFlakes` (last 20), a second failure, refusal or unconcluded hour reverting it.
 
 ## Accepted evidence turns out to be wrong
 
@@ -45,8 +45,8 @@ Minutely scan (`GET /api/interventions` → `scan`; `GRAPHYARD_INTERVENTION_PATT
 | --- | ---
 | `merge` | gates pass, GitHub may merge: 20s
 | `active` | awaiting check, review, base refresh, rework: 1min
-| `steady` | unchanged: 5min, stretched by fleet bound; review requests ≤10min
-| `idle` | awaiting dispatch/escalation: 5min, stretched if unchanged
+| `steady` | unchanged: 5min, stretched by fleet bound
+| `idle` | awaiting dispatch/escalation: 5min
 
 Unchanged non-merge candidates spend **at most 40%** (`steadyStateShare`).
 
@@ -72,9 +72,9 @@ Silent webhook hour: `master status` cites `https://github.com/settings/apps/APP
 
 ## Control-plane resources
 
-`resources` remedies: ledgers, `graphyard master run --once`; `agent-names:PROFILE`, `herdr pane close PANE`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow volume and `GRAPHYARD_DATABASE_MAX_BYTES` (10GiB); `tmp-inodes`, free `TMPDIR`/`/tmp` (detail counts this user's `tsx-<uid>` compile cache; the pass deletes its regular files older than 6 h, ≤100 per cycle, never directories or sockets); `loaded-revision` counts code moves. No fault while remedy acts: owed restart retried within bound, pane unowned <10min, loop's lag, `/tmp` >10% free after pass within 30min.
+`resources` remedies: ledgers, `graphyard master run --once`; `agent-names:PROFILE`, `herdr pane close PANE`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow volume and `GRAPHYARD_DATABASE_MAX_BYTES` (10GiB); `tmp-inodes`, free `TMPDIR`/`/tmp` (the pass deletes this user's `tsx-<uid>` cache files older than 6 h, ≤100 per cycle, never directories or sockets); `loaded-revision` counts code moves. No fault while remedy acts: owed restart retried within bound, pane unowned <10min, loop's lag, `/tmp` >10% free after pass within 30min.
 
-Session-started `npm test`, `test:browser`, typecheck, `tsc --noEmit` take one of max(2, floor(GB/8)) slots (`GRAPHYARD_VERIFICATION_SLOTS`; managed root's `.verification-slots`); CI unbounded. Under max(10% RAM, 4GB) available, launches defer (`escalation:dispatch:memory`; item `memory` names top consumers; one `memory-pressure` fault per dip) until 1GB above.
+Session-started `npm test`, `test:browser` and typecheck take one of max(2, floor(GB/8)) slots (`GRAPHYARD_VERIFICATION_SLOTS`; managed root's `.verification-slots`); CI unbounded. Under max(10% RAM, 4GB) available, launches defer (`escalation:dispatch:memory`; item `memory` names top consumers; one `memory-pressure` fault per dip) until 1GB above.
 
 ## Storage retention
 
