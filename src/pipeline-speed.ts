@@ -46,7 +46,14 @@ export interface TimelineBackfill {
   /** The replay as the last pass left it; present only while `truncated`. */
   resume?: ReplayState;
 }
-declare module './model/work.js' { interface Work { pipeline?: PipelineTimeline } }
+declare module './model/work.js' {
+  interface Work { pipeline?: PipelineTimeline }
+  /**
+   * The assignment's first lease renewal (GY-1499). The watch supervisor renews once just before it
+   * starts the agent, so claim→start is launch overhead and start→first push the agent's own work.
+   */
+  interface AssignmentIdentity { startedAt?: string }
+}
 
 export const speedTarget = { submitToMergeP50Ms: 30 * 60_000, submitToMergeP90Ms: 60 * 60_000, reworkRoundsMedian: 1, minimumItems: 10 } as const;
 
@@ -82,6 +89,17 @@ export function endAttempt(work: Work, epoch: number, end: NonNullable<PipelineA
 export function endLapsedAttempt(work: Work, lease: { epoch: number; expiresAt: string }, now: Date) {
   const deadline = Date.parse(lease.expiresAt);
   endAttempt(work, lease.epoch, 'expired', new Date(Number.isFinite(deadline) ? Math.min(deadline, now.getTime()) : now.getTime()));
+}
+/**
+ * Stamp the assignment's session start at the first lease renewal of its epoch, once: a later
+ * renewal never moves it, and a renewal of another epoch never sets it. An assignment carried
+ * forward without its claim time (`preserveAssignment`) was not watched from its claim, so its
+ * start is not known either and stays unset.
+ */
+export function recordAssignmentStart(work: Work, epoch: number, now: Date) {
+  const assignment = work.lastAssignment;
+  if (!assignment || assignment.epoch !== epoch || !assignment.claimedAt || assignment.startedAt) return;
+  assignment.startedAt = now.toISOString();
 }
 export function recordSubmission(work: Work, epoch: number, now: Date) {
   const timeline = pipelineTimeline(work);

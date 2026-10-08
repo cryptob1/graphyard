@@ -5,6 +5,10 @@
 
 An AI `slice-lead` leads slice (`product`, `infrastructure`, `docs-experience`): rules on plans, sends back, escalates; never implements, reviews, proves, merges (`lead.action.refused`). `reject-plan`/`send-back` hold merging (**lead hold**) until that lead's `approve-plan` with `"supersedes": "RULING-ID"` or `rework`. Producers ever assigned item or in its slice: `evidence.producer.refused`. Limits: [deployment variables](deployment.md#variables).
 
+## Reviewer provider diversity
+
+The agent registry chooses a `reviewer` account on a different model provider than the item's implementer, so the two share no blind spots. A provider is the account's model `provider`, else its runtime's launch kind; the implementer's is the newest registry `worker` session for the item (retained, then `agent-registry.selected` events), else `lastAssignment.runtime`. Same-provider accounts are recorded in `skipped` (`shares the implementer's provider P on GY-N`). A different-provider account at only its own session limit is waited for (refused as `role reviewer is at its concurrency limit for providers other than P`, retried as capacity). Otherwise the first eligible same-provider account serves, its reason recording `no reviewer account outside provider P can serve GY-N` with why. Unknown implementer provider, or other roles: unchanged.
+
 ## Escalation
 
 | Trigger | Raised when

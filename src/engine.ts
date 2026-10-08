@@ -46,7 +46,7 @@ import { recordSession, sessionHandleSchema, sessionObservationFields } from './
 import { noSubmissionRenewalRefused, observeHead, workerNoSubmissionRefusalMs } from './model/attempt-bound.js';
 import { blockedAttemptMarker, partialWorkSchema, retainedExhaustions, type ExhaustionRecord } from './model/capacity.js';
 import { credentialBlockedReason, credentialFailure } from './worker-credential.js';
-import { beginAttempt, endAttempt, endLapsedAttempt, pipelineTimeline, recordIntervention, recordRework, recordSubmission } from './pipeline-speed.js';
+import { beginAttempt, endAttempt, endLapsedAttempt, pipelineTimeline, recordAssignmentStart, recordIntervention, recordRework, recordSubmission } from './pipeline-speed.js';
 import { dispatchFailureBlockAfter } from './daemon/dispatch-failures.js';
 import { foldDecisions, type Decision } from './model/approval.js';
 import { coveringWindow, directMergeAuthorization, directMergeFromEnv, directMergeWindows, sweepDirectMerges, type DirectMergeWindow } from './direct-merge.js';
@@ -654,13 +654,15 @@ interface ReconcilePass {
 /**
  * What other items' evaluations can read of an item (GY-1124): its document without the fields a
  * renewal moves — the revision, the update time, the lease's expiry, and an action claim's expiry
- * and renewal count (GY-1276). A heartbeat or an executor's claim renewal leaves the face
- * unchanged, so the pass after it evaluates only the renewed item; any other write changes it, and
+ * and renewal count (GY-1276), and the assignment's session start the first renewal stamps
+ * (GY-1499). A heartbeat or an executor's claim renewal leaves the face unchanged, so the pass
+ * after it evaluates only the renewed item; any other write changes it, and
  * the pass evaluates every live item against it. A claim expiring is a move of the clock alone,
  * which the bounded full evaluation (`reconcileFullEvaluationMs`) catches up.
  */
 function fleetFace(work: Work) {
-  const { revision: _revision, updatedAt: _updatedAt, lease, actionQueue, ...rest } = work;
+  const { revision: _revision, updatedAt: _updatedAt, lease, actionQueue, lastAssignment, ...rest } = work;
+  const assignment = lastAssignment && (({ startedAt: _startedAt, ...identity }) => identity)(lastAssignment);
   const actions = actionQueue && {
     ...actionQueue,
     actions: actionQueue.actions.map(row => {
@@ -669,7 +671,7 @@ function fleetFace(work: Work) {
       return { ...row, claim };
     }),
   };
-  return stableJson({ ...rest, actionQueue: actions, lease: lease ? { owner: lease.owner, epoch: lease.epoch } : null });
+  return stableJson({ ...rest, lastAssignment: assignment, actionQueue: actions, lease: lease ? { owner: lease.owner, epoch: lease.epoch } : null });
 }
 /** The longest reconciliation goes between full evaluations: `GRAPHYARD_RECONCILE_FULL_MS`, 2000..300000 ms, default 10000 (GY-1124). */
 export function configuredReconcileFullMs(value = process.env.GRAPHYARD_RECONCILE_FULL_MS, fallback = 10_000): number {
@@ -2309,6 +2311,7 @@ export class Engine {
       `Implementation lease for epoch ${epoch} of ${work.key} is not renewed: no submission in ${workerNoSubmissionRefusalMs / 60_000} minutes, past the worker no-submission bound; the attempt ends and its branch is kept for the next`);
     work.lease!.expiresAt = new Date(now.getTime() + this.leaseSeconds * 1000).toISOString();
     delete (work.lease as GracedLease).renewalFault;
+    recordAssignmentStart(work, epoch, now);
   }
 
   /**

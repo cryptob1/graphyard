@@ -387,9 +387,10 @@ test('integration:role-scoped-harness-rules — worker, reviewer and producer se
   assert.equal(denied(rules(worker, 'deny'), 'git push --force origin graphyard/gy-69-4'), true);
   assert.equal(denied(rules(reviewer, 'deny'), 'git push origin graphyard/gy-69-4'), true);
   assert.equal(denied(rules(producer, 'deny'), 'git push origin graphyard/gy-69-4'), true);
-  assert.ok(rules(reviewer, 'allow').includes('Bash(gh api --method POST repos/owner/project/pulls/69/reviews*)'));
+  assert.ok(rules(reviewer, 'allow').includes(`Bash(node ${input.cliPath} review post:*)`));
   // The merge deny names merge endpoints, so a verdict body that mentions merging is not refused.
-  assert.equal(denied(rules(reviewer, 'deny'), 'gh api --method POST repos/owner/project/pulls/69/reviews -f event=APPROVE -f body=safe to merge'), false);
+  assert.equal(denied(rules(reviewer, 'deny'), `node ${input.cliPath} review post --event APPROVE --body safe to merge`), false);
+  assert.equal(denied(rules(reviewer, 'deny'), 'gh api --method POST repos/owner/project/pulls/69/reviews -f event=APPROVE -f body=safe'), true, 'a raw review call is denied (GY-1492)');
   for (const command of ['gh api --method PUT repos/owner/project/pulls/69/merge', 'gh api --method POST repos/owner/project/merges -f base=main', 'gh api graphql -f query=mutation{mergePullRequest}']) {
     for (const plan of [worker, reviewer, producer]) assert.equal(denied(rules(plan, 'deny'), command), true, `${command} stays denied`);
   }
@@ -441,8 +442,8 @@ test('integration:role-scoped-harness-rules — worker, reviewer and producer se
     assert.equal(typedReview.args.at(-3), '--append-system-prompt-file'); assert.equal(roleOf(typedReview.args), launchAuthorization.replace(/\s+/g, ' '));
     assert.match(typedReview.args.at(-1)!, /^You are the independent Graphyard reviewer/, 'the request is the positional prompt (GY-93)');
     const reviewerSettings = JSON.parse(await readFile(reviewerFile, 'utf8'));
-    assert.ok(reviewerSettings.permissions.allow.includes('Bash(gh api --method POST repos/owner/project/pulls/69/reviews*)'));
-    assert.equal(denied(reviewerSettings.permissions.deny, `gh api --method POST repos/owner/project/pulls/69/reviews -f commit_id=${H} -f event=APPROVE`), false, 'the master deny on review calls cannot block the reviewer');
+    assert.ok(reviewerSettings.permissions.allow.includes(`Bash(node ${config.cliPath} review post:*)`));
+    assert.equal(denied(reviewerSettings.permissions.deny, `node ${config.cliPath} review post --event APPROVE`), false, 'the master deny on review calls cannot block the reviewer');
     assert.equal(denied(reviewerSettings.permissions.deny, 'git push origin main'), true);
 
     // Producer: likewise, with its own evidence command.
@@ -560,7 +561,7 @@ test('unit:autonomous-session-prompts — reviewer, producer and worker sessions
   for (const [role, prompt] of Object.entries(prompts)) {
     for (const fragment of ['Decide and act on your own', 'Never stop to ask a human for confirmation', 'never end your turn with a question', 'never offer a menu of options', 'naming the exact command that was blocked and its error', 'A session that ends waiting on input is recorded as failed']) assert.ok(prompt.includes(fragment), `the ${role} prompt states: ${fragment}`);
   }
-  assert.match(prompts.reviewer, /post the verdict yourself, APPROVE or REQUEST_CHANGES/); assert.match(prompts.reviewer, new RegExp(`record a blocker as one review with event=COMMENT on commit ${H}`));
+  assert.match(prompts.reviewer, /post the verdict yourself, APPROVE or REQUEST_CHANGES/); assert.match(prompts.reviewer, /record a blocker as one review posted with --event COMMENT/);
   assert.match(prompts.producer, /submit pass or fail evidence for every proof of the group/); assert.match(prompts.producer, /submit that proof as result fail/);
   assert.match(prompts.worker, new RegExp(`record a blocker with node ${launcher.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} blocked GY-69 4 REASON`));
   assert.equal(autonomousSession('x', 'y').startsWith('Decide and act on your own: x.'), true);

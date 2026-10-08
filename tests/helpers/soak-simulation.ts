@@ -53,7 +53,8 @@ import { type TmpReclaimReport, heldOpenPaths, reclaimTmpDirectories, tmpReclaim
 import { temporaryDirectory } from './temp-dirs.js';
 import { lostRunReason, sessionRetry } from '../../src/producer.js';
 import { type SelfUpgradeOutcome, performSelfUpgrade } from '../../src/daemon/upgrade.js';
-import { watchdogPlan } from '../../src/daemon/liveness.js';
+import { cycleDelay, watchdogPlan } from '../../src/daemon/liveness.js';
+import { LoopWake, loopWakeSubjects } from '../../src/daemon/loop-wake.js';
 import { loopSelfProvision, masterSetup } from '../../src/cli/master-setup.js';
 import { deploymentTarget } from '../../src/install/index.js';
 import { type Transport } from '../../src/install/transport.js';
@@ -168,7 +169,14 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   /** GY-1417: record three goals and wire the acceptance role (acceptanceWorld below). */
   acceptance?: boolean;
   /** GY-1418: with `acceptance`, also wire the planner role over the same goals (tests/helpers/soak-planner.ts). */
-  planner?: boolean }) {
+  planner?: boolean;
+  /**
+   * GY-1490: the loop sleeps `intervalSeconds` after an idle cycle and the dispatcher's tick wakes it
+   * (src/daemon/loop-wake.ts): the day steps on the tick, feeds each tick's snapshot and agents to the
+   * real `LoopWake`, and runs a cycle only when its wait ends or the wake ends it. Every
+   * `unreadableEvery`-th tick Herdr cannot be read, so every free-slot subject drops out for it.
+   */
+  loopWake?: { intervalSeconds: number; unreadableEvery?: number } }) {
   const dayStart = clock.now();
   // A day may restage the shared scenario: the day-scoped view of the plan is what every fault
   // below arms from, while each test's own assertions still read the shared base plan.
@@ -182,6 +190,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     : options.slowDeployment ? masterConfigSchema.parse({ ...soakConfig, run: { ...soakConfig.run, smokeWorkflow: 'smoke.yml' } })
     : options.decomposition ? masterConfigSchema.parse({ ...soakConfig, run: { ...soakConfig.run, research: { command: 'pi', model: 'research-pi-model' }, decomposition: { concurrency: options.decomposition.concurrency ?? 2 } } })
     : options.reviewCap ? masterConfigSchema.parse({ ...soakConfig, reviewRoundCap: options.reviewCap.cap })
+    : options.loopWake ? masterConfigSchema.parse({ ...soakConfig, run: { ...soakConfig.run, intervalSeconds: options.loopWake.intervalSeconds } })
     : soakConfig;
   // The spent producer request (GY-496) is a main-day fault, like the blind window and the split:
   // the hand-approver, documentation and regression days exercise their own faults and would only
@@ -2013,6 +2022,32 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   // The day's schedule position, hoisted so the launch effects record against it: one cycle is one
   // simulated minute, and a launch the cycle handed over settles before the position advances.
   let elapsed = 0;
+  // ---- GY-1490: the loop-wake day's cadence. Each iteration is one dispatcher tick: the world moves,
+  // the tick observes the snapshot and Herdr's agents, and the loop cycles only once its wait is over
+  // or the wake ended it past its floor — as `master run` wires `runDaemon` and the dispatcher. ----
+  const loopWakeDay = options.loopWake && (() => {
+    const tickMs = config.run.dispatchIntervalSeconds * 1000, unreadableEvery = options.loopWake.unreadableEvery ?? 0;
+    const day = { tickMs, wake: new LoopWake(tickMs), ticks: 0, unreadable: 0, lastCycle: -Infinity, waitMs: 0,
+      cycles: [] as { elapsed: number; woken: string[]; waitMs: number; early: boolean }[], fresh: [] as { key: string; elapsed: number; absentTicks: number }[], lastSeen: new Map<string, number>(),
+      /** One tick: observe, then answer whether the loop's sleep ends now. */
+      async tick(at: number) {
+        const unreadable = unreadableEvery > 0 && ++day.ticks % unreadableEvery === 0;
+        if (unreadableEvery === 0) day.ticks++;
+        if (unreadable) day.unreadable++;
+        const subjects = loopWakeSubjects(await store.list(), config, clock.now(), unreadable ? null : herdr.list());
+        for (const subject of day.wake.observe(subjects)) day.fresh.push({ key: subject.key, elapsed: at, absentTicks: day.lastSeen.has(subject.key) ? day.ticks - day.lastSeen.get(subject.key)! - 1 : Infinity });
+        for (const subject of subjects) day.lastSeen.set(subject.key, day.ticks);
+        if (!day.wake.due(at - day.lastCycle, day.waitMs)) return false;
+        const woken = day.wake.take();
+        day.cycles.push({ elapsed: at, woken, waitMs: day.waitMs, early: woken.length > 0 && at - day.lastCycle < day.waitMs });
+        day.lastCycle = at; day.waitMs = config.run.intervalSeconds * 1000;
+        return true;
+      },
+      /** The cycle ran: the loop's wait is the one `runDaemon` takes after it. */
+      ran(result: Awaited<ReturnType<typeof runCycle>>) { day.waitMs = cycleDelay(config.run.intervalSeconds * 1000, result.silence); },
+    };
+    return day;
+  })();
   for (; elapsed <= options.hours * hour;) {
     const now = clock.now();
     // Scheduled events: releases, the file split on main, the deploys. The queue-only day runs with
@@ -2333,6 +2368,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
       if (working && master.worked && master.bannerAt === null && elapsed >= working.retryAt) { screens.set(master.worked, retryBanner); master.bannerAt = elapsed; }
       if (options.staleRework && await restartOnVerdict(now)) { elapsed += minute; await moveClock(minute); continue; }
       if (options.staleMerge && await restartOnMerge(now)) { elapsed += minute; await moveClock(minute); continue; }
+      if (loopWakeDay && !await loopWakeDay.tick(elapsed)) { elapsed += loopWakeDay.tickMs; await moveClock(loopWakeDay.tickMs); continue; }
       master.cycleOf = cycles;
       // GY-916: the supervisor restarts the loop for its own reasons: a new process, the same unit.
       if (loopRestarts.length && elapsed >= loopRestarts[0]) { loopRestarts.shift(); await processStart(state); }
@@ -2347,6 +2383,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
         if (options.slowDeployment) { deploymentDay.land(); await new Promise(resolve => setImmediate(resolve)); }
         const cycleStart = clock.now(); budgetDay.cycleSlow = 0;
         const result = await runCycle(config, state, effects, clock.now, launcher); cycles++;
+        loopWakeDay?.ran(result);
         if (acceptance) await draftsSettled();
         if (planner) await plansSettled();
         if (options.staleRelease) { staleReleaseDay.steps.push({ elapsed, ms: result.metrics.steps?.decisions?.ms ?? 0, backlogReads: staleReleaseDay.backlogReads }); staleReleaseDay.backlogReads = 0; }
@@ -2442,7 +2479,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
       }
     }
     const open = (await store.list()).filter(item => item.stage !== 'done').length;
-    const step = open ? minute : 10 * minute;
+    const step = loopWakeDay ? loopWakeDay.tickMs : open ? minute : 10 * minute;
     // The containment day's slow reads moved the clock inside the cycle; the day keeps one cycle a minute.
     elapsed += step; await moveClock(Math.max(0, step - fenced.drift)); fenced.drift = 0;
   }
@@ -2498,7 +2535,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     mergeQueuePosts, config, refused, decideCalls, restarted, approverPanes, failing, herdrClosed: herdr.closed, diagnosisModel: settings.model, diagnosisRuns: diagnosed, baseBreak, capacityRefused, capacityLaunched, capacityWaiters,
     decided, misreads, prompts, screens, heldAccounts, approverAccounts, retryReset, exitedLive, exitedClosed, exitedRowsSeen, reassign, workspaceFailures, workspaceCooled, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, fenced, mergeStallSightings, master, baseFailure,
     blockerEvents, blockerProbes, blockerDecisions, blockerActions, blockerKeysPeak, attempts, lanesSeen, laneApplications, approverWorks, approverDecisions, failover, webhook, remedies, observeRequests, starvation, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size }, mechanical: { ledger, botRounds, misclassified, reviewHolds }, shared, charges: { ...charged, b: charged.b.length, instancesSeen: [...charged.instancesSeen], restarts: chargeRestarts },
-    wakes, staleMerges, restartLog, hostDay, guardDay, budgetDay, observationDay, deploymentDay, decompositionDay: decompositionHistory, diagnosisRaces, diagnosisRequestRaces, transientRefused, lateReads, staleReleaseDay, drain, acceptanceDay: acceptance?.day ?? null, plannerDay: planner?.day ?? null };
+    wakes, staleMerges, restartLog, hostDay, guardDay, budgetDay, observationDay, deploymentDay, decompositionDay: decompositionHistory, diagnosisRaces, diagnosisRequestRaces, transientRefused, lateReads, staleReleaseDay, drain, acceptanceDay: acceptance?.day ?? null, plannerDay: planner?.day ?? null, loopWakeDay: loopWakeDay || null };
 }
 
 /**
