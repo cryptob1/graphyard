@@ -5,7 +5,7 @@ Sidebar: **Work**, **Workers**, **Shipped**, **Tests**, **Insights**, **Settings
 
 ## From your phone
 
-A local (compose) dashboard listens on `127.0.0.1:4310`. On a host with Tailscale, `graphyard up` prints `tailscale serve --bg --http=4310 http://127.0.0.1:4310` and the tailnet URL it gives (`http://HOST.TAILNET.ts.net:4310`); `--share-tailnet` runs it, keeps it in `up.json` (summary `reachableUrl`), and every sign-in link `up` prints uses it. It is tailnet-only, never `tailscale funnel`. A serve the tailnet has not allowed is reported, not waited on. A green `up` ends with one single-use sign-in link (`signIn`, 10 minutes), so nobody runs `graphyard login`.
+A local (compose) dashboard listens on `127.0.0.1:4310`, or the free port its install chose ([install](install.md)). On a host with Tailscale, `graphyard up` prints `tailscale serve --bg --http=4310 http://127.0.0.1:4310` and the tailnet URL it gives (`http://HOST.TAILNET.ts.net:4310`); `--share-tailnet` runs it, keeps it in `up.json` (summary `reachableUrl`), and every sign-in link `up` prints uses it. It is tailnet-only, never `tailscale funnel`. A serve the tailnet has not allowed is reported, not waited on. A green `up` ends with one single-use sign-in link (`signIn`, 10 minutes), so nobody runs `graphyard login`.
 
 ## Work
 
