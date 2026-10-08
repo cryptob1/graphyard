@@ -4,7 +4,7 @@ import { homedir } from 'node:os';
 import { dirname, isAbsolute, resolve } from 'node:path';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { assertRepository, buildProposal, canonicalJson, collectScanInput, discover, localDirectory, saveDiscovery, setupProposalSchema, type ScanInput, type SetupProposal } from './onboarding.js';
+import { assertRepository, buildProposal, canonicalJson, collectScanInput, discover, localDirectory, saveDiscovery, writeDeliveryWorkflow, setupProposalSchema, type ScanInput, type SetupProposal } from './onboarding.js';
 import { generatedFilesAssignment } from './install/generated-files.js';
 import { ensureMergeMode, type ProtectionRun } from './protection.js';
 import { autonomyContract } from './autonomy.js';
@@ -400,6 +400,17 @@ export async function applyProposal(root: string, proposalInput: unknown, depend
   // committed delivery policy, and the candidate and promotion workflows are rendered from it.
   const delivery = proposal.delivery ? await applyDelivery(root, proposal.delivery, proposal.stack.name) : null;
   if (delivery) { applied.push(...delivery.applied); unchanged.push(...delivery.unchanged); drift.push(...delivery.drift); }
+  // GY-1480: a repository with no CI of its own gets a minimal delivery workflow — build and test
+  // for its stack, then Graphyard's gate job — in the onboarding change; it is reported among the
+  // workflows only once it is on disk. It decides "no CI" itself, so a rerun that finds only
+  // Graphyard's own workflows still reports it, matching the gate the proposed policy requires.
+  const deliveryWorkflow = delivery ? await writeDeliveryWorkflow(root) : null;
+  // An operator's edit to it is drift: the edited file is kept, and still published as the workflow.
+  if (delivery && deliveryWorkflow) {
+    if (deliveryWorkflow.state === 'drift') drift.push(`${deliveryWorkflow.path} differs from the generated workflow; the edited file was kept`);
+    else (deliveryWorkflow.state === 'written' ? applied : unchanged).push(deliveryWorkflow.path);
+    delivery.workflows.push(deliveryWorkflow.path);
+  }
 
   const randomToken = dependencies.token ?? (() => randomBytes(32).toString('base64url'));
   const grants = proposal.proofs.filter(proof => proof.command).map(proof => proof.name);
