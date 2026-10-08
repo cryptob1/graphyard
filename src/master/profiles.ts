@@ -9,7 +9,7 @@ import { temporaryDirectories, underTestRunner } from '../supervisor.js';
 import { decompositionSettingsSchema, diagnosticianSettingsSchema, narrowRoleRuntimeSchema, piRuntimeSchema } from '../runner/payloads.js';
 import { researchSettingsSchema } from '../research.js';
 import { doctorSettingsSchema } from './doctor-settings.js';
-import { mergeWriterSettingsSchema, shadowGateSettingsSchema } from './merge-writer-settings.js';
+import { candidateSettingsSchema, mergeWriterSettingsSchema, shadowGateSettingsSchema } from './merge-writer-settings.js';
 import { sessionNameField, sessionNameLimit, assertSessionName, sessionNameDigestLength, SessionNameRefusedError } from '../session-name.js';
 import { invariantThresholdsSchema } from '../model/invariants.js';
 import { runtimeSandboxes } from '../worker-sandbox.js';
@@ -302,6 +302,7 @@ export const masterRunSchema = z.object({
   diagnostician: diagnosticianSettingsSchema.optional(),
   shadowGate: shadowGateSettingsSchema.optional(),
   mergeWriter: mergeWriterSettingsSchema.optional(), // the control-plane merge executor's deploy key and re-trial bound (GY-1524)
+  candidates: candidateSettingsSchema.optional(), // when the loop cuts release candidates itself in control-plane mode (GY-1526): every N merges or M idle minutes
 }).strict();
 export type MasterRun = z.infer<typeof masterRunSchema>;
 

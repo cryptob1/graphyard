@@ -84,17 +84,22 @@ export const candidateId = (now: Date) => now.toISOString().replace(/[-:]/g, '')
 /**
  * The delivered items a range of main's first-parent commits carries. A Graphyard branch merge
  * names its item in the branch (`graphyard/gy-1094-1`); a squash or a hand-written subject names
- * it as `GY-N:`. A commit naming no item (a docs touch, a direct fix) is not a delivery.
+ * it as `GY-N:`. A commit naming no item (a docs touch, a direct fix) is not a delivery, and neither
+ * is a revert of an item's merge or the merge it reverted (GY-1526).
  */
 export function itemsFromCommits(commits: readonly CommitSummary[]): CandidateItem[] {
   const items: CandidateItem[] = [];
-  const seen = new Set<string>();
+  const seen = new Set<string>(), reverted = new Set<string>();
   for (const commit of commits) {
     // The subject names the merged branch; a body may mention other items' branches in passing.
     const branchIn = (text: string) => /\bgraphyard\/([a-z][a-z0-9]*-\d+)-\d+\b/i.exec(text)?.[1];
     const namedIn = (text: string) => /^([A-Z][A-Z0-9]*-\d+):/m.exec(text)?.[1];
     const key = (branchIn(commit.subject) ?? namedIn(commit.subject) ?? branchIn(commit.body) ?? namedIn(commit.body))?.toUpperCase();
-    if (!key || seen.has(key)) continue;
+    // GY-1526: a revert of an item's merge (`Revert "Merge pull request #N from …/graphyard/gy-N-E"`, as the
+    // loop's candidate revert or the main guard writes it) delivers nothing, and the older merge it undoes
+    // is no delivery either: the item is reopened, and its next merge names it afresh.
+    if (key && /^Revert "/.test(commit.subject)) { reverted.add(key); continue; }
+    if (!key || seen.has(key) || reverted.has(key)) continue;
     seen.add(key);
     const pr = /#(\d+)\b/.exec(commit.subject);
     items.push({ key, mergeSha: commit.sha, pr: pr ? Number(pr[1]) : null });
@@ -237,11 +242,20 @@ export const servedRevision = (health: any): string | null => {
 // ——— Effects: the candidate ledger is the repository's own tags and branches. ———
 
 export type Git = (args: string[]) => string;
+/** Async git the loop's local release ports use (GY-1526): every child goes through child-runner, never execFileSync. */
+export type AsyncGit = (args: string[]) => Promise<string>;
 export const gitIn = (cwd: string): Git => args => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024 });
 
 /** Every record under one tag prefix, newest first, read from annotated tag messages. */
 export function readRecords<T>(git: Git, prefix: string): T[] {
   const out = git(['for-each-ref', '--sort=-refname', '--format=%(refname:strip=2)%00%(contents)%00%00', `refs/tags/${prefix}`]);
+  return out.split('\0\0').map(entry => entry.replace(/^\n/, '')).filter(Boolean).flatMap(entry => {
+    const [, body] = entry.split('\0');
+    try { return [JSON.parse(body.trim()) as T]; } catch { return []; }
+  });
+}
+async function readRecordsAsync<T>(git: AsyncGit, prefix: string): Promise<T[]> {
+  const out = await git(['for-each-ref', '--sort=-refname', '--format=%(refname:strip=2)%00%(contents)%00%00', `refs/tags/${prefix}`]);
   return out.split('\0\0').map(entry => entry.replace(/^\n/, '')).filter(Boolean).flatMap(entry => {
     const [, body] = entry.split('\0');
     try { return [JSON.parse(body.trim()) as T]; } catch { return []; }
@@ -254,6 +268,12 @@ export const readLedger = (git: Git): Ledger => ({
   uat: readRecords<UatRecord>(git, uatTagPrefix),
   production: readRecords<ProductionRecord>(git, productionTagPrefix),
   soak: readRecords<SoakRecord>(git, soakTagPrefix),
+});
+export const readLedgerAsync = async (git: AsyncGit): Promise<Ledger> => ({
+  candidates: await readRecordsAsync<ReleaseCandidate>(git, candidateTagPrefix),
+  uat: await readRecordsAsync<UatRecord>(git, uatTagPrefix),
+  production: await readRecordsAsync<ProductionRecord>(git, productionTagPrefix),
+  soak: await readRecordsAsync<SoakRecord>(git, soakTagPrefix),
 });
 export const findCandidate = (ledger: Ledger, id: string) => {
   const candidate = id === 'latest' ? ledger.candidates[0] : ledger.candidates.find(entry => entry.id === id);
@@ -270,6 +290,10 @@ export function writeRecord(git: Git, tag: string, sha: string, record: unknown,
   git(['-c', 'user.name=graphyard-release', '-c', 'user.email=release@graphyard.invalid', 'tag', '-a', tag, sha, '-m', JSON.stringify(record, null, 2)]);
   if (push) git(['push', 'origin', `refs/tags/${tag}`]);
 }
+export async function writeRecordAsync(git: AsyncGit, tag: string, sha: string, record: unknown, push: boolean) {
+  await git(['-c', 'user.name=graphyard-release', '-c', 'user.email=release@graphyard.invalid', 'tag', '-a', tag, sha, '-m', JSON.stringify(record, null, 2)]);
+  if (push) await git(['push', 'origin', `refs/tags/${tag}`]);
+}
 
 /**
  * Point an environment branch at the exact candidate SHA; the environment deploys that commit.
@@ -284,15 +308,27 @@ export const deployBranch = (git: Git, branch: string, sha: string, expected?: s
   const lease = expected === undefined ? '--force' : `--force-with-lease=refs/heads/${branch}:${expected ?? ''}`;
   git(['push', lease, 'origin', `${sha}:refs/heads/${branch}`]);
 };
+export const deployBranchAsync = async (git: AsyncGit, branch: string, sha: string, expected?: string | null) => {
+  assertSha(sha, 'candidate');
+  if (expected) assertSha(expected, 'expected branch tip');
+  const lease = expected === undefined ? '--force' : `--force-with-lease=refs/heads/${branch}:${expected ?? ''}`;
+  await git(['push', lease, 'origin', `${sha}:refs/heads/${branch}`]);
+};
 
 export function firstParentCommits(git: Git, tip: string, since: string | null): CommitSummary[] {
   const range = since ? [`${since}..${tip}`] : ['--max-count=200', tip];
   const out = git(['log', '--first-parent', '--format=%H%x00%s%x00%b%x1e', ...range]);
   return out.split('\x1e').map(entry => entry.trim()).filter(Boolean).map(entry => { const [sha, subject, body] = entry.split('\0'); return { sha, subject, body: body ?? '' }; });
 }
+async function firstParentCommitsAsync(git: AsyncGit, tip: string, since: string | null): Promise<CommitSummary[]> {
+  const range = since ? [`${since}..${tip}`] : ['--max-count=200', tip];
+  const out = await git(['log', '--first-parent', '--format=%H%x00%s%x00%b%x1e', ...range]);
+  return out.split('\x1e').map(entry => entry.trim()).filter(Boolean).map(entry => { const [sha, subject, body] = entry.split('\0'); return { sha, subject, body: body ?? '' }; });
+}
 
 /** Bring the base branch and every ledger tag up to date with the remote. */
 export const syncLedger = (git: Git, base: string) => git(['fetch', '--quiet', '--force', 'origin', `+refs/heads/${base}:refs/remotes/origin/${base}`, '+refs/tags/*:refs/tags/*']);
+export const syncLedgerAsync = (git: AsyncGit, base: string) => git(['fetch', '--quiet', '--force', 'origin', `+refs/heads/${base}:refs/remotes/origin/${base}`, '+refs/tags/*:refs/tags/*']);
 
 /** Cut a candidate from the remote base branch's tip, as recorded in the remote's tags. */
 export function cut(git: Git, options: { base: string; trigger: CutTrigger; now: Date; push: boolean; maxPrs?: number }) {
@@ -306,6 +342,19 @@ export function cut(git: Git, options: { base: string; trigger: CutTrigger; now:
   if (!promoted && latest && !commits.some(commit => commit.sha === latest.sha)) commits = [...firstParentCommits(git, tip, latest.sha), ...firstParentCommits(git, latest.sha, null)];
   const result = cutCandidate({ tip, now: options.now, trigger: options.trigger, latest, promoted, maxPrs, commits });
   if (result.cut) writeRecord(git, `${candidateTagPrefix}${result.candidate.id}`, result.candidate.sha, result.candidate, options.push);
+  return result;
+}
+/** Async cut for the loop's local ports (GY-1526): same ledger rules as `cut`, through AsyncGit. */
+export async function cutAsync(git: AsyncGit, options: { base: string; trigger: CutTrigger; now: Date; push: boolean; maxPrs?: number }) {
+  await syncLedgerAsync(git, options.base);
+  const tip = (await git(['rev-parse', `refs/remotes/origin/${options.base}`])).trim();
+  const ledger = await readLedgerAsync(git);
+  const promoted = latestPromoted(ledger), latest = ledger.candidates[0] ?? null;
+  const maxPrs = options.maxPrs ?? maxPrsFrom(process.env.GRAPHYARD_RC_MAX_PRS);
+  let commits = await firstParentCommitsAsync(git, tip, promoted?.sha ?? null);
+  if (!promoted && latest && !commits.some(commit => commit.sha === latest.sha)) commits = [...await firstParentCommitsAsync(git, tip, latest.sha), ...await firstParentCommitsAsync(git, latest.sha, null)];
+  const result = cutCandidate({ tip, now: options.now, trigger: options.trigger, latest, promoted, maxPrs, commits });
+  if (result.cut) await writeRecordAsync(git, `${candidateTagPrefix}${result.candidate.id}`, result.candidate.sha, result.candidate, options.push);
   return result;
 }
 
@@ -556,6 +605,7 @@ export function assessUatDeploy(candidate: ReleaseCandidate, ledger: Ledger, uat
  * still refuses to overwrite a branch that moved; with one deployer (the workflow) the gap is moot.
  */
 const remoteTip = (git: Git, branch: string) => git(['ls-remote', 'origin', `refs/heads/${branch}`]).split(/\s/)[0] || null;
+const remoteTipAsync = async (git: AsyncGit, branch: string) => (await git(['ls-remote', 'origin', `refs/heads/${branch}`])).split(/\s/)[0] || null;
 
 /**
  * Deploy a candidate to UAT: `release/uat` moves to its exact SHA, unless another candidate's
@@ -568,6 +618,16 @@ export function deployToUat(git: Git, id: string, base: string, now = new Date()
   const assessment = assessUatDeploy(candidate, ledger, remoteTip(git, uatBranch), now);
   if (!assessment.deploy) throw new Error(assessment.refusal);
   deployBranch(git, uatBranch, candidate.sha, assessment.expected);
+  return { candidate: candidate.id, sha: candidate.sha, branch: uatBranch };
+}
+/** Async UAT deploy for the loop's local ports (GY-1526). */
+export async function deployToUatAsync(git: AsyncGit, id: string, base: string, now = new Date()) {
+  await syncLedgerAsync(git, base);
+  const ledger = await readLedgerAsync(git);
+  const candidate = findCandidate(ledger, id);
+  const assessment = assessUatDeploy(candidate, ledger, await remoteTipAsync(git, uatBranch), now);
+  if (!assessment.deploy) throw new Error(assessment.refusal);
+  await deployBranchAsync(git, uatBranch, candidate.sha, assessment.expected);
   return { candidate: candidate.id, sha: candidate.sha, branch: uatBranch };
 }
 
@@ -614,6 +674,17 @@ export function promote(git: Git, id: string, options: { base: string; push: boo
   if (!assessment.promotable) return { promoted: false as const, candidate: candidate.id, refusals: assessment.refusals };
   deployBranch(git, productionBranch, candidate.sha, ledger.production[0]?.sha);
   if (!ledger.production.some(record => record.id === candidate.id)) writeRecord(git, `${productionTagPrefix}${candidate.id}`, candidate.sha, { id: candidate.id, sha: candidate.sha, at: options.now.toISOString() } satisfies ProductionRecord, options.push);
+  return { promoted: true as const, candidate: candidate.id, sha: candidate.sha, branch: productionBranch };
+}
+/** Async promote for the loop's local ports (GY-1526). */
+export async function promoteAsync(git: AsyncGit, id: string, options: { base: string; push: boolean; now: Date; acceptances?: readonly FlakyAcceptance[] }) {
+  await syncLedgerAsync(git, options.base);
+  const ledger = await readLedgerAsync(git);
+  const candidate = findCandidate(ledger, id);
+  const assessment = assessPromotion(candidate, ledger.uat.find(record => record.id === candidate.id) ?? null, ledger.production[0] ?? null, options.acceptances);
+  if (!assessment.promotable) return { promoted: false as const, candidate: candidate.id, refusals: assessment.refusals };
+  await deployBranchAsync(git, productionBranch, candidate.sha, ledger.production[0]?.sha);
+  if (!ledger.production.some(record => record.id === candidate.id)) await writeRecordAsync(git, `${productionTagPrefix}${candidate.id}`, candidate.sha, { id: candidate.id, sha: candidate.sha, at: options.now.toISOString() } satisfies ProductionRecord, options.push);
   return { promoted: true as const, candidate: candidate.id, sha: candidate.sha, branch: productionBranch };
 }
 

@@ -82,6 +82,8 @@ const REQUIRED_STATEMENTS: [string, RegExp][] = [
   ['docs/validation.md', /`command`: `run` in the checkout with `TARGET_URL`.*`{"kind":"command","run":"npx playwright test"}`/],
   ['docs/validation.md', /`agent`: agent-browser pursues `goal` at `path` until `success` holds, ending `VERDICT: PASS\|FAIL - reason`.*"goal":"Win tic-tac-toe"/],
   ['docs/validation.md', /`secrets: \["NAME"\]` from `~\/\.config\/graphyard\/INSTALL\/e2e-secrets\.TARGET\.env` \(0600, uncommitted\) as variables and `\{\{secret:NAME\}\}`, redacted/],
+  // GY-1526 AC-6: the loop-driven cut and the related-item revert of control-plane mode.
+  ['docs/delivery.md', /Under a `control-plane` merger the loop cuts \(`run\.candidates\.everyMerges` 10, `idleMinutes` 15\), validates, promotes and verifies .*no workflow.*a failed required E2E case reverts the newest candidate item a matching verification map covers \(`candidateReverts`; reopened\); a main-watch freeze holds all/],
   // GY-1523 AC-8: the head form of submit, its CLI and the change number it allocates.
   ['docs/protocol/work-commands.md', /`\{"epoch":1,"head":SHA\}` \(`complete GY-N EPOCH --head \[SHA\]`.*allocates one change number per head into `candidate\.pr`\/`submission\.pr`/],
 ];
