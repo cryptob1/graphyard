@@ -8,7 +8,7 @@ import { Timings } from '../src/master/timings.js';
 import { approverSessionName } from '../src/master/autonomy.js';
 import { workerSubmissionBoundMs } from '../src/model/attempt-bound.js';
 import { clearDoctorRuns, clearCoveredBlockers, coveredScopePaths, decisionCheckMs, doctorBounds, doctorDue, doctorIntervalMs, doctorPrompt, doctorReportPayloadSchema, doctorRunsSettled, doctorSanctionedCommands, doctorSessionArgs, doctorSessionTools, doctorStep, relaunchUnansweredApprovers, settleSubmittedContainment, stopDoctorRuns, unansweredDecisionMs, type DoctorEffects } from '../src/daemon/doctor.js';
-import { applyDoctorRun, doctorTool } from '../src/daemon/doctor.js';
+import { applyDoctorRun, doctorTool, filingDigest } from '../src/daemon/doctor.js';
 import { loopAttention, type LoopLiveness } from '../src/daemon/liveness.js';
 import { silenceBudgetMs, type SilenceEntry } from '../src/daemon/metrics.js';
 import { faultClassOf } from '../src/model/fault-classes.js';
@@ -1033,4 +1033,12 @@ test('unit:doctor-refused-filing-survives-history-bound — a refused filing sta
   assert.equal(state.doctor.refusedFilings.length, historyBound + 51, 'no refusal is evicted by the others');
   assert.equal(filed.filter(title => title === first.title).length, 1, 'the first filing was submitted to create exactly once');
   clearDoctorRuns();
+});
+
+test('unit:doctor-refusal-digest-is-normalised — reports whose create input is identical share one refusal digest, however the proof IDs and criterion IDs were spelled', () => {
+  const a = selfUpgradeFiling(['e2e:missing scenario']), b = selfUpgradeFiling(['e2e:missing-scenario']);
+  const spelled = (file: typeof a, id: string) => ({ ...file, criteria: file.criteria.map(criterion => ({ ...criterion, id })) });
+  assert.equal(filingDigest(a), filingDigest(b), 'proof IDs that normalise alike');
+  assert.equal(filingDigest(spelled(a, 'C1')), filingDigest(spelled(b, 'second')), 'criterion IDs create renumbers');
+  assert.notEqual(filingDigest(a), filingDigest(selfUpgradeFiling(['e2e:another-scenario'])), 'different content is not conflated');
 });

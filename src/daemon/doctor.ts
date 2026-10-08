@@ -261,6 +261,9 @@ export function doctorProofId(proof: string): string {
   return `${kind ? kind[1].toLowerCase() : 'manual'}:${name || 'doctor-filed'}`;
 }
 
+/** The criteria in the form create takes them (see doctorFileItem), which is also what create judges for a refusal digest. */
+const normalisedCriteria = (entry: DoctorFile) => entry.criteria.map((criterion, index) => ({ id: `AC-${index + 1}`, text: criterion.text.slice(0, 2000), proofs: [...new Set(criterion.proofs.map(doctorProofId))] }));
+
 /**
  * The fault item a doctor run files, as `master create` would: the create schema's checks, P0/P1,
  * and the class it closes. The criteria are the doctor's own words, so their shape is normalised
@@ -268,7 +271,7 @@ export function doctorProofId(proof: string): string {
  * a filing is refused only for what normalising cannot mend.
  */
 export function doctorFileItem(entry: DoctorFile, reason: string): DoctorFileInput {
-  const criteria = entry.criteria.map((criterion, index) => ({ id: `AC-${index + 1}`, text: criterion.text.slice(0, 2000), proofs: [...new Set(criterion.proofs.map(doctorProofId))] }));
+  const criteria = normalisedCriteria(entry);
   const input = createSchema.parse({ title: entry.title, description: entry.description, type: 'bug', priority: entry.priority, criteria, plannedFiles: entry.plannedFiles,
     origin: { faultClass: { class: entry.faultClass, threshold: 1, windowHours: 1, count: 1, detectedAt: new Date().toISOString(), instances: [] } } });
   return { ...input, reason: guardBroadScope(input, reason, { allow: false, command: 'master create' }) };
@@ -305,7 +308,7 @@ export const unregisteredScenario = (error: unknown) => /Register E2E scenario (
  * filing cites with no registered revision, or the refusal itself.
  */
 /** The refused content's identity: what create judges (class, title, files, criteria), not the evidence prose, which carries a fresh timestamp every run. */
-export const filingDigest = (file: DoctorFile) => createHash('sha256').update(JSON.stringify([file.faultClass, file.title, file.plannedFiles, file.criteria])).digest('hex').slice(0, 32);
+export const filingDigest = (file: DoctorFile) => createHash('sha256').update(JSON.stringify([file.faultClass, file.title, file.plannedFiles, normalisedCriteria(file)])).digest('hex').slice(0, 32);
 
 /**
  * The digest as seen refusal at `at`. Nothing evicts a refusal, neither a count nor an age: whenever
