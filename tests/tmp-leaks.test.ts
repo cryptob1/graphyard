@@ -146,7 +146,7 @@ test('unit:loop-sweeps-stale-test-temp — the loop removes this user\'s test te
   // This user's own entries in the directory: every kept entry, three of them with test temp names.
   assert.deepEqual(later?.own, { entries: kept.length, testTemp: 3, capped: false });
   const laterDetail = readResources({ ...input, tmp: later }).find(entry => entry.id === 'tmp-inodes')?.detail ?? '';
-  assert.match(laterDetail, new RegExp(`${kept.length} entries at its top level are this user's \\(3 with test temp names\\); the per-user quota itself is not readable`));
+  assert.match(laterDetail, new RegExp(`${kept.length} entries are this user's \\(3 top-level with test temp names\\); the per-user quota itself is not readable`));
   assert.match(laterDetail, /the loop's latest \/tmp pass removed 0 entries at .*; the last pass to remove anything removed 7 entries at /);
   assert.deepEqual((await readTmpInodes(root, tmp, async () => ({ files: 10, ffree: 5 }), (process.getuid?.() ?? 0) + 1))?.own, { entries: 0, testTemp: 0, capped: false }, 'another user\'s entries are not counted as this user\'s');
 });
