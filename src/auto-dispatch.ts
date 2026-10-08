@@ -726,7 +726,8 @@ export async function filePostMergeFollowUps(work: Work, record: ReviewRecord, e
   const body = launch?.verdict?.sha === record.sha ? launch.verdict.body : null;
   if (body === null) return null;
   const filed = [...(record.postMergeFollowUps?.filed ?? [])];
-  const findings = blockingFindings(body, postMergeFindingsMax);
+  // blockingFindings caps a body at ten; read line by line, every BLOCKING line is a finding.
+  const findings = body.split('\n').flatMap(line => blockingFindings(line)).slice(0, postMergeFindingsMax);
   let failure: string | undefined;
   for (const [index, text] of findings.entries()) {
     const finding = text.slice(0, 300);
