@@ -6,7 +6,7 @@ import { assertDecisionAuthority, decisionPrecondition, requiredDecisionCapabili
 import { decisionRace, readDecisions, type DecisionRecord, type StaleRace } from './decision-ledger.js';
 import { applyThroughEngine, authenticated, bookkeepingRebase, findWork, receipt, record, requesterAuthority, staleEvent } from './decisions.js';
 import { withdrawDecision } from './decision-refusal.js';
-import { laneApprover, mergeWriterApprover, mergeWriterTrialGround, reworkGround, trialFailedGround } from '../model/rework-ground.js';
+import { laneApprover, reworkGround } from '../model/rework-ground.js';
 import type { Services } from './routes.js';
 import { pastReviewCap } from '../review-cap.js';
 
@@ -20,9 +20,7 @@ import { pastReviewCap } from '../review-cap.js';
 // moved past it (GY-1297), or resumed under its recorded approval (GY-1297, GY-1300).
 
 // The ledger's approver of a rework its lane (GY-883) or its recorded ground (GY-1394) applied without an approver decision.
-export { laneApprover, mergeWriterApprover } from '../model/rework-ground.js';
-/** The control plane's own approvers (GY-883, GY-1524): a rework they approved is applied at once and resumed at once. */
-export const selfApprover = (id: string | null | undefined) => id === laneApprover || id === mergeWriterApprover;
+export { laneApprover } from '../model/rework-ground.js';
 
 /**
  * A decision approved whose application recorded no outcome (GY-1300): neither decision.applied,
@@ -96,16 +94,11 @@ export async function applyLaneRework(services: Services, requested: DecisionRec
     // ground is recorded in any lane, and the intervention fold reads it.
     const lane = itemLane(work!), ground = reworkGround(work!, history);
     if (reworkNeedsApprover(work!) && !ground) return decision;
-    // GY-1524: the merge writer's own failed trial of the head is the ground, and the writer is the
-    // approver, in every lane: it trial-merged, built and tested exactly this candidate itself.
-    const trial = trialFailedGround(work!);
-    const reason = trial ? `${trial}, so the merge writer is the rework's approver and no approver decision is needed (GY-1524)`
-      : ground && reworkNeedsApprover(work!) ? `${ground}, so the record is the rework's ground and no approver decision is needed (GY-1394)` : `the ${lane} risk lane applies a rework without an approver decision (GY-883)${ground ? `; the record shows its ground: ${ground}` : ''}`;
-    const approver = trial ? { id: mergeWriterApprover, role: 'merge-writer' } : { id: laneApprover, role: 'risk-lane' };
-    await record(db, work!, approver.id, 'decision.approved', { id: decision.id, action: decision.action, reason, requestedBy: decision.requestedBy, approver, lane, ...(ground ? { ground } : {}), ...(trial ? { groundKind: mergeWriterTrialGround } : {}) });
+    const reason = ground && reworkNeedsApprover(work!) ? `${ground}, so the record is the rework's ground and no approver decision is needed (GY-1394)` : `the ${lane} risk lane applies a rework without an approver decision (GY-883)${ground ? `; the record shows its ground: ${ground}` : ''}`;
+    await record(db, work!, laneApprover, 'decision.approved', { id: decision.id, action: decision.action, reason, requestedBy: decision.requestedBy, approver: { id: laneApprover, role: 'risk-lane' }, lane, ...(ground ? { ground } : {}) });
     return (await readDecisions(db, work!)).find(entry => entry.id === requested.id)!;
   });
-  return approvedUnapplied(approved) && selfApprover(approved.approvedBy) ? resumeApproved(services, approved) : approved;
+  return approvedUnapplied(approved) && approved.approvedBy === laneApprover ? resumeApproved(services, approved) : approved;
 }
 
 /**
@@ -215,15 +208,15 @@ export async function settleApprovedDecisions(services: Services, caller: Princi
     if (!work) return { superseded: [] as DecisionRecord[], due: [] as DecisionRecord[] };
     const history = (await readDecisions(db, work)).filter(decision => approvedUnapplied(decision) && (!only || (decision.id === only && mayRequest(services, actor, decision, work))));
     const superseded = await supersedeMoved(db, work, history, actor);
-    const due = history.filter(decision => !superseded.some(entry => entry.id === decision.id) && (immediate || selfApprover(decision.approvedBy) || stalledApproval(decision, now.getTime())));
+    const due = history.filter(decision => !superseded.some(entry => entry.id === decision.id) && (immediate || decision.approvedBy === laneApprover || stalledApproval(decision, now.getTime())));
     return { superseded, due };
   });
   const settled = [...found.superseded];
   for (const decision of found.due) {
-    try { settled.push(await resumeApproved(services, decision, !selfApprover(decision.approvedBy))); }
+    try { settled.push(await resumeApproved(services, decision, decision.approvedBy !== laneApprover)); }
     catch (error) {
       const fault = error instanceof Error ? error.message : 'unknown';
-      if (selfApprover(decision.approvedBy)) { console.error(`lane rework ${decision.id} on ${id} could not be resumed; the next request retries it:`, fault); continue; }
+      if (decision.approvedBy === laneApprover) { console.error(`lane rework ${decision.id} on ${id} could not be resumed; the next request retries it:`, fault); continue; }
       settled.push(await services.engine.store.transaction(async db => {
         // The approval's own application, or a second resumer, may have settled it meanwhile; the first outcome stands.
         const work = await findWork(db, id); demand(work, 'Work item not found', 404);
