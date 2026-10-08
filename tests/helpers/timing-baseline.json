@@ -402,6 +402,7 @@
     "tests/install-adapters.test.ts": 7238,
     "tests/install-docs.test.ts": 929,
     "tests/install-github.test.ts": 1620,
+    "tests/install-local-provider.test.ts": 6400,
     "tests/install-pilot-safety.test.ts": 4100,
     "tests/install-plan.test.ts": 20350,
     "tests/install-providers.test.ts": 1790,

@@ -669,15 +669,18 @@ export function recordedUp(root: string): { repository: string; provider: string
 export function upRequestFromArgs(args: string[], recorded: { repository: string; provider: string } | null = null): UpRequest {
   const { values } = parseArgs({ args, options: { repo: { type: 'string' }, provider: { type: 'string' }, agent: { type: 'boolean' }, json: { type: 'boolean' }, reviewer: { type: 'string' }, master: { type: 'string' }, goal: { type: 'string' }, 'browser-profile': { type: 'string' },
     'confirm-price': { type: 'string' }, 'max-monthly': { type: 'string' }, 'ssh-key': { type: 'string' }, 'ssh-host': { type: 'string' }, 'ssh-user': { type: 'string' },
-    'reuse-app': { type: 'string', multiple: true }, 'github-mobile': { type: 'boolean' }, wait: { type: 'string' }, 'no-wait': { type: 'boolean' }, 'share-tailnet': { type: 'boolean' } }, allowPositionals: false });
-  for (const [flag, given, kept] of [['--repo', values.repo, recorded?.repository], ['--provider', values.provider, recorded?.provider]] as const) {
+    'reuse-app': { type: 'string', multiple: true }, 'github-mobile': { type: 'boolean' }, wait: { type: 'string' }, 'no-wait': { type: 'boolean' }, 'share-tailnet': { type: 'boolean' }, local: { type: 'boolean' } }, allowPositionals: false });
+  // --local is --provider local (GY-1500): the control plane on embedded Postgres on this machine, no Docker.
+  if (values.local && values.provider !== undefined && values.provider !== 'local') throw new Error(`graphyard up --local means --provider local; it cannot be combined with --provider ${values.provider}`);
+  const provider = values.local ? 'local' : values.provider;
+  for (const [flag, given, kept] of [['--repo', values.repo, recorded?.repository], ['--provider', provider, recorded?.provider]] as const) {
     if (given !== undefined && kept !== undefined && given !== kept) throw new Error(`graphyard up ${flag} ${given} conflicts with ${kept}, which the run recorded in .graphyard/up.json resumes; omit ${flag} (or pass ${kept}) to resume it, or remove .graphyard/up.json to start over for ${given}`);
   }
   const repository = values.repo ?? recorded?.repository;
-  if (!repository || !/^[\w.-]+\/[\w.-]+$/.test(repository)) throw new Error('Use graphyard up --repo OWNER/NAME [--provider compose|railway|hetzner] [--agent]');
+  if (!repository || !/^[\w.-]+\/[\w.-]+$/.test(repository)) throw new Error('Use graphyard up --repo OWNER/NAME [--provider compose|railway|hetzner|local | --local] [--agent]');
   const minutes = values.wait === undefined ? null : Number(values.wait);
   if (minutes !== null && (!Number.isSafeInteger(minutes) || minutes < 1 || minutes > 1_440)) throw new Error('Use --wait with whole minutes from 1 to 1440');
-  return { repository, provider: values.provider ?? recorded?.provider ?? 'compose', agent: !!values.agent, reviewer: values.reviewer ?? 'claude', master: values.master ?? 'claude',
+  return { repository, provider: provider ?? recorded?.provider ?? 'compose', agent: !!values.agent, reviewer: values.reviewer ?? 'claude', master: values.master ?? 'claude',
     goalFile: values.goal ?? null, browserProfile: values['browser-profile'] ?? null,
     install: { confirmPrice: values['confirm-price'] ?? null, maxMonthly: values['max-monthly'] ?? null, sshKey: values['ssh-key'] ?? null, sshHost: values['ssh-host'] ?? null, sshUser: values['ssh-user'] ?? null },
     ...(values['reuse-app']?.length ? { reuseApps: values['reuse-app'] } : {}), ...(values['github-mobile'] ? { sudo: 'mobile' as const } : {}),

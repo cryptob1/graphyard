@@ -3,6 +3,7 @@ import { SERVER_CONTAINER_UID, shellQuote, type Transport } from './transport.js
 import { SERVER_PORT, type EnvValue, type PlanAction, type PreflightItem, type Provider } from './types.js';
 import { packageVersion } from '../release.js';
 import { hetznerQuote, spendConsent, type PriceQuote, type QuoteResult } from './pricing.js';
+import { localAdapter } from './local.js';
 
 /** The versioned release image for the checkout's own version, as .github/workflows/release.yml publishes it. */
 export const DEFAULT_IMAGE = `ghcr.io/cryptob1/graphyard:${packageVersion}`;
@@ -41,6 +42,8 @@ export interface AdapterContext {
   railwayDir: string;
   /** The self-contained host settings (GY-717); null for a server-only install. */
   host: import('./host.js').HostSettings | null;
+  /** The local provider's cluster, unit and supervisor (GY-1500); absent for every other provider. */
+  local?: import('./local.js').LocalSettings | null;
   /** Spend consent for a server this install creates: a monthly cap, or the exact price confirmed. */
   spend: { maxMonthly: number | null; confirmPrice: number | null };
   wait: (ms: number) => Promise<void>;
@@ -679,7 +682,8 @@ export const adapters: Partial<Record<Provider, ProviderAdapter>> = {
 };
 
 export const adapterFor = (provider: Provider) => {
-  const adapter = adapters[provider];
+  // Looked up when called: local.ts imports this module, so a record entry would read it before it is defined.
+  const adapter = provider === 'local' ? localAdapter : adapters[provider];
   // `host` exists only as a self-contained install; src/install/host.ts wraps it.
   if (!adapter) throw new Error(`The ${provider} target is installed by the self-contained host adapter (src/install/host.ts)`);
   return adapter;

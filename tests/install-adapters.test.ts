@@ -39,6 +39,7 @@ test('--apply provisions Postgres and the application, sets every variable, and 
     hetzner: 'https://graphyard.example.test',
     'docker-host': 'https://graphyard.example.test',
     compose: 'http://127.0.0.1:4310',
+    local: 'http://127.0.0.1:4310',
   };
   for (const provider of ['railway', 'hetzner', 'docker-host', 'compose'] as Provider[]) {
     const fixture = await harness({ provider });
