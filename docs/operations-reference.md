@@ -72,7 +72,7 @@ Silent webhook hour: `master status` cites `https://github.com/settings/apps/APP
 
 ## Control-plane resources
 
-`resources` remedies: ledgers, `graphyard master run --once`; `agent-names:PROFILE`, `herdr pane close PANE`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow volume and `GRAPHYARD_DATABASE_MAX_BYTES` (10GiB); `tmp-inodes`, free `TMPDIR`/`/tmp` (the pass deletes this user's `tsx-<uid>` compile-cache files older than 6 h, ≤100 per cycle); `loaded-revision` counts code moves. No fault while remedy acts: owed restart retried within bound, pane unowned <10min, `/tmp` >10% free after pass within 30min.
+`resources` remedies: ledgers, `graphyard master run --once`; `agent-names:PROFILE`, `herdr pane close PANE`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow volume and `GRAPHYARD_DATABASE_MAX_BYTES` (10GiB); `tmp-inodes`, free `TMPDIR`/`/tmp` (old `tsx-<uid>` compile-cache files); `loaded-revision` counts code moves. No fault while remedy acts: owed restart retried within bound, pane unowned <10min, `/tmp` >10% free after pass within 30min.
 
 Session-started `npm test`, `test:browser`, typecheck, `tsc --noEmit` take one of max(2, floor(GB/8)) slots (`GRAPHYARD_VERIFICATION_SLOTS`; managed root's `.verification-slots`); CI unbounded. Under max(10% RAM, 4GB) available, launches defer (`escalation:dispatch:memory`; one `memory-pressure` fault per dip) until 1GB above.
 
