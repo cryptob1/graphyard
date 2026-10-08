@@ -171,6 +171,20 @@ export async function herdrPluginBinding(runHerdr: (args: string[]) => string | 
   return typeof config?.url === 'string' && config.url ? { configDirectory, url: config.url, bound: config.url } : uninspectable('it names no server url');
 }
 
+/**
+ * Whether Herdr reports its `graphyard` plugin enabled (`plugin list --plugin graphyard --json`): a
+ * config.json written for the right server says nothing of an enable that failed after it, or a
+ * plugin disabled since (GY-1511). False when the plugin is not installed; null when Herdr cannot say.
+ */
+export async function herdrPluginEnabled(runHerdr: (args: string[]) => string | Promise<string>): Promise<boolean | null> {
+  try {
+    const parsed = JSON.parse(String(await runHerdr(['plugin', 'list', '--plugin', 'graphyard', '--json'])));
+    const plugins = parsed?.result?.plugins ?? parsed?.plugins;
+    if (!Array.isArray(plugins)) return null;
+    return plugins.find((plugin: any) => plugin?.plugin_id === 'graphyard')?.enabled === true;
+  } catch { return null; }
+}
+
 /** True when a plugin binding points anywhere but `target`, an uninspectable one included. */
 export function herdrBoundElsewhere(binding: { url: string | null } | null, target: string | null) {
   return !!binding && (binding.url === null || target === null || urlOrigin(binding.url) !== urlOrigin(target));

@@ -51,7 +51,7 @@ function upWorld(options: { herdrElsewhere: boolean; herdrOnly?: () => { code: n
 const request: UpRequest = { repository: 'acme/shop', provider: 'compose', agent: false, reviewer: 'claude', master: 'claude', goalFile: null, browserProfile: null };
 
 /** Herdr on a simulated host for up: what each step was asked, and what it did. */
-function fakeHerdrHost(state: { binary: boolean; running: Set<string>; plugin?: () => string | null }) {
+function fakeHerdrHost(state: { binary: boolean; running: Set<string>; plugin?: () => string | null; enabled?: () => boolean; enable?: () => Promise<void> }) {
   const log: { step: string; instance?: HerdrInstance | null; workspace?: string | null }[] = [];
   const host: UpHerdr = {
     binary: async () => { log.push({ step: 'binary' }); const installed = !state.binary; state.binary = true; return { binary: '/home/op/.local/bin/herdr', installed }; },
@@ -62,7 +62,8 @@ function fakeHerdrHost(state: { binary: boolean; running: Set<string>; plugin?: 
     },
     record: async (instance, workspace) => { log.push({ step: 'record', instance, workspace }); },
     // The plugin the install linked: bound to this install's server unless the state says otherwise.
-    plugin: async () => state.plugin ? state.plugin() : SERVER,
+    plugin: async () => { const url = state.plugin ? state.plugin() : SERVER; return url ? { url, enabled: state.enabled?.() ?? true } : null; },
+    enable: async instance => { log.push({ step: 'enable', instance }); await state.enable?.(); },
   };
   return { host, log };
 }
@@ -297,6 +298,79 @@ test('unit:up-sets-up-herdr-from-scratch — a plugin link or enable that fails 
   assert.equal(again.herdrAttach, 'herdr');
   assert.equal(world.calls.filter(args => args[0] === 'install' && args.includes('--apply')).length, 3, 'the done install ran again once');
   assert.ok(rerunEvents.some(event => event.kind === 'note' && /is bound to https:\/\/other\.example, not this install's server; running the install again to link it/.test(event.text)));
+});
+
+test('unit:up-sets-up-herdr-from-scratch — an enable that fails after config.json was written for this server is a named, recorded failure, retried on the next run; a plugin disabled since an earlier run is enabled again', async () => {
+  const { runUp, upHerdr } = await up();
+  // upHerdr reads the enabled state Herdr reports, not only config.json: a real herdr spawn (a fake
+  // binary on PATH) whose config.json names this server while `plugin list` reports it disabled.
+  const scratch = await temporaryDirectory('herdr-plugin-enable');
+  const bin = join(scratch, 'bin'), config = join(scratch, 'config'), flag = join(scratch, 'enabled'), refuse = join(scratch, 'refuse');
+  const previous = process.env.PATH;
+  try {
+    await mkdir(bin, { recursive: true }); await mkdir(config, { recursive: true });
+    await writeFile(join(config, 'config.json'), JSON.stringify({ url: SERVER, token: 't' }));
+    await writeFile(join(bin, 'herdr'), `#!/bin/sh
+[ "$1" = "--session" ] && shift 2
+case "$1 $2" in
+  "plugin config-dir") echo ${JSON.stringify(config)} ;;
+  "plugin list") if [ -e ${JSON.stringify(flag)} ]; then e=true; else e=false; fi; echo "{\\"result\\":{\\"plugins\\":[{\\"plugin_id\\":\\"graphyard\\",\\"enabled\\":$e}]}}" ;;
+  "plugin enable") if [ -e ${JSON.stringify(refuse)} ]; then echo "plugin graphyard failed to load" >&2; exit 1; fi; : > ${JSON.stringify(flag)} ;;
+esac
+exit 0
+`);
+    await chmod(join(bin, 'herdr'), 0o755);
+    process.env.PATH = `${bin}${delimiter}${previous}`;
+    const host = upHerdr(scratch, 'acme/shop');
+    assert.deepEqual(await host.plugin(null), { url: SERVER, enabled: false }, 'a written config.json is not an enabled plugin');
+    await writeFile(refuse, '');
+    await assert.rejects(host.enable(null), (error: any) => error.step === 'plugin' && /herdr plugin enable graphyard exited 1: plugin graphyard failed to load/.test(error.message));
+    assert.deepEqual(await host.plugin(null), { url: SERVER, enabled: false });
+    await rm(refuse);
+    await host.enable(null);
+    assert.deepEqual(await host.plugin(null), { url: SERVER, enabled: true });
+  } finally { process.env.PATH = previous; }
+
+  // up: the install wrote config.json for this server, then its enable failed. up enables it, is
+  // refused, and records the named failure with no attach command; the next run retries and sets it up.
+  const world = upWorld({ herdrElsewhere: false });
+  const root = await temporaryDirectory('herdr-plugin-enable-up');
+  let enabled = false, refused = true;
+  const fake = fakeHerdrHost({ binary: true, running: new Set(), enabled: () => enabled,
+    enable: async () => { if (refused) throw new (await herdr()).HerdrSetupFailure('plugin', 'herdr plugin enable graphyard exited 1: plugin graphyard failed to load'); enabled = true; } });
+  const events: UpEvent[] = [];
+  const failed = await runUp(request, world.deps(root, events, fake.host));
+  assert.equal(failed.exitCode, 0, failed.next);
+  assert.equal(failed.herdrAttach, null, 'no attach command for a plugin Herdr reports disabled');
+  assert.ok(!events.some(event => event.kind === 'note' && event.text.startsWith('Watch this install\'s agents')));
+  let recorded = JSON.parse(await readFile(join(root, '.graphyard/up.json'), 'utf8'));
+  assert.equal(recorded.noHerdr, true);
+  assert.equal(recorded.herdrFailure, 'Herdr plugin failed: herdr plugin enable graphyard exited 1: plugin graphyard failed to load');
+  assert.equal(fake.log.filter(entry => entry.step === 'enable').length, 1);
+
+  // Fixed: the next run sets Herdr up again, enables the plugin, and clears the failure.
+  refused = false;
+  const fixed = await runUp(request, world.deps(root, [], fake.host));
+  assert.equal(fixed.herdrAttach, 'herdr');
+  recorded = JSON.parse(await readFile(join(root, '.graphyard/up.json'), 'utf8'));
+  assert.equal(recorded.noHerdr, false);
+  assert.equal(recorded.herdrFailure, null);
+  assert.equal(fake.log.filter(entry => entry.step === 'enable').length, 2);
+
+  // Disabled between runs: a rerun whose install is done enables it again rather than reporting it set up.
+  enabled = false;
+  const rerunEvents: UpEvent[] = [];
+  const again = await runUp(request, world.deps(root, rerunEvents, fake.host));
+  assert.equal(again.herdrAttach, 'herdr');
+  assert.equal(enabled, true);
+  assert.ok(rerunEvents.some(event => event.kind === 'note' && event.text === 'Herdr\'s graphyard plugin is bound to this install\'s server but not enabled; enabling it'));
+
+  // An enable Herdr accepts while still reporting the plugin disabled is named too, never reported set up.
+  enabled = false;
+  const stuck = fakeHerdrHost({ binary: true, running: new Set(), enabled: () => false });
+  const ignored = await runUp(request, world.deps(root, [], stuck.host));
+  assert.equal(ignored.herdrAttach, null);
+  assert.equal(JSON.parse(await readFile(join(root, '.graphyard/up.json'), 'utf8')).herdrFailure, `Herdr plugin failed: the graphyard plugin in the host's default Herdr is bound to ${SERVER} but Herdr still reports it disabled after enabling it`);
 });
 
 test('unit:herdr-calls-target-install-instance — every herdr call an install with its own instance makes carries its XDG_CONFIG_HOME and --session through the shared helper, and no herdr spawn in src/ bypasses it', async () => {

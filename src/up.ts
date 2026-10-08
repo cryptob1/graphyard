@@ -16,7 +16,7 @@ import { redactString } from './evidence-replay.js';
 import { unitCheckout, userUnitDirectory } from './install/units.js';
 import { installIdFor } from './install/types.js';
 import { ensureHerdrBinary, ensureHerdrServer, ensureHerdrWorkspace, herdrAttachCommand, HerdrSetupFailure, herdrSync, hostHerdrDeps, installHerdrInstance, prepareHerdrInstance, withLocalBin, type HerdrHostDeps, type HerdrInstance } from './master/herdr.js';
-import { herdrBoundElsewhere, herdrPluginBinding } from './repository-setup.js';
+import { herdrBoundElsewhere, herdrPluginBinding, herdrPluginEnabled } from './repository-setup.js';
 import { recordHerdrInstance } from './master/config.js';
 
 /**
@@ -169,8 +169,10 @@ export interface UpHerdr {
   server(binary: string, instance: HerdrInstance | null, installId: string): Promise<{ started: boolean; unit: string | null; workspace: string | null }>;
   /** Records the own instance and its workspace in .graphyard/master.json. */
   record(instance: HerdrInstance, workspace: string | null): Promise<void>;
-  /** The server the graphyard plugin in INSTANCE (null: the default) is bound to, or null when it is not configured. */
-  plugin(instance: HerdrInstance | null): Promise<string | null>;
+  /** The server the graphyard plugin in INSTANCE (null: the default) is bound to and whether Herdr reports it enabled; null when it is not configured. */
+  plugin(instance: HerdrInstance | null): Promise<{ url: string; enabled: boolean } | null>;
+  /** Enables the graphyard plugin in INSTANCE; a refusal is a HerdrSetupFailure of step plugin. */
+  enable(instance: HerdrInstance | null): Promise<void>;
 }
 /**
  * The provider whose master loop runs on another machine: a self-contained host (`--provider host`,
@@ -578,23 +580,36 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
     await controlPlane();
     await resolveSetupUrl();
     await reach();
-    // GY-1511: the plugin the install linked is checked on every run, so a link or enable that failed
-    // inside the install, or a plugin changed since, is never reported set up. A run whose install was
-    // done earlier runs it again once; a plugin still not bound to this server leaves Herdr out, named.
+    // GY-1511: the plugin the install linked is checked on every run, its binding and its enabled state
+    // as Herdr reports them, so a link or enable that failed inside the install, or a plugin changed or
+    // disabled since, is never reported set up. A plugin bound elsewhere or missing on a run whose install
+    // was done earlier runs it again once; one bound here but disabled is enabled; a plugin still not
+    // bound and enabled for this server leaves Herdr out, named, and the next run sets it up again.
     if (herdrHost && herdrBinary && !state.noHerdr) {
       const server = await deps.serverUrl();
+      const where = ownHerdr ? ` in this install's own instance (session ${ownHerdr.session})` : " in the host's default Herdr";
+      const disabled = 'bound to this install\'s server but not enabled';
       const unbound = async () => {
-        const bound = await herdrHost.plugin(ownHerdr).catch(() => null);
-        return bound && server && !herdrBoundElsewhere({ url: bound }, server) ? null : bound ? `bound to ${bound}` : 'not configured';
+        const plugin = await herdrHost.plugin(ownHerdr).catch(() => null);
+        if (!plugin) return 'not configured';
+        if (!server || herdrBoundElsewhere({ url: plugin.url }, server)) return `bound to ${plugin.url}`;
+        return plugin.enabled ? null : disabled;
       };
       let wrong = await unbound();
-      if (wrong && installedBefore) {
+      if (wrong && wrong !== disabled && installedBefore) {
         deps.emit({ kind: 'note', text: `Herdr's graphyard plugin${ownHerdr ? ` in session ${ownHerdr.session}` : ''} is ${wrong}, not this install's server; running the install again to link it` });
         state.completed = state.completed.filter(name => name !== 'control-plane'); await writeState(deps.root, state);
         await controlPlane();
         wrong = await unbound();
       }
-      if (wrong) await leaveHerdrOut(new HerdrSetupFailure('plugin', `the graphyard plugin${ownHerdr ? ` in this install's own instance (session ${ownHerdr.session})` : " in the host's default Herdr"} is ${wrong} after the install linked it, not to ${server ?? 'this install\'s server'}`));
+      let refused: HerdrSetupFailure | null = null;
+      if (wrong === disabled) {
+        deps.emit({ kind: 'note', text: `Herdr's graphyard plugin${ownHerdr ? ` in session ${ownHerdr.session}` : ''} is ${disabled}; enabling it` });
+        try { await herdrHost.enable(ownHerdr); wrong = await unbound(); } catch (error) { if (!(error instanceof HerdrSetupFailure)) throw error; refused = error; }
+      }
+      if (refused) await leaveHerdrOut(refused);
+      else if (wrong === disabled) await leaveHerdrOut(new HerdrSetupFailure('plugin', `the graphyard plugin${where} is bound to ${server} but Herdr still reports it disabled after enabling it`));
+      else if (wrong) await leaveHerdrOut(new HerdrSetupFailure('plugin', `the graphyard plugin${where} is ${wrong} after the install linked it, not to ${server ?? 'this install\'s server'}`));
     }
     // GY-1511: the install's own instance is recorded beside the master configuration the install wrote,
     // so the loop, the dispatcher and every supervisor reach it; then the operator is told how to watch.
@@ -1304,7 +1319,15 @@ export function upHerdr(root: string, repository: string, deps: HerdrHostDeps = 
       return { ...server, workspace: instance ? await ensureHerdrWorkspace(deps, binary, instance, root, repository.split('/').pop() || repository) : null };
     },
     record: async (instance, workspace) => { await recordHerdrInstance(root, instance, workspace); },
-    plugin: async instance => (await herdrPluginBinding(args => herdrSync(args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 30_000 }, instance)))?.url ?? null,
+    plugin: async instance => {
+      const run = (args: string[]) => herdrSync(args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 30_000 }, instance);
+      const url = (await herdrPluginBinding(run))?.url;
+      return url ? { url, enabled: await herdrPluginEnabled(run) === true } : null;
+    },
+    enable: async instance => {
+      try { herdrSync(['plugin', 'enable', 'graphyard'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 30_000 }, instance); }
+      catch (error: any) { throw new HerdrSetupFailure('plugin', `herdr plugin enable graphyard${instance ? ` in session ${instance.session}` : ''} exited ${error?.status ?? 'abnormally'}: ${`${error?.stderr ?? ''}`.trim().split('\n').slice(-3).join(' ').slice(0, 300) || error?.message || 'no output'}`); }
+    },
   };
 }
 
