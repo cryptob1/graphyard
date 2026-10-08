@@ -1554,7 +1554,7 @@ export interface ExecutorIdentity { id: string; host: string }
 export type ExecutorHandler = (action: ActionRow, identity: ExecutorIdentity) => Promise<string> | string;
 export interface ExecutorEffects {
   /** Ask the control plane for one row this executor can run; null when the queue has nothing for it. */
-  claim: (request: { host: string; executor: string; kinds: NextActionKind[]; leaseSeconds?: number }) => Promise<{ action: ActionRow | null; open?: number }>;
+  claim: (request: { host: string; executor: string; kinds: NextActionKind[]; serves?: NextActionKind[]; leaseSeconds?: number }) => Promise<{ action: ActionRow | null; open?: number }>;
   settle: (action: ActionRow, result: 'done' | 'failed', reason: string) => Promise<unknown>;
   /**
    * Say the handler is still running, so the claim holds for another lease. An executor wired
@@ -1567,7 +1567,7 @@ export interface ExecutorEffects {
    * hears from an executor, so one that may not claim for a while — behind a fleet restart's
    * fence — says so here instead of falling silent and reading as a dead fleet.
    */
-  present?: (request: { host: string; executor: string; kinds: NextActionKind[] }) => Promise<unknown>;
+  present?: (request: { host: string; executor: string; kinds: NextActionKind[]; serves?: NextActionKind[] }) => Promise<unknown>;
   /** One handler per action kind this executor can run. A kind with no handler is never claimed. */
   handlers: Partial<Record<NextActionKind, ExecutorHandler>>;
   /**
@@ -1633,8 +1633,10 @@ export async function runExecutorTick(identity: ExecutorIdentity, effects: Execu
   if (!kinds.length) return step(null, 'idle', 'this executor has no handler for any action kind');
   const hold = kinds.some(kind => launchingKinds.includes(kind)) && effects.launchHold ? await effects.launchHold().catch(() => null) : null;
   const claimable = hold ? kinds.filter(kind => !launchingKinds.includes(kind)) : kinds;
-  if (!claimable.length) return step(null, 'idle', `claims nothing: ${hold}`);
-  const claimed = await effects.claim({ host: identity.host, executor: identity.id, kinds: claimable });
+  // Presence records what this executor serves, not what the hold lets it claim this tick (GY-1539):
+  // a deliberate deferral must never read as a fleet that lacks the kind.
+  if (!claimable.length) { await effects.present?.({ host: identity.host, executor: identity.id, kinds, serves: kinds }).catch(() => {}); return step(null, 'idle', `claims nothing: ${hold}`); }
+  const claimed = await effects.claim({ host: identity.host, executor: identity.id, kinds: claimable, serves: kinds });
   const action = claimed.action;
   if (!action) return step(null, 'idle', hold ? `the queue has no action this executor can run without launching a session, and it launches none: ${hold}` : 'the queue has no action this executor can run');
   // The handlers are not bounded by the claim lease: a dispatch prepares a worktree and waits on
