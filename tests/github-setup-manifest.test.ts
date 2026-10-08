@@ -76,3 +76,25 @@ test('unit:manifest-no-loopback-hook — a control-plane App is created although
     } finally { await new Promise<void>(done => page.http.close(() => done())); await rm(root, { recursive: true, force: true }); }
   }
 });
+
+test('unit:control-plane-manifest-no-events-without-hook — GitHub refuses events on an App with no hook, so a loopback origin\'s control-plane manifest has neither hook_attributes nor default_events and a public one has both', async () => {
+  const { appManifest } = await setup();
+  for (const origin of ['http://127.0.0.1:4310', 'http://localhost:4310', 'https://192.168.1.20']) {
+    const manifest = appManifest('owner/scratch', origin, CALLBACK);
+    assert.equal('hook_attributes' in manifest, false, `${origin} sent hook_attributes`);
+    assert.deepEqual(manifest.default_events, [], `${origin} subscribed to events without a hook`);
+  }
+  const hosted = appManifest('owner/scratch', 'https://graphyard.example', CALLBACK);
+  assert.equal(hosted.hook_attributes.url, 'https://graphyard.example/api/github/webhook');
+  assert.ok(hosted.default_events.length > 0, 'a public origin subscribed to no events');
+});
+
+test('unit:fake-github-refuses-hookless-events — the fake GitHub refuses a manifest with events and no hook as GitHub does, and accepts the manifests appManifest builds', async () => {
+  const { appManifest } = await setup();
+  const { FakeGitHub } = await import('./helpers/fake-github.js');
+  const github = new FakeGitHub('owner/scratch', { autoApprove: true });
+  const local = appManifest('owner/scratch', 'http://127.0.0.1:4310', CALLBACK);
+  assert.throws(() => github.submitManifest({ ...local, default_events: ['pull_request'] }, 'person:owner'), /Hook url cannot be blank/);
+  assert.ok(github.submitManifest(local, 'person:owner').code, 'the local control-plane manifest was refused');
+  assert.ok(github.submitManifest(appManifest('owner/scratch', 'https://graphyard.example', CALLBACK), 'person:owner').code, 'the hosted manifest was refused');
+});

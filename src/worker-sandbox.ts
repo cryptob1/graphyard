@@ -39,6 +39,22 @@ export const writablePaths = (paths: WorkerPaths) => {
   return [...new Set([paths.worktree, paths.gitDir, ...shared].filter((path): path is string => !!path))];
 };
 
+/**
+ * What a reviewer or producer session writes (GY-1507): the same narrow Git paths as a worker
+ * (`writablePaths`), never the common Git directory itself, which a confined runtime sandbox cannot
+ * even start on (`bwrap: Can't create file <common>/.git`). Its directory is anchored at the common
+ * directory (reviewer.ts anchorSessionCheckout), so Git reports that as its own Git directory; only a
+ * linked worktree's own admin directory is granted as such. It also adds its detached worktree with
+ * `git worktree add`, which registers under `<common>/worktrees`, the area the coordinator
+ * confinement re-exposes to a session that has no admin directory yet.
+ */
+export function sessionWritablePaths(directory: string, commonDir: string | null, run: Git = git) {
+  const own = workerPaths(directory, run), common = commonDir ?? own.commonDir;
+  const gitDir = own.gitDir && own.gitDir !== common ? own.gitDir : null;
+  const worktrees = common ? [join(common, 'worktrees')].filter(isDirectory) : [];
+  return [...new Set([...writablePaths({ worktree: directory, gitDir, commonDir: common }), ...worktrees])];
+}
+
 /** A runtime whose launch arguments carry a filesystem sandbox, and how that sandbox is granted and probed. */
 export interface RuntimeSandbox {
   /** The write-restricting mode the arguments select, or null when they leave writes unrestricted. */
@@ -97,8 +113,8 @@ export function grantWorkerPaths(kind: string | undefined, args: string[], paths
 }
 
 export class WorkerSandboxError extends Error {
-  constructor(readonly runtime: string, readonly path: string, readonly detail: string) {
-    super(`Worker launch failed: the ${runtime} sandbox cannot write ${path} (${detail}), so the worker would fail at its first commit or sync. Grant ${path} in the launch's sandbox arguments; docs/master-agent-sessions.md "Worker sandbox" says what each runtime needs`);
+  constructor(readonly runtime: string, readonly path: string, readonly detail: string, readonly role = 'worker') {
+    super(`${role[0].toUpperCase()}${role.slice(1)} launch failed: the ${runtime} sandbox cannot write ${path} (${detail}), so the ${role} would fail at its first ${role === 'worker' ? 'commit or sync' : 'command'}. Grant ${path} in the launch's sandbox arguments; docs/master-agent-sessions.md "Worker sandbox" says what each runtime needs`);
     this.name = 'WorkerSandboxError';
   }
 }
@@ -118,15 +134,15 @@ const probeScript = 'for p do f="$p/.graphyard-sandbox-probe-$$"; if err=$( { : 
  * launcher itself. Throws WorkerSandboxError naming the first path it cannot write, or the path
  * the sandbox could not start on.
  */
-export function verifyWorkerSandbox(launch: { kind?: string; args: string[]; environment?: Record<string, string>; confinement?: readonly string[] }, cwd: string, paths: string[], run: SandboxExec = exec) {
-  const kind = launch.kind ?? 'unknown';
+export function verifyWorkerSandbox(launch: { kind?: string; args: string[]; environment?: Record<string, string>; confinement?: readonly string[]; role?: string }, cwd: string, paths: string[], run: SandboxExec = exec) {
+  const kind = launch.kind ?? 'unknown', role = launch.role;
   const sandbox = runtimeSandboxes[kind];
   const wrapper = launch.confinement ?? [];
   if ((!sandbox || sandbox.mode(launch.args) === null) && !wrapper.length) {
     for (const path of paths) {
       const file = resolve(path, `.graphyard-sandbox-probe-${process.pid}`);
       try { writeFileSync(file, ''); rmSync(file, { force: true }); }
-      catch (error) { throw new WorkerSandboxError(kind, path, error instanceof Error ? error.message : String(error)); }
+      catch (error) { throw new WorkerSandboxError(kind, path, error instanceof Error ? error.message : String(error), role); }
     }
     return { runtime: kind, sandbox: null, verified: paths };
   }
@@ -142,12 +158,12 @@ export function verifyWorkerSandbox(launch: { kind?: string; args: string[]; env
       // A sandbox that could not start names the path it refused on (`bwrap: Can't create file
       // <path>: Read-only file system`): that path, not the list, is what the launch failed on.
       const stderr = `${error?.stderr ?? ''}`.trim(), refused = environmentFailure({ message: stderr }, cwd);
-      throw new WorkerSandboxError(kind, refused && stderr ? refused.path : paths.join(', '), `the sandbox probe \`${inner.command} ${inner.args.slice(0, 1).join(' ')}\`${where} did not run: ${stderr || (error instanceof Error ? error.message : String(error))}`.slice(0, 400));
+      throw new WorkerSandboxError(kind, refused && stderr ? refused.path : paths.join(', '), `the sandbox probe \`${inner.command} ${inner.args.slice(0, 1).join(' ')}\`${where} did not run: ${stderr || (error instanceof Error ? error.message : String(error))}`.slice(0, 400), role);
     }
   }
   const denied = /^unwritable\t([^\t]*)\t(.*)$/m.exec(output);
-  if (denied) throw new WorkerSandboxError(kind, denied[1], denied[2].trim() || 'write refused');
-  if (!/^writable$/m.test(output)) throw new WorkerSandboxError(kind, paths.join(', '), `the sandbox probe reported nothing: ${output.trim().slice(0, 200) || 'no output'}`);
+  if (denied) throw new WorkerSandboxError(kind, denied[1], denied[2].trim() || 'write refused', role);
+  if (!/^writable$/m.test(output)) throw new WorkerSandboxError(kind, paths.join(', '), `the sandbox probe reported nothing: ${output.trim().slice(0, 200) || 'no output'}`, role);
   return { runtime: kind, sandbox: sandbox?.mode(launch.args) ?? null, verified: paths };
 }
 
