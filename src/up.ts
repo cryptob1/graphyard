@@ -15,7 +15,8 @@ import { coordinatorCheckoutRefusal, coordinatorCheckoutRoot, dirtyCheckoutPaths
 import { redactString } from './evidence-replay.js';
 import { unitCheckout, userUnitDirectory } from './install/units.js';
 import { installIdFor } from './install/types.js';
-import { ensureHerdrBinary, ensureHerdrServer, ensureHerdrWorkspace, herdrAttachCommand, HerdrSetupFailure, hostHerdrDeps, installHerdrInstance, prepareHerdrInstance, withLocalBin, type HerdrHostDeps, type HerdrInstance } from './master/herdr.js';
+import { ensureHerdrBinary, ensureHerdrServer, ensureHerdrWorkspace, herdrAttachCommand, HerdrSetupFailure, herdrSync, hostHerdrDeps, installHerdrInstance, prepareHerdrInstance, withLocalBin, type HerdrHostDeps, type HerdrInstance } from './master/herdr.js';
+import { herdrBoundElsewhere, herdrPluginBinding } from './repository-setup.js';
 import { recordHerdrInstance } from './master/config.js';
 
 /**
@@ -168,9 +169,16 @@ export interface UpHerdr {
   server(binary: string, instance: HerdrInstance | null, installId: string): Promise<{ started: boolean; unit: string | null; workspace: string | null }>;
   /** Records the own instance and its workspace in .graphyard/master.json. */
   record(instance: HerdrInstance, workspace: string | null): Promise<void>;
+  /** The server the graphyard plugin in INSTANCE (null: the default) is bound to, or null when it is not configured. */
+  plugin(instance: HerdrInstance | null): Promise<string | null>;
 }
-/** The providers whose master loop runs on another machine: Herdr is set up there, by the install. */
-const remoteLoopProviders = ['host', 'hetzner', 'docker-host'];
+/**
+ * The provider whose master loop runs on another machine: a self-contained host (`--provider host`,
+ * install's --target host), set up there by `install --herdr-only` on every run. Every other
+ * provider, hetzner and docker-host included, installs only the server elsewhere: its loop and
+ * Herdr run here.
+ */
+const remoteLoopProviders = ['host'];
 
 export interface UpResult {
   ok: boolean;
@@ -446,7 +454,8 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
 
     // GY-1511: Herdr is set up on every run, the first install on a host included, with no flag. It is
     // checked outside the resumable steps, so a herdr removed or a server stopped since is set up again.
-    const herdrHost = deps.herdr && !remoteLoopProviders.includes(request.provider) ? deps.herdr : null;
+    const remoteLoop = remoteLoopProviders.includes(request.provider);
+    const herdrHost = deps.herdr && !remoteLoop ? deps.herdr : null;
     let herdrBinary: string | null = null;
     const leaveHerdrOut = async (error: unknown) => {
       if (!(error instanceof HerdrSetupFailure)) throw error;
@@ -514,7 +523,7 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
       } catch (error) { await leaveHerdrOut(error); }
     }
 
-    await step('control-plane', async () => {
+    const controlPlane = () => step('control-plane', async () => {
       // The install waits on the App pages itself, as long as this run waits on a person (900 s
       // without a bound); it then pauses (exit 1) and a rerun resumes it. The page's clock starts
       // before the drive reaches Confirm access, so it gets a minute more than the drive waits.
@@ -565,15 +574,45 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
         deps.emit({ kind: 'note', text: 'The App page is still waiting for a person; serving it again' });
       }
     });
+    const installedBefore = state.completed.includes('control-plane');
+    await controlPlane();
     await resolveSetupUrl();
     await reach();
+    // GY-1511: the plugin the install linked is checked on every run, so a link or enable that failed
+    // inside the install, or a plugin changed since, is never reported set up. A run whose install was
+    // done earlier runs it again once; a plugin still not bound to this server leaves Herdr out, named.
+    if (herdrHost && herdrBinary && !state.noHerdr) {
+      const server = await deps.serverUrl();
+      const unbound = async () => {
+        const bound = await herdrHost.plugin(ownHerdr).catch(() => null);
+        return bound && server && !herdrBoundElsewhere({ url: bound }, server) ? null : bound ? `bound to ${bound}` : 'not configured';
+      };
+      let wrong = await unbound();
+      if (wrong && installedBefore) {
+        deps.emit({ kind: 'note', text: `Herdr's graphyard plugin${ownHerdr ? ` in session ${ownHerdr.session}` : ''} is ${wrong}, not this install's server; running the install again to link it` });
+        state.completed = state.completed.filter(name => name !== 'control-plane'); await writeState(deps.root, state);
+        await controlPlane();
+        wrong = await unbound();
+      }
+      if (wrong) await leaveHerdrOut(new HerdrSetupFailure('plugin', `the graphyard plugin${ownHerdr ? ` in this install's own instance (session ${ownHerdr.session})` : " in the host's default Herdr"} is ${wrong} after the install linked it, not to ${server ?? 'this install\'s server'}`));
+    }
     // GY-1511: the install's own instance is recorded beside the master configuration the install wrote,
     // so the loop, the dispatcher and every supervisor reach it; then the operator is told how to watch.
     if (herdrHost && ownHerdr && !state.noHerdr) await herdrHost.record(ownHerdr, herdrWorkspace);
-    if (herdrHost && !state.noHerdr) {
-      herdrAttach = herdrAttachCommand(ownHerdr);
-      deps.emit({ kind: 'note', text: `Watch this install's agents in Herdr: ${herdrAttach}` });
+    if (herdrHost && !state.noHerdr) herdrAttach = herdrAttachCommand(ownHerdr);
+    // A self-contained host's loop and Herdr run there: its install's control-plane step, once done,
+    // never runs again, so `install --herdr-only` sets Herdr up there on every run, its own instance too.
+    if (remoteLoop) {
+      const args = [...installArgs('--apply'), '--herdr-only'].filter(arg => arg !== '--no-herdr' && arg !== '--herdr-instance');
+      const result = await deps.cli(args);
+      const output = parseJson(result.stdout);
+      if (typeof output?.herdr?.attach === 'string') {
+        herdrAttach = output.herdr.attach;
+        if (state.noHerdr || state.herdrFailure) { state.noHerdr = false; state.herdrFailure = null; await writeState(deps.root, state); }
+      } else await leaveHerdrOut(new HerdrSetupFailure(['install', 'server', 'workspace', 'plugin'].includes(output?.herdrFailure?.step) ? output.herdrFailure.step : 'server',
+        typeof output?.herdrFailure?.message === 'string' ? output.herdrFailure.message.replace(/^Herdr \w+ failed: /, '') : `graphyard install --herdr-only exited ${result.code}: ${childTail(result, 3) || 'no output'}`));
     }
+    if (herdrAttach) deps.emit({ kind: 'note', text: `Watch this install's agents in Herdr: ${herdrAttach}` });
 
     await step('host-supervisor', async () => {
       const token = await deps.masterToken();
@@ -1265,6 +1304,7 @@ export function upHerdr(root: string, repository: string, deps: HerdrHostDeps = 
       return { ...server, workspace: instance ? await ensureHerdrWorkspace(deps, binary, instance, root, repository.split('/').pop() || repository) : null };
     },
     record: async (instance, workspace) => { await recordHerdrInstance(root, instance, workspace); },
+    plugin: async instance => (await herdrPluginBinding(args => herdrSync(args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 30_000 }, instance)))?.url ?? null,
   };
 }
 

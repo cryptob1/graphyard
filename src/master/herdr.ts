@@ -2,7 +2,7 @@
 import { execFile, execFileSync, type ExecFileSyncOptions } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { mkdir, readFile, symlink, writeFile } from 'node:fs/promises';
-import { homedir } from 'node:os';
+import { homedir, userInfo } from 'node:os';
 import { delimiter, join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { type ChildRun, type ChildRunOptions, defaultChildTimeoutMs, type BoundChildRun, childRunner, defaultChildRun } from '../child-runner.js';
@@ -47,8 +47,7 @@ export const herdrSubcommand = (args: string[]) => args[0] === '--session' ? arg
  * XDG_CONFIG_HOME and `--session` (which outranks a pane's HERDR_SOCKET_PATH); for the default
  * instance, the arguments unchanged. Every herdr spawn in src/ goes through here or herdrCall.
  */
-export function herdrInvocation(args: string[], instance: HerdrInstance | null = processInstance): { command: string; args: string[]; env?: NodeJS.ProcessEnv } {
-  const command = herdrBinary();
+export function herdrInvocation(args: string[], instance: HerdrInstance | null = processInstance, command: string = herdrBinary()): { command: string; args: string[]; env?: NodeJS.ProcessEnv } {
   if (!instance) return { command, args };
   const { HERDR_SOCKET_PATH: _socket, ...env } = process.env;
   return { command, args: ['--session', instance.session, ...args], env: { ...env, XDG_CONFIG_HOME: instance.configHome, [herdrInstanceEnv.configHome]: instance.configHome, [herdrInstanceEnv.session]: instance.session } };
@@ -59,9 +58,12 @@ export function herdrCall<R>(run: (command: string, args: string[], options?: Ch
   if (!call.env) return options ? run(call.command, call.args, options) : run(call.command, call.args);
   return run(call.command, call.args, { ...options, env: { ...call.env, ...options?.env, XDG_CONFIG_HOME: instance!.configHome } });
 }
-/** The same call for a runner that takes no environment (an install transport): `env` sets the instance's variables. */
-export function herdrViaEnv(args: string[], instance: HerdrInstance | null = processInstance): { command: string; args: string[] } {
-  const call = herdrInvocation(args, instance);
+/**
+ * The same call for a runner that takes no environment (an install transport, another host's
+ * account): `env` sets the instance's variables. BINARY names herdr where that runner finds it.
+ */
+export function herdrViaEnv(args: string[], instance: HerdrInstance | null = processInstance, binary: string = herdrBinary()): { command: string; args: string[] } {
+  const call = herdrInvocation(args, instance, binary);
   if (!instance) return { command: call.command, args: call.args };
   return { command: 'env', args: ['-u', 'HERDR_SOCKET_PATH', `XDG_CONFIG_HOME=${instance.configHome}`, `${herdrInstanceEnv.configHome}=${instance.configHome}`, `${herdrInstanceEnv.session}=${instance.session}`, call.command, ...call.args] };
 }
@@ -207,8 +209,10 @@ export interface HerdrHostDeps {
   home: string;
   /** The PATH the server's panes inherit, so a session finds the runtimes the operator's shell does. */
   path: string;
+  /** The account the user units run under, whose lingering keeps them running after a reboot. */
+  user: string;
 }
-export type HerdrSetupStep = 'install' | 'server' | 'workspace';
+export type HerdrSetupStep = 'install' | 'server' | 'workspace' | 'plugin';
 /** A named, recorded reason Herdr is left out of an install: the only way up leaves it out. */
 export class HerdrSetupFailure extends Error {
   constructor(readonly step: HerdrSetupStep, detail: string) { super(`Herdr ${step} failed: ${detail}`); this.name = 'HerdrSetupFailure'; }
@@ -273,9 +277,13 @@ export async function herdrServerRunning(deps: HerdrHostDeps, binary: string, in
  * that restarts on failure and comes back after a reboot (with lingering, so no login is needed).
  */
 export async function ensureHerdrServer(deps: HerdrHostDeps, binary: string, instance: HerdrInstance | null, installId: string | null, waitMs = 15_000): Promise<{ started: boolean; unit: string | null }> {
-  if (await herdrServerRunning(deps, binary, instance)) return { started: false, unit: null };
   const unit = herdrServerUnit(instance ? installId : null);
   const directory = join(deps.home, '.config', 'systemd', 'user');
+  if (await herdrServerRunning(deps, binary, instance)) {
+    // A server this unit runs comes back after a reboot only while lingering holds, so that is checked on every run too.
+    if (deps.exists(join(directory, unit))) await ensureLinger(deps);
+    return { started: false, unit: null };
+  }
   if (instance) await deps.mkdir(instance.configHome);
   await deps.mkdir(directory);
   await deps.writeFile(join(directory, unit), herdrServerUnitText(binary, instance, deps.path));
@@ -283,12 +291,25 @@ export async function ensureHerdrServer(deps: HerdrHostDeps, binary: string, ins
     const result = await deps.exec('systemctl', args).catch(error => ({ code: 1, stdout: '', stderr: String(error?.message ?? error) }));
     if (result.code !== 0) throw new HerdrSetupFailure('server', `systemctl ${args.join(' ')} exited ${result.code}: ${outputTail(result)}`);
   }
-  // Lingering keeps the user manager, and so the unit, running after a reboot with nobody logged in.
-  await deps.exec('loginctl', ['enable-linger']).catch(() => null);
+  await ensureLinger(deps);
   for (const deadline = Date.now() + waitMs; ; await deps.sleep(500)) {
     if (await herdrServerRunning(deps, binary, instance)) return { started: true, unit };
     if (Date.now() >= deadline) throw new HerdrSetupFailure('server', `${unit} was started but the Herdr server${instance ? ` for session ${instance.session}` : ''} did not report running within ${Math.round(waitMs / 1000)}s; see journalctl --user -u ${unit}`);
   }
+}
+
+/**
+ * Lingering for the account the units run under: its user manager, and so the Herdr unit, starts at
+ * boot with nobody logged in. Read back after enabling it, since loginctl may refuse an unprivileged
+ * user; lingering that cannot be established is a named failure, never a unit reported to survive a
+ * reboot it would not.
+ */
+export async function ensureLinger(deps: Pick<HerdrHostDeps, 'exec' | 'user'>) {
+  const lingering = async () => (await deps.exec('loginctl', ['show-user', deps.user, '--property=Linger', '--value']).catch(() => null))?.stdout.trim() === 'yes';
+  if (await lingering()) return;
+  const result = await deps.exec('loginctl', ['enable-linger', deps.user]).catch(error => ({ code: 1, stdout: '', stderr: String(error?.message ?? error) }));
+  if (await lingering()) return;
+  throw new HerdrSetupFailure('server', `lingering is off for ${deps.user} and loginctl enable-linger ${deps.user} ${result.code === 0 ? 'left it off' : `exited ${result.code}: ${outputTail(result)}`}, so the Herdr server would not start after a reboot until ${deps.user} logs in; have an administrator run sudo loginctl enable-linger ${deps.user}, then rerun`);
 }
 
 /**
@@ -327,7 +348,7 @@ export async function ensureHerdrWorkspace(deps: HerdrHostDeps, binary: string, 
 /** This host as host setup sees it: real commands, files and clock, and the operator's PATH with ~/.local/bin first. */
 export function hostHerdrDeps(home: string = homedir(), env: NodeJS.ProcessEnv = process.env): HerdrHostDeps {
   return {
-    home, path: withLocalBin(env.PATH, home),
+    home, path: withLocalBin(env.PATH, home), user: env.USER || userInfo().username,
     exec: (command, args, options = {}) => new Promise(accept => {
       execFile(command, args, { encoding: 'utf8', timeout: options.timeoutMs ?? 60_000, maxBuffer: 8_000_000, env: { ...(options.env ?? env), PATH: withLocalBin((options.env ?? env).PATH, home) } }, (error: any, stdout, stderr) =>
         accept({ code: error ? (Number.isInteger(error.code) ? error.code : 1) : 0, stdout: String(stdout ?? ''), stderr: String(stderr ?? error?.message ?? '') }));

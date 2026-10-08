@@ -11,6 +11,9 @@ import { proposedConcurrency, proposedRuntimes } from '../model/registry-proposa
 import type { AgentRegistry, FleetAccountInput, FleetModel, FleetRole, FleetRoleName, FleetRuntime } from '../model/registry.js';
 import type { ProfileRegistration } from './index.js';
 import { suffixedSessionName } from '../session-name.js';
+import { herdrBoundElsewhere, herdrPluginBinding } from '../repository-setup.js';
+import { HerdrSetupFailure, herdrServerUnit, herdrServerUnitText, herdrViaEnv, installHerdrInstance, type HerdrInstance } from '../master/herdr.js';
+import { herdrConnectCommands } from '../model/setup-checklist.js';
 import { executorGlob, executorInstance, installUnitsFile, type InstallUnits, legacyExecutorTemplate, legacyLoopUnit, parseInstallUnits, perInstallUnits, readInstallUnits, unrecordedInstallUnits } from './units.js';
 
 /**
@@ -606,7 +609,7 @@ function hostActions(ctx: AdapterContext, observation: AdapterObservation): Plan
     ...plan.units.filter(unit => unit.scope === 'system').map(unit => ({ id: `host.unit.${unit.role}`, target: 'host' as const, state, title: `Supervise ${unit.role} with the system unit ${unit.path} (Restart=always, starts at boot)`, command: `systemctl enable --now ${unit.name}` })),
     ...(host.migrate ? migrationSteps.map(step => ({ id: step.id, target: 'host' as const, state: 'create' as const, title: step.title })) : []),
     { id: 'host.runtimes', target: 'host', state, title: `Install the agent runtimes: ${plan.runtimes.map(runtime => `${runtime.kind} (${runtime.package})`).join(', ')}`, command: `npm install -g ${plan.runtimes.map(runtime => runtime.package).join(' ')}` },
-    { id: 'host.herdr', target: 'host', state, title: `Install Herdr for ${HOST_USER}, supervise its server with the user unit ${host.layout.userUnitDirectory}/graphyard-herdr.service, and create the workspace ${plan.herdr.workspace}` },
+    { id: 'host.herdr', target: 'host', state, title: `Install Herdr for ${HOST_USER}, supervise its server with the user unit ${host.layout.userUnitDirectory}/graphyard-herdr.service, link and enable the graphyard plugin for this install's server (in this install's own Herdr instance, ${installHerdrInstance(ctx.installId, HOST_HOME).session}, when another install's server holds the default's), and create the workspace ${plan.herdr.workspace}` },
     { id: 'host.checkout', target: 'host', state, title: `Clone ${ctx.repository} into ${plan.checkout}, the loop's working directory, with a one-hour GitHub App installation token passed on standard input (never stored)` },
     { id: 'host.github', target: 'host', state, title: `Give workers a GitHub credential without anyone logging in: git's credential helper and the gh wrapper (${HOST_GH_WRAPPER}) mint one-hour App installation tokens narrowed to ${ctx.repository} (Contents and Pull requests write) from ${hostGithubKeyFile(host.layout)}; commits are made as the App's bot` },
     { id: 'host.environment', target: 'host', state, title: `Point the ${HOST_USER} user manager at ${host.layout.accountsDirectory} for login homes and ${host.layout.configDirectory} for credentials (${hostEnvironmentFile(host.layout)})` },
@@ -639,6 +642,8 @@ export interface HostFleetResult {
   runtimes: { kind: string; path: string | null }[];
   accounts: (HostAccount & { login: HostLogin | null })[];
   herdrWorkspace: string | null;
+  /** GY-1511: Herdr as host setup left it, or why it is left out of this apply. */
+  herdr: HostHerdr | null; herdrFailure: string | null;
   sessionViewer: 'local';
   /** GY-1479: the master's agent identities were provisioned on the host (`master autonomy --apply`). */
   masterIdentities: true;
@@ -665,6 +670,144 @@ async function copyLogin(ctx: AdapterContext, remote: Transport, account: HostAc
   return 'copied';
 }
 
+/** Herdr on a self-contained host as host setup left it (GY-1511). */
+export interface HostHerdr {
+  /** The install's own instance; null when its agents run in the host's default Herdr. */
+  instance: HerdrInstance | null;
+  /** The user unit that keeps that instance's server running, and the workspace the loop launches into. */
+  unit: string; workspace: string;
+  /** The machine, and the command that opens the install's agents there from the operator's machine. */
+  host: string; attach: string;
+}
+/** The PATH the host's Herdr panes inherit: herdr and the runtimes, which npm installs globally. */
+const hostHerdrPath = `${HOST_HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin`;
+
+/**
+ * Herdr on a self-contained host (GY-1511), set up by every install and by every `graphyard up`
+ * (`install --herdr-only`), so a herdr removed or a server stopped since is set up again: herdr
+ * installed for the graphyard account, the default server's unit running, and the graphyard plugin
+ * linked and enabled for this install's server. That is the host's default instance while its plugin
+ * is free or already bound to this server; when another install's server holds it, this install gets
+ * its own instance (its config home under the account's ~/.config/graphyard/INSTALL/herdr, its own
+ * session and user unit), and the default's plugin is never touched. An instance master.json already
+ * records is kept. Every herdr command goes through herdrViaEnv, and each step is idempotent; a step
+ * that cannot finish throws a named HerdrSetupFailure.
+ */
+export async function ensureHostHerdr(ctx: AdapterContext, remote: Transport, input: { url: string; hostName: string; owner: string; workerToken: string | null }): Promise<HostHerdr> {
+  const layout = ctx.host!.layout;
+  const tail = (result: { stdout: string; stderr: string }) => failure(ctx, result) || 'no output';
+  const herdr = (args: string[], instance: HerdrInstance | null, cwd = HOST_HOME) => {
+    const call = herdrViaEnv(args, instance, layout.herdr);
+    return asUser(remote, cwd, call.command, call.args, { allowFailure: true, timeout: 60_000 }).catch(error => ({ code: 1, stdout: '', stderr: String(error?.message ?? error) }));
+  };
+  const userctl = async (step: 'server', ...args: string[]) => {
+    const result = await asUser(remote, HOST_HOME, 'systemctl', ['--user', ...args], { allowFailure: true, timeout: 120_000 });
+    if (result.code !== 0) throw new HerdrSetupFailure(step, `systemctl --user ${args.join(' ')} on ${input.hostName} exited ${result.code}: ${tail(result)}`);
+  };
+  const installed = await asUser(remote, HOST_HOME, 'sh', ['-c', `[ -x ${shellQuote(layout.herdr)} ] || curl -fsSL https://herdr.dev/install.sh | sh`], { allowFailure: true, timeout: 600_000 });
+  if (installed.code !== 0) throw new HerdrSetupFailure('install', `Herdr's installer for ${HOST_USER} on ${input.hostName} exited ${installed.code}: ${tail(installed)}`);
+  await userctl('server', 'daemon-reload');
+  await userctl('server', 'enable', '--now', 'graphyard-herdr.service');
+
+  const binding = (instance: HerdrInstance | null) => herdrPluginBinding(async args => {
+    const result = await herdr(args, instance);
+    if (result.code !== 0) throw new Error(tail(result));
+    return result.stdout;
+  }, async file => {
+    const result = await remote.exec('cat', [file], { allowFailure: true, timeout: 60_000 });
+    if (result.code !== 0) throw Object.assign(new Error(result.stderr), { code: /No such file/i.test(result.stderr) ? 'ENOENT' : 'EACCES' });
+    return result.stdout;
+  });
+  const recorded = parseRecordedInstance(await readRemote(remote, `${layout.checkout}/.graphyard/master.json`));
+  const instance = recorded ?? (herdrBoundElsewhere(await binding(null), input.url) ? installHerdrInstance(ctx.installId, HOST_HOME) : null);
+  const unit = instance ? herdrServerUnit(ctx.installId) : 'graphyard-herdr.service';
+  if (instance) {
+    // Its session's directory, the gh and git configuration the panes read from XDG_CONFIG_HOME, and its
+    // session in the default config's list, so plain `herdr --session NAME` reaches its socket.
+    const prepare = 'mkdir -p "$1/herdr/sessions/$2" "$3/.config/herdr/sessions" && for shared in gh git; do if [ -e "$3/.config/$shared" ] && [ ! -e "$1/$shared" ]; then ln -s "$3/.config/$shared" "$1/$shared"; fi; done && { [ -e "$3/.config/herdr/sessions/$2" ] || ln -s "$1/herdr/sessions/$2" "$3/.config/herdr/sessions/$2"; }';
+    const prepared = await asUser(remote, HOST_HOME, 'sh', ['-c', prepare, 'herdr-instance', instance.configHome, instance.session, HOST_HOME], { allowFailure: true, timeout: 60_000 });
+    if (prepared.code !== 0) throw new HerdrSetupFailure('server', `preparing ${instance.configHome} on ${input.hostName} exited ${prepared.code}: ${tail(prepared)}`);
+    await remote.putFile(`${layout.userUnitDirectory}/${unit}`, herdrServerUnitText(layout.herdr, instance, hostHerdrPath), 0o644, input.owner);
+    await userctl('server', 'daemon-reload');
+    await userctl('server', 'enable', '--now', unit);
+  }
+  for (let attempt = 0; ; attempt++) {
+    const status = await herdr(['status', 'server'], instance);
+    if (status.code === 0 && /^status:\s*running\s*$/m.test(status.stdout)) break;
+    if (attempt >= 15) throw new HerdrSetupFailure('server', `${unit} on ${input.hostName} was started but its Herdr server${instance ? ` for session ${instance.session}` : ''} did not report running; see journalctl --user -u ${unit} there`);
+    await ctx.wait(1_000);
+  }
+
+  // The plugin, linked while disabled, configured for this install's server, then enabled; enabled
+  // again on every run, so one an earlier run left disabled is not reported set up.
+  const plugin = async (args: string[]) => {
+    const result = await herdr(args, instance);
+    if (result.code !== 0) throw new HerdrSetupFailure('plugin', `herdr ${args.slice(0, 2).join(' ')}${instance ? ` in session ${instance.session}` : ''} on ${input.hostName} exited ${result.code}: ${tail(result)}`);
+    return result.stdout.trim();
+  };
+  const bound = await binding(instance);
+  if (herdrBoundElsewhere(bound, input.url) || !bound) {
+    if (!input.workerToken) throw new HerdrSetupFailure('plugin', `no worker credential of this install is on ${input.hostName}, so the graphyard plugin cannot be configured`);
+    await plugin(['plugin', 'link', layout.graphyard, '--disabled']);
+    const directory = await plugin(['plugin', 'config-dir', 'graphyard']);
+    if (!directory.startsWith('/') || /[\r\n\0]/.test(directory)) throw new HerdrSetupFailure('plugin', `Herdr on ${input.hostName} named no usable plugin configuration directory (${directory.slice(0, 200) || 'none'})`);
+    await remote.exec('install', ['-d', '-m', '0700', '-o', HOST_USER, '-g', HOST_USER, directory], { timeout: 60_000 });
+    await remote.putFile(`${directory}/config.json`, `${JSON.stringify({ url: input.url, token: input.workerToken, cliPath: layout.cli, hostId: input.hostName }, null, 2)}\n`, 0o600, input.owner);
+  }
+  await plugin(['plugin', 'enable', 'graphyard']);
+
+  const label = `graphyard-${ctx.installId}`;
+  const workspaceIn = (text: string) => {
+    try {
+      const parsed = JSON.parse(text); const result = parsed?.result ?? parsed;
+      const listed = Array.isArray(result?.workspaces) ? result.workspaces.find((entry: any) => entry?.label === label) : result?.workspace ?? result;
+      return typeof listed?.workspace_id === 'string' ? listed.workspace_id as string : null;
+    } catch { return null; }
+  };
+  const workspace = workspaceIn((await herdr(['workspace', 'list'], instance)).stdout)
+    ?? workspaceIn((await herdr(['workspace', 'create', '--cwd', layout.checkout, '--label', label, '--no-focus'], instance)).stdout);
+  if (!workspace) throw new HerdrSetupFailure('workspace', `Herdr${instance ? ` session ${instance.session}` : ''} on ${input.hostName} neither lists nor creates the workspace ${label}`);
+  const attachHost = `${HOST_USER}@${ctx.sshHost ?? input.hostName}`;
+  return { instance, unit, workspace, host: input.hostName, attach: herdrConnectCommands({ configHome: instance?.configHome ?? null, session: instance?.session ?? null, host: attachHost }).ssh };
+}
+/** The Herdr instance a master.json's text records, else null. */
+function parseRecordedInstance(text: string | null): HerdrInstance | null {
+  try {
+    const instance = text ? JSON.parse(text)?.herdrInstance : null;
+    return typeof instance?.configHome === 'string' && typeof instance?.session === 'string' ? { configHome: instance.configHome, session: instance.session } : null;
+  } catch { return null; }
+}
+/**
+ * Records HERDR in the host checkout's .graphyard/master.json (its own instance, when it has one,
+ * and its workspace), changing nothing else; true when the file changed. The loop adopts it on its
+ * next reload, as it adopts any unbound setting.
+ */
+export async function recordHostHerdr(remote: Transport, layout: HostLayout, herdr: Pick<HostHerdr, 'instance' | 'workspace'>, owner: string) {
+  const file = `${layout.checkout}/.graphyard/master.json`, text = await readRemote(remote, file);
+  if (!text) return false;
+  const stored = JSON.parse(text);
+  const next = { ...stored, ...(herdr.instance ? { herdrInstance: herdr.instance } : {}), herdrWorkspace: herdr.workspace };
+  if (JSON.stringify(next) === JSON.stringify(stored)) return false;
+  await remote.putFile(file, `${JSON.stringify(next, null, 2)}\n`, 0o600, owner);
+  return true;
+}
+/** The worker credential the host keeps for the graphyard plugin, when apply has written one. */
+const pluginToken = (ctx: AdapterContext) => { const worker = workerPrincipals(ctx.host!.principals)[0]; return worker ? ctx.host!.tokens.get(worker.id) ?? null : null; };
+
+/**
+ * `install --target host --herdr-only` (GY-1511): Herdr on an installed host checked and set up
+ * again, its instance recorded for the loop. `graphyard up` runs it on every run, since its
+ * control-plane step, once done, never runs again.
+ */
+export async function hostHerdrOnly(ctx: AdapterContext, url: string): Promise<HostHerdr> {
+  const remote = await hostRemote(ctx);
+  const owner = await resolveOwner(ctx, remote);
+  const hostName = (await remote.exec('hostname', [], { allowFailure: true, timeout: 60_000 })).stdout.trim() || ctx.sshHost || ctx.service;
+  const herdr = await ensureHostHerdr(ctx, remote, { url, hostName, owner, workerToken: pluginToken(ctx) });
+  await recordHostHerdr(remote, ctx.host!.layout, herdr, owner);
+  return herdr;
+}
+
 /**
  * Everything after the server is healthy and GitHub is connected: runtimes, Herdr, the managed
  * checkout, the loop and executors, account homes, and the registry placing each account here.
@@ -683,10 +826,6 @@ export async function installHostFleet(ctx: AdapterContext, request: HostFleetRe
     runtimes.push({ kind: runtime.kind, path: located.code === 0 ? located.stdout.trim().split('\n')[0] || null : null });
   }
 
-  await asUser(remote, HOST_HOME, 'sh', ['-c', `[ -x ${shellQuote(layout.herdr)} ] || curl -fsSL https://herdr.dev/install.sh | sh`]);
-  await asUser(remote, HOST_HOME, 'systemctl', ['--user', 'daemon-reload']);
-  await asUser(remote, HOST_HOME, 'systemctl', ['--user', 'enable', '--now', 'graphyard-herdr.service']);
-
   // Workers push and open pull requests as the App: its key and the token helper go to <install>/github
   // (0600), gh is wrapped to take its token from the helper, and git is pointed at the helper.
   ctx.vault.add(request.github.privateKey);
@@ -700,16 +839,12 @@ export async function installHostFleet(ctx: AdapterContext, request: HostFleetRe
   const cloned = await asUser(remote, HOST_HOME, 'sh', ['-c', clone, 'managed-checkout', layout.checkout, `https://github.com/${ctx.repository}.git`], { input: request.cloneToken, allowFailure: true });
   if (cloned.code !== 0) throw new Error(`Cloning ${ctx.repository} into ${layout.checkout} on ${hostName} failed: ${failure(ctx, cloned)}`);
 
-  const label = `graphyard-${ctx.installId}`;
-  const workspaceIn = (text: string) => {
-    try {
-      const parsed = JSON.parse(text); const result = parsed?.result ?? parsed;
-      const listed = Array.isArray(result?.workspaces) ? result.workspaces.find((entry: any) => entry?.label === label) : result?.workspace ?? result;
-      return typeof listed?.workspace_id === 'string' ? listed.workspace_id : null;
-    } catch { return null; }
-  };
-  let herdrWorkspace = workspaceIn((await asUser(remote, HOST_HOME, layout.herdr, ['workspace', 'list'], { allowFailure: true })).stdout);
-  if (!herdrWorkspace) herdrWorkspace = workspaceIn((await asUser(remote, HOST_HOME, layout.herdr, ['workspace', 'create', '--cwd', layout.checkout, '--label', label], { allowFailure: true })).stdout);
+  // Herdr after the checkout its workspace opens in (GY-1511): a failure is named and leaves Herdr out
+  // of this apply only; `graphyard up` sets it up again on its next run (install --herdr-only).
+  let herdr: HostHerdr | null = null, herdrFailure: string | null = null;
+  try { herdr = await ensureHostHerdr(ctx, remote, { url: request.url, hostName, owner, workerToken: pluginToken(ctx) }); }
+  catch (error) { if (!(error instanceof HerdrSetupFailure)) throw error; herdrFailure = error.message; request.log(`Herdr is left out of this apply: ${error.message}`); }
+  const herdrWorkspace = herdr?.workspace ?? null;
 
   // The user manager's environment: login homes under <install>/accounts, credentials under <install>/.
   const environment = Object.entries(hostEnvironment(layout)).map(([name, value]) => `${name}=${value}`);
@@ -751,6 +886,8 @@ export async function installHostFleet(ctx: AdapterContext, request: HostFleetRe
   // The names master init recorded (GY-1441): a host installed before them keeps the legacy loop
   // unit as its alias, so the unit to enable and report is read back, never recomputed.
   // With no record, the legacy names are its alias only when no legacy unit on the host runs another checkout (GY-1452).
+  // The instance is recorded before the loop is enabled, so it starts against it.
+  if (herdr) await recordHostHerdr(remote, layout, herdr, owner);
   const recorded = await readRemote(remote, `${layout.checkout}/${installUnitsFile}`);
   const legacy = recorded === null ? await Promise.all([legacyLoopUnit, legacyExecutorTemplate].map(async name => ({ path: `${layout.userUnitDirectory}/${name}`, text: await readRemote(remote, `${layout.userUnitDirectory}/${name}`) }))) : [];
   const installUnits = parseInstallUnits(recorded, `${layout.checkout}/${installUnitsFile} on ${hostName}`, () => unrecordedInstallUnits(layout.checkout, legacy, HOST_HOME));
@@ -772,7 +909,8 @@ export async function installHostFleet(ctx: AdapterContext, request: HostFleetRe
 
   const system = hostUnitFiles(ctx.installId, layout, owner).filter(unit => unit.scope === 'system');
   const systemStates = await unitStates(remote, system.map(unit => unit.name));
-  const userUnits = [{ name: 'graphyard-herdr.service', scope: 'user' as const, path: `${layout.userUnitDirectory}/graphyard-herdr.service`, role: 'herdr' }, ...supervisedUnits(layout, host.executors, installUnits)];
+  const herdrUnits = [...new Set(['graphyard-herdr.service', herdr?.unit ?? 'graphyard-herdr.service'])].map(name => ({ name, scope: 'user' as const, path: `${layout.userUnitDirectory}/${name}`, role: name === 'graphyard-herdr.service' ? 'herdr' : 'herdr instance' }));
+  const userUnits = [...herdrUnits, ...supervisedUnits(layout, host.executors, installUnits)];
   const userState = await asUser(remote, HOST_HOME, 'systemctl', ['--user', 'is-active', ...userUnits.map(unit => unit.name)], { allowFailure: true });
   const userLines = userState.stdout.split('\n');
   const units = [
@@ -780,9 +918,9 @@ export async function installHostFleet(ctx: AdapterContext, request: HostFleetRe
     ...userUnits.map((unit, index) => ({ ...unit, active: (userLines[index] ?? '').trim() || 'unknown' })),
   ];
   return {
-    host: hostName, units, runtimes, accounts, herdrWorkspace, sessionViewer: 'local', masterIdentities: true,
+    host: hostName, units, runtimes, accounts, herdrWorkspace, herdr, herdrFailure, sessionViewer: 'local', masterIdentities: true,
     profiles: {
-      repository: { connected: true, herdr: !!herdrWorkspace, detail: herdrWorkspace ? `Herdr workspace ${herdrWorkspace} on ${hostName}` : 'Herdr is installed but no workspace could be created' },
+      repository: { connected: true, herdr: !!herdr, detail: herdr ? `the Herdr plugin is linked and enabled${herdr.instance ? ` in this installation's own Herdr instance (session ${herdr.instance.session})` : ''} with workspace ${herdr.workspace} on ${hostName}` : `Herdr is left out: ${herdrFailure}` },
       master: { configured: true, kind: null, detail: `the loop runs as ${installUnits.master} on ${hostName}` },
       workers, reviewers: [],
     },

@@ -155,16 +155,17 @@ const urlOrigin = (value: string) => { try { return new URL(value).origin; } cat
  * plugin for another server would silently repoint it (GY-1413). A config.json that exists but
  * cannot be read, is not JSON or names no server is a binding nobody can inspect: `url` is null
  * and `bound` says why, so callers refuse to overwrite it without --herdr-rebind rather than
- * mistaking it for no binding at all.
+ * mistaking it for no binding at all. READ reads that file: this machine's, or a host's over its
+ * transport (GY-1511), whose missing file rejects with code ENOENT.
  */
-export async function herdrPluginBinding(runHerdr: (args: string[]) => string | Promise<string>): Promise<{ configDirectory: string; url: string | null; bound: string } | null> {
+export async function herdrPluginBinding(runHerdr: (args: string[]) => string | Promise<string>, read: (file: string) => Promise<string> = file => readFile(file, 'utf8')): Promise<{ configDirectory: string; url: string | null; bound: string } | null> {
   let configDirectory: string;
   try { configDirectory = String(await runHerdr(['plugin', 'config-dir', 'graphyard'])).trim(); } catch { return null; }
   if (!configDirectory || !isAbsolute(configDirectory) || /[\r\n\0]/.test(configDirectory)) return null;
   const file = resolve(configDirectory, 'config.json');
   const uninspectable = (reason: string) => ({ configDirectory, url: null, bound: `a configuration that cannot be inspected (${file}: ${reason})` });
   let text: string;
-  try { text = await readFile(file, 'utf8'); } catch (error: any) { if (error.code === 'ENOENT') return null; return uninspectable(error.code ?? error.message); }
+  try { text = await read(file); } catch (error: any) { if (error.code === 'ENOENT') return null; return uninspectable(error.code ?? error.message); }
   let config: any;
   try { config = JSON.parse(text); } catch { return uninspectable('not valid JSON'); }
   return typeof config?.url === 'string' && config.url ? { configDirectory, url: config.url, bound: config.url } : uninspectable('it names no server url');

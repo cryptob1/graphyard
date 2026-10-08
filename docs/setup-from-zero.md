@@ -16,7 +16,7 @@ Its only human step: approving a GitHub Mobile prompt; `--help` lists options.
 
 A new Hetzner server waits (exit 3) for price approval; rerun: `--confirm-price X` or `--max-monthly N` and `--ssh-key NAME`.
 
-`up` runs, in order: preflight, control plane, host supervisor and Herdr, master identities (`master autonomy --apply`; host installs: on the server; no admin credential: exit 2), onboarding, accounts (host logins; asks for empty roles), harness, master loop. Onboarding files its `graphyard/onboarding` pull request for the loop to review and merge (a host install leaves it to a person); goals wait. Reruns skip steps `.graphyard/up.json` records finished, reusing its `--repo`/`--provider`. Every run sets Herdr up; a plugin bound elsewhere stays, and this install gets its own instance. Preflight failures (exit 2) name the [prerequisite](#1-machine-prerequisites).
+`up` runs, in order: preflight, control plane, host supervisor and Herdr, master identities (`master autonomy --apply`; host installs: on the server; no admin credential: exit 2), onboarding, accounts (host logins; asks for empty roles), harness, master loop. Onboarding files its `graphyard/onboarding` pull request for the loop to review and merge (a host install leaves it to a person); goals wait. Reruns skip steps `.graphyard/up.json` records finished, reusing its `--repo`/`--provider`. Every run sets Herdr up (host target: `install --herdr-only`); a plugin bound elsewhere stays, this install getting its own instance. Preflight failures (exit 2) name the [prerequisite](#1-machine-prerequisites).
 
 ## The Setup page
 

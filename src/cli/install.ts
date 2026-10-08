@@ -6,7 +6,7 @@ import { deliveryModes, type DeliveryMode } from '../model/delivery-policy.js';
 import { appPageBusy, appPagePortFree, startGithubSetup, updateAppPermissions } from '../github-setup.js';
 import { applyProposal, loadAppliedSetup, loadProposal, readDocumentationConfig, readSetupStatus, repositoryScanDifference, saveProposal, scanProposal, setupDrift, setupRepository } from '../repository-setup.js';
 import { protectionRun } from '../protection.js';
-import { appCommand, applyInstall, appStepWait, buildPlan, InstallPaused, installRequestFromArgs, prepareInstall } from '../install/index.js';
+import { appCommand, applyInstall, appStepWait, buildPlan, InstallPaused, installHerdrOnly, installRequestFromArgs, prepareInstall } from '../install/index.js';
 import { runManifestFlow } from '../install/manifest.js';
 import { delegationLimitAssignments } from '../install/limits.js';
 import { ciProducerProvisioningSteps, readRoster, registerCiProducer } from '../install/ci-proofs.js';
@@ -100,7 +100,7 @@ export const installCommands = defineCommands([
       '                                Install or reconcile a complete control plane.',
       '  install --target host|hetzner --repo OWNER/NAME [--plan|--apply]',
       '          [--ssh-host HOST | --local] [--migrate] [--max-monthly N | --confirm-price X]',
-      '          [--github-app FILE] [--reuse-app SLUG]...',
+      '          [--github-app FILE] [--reuse-app SLUG]... [--herdr-only]',
       '                                Self-contained host: server, Postgres, loop, executors,',
       '                                Herdr and agent runtimes on one machine (hetzner creates it',
       '                                and needs its monthly price confirmed). --migrate moves an',
@@ -117,6 +117,7 @@ export const installCommands = defineCommands([
       '                                production resources that cost money are created only with',
       '                                --create-environments. A Herdr graphyard plugin bound to',
       '                                another server is repointed only with --herdr-rebind.',
+      '                                --herdr-only sets up only Herdr on an installed host (up runs it every run).',
       '                                An App step nobody confirms within 900 s (under up: its --wait,',
       '                                plus a minute) exits 1 with a JSON summary and the exact resume command.',
       '                                See docs/install.md for the agent-executable runbook.',
@@ -130,6 +131,7 @@ export const installCommands = defineCommands([
         githubApp: request => runManifestFlow(request.root, request.repository, request.origin, { reviewer: request.reviewer, announce: line => console.error(line), ...appStepWait(process.env), dependencies: { file: request.file, ...(request.reuse ? { reusable: request.reuse.slugs, reuse: request.reuse.adopt } : {}) } }),
       }, values.apply ? 'apply' : 'plan');
       if (values.logs) return console.log(await session.adapter.logs(session.context));
+      if (values['herdr-only']) { const result = await installHerdrOnly(session); context.print(result); if (!result.herdr) process.exitCode = 1; return; }
       const plan = await buildPlan(session);
       if (!values.apply) return context.print(plan);
       try { return context.print(await applyInstall(session, plan)); }

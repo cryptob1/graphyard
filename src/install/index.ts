@@ -10,7 +10,7 @@ import { parseRepositoryConfig, repositoryConfigFile } from '../model/documentat
 import { requiredPullRequestChecks, type DeliveryPolicy } from '../model/delivery-policy.js';
 import { applyWiring, deploymentAdapters, observeReleaseWiring, wiringActions, type DeploymentAdapter, type DeploymentContext } from './deploy-target.js';
 import { adapterFor, carriesCredential, isProviderReference, quotedPrice, variableMarker, type AdapterContext, type AdapterObservation, type ProviderAdapter, DEFAULT_IMAGE } from './adapters.js';
-import { existingMachineAdapter, generateHostSecrets, hostLayout, hostPlan, hostTokenFile, installHostFleet, readHostSecrets, selfContainedAdapter, MIGRATE_SOURCE_VARIABLE, type HostFleetResult } from './host.js';
+import { existingMachineAdapter, generateHostSecrets, hostHerdrOnly, hostLayout, hostPlan, hostTokenFile, installHostFleet, readHostSecrets, selfContainedAdapter, MIGRATE_SOURCE_VARIABLE, type HostFleetResult } from './host.js';
 import { applyProtection, appClient, configureWebhook, detectCiAppIds, effectiveReviewCount, headSha, githubCli, installationClient, installationToken, protectionSatisfied, readProtection, GRAPHYARD_CHECKS, readWebhookConfig, repositoryInstallation, triggerDelivery, verifyDelivery, webhookUrlFor, CHECK_NAME, type AppFacts, type DeliveryProof } from './github.js';
 import { detectHerdr, detectRuntimes, masterRuntime, reviewerProfiles, workerProfiles, type DetectedRuntime, type HerdrState, type ReviewerProfileDraft, type WorkerProfileDraft } from './runtimes.js';
 import { generatedFilesAssignment, generatedManifestScript, type GeneratedFilesAssignment } from './generated-files.js';
@@ -19,7 +19,7 @@ import { assertOutsideRepository, configHome, ensureTokens, fingerprint, install
 import { AppStepPending, readAppFile, readSavedApp, readUninstalledApp, type SavedApp } from './manifest.js';
 import { appRoles, importApp, listApps, publiclyReachable, reuseExistingApp, savedRegistrations, type AppCredentials, type AppRole, type SavedRegistration } from '../github-setup.js';
 import { herdrBoundElsewhere, herdrPluginBinding, herdrRebindRefusal } from '../repository-setup.js';
-import { herdrViaEnv, installHerdrInstance, type HerdrInstance } from '../master/herdr.js';
+import { HerdrSetupFailure, herdrViaEnv, installHerdrInstance, type HerdrInstance } from '../master/herdr.js';
 import { localTransport, sshTransport, type Transport } from './transport.js';
 import { localDatabaseVariable, localSettings, type LocalSupervisor } from './local.js';
 import { localPaths } from './local-runtime.js';
@@ -106,7 +106,7 @@ export function installRequestFromArgs(args: string[]) {
     'server-type': { type: 'string' }, location: { type: 'string' }, port: { type: 'string' }, logs: { type: 'boolean' },
     target: { type: 'string' }, local: { type: 'boolean' }, migrate: { type: 'boolean' }, 'max-monthly': { type: 'string' }, 'confirm-price': { type: 'string' },
     'github-app': { type: 'string' }, 'reuse-app': { type: 'string', multiple: true },
-    'create-environments': { type: 'boolean' }, 'herdr-rebind': { type: 'boolean' }, 'no-herdr': { type: 'boolean' }, 'herdr-instance': { type: 'boolean' },
+    'create-environments': { type: 'boolean' }, 'herdr-rebind': { type: 'boolean' }, 'no-herdr': { type: 'boolean' }, 'herdr-instance': { type: 'boolean' }, 'herdr-only': { type: 'boolean' },
   }, allowPositionals: false });
   if ([values['herdr-rebind'], values['no-herdr'], values['herdr-instance']].filter(Boolean).length > 1) throw new Error('Choose one of --herdr-rebind, --no-herdr or --herdr-instance');
   if (!values.repo) throw new Error('Use --repo OWNER/NAME');
@@ -899,6 +899,19 @@ export async function protectionAvailability(gh: ReturnType<typeof githubCli>, r
 /** This install's own Herdr instance under --herdr-instance (GY-1511), else null: the host's default instance. */
 export function ownHerdrInstance(session: Pick<InstallSession, 'installId' | 'inputs'>) {
   return session.inputs.herdr === 'instance' ? installHerdrInstance(session.installId) : null;
+}
+/**
+ * `install --target host --herdr-only` (GY-1511): Herdr on an installed self-contained host set up
+ * again and its instance recorded, nothing else applied. `graphyard up` runs it on every run, as it
+ * sets Herdr up on this machine for every other provider; a step that cannot finish is reported by
+ * name in `herdrFailure`.
+ */
+export async function installHerdrOnly(session: InstallSession) {
+  if (!session.context.host) throw new Error('--herdr-only sets Herdr up on a self-contained host (--target host or hetzner); for any other install, graphyard up sets Herdr up on this machine');
+  const url = session.record?.url;
+  if (!url) throw new Error(`--herdr-only needs an installed host, and no install of ${session.inputs.repository} is recorded here; run install --apply first`);
+  try { return { herdr: await hostHerdrOnly(session.context, url), herdrFailure: null }; }
+  catch (error) { if (!(error instanceof HerdrSetupFailure)) throw error; return { herdr: null, herdrFailure: { step: error.step, message: session.vault.scrub(error.message) } }; }
 }
 /** Herdr on this machine and the server its graphyard plugin is bound to, when it is. */
 async function observeHerdr(session: InstallSession) {
