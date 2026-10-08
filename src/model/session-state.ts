@@ -81,7 +81,8 @@ export function unseenSessions(all: Work[], now: Date) {
  *   state (`idle`, `done`, `blocked`), and `ended` for a state the runtime reserves for an exit;
  * - listed with no agent in the pane (the agent exited to a shell): `ended`;
  * - not listed: one missed report; absent from `lostAfterReports` consecutive reports, `lost`;
- * - no coordinate to match (its launcher never wrote the pane or name): missed like one not listed.
+ * - no coordinate to match (its launcher never wrote the pane or name): missed like one not listed;
+ * - not listed, and its purpose over by the item's own facts (`settledPurpose`): `ended` at once.
  * `ended` and `lost` close the record with the reason. A runtime that could not be read is a gap,
  * not a report: nothing is counted against any session. A handle nothing has observed yet is left
  * alone through `sessionLaunchGraceMs`, because a session is registered before its runtime starts,
@@ -140,6 +141,32 @@ export function launchingSession(work: Pick<Work, 'lease'>, handle: Pick<Session
   const started = Date.parse(handle.startedAt);
   return (Number.isFinite(started) && clock - started < grace) || launchHeldByLease(work, handle, clock);
 }
+/**
+ * GY-1532. Why the item's own facts say a session's purpose is over, or null while it stands: an
+ * implementation session whose attempt has ended — submitted, released, blocked, parked or lapsed,
+ * so the lease it ran under is gone or another epoch's — or a review or proof session whose
+ * dispatch request was satisfied or cancelled. On 8 October 2026 every worker and reviewer session
+ * on vishrog closed as "vanished … so the session is lost" within a minute of its work landing:
+ * the loop had closed the pane itself once the attempt was submitted or the verdict read, and the
+ * report, judging absence alone, counted two missed reports and lost it — six losses in forty
+ * minutes, each a deliberate close. A session whose purpose is over is ended on the first report
+ * that no longer lists it, with that fact as the reason, so a close never reads as a loss; one the
+ * runtime still lists is observed as before, since its supervisor may still be stopping it.
+ */
+export function settledPurpose(work: Pick<Work, 'key' | 'lease' | 'submission' | 'autoDispatch'>, handle: Pick<SessionHandle, 'id' | 'kind' | 'epoch'>, clock: number): string | null {
+  if (handle.kind === 'implementation') {
+    const epoch = handleEpoch(handle), lease = work.lease;
+    if (!Number.isFinite(epoch) || (lease && lease.epoch === epoch && Date.parse(lease.expiresAt) > clock)) return null;
+    if (work.submission?.epoch === epoch) return `attempt ${epoch} of ${work.key} was submitted as pull request #${work.submission.pr}`;
+    if (lease && lease.epoch !== epoch) return `attempt ${epoch} of ${work.key} ended and epoch ${lease.epoch} is held by ${lease.owner}`;
+    return lease ? `attempt ${epoch} of ${work.key} ended with its lease expired at ${lease.expiresAt}` : `attempt ${epoch} of ${work.key} ended (released, blocked, parked or lapsed) and ${work.key} holds no lease`;
+  }
+  if (handle.kind !== 'review' && handle.kind !== 'proof') return null;
+  const dispatch = work.autoDispatch;
+  const request = [dispatch?.review, ...(dispatch?.producers ?? []), ...(dispatch?.history ?? [])].find(entry => entry?.id === handle.id);
+  if (!request || request.state === 'requested') return null;
+  return `its ${request.kind} request was ${request.state}${request.resolvedAt ? ` at ${request.resolvedAt}` : ''}${request.resolution ? ` (${request.resolution.slice(0, 160)})` : ''}`;
+}
 export function observeSessions(all: Work[], runtime: RuntimeSession[] | null, now: Date, options: ObserveOptions = {}): SessionReport {
   const entries: SessionReportEntry[] = [], missing: Record<string, string> = {};
   // A runtime that could not be read is a gap in the reports, not a report of absence.
@@ -158,6 +185,7 @@ export function observeSessions(all: Work[], runtime: RuntimeSession[] | null, n
     const where = handle.pane ? `pane ${handle.pane}` : handle.agentName ? `session ${handle.agentName}` : `session ${handle.id} (registered with no pane or name to match)`;
     const base = { workId: work.id, key: work.key, id: handle.id, kind: handle.kind, role: sessionRole(handle), runtime: handle.runtime, host: handle.host, subject: handle.subject };
     const entry = handle.pane || handle.agentName ? runtimeSessionOf(handle, runtime) : undefined;
+    const over = settledPurpose(work, handle, clock);
     if (entry) {
       const state = observedRuntimeState(entry, handle.runtime, states);
       // A pane whose agent has not started yet looks like one whose agent exited: registration
@@ -165,10 +193,19 @@ export function observeSessions(all: Work[], runtime: RuntimeSession[] | null, n
       if (state === 'ended' && young) continue;
       const due = !handle.observedAt || clock - Date.parse(handle.observedAt) >= refresh || !Number.isFinite(Date.parse(handle.observedAt));
       const changed = state !== handle.observed || !!handle.missedReports || state === 'ended' || due;
+      const after = over ? ` after ${over}` : '';
       const outcome = state !== 'ended' ? null : entry.agent === null || entry.agent === ''
-        ? `the ${handle.runtime} runtime on ${handle.host} reports ${where} as exited to a shell (no agent in the pane), so the session is over`
-        : `the ${handle.runtime} runtime on ${handle.host} reports ${where} as ${entry.agent_status ?? 'ended'}, so the session is over`;
+        ? `the ${handle.runtime} runtime on ${handle.host} reports ${where} as exited to a shell (no agent in the pane)${after}, so the session is over`
+        : `the ${handle.runtime} runtime on ${handle.host} reports ${where} as ${entry.agent_status ?? 'ended'}${after}, so the session is over`;
       entries.push({ ...base, observed: state, observedAt: at, missedReports: 0, closed: state === 'ended' ? 'ended' : null, outcome, changed });
+      continue;
+    }
+    // GY-1532: a session the runtime no longer lists whose purpose the item says is over ended
+    // deliberately — the loop closed its pane, or its supervisor stopped it — so this report ends it
+    // with that fact, launch grace or not, and counts nothing towards a loss.
+    if (over) {
+      entries.push({ ...base, observed: 'ended', observedAt: at, missedReports: 0, closed: 'ended', changed: true,
+        outcome: `the ${handle.runtime} runtime on ${handle.host} no longer reports ${where}: ${over}, so the session is over` });
       continue;
     }
     if (young || launchHeldByLease(work, handle, clock)) continue;
