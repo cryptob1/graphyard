@@ -4,7 +4,7 @@ import type { MasterConfig, WorkerProfile, HerdrAgent } from '../master.js';
 import { cycleMetricsSchema, type CycleStepName, type DaemonAction, type DaemonActionKind, type DaemonState, emptyCycleSteps, message, pruneDaemonState } from './state.js';
 import { reconcilePendingActions } from './reconcile.js';
 import { type ExhaustedProof, setAsideFollowUpThreads } from './decisions.js';
-import { emptyHeldDecisions, type HeldDecisions } from './decision-reads.js';
+import { decisionFailureKind, emptyHeldDecisions, type HeldDecisions } from './decision-reads.js';
 import { actionableSubjects, latencyBudget, observeItemClock, stageMetrics, trackSilence } from './metrics.js';
 import { profileHealth } from './sessions.js';
 import { boundedPersist } from './liveness.js';
@@ -178,10 +178,13 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
     catch (error) {
       const failed = `isolated:${kind}:${item?.id ?? key}`;
       const why = `The ${kind} launch for ${item?.key ?? key} threw, so only that launch failed: ${message(error)}`;
+      // GY-1505: an approver launch that met a silent control plane or lost the folder-trust race is
+      // made again next cycle; the first at its key is no decision fault, a second in a row is.
+      const faultKind = kind === 'decision' && item ? decisionFailureKind(state, item.key, why, state.actions[failed]) : undefined;
       try {
         sink.push(await record(state, failed, { kind, work: item?.key ?? null, principal: null, state: 'failed', epoch: item?.epoch ?? null,
           detail: why,
-          attempts: (state.actions[failed]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
+          attempts: (state.actions[failed]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist, faultKind));
       } catch { /* a cursor that cannot be written is the next cycle's failure */ }
       // The launch's own `started` entry is what holds the cycle off the same work until it settles,
       // and a body that threw after recording it, before settling it itself, left it started until a
@@ -192,7 +195,7 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
         try {
           sink.push(await record(state, key, { kind: started.kind, work: started.work, principal: started.principal, epoch: started.epoch, state: 'failed',
             detail: `${why} Its own started entry is settled failed for that throw, so no restart is needed to reconcile it`,
-            attempts: started.attempts, cycle: state.cycle }, now(), effects.persist));
+            attempts: started.attempts, cycle: state.cycle }, now(), effects.persist, faultKind));
         } catch { /* a cursor that cannot be written is the next cycle's failure */ }
       }
     }

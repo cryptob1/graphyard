@@ -385,3 +385,17 @@ test('unit:soak-invariants-hold — containment quarantines of dead workers stan
     assert.equal(final.find(item => item.key === key)!.stage, 'done', `${key}: delivered by the attempt after the settled one`);
   }
 });
+
+test('integration:soak-stuck-watches-invariants-hold — twelve approval watches whose registry sessions aged out of the registry\'s history are ended once each on the day\'s first cycle, and every system invariant, cycle-p90 among them, holds', { timeout: 480_000 }, async () => {
+  // GY-1504: the live loop carried twelve such watches for long-closed items, each end answered 404
+  // Unknown session and retried every cycle; the day starts with the same twelve in its state.
+  const { final, violations, failures, state, stuck, cycles } = await simulateDay({ hours: 6, stuckWatches: 12, plan: { lowLane: 0 } });
+  assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
+  assert.deepEqual(failures, [], 'no cycle failed');
+  assert.ok(cycles > 12, `the day ran many cycles: ${cycles}`);
+  assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => item.key), [], 'the day\'s items are delivered beside them');
+  assert.equal(stuck.ends.size, 12, 'every aged-out session was asked to end');
+  assert.deepEqual([...stuck.ends.values()].filter(count => count > 1), [], 'and none of them twice');
+  assert.deepEqual(Object.values(state.approvals).filter(watch => watch.session && stuck.sessions.has(watch.session)), [], 'no watch keeps an aged-out session');
+  assert.deepEqual(Object.values(state.actions).filter(action => action.kind === 'close' && action.state === 'failed' && /Unknown session/.test(action.detail)), [], 'no close failure stands for one');
+});

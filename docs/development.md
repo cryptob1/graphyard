@@ -13,6 +13,10 @@ npm ci && npm run build && npm test
 
 `npm test` hides `GRAPHYARD_*`/`HERDR_*`, reserves free Postgres ports; worktrees need [bubblewrap](install.md#preconditions). CI's `test` aggregates shards balanced by `tests/helpers/timing-baseline.json` (top-level `tests/*.test.ts`); PRs run affected tests (`scripts/ci-tests.mjs`); long suites run on [release candidates](delivery.md#pre-merge-gate-and-release-candidate-validation). Trusted CI runs only protected source, refusing candidates whose base lacks contract: land its harness and `scripts/contracts.mjs` entry before requiring its proof.
 
+### Verification maps
+
+`verification/AREA.md` maps (store, server, master) open with a `Paths:` line of documentation-style globs and hold `## Tests`, `## Drive`, `## Invariants` and `## Gotchas`, at most 250 words each, outside the docs budget (`tests/verification-maps.test.ts` checks globs and named tests exist). Worker and reviewer requests inline, right after the project-memory digest, the maps whose globs cover the item's plannedFiles (a directory scope matches globs beneath it), read from origin/BASE: workers get all four sections, reviewers Invariants and Gotchas; at most 3 maps and 600 words, others named by path. A malformed map or unreadable base leaves the section out. Add a map when an area's tests or invariants keep being rediscovered.
+
 ### Base failures
 
 A required check failing on base head too: no rework, no approver (waiting while base log is unreadable); one attention entry, P0 repair item per failing test and base head. Once base passes, attention clears, failed jobs rerun, blocked candidates get Graphyard-authored base merge (`refresh`) keeping approval. A failure base tip already passes refreshes at once (trigger `base breakage`).

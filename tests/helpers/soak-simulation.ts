@@ -20,9 +20,10 @@ import { doctorSettingsSchema } from '../../src/master/doctor-settings.js';
 import { headlessConfinementWrapper, sessionConfinement } from '../../src/master/launch.js';
 import { type DaemonEffects, type DaemonState, answeringWidening, emptyDaemonState, runCycle } from '../../src/master-daemon.js';
 import { type HostMemoryReading, readReclaimReports, reclaimResources, settleTmpReclaim } from '../../src/master-resources.js';
-import { retainedActions } from '../../src/daemon/state.js';
+import { approvalWatchSchema, retainedActions } from '../../src/daemon/state.js';
 import { adoptHeadlessRuns, coordinatorCheckoutGuard, noteWatchdog } from '../../src/daemon/run.js';
-import { type ExhaustedProof } from '../../src/daemon/decisions.js';
+import { type ExhaustedProof, handWatchPrefix } from '../../src/daemon/decisions.js';
+import { FleetUnreachableError } from '../../src/fleet.js';
 import { decisionEventKinds, decisionReadDeadlineMs } from '../../src/daemon/decision-reads.js';
 import { type Applied, adoptRuns, detachRuns, withRunnerAgents } from '../../src/runner/registry.js';
 import { applyDecision, approverRunOptions, startNarrowRun } from '../../src/runner/roles.js';
@@ -176,7 +177,13 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
    * real `LoopWake`, and runs a cycle only when its wait ends or the wake ends it. Every
    * `unreadableEvery`-th tick Herdr cannot be read, so every free-slot subject drops out for it.
    */
-  loopWake?: { intervalSeconds: number; unreadableEvery?: number } }) {
+  loopWake?: { intervalSeconds: number; unreadableEvery?: number };
+  /**
+   * GY-1504: the day starts with `stuckWatches` approval watches for long-closed items (half hand
+   * watches, half the loop's own) whose registry sessions aged out of the registry's history, so
+   * every end of one answers 404 Unknown session. Each such end call is counted per session.
+   */
+  stuckWatches?: number }) {
   const dayStart = clock.now();
   // A day may restage the shared scenario: the day-scoped view of the plan is what every fault
   // below arms from, while each test's own assertions still read the shared base plan.
@@ -1622,6 +1629,16 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     // A wake leaves the master idle, as a session that read master status and found nothing to do.
     effects.promptSession = async (agent, text) => agent.name === name ? void master.wakes.push({ at: elapsed, cycle: master.cycleOf, text }) : workerPrompt(agent, text);
   }
+  // GY-1504: the stuck watches' sessions are unknown to the registry; every other end reaches the day's own.
+  const stuck = { sessions: new Set<string>(), ends: new Map<string, number>() };
+  if (options.stuckWatches) {
+    const ending = effects.endRegistrySession;
+    effects.endRegistrySession = async (session, reason) => {
+      if (!stuck.sessions.has(session)) return ending?.(session, reason);
+      stuck.ends.set(session, (stuck.ends.get(session) ?? 0) + 1);
+      throw new FleetUnreachableError('The agent registry at https://graphyard.example answered 404: Unknown session');
+    };
+  }
   // The loop publishes the master's merge-queue settings each cycle they change (GY-330, GY-498,
   // GY-500, GY-516), exactly as daemonEffects wires it; the day records what was published, when.
   // ---- GY-811: the containment day. The work snapshot takes 6 s to read, as it does on a loaded
@@ -1883,6 +1900,12 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
 
   // ---- The day. ----
   let state = emptyDaemonState(config);
+  for (let index = 0; index < (options.stuckWatches ?? 0); index++) {
+    const decision = `aged-out-${index}`, session = `aged-out-session-${index}`;
+    stuck.sessions.add(session);
+    state.approvals[index % 2 ? `${handWatchPrefix}${decision}` : `GY-${5000 + index}:close:${decision}`] = approvalWatchSchema.parse({ work: `GY-${5000 + index}`, action: 'close', decision,
+      requestedAt: new Date(dayStart - 30 * 86_400_000).toISOString(), launches: 1, closeAttempts: 1000 + index, session });
+  }
   await processStart(state);
   const loopRestarts = [...plan.loopRestarts];
   // GY-866: the checkout guard `runDaemon` runs after every cycle, against the simulated checkout:
@@ -2531,7 +2554,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   const tmp = { root: tmpRoot, backlog, deadOwned, cache, heldDirectory, liveOwned, hourly, passes: tmpPasses, peak: tmpPeak, reports: await readReclaimReports(reclaimRoot), left: readdirSync(tmpRoot) };
   if (process.env.SOAK_TRACE) console.error(`landing: ${github.landingChecks} checks over ${github.landingBases.size} bases, ${github.ancestorCompares} ancestor compares, ${github.blindCompares} blind compares; false landing refusals: ${landingRefusals.map(entry => `${entry.key}@+${Math.round(entry.elapsed / minute)}min ${entry.sha.slice(0, 12)}`).join(', ') || 'none'}`);
   engine.execute = executeAll;
-  return { unboundedDay, provisionDay, promotion, throughput, reconciled, outside, items, final, github, sessions, docsSyncRuns, docsSyncRoot, lost, launches, violations, faulted, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, headless, herdr, hand, stranded, withdrawals, resumes, strandedLaunches, escalations, spent, attestations, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, guardReads, checkout, landingRefusals, foreignPane, previousWorktrees, closedLeased,
+  return { stuck, unboundedDay, provisionDay, promotion, throughput, reconciled, outside, items, final, github, sessions, docsSyncRuns, docsSyncRoot, lost, launches, violations, faulted, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, headless, herdr, hand, stranded, withdrawals, resumes, strandedLaunches, escalations, spent, attestations, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, guardReads, checkout, landingRefusals, foreignPane, previousWorktrees, closedLeased,
     mergeQueuePosts, config, refused, decideCalls, restarted, approverPanes, failing, herdrClosed: herdr.closed, diagnosisModel: settings.model, diagnosisRuns: diagnosed, baseBreak, capacityRefused, capacityLaunched, capacityWaiters,
     decided, misreads, prompts, screens, heldAccounts, approverAccounts, retryReset, exitedLive, exitedClosed, exitedRowsSeen, reassign, workspaceFailures, workspaceCooled, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, fenced, mergeStallSightings, master, baseFailure,
     blockerEvents, blockerProbes, blockerDecisions, blockerActions, blockerKeysPeak, attempts, lanesSeen, laneApplications, approverWorks, approverDecisions, failover, webhook, remedies, observeRequests, starvation, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size }, mechanical: { ledger, botRounds, misclassified, reviewHolds }, shared, charges: { ...charged, b: charged.b.length, instancesSeen: [...charged.instancesSeen], restarts: chargeRestarts },
