@@ -9,7 +9,9 @@ import { server } from '../src/server.js';
 import type { GitHub } from '../src/github.js';
 import type { Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-import { pipelineSpeedSummary, withPipelineTimelines, type PipelineTimeline, type StoredTimeline, type TimelineBackfill } from '../src/pipeline-speed.js';
+import { pipelineSpeedSummary, type PipelineTimeline, type StoredTimeline, type TimelineBackfill } from '../src/pipeline-speed.js';
+// A namespace import, so a proof run against code without the timeline read fails in its test case, not at load.
+import * as pipelineSpeed from '../src/pipeline-speed.js';
 
 // GY-1489: master status reads the coordination view, which drops every document's `pipeline`,
 // so its speed report measured 0 of 737 deliveries. The timelines are now read on their own
@@ -45,7 +47,7 @@ test('unit:speed-measured — every delivered item with a submission and a merge
   assert.equal(blind.unmeasured, 10);
 
   const { paths, read } = plane(stored);
-  assert.deepEqual(await withPipelineTimelines(work, read), { read: 10, attached: 10 });
+  assert.deepEqual(await pipelineSpeed.withPipelineTimelines(work, read), { read: 10, attached: 10 });
   assert.deepEqual(paths, ['pipeline-timelines'], 'one read of the timelines, never the ledger');
   const speed = pipelineSpeedSummary(work, now);
   assert.equal(speed.measured, 10, 'measured equals the delivered count');
@@ -65,7 +67,7 @@ test('unit:speed-measured — every delivery left unmeasured is named with its r
   const stored = [timeline(measured[0], 10, 15, finished()), timeline(measured[1], 20, 25, finished()),
     timeline(pruned, 30, null, finished(false)), timeline(noSubmission, 40, null, finished()),
     timeline(pending, 60, null, { ...finished(), truncated: true })];
-  await withPipelineTimelines(work, plane(stored).read);
+  await pipelineSpeed.withPipelineTimelines(work, plane(stored).read);
   const speed = pipelineSpeedSummary(work, now);
   assert.equal(speed.measured, 2);
   assert.deepEqual(speed.submitToMerge, { count: 2, p50Ms: 15 * 60_000, p90Ms: 25 * 60_000 });
@@ -81,11 +83,11 @@ test('unit:speed-measured — a timeline the snapshot already carries stands, an
   const item = delivered(1, 10);
   const own = timeline(item, 10, 5, finished()).pipeline;
   const work = [{ ...item, pipeline: own } as Work];
-  assert.deepEqual(await withPipelineTimelines(work, plane([timeline(item, 10, 40, finished())]).read), { read: 1, attached: 0 });
+  assert.deepEqual(await pipelineSpeed.withPipelineTimelines(work, plane([timeline(item, 10, 40, finished())]).read), { read: 1, attached: 0 });
   assert.equal(pipelineSpeedSummary(work, now).submitToMerge.p50Ms, 5 * 60_000);
 
   const bare = [delivered(2, 10)];
-  await assert.rejects(withPipelineTimelines(bare, async () => { throw new Error('plane unreachable'); }), /plane unreachable/);
+  await assert.rejects(pipelineSpeed.withPipelineTimelines(bare, async () => { throw new Error('plane unreachable'); }), /plane unreachable/);
   assert.equal(bare[0].pipeline, undefined);
   assert.equal(pipelineSpeedSummary(bare, now).coverage.awaitingBackfill, 1);
 });
@@ -130,7 +132,7 @@ test('integration:speed-timelines-read — GET /api/pipeline-timelines answers t
   assert.equal(entry.pipeline.submittedAt, item.pipeline!.submittedAt);
   assert.equal(entry.pipeline.attempts.length, 1);
   assert.equal(entry.pipeline.backfill?.resume, undefined, 'an unfinished replay state is never answered');
-  assert.deepEqual(await withPipelineTimelines(work, async path => read(path)), { read: answer.timelines.length, attached: answer.timelines.length });
+  assert.deepEqual(await pipelineSpeed.withPipelineTimelines(work, async path => read(path)), { read: answer.timelines.length, attached: answer.timelines.length });
   // Delivered as the ledger records a merge: the attached timeline measures it.
   const merged = work.find(candidate => candidate.id === item.id)! as Work & { delivery: unknown };
   Object.assign(merged, { stage: 'done', delivery: { mergedAt: new Date(Date.parse(item.pipeline!.submittedAt!) + 12 * 60_000).toISOString(), mergeSha: 'b'.repeat(40) } });
