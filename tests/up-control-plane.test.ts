@@ -67,11 +67,15 @@ after(async () => {
 });
 
 /** A provider that is already healthy, recording every environment it is handed. */
-function recordingAdapter(environments: EnvValue[][], options: { variables?: Record<string, string>; merge?: boolean } = {}): ProviderAdapter {
+function recordingAdapter(environments: EnvValue[][], options: { variables?: Record<string, string>; merge?: boolean; unread?: boolean } = {}): ProviderAdapter {
   const adapter: ProviderAdapter = {
     provider: 'compose',
     preflight: async () => [{ name: 'test provider', ok: true, detail: 'a live control plane is already running' }],
-    observe: async () => ({ ...emptyObservation(), installed: !!options.variables, variables: options.variables ?? {}, variablesObserved: true }),
+    // unread: the service exists but its variable listing could not be read (Railway swallows an
+    // unparsable `variables --json`), so nothing is known about what it holds.
+    observe: async () => options.unread
+      ? { ...emptyObservation(), installed: true, app: true, variables: {}, variablesObserved: false }
+      : { ...emptyObservation(), installed: !!options.variables, variables: options.variables ?? {}, variablesObserved: true },
     plan: () => [{ id: 'provider.provision.app', target: 'provider', title: 'Start the Graphyard application', state: 'create' }],
     provision: async () => {},
     setEnv: async (_context, values) => { environments.push(values); },
@@ -209,6 +213,22 @@ test('integration:install-without-github-app refuses a live App binding and merg
   assert.match(mergeGate.detail, /still holds GITHUB_APP_ID/);
   await assert.rejects(applyInstall(merge, mergePlan), /Preflight is incomplete/);
   assert.deepEqual(mergeEnv, [], 'a refused merge-style leftover writes no environment');
+
+  // A merge-style service whose variable listing could not be read is refused too: the only
+  // other guard would be the server reporting an App after the deploy.
+  const unreadEnv: EnvValue[][] = [];
+  const unread = await prepareInstall(root, installRequestFromArgs(['--provider', 'compose', '--repo', 'owner/project', '--no-github-app', '--apply']).request,
+    dependenciesFor(recordingAdapter(unreadEnv, { merge: true, unread: true })));
+  const unreadPlan = await buildPlan(unread);
+  const unreadGate = unreadPlan.preflight.find(item => item.name === 'GitHub App')!;
+  assert.equal(unreadGate.ok, false);
+  assert.match(unreadGate.detail, /variables of the .* could not be read/);
+  await assert.rejects(applyInstall(unread, unreadPlan), /Preflight is incomplete/);
+  assert.deepEqual(unreadEnv, [], 'an unread merge-style listing writes no environment');
+  // The same unread listing on a rewrite adapter is no refusal: the core-only write replaces it.
+  const unreadRewrite = await buildPlan(await prepareInstall(root, installRequestFromArgs(['--provider', 'compose', '--repo', 'owner/project', '--no-github-app', '--apply']).request,
+    dependenciesFor(recordingAdapter([], { unread: true }))));
+  assert.ok(unreadRewrite.preflight.every(item => item.ok), JSON.stringify(unreadRewrite.preflight));
 
   // A whole-environment rewrite with orphaned App variables is allowed: the core-only write clears them.
   const rewriteEnv: EnvValue[][] = [];

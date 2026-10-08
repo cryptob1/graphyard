@@ -786,7 +786,12 @@ export async function buildPlan(session: InstallSession): Promise<InstallPlan> {
   if (noApp && !record?.github) {
     const held = APP_VARIABLES.filter(name => presentOn(observation.variables, name));
     const merges = typeof adapter.applyVariables === 'function';
+    // A merge adapter whose running service exists but whose variable listing could not be read
+    // (Railway swallows an unparsable `variables --json`) may still hold an App: refuse rather
+    // than find out from the server after the deploy.
+    const unread = merges && observation.app && observation.variablesObserved !== true;
     if (held.length && merges) preflight.push({ name: 'GitHub App', ok: false, detail: `the ${context.provider} deployment still holds ${held.join(', ')}; that adapter keeps variables absent from a write, so --no-github-app cannot leave them unset`, fix: `Remove ${held.join(', ')} from the ${context.service} service on ${context.provider}, then rerun` });
+    else if (unread) preflight.push({ name: 'GitHub App', ok: false, detail: `the variables of the ${context.service} service on ${context.provider} could not be read, so whether it still holds ${APP_VARIABLES.join(', ')} is unknown; that adapter keeps variables absent from a write, so --no-github-app cannot promise to leave them unset`, fix: `Make the ${context.provider} variable listing of ${context.service} readable (remove any ${APP_VARIABLES.join(', ')} it holds), then rerun` });
     else preflight.push({ name: 'GitHub App', ok: true, detail: `--no-github-app: no App is registered or reused, ${APP_VARIABLES.join(', ')} stay unset, and the server serves without GitHub` });
   }
 
@@ -827,7 +832,7 @@ export async function buildPlan(session: InstallSession): Promise<InstallPlan> {
     // an App's variables, or a record bound to one, is named as drift, never silently kept.
     actions.push({ id: 'github.app', target: 'github', state: 'satisfied', title: `Skipped (--no-github-app): no GitHub App is registered or reused; ${APP_VARIABLES.join(', ')} stay unset and the server serves without GitHub` });
     if (record?.github) drift.push({ action: 'github.app', field: 'GitHub App', expected: 'none (--no-github-app)', observed: `app ${record.github.appId} (${record.github.slug}) bound by an earlier apply` });
-    for (const name of APP_VARIABLES) if (observation.variables[name] !== undefined) drift.push({ action: 'github.app', field: name, expected: 'unset (--no-github-app)', observed: 'set on the deployment' });
+    for (const name of APP_VARIABLES) if (presentOn(observation.variables, name)) drift.push({ action: 'github.app', field: name, expected: 'unset (--no-github-app)', observed: 'set on the deployment' });
   } else if (reusedApp && !appConfigured) actions.push({ id: 'github.app', target: 'github', state: 'update', title: `Reuse the GitHub App ${reusedApp} already installed on the account: add ${session.inputs.repository} to its installation with the host's gh login and verify the App reaches it; no browser step` });
   else actions.push(appConfigured || !saved
     ? { id: 'github.app', target: 'github', state: appConfigured ? 'satisfied' : 'create', title: 'Register the Graphyard GitHub App through the manifest flow and install it on the managed repository', human: 'One browser confirmation: create the App, then choose the managed repository. GitHub returns the App ID, private key, and webhook secret directly to this machine.' }
@@ -1144,8 +1149,8 @@ async function performInstall(session: InstallSession, plan: InstallPlan): Promi
     ...record,
     github: bound ? { ...githubRecord, webhookFingerprint: fingerprint(bound.facts.webhookSecret) } : null,
     // Persist the no-App choice so master setup / derivedVariables never reintroduce App vars
-    // from a leftover github-app.json on this host (GY-1550).
-    noGithubApp: bound ? false : noApp ? true : !!record.noGithubApp,
+    // from a leftover github-app.json on this host (GY-1550); bound is null exactly when noApp.
+    noGithubApp: noApp,
     reviewers: session.reviewers,
     profiles: [
       ...(profiles.master.configured ? [{ name: 'master', principal: principalOfRole(session.principals, 'coordinator').id, kind: profiles.master.kind ?? 'unknown', role: 'master' as const }] : []),
