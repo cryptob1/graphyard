@@ -178,14 +178,20 @@ test('unit:risk-class-shown — graphyard status GY-N prints risk, its reasons a
   assert.match(renderToStaticMarkup(createElement(WorkDetails, { ...dashboard(work), item: normal })), /<dt>Risk<\/dt><dd class="risk-details">normal<small> · no sensitive path in the merge delta<\/small><\/dd>/);
 });
 
-test('unit:landability-verdict — the risk class reads beside the lane and gates nothing: gates, landability and lane rework never import it, and the verdict suites stand unmodified', async () => {
-  for (const file of ['src/model/gates.ts', 'src/model/landability.ts', 'src/server/lane-rework.ts', 'src/model/policy.ts']) {
+test('unit:landability-verdict — the risk class reads beside the lane and gates github mode nothing: landability and lane rework never import it, the gates read it only for a control-plane observation (GY-1525), and the verdict suites stand unmodified', async () => {
+  for (const file of ['src/model/landability.ts', 'src/server/lane-rework.ts', 'src/model/policy.ts']) {
     const source = await read(file);
     assert.doesNotMatch(source, /risk-class/, `${file} does not read the risk class`);
   }
   for (const file of ['tests/landability-verdict.test.ts', 'tests/regression-guard.test.ts']) assert.doesNotMatch(await read(file), /risk-class|classifyRisk/, `${file} is untouched by GY-1521`);
-  // The gate evaluation reports the lane and never a risk class: the class is a read, not a verdict.
-  assert.doesNotMatch(await read('src/model/gates.ts'), /riskOf|classifyRisk|withRisk/);
+  // The gate evaluation reports the lane and never stamps a risk class on the record: the one place
+  // it reads the class is the review gate of a head the control plane observed itself (GY-1525 AC-3),
+  // where the delta's class decides whether the approval comes before or after the merge.
+  const gates = await read('src/model/gates.ts');
+  assert.doesNotMatch(gates, /classifyRisk|withRisk/, 'the gates neither classify a delta themselves nor print the class');
+  const reads = gates.split('\n').filter(line => /\briskOf\(/.test(line));
+  assert.equal(reads.length, 1, 'the gates read the class exactly once');
+  assert.match(reads[0]!, /source === 'control-plane'/, 'and only for a control-plane observation: github mode never reads it');
 });
 
 /** The file list a merge applied to its first parent, as `git diff-tree -M` names it: both ends of a rename. */

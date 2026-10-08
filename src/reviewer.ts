@@ -699,6 +699,12 @@ export function reviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<
     + autonomousSession('post the verdict yourself, APPROVE or REQUEST_CHANGES, as soon as you have judged the diff', `record a blocker as one review posted with --event COMMENT (or, when posting is itself refused, as a final line starting BLOCKED:)`);
 }
 
+/**
+ * The finding rule of a control-plane review: the same `Nit:` line as GitHub mode, without its
+ * mechanical class — no worker bot patches a control-plane head (reconcileReviews keeps these
+ * records out of the mechanical rounds), so a nit here is advisory and kept for later workers.
+ */
+export const controlPlaneFindingSection = 'Name each nit on its own "Nit: PATH:LINE — FINDING" line. Nits are advisory in control-plane mode: Graphyard keeps them in project memory for later workers, and no bot fixes them, so put anything that must be fixed on a BLOCKING: line instead. ';
 /** The control-plane form of the request (GY-1525 AC-5): head and base named, read from the shared object store, `review post` without a pull-request number. */
 function controlPlaneReviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<Pick<MasterConfig, 'cliPath'>>, binding: Pick<ReviewBinding, 'key' | 'policyRevision'>, plane: ControlPlanePrompt, checkout?: SessionCheckout, criteria?: { id: string; text: string }[], history?: ReviewHistory, documentation?: { obligation: DocumentationObligation; files?: readonly string[] | null }, research?: Pick<Work, 'key' | 'title' | 'description' | 'criteria' | 'researchBrief'> | null, roundsOrMemory?: ReviewRoundStatus | ProjectMemory | null, memory?: ProjectMemory | null, verification?: { maps: readonly VerificationMap[]; plannedFiles: readonly string[] } | null) {
   let rounds: ReviewRoundStatus | undefined;
@@ -718,7 +724,7 @@ function controlPlaneReviewPrompt(config: Pick<MasterConfig, 'repository'> & Par
     + verificationMapDigest(verification?.maps, verification?.plannedFiles, 'reviewer')
     + reviewRoundSection(plane.head, history, rounds)
     + criteriaRuleSection(binding.key, plane.head, criteria)
-    + findingClassificationSection()
+    + controlPlaneFindingSection
     + (documentation ? documentationReviewSection(documentation.obligation, documentation.files) : '')
     + repetitionReviewSection(documentation?.files)
     + (research ? researchReviewSection(research) : '')

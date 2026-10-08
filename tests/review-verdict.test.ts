@@ -261,7 +261,7 @@ test('integration:review-verdict-identity-independent — review-launch is the c
   assert.equal((await events(requested.id, 'review.independence-refused')).length, 1);
 });
 
-test('integration:review-verdict-recorded-once — the verdict is appended to observation.reviews with source control-plane and re-evaluated: an approval lands a sensitive head\'s review gate, a change request holds it with its BLOCKING findings; a retried key replays and a second verdict for the launch is refused', async () => {
+test('integration:review-verdict-recorded-once — the verdict is appended to observation.reviews as { reviewer, sha, state, body, submittedAt, source: control-plane } and re-evaluated: an approval lands a sensitive head\'s review gate, a change request holds it with its BLOCKING findings; a retried key replays and a second verdict for the launch is refused', async () => {
   const sensitive = await insert(item('GY-9004', { observation: planeObservation({ sha: H, baseSha: B, pr: 7, branch: 'graphyard/gy-7-1', author: 'graphyard-claude-1' }, ['src/store/pools.ts']) }));
   const token = freshToken();
   assert.equal((await request(tokenOf(coordinator), `work/${sensitive.id}/review-launch`, launchBody(token))).status, 200);
@@ -272,8 +272,8 @@ test('integration:review-verdict-recorded-once — the verdict is appended to ob
   assert.ok(Number.isInteger(approved.body.reviewId) && approved.body.reviewId > 0, 'the verdict event\'s sequence is its review id');
   const landed = await stored(sensitive.id);
   assert.equal(landed.observation!.reviews.length, 1);
-  const [review] = landed.observation!.reviews as { reviewer: string; sha: string; state: string; id?: number; submittedAt?: string; source?: string }[];
-  assert.deepEqual([review!.reviewer, review!.sha, review!.state, review!.id, review!.source, typeof review!.submittedAt], ['review-claude-1', H, 'APPROVED', approved.body.reviewId, 'control-plane', 'string']);
+  const [review] = landed.observation!.reviews as { reviewer: string; sha: string; state: string; id?: number; submittedAt?: string; body?: string; blocking?: string[]; source?: string }[];
+  assert.deepEqual([review!.reviewer, review!.sha, review!.state, review!.id, review!.body, review!.blocking, review!.source, typeof review!.submittedAt], ['review-claude-1', H, 'APPROVED', approved.body.reviewId, verdict(token, 'APPROVE').body, undefined, 'control-plane', 'string'], 'the record is { reviewer, sha, state, body, submittedAt, source } plus the ledger id: an approval carries its body too');
   assert.equal(landed.gates.find(gate => gate.name === 'review')!.passed, true, 'exactApproval and the review gate read the control-plane verdict unchanged');
   assert.deepEqual([landed.reviewLaunch!.verdict!.state, landed.reviewLaunch!.verdict!.reviewId, landed.reviewLaunch!.verdict!.source], ['APPROVED', approved.body.reviewId, 'control-plane']);
   assert.equal((await events(sensitive.id, 'review.verdict')).length, 1);

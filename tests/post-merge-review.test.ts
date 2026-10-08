@@ -10,7 +10,7 @@ import { masterConfigSchema } from '../src/master.js';
 import type { Principal, Work } from '../src/model.js';
 import { reconcileAutoDispatch } from '../src/model/dispatch.js';
 import { deliveredByMergeWriter, owedPostMergeReviews, parseFinding, postMergeFollowUp, postMergeRequestId, postMergeReviewMark } from '../src/model/post-merge-review.js';
-import { emptyDispatchCursor, filePostMergeFollowUps, postMergeRequest, postMergeWaitReason, reviewedAfterMerge, runDispatchTick, selectReviewerProfile, type DispatchEffects } from '../src/auto-dispatch.js';
+import { emptyDispatchCursor, filePostMergeFollowUps, postFollowUpItem, postMergeRequest, postMergeWaitReason, reviewedAfterMerge, runDispatchTick, selectReviewerProfile, unknownParent, type DispatchEffects } from '../src/auto-dispatch.js';
 import { controlPlaneRefusal, controlPlaneVerdict, staleReviewReason, type ReviewRecord } from '../src/reviewer.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -71,7 +71,15 @@ test('unit:post-merge-review-owed — owed reviews are the merge writer\'s deliv
   assert.deepEqual(postMergeReviewMark({ stage: 'review', postMergeReview: undefined }, 'normal', false), { postMergeReview: 'owed' });
   assert.deepEqual(postMergeReviewMark({ stage: 'review', postMergeReview: 'owed' }, 'sensitive', false), { postMergeReview: null });
   const request = postMergeRequest(owed);
-  assert.deepEqual([request.id, request.kind, request.sha, request.provider, request.state, request.requestedAt], [postMergeRequestId('GY-10', M), 'review', M, 'github', 'requested', at]);
+  assert.deepEqual([request.id, request.kind, request.sha, request.baseSha, request.provider, request.state, request.requestedAt], [postMergeRequestId('GY-10', M), 'review', M, B, undefined, 'requested', at], 'the base is the tip the ledger merged onto, and GitHub is not its provider');
+  assert.equal(postMergeRequest(delivered('GY-10', { mergeLedger: undefined })).baseSha, unknownParent, 'a delivery without its ledger leaves the parent to the launcher');
+  // Filing a follow-up: created under the request id, then released under its :ready key at the created revision.
+  const posted: { url: string; key: string; body: any }[] = [];
+  const filer = (async (url: string, init: RequestInit) => { posted.push({ url, key: String((init.headers as Record<string, string>)['Idempotency-Key']), body: JSON.parse(String(init.body)) }); return new Response(JSON.stringify(posted.length === 1 ? { id: 'w-1', key: 'GY-301', revision: 1 } : { id: 'w-1', key: 'GY-301', revision: 2, ready: true }), { status: 200 }); }) as unknown as typeof fetch;
+  assert.deepEqual(await postFollowUpItem('https://cp.example/', 't', { title: 'x' }, 'post-merge-follow-up:GY-10:m:0', filer), { key: 'GY-301' });
+  assert.deepEqual(posted.map(call => [call.url, call.key]), [['https://cp.example/api/work', 'post-merge-follow-up:GY-10:m:0'], ['https://cp.example/api/work/w-1/ready', 'post-merge-follow-up:GY-10:m:0:ready']]);
+  assert.equal(posted[1]!.body.expectedRevision, 1, 'the release names the revision the creation returned');
+  await assert.rejects(postFollowUpItem('https://cp.example', 't', {}, 'k', (async () => new Response(JSON.stringify({ error: 'Only unreleased backlog work can be released' }), { status: 409 })) as unknown as typeof fetch), /Only unreleased backlog work/);
   // The finding form: path and line when the line starts with them.
   assert.deepEqual(parseFinding('src/feature.ts:12 — the flag is never read'), { text: 'src/feature.ts:12 — the flag is never read', path: 'src/feature.ts', line: 12 });
   assert.deepEqual(parseFinding('`src/other.ts` - the retry loop never ends').path, 'src/other.ts');
@@ -189,14 +197,14 @@ test('integration:post-merge-review-files-follow-ups — a delivered normal-risk
   // The loop files the follow-ups through the API, as the identity that may create work.
   const ledgerRecord = record(reviewed, { launch: reviewed.reviewLaunch!.id, state: 'completed', verdict: { state: 'CHANGES_REQUESTED', reviewer: 'review-claude-1', reviewId: reviewed.reviewLaunch!.verdict!.reviewId, submittedAt: at } });
   const memory: string[][] = [];
-  const createWork = async (body: unknown, requestId: string) => { const created = await request(tokenOf(admin), 'work', body, requestId); assert.equal(created.status, 200, JSON.stringify(created.body)); return { key: created.body.key as string }; };
+  const createWork = (body: unknown, requestId: string) => postFollowUpItem(url, tokenOf(admin), body, requestId);
   const outcome = await filePostMergeFollowUps(reviewed, ledgerRecord, { createWork, recordFindings: async (_work, _record, findings) => { memory.push(findings); } }, new Date());
   assert.deepEqual([outcome!.filed.length, outcome!.memory, outcome!.failure], [2, 2, undefined]);
   assert.deepEqual(memory, [['AC-1 unmet after merge.', '- Nit: naming of `x` is terse']]);
   for (const [index, entry] of outcome!.filed.entries()) {
     const followUp = (await store.pool.query('SELECT document FROM work_items WHERE document->>\'key\'=$1', [entry.key])).rows[0].document as Work;
     const finding = index === 0 ? { path: 'src/feature.ts', text: 'src/feature.ts:12 — the flag is never read' } : { path: 'src/other.ts', text: 'src/other.ts — the retry loop never ends' };
-    assert.deepEqual([followUp.type, followUp.priority, followUp.plannedFiles, followUp.policy.review, followUp.stage], ['bug', 1, [finding.path], true, 'backlog']);
+    assert.deepEqual([followUp.type, followUp.priority, followUp.plannedFiles, followUp.policy.review, followUp.stage, followUp.ready], ['bug', 1, [finding.path], true, 'ready', true], 'filed and released, so a worker takes it without a triage pass');
     assert.deepEqual(followUp.origin, { reviewFollowUps: { parent: 'GY-9101', findings: [{ ...finding, ref: M }] } });
     assert.match(followUp.title, /^Post-merge review of GY-9101 \(cccccccccccc\): /);
     assert.match(followUp.description, new RegExp(`delivered as merge commit ${M}`));
