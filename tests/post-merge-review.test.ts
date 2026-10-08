@@ -152,6 +152,11 @@ test('unit:post-merge-review-owed — owed reviews are the merge writer\'s deliv
   let n = 0; const keys: string[] = [];
   const everything = await filePostMergeFollowUps(many, failing, { createWork: async (_body, requestId) => { keys.push(requestId); return { key: `GY-${300 + ++n}` }; } }, new Date(clock));
   assert.deepEqual([everything!.filed.length, keys.length, new Set(keys).size], [13, 13, 13]);
+  // A verdict past the ledger's bound files up to the bound and records the rest explicitly.
+  const huge = { ...launched, reviewLaunch: { ...launched.reviewLaunch!, verdict: { ...launched.reviewLaunch!.verdict!, body: Array.from({ length: 103 }, (_, k) => `BLOCKING: src/g${k}.ts — finding ${k}`).join('\n') } } } as typeof launched;
+  const capped = await filePostMergeFollowUps(huge, failing, { createWork: async () => ({ key: `GY-${400 + ++n}` }) }, new Date(clock));
+  assert.deepEqual([capped!.filed.length, capped!.overflow], [100, 3]);
+  assert.match(capped!.failure!, /3 further BLOCKING findings .* stand on the verdict unfiled/);
   // A project-memory write that fails leaves memory unset so the next tick retries; the verdict is not settled as handled.
   const memoryFail = record(launched, { state: 'completed', verdict: { state: 'CHANGES_REQUESTED', reviewer: 'review-claude-1', reviewId: 77, submittedAt: at } });
   let memoryCalls = 0;

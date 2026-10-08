@@ -727,7 +727,10 @@ export async function filePostMergeFollowUps(work: Work, record: ReviewRecord, e
   if (body === null) return null;
   const filed = [...(record.postMergeFollowUps?.filed ?? [])];
   // blockingFindings caps a body at ten; read line by line, every BLOCKING line is a finding.
-  const findings = body.split('\n').flatMap(line => blockingFindings(line)).slice(0, postMergeFindingsMax);
+  const lines = body.split('\n').flatMap(line => blockingFindings(line));
+  const findings = lines.slice(0, postMergeFindingsMax);
+  // The ledger bounds what it lists; a verdict past that bound is recorded as such, never silently cut.
+  const overflow = lines.length - findings.length;
   let failure: string | undefined;
   for (const [index, text] of findings.entries()) {
     const finding = text.slice(0, 300);
@@ -753,7 +756,8 @@ export async function filePostMergeFollowUps(work: Work, record: ReviewRecord, e
       }
     } else memory = nits.length;
   }
-  return { at: now.toISOString(), filed: filed.slice(0, postMergeFindingsMax), ...(memory !== undefined ? { memory } : {}), ...(failure ? { failure } : {}) };
+  if (overflow > 0) { const reason = `${overflow} further BLOCKING finding${overflow === 1 ? '' : 's'} beyond the ${postMergeFindingsMax} one item each could be filed for stand${overflow === 1 ? 's' : ''} on the verdict unfiled`; failure = failure ? `${failure}; ${reason}`.slice(0, 500) : reason; }
+  return { at: now.toISOString(), filed: filed.slice(0, postMergeFindingsMax), ...(overflow > 0 ? { overflow } : {}), ...(memory !== undefined ? { memory } : {}), ...(failure ? { failure } : {}) };
 }
 export interface DispatchTick { at: string; launched: DispatchLaunch[]; refused: (DispatchFailure & { requestId: string })[]; waiting: DispatchWait[]; skipped: number;
   /** Post-merge verdicts this tick filed (GY-1525): the follow-up items per item and merge commit. */
