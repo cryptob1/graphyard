@@ -2,6 +2,7 @@
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { readFile, symlink, writeFile } from 'node:fs/promises';
+import { constants } from 'node:os';
 import { join } from 'node:path';
 import { defaultChildRun, type ChildRun } from '../child-runner.js';
 import { allocateSessionCheckout, removeSessionCheckout } from '../install/worktree-root.js';
@@ -47,15 +48,28 @@ export async function trialMerge(git: TrialGit, input: { head: string; baseTip: 
   return { mergeSha, tree };
 }
 
-/** The variables a trial child never sees, besides every GRAPHYARD_* and HERDR_* one. */
-export const withheldTrialVariables = ['GH_CONFIG_DIR', 'GH_TOKEN', 'GITHUB_TOKEN', 'SSH_AUTH_SOCK', 'GIT_SSH_COMMAND'] as const;
+/**
+ * The variables a trial child never sees, besides every GRAPHYARD_* and HERDR_* one: the
+ * credentials, and the temporary-directory overrides. The suite assumes the platform's own
+ * temporary directory, as CI gives it (GY-1549: the loop's systemd unit inherits TMPDIR=/var/tmp
+ * from environment.d, and tests/test-isolation.test.ts's contained-install assertion failed on it).
+ */
+export const withheldTrialVariables = ['GH_CONFIG_DIR', 'GH_TOKEN', 'GITHUB_TOKEN', 'SSH_AUTH_SOCK', 'GIT_SSH_COMMAND', 'TMPDIR', 'TMP', 'TEMP'] as const;
 /** The trial child's environment: the isolated test one, with every credential and Graphyard control removed and git's global configuration off. */
 export function trialEnvironment(environment: NodeJS.ProcessEnv = process.env): Record<string, string> {
   const kept = Object.fromEntries(Object.entries(isolatedTestEnvironment(environment)).filter(([name]) => !/^(GRAPHYARD|HERDR)_/.test(name) && !(withheldTrialVariables as readonly string[]).includes(name)));
   return { ...kept, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' };
 }
 
-export interface TrialRun { build: 'pass' | 'fail'; tests: { passed: number; failed: string[]; files: number }; durationMs: number; logTail: string }
+/**
+ * A trial's verdict. `runnerExit` is how the test runner process ended: its exit status, 128 plus the
+ * signal number when a signal ended it, -1 when it could not be started or outgrew the capture, and
+ * null (or absent, from a trial stub) when no runner ran: a failed install or build, a failed
+ * selection, or an empty one.
+ */
+export interface TrialRun { build: 'pass' | 'fail'; tests: { passed: number; failed: string[]; files: number }; durationMs: number; logTail: string; runnerExit?: number | null }
+/** Whether a verdict's log tail is worth recording: the build did not pass, a test file failed, or the runner did not exit 0. */
+export const trialNeedsLog = (run: Pick<TrialRun, 'build' | 'tests' | 'runnerExit'>) => run.build !== 'pass' || run.tests.failed.length > 0 || (run.runnerExit != null && run.runnerExit !== 0);
 /**
  * A trial that outran `timeoutMs` measures the host, not the merge: it is no verdict, so runTrial
  * rejects with this (the phase it was in and the log so far) instead of answering a fail.
@@ -95,6 +109,28 @@ export interface RunTrialInput {
 const tailLength = 4000;
 const testFile = /tests\/[\w./-]+\.test\.ts/g;
 const testFileLine = /^tests\/[\w./-]+\.test\.ts$/;
+/**
+ * The failing files a runner log names, for a runner whose records are missing. A file-level
+ * failure is a `not ok`/`✖` line carrying the path; a failing case inside a file is reported as
+ * `✖ <case title>` and its file only on the `test at tests/x.test.ts:line:col` line that follows,
+ * so both are read (GY-1549: reading only the first kind counted every such file as passed).
+ */
+export function failingFilesInLog(out: string): string[] {
+  const files = new Set<string>();
+  for (const line of out.split('\n')) {
+    if (/not ok|✖|FAIL/.test(line)) for (const file of line.match(testFile) ?? []) files.add(file);
+    const located = /^\s*test at (tests\/[\w./-]+\.test\.ts):\d+:\d+/.exec(line);
+    if (located) files.add(located[1]!);
+  }
+  return [...files];
+}
+/** The runner's per-file records (`--durations FILE`, tests/helpers/file-durations.mjs): one JSON line per file that ran, with whether it passed. */
+export function runnerRecords(text: string): { file: string; passed: boolean }[] {
+  return text.split('\n').flatMap(line => {
+    try { const record = JSON.parse(line) as { file?: unknown; passed?: unknown }; return typeof record.file === 'string' ? [{ file: record.file, passed: record.passed !== false }] : []; }
+    catch { return []; }
+  });
+}
 
 /**
  * Check the merge commit out detached as a `trial` checkout, run `npm run build`, then the affected
@@ -117,20 +153,33 @@ export async function runTrial(input: RunTrialInput): Promise<TrialRun> {
     return `${typeof failed.stdout === 'string' ? failed.stdout : ''}${typeof failed.stderr === 'string' ? failed.stderr : ''}` || String(failed.message ?? error);
   };
   // A child killed at the deadline, or one that ended past it, ends the trial as a timeout, never as a fail.
+  // How a failed child ended, as the log's last line for that command: the status or signal, and the
+  // runner's own reason when it could not be started or outgrew the capture (its output alone would not say).
+  const ending = (error: unknown) => {
+    const failed = error as { status?: number | null; signal?: string | null; cause?: unknown };
+    const cause = failed.cause instanceof Error ? failed.cause.message : failed.cause === undefined ? null : String(failed.cause);
+    return `[exit ${failed.signal ? `signal ${failed.signal}` : `status ${failed.status ?? 'unknown'}`}${cause ? `: ${cause}` : ''}]`;
+  };
+  const exitCode = (error: unknown) => {
+    const failed = error as { status?: number | null; signal?: NodeJS.Signals | null; cause?: unknown };
+    if (failed.cause !== undefined) return -1;
+    if (typeof failed.status === 'number') return failed.status;
+    return failed.signal ? 128 + (constants.signals[failed.signal] ?? 0) : -1;
+  };
   const child = async (phase: TrialTimeoutError['phase'], command: string, args: string[], options: { env?: NodeJS.ProcessEnv } = {}) => {
     let out: string;
     try { out = String(await run(command, args, { cwd: checkout.worktree, env: (options.env ?? env) as Record<string, string>, timeoutMs: remaining() })); }
     catch (error) {
       const out = output(error);
-      log.push(`$ ${command} ${args.join(' ')}\n${out}`);
+      log.push(`$ ${command} ${args.join(' ')}\n${out}\n${ending(error)}`);
       if ((error as { timedOut?: boolean }).timedOut || now() >= deadline) throw new TrialTimeoutError(phase, Math.max(0, now() - startedAt), tail());
-      return { ok: false, out };
+      return { ok: false, out, exit: exitCode(error) };
     }
     log.push(`$ ${command} ${args.join(' ')}\n${out}`);
     if (now() >= deadline) throw new TrialTimeoutError(phase, Math.max(0, now() - startedAt), tail());
-    return { ok: true, out };
+    return { ok: true, out, exit: 0 };
   };
-  const finish = (build: TrialRun['build'], tests: TrialRun['tests']): TrialRun => ({ build, tests, durationMs: Math.max(0, now() - startedAt), logTail: tail() });
+  const finish = (build: TrialRun['build'], tests: TrialRun['tests'], runnerExit: number | null = null): TrialRun => ({ build, tests, durationMs: Math.max(0, now() - startedAt), logTail: tail(), runnerExit });
   const listed = (out: string) => out.split('\n').map(line => line.trim()).filter(line => testFileLine.test(line));
   const trial = async (): Promise<TrialRun> => {
     try {
@@ -153,12 +202,14 @@ export async function runTrial(input: RunTrialInput): Promise<TrialRun> {
       }
       // An affected selection of nothing runs nothing.
       if (!files.length) return finish('pass', { passed: 0, failed: [], files: 0 });
-      const list = join(checkout.directory, 'affected-tests.txt');
+      const list = join(checkout.directory, 'affected-tests.txt'), records = join(checkout.directory, 'test-results.jsonl');
       await writeFile(list, `${files.join('\n')}\n`);
-      const tests = await child('tests', 'node', ['--import', 'tsx', 'tests/helpers/run-tests.ts', '--files-from', list]);
-      if (tests.ok) return finish('pass', { passed: files.length, failed: [], files: files.length });
-      const failing = [...new Set(tests.out.split('\n').filter(line => /not ok|✖|FAIL/.test(line)).flatMap(line => line.match(testFile) ?? []))];
-      return finish('pass', { passed: Math.max(0, files.length - failing.length), failed: failing.length ? failing : ['tests/helpers/run-tests.ts'], files: files.length });
+      // The runner's own per-file records decide which files failed; the human-readable log is only read when they are missing.
+      const tests = await child('tests', 'node', ['--import', 'tsx', 'tests/helpers/run-tests.ts', '--files-from', list, '--durations', records]);
+      const recorded = runnerRecords(await readFile(records, 'utf8').catch(() => ''));
+      const failing = [...new Set(recorded.length ? recorded.filter(record => !record.passed).map(record => record.file) : tests.ok ? [] : failingFilesInLog(tests.out))];
+      if (tests.ok && !failing.length) return finish('pass', { passed: files.length, failed: [], files: files.length }, 0);
+      return finish('pass', { passed: Math.max(0, files.length - failing.length), failed: failing.length ? failing : ['tests/helpers/run-tests.ts'], files: files.length }, tests.exit);
     } catch (error) {
       if (error instanceof TrialTimeoutError) throw error;
       log.push(`trial checkout failed: ${error instanceof Error ? error.message : String(error)}`);

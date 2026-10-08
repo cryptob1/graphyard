@@ -11,7 +11,11 @@ export interface ShadowVerdict {
   durationMs: number; at: string; outcome: ShadowOutcome;
   /** The merge commit GitHub made of this head, remembered once seen: a reverted item is reopened with its delivery and candidate cleared, and the revert is matched by this commit. */
   delivered?: { mergeSha: string };
+  /** The last `trialLogTailLength` characters of the trial's output, kept only when the trial did not pass (the build, a test file, or the runner's exit). The recorded event carries it; the loop's cursor does not. */
+  logTail?: string;
 }
+/** How much of the trial's output a failing verdict records. */
+export const trialLogTailLength = 4000;
 /** What GitHub's gate did with the head: nothing yet, merged and kept, merged then reverted by the main guard, or failed its required checks. */
 export type GithubOutcome = 'pending' | 'merged' | 'reverted' | 'failed';
 
