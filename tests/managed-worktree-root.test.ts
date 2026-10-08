@@ -687,9 +687,15 @@ test('unit:dispatch-defers-on-host-memory — below the memory floor the loop de
   assert.ok(tick.waiting.length > 0 && tick.waiting.every(wait => /below its 6\.2 GB floor, so new session launches on it are deferred/.test(wait.reason)));
   // The executor claims no launching row meanwhile: the rows wait in the queue without failing.
   const claims: NextActionKind[][] = [];
+  const presences: NextActionKind[][] = [];
   const idle = await runExecutorTick({ id: 'executor-a', host: 'machine-a' }, { claim: async request => { claims.push(request.kinds); return { action: null }; }, settle: async () => {},
+    present: async request => { presences.push(request.kinds); },
     handlers: { dispatch: async () => 'launched', 'request-review': async () => 'launched', resync: async () => 'resynced' }, launchHold: () => hostMemoryHold('machine-a', async () => memory, () => at) });
   assert.deepEqual(claims, [['resync']]);
+  // GY-1538: the hold defers launches, it does not stop the executor serving them, so presence
+  // still names every kind it runs; otherwise the control plane reports dispatch and request-review
+  // unserved and files a configuration fault for a deferral (GY-1515, GY-1537, GY-1530).
+  assert.deepEqual(presences, [['dispatch', 'request-review', 'resync']]);
   assert.ok(claims[0].every(kind => !launchingKinds.includes(kind)));
   assert.match(idle.reason, /launches none: host machine-a has 2\.0 GB/);
 
