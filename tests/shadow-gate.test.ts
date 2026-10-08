@@ -5,7 +5,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import EmbeddedPostgres from 'embedded-postgres';
 import { daemonStateSchema, emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
-import { shadowAttention, shadowGateSummary, shadowKeptVerdicts, shadowReads, shadowIdle, shadowStateSchema } from '../src/daemon/cycle-shadow.js';
+import { shadowKeptVerdicts, shadowReads, shadowIdle, shadowReportKey, shadowReportText, shadowStateSchema } from '../src/daemon/cycle-shadow.js';
 import { compareVerdicts, githubOutcome, shadowDue, shadowReport, type ShadowVerdict } from '../src/merge-writer/shadow.js';
 import { shadowGateSettings, shadowGateSettingsSchema } from '../src/master/merge-writer-settings.js';
 import { masterConfigSchema } from '../src/master.js';
@@ -165,16 +165,11 @@ test('unit:shadow-step-writes-nothing — across a conflicting head, a passing o
   assert.ok(git.calls.every(call => call[0] === 'git' && call[1] === '-C' && call[2] !== 'gh'));
 });
 
-test('unit:shadow-status — master status carries a shadowGate section with the report, one attention line per item with a shadow-only-fail or shadow-missed, a disagreement is raised once as an escalation, and docs/delivery-redesign.md Rollout names the fields within 50 net words', async () => {
-  const entries = [verdict('GY-1', { outcome: 'agree-pass' }), verdict('GY-2', { outcome: 'shadow-only-fail', tests: failedTests }), verdict('GY-2', { outcome: 'shadow-only-fail', head: sha('rework'), tests: failedTests }), verdict('GY-3', { outcome: 'shadow-missed' })];
-  const summary = shadowGateSummary(entries);
-  assert.equal(summary.total, 4);
-  assert.deepEqual(summary.counts, { 'agree-pass': 1, 'agree-fail': 0, 'shadow-only-fail': 2, 'shadow-missed': 1, pending: 0 });
-  assert.deepEqual(shadowAttention(entries).map(line => line.subject), ['GY-2', 'GY-3'], 'one line per item');
-  assert.match(shadowAttention(entries)[1]!.text, /shadow-missed.*main guard reverted/);
-  assert.deepEqual(shadowAttention([]), []);
-  const operations = readFileSync(fileURLToPath(new URL('../src/cli/master/operations.ts', import.meta.url)), 'utf8');
-  assert.ok(/shadowGate: shadowGateSummary\(/.test(operations) && /shadowAttention\(/.test(operations), 'master status prints the section and its attention');
+test('unit:shadow-status — master status lists the gate report and, for each item with a shadow-only-fail or shadow-missed, one escalation line raised once, and docs/delivery-redesign.md Rollout names the fields within 50 net words', async () => {
+  const entries = [verdict('GY-1', { outcome: 'agree-pass' }), verdict('GY-2', { outcome: 'shadow-only-fail', tests: failedTests }), verdict('GY-3', { outcome: 'shadow-missed' })];
+  const summary = shadowReport(entries, []);
+  assert.deepEqual(summary.counts, { 'agree-pass': 1, 'agree-fail': 0, 'shadow-only-fail': 1, 'shadow-missed': 1, pending: 0 });
+  assert.match(shadowReportText(summary), /^3 verdicts \(agree-pass 1, agree-fail 0, shadow-only-fail 1, shadow-missed 1, pending 0\); trial p50 1s, p90 1s; newest disagreements: GY-\d/);
   // The step raises each disagreement once, however many cycles follow.
   const git = recordingGit(), now = () => start;
   let delivered = false;
@@ -189,9 +184,11 @@ test('unit:shadow-status — master status carries a shadowGate section with the
   for (let cycle = 0; cycle < 3; cycle++) raised.push(...(await runCycle(config, state, effects, now)).actions.filter(action => action.detail.startsWith('Shadow merge gate:')).map(action => action.detail));
   assert.equal(state.shadow[0]?.outcome, 'shadow-only-fail');
   assert.equal(raised.length, 1, 'raised once');
+  const row = state.actions[shadowReportKey];
+  assert.ok(row?.kind === 'escalation' && /shadow-only-fail 1/.test(row.detail) && /newest disagreements: GY-1 /.test(row.detail), 'master status lists the report among the loop\'s escalations');
   const docs = readFileSync(fileURLToPath(new URL('../docs/delivery-redesign.md', import.meta.url)), 'utf8');
   const rollout = docs.split(/^## Rollout\s*$/m)[1]!.split(/\n## /)[0]!;
-  for (const field of ['shadowGate', 'agree-pass', 'agree-fail', 'shadow-only-fail', 'shadow-missed', 'pending', 'p50/p90', 'newest ten']) assert.ok(rollout.includes(field), `Rollout names ${field}`);
+  for (const field of ['shadow gate report', 'agree-pass', 'agree-fail', 'shadow-only-fail', 'shadow-missed', 'pending', 'p50/p90', 'newest ten']) assert.ok(rollout.includes(field), `Rollout names ${field}`);
 });
 
 // ——— The verdict route: the loop's coordinator identity only, one event per Idempotency-Key. ———

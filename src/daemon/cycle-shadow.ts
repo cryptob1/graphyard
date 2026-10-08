@@ -1,11 +1,12 @@
 // Concern: the shadow merge gate's cycle step (GY-1522) — trial-merge one submitted head per cycle beside GitHub's gate and record the verdict; it writes nothing.
 import { z } from 'zod';
 import type { ChildRun } from '../child-runner.js';
-import type { MasterConfig } from '../master.js';
+import { readCredentialFile, type MasterConfig } from '../master.js';
+import { defaultChildRun } from '../child-runner.js';
+import { worktreeRoot } from '../install/worktree-root.js';
 import type { Work } from '../model.js';
 import { classifyRisk } from '../model/risk-class.js';
 import { shadowGateSettings } from '../master/merge-writer-settings.js';
-import type { AttentionItem } from '../master/attention.js';
 import { runTrial, trialMerge, type TrialRun } from '../merge-writer/trial.js';
 import { judgedVerdicts, shadowOutcomes, shadowDue, shadowReport, type ShadowVerdict } from '../merge-writer/shadow.js';
 import { storeAction, type DaemonState } from './state.js';
@@ -57,6 +58,21 @@ export function shadowReads(config: Pick<MasterConfig, 'baseBranch' | 'run'>, ro
   };
 }
 
+/**
+ * The loop's own reads when the effects carry none: the coordinator checkout is the loop's working
+ * directory, and the verdict is posted with the loop's coordinator credential. A test hands its own
+ * through `effects.shadow`; a loop with `run.shadowGate.enabled` false never builds them.
+ */
+export function defaultShadowReads(config: MasterConfig, run: ChildRun = defaultChildRun, root: string = process.cwd()): ShadowReads {
+  return shadowReads(config, root, run, { base: worktreeRoot(root, config), record: async (work, verdict) => {
+    const response = await fetch(`${config.url}/api/work/${work.id}/shadow-verdict`, { method: 'POST',
+      headers: { Authorization: `Bearer ${await readCredentialFile(config.credentialFile)}`, 'Content-Type': 'application/json', 'Idempotency-Key': `shadow:${work.id}:${verdict.head}:${verdict.baseTip}` },
+      body: JSON.stringify({ head: verdict.head, baseTip: verdict.baseTip, mergeSha: verdict.mergeSha, risk: verdict.risk, build: verdict.build, tests: verdict.tests, conflict: verdict.conflict, durationMs: verdict.durationMs }), signal: AbortSignal.timeout(30_000) });
+    if (!response.ok) throw new Error(`Graphyard refused shadow-verdict (${response.status}): ${(await response.json().catch(() => null))?.error ?? 'no reason given'}`);
+  } });
+}
+const loopReads = new WeakMap<DaemonState, ShadowReads>();
+
 interface Flight { key: string; head: string; baseTip: string; settled: { error: unknown } | { verdict: Omit<ShadowVerdict, 'outcome'>; work: Work } | null }
 const flights = new WeakMap<DaemonState, Flight>();
 /** Resolves once the trial in flight for `state` has settled; for the step's tests. */
@@ -73,7 +89,9 @@ const disagreement = (outcome: string) => outcome === 'shadow-only-fail' || outc
  */
 export async function shadowStep(cycle: Cycle) {
   const { config, state, effects, now, snapshot, performed } = cycle;
-  const reads = effects.shadow;
+  // The effects may carry their own reads (a test's); otherwise the loop builds the default once.
+  let reads = (effects as { shadow?: ShadowReads | null }).shadow;
+  if (reads === undefined && shadowGateSettings(config.run).enabled) { reads = loopReads.get(state); if (!reads) loopReads.set(state, reads = defaultShadowReads(config)); }
   if (!reads?.enabled) return;
   let changed = false;
   const flight = flights.get(state);
@@ -116,20 +134,25 @@ export async function shadowStep(cycle: Cycle) {
       })().then(verdict => { entry.settled = { verdict, work: due }; }, error => { entry.settled = { error }; });
     }
   }
+  // `master status` lists the loop's escalations: the gate's report rides on one row, rewritten only when it changes.
+  const report = `Shadow merge gate report: ${shadowReportText(shadowReport(state.shadow, snapshot.work))}`;
+  if (state.shadow.length && state.actions[shadowReportKey]?.detail !== report) {
+    performed.push(storeAction(state, shadowReportKey, { kind: 'escalation', work: null, principal: null, state: 'done', detail: report.slice(0, 1900), attempts: 1, epoch: null, cycle: state.cycle, at: new Date(now()).toISOString() }, null));
+    changed = true;
+  }
   if (changed) await effects.persist(state);
+}
+
+export const shadowReportKey = 'shadow-gate:report';
+/** The report as one line: counts per outcome, trial time p50/p90 and the newest disagreements. */
+export function shadowReportText(report: ReturnType<typeof shadowReport>) {
+  const counts = shadowOutcomes.map(outcome => `${outcome} ${report.counts[outcome]}`).join(', ');
+  const seconds = (ms: number | null) => ms === null ? 'n/a' : `${Math.round(ms / 1000)}s`;
+  const newest = report.disagreements.map(entry => `${entry.key} ${entry.head.slice(0, 12)} ${entry.mergeSha?.slice(0, 12) ?? 'conflict'} (${entry.outcome})`).join('; ');
+  return `${report.total} verdicts (${counts}); trial p50 ${seconds(report.p50Ms)}, p90 ${seconds(report.p90Ms)}${newest ? `; newest disagreements: ${newest}` : ''}`;
 }
 
 export function shadowDisagreementDetail(verdict: Pick<ShadowVerdict, 'key' | 'head' | 'mergeSha' | 'outcome'>) {
   return `Shadow merge gate: ${verdict.key} head ${verdict.head} is ${verdict.outcome} (trial merge ${verdict.mergeSha ?? 'none: it conflicts'}); `
     + `${verdict.outcome === 'shadow-missed' ? 'the shadow trial passed it but the main guard reverted it' : 'the shadow trial failed it but GitHub merged it'}. Report only: nothing is changed`;
-}
-
-/** What `master status` shows: the report over the verdicts the cursor keeps, outcomes as the step last judged them. */
-export const shadowGateSummary = (shadow: DaemonState['shadow']) => shadowReport(shadow, []);
-
-/** One attention line per item that has a disagreement, naming its newest. */
-export function shadowAttention(shadow: DaemonState['shadow']): AttentionItem[] {
-  const newest = new Map<string, ShadowVerdict>();
-  for (const verdict of shadow) if (disagreement(verdict.outcome)) newest.set(verdict.key, verdict);
-  return [...newest.values()].map(verdict => ({ subject: verdict.key, text: shadowDisagreementDetail(verdict), role: 'master' as const, approvedBy: null, human: false, humanOnly: null, next: `Explain the disagreement for ${verdict.key} before the switch criterion in docs/delivery-redesign.md is judged` }));
 }
