@@ -27,6 +27,7 @@ import { withVerificationPath } from './verification-slots.js';
 import { currentAgents, dispatchedFile, DispatchReservedError, launchedSinceSnapshot, profileLaunchedFile, reclaimableAgent, reserveDispatch, watchSupervisorRunning } from './dispatch-reservation.js';
 import { projectMemoryDigest, type ProjectMemory } from '../model/project-memory.js';
 import { readProjectMemory } from '../project-memory.js';
+import { readVerificationMaps, verificationMapDigest, type VerificationMap } from '../verification-maps.js';
 
 /** The launcher's own runner: the CLI as a child, and git. `stdio` is honoured for the streams a child may inherit; the rest is captured. */
 type WorkerCommand = (command: string, args: string[], options?: { cwd?: string; env?: NodeJS.ProcessEnv; stdio?: ('ignore' | 'pipe' | 'inherit')[] }) => string | Buffer | Promise<string | Buffer>;
@@ -75,6 +76,8 @@ export interface DispatchOptions {
   renew?: LeaseRenewer;
   /** How often the launch renews the lease until its supervisor takes over (launchRenewalMs). */
   renewIntervalMs?: number;
+  /** Reads the base's verification maps (GY-1495); readVerificationMaps from the coordinator checkout by default. */
+  verificationMaps?: (root: string, baseBranch: string) => Promise<VerificationMap[]>;
 }
 /** Renews `key` epoch `epoch` under `profileName`'s credential, as the worker's own heartbeat does. */
 export type LeaseRenewer = (root: string, key: string, epoch: number, profileName: string) => Promise<unknown>;
@@ -199,7 +202,7 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
             try {
               assertClaimDeadline(work.key, options.claimBy);
               let epoch: number;
-              ({ target, harness, dependencies, delivery, sandbox, started, consent, epoch, reclaimed } = await launchWorker(root, config, work, profile, launch, run, prepare, release, agentTimeoutMs, options.prompt, options.start, options.sandbox ?? (prepare === prepareWorkerLaunch ? 'host' : null), options.claimBy, options.supervisor, options.stopSupervisor, options.credential ?? (prepare === prepareWorkerLaunch ? mintWorkerCredential : null), options.coordinatorRoot, options.renew ?? (prepare === prepareWorkerLaunch ? renewWorkerLaunch : null), options.renewIntervalMs));
+              ({ target, harness, dependencies, delivery, sandbox, started, consent, epoch, reclaimed } = await launchWorker(root, config, work, profile, launch, run, prepare, release, agentTimeoutMs, options.prompt, options.start, options.sandbox ?? (prepare === prepareWorkerLaunch ? 'host' : null), options.claimBy, options.supervisor, options.stopSupervisor, options.credential ?? (prepare === prepareWorkerLaunch ? mintWorkerCredential : null), options.coordinatorRoot, options.renew ?? (prepare === prepareWorkerLaunch ? renewWorkerLaunch : null), options.renewIntervalMs, options.verificationMaps));
               // The epoch this launch claimed outlives the reservation, so a dispatcher still holding the older snapshot is refused cleanly.
               const at = new Date().toISOString();
               await writeFile(dispatchedFile(root, work.key), JSON.stringify({ epoch, at }), { mode: 0o600 }).catch(() => {});
@@ -353,7 +356,7 @@ export function consentHold(config: Pick<MasterConfig, 'herdrWorkspace'>, key: s
   return { key, epoch, agentName, pane, attach: herdrAttach(pane, config.herdrWorkspace), prompt: awaiting.prompt, kind: awaiting.kind, since: new Date(now).toISOString(), releaseAt: new Date(now + consentHoldMs).toISOString(), ...(awaiting.request ? { request: awaiting.request } : {}), ...(awaiting.named === false ? { named: false } : {}) };
 }
 
-async function launchWorker(root: string, config: MasterConfig, work: Work, profile: WorkerProfile, launch: ReturnType<typeof accountLaunch>, run: ChildRun | undefined, prepare: WorkerPreparer, release: (root: string, key: string, epoch: number, profileName: string) => Promise<void>, agentTimeoutMs: number | undefined, delivery?: PromptDelivery, start?: StartBounds, sandboxProbe: SandboxExec | 'host' | null = null, claimBy?: number, supervisor: NonNullable<DispatchOptions['supervisor']> = watchSupervisorRunning, stopSupervisor: NonNullable<DispatchOptions['stopSupervisor']> = stopLaunchSupervisor, credentialMint: CredentialMinter | null = null, coordinatorRoot?: string, renew: LeaseRenewer | null = null, renewIntervalMs?: number) {
+async function launchWorker(root: string, config: MasterConfig, work: Work, profile: WorkerProfile, launch: ReturnType<typeof accountLaunch>, run: ChildRun | undefined, prepare: WorkerPreparer, release: (root: string, key: string, epoch: number, profileName: string) => Promise<void>, agentTimeoutMs: number | undefined, delivery?: PromptDelivery, start?: StartBounds, sandboxProbe: SandboxExec | 'host' | null = null, claimBy?: number, supervisor: NonNullable<DispatchOptions['supervisor']> = watchSupervisorRunning, stopSupervisor: NonNullable<DispatchOptions['stopSupervisor']> = stopLaunchSupervisor, credentialMint: CredentialMinter | null = null, coordinatorRoot?: string, renew: LeaseRenewer | null = null, renewIntervalMs?: number, verificationMaps: NonNullable<DispatchOptions['verificationMaps']> = readVerificationMaps) {
   // The lease is the launch's to keep alive until the supervisor's first heartbeat (GY-1287), from
   // the claim itself (GY-1373): building the worktree of a large repository on a loaded host took
   // longer than the 120 s lease, which lapsed before the credential was minted ("Lease missing,
@@ -384,7 +387,9 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
     const memory = await readProjectMemory(root).catch(() => null);
     // A mechanical-fix round (GY-971) is told exactly which findings its one commit fixes.
     const mechanical = await mechanicalRound(root, config, work);
-    const prompt = workerPrompt(config, work, profile, prepared.epoch, prepared.dependencies ?? null, memory, prepared.base, mechanical);
+    // The area maps the plan touches (GY-1495), read from the base before the session starts.
+    const maps = await verificationMaps(root, config.baseBranch).catch(() => []);
+    const prompt = workerPrompt(config, work, profile, prepared.epoch, prepared.dependencies ?? null, memory, prepared.base, mechanical, maps);
     // The worker loads its own role rules, never the master's: it may push its assigned branch.
     const sessionHarness = await prepareSessionHarness(root, config, { role: 'worker', kind: launch.kind, profile: profile.name, branch: prepared.branch ?? `graphyard/${work.key.toLowerCase()}-${prepared.epoch}`, key: work.key, epoch: prepared.epoch, credentialFiles: [profile.credentialFile!] });
     let pane: string | undefined, tabId: string | undefined, sandbox: ReturnType<typeof verifyWorkerSandbox> | null = null, ran = false;
@@ -473,13 +478,14 @@ export function autonomousSession(outcome: string, blocker: string) {
 export const destructivePromptGuidance = 'Avoid any command that triggers your runtime\'s destructive-operation prompt, which waits for a person and no person will answer it: never give rm or mv a glob or a variable as its target (such as DIR/* or "$DIR") outside a directory you created yourself with mktemp -d. Name explicit paths inside your worktree instead, and for scratch files create a directory with mktemp -d and remove only that directory by its exact path. ';
 export function workerPrompt(
   config: Pick<MasterConfig, 'cliPath'> & Partial<Pick<MasterConfig, 'repository'>>,
-  work: Pick<Work, 'key' | 'title'> & Partial<Pick<Work, 'capacity' | 'humanRequests' | 'documentation' | 'description' | 'criteria' | 'researchBrief' | 'candidate'>>,
+  work: Pick<Work, 'key' | 'title'> & Partial<Pick<Work, 'capacity' | 'humanRequests' | 'documentation' | 'description' | 'criteria' | 'researchBrief' | 'candidate' | 'plannedFiles'>>,
   profile: Pick<WorkerProfile, 'principal'>,
   epoch: number,
   dependencies?: Pick<SharedDependencies, 'shared'> | null,
   memoryOrMechanical?: ProjectMemory | { requests: readonly MechanicalFixRequest[]; reviewId: number } | null,
   baseShaOrMechanical?: string | { requests: readonly MechanicalFixRequest[]; reviewId: number } | null,
   mechanicalOpt?: { requests: readonly MechanicalFixRequest[]; reviewId: number } | null,
+  verificationMaps?: readonly VerificationMap[] | null,
 ) {
   let memory: ProjectMemory | null = null;
   let baseSha: string | undefined = undefined;
@@ -507,6 +513,7 @@ export function workerPrompt(
   return `Implement ${work.key}: ${work.title}. The Graphyard worker launcher has claimed this item under principal ${profile.principal}, created its assigned worktree, and placed this agent under lease supervision. Run node ${config.cliPath} status ${work.key} before editing. Work only in the current assigned worktree, satisfy the stated criteria without weakening them, open a PR, and submit it with complete as your last action: complete ends your lease and the supervisor then stops this session, which is the attempt ending, not lease loss. Stop immediately if the supervisor reports lease loss before you have submitted. Do not submit trusted evidence or merge the PR; the control plane requests the independent review and the proof producers for your exact head as soon as it passes the build gate, so ask nobody to launch them. `
     + installed
     + (memoryDigest || '')
+    + verificationMapDigest(verificationMaps, work.plannedFiles, 'worker')
     // The research brief recorded before build, with the product decisions it asked for (GY-259).
     + (work.researchBrief && work.criteria ? researchWorkerSection({ ...work, criteria: work.criteria, description: work.description ?? '' }, config.cliPath) : '')
     // The standard documentation criterion the control plane stamped at create time (GY-215).

@@ -24,6 +24,7 @@ import { paneAlreadyGone, sessionReported, withPaneGone } from './request-settle
 import { findingClassificationSection, freshReadFor, freshReadRecordSchema, freshReadSection, judgeFreshRead, mechanicalFixRecordSchema, mechanicalFixRequests, mechanicalRoundStartMs, misclassificationAttempts, misclassificationSignal, observeGitHubCommit, planMechanicalFix, readReview, type FreshReadRecord } from './mechanical-findings.js';
 import type { InterventionRecordInput } from './model/interventions.js';
 import { projectMemoryDigest, type ProjectMemory } from './model/project-memory.js';
+import { readVerificationMaps, verificationMapDigest, type VerificationMap } from './verification-maps.js';
 import { readProjectMemory } from './project-memory.js';
 import { conflictingVerdictStates } from './model/review-conflict.js';
 
@@ -621,7 +622,7 @@ export async function coordinationCheckout(root: string, config: MasterConfig, k
 }
 
 /** `fresh` is the fresh read of a mechanical-fix bot round's head (GY-971): the bot commit the reviewer checks and may reject, and the findings it judges again. */
-export function reviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<Pick<MasterConfig, 'cliPath'>>, binding: Pick<ReviewBinding, 'key' | 'pr' | 'sha' | 'baseSha' | 'policyRevision'>, checkout?: SessionCheckout, threads?: { unresolved: LaunchThread[]; failure?: string; total?: number }, criteria?: { id: string; text: string }[], history?: ReviewHistory, documentation?: { obligation: DocumentationObligation; files?: readonly string[] | null }, research?: Pick<Work, 'key' | 'title' | 'description' | 'criteria' | 'researchBrief'> | null, roundsOrMemory?: ReviewRoundStatus | ProjectMemory | null, memory?: ProjectMemory | null, fresh?: FreshReadRecord | null) {
+export function reviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<Pick<MasterConfig, 'cliPath'>>, binding: Pick<ReviewBinding, 'key' | 'pr' | 'sha' | 'baseSha' | 'policyRevision'>, checkout?: SessionCheckout, threads?: { unresolved: LaunchThread[]; failure?: string; total?: number }, criteria?: { id: string; text: string }[], history?: ReviewHistory, documentation?: { obligation: DocumentationObligation; files?: readonly string[] | null }, research?: Pick<Work, 'key' | 'title' | 'description' | 'criteria' | 'researchBrief'> | null, roundsOrMemory?: ReviewRoundStatus | ProjectMemory | null, memory?: ProjectMemory | null, fresh?: FreshReadRecord | null, verification?: { maps: readonly VerificationMap[]; plannedFiles: readonly string[] } | null) {
   let rounds: ReviewRoundStatus | undefined;
   if (roundsOrMemory && 'round' in roundsOrMemory && typeof roundsOrMemory.round === 'number') {
     rounds = roundsOrMemory;
@@ -633,6 +634,7 @@ export function reviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<
   return `You are the independent Graphyard reviewer for ${config.repository}. Review pull request #${binding.pr} at head ${binding.sha} against base ${binding.baseSha} under policy revision ${binding.policyRevision}, for work item ${binding.key}. `
     + `Read the change with: gh pr diff ${binding.pr} --repo ${config.repository}. `
     + (memorySection || '')
+    + verificationMapDigest(verification?.maps, verification?.plannedFiles, 'reviewer')
     + reviewRoundSection(binding.sha, history, rounds)
     + criteriaRuleSection(binding.key, binding.sha, criteria)
     + findingClassificationSection()
@@ -751,6 +753,8 @@ export async function launchReview(root: string, work: Work, profileName: string
   threads?: (repository: string, pr: number) => Promise<LaunchThread[]>;
   /** How a bot round's head is read to verify it as the bot commit (GY-971): with the loop's own GitHub access by default, none for a test launch that substitutes `mint` and not this. */
   observeCommit?: (sha: string) => Promise<{ parents: string[]; files: string[]; at: string }>;
+  /** Reads the base's verification maps (GY-1495); readVerificationMaps from the coordinator checkout by default. */
+  verificationMaps?: (root: string, baseBranch: string) => Promise<VerificationMap[]>;
 } = {}) {
   const now = dependencies.now ?? (() => new Date());
   // The automatic profile's unset concurrency reads as its default here too (GY-1072), so the launch names and counts its sessions as the dispatcher does.
@@ -876,9 +880,10 @@ export async function launchReview(root: string, work: Work, profileName: string
           '--label', `${binding.key} review · ${agentName}`, ...Object.entries(environment).flatMap(([name, value]) => ['--env', `${name}=${value}`]), '--no-focus'], dependencies.run));
         pane = created.pane; tabId = created.tab;
         const memory = await readProjectMemory(root).catch(() => null);
+        const maps = await (dependencies.verificationMaps ?? readVerificationMaps)(root, config.baseBranch).catch(() => []);
         // The request is the session's own first message, on the runtime's command line (GY-93), read
         // from the request file in the session's checkout so the typed line stays short (GY-121).
-        ({ delivery, consent } = await startAgentSession(agentName, launch.kind!, created.pane, [...launch.args, ...harness.args], reviewPrompt(config, binding, checkout, { unresolved: listed, total: unresolved.length, failure: threadReadFailure }, work.criteria, reservation.record.reviewRound, work.documentation ? { obligation: work.documentation, files: work.observation?.candidate.sha === binding.sha ? work.observation.files : null } : undefined, work, reviewRoundStatus(work, reviewRoundCapOf(config)), memory, reservation.record.freshRead), dependencies.run, { ...dependencies.prompt, ...dependencies.start, timeoutMs: dependencies.start?.timeoutMs ?? launchStartMs(config), directory: checkout.directory, cwd: checkout.directory, environment, ownGitHubCredential: true, role: harness.role, contract: launch.contract }));
+        ({ delivery, consent } = await startAgentSession(agentName, launch.kind!, created.pane, [...launch.args, ...harness.args], reviewPrompt(config, binding, checkout, { unresolved: listed, total: unresolved.length, failure: threadReadFailure }, work.criteria, reservation.record.reviewRound, work.documentation ? { obligation: work.documentation, files: work.observation?.candidate.sha === binding.sha ? work.observation.files : null } : undefined, work, reviewRoundStatus(work, reviewRoundCapOf(config)), memory, reservation.record.freshRead, { maps, plannedFiles: work.plannedFiles ?? [] }), dependencies.run, { ...dependencies.prompt, ...dependencies.start, timeoutMs: dependencies.start?.timeoutMs ?? launchStartMs(config), directory: checkout.directory, cwd: checkout.directory, environment, ownGitHubCredential: true, role: harness.role, contract: launch.contract }));
       } catch (error) {
         // A launch that never became a session leaves no checkout behind.
         await discard();
