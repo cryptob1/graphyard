@@ -565,6 +565,7 @@
     "tests/rework-causes.test.ts": 1915,
     "tests/rework-grounds.test.ts": 900,
     "tests/rework-observation-cadence.test.ts": 1092,
+    "tests/risk-class.test.ts": 900,
     "tests/risk-lanes.test.ts": 4016,
     "tests/role-concurrency.test.ts": 2964,
     "tests/rooflow-lessons-report.test.ts": 134,

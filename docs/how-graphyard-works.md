@@ -24,6 +24,8 @@ Goal passes intake, acceptance, approval, planning, approval and delivery. `grap
 - **Medium** (60 min): remainder; adds producer-run `unit:`/`integration:`.
 - **Low** (30 min): test-only, docs-only, single-module. Required CI and one approval only.
 
+Beside the lane, **risk class** (`sensitive`/`normal`, `src/model/risk-class.ts`) is judged from the merge delta — renames at both ends, CI config and dependency changes included, unknown is sensitive — and shown by `graphyard status` and the item page; lanes still gate github mode.
+
 All lanes require `e2e:` proofs; low/medium reworks need no approver (approved by `graphyard-risk-lane`), nor does any lane's rework whose ground the record shows on the exact head: trusted proof failed on it, approver refused its `manual:` attestation (loop then requests that rework itself), or control plane's own test merge onto moved base conflicted, not GitHub's reading alone (`src/model/rework-ground.ts`). A head already returned to worker has spent its ground (a later retry-cap rework waits). Grounded reworks are no [intervention](dashboard.md).
 
 ## Who holds which authority
