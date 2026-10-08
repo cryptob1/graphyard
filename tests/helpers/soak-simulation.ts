@@ -21,7 +21,8 @@ import { coordinatorConfinementRefusal, rerunFailedChecks } from '../../src/mast
 import { doctorSettingsSchema } from '../../src/master/doctor-settings.js';
 import { headlessConfinementWrapper, sessionConfinement } from '../../src/master/launch.js';
 import { type DaemonEffects, type DaemonState, answeringWidening, emptyDaemonState, runCycle } from '../../src/master-daemon.js';
-import { type HostMemoryReading, readReclaimReports, reclaimResources, settleTmpReclaim } from '../../src/master-resources.js';
+import { type HostMemoryReading, owedUpgrade, readReclaimReports, readResources, reclaimResources, resourceAttention, settleTmpReclaim } from '../../src/master-resources.js';
+import { type DoctorFile } from '../../src/daemon/doctor.js';
 import { approvalWatchSchema, retainedActions } from '../../src/daemon/state.js';
 import { adoptHeadlessRuns, coordinatorCheckoutGuard, noteWatchdog } from '../../src/daemon/run.js';
 import { type ExhaustedProof, handWatchPrefix } from '../../src/daemon/decisions.js';
@@ -209,7 +210,20 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
    * review; it never reviews the `withheld` items, and approves only an earlier head of `stale.item`
    * until `stale.untilMs` into the day.
    */
-  supervised?: { operator: string; withheld: number[]; stale: { item: number; untilMs: number } } }) {
+  supervised?: { operator: string; withheld: number[]; stale: { item: number; untilMs: number } };
+  /**
+   * GY-1531: the coordinator checkout's HEAD moves at `moveAt` — `forward` onto the base tip the
+   * loop never aligned to, `foreign` onto a commit off the base branch — and nothing restores it:
+   * the guard's refusal stands until the supervisor restarts the loop at `restartAt`, as the
+   * operator's `systemctl --user restart graphyard-master` does: the stopping loop's own
+   * between-cycles read, then a new process that loads the checkout's HEAD and runs its startup
+   * read. The loaded-revision reading (src/master-resources.ts) is sampled after every cycle from
+   * the day's own loaded commit and checkout. With `doctor`, every doctor run from `doctor.from`
+   * files the guard fault as the doctor wrote it on 2026-10-08: a loop-class item with a criterion
+   * proved by `e2e:<scenario>`, a scenario nothing registered, beside a configuration-class item
+   * with manual proofs only; the control plane takes no filing between `outage.from` and `outage.to`.
+   */
+  checkoutRestart?: { moveAt: number; restartAt: number; kind: 'forward' | 'foreign'; doctor?: { scenario: string; from: number; outage: { from: number; to: number } } } }) {
   const dayStart = clock.now();
   // A day may restage the shared scenario: the day-scoped view of the plan is what every fault
   // below arms from, while each test's own assertions still read the shared base plan.
@@ -1252,14 +1266,38 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   // item as stuck, the loop applies the report through its real path, and every run summary is
   // posted to the control plane the dashboard reads. The day thus proves the doctor step fires
   // from the real cycle on its interval — per-cycle behaviour belongs in this world.
+  // GY-1531: on the restart day the doctor also files the guard fault, as it wrote it on 2026-10-08
+  // — the loop class's criterion proved by an e2e scenario nothing registered, beside the
+  // configuration class on manual proofs — from `doctor.from` on every run, and every create the
+  // loop sends for a filing is recorded with its outcome, through the real engine's own refusals.
+  const restartDoctor = options.checkoutRestart?.doctor ?? null;
+  const restartFilings = (): DoctorFile[] => {
+    if (!restartDoctor || clock.now() - dayStart < restartDoctor.from) return [];
+    const description = `The master loop refuses to restart or self-upgrade from the coordinator checkout at /soak/coordinator: its HEAD moved while the loop was running, so HEAD is not the commit it runs (escalation:dirty-checkout standing). Evidence: action:config ${new Date(clock.now()).toISOString()}; resource:loaded-revision at its bound with 0 commits of headroom.`;
+    return [
+      { faultClass: 'loop', priority: 1, plannedFiles: ['src/daemon/run.ts'], title: 'Master loop strands its self-upgrade when the checkout HEAD moves while it runs: the dirty-checkout guard refuses the restart it owes, leaving the loop on stale code', description,
+        criteria: [{ id: 'AC-1', text: 'Restored to the loaded commit or restarted onto its HEAD, the refusal ends', proofs: ['manual:dirty-checkout-detach-restart'] }, { id: 'AC-2', text: 'After the restart the loaded revision equals the checkout HEAD and the loaded-revision bound clears', proofs: [`e2e:${restartDoctor.scenario}`] }] },
+      { faultClass: 'configuration', priority: 1, plannedFiles: ['src/daemon/run.ts'], title: 'Master loop cannot restart or self-upgrade: the dirty-checkout guard stands for hours', description,
+        criteria: [{ id: 'AC-1', text: 'Applying the remedy the guard records ends the refusal and the loop restarts onto the checkout revision', proofs: ['manual:coordinator-checkout-restored-and-loop-restarted'] }] },
+    ];
+  };
   const doctor: DaemonEffects['doctor'] = {
     settings: { ...doctorSettingsSchema.parse({}), command: 'pi' }, cwd: '/soak/coordinator', env: {},
     runner: async () => ({ runtime: 'pi', model: 'soak/doctor', runner: {
       name: 'pi', start: (_prompt: string, runOptions: { tool: string }) => ({
         id: `soak-doctor-${clock.now()}`, events: [], onEvent: () => () => {}, cancel: () => {},
         result: async () => ({ ok: true as const, tool: runOptions.tool, payloads: [],
-          payload: { findings: [{ subject: items[0].key, check: 'worker' as const, detail: 'The scripted soak finding: this item stood in its stage past the worker bound', unactionable: false }], actions: [], filed: [] } }) }) } as unknown as Runner }),
-    file: async input => api(principals.operatorAgent, 'POST', 'work', input) as Promise<Work>,
+          payload: { findings: [{ subject: items[0].key, check: 'worker' as const, detail: 'The scripted soak finding: this item stood in its stage past the worker bound', unactionable: false }], actions: [], filed: restartFilings() } }) }) } as unknown as Runner }),
+    // The filing rides the operator-agent route under the loop's own idempotency key, as
+    // `doctorEffects` sends it; the restart day's outage refuses it as an unreachable plane does.
+    file: async (input, key) => {
+      const elapsed = clock.now() - dayStart, create = { elapsed, faultClass: input.origin?.faultClass?.class ?? 'none', proofs: input.criteria.map(criterion => criterion.proofs), outcome: 'accepted' };
+      try {
+        if (restartDoctor && elapsed >= restartDoctor.outage.from && elapsed < restartDoctor.outage.to) throw new Error('Graphyard refused work (503): the control plane is unavailable');
+        return await api(principals.operatorAgent, 'POST', 'work', input, key) as Work;
+      } catch (error) { create.outcome = `refused: ${error instanceof Error ? error.message : String(error)}`; throw error; }
+      finally { if (restartDoctor) restartDay.creates.push(create); }
+    },
     recordRun: async run => api(principals.operatorAgent, 'POST', 'doctor', run),
   };
   const observeRequests: { key: string; sha: string; at: number }[] = [];
@@ -1930,6 +1968,30 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   // A detached checkout of the base branch, at the tip the day starts on; git answers from the
   // simulated GitHub, and a restart of the fleet or of the loop itself is recorded, not performed.
   const checkout = { head: github.tip, origin: github.tip, dirty: false };
+  /**
+   * GY-1531: the restart day as the loop saw it — the commit its process loaded, when the checkout
+   * moved onto one it did not, the loaded-revision reading and the guard's refusal and escalation row
+   * after every cycle, the pending doctor filings, every create a filing cost, the guard's journal,
+   * the stopping loop's own read and the new process's startup read.
+   */
+  const restartDay = { loaded: checkout.head, movedAt: null as number | null, movedTo: null as string | null, restartedAt: null as number | null, startRefusal: null as string | null,
+    stop: null as { elapsed: number; refusal: string | null; upgraded: string | null; escalation: { state: string; attempts: number; at: string } | null } | null,
+    readings: [] as { elapsed: number; used: number | null; state: string; attention: boolean; detail: string; loaded: string; checkout: string }[],
+    refusals: [] as { elapsed: number; refusal: string | null; escalation: { state: string; attempts: number; at: string } | null }[],
+    pending: [] as { elapsed: number; keys: string[] }[], creates: [] as { elapsed: number; faultClass: string; proofs: string[][]; outcome: string }[], journal: [] as { elapsed: number; line: string }[] };
+  /** The commits `to` holds past `from`, as `git rev-list --count from..to` counts them: one for a commit off the graph. */
+  const commitsBehind = (from: string, to: string) => {
+    if (from === to) return 0;
+    if (!github.commits.has(to)) return 1;
+    const seen = new Set<string>(), queue = [to];
+    while (queue.length) {
+      const at = queue.pop()!;
+      if (seen.has(at) || github.contains(from, at)) continue;
+      seen.add(at);
+      queue.push(...github.commits.get(at)!.parents);
+    }
+    return seen.size;
+  };
   const upgrades = { fetches: 0, checkouts: [] as { at: number; from: string; to: string }[], executors: [] as string[], self: 0, outcomes: [] as SelfUpgradeOutcome['outcome'][],
     /** GY-916: the restarts refused on a held claim, the owed restart sampled each cycle it stood, and the unit the supervisor runs. */
     held: [] as string[], owed: [] as { to: string; state: string; attempts: number }[], unit: { watchdogSec: plan.driftedWatchdogSec, rewrites: 0 },
@@ -1978,7 +2040,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     },
     // The supervisor re-executes the loop: the next process loads the release the checkout holds, as runDaemon records it,
     // and starts under the unit as it now stands.
-    restartSelf: async () => { upgrades.self++; state.release = { commit: checkout.head, dirty: checkout.dirty }; await processStart(state); },
+    restartSelf: async () => { upgrades.self++; state.release = { commit: checkout.head, dirty: checkout.dirty }; restartDay.loaded = checkout.head; await processStart(state); },
   });
   /** What runDaemon does once per process start: the supervisor's watchdog window judged against the interval (GY-916). */
   const processStart = async (state: DaemonState) => {
@@ -2001,11 +2063,13 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   // panes pointing at the checkout, and lets the self-upgrade run only on a clean checkout at the
   // commit the loop runs. Its Herdr inventory reads are counted, to bound them.
   const guardReads = { agents: 0, refused: 0, transitions: 0, details: new Set<string>(), headMoves: 0, foreignHead: sha('foreign-head', 1) };
-  const guard = coordinatorCheckoutGuard({
-    state: () => state, snapshot, persist: async () => {}, now: clock.now, log: () => {}, applies: () => true,
+  // One guard per loop process, as runDaemon builds it: the restart day's new process builds its own.
+  const newGuard = () => coordinatorCheckoutGuard({
+    state: () => state, snapshot, persist: async () => {}, now: clock.now, log: line => { if (options.checkoutRestart) restartDay.journal.push({ elapsed: clock.now() - dayStart, line }); }, applies: () => true,
     read: async () => ({ root: '/soak/coordinator', commit: checkout.head, modified: checkout.dirty ? ['src/master.ts'] : [], untracked: [] }),
     agents: () => { guardReads.agents++; return herdr.list(); },
   });
+  let guard = newGuard();
   await guard.start(checkout.head);
   let movedFrom: string | null = null, lastRefusal: string | null = null;
   /** The cursor's upgrade actions and the refusal's attempts, sampled every cycle the checkout stood refused. */
@@ -2564,8 +2628,27 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
       const moved = elapsed >= plan.headMove.from && elapsed < plan.headMove.to;
       if (moved && movedFrom === null) { movedFrom = checkout.head; checkout.head = guardReads.foreignHead; guardReads.headMoves++; }
       if (!moved && movedFrom !== null) { checkout.head = movedFrom; movedFrom = null; }
+      // GY-1531: the move nothing restores. HEAD stands moved until the supervisor's restart: that
+      // cycle's between-cycles read is the stopping loop's (self-upgrade off, as runDaemon passes
+      // it), then the next process loads the checkout's HEAD and runs its startup read.
+      const restart = options.checkoutRestart ?? null;
+      if (restart && restartDay.movedAt === null && restartDay.restartedAt === null && elapsed >= restart.moveAt) {
+        const to = restart.kind === 'forward' ? github.tip : sha('restart-head', 1);
+        assert.notEqual(to, checkout.head, `the restart day moves HEAD onto a commit the loop did not load (${restart.kind})`);
+        checkout.head = to; restartDay.movedAt = clock.now(); restartDay.movedTo = to; guardReads.headMoves++;
+      }
+      const stopping = !!restart && restartDay.restartedAt === null && elapsed >= restart.restartAt;
       const readsBefore = guardReads.agents;
-      const { refusal, upgraded } = await guard.betweenCycles(selfUpgrade);
+      const { refusal, upgraded } = await guard.betweenCycles(stopping ? undefined : selfUpgrade, undefined, { stopping });
+      if (stopping) {
+        const row = state.actions['escalation:dirty-checkout'];
+        restartDay.stop = { elapsed, refusal, upgraded: upgraded?.outcome ?? null, escalation: row ? { state: row.state, attempts: row.attempts, at: row.at } : null };
+        state.release = { commit: checkout.head, dirty: checkout.dirty }; restartDay.loaded = checkout.head; restartDay.movedAt = null;
+        await processStart(state);
+        guard = newGuard();
+        restartDay.startRefusal = await guard.start(checkout.head);
+        restartDay.restartedAt = elapsed;
+      }
       const lastSeen = lastRefusal;
       if (refusal && refusal !== lastRefusal) guardReads.transitions++;
       lastRefusal = refusal;
@@ -2576,6 +2659,17 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
         refusalSamples.push({ keys: Object.keys(state.actions).filter(key => key.startsWith('upgrade:') || key.startsWith('escalation:dirty-checkout')).length, attempts: state.actions['escalation:dirty-checkout']?.attempts ?? 0, head: moved });
       } else assert.equal(guardReads.agents, readsBefore, 'a clean checkout costs no Herdr inventory read');
       if (upgraded) upgrades.outcomes.push(upgraded.outcome);
+      // GY-1531: the loaded-revision reading after this cycle, as `master status` computes it from the
+      // loaded commit, the checkout's HEAD, how far it moved and when, and the restart the cursor owes.
+      if (restart) {
+        const loaded = restartDay.loaded, behind = commitsBehind(loaded, checkout.head);
+        const reading = readResources({ now: clock.now(), reviews: [], producers: [], agents: [], work: [], plane: null, loop: null, disk: null, profiles: { workers: [], reviewers: [], producers: [] },
+          revision: { behind, loaded, checkout: checkout.head, ...(restartDay.movedAt === null ? {} : { movedAt: restartDay.movedAt }) }, upgrade: owedUpgrade(state) }).find(entry => entry.id === 'loaded-revision')!;
+        restartDay.readings.push({ elapsed, used: reading.used, state: reading.state, attention: resourceAttention([reading]).length > 0, detail: reading.detail ?? '', loaded, checkout: checkout.head });
+        const row = state.actions['escalation:dirty-checkout'];
+        restartDay.refusals.push({ elapsed, refusal, escalation: row ? { state: row.state, attempts: row.attempts, at: row.at } : null });
+        restartDay.pending.push({ elapsed, keys: state.doctor.pendingFiles.map(entry => entry.key) });
+      }
       if (upgraded?.outcome === 'failed') failures.push(`${new Date(now).toISOString()}: self-upgrade failed: ${upgraded.reason}`);
       if (upgraded?.outcome === 'pending') upgrades.owed.push({ to: state.upgrade.pending?.to ?? 'none', state: state.actions[`upgrade:${state.deployment?.sha}`]?.state ?? 'none', attempts: state.actions[`upgrade:${state.deployment?.sha}`]?.attempts ?? 0 });
       const watchdogActions = Object.entries(state.actions).filter(([key]) => key.startsWith('escalation:watchdog:'));
@@ -2655,7 +2749,8 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     mergeQueuePosts, config, refused, decideCalls, restarted, approverPanes, failing, herdrClosed: herdr.closed, diagnosisModel: settings.model, diagnosisRuns: diagnosed, baseBreak, capacityRefused, capacityLaunched, capacityWaiters,
     decided, misreads, prompts, screens, heldAccounts, approverAccounts, retryReset, exitedLive, exitedClosed, exitedRowsSeen, reassign, workspaceFailures, workspaceCooled, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, fenced, mergeStallSightings, master, baseFailure,
     blockerEvents, blockerProbes, blockerDecisions, blockerActions, blockerKeysPeak, attempts, lanesSeen, laneApplications, approverWorks, approverDecisions, failover, webhook, remedies, observeRequests, starvation, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size }, mechanical: { ledger, botRounds, misclassified, reviewHolds }, shared, charges: { ...charged, b: charged.b.length, instancesSeen: [...charged.instancesSeen], restarts: chargeRestarts },
-    wakes, lateReading, staleMerges, restartLog, hostDay, guardDay, budgetDay, observationDay, deploymentDay, decompositionDay: decompositionHistory, diagnosisRaces, diagnosisRequestRaces, transientRefused, lateReads, staleReleaseDay, drain, acceptanceDay: acceptance?.day ?? null, plannerDay: planner?.day ?? null, loopWakeDay: loopWakeDay || null };
+    wakes, lateReading, staleMerges, restartLog, hostDay, guardDay, budgetDay, observationDay, deploymentDay, decompositionDay: decompositionHistory, diagnosisRaces, diagnosisRequestRaces, transientRefused, lateReads, staleReleaseDay, drain, acceptanceDay: acceptance?.day ?? null, plannerDay: planner?.day ?? null, loopWakeDay: loopWakeDay || null,
+    restartDay: options.checkoutRestart ? restartDay : null };
 }
 
 /**
