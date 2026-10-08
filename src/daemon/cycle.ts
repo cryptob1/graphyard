@@ -27,7 +27,6 @@ import { triageBacklogStep } from './cycle-triage.js';
 import { remedyStep } from './cycle-remedies.js';
 import { mainWatchStep } from './main-watch.js';
 import { shadowStep } from './cycle-shadow.js';
-import { mergeWriterStep } from './cycle-merge-writer.js';
 import { Timings, withTimings, withoutTimings } from '../master/timings.js';
 import { syncProjectMemory } from '../project-memory.js';
 import { planeUnavailable } from '../model/refusal.js';
@@ -264,9 +263,6 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
   spent('decisions');
 
   await timings.step('merges', () => mergeStep(cycle));
-  // 6b'. The control-plane merge executor (GY-1524): open intents reconciled, then one head trial-merged,
-  //      tested and pushed with the deploy key beside the cycle; active only under the control-plane merger.
-  await timings.step('merge writer', () => cycle.isolate('merge', null, 'merge writer', () => mergeWriterStep(cycle)));
   // 6c. The shadow merge gate (GY-1522): one head trial-merged and fast-tested beside GitHub's gate; it writes nothing.
   await timings.step('shadow gate', () => cycle.isolate('merge', null, 'shadow gate', () => shadowStep(cycle)));
   spent('merge');
