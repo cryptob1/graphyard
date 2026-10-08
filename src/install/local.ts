@@ -100,10 +100,11 @@ const settings = (ctx: AdapterContext) => {
 };
 const serverUrl = (ctx: AdapterContext) => `http://127.0.0.1:${ctx.port}`;
 
-/** One systemd word: quoted when it holds whitespace; a quote, backslash or newline has no spelling. */
+/** One systemd word: % escaped as a specifier, quoted when it holds whitespace; a quote, backslash or newline has no spelling. */
 function unitWord(value: string) {
   if (/[\r\n\0"\\]/.test(value)) throw new Error(`${value} cannot be written into a systemd unit: it contains a newline, quote or backslash`);
-  return /\s/.test(value) ? `"${value}"` : value;
+  const escaped = value.replaceAll('%', '%%');
+  return /\s/.test(escaped) ? `"${escaped}"` : escaped;
 }
 
 export function localUnitText(ctx: AdapterContext) {
@@ -124,7 +125,9 @@ WorkingDirectory=${unitWord(local.paths.directory)}
 ExecStart=${local.command.map(unitWord).join(' ')}
 Restart=always
 RestartSec=2
-# SIGTERM lets the runtime close its store before it stops the cluster.
+# SIGTERM reaches only the runtime, which closes its store before it stops the cluster; the
+# postgres children it spawned get SIGKILL only if they outlive TimeoutStopSec.
+KillMode=mixed
 KillSignal=SIGTERM
 TimeoutStopSec=60
 UMask=0077

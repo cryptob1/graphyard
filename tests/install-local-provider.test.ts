@@ -180,7 +180,7 @@ test('integration:local-provider-embedded-postgres — --apply creates the clust
 });
 
 test('integration:local-runtime-restart — the supervised process starts the cluster, migrates through the Store, then serves; on SIGTERM it closes the store before it stops the cluster, and a restart serves the same ledger', { timeout: 240_000 }, async () => {
-  const { runtimeCommand } = await local();
+  const { runtimeCommand, localUnit } = await local();
   const { localPaths, startLocalRuntime, serveControlPlane } = await runtimeModule();
   const unitDirectory = await temporaryDirectory('local-units');
   const systemd = inProcessSystemd(unitDirectory);
@@ -211,6 +211,11 @@ test('integration:local-runtime-restart — the supervised process starts the cl
     const item = await created.json() as any;
     await runtime.stop();
     assert.deepEqual(order, ['served', 'store closed', 'cluster stopped']);
+
+    // systemd signals only the runtime, never the cluster it spawned, so the store closes before the cluster stops.
+    const unit = await readFile(join(unitDirectory, localUnit(INSTALL)), 'utf8');
+    assert.match(unit, /^KillMode=mixed$/m);
+    assert.match(unit, /^KillSignal=SIGTERM$/m);
 
     // As the unit runs it: the foreground command, stopped with the unit's KillSignal and started again.
     const start = async () => {

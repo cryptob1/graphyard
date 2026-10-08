@@ -57,7 +57,7 @@ export const installCommands = defineCommands([
   {
     name: 'up',
     help: [
-      '  up --repo OWNER/NAME [--provider compose|railway|hetzner] [--reviewer NAME]',
+      '  up --repo OWNER/NAME [--provider compose|railway|hetzner|local | --local] [--reviewer NAME]',
       '     [--master claude|codex] [--agent] [--goal FILE] [--browser-profile PROFILE]',
       '     [--confirm-price X | --max-monthly N] [--ssh-key NAME] [--ssh-host HOST] [--ssh-user USER]',
       '     [--reuse-app SLUG]... [--github-mobile] [--wait MINUTES] [--no-wait] [--share-tailnet]',
@@ -92,7 +92,7 @@ export const installCommands = defineCommands([
   {
     name: 'install',
     help: [
-      '  install --provider railway|hetzner|docker-host|compose --repo OWNER/NAME',
+      '  install --provider railway|hetzner|docker-host|compose|local --repo OWNER/NAME',
       '          [--plan|--apply] [--domain HOST] [--workers N] [--reviewer NAME]',
       '          [--producer-proof PROOF] [--ssh-host HOST] [--ssh-user USER]',
       '          [--ssh-key NAME] [--port N] [--workspace NAME-OR-ID] [--image REF]',
