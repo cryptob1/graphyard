@@ -7,7 +7,7 @@ An AI `slice-lead` leads slice (`product`, `infrastructure`, `docs-experience`):
 
 ## Reviewer provider diversity
 
-The agent registry chooses a `reviewer` account on a different model provider than the item's implementer, so the two share no blind spots. A provider is the account's model `provider`, else its runtime's launch kind; the implementer's is the newest registry `worker` session for the item (retained, then `agent-registry.selected` events), else `lastAssignment.runtime`. Same-provider accounts are recorded in `skipped` (`shares the implementer's provider P on GY-N`). A different-provider account at only its own session limit is waited for (refused as `role reviewer is at its concurrency limit for providers other than P`, retried as capacity). Otherwise the first eligible same-provider account serves, its reason recording `no reviewer account outside provider P can serve GY-N` with why. Unknown implementer provider, or other roles: unchanged.
+The agent registry picks a `reviewer` account on a different model provider (the account's model `provider`, else its runtime's launch kind) than the item's newest `worker` session. Same-provider accounts are recorded in `skipped` (`shares the implementer's provider P on GY-N`). A different-provider account at only its session limit is waited for (retried as capacity); otherwise the first eligible same-provider account serves, recording `no reviewer account outside provider P can serve GY-N`. Unknown implementer provider: unchanged.
 
 ## Escalation
 
@@ -25,6 +25,6 @@ Unresolved triggers refuse merging; replacements may claim, delivery waits. Expl
 `escalation.resolved` records each:
 
 - Explained `lease-loss`: reconciliation, or `admin` `resolve GY-N lease-loss --attestation blocked|stopped-worker "reason"`.
-- Superseded-epoch `lease-loss` (latest attempt leased or submitted, no lost-epoch fence): reconciliation; control-plane `lease-loss` whose attempts all ended (no lease, no containment fence): after 5 min (`auto-settled: ended — …`).
+- Superseded-epoch `lease-loss` (no lost-epoch fence): reconciliation; one whose attempts all ended unfenced: after 5 min (`auto-settled: ended — …`).
 - `security-concern`, `requirement-weakening`, `evidence-policy-conflict`, lead-raised `lease-loss`: master-requested two-party decision or declared human session (`admin`, `sessionKind: "human"`; settles any).
 - `requirement-weakening` from approved `requirements` decision: records id, settled by that approval (citing approver); no `scope` fault.

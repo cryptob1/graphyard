@@ -5,7 +5,7 @@ Sidebar: **Work**, **Workers**, **Shipped**, **Tests**, **Insights**, **Settings
 
 ## From your phone
 
-A local (compose) dashboard listens on `127.0.0.1:4310`. On a host with Tailscale, `graphyard up` prints `tailscale serve --bg --http=4310 http://127.0.0.1:4310` and the tailnet URL it gives (`http://HOST.TAILNET.ts.net:4310`); `--share-tailnet` runs it, keeps it in `up.json` (summary `reachableUrl`), and every sign-in link `up` prints uses it. It is tailnet-only, never `tailscale funnel`. A serve the tailnet has not allowed is reported, not waited on. A green `up` ends with one single-use sign-in link (`signIn`, 10 minutes), so nobody runs `graphyard login`.
+A local (compose) dashboard listens on `127.0.0.1:4310`. With Tailscale, `graphyard up` prints `tailscale serve --bg --http=4310 http://127.0.0.1:4310` and its tailnet URL; `--share-tailnet` runs it, keeps it in `up.json` (`reachableUrl`) and its sign-in links use it: tailnet-only, never `tailscale funnel`; an unallowed serve is reported, not waited on. A green `up` ends with one single-use sign-in link (`signIn`, 10 minutes).
 
 ## Work
 
@@ -13,7 +13,7 @@ Open items by group (tiles count, filter): **Needs you** (yours alone), **Blocke
 
 ## Needs you
 
-Cards: ask, **Recommended** choice (or safest way), one-line why, numbered steps, choices (recommended first, preselected); agent detail folds under **Details for agents** (older requests: need's first sentence). `graphyard login`: single-use sign-in link; **Provide now** seals credentials for `unseal GY-N`; operator approvals offer **Approve** or terminal **Decline** (`master refuse GY-N DECISION REASON`), answered only from human admin sessions.
+Cards: ask, **Recommended** choice (or safest way), one-line why, numbered steps, choices (recommended first, preselected); agent detail folds under **Details for agents**. `graphyard login`: single-use sign-in link; **Provide now** seals credentials for `unseal GY-N`; operator approvals offer **Approve** or terminal **Decline** (`master refuse GY-N DECISION REASON`), answered only from human admin sessions.
 
 ## Workers
 
@@ -23,7 +23,7 @@ Cards: ask, **Recommended** choice (or safest way), one-line why, numbered steps
 
 ## Settings › Agents
 
-**Can launch now?** role chips (titles name next account; blocked roles: reason, earliest time). **Accounts** rows (working, idle, out of work): state chip (Disabled, No role, Spent, Launch failing, Unavailable, Working, Idle), **Usage** (bar, percent, hover reset; — unreported), **Why** (live work or refusal); shared plans head groups; same-day spent collapse (*4 spent until Oct 8*). **Roles (N)**: preference, launch policy.
+**Can launch now?** role chips (blocked roles: reason, earliest time). **Accounts** rows: state chip (Disabled, No role, Spent, Launch failing, Unavailable, Working, Idle), **Usage** (bar, percent), **Why** (live work or refusal); same-day spent accounts collapse. **Roles (N)**: preference, launch policy.
 
 ## The status sentence
 
