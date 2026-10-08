@@ -5,7 +5,7 @@ import { dirname, resolve, basename } from 'node:path';
 import { type ChildRun, defaultChildRun } from '../child-runner.js';
 import { nameForLaunch } from '../session-name.js';
 import { executorUnitDirectory, launchAuthorization } from '../repository-setup.js';
-import { type HarnessPlan, type HarnessRule, writeHarnessPermissions, masterHarnessPlan, harnessDecision, claudeRuleProblem, bashRuleMatches } from '../harness.js';
+import { type HarnessHook, type HarnessPlan, type HarnessRule, writeHarnessPermissions, mergeHarnessHooks, masterHarnessPlan, harnessDecision, claudeRuleProblem, bashRuleMatches } from '../harness.js';
 import { executorInstance, legacyLoopUnit, readInstallUnits } from '../install/units.js';
 import type { Work } from '../model.js';
 import type { MasterConfig, WorkerProfile } from './profiles.js';
@@ -16,6 +16,7 @@ import { type RequestDelivery, startAgentSession } from './launch.js';
 import { createdHerdrTab, type HerdrAgent, herdrJson, stopCreatedHerdrTab } from './herdr.js';
 import type { PreparedWorker } from './dispatch.js';
 import { worktreeRoot } from '../install/worktree-root.js';
+import { scopeGuardCommand, scopeGuardMatcher } from '../scope-guard.js';
 import { verificationEnvironment, verificationSlotsDirectory } from './verification-slots.js';
 
 /**
@@ -96,6 +97,8 @@ export function installUnitRules(root: string, unitDirectory: string): { allow: 
  */
 export type SessionRole = 'worker' | 'reviewer' | 'producer' | 'docs-sync';
 export interface SessionHarnessInput { role: SessionRole; kind: string | undefined; cliPath: string; repository: string; baseBranch: string; credentialHome: string; credentialDirectories: string[]; branch?: string; pr?: number;
+  /** A worker's own item and epoch, which its scope-guard hook names (GY-1494). */
+  key?: string; epoch?: number;
   /** The detached checkout Graphyard allocated for a reviewer session under the managed worktree root. */
   checkout?: string }
 export function sessionHarnessPlan(input: SessionHarnessInput): HarnessPlan {
@@ -125,13 +128,14 @@ export function sessionHarnessPlan(input: SessionHarnessInput): HarnessPlan {
     { rule: 'Bash(git commit:*)', why: 'This session changes nothing in the candidate.' },
     { rule: `Bash(${cli} claim:*)`, why: 'Claiming work would make this principal an implementer.' },
   ];
-  let allow: HarnessRule[], deny: HarnessRule[];
+  let allow: HarnessRule[], deny: HarnessRule[], hooks: HarnessHook[] = [];
   if (input.role === 'worker') {
     if (!input.branch) throw new Error('A worker harness names the assigned branch it may push');
     // The same worker rules installWorkerHarness writes into the worktree, plus the shared secret
     // and verdict denies: loaded through --settings they apply even though the worktree's own
     // settings file is not loaded.
-    const worker = workerHarnessPlan({ cliPath: input.cliPath, branch: input.branch, baseBranch: input.baseBranch, credentialHome: input.credentialHome });
+    const worker = workerHarnessPlan({ cliPath: input.cliPath, branch: input.branch, baseBranch: input.baseBranch, credentialHome: input.credentialHome, key: input.key, epoch: input.epoch });
+    hooks = worker.hooks ?? [];
     const extra = [...secrets, ...noVerdict, { rule: `Bash(${cli} evidence:*)`, why: 'Implementation workers never submit trusted evidence.' }];
     allow = worker.allow;
     deny = [...worker.deny, ...extra.filter(entry => !worker.deny.some(existing => existing.rule === entry.rule))];
@@ -139,7 +143,9 @@ export function sessionHarnessPlan(input: SessionHarnessInput): HarnessPlan {
     allow = [
       { rule: 'Bash(gh pr diff:*)', why: 'Read the candidate diff.' },
       { rule: 'Bash(gh pr view:*)', why: 'Read the pull request and poll its mergeability before posting.' },
-      ...(input.pr ? [{ rule: `Bash(gh api --method POST repos/${input.repository}/pulls/${input.pr}/reviews*)`, why: 'Post the one verdict this session was launched for; the master itself is denied every review call.' }] : []),
+      // GY-1492: the verdict goes through review post, which checks the launch's binding, the head,
+      // mergeability and the thread lines before its one POST; a raw review call is denied below.
+      { rule: `Bash(${cli} review post:*)`, why: 'Post the one verdict this session was launched for, checked against its launch binding; the master itself is denied every review call.' },
       // Surrounding code is read from a detached checkout under the managed worktree root, which
       // Graphyard allocates for the session and removes when it ends.
       ...(input.checkout ? [{ rule: 'Bash(git fetch:*)', why: 'Fetch the exact head under review.' },
@@ -147,6 +153,7 @@ export function sessionHarnessPlan(input: SessionHarnessInput): HarnessPlan {
     ];
     deny = [...secrets, ...noPush,
       { rule: `Bash(${cli} evidence:*)`, why: 'A reviewer never submits evidence.' },
+      { rule: 'Bash(gh api *pulls/*/reviews*)', why: 'The verdict is posted only through review post, which checks it first.' },
       { rule: 'Edit(./**)', why: 'The review session is read-only.' },
       { rule: 'Write(./**)', why: 'The review session is read-only.' },
     ];
@@ -177,7 +184,7 @@ export function sessionHarnessPlan(input: SessionHarnessInput): HarnessPlan {
     ];
     deny = [...secrets, ...noPush, ...noVerdict];
   }
-  return { harness: 'claude', file: null, allow, deny, manual: null, note: `Role-scoped ${input.role} rules; the session loads these and the operator's user settings, never the repository's project or local settings where the master's rules live.` };
+  return { harness: 'claude', file: null, allow, deny, manual: null, ...(hooks.length ? { hooks } : {}), note: `Role-scoped ${input.role} rules; the session loads these and the operator's user settings, never the repository's project or local settings where the master's rules live.` };
 }
 
 /** The one push a docs-sync session makes, after `git push`: the resolved merge to the item's own branch. */
@@ -262,7 +269,8 @@ export async function prepareSessionHarness(root: string, config: MasterConfig, 
   if (input.kind !== 'claude' || !await repositoryCarriesClaudeSettings(root)) return { plan, file: null, args: [] as string[], role: null as string | null, environment };
   const file = sessionHarnessFile(root, input.role, input.profile);
   await mkdir(dirname(file), { recursive: true, mode: 0o700 });
-  await atomicPrivateText(file, `${JSON.stringify({ permissions: { allow: plan.allow.map(entry => entry.rule), deny: plan.deny.map(entry => entry.rule) } }, null, 2)}\n`);
+  await atomicPrivateText(file, `${JSON.stringify({ permissions: { allow: plan.allow.map(entry => entry.rule), deny: plan.deny.map(entry => entry.rule) },
+    ...(plan.hooks?.length ? { hooks: mergeHarnessHooks({}, plan.hooks) } : {}) }, null, 2)}\n`);
   // The authorization is the session's role text: startAgentSession writes it to the session's
   // role file and the command line loads that file (GY-121), never the text itself.
   return { plan, file, args: ['--setting-sources', 'user', '--settings', file], role: launchAuthorization.replace(/\s+/g, ' ') as string | null, environment };
@@ -397,7 +405,14 @@ export function coordinatorWriteDenials(coordinatorRoot: string): HarnessRule[] 
   const why = (area: string) => `The coordinator checkout runs the loop and the executors; this session writes only its assigned worktree, never ${area}/ there (GY-857).`;
   return checkoutAreas.flatMap(area => [{ rule: `Edit(${absolute}/${area}/**)`, why: why(area) }, { rule: `Write(${absolute}/${area}/**)`, why: why(area) }]);
 }
-export function workerHarnessPlan(input: { cliPath: string; branch: string; baseBranch: string; credentialHome: string }): HarnessPlan {
+/**
+ * GY-1494. The worker's scope guard: before every file edit Claude Code runs scope-guard for the
+ * worker's own item and epoch, which denies an edit complete would refuse as outside plannedFiles
+ * and names the scope-request command. Its read is bounded at five seconds and it fails open.
+ */
+export const scopeGuardHook = (cliPath: string, key: string, epoch: number): HarnessHook => ({ event: 'PreToolUse', matcher: scopeGuardMatcher, command: scopeGuardCommand(cliPath, key, epoch), timeout: 30,
+  why: 'Deny an edit outside plannedFiles when it happens, naming scope-request, instead of at complete; complete stays the authority.' });
+export function workerHarnessPlan(input: { cliPath: string; branch: string; baseBranch: string; credentialHome: string; key?: string; epoch?: number }): HarnessPlan {
   const cli = `node ${input.cliPath}`;
   const allow: HarnessRule[] = [
     ...['status', 'sync', 'restore-branch', 'complete', 'blocked', 'heartbeat', 'events', 'diagnose'].map(command => ({ rule: `Bash(${cli} ${command}:*)`, why: `The worker's own ${command} command on its claimed item; the server checks the lease epoch.` })),
@@ -457,7 +472,8 @@ export function workerHarnessPlan(input: { cliPath: string; branch: string; base
     { rule: `Read(//${input.credentialHome}/**)`, why: 'Credentials are used through the CLI, never read into a transcript.' },
     { rule: 'Read(**/*.token)', why: 'Token files are never read into a session transcript.' },
   ];
-  return { harness: 'claude', file: '.claude/settings.local.json', allow, deny, manual: null, note: 'Worker rules for one assigned worktree: its own commands and its own branch. A harness rule is a prompt policy; branch protection, leases and the merge gate remain the enforcement.' };
+  const hooks = input.key && input.epoch ? [scopeGuardHook(input.cliPath, input.key, input.epoch)] : [];
+  return { harness: 'claude', file: '.claude/settings.local.json', allow, deny, manual: null, ...(hooks.length ? { hooks } : {}), note: 'Worker rules for one assigned worktree: its own commands and its own branch. A harness rule is a prompt policy; branch protection, leases and the merge gate remain the enforcement.' };
 }
 /**
  * How a worker restores its assigned branch after it was contaminated, as the exact
@@ -525,7 +541,7 @@ export async function installWorkerHarness(config: MasterConfig, profile: Worker
   if (profile.kind !== 'claude') return { applied: false, reason: `No generated worker rules for ${profile.kind}` };
   try { await defaultChildRun('git', ['check-ignore', '--quiet', '--', '.claude/settings.local.json'], { cwd: prepared.path }); }
   catch { return { applied: false, reason: 'The worktree does not ignore .claude/settings.local.json, so no rules were written into it' }; }
-  const plan = workerHarnessPlan({ cliPath: config.cliPath, branch: `graphyard/${key.toLowerCase()}-${prepared.epoch}`, baseBranch: config.baseBranch, credentialHome: dirname(dirname(config.credentialFile)) });
+  const plan = workerHarnessPlan({ cliPath: config.cliPath, branch: `graphyard/${key.toLowerCase()}-${prepared.epoch}`, baseBranch: config.baseBranch, credentialHome: dirname(dirname(config.credentialFile)), key, epoch: prepared.epoch });
   const written = await writeHarnessPermissions(prepared.path, plan, true);
   return { applied: written.applied, reason: null, added: written.added.length };
 }

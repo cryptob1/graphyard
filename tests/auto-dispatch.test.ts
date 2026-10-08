@@ -253,7 +253,7 @@ test('integration:auto-dispatch-review — a pending reviewer session for a repl
     // GY-93: the request is the last argument of the runtime's command line, its positional
     // prompt, which the shell reads from the request file the typed line references (GY-121).
     assert.deepEqual(calls[1].slice(0, 3), ['pane', 'run', 'pane-review']);
-    assert.match(expandTypedCommand(calls[1][3]).args.at(-1)!, /repeat it every 5 seconds until mergeable is no longer UNKNOWN/, 'the reviewer polls mergeability before posting');
+    assert.match(expandTypedCommand(calls[1][3]).args.at(-1)!, / review post --event APPROVE/, 'the reviewer posts through review post, which polls mergeability before posting (GY-1492)');
     const ledger = await readReviewLedger(root);
     assert.equal(ledger.reviews[0].requestId, request.id); assert.equal(ledger.reviews[0].state, 'pending');
     const sessionDirectory = ledger.reviews[0].sessionDirectory;

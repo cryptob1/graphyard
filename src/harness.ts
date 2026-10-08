@@ -456,7 +456,24 @@ export function launchPlan(kind: string | undefined, approvals: ApprovalMode = '
 }
 
 export interface HarnessRule { rule: string; why: string }
-export interface HarnessPlan { harness: string; file: string | null; allow: HarnessRule[]; deny: HarnessRule[]; manual: string | null; note: string; retired?: string[] }
+/** One Claude Code command hook Graphyard generates: the event, the tool matcher and the command it runs. */
+export interface HarnessHook { event: 'PreToolUse'; matcher: string; command: string; timeout: number; why: string }
+export interface HarnessPlan { harness: string; file: string | null; allow: HarnessRule[]; deny: HarnessRule[]; manual: string | null; note: string; retired?: string[]; hooks?: HarnessHook[] }
+/**
+ * Whether a settings hook entry is Graphyard's own (GY-1494): one whose command runs a CLI's
+ * `scope-guard KEY EPOCH`. A regeneration replaces exactly these and keeps every other entry.
+ */
+export const graphyardHookEntry = (entry: unknown) => Array.isArray((entry as any)?.hooks)
+  && (entry as any).hooks.some((hook: any) => typeof hook?.command === 'string' && / scope-guard \S+ \d+$/.test(hook.command.trim()));
+/** The settings `hooks` object with the plan's hooks in place of Graphyard's earlier ones; operator-added entries are kept. */
+export function mergeHarnessHooks(existing: unknown, hooks: readonly HarnessHook[]) {
+  const current: Record<string, unknown> = existing && typeof existing === 'object' && !Array.isArray(existing) ? { ...existing as Record<string, unknown> } : {};
+  for (const event of new Set(hooks.map(hook => hook.event))) {
+    const kept = (Array.isArray(current[event]) ? current[event] as unknown[] : []).filter(entry => !graphyardHookEntry(entry));
+    current[event] = [...kept, ...hooks.filter(hook => hook.event === event).map(hook => ({ matcher: hook.matcher, hooks: [{ type: 'command', command: hook.command, timeout: hook.timeout }] }))];
+  }
+  return current;
+}
 
 /**
  * How Claude Code judges one shell command against a rule set: a matching deny wins, then a
@@ -635,7 +652,8 @@ export async function writeHarnessPermissions(root: string, plan: HarnessPlan, a
   // Operator-added entries are never removed; generation adds the master's own rules and removes
   // only the retired rules an earlier Graphyard itself generated.
   const kept = (list: unknown) => (Array.isArray(list) ? list : []).filter(rule => !plan.retired?.includes(rule));
-  const next = { ...settings, permissions: { ...permissions, allow: [...kept(permissions.allow), ...addedAllow.map(entry => entry.rule)], deny: [...kept(permissions.deny), ...addedDeny.map(entry => entry.rule)] } };
+  const next = { ...settings, permissions: { ...permissions, allow: [...kept(permissions.allow), ...addedAllow.map(entry => entry.rule)], deny: [...kept(permissions.deny), ...addedDeny.map(entry => entry.rule)] },
+    ...(plan.hooks?.length ? { hooks: mergeHarnessHooks(settings.hooks, plan.hooks) } : {}) };
   await mkdir(dirname(file), { recursive: true, mode: 0o700 });
   await assertIgnored(root, plan.file);
   const temporary = `${file}.${randomUUID()}.tmp`;

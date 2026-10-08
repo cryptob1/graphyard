@@ -16,6 +16,8 @@ import { operatorCommands } from './direct-merges.js';
 import { leaseCommands } from './lease.js';
 import { workspaceCommands } from './workspace.js';
 import { goalCommands } from './goal.js';
+import { reviewCommands } from './review.js';
+import { scopeGuardCommands } from './scope-guard.js';
 
 /**
  * Every command the launcher answers to, in help order. A feature adds its commands to
@@ -25,7 +27,7 @@ export const commands: readonly CliCommand[] = [
   ...installCommands, ...dbCommands, ...masterCommands, ...workCommands, ...policyCommands,
   ...validationCommands, ...deliveryCommands, ...releaseCommands, ...runnerCommands, ...scenarioCommands,
   ...grantsCommands, ...operatorAgentCommands, ...operatorCommands, ...leaseCommands, ...workspaceCommands,
-  ...goalCommands,
+  ...goalCommands, ...reviewCommands, ...scopeGuardCommands,
 ];
 
 export function renderHelp() {
