@@ -7,7 +7,7 @@ import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { defaultChildRun } from '../src/child-runner.js';
-import { groupTestFiles, runnerDiagnosticTailLength, runTrial, trialAuthor, trialEnvironment, trialMerge, trialNeedsLog, trialRef, trialTestGroupSize, TrialCleanupError, TrialRunnerError, TrialTimeoutError, withheldTrialVariables, type RunTrialInput } from '../src/merge-writer/trial.js';
+import { credentialTrialVariable, groupTestFiles, runnerDiagnosticTailLength, runTrial, trialAuthor, trialEnvironment, trialMerge, trialNeedsLog, trialRef, trialTestGroupSize, TrialCleanupError, TrialRunnerError, TrialTimeoutError, withheldTrialVariables, type RunTrialInput } from '../src/merge-writer/trial.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { shadowErrorKey, shadowIdle, shadowReads, shadowRunnerKey, shadowRunnerRetries } from '../src/daemon/cycle-shadow.js';
 import { masterConfigSchema } from '../src/master.js';
@@ -97,12 +97,16 @@ const fixtureFiles = {
   // The stand-in runner: it runs only the listed files and refuses to run without a list. It writes the real runner's
   // per-file records under --durations (a `bad` file fails), names the tree it ran in (`tree-marker`), and ends as a
   // runner that names no failing test does: with a `crash` file listed it prints every credential-shaped variable it sees and exits 3 after
-  // every file passed, with a `killed` file listed a signal ends it.
+  // every file passed, with a `killed` file listed a signal ends it. A `partial` file listed writes passing records for
+  // every other file, prints a named failure for itself without a completion record, and exits 1 — as a runner that dies
+  // mid-group after some files finished (GY-1548).
   'tests/helpers/run-tests.ts': "import { existsSync, readFileSync, writeFileSync } from 'node:fs'; const at = process.argv.indexOf('--files-from'); if (at < 0) { console.error('no --files-from: the runner would run every test file'); process.exit(2); } const files = readFileSync(process.argv[at + 1], 'utf8').split('\\n').filter(Boolean);\n"
     + "console.log('group: ' + files.length + ' file(s)' + (existsSync('tree-marker') ? ' in ' + readFileSync('tree-marker', 'utf8').trim() : ''));\n"
+    + "const durations = process.argv.indexOf('--durations');\n"
+    + "if (files.some(file => file.includes('partial'))) { const done = files.filter(file => !file.includes('partial')); for (const file of done) console.log('ok - ' + file); const failed = files.find(file => file.includes('partial')); console.log('not ok - ' + failed); console.log('  test at ' + failed + ':1:1'); if (durations >= 0) writeFileSync(process.argv[durations + 1], done.map(file => JSON.stringify({ file, durationMs: 1, passed: true })).join('\\n') + (done.length ? '\\n' : '')); process.exit(1); }\n"
     + "for (const file of files) console.log((file.includes('bad') ? 'not ok - ' : 'ok - ') + file);\n"
-    + "const durations = process.argv.indexOf('--durations'); if (durations >= 0) writeFileSync(process.argv[durations + 1], files.map(file => JSON.stringify({ file, durationMs: 1, passed: !file.includes('bad') })).join('\\n') + '\\n');\n"
-    + "if (files.some(file => file.includes('crash'))) { console.error('the runner process is leaving without a verdict'); console.error('credentials seen: ' + JSON.stringify(Object.fromEntries(Object.entries(process.env).filter(([name]) => /TOKEN|SECRET|SOCK|AUTH/.test(name))))); process.exit(3); }\n"
+    + "if (durations >= 0) writeFileSync(process.argv[durations + 1], files.map(file => JSON.stringify({ file, durationMs: 1, passed: !file.includes('bad') })).join('\\n') + '\\n');\n"
+    + "if (files.some(file => file.includes('crash'))) { console.error('the runner process is leaving without a verdict'); console.error('credentials seen: ' + JSON.stringify(Object.fromEntries(Object.entries(process.env).filter(([name]) => /TOKEN|SECRET|SOCK|AUTH|PASSWORD|PASSWD|PRIVATE_KEY|API_KEY|ACCESS_KEY|CREDENTIAL/.test(name))))); process.exit(3); }\n"
     + "if (files.some(file => file.includes('killed'))) process.kill(process.pid, 'SIGKILL');\n"
     + "if (files.some(file => file.includes('bad'))) process.exit(1);\n",
 };
@@ -215,13 +219,15 @@ test('unit:trial-credential-free-runner-exits-zero — this repository\'s own tw
   assert.equal(existsSync(trial.base) ? readdirSync(trial.base).length : 0, 0, 'the trial checkout is removed');
 });
 
-test('unit:trial-run-credential-free — the trial child sees none of GH_CONFIG_DIR, GH_TOKEN, GITHUB_TOKEN, SSH_AUTH_SOCK, GIT_SSH_COMMAND, TMPDIR or any GRAPHYARD_*/HERDR_* variable, and git\'s global configuration is off', async () => {
+test('unit:trial-run-credential-free — the trial child sees none of GH_CONFIG_DIR, GH_TOKEN, GITHUB_TOKEN, SSH_AUTH_SOCK, GIT_SSH_COMMAND, TMPDIR, AWS_SECRET_ACCESS_KEY, NPM_TOKEN or any GRAPHYARD_*/HERDR_* variable, and git\'s global configuration is off', async () => {
   const planted: NodeJS.ProcessEnv = { PATH: process.env.PATH!, HOME: '/home/me', GH_CONFIG_DIR: '/home/me/.config/gh', GH_TOKEN: 'gh-secret', GITHUB_TOKEN: 'github-secret', SSH_AUTH_SOCK: '/run/agent.sock', GIT_SSH_COMMAND: 'ssh -i key',
-    XDG_RUNTIME_DIR: '/run/user/1000', TMPDIR: '/var/tmp', TMP: '/var/tmp', TEMP: '/var/tmp',
+    XDG_RUNTIME_DIR: '/run/user/1000', TMPDIR: '/var/tmp', TMP: '/var/tmp', TEMP: '/var/tmp', AWS_SECRET_ACCESS_KEY: 'aws-secret-key', NPM_TOKEN: 'npm-secret-token',
     GRAPHYARD_TOKEN: 'graphyard-secret', GRAPHYARD_URL: 'https://example.test', GRAPHYARD_TIMING_RECORD: '/tmp/record', HERDR_PANE_ID: 'p1', HERDR_SOCKET_PATH: '/run/herdr.sock', GIT_CONFIG_GLOBAL: '/home/me/.gitconfig', KEPT: 'yes' };
-  const withheld = [...withheldTrialVariables, 'GRAPHYARD_TOKEN', 'GRAPHYARD_URL', 'GRAPHYARD_TIMING_RECORD', 'HERDR_PANE_ID', 'HERDR_SOCKET_PATH'];
+  const withheld = [...withheldTrialVariables, 'AWS_SECRET_ACCESS_KEY', 'NPM_TOKEN', 'GRAPHYARD_TOKEN', 'GRAPHYARD_URL', 'GRAPHYARD_TIMING_RECORD', 'HERDR_PANE_ID', 'HERDR_SOCKET_PATH'];
   const environment = trialEnvironment(planted);
   for (const name of withheld) assert.ok(!(name in environment), `${name} is withheld`);
+  assert.ok(credentialTrialVariable('AWS_SECRET_ACCESS_KEY') && credentialTrialVariable('NPM_TOKEN') && credentialTrialVariable('GH_TOKEN'));
+  assert.ok(!credentialTrialVariable('PATH') && !credentialTrialVariable('KEPT') && !credentialTrialVariable('HOME'));
   assert.deepEqual([environment.KEPT, environment.XDG_RUNTIME_DIR, environment.HOME], ['yes', '/run/user/1000', '/home/me'], 'everything else, the home among it, stays');
   assert.equal(environment.GIT_CONFIG_NOSYSTEM, '1');
   assert.equal(environment.GIT_CONFIG_GLOBAL, '/dev/null');
@@ -281,10 +287,10 @@ test('integration:trial-run-build-and-tests — a trial that outruns its time bu
 
 // ——— GY-1548: a runner exit that names no failing test is a runner failure, never a failing verdict; the selection runs in bounded groups. ———
 const mergeOf = async (repo: Awaited<ReturnType<typeof fixture>>, head: string) => { const merged = await trialMerge(gitFor(repo.root), { head, baseTip: repo.base }); assert.ok('mergeSha' in merged); return merged.mergeSha; };
-const planted: NodeJS.ProcessEnv = { PATH: process.env.PATH!, GH_TOKEN: 'gh-secret-token', GITHUB_TOKEN: 'github-secret-token', GRAPHYARD_TOKEN: 'graphyard-secret-token', SSH_AUTH_SOCK: '/nowhere/agent.sock' };
-const secrets = ['gh-secret-token', 'github-secret-token', 'graphyard-secret-token', '/nowhere/agent.sock'];
+const planted: NodeJS.ProcessEnv = { PATH: process.env.PATH!, GH_TOKEN: 'gh-secret-token', GITHUB_TOKEN: 'github-secret-token', GRAPHYARD_TOKEN: 'graphyard-secret-token', SSH_AUTH_SOCK: '/nowhere/agent.sock', AWS_SECRET_ACCESS_KEY: 'aws-secret-access-key', NPM_TOKEN: 'npm-registry-token' };
+const secrets = ['gh-secret-token', 'github-secret-token', 'graphyard-secret-token', '/nowhere/agent.sock', 'aws-secret-access-key', 'npm-registry-token'];
 
-test('integration:shadow-trial-failure-diagnostics — a runner that exits non-zero naming a failing file is a failing verdict with the exit, the group and the files; one that exits non-zero or on a signal naming none (every record passed) rejects with TrialRunnerError carrying the phase, status or signal, the group\'s files and how many finished, a bounded credential-free output tail and the trial merge sha, as does a build a signal ended; and the loop records it against head, base tip and merge sha, retried twice then given up under one attention line, never as a verdict', async () => {
+test('integration:shadow-trial-failure-diagnostics — a runner that exits non-zero naming a failing file is a failing verdict with the exit, the group and the files; one that exits non-zero or on a signal naming none (every record passed) rejects with TrialRunnerError carrying the phase, status or signal, the group\'s files and how many finished, a bounded credential-free output tail and the trial merge sha, as does a build a signal ended; a partial-record run that prints a named failure is still a failing verdict; and the loop records a runner exit against head, base tip and merge sha, retried twice then given up under one attention line, never as a verdict', async () => {
   const repo = await fixture();
   // A named failing test file: the merge's, so a failing verdict, with how the runner ended beside it.
   const named = repo.commitOnBase({ 'tests/bad.test.ts': 'x\n', 'tests/ok.test.ts': 'x\n' }, 'named failure');
@@ -292,6 +298,11 @@ test('integration:shadow-trial-failure-diagnostics — a runner that exits non-z
   assert.deepEqual([verdict.build, verdict.tests, verdict.runnerExit], ['pass', { passed: 1, failed: ['tests/bad.test.ts'], files: 2 }, 1], verdict.logTail);
   assert.deepEqual(verdict.groups, [{ files: ['tests/bad.test.ts', 'tests/ok.test.ts'], status: 1, signal: null, failed: ['tests/bad.test.ts'] }], 'the group record names the failing file and the exit status');
   assert.ok(trialNeedsLog(verdict));
+  // A partial-record run: one file finished (passing record), another printed a named failure without a completion record — still the merge's failing verdict, never a runner retry.
+  const partial = repo.commitOnBase({ 'tests/ok.test.ts': 'x\n', 'tests/partial.test.ts': 'x\n' }, 'partial records');
+  const partialVerdict = await runTrial({ root: repo.root, base: await temporaryDirectory('trial-merge-root', tmpdir()), mergeSha: await mergeOf(repo, partial), changedFiles: ['tests/ok.test.ts', 'tests/partial.test.ts'], timeoutMs: 120_000, key: 'GY-9', environment: planted });
+  assert.deepEqual([partialVerdict.build, partialVerdict.tests, partialVerdict.runnerExit], ['pass', { passed: 1, failed: ['tests/partial.test.ts'], files: 2 }, 1], partialVerdict.logTail);
+  assert.deepEqual(partialVerdict.groups, [{ files: ['tests/ok.test.ts', 'tests/partial.test.ts'], status: 1, signal: null, failed: ['tests/partial.test.ts'] }], 'the log names the failing file when records do not');
   // A runner that exits 3 after every file passed, records and all: no test is named, so no verdict; the record says how it ended and holds no credential.
   const crashed = repo.commitOnBase({ 'tests/crash.test.ts': 'x\n', 'tests/ok.test.ts': 'x\n' }, 'runner exit');
   const crashedMerge = await mergeOf(repo, crashed), crashedBase = await temporaryDirectory('trial-merge-root', tmpdir());
@@ -310,10 +321,16 @@ test('integration:shadow-trial-failure-diagnostics — a runner that exits non-z
   const killed = repo.commitOnBase({ 'tests/killed.test.ts': 'x\n' }, 'runner killed');
   await assert.rejects(runTrial({ root: repo.root, base: await temporaryDirectory('trial-merge-root', tmpdir()), mergeSha: await mergeOf(repo, killed), changedFiles: ['tests/killed.test.ts'], timeoutMs: 120_000, key: 'GY-9', environment: planted }),
     (error: unknown) => error instanceof TrialRunnerError && error.phase === 'tests' && error.status === null && error.signal === 'SIGKILL' && error.outputTail.includes('[exit signal SIGKILL]') && error.files.length === 1);
-  // A build child a signal ended measures the host too; one that exits non-zero is still the merge's failed build.
+  // A build child a signal ended measures the host too; npm often reports that as status 137 with no signal field — still a runner failure. One that exits non-zero without a signal is still the merge's failed build.
   const buildKilled = repo.commitOnBase({ 'kill-build': '', 'tests/ok.test.ts': 'x\n' }, 'build killed');
   await assert.rejects(runTrial({ root: repo.root, base: await temporaryDirectory('trial-merge-root', tmpdir()), mergeSha: await mergeOf(repo, buildKilled), changedFiles: ['tests/ok.test.ts'], timeoutMs: 120_000, key: 'GY-9', environment: planted }),
     (error: unknown) => error instanceof TrialRunnerError && error.phase === 'build' && error.signal === 'SIGKILL' && error.files.length === 0 && error.outputTail.includes('build killed'));
+  const npmReportsKill = ((command: string, args: string[], options: unknown) => {
+    if (command === 'npm' && args[0] === 'run') throw Object.assign(new Error('Command failed: npm run build'), { status: 137, signal: null, stdout: '', stderr: 'build killed\n' });
+    return defaultChildRun(command, args, options as never);
+  }) as never;
+  await assert.rejects(runTrial({ root: repo.root, base: await temporaryDirectory('trial-merge-root', tmpdir()), mergeSha: await mergeOf(repo, buildKilled), changedFiles: ['tests/ok.test.ts'], timeoutMs: 120_000, key: 'GY-9', environment: planted, run: npmReportsKill }),
+    (error: unknown) => error instanceof TrialRunnerError && error.phase === 'build' && error.signal === 'SIGKILL' && error.status === null && error.outputTail.includes('build killed'));
   const buildBroken = repo.commitOnBase({ 'break-build': '', 'tests/ok.test.ts': 'x\n' }, 'build broken');
   assert.equal((await runTrial({ root: repo.root, base: await temporaryDirectory('trial-merge-root', tmpdir()), mergeSha: await mergeOf(repo, buildBroken), changedFiles: ['tests/ok.test.ts'], timeoutMs: 120_000, key: 'GY-9', environment: planted })).build, 'fail');
 

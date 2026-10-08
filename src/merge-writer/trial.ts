@@ -49,15 +49,25 @@ export async function trialMerge(git: TrialGit, input: { head: string; baseTip: 
 }
 
 /**
- * The variables a trial child never sees, besides every GRAPHYARD_* and HERDR_* one: the
- * credentials, and the temporary-directory overrides. The suite assumes the platform's own
- * temporary directory, as CI gives it (GY-1549: the loop's systemd unit inherits TMPDIR=/var/tmp
- * from environment.d, and tests/test-isolation.test.ts's contained-install assertion failed on it).
+ * The variables a trial child never sees by name, besides every GRAPHYARD_* and HERDR_* one and
+ * every credential-bearing name (`credentialTrialVariable`): the gh/ssh helpers, and the
+ * temporary-directory overrides. The suite assumes the platform's own temporary directory, as CI
+ * gives it (GY-1549: the loop's systemd unit inherits TMPDIR=/var/tmp from environment.d, and
+ * tests/test-isolation.test.ts's contained-install assertion failed on it).
  */
 export const withheldTrialVariables = ['GH_CONFIG_DIR', 'GH_TOKEN', 'GITHUB_TOKEN', 'SSH_AUTH_SOCK', 'GIT_SSH_COMMAND', 'TMPDIR', 'TMP', 'TEMP'] as const;
+/**
+ * Whether a variable name is credential-bearing and must not reach the trial child (GY-1548): the
+ * named helpers above, plus any name carrying a token, secret, password, private key, API key,
+ * access key or credential (so AWS_SECRET_ACCESS_KEY, NPM_TOKEN and the like never ride into the
+ * child or its diagnostic record when a runner echoes its environment).
+ */
+export const credentialTrialVariable = (name: string) =>
+  (withheldTrialVariables as readonly string[]).includes(name)
+  || /(?:TOKEN|SECRET|PASSWORD|PASSWD|PRIVATE_KEY|API_KEY|ACCESS_KEY|CREDENTIAL)/i.test(name);
 /** The trial child's environment: the isolated test one, with every credential and Graphyard control removed and git's global configuration off. */
 export function trialEnvironment(environment: NodeJS.ProcessEnv = process.env): Record<string, string> {
-  const kept = Object.fromEntries(Object.entries(isolatedTestEnvironment(environment)).filter(([name]) => !/^(GRAPHYARD|HERDR)_/.test(name) && !(withheldTrialVariables as readonly string[]).includes(name)));
+  const kept = Object.fromEntries(Object.entries(isolatedTestEnvironment(environment)).filter(([name]) => !/^(GRAPHYARD|HERDR)_/.test(name) && !credentialTrialVariable(name)));
   return { ...kept, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' };
 }
 
@@ -204,15 +214,27 @@ export async function runTrial(input: RunTrialInput): Promise<TrialRun> {
     return ended.signal ? 128 + (constants.signals[ended.signal as NodeJS.Signals] ?? 0) : -1;
   };
   type Ended = { ok: boolean; out: string; status: number | null; signal: string | null; cause: unknown };
+  /** How a failed child ended: npm and shells often report a signal kill as status 128+N with no signal field; recover the name so a host kill is a runner failure, never a merge fail. */
+  const endedOf = (error: unknown, out: string): Ended => {
+    const failed = error as { status?: number | null; signal?: string | null; cause?: unknown };
+    let status = typeof failed.status === 'number' ? failed.status : null;
+    let signal: string | null = failed.signal ?? null;
+    if (signal === null && status !== null && status > 128 && status < 160) {
+      const number = status - 128;
+      const name = (Object.entries(constants.signals) as [string, number][]).find(([, value]) => value === number)?.[0] ?? null;
+      if (name) { signal = name; status = null; }
+    }
+    return { ok: false, out, status, signal, cause: failed.cause };
+  };
   const child = async (phase: TrialTimeoutError['phase'], command: string, args: string[], options: { env?: NodeJS.ProcessEnv } = {}): Promise<Ended> => {
     let out: string;
     try { out = String(await run(command, args, { cwd: checkout.worktree, env: (options.env ?? env) as Record<string, string>, timeoutMs: remaining() })); }
     catch (error) {
       const out = output(error);
-      log.push(`$ ${command} ${args.join(' ')}\n${out}\n${ending(error)}`);
+      const ended = endedOf(error, out);
+      log.push(`$ ${command} ${args.join(' ')}\n${out}\n${ending({ status: ended.status, signal: ended.signal, cause: ended.cause })}`);
       if ((error as { timedOut?: boolean }).timedOut || now() >= deadline) throw new TrialTimeoutError(phase, Math.max(0, now() - startedAt), tail());
-      const failed = error as { status?: number | null; signal?: string | null; cause?: unknown };
-      return { ok: false, out, status: typeof failed.status === 'number' ? failed.status : null, signal: failed.signal ?? null, cause: failed.cause };
+      return ended;
     }
     log.push(`$ ${command} ${args.join(' ')}\n${out}`);
     if (now() >= deadline) throw new TrialTimeoutError(phase, Math.max(0, now() - startedAt), tail());
@@ -250,10 +272,11 @@ export async function runTrial(input: RunTrialInput): Promise<TrialRun> {
       }
       // An affected selection of nothing runs nothing.
       if (!files.length) return finish('pass', { passed: 0, failed: [], files: 0 });
-      // Each group is one runner process over the same checkout. Its own per-file records decide which
-      // files failed; the human-readable log is only read when they are missing. A group that ends
-      // non-zero naming no failing file is a runner failure, unless another group named one: a named
-      // failing test is the merge's, and stays a failing verdict.
+      // Each group is one runner process over the same checkout. Failing per-file records decide which
+      // files failed; the human-readable log is read when those records name none — including a
+      // partial-record run that finished some files and printed a named failure for another (GY-1548).
+      // A group that ends non-zero naming no failing file is a runner failure, unless another group
+      // named one: a named failing test is the merge's, and stays a failing verdict.
       const groups: TrialGroup[] = [];
       let unattributed: TrialRunnerError | null = null;
       for (const [index, group] of groupTestFiles(files, input.groupSize).entries()) {
@@ -261,7 +284,8 @@ export async function runTrial(input: RunTrialInput): Promise<TrialRun> {
         await writeFile(list, `${group.join('\n')}\n`);
         const tests = await child('tests', 'node', ['--import', 'tsx', 'tests/helpers/run-tests.ts', '--files-from', list, '--durations', records]);
         const recorded = runnerRecords(await readFile(records, 'utf8').catch(() => ''));
-        const failing = [...new Set(recorded.length ? recorded.filter(record => !record.passed).map(record => record.file) : tests.ok ? [] : failingFilesInLog(tests.out))];
+        const namedByRecords = recorded.filter(record => !record.passed).map(record => record.file);
+        const failing = [...new Set(namedByRecords.length ? namedByRecords : tests.ok ? [] : failingFilesInLog(tests.out))];
         groups.push({ files: group, status: tests.status, signal: tests.signal, failed: failing });
         if (!tests.ok && !failing.length) unattributed ??= runnerFailure('tests', tests, group, recorded.filter(record => group.includes(record.file)).length);
       }

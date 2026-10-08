@@ -115,7 +115,8 @@ const runnerFailures = (state: DaemonState, head: string, baseTip: string) => fa
 /**
  * The diagnostic record of a runner failure: the pair and its trial merge, the phase, the exit
  * status or signal, the failing group's size and how many of its files finished, then the child's
- * bounded output tail, within one action's detail. The trial ran credential-free, so the tail is.
+ * bounded output tail, within one action's detail. The trial withheld every credential-bearing
+ * variable (`credentialTrialVariable`), so the tail is credential-free.
  */
 export function shadowRunnerDetail(flight: { key: string; head: string; baseTip: string }, error: TrialRunnerError, attempts: number, given: boolean) {
   const exit = error.signal ? `signal ${error.signal}` : `status ${error.status ?? 'unknown'}`;
