@@ -9,6 +9,7 @@ import { GitHub, idleObservationSeconds, processJob } from '../../src/github.js'
 import { GitHubCacheStore } from '../../src/github-cache.js';
 import { GitHubChargeLedger } from '../../src/github-charges.js';
 import { type Principal, Refusal, type Work } from '../../src/model.js';
+import { conflictReworkBoundMs } from '../../src/model/approval.js';
 import * as deploymentStep from '../../src/daemon/deployment.js';
 import { DispatchReservedError, type HerdrAgent, type MasterConfig, type WorkerProfile, approverSessionName, assessContainment, containmentPhase, containmentQuarantines, decisionInput, dispatchWork, masterConfigSchema, reclaimableAgent } from '../../src/master.js';
 import { withSupervision } from '../../src/master/profiles.js';
@@ -33,7 +34,6 @@ import { type DecidePayload, diagnosticianSettings } from '../../src/runner/payl
 import { clearDecompositionRuns } from '../../src/decomposition-step.js';
 import { type ScopeRequestState, scopeRefusalBlocker } from '../../src/model/scope.js';
 import { stoppedStates } from '../../src/daemon/effects.js';
-import { mainWatchHistoryLimit, type MainWatchCommit, type MainWatchPolicy } from '../../src/daemon/main-watch.js';
 import { loopThroughputMeasurement, throughputClaim } from '../../src/throughput.js';
 import { type RunOptions, type RunRecord, type RunResult, type Runner } from '../../src/runner/types.js';
 import { type DiagnosticianEffects } from '../../src/daemon/diagnosis.js';
@@ -146,24 +146,12 @@ export let days = 0;
  */
 export interface PromotionDay { validationMs?: number; promoteAfterMs?: number | null; soakMs?: number }
 /**
- * GY-1519: the main watch over the day's moving main. Each `foreign` commit is pushed straight onto
- * main at `at` by `author`, and an admin acknowledges it through the real route `acknowledgeAfterMs`
- * after it landed (null: never). The day's own pushes to main — the file split, the NOTICE, the docs
- * reword, each a single-parent commit no delivery explains — are the operator's, acknowledged
- * `acknowledgeOwnAfterMs` after they landed (null: never). With `freeze` the loop's promotion drive
- * takes the watch's freeze. Once the watch has raised its first line, the day fills the cursor past
- * its bound so `pruneDaemonState` really retires the line's row, as a busy day's would be.
- */
-export interface MainWatchDay { freeze: boolean; foreign: { at: number; author: string; subject: string; acknowledgeAfterMs: number | null }[]; acknowledgeOwnAfterMs: number | null }
-/** A commit on the day's main the watch cannot explain: pushed by the suite (`own: false`) or by the day's own script (`own: true`). */
-export interface MainWatchLanding { sha: string; at: number; subject: string; author: string; own: boolean; acknowledgeAt: number | null; acknowledgedAt: number | null }
-/**
  * GY-1501: the effects `daemonEffects` leaves absent on a supervised install, whose config carries no
  * operator-agent, approver or reviewer identity: every decision, approver, escalation and reviewer
  * effect. tests/soak-supervised.test.ts checks the real effects leave each of them absent.
  */
 export const supervisedAbsentEffects = ['decide', 'approver', 'docsSync', 'withdraw', 'resume', 'decisions', 'decisionChanges', 'replan', 'widenScope', 'withdrawReview', 'diagnostician', 'acceptance', 'planner', 'fileFaultClass', 'unblock', 'doctor'] as const;
-export async function simulateDay(options: { hours: number; backlog?: boolean; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number; working?: { from: number; retryAt: number } }; regression?: ('approvers-left-open' | 'docs-syncs-left-open')[]; headless?: boolean; handApprovers?: boolean; stranded?: boolean | 'resume'; staleRework?: boolean; staleMerge?: number; capacityWait?: { from: number; to: number }; diagnosisLimit?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; workspaceFailure?: { item: number; until: number }; credentialBlocked?: { recovers: number; never: number }; blockers?: boolean; retrying?: { worker: number; approver: number }; unbounded?: { stuck: number; progressing: number; pushedOnce: number; rework: number }; starved?: { items: number[]; dropFirst: number }; docs?: { budget: { total: number; perPage: number } }; dispatchFailing?: { constant: number; changing: number; refuseBlocks: number; unblockAfterMs: number }; mainGuard?: MainGuardDay; containment?: { failUntil: number; slowUntil: number; refuseSettle?: number }; mechanical?: { applied: number; rejected: number }; slowDecisions?: { from: number; to: number; ms: number }; slowObservation?: { from: number; to: number; attentionMs: number }; slowDeployment?: { from: number; to: number; observationMs: number }; selfProvision?: { redeployFails: { from: number; to: number } }; plan?: Partial<typeof basePlan>; github806?: boolean; remedies?: boolean;
+export async function simulateDay(options: { hours: number; backlog?: boolean; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number; working?: { from: number; retryAt: number } }; regression?: ('approvers-left-open' | 'docs-syncs-left-open')[]; headless?: boolean; handApprovers?: boolean; stranded?: boolean | 'resume'; staleRework?: boolean; staleMerge?: number; capacityWait?: { from: number; to: number }; diagnosisLimit?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; workspaceFailure?: { item: number; until: number }; credentialBlocked?: { recovers: number; never: number }; blockers?: boolean; retrying?: { worker: number; approver: number }; unbounded?: { stuck: number; progressing: number; pushedOnce: number; rework: number }; starved?: { items: number[]; dropFirst: number }; docs?: { budget: { total: number; perPage: number } }; dispatchFailing?: { constant: number; changing: number; refuseBlocks: number; unblockAfterMs: number }; mainGuard?: MainGuardDay; containment?: { failUntil: number; slowUntil: number; refuseSettle?: number }; mechanical?: { applied: number; rejected: number }; slowDecisions?: { from: number; to: number; ms: number }; slowObservation?: { from: number; to: number; attentionMs: number }; lateReading?: boolean; slowDeployment?: { from: number; to: number; observationMs: number }; selfProvision?: { redeployFails: { from: number; to: number } }; plan?: Partial<typeof basePlan>; github806?: boolean; remedies?: boolean;
   decomposition?: { broadItems: number[]; concurrency?: number };
   /** GY-1294: the loop's own write moves a diagnosed item's revision before its approver reads the diagnosis decision, so the decision settles stale. */
   staleDiagnosis?: boolean;
@@ -189,8 +177,6 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
    * list, dispatch and (GY-1513) soak-run list; `true` is the main day's shape, an object another.
    */
   promotion?: boolean | PromotionDay;
-  /** GY-1519: wire the loop's main watch over the day's main, with foreign commits an admin acknowledges (MainWatchDay). */
-  mainWatch?: MainWatchDay;
   /** GY-1389: the review-round cap, the items whose change requests name a blocking finding past it, and those whose capped round the approver refuses. */
   reviewCap?: { cap: number; items: number[]; refused: number[] };
   /**
@@ -1015,6 +1001,9 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   // Main rewrites the docs page an item documented itself in just as its reviewer approves it: the
   // approved head now conflicts with the base there, and only there (GY-566).
   let docsRewritten = false;
+  // GY-1537: the docs-conflict item's GitHub readings are late — its observation job is held and a wake brings none — until well past the
+  // loop-owned rework bound, as the delayed readings behind two stalled-step faults were.
+  const lateReading = { since: null as number | null, skipped: 0 };
   const docsTick = () => {
     const host = items[plan.docsConflict.item - 1]; // absent on a day planned with fewer items
     const pr = host && [...github.prs.values()].find(entry => entry.key === host.key && entry.open);
@@ -1036,6 +1025,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     if (herdr.byName(agentName)) throw new Error(`Docs-sync session ${agentName} is already visible in Herdr; let it finish first`);
     const { file: roleFile } = await docsSyncHarness(docsSyncRoot, config, docsPlan, 'claude');
     const pane = herdr.open(agentName);
+    lateReading.since ??= clock.now();
     docsSyncRuns.push({ plan: docsPlan, agentName, pane, pushAt: clock.now() + plan.docsConflict.syncMs, outcome: 'working', roleFile });
     return { agentName, pane, account: 'claude-reviewer', runtime: 'claude', session: null };
   };
@@ -1481,77 +1471,6 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
       promotion.soaks.push({ id, sha, startedAt: now + promotion.listedAfterMs, endsAt: now + promotion.soakMs, result: promotion.soaks.length % 3 === 2 ? 'failure' : 'success' });
     },
   } : undefined;
-  // GY-1519: the loop's main watch. Its history read walks main's first parents in the simulated
-  // GitHub from the tip down to the promoted commit (the production record), everything since it as
-  // the real read does; its policy read is the real control plane's. Foreign commits land straight on
-  // main at their time and are acknowledged by the admin through the real route, both inside the
-  // read, as the promotion day's landings are; the day's own single-parent pushes are acknowledged
-  // the same way. The day counts every read and the largest history and unknown list the watch held,
-  // when each commit was first and last unknown, and whether the cursor's bound really pruned a
-  // raised line's row.
-  const mainWatchDay = options.mainWatch && { ...options.mainWatch, landed: [] as MainWatchLanding[], foreignLanded: new Set<number>(),
-    historyReads: 0, policyReads: 0, largestHistory: 0, largestUnknown: 0, reports: [] as { sha: string; at: number; detail: string }[], filled: false, rowPruned: false, frozenAt: [] as number[], unfrozenAt: [] as number[], reasons: new Set<string>(),
-    // When each commit was first and last unknown; every change the policy read returned; and any commit the list dropped before its acknowledgement was recorded (the suite expects none).
-    unknownSeen: new Map<string, { first: number; last: number }>(), policyLog: [] as { at: number; acknowledged: string[]; windows: string[] }[], vanished: [] as { sha: string; at: number; tip: string | null; unknown: string[]; frozen: string | null }[],
-    observe(result: Awaited<ReturnType<typeof runCycle>>, at: number) {
-      for (const action of result.actions) if (action.detail.startsWith('Main watch:')) this.reports.push({ sha: action.detail.match(/commit ([0-9a-f]{40})/)?.[1] ?? '', at, detail: action.detail });
-      this.largestUnknown = Math.max(this.largestUnknown, state.mainWatch?.unknown.length ?? 0);
-      for (const entry of state.mainWatch?.unknown ?? []) { const seen = this.unknownSeen.get(entry.sha); if (seen) seen.last = at; else this.unknownSeen.set(entry.sha, { first: at, last: at }); }
-      for (const [sha, seen] of this.unknownSeen) if (seen.last !== at && !this.vanished.some(entry => entry.sha === sha) && this.landed.find(entry => entry.sha === sha)?.acknowledgedAt === null)
-        this.vanished.push({ sha, at, tip: state.mainWatch?.tip ?? null, unknown: (state.mainWatch?.unknown ?? []).map(entry => entry.sha.slice(0, 8)), frozen: state.mainWatch?.frozen?.sha.slice(0, 8) ?? null });
-      const frozen = !!state.mainWatch?.frozen, was = this.frozenAt.length > this.unfrozenAt.length;
-      if (frozen && !was) this.frozenAt.push(at); else if (!frozen && was) this.unfrozenAt.push(at);
-      if (state.promotion?.reason) this.reasons.add(state.promotion.reason.replace(/frozen since \S+?: /, 'frozen since T: '));
-      const row = Object.keys(state.actions).find(key => key.startsWith('main-watch:'));
-      if (row && !this.filled) {
-        for (let index = 0; index < retainedActions + 20; index++) state.actions[`dispatch:filler:${index}`] = { kind: 'dispatch', work: null, principal: null, state: 'done', detail: 'filler', attempts: 1, epoch: null, cycle: state.cycle, at: new Date(clock.now() + index).toISOString() } as never;
-        this.filled = true;
-      } else if (this.filled && !row) this.rowPruned = true;
-    } };
-  const mainWatchEffect: DaemonEffects['mainWatch'] = mainWatchDay ? {
-    freeze: mainWatchDay.freeze,
-    history: async () => {
-      const now = clock.now();
-      mainWatchDay.foreign.forEach((foreign, index) => {
-        if (mainWatchDay.foreignLanded.has(index) || elapsed < foreign.at) return;
-        const commit = github.commit(foreign.subject, github.files, now);
-        mainWatchDay.foreignLanded.add(index);
-        mainWatchDay.landed.push({ sha: commit.sha, at: now, subject: foreign.subject, author: foreign.author, own: false, acknowledgeAt: foreign.acknowledgeAfterMs === null ? null : now + foreign.acknowledgeAfterMs, acknowledgedAt: null });
-      });
-      // As the real read: everything since the production record, however much landed; only a record
-      // the first-parent walk never reaches (none here) falls back to the newest `mainWatchHistoryLimit`.
-      const since = promotedSha(), commits: MainWatchCommit[] = [];
-      let reached = false;
-      for (let at: string | undefined = github.tip; at; at = github.commits.get(at)?.parents[0]) {
-        if (at === since) { reached = true; break; }
-        const commit = github.commits.get(at);
-        if (!commit) break;
-        let landing = mainWatchDay.landed.find(entry => entry.sha === commit.sha);
-        if (!landing && commit.parents.length === 1 && commit.message !== 'root') {
-          // The day's own push to main: single-parent, so no merge GitHub made for a delivery.
-          landing = { sha: commit.sha, at: commit.at, subject: commit.message.split('\n')[0], author: 'soak-operator', own: true, acknowledgeAt: mainWatchDay.acknowledgeOwnAfterMs === null ? null : commit.at + mainWatchDay.acknowledgeOwnAfterMs, acknowledgedAt: null };
-          mainWatchDay.landed.push(landing);
-        }
-        commits.push({ sha: commit.sha, parents: commit.parents, subject: commit.message.split('\n')[0], author: landing?.author ?? 'graphyard[bot]', at: new Date(commit.at).toISOString() });
-      }
-      if (!reached) commits.splice(mainWatchHistoryLimit);
-      for (const landed of mainWatchDay.landed) if (landed.acknowledgedAt === null && landed.acknowledgeAt !== null && now >= landed.acknowledgeAt) {
-        await api(principals.operator, 'POST', 'main-watch/acknowledge', { sha: landed.sha, reason: landed.own ? 'the operator\'s own push, reviewed on the host' : 'landed by hand, reviewed on the host' });
-        landed.acknowledgedAt = now;
-      }
-      mainWatchDay.historyReads++;
-      mainWatchDay.largestHistory = Math.max(mainWatchDay.largestHistory, commits.length);
-      return { tip: github.tip, since: reached ? since : null, commits };
-    },
-    policy: async () => {
-      mainWatchDay.policyReads++;
-      const policy = await api(principals.coordinator, 'GET', 'main-watch') as MainWatchPolicy;
-      const acknowledged = policy.acknowledged.map(entry => entry.sha.slice(0, 8)), windows = policy.directMergeWindows.map(window => `${window.since}..${window.until}`);
-      const last = mainWatchDay.policyLog.at(-1);
-      if (!last || last.acknowledged.join() !== acknowledged.join() || last.windows.join() !== windows.join()) mainWatchDay.policyLog.push({ at: elapsed, acknowledged, windows });
-      return policy;
-    },
-  } : undefined;
   // GY-1385: the loop's own throughput measurement after each verified deployment, through the
   // real loopThroughputMeasurement, recorded under a directory of this day's own. The plane's status
   // names a deployed release only statusLagMs after the loop first asks for it, as a rollout that
@@ -1596,7 +1515,6 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   };
   const effects: DaemonEffects = {
     ...(promotionEffect ? { promotion: promotionEffect } : {}),
-    ...(mainWatchEffect ? { mainWatch: mainWatchEffect } : {}),
     ...(hostDay ? { healHostSupervision: allow => healUserSupervision(hostDay.root, { systemctl: hostSystemctl, loginctl: hostLoginctl, masked: () => false, platform: 'linux',
       wait: async ms => { fenced.drift += ms; await moveClock(ms); } }, allow) } : {}),
     measureThroughput,
@@ -1919,6 +1837,12 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   // ---- GY-1345: the slow-observation day. Inside the window the attention master status adds answers
   // ---- `attentionMs` after it is asked, as cycle 12621's did in 350.8s: the cycle that asks spends the
   // ---- faults step's whole budget on it and is cut, and the read stays in flight across cycles.
+  if (options.lateReading) {
+    const { observe, wakeObservation } = effects, host = () => items[plan.docsConflict.item - 1];
+    const late = (work: Work) => lateReading.since !== null && work.key === host().key && clock.now() < lateReading.since + conflictReworkBoundMs + 15 * minute;
+    effects.observe = (work, waitMs) => late(work) ? (lateReading.skipped++, Promise.resolve(null)) : observe!(work, waitMs);
+    effects.wakeObservation = work => late(work) ? (lateReading.skipped++, Promise.resolve(undefined)) : wakeObservation!(work);
+  }
   const observationDay = { cycles: [] as { cycle: number; elapsed: number; spentMs: number; cut: boolean; pending: number }[], started: 0, landed: 0, inFlight: 0, maxInFlight: 0 };
   if (options.slowObservation) {
     const window = options.slowObservation, { controlPlane } = effects, attention = effects.reportedAttention ?? (async () => ({ items: [] }) as ReportedAttention);
@@ -2490,6 +2414,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
       if (headless) await Promise.all([...headless.settling].filter(([directory]) => headless.pi.processes.get(directory)!.state !== 'live').map(([directory, settled]) => { headless.settling.delete(directory); return settled; }));
       await engine.reconcile();
       await busyFleet(now);
+      if (options.lateReading && lateReading.since !== null && now < lateReading.since + conflictReworkBoundMs + 15 * minute) await store.pool.query('UPDATE jobs SET available_at=GREATEST(available_at, $2) WHERE work_id=$1', [items[plan.docsConflict.item - 1].id, new Date(lateReading.since + conflictReworkBoundMs + 15 * minute)]);
       // GY-806: CI's check_run webhooks, delivered as the route delivers them. The pass claims every
       // webhook-woken job that is due before any polled one, and re-observes each within the minute.
       // Only the day that asserts them runs them (`github806`): every other scenario keeps main's pass.
@@ -2662,7 +2587,6 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
             guardDay.filled = true;
           } else if (guardDay.filled && !lineKey) guardDay.linePruned = true;
         }
-        if (mainWatchDay) mainWatchDay.observe(result, elapsed);
         if (options.blockers) blockerActions.push(...result.actions.filter(action => action.kind === 'blocker').map(action => ({ elapsed, work: action.work, state: action.state, detail: action.detail })));
         if (options.master) {
           const after = clock.now() - dayStart;
@@ -2825,7 +2749,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     mergeQueuePosts, config, refused, decideCalls, restarted, approverPanes, failing, herdrClosed: herdr.closed, diagnosisModel: settings.model, diagnosisRuns: diagnosed, baseBreak, capacityRefused, capacityLaunched, capacityWaiters,
     decided, misreads, prompts, screens, heldAccounts, approverAccounts, retryReset, exitedLive, exitedClosed, exitedRowsSeen, reassign, workspaceFailures, workspaceCooled, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, fenced, mergeStallSightings, master, baseFailure,
     blockerEvents, blockerProbes, blockerDecisions, blockerActions, blockerKeysPeak, attempts, lanesSeen, laneApplications, approverWorks, approverDecisions, failover, webhook, remedies, observeRequests, starvation, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size }, mechanical: { ledger, botRounds, misclassified, reviewHolds }, shared, charges: { ...charged, b: charged.b.length, instancesSeen: [...charged.instancesSeen], restarts: chargeRestarts },
-    wakes, staleMerges, restartLog, hostDay, guardDay, mainWatchDay, budgetDay, observationDay, deploymentDay, decompositionDay: decompositionHistory, diagnosisRaces, diagnosisRequestRaces, transientRefused, lateReads, staleReleaseDay, drain, acceptanceDay: acceptance?.day ?? null, plannerDay: planner?.day ?? null, loopWakeDay: loopWakeDay || null,
+    wakes, lateReading, staleMerges, restartLog, hostDay, guardDay, budgetDay, observationDay, deploymentDay, decompositionDay: decompositionHistory, diagnosisRaces, diagnosisRequestRaces, transientRefused, lateReads, staleReleaseDay, drain, acceptanceDay: acceptance?.day ?? null, plannerDay: planner?.day ?? null, loopWakeDay: loopWakeDay || null,
     restartDay: options.checkoutRestart ? restartDay : null };
 }
 

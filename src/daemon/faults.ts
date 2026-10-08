@@ -96,6 +96,7 @@ export function cycleFaults(state: DaemonState, snapshot: Work[], now: number, s
         && !(containmentKinds.has(item.kind) && containmentInMotion(byKey.get(item.subject), now))
         && !(item.kind === 'base-conflict' && baseConflictInMotion(byKey.get(item.subject), now))
         && !(item.kind === 'merge-base-dismissed' && mergeBaseDismissalInMotion(byKey.get(item.subject), now))
+        && !(item.kind === 'stalled-step' && reworkDecisionInMotion(byKey.get(item.subject), now))
         && !(item.kind === 'owed-decision' && owedReworkLine(byKey.get(item.subject), item.text) && reworkDecisionInMotion(byKey.get(item.subject), now))
         && !(item.kind === 'owed-decision' && owedEscalationInMotion(byKey.get(item.subject), item.text, now))
         && !(item.kind === 'owed-decision' && owedContainmentLine(byKey.get(item.subject), item.text) && !standingFence(byKey.get(item.subject), now))
