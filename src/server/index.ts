@@ -42,9 +42,9 @@ export { principalSchema, type Credential } from './principals.js';
 /** Routes that answer without a bearer token. */
 export const publicRoutes: readonly RouteModule[] = [healthRoutes, githubRoutes, signinRoutes];
 /**
- * Every authenticated `/api/` route, in matching order. A resource adds its module here, or
- * registers it in routes.ts (`registerApiRoutes`: the main watch, GY-1519); modules ahead of the
- * operator-agent guard authorize their callers themselves.
+ * Every authenticated `/api/` route, in matching order. A resource adds its module here or in
+ * routes.ts (`registerApiRoutes`); modules ahead of the operator-agent guard authorize their
+ * callers themselves.
  */
 export const apiRoutes: readonly RouteModule[] = registerApiRoutes([
   operatorAgentRoutes, proofGrantRoutes, goalRoutes,

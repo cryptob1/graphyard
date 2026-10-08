@@ -154,21 +154,25 @@ export function mainWatchDetail(commit: Pick<MainWatchCommit, 'sha' | 'subject' 
     + `${freeze ? 'Promotion is frozen until an admin acknowledges it' : 'Reported only: nothing is reverted or reworked'}; acknowledge it with ${acknowledgeCommand(commit.sha)}`;
 }
 
-/** A commit the verdict does not cover yet: younger than the settling bound at `now`. */
+/** A commit still inside the settling grace at `now`: too young for an unexplained one to be judged unknown. */
 const settling = (commit: Pick<MainWatchCommit, 'at'>, now: number) => { const at = Date.parse(commit.at); return Number.isFinite(at) && now - at < mainWatchSettleMs; };
 
 /**
  * The verdict over one read: every commit the history holds or the state still carries, labelled;
- * what is unknown (unacknowledged, settled) and what newest commit the verdict covers. Pure, so the
- * step and its tests share it.
+ * what is unknown (unacknowledged, settled) and the newest commit the verdict covers. An explained
+ * commit is covered at once, however fresh; an unexplained one still settling is not judged yet, so
+ * the verdict stops below it and promotion (with the freeze on) waits there, never for a merge the
+ * control plane has already recorded. Pure, so the step and its tests share it.
  */
 export function mainWatchVerdict(history: MainWatchHistory, carried: readonly UnknownMainCommit[], inputs: MainWatchInputs, acknowledged: ReadonlySet<string>, now: number) {
   const inHistory = new Set(history.commits.map(commit => commit.sha));
   // The commits the last verdict held unknown that this read no longer reaches: judged again against today's records, never forgotten.
   const retained = carried.filter(entry => !inHistory.has(entry.sha)).map(entry => ({ ...entry, parents: [] as string[] }));
   const classified = classifyMainCommits([...history.commits, ...retained], inputs);
+  const pending = (commit: ClassifiedMainCommit) => commit.label === 'unknown' && !acknowledged.has(commit.sha) && settling(commit, now);
   const unknown = classified.filter(commit => commit.label === 'unknown' && !acknowledged.has(commit.sha) && !settling(commit, now));
-  const covered = history.commits.find(commit => !settling(commit, now))?.sha ?? (history.commits.length ? history.since : history.tip);
+  const judged = classified.slice(0, history.commits.length), newestPending = judged.findIndex(pending);
+  const covered = newestPending < 0 ? history.tip : judged.slice(newestPending + 1).find(commit => !pending(commit))?.sha ?? history.since;
   return { classified, unknown, tip: covered };
 }
 

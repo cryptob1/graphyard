@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import EmbeddedPostgres from 'embedded-postgres';
 import { daemonStateSchema, daemonSummary, emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { acknowledgeCommand, classifyMainCommits, mainWatchAttention, mainWatchFreezeFromEnv, mainWatchHistoryLimit, mainWatchKey, mainWatchReads, mainWatchSettleMs, mainWatchStateSchema, mainWatchUnknownListed, type MainWatchCommit, type MainWatchPolicy, type MainWatchReads } from '../src/daemon/main-watch.js';
-import { promotionCycle, promotionFrozenReason, type PromotionReads } from '../src/daemon/deployment.js';
+import { promotionCycle, promotionFrozenReason, promotionReadWindows, type PromotionReads } from '../src/daemon/deployment.js';
 import { masterConfigSchema } from '../src/master.js';
 import type { Principal, Work } from '../src/model.js';
 import { Store } from '../src/store.js';
@@ -115,10 +115,10 @@ test('unit:main-watch-step — the step runs after deployment verification, stor
   assert.equal(raised(result.actions).length, 0);
   now += 3 * minute; items = [...work, delivered('GY-9', sha('m9'))];
   result = await runCycle(config, state, settlingWorld.effects, () => now);
-  assert.equal(state.mainWatch?.tip, sha('u1'));
+  assert.equal(state.mainWatch?.tip, sha('m9'), 'delivered: the verdict covers the tip at once, fresh as it is, so promotion never waits for a recorded merge');
   now += mainWatchSettleMs;
   result = await runCycle(config, state, settlingWorld.effects, () => now);
-  assert.equal(state.mainWatch?.tip, sha('m9'), 'settled and delivered: the verdict covers the tip');
+  assert.equal(state.mainWatch?.tip, sha('m9'), 'settled and delivered: the verdict still covers the tip');
   assert.deepEqual(state.mainWatch?.unknown, []); assert.equal(raised(result.actions).length, 0, 'never reported');
   // The same fresh commit nothing ever explains: reported once it has settled, and not before.
   const stranger = commit('s9', 'Pushed straight to main', 'A. Stranger', iso(now - minute));
@@ -257,6 +257,8 @@ test('unit:main-watch-freeze — with freeze: true promotionCycle takes the froz
   // An operator promotes by hand past the commit: the production record moves and the read no longer reaches it; the freeze stands.
   since = sha('x1'); history = [commit('x2', 'Merge pull request #2', 'graphyard[bot]')];
   ledger.mainSha = sha('x2');
+  // The promotion drive re-reads the ledger once its window has passed; the watch reads the checkout every cycle.
+  now += promotionReadWindows(20_000).ledgerMs;
   for (let n = 0; n < 2; n++) { now += 20_000; await runCycle(config, state, world.effects, () => now); }
   assert.deepEqual(state.mainWatch?.unknown.map(entry => entry.sha), [sha('x2'), sha('x1')], 'the commit the read no longer reaches is kept');
   assert.deepEqual(state.mainWatch?.frozen, { sha: sha('x2'), since: began }, 'the newest unknown commit heads the freeze, which keeps the time it began');

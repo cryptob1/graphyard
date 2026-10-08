@@ -607,6 +607,7 @@
     "tests/soak-flake-ledger.test.ts": 1100,
     "tests/soak-loop-wake.test.ts": 34070,
     "tests/soak-main-guard.test.ts": 31000,
+    "tests/soak-main-watch.test.ts": 102000,
     "tests/soak-review.test.ts": 35617,
     "tests/soak-sessions.test.ts": 156501,
     "tests/soak-supervised.test.ts": 17000,

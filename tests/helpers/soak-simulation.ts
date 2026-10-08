@@ -32,7 +32,7 @@ import { type DecidePayload, diagnosticianSettings } from '../../src/runner/payl
 import { clearDecompositionRuns } from '../../src/decomposition-step.js';
 import { type ScopeRequestState, scopeRefusalBlocker } from '../../src/model/scope.js';
 import { stoppedStates } from '../../src/daemon/effects.js';
-import { mainWatchHistoryLimit, type MainWatchCommit } from '../../src/daemon/main-watch.js';
+import { mainWatchHistoryLimit, type MainWatchCommit, type MainWatchPolicy } from '../../src/daemon/main-watch.js';
 import { loopThroughputMeasurement, throughputClaim } from '../../src/throughput.js';
 import { type RunOptions, type RunRecord, type RunResult, type Runner } from '../../src/runner/types.js';
 import { type DiagnosticianEffects } from '../../src/daemon/diagnosis.js';
@@ -147,11 +147,15 @@ export interface PromotionDay { validationMs?: number; promoteAfterMs?: number |
 /**
  * GY-1519: the main watch over the day's moving main. Each `foreign` commit is pushed straight onto
  * main at `at` by `author`, and an admin acknowledges it through the real route `acknowledgeAfterMs`
- * after it landed (null: never). With `freeze` the loop's promotion drive takes the watch's freeze.
- * Once the watch has raised its first line, the day fills the cursor past its bound so
- * `pruneDaemonState` really retires the line's row, as a busy day's would be.
+ * after it landed (null: never). The day's own pushes to main — the file split, the NOTICE, the docs
+ * reword, each a single-parent commit no delivery explains — are the operator's, acknowledged
+ * `acknowledgeOwnAfterMs` after they landed (null: never). With `freeze` the loop's promotion drive
+ * takes the watch's freeze. Once the watch has raised its first line, the day fills the cursor past
+ * its bound so `pruneDaemonState` really retires the line's row, as a busy day's would be.
  */
-export interface MainWatchDay { freeze: boolean; foreign: { at: number; author: string; subject: string; acknowledgeAfterMs: number | null }[] }
+export interface MainWatchDay { freeze: boolean; foreign: { at: number; author: string; subject: string; acknowledgeAfterMs: number | null }[]; acknowledgeOwnAfterMs: number | null }
+/** A commit on the day's main the watch cannot explain: pushed by the suite (`own: false`) or by the day's own script (`own: true`). */
+export interface MainWatchLanding { sha: string; at: number; subject: string; author: string; own: boolean; acknowledgeAt: number | null; acknowledgedAt: number | null }
 /**
  * GY-1501: the effects `daemonEffects` leaves absent on a supervised install, whose config carries no
  * operator-agent, approver or reviewer identity: every decision, approver, escalation and reviewer
@@ -1440,18 +1444,26 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     },
   } : undefined;
   // GY-1519: the loop's main watch. Its history read walks main's first parents in the simulated
-  // GitHub from the tip down to the promoted commit (the production record), never past the fallback
-  // bound; its policy read is the real control plane's. Foreign commits land straight on main at their
-  // time and are acknowledged by the admin through the real route, both inside the read, as the
-  // promotion day's landings are. The day counts every read and the largest history and unknown
-  // list the watch held, and whether the cursor's bound really pruned a raised line's row.
-  const mainWatchDay = options.mainWatch && { ...options.mainWatch, landed: [] as { sha: string; at: number; acknowledgeAt: number | null; acknowledgedAt: number | null }[],
-    historyReads: 0, policyReads: 0, largestHistory: 0, largestUnknown: 0, reports: [] as { sha: string; at: number; detail: string }[], filled: false, rowPruned: false, frozenAt: [] as number[], unfrozenAt: [] as number[],
+  // GitHub from the tip down to the promoted commit (the production record), everything since it as
+  // the real read does; its policy read is the real control plane's. Foreign commits land straight on
+  // main at their time and are acknowledged by the admin through the real route, both inside the
+  // read, as the promotion day's landings are; the day's own single-parent pushes are acknowledged
+  // the same way. The day counts every read and the largest history and unknown list the watch held,
+  // when each commit was first and last unknown, and whether the cursor's bound really pruned a
+  // raised line's row.
+  const mainWatchDay = options.mainWatch && { ...options.mainWatch, landed: [] as MainWatchLanding[], foreignLanded: new Set<number>(),
+    historyReads: 0, policyReads: 0, largestHistory: 0, largestUnknown: 0, reports: [] as { sha: string; at: number; detail: string }[], filled: false, rowPruned: false, frozenAt: [] as number[], unfrozenAt: [] as number[], reasons: new Set<string>(),
+    // When each commit was first and last unknown; every change the policy read returned; and any commit the list dropped before its acknowledgement was recorded (the suite expects none).
+    unknownSeen: new Map<string, { first: number; last: number }>(), policyLog: [] as { at: number; acknowledged: string[]; windows: string[] }[], vanished: [] as { sha: string; at: number; tip: string | null; unknown: string[]; frozen: string | null }[],
     observe(result: Awaited<ReturnType<typeof runCycle>>, at: number) {
       for (const action of result.actions) if (action.detail.startsWith('Main watch:')) this.reports.push({ sha: action.detail.match(/commit ([0-9a-f]{40})/)?.[1] ?? '', at, detail: action.detail });
       this.largestUnknown = Math.max(this.largestUnknown, state.mainWatch?.unknown.length ?? 0);
+      for (const entry of state.mainWatch?.unknown ?? []) { const seen = this.unknownSeen.get(entry.sha); if (seen) seen.last = at; else this.unknownSeen.set(entry.sha, { first: at, last: at }); }
+      for (const [sha, seen] of this.unknownSeen) if (seen.last !== at && !this.vanished.some(entry => entry.sha === sha) && this.landed.find(entry => entry.sha === sha)?.acknowledgedAt === null)
+        this.vanished.push({ sha, at, tip: state.mainWatch?.tip ?? null, unknown: (state.mainWatch?.unknown ?? []).map(entry => entry.sha.slice(0, 8)), frozen: state.mainWatch?.frozen?.sha.slice(0, 8) ?? null });
       const frozen = !!state.mainWatch?.frozen, was = this.frozenAt.length > this.unfrozenAt.length;
       if (frozen && !was) this.frozenAt.push(at); else if (!frozen && was) this.unfrozenAt.push(at);
+      if (state.promotion?.reason) this.reasons.add(state.promotion.reason.replace(/frozen since \S+?: /, 'frozen since T: '));
       const row = Object.keys(state.actions).find(key => key.startsWith('main-watch:'));
       if (row && !this.filled) {
         for (let index = 0; index < retainedActions + 20; index++) state.actions[`dispatch:filler:${index}`] = { kind: 'dispatch', work: null, principal: null, state: 'done', detail: 'filler', attempts: 1, epoch: null, cycle: state.cycle, at: new Date(clock.now() + index).toISOString() } as never;
@@ -1463,26 +1475,44 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     history: async () => {
       const now = clock.now();
       mainWatchDay.foreign.forEach((foreign, index) => {
-        if (mainWatchDay.landed[index] || elapsed < foreign.at) return;
+        if (mainWatchDay.foreignLanded.has(index) || elapsed < foreign.at) return;
         const commit = github.commit(foreign.subject, github.files, now);
-        mainWatchDay.landed[index] = { sha: commit.sha, at: now, acknowledgeAt: foreign.acknowledgeAfterMs === null ? null : now + foreign.acknowledgeAfterMs, acknowledgedAt: null };
+        mainWatchDay.foreignLanded.add(index);
+        mainWatchDay.landed.push({ sha: commit.sha, at: now, subject: foreign.subject, author: foreign.author, own: false, acknowledgeAt: foreign.acknowledgeAfterMs === null ? null : now + foreign.acknowledgeAfterMs, acknowledgedAt: null });
       });
-      for (const landed of mainWatchDay.landed) if (landed && landed.acknowledgedAt === null && landed.acknowledgeAt !== null && now >= landed.acknowledgeAt) {
-        await api(principals.operator, 'POST', 'main-watch/acknowledge', { sha: landed.sha, reason: 'landed by hand, reviewed on the host' });
+      // As the real read: everything since the production record, however much landed; only a record
+      // the first-parent walk never reaches (none here) falls back to the newest `mainWatchHistoryLimit`.
+      const since = promotedSha(), commits: MainWatchCommit[] = [];
+      let reached = false;
+      for (let at: string | undefined = github.tip; at; at = github.commits.get(at)?.parents[0]) {
+        if (at === since) { reached = true; break; }
+        const commit = github.commits.get(at);
+        if (!commit) break;
+        let landing = mainWatchDay.landed.find(entry => entry.sha === commit.sha);
+        if (!landing && commit.parents.length === 1 && commit.message !== 'root') {
+          // The day's own push to main: single-parent, so no merge GitHub made for a delivery.
+          landing = { sha: commit.sha, at: commit.at, subject: commit.message.split('\n')[0], author: 'soak-operator', own: true, acknowledgeAt: mainWatchDay.acknowledgeOwnAfterMs === null ? null : commit.at + mainWatchDay.acknowledgeOwnAfterMs, acknowledgedAt: null };
+          mainWatchDay.landed.push(landing);
+        }
+        commits.push({ sha: commit.sha, parents: commit.parents, subject: commit.message.split('\n')[0], author: landing?.author ?? 'graphyard[bot]', at: new Date(commit.at).toISOString() });
+      }
+      if (!reached) commits.splice(mainWatchHistoryLimit);
+      for (const landed of mainWatchDay.landed) if (landed.acknowledgedAt === null && landed.acknowledgeAt !== null && now >= landed.acknowledgeAt) {
+        await api(principals.operator, 'POST', 'main-watch/acknowledge', { sha: landed.sha, reason: landed.own ? 'the operator\'s own push, reviewed on the host' : 'landed by hand, reviewed on the host' });
         landed.acknowledgedAt = now;
       }
       mainWatchDay.historyReads++;
-      const since = promotedSha(), commits: MainWatchCommit[] = [];
-      for (let at: string | undefined = github.tip; at && at !== since && commits.length < mainWatchHistoryLimit; at = github.commits.get(at)?.parents[0]) {
-        const commit = github.commits.get(at);
-        if (!commit) break;
-        const foreign = mainWatchDay.landed.find(entry => entry?.sha === commit.sha);
-        commits.push({ sha: commit.sha, parents: commit.parents, subject: commit.message, author: foreign ? mainWatchDay.foreign[mainWatchDay.landed.indexOf(foreign)].author : 'graphyard[bot]', at: new Date(commit.at).toISOString() });
-      }
       mainWatchDay.largestHistory = Math.max(mainWatchDay.largestHistory, commits.length);
-      return { tip: github.tip, since, commits };
+      return { tip: github.tip, since: reached ? since : null, commits };
     },
-    policy: async () => { mainWatchDay.policyReads++; return api(principals.coordinator, 'GET', 'main-watch'); },
+    policy: async () => {
+      mainWatchDay.policyReads++;
+      const policy = await api(principals.coordinator, 'GET', 'main-watch') as MainWatchPolicy;
+      const acknowledged = policy.acknowledged.map(entry => entry.sha.slice(0, 8)), windows = policy.directMergeWindows.map(window => `${window.since}..${window.until}`);
+      const last = mainWatchDay.policyLog.at(-1);
+      if (!last || last.acknowledged.join() !== acknowledged.join() || last.windows.join() !== windows.join()) mainWatchDay.policyLog.push({ at: elapsed, acknowledged, windows });
+      return policy;
+    },
   } : undefined;
   // GY-1385: the loop's own throughput measurement after each verified deployment, through the
   // real loopThroughputMeasurement, recorded under a directory of this day's own. The plane's status
