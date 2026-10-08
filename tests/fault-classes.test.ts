@@ -80,7 +80,7 @@ test('unit:fault-classes — every existing attention kind maps to exactly one c
     ['escalation triggers', escalationTriggers.map(escalationFaultKind)],
     ['failed loop actions', daemonActionKinds.map(daemonActionFaultKind)],
     ['loop attention', ['loop-liveness', 'loop-cost', 'loop-failures', 'loop-silence', 'delivery-budget', 'loop-cursor', 'dispatch-failures']],
-    ['master status builders', ['disk-pressure', 'resource-bound', 'ledger-refusal', 'scope-request', 'consent-hold', 'review-conflict', 'unobtainable-review', 'decision-refused', 'decision-stale', 'decision-unanswered',
+    ['master status builders', ['disk-pressure', 'resource-bound', 'docs-headroom', 'ledger-refusal', 'scope-request', 'consent-hold', 'review-conflict', 'unobtainable-review', 'decision-refused', 'decision-stale', 'decision-unanswered',
       'approver-launch', 'request-remedy', 'stalled-action', 'stalled-item', 'unanswered-request', 'stuck-request', 'overlong-session', 'context-overflow', 'timing-failure', 'agent-request', 'owed-decision', 'generated-files',
       'github-budget', 'intervention-pattern', 'throughput', 'executor', 'setup', 'installation', 'sudo', 'unrunnable-remedy', 'role-capacity', 'concurrency-starved', 'fleet', 'fleet-capacity', 'actorless',
       'nonexercising-proof', 'retry-stopped', 'review-settlement', 'launch-review']],

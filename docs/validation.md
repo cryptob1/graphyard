@@ -9,8 +9,10 @@ An `e2e:` proof passes from pinned candidate, bundle, separate [collector](runne
 
 - `http`: `method`, `path`, optional `body`, expected `status`; `expect` checks dotted JSON `path` (`equals`, `exists`, `type`, `includes`); `save` keeps values.
 - `browser` (Playwright Chromium): `open` `path`, `fill` `label` with `value`, `click`/`expectText` `text`, optionally by `role`; `exact: false` matches substrings.
+- `command`: `run` in the checkout with `TARGET_URL`, exit 0 passes, last 50 lines kept: `{"kind":"command","run":"npx playwright test"}`.
+- `agent`: agent-browser pursues `goal` at `path` until `success` holds, ending `VERDICT: PASS|FAIL - reason`, screenshot kept: `{"kind":"agent","goal":"Win tic-tac-toe","success":["Board says You win"],"path":"/games"}`.
 
-Values: `{{token}}`, `{{run}}`, `{{case}}`, saved. `graphyard e2e list` refuses malformed cases by file, field. `graphyard e2e sync` (`admin`) registers scenario revisions; edits make new ones, proofs keep theirs. `graphyard e2e run CASE|--tag T|--target uat|--all --url URL`: `GRAPHYARD_TOKEN`/`--token-file`, no token argument; `--step-timeout` (30 s); `--retries N` (none); prints failing steps, reasons; `--report` JSON; non-zero on failure; records base URL, served SHA, duration, outcome, failing step unless `--no-record`. **Tests** shows last outcome, SHA, environment, 20-run pass rate, flaky flag, failed steps, required/optional.
+Both: `timeoutSeconds` (600). Case `secrets: ["NAME"]` from `~/.config/graphyard/INSTALL/e2e-secrets.TARGET.env` (0600, uncommitted) as variables and `{{secret:NAME}}`, redacted; missing fails naming file, variable. Values: `{{token}}`, `{{run}}`, `{{case}}`, saved. `graphyard e2e list` refuses malformed cases by file, field. `graphyard e2e sync` (`admin`) registers scenario revisions; edits make new ones, proofs keep theirs. `graphyard e2e run CASE|--tag T|--target uat|--all --url URL`: `GRAPHYARD_TOKEN`/`--token-file`, no token argument; `--step-timeout` (30 s); `--retries N` (none); prints failing steps, reasons; `--report` JSON; non-zero on failure; records base URL, served SHA, duration, outcome, failing step unless `--no-record`. **Tests** shows last outcome, SHA, environment, 20-run pass rate, flaky flag, failed steps, required/optional.
 
 **Every release candidate runs `uat` cases**, in id order, as [`release validate`](delivery.md#release-candidates)'s `e2e` suite (`GRAPHYARD_UAT_URL`, `GRAPHYARD_UAT_TOKEN`; `--suite` commands write detail to `GRAPHYARD_SUITE_DETAIL`); `graphyard e2e record REPORT` records every attempt.
 
@@ -20,7 +22,7 @@ One retry: **passed**; **failed** (both); **flaky** (retry passed at same served
 
 Flaky required cases block promotion until `evidence` decision (`{"case":ID,"runId":RUN,"sha":FULL_SHA}` on hold item, another agent approving) accepts; refused unless both attempts recorded at that SHA. `release promote` reads only that run's and SHA's applied decisions. Workflow's `release promote ID` (`GRAPHYARD_URL`, `GRAPHYARD_TOKEN`) promotes only passing UATs.
 
-`e2e/contract.json` lists required customer outcomes: `id`, `title`, optional `criteria`, proving `cases` (shareable). Pre-cut `graphyard release contract` refuses `release cut`, naming outcome, case, when bound case is missing, invalid, not `uat`-targeted or optional, or required case proves nothing.
+`e2e/contract.json` lists required customer outcomes: `id`, `title`, optional `criteria`, proving `cases` (shareable). Pre-cut `graphyard release contract` refuses `release cut`, naming outcome and case, when a bound case is missing, invalid, not `uat`-targeted, optional, or proves nothing.
 
 ## Flake ledger
 

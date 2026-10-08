@@ -31,11 +31,11 @@ Installers derive limits; unset ones are `delegationLimits` drift.
 
 ### Production deployment observation
 
-A merge unserved five minutes after new `GRAPHYARD_BUILD_SHA` is `delivery.deployment-incident`; until then, or with provider attempt past serving commit in flight, `production` shows `aheadBy`, `rollingOut: true`, no "main is N commits ahead of production" attention. With `release/production` (`GRAPHYARD_PRODUCTION_BRANCH`) production is measured against it (unpromoted merges: pipeline lag). Deployments: Railway's API (`RAILWAY_API_TOKEN`/`RAILWAY_TOKEN`), else App-read GitHub deployments under [production environment name](#production-environment-name); in-flight holds incident, failed names log URL. A lagging list yields to a fresh `master verify-deployment` endpoint observation (`servingSource: endpoint`); the running build's `/healthz` commit outranks both (`servingSource: build`). Probe: `master init --deployment-url https://YOUR-DOMAIN/healthz --deployment-sha-field commit`. Loop reuses last verified observation for `run.deploymentReuseMinutes` (15; `master config deploymentReuseMinutes=N`, `0` reads every cycle) while nothing is pending.
+A merge unserved five minutes after new `GRAPHYARD_BUILD_SHA` is `delivery.deployment-incident`; before then, or with a provider attempt in flight, `production` shows `aheadBy`, `rollingOut: true` and no "main is N commits ahead of production" attention. With `release/production` (`GRAPHYARD_PRODUCTION_BRANCH`) production is measured against it (unpromoted merges are pipeline lag). Deployments: Railway's API (`RAILWAY_API_TOKEN`/`RAILWAY_TOKEN`), else App-read GitHub deployments under [production environment name](#production-environment-name); in-flight holds the incident; a failed one names its log URL. A fresh `master verify-deployment` endpoint observation (`servingSource: endpoint`) outranks a lagging list; the running build's `/healthz` commit outranks both (`servingSource: build`). Probe: `master init --deployment-url https://YOUR-DOMAIN/healthz --deployment-sha-field commit`. Loop reuses last verified observation for `run.deploymentReuseMinutes` (15; `master config deploymentReuseMinutes=N`, `0` reads every cycle) while nothing is pending.
 
 Deliveries awaiting not-yet-due or validating [promotion](delivery.md) are skipped by release lag and the `loaded-revision` [resource](operations-reference.md#control-plane-resources), naming `nextDueAt`.
 
-After a verified deployment the loop measures throughput on the served release into `.graphyard/measurements/throughput` (`scripts/measure-throughput.mjs --record` too), excluding deliveries a master, operator or human hand touched; all ≥20 window deliveries excluded raises `escalation:throughput:GY-N:REV` once, and the loop files an owner item.
+After a verified deployment the loop measures served-release throughput into `.graphyard/measurements/throughput` (`scripts/measure-throughput.mjs --record` too), excluding deliveries a master, operator or human hand touched; all ≥20 window deliveries excluded raises `escalation:throughput:GY-N:REV` once and files an owner item.
 
 ### Deployment incident
 
@@ -43,7 +43,7 @@ Railway deploys `release/production` within a minute of promotion. `/healthz` `c
 
 #### Production environment name
 
-Railway reports to GitHub as `<project> / production` (`graphyard / production`). Startup takes ledger's master-published `production.environment` (run field `productionEnvironment`), else `GRAPHYARD_PRODUCTION_ENVIRONMENT` (`.railway/railway.ts`), else `production`; changes apply at restart. Check: startup line `production observation via GitHub deployments to NAME`, `/api/status` `production.providerDescription`.
+Railway reports to GitHub as `<project> / production`. Startup takes ledger's master-published `production.environment` (run field `productionEnvironment`), else `GRAPHYARD_PRODUCTION_ENVIRONMENT` (`.railway/railway.ts`), else `production`; changes apply at restart. Check: startup line `production observation via GitHub deployments to NAME`, `/api/status` `production.providerDescription`.
 
 ## Backup, upgrade, rollback
 
