@@ -6,8 +6,10 @@ import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import type { Principal, Work } from '../src/model.js';
-import { recordSession, type RuntimeSession, type SessionHandle } from '../src/model/sessions.js';
-import { lostAfterReports, observeSessions, observedRuntimeState, reportedHandle, sessionObservationFreshMs, sessionObservationRefreshMs, sessionView, runningSessions } from '../src/model/session-state.js';
+import { recordSession, type RuntimeSession, type SessionHandle, type SessionHandleInput } from '../src/model/sessions.js';
+import { endedByFact, lostAfterReports, observeSessions, observedRuntimeState, registeredLaunch, reportedHandle, sessionObservationFreshMs, sessionObservationRefreshMs, sessionView, settledPurpose, runningSessions } from '../src/model/session-state.js';
+import { reconcileAutoDispatch } from '../src/model/dispatch.js';
+import { reconciledClosure } from '../web/workers-view.js';
 import { dispatchEffects, emptyDispatchCursor, herdrSessionListing, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
 import { runtimeEndedStates } from '../src/harness.js';
 import { masterConfigSchema } from '../src/master.js';
@@ -152,7 +154,8 @@ test('unit:session-liveness-model — the rule itself: what a listed entry says,
   const handle = (fields: Partial<SessionHandle>): SessionHandle => ({ id: 's', kind: 'implementation', principal: 'p', epoch: 1, runtime: 'claude', host: 'host-1', workspace: null, tab: null,
     pane: 'wF:p1', agentName: null, role: null, head: null, attach: null, transcript: null, subject: 'GY-1: s', startedAt: now.toISOString(), updatedAt: now.toISOString(), endedAt: null,
     state: 'running', outcome: null, ...fields });
-  const work = (sessions: SessionHandle[]) => [{ id: 'w', key: 'GY-1', sessions } as unknown as Work];
+  // The attempt the handle names holds its lease, as a launching worker's does (the claim precedes the handle).
+  const work = (sessions: SessionHandle[]) => [{ id: 'w', key: 'GY-1', lease: { owner: 'p', epoch: 1, expiresAt: new Date(now.getTime() + 90_000).toISOString() }, sessions } as unknown as Work];
   // Registered a moment ago, before its runtime started: a pane without an agent yet, or no pane
   // listed at all, is a session starting, not one that ended or vanished.
   const young = handle({});
@@ -165,6 +168,7 @@ test('unit:session-liveness-model — the rule itself: what a listed entry says,
     { observed: 'idle', seenAt: new Date(now.getTime() - 60_000).toISOString(), live: true, unseenMs: null });
   assert.equal(sessionView(handle({ observed: 'working', observedAt: new Date(now.getTime() - sessionObservationFreshMs - 1).toISOString() }), now).live, false, 'stale: not running');
   assert.equal(sessionView(handle({ observed: 'lost', observedAt: now.toISOString() }), now).live, false, 'lost is never running');
+  assert.equal(sessionView(handle({ observed: 'working', observedAt: now.toISOString(), missedReports: lostAfterReports }), now).live, false, 'a handle the reports keep missing is not running either, however fresh its last sighting (GY-1532)');
   assert.equal(sessionView(handle({ state: 'finished', observed: 'working', observedAt: now.toISOString() }), now).live, false, 'a closed record is never running');
 });
 
@@ -238,4 +242,179 @@ test('unit:session-liveness-model — only the observer writes the observation, 
   assert.deepEqual([reopened.state, reopened.agentName, reopened.pane, reopened.tab, reopened.attach, reopened.transcript, reopened.observed, reopened.outcome],
     ['running', null, null, null, null, null, undefined, null], 'the retry is not pointed at the previous attempt\'s pane, attach command or transcript');
   assert.equal(reopened.role, 'approver', 'while the slot it occupies is the same one');
+});
+
+/**
+ * GY-1532. On 8 October 2026 every worker and reviewer session on vishrog closed as "vanished …
+ * so the session is lost" within a minute of its work landing — the loop had closed the pane
+ * itself once the attempt was submitted or the verdict read, and the report, judging absence
+ * alone, counted two missed reports and lost it. A session whose purpose the item says is over
+ * (attempt ended, request answered) is ended on the first report that no longer lists it, with
+ * that fact as its terminal reason. One whose purpose stands is held — missed, counted, not shown
+ * running — never lost: every attempt ends on the record (its supervisor releases the lease once
+ * Herdr drops the pane, the loop keeps a dead worker's work, the lease lapses) and the item is
+ * dispatched again under a fresh lease, and the next report ends the handle with that fact.
+ */
+test('unit:session-liveness-model — GY-1532: a session whose attempt or request is over is ended with that fact on the first report that no longer lists it, and one whose attempt stands is held until it ends, never lost', () => {
+  const now = new Date('2026-10-08T04:20:35.000Z'), ago = (ms: number) => new Date(now.getTime() - ms).toISOString(), ahead = (ms: number) => new Date(now.getTime() + ms).toISOString();
+  const handle = (fields: Partial<SessionHandle>): SessionHandle => ({ id: 'agent-a:1', kind: 'implementation', principal: 'agent-a', epoch: 1, runtime: 'claude', host: 'host-1', workspace: 'wF', tab: null,
+    pane: 'wF:p1', agentName: 'work-claude', role: null, head: null, attach: null, transcript: null, subject: 'GY-1513: implement', startedAt: ago(10 * 60_000), updatedAt: ago(30_000), endedAt: null,
+    state: 'running', outcome: null, observed: 'working', observedAt: ago(30_000), ...fields });
+  const item = (fields: Partial<Work>): Work => ({ id: 'w', key: 'GY-1513', lease: null, submission: null, autoDispatch: { review: null, producers: [], history: [] }, ...fields } as unknown as Work);
+  const report = (work: Work, listing: RuntimeSession[]) => observeSessions([work], listing, now, { hostId: 'host-1' }).entries;
+
+  // The attempt still holds its lease and the runtime stops listing the pane: the handle is held,
+  // never lost. Each miss is counted and written up to the second, from which no reader shows it
+  // running; later misses are held without a write, and the record waits for the item's fact.
+  const live = item({ lease: { owner: 'agent-a', epoch: 1, expiresAt: ahead(90_000) }, sessions: [handle({})] });
+  assert.equal(settledPurpose(live, live.sessions![0], now.getTime()), null);
+  assert.equal(endedByFact(live, live.sessions![0]), true, 'a worker handle ends with its attempt');
+  const [miss] = report(live, []);
+  assert.deepEqual([miss.missedReports, miss.closed, miss.observed, miss.changed], [1, null, 'working', true]);
+  const [second] = report(item({ ...live, sessions: [handle({ missedReports: 1 })] }), []);
+  assert.deepEqual([second.missedReports, second.closed, second.changed], [2, null, true], 'a live attempt whose pane stays unlisted is held, not lost');
+  const unseen = handle({ missedReports: 2 });
+  assert.equal(sessionView(unseen, now).live, false, 'and from the second miss no reader shows it running');
+  const [third] = report(item({ ...live, sessions: [unseen] }), []);
+  assert.deepEqual([third.missedReports, third.closed, third.changed], [3, null, false], 'held on, without a write');
+  // The loss ends the attempt — its supervisor surrendered the lease once Herdr dropped the pane,
+  // or the loop kept the interrupted work of a worker whose supervisor died with it — and the item
+  // was dispatched again under a fresh lease. The next report ends the handle with that fact: the
+  // terminal event names the release, its cause and the relaunch, never a loss.
+  const gone = 'ended without submitting: its agent session work-claude is gone from Herdr and its supervisor has exited without releasing the lease';
+  const relaunched = item({ lease: { owner: 'agent-b', epoch: 2, expiresAt: ahead(90_000) }, sessions: [unseen],
+    pipeline: { attempts: [{ epoch: 1, owner: 'agent-a', claimedAt: ago(600_000), endedAt: ago(40_000), end: 'released' }, { epoch: 2, owner: 'agent-b', claimedAt: ago(10_000), endedAt: null, end: null }] },
+    capacity: { exhaustions: [{ role: 'worker', epoch: 1, cause: 'interrupted', reason: gone }], escalations: [] } } as unknown as Partial<Work>);
+  const [recovered] = observeSessions([relaunched], [], now, { hostId: 'host-1', firstMissed: { 'w\u0000agent-a:1': ago(25_000) } }).entries;
+  assert.deepEqual([recovered.closed, recovered.observed, recovered.missedReports], ['ended', 'ended', 0]);
+  assert.equal(recovered.outcome, `the claude runtime on host-1 no longer reports pane wF:p1 (unlisted for 25s): attempt 1 of GY-1513 was released at ${ago(40_000)} (${gone}); attempt 2 runs under a fresh lease held by agent-b, so the session is over`);
+  recordSession(relaunched, reportedHandle(recovered), 'executor-a', now);
+  assert.equal(reconciledClosure(relaunched.sessions![0]), 'ended', 'the Workers page reads it as ended by its runtime');
+  // A lapse ends it the same way, and so does a lease that lapsed under a later attempt.
+  assert.match(report(item({ lease: { owner: 'agent-a', epoch: 1, expiresAt: ago(1_000) }, sessions: [unseen], pipeline: { attempts: [{ epoch: 1, owner: 'agent-a', claimedAt: ago(600_000), endedAt: ago(1_000), end: 'expired' }] } } as unknown as Partial<Work>), [])[0].outcome!,
+    /\(unlisted for 2 session reports\): attempt 1 of GY-1513 ended when its lease lapsed at .*, so the session is over$/);
+  assert.match(report(item({ lease: { owner: 'agent-b', epoch: 2, expiresAt: ago(1_000) }, sessions: [handle({})] }), [])[0].outcome!, /attempt 1 of GY-1513 ended, and attempt 2's lease lapsed at .*, so the session is over$/);
+
+  // Submitted: the loop closed the pane once the lease ended. The first report that no longer
+  // lists it ends the record with the submission as the reason — a terminal event, not a loss.
+  const submitted = item({ submission: { epoch: 1, pr: 989 }, sessions: [handle({})] });
+  const [ended] = report(submitted, []);
+  assert.deepEqual([ended.closed, ended.observed, ended.observedAt, ended.missedReports], ['ended', 'ended', now.toISOString(), 0]);
+  assert.equal(ended.outcome, 'the claude runtime on host-1 no longer reports pane wF:p1: attempt 1 of GY-1513 was submitted as pull request #989, so the session is over');
+  recordSession(submitted, reportedHandle(ended), 'executor-a', now);
+  const stored = submitted.sessions![0];
+  assert.deepEqual([stored.state, stored.observed, stored.endedAt], ['finished', 'ended', now.toISOString()]);
+  assert.equal(reconciledClosure(stored), 'ended', 'the Workers page shows it ended by its runtime, not as one that stopped responding');
+  // While the runtime still lists it — the supervisor is stopping the agent — it is observed as before, not closed.
+  const [stopping] = report(item({ submission: { epoch: 1, pr: 989 }, sessions: [handle({})] }), [{ name: 'work-claude', pane_id: 'wF:p1', agent: 'claude', agent_status: 'working' }]);
+  assert.deepEqual([stopping.observed, stopping.closed], ['working', null]);
+  // Its agent exited to a shell: ended by the listing, with the attempt's end named too.
+  const [shell] = report(item({ submission: { epoch: 1, pr: 989 }, sessions: [handle({})] }), [{ name: 'work-claude', pane_id: 'wF:p1', agent: null, agent_status: 'idle' }]);
+  assert.equal(shell.outcome, 'the claude runtime on host-1 reports pane wF:p1 as exited to a shell (no agent in the pane) after attempt 1 of GY-1513 was submitted as pull request #989, so the session is over');
+
+  // A lapsed attempt, even inside the launch grace with no coordinate yet: the lease that would
+  // have held it (`launchHeldByLease`) is gone, so the record ends with the lapse rather than
+  // waiting out the grace to be lost (GY-1493 epoch 2 on 8 October 2026).
+  const lapsed = item({ lease: { owner: 'agent-a', epoch: 1, expiresAt: ago(1_000) }, sessions: [handle({ pane: null, agentName: null, observed: undefined, observedAt: undefined, startedAt: ago(60_000) })] });
+  const [expired] = report(lapsed, []);
+  assert.equal(expired.closed, 'ended');
+  assert.equal(expired.outcome, `the claude runtime on host-1 no longer reports session agent-a:1 (registered with no pane or name to match): attempt 1 of GY-1513 ended with its lease expired at ${ago(1_000)}, so the session is over`);
+  // A later attempt holds the item: the earlier session's attempt is over.
+  const [superseded] = report(item({ lease: { owner: 'agent-b', epoch: 2, expiresAt: ahead(90_000) }, sessions: [handle({})] }), []);
+  assert.match(superseded.outcome!, /attempt 1 of GY-1513 ended; attempt 2 runs under a fresh lease held by agent-b, so the session is over$/);
+  // No lease and no submission for the epoch: released, blocked, parked or reconciled — over either way.
+  assert.match(report(item({ sessions: [handle({})] }), [])[0].outcome!, /attempt 1 of GY-1513 ended \(released, blocked, parked or lapsed\) and GY-1513 holds no lease, so the session is over$/);
+
+  // A reviewer: its handle is its request's id. Answered (satisfied) or cancelled, the first
+  // report without its pane ends it with the request's resolution; still requested, it is missed
+  // and held — the reconcile fails and relaunches an unanswered session, and a head change cancels
+  // the request — never lost.
+  const request = { id: 'ddf7e329', kind: 'review' as const, sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), policyRevision: 1, pr: 989, requestedAt: ago(120_000), reason: 'review requested', state: 'requested' as const };
+  const reviewer = (fields: Partial<SessionHandle>) => handle({ id: request.id, kind: 'review', principal: 'reviewer-a', epoch: null, runtime: 'codex', pane: 'wF:p2', agentName: 'review-codex', role: 'review', head: request.sha, ...fields });
+  const asked = item({ autoDispatch: { review: request, producers: [], history: [] }, sessions: [reviewer({})] });
+  assert.deepEqual([report(asked, [])[0].missedReports, report(asked, [])[0].closed], [1, null], 'a standing request: the miss is counted as before');
+  assert.equal(endedByFact(asked, asked.sessions![0]), true, 'a reviewer handle ends with its request');
+  assert.deepEqual(report(item({ ...asked, sessions: [reviewer({ missedReports: 1 })] }), []).map(entry => [entry.missedReports, entry.closed]), [[2, null]], 'and the second miss holds it rather than losing it');
+  // A review session no request names (`master review` by hand, under `review:SHA`) answers to
+  // the runtime alone while its head stands: unlisted past two reports it is lost, so its slot frees.
+  const byHand = item({ candidate: { sha: request.sha }, sessions: [reviewer({ id: `review:${request.sha}`, missedReports: 1 })] } as Partial<Work>);
+  assert.equal(endedByFact(byHand, byHand.sessions![0]), false);
+  const [handEnd] = report(byHand, []);
+  assert.deepEqual([handEnd.closed, handEnd.observed], ['lost', 'ended'], 'closed in the same tick (cause vanished) but recorded as an ended session, not a lost one');
+  assert.match(handEnd.outcome!, /the dispatcher's fresh review request for the standing head is the relaunch that follows$/);
+  assert.doesNotMatch(handEnd.outcome!, /so the session is lost/, 'no outcome on a current head reads as a lost session');
+  // Once the candidate moves on, the head is over and it is ended with that fact.
+  const moved = item({ candidate: { sha: 'c'.repeat(40) }, sessions: [reviewer({ id: `review:${request.sha}`, missedReports: 1 })] } as Partial<Work>);
+  assert.match(report(moved, [])[0].outcome!, /the candidate no longer is aaaaaaaaaaaa \(it is cccccccccccc\), so the session is over$/);
+  assert.equal(report(moved, [])[0].closed, 'ended');
+  const answered = item({ autoDispatch: { review: null, producers: [], history: [{ ...request, state: 'satisfied', resolvedAt: ago(20_000), resolution: 'approved by graphyard-reviewer[bot]' }] }, sessions: [reviewer({})] });
+  const [verdict] = report(answered, []);
+  assert.equal(verdict.closed, 'ended');
+  assert.equal(verdict.outcome, `the codex runtime on host-1 no longer reports pane wF:p2: its review request was satisfied at ${ago(20_000)} (approved by graphyard-reviewer[bot]), so the session is over`);
+  // A producer's request lives in `producers` until it resolves; cancelled, the proof session is over too.
+  const proof = item({ autoDispatch: { review: null, producers: [{ ...request, id: 'p1', kind: 'producer', state: 'cancelled', resolvedAt: ago(5_000), resolution: 'head moved' }], history: [] },
+    sessions: [reviewer({ id: 'p1', kind: 'proof', role: 'proof:integration' })] });
+  assert.match(report(proof, [])[0].outcome!, /its producer request was cancelled at .* \(head moved\), so the session is over$/);
+  // A coordination session answers to no attempt or request here: the loop closes it itself.
+  assert.equal(settledPurpose(item({}), { id: 'approver:1', kind: 'coordination', epoch: null }, now.getTime()), null);
+  assert.equal(endedByFact(item({}), { id: 'approver:1', kind: 'coordination', epoch: null }), false);
+});
+
+/**
+ * GY-1532. A request relaunched while its earlier session's handle is held — unlisted, counted,
+ * waiting for the request to end — registers under that request's id, over a record still
+ * running under another launch's token. Taken over as it was, the record kept the held session's
+ * observation, so the new pane, listed before its agent started, read as an agent that exited.
+ * The takeover closes the held record as superseded first and registers the new session afresh.
+ */
+test('unit:session-liveness-model — GY-1532: a launch registered over a held record closes it as superseded and registers afresh, so the new session starts with no observation of the old', async () => {
+  const writes: SessionHandleInput[] = [];
+  let held = true;
+  const record = async (handle: SessionHandleInput) => {
+    writes.push(handle);
+    if (handle.state === 'running' && !handle.supersede && held) throw new Error('Session handle r1 is held by another launch attempt that is still recorded running');
+    if (handle.state === 'finished') held = false;
+  };
+  const handle: SessionHandleInput = { id: 'r1', kind: 'review', runtime: 'claude', host: 'host-1', subject: 'GY-1513: review', state: 'running' };
+  assert.deepEqual(await registeredLaunch(record, handle, async () => ({ pane: 'wF:p3', agentName: 'review-claude' })), { pane: 'wF:p3', agentName: 'review-claude' });
+  assert.deepEqual(writes.map(write => [write.state, write.supersede ?? false, write.pane ?? null, write.outcome ?? null]),
+    [['running', false, null, null], ['finished', true, null, 'superseded: a later launch for GY-1513: review started its runtime, so this record describes the session before it'], ['running', true, 'wF:p3', null]],
+    'refused, then the held record closed as superseded, then registered with its coordinates');
+  assert.ok(writes[1].launch && writes[1].launch === writes[2].launch, 'both carry this launch\'s token');
+
+  // Through the control plane: the held record, observed working and missed twice under another
+  // launch's token, is closed and reopened; the new session carries none of that observation.
+  let item = await engine.execute(operator, 'create', null, { title: 'Relaunch over a held record', plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'Fresh', proofs: ['unit:fresh'] }] }, randomUUID());
+  item = await engine.execute(operator, 'ready', item.id, {}, randomUUID());
+  const earlier = { id: 'req-1', kind: 'review', role: 'review', runtime: 'claude', host: 'host-1', pane: 'wF:p8', agentName: 'review-claude', subject: `${item.key}: review`, state: 'running', launch: 'a'.repeat(32) } as const;
+  await engine.execute(coordinator, 'session', item.id, earlier, randomUUID());
+  await engine.execute(coordinator, 'session', item.id, { ...earlier, observed: 'working', observedAt: new Date(Date.now() - 120_000).toISOString(), missedReports: 2 }, randomUUID());
+  const plane = (write: SessionHandleInput) => engine.execute(coordinator, 'session', item.id, write, randomUUID());
+  const before = Date.now();
+  await registeredLaunch(plane, { ...earlier, pane: undefined, agentName: undefined, launch: undefined }, async () => ({ pane: 'wF:p9', agentName: 'review-claude' }));
+  const fresh = await handleOf(item.id, 'req-1');
+  assert.deepEqual([fresh.state, fresh.pane, fresh.observed, fresh.missedReports, fresh.outcome], ['running', 'wF:p9', undefined, undefined, null], 'the record describes the new session alone');
+  assert.ok(Date.parse(fresh.startedAt) >= before, 'and started now, so its pane is young until its agent appears');
+  const [listed] = observeSessions([await reload(item.id)], [{ pane_id: 'wF:p9', agent: null, agent_status: 'unknown' }], new Date(), { hostId: 'host-1' }).entries.filter(entry => entry.id === 'req-1');
+  assert.equal(listed, undefined, 'the new pane, listed before its agent starts, does not end the session');
+});
+
+test('unit:session-liveness-model — GY-1532: after a hand-launched review of a standing head is ended for its silence, the dispatcher opens the review request that launches a reviewer under a fresh attempt', () => {
+  const now = new Date('2026-10-08T05:00:00.000Z'), ago = (ms: number) => new Date(now.getTime() - ms).toISOString();
+  const sha = 'a'.repeat(40), baseSha = 'b'.repeat(40);
+  const candidate = { sha, baseSha, pr: 995, branch: 'graphyard/gy-1532-1', author: 'implementer' };
+  const observation = { candidate, checks: [], reviews: [], merged: false, mergeSha: null, mergeable: true, protected: true, files: ['src/a.ts'], scopeFiles: [], at: ago(60_000),
+    prState: 'open', draft: false, baseTip: baseSha, baseTree: '7b'.padEnd(40, '0'), baseTipContained: true };
+  const hand = { id: `review:${sha}`, kind: 'review', principal: 'reviewer-a', epoch: null, runtime: 'codex', host: 'host-1', workspace: 'wF', tab: null, pane: 'wF:p2', agentName: 'review-codex', role: 'review', head: sha,
+    attach: null, transcript: null, subject: 'GY-1532: review', startedAt: ago(40 * 60_000), updatedAt: ago(20 * 60_000), endedAt: null, state: 'running', outcome: null, observed: 'working', observedAt: ago(20 * 60_000), missedReports: 1 } as unknown as SessionHandle;
+  const work = { id: 'w', key: 'GY-1532', title: 'Item', description: '', type: 'bug', priority: 0, dependencies: [], plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'Review', proofs: ['unit:x'] }],
+    policy: { checks: [], review: true, reviewProvider: 'github' }, stage: 'review', revision: 7, policyRevision: 4, createdAt: ago(3_600_000), updatedAt: ago(60_000), stageEnteredAt: ago(60_000), ready: true, epoch: 1, lease: null,
+    workspaces: [], candidate, submission: { epoch: 1, pr: 995 }, reworkRequested: false, scenarioRequirements: [], observation, blocker: null, violations: [], sessions: [hand], autoDispatch: null,
+    evidence: [{ id: 'e1', proof: 'unit:x', sha, baseSha, policyRevision: 4, producer: 'ci-runner', trusted: true, result: 'pass', executed: 3, skipped: 0, at: ago(120_000) }],
+    gates: [{ name: 'ready', passed: true, reasons: [] }, { name: 'build', passed: true, reasons: [] }, { name: 'review', passed: false, reasons: ['Independent approval of the current commit is required'] }] } as unknown as Work;
+  const [ended] = observeSessions([work], [], now, { hostId: 'host-1' }).entries;
+  assert.deepEqual([ended.observed, ended.closed], ['ended', 'lost'], 'the silent hand-launched review is recorded ended (closed same tick, cause vanished), never a lost record');
+  reconcileAutoDispatch(work, [work], now);
+  assert.equal(work.autoDispatch?.review?.state, 'requested', 'the standing head is requested afresh');
+  assert.equal(work.autoDispatch?.review?.sha, sha);
 });

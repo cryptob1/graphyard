@@ -9,7 +9,7 @@ Keep cycling: `master status`; `master run` dispatches (`schedule.order`); merge
 
 `master run` is unit `graphyard-master.service` ([supervision](onboarding.md#the-loop-must-be-supervised)); on `daemon.liveness` `stalled`/`absent`: `systemctl --user restart graphyard-master`, never from a [dirty or non-forward checkout](master-agent-sessions.md#the-coordinator-checkout-is-confined-at-the-os-level).
 
-**Cycle cadence.** Between cycles the loop sleeps `run.intervalSeconds`, at most 30 s while anything is actionable. The dispatcher tick wakes it early, once per new subject its next cycle acts on (claimable item, freed launch profile, scope request on a live lease, routine decision), no sooner than one `run.dispatchIntervalSeconds` after the cycle, logged `woken Ns before the … wait ended: REASONS`; a failed cycle's backoff is never cut short.
+**Cycle cadence.** The loop sleeps `run.intervalSeconds`, at most 30 s while anything is actionable. The dispatcher tick wakes it early, once per new subject its next cycle acts on, no sooner than `run.dispatchIntervalSeconds` after the cycle, logged `woken Ns before the … wait ended: REASONS`; a failed cycle's backoff is not cut short.
 
 ### System-driven items
 
@@ -17,7 +17,7 @@ Unless created `"systemDriven": false`, items refuse hand `dispatch`, `merge`, `
 
 ### Session liveness is reconciled, not trusted
 
-**The control plane reconciles session liveness; closing sessions is not the master's manual duty.** A sweep runs every automatic-dispatch tick (`run.dispatchIntervalSeconds`, default 10, 30 at most); a handle closes at the second consecutive sweep that misses it; an unobserved one is left alone for its first 3 minutes; a paneless worker handle reads `launching` while its lease stands (launch renews it until first heartbeat). A handle another host launched is left to that host's loop. Closures: **Vanished** (missing from two listings running), **Ended** (agentless pane or terminal state; `idle`, `done` and `blocked` are deliberately not terminal), **Superseded** (review or proof session for a head the item moved past, delivered items too; implementation sessions follow lease), **Duplicate** (older session for one role and head). A closure decides no gate, ends no lease, stops no process; concurrency and busy names count live sessions only. A session past its role's maximum (4h implementation, 1h review, `run.producerTimeoutMinutes` for a producer, 12h coordination) is flagged, not closed.
+**The control plane reconciles session liveness; closing sessions is not the master's manual duty.** A sweep runs every automatic-dispatch tick (`run.dispatchIntervalSeconds`, default 10, 30 at most); a coordination handle closes at the second consecutive sweep that misses it; a worker, reviewer or producer handle that a lease or dispatch request names is held until that attempt or request ends; an unobserved one is left alone for its first 3 minutes; a paneless worker handle reads `launching` while its lease stands. A handle another host launched is left to that host's loop. Closures: **Vanished** (a handle no attempt or request names, missing from two listings; a request-less review is recorded ended, relaunched by a fresh review request), **Ended** (agentless pane or terminal state; `idle`, `done` and `blocked` are deliberately not terminal; also unlisted once its attempt ended or its request was answered, that fact recorded), **Superseded** (review or proof session for a head the item moved past, delivered items too; implementation sessions follow lease), **Duplicate** (older session per role and head). A closure decides no gate, ends no lease, stops no process; concurrency and busy names count live sessions only. A session past its role's maximum (4h implementation, 1h review, `run.producerTimeoutMinutes` for a producer, 12h coordination) is flagged, not closed.
 
 **Instead of closing sessions by hand:** do nothing for a finished or dead session (`graphyard master run --once` sweeps); attach to an overlong one with its handle's command. Never mark another session's handle finished to free a slot.
 
@@ -25,11 +25,11 @@ Unless created `"systemDriven": false`, items refuse hand `dispatch`, `merge`, `
 
 ### System invariants
 
-Per cycle (`daemon.invariants.lines`): `follow-ups-per-parent` (1 open), `lingering-sessions` (30 min), `refresh-churn` (3 per own head), `merge-stall` (10 min), `cycle-p90` (30 s), `untriaged-backlog` (24 h), `deploy-lease-loss` (0). Thresholds: `invariants` in `.graphyard/master.json`; `tests/soak-*.test.ts` enforce.
+Per cycle (`daemon.invariants.lines`): `follow-ups-per-parent` (1 open), `lingering-sessions` (30 min), `refresh-churn` (3 per own head), `merge-stall` (10 min), `cycle-p90` (30 s), `untriaged-backlog` (24 h), `deploy-lease-loss` (0). `cycle-p90` judges a cycle's own work, net of child and control-plane waits. Thresholds: `invariants` in `.graphyard/master.json`; `tests/soak-*.test.ts` enforce.
 
 ## Research and diagnosis
 
-`Recurring <class> faults` and `invariant:` faults past `invariantBoundMinutes` get a read-only diagnostician (`run.diagnostician`; human-only parks get no fix); quota refusals wait in `daemon.diagnoses` until `retryAt`, then probe; `stale`/`withdrawn` decisions, stale backlog releases: re-requested ≤3 times, then escalated (30m fault, `decision-stale`); raced, delivered, [plane-wide](operations.md#incident-decision-tree) requests retry faultless; no `loop` fault for restart-lost diagnoses or approver refusals, nor `merge` for base conflicts under 30m.
+`Recurring <class>` and `invariant:` faults past `invariantBoundMinutes` get a read-only diagnostician (`run.diagnostician`; none for human-only parks); quota refusals wait in `daemon.diagnoses` until `retryAt`; `stale`/`withdrawn` decisions, stale backlog releases: re-requested ≤3 times, then escalated (`decision-stale`); raced, delivered, [plane-wide](operations.md#incident-decision-tree) requests retry faultless; a refused fix `create` is `fix-item`, never re-filed; runs stopped at their bound: `overlong-session`; no `loop` fault for restart-lost diagnoses, approver refusals, nor `merge` for base conflicts under 30m.
 
 ## Machine-filed backlog
 

@@ -180,11 +180,13 @@ const actionClaimSchema = z.object({
   host: executorName,
   /** The action kinds this executor can actually run. A kind it cannot run is left for one that can. */
   kinds: z.array(z.enum(nextActionKinds)).min(1).max(nextActionKinds.length).optional(),
+  /** Every kind this executor has a handler for, whatever a launch hold lets it claim this tick (GY-1539); presence records it. */
+  serves: z.array(z.enum(nextActionKinds)).min(1).max(nextActionKinds.length).optional(),
   leaseSeconds: z.number().int().min(10).max(900).optional(),
   work: z.string().min(1).max(200).optional(),
 }).strict();
 /** A presence-only poll (GY-1288): who is asking, where, and what it runs — a claim's own fields, claiming nothing. */
-export const executorPresenceSchema = actionClaimSchema.pick({ executor: true, host: true, kinds: true }).strict();
+export const executorPresenceSchema = actionClaimSchema.pick({ executor: true, host: true, kinds: true, serves: true }).strict();
 const actionSettleSchema = z.object({ executor: executorName.optional(), result: z.enum(['done', 'failed']), reason: z.string().trim().min(1).max(2000) }).strict();
 // A renewal carries no result: it says only that the executor named on the claim is still
 // inside the handler, and asks for the lease it already holds to run on.

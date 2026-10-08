@@ -1,12 +1,15 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import EmbeddedPostgres from 'embedded-postgres';
 import { daemonStateSchema, daemonSummary, emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
-import { keepVerdicts, shadowKeptVerdicts, shadowReads, shadowIdle, shadowStateSchema } from '../src/daemon/cycle-shadow.js';
-import { compareVerdicts, githubOutcome, shadowDue, shadowReport, type ShadowVerdict } from '../src/merge-writer/shadow.js';
+import { keepVerdicts, shadowErrorKey, shadowKeptVerdicts, shadowReads, shadowIdle, shadowStateSchema, shadowVerdictBody, shadowVerdictKey } from '../src/daemon/cycle-shadow.js';
+import { compareVerdicts, githubOutcome, shadowDue, shadowGateAttention, shadowReport, submittedAtOf, type ShadowVerdict } from '../src/merge-writer/shadow.js';
+import { TrialTimeoutError } from '../src/merge-writer/trial.js';
+import { daemonEffects } from '../src/daemon/effects.js';
 import { shadowGateSettings, shadowGateSettingsSchema } from '../src/master/merge-writer-settings.js';
 import { masterConfigSchema } from '../src/master.js';
 import type { Principal, Work } from '../src/model.js';
@@ -40,6 +43,12 @@ test('unit:shadow-due-selection — submission time orders the trials, not stage
   assert.equal(shadowDue([late, early], [], tip)?.key, 'GY-2', 'the earlier submission goes first even though its stage was entered later');
   const resubmitted = pipelined(3, start - 80 * minute, { pipeline: { submittedAt: iso(start - 80 * minute), resubmittedAt: iso(start - 1 * minute) } });
   assert.equal(shadowDue([resubmitted, late], [], tip)?.key, 'GY-1', 'a resubmitted head is as old as its resubmission');
+  // The loop's coordination view drops the pipeline timeline: there the moment this very head was observed orders, then the pull request's creation, then the stage entry.
+  const observedLate = submitted(8, 90, { headObserved: { pr: 8, sha: sha('head8'), at: iso(start - 2 * minute) } }), observedEarly = submitted(9, 10, { headObserved: { pr: 9, sha: sha('head9'), at: iso(start - 40 * minute) } });
+  assert.equal(shadowDue([observedLate, observedEarly], [], tip)?.key, 'GY-9', 'the head observed earlier goes first, whatever the stage entry');
+  const staleObservation = submitted(10, 10, { headObserved: { pr: 10, sha: sha('older-head'), at: iso(start - 99 * minute) }, candidate: { sha: sha('head10'), baseSha: sha('base'), pr: 10, branch: 'b', author: 'w', createdAt: iso(start - 20 * minute) } });
+  assert.equal(submittedAtOf(staleObservation), start - 20 * minute, 'an observation of an earlier head does not date the current one; the pull request creation does');
+  assert.equal(submittedAtOf(submitted(11, 30)), start - 30 * minute, 'without either, the stage entry');
   const merged = pipelined(4, start - 99 * minute, { observation: { merged: true, candidate: { sha: sha('head4') }, checks: [] } });
   assert.equal(shadowDue([merged, late], [], tip)?.key, 'GY-1', 'GitHub merged GY-4 before its turn');
   const earlier = sha('old-head'), delivered = item({ id: 'd', key: 'GY-7', stage: 'done', candidate: { sha: sha('final') }, delivery: { mergedAt: iso(start), mergeSha: sha('d'), authorizationRevision: 1 } });
@@ -192,7 +201,16 @@ test('unit:shadow-step-writes-nothing — across a conflicting head, a passing o
   await runCycle(config, state, effects, now); await shadowIdle(state);
   await runCycle(config, state, effects, now);
   assert.deepEqual(state.shadow.map(entry => entry.key), ['GY-1', 'GY-2'], 'a head whose trial could not run records no verdict');
-  assert.match(state.actions[`shadow-error:${sha('head3')}:${tip}`]?.detail ?? '', /network down/);
+  assert.match(state.actions[shadowErrorKey(sha('head3'), tip)]?.detail ?? '', /network down/);
+  // A trial past its time budget is no verdict either: excluded from the counts, not retried against this tip, and tried again once main moves.
+  const timing = shadowReads(config, '/coordinator', git.run, { base: '/w', record: async () => {}, trial: async () => { throw new TrialTimeoutError('tests', 1_200_000, 'ok - tests/a.test.ts'); } });
+  const slow = emptyDaemonState(config), slowEffects = effectsFor({ work: () => [submitted(4, 5)], now, shadow: timing });
+  await runCycle(config, slow, slowEffects, now); await shadowIdle(slow);
+  await runCycle(config, slow, slowEffects, now); await shadowIdle(slow);
+  await runCycle(config, slow, slowEffects, now);
+  assert.deepEqual(slow.shadow, [], 'a timeout records no verdict');
+  assert.match(slow.actions[shadowErrorKey(sha('head4'), tip)]?.detail ?? '', /timed out during its tests after 1200s; a timeout measures the host, not the merge/);
+  assert.equal(Object.keys(slow.actions).filter(key => key.startsWith('shadow-error:')).length, 1, 'and is not retried against the same tip');
   const subcommands = new Set(git.calls.map(call => call[3]));
   for (const forbidden of ['push', 'branch', 'checkout', 'reset', 'commit', 'merge', 'tag', 'remote']) assert.ok(!subcommands.has(forbidden), `no git ${forbidden}`);
   assert.ok(['fetch', 'merge-tree'].every(name => subcommands.has(name)), git.calls.map(call => call.slice(3, 5).join(' ')).join(' / '));
@@ -221,9 +239,26 @@ test('unit:shadow-status — master status lists the gate report and, for each i
   const section = daemonSummary(state, now(), config.run.intervalSeconds * 1000, config.hostId).shadowGate;
   assert.equal(section.counts['shadow-only-fail'], 1);
   assert.deepEqual(section.disagreements.map(entry => entry.key), ['GY-1'], 'master status carries the shadowGate section with the report');
+  // master status: one attention line per disagreeing item, from the item's newest verdict, however many verdicts it has.
+  const lines = shadowGateAttention([...entries, verdict('GY-2', { outcome: 'agree-pass', at: iso(start + minute) }), verdict('GY-3', { outcome: 'shadow-missed', at: iso(start - minute) })]);
+  assert.deepEqual(lines.map(line => [line.subject, line.role, line.human, line.text.startsWith('Shadow merge gate: GY-3')]), [['shadow-gate', 'master', false, true]], 'GY-2 is agreed at its newest verdict; GY-3 keeps its one line');
+  assert.match(lines[0]!.next, /before the switch to control-plane merging/);
+  assert.deepEqual(shadowGateAttention([]), []);
+  // The loop's own effects carry the reads: the verdict is posted as the coordinator under one idempotency key per (head, tip), with the route's body.
+  const posted: { path: string; data: unknown; key?: string }[] = [];
+  const wired = daemonEffects('/coordinator', config, { snapshot: async () => ({ work: [], now: iso(start) }), mutate: async (path, data, key) => { posted.push({ path, data, key }); return {}; }, run: git.run });
+  assert.ok(wired.shadow?.enabled);
+  const entry = verdict('GY-5', { id: 'w5' });
+  await wired.shadow!.record(item({ id: 'w5', key: 'GY-5' }), entry);
+  assert.deepEqual(posted, [{ path: 'work/w5/shadow-verdict', data: shadowVerdictBody(entry), key: shadowVerdictKey({ id: 'w5' }, entry) }]);
+  assert.deepEqual(Object.keys(shadowVerdictBody(entry)).sort(), ['baseTip', 'build', 'conflict', 'durationMs', 'head', 'mergeSha', 'risk', 'tests']);
+  assert.equal(daemonEffects('/coordinator', { ...config, run: { ...config.run, shadowGate: { enabled: false } } }, { snapshot: async () => ({ work: [], now: iso(start) }), mutate: async () => ({}), run: git.run }).shadow?.enabled, false);
   const docs = readFileSync(fileURLToPath(new URL('../docs/delivery-redesign.md', import.meta.url)), 'utf8');
   const rollout = docs.split(/^## Rollout\s*$/m)[1]!.split(/\n## /)[0]!;
-  for (const field of ['shadow gate report', 'agree-pass', 'agree-fail', 'shadow-only-fail', 'shadow-missed', 'pending', 'p50/p90', 'newest ten']) assert.ok(rollout.includes(field), `Rollout names ${field}`);
+  for (const field of ['`shadowGate`', 'agree-pass', 'agree-fail', 'shadow-only-fail', 'shadow-missed', 'pending', 'p50/p90', 'newest ten']) assert.ok(rollout.includes(field), `Rollout names ${field}`);
+  const mainRollout = execFileSync('git', ['show', 'origin/main:docs/delivery-redesign.md'], { encoding: 'utf8' }).split(/^## Rollout\s*$/m)[1]?.split(/\n## /)[0];
+  const words = (text: string) => text.split(/\s+/).filter(Boolean).length;
+  if (mainRollout) assert.ok(words(rollout) - words(mainRollout) <= 50, `Rollout grew by ${words(rollout) - words(mainRollout)} words, at most 50`);
 });
 
 // ——— The verdict route: the loop's coordinator identity only, one event per Idempotency-Key. ———

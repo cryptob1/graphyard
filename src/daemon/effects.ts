@@ -44,6 +44,8 @@ import { type BaseFailureEffects, baseFailureEffects } from './base-failure-effe
 import type { daemonSummary } from './run.js';
 import { observeDeployment, promotionReads, promotionWorkflow, type PromotionReads } from './deployment.js';
 import { mainWatchFreezeFromEnv, mainWatchReads, type MainWatchReads } from './main-watch.js';
+import { shadowReads, shadowVerdictBody, shadowVerdictKey, type ShadowReads } from './cycle-shadow.js';
+import { worktreeRoot } from '../install/worktree-root.js';
 import { throughputEffects, type ThroughputEffects } from './throughput-effect.js';
 import { alignRunningLoopUnit, awaitSupervisorRestart, detectLoopSupervisorUnit, performSelfUpgrade, recoverMovedHead, type SelfUpgradeDeps, type SelfUpgradeOutcome } from './upgrade.js';
 import { readRelease, restartExecutors } from '../executor-fleet.js';
@@ -141,6 +143,8 @@ export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffec
   promotion?: PromotionReads | null;
   /** The main watch's reads (GY-1519, main-watch.ts): the checkout's history and the control plane's acknowledgements; absent, the watch does not run. */
   mainWatch?: MainWatchReads | null;
+  /** The shadow merge gate's reads (GY-1522, cycle-shadow.ts): the coordinator checkout's trial merge, build and tests, and the verdict post; absent, the gate does not run. */
+  shadow?: ShadowReads | null;
   /** Publishes `mergeQueue.rerunFailedChecks` to the control plane, which reruns a failed required check by it (GY-516); sent only on a change, and read at the start of every cycle so a reconfiguration applies before the next observation. */
   publishMergeSettings?: () => Promise<unknown>;
   /** GY-1416: the loop's setup step, `master setup --apply` beside the cycle at most hourly; it sets derived deployment variables only where the provider adapter applies them in place. */
@@ -668,6 +672,8 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     get promotion() { return promotionReads(current(), root, run, existsSync(join(root, '.github', 'workflows', promotionWorkflow))); },
     // GY-1519: the watch reads history from this checkout and its policy from the control plane; the freeze is the environment's ask.
     get mainWatch() { return mainWatchReads(current(), root, run, { policy: () => asCoordinator('main-watch'), freeze: mainWatchFreezeFromEnv() }); },
+    // GY-1522: the gate trial-merges in this checkout's object store under the managed worktree root and records each verdict as the coordinator, one idempotency key per (head, tip).
+    get shadow() { const config = current(); return shadowReads(config, root, run, { base: worktreeRoot(root, config), record: (work, verdict) => mutate(`work/${work.id}/shadow-verdict`, shadowVerdictBody(verdict), shadowVerdictKey(work, verdict)) }); },
     publishProductionEnvironment: async () => {
       const environment = current().run.productionEnvironment ?? productionEnvironmentFromEnv();
       if (environment === publishedEnvironment) return;

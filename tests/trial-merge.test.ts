@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, readdirSync, symlinkSync, writeFileSync } from '
 import { dirname, join, resolve } from 'node:path';
 import { createRequire } from 'node:module';
 import { defaultChildRun } from '../src/child-runner.js';
-import { runTrial, trialAuthor, trialEnvironment, trialMerge, trialRef, withheldTrialVariables } from '../src/merge-writer/trial.js';
+import { runTrial, trialAuthor, trialEnvironment, trialMerge, trialRef, TrialTimeoutError, withheldTrialVariables } from '../src/merge-writer/trial.js';
 import { checkoutKinds } from '../src/install/worktree-root.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -153,4 +153,27 @@ test('integration:trial-run-build-and-tests — a merge that changes the lockfil
     assert.equal(result.build, 'pass', result.logTail);
   }
   assert.equal(commands.filter(command => command === 'npm ci').length, 1, 'only the changed lockfile installs');
+});
+
+test('integration:trial-run-build-and-tests — a trial that outruns its time budget is no verdict: runTrial rejects with TrialTimeoutError naming the phase, and the checkout is still removed', async () => {
+  const repo = await fixture();
+  const head = repo.commitOnBase({ 'src/a.ts': 'export {};\n' }, 'slow head');
+  const merged = await trialMerge(gitFor(repo.root), { head, baseTip: repo.base });
+  assert.ok('mergeSha' in merged);
+  const base = await temporaryDirectory('trial-merge-root');
+  // The build child is killed at the deadline, as the child runner reports it.
+  const run = ((command: string, args: string[], options: unknown) => {
+    if (command === 'npm' && args[0] === 'run') throw Object.assign(new Error('npm run build did not finish within 1000ms and was killed'), { timedOut: true, stdout: 'building…', stderr: '' });
+    return defaultChildRun(command, args, options as never);
+  }) as never;
+  await assert.rejects(runTrial({ root: repo.root, base, mergeSha: merged.mergeSha, changedFiles: ['src/a.ts'], timeoutMs: 120_000, key: 'GY-9', environment: { PATH: process.env.PATH! }, run }),
+    (error: unknown) => error instanceof TrialTimeoutError && error.phase === 'build' && /timed out during its build/.test(error.message) && error.logTail.includes('building…'));
+  assert.equal(existsSync(base) ? readdirSync(base).length : 0, 0, 'the trial checkout is removed after a timeout');
+  assert.equal(gitIn(repo.root, 'worktree', 'list').split('\n').length, 1);
+  // A deadline that passed while a child ran to completion ends the trial the same way.
+  let clock = 0;
+  const slow = ((command: string, args: string[], options: unknown) => { if (command === 'npm' && args[0] === 'run') clock += 200_000; return defaultChildRun(command, args, options as never); }) as never;
+  await assert.rejects(runTrial({ root: repo.root, base, mergeSha: merged.mergeSha, changedFiles: ['src/a.ts'], timeoutMs: 120_000, key: 'GY-9', environment: { PATH: process.env.PATH! }, run: slow, now: () => clock }),
+    (error: unknown) => error instanceof TrialTimeoutError && error.phase === 'build' && error.durationMs === 200_000);
+  assert.equal(existsSync(base) ? readdirSync(base).length : 0, 0);
 });

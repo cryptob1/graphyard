@@ -14,6 +14,7 @@ import { intentCommand } from './master/intent.js';
 import { fleetCommand } from './master/fleet.js';
 import { operationsCommand } from './master/operations.js';
 import { loopCommand } from './master/loop.js';
+import { mergerCommand } from './merger.js';
 
 /** Every master subcommand authenticates with the coordinator credential the master keeps for itself, never the repository connection file. */
 export const masterCommands = defineCommands([
@@ -36,6 +37,8 @@ export const masterCommands = defineCommands([
       '  master review GY-N [PROFILE]  Launch the bound reviewer on the exact current candidate as the',
       '                                open request\'s next attempt; master run does this on its own,',
       '                                so it is the recovery path for a request nothing else answers',
+      '  master merger [github|control-plane --reason TEXT]',
+      '                                Show the merger setting and history; set it (admin credential)',
       '  master setup [--apply] [--provider P --service NAME --link-dir DIR]',
       '                                Plan, or set, each deployment variable derived from credentials',
       '                                saved on this host that the deployment lacks (the revert approver',
@@ -100,7 +103,7 @@ export const masterCommands = defineCommands([
       if (id === 'setup') return masterSetupCommand(context, root, await loadStoredMasterConfig(root));
       const session = await openMasterSession(context, root);
       // Each concern under ./master/ answers its own subcommands; the first that knows the id handles it.
-      for (const command of [intentCommand, fleetCommand, operationsCommand, loopCommand]) if (await command(session) !== unhandled) return;
+      for (const command of [intentCommand, fleetCommand, operationsCommand, loopCommand, mergerCommand]) if (await command(session) !== unhandled) return;
       throw new Error(`There is no master ${id}; use master guide for the subcommands`);
     },
   },

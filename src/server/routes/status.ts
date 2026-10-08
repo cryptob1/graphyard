@@ -14,6 +14,7 @@ import { defineRoutes, parseJson } from '../routes.js';
 import { coordinationSnapshot, coordinationViewHeader } from '../work-view.js';
 import { executorHost } from './agent-registry.js';
 import { directMergeStatus } from '../../direct-merge.js';
+import { mergeWriterStatus } from '../../merger-mode.js';
 import { rerunFailedChecksEvent } from '../../merge-queue.js';
 import { maxRerunFailedChecks } from '../../master/profiles.js';
 import { eventStats } from '../../store/snapshot-delta.js';
@@ -98,6 +99,8 @@ export const statusRoutes = defineRoutes('status', [
         doctor: actor.role === 'operator-agent' ? null : (await engine.store.pool.query('SELECT payload FROM events WHERE kind=$1 ORDER BY seq DESC LIMIT 20', [doctorRunEvent])).rows.map((row: any) => row.payload),
         // Direct-merge mode (direct-merge.ts): the open windows and the one line master status shows while any is.
         directMerge: await directMergeStatus(engine.store.pool, engine.directMergeEnvironment, observedAt),
+        // The merger setting (merger-mode.ts): which writer lands heads, and one line while it is the control plane.
+        mergeWriter: await mergeWriterStatus(engine.store.pool),
         // Heartbeat latency and the renewals refused or failed server-side, this process, last 10 minutes (GY-558).
         leaseHealth: engine.leaseHealth.report(),
         // The first-run facts the Setup page and `graphyard up` read beside the App and the fleet (GY-1419):

@@ -454,6 +454,7 @@
     "tests/machine-backlog-triage.test.ts": 1111,
     "tests/main-guard.test.ts": 2132,
     "tests/main-watch.test.ts": 3000,
+    "tests/main-watch-docs-wording.test.ts": 500,
     "tests/managed-worktree-root.test.ts": 3667,
     "tests/manual-proof-scoring.test.ts": 504,
     "tests/master-agent-envs.test.ts": 2965,
@@ -478,6 +479,7 @@
     "tests/merge-refusal-lift.test.ts": 2339,
     "tests/merge-stall-attention.test.ts": 1067,
     "tests/merge-version-skew.test.ts": 735,
+    "tests/merger-setting.test.ts": 3000,
     "tests/mergeability-unknown.test.ts": 609,
     "tests/migration-under-load.test.ts": 5169,
     "tests/module-budgets.test.ts": 723,
@@ -611,6 +613,7 @@
     "tests/soak-day.test.ts": 112848,
     "tests/soak-decisions.test.ts": 227396,
     "tests/soak-dispatch.test.ts": 23662,
+    "tests/soak-doctor.test.ts": 20000,
     "tests/soak-flake-ledger.test.ts": 1100,
     "tests/soak-loop-wake.test.ts": 34070,
     "tests/soak-main-guard.test.ts": 31000,
@@ -682,6 +685,9 @@
     "tests/worktree-hold-followups.test.ts": 1952,
     "tests/worktree-preserved-aside.test.ts": 1442,
     "tests/worktree-reclaim.test.ts": 3054,
-    "tests/zero-touch-onboarding.test.ts": 5900
+    "tests/zero-touch-onboarding.test.ts": 5900,
+    "tests/shadow-gate.test.ts": 2153,
+    "tests/trial-merge.test.ts": 2528,
+    "tests/soak-shadow-gate.test.ts": 5943
   }
 }

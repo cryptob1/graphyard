@@ -1,5 +1,6 @@
 // Concern: the shadow merge gate's pure parts — which head is tried next, how a shadow verdict compares with GitHub's, and the report.
 import type { Work } from '../model.js';
+import type { AttentionItem } from '../master/attention.js';
 import { ownHeads } from '../merge-queue.js';
 
 export const shadowOutcomes = ['agree-pass', 'agree-fail', 'shadow-only-fail', 'shadow-missed', 'pending'] as const;
@@ -16,10 +17,16 @@ export type GithubOutcome = 'pending' | 'merged' | 'reverted' | 'failed';
 /** Whether the trial passed: it merged cleanly, built, and every affected test passed. */
 export const shadowPassed = (verdict: Pick<ShadowVerdict, 'build' | 'tests' | 'conflict'>) => !verdict.conflict.length && verdict.build === 'pass' && !verdict.tests.failed.length;
 
-/** When the item's current head was handed in: the pipeline timeline's resubmission, else its submission, else the stage entry. */
-export function submittedAtOf(item: Pick<Work, 'stageEnteredAt'>): number {
+/**
+ * When the item's current head was handed in. The pipeline timeline's resubmission or submission
+ * when the snapshot carries it; the loop's coordination view drops that timeline, so there the
+ * moment this very head was first observed (`headObserved`, set when the candidate changed) stands
+ * in, then the pull request's creation, then the stage entry.
+ */
+export function submittedAtOf(item: Pick<Work, 'stageEnteredAt' | 'candidate' | 'headObserved'>): number {
   const pipeline = (item as { pipeline?: { submittedAt?: string | null; resubmittedAt?: string | null } }).pipeline;
-  for (const at of [pipeline?.resubmittedAt, pipeline?.submittedAt, item.stageEnteredAt]) if (at && Number.isFinite(Date.parse(at))) return Date.parse(at);
+  const observed = item.headObserved && item.candidate && item.headObserved.sha.toLowerCase() === item.candidate.sha.toLowerCase() ? item.headObserved.at : null;
+  for (const at of [pipeline?.resubmittedAt, pipeline?.submittedAt, observed, item.candidate?.createdAt, item.stageEnteredAt]) if (at && Number.isFinite(Date.parse(at))) return Date.parse(at);
   return 0;
 }
 /** A head GitHub has already merged (or whose item is done) has no turn left: GitHub's gate decided it first. */
@@ -76,4 +83,25 @@ export function shadowReport(verdicts: readonly ShadowVerdict[], work: readonly 
   const disagreements = judged.filter(verdict => verdict.outcome === 'shadow-only-fail' || verdict.outcome === 'shadow-missed')
     .sort((a, b) => Date.parse(b.at) - Date.parse(a.at)).slice(0, 10).map(verdict => ({ outcome: verdict.outcome, key: verdict.key, head: verdict.head, mergeSha: verdict.mergeSha }));
   return { total: judged.length, counts, p50Ms: percentile(durations, 0.5), p90Ms: percentile(durations, 0.9), disagreements };
+}
+
+/** A disagreement is a verdict GitHub's gate contradicted: `shadow-only-fail` or `shadow-missed`. */
+export const shadowDisagreement = (outcome: ShadowOutcome) => outcome === 'shadow-only-fail' || outcome === 'shadow-missed';
+
+/**
+ * `master status` attention: one line per item whose newest verdict disagrees with GitHub, report
+ * only (nothing acts on it; the line is the switch decision's evidence).
+ */
+export function shadowGateAttention(verdicts: readonly ShadowVerdict[]): AttentionItem[] {
+  const newest = new Map<string, ShadowVerdict>();
+  for (const verdict of [...verdicts].sort((a, b) => Date.parse(a.at) - Date.parse(b.at))) newest.set(verdict.key, verdict);
+  return [...newest.values()].filter(verdict => shadowDisagreement(verdict.outcome)).map(verdict => ({
+    subject: 'shadow-gate', text: shadowDisagreementDetail(verdict),
+    role: 'master' as const, approvedBy: null, human: false, humanOnly: null, next: `Explain the disagreement on ${verdict.key} before the switch to control-plane merging; nothing is changed`,
+  }));
+}
+
+export function shadowDisagreementDetail(verdict: Pick<ShadowVerdict, 'key' | 'head' | 'mergeSha' | 'outcome'>) {
+  return `Shadow merge gate: ${verdict.key} head ${verdict.head} is ${verdict.outcome} (trial merge ${verdict.mergeSha ?? 'none: it conflicts'}); `
+    + `${verdict.outcome === 'shadow-missed' ? 'the shadow trial passed it but the main guard reverted it' : 'the shadow trial failed it but GitHub merged it'}. Report only: nothing is changed`;
 }

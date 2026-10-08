@@ -8,15 +8,13 @@ Only Graphyard writes to main.
 ## Flow
 
 1. **Head submission under a lease.** A worker submits a commit (`complete GY-N EPOCH --head SHA`); the lease ends in the same transaction.
-2. **One serial merge writer** trial-merges the head onto main, runs build and fast tests on the merged tree, records merge intent, then pushes the exact tested merge commit with the install's deploy key, leased on the tested tip (moved: re-trial).
-3. **Candidates every ~10 merges or 15 quiet minutes.** Main's tip becomes a fixed candidate: UAT serves it, E2E runs, the exact tested commit is promoted. On E2E failure the newest item related to the failing cases is reverted and reopened.
-4. **One independent reviewer per item.** Sensitive diffs, classified from the merge delta, get a blocking review before step 2; the rest a non-blocking review after merge, findings becoming follow-ups.
+2. **One serial merge writer** trial-merges the head onto main, runs build and fast tests on the merged tree, records merge intent, then pushes the exact tested merge commit with the install's deploy key, leased on the tested tip.
+3. **Candidates every ~10 merges or 15 quiet minutes.** Main's tip becomes a candidate: UAT serves it, E2E runs, the exact tested commit is promoted. On E2E failure the newest item related to the failing cases is reverted.
+4. **One independent reviewer per item.** Sensitive diffs get a blocking review before step 2; the rest a non-blocking review after merge.
 
 ## Merge writer
 
-Steps are idempotent; main's observed sha settles delivery.
-
-The shadow gate is the loop's step `run.shadowGate` (`enabled`, default true; `timeoutMinutes`, default 20); the coordinator records each verdict through `POST /api/work/:id/shadow-verdict`.
+Steps are idempotent; main's sha settles delivery.
 
 ## Removed and kept
 
@@ -26,14 +24,14 @@ Kept: leases and epochs, the transactional ledger, two risk lanes, UAT serving a
 
 ## The merger setting
 
-`merger` selects the mode per install, `github` (default) or `control-plane`: an admin-only ledger event, never read from graphyard.json.
+`merger` selects the mode per install, `github` (default) or `control-plane`: an admin-only ledger event, never read from graphyard.json. Read: `graphyard master merger`; set: `graphyard master merger MODE --reason TEXT`; `/api/status` shows `mergeWriter`; `GET`/`POST /api/merger` (admin, `reason`, `Idempotency-Key`).
 
 ## Rollout
 
-1. **Shadow mode**: every head is trial-merged and fast-tested beside the GitHub gate, verdicts recorded, nothing written. The shadow gate report (`master status` `daemon.shadowGate`) gives counts per outcome (agree-pass, agree-fail, shadow-only-fail, shadow-missed, pending), p50/p90 trial time and the newest ten disagreements. Switch criterion: two weeks with no shadow-passed head reverted by the main guard (no shadow-missed) and every shadow-only failure explained.
+1. **Shadow mode**: every head is trial-merged and fast-tested beside the GitHub gate, verdicts recorded, nothing written; `master status` `shadowGate` reports agree-pass, agree-fail, shadow-only-fail, shadow-missed, pending counts, p50/p90, newest ten disagreements. Switch criterion: two weeks with no shadow-passed head reverted by the main guard and every shadow-only failure explained.
 2. **Switch** `control-plane`.
 3. **Run the Snake pilot.**
-4. **After a week of real merges**, delete the github-mode gate code.
+4. **After a week**, delete the github-mode gate code.
 
 ## Measures
 

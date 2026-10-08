@@ -5,6 +5,7 @@ import type { Work } from '../model.js';
 import { createSchema } from '../model.js';
 import { isClosed } from '../model/closure.js';
 import { planeWideRefusal } from '../model/blocker-class.js';
+import { RefusedResponse } from '../model/refusal.js';
 import { openFaultClassItem } from '../model/fault-classes.js';
 import { workerSubmissionBoundMs } from '../model/attempt-bound.js';
 import { scopeRefusalBlocker, unplannedPaths } from '../model/scope.js';
@@ -260,6 +261,9 @@ export function doctorProofId(proof: string): string {
   return `${kind ? kind[1].toLowerCase() : 'manual'}:${name || 'doctor-filed'}`;
 }
 
+/** The criteria in the form create takes them (see doctorFileItem), which is also what create judges for a refusal digest. */
+const normalisedCriteria = (entry: DoctorFile) => entry.criteria.map((criterion, index) => ({ id: `AC-${index + 1}`, text: criterion.text.slice(0, 2000), proofs: [...new Set(criterion.proofs.map(doctorProofId))] }));
+
 /**
  * The fault item a doctor run files, as `master create` would: the create schema's checks, P0/P1,
  * and the class it closes. The criteria are the doctor's own words, so their shape is normalised
@@ -267,46 +271,11 @@ export function doctorProofId(proof: string): string {
  * a filing is refused only for what normalising cannot mend.
  */
 export function doctorFileItem(entry: DoctorFile, reason: string): DoctorFileInput {
-  const criteria = entry.criteria.map((criterion, index) => ({ id: `AC-${index + 1}`, text: criterion.text.slice(0, 2000), proofs: [...new Set(criterion.proofs.map(doctorProofId))] }));
+  const criteria = normalisedCriteria(entry);
   const input = createSchema.parse({ title: entry.title, description: entry.description, type: 'bug', priority: entry.priority, criteria, plannedFiles: entry.plannedFiles,
     origin: { faultClass: { class: entry.faultClass, threshold: 1, windowHours: 1, count: 1, detectedAt: new Date().toISOString(), instances: [] } } });
   return { ...input, reason: guardBroadScope(input, reason, { allow: false, command: 'master create' }) };
 }
-
-/** The reason a doctor filing carries: the class and the doctor's own evidence. */
-const filingReason = (file: DoctorFile) => `The pipeline doctor found a ${file.faultClass} fault no open item covers: ${file.description.slice(0, 1500)}`;
-
-/** The scenario a create refusal names as unregistered (src/engine.ts: "Register E2E scenario X before creating work that requires it"), or null. */
-export function unregisteredScenarioOf(error: unknown): string | null {
-  return /Register E2E scenario (\S+) before creating work/.exec(message(error))?.[1] ?? null;
-}
-
-/** The filing with every criterion's `e2e:<scenario>` proof made the manual proof of the same name. */
-export function withoutScenario(file: DoctorFile, scenario: string): DoctorFile {
-  return { ...file, criteria: file.criteria.map(criterion => ({ ...criterion, proofs: [...new Set(criterion.proofs.map(proof => doctorProofId(proof) === `e2e:${scenario}` ? `manual:${scenario}` : proof))] })) };
-}
-
-/**
- * Files one doctor item, mending the one refusal the filing itself can mend (GY-1531). A criterion
- * the doctor wrote against `e2e:<scenario>` with no scenario registered by that name is refused by
- * create on every attempt — no loop path registers a scenario — so the pending filing failed again
- * cycle after cycle and the fault class stayed unfiled. That proof becomes `manual:<scenario>` and
- * the filing is sent again at once; `file` is the filing as last sent, the one a later retry keeps.
- */
-export async function fileDoctorItem(file: DoctorFile, key: string, send: DoctorEffects['file']): Promise<{ work: Work | null; file: DoctorFile; mended: string[]; error?: unknown }> {
-  const mended: string[] = [];
-  for (;;) {
-    try { return { work: await send(doctorFileItem(file, filingReason(file)), key), file, mended }; }
-    catch (error) {
-      const scenario = unregisteredScenarioOf(error);
-      if (!scenario || mended.includes(scenario)) return { work: null, file, mended, error };
-      mended.push(scenario);
-      file = withoutScenario(file, scenario);
-    }
-  }
-}
-/** The clause a filing's record carries for the proofs it mended, or nothing. */
-const mendedClause = (mended: readonly string[]) => mended.length ? `; ${mended.map(scenario => `e2e:${scenario}`).join(', ')} named no registered scenario and was filed as ${mended.map(scenario => `manual:${scenario}`).join(', ')}` : '';
 
 /**
  * A filing the create checks refuse even normalised is the doctor's malformed output, not the loop
@@ -314,6 +283,57 @@ const mendedClause = (mended: readonly string[]) => mended.length ? `; ${mended.
  */
 const invalidFiling = (file: DoctorFile, error: unknown) =>
   `The doctor asked to file "${file.title}" (${file.faultClass}, P${file.priority}), but the filing fails the checks master create applies, so it is not filed; file it by hand with master create: ${message(error)}`.slice(0, 2000);
+
+/**
+ * GY-1530: whether the control plane's create route refused the filing itself — a 409, the status
+ * every `demand` of create answers with — rather than failing to answer. The content is what it
+ * refused, so a retry of the same content is refused the same way, for ever: GY-1516's doctor re-filed
+ * one dead filing every cycle for hours. Read structurally from the response, else from the text the
+ * operator-agent post wraps the status in. The diagnosis step reads its fix item's refusal by the same rule.
+ */
+export const createRefused = (error: unknown) => error instanceof RefusedResponse ? error.status === 409 : /^Graphyard refused \S+ \(409\)/.test(message(error));
+/**
+ * The scenario a create refusal names as unregistered (src/engine.ts's "Register E2E scenario NAME
+ * before creating work that requires it"), else null. Scenarios register only from the repository's
+ * e2e/cases files (`graphyard e2e sync`) or an admin's defineScenario; a filing that cites one by a
+ * name nothing registers is malformed, as a proof ID the checks refuse is, and can never be filed as written.
+ */
+export const unregisteredScenario = (error: unknown) => /Register E2E scenario (\S+) (?:before creating work that requires it|first)\b/.exec(message(error))?.[1] ?? null;
+
+/**
+ * A filing create refused (GY-1530): the content is malformed as far as the control plane is
+ * concerned, so it is dropped from the pending files — never re-filed — and recorded failed under
+ * the proof class's `fix-item` ("a fix item create refuses"), the cause, instead of the doctor step's
+ * own kind. The escalation beside it names what the master must mend by hand: the scenario the
+ * filing cites with no registered revision, or the refusal itself.
+ */
+/** The refused content's identity: what create judges (class, title, files, criteria), not the evidence prose, which carries a fresh timestamp every run. */
+export const filingDigest = (file: DoctorFile) => createHash('sha256').update(JSON.stringify([file.faultClass, file.title, file.plannedFiles, normalisedCriteria(file)])).digest('hex').slice(0, 32);
+
+/**
+ * The digest as seen refusal at `at`. Nothing evicts a refusal, neither a count nor an age: whenever
+ * the doctor reports that content again, however long after, it is not submitted to create again.
+ */
+const renewRefusal = (refused: DaemonState['doctor']['refusedFilings'], digest: string, at: number) => [...refused.filter(entry => entry.digest !== digest), { digest, at }];
+const isRefused = (refused: DaemonState['doctor']['refusedFilings'], digest: string) => refused.some(entry => entry.digest === digest);
+
+async function dropRefusedFiling(cycle: Pick<Cycle, 'state' | 'effects' | 'performed'>, key: string, file: DoctorFile, error: unknown, attempts: number, now: () => number) {
+  const { state, effects: daemon, performed } = cycle;
+  state.doctor.pendingFiles = state.doctor.pendingFiles.filter(entry => entry.key !== key);
+  // The refusal outlives this run's key: a later run reporting the same content is not filed again, corrected content is.
+  state.doctor.refusedFilings = renewRefusal(state.doctor.refusedFilings, filingDigest(file), now());
+  // A pending retry that met the plane's outage opened a plane-unavailable run on this key (GY-1404),
+  // and a key's later failures are noted against its standing run whatever their kind. The plane has
+  // answered now, so that run is over: ended here, the refusal opens the proof instance it is.
+  const standing = state.faults.failing[key] ? state.faults.instances.find(entry => entry.id === state.faults.failing[key]) : undefined;
+  if (standing && standing.kind !== 'fix-item') delete state.faults.failing[key];
+  const scenario = unregisteredScenario(error);
+  performed.push(await record(state, key, { kind: 'fault', work: null, principal: null, state: 'failed', detail: `Could not file "${file.title}", and it is not filed again: master create refused the filing itself${scenario ? ` for the e2e proof it cites, whose scenario ${scenario} has no registered revision` : ''}: ${message(error)}`.slice(0, 2000), attempts, cycle: state.cycle }, now(), daemon.persist, 'fix-item'));
+  const mend = scenario
+    ? `the filing cites e2e:${scenario}, and no scenario ${scenario} is registered (scenarios register only from e2e/cases files via graphyard e2e sync or an admin's defineScenario); register it, or file the item by hand with master create under a proof that exists`
+    : `master create refused it (${message(error)}); file it by hand with master create once mended`;
+  performed.push(await record(state, `escalation:doctor-filing:${key}`, { kind: 'escalation', work: null, principal: null, state: 'done', detail: `The doctor asked to file "${file.title}" (${file.faultClass}, P${file.priority}), but ${mend}`.slice(0, 2000), attempts: 1, cycle: state.cycle }, now(), daemon.persist));
+}
 
 /**
  * Apply one settled doctor run: record one event per item the run found or acted on, deduplicate
@@ -346,27 +366,31 @@ export async function applyDoctorRun(cycle: Cycle, effects: DoctorEffects, run: 
   for (const { file, covered } of deduped) {
     if (covered) { await note('installation', `Not filing "${file.title}": the ${file.faultClass} fault class is already covered by an open item`); continue; }
     const filingKey = `${key}:file:${file.faultClass}`;
+    if (isRefused(state.doctor.refusedFilings, filingDigest(file))) { state.doctor.refusedFilings = renewRefusal(state.doctor.refusedFilings, filingDigest(file), now()); await note('installation', `Not filing "${file.title}" again: master create refused this content earlier and the escalation for it stands; it is filed again only when the doctor corrects it`); continue; }
     if (!fresh) {
       state.doctor.pendingFiles = [...state.doctor.pendingFiles.filter(entry => entry.key !== filingKey), { key: filingKey, at: run.at, file }].slice(-40);
       await note('installation', `Not filing "${file.title}" yet: the open items could not be read when the run settled, so it is filed on a later cycle if no open item covers the ${file.faultClass} fault class`);
       continue;
     }
-    try { doctorFileItem(file, filingReason(file)); }
+    let input: DoctorFileInput;
+    try { input = doctorFileItem(file, `The pipeline doctor found a ${file.faultClass} fault no open item covers: ${file.description.slice(0, 1500)}`); }
     catch (error) { await note('installation', invalidFiling(file, error), 'done', 'escalation'); continue; }
-    const filed = await fileDoctorItem(file, filingKey, effects.file);
-    if (filed.work) {
+    try {
+      const filedItem = await effects.file(input, filingKey);
       // Filed: any pending retry of the same filing is dropped before the cursor is persisted.
       state.doctor.pendingFiles = state.doctor.pendingFiles.filter(entry => entry.key !== filingKey);
-      run.filed.push({ faultClass: file.faultClass, title: file.title, work: filed.work.key, deduplicated: false });
-      await note(filed.work.key, `Filed ${filed.work.key} (P${file.priority}) for the ${file.faultClass} fault no open item covered: ${file.title}${mendedClause(filed.mended)}`);
-    } else {
+      run.filed.push({ faultClass: file.faultClass, title: file.title, work: filedItem.key, deduplicated: false });
+      await note(filedItem.key, `Filed ${filedItem.key} (P${file.priority}) for the ${file.faultClass} fault no open item covered: ${file.title}`);
+    } catch (error) {
+      // GY-1530: a refusal of the filing itself is never mended by a retry; it is dropped and classified.
+      if (createRefused(error)) { await dropRefusedFiling(cycle, filingKey, file, error, (state.actions[filingKey]?.attempts ?? 0) + 1, now); continue; }
       // A filing the control plane would not take is kept on the cursor — before the failed record
       // persists it — so a later cycle files it again under the same stable key; a control plane
       // that was only briefly unreachable loses no P0/P1 fault item (GY-711).
       // GY-1336: queued for that retry, the refusal is handled by design — still failed, but no fault
       // kind, so no loop fault instance (as GY-1295 and GY-1318 did); a retry that fails again is one.
-      state.doctor.pendingFiles = [...state.doctor.pendingFiles.filter(entry => entry.key !== filingKey), { key: filingKey, at: run.at, file: filed.file }].slice(-40);
-      performed.push(await record(state, filingKey, { kind: 'fault', work: null, principal: null, state: 'failed', detail: `Could not file "${file.title}"; it is filed again on a later cycle: ${message(filed.error)}`.slice(0, 2000), attempts: (state.actions[filingKey]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), daemon.persist, null));
+      state.doctor.pendingFiles = [...state.doctor.pendingFiles.filter(entry => entry.key !== filingKey), { key: filingKey, at: run.at, file }].slice(-40);
+      performed.push(await record(state, filingKey, { kind: 'fault', work: null, principal: null, state: 'failed', detail: `Could not file "${file.title}"; it is filed again on a later cycle: ${message(error)}`.slice(0, 2000), attempts: (state.actions[filingKey]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), daemon.persist, null));
     }
   }
   run.state = 'reported';
@@ -403,9 +427,9 @@ const retainedRuns = 20;
 
 /**
  * A filing the control plane did not accept when its run applied is filed again on a later cycle,
- * under the same stable key, until the control plane takes it or an open item comes to cover the
- * class. The cursor is updated before the outcome is recorded, so an abrupt exit between the two
- * leaves the filing pending rather than lost.
+ * under the same stable key, until the control plane takes it, refuses it as written (GY-1530) or an
+ * open item comes to cover the class. The cursor is updated before the outcome is recorded, so an
+ * abrupt exit between the two leaves the filing pending rather than lost.
  */
 export async function retryDoctorFile(cycle: Cycle, effects: DoctorEffects, pending: DoctorPendingFile, now: () => number) {
   const { state, effects: daemon, snapshot } = cycle;
@@ -415,18 +439,24 @@ export async function retryDoctorFile(cycle: Cycle, effects: DoctorEffects, pend
     await record(state, pending.key, { kind: 'fault', work, principal: null, state: outcome, detail: detail.slice(0, 2000), attempts, cycle: state.cycle }, now(), daemon.persist);
   };
   if (openFaultClassItem(snapshot.work, pending.file.faultClass)) return drop(`Not filing "${pending.file.title}" on retry: the ${pending.file.faultClass} fault class is now covered by an open item`, null, 'done');
-  try { doctorFileItem(pending.file, filingReason(pending.file)); }
+  // Queued through an outage beside another run's copy, the same content may already have been refused.
+  if (isRefused(state.doctor.refusedFilings, filingDigest(pending.file))) { state.doctor.refusedFilings = renewRefusal(state.doctor.refusedFilings, filingDigest(pending.file), now()); return drop(`Not filing "${pending.file.title}" on retry: master create refused this content earlier and the escalation for it stands`, null, 'done'); }
+  let input: DoctorFileInput;
+  try { input = doctorFileItem(pending.file, `The pipeline doctor found a ${pending.file.faultClass} fault no open item covers: ${pending.file.description.slice(0, 1500)}`); }
   catch (error) {
     // Refused by the checks themselves, the filing would be refused the same way on every retry.
     state.doctor.pendingFiles = state.doctor.pendingFiles.filter(entry => entry.key !== pending.key);
     await record(state, pending.key, { kind: 'escalation', work: null, principal: null, state: 'done', detail: invalidFiling(pending.file, error), attempts, cycle: state.cycle }, now(), daemon.persist);
     return;
   }
-  const filed = await fileDoctorItem(pending.file, pending.key, effects.file);
-  if (filed.work) return drop(`Filed ${filed.work.key} (P${pending.file.priority}) for the ${pending.file.faultClass} fault on a later cycle: ${pending.file.title}${mendedClause(filed.mended)}`, filed.work.key, 'done');
-  // The filing as last sent is what the next cycle retries: a proof mended here is not refused again.
-  state.doctor.pendingFiles = state.doctor.pendingFiles.map(entry => entry.key === pending.key ? { ...entry, file: filed.file } : entry);
-  await record(state, pending.key, { kind: 'fault', work: null, principal: null, state: 'failed', detail: `Still could not file "${pending.file.title}": ${message(filed.error)}`.slice(0, 2000), attempts, cycle: state.cycle }, now(), daemon.persist);
+  try {
+    const filedItem = await effects.file(input, pending.key);
+    await drop(`Filed ${filedItem.key} (P${pending.file.priority}) for the ${pending.file.faultClass} fault on a later cycle: ${pending.file.title}`, filedItem.key, 'done');
+  } catch (error) {
+    if (createRefused(error)) return dropRefusedFiling(cycle, pending.key, pending.file, error, attempts, now);
+    // Refused again, the retry is a fault: the plane not answering is the plane's (GY-1404), any other the step's own.
+    await record(state, pending.key, { kind: 'fault', work: null, principal: null, state: 'failed', detail: `Still could not file "${pending.file.title}": ${message(error)}`.slice(0, 2000), attempts, cycle: state.cycle }, now(), daemon.persist, planeWideRefusal(error) ? 'plane-unavailable' : undefined);
+  }
 }
 
 /**

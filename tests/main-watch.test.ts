@@ -300,6 +300,12 @@ test('unit:main-watch-status — master status shows mainWatch (unknown count, n
   assert.ok(paragraph.includes('--admin-token-stdin') && paragraph.includes('POST /api/main-watch/acknowledge') && paragraph.includes('Idempotency-Key'), 'the docs name the credential flow and the API');
 });
 
+test('unit:main-watch-docs-names-read-routes — the Main watch paragraph names the read-only routes beside the freeze and acknowledge command', () => {
+  const docs = readFileSync(fileURLToPath(new URL('../docs/recovery.md', import.meta.url)), 'utf8');
+  assert.ok(docs.includes('GET /api/main-watch'));
+  assert.ok(docs.includes('graphyard master main-watch status'));
+});
+
 // ——— The acknowledgement route: admin-only, recorded once per Idempotency-Key, readable by the loop. ———
 const repository = 'owner/project';
 const operator: Principal = { id: 'human-operator', role: 'admin', sessionKind: 'human' };

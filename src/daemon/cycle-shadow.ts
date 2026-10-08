@@ -1,14 +1,12 @@
 // Concern: the shadow merge gate's cycle step (GY-1522) — trial-merge one submitted head per cycle beside GitHub's gate and record the verdict; it writes nothing.
 import { z } from 'zod';
 import type { ChildRun } from '../child-runner.js';
-import { readCredentialFile, type MasterConfig } from '../master.js';
-import { defaultChildRun } from '../child-runner.js';
-import { worktreeRoot } from '../install/worktree-root.js';
+import type { MasterConfig } from '../master.js';
 import type { Work } from '../model.js';
 import { classifyRisk } from '../model/risk-class.js';
 import { shadowGateSettings } from '../master/merge-writer-settings.js';
-import { runTrial, trialMerge, type TrialRun } from '../merge-writer/trial.js';
-import { judgedVerdicts, shadowOutcomes, shadowDue, shadowReport, type ShadowVerdict } from '../merge-writer/shadow.js';
+import { runTrial, trialMerge, TrialTimeoutError, type TrialRun } from '../merge-writer/trial.js';
+import { judgedVerdicts, shadowDisagreement, shadowDisagreementDetail, shadowOutcomes, shadowDue, shadowReport, type ShadowVerdict } from '../merge-writer/shadow.js';
 import { storeAction, type DaemonState } from './state.js';
 import type { Cycle } from './cycle.js';
 
@@ -29,13 +27,21 @@ export interface ShadowReads {
   mainTip(): Promise<string | null>;
   /** Fetches the head's branch (and the base) into the coordinator checkout; moves no local branch. */
   fetch(branch: string): Promise<void>;
-  /** The trial of `head` on `baseTip`: its merge commit, the files the merge changes, and the build and test run. */
+  /** The trial of `head` on `baseTip`: its merge commit, the files the merge changes, and the build and test run. Rejects with TrialTimeoutError past the time budget. */
   trial(head: string, baseTip: string, key: string): Promise<{ mergeSha: string | null; conflict: string[]; files: string[]; run: TrialRun | null }>;
   /** Posts the verdict to the coordinator (`POST /api/work/:id/shadow-verdict`). */
   record(work: Work, verdict: Omit<ShadowVerdict, 'outcome'>): Promise<void>;
 }
 
-/** The shadow reads over the coordinator checkout. Git writes are limited to the trial ref; a trial checkout is the only worktree made. */
+/** The body `POST /api/work/:id/shadow-verdict` takes, and the idempotency key one (head, baseTip) pair keeps across retries. */
+export const shadowVerdictBody = (verdict: Omit<ShadowVerdict, 'outcome'>) => ({ head: verdict.head, baseTip: verdict.baseTip, mergeSha: verdict.mergeSha, risk: verdict.risk, build: verdict.build, tests: verdict.tests, conflict: verdict.conflict, durationMs: verdict.durationMs });
+export const shadowVerdictKey = (work: Pick<Work, 'id'>, verdict: Pick<ShadowVerdict, 'head' | 'baseTip'>) => `shadow:${work.id}:${verdict.head}:${verdict.baseTip}`;
+
+/**
+ * The shadow reads over the coordinator checkout `root` (its object store holds the trial
+ * commit). Git writes are limited to the trial ref; a trial checkout under `base` is the only
+ * worktree made. The loop wires them in effects.ts; a test hands its own through `effects.shadow`.
+ */
 export function shadowReads(config: Pick<MasterConfig, 'baseBranch' | 'run'>, root: string, run: ChildRun, options: { base: string; record: ShadowReads['record']; trial?: typeof runTrial }): ShadowReads {
   const git = async (...args: string[]) => String(await run('git', ['-C', root, ...args]));
   const gitAs = async (args: string[], env?: Record<string, string>) => String(await run('git', ['-C', root, ...args], env ? { env: { ...process.env, ...env } } : undefined));
@@ -57,21 +63,6 @@ export function shadowReads(config: Pick<MasterConfig, 'baseBranch' | 'run'>, ro
     },
   };
 }
-
-/**
- * The loop's own reads when the effects carry none: the coordinator checkout is the loop's working
- * directory, and the verdict is posted with the loop's coordinator credential. A test hands its own
- * through `effects.shadow`; a loop with `run.shadowGate.enabled` false never builds them.
- */
-export function defaultShadowReads(config: MasterConfig, run: ChildRun = defaultChildRun, root: string = process.cwd()): ShadowReads {
-  return shadowReads(config, root, run, { base: worktreeRoot(root, config), record: async (work, verdict) => {
-    const response = await fetch(`${config.url}/api/work/${work.id}/shadow-verdict`, { method: 'POST',
-      headers: { Authorization: `Bearer ${await readCredentialFile(config.credentialFile)}`, 'Content-Type': 'application/json', 'Idempotency-Key': `shadow:${work.id}:${verdict.head}:${verdict.baseTip}` },
-      body: JSON.stringify({ head: verdict.head, baseTip: verdict.baseTip, mergeSha: verdict.mergeSha, risk: verdict.risk, build: verdict.build, tests: verdict.tests, conflict: verdict.conflict, durationMs: verdict.durationMs }), signal: AbortSignal.timeout(30_000) });
-    if (!response.ok) throw new Error(`Graphyard refused shadow-verdict (${response.status}): ${(await response.json().catch(() => null))?.error ?? 'no reason given'}`);
-  } });
-}
-const loopReads = new WeakMap<DaemonState, ShadowReads>();
 
 interface Flight { key: string; head: string; baseTip: string; settled: { error: unknown } | { verdict: Omit<ShadowVerdict, 'outcome'>; work: Work } | null }
 const flights = new WeakMap<DaemonState, Flight>();
@@ -96,27 +87,30 @@ export function keepVerdicts<T extends Pick<ShadowVerdict, 'id' | 'head'>>(verdi
 }
 
 const shadowAttentionKey = (key: string) => `shadow:${key}`;
-const disagreement = (outcome: string) => outcome === 'shadow-only-fail' || outcome === 'shadow-missed';
+/** The action key under which a trial that could not run (or timed out) against one tip is remembered, so it is not retried against that tip. */
+export const shadowErrorKey = (head: string, baseTip: string) => `shadow-error:${head}:${baseTip}`;
 
 /**
  * Cycle step 6b' (after the merge step). One trial runs at a time, beside the cycle: the step
  * starts the oldest submitted head owed one, and the cycle after it settles records the verdict.
  * It makes no GitHub call, pushes nothing and moves no `refs/heads/*`. Outcomes are re-judged
  * against the snapshot every cycle, and a disagreement raises one escalation line per item, once.
+ * Without `effects.shadow` (a loop wired without the reads, or a test) or with the gate off, the
+ * step does nothing. A trial that errs or times out records no verdict: it is excluded from the
+ * agreement counts and not retried against the same tip.
  */
 export async function shadowStep(cycle: Cycle) {
-  const { config, state, effects, now, snapshot, performed } = cycle;
-  // The effects may carry their own reads (a test's); otherwise the loop builds the default once.
-  let reads = (effects as { shadow?: ShadowReads | null }).shadow;
-  if (reads === undefined && shadowGateSettings(config.run).enabled) { reads = loopReads.get(state); if (!reads) loopReads.set(state, reads = defaultShadowReads(config)); }
+  const { state, effects, now, snapshot, performed } = cycle;
+  const reads = effects.shadow;
   if (!reads?.enabled) return;
   let changed = false;
   const flight = flights.get(state);
   if (flight?.settled) {
     flights.delete(state);
     if ('error' in flight.settled) {
-      const reason = flight.settled.error instanceof Error ? flight.settled.error.message : String(flight.settled.error);
-      performed.push(storeAction(state, `shadow-error:${flight.head}:${flight.baseTip}`, { kind: 'merge', work: flight.key, principal: null, state: 'failed', detail: `Shadow trial of ${flight.key} head ${flight.head} on ${flight.baseTip} could not run, so no verdict was recorded: ${reason}`.slice(0, 1900), attempts: 1, epoch: null, cycle: state.cycle, at: new Date(now()).toISOString() }, null));
+      const error = flight.settled.error;
+      const reason = error instanceof TrialTimeoutError ? `${error.message}; a timeout measures the host, not the merge, so it is no verdict` : error instanceof Error ? error.message : String(error);
+      performed.push(storeAction(state, shadowErrorKey(flight.head, flight.baseTip), { kind: 'merge', work: flight.key, principal: null, state: 'failed', detail: `Shadow trial of ${flight.key} head ${flight.head} on ${flight.baseTip} could not run, so no verdict was recorded: ${reason}`.slice(0, 1900), attempts: 1, epoch: null, cycle: state.cycle, at: new Date(now()).toISOString() }, null));
     } else unrecorded.set(state, flight.settled);
   }
   // A settled verdict joins the cursor only once the coordinator has recorded it: a refused or
@@ -139,12 +133,12 @@ export async function shadowStep(cycle: Cycle) {
     state.shadow[index] = { ...state.shadow[index]!, outcome: verdict.outcome };
     changed = true;
     const key = shadowAttentionKey(verdict.key);
-    if (disagreement(verdict.outcome) && !state.actions[key]) performed.push(storeAction(state, key, { kind: 'escalation', work: verdict.key, principal: null, state: 'done', detail: shadowDisagreementDetail(verdict), attempts: 1, epoch: null, cycle: state.cycle, at: new Date(now()).toISOString() }, null));
+    if (shadowDisagreement(verdict.outcome) && !state.actions[key]) performed.push(storeAction(state, key, { kind: 'escalation', work: verdict.key, principal: null, state: 'done', detail: shadowDisagreementDetail(verdict), attempts: 1, epoch: null, cycle: state.cycle, at: new Date(now()).toISOString() }, null));
   }
   if (!flights.has(state) && !unrecorded.has(state)) {
     const tip = await reads.mainTip();
     // A head whose trial could not run against this tip is not tried again against it.
-    const open = snapshot.work.filter(item => !item.candidate || !state.actions[`shadow-error:${item.candidate.sha.toLowerCase()}:${tip}`]);
+    const open = snapshot.work.filter(item => !item.candidate || !state.actions[shadowErrorKey(item.candidate.sha.toLowerCase(), tip ?? '')]);
     const due = tip ? shadowDue(open, state.shadow, tip) : null;
     if (tip && due?.candidate) {
       const head = due.candidate.sha.toLowerCase(), branch = due.candidate.branch, started = now();
@@ -164,8 +158,3 @@ export async function shadowStep(cycle: Cycle) {
 
 /** The `shadowGate` section of `master status`: the report over the cursor's recorded outcomes (the step re-judges them every cycle). */
 export const shadowGateSummary = (shadow: readonly ShadowVerdict[]) => shadowReport(shadow, []);
-
-export function shadowDisagreementDetail(verdict: Pick<ShadowVerdict, 'key' | 'head' | 'mergeSha' | 'outcome'>) {
-  return `Shadow merge gate: ${verdict.key} head ${verdict.head} is ${verdict.outcome} (trial merge ${verdict.mergeSha ?? 'none: it conflicts'}); `
-    + `${verdict.outcome === 'shadow-missed' ? 'the shadow trial passed it but the main guard reverted it' : 'the shadow trial failed it but GitHub merged it'}. Report only: nothing is changed`;
-}
