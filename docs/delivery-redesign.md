@@ -24,17 +24,17 @@ Kept: leases and epochs, the transactional ledger, two risk lanes, UAT on a pinn
 
 ## The merger setting
 
-`merger` selects the mode per install, `github` (default) or `control-plane`: an admin-only ledger event, never read from graphyard.json. `graphyard master merger [MODE --reason TEXT]`, `/api/status` `mergeWriter`, `GET`/`POST /api/merger` (admin, `reason`, `Idempotency-Key`). Under `control-plane` launches get no push credential or keyring proxy; an unreadable merger refuses launch. The Setup page and `doctor` pass `github-app`, `reviewer-app` and `branch-protection` as `not required (merger: control-plane)`, and the AGENTS.md worker block says `complete GY-N EPOCH --head SHA`.
+`merger` selects the mode per install, `github` (default) or `control-plane`: an admin-only ledger event, never read from graphyard.json. `graphyard master merger [MODE --reason TEXT]`, `/api/status` `mergeWriter`, `GET`/`POST /api/merger` (admin, `reason`, `Idempotency-Key`). Under `control-plane` launches get no push credential or keyring proxy; an unreadable merger refuses launch. Setup and `doctor` pass `github-app`, `reviewer-app` and `branch-protection` as `not required (merger: control-plane)`; AGENTS.md says `complete GY-N EPOCH --head SHA`.
 
 `POST /api/work/:id/merge-record` (coordinator only, `Idempotency-Key`) appends one event per step (`intent`, `trial`, `pushed`, `reconciled`, `refused`); `pushed`/`reconciled` name the open intent's merge commit, `reconciled` one main holds, else 409.
 
 ## Rollout
 
-1. **Shadow mode**: trials beside the GitHub gate, nothing written; `shadowGate` counts agree-pass, agree-fail, shadow-only-fail, shadow-missed, pending; p50/p90; newest ten disagreements. Switch criterion: two weeks with no shadow-passed head reverted by the main guard and every shadow-only failure explained.
+1. **Shadow mode**: trials beside the GitHub gate, nothing written; `shadowGate` counts agree-pass, agree-fail, shadow-only-fail, shadow-missed, pending; p50/p90; newest ten disagreements. Switch criterion: two weeks with no shadow-passed head reverted by the main guard and every shadow-only failure explained. `POST /api/merger` `control-plane` refuses while any shadow disagreement stands unexplained.
 2. **Switch** `control-plane`.
 3. **Run the Snake pilot.**
 4. **After a week**, delete the github-mode gate code.
 
 ## Measures
 
-Weekly: defects reaching production (escapes), merge-queue wait, human touches. Deferred until one demands it: pre-merge review for medium risk, batched merge validation, a per-test flake ledger.
+Weekly: escapes, merge-queue wait, human touches. Deferred: medium-risk pre-merge review, batched merge validation, per-test flake ledger.

@@ -6,7 +6,7 @@ import type { Work } from '../model.js';
 import { classifyRisk } from '../model/risk-class.js';
 import { shadowGateSettings } from '../master/merge-writer-settings.js';
 import { runTrial, trialMerge, trialNeedsLog, TrialCleanupError, TrialRunnerError, TrialTimeoutError, type TrialRun } from '../merge-writer/trial.js';
-import { judgedVerdicts, shadowDisagreement, shadowDisagreementDetail, shadowOutcomes, shadowDue, shadowReport, trialLogTailLength, type ShadowVerdict } from '../merge-writer/shadow.js';
+import { judgedVerdicts, shadowDisagreement, shadowDisagreementDetail, shadowOutcomes, shadowDue, shadowReportWithExplanations, trialLogTailLength, type ShadowExplanationRef, type ShadowVerdict } from '../merge-writer/shadow.js';
 import { storeAction, type DaemonState } from './state.js';
 import type { Cycle } from './cycle.js';
 
@@ -222,5 +222,9 @@ export async function shadowStep(cycle: Cycle) {
   if (changed) await effects.persist(state);
 }
 
-/** The `shadowGate` section of `master status`: the report over the cursor's recorded outcomes (the step re-judges them every cycle). */
-export const shadowGateSummary = (shadow: readonly ShadowVerdict[]) => shadowReport(shadow, []);
+/**
+ * The `shadowGate` section of `master status`: the report over the cursor's recorded outcomes (the
+ * step re-judges them every cycle), with unexplained vs explained disagreement counts (GY-1560).
+ */
+export const shadowGateSummary = (shadow: readonly ShadowVerdict[], explanations: readonly ShadowExplanationRef[] = []) =>
+  shadowReportWithExplanations(shadow, [], explanations);

@@ -34,12 +34,16 @@ export async function operationsCommand(session: MasterSession): Promise<unknown
     // An installed harness that differs from the current plan is drift the master repairs (GY-1217).
     const harness = await masterHarnessDrift(root, master);
     // GY-1519: each commit on the base branch the main watch cannot explain is one attention line, report-only.
-    // GY-1522: each item whose shadow verdict GitHub's gate contradicted (shadow-only-fail, shadow-missed) is one attention line, report-only.
-    const added = [...(harness ? [harness] : []), ...mainWatchAttention(state?.mainWatch ?? null, master.baseBranch), ...shadowGateAttention(state?.shadow ?? [])];
+    // GY-1522 / GY-1560: each unexplained shadow-only-fail or shadow-missed is one attention line; explained ones drop out.
+    const explanations = await masterApi('shadow-disagreements').then(
+      (body: { explanations?: { key: string; head: string; baseTip: string }[] }) => body?.explanations ?? [],
+      () => [] as { key: string; head: string; baseTip: string }[],
+    );
+    const added = [...(harness ? [harness] : []), ...mainWatchAttention(state?.mainWatch ?? null, master.baseBranch), ...shadowGateAttention(state?.shadow ?? [], explanations)];
     const attention = added.length ? { attentionItems: [...report.attentionItems, ...added], counts: { ...report.counts, attention: report.counts.attention + added.length } } : {};
-    // `shadowGate`: the shadow merge gate's report (counts per outcome, trial p50/p90, newest disagreements) the switch decision reads.
+    // `shadowGate`: the shadow merge gate's report (counts per outcome, trial p50/p90, newest disagreements, explained vs unexplained) the switch decision reads.
     // `mergeWriter` (GY-1524): the control-plane merge executor's queue (oldest first), the merge in flight, its last delivery and newest refusals.
-    return print({ ...report, ...attention, harnessDrift: harness?.drift ?? null, shadowGate: shadowGateSummary(state?.shadow ?? []), mergeWriter: mergeWriterSummary(state?.mergeWriter), daemon: { ...report.daemon, cycleBudget: state ? cycleBudget(state, master.run.intervalSeconds * 1000) : null, ...(master2 ? { master: master2 } : {}) } });
+    return print({ ...report, ...attention, harnessDrift: harness?.drift ?? null, shadowGate: shadowGateSummary(state?.shadow ?? [], explanations), mergeWriter: mergeWriterSummary(state?.mergeWriter), daemon: { ...report.daemon, cycleBudget: state ? cycleBudget(state, master.run.intervalSeconds * 1000) : null, ...(master2 ? { master: master2 } : {}) } });
   }
   if (id === 'settle-containment') {
     if (!args[0] || !args.slice(1).join(' ').trim()) throw new Error('Use master settle-containment GY-N REASON');

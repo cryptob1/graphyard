@@ -3,12 +3,14 @@ import type pg from 'pg';
 import { z } from 'zod';
 import { demand, type Principal } from './model.js';
 import type { Store } from './store.js';
+import { unexplainedShadowDisagreements } from './server/shadow-verdict.js';
 
 /**
  * The merger setting: which writer lands heads on the base branch, `github` (the default) or the
  * `control-plane`. Like direct-merge mode it lives on the append-only ledger (`policy.merger.set`,
  * no work item), is set only with an admin credential, and is never read from graphyard.json or the
- * environment. Nothing consumes it yet: recording it changes no behaviour.
+ * environment. Switching to `control-plane` is refused while any shadow-only-fail or shadow-missed
+ * verdict stands unexplained (GY-1560); setting `github` is never refused for that reason.
  */
 export const mergerModes = ['github', 'control-plane'] as const;
 export type MergerMode = typeof mergerModes[number];
@@ -58,6 +60,11 @@ export class MergerSettings {
       if (receipt) { demand(receipt.fingerprint === fingerprint, 'Idempotency key reused with different input'); return receipt.result; }
       const current = await recordedMergerMode(db);
       demand(current.merger !== data.merger, `The merger is already ${current.merger}`, 409);
+      // GY-1560: control-plane is refused while any shadow disagreement stands unexplained; github never is.
+      if (data.merger === 'control-plane') {
+        const unexplained = await unexplainedShadowDisagreements(db, await this.store.list());
+        demand(!unexplained.length, `Control-plane merger refused while unexplained shadow disagreements stand: ${[...new Set(unexplained.map(entry => entry.key))].join(', ')}`, 409);
+      }
       await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', [actor.id, mergerEventKind, JSON.stringify({ merger: data.merger, reason: data.reason, previous: current.merger })]);
       const result = { ...await mergeWriterStatus(db), history: await mergerHistory(db) };
       await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]);
