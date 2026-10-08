@@ -45,4 +45,4 @@ Executors claim (`POST /api/delivery/rollback-claim`), report `applied`/`failed`
 
 ## Coordinator recovery
 
-The loop runs from a pinned checkout, `<install dir>/coordinator/current`. If it stalls after a self-merge or the main watch freezes, run `graphyard master recover [--to SHA] --admin-token-stdin` (repins, restarts, records `policy.coordinator.recovered`). Promotion resumes; a failed pin retries each cycle.
+The loop runs from a pinned checkout, `<install dir>/coordinator/current`. If it stalls after a self-merge or main-watch freeze, run `graphyard master recover [--to SHA] --admin-token-stdin` (repins, restarts, records `policy.coordinator.recovered`). Promotion resumes; failed pins retry.
