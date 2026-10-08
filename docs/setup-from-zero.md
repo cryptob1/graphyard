@@ -12,11 +12,11 @@ git clone https://github.com/cryptob1/graphyard.git ~/graphyard && (cd ~/graphya
 cd /path/to/REPO && node ~/graphyard/bin/graphyard.mjs up --agent --repo OWNER/REPO   # --provider compose (default), railway or hetzner
 ```
 
-Its only human step: approving a GitHub Mobile prompt; `--help` lists options.
+Its only human step: approving a GitHub Mobile prompt (none with `--merger control-plane`).
 
 A new Hetzner server waits (exit 3) for price approval; rerun: `--confirm-price X` or `--max-monthly N` and `--ssh-key NAME`.
 
-`up` runs: preflight, control plane, host supervisor and Herdr, master identities (`master autonomy --apply`; no admin credential: exit 2; `--local`: none, [supervised](onboarding.md#supervised-mode-up---local)), onboarding, accounts, harness, master loop. Onboarding files `graphyard/onboarding` for merge; goals wait. Reruns skip finished steps in `.graphyard/up.json`. Every run sets Herdr up (`install --herdr-only` on host). Preflight failures (exit 2) name the [prerequisite](#1-machine-prerequisites).
+`up` runs, in order: preflight, control plane, host supervisor and Herdr, (`--merger control-plane`: deploy key, merger setting,) master identities (`master autonomy --apply`; no admin credential: exit 2; `--local`: none, you review and merge, [supervised](onboarding.md#supervised-mode-up---local)), onboarding, accounts (host logins), harness, master loop. Onboarding files its `graphyard/onboarding` pull request for the loop to merge (a host install: a person); goals wait. Reruns skip steps `.graphyard/up.json` records. Every run sets Herdr up (host target: `install --herdr-only`).
 
 ## The Setup page
 
@@ -33,7 +33,7 @@ Once green (onboarding merged), **Describe what you want built** records a goal 
 
 ## Agent setup: up --agent
 
-`up --agent` takes `[--goal FILE] [--browser-profile PROFILE]`: JSON on stderr; exit `0` green, `1` failed, `2` prerequisite, `3` waiting. Apps are created in a signed-in Chrome profile (passed, master's, or same-login install's; none without `--reuse-app`/saved Apps: exit `2`), under `.graphyard/master-actions/`. Device `handoff`: subscription approval or GitHub Mobile (≤3 prompts). Without Mobile: confirm in Chrome, `up --sudo-code CODE|email`, or `graphyard app import` both Apps then `up --reuse-app SLUG --reuse-app REVIEWER_SLUG` (`--no-wait` exits `3`). Waits `--wait MINUTES` (20); same repo/provider/profile resumes *Confirm access*. Preflight refuses `/tmp` and `/var/tmp`.
+`up --agent` takes `[--goal FILE] [--browser-profile PROFILE]`: JSON events on stderr, summary stdout; exit `0` green, `1` failed (quoting GitHub's rejection), `2` prerequisite, `3` waiting. `--merger control-plane`: no Apps, browser profile, Mobile approval or `--reviewer`; a deploy key; a missing repository made with `gh` from this checkout (`--source . --push`); no `--local`. Otherwise it creates the Apps in a GitHub-signed-in Chrome profile (passed, else the master's, else a same-login install's; none, without `--reuse-app` or saved Apps: exit `2`), recorded under `.graphyard/master-actions/`; FILE is one goal. Only a device step becomes a `handoff`: a subscription login's approval, or *Confirm access*: a GitHub Mobile number. Without Mobile: confirm in your Chrome on the named page; give a code via the App page or `up --sudo-code CODE|email` (never recorded); or create both Apps at github.com/settings/apps/new (no webhook URL), `graphyard app import` each, then `up --reuse-app SLUG --reuse-app REVIEWER_SLUG` (`--no-wait` exits `3` here). Human waits last `--wait MINUTES` (default 20); a same-profile rerun resumes pending *Confirm access*. Preflight refuses `/tmp`, `/var/tmp` checkouts. 
 
 ## Troubleshooting: manual steps
 
@@ -61,7 +61,7 @@ The repository needs a GitHub `origin` and an Actions `pull_request` test workfl
 
 ## 4. Register the GitHub App
 
-GitHub merger only (`control-plane`: `PASS github-app: not required (merger: control-plane)`). `--apply` serves `http://127.0.0.1:4311` (no browser; [900 s then `resume`](install.md#step-3-app-confirmation)). **HUMAN:** create and install the App on OWNER/REPO. **Verify:** `github-app` passes; on `missing permissions`, `gy github-setup --update-permissions --wait 600` ([permissions](github.md#app-permissions)).
+GitHub merger only (`control-plane`: `PASS github-app: not required (merger: control-plane)`). `--apply` serves `http://127.0.0.1:4311` and prints it; it opens no browser ([900 s, then `resume`](install.md#step-3-app-confirmation)). **HUMAN:** create the App, install it on OWNER/REPO only. **Verify:** `github-app` passes; on `missing permissions`, `gy github-setup --update-permissions --wait 600` ([permissions](github.md#app-permissions)).
 
 ## 5. Reviewer and revert-approver Apps
 
