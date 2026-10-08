@@ -93,6 +93,9 @@ export function stalledItemAttention(snapshot: { work: Work[]; now: string }, th
 /** Direct-merge mode (src/direct-merge.ts), first in master status and in one line while it is on: gated merging is bypassed. */
 export const directMergeLine = (coordinator: any): { directMerge?: string } => coordinator?.directMerge?.line ? { directMerge: coordinator.directMerge.line } : {};
 
+/** The merger setting (src/merger-mode.ts), in one line while the control plane is the merge writer; the key is `mergeWriter` because `merger` is the loop-merger presence report. */
+export const mergeWriterLine = (coordinator: any): { mergeWriter?: string } => coordinator?.mergeWriter?.line ? { mergeWriter: coordinator.mergeWriter.line } : {};
+
 /**
  * The worker scope requests the loop has routed to the independent approver (GY-176), as the
  * `(key, epoch, at)` that identifies each ask. A routed request is the approver's to judge and the
