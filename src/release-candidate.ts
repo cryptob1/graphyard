@@ -27,6 +27,8 @@ export const productionBranch = 'release/production';
 export const candidateTagPrefix = 'rc/';
 export const uatTagPrefix = 'rc-uat/';
 export const productionTagPrefix = 'rc-production/';
+/** GY-1513: the advisory soak's verdict, recorded on the candidate's SHA by release-candidate-soak.yml once its run concludes. */
+export const soakTagPrefix = 'rc-soak/';
 /** The request id that makes filing a failed candidate's follow-up idempotent across retries. */
 export const followUpRequestId = (id: string) => `release-candidate-follow-up:${id}`;
 
@@ -65,6 +67,12 @@ export interface UatRecord {
 /** An applied evidence decision (GY-1378): one flaky case of one run accepted at one exact SHA. */
 export interface FlakyAcceptance { case: string; runId: string; sha: string; decision: string }
 export interface ProductionRecord { id: string; sha: string; at: string }
+/**
+ * GY-1513: the advisory soak and timing-budget suites' verdict for a candidate (`rc-soak/ID`): the
+ * result of the soak run that soaked its exact SHA, that run's URL and the name of the timing report
+ * it uploaded there. It decides nothing — promotion never reads it (GY-1440).
+ */
+export interface SoakRecord { id: string; sha: string; result: 'passed' | 'failed' | 'cancelled'; at: string; run: string | null; report: string | null }
 export interface CommitSummary { sha: string; subject: string; body: string }
 
 const fullSha = /^[0-9a-f]{40}$/;
@@ -240,11 +248,12 @@ export function readRecords<T>(git: Git, prefix: string): T[] {
   });
 }
 
-export interface Ledger { candidates: ReleaseCandidate[]; uat: UatRecord[]; production: ProductionRecord[] }
+export interface Ledger { candidates: ReleaseCandidate[]; uat: UatRecord[]; production: ProductionRecord[]; soak: SoakRecord[] }
 export const readLedger = (git: Git): Ledger => ({
   candidates: readRecords<ReleaseCandidate>(git, candidateTagPrefix),
   uat: readRecords<UatRecord>(git, uatTagPrefix),
   production: readRecords<ProductionRecord>(git, productionTagPrefix),
+  soak: readRecords<SoakRecord>(git, soakTagPrefix),
 });
 export const findCandidate = (ledger: Ledger, id: string) => {
   const candidate = id === 'latest' ? ledger.candidates[0] : ledger.candidates.find(entry => entry.id === id);
@@ -608,11 +617,31 @@ export function promote(git: Git, id: string, options: { base: string; push: boo
   return { promoted: true as const, candidate: candidate.id, sha: candidate.sha, branch: productionBranch };
 }
 
-/** Every candidate with its UAT and production state, newest first. */
+/**
+ * GY-1513: record the advisory soak's verdict on a candidate as `rc-soak/ID` on its exact SHA: the
+ * result, the soak run that produced it and the timing report it uploaded. A candidate's first record
+ * stands — a second soak of the same SHA (a re-run) records nothing — and a SHA that is not the
+ * candidate's is refused: the verdict belongs to the commit the suites ran against.
+ */
+export function recordSoak(git: Git, id: string, input: { sha: string; result: SoakRecord['result']; run: string | null; report: string | null; base: string; now: Date; push: boolean }) {
+  assertSha(input.sha, 'soaked');
+  syncLedger(git, input.base);
+  const ledger = readLedger(git);
+  const candidate = findCandidate(ledger, id);
+  if (candidate.sha !== input.sha) throw new Error(`Candidate ${candidate.id} is ${candidate.sha}, not the soaked ${input.sha}; the verdict is recorded on the candidate it soaked`);
+  const existing = ledger.soak.find(record => record.id === candidate.id);
+  if (existing) return { recorded: false as const, record: existing };
+  const record: SoakRecord = { id: candidate.id, sha: candidate.sha, result: input.result, at: input.now.toISOString(), run: input.run, report: input.report };
+  writeRecord(git, `${soakTagPrefix}${candidate.id}`, candidate.sha, record, input.push);
+  return { recorded: true as const, record };
+}
+
+/** Every candidate with its UAT, advisory soak and production state, newest first. */
 export const ledgerStatus = (ledger: Ledger) => ledger.candidates.map(candidate => {
-  const uat = ledger.uat.find(record => record.id === candidate.id) ?? null;
+  const uat = ledger.uat.find(record => record.id === candidate.id) ?? null, soak = ledger.soak.find(record => record.id === candidate.id) ?? null;
   return { id: candidate.id, sha: candidate.sha, cutAt: candidate.cutAt, trigger: candidate.trigger, prs: candidate.prs ?? null, queued: candidate.queued ?? null, items: candidate.items.map(item => item.key),
     uat: uat ? { result: uat.result, at: uat.at, failing: failingSuites(uat).map(suite => suite.name), followUp: uat.followUp,
       ...(uat.e2e ? { blocking: uat.e2e.blocking, unrun: uat.e2e.cases.filter(entry => entry.verdict === 'unrun').map(entry => entry.case) } : {}), ...(uat.holds?.length ? { holds: uat.holds } : {}) } : null,
+    soak: soak ? { result: soak.result, at: soak.at, run: soak.run, report: soak.report } : null,
     production: ledger.production.find(record => record.id === candidate.id)?.at ?? null };
 });

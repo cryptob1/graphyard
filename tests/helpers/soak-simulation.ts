@@ -137,6 +137,13 @@ import { type DiagnosisRun, type Failover, MANUAL, type MainGuardDay, PROOF, api
  */
 export let days = 0;
 /**
+ * GY-1513: a promotion day's shape. Each release run validates for `validationMs` from its dispatch and,
+ * with `promoteAfterMs` set, promotes its candidate that long in (null: the main day's runs never
+ * promote; production moves on its own deploys). Each cut candidate's advisory soak is listed
+ * `listedAfterMs` after the dispatch and concludes `soakMs` after it, so it outlives the run.
+ */
+export interface PromotionDay { validationMs?: number; promoteAfterMs?: number | null; soakMs?: number }
+/**
  * GY-1501: the effects `daemonEffects` leaves absent on a supervised install, whose config carries no
  * operator-agent, approver or reviewer identity: every decision, approver, escalation and reviewer
  * effect. tests/soak-supervised.test.ts checks the real effects leave each of them absent.
@@ -163,8 +170,11 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
    * blocker recorded on the fleet-idle cause before the loop could reclaim.
    */
   drained?: { finishAt: number; seeded: number };
-  /** GY-1302: wire the loop's promotion drive over the day's moving main, with a stubbed ledger, run list and dispatch. */
-  promotion?: boolean;
+  /**
+   * GY-1302: wire the loop's promotion drive over the day's moving main, with a stubbed ledger, run
+   * list, dispatch and (GY-1513) soak-run list; `true` is the main day's shape, an object another.
+   */
+  promotion?: boolean | PromotionDay;
   /** GY-1389: the review-round cap, the items whose change requests name a blocking finding past it, and those whose capped round the approver refuses. */
   reviewCap?: { cap: number; items: number[]; refused: number[] };
   /**
@@ -1323,11 +1333,21 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   // A backlog of 23 merges lands on an otherwise idle main at hour eight; the second run after it cuts
   // nothing (a refused cut), and one more merge lands at hour sixteen, so the queue goes out as
   // 10, then (after that merge) 10 and 4.
-  const promotion = { ledgerReads: 0, runReads: 0, dispatches: [] as number[], cuts: [] as string[], violations: [] as string[], validationMs: 90 * minute, listedAfterMs: 2 * minute,
+  // GY-1513: the advisory soak of each cut candidate runs in a workflow of its own and outlives the
+  // release run, which concludes at promote; the loop reads the soak runs only for master status.
+  // On the main day the runs never promote (production moves on its own deploys); a promotion day
+  // promotes `promoteAfterMs` in, so the next candidate follows inside the gap while the last soaks.
+  // Soak reads fail for the half hour from hour two, which no cycle fails on.
+  const promotionDay = typeof options.promotion === 'object' ? options.promotion : {};
+  const promotion = { ledgerReads: 0, runReads: 0, dispatches: [] as number[], cuts: [] as string[], violations: [] as string[], validationMs: promotionDay.validationMs ?? 90 * minute, listedAfterMs: 2 * minute,
     failDispatchUntil: hour, failLedger: [hour, hour + 30 * minute] as const, failedDispatches: [] as number[], failedLedgerReads: 0,
     maxPrs: 10, runnerSkewMs: 3 * minute, landings: [{ at: 8 * hour, merges: 23, landed: false }, { at: 16 * hour, merges: 1, landed: false }],
     mainline: [github.tip] as string[], seenTip: github.tip, candidates: [] as { id: string; sha: string; cutAt: string; prs: number; queued: number }[],
-    backlogDispatches: [] as number[], cutNothingAt: 2, emptyRuns: [] as number[], followed: [] as (string | null)[] };
+    backlogDispatches: [] as number[], cutNothingAt: 2, emptyRuns: [] as number[], followed: [] as (string | null)[],
+    promoteAfterMs: promotionDay.promoteAfterMs ?? null, soakMs: promotionDay.soakMs ?? 110 * minute, soaks: [] as { id: string; sha: string; startedAt: number; endsAt: number; result: 'success' | 'failure' }[],
+    soakReads: 0, failedSoakReads: 0, failSoak: [2 * hour, 2 * hour + 30 * minute] as const, promoted: null as { id: string; sha: string; at: number } | null, promotions: [] as number[],
+    // When main first moved past the last cut (null once dispatched), the delay from each promoting run's conclusion to the dispatch that followed it with main already ahead, and the dispatches made while the last soak still ran.
+    aheadSince: null as number | null, followDelays: [] as number[], soakOverlaps: 0 };
   // The stub's main: every tip the day's merges move it to, then the landed backlogs on top.
   const promotedMain = () => {
     const into = clock.now() - dayStart;
@@ -1339,26 +1359,56 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     return promotion.mainline.at(-1)!;
   };
   const queuedBehind = (sha: string) => promotion.mainline.length - 1 - promotion.mainline.lastIndexOf(sha);
+  // A promotion day's runs promote their candidate `promoteAfterMs` after the dispatch: the ledger's production record moves to it then.
+  const promoteDue = () => {
+    if (promotion.promoteAfterMs === null) return;
+    promotion.dispatches.forEach((at, index) => {
+      const candidate = promotion.candidates.find(entry => entry.id === `rc-${index + 1}`), promotesAt = at + promotion.promoteAfterMs!;
+      if (candidate && clock.now() >= promotesAt && (!promotion.promoted || promotion.promoted.at < promotesAt)) { promotion.promoted = { id: candidate.id, sha: candidate.sha, at: promotesAt }; promotion.promotions.push(promotesAt); }
+    });
+  };
+  const promotedSha = () => promotion.promoted?.sha ?? production.sha;
+  const soakUrl = (soak: { id: string }) => `https://github.test/owner/repo/actions/runs/soak-${soak.id}`;
+  // The candidate's record carries the soak's verdict once its run recorded it (release-candidate-soak.yml's record job).
+  const soakRecordOf = (candidate: { id: string }) => {
+    const soak = promotion.soaks.find(entry => entry.id === candidate.id);
+    return soak && clock.now() >= soak.endsAt ? { result: soak.result === 'success' ? 'passed' : 'failed', at: new Date(soak.endsAt).toISOString(), run: soakUrl(soak) } : null;
+  };
   const promotionEffect: DaemonEffects['promotion'] = options.promotion ? {
     ledger: async () => {
       promotion.ledgerReads++;
       const into = clock.now() - dayStart, mainSha = promotedMain();
       if (into >= promotion.failLedger[0] && into < promotion.failLedger[1]) { promotion.failedLedgerReads++; throw new Error('git fetch: Could not resolve host: github.com'); }
-      return { mainSha, promotedSha: production.sha, promotedAt: null, behind: mainSha === production.sha ? 0 : 1,
-        candidates: promotion.candidates.slice(-5).reverse().map(candidate => ({ ...candidate, queued: queuedBehind(candidate.sha) })) };
+      promoteDue();
+      return { mainSha, promotedSha: promotedSha(), promotedAt: promotion.promoted ? new Date(promotion.promoted.at).toISOString() : null, behind: mainSha === promotedSha() ? 0 : 1,
+        candidates: promotion.candidates.slice(-5).reverse().map(candidate => ({ ...candidate, queued: queuedBehind(candidate.sha), soak: soakRecordOf(candidate) })) };
     },
     runs: async () => {
       promotion.runReads++;
       return promotion.dispatches.filter(at => clock.now() - at >= promotion.listedAfterMs).reverse()
         .map(at => ({ status: clock.now() < at + promotion.validationMs ? 'in_progress' : 'completed', createdAt: new Date(at).toISOString(), event: 'workflow_dispatch', headSha: promotion.cuts[promotion.dispatches.indexOf(at)] }));
     },
+    // GY-1513: the soak workflow's runs as gh lists them, newest first, each named for the SHA it soaks.
+    soaks: async () => {
+      promotion.soakReads++;
+      const into = clock.now() - dayStart;
+      if (into >= promotion.failSoak[0] && into < promotion.failSoak[1]) { promotion.failedSoakReads++; throw new Error('gh: HTTP 502 Bad Gateway'); }
+      return promotion.soaks.filter(soak => clock.now() >= soak.startedAt).slice(-20).reverse().map(soak => ({ sha: soak.sha, status: clock.now() < soak.endsAt ? 'in_progress' : 'completed',
+        conclusion: clock.now() < soak.endsAt ? null : soak.result, createdAt: new Date(soak.startedAt).toISOString(), url: soakUrl(soak) }));
+    },
     dispatch: async () => {
       const now = clock.now(), last = promotion.dispatches.at(-1), tip = promotedMain(), into = Math.round((now - dayStart) / minute);
       if (now - dayStart < promotion.failDispatchUntil) { promotion.failedDispatches.push(now); throw new Error('gh: HTTP 403: Resource not accessible by integration'); }
-      if (tip === production.sha) promotion.violations.push(`+${into} min: dispatched while production runs main`);
+      promoteDue();
+      if (tip === promotedSha()) promotion.violations.push(`+${into} min: dispatched while production runs main`);
       if (last !== undefined && now < last + promotion.validationMs) promotion.violations.push(`+${into} min: dispatched while the candidate of +${Math.round((last - dayStart) / minute)} min is in validation`);
       const gap = deploymentStep.defaultPromoteEveryMinutes * minute;
-      if (last !== undefined && now - last < gap) promotion.violations.push(`+${into} min: dispatched ${Math.round((now - last) / minute)} min after the last`);
+      // GY-1513: the gap spaces runs that concluded without promoting; a run that promoted is followed at once.
+      const lastPromoted = last !== undefined && !!promotion.promoted && promotion.promoted.at >= last;
+      if (last !== undefined && now - last < gap && !lastPromoted) promotion.violations.push(`+${into} min: dispatched ${Math.round((now - last) / minute)} min after the last`);
+      if (last !== undefined && lastPromoted && promotion.aheadSince !== null && promotion.aheadSince <= last + promotion.validationMs) promotion.followDelays.push(now - (last + promotion.validationMs));
+      if (promotion.soaks.some(soak => soak.startedAt <= now && now < soak.endsAt)) promotion.soakOverlaps++;
+      promotion.aheadSince = null;
       const refused = promotion.failedDispatches.at(-1);
       if (refused !== undefined && now - refused < gap) promotion.violations.push(`+${into} min: dispatched ${Math.round((now - refused) / minute)} min after a refused attempt`);
       // A tip already cut goes out again only for the merges a newer capped candidate left queued behind it.
@@ -1372,7 +1422,10 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
       const from = newest ? promotion.mainline.lastIndexOf(newest.sha) : -1, waiting = promotion.mainline.length - 1 - from;
       if (newest && waiting <= 0) return;
       const prs = newest ? Math.min(waiting, promotion.maxPrs) : 1, sha = newest ? promotion.mainline[from + prs] : tip;
-      promotion.candidates.push({ id: `rc-${promotion.dispatches.length}`, sha, cutAt: new Date(now - promotion.runnerSkewMs).toISOString(), prs, queued: queuedBehind(sha) });
+      const id = `rc-${promotion.dispatches.length}`;
+      promotion.candidates.push({ id, sha, cutAt: new Date(now - promotion.runnerSkewMs).toISOString(), prs, queued: queuedBehind(sha) });
+      // The run starts the candidate's soak, which gh lists once it is queued; every third one fails, deciding nothing.
+      promotion.soaks.push({ id, sha, startedAt: now + promotion.listedAfterMs, endsAt: now + promotion.soakMs, result: promotion.soaks.length % 3 === 2 ? 'failure' : 'success' });
     },
   } : undefined;
   // GY-1385: the loop's own throughput measurement after each verified deployment, through the
@@ -2417,6 +2470,8 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
       if (options.staleMerge && await restartOnMerge(now)) { elapsed += minute; await moveClock(minute); continue; }
       if (loopWakeDay && !await loopWakeDay.tick(elapsed)) { elapsed += loopWakeDay.tickMs; await moveClock(loopWakeDay.tickMs); continue; }
       master.cycleOf = cycles;
+      // GY-1513: when main first moves past the last cut, so a promoting run's follow-up is timed from its conclusion.
+      if (promotionEffect && promotion.aheadSince === null && promotedMain() !== promotion.cuts.at(-1)) promotion.aheadSince = clock.now();
       // GY-916: the supervisor restarts the loop for its own reasons: a new process, the same unit.
       if (loopRestarts.length && elapsed >= loopRestarts[0]) { loopRestarts.shift(); await processStart(state); }
       try {

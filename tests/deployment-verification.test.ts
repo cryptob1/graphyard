@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { defaultPromoteEveryMinutes, promotionCycle, promotionLedgerReadMs, promotionRunsReadMs, promotionReads, promotionStatus, promotionWorkflow, type PromotionLedger, type PromotionReads, type PromotionRun } from '../src/daemon/deployment.js';
+import { defaultPromoteEveryMinutes, promotionCycle, promotionLedgerReadMs, promotionRunsReadMs, promotionReads, promotionStatus, promotionUnlistedMs, promotionWorkflow, type PromotionLedger, type PromotionReads, type PromotionRun } from '../src/daemon/deployment.js';
 import { promotionStateSchema, type PromotionState } from '../src/daemon/state.js';
 import type { MasterConfig } from '../src/master.js';
 
@@ -72,7 +72,7 @@ test('unit:loop-dispatches-promotion — nothing is dispatched when production r
   assert.equal(current.reads.dispatches + off.reads.dispatches + fired.reads.dispatches, 0);
 });
 
-test('unit:loop-dispatches-promotion — the ledger read fetches from the remote, so cycles every 20 seconds for six hours fetch once per read window, GitHub runs are read once a minute at most, and promotion that is off reads nothing', async () => {
+test('unit:loop-dispatches-promotion — the ledger read fetches from the remote, so cycles every 20 seconds for six hours fetch once per read window, GitHub runs are read once a cycle while a candidate is in validation (GY-1513) and once a minute at most otherwise, and promotion that is off reads nothing', async () => {
   const { reads, api } = stubReads({ mainSha: MAIN, promotedSha: PROMOTED, promotedAt: null, behind: 1 },
     [{ status: 'in_progress', createdAt: new Date(T0 - minutes(10)).toISOString(), event: 'workflow_dispatch' }]);
   const span = minutes(360), step = 20_000;
@@ -81,12 +81,15 @@ test('unit:loop-dispatches-promotion — the ledger read fetches from the remote
     // Main moves every 40 minutes; the candidate concludes after three hours.
     reads.ledger = { ...reads.ledger, mainSha: sha(String(Math.floor((now - T0) / minutes(40)) % 10)), behind: 1 + Math.floor((now - T0) / minutes(40)) };
     if (now - T0 >= minutes(180)) reads.runs = reads.runs.map(run => ({ ...run, status: 'completed' }));
-    state = promotionStateSchema.parse((await promotionCycle(state, api, { now, everyMinutes: 120 })).state);
+    state = promotionStateSchema.parse((await promotionCycle(state, api, { now, everyMinutes: 120, intervalMs: step })).state);
   }
   const cycles = span / step;
   assert.ok(reads.ledgerReads <= Math.ceil(span / promotionLedgerReadMs) + 1, `${reads.ledgerReads} fetches over ${cycles} cycles`);
   assert.ok(reads.ledgerReads >= span / promotionLedgerReadMs - 1, 'the ledger is still refreshed every read window, so behind stays current');
-  assert.ok(reads.runReads <= Math.ceil(span / promotionRunsReadMs) + 1, `${reads.runReads} run reads`);
+  // In validation for three hours, then the loop's own dispatch unlisted for its window: read once a cycle there, once a minute in the rest.
+  const inFlightMs = minutes(180) + promotionUnlistedMs;
+  assert.ok(reads.runReads <= Math.ceil(inFlightMs / step) + Math.ceil((span - inFlightMs) / promotionRunsReadMs) + 2, `${reads.runReads} run reads`);
+  assert.ok(reads.runReads >= minutes(180) / step - 1, `in validation, the runs are read every cycle (${reads.runReads} run reads over ${cycles} cycles)`);
   assert.ok(reads.dispatches >= 1 && reads.dispatches <= Math.ceil(span / minutes(120)), `${reads.dispatches} dispatches`);
   const off = stubReads({ mainSha: MAIN, promotedSha: PROMOTED, promotedAt: null, behind: 1 }, []);
   let offState: PromotionState | null = null;

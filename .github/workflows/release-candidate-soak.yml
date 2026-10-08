@@ -1,0 +1,94 @@
+name: Release candidate soak
+# The advisory soak and timing-budget suites of one release candidate (GY-1440, GY-1513). Each
+# release-candidate.yml run dispatches this with the exact SHA it cut or pinned, so the suites run
+# against that commit and nothing else, never on a pull request and never as a required check. They
+# run in a run of their own so the release run concludes when promote does: the loop cuts the next
+# candidate while this one is still soaking. The verdict decides nothing: the record job writes it,
+# with this run and its timing report, onto the candidate's ledger record (rc-soak/ID), which
+# `release status` and `master status` list beside the candidate (running, while this run is).
+run-name: Soak ${{ inputs.candidate || 'pinned' }} ${{ inputs.sha }}
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: Full 40-character commit SHA of the release candidate to soak
+        required: true
+      candidate:
+        description: The release candidate id (rc/ID) the SHA was cut as; empty for a pinned SHA
+        required: false
+        default: ''
+permissions:
+  contents: read
+concurrency:
+  # A group of its own, one soak per SHA: a second request for the same SHA waits rather than cancels,
+  # and never shares a group with the release run it came from.
+  group: ${{ github.workflow }}-${{ inputs.sha }}
+  cancel-in-progress: false
+jobs:
+  long-suites:
+    name: soak and timing-budget suites
+    env:
+      CANDIDATE_SHA: ${{ inputs.sha }}
+    runs-on: ubuntu-latest
+    # The soak runs the launcher's real mount namespace on every simulated launch (GY-888) and
+    # takes about twenty minutes on a runner by itself; the timing budgets, one at a time, about fifteen.
+    timeout-minutes: 60
+    steps:
+      - name: Refuse anything but a full commit SHA
+        run: '[[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "sha must be a full 40-character commit SHA: $CANDIDATE_SHA" >&2; exit 1; }'
+        shell: bash
+      - uses: actions/checkout@v4
+        with: { ref: '${{ env.CANDIDATE_SHA }}', persist-credentials: false }
+      - uses: actions/setup-node@v4
+        with: { node-version: '24', cache: npm }
+      - run: npm ci
+      - name: Install bubblewrap (the soak confines every simulated launch in real namespaces)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 2>/dev/null || true
+      # The timing budgets run first and one file at a time, the soak after them: a budget measured
+      # beside another suite's load (plane-load's ten minutes of users, the soak's loop days) measures
+      # that load, not the candidate (GY-1440). The soak runs whatever the budgets' verdict.
+      - name: Run the release-candidate test files
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/ci-tests.mjs release-candidate --suite timing-budget --out "$RUNNER_TEMP/timing-budget-tests.txt"
+          node scripts/ci-tests.mjs release-candidate --suite soak --out "$RUNNER_TEMP/soak-tests.txt"
+          mkdir -p "$RUNNER_TEMP/timing"
+          export GRAPHYARD_TIMING_SLACK=1.5 GRAPHYARD_TIMING_RECORD="$RUNNER_TEMP/timing/release-candidate.jsonl"
+          status=0
+          npm test -- --files-from "$RUNNER_TEMP/timing-budget-tests.txt" --test-concurrency=1 --durations "$RUNNER_TEMP/timing/durations-timing-budget.jsonl" 2>&1 | tee "$RUNNER_TEMP/timing/test-timing-budget.log" || status=1
+          npm test -- --files-from "$RUNNER_TEMP/soak-tests.txt" --durations "$RUNNER_TEMP/timing/durations-soak.jsonl" 2>&1 | tee "$RUNNER_TEMP/timing/test-soak.log" || status=1
+          exit "$status"
+      - name: Summarise the timing-dependent assertions
+        if: always()
+        run: npx tsx tests/helpers/timing-report.ts "$RUNNER_TEMP/timing/release-candidate.jsonl" "$RUNNER_TEMP/timing/test-timing-budget.log" "$RUNNER_TEMP/timing/test-soak.log"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: graphyard-release-candidate-timing
+          path: ${{ runner.temp }}/timing/
+          if-no-files-found: ignore
+  record:
+    name: record the verdict on the candidate
+    needs: long-suites
+    # Whatever the suites' verdict, and only for a cut candidate: a pinned SHA has no record to carry it.
+    if: ${{ always() && inputs.candidate != '' }}
+    env:
+      CANDIDATE_SHA: ${{ inputs.sha }}
+      SOAK_RESULT: ${{ needs.long-suites.result }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      # The ledger is written by the current release tooling, as promote does, not by the candidate's checkout.
+      - uses: actions/checkout@v4
+        with: { ref: main, fetch-depth: 0 }
+      - uses: actions/setup-node@v4
+        with: { node-version: '24', cache: npm }
+      - run: npm ci
+      - name: Record the advisory verdict, this run and its timing report as rc-soak/ID on the candidate's SHA
+        run: node bin/graphyard.mjs release soak "${{ inputs.candidate }}" --sha "$CANDIDATE_SHA" --result "$SOAK_RESULT" --run "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" --report graphyard-release-candidate-timing
