@@ -16,8 +16,8 @@ import { mergerNotRequired, statusControlPlaneMerger } from './model/setup-check
 export const setupSteps = {
   install: 'docs/setup-from-zero.md step 3 (install the control plane)',
   app: 'docs/setup-from-zero.md step 4 (register the GitHub App)',
-  reviewer: 'docs/setup-from-zero.md step 5 (reviewer and revert-approver Apps)',
-  protection: 'docs/setup-from-zero.md step 7 (branch protection)',
+  reviewer: 'docs/setup-from-zero.md step 4 (reviewer and revert-approver Apps)',
+  protection: 'docs/setup-from-zero.md step 4 (branch protection)',
   environments: 'docs/setup-from-zero.md step 8 (agent environments)',
   sandbox: 'docs/setup-from-zero.md step 9 (worker sandbox)',
 } as const;

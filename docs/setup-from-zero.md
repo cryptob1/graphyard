@@ -33,7 +33,7 @@ Once green (onboarding merged), **Describe what you want built** records a goal 
 
 ## Agent setup: up --agent
 
-`up --agent` takes `[--goal FILE] [--browser-profile PROFILE]`: JSON events on stderr, summary stdout; exit `0` green, `1` failed (quoting GitHub's rejection), `2` prerequisite, `3` waiting. `--merger control-plane`: no Apps, browser profile, Mobile approval or `--reviewer`; a deploy key; a missing repository made with `gh` from this checkout (`--source . --push`); no `--local`. Otherwise it creates the Apps in a GitHub-signed-in Chrome profile (passed, else the master's, else a same-login install's; none, without `--reuse-app` or saved Apps: exit `2`), recorded under `.graphyard/master-actions/`; FILE is one goal. Only a device step becomes a `handoff`: a subscription login's approval, or *Confirm access*: a GitHub Mobile number. Without Mobile: confirm in your Chrome on the named page; give a code via the App page or `up --sudo-code CODE|email` (never recorded); or create both Apps at github.com/settings/apps/new (no webhook URL), `graphyard app import` each, then `up --reuse-app SLUG --reuse-app REVIEWER_SLUG` (`--no-wait` exits `3` here). Human waits last `--wait MINUTES` (default 20); a same-profile rerun resumes pending *Confirm access*. Preflight refuses `/tmp`, `/var/tmp` checkouts. 
+`up --agent` takes `[--goal FILE] [--browser-profile PROFILE]`: JSON events on stderr; exit `0` green, `1` failed (quoting GitHub's rejection), `2` prerequisite, `3` waiting. `--merger control-plane`: no Apps, browser profile, Mobile approval or `--reviewer`; a deploy key; a missing repository made with `gh` from this checkout (`--source . --push`); no `--local`. Otherwise it creates the Apps in a GitHub-signed-in Chrome profile (passed, else the master's, else a same-login install's; none, without `--reuse-app` or saved Apps: exit `2`), recorded under `.graphyard/master-actions/`. Only a device step becomes a `handoff`: a subscription login's approval, or *Confirm access*: a GitHub Mobile number. Without Mobile: confirm in your Chrome; give a code via `up --sudo-code CODE|email` (never recorded); or create both Apps at github.com/settings/apps/new, `graphyard app import` each, then `up --reuse-app SLUG --reuse-app REVIEWER_SLUG` (`--no-wait` exits `3`). Waits last `--wait MINUTES` (default 20). Preflight refuses `/tmp`, `/var/tmp` checkouts.
 
 ## Troubleshooting: manual steps
 
@@ -59,21 +59,17 @@ The repository needs a GitHub `origin` and an Actions `pull_request` test workfl
 
 `gy install --provider compose --repo OWNER/REPO --reviewer claude --plan`, then `--apply` ([install](install.md); `gy` is `node ~/graphyard/bin/graphyard.mjs`). Before the App step, `--apply` records the master connection `.graphyard/master.json`, its `0600` credential under the plan's `installDirectory`; `gy doctor` reads as it; `GRAPHYARD_TOKEN_FILE` overrides it. **Verify:** `control-plane` and `credentials-file` pass.
 
+### Control-plane merger
+
+`up --merger control-plane` creates an ed25519 deploy key, registers it read-write on OWNER/REPO through your `gh` login and sets the [merger](delivery-redesign.md#the-merger-setting) (`POST /api/merger`); the merge writer pushes with that key; no App, no branch protection. **Verify:** `github-app`, `reviewer-app` and `branch-protection` print `PASS ... not required (merger: control-plane)`.
+
 ## 4. Register the GitHub App
 
-GitHub merger only (`control-plane`: `PASS github-app: not required (merger: control-plane)`). `--apply` serves `http://127.0.0.1:4311` and prints it; it opens no browser ([900 s, then `resume`](install.md#step-3-app-confirmation)). **HUMAN:** create the App, install it on OWNER/REPO only. **Verify:** `github-app` passes; on `missing permissions`, `gy github-setup --update-permissions --wait 600` ([permissions](github.md#app-permissions)).
-
-## 5. Reviewer and revert-approver Apps
-
-GitHub merger only (`control-plane`: same PASS for `reviewer-app`). `--reviewer claude` registers the reviewer App and revert approver (`GRAPHYARD_REVERT_APPROVER_*`). **Verify:** `reviewer-app` and readiness `revert-approver` pass; outside `install`, `gy master reviewer setup` and [variables](deployment.md#variables).
+GitHub merger only. `--apply` serves `http://127.0.0.1:4311` and prints it; it opens no browser ([900 s, then `resume`](install.md#step-3-app-confirmation)). **HUMAN:** create the App, install it on OWNER/REPO only. **Verify:** `github-app` passes; on `missing permissions`, `gy github-setup --update-permissions --wait 600` ([permissions](github.md#app-permissions)). Reviewer and revert-approver Apps: `--reviewer claude` registers both (else `gy master reviewer setup`); **Verify:** `reviewer-app`. Branch protection: `--apply` protects the base; rerun once `Graphyard / merge` appears to require it; **Verify:** `branch-protection`.
 
 ## 6. Onboard the checkout
 
 `gy init --scan`, then `gy init --scan --apply --url http://127.0.0.1:4310`; merge `AGENTS.md .gitignore graphyard.json .github/workflows` to the base (never `.graphyard/`). Control-plane: worker block says `complete GY-N EPOCH --head SHA`. **Verify:** readiness `setup-proposal` is `ready` ([onboarding](onboarding.md#documentation-policy)).
-
-## 7. Branch protection
-
-GitHub merger only (`control-plane`: same PASS for `branch-protection`). `--apply` protects the base branch; once the first pull request shows `Graphyard / merge`, rerun it (or `up`) to require that check. **Verify:** `branch-protection` passes.
 
 ## 8. Agent environments
 
