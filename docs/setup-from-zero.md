@@ -12,11 +12,11 @@ git clone https://github.com/cryptob1/graphyard.git ~/graphyard && (cd ~/graphya
 cd /path/to/REPO && node ~/graphyard/bin/graphyard.mjs up --agent --repo OWNER/REPO   # --provider compose (default), railway or hetzner
 ```
 
-Its only human step: approving a GitHub Mobile prompt; `--help` lists options.
+Its only human step: approving a GitHub Mobile prompt (none with `--merger control-plane`).
 
 A new Hetzner server waits (exit 3) for price approval; rerun: `--confirm-price X` or `--max-monthly N` and `--ssh-key NAME`.
 
-`up` runs, in order: preflight, control plane, host supervisor and Herdr, master identities (`master autonomy --apply`; no admin credential: exit 2; `--local`: none, you review and merge, [supervised](onboarding.md#supervised-mode-up---local)), onboarding, accounts (host logins; asks for empty roles), harness, master loop. Onboarding files its `graphyard/onboarding` pull request for the loop to review and merge (a host install leaves it to a person); goals wait. Reruns skip steps `.graphyard/up.json` records finished. Every run sets Herdr up (host target: `install --herdr-only`), a second install getting its own instance. Preflight failures (exit 2) name the [prerequisite](#1-machine-prerequisites).
+`up` runs, in order: preflight, control plane, host supervisor and Herdr, (`--merger control-plane`: deploy key, merger setting,) master identities (`master autonomy --apply`; no admin credential: exit 2; `--local`: none, you review and merge, [supervised](onboarding.md#supervised-mode-up---local)), onboarding, accounts (host logins), harness, master loop. Onboarding files its `graphyard/onboarding` pull request for the loop to merge (a host install: a person); goals wait. Reruns skip steps `.graphyard/up.json` records. Every run sets Herdr up (host target: `install --herdr-only`).
 
 ## The Setup page
 
@@ -33,7 +33,7 @@ Once green (onboarding merged), **Describe what you want built** records a goal 
 
 ## Agent setup: up --agent
 
-`up --agent` takes `[--goal FILE] [--browser-profile PROFILE]`: JSON events on stderr, summary stdout; exit `0` green, `1` failed (quoting GitHub's rejection), `2` prerequisite, `3` waiting. It creates the Apps in a GitHub-signed-in Chrome profile (passed, else the master's, else a same-login install's; none, without `--reuse-app` or saved Apps: exit `2`), recorded under `.graphyard/master-actions/`; FILE is one goal. Only a device step becomes a `handoff`: a subscription login's approval, or *Confirm access*: a GitHub Mobile number (≤3 prompts). Without Mobile: confirm in your Chrome on the named page; give a code via the App page or `up --sudo-code CODE|email` (never recorded); or create both Apps at github.com/settings/apps/new (no webhook URL), `graphyard app import` each, then `up --reuse-app SLUG --reuse-app REVIEWER_SLUG` (`--no-wait` exits `3` here). Human waits last `--wait MINUTES` (default 20); a same repository/provider/profile rerun resumes pending *Confirm access*. Preflight refuses `/tmp`, `/var/tmp` checkouts.
+`up --agent` takes `[--goal FILE] [--browser-profile PROFILE]`: JSON events on stderr, summary stdout; exit `0` green, `1` failed (quoting GitHub's rejection), `2` prerequisite, `3` waiting. `--merger control-plane`: no Apps, browser profile, Mobile approval or `--reviewer`; a deploy key; a missing repository made with `gh`; no `--local`. Otherwise it creates the Apps in a GitHub-signed-in Chrome profile (passed, else the master's, else a same-login install's; none, without `--reuse-app` or saved Apps: exit `2`), recorded under `.graphyard/master-actions/`; FILE is one goal. Only a device step becomes a `handoff`: a subscription login's approval, or *Confirm access*: a GitHub Mobile number . Without Mobile: confirm in your Chrome on the named page; give a code via the App page or `up --sudo-code CODE|email` (never recorded); or create both Apps at github.com/settings/apps/new (no webhook URL), `graphyard app import` each, then `up --reuse-app SLUG --reuse-app REVIEWER_SLUG` (`--no-wait` exits `3` here). Human waits last `--wait MINUTES` (default 20); a same-profile rerun resumes pending *Confirm access*. Preflight refuses `/tmp`, `/var/tmp` checkouts. 
 
 ## Troubleshooting: manual steps
 

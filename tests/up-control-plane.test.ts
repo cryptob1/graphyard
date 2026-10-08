@@ -415,3 +415,8 @@ test('unit:up-github-steps-unchanged — without --merger control-plane the step
   assert.ok(applies.every(args => !args.includes('--no-github-app')), 'github mode never passes --no-github-app');
   assert.ok(!events.some(event => event.kind === 'step' && (event.step === 'deploy-key' || event.step === 'merger-setting')));
 });
+
+test('up --merger control-plane is refused beside --local, which provisions no master identities', async () => {
+  const { upRequestFromArgs } = await import('../src/up.js');
+  assert.throws(() => upRequestFromArgs(['--repo', 'acme/shop', '--local', '--merger', 'control-plane']), /cannot be combined with --local/);
+});

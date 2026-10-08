@@ -2,6 +2,7 @@
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { z } from 'zod';
+import { configHome } from '../install/secrets.js';
 
 /** How long one trial (build plus the affected tests) may run before it is killed; a timeout is no verdict and is retried later (cycle-shadow.ts). */
 export const defaultShadowTimeoutMinutes = 20;
@@ -31,8 +32,8 @@ export const shadowGateSettings = (run: { shadowGate?: ShadowGateSettings }) => 
 export const defaultMergeWriterRetrials = 3;
 /** The most re-trials an install may ask for: every one is a full build and test run on a fresh merge commit. */
 export const maxMergeWriterRetrials = 10;
-/** The install's deploy key by default: `~/.config/graphyard/<install>/deploy-key`, the one credential the push child sees. */
-export const defaultDeployKeyFile = (installId: string, home: string = homedir()) => join(home, '.config', 'graphyard', installId, 'deploy-key');
+/** The install's deploy key by default: `<config home>/<install>/deploy-key` (`~/.config/graphyard`, or GRAPHYARD_CONFIG_HOME), the one credential the push child sees. */
+export const defaultDeployKeyFile = (installId: string, home?: string) => join(home === undefined ? configHome() : join(home, '.config', 'graphyard'), installId, 'deploy-key');
 
 /**
  * `run.mergeWriter` in .graphyard/master.json: the control-plane merge executor's deploy key and
@@ -48,7 +49,7 @@ export type MergeWriterSettings = z.infer<typeof mergeWriterSettingsSchema>;
 const expandHome = (path: string, home: string) => path === '~' ? home : path.startsWith('~/') ? join(home, path.slice(2)) : path;
 
 /** The settings with their defaults applied, for the install `installId` (install/types.ts `installIdFor`). */
-export const mergeWriterSettings = (run: { mergeWriter?: MergeWriterSettings }, installId: string, home: string = homedir()) => ({
-  deployKeyFile: expandHome(run.mergeWriter?.deployKeyFile ?? defaultDeployKeyFile(installId, home), home),
+export const mergeWriterSettings = (run: { mergeWriter?: MergeWriterSettings }, installId: string, home?: string) => ({
+  deployKeyFile: expandHome(run.mergeWriter?.deployKeyFile ?? defaultDeployKeyFile(installId, home), home ?? homedir()),
   retrials: run.mergeWriter?.retrials ?? defaultMergeWriterRetrials,
 });

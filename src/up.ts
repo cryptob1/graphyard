@@ -982,6 +982,7 @@ export function upRequestFromArgs(args: string[], recorded: { repository: string
   const mergerFlag = values.merger;
   if (mergerFlag !== undefined && !(mergerModes as readonly string[]).includes(mergerFlag)) throw new Error(`Use --merger ${mergerModes.join('|')}`);
   const merger = (mergerFlag ?? recorded?.merger) as MergerMode | undefined;
+  if (merger === 'control-plane' && (provider ?? recorded?.provider) === 'local') throw new Error('graphyard up --merger control-plane cannot be combined with --local: supervised mode provisions no operator-agent or approver identity');
   for (const [flag, given, kept] of [['--repo', values.repo, recorded?.repository], ['--provider', provider, recorded?.provider], ['--merger', mergerFlag, recorded?.merger]] as const) {
     if (given !== undefined && kept !== undefined && given !== kept) throw new Error(`graphyard up ${flag} ${given} conflicts with ${kept}, which the run recorded in .graphyard/up.json resumes; omit ${flag} (or pass ${kept}) to resume it, or remove .graphyard/up.json to start over for ${given}`);
   }
