@@ -17,8 +17,8 @@ export interface LocalValidation { record: Pick<UatRecord, 'result' | 'suites' |
  * daemon/release-ports.ts builds them). No workflow run is read or dispatched.
  */
 export interface LocalReleasePorts {
-  /** Cuts the next candidate from the base tip (`cut`), or names the newest one UAT holds no verdict for yet, to be resumed after a crash. */
-  cut(): Promise<{ cut: true; candidate: LocalCandidate } | { cut: false; resume: LocalCandidate } | { cut: false; reason: string }>;
+  /** Names the newest candidate UAT holds no verdict for yet, to be resumed after a crash; else, only when `due`, cuts the next one from the base tip (`cut`). A cut not due cuts nothing. */
+  cut(due: boolean): Promise<{ cut: true; candidate: LocalCandidate } | { cut: false; resume: LocalCandidate } | { cut: false; reason: string }>;
   /** Moves `release/uat` to the candidate's exact SHA (`deployToUat`); refused while another candidate's validation runs there. */
   uat(id: string): Promise<{ sha: string }>;
   /** Waits for UAT to serve the SHA, runs every suite and records `rc-uat/ID` (`validateAndRecord`), filing holds and the follow-up. */
@@ -121,7 +121,8 @@ export async function localPromotionCycle(previous: PromotionState | null, reads
   try { history = await local.history(); } catch (error) { return failed({ ...base, runsReadAt: at }, `The base branch history could not be read for the cut rule: ${message(error)}`); }
   const assessment = assessCut(ledger, history, options.now, local.settings);
   let decided: Awaited<ReturnType<LocalReleasePorts['cut']>>;
-  try { decided = assessment.due ? await local.cut() : await resumable(local); } catch (error) { return failed({ ...base, runsReadAt: at }, `The release candidate could not be cut: ${message(error)}`); }
+  // The port is told whether the rule is due: not due, it only resumes a candidate whose validation never recorded and cuts nothing.
+  try { decided = await local.cut(assessment.due); } catch (error) { return failed({ ...base, runsReadAt: at }, `The release candidate could not be cut: ${message(error)}`); }
   if (!decided.cut && !('resume' in decided)) return done({ ...base, runsReadAt: at }, assessment.due ? `${assessment.reason}, but nothing was cut: ${decided.reason}` : assessment.reason, !assessment.due && assessment.merges > 0);
   const candidate = decided.cut ? decided.candidate : decided.resume, resumed = !decided.cut;
   // The attempt is stamped before the run: whatever its outcome, the next cut waits out the gap and starts after this candidate.
@@ -134,10 +135,4 @@ export async function localPromotionCycle(previous: PromotionState | null, reads
   let after = attempted;
   try { after = { ...attempted, ...await readLedger(), ledgerReadAt: new Date(Date.now()).toISOString() }; } catch { /* the next window re-reads it */ }
   return done(after, `${resumed ? `Resumed candidate ${candidate.id}: ` : `Cut candidate ${candidate.id} at ${short(candidate.sha)}: `}${run.detail}`, true, { dispatched: true, run });
-}
-
-/** A cut not due still resumes a candidate whose validation never recorded: the port answers it as `resume` without cutting. */
-async function resumable(local: LocalReleasePorts): Promise<Awaited<ReturnType<LocalReleasePorts['cut']>>> {
-  const decided = await local.cut().catch(() => null);
-  return decided && !decided.cut && 'resume' in decided ? decided : { cut: false, reason: 'not due' };
 }

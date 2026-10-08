@@ -105,11 +105,13 @@ export function localReleasePorts(config: Pick<MasterConfig, 'baseBranch' | 'run
   };
   return {
     settings,
-    cut: async () => {
+    cut: async due => {
       syncLedger(git, base);
       const ledger = readLedger(git), newest = ledger.candidates[0];
       // A candidate cut and never judged — a run that crashed between the cut and its record — is resumed, not cut past.
       if (newest && !ledger.uat.some(record => record.id === newest.id) && now() - Date.parse(newest.cutAt) < uatValidationWindowMs) return { cut: false, resume: toCandidate(newest) };
+      // The cut rule (candidate-cut.ts) alone decides a cut: not due, nothing is tagged or pushed.
+      if (!due) return { cut: false, reason: `the cut rule is not due (${settings.everyMerges} merges or ${settings.idleMinutes} idle minutes)` };
       const result = cut(git, { base, trigger: 'manual', now: new Date(now()), push: true, maxPrs: settings.everyMerges });
       return result.cut ? { cut: true, candidate: toCandidate(result.candidate) } : { cut: false, reason: result.reason };
     },

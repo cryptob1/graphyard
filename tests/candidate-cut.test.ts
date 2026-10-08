@@ -75,11 +75,12 @@ const flaky: LocalValidation = { record: { ...failed.record, e2e: { ...failed.re
 
 /** Local ports answering from memory, recording every call in order. */
 function fakeLocal(options: { validation?: LocalValidation; cut?: Awaited<ReturnType<LocalReleasePorts['cut']>>; history?: CutCommit[]; served?: string | null; revert?: RevertOutcome; promote?: Awaited<ReturnType<LocalReleasePorts['promote']>> } = {}) {
-  const calls: string[] = [];
+  const calls: string[] = [], due: boolean[] = [];
+  // Like the real port, the fake cuts only when told the rule is due; not due, it answers a resumable candidate or nothing.
   const local: LocalReleasePorts = {
     settings: defaults,
     history: async () => { calls.push('history'); return options.history ?? history(20); },
-    cut: async () => { calls.push('cut'); return options.cut ?? { cut: true, candidate }; },
+    cut: async isDue => { calls.push('cut'); due.push(isDue); return options.cut ?? (isDue ? { cut: true, candidate } : { cut: false, reason: 'not due' }); },
     uat: async id => { calls.push(`uat:${id}`); return { sha: CUT }; },
     validate: async id => { calls.push(`validate:${id}`); return options.validation ?? passed; },
     promote: async id => { calls.push(`promote:${id}`); return options.promote ?? { promoted: true, sha: CUT }; },
@@ -87,7 +88,7 @@ function fakeLocal(options: { validation?: LocalValidation; cut?: Awaited<Return
     revertInputs: async () => { calls.push('revertInputs'); return { items: [{ key: 'GY-2', mergeSha: sha('merge-2'), files: ['src/server/routes/work.ts'] }, { key: 'GY-1', mergeSha: sha('merge-1'), files: ['web/app.ts'] }], maps: [{ path: 'verification/server.md', paths: ['src/server/**'], sections: { Tests: 't', Drive: 'd', Invariants: 'i', Gotchas: 'g' } }], contract: { outcomes: [{ id: 'sign-in', cases: ['sign-in'] }], cases: [{ id: 'sign-in', tags: ['browser', 'server'] }] } }; },
     revert: async target => { calls.push(`revert:${target.key}`); return options.revert ?? { outcome: 'reverted', revertSha: REVERT, baseTip: MAIN, observedTip: REVERT, pushes: 1 }; },
   };
-  return { local, calls };
+  return { local, calls, due };
 }
 function stubReads(ledger: PromotionLedger, local: LocalReleasePorts | null, merger: 'github' | 'control-plane' | (() => Promise<'github' | 'control-plane'>) = 'control-plane') {
   const state = { ledger, dispatches: 0, runsRead: 0 };
@@ -116,10 +117,11 @@ test('unit:promotion-local-ports — under a control-plane merger promotionCycle
   const again = fakeLocal();
   result = await cycle(result.state, { ...reads, local: again.local }, start + 5 * minute);
   assert.deepEqual(again.calls, []); assert.match(result.state.reason!, /The last candidate was cut 5 minute\(s\) ago; the next is due no sooner than 10 minute\(s\) after it/);
-  // Past the gap, a cut not due reads the history and the ledger for a resumable candidate, and cuts nothing.
-  const idle = fakeLocal({ history: history(1, 2), cut: { cut: false, reason: 'not due' } });
+  // Past the gap, a cut not due reads the history and asks the port only for a resumable candidate — told the rule is not due, it cuts nothing.
+  const idle = fakeLocal({ history: history(1, 2) });
   result = await cycle(result.state, { ...reads, local: idle.local }, start + 11 * minute);
-  assert.deepEqual(idle.calls, ['history', 'cut']); assert.equal(result.dispatched, false);
+  assert.deepEqual(idle.calls, ['history', 'cut']); assert.deepEqual(idle.due, [false], 'the port is told the cut is not due'); assert.equal(result.dispatched, false);
+  assert.deepEqual(green.due, [true], 'the passing run above asked for a due cut');
   assert.match(result.state.reason!, /2 merge\(s\) landed on main after candidate 20300501T100000Z; the next candidate is cut at 10 merges or once one has waited 15 minutes/);
   assert.equal(result.state.nextDueAt, iso(start + 11 * minute), 'with merges waiting the cut is due later');
   // The cut rule is read once a run-read window: the next cycle inside it neither reads nor cuts.
