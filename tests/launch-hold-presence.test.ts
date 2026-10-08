@@ -80,3 +80,13 @@ test('integration:no-executor-fault-during-hold — a hold raises no "Nothing ca
   const faults = classifyAttention(describeUnserved(executorReport(work, bare, new Date())).map(entry => ({ subject: entry.keys[0], text: entry.text })));
   assert.ok(faults.some(fault => fault.faultClass === 'configuration' && /Nothing can run dispatch/.test(fault.text) && /graphyard-executor@1/.test(fault.text)));
 });
+
+test('unit:gy-612-launch-hold-waits — under a hold a launching row waits in the queue: it is never claimed, run or settled as a failure', async () => {
+  const claims: NextActionKind[][] = [], settled: unknown[] = [], ran: string[] = [];
+  const handlers = Object.fromEntries(served.map(kind => [kind, async () => { ran.push(kind); return 'ran'; }]));
+  const step = await runExecutorTick({ id: slot(1), host }, { claim: async request => { claims.push(request.kinds); return { action: null }; }, settle: async result => { settled.push(result); }, handlers, launchHold: async () => 'held' });
+  assert.ok(claims.every(kinds => !kinds.includes('dispatch') && !kinds.includes('request-review')));
+  assert.deepEqual(settled, []);
+  assert.deepEqual(ran, []);
+  assert.doesNotMatch(step.reason, /fail/i);
+});
