@@ -47,6 +47,7 @@ import { livenessFallback, livenessOf, livenessRepairEntry } from './model/liven
 import { agentRequestSchema, boundedAgentRequests, deciderFor, expireAgentRequests, leaseHeldRequestTypes, requestResolutionRefusal, resolveSatisfiedScopeRequests, type AgentRequest } from './model/agent-requests.js';
 import { recordSession, sessionHandleSchema, sessionObservationFields } from './model/sessions.js';
 import { noSubmissionRenewalRefused, observeHead, workerNoSubmissionRefusalMs } from './model/attempt-bound.js';
+import { observeBaseHold } from './model/behind-base.js';
 import { blockedAttemptMarker, partialWorkSchema, retainedExhaustions, type ExhaustionRecord } from './model/capacity.js';
 import { credentialBlockedReason, credentialFailure } from './worker-credential.js';
 import { beginAttempt, endAttempt, endLapsedAttempt, pipelineTimeline, recordAssignmentStart, recordIntervention, recordRework, recordSubmission } from './pipeline-speed.js';
@@ -1705,6 +1706,7 @@ export class Engine {
           observeHead(work, observed!.candidate, observed!.at);
           work.candidate = observed!.candidate;
           work.observation = observed!;
+          observeBaseHold(work, observed!.at);
         }
         if (work.documentation) work.documentation = { ...work.documentation, submission: recordDocumentationSubmission(work.documentation, work.submission, observed?.files ?? null, data.documentation, now) };
         work.reworkRequested = false;
@@ -2130,7 +2132,7 @@ export class Engine {
         // onto the head, and the stored observation has its conflict disproved.
         work.baseRefresh = staleRefreshRecord(work.baseRefresh, refresh);
         const disproved = work.observation?.conflicting ? disprovedConflict(work, work.observation) : null;
-        if (disproved) work.observation = withDisprovedConflict(work.observation!, disproved);
+        if (disproved) { work.observation = withDisprovedConflict(work.observation!, disproved); observeBaseHold(work, now.toISOString()); }
         this.evaluate(work, all, now);
         await this.recordDispatch(db, work, now);
         await save(db, work, 'graphyard', 'base.stale-mergeability', now, { head: refresh.from.sha, base: refresh.base, reading: refresh.stale.reading });
@@ -2816,6 +2818,8 @@ export class Engine {
       // carries what GitHub reported.
       const disproved = observation.conflicting ? disprovedConflict(work, observation) : null;
       work.observation = disproved ? withDisprovedConflict(observation, disproved) : observation;
+      // When the hold on this head was first sighted (GY-1557): the actorless bound runs from it, never from a poll that reads it again.
+      observeBaseHold(work, observation.at);
       // A submission recorded without an observation has no files (GY-293): the first observation
       // of that pull request records what its diff changes inside the documentation paths, so a
       // docs diff reads as satisfied rather than waiting for the reviewer to judge it.
