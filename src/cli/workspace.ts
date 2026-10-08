@@ -66,7 +66,7 @@ async function syncWork({ api, print, base: serverUrl, args }: CliContext, work:
     const conflicted = await readFile(resolve(cwd, 'AGENTS.md'), 'utf8');
     const url = managedServerUrl(quietly('show', `${baseTip}:AGENTS.md`).stdout) ?? managedServerUrl(conflicted) ?? serverUrl;
     const renderers = await agentsRenderers(cwd);
-    const rendered = regenerateManagedBlocks(conflicted, text => { const worker = renderers.managedInstructions(text, url); return worker.includes('<!-- graphyard-master -->') ? renderers.managedMasterInstructions(worker) : worker; });
+    const rendered = regenerateManagedBlocks(conflicted, text => renderers.managedInstructions(renderers.withoutMasterInstructions(text), url));
     if (rendered !== null) { await writeFile(resolve(cwd, 'AGENTS.md'), rendered); git('add', '--', 'AGENTS.md'); regenerated.push(`AGENTS.md (managed blocks rendered from the ${renderers.source} templates)`); }
   }
   conflicts = unmerged();

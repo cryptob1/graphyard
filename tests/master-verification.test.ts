@@ -6,7 +6,7 @@ import { createServer, type Server } from 'node:http';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { loadMasterConfig, managedMasterInstructions, masterConfigSchema, setupMaster, type MasterConfig } from '../src/master.js';
+import { loadMasterConfig, masterInstructions, masterConfigSchema, setupMaster, type MasterConfig } from '../src/master.js';
 import { managedInstructions } from '../src/repository-setup.js';
 import { assessDeploymentVerification, checkoutRelease, deploymentFreshnessMs, emitInstructions, masterLoopStatements, missingLoopStatements, verificationEffects, verifyDeployment, type EmittedInstructions } from '../src/master-verification.js';
 import type { Work } from '../src/model.js';
@@ -72,9 +72,9 @@ const close = (server: Server) => new Promise<void>(resolve => server.close(() =
 
 test('integration:master-loop-deployment-verification — the generated instructions and the guide carry every statement the verifier checks', async () => {
   const worker = managedInstructions('# Rules\n', 'https://graphyard.example');
-  const master = managedMasterInstructions(worker);
+  const master = masterInstructions;
   const guide = await readFile(join(root, 'docs/master-agent.md'), 'utf8');
-  for (const [name, text] of [['worker section', worker], ['master section', master], ['master guide', guide]] as const) assert.deepEqual(missingLoopStatements(text), [], `${name} carries the loop`);
+  for (const [name, text] of [['worker section', worker], ['master instructions', master], ['master guide', guide]] as const) assert.deepEqual(missingLoopStatements(text), [], `${name} carries the loop`);
   assert.equal(masterLoopStatements.length, 6);
   // The statements are the real content, not a coincidence of the wrapper: an earlier
   // generation that stopped at the observed merge fails every one of them.
