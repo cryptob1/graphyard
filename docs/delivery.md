@@ -18,7 +18,7 @@ Main → candidate → uat → production; `.railway/railway.ts` deploys `releas
 
 ### Pre-merge gate and release-candidate validation
 
-Required: `typecheck`, `test` (`.github/workflows/ci.yml`), under ten minutes; soak/timing files (`releaseCandidateTests` in `scripts/ci-tests.mjs`), container and Helm checks run per candidate. The advisory soak runs in `release-candidate-soak.yml` on the candidate's SHA,. UAT's `zero-touch` suite runs `tests/zero-touch-onboarding.test.ts`: `up --agent --goal` against a fake GitHub must reach a merged first item; any human step but the App approval blocks promotion.
+Required: `typecheck`, `test` (`.github/workflows/ci.yml`), under ten minutes; soak/timing files (`releaseCandidateTests` in `scripts/ci-tests.mjs`), container and Helm checks run per candidate. The advisory soak runs in `release-candidate-soak.yml` on the candidate's SHA. UAT's `zero-touch` suite runs `tests/zero-touch-onboarding.test.ts`: `up --agent --goal` against a fake GitHub must reach a merged first item; any human step but the App approval blocks promotion.
 
 ### One delivery path
 
