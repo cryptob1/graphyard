@@ -8,7 +8,8 @@ import { setupMaster } from '../src/master.js';
 import * as checklist from '../src/model/setup-checklist.js';
 import { setupChecklist } from '../src/model/setup-checklist.js';
 import { setupFromZeroChecks, setupLine, setupSteps } from '../src/setup-from-zero.js';
-import { managedInstructions, setupRepository } from '../src/repository-setup.js';
+import * as installCli from '../src/cli/install.js';
+import { applyProposal, managedInstructions, scanProposal, setupRepository } from '../src/repository-setup.js';
 import { managedServerUrl } from '../src/sync.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -23,6 +24,7 @@ const notRequired = ['github-app', 'reviewer-app', 'branch-protection'] as const
 // Namespace reads, so a test against code without these symbols fails as a test case, not at load.
 const mergerNotRequired: string = (checklist as any).mergerNotRequired;
 const statusControlPlaneMerger = (status: any) => (checklist as any).statusControlPlaneMerger(status);
+const mergerFromStatus = (status: () => Promise<any>) => (installCli as any).mergerFromStatus(status);
 /** A fresh install with no App, no reviewer App and no protection, only a worker account. */
 const bare = (merger: 'github' | 'control-plane' | null) => ({
   actor: { role: 'admin' }, github: false, githubAppId: null, githubRepository: null, baseBranch: 'main', reviewerApps: [],
@@ -150,4 +152,30 @@ test('unit:agents-block-control-plane — worker init (setupRepository) passes t
   assert.equal(await run(null), github, 'a server that reports no merger keeps the pull-request text');
   // Rerunning under control-plane after a github write must restore --head, not leave PR_NUMBER.
   assert.equal(await run('control-plane'), control);
+});
+
+test('unit:agents-block-control-plane — init --apply (applyProposal) writes the worker block from the merger its caller passes: --head SHA under control-plane, the pull-request text otherwise; mergerFromStatus reads /api/status and defaults to null on failure', async () => {
+  assert.equal(typeof (installCli as any).mergerFromStatus, 'function', 'init --apply exports mergerFromStatus so a control-plane apply can thread the recorded merger');
+  assert.equal(await mergerFromStatus(async () => ({ mergeWriter: { merger: 'control-plane' } })), 'control-plane');
+  assert.equal(await mergerFromStatus(async () => ({ mergeWriter: { merger: 'github' } })), 'github');
+  assert.equal(await mergerFromStatus(async () => ({})), null);
+  assert.equal(await mergerFromStatus(async () => { throw new Error('unreachable'); }), null, 'a failed status read never invents control-plane');
+
+  const root = await temporaryDirectory('merger-apply');
+  execFileSync('git', ['init', '-q', root]);
+  execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
+  const proposal = await scanProposal(root, { url: 'https://graphyard.example', runtimes: [] });
+  const installed = { directory: '/tmp/graphyard-install-fixture', githubApp: { appId: 1, slug: 'graphyard-owner-project' } };
+  const apply = async (merger: string | null | undefined) => {
+    await applyProposal(root, proposal, { url: 'https://graphyard.example', installed, ...(merger !== undefined ? { merger } : {}) });
+    return readFile(join(root, 'AGENTS.md'), 'utf8');
+  };
+  const control = await apply('control-plane');
+  assert.match(control, /Submit the commit with `complete GY-N EPOCH --head SHA`/); assert.ok(!control.includes('PR_NUMBER'));
+  assert.equal(control, managedInstructions('', 'https://graphyard.example', { merger: 'control-plane' }));
+  const github = await apply('github');
+  assert.match(github, /Submit the PR with `complete GY-N EPOCH PR_NUMBER`/); assert.ok(!github.includes('--head'));
+  assert.equal(await apply(null), github, 'omitted or null merger keeps the pull-request text');
+  assert.equal(await apply(undefined), github, 'a caller that forgets merger keeps the pull-request text');
+  assert.equal(await apply('control-plane'), control, 'rerunning under control-plane restores --head');
 });

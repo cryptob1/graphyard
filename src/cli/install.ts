@@ -33,6 +33,15 @@ const interactiveGithubSetup = (root: string) => async (repository: string, depl
   }
 };
 /**
+ * GY-1553: the merge writer `/api/status` reports for `init --apply`. A failed or empty read
+ * leaves the AGENTS.md worker block on the GitHub pull-request text (never invents control-plane).
+ */
+export async function mergerFromStatus(status: () => Promise<any>): Promise<string | null> {
+  try { return (await status())?.mergeWriter?.merger ?? null; }
+  catch { return null; }
+}
+
+/**
  * The capacity variables that accompany the principals `init --apply` registers: derived from
  * the roster in .graphyard/principals.json, and — when the operator credential reaches the
  * server — compared with what the deployment runs with, so a re-run after the roster grew
@@ -177,8 +186,10 @@ export const installCommands = defineCommands([
           if (differences.length) throw new Error(`${differences.join('; ')}. Rerun init --scan, review the refreshed proposal, then apply it again. The stored proposal was left unchanged.`);
           const url = selected ?? installed?.url;
           if (!url) throw new Error('Applying requires the Graphyard server URL; pass --url');
+          // GY-1553: thread the recorded merger so control-plane apply writes `complete … --head SHA`.
+          const merger = await mergerFromStatus(() => context.api('status'));
           if (installed) {
-            const result = await applyProposal(root, stored.proposal, { url, installed, github: protectionRun });
+            const result = await applyProposal(root, stored.proposal, { url, installed, github: protectionRun, merger });
             return print({ proposal: stored.file, ...result, installed: installed.directory });
           }
           // Apply rewrites the registry from the reviewed proposal; the CI producer's token is read
@@ -186,7 +197,7 @@ export const installCommands = defineCommands([
           const roster = await readRoster(resolve(root, '.graphyard/principals.json'));
           // The App page init would open needs port 4311; a busy one refuses here, before any write.
           if (!(await loadAppliedSetup(root))?.artifacts.githubApp && !await readFile(resolve(root, '.graphyard/github-app.json')).then(() => true, () => false) && !await appPagePortFree()) throw appPageBusy(4311);
-          const result = await applyProposal(root, stored.proposal, { url, githubSetup: interactiveGithubSetup(root), github: protectionRun, writeCredentials: true });
+          const result = await applyProposal(root, stored.proposal, { url, githubSetup: interactiveGithubSetup(root), github: protectionRun, writeCredentials: true, merger });
           if (!result.principalsFile) throw new Error('applyProposal wrote no principals registry');
           const ciProofs = await registerCiProducer(result.principalsFile, roster);
           return print({ proposal: stored.file, ...result, ciProofs: { ...ciProofs, next: ciProducerProvisioningSteps(stored.proposal.repository, url) },
