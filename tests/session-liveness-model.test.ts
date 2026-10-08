@@ -340,6 +340,9 @@ test('unit:session-liveness-model — GY-1532: a session whose attempt or reques
   const byHand = item({ candidate: { sha: request.sha }, sessions: [reviewer({ id: `review:${request.sha}`, missedReports: 1 })] } as Partial<Work>);
   assert.equal(endedByFact(byHand, byHand.sessions![0]), true);
   assert.equal(report(byHand, [])[0].closed, null);
+  const stale = item({ candidate: { sha: request.sha }, sessions: [reviewer({ id: `review:${request.sha}`, missedReports: 1, observedAt: ago(16 * 60_000) })] } as Partial<Work>);
+  assert.match(report(stale, [])[0].outcome!, /its hand-launched review of aaaaaaaaaaaa produced no verdict within 15 minutes of its last sighting.*runs it afresh, so the session is over$/);
+  assert.equal(report(stale, [])[0].closed, 'ended', 'a hand-launched review the runtime stopped listing is ended on a bound, never vanished');
   const moved = item({ candidate: { sha: 'c'.repeat(40) }, sessions: [reviewer({ id: `review:${request.sha}`, missedReports: 1 })] } as Partial<Work>);
   assert.match(report(moved, [])[0].outcome!, /the candidate no longer is aaaaaaaaaaaa \(it is cccccccccccc\), so the session is over$/);
   assert.equal(report(moved, [])[0].closed, 'ended');

@@ -174,7 +174,7 @@ export function launchingSession(work: Pick<Work, 'lease'>, handle: Pick<Session
  * recorded end (its pipeline timeline), the cause the loop kept its interrupted work for, and the
  * fresh lease a later attempt runs under — the relaunch a genuine disappearance ends in.
  */
-export function settledPurpose(work: Pick<Work, 'key' | 'lease' | 'submission' | 'autoDispatch' | 'capacity'> & { pipeline?: PipelineTimeline; candidate?: { sha: string } | null; reviewVerdicts?: { sha: string; verdicts: unknown[] } | null }, handle: Pick<SessionHandle, 'id' | 'kind' | 'epoch'> & { head?: string | null }, clock: number): string | null {
+export function settledPurpose(work: Pick<Work, 'key' | 'lease' | 'submission' | 'autoDispatch' | 'capacity'> & { pipeline?: PipelineTimeline; candidate?: { sha: string } | null; reviewVerdicts?: { sha: string; verdicts: unknown[] } | null }, handle: Pick<SessionHandle, 'id' | 'kind' | 'epoch'> & { head?: string | null; observedAt?: string | null; updatedAt?: string | null; startedAt?: string | null }, clock: number): string | null {
   if (handle.kind === 'implementation') {
     const epoch = handleEpoch(handle), lease = work.lease;
     if (!Number.isFinite(epoch) || (lease && lease.epoch === epoch && Date.parse(lease.expiresAt) > clock)) return null;
@@ -190,7 +190,7 @@ export function settledPurpose(work: Pick<Work, 'key' | 'lease' | 'submission' |
     return `attempt ${epoch} of ${work.key} ${end}${fresh}`;
   }
   const request = dispatchRequestOf(work, handle);
-  if (!request) return handByHandPurpose(work, handle);
+  if (!request) return handByHandPurpose(work, handle, clock);
   if (request.state === 'requested') return null;
   return `its ${request.kind} request was ${request.state}${request.resolvedAt ? ` at ${request.resolvedAt}` : ''}${request.resolution ? ` (${request.resolution.slice(0, 160)})` : ''}`;
 }
@@ -200,7 +200,8 @@ export function settledPurpose(work: Pick<Work, 'key' | 'lease' | 'submission' |
  * cancelled, or when the head's verdict is recorded; until one of those it is held, never lost.
  */
 const reviewedHead = (handle: Pick<SessionHandle, 'id'> & { head?: string | null }) => handle.head ?? (handle.id.startsWith('review:') ? handle.id.slice(7) : null);
-function handByHandPurpose(work: Parameters<typeof settledPurpose>[0], handle: Pick<SessionHandle, 'id' | 'kind'> & { head?: string | null }): string | null {
+export const handReviewHoldMs = 15 * 60_000;
+function handByHandPurpose(work: Parameters<typeof settledPurpose>[0], handle: Pick<SessionHandle, 'id' | 'kind'> & { head?: string | null; observedAt?: string | null; updatedAt?: string | null; startedAt?: string | null }, clock: number): string | null {
   if (handle.kind !== 'review') return null;
   const head = reviewedHead(handle);
   if (!head) return null;
@@ -209,6 +210,10 @@ function handByHandPurpose(work: Parameters<typeof settledPurpose>[0], handle: P
   if (answered) return `its review request for ${head.slice(0, 12)} was ${answered.state}${answered.resolvedAt ? ` at ${answered.resolvedAt}` : ''}`;
   if (work.reviewVerdicts?.sha === head && work.reviewVerdicts.verdicts.length) return `a review verdict for ${head.slice(0, 12)} is recorded`;
   if (work.candidate?.sha !== head) return `the candidate no longer is ${head.slice(0, 12)}${work.candidate ? ` (it is ${work.candidate.sha.slice(0, 12)})` : ''}`;
+  // Bounded: no request exists to relaunch it, so a hand-launched review the runtime has stopped listing for the hold
+  // ends with that fact, and the review request the loop makes for the standing candidate runs it afresh.
+  const seen = Date.parse(handle.observedAt ?? handle.updatedAt ?? handle.startedAt ?? '');
+  if (Number.isFinite(seen) && clock - seen >= handReviewHoldMs) return `its hand-launched review of ${head.slice(0, 12)} produced no verdict within ${Math.round(handReviewHoldMs / 60_000)} minutes of its last sighting at ${new Date(seen).toISOString()}; the review request for the standing candidate runs it afresh`;
   return null;
 }
 /** The dispatch request a review or proof session was launched for: the one its handle's id names. */
