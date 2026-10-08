@@ -190,10 +190,11 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
   assertDispatchable(work, allWork, observedAt);
   const config = await loadMasterConfig(root);
   // GY-1523: a control-plane worker is launched with no push credential and no keyring proxy. The
-  // merger is read once per launch, before anything is claimed or reserved, and a read that fails
-  // refuses the launch (readMergeWriter): the mode is never guessed.
-  const mergeWriter = options.mergeWriter ?? await (options.readMergeWriter ?? (prepare === prepareWorkerLaunch ? readMergeWriter : async () => 'github' as const))(config);
-  const credentialMint = mergeWriter === 'control-plane' ? null : options.credential ?? (prepare === prepareWorkerLaunch ? mintWorkerCredential : null);
+  // merger is read once per launch, after the refusals that launch nothing (an existing-mode
+  // profile, a missing credential file, a name already visible in Herdr, an approval opt-out) and
+  // before anything is reserved, claimed or minted; a read that fails refuses the launch
+  // (readMergeWriter): the mode is never guessed.
+  let mergeWriter: MergerMode, credentialMint: CredentialMinter | null;
   let target = agents.find(agent => agent.name === profile.agentName);
   let selected: Awaited<ReturnType<typeof selectAccount>> | undefined, launched: ReturnType<typeof accountLaunch> | undefined, relaunched = 0;
   let harness: Awaited<ReturnType<typeof installWorkerHarness>> | null = null;
@@ -212,6 +213,8 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
     if (target && !reclaimableAgent(profile, target, allWork, now)) throw new DispatchReservedError('profile', profile.name, 'Launch profile agent name is already visible in Herdr');
     // A profile that cannot launch without a human at its prompts is refused before any account is chosen.
     assertNoApprovalOptOut(profile.kind ?? 'unnamed', profile.approvals);
+    mergeWriter = options.mergeWriter ?? await (options.readMergeWriter ?? (prepare === prepareWorkerLaunch ? readMergeWriter : async () => 'github' as const))(config);
+    credentialMint = mergeWriter === 'control-plane' ? null : options.credential ?? (prepare === prepareWorkerLaunch ? mintWorkerCredential : null);
     // The profile and the item are reserved before anything is claimed, and Herdr's agents are read
     // again under the reservation: the snapshot this dispatcher chose from may already be stale (GY-273).
     const unreserve = await reserveDispatch(root, work, profile, observedAt);

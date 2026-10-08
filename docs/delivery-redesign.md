@@ -14,7 +14,7 @@ Only Graphyard writes to main.
 
 ## Merge writer
 
-Steps are idempotent; main's sha settles delivery.
+Idempotent steps; main's sha settles delivery.
 
 ## Removed and kept
 
@@ -24,7 +24,7 @@ Kept: leases and epochs, the transactional ledger, two risk lanes, UAT serving a
 
 ## The merger setting
 
-`merger` selects the mode per install, `github` (default) or `control-plane`: an admin-only ledger event, never read from graphyard.json. Read: `graphyard master merger`; set: `graphyard master merger MODE --reason TEXT`; `/api/status` shows `mergeWriter`; `GET`/`POST /api/merger` (admin, `reason`, `Idempotency-Key`). Under `control-plane`, worker launches mint no push credential and bind no keyring proxy; a launch whose merger read fails is refused before any claim and retried, never guessed.
+`merger` selects the mode per install, `github` (default) or `control-plane`: an admin-only ledger event, never read from graphyard.json. Read: `graphyard master merger`; set: `graphyard master merger MODE --reason TEXT`; `/api/status` shows `mergeWriter`; `GET`/`POST /api/merger` (admin, `reason`, `Idempotency-Key`). Under `control-plane`, launches get no push credential or keyring proxy; an unreadable merger refuses the launch.
 
 ## Rollout
 
