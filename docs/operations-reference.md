@@ -27,7 +27,7 @@ Minutely scan (`GET /api/interventions` → `scan`; `GRAPHYARD_INTERVENTION_PATT
 
 ## Flaky CI check
 
-[Reruns once](github.md#failed-checks) (`mergeQueue.rerunFailedChecks`, 0 disables); pass clears it. On main, a run failing only through cancelled or timed-out jobs (the `test` aggregate included) is no failing test: the main guard keeps main pending, reruns its failed jobs up to 3 times and reverts only a concluded rerun's real failure; still cancelled, it raises one `escalation:main-guard:SHA` infrastructure fault naming the run and the step its job stopped in, reverting nothing; until a rerun concludes no later merge is judged. The CI bubblewrap install retries apt on fallback mirrors; exhausted, its shard times out, so is rerun.
+[Reruns once](github.md#failed-checks) (`mergeQueue.rerunFailedChecks`, 0 disables); pass clears it. On main, a run failing only through cancelled or timed-out jobs (the `test` aggregate included) is no failing test: the main guard keeps main pending, reruns its failed jobs up to 3 times and reverts only a concluded rerun's real failure; still cancelled, it raises one `escalation:main-guard:SHA` infrastructure fault naming the run and the step its job stopped in, reverting nothing; until a rerun concludes no later merge is judged. A real failure is rerun once first (failed jobs, as the PR gate): main stays pending, nothing reverted or judged later. Passing, it reverts nothing and appends `{mergeSha, check, failedRunId, rerunRunId, at}` to the item's `mainGuardFlakes` (last 20); failing again, refused, or unconcluded within the revert checks' hour, it is reverted. The CI bubblewrap install retries apt on fallback mirrors; exhausted, its shard times out, so is rerun.
 
 ## Accepted evidence turns out to be wrong
 

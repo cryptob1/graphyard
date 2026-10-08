@@ -183,9 +183,10 @@ world.adapter = function (this: SimulatedGitHub) {
   };
   return Object.assign(adapter, {
     async jobRun(checkRun: number) {
-      cancelledDay!.jobReads.push({ at: clock.now(), checkRun });
+      // GY-1497: the guard reads the real failure's job too, to rerun it once; it is no cancelled job's read.
       const found = owner(checkRun);
       if (!found) throw new Error(`Check run ${checkRun} is not a GitHub Actions job; it cannot be rerun`);
+      cancelledDay!.jobReads.push({ at: clock.now(), checkRun });
       return { id: found.run.runId, attempt: found.attempt, step: aptStep };
     },
     async rerunFailedJobs(checkRun: number, options?: { runRead?: boolean; run?: { runId: number; attempt?: number } }) {
@@ -257,4 +258,103 @@ test('unit:soak.main-guard-cancelled-runs — under GitHub delivery across a day
   const afterReport = scenario.jobReads.filter(read => lastJobRun.includes(read.checkRun));
   assert.ok(afterReport.length <= 1 + scenario.refused, `the reported run's job is read once: ${afterReport.length}`);
   assert.ok(scenario.jobReads.length <= reruns(passes) + reruns(stays) + 1 + scenario.refused, `job reads stay bounded: ${scenario.jobReads.length}`);
+});
+
+// ---------------------------------------------------------------------------
+// GY-1497: a flaky test on main. The world's main CI is extended here, for this day only: the first
+// merge of item `flakyDay.flaky` fails `test` on its first run and passes when its failed jobs are
+// rerun; every other main run reruns to the result it had. A rerun concludes in two minutes, and
+// GitHub, like the shared world, lists the latest run of each check.
+// ---------------------------------------------------------------------------
+interface MainRun { reruns: { at: number; jobs: { name: string; id: number }[] }[] }
+let flakyDay: { flaky: number; flakyMerge: string | null; runs: Map<string, MainRun>; owners: Map<number, string>; reruns: { at: number; commit: string }[] } | null = null;
+let flakySerial = 60_000_000;
+const layeredChecks = world.commitChecks, layeredAdapter = world.adapter;
+/** Whether `commit` is the flaky item's first merge, which fails `test` until it is rerun. */
+function flakyMerge(github: SimulatedGitHub, commit: string) {
+  if (!flakyDay) return false;
+  if (flakyDay.flakyMerge) return flakyDay.flakyMerge === commit;
+  const merge = github.merges.find(entry => entry.sha === commit);
+  if (!merge || !github.prs.get(merge.pr)?.files.includes(file(flakyDay.flaky)) || github.merges.find(entry => entry.key === merge.key) !== merge) return false;
+  flakyDay.flakyMerge = commit;
+  return true;
+}
+world.commitChecks = function (this: SimulatedGitHub, commit: string, now: number) {
+  const first = layeredChecks.call(this, commit, now);
+  if (!flakyDay || !first.length) return first;
+  const flaky = flakyMerge(this, commit), latest = new Map<string, { name: string; result: string; id: number }>();
+  for (const run of first) { flakyDay.owners.set(run.id, commit); latest.set(run.name, flaky && run.name === 'test' ? { ...run, result: 'failure' } : run); }
+  for (const rerun of flakyDay.runs.get(commit)?.reruns ?? []) for (const job of rerun.jobs) {
+    const before = first.find(run => run.name === job.name)!.result;
+    latest.set(job.name, { name: job.name, id: job.id, result: now - rerun.at < 2 * minute ? 'in_progress' : flaky ? 'success' : before });
+  }
+  return [...latest.values()];
+};
+world.adapter = function (this: SimulatedGitHub) {
+  const adapter = layeredAdapter.call(this), github = this;
+  if (!flakyDay) return adapter;
+  const jobRun = adapter.jobRun?.bind(adapter), rerun = adapter.rerunFailedJobs.bind(adapter);
+  const runId = (commit: string) => 8_000_000 + [...flakyDay!.owners.values()].indexOf(commit);
+  return Object.assign(adapter, {
+    async jobRun(checkRun: number) {
+      const commit = flakyDay!.owners.get(checkRun);
+      if (!commit) { if (jobRun) return jobRun(checkRun); throw new Error(`Check run ${checkRun} is not a GitHub Actions job; it cannot be rerun`); }
+      return { id: runId(commit), attempt: 1 + (flakyDay!.runs.get(commit)?.reruns.length ?? 0), step: null };
+    },
+    async rerunFailedJobs(checkRun: number, options?: { runRead?: boolean; run?: { runId: number; attempt?: number } }) {
+      const commit = flakyDay!.owners.get(checkRun);
+      if (!commit) return rerun(checkRun, options);
+      const run = flakyDay!.runs.get(commit) ?? { reruns: [] };
+      const last = run.reruns.at(-1);
+      if (last && clock.now() - last.at < 2 * minute) throw new RerunPending(runId(commit), 'in_progress', run.reruns.length + 1);
+      const failed = github.commitChecks(commit, clock.now()).filter(entry => entry.result === 'failure').map(entry => ({ name: entry.name, id: ++flakySerial }));
+      run.reruns.push({ at: clock.now(), jobs: failed });
+      flakyDay!.runs.set(commit, run);
+      flakyDay!.reruns.push({ at: clock.now(), commit });
+      return { runId: runId(commit), attempt: run.reruns.length + 1 };
+    },
+  }) as GitHub;
+};
+
+test('unit:soak-main-guard-flaky — under GitHub delivery across a day with one flaky and one genuinely failing merge on main, the flaky merge is rerun once and never reverted with the flake on its item, the failing merge is rerun once then reverted once, no commit is rerun twice, and every invariant holds each cycle', { timeout: 600_000 }, async () => {
+  // GY-1497: a test that flakes once on main used to revert a good merge. Item two's main run fails
+  // `test` once and passes on its rerun; item four breaks main for real (its rerun fails again).
+  const before = process.env.GRAPHYARD_DELIVERY;
+  process.env.GRAPHYARD_DELIVERY = 'github';
+  flakyDay = { flaky: 2, flakyMerge: null, runs: new Map(), owners: new Map(), reruns: [] };
+  let day: Awaited<ReturnType<typeof simulateDay>>;
+  try {
+    day = await simulateDay({
+      hours: 6, mainGuard: { breaks: 4, fixAfterMs: 99 * hour },
+      plan: { items: 6, leftovers: 1, slowRecompute: 0, workMs: 15 * minute, rework: new Set(), deaths: new Set(), flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set(), misread: new Set(), exits: new Set(), spentProducer: 0, lostRuns: 0, attested: 0, exhaustedReviewer: 0, unstable: 0, lowLane: 0, outOfQueue: { item: 6, afterMs: 99 * hour }, blind: { from: 99 * hour, to: 100 * hour }, split: { at: 99 * hour, item: 6 } },
+    });
+  } finally {
+    if (before === undefined) delete process.env.GRAPHYARD_DELIVERY; else process.env.GRAPHYARD_DELIVERY = before;
+  }
+  const scenario = flakyDay; flakyDay = null;
+  const { items, final, violations, failures, lost, github } = day;
+  assert.deepEqual(violations, [], 'every system invariant holds every cycle');
+  assert.deepEqual(failures, [], 'no cycle failed');
+  assert.deepEqual(lost, [], 'no lease was lost');
+  assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}`), [], 'every item is delivered, the reverted one included');
+
+  const [flaky, failing] = [items[1].key, items[3].key];
+  const flakyMergeSha = scenario.flakyMerge, broken = github.broken.find(entry => entry.key === failing);
+  assert.ok(flakyMergeSha && broken, 'the flaky and the failing merge both landed on main');
+  const reruns = (commit: string) => scenario.reruns.filter(entry => entry.commit === commit).length;
+  assert.equal(reruns(flakyMergeSha!), 1, 'the flaky merge is rerun once');
+  assert.equal(reruns(broken!.mergeSha), 1, 'the failing merge is rerun once before it is reverted');
+  assert.deepEqual([...new Set(scenario.reruns.map(entry => entry.commit))].filter(commit => reruns(commit) > 1), [], 'no commit is rerun twice');
+
+  const reverts = [...github.reverts.values()];
+  assert.deepEqual(reverts.map(revert => revert.mergeSha), [broken!.mergeSha], 'only the failing merge is reverted, once');
+  const kept = final.find(item => item.key === flaky)!;
+  assert.equal(kept.mainGuardReverts, undefined, 'the flaky merge is never reverted');
+  assert.equal(kept.delivery?.mergeSha, flakyMergeSha, 'the flaky merge stays delivered');
+  assert.deepEqual(kept.mainGuardFlakes?.map(flake => `${flake.mergeSha} ${flake.check}`), [`${flakyMergeSha} test`], 'the flake is recorded on its item');
+  assert.ok(kept.mainGuardFlakes![0].failedRunId !== null && kept.mainGuardFlakes![0].rerunRunId !== null && kept.mainGuardFlakes![0].rerunRunId !== kept.mainGuardFlakes![0].failedRunId, 'the flake names the failed run and the rerun that passed');
+  const reverted = final.find(item => item.key === failing)!;
+  assert.deepEqual(reverted.mainGuardReverts?.map(revert => revert.state), ['merged']);
+  assert.match(reverted.mainGuardReverts![0].reason!, /test failed on that merge commit while its parent passed/);
+  assert.equal(reverted.mainGuardFlakes, undefined, 'a failure that failed again is no flake');
 });

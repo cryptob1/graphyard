@@ -529,8 +529,8 @@ const cancelledRun = (from = 0) => shardRuns(['cancelled', 'cancelled', 'success
 /** The fake's Actions runs: each cancelled job names run 4242 at its attempt; a rerun bumps the attempt and leaves the rerun's jobs queued. */
 function withReruns(fake: ReturnType<typeof world>, commit: string, attempt = 1) {
   const reruns: number[] = [];
-  fake.ports.cancelledRun = async () => ({ id: 4242, attempt });
-  fake.ports.rerunCancelled = async (checkRun, run) => {
+  fake.ports.jobRun = async () => ({ id: 4242, attempt });
+  fake.ports.rerunFailed = async (checkRun, run) => {
     reruns.push(checkRun); assert.equal(run.id, 4242);
     attempt += 1;
     fake.checks.set(commit, [...fake.checks.get(commit)!, ...shardRuns(['queued', 'queued'], 'queued', 100 * attempt).filter(check => check.result === 'queued')]);
@@ -589,18 +589,23 @@ test('unit:main-guard-cancelled-run-not-culprit a main run whose only failures a
   assert.deepEqual(fake.calls.opened, [B]);
 });
 
-test('unit:main-guard-real-failure-reverted a main run with a genuine test failure on the merge while its parent passed is reverted exactly as before, with nothing rerun', async () => {
+test('unit:main-guard-real-failure-reverted a main run with a genuine test failure on the merge while its parent passed is reverted exactly as before once its one rerun fails again', async () => {
   const [base, A] = ['b0', 'a1'].map(sha);
   const history: MainCommit[] = [{ sha: A, parent: base }, { sha: base, parent: null }];
   const itemA = delivered('GY-2', A, 702);
   const fake = world(history, [itemA]);
   fake.checks.set(base, green); fake.checks.set(A, shardRuns(['failure', 'success', 'success'], 'failure'));
   const actions = withReruns(fake, A);
-  const options = { required, ciAppIds: [ci], now: new Date(at) };
+  const options = { required, ciAppIds: [ci], now: new Date(at), verdicts: new Map(), reruns: new Map() };
   let tick = await runMainGuard(fake.ports, options);
+  assert.deepEqual(tick.main, { state: 'pending', probe: A, rerun: { failing: ['test'] } });
+  assert.deepEqual(actions.reruns, [10], 'the failed run is rerun once, from the failing check');
+  // The rerun's shard fails again: reverted exactly as before.
+  fake.checks.set(A, [...fake.checks.get(A)!, ...shardRuns(['failure'], 'failure', 500).filter(check => check.name !== 'typecheck')]);
+  tick = await runMainGuard(fake.ports, options);
   assert.deepEqual(tick.main, { state: 'broken', culprit: A, parent: base, failing: ['test'] });
   assert.deepEqual(fake.calls.opened, [A]);
-  assert.deepEqual(actions.reruns, [], 'a real failure is not rerun');
+  assert.deepEqual(actions.reruns, [10], 'never rerun twice');
   const revert = itemA.mainGuardReverts![0].revert!;
   fake.checks.set(revert.head, green);
   tick = await runMainGuard(fake.ports, options);
@@ -609,6 +614,106 @@ test('unit:main-guard-real-failure-reverted a main run with a genuine test failu
   assert.match(itemA.mainGuardReverts![0].reason!, /broke main: test failed on that merge commit while its parent passed/);
   // A cancelled revert's own checks are still not merged: it is given up as before.
   assert.equal(commitVerdict(runs({ test: 'cancelled', typecheck: 'success' }), required, [ci]).verdict, 'cancelled');
+});
+
+// GY-1497: a failed required check on main is rerun once before its merge is reverted.
+/** The fake's Actions run 5151 behind main's failed `test`: a rerun bumps the attempt and leaves the rerun's `test` queued until `conclude`. */
+function withFailedReruns(fake: ReturnType<typeof world>, commit: string, answer: () => 'requested' | 'waiting' = () => 'requested') {
+  let attempt = 1;
+  const reruns: number[] = [];
+  fake.ports.jobRun = async () => ({ id: 5151, attempt });
+  fake.ports.rerunFailed = async (checkRun, run) => {
+    assert.equal(run.id, 5151);
+    if (answer() === 'waiting') return 'waiting';
+    reruns.push(checkRun); attempt += 1;
+    fake.checks.set(commit, [...fake.checks.get(commit)!, { name: 'test', result: 'queued', appId: ci, id: 100 * attempt }]);
+    return 'requested';
+  };
+  const conclude = (result: string) => fake.checks.set(commit, fake.checks.get(commit)!.map(check => check.id === 100 * attempt ? { ...check, result } : check));
+  return { reruns, conclude };
+}
+
+test('unit:main-guard-reruns-before-revert a merge that fails a required check its parent passed is rerun once first: main is pending, nothing is reverted and no later merge is judged until the rerun concludes', async () => {
+  assert.equal((mainGuard as { mainFailedRerunLimit?: number }).mainFailedRerunLimit, 1);
+  const [base, A, B] = ['b0', 'a1', 'b2'].map(sha);
+  const history: MainCommit[] = [{ sha: B, parent: A }, { sha: A, parent: base }, { sha: base, parent: null }];
+  const itemA = delivered('GY-1', A, 701), itemB = delivered('GY-2', B, 702);
+  const fake = world(history, [itemA, itemB]);
+  fake.checks.set(base, green); fake.checks.set(A, runs({ test: 'failure', typecheck: 'success' })); fake.checks.set(B, runs({ test: 'failure', typecheck: 'success' }));
+  // GitHub first answers that the run is still finishing its other jobs: the rerun is asked again next tick.
+  let waits = 1;
+  const actions = withFailedReruns(fake, A, () => waits-- > 0 ? 'waiting' : 'requested');
+  const options = { required, ciAppIds: [ci], now: new Date(at), verdicts: new Map(), reruns: new Map() };
+  for (let index = 0; index < 4; index++) {
+    const tick = await runMainGuard(fake.ports, options);
+    assert.deepEqual(tick.main, { state: 'pending', probe: A, rerun: { failing: ['test'] } }, `tick ${index}: main is pending on the rerun`);
+    assert.deepEqual(tick.errors, []);
+  }
+  assert.deepEqual(actions.reruns, [0], 'rerun once, after the wait, from the failed check run');
+  assert.deepEqual(fake.calls.opened, [], 'no revert while the rerun runs');
+  assert.equal(itemA.mainGuardReverts, undefined); assert.equal(itemB.mainGuardReverts, undefined, 'the later merge is not judged');
+  // The rerun fails again: A, not B, is reverted, and nothing is rerun twice.
+  actions.conclude('failure');
+  let tick = await runMainGuard(fake.ports, options);
+  assert.deepEqual(tick.main, { state: 'broken', culprit: A, parent: base, failing: ['test'] });
+  assert.deepEqual(fake.calls.opened, [A]);
+  await runMainGuard(fake.ports, options);
+  assert.deepEqual(actions.reruns, [0]); assert.deepEqual(fake.calls.opened, [A]);
+
+  // A rerun GitHub refuses counts as the failure: reverted on the same tick.
+  const C = sha('c3'), itemC = delivered('GY-3', C, 703), refused = world([{ sha: C, parent: base }, { sha: base, parent: null }], [itemC]);
+  refused.checks.set(base, green); refused.checks.set(C, runs({ test: 'failure', typecheck: 'success' }));
+  refused.ports.jobRun = async () => ({ id: 5151, attempt: 1 });
+  refused.ports.rerunFailed = async () => { throw new Error('Resource not accessible by integration (403)'); };
+  tick = await runMainGuard(refused.ports, { required, ciAppIds: [ci], now: new Date(at) });
+  assert.equal(tick.main.state, 'broken'); assert.deepEqual(refused.calls.opened, [C]);
+
+  // A rerun that does not conclude within revertChecksTimeoutMs counts as the failure.
+  const D = sha('d4'), itemD = delivered('GY-4', D, 704), slow = world([{ sha: D, parent: base }, { sha: base, parent: null }], [itemD]);
+  slow.checks.set(base, green); slow.checks.set(D, runs({ test: 'failure', typecheck: 'success' }));
+  const hung = withFailedReruns(slow, D), slowOptions = { required, ciAppIds: [ci], verdicts: new Map(), reruns: new Map() };
+  tick = await runMainGuard(slow.ports, { ...slowOptions, now: new Date(at) });
+  assert.equal(tick.main.state, 'pending');
+  tick = await runMainGuard(slow.ports, { ...slowOptions, now: new Date(Date.parse(at) + 59 * 60_000) });
+  assert.equal(tick.main.state, 'pending'); assert.deepEqual(slow.calls.opened, []);
+  tick = await runMainGuard(slow.ports, { ...slowOptions, now: new Date(Date.parse(at) + 61 * 60_000) });
+  assert.equal(tick.main.state, 'broken'); assert.deepEqual(slow.calls.opened, [D]); assert.deepEqual(hung.reruns, [0]);
+
+  // A job already rerun (a restarted guard forgot it) is not rerun again: reverted.
+  const E = sha('e5'), itemE = delivered('GY-5', E, 705), again = world([{ sha: E, parent: base }, { sha: base, parent: null }], [itemE]);
+  again.checks.set(base, green); again.checks.set(E, runs({ test: 'failure', typecheck: 'success' }));
+  let asked = 0;
+  again.ports.jobRun = async () => ({ id: 5151, attempt: 2 });
+  again.ports.rerunFailed = async () => { asked++; return 'requested'; };
+  await runMainGuard(again.ports, { required, ciAppIds: [ci], now: new Date(at) });
+  assert.equal(asked, 0); assert.deepEqual(again.calls.opened, [E]);
+});
+
+test('unit:main-guard-flake-recorded a rerun that passes leaves main green with no revert and records the flake on the merged item, bounded', async () => {
+  const [base, A] = ['b0', 'a1'].map(sha);
+  const itemA = delivered('GY-1', A, 701);
+  const fake = world([{ sha: A, parent: base }, { sha: base, parent: null }], [itemA]);
+  fake.checks.set(base, green); fake.checks.set(A, runs({ test: 'failure', typecheck: 'success' }));
+  const actions = withFailedReruns(fake, A);
+  const options = { required, ciAppIds: [ci], now: new Date(at), verdicts: new Map(), reruns: new Map() };
+  let tick = await runMainGuard(fake.ports, options);
+  assert.equal(tick.main.state, 'pending');
+  actions.conclude('success');
+  tick = await runMainGuard(fake.ports, options);
+  assert.deepEqual(tick.main, { state: 'green' });
+  assert.deepEqual(fake.calls.opened, []);
+  assert.equal(itemA.stage, 'done'); assert.equal(itemA.delivery?.mergeSha, A); assert.equal(itemA.mainGuardReverts, undefined);
+  const flake = { mergeSha: A, check: 'test', failedRunId: 0, rerunRunId: 200, at };
+  assert.deepEqual(itemA.mainGuardFlakes, [flake]);
+  assert.deepEqual(tick.flakes, [flake]);
+  // Later ticks record nothing more and rerun nothing.
+  tick = await runMainGuard(fake.ports, options);
+  assert.deepEqual(itemA.mainGuardFlakes, [flake]); assert.deepEqual(actions.reruns, [0]); assert.deepEqual(tick.flakes, []);
+  // The record keeps the last 20.
+  const many = Array.from({ length: 25 }, (_, index) => ({ ...flake, failedRunId: index }));
+  mainGuard.applyMainGuardFlakes(itemA, many);
+  assert.equal(itemA.mainGuardFlakes!.length, 20);
+  assert.equal(itemA.mainGuardFlakes!.at(-1)!.failedRunId, 24);
 });
 
 test('unit:main-guard-cancel-bound-escalates a run still cancelled past the rerun bound is reported once to the master as an infrastructure fault naming the run, never reverted', async () => {
@@ -621,8 +726,8 @@ test('unit:main-guard-cancel-bound-escalates a run still cancelled past the reru
   const options = { required, ciAppIds: [ci], now: new Date(at), cancelled: new Set<string>() };
   // Every attempt is cancelled again: the guard reruns up to the bound, then reports.
   let attempt = 1, reads = 0, recordFails = 1; const reruns: number[] = [];
-  fake.ports.cancelledRun = async () => { reads++; return { id: 4242, attempt, step: 'Install bubblewrap (the confinement suite runs real namespaces)' }; };
-  fake.ports.rerunCancelled = async checkRun => { reruns.push(checkRun); attempt += 1; return 'requested'; };
+  fake.ports.jobRun = async () => { reads++; return { id: 4242, attempt, step: 'Install bubblewrap (the confinement suite runs real namespaces)' }; };
+  fake.ports.rerunFailed = async checkRun => { reruns.push(checkRun); attempt += 1; return 'requested'; };
   // The first durable record fails: the fault is not marked seen, so the next tick records it.
   const record = fake.ports.record;
   fake.ports.record = async (work, revert) => { if (revert.cause === 'cancelled' && recordFails-- > 0) throw new Error('database unavailable'); return record(work, revert); };
