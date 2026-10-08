@@ -217,6 +217,9 @@ export async function setupRepository(root: string, input: Connection, options: 
   if (!isAbsolute(connection.cliPath) || !(await lstat(connection.cliPath)).isFile()) throw new Error('CLI path must be an existing absolute launcher path');
   if (options.herdr && !connection.token) throw new Error('Herdr setup requires an individual worker credential via GRAPHYARD_TOKEN or --token-stdin');
   const detected = await discover(root);
+  // GY-1553: worker init regenerates AGENTS.md from the recorded merger; discarding it would rewrite
+  // a control-plane install back to `complete GY-N EPOCH PR_NUMBER`.
+  let merger: string | null = null;
   if (connection.token) {
     let response: Response;
     try { response = await (options.fetcher ?? fetch)(`${connection.url}/api/status`, { headers: { Authorization: `Bearer ${connection.token}` }, signal: AbortSignal.timeout(15000) }); } catch { throw new Error('Cannot reach Graphyard; setup has not saved credentials'); }
@@ -225,10 +228,11 @@ export async function setupRepository(root: string, input: Connection, options: 
     if (status.actor?.role !== 'worker') throw new Error('Repository worker setup requires a worker credential; operator, coordinator, producer, and reader tokens are not suitable for launching workers');
     assertRepository(detected.repository, status.repository);
     connection.principal = status.actor.id;
+    merger = status.mergeWriter?.merger ?? null;
   }
   const instructionsFile = resolve(root, 'AGENTS.md'); await regularOrMissing(instructionsFile);
   let existing = ''; try { existing = await readFile(instructionsFile, 'utf8'); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
-  const instructions = managedInstructions(existing, connection.url);
+  const instructions = managedInstructions(existing, connection.url, { merger });
   const runHerdr = options.runHerdr ?? ((args: string[]) => {
     // GY-1511: an install with its own Herdr instance links the plugin there, never in the default one.
     try { return herdrSync(args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }, options.herdrInstance === undefined ? herdrTarget() : options.herdrInstance).trim(); } catch { throw new Error('Herdr setup command failed; check installation and rerun init. No credentials were printed.'); }
@@ -397,6 +401,11 @@ export interface ApplyDependencies {
   installed?: { directory: string; githubApp: { appId: number; slug: string } };
   /** Write each worker profile's credential file (GY-1412). Explicit, never implied: only `init --apply` passes it. */
   writeCredentials?: boolean;
+  /**
+   * GY-1553: the recorded merge writer from `/api/status.mergeWriter.merger`. Callers that already
+   * hold status pass it; without one the block keeps the GitHub pull-request text (no new status read).
+   */
+  merger?: string | null;
 }
 
 /**
@@ -416,7 +425,7 @@ export async function applyProposal(root: string, proposalInput: unknown, depend
   const instructionsFile = resolve(root, 'AGENTS.md');
   await regularOrMissing(instructionsFile);
   let existing = ''; try { existing = await readFile(instructionsFile, 'utf8'); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
-  const instructions = managedInstructions(existing, server);
+  const instructions = managedInstructions(existing, server, { merger: dependencies.merger ?? null });
   if (instructions === existing) unchanged.push('AGENTS.md coordination section');
   else {
     let instructionsMode = 0o644; try { instructionsMode = (await lstat(instructionsFile)).mode & 0o777; } catch { /* new instructions */ }

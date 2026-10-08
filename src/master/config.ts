@@ -170,7 +170,10 @@ export async function setupMaster(root: string, input: { url: string; token: str
   if (status.actor?.role !== 'coordinator') throw new Error('Master setup requires a coordinator credential; worker, operator, producer, and reader credentials are not suitable');
   if (typeof status.repository !== 'string' || !status.repository) throw new Error('Master setup requires the control plane to be bound to a GitHub repository');
   if (typeof status.baseBranch !== 'string' || !status.baseBranch) throw new Error('Master setup requires the control plane to identify its managed base branch');
-  const appPending = input.allowPendingApp === true && (status.githubAppId === null || status.githubAppId === undefined);
+  // GY-1553: control-plane merger installs correctly have no GitHub App; treat that as app-pending
+  // so master init can write the worker block before any App exists (same as install --apply's allowPendingApp).
+  const controlPlaneMerger = status.mergeWriter?.merger === 'control-plane';
+  const appPending = (input.allowPendingApp === true || controlPlaneMerger) && (status.githubAppId === null || status.githubAppId === undefined);
   if (!appPending && (!Number.isSafeInteger(status.githubAppId) || status.githubAppId <= 0)) throw new Error('Master setup requires the control plane to identify its GitHub App');
   assertRepository(detected.repository, status.repository);
   if (!detected.repository) throw new Error('Master setup requires a recognized GitHub origin');
