@@ -728,18 +728,22 @@ export async function filePostMergeFollowUps(work: Work, record: ReviewRecord, e
   const filed = [...(record.postMergeFollowUps?.filed ?? [])];
   // blockingFindings caps a body at ten; read line by line, every BLOCKING line is a finding.
   const lines = body.split('\n').flatMap(line => blockingFindings(line));
-  const findings = lines.slice(0, postMergeFindingsMax);
-  // The ledger bounds what it lists; a verdict past that bound is recorded as such, never silently cut.
-  const overflow = lines.length - findings.length;
+  // Every line is filed, never cut: at most postMergeFindingsMax per tick, the rest on the next ticks (`pending`).
+  // `through` counts the lines filed in order, so the ledger lists only the most recent window of them.
+  let through = record.postMergeFollowUps?.through ?? 0;
   let failure: string | undefined;
-  for (const [index, text] of findings.entries()) {
+  let batch = 0;
+  for (const [index, text] of lines.entries()) {
     const finding = text.slice(0, 300);
     // Completion is per line, not per wording: two distinct lines with the same text each get their own item.
-    if (filed.some(entry => entry.index === index || (entry.index === undefined && entry.finding === finding))) continue;
+    if (index < through || filed.some(entry => entry.index === index || (entry.index === undefined && entry.finding === finding))) continue;
+    if (batch >= postMergeFindingsMax) break;
     if (!effects.createWork) { failure = 'no follow-up filer is wired; the finding stands on the verdict'; break; }
     try {
       const created = await effects.createWork(postMergeFollowUp(work, record.sha, parseFinding(text), index), `post-merge-follow-up:${work.key}:${record.sha}:${index}`);
       filed.push({ key: created.key, finding, index });
+      if (index === through) through = index + 1;
+      batch++;
     } catch (error) { failure = `filing the follow-up for "${finding.slice(0, 80)}" failed: ${(error instanceof Error ? error.message : String(error)).split('\n')[0]}`.slice(0, 500); break; }
   }
   // Non-blocking findings stay retryable until project memory accepts them: a write failure must
@@ -756,8 +760,8 @@ export async function filePostMergeFollowUps(work: Work, record: ReviewRecord, e
       }
     } else memory = nits.length;
   }
-  if (overflow > 0) { const reason = `${overflow} further BLOCKING finding${overflow === 1 ? '' : 's'} beyond the ${postMergeFindingsMax} one item each could be filed for stand${overflow === 1 ? 's' : ''} on the verdict unfiled`; failure = failure ? `${failure}; ${reason}`.slice(0, 500) : reason; }
-  return { at: now.toISOString(), filed: filed.slice(0, postMergeFindingsMax), ...(overflow > 0 ? { overflow } : {}), ...(memory !== undefined ? { memory } : {}), ...(failure ? { failure } : {}) };
+  const pending = lines.filter((_, index) => index >= through && !filed.some(entry => entry.index === index)).length;
+  return { at: now.toISOString(), filed: filed.slice(-postMergeFindingsMax), through, ...(pending > 0 ? { pending } : {}), ...(memory !== undefined ? { memory } : {}), ...(failure ? { failure } : {}) };
 }
 export interface DispatchTick { at: string; launched: DispatchLaunch[]; refused: (DispatchFailure & { requestId: string })[]; waiting: DispatchWait[]; skipped: number;
   /** Post-merge verdicts this tick filed (GY-1525): the follow-up items per item and merge commit. */
@@ -1320,7 +1324,7 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
       await persist();
     }
     for (const record of reviews) {
-      if (!record.postMerge || !record.verdict || (record.postMergeFollowUps && !record.postMergeFollowUps.failure)) continue;
+      if (!record.postMerge || !record.verdict || (record.postMergeFollowUps && !record.postMergeFollowUps.failure && !record.postMergeFollowUps.pending)) continue;
       const item = snapshot.work.find(work => work.key === record.key);
       if (!item) continue;
       const outcome = await filePostMergeFollowUps(item, record, effects, new Date(now()));
