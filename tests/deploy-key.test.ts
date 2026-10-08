@@ -11,7 +11,10 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 // read-write on the repository through the operator's gh login only when its fingerprint is not
 // already listed, and never shown to anyone.
 
-const PRIVATE = '-----BEGIN OPENSSH PRIVATE KEY-----\nSENTINEL-PRIVATE-KEY-MATERIAL\n-----END OPENSSH PRIVATE KEY-----\n';
+// The fake private key's armor is assembled here, never written as a literal: the secrets scan's
+// private-key rule reads a PEM block in a committed file as a leak (GY-1186, GY-1352, GY-1461).
+const armor = (edge: string) => `-----${edge} OPENSSH PRIVATE KEY-----`;
+const PRIVATE = `${armor('BEGIN')}\nSENTINEL-PRIVATE-KEY-MATERIAL\n${armor('END')}\n`;
 // A real ed25519 public key line: its fingerprint is what GitHub would list for it.
 const PUBLIC_BODY = 'AAAAC3NzaC1lZDI1NTE5AAAAIFzs4bbnB6bJVeLLB+C7aK2b6qJ9fcQ0Y6hVwLrjQJvQ';
 const OTHER_BODY = 'AAAAC3NzaC1lZDI1NTE5AAAAIO6YdF1p3nqlEWpqTXzmXb5Gc0Ztw1KqHoNfk2xzXyAB';
@@ -95,7 +98,7 @@ test('unit:deploy-key-idempotent — ensureDeployKey generates the ed25519 pair 
     const privateKeyFile = await ensureDeployKey(realDir, 'owner/project', real.gh, { hostname: 'box-2' });
     const publicKey = await readFile(`${privateKeyFile}.pub`, 'utf8');
     assert.match(publicKey, /^ssh-ed25519 \S+ graphyard-merge-writer-box-2\n$/);
-    assert.match(await readFile(privateKeyFile, 'utf8'), /^-----BEGIN OPENSSH PRIVATE KEY-----/);
+    assert.ok((await readFile(privateKeyFile, 'utf8')).startsWith(armor('BEGIN')), 'ssh-keygen wrote an OpenSSH private key');
     const printed = execFileSync('ssh-keygen', ['-lf', `${privateKeyFile}.pub`], { encoding: 'utf8' });
     assert.ok(printed.includes(publicKeyFingerprint(publicKey)!), `${printed.trim()} carries the computed fingerprint`);
     assert.equal(await mode(realDir), 0o700); assert.equal(await mode(privateKeyFile), 0o600); assert.equal(await mode(`${privateKeyFile}.pub`), 0o600);

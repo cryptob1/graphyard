@@ -8,3 +8,5 @@
 0883df82456408d4121e5b185c5c67f5a01bbced:tests/doctor-setup-from-zero.test.ts:private-key:185
 # GY-1461: fake Confirm-access session values in the sudo-form-capture test fixture (now generated at runtime).
 1c06e084a7b69410fa308f638215811fcc22833b:tests/sudo-form-capture.test.ts:generic-api-key:32
+# GY-1551: a fake OpenSSH private-key armor in the deploy-key test fixture (now assembled at runtime).
+a680d97226f082e44d60e0edb0a7823f02c36392:tests/deploy-key.test.ts:private-key:14
