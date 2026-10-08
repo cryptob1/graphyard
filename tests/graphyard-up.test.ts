@@ -587,7 +587,7 @@ test('unit:up-local-flag — up --local is --provider local, recorded in .graphy
   const installs = w.calls.filter(args => args[0] === 'install');
   assert.ok(installs.length >= 2 && installs.every(args => args[args.indexOf('--provider') + 1] === 'local'), 'install --plan and --apply both run with --provider local');
   assert.equal(JSON.parse(await readFile(upStateFile(root), 'utf8')).provider, 'local', 'recorded in .graphyard/up.json');
-  assert.deepEqual(recordedUp(root), { repository: 'acme/shop', provider: 'local' });
+  assert.deepEqual(recordedUp(root), { repository: 'acme/shop', provider: 'local', merger: 'github' });
   // A resumed run keeps it; --local again agrees with it, and another provider is refused against it.
   assert.equal(upRequestFromArgs(['--local'], recordedUp(root)).provider, 'local');
   assert.equal(upRequestFromArgs([], recordedUp(root)).provider, 'local');

@@ -5,8 +5,10 @@ import { routableScopeRequest, scopeBlockedBudgetMs, scopeRefusalBlocker } from 
 import { containmentPhase } from './containment.js';
 import { lapsedBeforeStart } from './escalation.js';
 import { blockerKind } from './blocker-kind.js';
-import { unsubmittedAttempt, unsubmittedAttemptText } from './attempt-bound.js';
+import { unsubmittedAttempt, unsubmittedAttemptText, type UnsubmittedAttempt } from './attempt-bound.js';
 export { blockerKind };
+/** The loop's record of ending an attempt held past the reclaim bound unsubmitted (cycle-reclaim.ts stopUnboundedAttempts; read by faults.ts attemptReclaimInMotion). */
+export const unboundedAttemptKey = (item: { id: string }, epoch: number) => `unbounded:${item.id}:${epoch}`;
 // Types only from work.ts: work.ts reaches this module through the origin schema (interventions.ts),
 // so a value import back would read work.ts before it has evaluated.
 import type { EscalationTrigger, Work } from './work.js';
@@ -189,7 +191,12 @@ export function standingScopeRequest(work: Pick<Work, 'scopeRequest' | 'lease' |
   return !(routes && request.decision.decidedBy === 'graphyard' && routableScopeRequest(work, now));
 }
 
-export function workFaults(work: Work, now: number, routes = true): FaultObservation[] {
+/**
+ * `reclaimInMotion`, which the loop passes (daemon/faults.ts attemptReclaimInMotion, GY-1557): an
+ * attempt past the worker bound that the loop's own reclaim remedy is still due to end, or ended
+ * this cycle, is the record's to name — the dashboard reads it without the hook — not a fault to count.
+ */
+export function workFaults(work: Work, now: number, routes = true, reclaimInMotion?: (attempt: UnsubmittedAttempt) => boolean): FaultObservation[] {
   if (work.stage === 'done' || isClosed(work)) return [];
   const found: FaultObservation[] = [];
   const escalations = work.escalations ?? (work.escalation ? [work.escalation] : []);
@@ -203,7 +210,7 @@ export function workFaults(work: Work, now: number, routes = true): FaultObserva
   const restated = /* a blocker restating a typed fault is that fault: a human-only park's wait, a refused scope request */ (work.humanRequest && !work.humanRequest.answer) || (work.scopeRequest && work.blocker?.startsWith(scopeRefusalBlocker));
   if (work.blocker && !restated) found.push(observe(blockerKind(work.blocker), work.key, work.blocker));
   const unsubmitted = unsubmittedAttempt(work, now);
-  if (unsubmitted) found.push(observe('unsubmitted-attempt', work.key, unsubmittedAttemptText(unsubmitted)));
+  if (unsubmitted && !reclaimInMotion?.(unsubmitted)) found.push(observe('unsubmitted-attempt', work.key, unsubmittedAttemptText(unsubmitted)));
   return found;
 }
 
