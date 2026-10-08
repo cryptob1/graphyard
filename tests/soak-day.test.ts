@@ -688,26 +688,6 @@ test('unit:soak-invariants-hold — a system-driven docs conflict whose docs-syn
   }
 });
 
-test('unit:soak-invariants-hold — a docs conflict whose GitHub readings are late past the loop-owned rework bound is still reworked once inside the bound, with no stalled-step fault and every invariant holding', { timeout: 600_000 }, async () => {
-  // GY-1537. The docs-sync is stopped at its cutoff and the conflicted item's observation job is held (and its wakes answered with nothing)
-  // until well past the bound: before the change the rework waited on that reading and the loop missed its own bound (stalled-step).
-  const day = await simulateDay({ hours: 4, lateReading: true, plan: { docsConflict: { ...basePlan.docsConflict, syncMs: 30 * minute } } });
-  assertLaunchesConfined(day, coordinatorRoot!);
-  const { violations, failures, state, docsSyncRuns, decideCalls, items, lateReading, final } = day;
-  assert.deepEqual(violations, [], 'every system invariant holds');
-  assert.deepEqual(failures, [], 'no cycle failed');
-  assert.ok(lateReading.skipped > 0, 'the readings were late: the loop asked for one and none came');
-  const conflicted = items[basePlan.docsConflict.item - 1].key, head = docsSyncRuns[0].plan.head;
-  assert.deepEqual(docsSyncRuns.map(run => [run.plan.key, run.outcome]), [[conflicted, 'stopped']], 'one docs-sync session, stopped at its cutoff');
-  const round = decideCalls.filter(call => call.key === conflicted && call.action === 'rework' && (call.input as { binding?: string } | undefined)?.binding === `${head}:conflict`);
-  assert.equal(round.length, 1, `one rework per head: ${JSON.stringify(round)}`);
-  const since = Date.parse(state.conflicts.find(entry => entry.work === conflicted)!.at), requested = Object.entries(state.actions).find(([key]) => key.startsWith('decision:rework:') && key.includes(`:${head}:conflict:`))?.[1];
-  assert.ok(requested && Date.parse(requested.at) - since <= conflictReworkBoundMs + minute, `requested within a cycle of the bound without a fresh reading: ${requested ? (Date.parse(requested.at) - since) / minute : 'never'} minutes`);
-  assert.ok(!state.faults.instances.some(instance => instance.kind === 'stalled-step' && instance.subject === conflicted), 'no stalled-step fault, repeated or not');
-  assert.ok(Object.values(state.docsSyncs).every(watch => watch.settledAt), 'its session record is settled');
-  assert.equal(final.find(entry => entry.key === conflicted)!.stage, 'done', 'and the item is delivered');
-});
-
 test('unit:soak-invariants-hold — broad items are split before dispatch with bounded decomposition concurrency, child items merge, parents are delivered, and every system invariant holds', { timeout: 360_000 }, async () => {
   clearDecompositionRuns();
   const broadItems = [1, 2, 3];

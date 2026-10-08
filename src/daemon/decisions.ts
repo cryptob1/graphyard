@@ -6,7 +6,7 @@ import { itemBlockerClass, maxAutomaticClears, uncoveredBlockerPaths } from '../
 import { baseRefreshConflict, checkRerunHeld, ciAppIdsOf, requiredCheck, requiredCheckRun, requiredChecksOf, threadsAwaitReview, botThread, openThreads, pendingBaseRefresh, type ReviewThread, describeThread } from '../merge-queue.js';
 import { mechanicalFailure, mechanicalProof, mechanicalVerdicts, producerManualFailure, producerManualFailures } from '../model/mechanical-proofs.js';
 import { extractProducerAccountsOrRuntimes, unactedProducerAttempts, unexercisedFindings } from '../auto-dispatch.js';
-import { conflictReworkDue, decisionBindingMax, type DecisionSituation } from '../model/approval.js'; import { unsettledApproval } from './decision-reads.js';
+import { decisionBindingMax, type DecisionSituation } from '../model/approval.js'; import { unsettledApproval } from './decision-reads.js';
 import { guardBroadScope, type MasterConfig, type ContainmentAssessment, containmentPhase, type HerdrAgent } from '../master.js';
 import { researchRework } from '../research.js'; import { baseBreakHold } from '../master/base-break-refresh.js';
 import { unproducedManualProofs } from '../model/unproduced-attestation.js';
@@ -140,14 +140,6 @@ export function reworkObservationWait(work: Work, now: number, pause: GitHubPaus
   if (!(Number.isFinite(age) && age < reworkObservationMaxAgeMs)) return `${work.key}: rework waits for a fresh GitHub observation — ${seen} is a stale observation, older than two minutes, and the branch may have moved past that head`;
   return null;
 }
-
-/**
- * GY-1537. A conflict rework past the loop-owned bound (GY-1434) is requested whether or not a fresh reading landed: the reading
- * is slow exactly when the loop is, and the bound is missed for it. The request binds the head it names, so an approver judging a head the
- * branch has moved past refuses it; waiting on the reading only added a stall.
- */
-export const conflictReworkOverdue = (work: Work, decision: Pick<RoutineDecision, 'action' | 'binding'>, now: number) =>
-  decision.action === 'rework' && decision.binding === `${work.candidate?.sha}:conflict` && (conflictReworkDue(work, now)?.overdueMs ?? 0) > 0;
 
 /**
  * GY-710. A step refused for want of a fresh observation wakes the item's observation job at once and waits for that
