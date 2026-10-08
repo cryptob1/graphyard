@@ -1284,13 +1284,16 @@ function mobilePage(options: { landing: string; codes?: string[]; expireAfter?: 
     click: selector => { clicked.push(selector); if (selector === '#create') phase = 'landing'; if (selector === '#mobile' || selector === '#again') issue(); },
     setChecked: () => {}, select: () => {}, screenshot: () => {}, wait: () => {}, close: () => {},
   };
-  const sleep = async () => {
+  // A fake clock, so a drive that never sees its approval gives up at its timeout instead of waiting in real time.
+  const clock = { t: 0 };
+  const sleep = async (ms = 1_000) => {
+    clock.t += ms;
     if (phase !== 'code') return;
     polls += 1;
     if (prompt === options.approvedAt && polls >= 1) phase = 'done';
     else if (polls >= (options.expireAfter ?? 2)) phase = 'expired';
   };
-  return { page, sleep, clicked };
+  return { page, sleep, clicked, now: () => new Date(clock.t), timeoutMs: 600_000 };
 }
 
 test('unit:up-agent-defaults-browser-profile — with no --browser-profile, agent mode drives the profile another install on this host recorded for the same GitHub login and says so; with none, it refuses as before', async () => {
@@ -1344,7 +1347,7 @@ test('unit:up-agent-mobile-default — in agent mode a Confirm-access page offer
   // GitHub's passkey-first page hides Mobile under "Having problems?": it is still the method used.
   const offered = mobilePage({ landing: 'Confirm access\nUse your passkey\nHaving problems?\nUse GitHub Mobile', codes: ['37'], approvedAt: 0 });
   const handed: { sentence: string; code: string | null }[] = [];
-  assert.deepEqual(await browserAppDriver({ page: offered.page, repository: 'acme/shop', ids, sleep: offered.sleep })('http://127.0.0.1:4311', (sentence, link) => { handed.push({ sentence, code: link.code ?? null }); }), { state: 'done' });
+  assert.deepEqual(await browserAppDriver({ page: offered.page, repository: 'acme/shop', ids, sleep: offered.sleep, now: offered.now, timeoutMs: offered.timeoutMs })('http://127.0.0.1:4311', (sentence, link) => { handed.push({ sentence, code: link.code ?? null }); }), { state: 'done' });
   assert.ok(offered.clicked.includes('#mobile'), 'the Mobile prompt was requested');
   assert.deepEqual(handed, [{ sentence: 'Approve the GitHub Mobile prompt on your phone and choose 37', code: '37' }]);
   assert.equal(handed[0].sentence.split(/(?<=[.!?])\s+/).length, 1, 'one plain sentence');
@@ -1372,12 +1375,12 @@ test('unit:up-mobile-reprompt — a GitHub Mobile prompt that expires unapproved
   // Approved on the second fresh prompt: three numbers handed off, the drive finishes.
   const late = mobilePage({ landing, codes: ['11', '12', '13', '14'], approvedAt: 2 });
   const lateHanded: string[] = [];
-  assert.deepEqual(await browserAppDriver({ page: late.page, repository: 'acme/shop', ids, sleep: late.sleep })('http://127.0.0.1:4311', sentence => { lateHanded.push(sentence); }), { state: 'done' });
+  assert.deepEqual(await browserAppDriver({ page: late.page, repository: 'acme/shop', ids, sleep: late.sleep, now: late.now, timeoutMs: late.timeoutMs })('http://127.0.0.1:4311', sentence => { lateHanded.push(sentence); }), { state: 'done' });
   assert.deepEqual(lateHanded, ['11', '12', '13'].map(code => `Approve the GitHub Mobile prompt on your phone and choose ${code}`));
   // Never approved: the first prompt and 3 fresh ones, each number handed off, then the drive gives up.
   const never = mobilePage({ landing, codes: ['11', '12', '13', '14', '15'] });
   const neverHanded: string[] = [];
-  const outcome = await browserAppDriver({ page: never.page, repository: 'acme/shop', ids, sleep: never.sleep })('http://127.0.0.1:4311', sentence => { neverHanded.push(sentence); });
+  const outcome = await browserAppDriver({ page: never.page, repository: 'acme/shop', ids, sleep: never.sleep, now: never.now, timeoutMs: never.timeoutMs })('http://127.0.0.1:4311', sentence => { neverHanded.push(sentence); });
   assert.deepEqual(neverHanded, ['11', '12', '13', '14'].map(code => `Approve the GitHub Mobile prompt on your phone and choose ${code}`));
   assert.equal(never.clicked.filter(selector => selector === '#mobile' || selector === '#again').length, 1 + upMobileReprompts);
   assert.equal(outcome.state, 'failed');
@@ -1426,12 +1429,12 @@ test('unit:up-app-page-rejection-fails — GitHub rejecting the App manifest, or
   assert.equal(githubAppError('Register new GitHub App\nGitHub App name\nWebhook'), null);
   // The manifest page itself shows GitHub's error and no create button.
   const rejected = mobilePage({ landing: '', error: 'Invalid GitHub App configuration\nHook url cannot be blank' });
-  const outcome = await browserAppDriver({ page: rejected.page, repository: 'acme/shop', ids: () => ({ owner: 11, repository: 22 }), sleep: rejected.sleep })('http://127.0.0.1:4311', () => {});
+  const outcome = await browserAppDriver({ page: rejected.page, repository: 'acme/shop', ids: () => ({ owner: 11, repository: 22 }), sleep: rejected.sleep, now: rejected.now, timeoutMs: rejected.timeoutMs })('http://127.0.0.1:4311', () => {});
   assert.deepEqual(outcome, { state: 'rejected', error: 'Invalid GitHub App configuration; Hook url cannot be blank' });
 
   // up fails (exit 1, not 3), its next line quoting GitHub, and stops the install it drove.
   const w = world({ pauseAfter: 20 });
-  const result = await runUp(request({ agent: true }), dependencies(w, await temporaryDirectory('graphyard-up-rejected'), [], { driveApp: async () => ({ state: 'rejected', error: 'Hook url cannot be blank' }) }));
+  const result = await runUp(request({ agent: true }), dependencies(w, await temporaryDirectory('graphyard-up-rejected'), [], { humanWaitMs: 1_000, driveApp: async () => ({ state: 'rejected', error: 'Hook url cannot be blank' }) }));
   assert.equal(result.exitCode, 1, result.next);
   const next = result.next.split('\n')[0];
   assert.match(next, /^GitHub rejected the App: "Hook url cannot be blank"/);
