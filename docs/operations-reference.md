@@ -27,7 +27,7 @@ Minutely scan (`GET /api/interventions` → `scan`; `GRAPHYARD_INTERVENTION_PATT
 
 ## Flaky CI check
 
-[Reruns once](github.md#failed-checks) (`mergeQueue.rerunFailedChecks`, 0 disables); pass clears it. On main the main guard judges no later merge until reruns conclude. A run failing only through cancelled or timed-out jobs reruns them up to 3 times; still cancelled, one `escalation:main-guard:SHA` infrastructure fault names the run and stopped step, reverting nothing. A real failure reruns once: passing, it is appended to the item's `mainGuardFlakes` (last 20); failing again, refused, or unconcluded within the hour, it is reverted.
+[Reruns once](github.md#failed-checks) (`mergeQueue.rerunFailedChecks`, 0 disables); pass clears it. On main the main guard judges no later merge until reruns conclude. Cancelled or timed-out jobs rerun up to 3 times; still cancelled, one `escalation:main-guard:SHA` infrastructure fault names the run and step, reverting nothing. A real failure reruns once: a pass is appended to `mainGuardFlakes` (last 20); a second failure, refusal or no conclusion within the hour reverts it.
 
 ## Accepted evidence turns out to be wrong
 

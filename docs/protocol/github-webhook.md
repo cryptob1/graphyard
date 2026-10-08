@@ -11,7 +11,7 @@ Commits and exact-SHA compares cache once (`github_cache`); a SHA pair's questio
 
 ## Prioritized wakes
 
-`POST /api/work/:id/resync` with `prioritized: true` is claimed like webhook wake; loop wakes add `wait: false`, answering without a reconcile tick. A rework decision on a stale observation sends one, deciding from its result (any age; candidate head; no GitHub pause); meanwhile-saved bookkeeping (sessions, next action, gates, escalations) doesn't refuse it; decisions the candidate moved past are withdrawn. A rework dispatch refused with `Submitted PR branch changed` releases its claim via one, restarting from new head.
+`POST /api/work/:id/resync` with `prioritized: true` is claimed like webhook wake; loop wakes add `wait: false`, answering without a reconcile tick. A rework decision on a stale observation sends one, deciding from its result (any age; candidate head; no GitHub pause); decisions the candidate moved past are withdrawn. A rework dispatch refused with `Submitted PR branch changed` releases its claim via one, restarting from new head.
 
 Decisions step budget: two fifths of `run.intervalSeconds`, ≥30 s; unreached items keep standing decisions, request nothing, show in `decisions:deferred`; both passes (rework; routine decisions, then attestations) resume them next cycle, always reaching first item even past budget.
 
