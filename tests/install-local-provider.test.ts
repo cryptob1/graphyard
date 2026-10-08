@@ -6,8 +6,8 @@ import { readdir, readFile, stat } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { join } from 'node:path';
 import { buildPlan, coreEnv, materializeInstall, prepareInstall, type InstallSession } from '../src/install/index.js';
-import { localUnit, runtimeCommand, type LocalSupervisor } from '../src/install/local.js';
-import { localPaths, startLocalRuntime, serveControlPlane, type LocalRuntime } from '../src/install/local-runtime.js';
+import type { LocalSupervisor } from '../src/install/local.js';
+import type { LocalRuntime } from '../src/install/local-runtime.js';
 import { REDACTED } from '../src/install/types.js';
 import { harness, type Harness } from './install-harness.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -17,6 +17,9 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
  * on this machine against an embedded Postgres cluster under ~/.config/graphyard/INSTALL/postgres,
  * supervised by a systemd user unit, with no Docker. Each test is named for the proof it produces.
  */
+// Loaded inside each test, so a tree without them fails as a test case, not at load.
+const local = () => import('../src/install/local.js');
+const runtimeModule = () => import('../src/install/local-runtime.js');
 
 const INSTALL = 'owner-project';
 
@@ -40,8 +43,8 @@ function inProcessSystemd(unitDirectory: string) {
       calls.push(args);
       const [verb, ...rest] = args, unit = rest[rest.length - 1];
       if (verb === 'is-active') { if (!runtime) throw new Error('inactive'); return 'active\n'; }
-      if (verb === 'enable' && !runtime) { runtime = await startLocalRuntime(await directoryOf(unit)); starts++; }
-      if (verb === 'restart') { await runtime?.stop(); runtime = await startLocalRuntime(await directoryOf(unit)); starts++; }
+      if (verb === 'enable' && !runtime) { runtime = await (await runtimeModule()).startLocalRuntime(await directoryOf(unit)); starts++; }
+      if (verb === 'restart') { await runtime?.stop(); runtime = await (await runtimeModule()).startLocalRuntime(await directoryOf(unit)); starts++; }
       if (verb === 'stop') { await runtime?.stop(); runtime = null; }
       return '';
     },
@@ -85,6 +88,7 @@ async function snapshot(directory: string, skip: (path: string) => boolean = () 
 }
 
 test('unit:local-provider-plan — install --provider local --plan lists Node 24, resolvable embedded-postgres binaries and a free loopback port, plans the cluster and the unit, never needs Docker, and creates nothing', async () => {
+  const { localUnit, runtimeCommand } = await local();
   const unitDirectory = await temporaryDirectory('local-units');
   const port = await freePort();
   const { fixture, deps, inputs } = await localFixture(inProcessSystemd(unitDirectory).supervisor, port);
@@ -129,6 +133,8 @@ test('unit:local-provider-plan — install --provider local --plan lists Node 24
 });
 
 test('integration:local-provider-embedded-postgres — --apply creates the cluster under the install directory (0700, password 0600), serves on 127.0.0.1 with DATABASE_URL pointing at it, and a rerun changes nothing', { timeout: 240_000 }, async () => {
+  const { localUnit } = await local();
+  const { localPaths } = await runtimeModule();
   const unitDirectory = await temporaryDirectory('local-units');
   const systemd = inProcessSystemd(unitDirectory);
   const port = await freePort();
@@ -174,6 +180,8 @@ test('integration:local-provider-embedded-postgres — --apply creates the clust
 });
 
 test('integration:local-runtime-restart — the supervised process starts the cluster, migrates through the Store, then serves; on SIGTERM it closes the store before it stops the cluster, and a restart serves the same ledger', { timeout: 240_000 }, async () => {
+  const { runtimeCommand } = await local();
+  const { localPaths, startLocalRuntime, serveControlPlane } = await runtimeModule();
   const unitDirectory = await temporaryDirectory('local-units');
   const systemd = inProcessSystemd(unitDirectory);
   const port = await freePort();
@@ -230,6 +238,7 @@ test('integration:local-runtime-restart — the supervised process starts the cl
 });
 
 test('unit:local-provider-credentials-outside-repo — the local provider writes every credential under the install directory, none inside the repository, and embedded-postgres is a runtime dependency', async () => {
+  const { localPaths } = await runtimeModule();
   const pkg = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
   assert.ok(pkg.dependencies['embedded-postgres'], 'an installed CLI can start the cluster');
   assert.equal(pkg.devDependencies['embedded-postgres'], undefined);
