@@ -6,9 +6,9 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import EmbeddedPostgres from 'embedded-postgres';
 import { daemonStateSchema, daemonSummary, emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
-import { keepVerdicts, shadowErrorKey, shadowKeptVerdicts, shadowLeftoverKey, shadowReads, shadowIdle, shadowStateSchema, shadowTimeoutKey, shadowTimeoutRetries, shadowVerdictBody, shadowVerdictKey } from '../src/daemon/cycle-shadow.js';
+import { keepVerdicts, shadowErrorKey, shadowKeptVerdicts, shadowLeftoverKey, shadowReads, shadowRunnerDetail, shadowRunnerKey, shadowRunnerRetries, shadowIdle, shadowStateSchema, shadowTimeoutKey, shadowTimeoutRetries, shadowVerdictBody, shadowVerdictKey } from '../src/daemon/cycle-shadow.js';
 import { compareVerdicts, githubOutcome, judgedVerdicts, shadowDue, shadowGateAttention, shadowReport, submittedAtOf, trialLogTailLength, type ShadowVerdict } from '../src/merge-writer/shadow.js';
-import { trialNeedsLog, TrialCleanupError, TrialTimeoutError, type TrialRun } from '../src/merge-writer/trial.js';
+import { trialNeedsLog, TrialCleanupError, TrialRunnerError, TrialTimeoutError, type TrialRun } from '../src/merge-writer/trial.js';
 import { daemonEffects } from '../src/daemon/effects.js';
 import { maxShadowTimeoutMinutes, shadowGateSettings, shadowGateSettingsSchema } from '../src/master/merge-writer-settings.js';
 import { masterConfigSchema } from '../src/master.js';
@@ -347,6 +347,75 @@ test('unit:shadow-status — master status lists the gate report and, for each i
   const mainRollout = base?.split(/^## Rollout\s*$/m)[1]?.split(/\n## /)[0];
   const words = (text: string) => text.split(/\s+/).filter(Boolean).length;
   if (mainRollout) assert.ok(words(rollout) - words(mainRollout) <= 50, `Rollout grew by ${words(rollout) - words(mainRollout)} words, at most 50`);
+});
+
+// ——— GY-1548: a runner exit naming no failing test is no verdict; a named failing test stays one. ———
+const delivery = (mergeSha: string) => ({ mergedAt: iso(start + minute), mergeSha, authorizationRevision: 1 });
+
+test('unit:shadow-unattributed-runner-exit — a trial whose runner exited naming no failing test (every record passed; a signal or a non-zero status) records no verdict: the step keeps one diagnostic record under shadowRunnerKey naming the head, base tip, trial merge, phase, exit, group and bounded output tail, retries the pair once no other head is due, gives it up after shadowRunnerRetries under one attention line, and GitHub merging the head makes no shadow-only-fail and no disagreement line', async () => {
+  const git = recordingGit(), now = () => start;
+  const tried: string[] = [];
+  const exit = new TrialRunnerError('tests', null, 'SIGKILL', ['tests/a.test.ts', 'tests/b.test.ts'], 2, 'ok - tests/a.test.ts\nok - tests/b.test.ts\n[exit signal SIGKILL: stdout exceeded 16777216 bytes]', sha('merge'), 90_000);
+  const reads = shadowReads(config, '/coordinator', git.run, { base: '/w', record: async (work, entry) => { assert.notEqual(work.key, 'GY-4', `a runner failure posts no verdict: ${JSON.stringify(entry)}`); }, trial: async input => { tried.push(input.key!); if (input.key === 'GY-4') throw exit; return trialRun; } });
+  let merged = false;
+  const items = () => [merged ? submitted(4, 50, { stage: 'done', delivery: delivery(sha('gh-merge-4')) }) : submitted(4, 50), submitted(5, 5)];
+  const state = emptyDaemonState(config), effects = effectsFor({ work: items, now, shadow: reads });
+  const lines: string[] = [];
+  for (let cycle = 0; cycle < 8; cycle++) { lines.push(...(await runCycle(config, state, effects, now)).actions.filter(action => action.detail.startsWith('Shadow merge gate runner failure:')).map(action => action.detail)); await shadowIdle(state); }
+  assert.deepEqual(state.shadow.map(entry => entry.key), ['GY-5'], 'the runner failure records no verdict; the head that passed has one');
+  assert.deepEqual(tried, ['GY-4', 'GY-5', 'GY-4'], 'the untried head goes next, then the pair is tried again once and given up');
+  const record = state.actions[shadowRunnerKey(sha('head4'), tip)]!;
+  assert.deepEqual([record.kind, record.state, record.attempts, record.work], ['merge', 'failed', shadowRunnerRetries, 'GY-4']);
+  assert.match(record.detail, new RegExp(`^Shadow trial of GY-4 head ${sha('head4')} on ${tip} \\(trial merge ${sha('merge')}\\) met a runner failure \\(2 of 2\\): its tests runner exited \\(signal SIGKILL\\) naming no failing test, 2 of the group's 2 file\\(s\\) finished \\(tests/a\\.test\\.ts, tests/b\\.test\\.ts\\); a runner exit naming no test measures the host, not the merge, so it is no verdict and the pair is given up against this tip\\. Output tail: ok - tests/a\\.test\\.ts\\n`));
+  assert.ok(record.detail.endsWith('[exit signal SIGKILL: stdout exceeded 16777216 bytes]'), record.detail);
+  const first = shadowRunnerDetail({ key: 'GY-4', head: sha('head4'), baseTip: tip }, new TrialRunnerError('tests', 137, null, Array.from({ length: 40 }, (_, index) => `tests/f${index}.test.ts`), 39, 'x'.repeat(5000), sha('merge'), 1000), 1, false);
+  assert.match(first, /\(1 of 2\): its tests runner exited \(status 137\) naming no failing test, 39 of the group's 40 file\(s\) finished \(tests\/f0\.test\.ts, tests\/f1\.test\.ts, tests\/f2\.test\.ts, tests\/f3\.test\.ts, tests\/f4\.test\.ts, …\); .*the pair is tried again once no other head is due\. Output tail: x+$/);
+  assert.ok(first.length <= 1900 && first.length > 1500, `the record is one bounded action holding the tail's end (${first.length})`);
+  assert.match(shadowRunnerDetail({ key: 'GY-4', head: sha('head4'), baseTip: tip }, new TrialRunnerError('build', null, 'SIGKILL', [], 0, 'build killed', sha('merge'), 1000), 1, false), /its build runner exited \(signal SIGKILL\) naming no failing test; a runner exit/);
+  assert.equal(lines.length, 1, `one attention line, once: ${lines.join(' / ')}`);
+  assert.match(lines[0]!, new RegExp(`^Shadow merge gate runner failure: GY-4 head ${sha('head4')} on ${tip} ended 2 trials with its tests runner exiting \\(signal SIGKILL\\) and no failing test named, so it has no verdict against this tip; read the record under shadow-runner:${sha('head4')}:${tip}, nothing is changed$`));
+  assert.ok(!state.actions[shadowErrorKey(sha('head4'), tip)] && !state.actions[shadowTimeoutKey(sha('head4'), tip)], 'a runner failure is neither a trial error nor a timeout');
+  // GitHub merges the head: with no verdict there is nothing to disagree with, so no shadow-only-fail and no line.
+  merged = true;
+  const raised: string[] = [];
+  for (let cycle = 0; cycle < 3; cycle++) { raised.push(...(await runCycle(config, state, effects, now)).actions.filter(action => action.detail.startsWith('Shadow merge gate:')).map(action => action.detail)); await shadowIdle(state); }
+  assert.deepEqual(raised, []);
+  assert.deepEqual(tried, ['GY-4', 'GY-5', 'GY-4'], 'a merged head is owed nothing more');
+  assert.equal(shadowReport(state.shadow, items()).counts['shadow-only-fail'], 0);
+  assert.deepEqual(shadowGateAttention(state.shadow), []);
+  assert.equal(daemonSummary(state, now(), config.run.intervalSeconds * 1000, config.hostId).shadowGate.counts['shadow-only-fail'], 0);
+  assert.deepEqual(daemonStateSchema.parse(JSON.parse(JSON.stringify(state))).actions[shadowRunnerKey(sha('head4'), tip)], record, 'the record persists in the daemon state');
+  // A timeout and a runner failure on one pair both defer it; whichever bound is reached first gives it up.
+  const mixedTried: string[] = [];
+  const mixed = shadowReads(config, '/coordinator', git.run, { base: '/w', record: async () => {}, trial: async input => { mixedTried.push(input.key!); throw mixedTried.length === 1 ? new TrialTimeoutError('tests', 1_200_000, 'slow') : exit; } });
+  const both = emptyDaemonState(config), bothEffects = effectsFor({ work: () => [submitted(7, 5)], now, shadow: mixed });
+  for (let cycle = 0; cycle < 8; cycle++) { await runCycle(config, both, bothEffects, now); await shadowIdle(both); }
+  assert.deepEqual(mixedTried, ['GY-7', 'GY-7', 'GY-7'], 'a timeout, then two runner failures: given up at the runner bound');
+  assert.deepEqual([both.actions[shadowTimeoutKey(sha('head7'), tip)]?.attempts, both.actions[shadowRunnerKey(sha('head7'), tip)]?.attempts, both.shadow], [1, 2, []]);
+});
+
+test('unit:shadow-named-test-failure — a runner exit that names a failing test file is the merge\'s: the verdict records the file, the exit and the log tail, the pair is tried once, and GitHub merging the head makes it shadow-only-fail under one attention line', async () => {
+  const git = recordingGit(), now = () => start;
+  const tried: string[] = [];
+  const failingRun: TrialRun = { build: 'pass', tests: { passed: 1, failed: ['tests/x.test.ts'], files: 2 }, durationMs: 3000, logTail: 'not ok 1 - tests/x.test.ts\n[exit status 1]', runnerExit: 1, groups: [{ files: ['tests/x.test.ts', 'tests/y.test.ts'], status: 1, signal: null, failed: ['tests/x.test.ts'] }] };
+  const posted: ReturnType<typeof shadowVerdictBody>[] = [];
+  const reads = shadowReads(config, '/coordinator', git.run, { base: '/w', record: async (_work, entry) => { posted.push(shadowVerdictBody(entry)); }, trial: async input => { tried.push(input.key!); return failingRun; } });
+  let merged = false;
+  const items = () => [merged ? submitted(6, 50, { stage: 'done', delivery: delivery(sha('gh-merge-6')) }) : submitted(6, 50)];
+  const state = emptyDaemonState(config), effects = effectsFor({ work: items, now, shadow: reads });
+  for (let cycle = 0; cycle < 4; cycle++) { await runCycle(config, state, effects, now); await shadowIdle(state); }
+  assert.deepEqual(tried, ['GY-6'], 'a named failure is a verdict: the pair is tried once, never retried');
+  assert.deepEqual(state.shadow.map(entry => [entry.key, entry.build, entry.tests, entry.outcome]), [['GY-6', 'pass', { passed: 1, failed: ['tests/x.test.ts'], files: 2 }, 'pending']]);
+  assert.deepEqual(posted.map(body => [body.tests, body.logTail]), [[failingRun.tests, failingRun.logTail]], 'the posted verdict names the file and carries the exit in its log tail');
+  assert.ok(!state.actions[shadowRunnerKey(sha('head6'), tip)] && !state.actions[shadowTimeoutKey(sha('head6'), tip)], 'no runner failure is recorded for a named failure');
+  merged = true;
+  const raised: string[] = [];
+  for (let cycle = 0; cycle < 3; cycle++) { raised.push(...(await runCycle(config, state, effects, now)).actions.filter(action => action.detail.startsWith('Shadow merge gate:')).map(action => action.detail)); await shadowIdle(state); }
+  assert.equal(state.shadow[0]?.outcome, 'shadow-only-fail');
+  assert.equal(raised.length, 1, 'one disagreement line');
+  assert.match(raised[0]!, /^Shadow merge gate: GY-6 head .* is shadow-only-fail .*the shadow trial failed it but GitHub merged it/);
+  assert.deepEqual(shadowGateAttention(state.shadow).map(line => line.text.startsWith('Shadow merge gate: GY-6')), [true]);
+  assert.equal(compareVerdicts({ build: 'pass', tests: failingRun.tests, conflict: [] }, 'merged'), 'shadow-only-fail', 'at the pure level a verdict naming a file fails; a runner exit naming none never becomes a verdict');
 });
 
 // ——— The verdict route: the loop's coordinator identity only, one event per Idempotency-Key. ———
