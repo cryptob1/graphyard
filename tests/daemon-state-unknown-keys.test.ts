@@ -29,24 +29,24 @@ test('unit:daemon-state-ignores-unknown-keys drops undeclared keys, still reject
   console.error = (...args: unknown[]) => { logged.push(args.join(' ')); };
   try {
     const base = { ...emptyDaemonState(master), cycle: 7 };
-    await writeFile(file, JSON.stringify({ ...base, mainWatch: { at: 'x' } }));
+    await writeFile(file, JSON.stringify({ ...base, retiredWatch: { at: 'x' } }));
     const loaded = await readDaemonState(root, master);
     assert.equal(loaded.cycle, 7);
-    assert.equal('mainWatch' in loaded, false);
+    assert.equal('retiredWatch' in loaded, false);
     assert.equal(logged.length, 1);
-    assert.match(logged[0]!, /mainWatch/);
+    assert.match(logged[0]!, /retiredWatch/);
 
-    await writeFile(file, JSON.stringify({ ...base, mainWatch: {}, cycle: 'seven' }));
+    await writeFile(file, JSON.stringify({ ...base, retiredWatch: {}, cycle: 'seven' }));
     await assert.rejects(readDaemonState(root, master));
 
     await writeFile(file, JSON.stringify({ ...base, constructor: 1, toString: 2 }));
     assert.equal((await readDaemonState(root, master)).cycle, 7);
 
-    await writeFile(file, JSON.stringify({ ...base, mainWatch: { at: 'x' } }));
+    await writeFile(file, JSON.stringify({ ...base, retiredWatch: { at: 'x' } }));
     await writeDaemonState(master, await readDaemonState(root, master));
-    assert.equal('mainWatch' in JSON.parse(await readFile(file, 'utf8')), false);
+    assert.equal('retiredWatch' in JSON.parse(await readFile(file, 'utf8')), false);
     const again = await readDaemonState(root, master);
     assert.equal(again.cycle, 7);
-    assert.equal('mainWatch' in again, false);
+    assert.equal('retiredWatch' in again, false);
   } finally { console.error = original; await dispose(); }
 });
