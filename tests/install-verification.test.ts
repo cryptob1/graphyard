@@ -143,7 +143,7 @@ test('the installer verifies /healthz, authenticated /api/status, and webhook de
 
   const instructions = await readFile(join(root, 'AGENTS.md'), 'utf8');
   assert.match(instructions, /## Graphyard coordination/);
-  assert.match(instructions, /## Graphyard master agent/);
+  assert.doesNotMatch(instructions, /## Graphyard master agent|graphyard-master -->/, 'the master reads its rules from master guide, not AGENTS.md');
   for (const token of tokens.values()) assert.ok(!instructions.includes(token));
 
   // Each registered credential authenticates as exactly its own role on the live server.

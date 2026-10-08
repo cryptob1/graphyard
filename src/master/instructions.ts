@@ -1,11 +1,14 @@
-// Concern: the managed master-agent block the master writes into AGENTS.md.
+// Concern: the master agent's role instructions, printed by `graphyard master guide`, and the
+// migration that removes the graphyard-master block earlier master inits wrote into AGENTS.md.
 
 const masterStart = '<!-- graphyard-master -->', masterEnd = '<!-- /graphyard-master -->';
-export function managedMasterInstructions(existing: string) {
-  const starts = existing.split(masterStart).length - 1, ends = existing.split(masterEnd).length - 1;
-  if (starts !== ends || starts > 1 || starts === 1 && existing.indexOf(masterEnd) < existing.indexOf(masterStart)) throw new Error('Malformed or duplicate Graphyard master markers; resolve them before updating AGENTS.md');
-  const section = `${masterStart}
-## Graphyard master agent
+
+/**
+ * The master session's own rules. They once lived in a graphyard-master block of the managed
+ * repository's AGENTS.md, which every worker, reviewer and producer session loads; only the master
+ * needs them, and its first request runs `graphyard master guide`, which prints them (GY-1493).
+ */
+export const masterInstructions = `## Graphyard master agent
 
 The recommended coordinator is a dedicated, visible master-agent session. It does
 not implement work, hold worker leases, submit evidence, or bypass gates. Run
@@ -103,6 +106,22 @@ as a violation until a two-party \`graphyard master decide GY-N merge\` reconcil
 Never use an administrative merge bypass, edit a candidate, or read a
 worker credential. Read \`docs/master-agent.md\`
 in Graphyard or run \`graphyard master guide\` for the complete operating loop.
-${masterEnd}`;
-  return starts ? existing.slice(0, existing.indexOf(masterStart)) + section + existing.slice(existing.indexOf(masterEnd) + masterEnd.length) : `${existing}${existing.endsWith('\n') || !existing ? '' : '\n'}\n${section}\n`;
+`;
+
+/**
+ * AGENTS.md without its graphyard-master block: exactly the markers and what lies between them are
+ * removed, every byte outside them kept. Malformed or duplicate markers are refused, naming the file.
+ */
+export function withoutMasterInstructions(existing: string) {
+  const starts = existing.split(masterStart).length - 1, ends = existing.split(masterEnd).length - 1;
+  if (starts !== ends || starts > 1 || starts === 1 && existing.indexOf(masterEnd) < existing.indexOf(masterStart)) throw new Error('Malformed or duplicate Graphyard master markers; resolve them before updating AGENTS.md');
+  return starts ? existing.slice(0, existing.indexOf(masterStart)) + existing.slice(existing.indexOf(masterEnd) + masterEnd.length) : existing;
 }
+
+/**
+ * @deprecated The name of the AGENTS.md block renderer this replaced. A CLI released before GY-1493
+ * still loads it from the merged tree when sync regenerates a conflicted AGENTS.md carrying the master
+ * block, so text with master markers loses that block, never the rest of the file; text without them
+ * gets the master instructions.
+ */
+export const managedMasterInstructions = (existing = '') => existing.includes(masterStart) || existing.includes(masterEnd) ? withoutMasterInstructions(existing) : masterInstructions;
