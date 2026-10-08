@@ -22,7 +22,7 @@ for (const [key, kind] of [['GY-1515', 'dispatch'], ['GY-1537', 'request-review'
     const registry = new ExecutorRegistry();
     const identity = { id: 'executor-a', host: 'machine-a' };
     const poll = (kinds: string[]) => { registry.observe({ executor: identity.id, host: identity.host, principal: 'graphyard-executor', kinds: kinds as never }, clock); };
-    await runExecutorTick(identity, { claim: async request => { poll(request.kinds); return { action: null }; }, settle: async () => {}, present: async request => { poll(request.kinds); },
+    await runExecutorTick(identity, { claim: async request => { poll(request.serves ?? request.kinds); return { action: null }; }, settle: async () => {}, present: async request => { poll(request.serves ?? request.kinds); },
       handlers: { dispatch: async () => 'launched', 'request-review': async () => 'launched', resync: async () => 'resynced' }, launchHold: async () => 'host machine-a has 2.0 GB free' });
     const unserved = describeUnserved(executorReport([item(key, kind)], registry, clock));
     const faults = classifyAttention(unserved.map(entry => ({ subject: 'executors', text: entry.text }))).filter(entry => entry.faultClass === 'configuration');
