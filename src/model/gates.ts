@@ -111,9 +111,14 @@ export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[])
   const byRisk = current && obs!.source === 'control-plane' && work.policy.review ? riskOf(work) : null;
   const riskRefusal = byRisk ? byRisk.risk === 'sensitive' && !reviewPassed ? [sensitiveReviewRefusal(byRisk.reasons)] : [] : !reviewPassed ? [reviewRefusal] : [];
   const postMerge = byRisk ? postMergeReviewMark(work, byRisk.risk, reviewPassed) : {};
+  // A change request holds only when this mode still requires a pre-merge review: github mode, or a
+  // sensitive control-plane delta. A normal-risk control-plane change request is attention for the
+  // post-merge pass, never a merge gate (GY-1525).
+  const changeRequestHold = changesRequested && byRisk?.risk !== 'normal'
+    ? ['Outstanding change requests must be resolved through a new review'] : [];
   add('review', work.policy.review ? [
     ...riskRefusal,
-    ...(changesRequested ? ['Outstanding change requests must be resolved through a new review'] : []),
+    ...changeRequestHold,
     ...(mechanicalHold ? [mechanicalHold] : []),
   ] : []);
   // The policy's checks and every other check the base branch's protection requires (GY-430):

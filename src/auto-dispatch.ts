@@ -737,14 +737,21 @@ export async function filePostMergeFollowUps(work: Work, record: ReviewRecord, e
       filed.push({ key: created.key, finding });
     } catch (error) { failure = `filing the follow-up for "${finding.slice(0, 80)}" failed: ${(error instanceof Error ? error.message : String(error)).split('\n')[0]}`.slice(0, 500); break; }
   }
-  let memory = record.postMergeFollowUps?.memory ?? 0;
-  if (record.postMergeFollowUps?.memory === undefined) {
+  // Non-blocking findings stay retryable until project memory accepts them: a write failure must
+  // not settle the count, or later ticks skip the verdict and the findings are never recorded.
+  let memory = record.postMergeFollowUps?.memory;
+  if (memory === undefined) {
     // Every finding that is no BLOCKING line: the body without those lines, read as a change request's follow-ups are.
     const nits = followUpFindingsOf(body.split('\n').filter(line => !/^\s*(?:[-*]\s*)?\**BLOCKING\**\s*:/i.test(line)).join('\n'));
-    if (nits.length && effects.recordFindings) await effects.recordFindings(work, record, nits).catch(() => { /* memory is advisory; the verdict keeps the text */ });
-    memory = nits.length;
+    if (nits.length && effects.recordFindings) {
+      try { await effects.recordFindings(work, record, nits); memory = nits.length; }
+      catch (error) {
+        const reason = `recording non-blocking findings in project memory failed: ${(error instanceof Error ? error.message : String(error)).split('\n')[0]}`.slice(0, 500);
+        failure = failure ? `${failure}; ${reason}`.slice(0, 500) : reason;
+      }
+    } else memory = nits.length;
   }
-  return { at: now.toISOString(), filed: filed.slice(0, 10), memory, ...(failure ? { failure } : {}) };
+  return { at: now.toISOString(), filed: filed.slice(0, 10), ...(memory !== undefined ? { memory } : {}), ...(failure ? { failure } : {}) };
 }
 export interface DispatchTick { at: string; launched: DispatchLaunch[]; refused: (DispatchFailure & { requestId: string })[]; waiting: DispatchWait[]; skipped: number;
   /** Post-merge verdicts this tick filed (GY-1525): the follow-up items per item and merge commit. */
@@ -1313,7 +1320,7 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
       const outcome = await filePostMergeFollowUps(item, record, effects, new Date(now()));
       if (!outcome) continue;
       await effects.settlePostMerge?.(record, outcome);
-      (tick.followUps ??= []).push({ work: item.key, sha: record.sha, filed: outcome.filed.map(entry => entry.key), memory: outcome.memory, ...(outcome.failure ? { failure: outcome.failure } : {}) });
+      (tick.followUps ??= []).push({ work: item.key, sha: record.sha, filed: outcome.filed.map(entry => entry.key), memory: outcome.memory ?? 0, ...(outcome.failure ? { failure: outcome.failure } : {}) });
     }
   });
   for (const { key, wake } of settlementWakes.values()) {

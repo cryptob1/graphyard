@@ -62,9 +62,14 @@ test('unit:review-gate-by-risk — with a control-plane observation a sensitive 
   normal.postMergeReview = 'owed';
   normal.observation!.reviews.push({ reviewer: 'review-claude-1', sha: H, state: 'APPROVED', id: 13, submittedAt: now(), source: 'control-plane' } as never);
   assert.equal(evaluate(normal, [normal], new Date(), [15368]).postMergeReview, null, 'an approval before the merge clears the owed review');
-  // A change request holds either class, and the mark never changes a delivered or reviewed item.
+  // A change request holds a sensitive pre-merge review; a normal-risk one is attention for the
+  // post-merge pass and does not hold the gate. The mark never changes a delivered or reviewed item.
   const changes = item('GY-3'); changes.observation!.reviews.push({ reviewer: 'review-claude-1', sha: H, state: 'CHANGES_REQUESTED', id: 14, submittedAt: now() });
-  assert.deepEqual(reviewGate(changes).reasons, ['Outstanding change requests must be resolved through a new review']);
+  assert.equal(reviewGate(changes).passed, true, 'a normal-risk change request does not hold the merge');
+  assert.equal(evaluate(changes, [changes], new Date(), [15368]).postMergeReview, 'owed');
+  const sensitiveChanges = item('GY-3b', { observation: planeObservation({ sha: H, baseSha: B, pr: 7, branch: 'b', author: 'graphyard-claude-1' }, ['src/store/pools.ts']) });
+  sensitiveChanges.observation!.reviews.push({ reviewer: 'review-claude-1', sha: H, state: 'CHANGES_REQUESTED', id: 15, submittedAt: now() });
+  assert.ok(reviewGate(sensitiveChanges).reasons.includes('Outstanding change requests must be resolved through a new review'));
   assert.deepEqual(postMergeReviewMark({ stage: 'done', postMergeReview: 'owed' }, 'sensitive', false), {});
   assert.deepEqual(postMergeReviewMark({ stage: 'review', postMergeReview: 'reviewed' }, 'normal', false), {});
   assert.deepEqual(postMergeReviewMark({ stage: 'review', postMergeReview: null }, 'normal', false), { postMergeReview: 'owed' });
@@ -261,7 +266,7 @@ test('integration:review-verdict-identity-independent — review-launch is the c
   assert.equal((await events(requested.id, 'review.independence-refused')).length, 1);
 });
 
-test('integration:review-verdict-recorded-once — the verdict is appended to observation.reviews as { reviewer, sha, state, body, submittedAt, source: control-plane } and re-evaluated: an approval lands a sensitive head\'s review gate, a change request holds it with its BLOCKING findings; a retried key replays and a second verdict for the launch is refused', async () => {
+test('integration:review-verdict-recorded-once — the verdict is appended to observation.reviews as { reviewer, sha, state, body, submittedAt, source: control-plane } and re-evaluated: an approval lands a sensitive head\'s review gate, a normal-risk change request keeps its BLOCKING findings without holding the gate; a retried key replays and a second verdict for the launch is refused', async () => {
   const sensitive = await insert(item('GY-9004', { observation: planeObservation({ sha: H, baseSha: B, pr: 7, branch: 'graphyard/gy-7-1', author: 'graphyard-claude-1' }, ['src/store/pools.ts']) }));
   const token = freshToken();
   assert.equal((await request(tokenOf(coordinator), `work/${sensitive.id}/review-launch`, launchBody(token))).status, 200);
@@ -300,7 +305,7 @@ test('integration:review-verdict-recorded-once — the verdict is appended to ob
   const held = await stored(normal.id);
   const [change] = held.observation!.reviews as { state: string; blocking?: string[]; body?: string }[];
   assert.deepEqual([change!.state, change!.blocking, change!.body], ['CHANGES_REQUESTED', ['src/feature.ts:12 — the flag is never read'], body]);
-  assert.deepEqual(held.gates.find(gate => gate.name === 'review')!.reasons, ['Outstanding change requests must be resolved through a new review']);
+  assert.equal(held.gates.find(gate => gate.name === 'review')!.passed, true, 'a normal-risk change request is attention for the post-merge pass, never a merge gate');
   assert.equal(held.postMergeReview, 'owed', 'the engine persists the normal delta\'s post-merge debt');
   const secondVerdict = await request(tokenOf(coordinator), `work/${normal.id}/review-verdict`, verdict(changes, 'APPROVE'));
   assert.deepEqual([secondVerdict.status, secondVerdict.body.error], [409, secondVerdictRefusal('GY-9005', H)]);

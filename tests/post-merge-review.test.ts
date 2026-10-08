@@ -147,6 +147,24 @@ test('unit:post-merge-review-owed — owed reviews are the merge writer\'s deliv
   const retried = await filePostMergeFollowUps(launched, { ...failing, postMergeFollowUps: partial! }, { createWork: async () => ({ key: 'GY-202' }) }, new Date(clock));
   assert.deepEqual(retried!.filed.map(entry => entry.key), ['GY-201', 'GY-202']);
   assert.equal(retried!.failure, undefined);
+  // A project-memory write that fails leaves memory unset so the next tick retries; the verdict is not settled as handled.
+  const memoryFail = record(launched, { state: 'completed', verdict: { state: 'CHANGES_REQUESTED', reviewer: 'review-claude-1', reviewId: 77, submittedAt: at } });
+  let memoryCalls = 0;
+  const memoryPartial = await filePostMergeFollowUps(launched, memoryFail, {
+    createWork: async () => ({ key: 'GY-301' }),
+    recordFindings: async () => { memoryCalls++; throw new Error('disk full'); },
+  }, new Date(clock));
+  assert.equal(memoryPartial!.memory, undefined, 'a failed memory write does not settle the count');
+  assert.match(memoryPartial!.failure!, /recording non-blocking findings in project memory failed: disk full/);
+  const memoryRetry: string[][] = [];
+  const memoryDone = await filePostMergeFollowUps(launched, { ...memoryFail, postMergeFollowUps: memoryPartial! }, {
+    createWork: async () => ({ key: 'GY-301' }),
+    recordFindings: async (_work, _record, findings) => { memoryRetry.push(findings); },
+  }, new Date(clock));
+  assert.equal(memoryCalls, 1);
+  assert.deepEqual(memoryDone!.memory, 2);
+  assert.equal(memoryDone!.failure, undefined);
+  assert.deepEqual(memoryRetry, [['AC-1 unmet after merge.', '- Nit: naming of `x` is terse']]);
   assert.equal(launched.stage, 'done');
   assert.equal(await filePostMergeFollowUps(launched, record(launched), {}, new Date(clock)), null, 'no verdict, nothing to file');
 });

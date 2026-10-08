@@ -144,8 +144,8 @@ export const reviewRecordSchema = z.object({
   launch: z.string().min(1).max(64).optional(),
   /** A post-merge review (GY-1525): `sha` is the delivered merge commit and `baseSha` its first parent. */
   postMerge: z.literal(true).optional(),
-  /** What the loop did with a post-merge verdict: the follow-up item filed per BLOCKING finding, the nits kept in project memory, and a filing failure to retry. */
-  postMergeFollowUps: z.object({ at: z.string().min(1).max(40), filed: z.array(z.object({ key: z.string().min(1).max(40), finding: z.string().min(1).max(300) }).strict()).max(10), memory: z.number().int().min(0), failure: z.string().min(1).max(500).optional() }).strict().optional(),
+  /** What the loop did with a post-merge verdict: the follow-up item filed per BLOCKING finding, the nits kept in project memory, and a filing failure to retry. `memory` is set only once the write succeeds so a failed write stays retryable. */
+  postMergeFollowUps: z.object({ at: z.string().min(1).max(40), filed: z.array(z.object({ key: z.string().min(1).max(40), finding: z.string().min(1).max(300) }).strict()).max(10), memory: z.number().int().min(0).optional(), failure: z.string().min(1).max(500).optional() }).strict().optional(),
 }).strict();
 export type ReviewRecord = z.infer<typeof reviewRecordSchema>;
 // The bound is enforced on write (boundSessionLedger), never on read: a ledger written before the
