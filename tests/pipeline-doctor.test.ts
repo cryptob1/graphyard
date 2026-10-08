@@ -984,6 +984,12 @@ test('unit:doctor-filing-refusal-fix-item-kind — a filing master create refuse
   await doctorStep(cycle([item()], { doctor: outage, state: queued.state }));
   assert.deepEqual(instanceKinds(queued.state), [['plane-unavailable', 'deployment']]);
   assert.equal(queued.state.doctor.pendingFiles.length, 1, 'still kept: the plane may answer later');
+  // The plane back, the create route refuses the content: the plane's run on the key is over, so the refusal opens its own proof instance, and the filing is dropped.
+  const mended = { ...outage, file: async () => { throw new Error('Graphyard refused work (409): Idempotency key reused with different input'); } };
+  queued.state.cycle += 2;
+  await doctorStep(cycle([item()], { doctor: mended, state: queued.state }));
+  assert.deepEqual(instanceKinds(queued.state), [['plane-unavailable', 'deployment'], ['fix-item', 'proof']], 'the outage and the refusal are two causes, two instances');
+  assert.deepEqual(queued.state.doctor.pendingFiles, [], 'dropped once the plane refused the content');
   clearDoctorRuns();
 });
 

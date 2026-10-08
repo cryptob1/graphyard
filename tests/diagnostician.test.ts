@@ -15,7 +15,7 @@ import { registryRoles, roleSchema, fleetRoles } from '../src/model/registry.js'
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { decisionInput } from '../src/master/autonomy.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
-import { standingFaultClassItem, clearDiagnoses, diagnosesSettled, diagnosisStep, diagnosisSubjects, noDiagnosisKind, type DiagnosticianEffects, type DiagnosisContext, type DiagnosisSubject } from '../src/daemon/diagnosis.js';
+import { standingFaultClassItem, clearDiagnoses, diagnosesSettled, diagnosisStep, diagnosisSubjects, type DiagnosticianEffects, type DiagnosisContext, type DiagnosisSubject } from '../src/daemon/diagnosis.js';
 import { clearDoctorRuns, doctorStep, type DoctorEffects } from '../src/daemon/doctor.js';
 import { doctorSettingsSchema } from '../src/master/doctor-settings.js';
 import { RefusedResponse } from '../src/model/refusal.js';
@@ -683,6 +683,8 @@ const failingRunner = (name: string, failure: () => RunResult<never>): Runner =>
 const diagnosisInstances = (state: ReturnType<typeof emptyDaemonState>) => state.faults.instances.filter(entry => /diagnos/i.test(entry.text)).map(entry => [entry.kind, entry.faultClass, entry.text]);
 
 test('unit:diagnosis-no-terminal-event-fault-kind — a diagnosis whose runs were both stopped at their bound is recorded under overlong-session (session-liveness), never action:diagnosis; a mix naming no one cause keeps the step kind', async () => {
+  // Imported here, not at the top: on the base tree the symbol is absent, and the proof's exercise must run this case and fail it rather than fail the file at load.
+  const { noDiagnosisKind } = await import('../src/daemon/diagnosis.js');
   const h = harness(() => null);
   h.diagnostician.runner = async attempt => ({ runner: failingRunner(attempt, () => stoppedAtBound(1200)), runtime: 'pi', model: attempt === 'primary' ? 'zai/glm-5.3-flash' : 'zai/glm-5.3' });
   const state = emptyDaemonState(config()), work = [recurring(state)];

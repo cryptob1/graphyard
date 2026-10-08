@@ -307,6 +307,11 @@ export const unregisteredScenario = (error: unknown) => /Register E2E scenario (
 async function dropRefusedFiling(cycle: Pick<Cycle, 'state' | 'effects' | 'performed'>, key: string, file: DoctorFile, error: unknown, attempts: number, now: () => number) {
   const { state, effects: daemon, performed } = cycle;
   state.doctor.pendingFiles = state.doctor.pendingFiles.filter(entry => entry.key !== key);
+  // A pending retry that met the plane's outage opened a plane-unavailable run on this key (GY-1404),
+  // and a key's later failures are noted against its standing run whatever their kind. The plane has
+  // answered now, so that run is over: ended here, the refusal opens the proof instance it is.
+  const standing = state.faults.failing[key] ? state.faults.instances.find(entry => entry.id === state.faults.failing[key]) : undefined;
+  if (standing && standing.kind !== 'fix-item') delete state.faults.failing[key];
   const scenario = unregisteredScenario(error);
   performed.push(await record(state, key, { kind: 'fault', work: null, principal: null, state: 'failed', detail: `Could not file "${file.title}", and it is not filed again: master create refused the filing itself${scenario ? ` for the e2e proof it cites, whose scenario ${scenario} has no registered revision` : ''}: ${message(error)}`.slice(0, 2000), attempts, cycle: state.cycle }, now(), daemon.persist, 'fix-item'));
   const mend = scenario

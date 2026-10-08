@@ -12,7 +12,6 @@ import { escalationTriggers, type Evidence, type Observation, type Work } from '
 import { nameUnobtainableReviews, requestAttemptLimit, settledAnswerGraceMs, unansweredRequest, type DispatchRequest, type RequestProgress } from '../src/model/dispatch.js';
 import { applyRegistryMutation, emptyRegistry, fleetRoles, fleetView, proposedRuntimes, type AgentRegistry, type FleetSession } from '../src/model/registry.js';
 import { agentOwner, buildMasterStatus, controlPlaneAttention, installationSources, masterConfigSchema, workAttentionCauses, type AttentionItem, type MasterConfig } from '../src/master.js';
-import { noDiagnosisKind } from '../src/daemon/diagnosis.js';
 import { containmentSettleWaitBoundMs, cycleFailureAttentionAfter, cycleFaults, daemonActionFaultKind, daemonActionKinds, daemonEffects, daemonSummary, emptyDaemonState, endFailingRuns, fileRecurringFaultClasses, herdrFaultKinds, loopAttention, loopLiveness, noteConfigReload, noteCycleFailure, noteWatchdog, onceAnnotations, faultObservationIntervalMs, deploymentObservationSchema, pruneDaemonState, reconcilePendingActions, retainedActions, runCycle, storeAction, timingFaultAttention, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { attributeAttention, derivedAttention, faulted } from '../src/master-status.js';
 import { sessionRetries } from '../src/producer.js';
@@ -269,7 +268,8 @@ test('unit:fault-catalogue-action-kinds — a failed fault or diagnosis action i
   assert.deepEqual(posting.faults.instances.map(entry => [entry.kind, entry.faultClass]), [['action:fault', 'unclassified'], ['plane-unavailable', 'deployment']]);
 });
 
-test('unit:fault-classes-catalogue-total — after GY-1530 every source\'s kind is still listed exactly once, the step kinds action:fault/action:diagnosis stay parked under unclassified for emitters that pass no cause, and the causes the doctor and the diagnosis step now pass are catalogued under their classes', () => {
+test('unit:fault-classes-catalogue-total — after GY-1530 every source\'s kind is still listed exactly once, the step kinds action:fault/action:diagnosis stay parked under unclassified for emitters that pass no cause, and the causes the doctor and the diagnosis step now pass are catalogued under their classes', async () => {
+  const { noDiagnosisKind } = await import('../src/daemon/diagnosis.js'); // dynamic: the exercise runs this case on the base tree, where the symbol is absent
   const listed = faultClasses.flatMap(faultClass => faultCatalogue[faultClass].map(kind => ({ kind, faultClass })));
   for (const { kind } of listed) assert.equal(listed.filter(entry => entry.kind === kind).length, 1, `${kind} is listed under exactly one class`);
   assert.equal(new Set(faultKinds).size, faultKinds.length, 'no kind is listed twice');
