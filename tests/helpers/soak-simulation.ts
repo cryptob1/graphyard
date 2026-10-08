@@ -160,6 +160,8 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
    * them, each history read taking `readMs` of real time.
    */
   staleRelease?: { item: number; racing: number; backlog: number; readMs: number };
+  /** GY-1541: the agent registry answers the startup-readiness 503 of a deploying plane to the loop's every registry reconcile in this window (ms from the day's start), then answers. */
+  readiness?: { from: number; to: number };
   /** GY-1329: item `item`'s flaky workflow run keeps running its other jobs for `ms` after its `test` check failed. */
   unfinishedRun?: { item: number; ms: number };
   /** GY-417: dispatch through the real `dispatchWork` on a real master root with a two-account launch profile. */
@@ -1754,6 +1756,17 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
       throw new FleetUnreachableError('The agent registry at https://graphyard.example answered 404: Unknown session');
     };
   }
+  // GY-1541: a deploying plane answers the registry reconcile with its startup-readiness 503 (src/server/main.ts), cycle after cycle, then recovers.
+  const readinessDay = { refused: 0, answered: 0 };
+  if (options.readiness) {
+    const window = options.readiness;
+    effects.reconcileSessions = async () => {
+      const at = clock.now() - dayStart;
+      if (at >= window.from && at < window.to) { readinessDay.refused++; throw new FleetUnreachableError('The agent registry at https://graphyard.example answered 503: Startup validation has not completed; retry shortly'); }
+      readinessDay.answered++;
+      return [];
+    };
+  }
   // The loop publishes the master's merge-queue settings each cycle they change (GY-330, GY-498,
   // GY-500, GY-516), exactly as daemonEffects wires it; the day records what was published, when.
   // ---- GY-811: the containment day. The work snapshot takes 6 s to read, as it does on a loaded
@@ -2733,7 +2746,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   const tmp = { root: tmpRoot, backlog, deadOwned, cache, heldDirectory, liveOwned, hourly, passes: tmpPasses, peak: tmpPeak, reports: await readReclaimReports(reclaimRoot), left: readdirSync(tmpRoot) };
   if (process.env.SOAK_TRACE) console.error(`landing: ${github.landingChecks} checks over ${github.landingBases.size} bases, ${github.ancestorCompares} ancestor compares, ${github.blindCompares} blind compares; false landing refusals: ${landingRefusals.map(entry => `${entry.key}@+${Math.round(entry.elapsed / minute)}min ${entry.sha.slice(0, 12)}`).join(', ') || 'none'}`);
   engine.execute = executeAll;
-  return { supervisedDay, stuck, unboundedDay, provisionDay, promotion, throughput, reconciled, outside, items, final, github, sessions, docsSyncRuns, docsSyncRoot, lost, launches, violations, faulted, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, headless, herdr, hand, stranded, withdrawals, resumes, strandedLaunches, escalations, spent, attestations, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, guardReads, checkout, landingRefusals, foreignPane, previousWorktrees, closedLeased,
+  return { readinessDay, supervisedDay, stuck, unboundedDay, provisionDay, promotion, throughput, reconciled, outside, items, final, github, sessions, docsSyncRuns, docsSyncRoot, lost, launches, violations, faulted, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, headless, herdr, hand, stranded, withdrawals, resumes, strandedLaunches, escalations, spent, attestations, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, guardReads, checkout, landingRefusals, foreignPane, previousWorktrees, closedLeased,
     mergeQueuePosts, config, refused, decideCalls, restarted, approverPanes, failing, herdrClosed: herdr.closed, diagnosisModel: settings.model, diagnosisRuns: diagnosed, baseBreak, capacityRefused, capacityLaunched, capacityWaiters,
     decided, misreads, prompts, screens, heldAccounts, approverAccounts, retryReset, exitedLive, exitedClosed, exitedRowsSeen, reassign, workspaceFailures, workspaceCooled, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, fenced, mergeStallSightings, master, baseFailure,
     blockerEvents, blockerProbes, blockerDecisions, blockerActions, blockerKeysPeak, attempts, lanesSeen, laneApplications, approverWorks, approverDecisions, failover, webhook, remedies, observeRequests, starvation, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size }, mechanical: { ledger, botRounds, misclassified, reviewHolds }, shared, charges: { ...charged, b: charged.b.length, instancesSeen: [...charged.instancesSeen], restarts: chargeRestarts },
