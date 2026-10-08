@@ -147,7 +147,8 @@ test('manual:fault-filing-dirty-checkout-succeeds-after-scenario-fix — over th
   assert.ok(actions.some(action => action.kind === 'escalation' && action.detail.includes(`e2e:${scenario}`) && /register it, or file the item by hand/.test(action.detail)), 'the escalation names the unregistered scenario for the master');
   // Convergence: nothing stays pending, and the dropped filing is never kept for a retry.
   assert.deepEqual(r.pending.at(-1)!.keys, [], 'no filing is left pending at the end of the day');
-  // Each later create is a later doctor run proposing the filing afresh (the simulated doctor re-emits it
-  // while no item covers the class), never the dropped pending file: the cursor holds none of them.
-  assert.equal(r.creates.filter(create => create.elapsed > refused.elapsed).length, afterOutage.length - 1, 'every create after the first is a fresh run\'s filing');
+  // GY-1530: the refusal outlives its run. The simulated doctor re-emits the same filing every run, but the
+  // content create refused is remembered, so no later run submits it: exactly one create was refused.
+  assert.equal(afterOutage.length, 1, `submissions stop after the first content refusal: ${JSON.stringify(afterOutage)}`);
+  assert.equal(day.state.doctor.refusedFilings.length, 1, 'the refused content is remembered on the cursor');
 });
