@@ -55,8 +55,8 @@ Reviewers/producers are `awaiting acknowledgement` until 30 s active (`counts.di
 
 ### Panes are closed and reclaimed
 
-Ended sessions' panes close; each cycle closes ≤12 more, never a live lease's: agentless shells in `.graphyard/worktrees` after **120 s** (never elsewhere), agents named for ended sessions after **60 s**. Shells come from `herdr pane list` (the agent list never carries one); `master status` counts the same set. Over 20 agentless: `daemon.escalations` attention.
+Ended sessions' panes close; each cycle closes ≤12 more, never a live lease's: agentless shells in `.graphyard/worktrees` after **120 s** (never elsewhere), agents named for ended sessions after **60 s**. Shells come from `herdr pane list` (the agent list never carries one), recorded by a session or not; `master status` counts the same set. Over 20 agentless: `daemon.escalations` attention.
 
 ### The dispatcher's own state
 
-Dispatcher bounds its state where it composes it, marking each cut with an ellipsis; schema-failing cursor is repaired, not fatal, logged once with the failing path. Tick failures are attributed (`dispatch.lastFailure`); three in a row raise one attention item (no reviewer or producer launches for any item); `graphyard master restart` repairs it. A session exiting **at launch** is classified by `herdr pane read` (`herdr agent get` answers only `agent_not_found`): a **provider limit notice** fails over like mid-session exhaustion; others refused with the pane's last words and retried.
+Dispatcher bounds its own state where it composes it, marking each cut with an ellipsis; schema-failing cursor is repaired, not fatal, logged once with the failing path. Tick failures are attributed (`dispatch.lastFailure`); three in a row raise one attention item (no reviewer or producer session launches for any item); `graphyard master restart` repairs it. A session exiting **at launch** is classified by `herdr pane read` (`herdr agent get` answers only `agent_not_found`): a **provider limit notice** fails over like a mid-session exhaustion; others refused with the pane's last words and retried.

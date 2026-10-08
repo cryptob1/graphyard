@@ -81,12 +81,12 @@ export function blockingFindings(body: unknown): string[] {
  * `Follow-up finding:` lines when it has any; otherwise each list item or paragraph that is neither
  * a `BLOCKING:` line nor the verdict's scaffolding, bounded; the whole body when it has no structure.
  */
-export function followUpFindingsOf(body: unknown, limit = 20): string[] {
+export function followUpFindingsOf(body: unknown, limit = 20, width = 2000): string[] {
   if (typeof body !== 'string' || !body.trim()) return [];
   const named = body.split('\n').map(line => followUpLine.exec(line)?.[1]?.trim() ?? '').filter(text => text && !noneNamed.test(text));
-  if (named.length) return named.map(text => text.slice(0, 2000)).slice(0, limit);
+  if (named.length) return named.map(text => text.slice(0, width)).slice(0, limit);
   const blocks = body.split(/\n\s*\n|\n(?=\s*(?:[-*]|\d+\.)\s)/).map(block => block.trim()).filter(block => block && !blockingLine.test(block.split('\n')[0]!) && !scaffold.test(block));
-  return blocks.map(block => block.slice(0, 2000)).slice(0, limit);
+  return blocks.map(block => block.slice(0, width)).slice(0, limit);
 }
 /**
  * What an observation keeps of a change request's body (github.ts): the whole body when it fits

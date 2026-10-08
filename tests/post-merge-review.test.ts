@@ -1,4 +1,5 @@
 import { after, before, test } from 'node:test';
+import { rm } from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -10,8 +11,9 @@ import { masterConfigSchema } from '../src/master.js';
 import type { Principal, Work } from '../src/model.js';
 import { reconcileAutoDispatch } from '../src/model/dispatch.js';
 import { deliveredByMergeWriter, owedPostMergeReviews, parseFinding, postMergeFollowUp, postMergeRequestId, postMergeReviewMark } from '../src/model/post-merge-review.js';
-import { emptyDispatchCursor, filePostMergeFollowUps, postFollowUpItem, postMergeRequest, postMergeWaitReason, reviewedAfterMerge, runDispatchTick, selectReviewerProfile, unknownParent, type DispatchEffects } from '../src/auto-dispatch.js';
+import { dispatchEffects, emptyDispatchCursor, filePostMergeFollowUps, postFollowUpItem, postMergeRequest, postMergeWaitReason, reviewedAfterMerge, runDispatchTick, selectReviewerProfile, unknownParent, type DispatchEffects } from '../src/auto-dispatch.js';
 import { controlPlaneRefusal, controlPlaneVerdict, staleReviewReason, type ReviewRecord } from '../src/reviewer.js';
+import { readProjectMemory } from '../src/project-memory.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-1525 AC-4: a normal-risk delta the merge writer delivered owes one post-merge review of its
@@ -84,6 +86,13 @@ test('unit:post-merge-review-owed — owed reviews are the merge writer\'s deliv
   assert.deepEqual(parseFinding('src/feature.ts:12 — the flag is never read'), { text: 'src/feature.ts:12 — the flag is never read', path: 'src/feature.ts', line: 12 });
   assert.deepEqual(parseFinding('`src/other.ts` - the retry loop never ends').path, 'src/other.ts');
   assert.deepEqual(parseFinding('the retry loop never ends'), { text: 'the retry loop never ends', path: null, line: null });
+  // An extensionless file, or a file named after the criterion, is still the finding's file; prose is not.
+  assert.deepEqual(parseFinding('Dockerfile:12 — the base image is unpinned'), { text: 'Dockerfile:12 — the base image is unpinned', path: 'Dockerfile', line: 12 });
+  assert.equal(parseFinding('Makefile — the test target skips the build').path, 'Makefile');
+  assert.equal(postMergeFollowUp(owed, M, parseFinding('deploy/Containerfile has no healthcheck'), 0).plannedFiles[0], 'deploy/Containerfile');
+  assert.deepEqual(parseFinding('AC-4, src/model/post-merge-review.ts:80-84 and :100 — the path is lost'), { text: 'AC-4, src/model/post-merge-review.ts:80-84 and :100 — the path is lost', path: 'src/model/post-merge-review.ts', line: 80 });
+  assert.equal(parseFinding('.gitignore misses dist').path, '.gitignore');
+  for (const prose of ['AC-4 — i.e. version 1.2 regressed', 'read/write races', 'see https://example.com/a.html']) assert.equal(parseFinding(prose).path, null, prose);
   const followUp = postMergeFollowUp(owed, M, parseFinding('src/feature.ts:12 — the flag is never read'), 0);
   assert.deepEqual([followUp.type, followUp.priority, followUp.plannedFiles, followUp.policy, followUp.origin], ['bug', 1, ['src/feature.ts'], { checks: ['test'], review: true }, { reviewFollowUps: { parent: 'GY-10', findings: [{ path: 'src/feature.ts', text: 'src/feature.ts:12 — the flag is never read', ref: M }] } }]);
   assert.match(followUp.title, /^Post-merge review of GY-10 \(cccccccccccc\): src\/feature\.ts:12 — the flag is never read$/);
@@ -178,6 +187,20 @@ test('unit:post-merge-review-owed — owed reviews are the merge writer\'s deliv
   assert.deepEqual(memoryDone!.memory, 2);
   assert.equal(memoryDone!.failure, undefined);
   assert.deepEqual(memoryRetry, [['AC-1 unmet after merge.', '- Nit: naming of `x` is terse']]);
+  // Every non-blocking finding reaches project memory, uncounted and uncut: 25 of them, one past 2,000 characters.
+  const long = `- Nit: ${'w'.repeat(2_500)}`;
+  const nits = Array.from({ length: 24 }, (_, k) => `- Nit ${k}: finding ${k}`).concat(long).join('\n\n');
+  const wordy = { ...launched, reviewLaunch: { ...launched.reviewLaunch!, verdict: { ...launched.reviewLaunch!.verdict!, body: nits } } } as typeof launched;
+  const kept: string[][] = [];
+  const allKept = await filePostMergeFollowUps(wordy, memoryFail, { recordFindings: async (_work, _record, findings) => { kept.push(findings); } }, new Date(clock));
+  assert.equal(allKept!.memory, 25);
+  assert.equal(kept[0]!.length, 25); assert.equal(kept[0]![24], long);
+  const memoryRoot = await temporaryDirectory('post-merge-memory');
+  try {
+    await dispatchEffects(memoryRoot, config, { snapshot: async () => ({ work: [], now: at }) }).recordFindings!(wordy, memoryFail, kept[0]!);
+    const entry = (await readProjectMemory(memoryRoot)).decisions.find(decision => decision.action === 'post-merge-review')!;
+    for (const finding of kept[0]!) assert.ok(entry.reason.includes(finding), 'project memory keeps every finding whole');
+  } finally { await rm(memoryRoot, { recursive: true, force: true }); }
   assert.equal(launched.stage, 'done');
   assert.equal(await filePostMergeFollowUps(launched, record(launched), {}, new Date(clock)), null, 'no verdict, nothing to file');
 });
@@ -191,7 +214,7 @@ const credentials = principals.map(principal => ({ ...principal, token: `${princ
 const tokenOf = (principal: Principal) => credentials.find(credential => credential.id === principal.id)!.token;
 let pg: EmbeddedPostgres, store: Store, http: ReturnType<typeof server>, url: string;
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1526;
+  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1529;
   pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('post-merge-review-pg'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('post_merge_review_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/post_merge_review_test`); await store.init();

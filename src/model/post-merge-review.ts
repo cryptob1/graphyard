@@ -76,12 +76,29 @@ export function owedPostMergeReviews(work: readonly Work[]): Work[] {
 /** The dispatch request id a post-merge review is launched under: one per delivered merge commit, so the ledger keeps one session per attempt. */
 export const postMergeRequestId = (key: string, mergeSha: string) => `post-merge:${key}:${mergeSha.slice(0, 12)}`;
 
-/** One blocking finding of a post-merge verdict, with the file it names when the finding starts with `PATH:LINE —` or `PATH —`. */
+/**
+ * One blocking finding of a post-merge verdict, with the first repository file it names and that
+ * file's line: a token with an extension (`src/a.ts:12`, `.gitignore`), one followed
+ * by a line (`Dockerfile:12`, `Makefile:3-9`), or a well-known extensionless file named alone.
+ */
 export interface PostMergeFinding { text: string; path: string | null; line: number | null }
-const findingPath = /^`?([A-Za-z0-9_./-]+\.[A-Za-z0-9]+)`?(?::(\d+))?(?:\s*[—–:-]\s*|\s+)/;
+const extensionlessFiles = new Set(['Dockerfile', 'Containerfile', 'Makefile', 'GNUmakefile', 'Procfile', 'Gemfile', 'Rakefile', 'Jenkinsfile', 'Vagrantfile', 'Brewfile', 'Justfile', 'LICENSE', 'CODEOWNERS', 'VERSION']);
+const notFiles = new Set(['e.g', 'i.e', 'etc', 'vs']);
+function findingFile(token: string): { path: string; line: number | null } | null {
+  const match = /^([A-Za-z0-9_./@+-]+?)(?::(\d+)(?:[-–]\d+)?)?$/.exec(token);
+  if (!match || token.includes('://')) return null;
+  const path = match[1]!.replace(/[.,;]+$/, ''), line = match[2] ? Number(match[2]) : null;
+  if (!path || notFiles.has(path.toLowerCase()) || /^AC-\d+$/i.test(path) || /^\.+$/.test(path) || /^[\d.]+$/.test(path)) return null;
+  const named = /\.[A-Za-z][A-Za-z0-9]*$/.test(path) || extensionlessFiles.has(path.split('/').pop()!) || (line !== null && /[A-Za-z]/.test(path));
+  return named ? { path: path.replace(/^\.\//, ''), line } : null;
+}
 export function parseFinding(text: string): PostMergeFinding {
-  const match = findingPath.exec(text.trim());
-  return { text: text.trim(), path: match?.[1] ?? null, line: match?.[2] ? Number(match[2]) : null };
+  const trimmed = text.trim();
+  for (const token of trimmed.split(/[\s`'"()[\]{},]+/)) {
+    const file = findingFile(token.replace(/[.;:—–]+$/, ''));
+    if (file) return { text: trimmed, ...file };
+  }
+  return { text: trimmed, path: null, line: null };
 }
 
 /**

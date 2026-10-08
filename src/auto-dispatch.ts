@@ -750,8 +750,9 @@ export async function filePostMergeFollowUps(work: Work, record: ReviewRecord, e
   // not settle the count, or later ticks skip the verdict and the findings are never recorded.
   let memory = record.postMergeFollowUps?.memory;
   if (memory === undefined) {
-    // Every finding that is no BLOCKING line: the body without those lines, read as a change request's follow-ups are.
-    const nits = followUpFindingsOf(body.split('\n').filter(line => !/^\s*(?:[-*]\s*)?\**BLOCKING\**\s*:/i.test(line)).join('\n'));
+    // Every finding that is no BLOCKING line: the body without those lines, read as a change request's
+    // follow-ups are, but neither counted nor cut — the API bounds the verdict body, so every one is kept.
+    const nits = followUpFindingsOf(body.split('\n').filter(line => !/^\s*(?:[-*]\s*)?\**BLOCKING\**\s*:/i.test(line)).join('\n'), Infinity, Infinity);
     if (nits.length && effects.recordFindings) {
       try { await effects.recordFindings(work, record, nits); memory = nits.length; }
       catch (error) {
@@ -1496,7 +1497,8 @@ export function dispatchEffects(root: string, config: MasterConfig | (() => Mast
     recordFindings: async (work, record, findings) => {
       const memory = await readProjectMemory(root), at = new Date((deps.now ?? Date.now)()).toISOString();
       recordDecisionInMemory(memory, { id: `post-merge-review:${work.key}:${record.sha.slice(0, 12)}`, key: work.key, action: 'post-merge-review', state: 'applied', approvedBy: record.verdict?.reviewer ?? 'reviewer', at,
-        reason: `Post-merge review of ${record.sha.slice(0, 12)} noted: ${findings.join(' | ')}`.slice(0, 1000) });
+        // Every finding, uncut: the entry is bounded by the verdict body the API accepted (65,536 characters).
+        reason: `Post-merge review of ${record.sha.slice(0, 12)} noted: ${findings.join(' | ')}` });
       await writeProjectMemory(root, memory);
     },
     settlePostMerge: (record, outcome) => updateReviewLedger(root, ledger => { const entry = ledger.reviews.find(candidate => candidate.id === record.id); if (entry) entry.postMergeFollowUps = outcome; }),
