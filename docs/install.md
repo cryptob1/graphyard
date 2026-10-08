@@ -57,7 +57,7 @@ Dispatch [small item](onboarding.md#4-prove-the-first-pr); once `Graphyard / mer
 
 `--target host --ssh-host HOST` (or `--target hetzner`): server, Postgres, loop, executors, Herdr, runtimes on one systemd machine; credentials in `~graphyard/.config/graphyard/<install>/`. Public IPv4 serves `<ip>.sslip.io`; private/`--local` needs `--domain`. Unpullable images build on the host at the installer's commit. Workers push and open PRs as the App via one-hour repository tokens.
 
-Price consent: `--confirm-price`, `--max-monthly`. Saved Apps (`--github-app FILE`, this install's, `.graphyard/github-app.json`) are reused once minting a token; `--reuse-app SLUG` (or the App page) reuses a host-saved App installed on the account. `--migrate` stops old loop, fences `GRAPHYARD_MIGRATE_DATABASE_URL` (`db fence`), restores; local logins move.
+Price consent: `--confirm-price`, `--max-monthly`. Saved Apps (`--github-app FILE`, this install's, `.graphyard/github-app.json`) are reused once minting a token; `--reuse-app SLUG` (or the App page) reuses a host-saved App installed on the account. `--no-github-app` (server-only providers; refused with `--github-app`, `--reuse-app`, `--reviewer`, `--target`) registers no App: `GITHUB_APP_*` stay unset, `/api/status.github` is `false`, no webhook, protection or reviewer App. `--migrate` stops old loop, fences `GRAPHYARD_MIGRATE_DATABASE_URL` (`db fence`), restores; local logins move.
 
 ## Upgrading an existing installation
 
