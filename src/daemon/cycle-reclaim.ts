@@ -2,7 +2,7 @@
 import { describeReclaim, graphyardWorktree, paneReclaimStatus, agentlessPaneAttentionBound, finishedSessionGraceMs } from '../master-resources.js';
 import { diskThresholdBytes, containmentPhase } from '../master.js';
 import { worktreeRootMinFreeBytes } from '../install/worktree-root.js';
-import { actionDetailMax, gigabytes, message, reclaimIntervalMs, reclaimSummarySchema } from './state.js';
+import { actionDetailMax, gigabytes, message, reclaimIntervalMs, reclaimSummarySchema, unboundedAttemptKey } from './state.js';
 import { readyToRetry } from './sessions.js';
 import { boundDetail, detailChanged } from './decisions.js';
 import { launchAppearanceMs, preserveInterruptedAttempt, record } from './effects.js';
@@ -490,7 +490,7 @@ export async function reclaimStep(cycle: Cycle) {
 }
 
 /** The loop's record that it stopped renewing an attempt's lease (GY-1460). */
-export const unboundedAttemptKey = (item: Pick<Work, 'id'>, epoch: number) => `unbounded:${item.id}:${epoch}`;
+export { unboundedAttemptKey };
 /**
  * 3a'. An attempt holding its lease past the reclaim bound (`workerReclaimBoundMs`: one further
  * worker bound after the stalled-gate fault) with still no submission and no submission progress

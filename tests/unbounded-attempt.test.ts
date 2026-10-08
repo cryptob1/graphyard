@@ -261,7 +261,7 @@ test('unit:lease-stop-renewal — past the reclaim bound the loop ends the attem
   } finally { await cleanup(); }
 });
 
-test('integration:unbounded-attempt-reclaimed — a live, renewing attempt past both bounds is faulted, then its renewal stops: the attempt ends on the record, its supervisor stops, its fence settles and the item returns to the queue with its worktree kept', async () => {
+test('integration:unbounded-attempt-reclaimed — a live, renewing attempt past the worker bound is named by its record and left to the loop\'s reclaim; past the reclaim bound its renewal stops: the attempt ends on the record, its supervisor stops, its fence settles and the item returns to the queue with its worktree kept, and the remedy that worked opens no fault instance', async () => {
   const { unboundedAttemptKey } = await reclaim();
   const { config, cleanup } = await configured();
   // The plane's record, renewed by the supervisor on every read while it runs, as `graphyard watch` does.
@@ -305,12 +305,15 @@ test('integration:unbounded-attempt-reclaimed — a live, renewing attempt past 
     plane.item = attempt(59);
     await cycle();
     assert.deepEqual(standing(), [], 'no fault inside the bound');
-    // Past the 60-minute bound with the lease still renewing: the stalled-gate fault, nothing stopped.
+    // Past the 60-minute bound with the lease still renewing: the record names the stalled-gate fault, nothing stopped;
+    // the loop counts no instance while its own reclaim remedy is still due (GY-1557).
     plane.item = attempt(61);
     await cycle();
-    assert.equal(standing().length, 1, 'the renewed attempt past the bound is recorded');
-    assert.equal(standing()[0].faultClass, 'stalled-gate');
-    assert.match(standing()[0].text, /GY-1457 epoch 1 \(worker-a\) has held its lease 1 minutes past the 60-minute worker bound without a submission \(claimed at .+, lease renewed to /);
+    const named = workFaults(plane.item, Date.now()).filter(fault => fault.kind === 'unsubmitted-attempt');
+    assert.equal(named.length, 1, 'the renewed attempt past the bound is named by its record');
+    assert.equal(named[0].faultClass, 'stalled-gate');
+    assert.match(named[0].text, /GY-1457 epoch 1 \(worker-a\) has held its lease 1 minutes past the 60-minute worker bound without a submission \(claimed at .+, lease renewed to /);
+    assert.deepEqual(standing(), [], 'no fault instance an hour before the reclaim bound');
     assert.equal(supervisor.running, true, 'the first bound stops nothing');
     // One further bound, still no submission and no progress: the loop stops renewing — it ends the
     // attempt through the reclaim path, keeping its work, stopping its supervisor and settling its fence.
@@ -323,11 +326,10 @@ test('integration:unbounded-attempt-reclaimed — a live, renewing attempt past 
     assert.equal(plane.item.lease, null, 'the attempt ended on the record, so the item is claimable again and no lease lapses unexplained');
     assert.equal(plane.item.containmentQuarantine, null, 'the fence was settled once the host verified the supervisor gone');
     assert.deepEqual(plane.item.workspaces.map(workspace => workspace.path), [path], 'its worktree is kept on the record');
-    assert.equal(standing().length, 1, 'still the same fault instance');
-    assert.match(standing()[0].text, /past the 120-minute bound the loop ends the attempt and stops its supervisor, returning GY-1457 to the queue with its worktree kept$/, 'the fault records the reclaim');
+    assert.deepEqual(standing(), [], 'the remedy that ended it this cycle opens no fault instance, though the snapshot the cycle began with still showed the lease');
     await cycle();
     assert.equal(supervisor.running, false);
-    assert.equal(standing().length, 1, 'one fault instance across the whole episode');
-    assert.equal(state.faults.open[Object.keys(state.faults.open).find(key => key.startsWith('unsubmitted-attempt|GY-1457')) ?? ''], undefined, 'and ends once the item is back in the queue');
+    assert.deepEqual(standing(), [], 'no fault instance across the whole episode');
+    assert.equal(state.faults.open[Object.keys(state.faults.open).find(key => key.startsWith('unsubmitted-attempt|GY-1457')) ?? ''], undefined, 'nothing stands once the item is back in the queue');
   } finally { await cleanup(); }
 });

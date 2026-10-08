@@ -88,17 +88,21 @@ test('unit:unsubmitted-attempt-fault — an attempt past the no-submission bound
   assert.match(unsubmittedFaults(workFaults(reworked, clock))[0]?.text ?? '', /GY-1457 epoch 2/);
 });
 
-test('integration:cycle-faults-unsubmitted-attempt — the loop\'s faults step records the unsubmitted attempt while its lease renews and its session reports activity', async () => {
-  await bound();
+test('integration:cycle-faults-unsubmitted-attempt — the loop\'s faults step records the unsubmitted attempt past the reclaim bound while its lease renews and its session reports activity, and leaves one inside that bound to the reclaim it promises', async () => {
+  const { workerReclaimBoundMs } = await bound();
   const session = { id: 'graphyard-claude-1:1', kind: 'implementation', principal: 'graphyard-claude-1', epoch: 1, runtime: 'claude', host: 'machine-a', workspace: null, tab: null,
     pane: 'w1:p1', agentName: 'graphyard-claude-1', role: null, head: null, attach: 'herdr pane attach w1:p1', transcript: null, subject: 'GY-1457', state: 'running',
     observed: 'working', observedAt: iso(-5_000), outcome: null, startedAt: iso(-61 * minute), updatedAt: iso(-5_000), endedAt: null };
-  const item = held(60 * minute + 11_000, { sessions: [session] } as Partial<Work>);
+  const item = held(workerReclaimBoundMs + 11_000, { sessions: [session] } as Partial<Work>);
   const observed = unsubmittedFaults(cycleFaults(emptyDaemonState(config()), [item], clock, { config: config() }));
   assert.equal(observed.length, 1, 'the faults step records it');
   assert.equal(observed[0]!.faultClass, 'stalled-gate');
-  assert.match(observed[0]!.text, /GY-1457 epoch 1/);
-  // The same attempt a minute inside the bound is the ordinary pace of work.
+  assert.match(observed[0]!.text, /GY-1457 epoch 1 .* has held its lease 60 minutes past the 60-minute worker bound/);
+  // GY-1557: inside the reclaim bound the fault is the record's to name (workFaults, master status) and the loop's reclaim step to end, not the faults step's to count;
+  // a minute inside the worker bound it is the ordinary pace of work for both.
+  const named = held(60 * minute + 11_000, { sessions: [session] } as Partial<Work>);
+  assert.equal(unsubmittedFaults(workFaults(named, clock)).length, 1, 'master status names it from the worker bound');
+  assert.deepEqual(unsubmittedFaults(cycleFaults(emptyDaemonState(config()), [named], clock, { config: config() })), [], 'the loop counts it only once its own remedy is overdue');
   assert.deepEqual(unsubmittedFaults(cycleFaults(emptyDaemonState(config()), [held(59 * minute, { sessions: [session] } as Partial<Work>)], clock, { config: config() })), []);
 });
 
