@@ -961,7 +961,8 @@ test('unit:resource-fault-recurrence-reproduces-gy-1196-subjects — the three G
   assert.equal(owedUpgrade!({ upgrade: { pending: null }, actions: {} }), null);
   const loop = { state: 'running' as const, lagMs: 0, stalledAfterMs: 120_000, detail: '', lock: { pid: 1, host: 'vishrog' } };
   const status = (withCursor: boolean) => resourceStatus(directory, master, { reviews: [], producers: [], agents: [gy1198.pane], work: gy1198.work, loop },
-    { run, now: now + selfUpgradeBoundMs, fetcher: (async () => { throw new Error('no plane'); }) as unknown as typeof fetch, cursor: async () => withCursor ? cursor : { upgrade: { pending: null }, actions: {} } });
+    // The stub's ps answers the loop's age as of this same instant, so the host clock the status counts it back from is this instant too (GY-1547).
+    { run, now: now + selfUpgradeBoundMs, clock: () => now + selfUpgradeBoundMs, fetcher: (async () => { throw new Error('no plane'); }) as unknown as typeof fetch, cursor: async () => withCursor ? cursor : { upgrade: { pending: null }, actions: {} } });
   const subjects = async (withCursor: boolean) => classifyAttention((await status(withCursor)).attention).filter(item => item.faultClass === 'resources').map(item => item.subject).sort();
   // At now + 30 minutes the cursor's attempt is 42 minutes old: past the grace, it faults; the pane is seen 39 minutes: overdue.
   assert.deepEqual(await subjects(true), ['resource:agent-names:claude-primary', 'resource:loaded-revision']);
