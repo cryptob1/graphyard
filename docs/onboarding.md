@@ -82,7 +82,7 @@ Adding workers: worker count `W` and `G` proof groups need `⌈W/2⌉` review an
 
 `master init` (coordinator checkout) writes `~/.config/systemd/user/graphyard-master-OWNER-NAME.service`, runs `systemctl --user enable --now`, `loginctl enable-linger` (restart on crash, reboot, hang); never a side effect (worker checkouts, temp directories refused). Move: `master init --token-stdin --replace-supervisor` from new checkout. `master status`: `setup.supervisor`. The loop refuses a dirty CLI checkout; so does `graphyard up` preflight (exit 2, naming its paths). The loop's research scratch is a worktree of the managed repository, never of the CLI checkout.
 
-Installs share hosts: units named per repository (`graphyard-executor-OWNER-NAME@N.service` too) in `.graphyard/units.json` (legacy alias kept); setup never touches another checkout's unit. Each install needs its own `--herdr-workspace`.
+Installs share hosts: units named per repository (`graphyard-executor-OWNER-NAME@N.service` too) in `.graphyard/units.json` (legacy `graphyard-master.service` kept as recorded alias); setup never touches another checkout's unit. Each install needs its own `--herdr-workspace`.
 
 ### The pipeline doctor (on by default)
 
