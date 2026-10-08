@@ -16,7 +16,7 @@ import { readSecretFromStdin } from './context.js';
 import { documentationDrift } from '../model/documentation.js';
 import { agentEnvironmentRoot } from '../master/environments.js';
 import { masterCredential, planeAnswers, planeRequest, setupFromZeroChecks, setupLine, setupNext } from '../setup-from-zero.js';
-import { upCommand } from '../up.js';
+import { upCommand, upHelpRequested, upUsage } from '../up.js';
 
 const interactiveGithubSetup = (root: string) => async (repository: string, deployment: string) => {
   const setup = await startGithubSetup(root, repository, deployment);
@@ -71,19 +71,19 @@ export const installCommands = defineCommands([
       '                                logins first (registry propose --apply), asking only for an empty role. A green run',
       '                                ends with one fresh sign-in link (signIn). A Tailscale host prints its tailnet-only',
       '                                `tailscale serve` URL; --share-tailnet runs it, links use it (reachableUrl); never public.',
-      '                                --agent runs every step non-interactively (JSON events on stderr), Apps in',
-      '                                the given or master\'s browser profile (none: exit 2), handing off only device',
-      '                                approvals. Confirm access lists the page\'s methods, re-checked every 10 s: confirm in',
-      '                                your Chrome (shared profile only), or --sudo-code a 6-digit authenticator/email code',
-      '                                (email: GitHub sends one); --github-mobile: Mobile first, password link after 60 s;',
-      '                                or app import both Apps and --reuse-app each (--no-wait exits 3 saying so). A drive',
-      '                                that gives up hands off the still-served App page. --wait MINUTES bounds each wait on',
-      '                                a person (agent: 20), App page and Confirm access too; a rerun resumes a pending',
-      '                                Confirm access. Exit 0 green, 1 failed, 2 prereq, 3 waiting.',
+      '                                --agent runs every step non-interactively (JSON events on stderr), Apps in the given,',
+      '                                master\'s or same-login other install\'s Chrome profile (none: exit 2), handing off only',
+      '                                device approvals. Confirm access: GitHub Mobile whenever offered (its number; 3 fresh prompts',
+      '                                at most; password link after 60 s); else the page\'s methods, re-checked every 10 s: your',
+      '                                Chrome (shared profile only), --sudo-code a 6-digit authenticator/email code (email: GitHub',
+      '                                sends one), or app import both Apps and --reuse-app each (--no-wait exits 3 saying so). A drive',
+      '                                giving up hands off the still-served page; a GitHub rejection exits 1 quoting it. --wait MINUTES',
+      '                                bounds each human wait (agent: 20); a rerun resumes Confirm access; up --help: options, exit codes.',
     ],
     // `up` installs the control plane and records the connection; it never reads a stale one.
     readsConnection: () => false,
     async run(context) {
+      if (upHelpRequested([context.id, ...context.args])) { console.log(upUsage); return; }
       const result = await upCommand(context.repositoryRoot(), () => context.activeCliPath(), [context.id, ...context.args].filter((value): value is string => value !== undefined));
       context.print(result);
       if ('exitCode' in result) process.exitCode = result.exitCode;
