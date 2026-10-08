@@ -65,6 +65,8 @@ export const masterCommands = defineCommands([
       '                                The durable coordination loop: launches reviewers and producers',
       '                                for every submitted head and decides open scope requests',
       '  master autonomy [--admin-token-stdin --apply]  Provision the master and approver identities',
+      '  master promote --admin-token-stdin  Promote a supervised install to autonomy once its reviewer',
+      '                                App and profile are independent of you and every worker; audited',
       '  master create FILE|release GY-N|unblock GY-N|requirements GY-N FILE [--allow-broad-scope] REASON',
       '                                Own intent; a root-level directory scope needs the flag',
       ...closeHelp,
