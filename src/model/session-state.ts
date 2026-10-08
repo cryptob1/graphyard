@@ -221,7 +221,7 @@ function dispatchRequestOf(work: Pick<Work, 'autoDispatch'>, handle: Pick<Sessio
  * Whether the item's own facts end this handle in time, so absence alone never has to (GY-1532): a
  * worker handle with an epoch ends with its attempt — every lease lapses, and every attempt ends on
  * the record — and a reviewer's or producer's that a dispatch request names ends with that request.
- * A coordination handle, or a review session no request names (`master review` by hand), answers to the runtime alone and is lost when absent.
+ * A coordination handle, or a review session no request names (`master review` by hand), answers to the runtime alone and is closed in the same tick when absent, recorded as ended (the dispatcher's fresh review request relaunches it).
  */
 export const endedByFact = (work: Pick<Work, 'autoDispatch'>, handle: Pick<SessionHandle, 'id' | 'kind' | 'epoch'> & { head?: string | null }) =>
   handle.kind === 'implementation' ? Number.isFinite(handleEpoch(handle)) : !!dispatchRequestOf(work, handle);
@@ -283,6 +283,14 @@ export function observeSessions(all: Work[], runtime: RuntimeSession[] | null, n
       // item's facts will end is held here, miss after miss, until they do: the count is written
       // up to `lostAfterReports`, from which no reader shows it running, and not again after.
       entries.push({ ...base, observed: handle.observed ?? null, observedAt: handle.observedAt ?? lastSeen, missedReports: Math.min(missed, missedReportsCeiling), closed: null, outcome: null, changed: missed <= lostAfterReports });
+      continue;
+    }
+    // A review session no request names (`master review` by hand) is never "lost" while its head
+    // stands: its slot frees in this same tick, and it ends on the record with the relaunch that
+    // follows — the dispatcher's fresh review request for the standing head.
+    if (handle.kind === 'review') {
+      entries.push({ ...base, observed: 'ended', observedAt: at, missedReports: 0, closed: 'lost', changed: true,
+        outcome: `vanished: the ${handle.runtime} runtime on ${handle.host} has not reported ${where} for ${Math.round((clock - firstMissedAt) / 1000)}s (absent from ${missed} consecutive session reports); no dispatch request names this review session, so it is over and its slot is free, and the dispatcher's fresh review request for the standing head is the relaunch that follows` });
       continue;
     }
     entries.push({ ...base, observed: 'lost', observedAt: handle.observedAt ?? lastSeen, missedReports: missed, closed: 'lost', changed: true,
