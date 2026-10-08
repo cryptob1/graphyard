@@ -2,7 +2,7 @@ import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
-import { cp, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { chmod, cp, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
@@ -14,8 +14,9 @@ import { server } from '../src/server.js';
 import type { Principal, Work } from '../src/model.js';
 import type { CaseRun } from '../src/scenarios.js';
 import { caseDirectory, loadCases, parseCase, scenarioDefinition, selectCases, syncCases, type CaseFile } from '../src/e2e/case.js';
-import { e2eSuite, recordRuns, runCases, summarize, type E2eLauncher, type E2ePage } from '../src/e2e/runner.js';
+import { e2eSuite, recordRuns, runCases, substitute, summarize, type E2eLauncher, type E2ePage } from '../src/e2e/runner.js';
 import * as runner from '../src/e2e/runner.js';
+import { agentPrompt, hostPassthrough, lastLines, loadSecrets, parseVerdict, redact, secretsFileName, stepEnvironment } from '../src/e2e/steps.js';
 import { assessPromotion, assessUat, type ReleaseCandidate } from '../src/release-candidate.js';
 import { commands } from '../src/cli/index.js';
 import { TestsView } from '../web/pages/tests.js';
@@ -393,4 +394,207 @@ test('unit:e2e-flaky-evidence-decision — a flaky required case blocks promotio
   assert.equal(unrecorded.status, 409); assert.match(unrecorded.body.error, /no recorded flaky result in run rc-20261006T120000Z at 4{40}/);
   const short = await as(agents.requester.id, `work/${hold.key}/decide`, { action: 'evidence', input: { ...input, sha: sha.slice(0, 12) }, reason: 'A short SHA' });
   assert.equal(short.status, 400, 'an acceptance names the full 40-character SHA');
+});
+
+// GY-1536: general cases. A `command` step runs the project's own test command, an `agent` step
+// hands agent-browser a goal, and a case declares the secrets its steps get, from the install's
+// e2e-secrets.<target>.env, redacted from everything recorded.
+const commandCase = (id: string, run: string, extra: Record<string, unknown> = {}) => ({ id, title: `Case ${id}`, target: 'any', steps: [{ kind: 'command', run }], ...extra });
+const agentCase = (id: string, extra: Record<string, unknown> = {}) => ({ id, title: `Case ${id}`, target: 'any', steps: [{ kind: 'agent', goal: 'Play the game until the board says you won', success: ['The board shows "You win"', 'The score is at least 1'], path: '/games/tic-tac-toe' }], ...extra });
+/** A fake `agent-browser` on PATH: logs every invocation, answers `chat` with the reply file's text, and writes the screenshot it is asked for. */
+async function fakeAgentBrowser(dir: string) {
+  const bin = join(dir, 'bin'); await mkdir(bin, { recursive: true });
+  const log = join(dir, 'agent-browser.log'), reply = join(dir, 'reply.txt');
+  await writeFile(join(bin, 'agent-browser'), `#!/bin/sh\nprintf '%s\\n---\\n' "$*" >> ${JSON.stringify(log)}\ncase "$3" in\n  chat) cat ${JSON.stringify(reply)}; exit $(cat ${JSON.stringify(join(dir, 'exit.txt'))} 2>/dev/null || echo 0) ;;\n  screenshot) printf 'png' > "$4" ;;\nesac\n`);
+  await chmod(join(bin, 'agent-browser'), 0o755);
+  await writeFile(join(dir, 'exit.txt'), '0');
+  return { bin, log, invocations: async () => (await readFile(log, 'utf8').catch(() => '')).split('\n---\n').filter(Boolean), reply: (text: string) => writeFile(reply, text), exit: (code: number) => writeFile(join(dir, 'exit.txt'), String(code)) };
+}
+/** Run options for a scratch checkout: a host environment that holds every credential Graphyard could, which no step may see. */
+const generalOptions = (root: string, extra: Partial<Parameters<typeof runCases>[1]> = {}) => ({ url: 'http://target.test:4310', token: 'graphyard-token-value', fetcher: (async () => new Response('{}')) as typeof fetch, root, secretsDirectory: join(root, 'install'), artifactsDirectory: join(root, 'shots'),
+  hostEnvironment: { PATH: process.env.PATH, HOME: process.env.HOME, LANG: 'C.UTF-8', GRAPHYARD_TOKEN: 'graphyard-token-value', GRAPHYARD_TOKEN_FILE: '/x/token', GRAPHYARD_URL: 'https://plane.test', GRAPHYARD_UAT_TOKEN: 'uat-token-value', GH_TOKEN: 'gh-token-value', GITHUB_TOKEN: 'github-token-value', RAILWAY_TOKEN: 'railway-token-value', HERDR_SESSION: 'h', ANTHROPIC_API_KEY: 'anthropic-key-value' }, ...extra });
+const secretsFile = async (root: string, target: string, content: string, mode = 0o600) => { await mkdir(join(root, 'install'), { recursive: true }); const file = join(root, 'install', secretsFileName(target)); await writeFile(file, content, { mode }); await chmod(file, mode); return file; };
+
+test('unit:e2e-command-and-agent-steps — a case accepts command and agent steps with a 600-second default timeout, declared secrets, and nothing else changes: the existing kinds and their refusals hold', async () => {
+  const file = 'e2e/cases/general.json';
+  const command = parseCase(file, JSON.stringify(commandCase('general', 'npx playwright test --project=uat')));
+  assert.deepEqual(command.steps, [{ kind: 'command', run: 'npx playwright test --project=uat', timeoutSeconds: 600 }]); assert.deepEqual(command.secrets, []);
+  const agent = parseCase(file, JSON.stringify(agentCase('general', { secrets: ['PLAYER_PASSWORD'] })));
+  assert.deepEqual(agent.steps, [{ kind: 'agent', goal: 'Play the game until the board says you won', success: ['The board shows "You win"', 'The score is at least 1'], path: '/games/tic-tac-toe', timeoutSeconds: 600 }]);
+  assert.deepEqual(agent.secrets, ['PLAYER_PASSWORD']);
+  assert.deepEqual(parseCase(file, JSON.stringify(commandCase('general', 'true', { steps: [{ kind: 'command', run: 'true', timeoutSeconds: 30, name: 'quick' }] }))).steps[0], { kind: 'command', run: 'true', timeoutSeconds: 30, name: 'quick' });
+  // Each kind refuses what it cannot run, naming the field.
+  assert.match(refusal(file, { ...commandCase('general', 'true'), steps: [{ kind: 'command' }] })!, /general\.json: steps\.0\.run: /);
+  assert.match(refusal(file, { ...commandCase('general', 'true'), steps: [{ kind: 'command', run: 'true', timeoutSeconds: 0 }] })!, /general\.json: steps\.0\.timeoutSeconds: /);
+  assert.match(refusal(file, { ...commandCase('general', 'true'), steps: [{ kind: 'command', run: 'true', env: { A: 'b' } }] })!, /general\.json: steps\.0: Unrecognized key/);
+  assert.match(refusal(file, { ...agentCase('general'), steps: [{ kind: 'agent', goal: 'win' }] })!, /general\.json: steps\.0\.success: /);
+  assert.match(refusal(file, { ...agentCase('general'), steps: [{ kind: 'agent', goal: 'win', success: [], path: '/' }] })!, /general\.json: steps\.0\.success: /);
+  assert.match(refusal(file, { ...agentCase('general'), steps: [{ kind: 'agent', goal: 'win', success: ['won'], path: 'games' }] })!, /general\.json: steps\.0\.path: a path starts with \//);
+  assert.match(refusal(file, { ...agentCase('general'), secrets: ['not a name'] })!, /general\.json: secrets\.0: a variable name/);
+  assert.match(refusal(file, { ...agentCase('general'), secrets: ['A', 'A'] })!, /general\.json: secrets: a secret is declared once/);
+  // The old kinds and checks are as they were.
+  assert.equal(refusal(file, http200('general')), null);
+  assert.match(refusal(file, { ...http200('general'), steps: [{ kind: 'browser', action: 'open', path: '/' }] })!, /steps: a case checks something/);
+  assert.match(refusal(file, { ...http200('general'), steps: [{ kind: 'shell', run: 'true' }] })!, /steps\.0\.kind: /);
+  assert.match(refusal(file, { ...http200('general'), steps: [{ kind: 'browser', action: 'click', role: 'button' }, { kind: 'http', method: 'GET', path: '/', status: 200 }] })!, /steps\.0\.text: a browser click step needs text/);
+  const shipped = await loadCases(root);
+  assert.ok(shipped.every(entry => entry.definition.secrets.length === 0 && entry.definition.steps.every(step => step.kind === 'http' || step.kind === 'browser')), 'the shipped cases are untouched');
+  // The registered definition records both kinds and the declared secret names, never values.
+  const definition = scenarioDefinition({ file, definition: agent });
+  assert.deepEqual(definition.setup, ['secret PLAYER_PASSWORD']);
+  assert.deepEqual(definition.expected, ['agent-browser finds: The board shows "You win"', 'agent-browser finds: The score is at least 1']);
+  assert.deepEqual(scenarioDefinition({ file, definition: command }).expected, ['run npx playwright test --project=uat exits 0']);
+  assert.deepEqual(scenarioDefinition(shipped[0]).setup, [], 'an existing case registers as before');
+});
+
+test('unit:e2e-command-step-runs — a command step runs through the shell in the checkout with TARGET_URL set, passes on exit 0, fails otherwise or on timeout, and keeps the last 50 lines of output', async () => {
+  const dir = await repository({});
+  await writeFile(join(dir, 'marker.txt'), 'here');
+  const cases = await loadCases(await repository({
+    'passes.json': commandCase('passes', 'cat marker.txt && echo "target is $TARGET_URL" && seq 1 60'),
+    'fails.json': commandCase('fails', 'echo starting; echo "broken: expected 3 passed" >&2; exit 3'),
+    'slow.json': commandCase('slow', 'sleep 30', { steps: [{ kind: 'command', run: 'sleep 30', timeoutSeconds: 1 }] }),
+  }));
+  const report = await runCases(cases, generalOptions(dir));
+  const of = (id: string) => report.cases.find(entry => entry.id === id)!;
+  assert.equal(of('passes').outcome, 'pass', JSON.stringify(of('passes').failingStep));
+  const passed = of('passes').attemptResults[0].steps!;
+  assert.equal(passed.length, 1); assert.equal(passed[0].kind, 'command'); assert.equal(passed[0].outcome, 'pass');
+  assert.equal(passed[0].output.length, 50, 'the last 50 lines are kept'); assert.deepEqual(passed[0].output.slice(-2), ['59', '60']);
+  assert.equal(passed[0].output[0], '11', 'the earlier lines are dropped');
+  const fails = of('fails');
+  assert.equal(fails.outcome, 'fail');
+  assert.deepEqual(fails.failingStep, { index: 0, name: 'run echo starting; echo "broken: expected 3 passed" >&2; exit 3', reason: 'the command exited 3: broken: expected 3 passed' });
+  assert.deepEqual(fails.attemptResults[0].steps![0].output, ['starting', 'broken: expected 3 passed'], 'stdout and stderr are both kept');
+  assert.equal(of('slow').outcome, 'fail'); assert.match(of('slow').failingStep!.reason, /did not finish within 1 s/);
+  assert.ok(of('slow').durationMs < 10_000, 'the timeout kills the command');
+  assert.match(summarize(report), /FAIL fails \(optional\)[^\n]*\n {5}step 1 run echo starting.*: the command exited 3/);
+  // The marker proves the working directory: the same command outside the checkout fails.
+  const passing = cases.filter(entry => entry.definition.id === 'passes');
+  const elsewhere = await runCases(passing, generalOptions(await repository({})));
+  assert.equal(elsewhere.cases[0].outcome, 'fail'); assert.match(elsewhere.cases[0].failingStep!.reason, /exited 1: cat: marker.txt: No such file or directory/);
+  const stdout = await runCases(passing, generalOptions(dir, { processRunner: async (command, args, options) => ({ code: 0, output: `${command} ${args.join(' ')} cwd=${options.cwd} shell=${options.shell} timeout=${options.timeoutMs} url=${options.env.TARGET_URL}\n`, timedOut: false }) }));
+  assert.deepEqual(stdout.cases[0].attemptResults[0].steps![0].output, [`cat marker.txt && echo "target is $TARGET_URL" && seq 1 60  cwd=${dir} shell=true timeout=600000 url=http://target.test:4310`], 'the shell gets the command as written');
+  assert.ok((await runCases(passing, generalOptions(dir, { processRunner: async (_c, _a, options) => ({ code: 0, output: `${options.env.TARGET_URL}\n`, timedOut: false }) }))).cases[0].attemptResults[0].steps![0].output[0] === 'http://target.test:4310');
+  assert.deepEqual(lastLines(''), []); assert.deepEqual(lastLines('a\r\nb\n\n'), ['a', 'b']);
+});
+
+test('unit:e2e-agent-step-verdict — an agent step opens the target URL plus path, gives agent-browser the goal, the success criteria and the VERDICT instruction, records the verdict and screenshot path, and fails on a missing verdict or a timeout', async () => {
+  const dir = await repository({});
+  const fake = await fakeAgentBrowser(dir);
+  const options = generalOptions(dir, { hostEnvironment: { PATH: `${fake.bin}:${process.env.PATH}`, HOME: process.env.HOME }, runId: 'run-1' });
+  const cases = await loadCases(await repository({ 'play.json': agentCase('play') }));
+  await fake.reply('I opened the board and played three moves.\nThe board now says You win and the score is 1.\nVERDICT: PASS\n');
+  const won = await runCases(cases, options);
+  assert.equal(won.cases[0].outcome, 'pass', JSON.stringify(won.cases[0].failingStep));
+  const step = won.cases[0].attemptResults[0].steps![0];
+  assert.equal(step.kind, 'agent'); assert.equal(step.verdict, 'VERDICT: PASS');
+  assert.deepEqual(step.screenshots, [join(dir, 'shots', 'graphyard-e2e-run-1-play-1-1.png')]);
+  assert.equal(await readFile(step.screenshots![0], 'utf8'), 'png', 'the screenshot was taken');
+  assert.ok(step.output.includes('VERDICT: PASS'));
+  const calls = await fake.invocations();
+  assert.equal(calls[0], '--session graphyard-e2e-run-1-play-1-1 open http://target.test:4310/games/tic-tac-toe');
+  assert.match(calls[1], /^--session graphyard-e2e-run-1-play-1-1 chat You are testing the web application at http:\/\/target\.test:4310; the page is already open\.$/m);
+  assert.match(calls[1], /^Goal: Play the game until the board says you won$/m); assert.match(calls[1], /^1\. The board shows "You win"$/m); assert.match(calls[1], /^2\. The score is at least 1$/m);
+  assert.match(calls[1], /end your answer with exactly one final line, either `VERDICT: PASS` or `VERDICT: FAIL - <reason>`/);
+  assert.match(calls[2], /^--session graphyard-e2e-run-1-play-1-1 screenshot .*\/shots\/graphyard-e2e-run-1-play-1-1\.png$/);
+  assert.equal(calls[3], '--session graphyard-e2e-run-1-play-1-1 close');
+  // A FAIL verdict names its reason; the last verdict line counts.
+  await fake.reply('VERDICT: PASS\nActually the board shows "Draw".\nVERDICT: FAIL - the board shows Draw, not You win\n');
+  const lost = await runCases(cases, { ...options, runId: 'run-2' });
+  assert.equal(lost.cases[0].outcome, 'fail');
+  assert.deepEqual(lost.cases[0].failingStep, { index: 0, name: 'agent "Play the game until the board says you won"', reason: 'the board shows Draw, not You win' });
+  assert.equal(lost.cases[0].attemptResults[0].steps![0].verdict, 'VERDICT: FAIL - the board shows Draw, not You win');
+  assert.ok((await fake.invocations()).includes('--session graphyard-e2e-run-2-play-1-1 close'), 'the session is closed after a failure too');
+  // No verdict line is a failure, as is a non-zero exit without one.
+  await fake.reply('I could not find the board.\n');
+  const silent = await runCases(cases, { ...options, runId: 'run-3' });
+  assert.equal(silent.cases[0].failingStep!.reason, 'agent-browser ended without a VERDICT line');
+  await fake.exit(2);
+  assert.equal((await runCases(cases, { ...options, runId: 'run-4' })).cases[0].failingStep!.reason, 'agent-browser exited 2 without a VERDICT line');
+  await fake.exit(0);
+  // A timeout is a failure, the session still closed.
+  const hanging = await runCases(cases, { ...options, runId: 'run-5', processRunner: async (_command, args, { timeoutMs }) => args[2] === 'chat' ? { code: null, output: '', timedOut: true } : { code: 0, output: `${args[2]} ok ${timeoutMs}`, timedOut: false } });
+  assert.match(hanging.cases[0].failingStep!.reason, /agent-browser did not finish within 600 s/);
+  assert.deepEqual(parseVerdict('x\nverdict: fail\n'), { outcome: 'fail', verdict: 'VERDICT: FAIL - no reason given', reason: 'agent-browser gave no reason' });
+  assert.equal(agentPrompt(cases[0].definition.steps[0] as any, 'http://t').split('\n').at(-1), 'Work in the browser until the goal is achieved or you are sure it cannot be. Then end your answer with exactly one final line, either `VERDICT: PASS` or `VERDICT: FAIL - <reason>`, and nothing after it.');
+  // agent-browser not installed: the open fails and says so.
+  const none = await runCases(cases, { ...options, runId: 'run-6', hostEnvironment: { PATH: join(dir, 'empty-bin'), HOME: process.env.HOME } });
+  assert.match(none.cases[0].failingStep!.reason, /agent-browser could not open http:\/\/target\.test:4310\/games\/tic-tac-toe: spawn agent-browser ENOENT/);
+});
+
+test('unit:e2e-step-environment-isolated — a step\'s process holds TARGET_URL, the case\'s declared secrets and the host basics, and no Graphyard, GitHub, deploy or provider credential', async () => {
+  const dir = await repository({});
+  await secretsFile(dir, 'any', 'PLAYER_PASSWORD=hunter2-value\nOTHER_SECRET=never-declared\n');
+  const cases = await loadCases(await repository({ 'env.json': commandCase('env', 'env | sort', { secrets: ['PLAYER_PASSWORD'] }), 'bare.json': commandCase('bare', 'env | sort') }));
+  const report = await runCases(cases, generalOptions(dir));
+  const seen = (id: string) => Object.fromEntries(report.cases.find(entry => entry.id === id)!.attemptResults[0].steps![0].output.map(line => line.split(/=(.*)/s).slice(0, 2)));
+  const bare = seen('bare');
+  assert.equal(bare.TARGET_URL, 'http://target.test:4310');
+  assert.deepEqual(Object.keys(bare).filter(name => !(hostPassthrough as readonly string[]).includes(name) && !['_', 'PWD', 'OLDPWD', 'SHLVL'].includes(name)), ['TARGET_URL'], `a step without secrets sees the host basics and the target only, not ${JSON.stringify(bare)}`);
+  for (const name of ['GRAPHYARD_TOKEN', 'GRAPHYARD_TOKEN_FILE', 'GRAPHYARD_URL', 'GRAPHYARD_UAT_TOKEN', 'GH_TOKEN', 'GITHUB_TOKEN', 'RAILWAY_TOKEN', 'HERDR_SESSION', 'ANTHROPIC_API_KEY']) assert.equal(bare[name], undefined, `${name} never reaches a step`);
+  const declared = seen('env');
+  assert.equal(declared.PLAYER_PASSWORD, '[secret:PLAYER_PASSWORD]', 'the declared secret is set, and redacted in the record');
+  assert.equal(declared.OTHER_SECRET, undefined, 'an undeclared secret in the file is not exposed');
+  assert.equal(declared.GRAPHYARD_TOKEN, undefined);
+  assert.deepEqual(Object.keys(stepEnvironment('http://t', { A: '1' }, { PATH: '/bin', GRAPHYARD_TOKEN: 'x', HOME: '/h', GH_TOKEN: 'y' })).sort(), ['A', 'HOME', 'PATH', 'TARGET_URL']);
+});
+
+test('unit:e2e-declared-secrets — declared secrets come from the install\'s e2e-secrets.<target>.env (mode 0600) as variables and {{secret:NAME}} for that case only; a missing one fails the case before it runs, naming the file and variable', async () => {
+  const dir = await repository({});
+  const file = await secretsFile(dir, 'any', '# the player\nexport PLAYER_PASSWORD="hunter2-value"\nAPI_KEY=key-value # trailing\n');
+  const cases = await loadCases(await repository({
+    'uses.json': commandCase('uses', 'test "$PLAYER_PASSWORD" = "{{secret:PLAYER_PASSWORD}}" && echo "key={{secret:API_KEY}}"', { secrets: ['PLAYER_PASSWORD', 'API_KEY'] }),
+    'undeclared.json': commandCase('undeclared', 'echo "{{secret:PLAYER_PASSWORD}}"'),
+    'missing.json': commandCase('missing', 'echo never runs', { secrets: ['PLAYER_PASSWORD', 'NOT_IN_FILE'] }),
+    'other-target.json': { ...commandCase('other-target', 'true', { secrets: ['PLAYER_PASSWORD'] }), target: 'uat' },
+  }));
+  const report = await runCases(cases, generalOptions(dir));
+  const of = (id: string) => report.cases.find(entry => entry.id === id)!;
+  assert.equal(of('uses').outcome, 'pass', JSON.stringify(of('uses').failingStep));
+  assert.deepEqual(of('uses').attemptResults[0].steps![0].output, ['key=[secret:API_KEY]']);
+  assert.equal(of('undeclared').outcome, 'fail');
+  assert.equal(of('undeclared').failingStep!.reason, "{{secret:PLAYER_PASSWORD}} is not declared: add PLAYER_PASSWORD to the case's secrets");
+  assert.equal(of('missing').outcome, 'fail'); assert.equal(of('missing').executed, 0, 'the case never ran');
+  assert.deepEqual(of('missing').failingStep, { index: 0, name: 'declared secrets', reason: `declared secret NOT_IN_FILE is not set in ${file}` });
+  assert.deepEqual(of('missing').attemptResults[0].steps, []);
+  assert.equal(of('other-target').outcome, 'fail');
+  assert.equal(of('other-target').failingStep!.reason, `declared secret PLAYER_PASSWORD is not set: ${join(dir, 'install', 'e2e-secrets.uat.env')} does not exist`, 'each target has its own file');
+  assert.match(summarize(report), /FAIL missing \(optional\)[^\n]*\n {5}step 1 declared secrets: declared secret NOT_IN_FILE is not set in /);
+  // The file is the operator's alone.
+  await chmod(file, 0o644);
+  await assert.rejects(loadSecrets(['PLAYER_PASSWORD'], 'any', () => join(dir, 'install')), new RegExp(`${file.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} must be a regular file with mode 0600`));
+  await chmod(file, 0o600);
+  await secretsFile(dir, 'uat', 'BROKEN="unpaired\n');
+  await assert.rejects(loadSecrets(['BROKEN'], 'uat', () => join(dir, 'install')), /e2e-secrets\.uat\.env line 1: the value of BROKEN has unpaired quotes/);
+  assert.deepEqual(await loadSecrets([], 'any', () => { throw new Error('never resolved'); }), {}, 'a case declaring nothing reads no file');
+  // Without a directory given, the install directory is the checkout's own, named by its GitHub origin.
+  const unresolved = await runCases(cases.filter(entry => entry.definition.id === 'uses'), { ...generalOptions(dir), secretsDirectory: undefined });
+  assert.match(unresolved.cases[0].failingStep!.reason, /has no git origin, so no install directory holds its E2E secrets/);
+  assert.deepEqual(substitute({ a: '{{secret:X}}-{{run}}' }, { 'secret:X': 'v', run: 'r' }), { a: 'v-r' });
+});
+
+test('unit:e2e-secrets-redacted — secret values never appear in recorded output, failing reasons, verdicts or step names: the runner redacts each as [secret:NAME]', async () => {
+  const dir = await repository({});
+  await secretsFile(dir, 'any', 'PLAYER_PASSWORD=hunter2-value\nSHORT=hun\n');
+  const fake = await fakeAgentBrowser(dir);
+  const cases = await loadCases(await repository({
+    'leaks.json': commandCase('leaks', 'echo "password is $PLAYER_PASSWORD and {{secret:PLAYER_PASSWORD}}"; echo "again hunter2-value" >&2; exit 1', { secrets: ['PLAYER_PASSWORD', 'SHORT'] }),
+    'agent.json': agentCase('agent', { secrets: ['PLAYER_PASSWORD'], steps: [{ kind: 'agent', goal: 'Sign in with {{secret:PLAYER_PASSWORD}} and play', success: ['Signed in as player'] }] }),
+  }));
+  await fake.reply('I typed hunter2-value into the password field.\nVERDICT: FAIL - the password hunter2-value was refused\n');
+  const report = await runCases(cases, generalOptions(dir, { hostEnvironment: { PATH: `${fake.bin}:${process.env.PATH}`, HOME: process.env.HOME } }));
+  const text = JSON.stringify(report);
+  assert.ok(!text.includes('hunter2-value'), `the report never holds the secret value: ${text}`);
+  const leaks = report.cases.find(entry => entry.id === 'leaks')!;
+  assert.deepEqual(leaks.attemptResults[0].steps![0].output, ['password is [secret:PLAYER_PASSWORD] and [secret:PLAYER_PASSWORD]', 'again [secret:PLAYER_PASSWORD]']);
+  assert.equal(leaks.failingStep!.reason, 'the command exited 1: again [secret:PLAYER_PASSWORD]');
+  assert.equal(leaks.failingStep!.name, 'run echo "password is $PLAYER_PASSWORD and [secret:PLAYER_PASSWORD]"; echo "again...', 'the step name is redacted after substitution and before it is shortened, so no cut leaves a prefix');
+  const agent = report.cases.find(entry => entry.id === 'agent')!;
+  assert.equal(agent.failingStep!.reason, 'the password [secret:PLAYER_PASSWORD] was refused');
+  assert.equal(agent.attemptResults[0].steps![0].verdict, 'VERDICT: FAIL - the password [secret:PLAYER_PASSWORD] was refused');
+  assert.equal(agent.failingStep!.name, 'agent "Sign in with [secret:PLAYER_PASSWORD] and play"');
+  assert.ok(!(await summarize(report)).includes('hunter2-value'));
+  assert.equal(redact('hun hunter2-value', { SHORT: 'hun', PLAYER_PASSWORD: 'hunter2-value' }), '[secret:SHORT] [secret:PLAYER_PASSWORD]');
+  assert.equal(redact('nothing', { EMPTY: '' }), 'nothing');
 });

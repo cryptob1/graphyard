@@ -10,8 +10,13 @@ import { z } from 'zod';
  * registers each case as a revision of the scenario of the same id (src/scenarios.ts), so editing a
  * case publishes a new immutable revision and `e2e:ID` proofs keep pinning the revision they named.
  *
- * Values may name `{{token}}` (the target's credential), `{{run}}` (this run's id), `{{case}}` and
- * any value an earlier http step saved; the runner (src/e2e/runner.ts) substitutes them.
+ * Values may name `{{token}}` (the target's credential), `{{run}}` (this run's id), `{{case}}`,
+ * `{{secret:NAME}}` (a secret the case declares, GY-1536) and any value an earlier http step saved;
+ * the runner (src/e2e/runner.ts) substitutes them.
+ *
+ * Beside the http and browser steps a case may run the project's own test command (`command`:
+ * Playwright or anything, in the candidate checkout with `TARGET_URL` set) or hand a goal to the
+ * agent-browser CLI (`agent`, judged by its `VERDICT:` line); src/e2e/steps.ts runs both.
  */
 export const caseDirectory = 'e2e/cases';
 export const caseRunner = 'graphyard-e2e';
@@ -50,7 +55,21 @@ const browserStep = z.object({
   const needs: Record<typeof step.action, (keyof typeof step)[]> = { open: ['path'], click: ['text'], fill: ['label', 'value'], expectText: ['text'] };
   for (const field of needs[step.action]) if (step[field] === undefined) context.addIssue({ code: 'custom', path: [field], message: `a browser ${step.action} step needs ${field}` });
 });
-const step = z.discriminatedUnion('kind', [httpStep, browserStep]);
+/** Both general steps default to ten minutes: a Playwright suite or an agent's browsing is not one request. */
+export const defaultGeneralStepTimeoutSeconds = 600;
+const timeoutSeconds = z.number().int().min(1).max(3600).default(defaultGeneralStepTimeoutSeconds);
+const commandStep = z.object({
+  kind: z.literal('command'), name: text.optional(),
+  /** Run through the shell in the candidate checkout with `TARGET_URL` set; exit 0 passes. */
+  run: z.string().min(1).max(1500), timeoutSeconds,
+}).strict();
+const agentStep = z.object({
+  kind: z.literal('agent'), name: text.optional(),
+  /** What agent-browser pursues at the target URL plus `path`, and the criteria it judges by. */
+  goal: z.string().min(1).max(1000), success: z.array(text).min(1).max(20),
+  path: z.string().regex(/^\//, 'a path starts with /').max(500).optional(), timeoutSeconds,
+}).strict();
+const step = z.discriminatedUnion('kind', [httpStep, browserStep, commandStep, agentStep]);
 /** A case or outcome id: also a file name and a ledger tag segment. */
 export const caseId = z.string().regex(/^[a-z0-9][a-z0-9._-]*$/, 'an id is lower-case letters, digits, ., _ and -').max(100);
 export const caseSchema = z.object({
@@ -61,9 +80,12 @@ export const caseSchema = z.object({
   target: z.enum(['uat', 'any']),
   /** Whether a failure of this case can block a release; an optional case still runs and is recorded. */
   required: z.boolean().default(false),
+  /** Secrets the operator keeps for this case (GY-1536), exposed to its steps only as variables and `{{secret:NAME}}`. */
+  secrets: z.array(variable.max(100)).max(20).default([]),
   steps: z.array(step).min(1).max(50),
 }).strict().superRefine((entry, context) => {
-  if (!entry.steps.some(s => s.kind === 'http' || s.action === 'expectText')) context.addIssue({ code: 'custom', path: ['steps'], message: 'a case checks something: at least one http step or browser expectText step' });
+  if (!entry.steps.some(s => s.kind !== 'browser' || s.action === 'expectText')) context.addIssue({ code: 'custom', path: ['steps'], message: 'a case checks something: at least one http, command or agent step or browser expectText step' });
+  if (new Set(entry.secrets).size !== entry.secrets.length) context.addIssue({ code: 'custom', path: ['secrets'], message: 'a secret is declared once' });
   entry.steps.forEach((s, index) => { if (JSON.stringify(s).length > 2000) context.addIssue({ code: 'custom', path: ['steps', index], message: 'a step is at most 2000 characters of JSON' }); });
 });
 export type E2eCase = z.infer<typeof caseSchema>;
@@ -119,20 +141,25 @@ export function selectCases(cases: readonly CaseFile[], selector: { id?: string;
 export function describeStep(step: E2eStep): string {
   if (step.name) return step.name;
   if (step.kind === 'http') return `${step.method} ${step.path}`;
+  if (step.kind === 'command') return `run ${step.run.length > 80 ? `${step.run.slice(0, 77)}...` : step.run}`;
+  if (step.kind === 'agent') return `agent "${step.goal.length > 80 ? `${step.goal.slice(0, 77)}...` : step.goal}"`;
   return { open: `open ${step.path}`, click: `click ${step.role ? `${step.role} ` : ''}"${step.text}"`, fill: `fill "${step.label}"`, expectText: `expect ${step.role ? `${step.role} ` : 'text '}"${step.text}"` }[step.action];
 }
 
 /**
  * The scenario definition a case registers as: the registry's own fields, with each step recorded
- * in full so any edit to a case — a step, a body, an assertion, a tag — is a new revision.
+ * in full so any edit to a case — a step, a body, an assertion, a tag, a declared secret — is a
+ * new revision. The secrets are named in `setup` by name only; their values are never a case's.
  */
 export function scenarioDefinition({ file, definition }: CaseFile) {
   const expected = definition.steps.flatMap(s => s.kind === 'http'
     ? [`${s.method} ${s.path} answers ${s.status}`, ...s.expect.map(check => `${check.path || '(body)'} ${Object.entries(check).filter(([key]) => key !== 'path').map(([key, value]) => `${key} ${JSON.stringify(value)}`).join('')}`)]
+    : s.kind === 'command' ? [`${describeStep(s)} exits 0`]
+    : s.kind === 'agent' ? s.success.map(criterion => `agent-browser finds: ${criterion}`)
     : s.action === 'expectText' ? [`the page shows ${s.role ? `${s.role} ` : ''}"${s.text}"`] : []);
   return {
     id: definition.id, title: definition.title, purpose: definition.description ?? definition.title,
-    setup: [], steps: definition.steps.map(s => JSON.stringify(s)), expected: expected.slice(0, 50).map(line => line.slice(0, 2000)),
+    setup: definition.secrets.map(name => `secret ${name}`), steps: definition.steps.map(s => JSON.stringify(s)), expected: expected.slice(0, 50).map(line => line.slice(0, 2000)),
     environment: definition.target, runner: caseRunner, testPath: file, tags: definition.tags, required: definition.required,
   };
 }
