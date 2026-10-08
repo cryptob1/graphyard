@@ -134,7 +134,7 @@ test('unit:post-merge-review-owed — owed reviews are the merge writer\'s deliv
   const third = await runDispatchTick(config, cursor, effects, () => clock + 40_000);
   assert.deepEqual(filed.map(entry => [(entry as { body: { plannedFiles: string[] } }).body.plannedFiles, (entry as { requestId: string }).requestId]), [[['src/feature.ts'], `post-merge-follow-up:GY-10:${M}:0`], [['src/other.ts'], `post-merge-follow-up:GY-10:${M}:1`]]);
   assert.deepEqual(memory, [['AC-1 unmet after merge.', '- Nit: naming of `x` is terse']], 'everything but the BLOCKING lines goes to memory');
-  assert.deepEqual(settled, [{ at: new Date(clock + 40_000).toISOString(), filed: [{ key: 'GY-101', finding: 'src/feature.ts:12 — the flag is never read' }, { key: 'GY-102', finding: 'src/other.ts — the retry loop never ends' }], memory: 2 }]);
+  assert.deepEqual(settled, [{ at: new Date(clock + 40_000).toISOString(), filed: [{ key: 'GY-101', finding: 'src/feature.ts:12 — the flag is never read', index: 0 }, { key: 'GY-102', finding: 'src/other.ts — the retry loop never ends', index: 1 }], memory: 2 }]);
   assert.deepEqual(third.followUps, [{ work: 'GY-10', sha: M, filed: ['GY-101', 'GY-102'], memory: 2 }]);
   await runDispatchTick(config, cursor, effects, () => clock + 50_000);
   assert.equal(filed.length, 2, 'a settled record files nothing again');
@@ -143,10 +143,15 @@ test('unit:post-merge-review-owed — owed reviews are the merge writer\'s deliv
   const failing = record(launched, { state: 'completed', verdict: { state: 'CHANGES_REQUESTED', reviewer: 'review-claude-1', reviewId: 77, submittedAt: at } });
   let calls = 0;
   const partial = await filePostMergeFollowUps(launched, failing, { createWork: async () => { if (++calls === 2) throw new Error('route down'); return { key: 'GY-201' }; } }, new Date(clock));
-  assert.deepEqual(partial, { at, filed: [{ key: 'GY-201', finding: 'src/feature.ts:12 — the flag is never read' }], memory: 2, failure: 'filing the follow-up for "src/other.ts — the retry loop never ends" failed: route down' });
+  assert.deepEqual(partial, { at, filed: [{ key: 'GY-201', finding: 'src/feature.ts:12 — the flag is never read', index: 0 }], memory: 2, failure: 'filing the follow-up for "src/other.ts — the retry loop never ends" failed: route down' });
   const retried = await filePostMergeFollowUps(launched, { ...failing, postMergeFollowUps: partial! }, { createWork: async () => ({ key: 'GY-202' }) }, new Date(clock));
   assert.deepEqual(retried!.filed.map(entry => entry.key), ['GY-201', 'GY-202']);
   assert.equal(retried!.failure, undefined);
+  // One item per BLOCKING line: identical wording is filed once per line, and findings past ten are not dropped.
+  const many = { ...launched, reviewLaunch: { ...launched.reviewLaunch!, verdict: { ...launched.reviewLaunch!.verdict!, body: [...Array.from({ length: 2 }, () => 'BLOCKING: src/same.ts — same wording'), ...Array.from({ length: 11 }, (_, n) => `BLOCKING: src/f${n}.ts — finding ${n}`)].join('\n') } } } as typeof launched;
+  let n = 0; const keys: string[] = [];
+  const everything = await filePostMergeFollowUps(many, failing, { createWork: async (_body, requestId) => { keys.push(requestId); return { key: `GY-${300 + ++n}` }; } }, new Date(clock));
+  assert.deepEqual([everything!.filed.length, keys.length, new Set(keys).size], [13, 13, 13]);
   // A project-memory write that fails leaves memory unset so the next tick retries; the verdict is not settled as handled.
   const memoryFail = record(launched, { state: 'completed', verdict: { state: 'CHANGES_REQUESTED', reviewer: 'review-claude-1', reviewId: 77, submittedAt: at } });
   let memoryCalls = 0;

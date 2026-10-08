@@ -18,7 +18,7 @@ import { withLaunchedRuntime } from './master/launch.js';
 import { herdrSubcommand, isHerdrCommand } from './master/herdr.js';
 import { boundedLaunch, launchBoundMs } from './master/launch-bound.js';
 import { capacityRefusal } from './fleet.js';
-import { answeredByPendingReview, launchReview, reconcileReviews, reviewVerdictReminderMs, unpostedVerdict, updateReviewLedger, type ReviewRecord } from './reviewer.js';
+import { answeredByPendingReview, postMergeFindingsMax, launchReview, reconcileReviews, reviewVerdictReminderMs, unpostedVerdict, updateReviewLedger, type ReviewRecord } from './reviewer.js';
 import { owedPostMergeReviews, parseFinding, postMergeFollowUp, postMergeRequestId } from './model/post-merge-review.js';
 import { riskOf } from './model/risk-class.js';
 import { blockingFindings, followUpFindingsOf } from './review-cap.js';
@@ -726,15 +726,16 @@ export async function filePostMergeFollowUps(work: Work, record: ReviewRecord, e
   const body = launch?.verdict?.sha === record.sha ? launch.verdict.body : null;
   if (body === null) return null;
   const filed = [...(record.postMergeFollowUps?.filed ?? [])];
-  const findings = blockingFindings(body);
+  const findings = blockingFindings(body, postMergeFindingsMax);
   let failure: string | undefined;
   for (const [index, text] of findings.entries()) {
     const finding = text.slice(0, 300);
-    if (filed.some(entry => entry.finding === finding)) continue;
+    // Completion is per line, not per wording: two distinct lines with the same text each get their own item.
+    if (filed.some(entry => entry.index === index || (entry.index === undefined && entry.finding === finding))) continue;
     if (!effects.createWork) { failure = 'no follow-up filer is wired; the finding stands on the verdict'; break; }
     try {
       const created = await effects.createWork(postMergeFollowUp(work, record.sha, parseFinding(text), index), `post-merge-follow-up:${work.key}:${record.sha}:${index}`);
-      filed.push({ key: created.key, finding });
+      filed.push({ key: created.key, finding, index });
     } catch (error) { failure = `filing the follow-up for "${finding.slice(0, 80)}" failed: ${(error instanceof Error ? error.message : String(error)).split('\n')[0]}`.slice(0, 500); break; }
   }
   // Non-blocking findings stay retryable until project memory accepts them: a write failure must
@@ -751,7 +752,7 @@ export async function filePostMergeFollowUps(work: Work, record: ReviewRecord, e
       }
     } else memory = nits.length;
   }
-  return { at: now.toISOString(), filed: filed.slice(0, 10), ...(memory !== undefined ? { memory } : {}), ...(failure ? { failure } : {}) };
+  return { at: now.toISOString(), filed: filed.slice(0, postMergeFindingsMax), ...(memory !== undefined ? { memory } : {}), ...(failure ? { failure } : {}) };
 }
 export interface DispatchTick { at: string; launched: DispatchLaunch[]; refused: (DispatchFailure & { requestId: string })[]; waiting: DispatchWait[]; skipped: number;
   /** Post-merge verdicts this tick filed (GY-1525): the follow-up items per item and merge commit. */

@@ -68,13 +68,13 @@ const scaffold = /^(?:#{1,6}\s|(?:[-*]\s*)?\**\[(?:AC-\d+|DOCS)\]|(?:[-*]\s*)?\*
  * The blocking findings a change request names, one per `BLOCKING:` line; a line naming none ("BLOCKING: none")
  * names nothing. Prose that merely mentions the word is not a finding: the reviewer is told the form at the cap.
  */
-export function blockingFindings(body: unknown): string[] {
+export function blockingFindings(body: unknown, limit = 10): string[] {
   if (typeof body !== 'string') return [];
   return body.split('\n')
     .map(line => { const match = blockingLine.exec(line); return match ? unwrapFinding(match) : ''; })
     .filter(text => text && !noneNamed.test(text))
     .map(text => text.slice(0, 300))
-    .slice(0, 10);
+    .slice(0, limit);
 }
 /**
  * The non-blocking findings of a change request, as the follow-up batch records them: its

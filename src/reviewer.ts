@@ -42,6 +42,8 @@ export const reviewerCredentialSchema = z.object({
 }).strict();
 export type ReviewerCredential = z.infer<typeof reviewerCredentialSchema>;
 
+/** The most BLOCKING lines of a post-merge verdict that are each filed as their own follow-up item (GY-1525 AC-4). */
+export const postMergeFindingsMax = 100;
 export const reviewRecordSchema = z.object({
   id: z.string().uuid(),
   key: z.string().min(1).max(40),
@@ -145,7 +147,7 @@ export const reviewRecordSchema = z.object({
   /** A post-merge review (GY-1525): `sha` is the delivered merge commit and `baseSha` its first parent. */
   postMerge: z.literal(true).optional(),
   /** What the loop did with a post-merge verdict: the follow-up item filed per BLOCKING finding, the nits kept in project memory, and a filing failure to retry. `memory` is set only once the write succeeds so a failed write stays retryable. */
-  postMergeFollowUps: z.object({ at: z.string().min(1).max(40), filed: z.array(z.object({ key: z.string().min(1).max(40), finding: z.string().min(1).max(300) }).strict()).max(10), memory: z.number().int().min(0).optional(), failure: z.string().min(1).max(500).optional() }).strict().optional(),
+  postMergeFollowUps: z.object({ at: z.string().min(1).max(40), filed: z.array(z.object({ key: z.string().min(1).max(40), finding: z.string().min(1).max(300), index: z.number().int().min(0).optional() }).strict()).max(postMergeFindingsMax), memory: z.number().int().min(0).optional(), failure: z.string().min(1).max(500).optional() }).strict().optional(),
 }).strict();
 export type ReviewRecord = z.infer<typeof reviewRecordSchema>;
 // The bound is enforced on write (boundSessionLedger), never on read: a ledger written before the
