@@ -1,6 +1,6 @@
 // Concern: `graphyard master` intent and two-party decision subcommands — autonomy, promote, scope, close, withdraw, refuse.
 import { randomUUID } from 'node:crypto';
-import { agentToken, autonomySubcommands, runAutonomyCommand, listHerdrAgents, readCredentialFile, promoteToAutonomy } from '../../master.js';
+import { agentToken, autonomySubcommands, runAutonomyCommand, listHerdrAgents, readCredentialFile, promoteToAutonomy, assertPromotionRoute } from '../../master.js';
 import { readDaemonState } from '../../master-daemon.js';
 import { readProducerLedger } from '../../producer.js';
 import { readDispatchCursor } from '../../auto-dispatch.js';
@@ -31,6 +31,8 @@ export async function intentCommand(session: MasterSession): Promise<unknown> {
     const loop = { sessions: (await readProducerLedger(root)).producers, failures: cursor.failures, now, requestsDecisions: !!master.operatorAgent };
     const owned = handDecision(work, action, input, loop); if (owned) assertHandAction(work, owned);
   };
+  // GY-1502: a supervised install's autonomy apply is the promotion's, behind its checks and audit.
+  if (id === 'autonomy') assertPromotionRoute(master, args);
   if ((autonomySubcommands as readonly string[]).includes(id ?? '')) return print(await runAutonomyCommand(root, master, id!, args,
     { coordinator: masterApi, readSecret: () => readSecretFromStdin(10_000), agents: listHerdrAgents, daemonLock: async () => (await readDaemonState(root, master)).lock, assertDecision, mutate: masterMutation }));
   if (id === 'promote') {

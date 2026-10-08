@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rmdir, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { buildMasterStatus, loadMasterConfig, loadStoredMasterConfig, type MasterConfig } from '../src/master.js';
 import { masterCommands } from '../src/cli/master.js';
@@ -16,6 +16,8 @@ const promotion = () => import('../src/master/promotion.js');
 
 const OPERATOR = 'octo-operator';
 const ADMIN = `admin-${'a'.repeat(40)}`;
+/** The login gh holds now, injected so no test reaches the real gh. */
+const current = (login: string | null = OPERATOR) => () => login;
 
 /** A control plane that answers the admin and the identities it provisions, recording every write. */
 function controlPlane() {
@@ -48,7 +50,7 @@ async function supervisedHost(edit: (config: any) => void = () => {}) {
 }
 
 test('unit:promotion-preconditions — master promote refuses, naming each missing step and its command, unless a reviewer App is registered, a reviewer profile exists and the reviewer bot is neither the operator nor any worker', async () => {
-  const { promoteToAutonomy, promotionAuditFile, promotionPreconditions, PromotionRefusedError } = await promotion();
+  const { assertPromotionRoute, promoteToAutonomy, promotionAuditFile, promotionPreconditions, PromotionRefusedError } = await promotion();
   const reviewer = { appId: 5678, installationId: 1, slug: 'graphyard-reviewer', credentialFile: '/outside/reviewer.json', boundAt: '2026-10-08T00:00:00.000Z' };
   const profile = { name: 'claude-reviewer', agentName: 'claude-reviewer', kind: 'claude' } as MasterConfig['reviewers'][number];
   const worker = { name: 'claude-primary', principal: 'graphyard-claude-1', agentName: 'graphyard-claude-1', mode: 'launch', kind: 'claude', credentialFile: '/outside/worker.token' } as MasterConfig['workers'][number];
@@ -63,18 +65,37 @@ test('unit:promotion-preconditions — master promote refuses, naming each missi
   assert.match(promotionPreconditions(ready, 'Graphyard-Reviewer[bot]')[0].missing, /is the operator's own GitHub login/);
   assert.match(promotionPreconditions({ ...ready, githubAppId: 5678 }, OPERATOR)[0].missing, /is the worker App every worker pushes with/);
   assert.match(promotionPreconditions({ ...ready, workers: [{ ...worker, principal: 'graphyard-reviewer[bot]' }] }, OPERATOR)[0].missing, /is the identity of worker claude-primary/);
+  // The login up recorded is checked too, never instead of the current one.
+  assert.match(promotionPreconditions(ready, OPERATOR, 'graphyard-reviewer[bot]')[0].missing, /is the operator's own GitHub login graphyard-reviewer\[bot\]/);
+  assert.deepEqual(promotionPreconditions(ready, null, OPERATOR).map(step => step.command), ['gh auth login'], 'a recorded login never stands in for an unknown current one');
 
   // The command refuses before it reads the admin credential or writes anything.
   const host = await supervisedHost(config => { delete config.reviewer; config.reviewers = []; });
   try {
     const before = await readFile(host.file, 'utf8'), plane = controlPlane();
-    const refused = await promoteToAutonomy(host.root, ADMIN, { fetcher: plane.fetcher }).catch(error => error);
+    const refused = await promoteToAutonomy(host.root, ADMIN, { fetcher: plane.fetcher, operatorLogin: current() }).catch(error => error);
     assert.ok(refused instanceof PromotionRefusedError);
     assert.match(refused.message, /no reviewer App is registered \(run graphyard master reviewer setup .*\); no reviewer profile is configured \(run graphyard master reviewer add PROFILE\.json\)/);
     assert.deepEqual(plane.writes, [], 'no identity is provisioned');
     assert.equal(await readFile(host.file, 'utf8'), before, 'master.json is unchanged: still supervised');
     await assert.rejects(stat(promotionAuditFile(host.root)), /ENOENT/, 'a refusal is not a promotion');
   } finally { await host.cleanup(); }
+
+  // gh's current login decides even when up recorded another: after a gh switch to the reviewer bot, or with gh unreadable, it refuses.
+  const switched = await supervisedHost();
+  try {
+    const plane = controlPlane();
+    const asBot = await promoteToAutonomy(switched.root, ADMIN, { fetcher: plane.fetcher, operatorLogin: current('graphyard-reviewer[bot]') }).catch(error => error);
+    assert.ok(asBot instanceof PromotionRefusedError); assert.match(asBot.message, /is the operator's own GitHub login graphyard-reviewer\[bot\]/);
+    const unknown = await promoteToAutonomy(switched.root, ADMIN, { fetcher: plane.fetcher, operatorLogin: current(null) }).catch(error => error);
+    assert.ok(unknown instanceof PromotionRefusedError); assert.match(unknown.message, /current GitHub login is unknown, .* \(run gh auth login\)/);
+    assert.deepEqual(plane.writes, []);
+    assert.equal((await loadStoredMasterConfig(switched.root)).supervision, 'supervised');
+    // master autonomy --apply no longer bypasses these checks on a supervised install; its preview, and autonomous installs, are unchanged.
+    const stored = await loadStoredMasterConfig(switched.root);
+    assert.throws(() => assertPromotionRoute(stored, ['--admin-token-stdin', '--apply']), /supervised; it becomes autonomous only through graphyard master promote --admin-token-stdin/);
+    assertPromotionRoute(stored, []); assertPromotionRoute({ supervision: 'autonomous' }, ['--admin-token-stdin', '--apply']);
+  } finally { await switched.cleanup(); }
 
   // Routed and documented as an operator command with the admin credential on stdin, and no demotion.
   const help = JSON.stringify(masterCommands);
@@ -87,9 +108,17 @@ test('unit:promotion-audited — promotion provisions the operator-agent and app
   const host = await supervisedHost();
   try {
     const plane = controlPlane();
-    await assert.rejects(promoteToAutonomy(host.root, undefined, { fetcher: plane.fetcher }), /needs the admin credential once, on stdin/);
+    await assert.rejects(promoteToAutonomy(host.root, undefined, { fetcher: plane.fetcher, operatorLogin: current() }), /needs the admin credential once, on stdin/);
     const now = new Date('2026-10-08T04:00:00.000Z');
-    const result = await promoteToAutonomy(host.root, ADMIN, { fetcher: plane.fetcher, now: () => now });
+    // The audit entry is written first: one that cannot be written changes nothing, so the install is never autonomous without it, and a rerun promotes.
+    const file = promotionAuditFile(host.root);
+    await mkdir(file, { recursive: true });
+    const unaudited = await readFile(host.file, 'utf8');
+    await assert.rejects(promoteToAutonomy(host.root, ADMIN, { fetcher: plane.fetcher, operatorLogin: current(), now: () => now }), /EISDIR/);
+    assert.equal(await readFile(host.file, 'utf8'), unaudited, 'still supervised, no identity recorded');
+    assert.equal(plane.writes.length, 0, 'no identity is provisioned without its audit entry');
+    await rmdir(file);
+    const result = await promoteToAutonomy(host.root, ADMIN, { fetcher: plane.fetcher, operatorLogin: current(), now: () => now });
     assert.equal(result.promoted, true);
     // Both identities are created by the existing apply, each with the promotion as its reason.
     const created = plane.writes.filter(write => write.path === '/api/operator-agents');
@@ -103,7 +132,6 @@ test('unit:promotion-audited — promotion provisions the operator-agent and app
     assert.equal(stored.reviewer!.slug, 'graphyard-reviewer', 'the registered reviewer App is kept');
 
     // One audit entry under .graphyard/master-actions: who ran it, the reviewer identity, the time.
-    const file = promotionAuditFile(host.root);
     assert.equal(file, join(host.root, '.graphyard/master-actions/promotions.jsonl'));
     assert.equal((await stat(file)).mode & 0o777, 0o600);
     const lines = (await readFile(file, 'utf8')).trim().split('\n');
@@ -113,11 +141,12 @@ test('unit:promotion-audited — promotion provisions the operator-agent and app
     assert.deepEqual([entry.from, entry.to], ['supervised', 'autonomous']);
     assert.equal(entry.by.actor, 'human-operator'); assert.equal(entry.by.githubLogin, OPERATOR); assert.ok(entry.by.user && entry.by.host);
     assert.equal(entry.reviewer.app, 'graphyard-reviewer[bot]'); assert.equal(entry.reviewer.appId, 5678);
+    assert.deepEqual(entry.identities, { operatorAgent: 'graphyard-master-project-operator', approver: 'graphyard-approver-project' });
     assert.ok(!(await readFile(file, 'utf8')).includes(ADMIN), 'the admin credential is never recorded');
 
     // A rerun on the now autonomous install changes nothing: no write, no new audit entry, same master.json.
     const config = await readFile(host.file, 'utf8'), writes = plane.writes.length;
-    const rerun = await promoteToAutonomy(host.root, ADMIN, { fetcher: plane.fetcher });
+    const rerun = await promoteToAutonomy(host.root, ADMIN, { fetcher: plane.fetcher, operatorLogin: current() });
     assert.equal(rerun.promoted, false); assert.deepEqual(rerun.changes, []);
     assert.equal(plane.writes.length, writes);
     assert.equal(await readFile(host.file, 'utf8'), config);
@@ -140,7 +169,7 @@ test('unit:promotion-enables-reviewer — after promotion the loop launches the 
     assert.deepEqual(before.launched.filter(entry => entry.kind === 'review'), []);
     assert.match(status(config)!, /^Supervised: .*graphyard master promote --admin-token-stdin/);
 
-    await promoteToAutonomy(host.root, ADMIN, { fetcher: controlPlane().fetcher });
+    await promoteToAutonomy(host.root, ADMIN, { fetcher: controlPlane().fetcher, operatorLogin: current() });
     config = await loadMasterConfig(host.root);
     assert.equal(config.reviewer!.slug, 'graphyard-reviewer');
     const after = await runDispatchTick(config, emptyDispatchCursor(config), host.effects(() => [item], () => config), Date.now);
