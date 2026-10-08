@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { paneSweepLimit } from '../src/daemon/cycle-reclaim.js';
+import type { HerdrPane } from '../src/master/herdr.js';
 import { agentlessPaneAttentionBound, paneReclaimStatus } from '../src/master-resources.js';
 import { daemonEffects, launchAppearanceMs } from '../src/daemon/effects.js';
 import { bindReviewer, launchReview, saveReviewerProfile } from '../src/reviewer.js';
@@ -79,8 +80,8 @@ class HerdrStub {
   agents = new Map<string, { pane: string; kind: string; status: string }>();
   /** What each pane runs, from the typed launch until the runtime is named (or exits). */
   occupants = new Map<string, string>();
-  /** Every pane the runtime holds, with or without an agent in it. */
-  panes = new Set<string>();
+  /** Every pane the runtime holds, with or without an agent in it, and the directory its shell sits in. */
+  panes = new Map<string, string | undefined>();
   /** Every close invocation, in order, without deduplication: the exactly-once record. */
   closes: string[] = [];
   /** Sessions stopped on a provider notice: `agent read` answers with their screen. */
@@ -90,7 +91,7 @@ class HerdrStub {
     assert.equal(_command, 'herdr', `only Herdr is run here: ${_command} ${args.join(' ')}`);
     const ok = (result: unknown = {}) => JSON.stringify({ result });
     const [noun, verb] = args;
-    if (noun === 'tab' && verb === 'create') { const pane = `pane-${++this.created}`; this.panes.add(pane); return ok({ root_pane: { pane_id: pane, tab_id: `tab-${this.created}` } }); }
+    if (noun === 'tab' && verb === 'create') { const pane = `pane-${++this.created}`; this.panes.set(pane, args.includes('--cwd') ? args[args.indexOf('--cwd') + 1] : undefined); return ok({ root_pane: { pane_id: pane, tab_id: `tab-${this.created}` } }); }
     if (noun === 'pane' && verb === 'run') { this.occupants.set(args[2], 'claude'); return ''; }
     if (noun === 'pane' && verb === 'read') return '';
     if (noun === 'agent' && verb === 'get') {
@@ -101,14 +102,10 @@ class HerdrStub {
     if (noun === 'agent' && verb === 'rename') { this.occupants.delete(args[2]); this.agents.set(args[3], { pane: args[2], kind: 'claude', status: 'working' }); return ok({ agent: { agent: 'claude', agent_status: 'working', name: args[3] } }); }
     if (noun === 'agent' && verb === 'prompt') return ok();
     if (noun === 'agent' && verb === 'read') return this.notices.get(args[2]) ?? '';
-    if (noun === 'agent' && verb === 'list') {
-      const live: HerdrAgent[] = [...this.agents.entries()].map(([name, entry]) => ({ name, pane_id: entry.pane, agent: entry.kind, agent_status: entry.status }));
-      // A pane whose runtime has exited is still this host's pane: Herdr lists it with no agent in it.
-      const shells: HerdrAgent[] = [...this.panes].filter(pane => ![...this.agents.values()].some(entry => entry.pane === pane))
-        .map(pane => ({ pane_id: pane, agent: null, agent_status: 'unknown' }));
-      return ok({ agents: [...live, ...shells] });
-    }
-    if (noun === 'pane' && verb === 'list') return ok({ panes: [...this.panes].map(pane_id => ({ pane_id })) });
+    // The agent list carries agents only: a pane whose runtime has exited is not in it (GY-1533).
+    if (noun === 'agent' && verb === 'list') return ok({ agents: [...this.agents.entries()].map(([name, entry]) => ({ name, pane_id: entry.pane, agent: entry.kind, agent_status: entry.status, cwd: this.panes.get(entry.pane) })) });
+    // The pane list carries every pane, a bare shell with no agent and status unknown, as `herdr pane list` reports one.
+    if (noun === 'pane' && verb === 'list') return ok({ panes: [...this.panes].map(([pane_id, cwd]) => { const live = [...this.agents.entries()].find(([, entry]) => entry.pane === pane_id); return live ? { pane_id, cwd, agent: live[1].kind, agent_status: live[1].status } : { pane_id, cwd, agent_status: 'unknown' }; }) });
     if (noun === 'pane' && verb === 'close') {
       this.closes.push(args[2]);
       if (!this.panes.has(args[2])) return JSON.stringify({ error: { code: 'pane_not_found', message: `pane ${args[2]} not found` } });
@@ -345,43 +342,51 @@ test('unit:agentless-pane-sweep — the sweep closes only the agentless panes Gr
       remoteCollision,
       ...bulk,
     ];
-    const agentsAt = (freshAgentless: boolean): HerdrAgent[] => [
-      { name: 'graphyard-reviewer-0', pane_id: 'pane-ended', agent_status: 'unknown', cwd: `${worktrees}/GY-1-4` },
-      { name: 'graphyard-cursor-1', pane_id: 'pane-live-lease', agent_status: 'unknown', cwd: `${worktrees}/GY-2-3` },
-      { name: 'graphyard-producer-1', pane_id: 'pane-deleted', agent_status: 'unknown', cwd: `${worktrees}/GY-3-1 (deleted)` },
-      { name: 'graphyard-reviewer-3', pane_id: 'pane-live-agent', agent: 'claude', agent_status: 'idle', cwd: `${worktrees}/GY-5-4` },
+    // The pane inventory, as `herdr pane list` reports it: a bare shell has no agent and status unknown.
+    const panesAt = (freshAgentless: boolean): HerdrPane[] => [
+      { pane_id: 'pane-ended', agent_status: 'unknown', cwd: `${worktrees}/GY-1-4` },
+      { pane_id: 'pane-live-lease', agent_status: 'unknown', cwd: `${worktrees}/GY-2-3` },
+      { pane_id: 'pane-deleted', agent_status: 'unknown', cwd: `${worktrees}/GY-3-1 (deleted)` },
+      { pane_id: 'pane-live-agent', agent: 'claude', agent_status: 'idle', cwd: `${worktrees}/GY-5-4` },
       // A pane Graphyard never launched: the operator's own shell. Never recorded here, never closed.
-      { name: 'operator-shell', pane_id: 'pane-foreign', agent_status: 'unknown', cwd: '/home/vish' },
-      ...bulk.map((_, index) => ({ name: `graphyard-reviewer-${10 + index}`, pane_id: `pane-bulk-${index}`, agent_status: 'unknown', cwd: `${worktrees}/GY-${10 + index}-1` })),
-      freshAgentless ? { name: 'graphyard-reviewer-2', pane_id: 'pane-fresh', agent_status: 'unknown', cwd: `${worktrees}/GY-4-4` }
-        : { name: 'graphyard-reviewer-2', pane_id: 'pane-fresh', agent: 'codex', agent_status: 'working', cwd: `${worktrees}/GY-4-4` },
+      { pane_id: 'pane-foreign', agent_status: 'unknown', cwd: '/home/vish' },
+      ...bulk.map((_, index) => ({ pane_id: `pane-bulk-${index}`, agent_status: 'unknown', cwd: `${worktrees}/GY-${10 + index}-1` })),
+      freshAgentless ? { pane_id: 'pane-fresh', agent_status: 'unknown', cwd: `${worktrees}/GY-4-4` }
+        : { pane_id: 'pane-fresh', agent: 'codex', agent_status: 'working', cwd: `${worktrees}/GY-4-4` },
+    ];
+    // The agent list names the sessions in the panes that hold an agent, and never a bare shell.
+    const agentsOf = (panes: HerdrPane[]): HerdrAgent[] => [
+      { name: 'graphyard-reviewer-3', pane_id: 'pane-live-agent', agent: 'claude', agent_status: 'idle', cwd: `${worktrees}/GY-5-4` },
+      ...panes.filter(pane => pane.pane_id === 'pane-fresh' && pane.agent).map(pane => ({ name: 'graphyard-reviewer-2', pane_id: pane.pane_id, agent: pane.agent, agent_status: pane.agent_status, cwd: pane.cwd })),
     ];
     const standing = ['pane-ended', 'pane-live-lease', 'pane-deleted', 'pane-fresh', 'pane-live-agent', 'pane-foreign', ...bulk.map((_, index) => `pane-bulk-${index}`)];
     const closed: string[] = [];
-    // The inventory is the host's truth: a pane that was closed no longer stands.
-    const panesEffect: Partial<DaemonEffects> = { panes: async () => ({ panes: standing.filter(pane => !closed.includes(pane)).map(pane => ({ pane_id: pane })), available: true }) };
-    const base = (agents: HerdrAgent[], at: number): DaemonEffects => ({
-      agents: () => agents,
-      credentials: async () => ({}),
-      snapshot: async () => ({ work: work.map(entry => ({ ...entry })), now: new Date(at).toISOString() }),
-      closeSession: pane => { closed.push(pane); },
-      herdr: async () => ({ agents, available: true }),
-      persist: async () => {}, recordSession: async () => {}, dispatch: async () => {}, requestProof: () => {},
-      merge: async () => ({ result: 'merged', merged: true }),
-      observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date(at).toISOString(), reason: 'not configured', deployed: [], pending: [] }),
-      recordDeployment: async () => {}, requestSmoke: () => {},
-      ...panesEffect,
-    } as DaemonEffects);
+    const base = (panes: HerdrPane[], at: number): DaemonEffects => {
+      const agents = agentsOf(panes);
+      return {
+        agents: () => agents,
+        credentials: async () => ({}),
+        snapshot: async () => ({ work: work.map(entry => ({ ...entry })), now: new Date(at).toISOString() }),
+        closeSession: pane => { closed.push(pane); },
+        herdr: async () => ({ agents, available: true }),
+        // The inventory is the host's truth: a pane that was closed no longer stands.
+        panes: async () => ({ panes: panes.filter(pane => !closed.includes(pane.pane_id!)), available: true }),
+        persist: async () => {}, recordSession: async () => {}, dispatch: async () => {}, requestProof: () => {},
+        merge: async () => ({ result: 'merged', merged: true }),
+        observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date(at).toISOString(), reason: 'not configured', deployed: [], pending: [] }),
+        recordDeployment: async () => {}, requestSmoke: () => {},
+      } as DaemonEffects;
+    };
     const state = emptyDaemonState(config);
     // First sighting: a runtime that has not started yet looks the same, so nothing closes.
-    await runCycle(config, state, base(agentsAt(false), clockStart), () => clockStart);
+    await runCycle(config, state, base(panesAt(false), clockStart), () => clockStart);
     assert.equal(closed.length, 0, 'an agentless launched pane is not closed on first sight');
     // Inside the launch bound nothing closes yet.
-    await runCycle(config, state, base(agentsAt(false), clockStart + 60_000), () => clockStart + 60_000);
+    await runCycle(config, state, base(panesAt(false), clockStart + 60_000), () => clockStart + 60_000);
     assert.equal(closed.length, 0, 'nothing closes within the launch bound of its sighting');
     // Past the bound of their first sighting the first pass closes; the fresh pane's runtime exits
     // only now, so its own bound starts here.
-    await runCycle(config, state, base(agentsAt(true), clockStart + 130_000), () => clockStart + 130_000);
+    await runCycle(config, state, base(panesAt(true), clockStart + 130_000), () => clockStart + 130_000);
     const firstPass: string[] = [...closed];
     assert.ok(firstPass.includes('pane-ended') && firstPass.includes('pane-deleted'), 'the ended launched panes close');
     assert.equal(firstPass.length, paneSweepLimit, `the pass is bounded at ${paneSweepLimit} closes`);
@@ -389,19 +394,19 @@ test('unit:agentless-pane-sweep — the sweep closes only the agentless panes Gr
     assert.ok(!firstPass.includes('pane-live-lease') && !firstPass.includes('pane-live-agent') && !firstPass.includes('pane-foreign'),
       'a pane whose worktree holds a live lease, a pane with an agent, and a pane Graphyard did not launch never close');
     // The rest of the backlog drains on the next cycle, the fresh pane with it.
-    await runCycle(config, state, base(agentsAt(true), clockStart + 260_000), () => clockStart + 260_000);
-    await runCycle(config, state, base(agentsAt(true), clockStart + 390_000), () => clockStart + 390_000);
+    await runCycle(config, state, base(panesAt(true), clockStart + 260_000), () => clockStart + 260_000);
+    await runCycle(config, state, base(panesAt(true), clockStart + 390_000), () => clockStart + 390_000);
     assert.deepEqual(closed.filter(pane => pane === 'pane-ended').length, 1, 'a pane is closed exactly once');
     assert.deepEqual([...new Set(closed)].sort(), standing.filter(pane => !['pane-live-lease', 'pane-live-agent', 'pane-foreign'].includes(pane)).sort(),
       'every ended launched pane closes across passes, and nothing else ever does while its reason stands');
     // The live lease has lapsed by now, so its pane stopped being protected: the lease, not the
     // pane, was the protection. It was first seen agentless only now its lease is gone, so this
     // pass starts its bound and the next one takes it, like any first sighting.
-    await runCycle(config, state, base(agentsAt(true), clockStart + 520_000), () => clockStart + 520_000);
+    await runCycle(config, state, base(panesAt(true), clockStart + 520_000), () => clockStart + 520_000);
     assert.ok(!closed.includes('pane-live-lease'), 'the lapsed pane was first seen agentless only now: its own bound starts');
     // The sighting is a wait, not an interrupted request, so the cycle's reconciliation leaves its
     // bound alone (GY-980): the next pass takes it, and the drain lands on the record with it.
-    await runCycle(config, state, base(agentsAt(true), clockStart + 650_000), () => clockStart + 650_000);
+    await runCycle(config, state, base(panesAt(true), clockStart + 650_000), () => clockStart + 650_000);
     assert.ok(closed.includes('pane-live-lease'), 'the pane whose lease lapsed is closable: the lease, not the pane, was the protection');
     const status = state.actions['sweep:panes:status'];
     assert.ok(status, 'the sweep records what the host holds');
@@ -414,15 +419,21 @@ test('unit:agentless-pane-sweep — the sweep closes only the agentless panes Gr
   } finally { await cleanup(); }
 });
 
-/** The loop's effects around a fixed Herdr inventory: every close is logged, and a closed pane leaves the inventory. */
-function sweepEffects(work: () => Work[], inventory: () => HerdrAgent[], closed: string[], at: number): DaemonEffects {
-  const agents = inventory().filter(agent => !closed.includes(agent.pane_id!));
+/** One pane of the host's inventory as a fixture names it: `herdr pane list`'s shape, with the session name the agent list carries for a pane holding an agent. */
+type InventoryPane = HerdrPane & { name?: string };
+/** The agent list of a pane inventory: the panes holding an agent, named; never a bare shell (GY-1533). */
+export function agentsOf(inventory: InventoryPane[]): HerdrAgent[] {
+  return inventory.filter(pane => !!pane.agent).map(pane => ({ name: pane.name, pane_id: pane.pane_id, agent: pane.agent, agent_status: pane.agent_status, cwd: pane.cwd }));
+}
+/** The loop's effects around a fixed Herdr pane inventory: every close is logged, and a closed pane leaves both inventories. */
+function sweepEffects(work: () => Work[], inventory: () => InventoryPane[], closed: string[], at: number): DaemonEffects {
+  const panes = inventory().filter(pane => !closed.includes(pane.pane_id!)), agents = agentsOf(panes);
   return {
     agents: () => agents, credentials: async () => ({}),
     snapshot: async () => ({ work: work().map(entry => ({ ...entry })), now: new Date(at).toISOString() }),
     closeSession: pane => { closed.push(pane); },
     herdr: async () => ({ agents, available: true }),
-    panes: async () => ({ panes: agents.map(agent => ({ pane_id: agent.pane_id })), available: true }),
+    panes: async () => ({ panes: panes.map(({ name: _name, ...pane }) => pane), available: true }),
     persist: async () => {}, recordSession: async () => {}, dispatch: async () => {}, requestProof: () => {},
     merge: async () => ({ result: 'merged', merged: true }),
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date(at).toISOString(), reason: 'not configured', deployed: [], pending: [] }),
@@ -452,11 +463,11 @@ test('unit:sweep-closes-unrecorded-worktree-shells — agentless shells in Graph
       item('GY-26', {}, [handle({ id: 'rev-26', kind: 'review', host: local, pane: 'pane-ended-outside', state: 'finished' })]),
       item('GY-27', {}, [handle({ id: 'rev-27', kind: 'review', host: local, pane: 'pane-ended-outside-deleted', state: 'finished' })]),
     ];
-    const inventory: HerdrAgent[] = [
-      { name: 'shell-unrecorded', pane_id: 'pane-unrecorded', agent_status: 'unknown', cwd: `${worktrees}/GY-20-3` },
+    const inventory: InventoryPane[] = [
+      { pane_id: 'pane-unrecorded', agent_status: 'unknown', cwd: `${worktrees}/GY-20-3` },
       // An item the snapshot no longer holds at all (delivered and gone from the read).
       { pane_id: 'pane-unknown-item', agent_status: 'unknown', cwd: `${worktrees}/GY-21-9` },
-      { name: 'graphyard-cursor-1', pane_id: 'pane-stuck', agent_status: 'unknown', cwd: `${worktrees}/GY-22-2/src` },
+      { pane_id: 'pane-stuck', agent_status: 'unknown', cwd: `${worktrees}/GY-22-2/src` },
       { pane_id: 'pane-old-epoch', agent_status: 'unknown', cwd: `${worktrees}/GY-23-4` },
       { pane_id: 'pane-leased', agent_status: 'unknown', cwd: `${worktrees}/GY-23-5` },
       { pane_id: 'pane-leased-subdirectory', agent_status: 'unknown', cwd: `${worktrees}/GY-23-5/tests` },
@@ -490,7 +501,7 @@ test('unit:sweep-closes-unrecorded-worktree-shells — agentless shells in Graph
 
     // A sighting whose pane stops being a candidate — closed by another step or by hand — leaves no
     // waiting row behind, and a later pane at that coordinate waits out its own bound.
-    const transient: HerdrAgent[] = [{ pane_id: 'pane-transient', agent_status: 'unknown', cwd: `${worktrees}/GY-20-3` }];
+    const transient: InventoryPane[] = [{ pane_id: 'pane-transient', agent_status: 'unknown', cwd: `${worktrees}/GY-20-3` }];
     let standing = transient;
     const sighted = emptyDaemonState(config), transientClosed: string[] = [];
     const sweep = (at: number) => runCycle(config, sighted, sweepEffects(() => [], () => standing, transientClosed, at), () => at);
@@ -508,7 +519,7 @@ test('unit:sweep-closes-unrecorded-worktree-shells — agentless shells in Graph
     // AC-3: a backlog of 300 agentless worktree shells drains within an hour at the default interval,
     // and at two-minute cycles too: the cycle's reconciliation of pending actions must not restart
     // the bound the first sighting started, which would cost the drain a cycle.
-    const backlog: HerdrAgent[] = Array.from({ length: 300 }, (_, index) => ({ pane_id: `pane-backlog-${index}`, agent_status: 'unknown', cwd: `${worktrees}/GY-${1000 + index}-${1 + index % 7}` }));
+    const backlog: InventoryPane[] = Array.from({ length: 300 }, (_, index) => ({ pane_id: `pane-backlog-${index}`, agent_status: 'unknown', cwd: `${worktrees}/GY-${1000 + index}-${1 + index % 7}` }));
     for (const intervalMs of [config.run.intervalSeconds * 1000, 120_000]) {
       const drained: string[] = [], fresh = emptyDaemonState(config);
       let at = clockStart, cycles = 0, last = clockStart;
@@ -556,7 +567,7 @@ test('unit:sweep-closes-finished-agent-panes — an agent pane named for a Graph
       // An ended handle that did record a name, its pane now holding an agent Herdr reports unnamed.
       item('GY-40', {}, [handle({ id: 'rev-40', kind: 'review', host: local, pane: 'pane-unnamed-agent', agentName: 'review-claude-4', state: 'finished' })]),
     ];
-    const inventory: HerdrAgent[] = [
+    const inventory: InventoryPane[] = [
       { name: 'graphyard-opencode-2', pane_id: 'pane-finished-worker', agent: 'opencode', agent_status: 'idle', cwd: `${worktrees}/GY-30-7` },
       { name: 'review-claude-1', pane_id: 'pane-finished-reviewer', agent: 'claude', agent_status: 'idle', cwd: '/repo/.graphyard/checkouts/review-31' },
       { name: 'graphyard-claude-1', pane_id: 'pane-working', agent: 'claude', agent_status: 'working', cwd: `${worktrees}/GY-32-4` },
@@ -585,12 +596,14 @@ test('unit:sweep-closes-finished-agent-panes — an agent pane named for a Graph
   } finally { await cleanup(); }
 });
 
-test('unit:pane-count-attention — master status counts the host\'s panes, the agentless Graphyard ones and the oldest, and raises attention past twenty', () => {
+test('unit:pane-count-attention — master status counts the host\'s panes, the agentless shells in Graphyard worktrees and the oldest, and raises attention past twenty', () => {
   const host = 'machine-a';
-  const paneList = (count: number) => [
-    ...Array.from({ length: 22 }, (_, index) => ({ pane_id: `pane-a-${index}` })),
-    { pane_id: 'pane-live' },
-    ...Array.from({ length: Math.max(0, count - 23) }, (_, index) => ({ pane_id: `pane-foreign-${index}` })),
+  /** The pane inventory: `recorded` worktree shells a session recorded, `unrecorded` ones none did, one live agent pane, and foreign panes up to `count`. */
+  const paneList = (recorded: number, unrecorded: number, count: number): HerdrPane[] => [
+    ...Array.from({ length: recorded }, (_, index) => ({ pane_id: `pane-a-${index}`, agent_status: 'unknown', cwd: `${worktrees}/GY-A${index}-1` })),
+    ...Array.from({ length: unrecorded }, (_, index) => ({ pane_id: `pane-u-${index}`, agent_status: 'unknown', cwd: `${worktrees}/GY-U${index}-2 (deleted)` })),
+    { pane_id: 'pane-live', agent: 'claude', agent_status: 'idle', cwd: `${worktrees}/GY-B0-1` },
+    ...Array.from({ length: Math.max(0, count - recorded - unrecorded - 1) }, (_, index) => ({ pane_id: `pane-foreign-${index}`, agent_status: 'unknown', cwd: '/home/vish' })),
   ];
   const recorded = (agentless: number, withAgent: number, closed: number) => {
     const items: Work[] = [];
@@ -599,12 +612,12 @@ test('unit:pane-count-attention — master status counts the host\'s panes, the 
     for (let index = 0; index < closed; index++) items.push(item(`GY-C${index}`, {}, [handle({ id: `h-c${index}`, kind: 'review', pane: `gone-${index}`, host })]));
     return items;
   };
-  const agents = [{ name: 'graphyard-reviewer-x', pane_id: 'pane-live', agent: 'claude', agent_status: 'idle' }, { name: 'operator-shell', pane_id: 'pane-foreign-99', agent_status: 'unknown' }];
+  const agents = [{ name: 'graphyard-reviewer-x', pane_id: 'pane-live', agent: 'claude', agent_status: 'idle' }];
 
-  // The counts: every pane the host reports, the ones Graphyard launched, the agentless among
-  // them, and the oldest by the launch its session recorded. A pane Graphyard never launched, and
-  // a recorded pane the runtime no longer holds, count for neither.
-  const below = paneReclaimStatus(paneList(30), recorded(18, 1, 2), agents, clockStart, host);
+  // The counts: every pane the host reports, the ones Graphyard launched, the agentless shells in
+  // Graphyard worktrees, and the oldest by the launch its session recorded. A pane outside the
+  // worktrees (the operator's own), and a recorded pane the runtime no longer holds, count for neither.
+  const below = paneReclaimStatus(paneList(18, 0, 30), recorded(18, 1, 2), agents, clockStart, host);
   assert.deepEqual({ panes: below.panes, launched: below.launched, agentless: below.agentless }, { panes: 30, launched: 21, agentless: 18 });
   assert.deepEqual(below.oldest, { pane: 'pane-a-0', work: 'GY-A0', kind: 'review', launchedAt: new Date(clockStart - 3_600_000).toISOString() });
   assert.equal(below.attention, null, 'no attention under the bound');
@@ -613,26 +626,141 @@ test('unit:pane-count-attention — master status counts the host\'s panes, the 
   // remote handle naming a local pane coordinate counts for neither launched nor agentless here.
   const remote = recorded(18, 1, 2).concat([item('GY-R1', {}, [handle({ id: 'r-1', kind: 'review', pane: 'pane-a-0', host: 'machine-b', state: 'finished' })]),
     item('GY-R2', {}, [handle({ id: 'r-2', kind: 'review', pane: 'pane-foreign-0', host: 'machine-b', state: 'finished' })])]);
-  const scoped = paneReclaimStatus(paneList(30), remote, agents, clockStart, host);
+  const scoped = paneReclaimStatus(paneList(18, 0, 30), remote, agents, clockStart, host);
   assert.deepEqual({ panes: scoped.panes, launched: scoped.launched, agentless: scoped.agentless }, { panes: 30, launched: 21, agentless: 18 },
     'remote handles never inflate the host reading, even on a coordinate collision');
 
-  const over = paneReclaimStatus(paneList(30), recorded(agentlessPaneAttentionBound + 2, 1, 2), agents, clockStart, host);
+  const over = paneReclaimStatus(paneList(agentlessPaneAttentionBound + 2, 0, 30), recorded(agentlessPaneAttentionBound + 2, 1, 2), agents, clockStart, host);
   assert.equal(over.agentless, agentlessPaneAttentionBound + 2);
   assert.ok(over.attention, 'attention rises past the bound');
-  assert.match(over.attention!.text, new RegExp(`${agentlessPaneAttentionBound + 2} of the panes Graphyard launched stand agentless \\(past the ${agentlessPaneAttentionBound}-pane attention bound\\)`));
-  assert.match(over.attention!.text, /the oldest pane pane-a-0 of GY-A0 \(review\), launched /, 'the oldest agentless pane is named');
+  assert.match(over.attention!.text, new RegExp(`${agentlessPaneAttentionBound + 2} of them stand agentless in Graphyard worktrees \\(past the ${agentlessPaneAttentionBound}-pane attention bound\\)`));
+  assert.match(over.attention!.text, /the oldest pane pane-a-0 of GY-A0 \(review\), standing since /, 'the oldest agentless pane is named');
   assert.match(over.attention!.text, /Herdr holds 30 pane\(s\) on this host/, 'the host pane count is on the item');
   assert.equal(over.attention!.next, 'the loop sweeps them itself, a bounded number per cycle, once agentless past its launch bound; graphyard master run --once runs a pass now');
 
   // Drained: once nothing stands agentless there is no oldest pane to name, whatever stood before.
-  const drained = paneReclaimStatus(paneList(30), recorded(0, 1, 21), agents, clockStart, host);
+  const drained = paneReclaimStatus(paneList(0, 0, 30), recorded(0, 1, 21), agents, clockStart, host);
   assert.deepEqual({ panes: drained.panes, launched: drained.launched, agentless: drained.agentless, oldest: drained.oldest }, { panes: 30, launched: 22, agentless: 0, oldest: null });
   assert.equal(drained.attention, null, 'a drained backlog raises no attention');
 
-  // A runtime that cannot be read: the pane count is unknown, and an agentless reading is still
-  // made from the agent inventory, which lists a session's pane while the pane stands.
-  const unreadable = paneReclaimStatus(null, recorded(2, 0, 0), [{ name: 'graphyard-reviewer-1', pane_id: 'pane-a-0', agent_status: 'unknown' }, { name: 'graphyard-reviewer-2', pane_id: 'pane-a-1', agent_status: 'unknown' }], clockStart, host);
+  // A pane inventory that cannot be read: the pane count is unknown, and no agentless reading is
+  // claimed, since the agent inventory never carries a bare shell and nothing can be closed unseen.
+  const unreadable = paneReclaimStatus(null, recorded(2, 0, 0), [{ name: 'graphyard-reviewer-1', pane_id: 'pane-live', agent: 'claude', agent_status: 'idle' }], clockStart, host);
   assert.equal(unreadable.panes, null);
-  assert.deepEqual({ launched: unreadable.launched, agentless: unreadable.agentless }, { launched: 2, agentless: 2 });
+  assert.deepEqual({ launched: unreadable.launched, agentless: unreadable.agentless, oldest: unreadable.oldest, attention: unreadable.attention }, { launched: 2, agentless: 0, oldest: null, attention: null });
+});
+
+// GY-1533: on 7 October 2026 Herdr held 246 bare shells in deleted Graphyard worktrees on vishrog
+// for over a day, while `master status` counted 6 standing agentless. The sweep and the count read
+// `herdr agent list`, which never carries a bare shell: only `herdr pane list` does.
+test('unit:pane-sweep-reads-pane-inventory — agentless shells stand only in the pane inventory, never in the agent list, and the sweep drains a backlog of 246 of them at its per-cycle bound', async () => {
+  const { config, cleanup } = await launchedMaster();
+  try {
+    const local = config.hostId;
+    const live = { owner: 'worker-a', epoch: 2, expiresAt: new Date(clockStart + 24 * 3_600_000).toISOString() } as Work['lease'];
+    const work = [
+      // The one item still open among the backlog's: its lease stands on epoch 2, whose worktree is one shell's.
+      item('GY-500', { stage: 'build', lease: live }),
+      // Six recorded panes: the ones the count used to see. Three ended, three whose handle stayed running.
+      ...Array.from({ length: 6 }, (_, index) => item(`GY-${600 + index}`, {}, [handle({ id: `rev-${600 + index}`, kind: 'review', pane: `pane-recorded-${index}`, host: local, state: index < 3 ? 'finished' : 'running' })])),
+      // A live reviewer, its agent idle at its prompt: never the sweep's.
+      item('GY-700', {}, [handle({ id: 'rev-700', kind: 'review', pane: 'pane-reviewer', host: local, agentName: 'review-claude-1' })]),
+    ];
+    // The host's panes, exactly as the runtime reports them: 246 bare shells in deleted worktrees of
+    // delivered items no snapshot holds, with no agent and status unknown; the six recorded shells;
+    // one shell in the live lease's worktree; the operator's shell; and one live agent pane.
+    const backlog: InventoryPane[] = Array.from({ length: 246 }, (_, index) => ({ pane_id: `w1:p${index}`, agent_status: 'unknown', cwd: `${worktrees}/GY-${1000 + index}-${1 + index % 5} (deleted)` }));
+    const inventory: InventoryPane[] = [
+      ...backlog,
+      ...Array.from({ length: 6 }, (_, index) => ({ pane_id: `pane-recorded-${index}`, agent_status: 'unknown', cwd: `${worktrees}/GY-${600 + index}-4 (deleted)` })),
+      { pane_id: 'pane-leased', agent_status: 'unknown', cwd: `${worktrees}/GY-500-2` },
+      { pane_id: 'pane-operator', agent_status: 'unknown', cwd: '/home/vish' },
+      { name: 'review-claude-1', pane_id: 'pane-reviewer', agent: 'claude', agent_status: 'idle', cwd: '/repo/.graphyard/checkouts/review-700' },
+    ];
+    // The agent list is the runtime's: the one agent, and not one of the 254 shells.
+    assert.deepEqual(agentsOf(inventory).map(agent => agent.pane_id), ['pane-reviewer'], 'the agent list never carries a bare shell');
+    const closed: string[] = [];
+    const state = emptyDaemonState(config);
+    const pass = (at: number) => runCycle(config, state, sweepEffects(() => work, () => inventory, closed, at), () => at);
+    await pass(clockStart);
+    assert.equal(closed.length, 0, 'nothing closes on first sight');
+    // The first sighting counts what the sweep will close: all 252 shells in unleased worktrees, not the 6 recorded.
+    assert.match(state.actions['sweep:panes:status']?.detail ?? '', /Herdr reports 255 pane\(s\) on this host, 7 opened by Graphyard launch\(es\), 252 standing agentless/,
+      `the count is the pane inventory's (${state.actions['sweep:panes:status']?.detail})`);
+    assert.match(state.actions['sweep:panes:attention']?.detail ?? '', /252 of them stand agentless in Graphyard worktrees/, 'attention stands on the backlog');
+    const intervalMs = config.run.intervalSeconds * 1000;
+    let at = clockStart + intervalMs, cycles = 1;
+    while (closed.length < 252 && at - clockStart <= 60 * 60_000) {
+      const before = closed.length;
+      await pass(at);
+      assert.ok(closed.length - before <= paneSweepLimit, `one pass closes at most ${paneSweepLimit}`);
+      at += intervalMs; cycles += 1;
+    }
+    assert.equal(new Set(closed).size, 252, `every shell in an unleased Graphyard worktree closed, each once, within the hour (${cycles} cycles)`);
+    assert.ok(backlog.every(pane => closed.includes(pane.pane_id!)), 'all 246 shells the agent list never carried are closed');
+    assert.ok(!closed.includes('pane-leased') && !closed.includes('pane-operator') && !closed.includes('pane-reviewer'),
+      'the live lease\'s worktree shell, the operator\'s shell and the agent pane are never closed');
+    assert.match(state.actions['sweep:pane:w1:p0'].detail, /holds no agent in the worktree of GY-1000 epoch 1, which holds no live lease and no Graphyard session recorded it/);
+    await pass(at);
+    assert.match(state.actions['sweep:panes:status'].detail, /0 standing agentless; the backlog has drained/, 'the drain lands on the record');
+    assert.match(state.actions['sweep:panes:attention'].detail, /back under the 20-pane attention bound/, 'attention stands down with it');
+  } finally { await cleanup(); }
+});
+
+test('unit:pane-reclaim-status-counts-bare-shells — the reading counts every agentless pane in a Graphyard worktree, recorded by a session or not: 246 unrecorded shells and 6 recorded ones read 252, and the attention stands', () => {
+  const host = 'machine-a';
+  const unrecorded: HerdrPane[] = Array.from({ length: 246 }, (_, index) => ({ pane_id: `w1:p${index}`, agent_status: 'unknown', cwd: `${worktrees}/GY-${1000 + index}-1 (deleted)` }));
+  const recorded: HerdrPane[] = Array.from({ length: 6 }, (_, index) => ({ pane_id: `pane-recorded-${index}`, agent_status: 'unknown', cwd: `${worktrees}/GY-${600 + index}-4` }));
+  const work = Array.from({ length: 6 }, (_, index) => item(`GY-${600 + index}`, {}, [handle({ id: `rev-${600 + index}`, kind: 'review', pane: `pane-recorded-${index}`, host, state: 'finished', startedAt: new Date(clockStart - 86_400_000 + index * 60_000).toISOString() })]));
+  const agents: HerdrAgent[] = [{ name: 'review-claude-1', pane_id: 'pane-reviewer', agent: 'claude', agent_status: 'idle' }];
+  const panes: HerdrPane[] = [...unrecorded, ...recorded, { pane_id: 'pane-reviewer', agent: 'claude', agent_status: 'idle', cwd: '/repo/.graphyard/checkouts/review' }, { pane_id: 'pane-operator', agent_status: 'unknown', cwd: '/home/vish' }];
+  const status = paneReclaimStatus(panes, work, agents, clockStart, host);
+  assert.deepEqual({ panes: status.panes, launched: status.launched, agentless: status.agentless }, { panes: 254, launched: 6, agentless: 252 });
+  assert.ok(status.attention, 'the attention stands on 252 agentless shells');
+  assert.match(status.attention!.text, /254 pane\(s\) on this host and 252 of them stand agentless in Graphyard worktrees/);
+  // The oldest is the longest-standing: the recorded start of a session, or an unrecorded shell's first sighting.
+  assert.deepEqual(status.oldest, { pane: 'pane-recorded-0', work: 'GY-600', kind: 'review', launchedAt: new Date(clockStart - 86_400_000).toISOString() });
+  const sighted = paneReclaimStatus(panes, work, agents, clockStart, host, { 'w1:p7': new Date(clockStart - 2 * 86_400_000).toISOString() });
+  assert.deepEqual(sighted.oldest, { pane: 'w1:p7', work: 'GY-1007', kind: 'unrecorded', launchedAt: new Date(clockStart - 2 * 86_400_000).toISOString() });
+  // Unrecorded shells alone raise it: nothing recorded, 246 standing.
+  const alone = paneReclaimStatus([...unrecorded, ...recorded.map(pane => ({ ...pane, agent: 'claude' }))], [], agents, clockStart, host);
+  assert.deepEqual({ launched: alone.launched, agentless: alone.agentless }, { launched: 0, agentless: 246 });
+  assert.ok(alone.attention, 'unrecorded shells alone raise the attention past its bound');
+  assert.equal(alone.oldest?.launchedAt, 'an unrecorded time', 'an unrecorded shell never sighted stands since an unrecorded time');
+  // A shell in a worktree whose exact item and epoch holds a live lease is that lease's, not counted: the sweep will not close it.
+  const leased = [item('GY-1000', { stage: 'build', lease: { owner: 'worker-a', epoch: 1, expiresAt: new Date(clockStart + 60_000).toISOString() } as Work['lease'] })];
+  assert.equal(paneReclaimStatus(unrecorded, leased, agents, clockStart, host).agentless, 245, 'the live lease\'s worktree shell is not counted');
+});
+
+test('unit:pane-reclaim-fixtures-use-pane-inventory — every fixture these proofs and the soak seed an agentless shell through is the pane inventory, and no agent list here ever carries one', async () => {
+  // The sweep proofs' helper: an inventory's agent list holds only the panes with an agent in them.
+  const inventory: InventoryPane[] = [
+    { pane_id: 'shell', agent_status: 'unknown', cwd: `${worktrees}/GY-1-1 (deleted)` },
+    { name: 'review-claude-1', pane_id: 'agent', agent: 'claude', agent_status: 'idle', cwd: '/repo/.graphyard/checkouts/review' },
+  ];
+  assert.deepEqual(agentsOf(inventory), [{ name: 'review-claude-1', pane_id: 'agent', agent: 'claude', agent_status: 'idle', cwd: '/repo/.graphyard/checkouts/review' }]);
+  const effects = sweepEffects(() => [], () => inventory, [], clockStart);
+  assert.deepEqual((await effects.agents()).map(agent => agent.pane_id), ['agent'], 'the effects\' agent list never carries the shell');
+  assert.deepEqual((await effects.panes!()).panes, [{ pane_id: 'shell', agent_status: 'unknown', cwd: `${worktrees}/GY-1-1 (deleted)` }, { pane_id: 'agent', agent: 'claude', agent_status: 'idle', cwd: '/repo/.graphyard/checkouts/review' }],
+    'the pane inventory carries both, the shell with no agent');
+  // The simulated Herdr behind the launchers: a runtime that exits leaves its pane in `pane list` only.
+  const herdr = new HerdrStub();
+  herdr.run('herdr', ['tab', 'create', '--cwd', `${worktrees}/GY-2-1`]);
+  herdr.run('herdr', ['agent', 'rename', 'pane-1', 'graphyard-claude-1']);
+  const listed = (output: string) => JSON.parse(output).result;
+  assert.deepEqual(listed(herdr.run('herdr', ['agent', 'list'])).agents.map((agent: HerdrAgent) => agent.pane_id), ['pane-1']);
+  herdr.exit('graphyard-claude-1');
+  assert.deepEqual(listed(herdr.run('herdr', ['agent', 'list'])).agents, [], 'an exited runtime leaves the agent list');
+  assert.deepEqual(listed(herdr.run('herdr', ['pane', 'list'])).panes, [{ pane_id: 'pane-1', cwd: `${worktrees}/GY-2-1`, agent_status: 'unknown' }], 'and its pane stands in the pane list as a bare shell');
+  // The soak's Herdr: `shell` seeds a worktree leftover into the pane inventory and never the agent list.
+  const { SimulatedHerdr } = await import('./helpers/soak-world.js');
+  const soak = new SimulatedHerdr(() => clockStart);
+  soak.open('review-previous-0', 'idle', '/tmp/soak/checkouts/review-previous-0');
+  soak.shell('w1:tree0', `${worktrees}/GY-3-90`);
+  assert.deepEqual(soak.list().map(agent => agent.pane_id), ['w1:p1'], 'the soak agent list carries agents only');
+  assert.deepEqual(soak.paneList(), [{ pane_id: 'w1:p1', cwd: '/tmp/soak/checkouts/review-previous-0', agent: 'claude', agent_status: 'idle' }, { pane_id: 'w1:tree0', cwd: `${worktrees}/GY-3-90`, agent_status: 'unknown' }],
+    'the soak pane inventory carries the shell with its cwd and no agent');
+  soak.kill('w1:p1');
+  assert.deepEqual(soak.list(), [], 'a killed runtime leaves the soak agent list');
+  assert.equal(soak.paneList().find(pane => pane.pane_id === 'w1:p1')?.agent, undefined, 'and stands agentless in its pane inventory');
 });

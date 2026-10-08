@@ -204,7 +204,8 @@ function sharedHerdr() {
     commands.push(args);
     const ok = (result: unknown) => JSON.stringify({ result });
     const entries = () => [...panes].map(([pane_id, pane]) => ({ pane_id, tab_id: pane_id.replace(':p', ':t'), workspace_id: pane.workspace, name: pane.name, cwd: pane.cwd, agent: pane.agent, agent_status: pane.agent ? 'idle' : 'unknown' }));
-    if (args[0] === 'agent' && args[1] === 'list') return ok({ agents: entries() });
+    // The agent list carries agents only; a bare shell stands in the pane list alone (GY-1533).
+    if (args[0] === 'agent' && args[1] === 'list') return ok({ agents: entries().filter(entry => entry.agent) });
     if (args[0] === 'pane' && args[1] === 'list') return ok({ panes: entries() });
     if (args[0] === 'pane' && args[1] === 'close') { panes.delete(args[2]); return ok({}); }
     if (args[0] === 'tab' && args[1] === 'close') { panes.delete(args[2].replace(':t', ':p')); return ok({}); }
@@ -232,11 +233,11 @@ test('unit:herdr-scope-per-install — the install\'s workspace scopes every inv
 
   // The inventories every sweep reads list only the install's own panes, though names and paths match.
   const herdr = sharedHerdr();
-  assert.deepEqual((await listHerdrAgents(herdr.run)).map(agent => agent.pane_id), ['wA:p1', 'wA:p2']);
+  assert.deepEqual((await listHerdrAgents(herdr.run)).map(agent => agent.pane_id), ['wA:p2']);
   assert.deepEqual((await listHerdrPanes(herdr.run)).map(pane => pane.pane_id), ['wA:p1', 'wA:p2']);
-  assert.deepEqual((await observeHerdrAgents(herdr.run)).agents.map(agent => agent.pane_id), ['wA:p1', 'wA:p2']);
-  assert.deepEqual((await listHerdrAgents(herdr.run, 'wB')).map(agent => agent.pane_id), ['wB:p1', 'wB:p2'], 'the other install sees only its own');
-  assert.equal((await listHerdrAgents(herdr.run, null)).length, 4, 'an install with no workspace is unscoped');
+  assert.deepEqual((await observeHerdrAgents(herdr.run)).agents.map(agent => agent.pane_id), ['wA:p2']);
+  assert.deepEqual((await listHerdrAgents(herdr.run, 'wB')).map(agent => agent.pane_id), ['wB:p2'], 'the other install sees only its own');
+  assert.equal((await listHerdrAgents(herdr.run, null)).length, 2, 'an install with no workspace is unscoped');
 
   // A close or tab cleanup of another install's pane is refused before Herdr is asked.
   await assert.rejects(closeHerdrPane('wB:p2', herdr.run), /belongs to workspace wB, not this installation's workspace wA/);
