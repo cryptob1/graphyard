@@ -117,19 +117,73 @@ export function shadowReport(verdicts: readonly ShadowVerdict[], work: readonly 
 export const shadowDisagreement = (outcome: ShadowOutcome) => outcome === 'shadow-only-fail' || outcome === 'shadow-missed';
 
 /**
- * `master status` attention: one line per item whose newest verdict disagrees with GitHub, report
- * only (nothing acts on it; the line is the switch decision's evidence).
+ * The pre-GY-1548 placeholder failing file: the trial wrote this when the runner died naming no
+ * test (16 MiB capture overrun) while every selected file had passed. Recognized from the record
+ * so those standing disagreements are explainable without re-running a trial (GY-1560).
  */
-export function shadowGateAttention(verdicts: readonly ShadowVerdict[]): AttentionItem[] {
+export const placeholderRunnerFailure = 'tests/helpers/run-tests.ts';
+/** Whether a verdict's failure list is exactly the fabricated-runner placeholder with build pass and every file counted as passed. */
+export const isPlaceholderVerdict = (verdict: Pick<ShadowVerdict, 'build' | 'tests'>) =>
+  verdict.build === 'pass'
+  && verdict.tests.failed.length === 1
+  && verdict.tests.failed[0] === placeholderRunnerFailure
+  && verdict.tests.passed === verdict.tests.files;
+
+/** One explanation of a (key, head, baseTip) disagreement, as the ledger and the status read it. */
+export interface ShadowExplanationRef { key: string; head: string; baseTip: string }
+
+/** The most pairs one loop read of `GET /api/shadow-explanations` names; the loop asks in chunks of this size. */
+export const shadowExplanationPairsMax = 50;
+
+/** The (work key, head, baseTip) pair an explanation and a standing disagreement share. */
+export const shadowDisagreementPair = (entry: Pick<ShadowExplanationRef, 'key' | 'head' | 'baseTip'>) =>
+  `${entry.key}:${entry.head.toLowerCase()}:${entry.baseTip.toLowerCase()}`;
+/** Whether an explanation stands for this verdict's (key, head, baseTip). */
+export const shadowPairExplained = (verdict: Pick<ShadowVerdict, 'key' | 'head' | 'baseTip'>, explanations: readonly ShadowExplanationRef[]) =>
+  explanations.some(entry => shadowDisagreementPair(entry) === shadowDisagreementPair(verdict));
+
+/**
+ * `master status` attention: one line per standing (key, head, baseTip) disagreement that has no
+ * explanation yet (GY-1560). A later head of the same item does not drop an earlier unexplained
+ * pair; only an explanation does. Report only until explained.
+ */
+export function shadowGateAttention(verdicts: readonly ShadowVerdict[], explanations: readonly ShadowExplanationRef[] = []): AttentionItem[] {
   const newest = new Map<string, ShadowVerdict>();
-  for (const verdict of [...verdicts].sort((a, b) => Date.parse(a.at) - Date.parse(b.at))) newest.set(verdict.key, verdict);
-  return [...newest.values()].filter(verdict => shadowDisagreement(verdict.outcome)).map(verdict => ({
+  for (const verdict of [...verdicts].sort((a, b) => Date.parse(a.at) - Date.parse(b.at))) {
+    newest.set(shadowDisagreementPair(verdict), verdict);
+  }
+  return [...newest.values()].filter(verdict => shadowDisagreement(verdict.outcome) && !shadowPairExplained(verdict, explanations)).map(verdict => ({
     subject: 'shadow-gate', text: shadowDisagreementDetail(verdict),
     role: 'master' as const, approvedBy: null, human: false, humanOnly: null, next: `Explain the disagreement on ${verdict.key} before the switch to control-plane merging; nothing is changed`,
   }));
 }
 
-export function shadowDisagreementDetail(verdict: Pick<ShadowVerdict, 'key' | 'head' | 'mergeSha' | 'outcome'>) {
+export function shadowDisagreementDetail(verdict: Pick<ShadowVerdict, 'key' | 'head' | 'mergeSha' | 'outcome' | 'build' | 'tests'>) {
+  const cause = isPlaceholderVerdict(verdict)
+    ? `the failure is the fabricated-runner-failure placeholder ${placeholderRunnerFailure} (pre-GY-1548: the runner died naming no test while every file passed)`
+    : verdict.outcome === 'shadow-missed' ? 'the shadow trial passed it but the main guard reverted it' : 'the shadow trial failed it but GitHub merged it';
   return `Shadow merge gate: ${verdict.key} head ${verdict.head} is ${verdict.outcome} (trial merge ${verdict.mergeSha ?? 'none: it conflicts'}); `
-    + `${verdict.outcome === 'shadow-missed' ? 'the shadow trial passed it but the main guard reverted it' : 'the shadow trial failed it but GitHub merged it'}. Report only: nothing is changed`;
+    + `${cause}. Report only: nothing is changed`;
+}
+
+/** Counts per outcome plus unexplained vs explained disagreement totals the switch criterion reads (GY-1560). */
+export interface ShadowReportWithExplanations extends ShadowReport {
+  unexplainedDisagreements: number;
+  explainedDisagreements: number;
+}
+
+/** The shadowGate report with disagreement counts split by whether an explanation stands. */
+export function shadowReportWithExplanations(
+  verdicts: readonly ShadowVerdict[],
+  work: readonly Work[],
+  explanations: readonly ShadowExplanationRef[] = [],
+): ShadowReportWithExplanations {
+  const report = shadowReport(verdicts, work);
+  const judged = judgedVerdicts(verdicts, work).filter(verdict => shadowDisagreement(verdict.outcome));
+  let explainedDisagreements = 0, unexplainedDisagreements = 0;
+  for (const verdict of judged) {
+    if (shadowPairExplained(verdict, explanations)) explainedDisagreements += 1;
+    else unexplainedDisagreements += 1;
+  }
+  return { ...report, unexplainedDisagreements, explainedDisagreements };
 }

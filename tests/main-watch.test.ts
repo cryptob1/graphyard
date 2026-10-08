@@ -337,7 +337,7 @@ async function request(credential: string, path: string, body?: unknown, key = r
 }
 
 test('integration:main-watch-acknowledge-admin-only — the route is registered through src/server/routes.ts; only an admin credential records policy.main-watch.acknowledged; coordinator, worker and operator-agent identities are refused and nothing is written; a retried key replays, a second acknowledgement of the same sha records nothing new, and the loop reads the list', async () => {
-  assert.deepEqual(registerApiRoutes([]).map(module => module.name), ['main-watch'], 'routes.ts registers the main watch module');
+  assert.deepEqual(registerApiRoutes([]).map(module => module.name), ['main-watch', 'shadow-disagreements'], 'routes.ts registers the main watch module (and GY-1560\'s shadow-disagreement routes)');
   assert.ok(apiRoutes.some(module => module.name === 'main-watch'), 'the assembled API table holds it');
   const target = sha('acknowledged');
   for (const credential of [token(coordinator), token(worker), agent.token]) {
