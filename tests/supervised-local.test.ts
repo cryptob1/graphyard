@@ -186,7 +186,7 @@ test('unit:supervised-review-gate-human — review stays required: no approval n
   const now = '2026-10-08T00:05:00.000Z';
   const line = buildMasterStatus({ work: [unreviewed], now }, [], [], {}, {}, undefined, 'main', undefined, undefined, undefined, undefined, 'graphyard', null, { mode: 'supervised', operatorLogin: OPERATOR }).supervision;
   assert.match(line!, /the operator reviews and merges each pull request/);
-  assert.match(line!, /graphyard master autonomy --admin-token-stdin --apply/);
+  assert.match(line!, /graphyard master promote --admin-token-stdin/);
   assert.equal(buildMasterStatus({ work: [unreviewed], now }, [], []).supervision, null);
 });
 

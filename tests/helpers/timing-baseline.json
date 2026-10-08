@@ -251,6 +251,7 @@
     "tests/auto-scope.test.ts": 7157,
     "tests/automatic-review-concurrency.test.ts": 3803,
     "tests/autonomy-contract.test.ts": 1014,
+    "tests/autonomy-promotion.test.ts": 2000,
     "tests/await-reviewers-exhausted.test.ts": 828,
     "tests/backup-restore.test.ts": 21895,
     "tests/base-break-refresh.test.ts": 2274,
