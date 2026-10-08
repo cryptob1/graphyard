@@ -28,6 +28,7 @@ import { hotspots } from './hotspots.js';
 import { stallAttention } from './stall-attention.js';
 import { coordinationStep } from './coordination-snapshot.js';
 import { buildPipelineStatus, reconcileLedgers } from './master-status-pipeline.js';
+import { mergeWriterLine } from './status-attention.js';
 import { assembleReportedAttention, assembleStatusSections } from './master-status-sections.js';
 
 export { actionReport, agentRequestAttention, agentRequestReport, sessionReport } from './loop-report.js';
@@ -150,6 +151,8 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
     runtime, reviewRuntime, humanOnly, masterApi, decisions, approvals: cycling?.approvals ?? [],
   });
   return {
+    // Leads the report while the control plane is the merge writer (the sections spread it again, in place).
+    ...mergeWriterLine(coordinator),
     ...status, ...attributed, ...faulted(attributeAttention(attributed.attentionItems, resources.readings)), resources: resources.report,
     unavailable: sections.unavailable,
     docsBudget: docs,

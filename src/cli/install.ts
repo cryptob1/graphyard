@@ -267,6 +267,8 @@ export const installCommands = defineCommands([
         : documentation.drift ? documentation.drift
         : production?.incidents?.length ? `Production has not deployed ${production.incidents.map((incident: any) => incident.key).join(', ')}: ${production.incidents[0].reason}`
         : readiness.next;
+      // The one merger line goes to stderr so stdout stays the single JSON report the doctor consumers parse.
+      console.error(mergerDoctorLine(live?.mergeWriter));
       return context.print({ discovered, server: base, cliPath: await context.activeCliPath(), hostId: context.individualHostId(), connected: !!live, githubConfigured: !!live?.github, role: live?.actor?.role, release: live?.release ?? null, failure,
         setup,
         appPermissions: appPermissions ? { verifiedAt: appPermissions.verifiedAt, missing: appPermissions.missing, attention: appPermissions.attention, installationUrl: appPermissions.installationUrl } : null,

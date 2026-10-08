@@ -24,7 +24,7 @@ Kept: leases and epochs, the transactional ledger, two risk lanes, UAT serving a
 
 ## The merger setting
 
-`merger` selects the mode per install, `github` (default) or `control-plane`: an admin-only ledger event, never read from graphyard.json. Read: `graphyard master merger`; set: `graphyard master merger MODE --reason TEXT`; `/api/status` shows `mergeWriter`.
+`merger` selects the mode per install, `github` (default) or `control-plane`: an admin-only ledger event, never read from graphyard.json. Read: `graphyard master merger`; set: `graphyard master merger MODE --reason TEXT`; `/api/status` shows `mergeWriter`; `GET`/`POST /api/merger` (admin, `reason`, `Idempotency-Key`).
 
 ## Rollout
 

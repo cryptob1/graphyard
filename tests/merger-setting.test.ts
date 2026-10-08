@@ -97,7 +97,8 @@ async function scenario(n: number) {
     checks: [], reviews: [], protected: true, mergeable: true, merged: false, prState: 'open', mergeSha: null, mergedAt: null, baseTip: 'b'.repeat(40), baseTree: '7e'.repeat(20), files: [], scopeFiles: [], at: new Date().toISOString() };
   const observed = await engine.observe(w.id, (await store.list()).find(item => item.id === w.id)!.revision, observation);
   // The item's own key, id and pull request number are the only things that may differ between two runs.
-  const view = (item: typeof observed) => JSON.parse(JSON.stringify({ stage: item.stage, ready: item.ready, violations: item.violations, gates: item.gates.map(gate => ({ name: gate.name, passed: gate.passed, reasons: gate.reasons })), nextAction: item.nextAction ?? null })
+  const dispatched = (item: typeof observed) => [item.autoDispatch?.review, ...(item.autoDispatch?.producers ?? [])].filter(Boolean).map((request: any) => ({ kind: request.kind, state: request.state, sha: request.sha, proofs: request.proofs ?? null }));
+  const view = (item: typeof observed) => JSON.parse(JSON.stringify({ stage: item.stage, ready: item.ready, violations: item.violations, gates: item.gates.map(gate => ({ name: gate.name, passed: gate.passed, reasons: gate.reasons })), nextAction: item.nextAction ?? null, dispatch: dispatched(item) })
     .replace(/"requestId":"[0-9a-f]{32}"/g, '"requestId":"R"').split(item.key).join('GY-N').split(item.id).join('ID').split(`"pr":${900 + n}`).join('"pr":0'));
   return { submitted: view(w), observed: view(observed) };
 }
