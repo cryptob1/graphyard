@@ -634,6 +634,7 @@
     "tests/timing-stability.test.ts": 1171,
     "tests/tip-branch-cleanup.test.ts": 300,
     "tests/tip-flake-rerun.test.ts": 3144,
+    "tests/tmp-reclaim-tsx-cache.test.ts": 1500,
     "tests/tmp-cleanup.test.ts": 16049,
     "tests/tmp-leaks.test.ts": 7136,
     "tests/uat-deploy-guard.test.ts": 1296,
