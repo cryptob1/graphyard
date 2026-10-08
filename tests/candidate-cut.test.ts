@@ -5,7 +5,7 @@ import { assessCut, cutDue, type CutCommit } from '../src/daemon/candidate-cut.j
 import { candidateSettings, candidateSettingsSchema, defaultCandidateEveryMerges, defaultCandidateIdleMinutes } from '../src/master/merge-writer-settings.js';
 import { masterRunSchema } from '../src/master/profiles.js';
 import { noLocalPortsReason, promotionCycle, promotionFrozenReason, promotionMode, promotionReads, promotionWorkflow, type PromotionLedger, type PromotionReads } from '../src/daemon/deployment.js';
-import { localPromotionCycle, runLocalCandidate, type LocalCandidate, type LocalReleasePorts, type LocalValidation } from '../src/daemon/promotion-local.js';
+import { localPromotionCycle, localPromotionIdle, runLocalCandidate, settleLocalPromotion, type LocalCandidate, type LocalReleasePorts, type LocalValidation } from '../src/daemon/promotion-local.js';
 import { lastJson, localValidateArguments, readCaseTags, readVerificationMaps } from '../src/daemon/release-ports.js';
 import { promotionStateSchema, type PromotionState } from '../src/daemon/state.js';
 import type { MasterConfig } from '../src/master.js';
@@ -97,8 +97,12 @@ function stubReads(ledger: PromotionLedger, local: LocalReleasePorts | null, mer
   return { state, reads };
 }
 const ledger = (fields: Partial<PromotionLedger> = {}): PromotionLedger => ({ mainSha: MAIN, promotedSha: PROMOTED, promotedAt: iso(start - 60 * minute), behind: 2, candidates: [{ id: '20300501T100000Z', sha: PROMOTED, cutAt: iso(start - 120 * minute), prs: 2, queued: 2 }], ...fields });
+const options = (now: number, frozen?: { sha: string; since: string } | null) => ({ now, everyMinutes: 10, intervalMs: 20_000, ...(frozen !== undefined ? { frozen, watchedTip: MAIN } : {}) });
+/** One local run through cut → validate → promote/revert, waiting out the in-flight cycles the budget would otherwise span. */
 const cycle = async (previous: PromotionState | null, reads: PromotionReads, now: number, frozen?: { sha: string; since: string } | null) => {
-  const result = await promotionCycle(previous, reads, { now, everyMinutes: 10, intervalMs: 20_000, ...(frozen !== undefined ? { frozen, watchedTip: MAIN } : {}) });
+  const result = reads.local
+    ? await settleLocalPromotion(previous, reads as PromotionReads & { local: LocalReleasePorts }, options(now, frozen))
+    : await promotionCycle(previous, reads, options(now, frozen));
   return { ...result, state: promotionStateSchema.parse(result.state) };
 };
 
@@ -159,6 +163,7 @@ test('unit:promotion-local-ports — under a control-plane merger promotionCycle
   result = await cycle(null, stubReads(ledger(), broken.local).reads, start);
   assert.match(result.failure!, /Cut candidate 20300501T120000Z \([0-9a-f]{12}\) failed before a verdict was recorded; it is resumed at the next read: UAT serves candidate X/);
   assert.equal(result.state.cutSha, CUT, 'the cut is stamped so the next attempt resumes rather than re-cuts');
+  assert.equal(result.state.inFlight, false, 'a failed validation clears inFlight so the next cycle can resume');
   // Nothing to promote, off, or a tip the watch has not classified: no port runs.
   const none = fakeLocal();
   result = await cycle(null, stubReads(ledger({ mainSha: PROMOTED }), none.local).reads, start);
@@ -187,7 +192,7 @@ test('unit:promotion-local-ports — under a control-plane merger promotionCycle
   assert.ok(readCaseTags(root).some(entry => entry.id === 'sign-in' && entry.tags.length > 0), 'the case tags are read');
 });
 
-test('unit:candidate-freeze-honoured — with state.mainWatch.frozen set the local cycle runs no cut, UAT deploy, promote or revert, and the promotion reason names the frozen sha; lifted, the next cycle runs them', async () => {
+test('unit:candidate-freeze-honoured — with state.mainWatch.frozen set the local cycle runs no cut, UAT deploy, promote or revert, and the promotion reason names the frozen sha; lifted, the next cycle runs them; a freeze that lands after validation still stops promote and revert', async () => {
   const frozen = { sha: sha('foreign'), since: iso(start - 10 * minute) };
   const local = fakeLocal({ validation: failed });
   const { state: stub, reads } = stubReads(ledger(), local.local);
@@ -203,7 +208,22 @@ test('unit:candidate-freeze-honoured — with state.mainWatch.frozen set the loc
   // Lifted, the cut runs and the failed case reverts.
   const lifted = await cycle(held.state, reads, start + minute, null);
   assert.deepEqual(local.calls, ['history', 'cut', `uat:${candidate.id}`, `validate:${candidate.id}`, 'revertInputs', 'revert:GY-2']);
-  assert.equal(lifted.dispatched, true);
+  assert.equal(lifted.dispatched, true); assert.equal(lifted.state.inFlight, false);
+  // A freeze that lands while validation is in flight (or after it settles) stops promote and revert; the reason names the sha.
+  const mid = fakeLocal({ validation: failed });
+  const midReads = stubReads(ledger(), mid.local).reads as PromotionReads & { local: LocalReleasePorts };
+  const cut = await localPromotionCycle(null, midReads, { now: start, everyMinutes: 10, intervalMs: 20_000, frozen: null, watchedTip: MAIN });
+  assert.equal(cut.state.inFlight, true, 'the cut stamps inFlight before the long validation');
+  assert.deepEqual(mid.calls.filter(call => call.startsWith('promote') || call.startsWith('revert')), [], 'promote/revert wait for a later cycle');
+  await localPromotionIdle(mid.local);
+  const frozenAfter = await localPromotionCycle(cut.state, midReads, { now: start + minute, everyMinutes: 10, intervalMs: 20_000, frozen, watchedTip: MAIN });
+  assert.equal(frozenAfter.state.inFlight, true, 'the validated candidate stays in flight under the freeze');
+  assert.equal(frozenAfter.state.reason, promotionFrozenReason(frozen));
+  assert.ok(frozenAfter.state.reason!.includes(frozen.sha));
+  assert.deepEqual(mid.calls.filter(call => call.startsWith('promote') || call.startsWith('revert:') || call === 'revertInputs'), [], 'no promote or revert while frozen');
+  const unfrozen = await localPromotionCycle(frozenAfter.state, midReads, { now: start + 2 * minute, everyMinutes: 10, intervalMs: 20_000, frozen: null, watchedTip: MAIN });
+  assert.equal(unfrozen.state.inFlight, false);
+  assert.ok(mid.calls.includes('revert:GY-2'), 'lifted, the revert runs');
   // A tip the watch has not classified waits too, naming the tip.
   const unseen = fakeLocal();
   const waiting = await promotionCycle(null, stubReads(ledger(), unseen.local).reads, { now: start, everyMinutes: 10, intervalMs: 20_000, frozen: null, watchedTip: sha('older-tip') });
@@ -247,8 +267,36 @@ test('unit:promotion-github-snapshot — under a github merger (or none) the dis
   // Under a control-plane merger the same reads run the local ports and never gh.
   const controlPlane = promotionReads(config, '/repo', run, true, false, { merger: async () => 'control-plane', local: local.local })!;
   const ghBefore = calls.filter(call => call.command === 'gh').length;
-  const switched = await promotionCycle(null, controlPlane, { now: start, everyMinutes: 10, intervalMs: 20_000 });
+  const switched = await settleLocalPromotion(null, controlPlane as PromotionReads & { local: LocalReleasePorts }, { now: start, everyMinutes: 10, intervalMs: 20_000 });
   assert.equal(calls.filter(call => call.command === 'gh').length, ghBefore, 'no gh call under control-plane');
   assert.equal(switched.dispatched, true); assert.deepEqual(local.calls.slice(0, 2), ['history', 'cut']);
   assert.match(switched.state.reason!, /^Cut candidate/);
+  assert.equal(switched.state.inFlight, false);
+});
+
+test('unit:promotion-local-inflight — a cut stamps PromotionState.inFlight across cycles until UAT settles; a budget-deferred validation reports the candidate in flight and clears the flag only after promote or revert', async () => {
+  let releaseValidate: () => void;
+  const gate = new Promise<void>(resolve => { releaseValidate = resolve; });
+  const slow = fakeLocal();
+  const validate = slow.local.validate;
+  slow.local.validate = async id => { await gate; return validate(id); };
+  const reads = stubReads(ledger(), slow.local).reads as PromotionReads & { local: LocalReleasePorts };
+  const cut = await localPromotionCycle(null, reads, { now: start, everyMinutes: 10, intervalMs: 20_000, frozen: null, watchedTip: MAIN });
+  assert.equal(cut.dispatched, true);
+  assert.equal(cut.state.inFlight, true, 'inFlight is set before validation returns');
+  assert.equal(cut.state.candidateAtDispatch, candidate.id);
+  assert.match(cut.state.reason!, /UAT validation is in flight/);
+  for (let waited = 0; !slow.calls.includes(`uat:${candidate.id}`) && waited < 50; waited++) await new Promise(resolve => setTimeout(resolve, 1));
+  assert.deepEqual(slow.calls, ['history', 'cut', `uat:${candidate.id}`], 'validate has started but not returned');
+  // A later cycle while validation still runs keeps inFlight and starts no second cut.
+  const waiting = await localPromotionCycle(cut.state, reads, { now: start + 20_000, everyMinutes: 10, intervalMs: 20_000, frozen: null, watchedTip: MAIN });
+  assert.equal(waiting.state.inFlight, true);
+  assert.equal(slow.calls.filter(call => call === 'cut').length, 1, 'no second cut while in flight');
+  assert.match(waiting.state.reason!, /is in validation/);
+  releaseValidate!();
+  await localPromotionIdle(slow.local);
+  const finished = await localPromotionCycle(waiting.state, reads, { now: start + minute, everyMinutes: 10, intervalMs: 20_000, frozen: null, watchedTip: MAIN });
+  assert.equal(finished.state.inFlight, false, 'inFlight clears only after the run settles');
+  assert.equal(finished.run?.promoted, true);
+  assert.ok(slow.calls.includes(`promote:${candidate.id}`));
 });

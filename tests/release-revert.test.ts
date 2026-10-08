@@ -8,7 +8,7 @@ import EmbeddedPostgres from 'embedded-postgres';
 import { applyCandidateRevert, candidateRevertReason, candidateRevertsOf, failingRequiredCases, revertCandidateItem, revertLedgerKind, revertRecordKey, revertTarget, type CandidateItemDelta, type RevertPorts, type RevertRecordEvent } from '../src/release-revert.js';
 import { revertRecordBodySchema, revertReopenedReason, unheldRevertRefusal, unrevertableRefusal } from '../src/server/merge-record.js';
 import { classifyMainCommits, mainWatchInputs, mainWatchVerdict, type MainWatchCommit } from '../src/daemon/main-watch.js';
-import { localPromotionCycle, type LocalCandidate, type LocalReleasePorts, type LocalValidation } from '../src/daemon/promotion-local.js';
+import { settleLocalPromotion, type LocalCandidate, type LocalReleasePorts, type LocalValidation } from '../src/daemon/promotion-local.js';
 import { localReleasePorts } from '../src/daemon/release-ports.js';
 import type { PromotionReads } from '../src/daemon/deployment.js';
 import { cut, itemsFromCommits, readLedger, type E2eCaseRecord, type ReleaseCandidate, type UatRecord } from '../src/release-candidate.js';
@@ -199,8 +199,9 @@ test('integration:candidate-revert-reopens-item — a failed required case makes
     verify: async () => { calls.push('verify'); throw new Error('nothing to verify'); },
   };
   const reads: PromotionReads & { local: LocalReleasePorts } = { ledger: async () => ({ mainSha: tipBefore, promotedSha: null, promotedAt: null, behind: null, candidates: [{ id: cutCandidate.id, sha: cutCandidate.sha, cutAt: cutCandidate.cutAt, prs: 2, queued: 0 }] }), runs: async () => [], dispatch: async () => { throw new Error('no dispatch in control-plane mode'); }, local };
-  const result = await localPromotionCycle(null, reads, { now: start, everyMinutes: 10, intervalMs: 20_000, frozen: null, watchedTip: tipBefore });
+  const result = await settleLocalPromotion(null, reads, { now: start, everyMinutes: 10, intervalMs: 20_000, frozen: null, watchedTip: tipBefore });
   assert.equal(result.failure, null, result.state.reason ?? '');
+  assert.equal(result.state.inFlight, false);
   assert.deepEqual(calls, ['cut', `uat:${cutCandidate.id}`, `validate:${cutCandidate.id}`], 'promote and verify never run: production stays on the previous release');
   const revert = result.run!.revert!;
   assert.deepEqual([revert.target.key, revert.target.map, revert.target.case, revert.target.step], ['GY-2', 'verification/server.md', 'sign-in', 'open the Work view'], 'the server map, named by the case\'s server tag, covers GY-2\'s routes delta');

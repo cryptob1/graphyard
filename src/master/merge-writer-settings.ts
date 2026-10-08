@@ -60,9 +60,9 @@ export const defaultCandidateEveryMerges = 10;
 /** A candidate is cut once any merge after the newest cut has waited this long, main quiet or not: a lone merge never waits for nine more. */
 export const defaultCandidateIdleMinutes = 15;
 /** The widest cut an install may ask for: past this a failed candidate implicates too many changes to revert by area. */
-export const maxCandidateEveryMerges = 100;
-/** The longest a merge may wait for its candidate: a day, past which the cut is no longer continuous delivery. */
-export const maxCandidateIdleMinutes = 24 * 60;
+export const maxCandidateEveryMerges = 50;
+/** The longest a merge may wait for its candidate: four hours, past which the cut is no longer continuous delivery. */
+export const maxCandidateIdleMinutes = 4 * 60;
 
 /**
  * `run.candidates` in .graphyard/master.json: when the loop cuts a release candidate itself
