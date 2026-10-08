@@ -166,6 +166,11 @@ export const promotionStateSchema = z.object({
   dispatchedAt: z.string().nullable(),
   lastDispatchAt: z.string().nullable(),
   cutSha: z.string().nullable().optional(),
+  /** GY-1491: the newest release candidates, each with the merges it carries and those on main behind it. */
+  candidates: z.array(z.object({
+    id: z.string().max(100), sha: z.string().max(64), cutAt: z.string().max(64),
+    prs: z.number().int().min(0).nullable(), queued: z.number().int().min(0).nullable(),
+  }).strict()).max(5).optional(),
   nextDueAt: z.string().nullable(),
   reason: z.string().max(500).nullable(),
 }).strict();

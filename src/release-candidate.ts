@@ -6,9 +6,10 @@ import { join } from 'node:path';
 /**
  * Release candidates: one moving main, a frozen candidate, UAT, then that exact SHA in production.
  *
- * A candidate is cut from main's tip on a schedule or on demand and recorded as an annotated tag
- * `rc/ID` on that exact commit, whose message is the candidate record: its SHA, when and why it
- * was cut, and the delivered items promoting it would bring to production. Cutting writes a tag
+ * A candidate is cut from main on a schedule or on demand and recorded as an annotated tag `rc/ID`
+ * on that exact commit, whose message is the candidate record: its SHA, when and why it was cut,
+ * and the delivered items promoting it would bring to production. It carries at most `maxPrs`
+ * merges after the previous candidate (GY-1491): main's tip, or the commit of that many merges. Cutting writes a tag
  * and nothing else, so merges to main never pause while a candidate is under test.
  *
  * UAT and production are Railway environments whose service tracks a branch of its own
@@ -17,7 +18,7 @@ import { join } from 'node:path';
  * `rc-uat/ID` and only a passing record whose deployment served the candidate SHA lets
  * `release/production` move to it, recorded as `rc-production/ID`. A failed candidate files one
  * follow-up item naming the failing suite and the SHA, changes nothing about the deliveries it
- * contains, and the next cut proceeds from main's tip (fix forward). A failure the release contract
+ * contains, and the next cut starts after it (fix forward). A failure the release contract
  * attributes to a customer outcome is a release hold instead (src/release-holds.ts, GY-1378).
  */
 
@@ -35,6 +36,14 @@ export interface ReleaseCandidate {
   id: string; sha: string; cutAt: string; trigger: CutTrigger;
   /** The newest candidate already promoted to production, which the item list is measured from. */
   since: { id: string; sha: string } | null;
+  /**
+   * GY-1491: the candidate this one starts after (the newest cut, promoted or not), which its merges
+   * are counted from; null for the first candidate. Absent on records cut before GY-1491.
+   */
+  from?: { id: string; sha: string } | null;
+  /** First-parent merges this candidate carries beyond `from`, and those left on main behind it at the cut. */
+  prs?: number;
+  queued?: number;
   items: CandidateItem[];
 }
 export interface SuiteResult { name: string; passed: boolean; detail: string }
@@ -86,18 +95,45 @@ export function itemsFromCommits(commits: readonly CommitSummary[]): CandidateIt
 }
 
 /**
- * Pure: the candidate a cut records, or why there is nothing to cut. The previous candidate's
- * outcome never matters — a failed candidate leaves main moving and the next cut proceeds — but a
- * tip that is already a candidate is not cut twice.
+ * GY-1491: the most merged pull requests one candidate carries, so a failed candidate implicates at
+ * most this many changes. `GRAPHYARD_RC_MAX_PRS` (or `release cut --max-prs N`) sets another.
  */
-export function cutCandidate(input: { tip: string; now: Date; trigger: CutTrigger; latest: ReleaseCandidate | null; promoted: ReleaseCandidate | null; commits: readonly CommitSummary[] }):
+export const defaultMaxPrs = 10;
+export function maxPrsFrom(value: string | number | undefined | null) {
+  if (value === undefined || value === null || value === '') return defaultMaxPrs;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1) throw new Error(`The release candidate PR cap must be a positive integer, got ${JSON.stringify(value)}`);
+  return parsed;
+}
+
+/**
+ * Pure: the candidate a cut records, or why there is nothing to cut. A candidate starts after the
+ * newest one cut (`latest`), whatever its outcome — a failed candidate leaves main moving and its
+ * successor starts after it (fix forward) — and carries at most `maxPrs` first-parent merges in
+ * merge order: with more waiting, it is cut at the `maxPrs`th merge and the rest stay queued for the
+ * next candidate, cut once this one concludes. `commits` are main's first-parent commits after the
+ * promoted candidate (the newest ones when none is promoted), newest first, as `git log
+ * --first-parent` lists them; the item list keeps measuring from the promoted candidate, since
+ * promoting this one brings a failed predecessor's deliveries too. The first candidate ever has
+ * nothing to start after, so it takes main's tip. A tip that is already a candidate is not cut twice.
+ */
+export function cutCandidate(input: { tip: string; now: Date; trigger: CutTrigger; latest: ReleaseCandidate | null; promoted: ReleaseCandidate | null; commits: readonly CommitSummary[]; maxPrs?: number }):
   { cut: true; candidate: ReleaseCandidate } | { cut: false; reason: string } {
   assertSha(input.tip, 'main tip');
-  if (input.latest?.sha === input.tip) return { cut: false, reason: `main tip ${input.tip} is already candidate ${input.latest.id}` };
+  const { latest } = input;
+  if (latest?.sha === input.tip) return { cut: false, reason: `main tip ${input.tip} is already candidate ${latest.id}` };
+  const maxPrs = maxPrsFrom(input.maxPrs);
+  const start = latest ? input.commits.findIndex(commit => commit.sha === latest.sha) : -1;
+  const merges = (start >= 0 ? input.commits.slice(0, start) : input.commits).slice().reverse();
+  if (latest && !merges.length) return { cut: false, reason: `main has no merge after candidate ${latest.id} (${latest.sha})` };
+  const capped = !!latest && merges.length > maxPrs;
+  const sha = capped ? merges[maxPrs - 1].sha : input.tip;
   return { cut: true, candidate: {
-    id: candidateId(input.now), sha: input.tip, cutAt: input.now.toISOString(), trigger: input.trigger,
+    id: candidateId(input.now), sha, cutAt: input.now.toISOString(), trigger: input.trigger,
     since: input.promoted ? { id: input.promoted.id, sha: input.promoted.sha } : null,
-    items: itemsFromCommits(input.commits),
+    from: latest ? { id: latest.id, sha: latest.sha } : null,
+    prs: capped ? maxPrs : merges.length, queued: capped ? merges.length - maxPrs : 0,
+    items: itemsFromCommits(input.commits.slice(Math.max(0, input.commits.findIndex(commit => commit.sha === sha)))),
   } };
 }
 
@@ -250,13 +286,14 @@ export function firstParentCommits(git: Git, tip: string, since: string | null):
 export const syncLedger = (git: Git, base: string) => git(['fetch', '--quiet', '--force', 'origin', `+refs/heads/${base}:refs/remotes/origin/${base}`, '+refs/tags/*:refs/tags/*']);
 
 /** Cut a candidate from the remote base branch's tip, as recorded in the remote's tags. */
-export function cut(git: Git, options: { base: string; trigger: CutTrigger; now: Date; push: boolean }) {
+export function cut(git: Git, options: { base: string; trigger: CutTrigger; now: Date; push: boolean; maxPrs?: number }) {
   syncLedger(git, options.base);
   const tip = git(['rev-parse', `refs/remotes/origin/${options.base}`]).trim();
   const ledger = readLedger(git);
-  const promoted = latestPromoted(ledger);
-  const result = cutCandidate({ tip, now: options.now, trigger: options.trigger, latest: ledger.candidates[0] ?? null, promoted, commits: firstParentCommits(git, tip, promoted?.sha ?? null) });
-  if (result.cut) writeRecord(git, `${candidateTagPrefix}${result.candidate.id}`, tip, result.candidate, options.push);
+  const promoted = latestPromoted(ledger), latest = ledger.candidates[0] ?? null;
+  const maxPrs = options.maxPrs ?? maxPrsFrom(process.env.GRAPHYARD_RC_MAX_PRS);
+  const result = cutCandidate({ tip, now: options.now, trigger: options.trigger, latest, promoted, maxPrs, commits: firstParentCommits(git, tip, promoted?.sha ?? null) });
+  if (result.cut) writeRecord(git, `${candidateTagPrefix}${result.candidate.id}`, result.candidate.sha, result.candidate, options.push);
   return result;
 }
 
@@ -571,7 +608,7 @@ export function promote(git: Git, id: string, options: { base: string; push: boo
 /** Every candidate with its UAT and production state, newest first. */
 export const ledgerStatus = (ledger: Ledger) => ledger.candidates.map(candidate => {
   const uat = ledger.uat.find(record => record.id === candidate.id) ?? null;
-  return { id: candidate.id, sha: candidate.sha, cutAt: candidate.cutAt, trigger: candidate.trigger, items: candidate.items.map(item => item.key),
+  return { id: candidate.id, sha: candidate.sha, cutAt: candidate.cutAt, trigger: candidate.trigger, prs: candidate.prs ?? null, queued: candidate.queued ?? null, items: candidate.items.map(item => item.key),
     uat: uat ? { result: uat.result, at: uat.at, failing: failingSuites(uat).map(suite => suite.name), followUp: uat.followUp,
       ...(uat.e2e ? { blocking: uat.e2e.blocking, unrun: uat.e2e.cases.filter(entry => entry.verdict === 'unrun').map(entry => entry.case) } : {}), ...(uat.holds?.length ? { holds: uat.holds } : {}) } : null,
     production: ledger.production.find(record => record.id === candidate.id)?.at ?? null };

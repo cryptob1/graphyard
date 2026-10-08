@@ -17,7 +17,8 @@ import * as e2eCase from '../src/e2e/case.js';
 import { e2eSuite, type E2eReport } from '../src/e2e/runner.js';
 import type { HoldRecord } from '../src/release-holds.js';
 import { readRecords } from '../src/release-candidate.js';
-import { defaultPromoteEveryMinutes, promotionCycle, promotionReadWindows, type PromotionLedger, type PromotionReads, type PromotionRun } from '../src/daemon/deployment.js';
+import { defaultPromoteEveryMinutes, promotionCycle, promotionReads, promotionReadWindows, promotionStatus, type PromotionLedger, type PromotionReads, type PromotionRun } from '../src/daemon/deployment.js';
+import type { MasterConfig } from '../src/master.js';
 import { promotionStateSchema, type PromotionState } from '../src/daemon/state.js';
 import { defaultDeliverySpeedTargets, deliverySpeed, deliverySpeedBreaches } from '../src/flow-analytics.js';
 
@@ -699,4 +700,82 @@ test('unit:promotion-latency-target — master status judges merged→production
   assert.deepEqual(deliverySpeedBreaches(within).filter(breach => breach.measure === 'mergedToProduction'), []);
   const slow = deliverySpeed(Array.from({ length: 10 }, (_, index) => item(index, hour)), { now, productionEnvironment: 'production' });
   assert.match(deliverySpeedBreaches(slow).find(breach => breach.measure === 'mergedToProduction')?.text ?? '', /p90 is 1h over 7 days \(10 items\), above the 45 min target/);
+});
+
+// GY-1491: a candidate carrying every merge since the last promotion implicates all of them when it
+// fails and holds back everything behind it. Each candidate now carries at most 10.
+test('unit:release-candidate-pr-cap — a backlog of 23 merges is cut into candidates of 10, 10 and 3 in merge order; a failed candidate\'s successor starts after it; the loop cuts the queued merges as soon as a capped candidate concludes; master status shows each candidate\'s PR count and queue', async () => {
+  // Imported here, not at the top, so the file still loads (and this test fails as a case) without GY-1491.
+  const { defaultMaxPrs, maxPrsFrom } = await import('../src/release-candidate.js') as Record<string, any>;
+  assert.equal(defaultMaxPrs, 10);
+  assert.equal(maxPrsFrom(undefined), 10); assert.equal(maxPrsFrom('4'), 4);
+  assert.throws(() => maxPrsFrom('0'), /positive integer/);
+  const repo = await repository();
+  repo.merge('GY-1', 1);
+  const first = cut(repo.git, { base: 'main', trigger: 'manual', now: new Date('2026-10-07T10:00:00Z'), push: true }) as any;
+  assert.ok(first.cut); assert.equal(first.candidate.from, null, 'the first candidate has nothing to start after');
+  const merges = Array.from({ length: 23 }, (_, index) => repo.merge(`GY-${100 + index}`, 100 + index));
+  const keys = (candidate: any) => candidate.items.map((item: any) => item.key);
+  const series = (from: number, to: number) => Array.from({ length: to - from }, (_, index) => `GY-${100 + from + index}`).reverse();
+
+  // The first ten merges in merge order, cut at the tenth; thirteen stay queued behind it.
+  const a = cut(repo.git, { base: 'main', trigger: 'manual', now: new Date('2026-10-07T11:00:00Z'), push: true }) as any;
+  assert.ok(a.cut);
+  assert.equal(a.candidate.sha, merges[9], 'cut at the 10th merge, not main\'s tip');
+  assert.deepEqual([a.candidate.prs, a.candidate.queued], [10, 13]);
+  assert.deepEqual(a.candidate.from, { id: first.candidate.id, sha: first.candidate.sha });
+  assert.deepEqual(keys(a.candidate).slice(0, 10), series(0, 10));
+  assert.equal(run(repo.origin, 'rev-parse', `refs/tags/rc/${a.candidate.id}^{commit}`), merges[9], 'the tag sits on the capped commit');
+
+  // It fails UAT: its successor starts after it, carrying the next ten, and its own deliveries ride along unpromoted.
+  const failed = await validateAndRecord(repo.git, a.candidate.id, 'https://uat.example.test', [recordingSuite('long', false, [])],
+    { base: 'main', push: true, timeoutMs: 0, fetcher: deployment([merges[9]]).fetcher, file: async () => 'GY-999' });
+  assert.equal(failed.record.result, 'failed');
+  const b = cut(repo.git, { base: 'main', trigger: 'manual', now: new Date('2026-10-07T12:00:00Z'), push: true }) as any;
+  assert.equal(b.candidate.sha, merges[19]);
+  assert.deepEqual([b.candidate.prs, b.candidate.queued], [10, 3]);
+  assert.deepEqual(b.candidate.from, { id: a.candidate.id, sha: merges[9] }, 'the failed candidate\'s successor starts after it');
+  assert.deepEqual(keys(b.candidate).slice(0, 20), series(0, 20), 'nothing was promoted, so promoting it would bring the failed candidate\'s deliveries too');
+
+  // The last three reach main's tip, and a tip already cut is not cut again.
+  const c = cut(repo.git, { base: 'main', trigger: 'manual', now: new Date('2026-10-07T13:00:00Z'), push: true }) as any;
+  assert.equal(c.candidate.sha, merges[22]);
+  assert.deepEqual([c.candidate.prs, c.candidate.queued], [3, 0]);
+  const again = cut(repo.git, { base: 'main', trigger: 'manual', now: new Date('2026-10-07T14:00:00Z'), push: true }) as any;
+  assert.equal(again.cut, false);
+  const listed = ledgerStatus(readLedger(repo.git));
+  assert.deepEqual(listed.slice(0, 3).map(entry => [entry.prs, entry.queued]), [[3, 0], [10, 3], [10, 13]], 'release status lists each candidate\'s PR count and queue at its cut');
+
+  // A configured cap: four merges after the last candidate, at most two each.
+  for (let index = 0; index < 4; index++) repo.merge(`GY-${200 + index}`, 200 + index);
+  const small = cut(repo.git, { base: 'main', trigger: 'manual', now: new Date('2026-10-07T15:00:00Z'), push: true, maxPrs: 2 }) as any;
+  assert.deepEqual([small.candidate.prs, small.candidate.queued], [2, 2]);
+
+  // The loop reads the newest candidates with what is queued behind each on main now, for master status.
+  const config = { repository: 'owner/repo', baseBranch: 'main' } as MasterConfig;
+  const reads = promotionReads(config, repo.work, (command, args) => execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }), true)!;
+  const ledger = await reads.ledger();
+  assert.deepEqual(ledger.candidates!.map(entry => [entry.id, entry.prs, entry.queued]),
+    [[small.candidate.id, 2, 2], [c.candidate.id, 3, 4], [b.candidate.id, 10, 7], [a.candidate.id, 10, 17], [first.candidate.id, 2, 27]]);
+
+  // A capped candidate concludes with main unmoved since its dispatch: the queued merges are dispatched at once rather than waiting for a new merge.
+  const T = Date.parse('2026-10-07T16:00:00Z'), min = 60_000, iso = (at: number) => new Date(at).toISOString();
+  const MAIN = promoSha('e'), CAPPED = promoSha('f');
+  const cappedLedger = (cutAt: number): PromotionLedger => ({ mainSha: MAIN, promotedSha: promoSha('a'), promotedAt: null, behind: 23,
+    candidates: [{ id: '20261007T160100Z', sha: CAPPED, cutAt: iso(cutAt), prs: 10, queued: 13 }] });
+  const { state: stub, reads: loopReads } = promotionStub(cappedLedger(T + min), [{ status: 'in_progress', createdAt: iso(T), event: 'workflow_dispatch', headSha: MAIN }]);
+  const previous = promotionStateSchema.parse({ checkedAt: iso(T), mainSha: MAIN, promotedSha: promoSha('a'), promotedAt: null, behind: 23, ledgerReadAt: iso(T), inFlight: true,
+    runsReadAt: iso(T), dispatchedAt: iso(T), lastDispatchAt: iso(T), cutSha: MAIN, candidates: [], nextDueAt: null, reason: null });
+  stub.runs = [{ ...stub.runs[0], status: 'completed' }];
+  const concluded = await promotionCycle(previous, loopReads, { now: T + 30 * min, everyMinutes: 10, intervalMs: 20_000 });
+  assert.equal(concluded.dispatched, true, 'the merges queued behind a capped candidate go out once it concludes');
+  assert.match(concluded.state.reason ?? '', /13 merge\(s\) queued behind candidate 20261007T160100Z/);
+  const report = promotionStatus(promotionStateSchema.parse(concluded.state));
+  assert.deepEqual(report.candidates, [{ id: '20261007T160100Z', sha: CAPPED, prs: 10, queued: 13 }]);
+  // An older candidate's queue is not this run's: a run that cut nothing waits for main to move, as before.
+  stub.ledger = cappedLedger(T - 60 * min);
+  stub.runs = [{ status: 'completed', createdAt: iso(T), event: 'workflow_dispatch', headSha: MAIN }];
+  const uncut = await promotionCycle(previous, loopReads, { now: T + 30 * min, everyMinutes: 10, intervalMs: 20_000 });
+  assert.equal(uncut.dispatched, false);
+  assert.match(uncut.state.reason ?? '', /did not promote it/);
 });

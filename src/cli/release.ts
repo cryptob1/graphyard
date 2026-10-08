@@ -6,7 +6,7 @@ import { resolveWork } from './context.js';
 import { releaseLeaseCommand } from './lease.js';
 import {
   apiSuite, assessProductionServing, awaitServing, commandSuite, cut, deployToUat, endpointSuite, findCandidate, followUpItem, followUpRequestId, gitIn,
-  ledgerStatus, promote, readLedger, readRecords, readServed, syncLedger, unacceptedFlaky, validateAndRecord, writeRecord, type CutTrigger, type FlakyAcceptance, type Suite,
+  ledgerStatus, maxPrsFrom, promote, readLedger, readRecords, readServed, syncLedger, unacceptedFlaky, validateAndRecord, writeRecord, type CutTrigger, type FlakyAcceptance, type Suite,
 } from '../release-candidate.js';
 import { acceptancesFrom, foldHolds, foldRecord, holdItemsFor, holdTag, holdTagPrefix, releaseHolds, type HoldRecord } from '../release-holds.js';
 import { checkRepositoryContract, contractFile, loadContract } from '../e2e/case.js';
@@ -27,7 +27,7 @@ function flags(args: string[]) {
 }
 
 const workKey = (created: any) => String(created?.key ?? created?.work?.key ?? created?.id);
-const usage = 'Use release contract | release cut [--trigger schedule|manual] | release status | release uat ID | release validate ID --url URL [--api] [--check PATH]... [--suite NAME=COMMAND]... [--e2e-report FILE] | release follow-up ID | release holds | release fold OUTCOME --decision ID | release promote ID | release verify --url URL';
+const usage = 'Use release contract | release cut [--trigger schedule|manual] [--max-prs N] | release status | release uat ID | release validate ID --url URL [--api] [--check PATH]... [--suite NAME=COMMAND]... [--e2e-report FILE] | release follow-up ID | release holds | release fold OUTCOME --decision ID | release promote ID | release verify --url URL';
 
 /** Every applied evidence decision on the hold items the candidate's failures landed in (GY-1378). */
 async function acceptancesOf(api: (path: string) => Promise<any>, git: ReturnType<typeof gitIn>, candidate: string): Promise<FlakyAcceptance[]> {
@@ -44,9 +44,11 @@ export const releaseCommands = defineCommands([
       '  release contract              The pre-cut check: every case e2e/contract.json binds exists,',
       '                                validates, targets uat and is required, and every required case',
       '                                is bound to an outcome; refusals name the outcome and case',
-      '  release cut [--trigger schedule|manual] [--base main] [--no-push]',
-      "                                Record main's tip as a release candidate (tag rc/ID) with the",
-      '                                deliveries it carries; merges to main never pause',
+      '  release cut [--trigger schedule|manual] [--max-prs N] [--base main] [--no-push]',
+      "                                Record main as a release candidate (tag rc/ID) with the",
+      '                                deliveries it carries; merges to main never pause. It takes at',
+      '                                most N merges after the last candidate (GRAPHYARD_RC_MAX_PRS,',
+      '                                default 10) and leaves the rest queued for the next cut',
       '  release status                Every candidate with its UAT verdict and production promotion',
       '  release uat ID|latest         Deploy the candidate to UAT: release/uat moves to its exact SHA',
       '  release validate ID --url URL [--api] [--check PATH]... [--suite NAME=COMMAND]... [--wait SECONDS]',
@@ -93,7 +95,8 @@ export const releaseCommands = defineCommands([
       if (id === 'cut') {
         const trigger = (options.one('trigger') ?? 'manual') as CutTrigger;
         if (trigger !== 'schedule' && trigger !== 'manual') throw new Error('--trigger is schedule or manual');
-        return print(cut(git, { base, trigger, now: new Date(), push }));
+        const maxPrs = maxPrsFrom(options.one('max-prs') ?? process.env.GRAPHYARD_RC_MAX_PRS);
+        return print(cut(git, { base, trigger, now: new Date(), push, maxPrs }));
       }
       if (id === 'status' || !id) { syncLedger(git, base); return print(ledgerStatus(readLedger(git))); }
       if (id === 'uat') return print(deployToUat(git, target, base));
