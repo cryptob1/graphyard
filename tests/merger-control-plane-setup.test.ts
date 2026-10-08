@@ -1,7 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { setupMaster } from '../src/master.js';
 import { mergerNotRequired, setupChecklist, statusControlPlaneMerger } from '../src/model/setup-checklist.js';
 import { setupFromZeroChecks, setupLine, setupSteps } from '../src/setup-from-zero.js';
 import { managedInstructions } from '../src/repository-setup.js';
@@ -97,4 +100,23 @@ test('unit:agents-block-control-plane — the AGENTS.md worker block says comple
   const recorded = managedServerUrl(agents);
   assert.ok(recorded, 'this repository\'s AGENTS.md names its server');
   assert.ok([managedInstructions(agents, recorded!), managedInstructions(agents, recorded!, { merger: 'control-plane' })].includes(agents), 'this repository\'s AGENTS.md is one of the two renderings, regenerated to match');
+});
+
+test('unit:agents-block-control-plane — master init renders the worker block from the merger /api/status reports: --head SHA under control-plane, the pull-request text under github, and a rerun after the setting changes rewrites it', async () => {
+  const root = await temporaryDirectory('merger-agents-block'), credentials = await temporaryDirectory('merger-agents-block-credentials');
+  execFileSync('git', ['init', '-q', root]);
+  execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
+  const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
+  const init = async (merger: 'github' | 'control-plane' | null) => {
+    const status = async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, ...(merger ? { mergeWriter: { merger } } : {}) }));
+    await setupMaster(root, { url: 'https://graphyard.example', token: 'coordinator-token-'.padEnd(40, 'x'), cliPath: launcher, credentialDirectory: credentials, herdrWorkspace: 'wE' }, status as typeof fetch);
+    return readFile(join(root, 'AGENTS.md'), 'utf8');
+  };
+  const control = await init('control-plane');
+  assert.match(control, /Submit the commit with `complete GY-N EPOCH --head SHA`/); assert.ok(!control.includes('PR_NUMBER'));
+  assert.equal(control, managedInstructions('', 'https://graphyard.example', { merger: 'control-plane' }), 'master init writes the control-plane rendering');
+  const github = await init('github');
+  assert.match(github, /Submit the PR with `complete GY-N EPOCH PR_NUMBER`/); assert.ok(!github.includes('--head'));
+  assert.equal(github, managedInstructions('', 'https://graphyard.example'), 'a rerun under the github merger restores the current text');
+  assert.equal(await init(null), github, 'a server that reports no merger renders the current text');
 });

@@ -197,7 +197,8 @@ export async function setupMaster(root: string, input: { url: string; token: str
   let existing = ''; let mode = 0o644;
   try { const info = await lstat(instructionsFile); if (!info.isFile()) throw new Error('Refusing to replace a non-regular AGENTS.md'); mode = info.mode & 0o777; existing = await readFile(instructionsFile, 'utf8'); }
   catch (error: any) { if (error.code !== 'ENOENT') throw error; }
-  const instructions = managedInstructions(withoutMasterInstructions(existing), url);
+  // GY-1553: the worker block's submission form follows the install's recorded merger (control-plane: `complete GY-N EPOCH --head SHA`).
+  const instructions = managedInstructions(withoutMasterInstructions(existing), url, { merger: status.mergeWriter?.merger ?? null });
   const directory = await localDirectory(root);
   await atomicPrivateText(credentialFile, token);
   await atomicPrivateWrite(resolve(directory, 'master.json'), config);
