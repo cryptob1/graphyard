@@ -5,6 +5,7 @@ import { demand, type Principal } from './model.js';
 import type { Store } from './store.js';
 import { RegistryError, applyRegistryMutation, chooseSession, emptyRegistry, fleetView, foldObservations, liveSessions, endRegistrySession, runOutcomes, refusalHistoryLimit, registryMutationSchemas, selectionRequestSchema, settleSessions, supersededByRequest,
   type AgentRegistry as RegistryDocument, type FleetSession, type RegistryMutation } from './model/registry.js';
+import { implementerProvider, type ReviewDiversity } from './model/review-diversity.js';
 
 /**
  * The agent registry as control-plane state.
@@ -131,7 +132,7 @@ export class AgentRegistry {
       }
       // Its quotas and the smoke tests it ran (GY-446), for the logins on its own host only.
       if (foldObservations(registry, request, { actor: actor.id, at })) changed = true;
-      const choice = chooseSession(registry, request, now.getTime());
+      const choice = chooseSession(registry, request, now.getTime(), await this.reviewDiversity(db, registry, request));
       let result: { selected: boolean; reason: string; skipped: typeof choice.skipped; session: FleetSession | null; account: unknown; runtime: unknown; model: unknown; policy?: unknown; revision: number };
       if (choice.account) {
         const session: FleetSession = { id: randomUUID(), role: request.role, account: choice.account.name, runtime: choice.runtime.name, model: choice.model.name, host: request.host, work: request.work, principal: request.principal, group: request.group,
@@ -149,6 +150,23 @@ export class AgentRegistry {
       await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]);
       return result;
     });
+  }
+
+  /**
+   * What a reviewer choice needs to prefer another provider than the implementer's (GY-1496): the
+   * newest worker session the registry retains for the item, else the newest one the ledger's
+   * `agent-registry.selected` events record, else the item's last assignment's runtime. Null for
+   * every other role, and when the implementer's provider is unknown.
+   */
+  private async reviewDiversity(db: Pick<pg.PoolClient, 'query'>, registry: RegistryDocument, request: { role: string; work: string | null }): Promise<ReviewDiversity | null> {
+    if (request.role !== 'reviewer' || !request.work) return null;
+    const ledger = registry.sessions.some(session => session.role === 'worker' && session.work === request.work) ? []
+      // Bounded to the last fortnight by the (kind, created_at) index: no review follows a worker by longer.
+      : (await db.query(`SELECT payload->'change'->'session' AS session FROM events WHERE kind = '${registryEventPrefix}selected' AND created_at > now() - interval '14 days'
+          AND payload->'change'->'session'->>'role' = 'worker' AND payload->'change'->'session'->>'work' = $1 ORDER BY created_at DESC, seq DESC LIMIT 1`, [request.work])).rows.map(row => row.session);
+    const work = ledger.length ? null : (await db.query('SELECT w.document FROM work_index i JOIN work_items w ON w.id = i.id WHERE i.key = $1', [request.work])).rows[0]?.document;
+    const provider = implementerProvider(registry, request.work, ledger, work?.lastAssignment);
+    return provider ? { work: request.work, provider } : null;
   }
 
   /** An executor whose launch failed gives the session back at once instead of waiting out the grace. */
