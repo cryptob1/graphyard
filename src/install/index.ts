@@ -411,7 +411,11 @@ export async function prepareInstall(cwd: string, rawInputs: InstallRequest & Re
     context.host!.secretsUnreadable = stored.unreadable;
   }
   const materialized = tokens.size === principals.length && !!context.databasePassword;
-  const savedApp = await findSavedApp(root, directory, inputs, dependencies.fetch ?? fetch);
+  // --no-github-app must not adopt a saved registration: derivedVariables and a later
+  // master setup would otherwise push GITHUB_APP_* onto a deployment that chose none.
+  const savedApp = rawInputs.noGithubApp
+    ? { app: null, error: null } satisfies InstallSession['savedApp']
+    : await findSavedApp(root, directory, inputs, dependencies.fetch ?? fetch);
   const registrations = await hostRegistrations(root, dependencies.configHome);
   for (const entry of registrations) { vault.add(entry.app.privateKey); if (entry.app.webhookSecret) vault.add(entry.app.webhookSecret); }
   if (savedApp.app) { vault.add(savedApp.app.facts.privateKey); if (savedApp.app.facts.webhookSecret) vault.add(savedApp.app.facts.webhookSecret); }
@@ -586,12 +590,16 @@ export const derivedFrom = (values: EnvValue[], source: string): DerivedVariable
  * Every variable an install session derives from credentials this host holds: the core variables
  * once every principal credential exists, the saved control-plane App registration, and the revert
  * approver from the reviewer App's registration (`revertApproverEnv`).
+ *
+ * A `--no-github-app` install (the request or the install record) never derives App variables, so
+ * `master setup --apply` cannot reintroduce an App onto a deployment that chose none (GY-1550).
  */
 export async function derivedVariables(session: InstallSession): Promise<DerivedVariable[]> {
   const saved = session.savedApp.app;
+  const noApp = !!session.inputs.noGithubApp || !!session.record?.noGithubApp;
   return [
     ...(session.materialized ? derivedFrom(coreEnv(session), `the install plan's credentials under ${session.directory}`) : []),
-    ...(saved ? derivedFrom(githubEnv(saved.facts, session.record?.github?.ciAppIds ?? []), `the control-plane App registration ${saved.file}`) : []),
+    ...(!noApp && saved ? derivedFrom(githubEnv(saved.facts, session.record?.github?.ciAppIds ?? []), `the control-plane App registration ${saved.file}`) : []),
     ...derivedFrom(await revertApproverEnv(session), `the revert approver App registration ${await revertApproverSource(session) ?? ''}`),
   ];
 }
@@ -757,7 +765,9 @@ export async function buildPlan(session: InstallSession): Promise<InstallPlan> {
   preflight.push(session.generatedFiles.error
     ? { name: 'Generated-file manifest', ok: false, detail: session.generatedFiles.error, fix: `Fix ${generatedManifestScript} so \`node ${generatedManifestScript} --manifest\` prints the generated files as JSON, then rerun` }
     : { name: 'Generated-file manifest', ok: true, detail: session.generatedFiles.assignment ? `declares ${session.generatedFiles.assignment.value}` : 'the repository declares no generated files' });
-  if (noApp) preflight.push({ name: 'GitHub App', ok: true, detail: `--no-github-app: no App is registered or reused, ${APP_VARIABLES.join(', ')} stay unset, and the server serves without GitHub` });
+  // --no-github-app never strips a live App: refuse before any write when the install record
+  // already binds one (GY-1550). Orphaned deployment variables are judged after observe below.
+  if (noApp && record?.github) preflight.push({ name: 'GitHub App', ok: false, detail: `this installation already binds GitHub App ${record.github.slug} (app ${record.github.appId}); --no-github-app does not strip a live App`, fix: `Rerun without --no-github-app to keep that App, or remove its binding and every ${APP_VARIABLES.join(', ')} variable from the ${context.provider} deployment before installing without one` });
   else if (session.inputs.githubAppFile) preflight.push(session.savedApp.error
     ? { name: 'GitHub App registration', ok: false, detail: session.savedApp.error, fix: 'Name the JSON the manifest flow saved for this repository with --github-app FILE, or omit --github-app to register the App in the browser' }
     : { name: 'GitHub App registration', ok: true, detail: `reusing app ${session.savedApp.app!.facts.appId} from ${session.savedApp.app!.file}` });
@@ -770,6 +780,15 @@ export async function buildPlan(session: InstallSession): Promise<InstallPlan> {
   const herdrRelink = session.inputs.herdr !== 'skip' && herdrBoundElsewhere(herdr?.binding ?? null, herdrTarget) ? herdr!.binding!.bound : null;
   if (herdrRelink && session.inputs.herdr !== 'rebind') preflight.push({ name: 'Herdr plugin', ok: false, detail: herdrRebindRefusal(herdrRelink, herdrTarget ?? 'this installation'), fix: 'Rerun with --herdr-instance to give this installation its own Herdr instance, --herdr-rebind to repoint the plugin at it, or --no-herdr to leave Herdr untouched' });
   const observation = preflight.every(item => item.ok) ? await adapter.observe(context) : { installed: false, compute: false, database: false, app: false, url: null, variables: {}, detail: ['provider preflight is incomplete; the installation was not inspected'] } as AdapterObservation;
+  // Adapters whose setEnv merges (Railway, local: they expose applyVariables) keep variables
+  // absent from a write. Refuse before changing the deployment when any GITHUB_APP_* is still
+  // there; adapters that rewrite the whole environment clear them with the core-only write.
+  if (noApp && !record?.github) {
+    const held = APP_VARIABLES.filter(name => presentOn(observation.variables, name));
+    const merges = typeof adapter.applyVariables === 'function';
+    if (held.length && merges) preflight.push({ name: 'GitHub App', ok: false, detail: `the ${context.provider} deployment still holds ${held.join(', ')}; that adapter keeps variables absent from a write, so --no-github-app cannot leave them unset`, fix: `Remove ${held.join(', ')} from the ${context.service} service on ${context.provider}, then rerun` });
+    else preflight.push({ name: 'GitHub App', ok: true, detail: `--no-github-app: no App is registered or reused, ${APP_VARIABLES.join(', ')} stay unset, and the server serves without GitHub` });
+  }
 
   const core = coreEnv(session);
   const drift: PlanDrift[] = [];
@@ -1054,12 +1073,11 @@ async function performInstall(session: InstallSession, plan: InstallPlan): Promi
   const early = !context.host && !record.github && !noApp ? await registerProfiles(session, url, true) : null;
 
   // GitHub: the App manifest flow needs the live HTTPS origin, so it runs after the URL exists.
-  // --no-github-app binds nothing: the core variables already deployed are the whole environment,
-  // and every GITHUB_APP_* variable stays unset, so the server serves with /api/status.github false.
+  // --no-github-app binds nothing: preflight already refused a live App binding and any
+  // merge-style deployment that still holds GITHUB_APP_*; a whole-environment rewrite clears
+  // orphaned App variables with the core-only write above, so they stay unset.
   let bound: BoundApp | null = null;
-  if (noApp) {
-    if (record.github) log(`The GitHub App ${record.github.slug} (app ${record.github.appId}) bound by an earlier apply is released (--no-github-app); this run writes no GITHUB_APP_* variable, and a provider that keeps variables individually still holds the old ones until they are removed there`);
-  } else try {
+  if (!noApp) try {
     bound = await bindApp(session, url, record, log);
   } catch (error) {
     if (!(error instanceof AppStepPending)) throw error;
@@ -1099,7 +1117,9 @@ async function performInstall(session: InstallSession, plan: InstallPlan): Promi
   record = { ...record, release: { adapter: release.adapter, created: releaseCreated } };
 
   const status = await authenticatedStatus(session, url);
-  if (noApp && status.githubAppId !== null) throw new Error(`The server at ${url} reports GitHub App ${status.githubAppId} although --no-github-app wrote none; remove the GITHUB_APP_* variables from the deployment`);
+  // Preflight refused merge-style leftovers and live App bindings; a rewrite adapter cleared
+  // orphaned App variables with the core-only write. Anything still reported here is a bug.
+  if (noApp && status.githubAppId !== null) throw new Error(`The server at ${url} reports GitHub App ${status.githubAppId} although --no-github-app left every GITHUB_APP_* variable unset`);
   const since = deps.now();
   let webhook: WebhookProof;
   if (!bound) webhook = { delivered: false, skipped: true, statusCode: null, event: null, at: null, detail: 'skipped: no GitHub App is registered (--no-github-app), so there is no webhook and nothing to deliver' };
@@ -1123,6 +1143,9 @@ async function performInstall(session: InstallSession, plan: InstallPlan): Promi
   record = installRecordSchema.parse({
     ...record,
     github: bound ? { ...githubRecord, webhookFingerprint: fingerprint(bound.facts.webhookSecret) } : null,
+    // Persist the no-App choice so master setup / derivedVariables never reintroduce App vars
+    // from a leftover github-app.json on this host (GY-1550).
+    noGithubApp: bound ? false : noApp ? true : !!record.noGithubApp,
     reviewers: session.reviewers,
     profiles: [
       ...(profiles.master.configured ? [{ name: 'master', principal: principalOfRole(session.principals, 'coordinator').id, kind: profiles.master.kind ?? 'unknown', role: 'master' as const }] : []),
