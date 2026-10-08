@@ -41,8 +41,6 @@ export const daemonActionSchema = z.object({
   since: z.string().optional(),
 }).strict();
 export type DaemonAction = z.infer<typeof daemonActionSchema>;
-/** The loop's record of ending an attempt held past the reclaim bound unsubmitted (cycle-reclaim.ts stopUnboundedAttempts; read by faults.ts attemptReclaimInMotion). */
-export const unboundedAttemptKey = (item: { id: string }, epoch: number) => `unbounded:${item.id}:${epoch}`;
 
 const percentileSchema = z.object({ count: z.number().int().min(0), p50Ms: z.number().int().min(0), p90Ms: z.number().int().min(0) }).strict();
 const noMeasurement = { count: 0, p50Ms: 0, p90Ms: 0 };

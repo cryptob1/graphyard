@@ -2,7 +2,8 @@
 import { describeReclaim, graphyardWorktree, paneReclaimStatus, agentlessPaneAttentionBound, finishedSessionGraceMs } from '../master-resources.js';
 import { diskThresholdBytes, containmentPhase } from '../master.js';
 import { worktreeRootMinFreeBytes } from '../install/worktree-root.js';
-import { actionDetailMax, gigabytes, message, reclaimIntervalMs, reclaimSummarySchema, unboundedAttemptKey } from './state.js';
+import { actionDetailMax, gigabytes, message, reclaimIntervalMs, reclaimSummarySchema } from './state.js';
+import { unboundedAttemptKey } from '../model/fault-classes.js';
 import { readyToRetry } from './sessions.js';
 import { boundDetail, detailChanged } from './decisions.js';
 import { launchAppearanceMs, preserveInterruptedAttempt, record } from './effects.js';

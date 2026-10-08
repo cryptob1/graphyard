@@ -39,7 +39,8 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 // Each instance is replayed from the ledger (tests/fixtures/gy-1557-stalled-gate.json, read from
 // `graphyard events`) as the item stood when the loop recorded it, through the loop's own fault step,
 // after the coordination view the loop reads. Against the base each replay fails: the instance
-// reproduces. Past the bound each is counted.
+// reproduces (cycleFaults names the actorless or unsubmitted-attempt kind). Past the bound each is
+// counted. Candidate-only readers this change adds are asserted in their own cases below.
 
 interface Conflict { at: string; base: string; baseSha: string }
 interface Instance {
@@ -57,7 +58,7 @@ const minute = 60_000;
 // Written out rather than imported, so this file loads against the base: the bounds the remedies keep
 // (src/cli/actorless-submissions.ts baseConflictWaitBoundMs, src/model/attempt-bound.ts workerReclaimBoundMs).
 const baseConflictWaitBoundMs = 30 * minute, workerSubmissionBoundMs = 60 * minute, workerReclaimBoundMs = 120 * minute;
-/** The record's readers this change adds, imported when a case runs: against the base, where none is declared, the case fails on its own. */
+/** Candidate-only readers this change adds. Kept out of the base replay so a missing symbol is not mistaken for a reproduction of the recorded fault. */
 async function holds() {
   const declared = await import('../src/model/behind-base.js');
   assert.equal(typeof declared.observeBaseHold, 'function', 'the observation write records the hold\'s first sighting');
@@ -120,21 +121,19 @@ test('manual:fault-class-stalled-gate — GY-1557 lists 3 instances, and every o
 
 for (const instance of instances.filter(entry => entry.kind === 'actorless')) {
   const confirmed = !!instance.conflicts?.length;
-  test(`manual:fault-class-stalled-gate — ${instance.id}: a hold the base's late move opened is in motion for the bound from its sighting, not from the submission`, async () => {
-    const { baseHoldSightedAt } = await holds();
+  // Base replay: reaches cycleFaults with no candidate-only import. Against the base the recorded
+  // actorless kind is named (the instance reproduces); at this head it is not.
+  test(`manual:fault-class-stalled-gate — ${instance.id}: a hold the base's late move opened is in motion for the bound from its sighting, not from the submission`, () => {
     const work = submitted(instance);
     // The reading the instance recorded: a sync is the missing actor, nothing named, hours or minutes past the 5-minute actorless bound.
     assert.equal(reviewNeed(work, [work], new Date(instance.at)).state, 'base-not-contained');
     const { work: viewed, reported, faults } = stalledGate(work, instance.at);
-    assert.ok(viewed.headObserved && (confirmed ? viewed.baseRefresh?.conflictSince : viewed.baseHold), 'the coordination view keeps the records the bound is read from');
+    assert.ok(viewed.headObserved, 'the coordination view keeps the head observation the bound is read from');
     assert.equal(reported.length, 1, 'master status still names the line, so the wait stays visible');
     assert.match(reported[0].text, /no rework request and no named wait; missing a sync rework/);
     assert.match(reported[0].text, confirmed ? /cannot be brought onto it without resolving a conflict/ : /GitHub reports a merge conflict with that base/);
     assert.match(reported[0].text, new RegExp(`has been submitted for ${Math.round((Date.parse(instance.at) - Date.parse(instance.claimedAt!)) / minute)}m`), 'dated from the stage entry, as the instance was');
     assert.deepEqual(faults.map(fault => fault.kind), [], `${instance.subject} is not counted while the loop returns its head: ${instance.moved}`);
-    // The sighting the bound runs from: the control plane's first confirmed conflict on the head, or the observation write's record of GitHub's reading.
-    assert.equal(baseHoldSightedAt(viewed), confirmed ? instance.conflicts![0]!.at : instance.holdSightedAt);
-    assert.equal(reported[0].inMotionUntil, shift(baseHoldSightedAt(viewed)!, baseConflictWaitBoundMs));
     // The loop's own remedy stands on the record: the confirmed conflict grounds its rework request; GitHub's conflict is its sync rework decision.
     if (confirmed) assert.ok(baseRefreshConflict(viewed), 'the control plane\'s test merge confirmed the conflict');
     else assert.ok(syncConflict(viewed), 'the routine decision step requests the sync rework for this head');
@@ -148,6 +147,19 @@ for (const instance of instances.filter(entry => entry.kind === 'actorless')) {
     const movedAgain = (at: string) => submitted(instance, { observation: { ...submitted(instance).observation, at: shift(at, -minute), baseTip: 'f'.repeat(40), baseTree: 'f'.repeat(40), mergeable: null, conflicting: false }, baseHold: { sha: instance.sha, at: sighted } } as unknown as Partial<Work>);
     assert.deepEqual(stalledGate(movedAgain(shift(sighted, baseConflictWaitBoundMs - minute)), shift(sighted, baseConflictWaitBoundMs - minute)).faults.map(fault => fault.kind), []);
     assert.deepEqual(stalledGate(movedAgain(late), late).faults.map(fault => fault.kind), ['actorless']);
+  });
+}
+
+// Candidate-only: the sighting readers and the bound they anchor. Against the base these fail on the
+// missing exports; they are not the base reproduction of GY-1522 or GY-1526 (those reach cycleFaults above).
+for (const instance of instances.filter(entry => entry.kind === 'actorless')) {
+  const confirmed = !!instance.conflicts?.length;
+  test(`unit:base-hold-bound — ${instance.id}: the actorless bound runs from the hold's first sighting`, async () => {
+    const { baseHoldSightedAt } = await holds();
+    const { work: viewed, reported } = stalledGate(submitted(instance), instance.at);
+    assert.ok(confirmed ? viewed.baseRefresh?.conflictSince : viewed.baseHold, 'the coordination view keeps the sighting record');
+    assert.equal(baseHoldSightedAt(viewed), confirmed ? instance.conflicts![0]!.at : instance.holdSightedAt);
+    assert.equal(reported[0].inMotionUntil, shift(baseHoldSightedAt(viewed)!, baseConflictWaitBoundMs));
   });
 }
 
@@ -177,7 +189,9 @@ for (const instance of instances.filter(entry => entry.kind === 'unsubmitted-att
     assert.deepEqual(stalledGate(work, instance.at).faults.map(fault => fault.kind), [], `${instance.subject} is not counted an hour before the loop's own reclaim bound: ${instance.moved}`);
     assert.deepEqual(stalledGate(unsubmitted(instance, { lease: { owner: instance.owner, epoch: instance.epoch, expiresAt: shift(instance.claimedAt!, workerReclaimBoundMs + 2 * minute) } } as Partial<Work>), shift(instance.claimedAt!, workerReclaimBoundMs - minute)).faults.map(fault => fault.kind), [], 'a minute inside the reclaim bound');
   });
+}
 
+for (const instance of instances.filter(entry => entry.kind === 'unsubmitted-attempt')) {
   test(`manual:fault-class-stalled-gate — ${instance.id}: past the reclaim bound the attempt counts unless the loop ended it this cycle; a lapsed lease is the containment path's`, () => {
     const late = shift(instance.claimedAt!, workerReclaimBoundMs + minute);
     const held = (expiresAt = shift(late, 2 * minute)) => unsubmitted(instance, { lease: { owner: instance.owner, epoch: instance.epoch, expiresAt } } as Partial<Work>);

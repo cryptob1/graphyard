@@ -7,6 +7,8 @@ import { lapsedBeforeStart } from './escalation.js';
 import { blockerKind } from './blocker-kind.js';
 import { unsubmittedAttempt, unsubmittedAttemptText, type UnsubmittedAttempt } from './attempt-bound.js';
 export { blockerKind };
+/** The loop's record of ending an attempt held past the reclaim bound unsubmitted (cycle-reclaim.ts stopUnboundedAttempts; read by faults.ts attemptReclaimInMotion). */
+export const unboundedAttemptKey = (item: { id: string }, epoch: number) => `unbounded:${item.id}:${epoch}`;
 // Types only from work.ts: work.ts reaches this module through the origin schema (interventions.ts),
 // so a value import back would read work.ts before it has evaluated.
 import type { EscalationTrigger, Work } from './work.js';
