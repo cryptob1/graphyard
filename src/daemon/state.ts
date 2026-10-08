@@ -592,7 +592,6 @@ export async function readDaemonState(root: string, config: MasterConfig): Promi
   let raw: string;
   try { raw = await readFile(file, 'utf8'); }
   catch (error: any) { if (error.code === 'ENOENT') return emptyDaemonState(config); throw error; }
-  // Keys written by newer, since reverted code are dropped and named once, not fatal (GY-1542); declared fields stay strict.
   const stored = JSON.parse(raw), dropped = stored && typeof stored === 'object' ? Object.keys(stored).filter(key => !Object.hasOwn(daemonStateSchema.shape, key)) : [];
   for (const key of dropped) delete stored[key];
   if (dropped.length) console.error(`Master daemon cursor: ignored top-level keys this version does not declare: ${dropped.join(', ')}`);
