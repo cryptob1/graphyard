@@ -28,7 +28,7 @@ import { type MasterSessionEffects, masterSessionEffects } from '../master/maste
 import { type WorkerProfile, type HerdrAgent, type WorktreeReclaimReport, type ContainmentAssessment, type EscalationSession, type ObservedExhaustion, type ProfileAccountHealth, type MasterConfig, agentToken, approverRoleHealth, decisionInput, escalationRoleHealth, launchApprover, launchEscalationHandler, readApproverLaunch, readEscalationSessions, saveEscalationSession, verifiedContext, listHerdrAgents, readEnvironmentLog, selectionKey, preservePartialWork, recordObservedExhaustion, closeHerdrPane, inspectProfileAccounts, inspectProducerCredentials, observeHerdrAgents, inspectWorkerCredentials, deliverPrompt, dispatchWork, reclaimWorktrees, removeReclaimableWorktrees, writeWorktreeInventoryCache, reclaimIdleMs, writeFailure, assessContainment, herdrJson, readCredentialFile, withRoleDefaults, type ControlPlaneStatus } from '../master.js';
 import { readControlPlaneClock, type ContainmentObservation, type ControlPlaneClock } from '../master/containment.js';
 import { annotatePaneShell } from '../quarantine.js';
-import { herdrCall, listHerdrPanes } from '../master/herdr.js';
+import { herdrCall, listHerdrPanes, type HerdrPane } from '../master/herdr.js';
 import { probeSupervisorAbsence } from '../containment-probe.js';
 import { httpFleetClient, reconcileFleetSessions, selectFleetSession, settledRecordSessions } from '../fleet.js';
 import { type ContainmentRetention, type DaemonAction, type DaemonState, type LoopRelease, storeAction, type DeploymentObservation, message, writeDaemonState } from './state.js';
@@ -307,11 +307,11 @@ export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffec
   /** Herdr's agent inventory, read asynchronously: an empty list when Herdr cannot be read. */
   agents: () => HerdrAgent[] | Promise<HerdrAgent[]>;
   /**
-   * The host's pane inventory (`herdr pane list`, GY-842): every pane this host's runtime holds,
-   * with or without an agent in it, for the pane count the agent inventory cannot give. A loop
-   * wired without it reports no pane count; the sweep judges presence from the agent inventory.
+   * The host's pane inventory (`herdr pane list`, GY-842): every pane, with its cwd and agent. The
+   * agent inventory never carries a bare shell (GY-1533), so the sweep's agentless candidates and
+   * the pane count come from here; a loop without it, or an unreadable runtime, sweeps none.
    */
-  panes?: () => Promise<{ panes: { pane_id?: string }[]; available: boolean }>;
+  panes?: () => Promise<{ panes: HerdrPane[]; available: boolean }>;
   /**
    * The same session inventory with whether it could be read at all. A Herdr that cannot be
    * reached reports no sessions, and stopping a supervisor on that would kill live work, so the
