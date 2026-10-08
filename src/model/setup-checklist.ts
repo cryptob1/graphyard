@@ -77,22 +77,34 @@ function roleReady(fleet: any, role: RequiredSetupRole) {
  * live loop names it).
  */
 export const statusSupervised = (status: any | null) => status?.setup?.supervision === 'supervised';
-export function setupChecklist(status: any | null, options: { appSetupUrl?: string; supervised?: boolean } = {}): SetupItem[] {
+/**
+ * CONTROL-PLANE MERGER (GY-1553): while the control plane is the merge writer (`mergeWriter.merger`
+ * on `/api/status`, src/merger-mode.ts) no GitHub App opens pull requests, no reviewer App signs
+ * reviews and no branch protection gates main, so those three items pass as not required. `doctor`'s
+ * setup-from-zero checks (src/setup-from-zero.ts) say the same words for the same ids.
+ */
+export const mergerNotRequired = 'not required (merger: control-plane)';
+export const statusControlPlaneMerger = (status: any | null) => status?.mergeWriter?.merger === 'control-plane';
+export function setupChecklist(status: any | null, options: { appSetupUrl?: string; supervised?: boolean; merger?: 'github' | 'control-plane' } = {}): SetupItem[] {
   const supervised = options.supervised ?? statusSupervised(status);
+  const controlPlane = options.merger ? options.merger === 'control-plane' : statusControlPlaneMerger(status);
+  const notRequired = (id: SetupItemId, title: string): SetupItem => ({ id, title, done: true, human: false, line: mergerNotRequired, action: null });
   const appUrl = options.appSetupUrl ?? defaultAppSetupUrl;
   const repository = status?.githubRepository?.fullName ?? status?.githubRepository ?? status?.repository ?? null;
   const missing: unknown[] = status?.appPermissions?.missing ?? [];
   const appBound = !!status?.github;
   const appDone = appBound && missing.length === 0;
   const items: SetupItem[] = [];
-  items.push({ id: 'github-app', title: 'GitHub App', done: appDone, human: true,
+  if (controlPlane) items.push(notRequired('github-app', 'GitHub App'));
+  else items.push({ id: 'github-app', title: 'GitHub App', done: appDone, human: true,
     line: appDone ? 'Graphyard can open pull requests and read checks in your repository.'
       : appBound ? 'The App needs a few more permissions before Graphyard can use it.'
       : 'Create the App that lets Graphyard work in your repository, then install it there.',
     action: appDone ? null : appBound && status?.appPermissions?.installationUrl ? { kind: 'link', label: 'Accept the new permissions', href: status.appPermissions.installationUrl }
       : { kind: 'link', label: 'Create the GitHub App', href: appUrl } });
   const reviewerDone = Array.isArray(status?.reviewerApps) && status.reviewerApps.length > 0;
-  if (!supervised) items.push({ id: 'reviewer-app', title: 'Reviewer App', done: reviewerDone, human: true,
+  if (controlPlane && !supervised) items.push(notRequired('reviewer-app', 'Reviewer App'));
+  else if (!supervised) items.push({ id: 'reviewer-app', title: 'Reviewer App', done: reviewerDone, human: true,
     line: reviewerDone ? 'A second App signs the independent code reviews.' : 'Create a second App so every change is reviewed by someone other than its author.',
     action: reviewerDone ? null : appBound ? { kind: 'link', label: 'Create the reviewer App', href: appUrl } : { kind: 'wait', label: 'Waiting for the GitHub App' } });
   for (const role of requiredSetupRoles) {
@@ -105,7 +117,8 @@ export function setupChecklist(status: any | null, options: { appSetupUrl?: stri
   // `checks` is protected enough to start: Graphyard requires its own merge check once the first change reports it.
   const protection = status?.setup?.protection;
   const protectedBranch = protection === 'complete' || protection === 'checks';
-  items.push({ id: 'branch-protection', title: 'Branch protection', done: protectedBranch, human: false,
+  if (controlPlane) items.push(notRequired('branch-protection', 'Branch protection'));
+  else items.push({ id: 'branch-protection', title: 'Branch protection', done: protectedBranch, human: false,
     line: protection === 'complete' ? 'Changes reach your main branch only after they pass review and tests.'
       : protectedBranch ? 'Your main branch requires its tests to pass; Graphyard adds its own check after the first change.' : appDone ? 'Graphyard turns this on by itself; if it stays off, open your repository\'s branch settings.' : 'Turned on by itself once the GitHub App is installed.',
     action: protectedBranch ? null : appDone && repository ? { kind: 'link', label: 'Open branch settings', href: `https://github.com/${repository}/settings/branches` } : { kind: 'wait', label: 'Waiting for the GitHub App' } });
