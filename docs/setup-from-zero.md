@@ -16,11 +16,11 @@ Its only human step: approving a GitHub Mobile prompt; `--help` lists options.
 
 A new Hetzner server waits (exit 3) for price approval; rerun: `--confirm-price X` or `--max-monthly N` and `--ssh-key NAME`.
 
-`up` runs, in order: preflight, control plane, host supervisor and Herdr, master identities (`master autonomy --apply`; host installs: on the server; no admin credential: exit 2; `--local`: none, you review and merge, [supervised](onboarding.md#supervised-mode-up---local)), onboarding, accounts (host logins; asks for empty roles), harness, master loop. Onboarding files its `graphyard/onboarding` pull request for the loop to review and merge (a host install leaves it to a person); goals wait. Reruns skip steps `.graphyard/up.json` records finished, reusing its `--repo`/`--provider`. Every run sets Herdr up (host target: `install --herdr-only`); a plugin bound elsewhere stays, this install getting its own instance. Preflight failures (exit 2) name the [prerequisite](#1-machine-prerequisites).
+`up` runs, in order: preflight, control plane, host supervisor and Herdr, master identities (`master autonomy --apply`; no admin credential: exit 2; `--local`: none, you review and merge, [supervised](onboarding.md#supervised-mode-up---local)), onboarding, accounts (host logins; asks for empty roles), harness, master loop. Onboarding files its `graphyard/onboarding` pull request for the loop to review and merge (a host install leaves it to a person); goals wait. Reruns skip steps `.graphyard/up.json` records finished. Every run sets Herdr up (host target: `install --herdr-only`), a second install getting its own instance. Preflight failures (exit 2) name the [prerequisite](#1-machine-prerequisites).
 
 ## The Setup page
 
-A step needing a person prints one link (`SERVER/#sign-in=CODE&setup`, minted from the operator credential or a host install's claim) and waits until green; it signs you in once (within 10 minutes) to the Setup page (also Settings → Agents). Green runs end with a fresh link; [phone access](dashboard.md#from-your-phone). Items:
+A step needing a person prints one link (`SERVER/#sign-in=CODE&setup`) and waits until green; it signs you in once (within 10 minutes) to the Setup page (also Settings → Agents). Green runs end with a fresh link; [phone access](dashboard.md#from-your-phone). Items:
 
 | Item | Button
 | --- | ---
@@ -33,7 +33,7 @@ Once green (onboarding merged), **Describe what you want built** records a goal 
 
 ## Agent setup: up --agent
 
-`up --agent` takes `[--goal FILE] [--browser-profile PROFILE]`: JSON events on stderr, summary stdout; exit `0` green, `1` failed (quoting GitHub's rejection), `2` prerequisite, `3` waiting. It creates the Apps in a GitHub-signed-in Chrome profile (passed, else the master's, else a same-login install's here; none, without `--reuse-app` or saved Apps for both: exit `2`), recorded under `.graphyard/master-actions/`; sets deployment variables from saved credentials, FILE is one goal. Only a device step becomes a `handoff`: a subscription login's approval, or *Confirm access*: a GitHub Mobile number (up to 3 fresh prompts; password link after 60 s). Without Mobile, it offers: confirm in your Chrome on the named page (shared profile); a code via the App page or `up --sudo-code CODE|email` (never recorded); or create both Apps at github.com/settings/apps/new (no webhook URL), `graphyard app import` each, then `up --reuse-app SLUG --reuse-app REVIEWER_SLUG` (`--no-wait` exits `3` here). A drive giving up hands off the still-served page. Human waits last `--wait MINUTES` (default 20); a same-repository/provider/profile rerun resumes pending *Confirm access*. Preflight refuses `/tmp`, `/var/tmp` checkouts.
+`up --agent` takes `[--goal FILE] [--browser-profile PROFILE]`: JSON events on stderr, summary stdout; exit `0` green, `1` failed (quoting GitHub's rejection), `2` prerequisite, `3` waiting. It creates the Apps in a GitHub-signed-in Chrome profile (passed, else the master's, else a same-login install's; none, without `--reuse-app` or saved Apps: exit `2`), recorded under `.graphyard/master-actions/`; FILE is one goal. Only a device step becomes a `handoff`: a subscription login's approval, or *Confirm access*: a GitHub Mobile number (up to 3 prompts). Without Mobile: confirm in your Chrome on the named page; a code via the App page or `up --sudo-code CODE|email` (never recorded); or create both Apps at github.com/settings/apps/new (no webhook URL), `graphyard app import` each, then `up --reuse-app SLUG --reuse-app REVIEWER_SLUG` (`--no-wait` exits `3` here). Human waits last `--wait MINUTES` (default 20); a same-repository/provider/profile rerun resumes pending *Confirm access*. Preflight refuses `/tmp`, `/var/tmp` checkouts.
 
 ## Troubleshooting: manual steps
 
@@ -57,7 +57,7 @@ The repository needs a GitHub `origin` and an Actions `pull_request` test workfl
 
 ## 3. Install the control plane
 
-`gy install --provider compose --repo OWNER/REPO --reviewer claude --plan`, then `--apply` ([install](install.md); `gy` is `node ~/graphyard/bin/graphyard.mjs`). Before the App step, `--apply` records the master connection `.graphyard/master.json`, its `0600` credential under the plan's `installDirectory`; `gy doctor` reads as it; `GRAPHYARD_TOKEN_FILE` overrides that credential (approver sessions require it). **Verify:** `control-plane` and `credentials-file` pass.
+`gy install --provider compose --repo OWNER/REPO --reviewer claude --plan`, then `--apply` ([install](install.md); `gy` is `node ~/graphyard/bin/graphyard.mjs`). Before the App step, `--apply` records the master connection `.graphyard/master.json`, its `0600` credential under the plan's `installDirectory`; `gy doctor` reads as it; `GRAPHYARD_TOKEN_FILE` overrides it. **Verify:** `control-plane` and `credentials-file` pass.
 
 ## 4. Register the GitHub App
 
@@ -65,11 +65,11 @@ The repository needs a GitHub `origin` and an Actions `pull_request` test workfl
 
 ## 5. Reviewer and revert-approver Apps
 
-`--reviewer claude` registers the reviewer App and revert approver (`GRAPHYARD_REVERT_APPROVER_*`, reset by every `--apply`). **Verify:** `reviewer-app` and readiness `revert-approver` pass; outside `install`, `gy master reviewer setup` and [variables](deployment.md#variables).
+`--reviewer claude` registers the reviewer App and revert approver (`GRAPHYARD_REVERT_APPROVER_*`). **Verify:** `reviewer-app` and readiness `revert-approver` pass; outside `install`, `gy master reviewer setup` and [variables](deployment.md#variables).
 
 ## 6. Onboard the checkout
 
-`gy init --scan` (reads `node --test` as `node:test`, reporting `junit-xml-v1`), then `gy init --scan --apply --url http://127.0.0.1:4310`; merge `AGENTS.md .gitignore graphyard.json .github/workflows` to the base (never `.graphyard/`). **Verify:** readiness `setup-proposal` is `ready` ([onboarding](onboarding.md#documentation-policy)).
+`gy init --scan`, then `gy init --scan --apply --url http://127.0.0.1:4310`; merge `AGENTS.md .gitignore graphyard.json .github/workflows` to the base (never `.graphyard/`). **Verify:** readiness `setup-proposal` is `ready` ([onboarding](onboarding.md#documentation-policy)).
 
 ## 7. Branch protection
 
@@ -77,7 +77,7 @@ The repository needs a GitHub `origin` and an Actions `pull_request` test workfl
 
 ## 8. Agent environments
 
-Connect each account in Settings → Agents ([dashboard](dashboard.md#settings-agents)); host-logged-in accounts register with `gy master registry propose --apply`. **Verify:** one `agent-environment:NAME` line passes per environment (Claude: `skipDangerousModePermissionPrompt` consent, `hasCompletedOnboarding`); then [roles](onboarding.md#configure-the-fleet).
+Connect each account in Settings → Agents ([dashboard](dashboard.md#settings-agents)); host-logged-in accounts register with `gy master registry propose --apply`. **Verify:** one `agent-environment:NAME` line passes per environment; then [roles](onboarding.md#configure-the-fleet).
 
 ## 9. Worker sandbox and harness rules
 
@@ -101,4 +101,4 @@ Set `RAILWAY_API_TOKEN` (**HUMAN:** the account owner issues it) and size `GRAPH
 
 ## 12. First item end to end
 
-The Setup page's goal, or `gy master create item.json REASON` ([work.json](../examples/work.json)). **Verify:** `gy status GY-1` reaches `done`; doctor `production.serving` reaches the merge commit, `production.incidents` `[]` ([production observation](deployment.md#production-deployment-observation)). Without a deploy job, merged ends it.
+The Setup page's goal, or `gy master create item.json REASON` ([work.json](../examples/work.json)). **Verify:** `gy status GY-1` reaches `done`; doctor `production.serving` reaches the merge commit, `production.incidents` `[]` ([production observation](deployment.md#production-deployment-observation)).
