@@ -9,7 +9,7 @@ Keep cycling: `master status`; `master run` dispatches (`schedule.order`); merge
 
 `master run` is unit `graphyard-master.service` ([supervision](onboarding.md#the-loop-must-be-supervised)); on `daemon.liveness` `stalled`/`absent`: `systemctl --user restart graphyard-master`, never from a [dirty or non-forward checkout](master-agent-sessions.md#the-coordinator-checkout-is-confined-at-the-os-level).
 
-**Cycle cadence.** The loop sleeps `run.intervalSeconds`, at most 30 s while anything is actionable. The dispatcher tick wakes it early, once per new subject, no sooner than `run.dispatchIntervalSeconds` after the cycle (`woken Ns before the … wait ended: REASONS`), never cutting a failed cycle's backoff.
+**Cycle cadence.** The loop sleeps `run.intervalSeconds`, at most 30 s while anything is actionable. The dispatcher tick wakes it early, once per new subject, no sooner than `run.dispatchIntervalSeconds` after the cycle (`woken Ns before the … wait ended: REASONS`).
 
 ### System-driven items
 
@@ -25,7 +25,7 @@ Unless created `"systemDriven": false`, items refuse hand `dispatch`, `merge`, `
 
 ### System invariants
 
-Per cycle (`daemon.invariants.lines`): `follow-ups-per-parent` (1 open), `lingering-sessions` (30 min), `refresh-churn` (3 per own head), `merge-stall` (10 min), `cycle-p90` (30 s), `untriaged-backlog` (24 h), `deploy-lease-loss` (0). `cycle-p90` judges a cycle's own work, net of child and control-plane waits. Thresholds: `invariants` in `.graphyard/master.json`; `tests/soak-*.test.ts` enforce.
+Per cycle (`daemon.invariants.lines`): `follow-ups-per-parent` (1 open), `lingering-sessions` (30 min), `refresh-churn` (3 per own head), `merge-stall` (10 min), `cycle-p90` (30 s), `untriaged-backlog` (24 h), `deploy-lease-loss` (0). Thresholds: `invariants` in `.graphyard/master.json`; `tests/soak-*.test.ts` enforce.
 
 ## Research and diagnosis
 
@@ -33,7 +33,7 @@ Per cycle (`daemon.invariants.lines`): `follow-ups-per-parent` (1 open), `linger
 
 ## Machine-filed backlog
 
-Review follow-ups are fixed in-PR, never filed; Pi (`run.research`, `triageConcurrency` 2) triages follow-up, fault items; closures need approval.
+Review follow-ups are fixed in-PR, never filed; Pi (`run.research`, `triageConcurrency` 2) triages follow-up, fault items.
 
 ## Automatic dispatch at submit
 
@@ -53,4 +53,4 @@ A passing producer records `"exercise"`: rerun without the criterion's behaviour
 
 GitHub merges heads whose gates pass under the `github` merger ([delivery](delivery.md#one-delivery-path)), the [merge writer](delivery-redesign.md#merge-writer) under `control-plane`; failing heads need two-party `master decide GY-N merge`; skew: `… deploy main first`; a check the base head fails too is a [base failure](development.md#base-failures). Unresolved review threads are the reviewer's inputs, not merge blockers (`reviewThreads`); approvals list each under `Resolved threads:`, `Follow-up threads:` or `Overridden threads:` ([rules](coordination.md#review-gate-verdicts-not-threads)).
 
-**Shadow gate.** Named test failures fail the verdict; a runner exit naming none is a host failure (diagnostic, retries, one attention line), never `shadow-only-fail`. Groups of 40.
+**Shadow gate.** Named failures fail the verdict; exit naming none is host failure (diagnostic, retries, attention), never `shadow-only-fail`. Groups of 40.
