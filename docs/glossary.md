@@ -47,11 +47,11 @@ Role | Held by | May | Never
 
 ## Who decides
 
-Master applies non-weakening intent directly; two-party decisions (`master decide GY-N ACTION REASON`, another's `master approve GY-N DECISION REASON`) cover requirement rewrites, escalations, [high-lane](how-graphyard-works.md#risk-lanes) rework the record doesn't ground, recovery, `manual:` attestation, proof grants, triage closures, merges with auto-merge off; gates decide the rest; human-only decisions [park](master-agent-reference.md#items-scope-and-human-waits) items.
+Master applies non-weakening intent directly; two-party decisions (`graphyard master decide GY-N ACTION REASON`, approved by another's `graphyard master approve GY-N DECISION REASON`) cover requirement rewrites, escalations, [high-lane](how-graphyard-works.md#risk-lanes) rework the record doesn't ground, recovery, `manual:` attestation, proof grants, triage closures, merges with automatic merging off; gates decide the rest; human-only decisions [park](master-agent-reference.md#items-scope-and-human-waits) items.
 
-An approved-but-unapplied decision never blocks the action's next request: bound to a passed head and base it settles `superseded`; otherwise it resumes after 60s (risk-lane rework at once), and once its approver session ends the next cycle sends `POST /api/work/:id/decide` `{"action":"resume","decision":ID}`. `master status` shows `approved but unapplied since <approvedAt>` (`loop-silence` fault).
+An approved-but-unapplied decision never blocks the action's next request: bound to a passed head and base it settles `superseded`; otherwise it resumes after 60 s, the next cycle sending `POST /api/work/:id/decide` `{"action":"resume","decision":ID}` once its approver session ends. `master status` shows `approved but unapplied since <approvedAt>` (`loop-silence` fault).
 
-A revision-bound decision (release, unblock, close, unpinned resolve) applies past lease renewals, liveness and observation, settling `stale` on any other item change; an approved close ends only the lease it judged. The loop re-validates a stale close and re-requests it at the current revision, taking no other decision on it meanwhile; stale settles form one `wait:decision-stale:<id>:close` action; after three in a row the loop stops, `master status` raising `Decision GY-N/ACTION (ACTION) is stale`.
+A revision-bound decision (release, unblock, close, unpinned resolve) applies past lease renewals, liveness and observation, settling `stale` on any other change to the item. The loop re-requests a stale close at the current revision; after three stale settles in a row it stops, `master status` raising `Decision GY-N/ACTION (ACTION) is stale`.
 
 ## Diagram legend
 

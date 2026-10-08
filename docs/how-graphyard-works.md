@@ -1,7 +1,7 @@
 <!-- page: Start here | 1 | lifecycle, authority. -->
 # How Graphyard works
 
-Graphyard decides whether work advances; runtimes (Herdr) run sessions, each starting with role-scoped ≤500-word digest from applied records (`.graphyard/project-memory.json`; `projectMemory` in `master status`).
+Graphyard decides whether work advances; runtimes (Herdr) run sessions, each starting with role-scoped ≤500-word digest (decisions, recurring faults, recent merges) from applied records (`.graphyard/project-memory.json`; `projectMemory` in `master status`).
 
 ## One trip from setup to Done
 
@@ -14,15 +14,17 @@ Graphyard decides whether work advances; runtimes (Herdr) run sessions, each sta
 
 ## From goal to work items
 
-Goal passes intake, acceptance, approval, planning, approval and delivery. `graphyard goal FILE` records it; acceptance role writes outcomes and required `uat` cases ([validation](validation.md)). Once merged, `planner` role writes architecture note (at most 400 words) and items, each naming outcomes served, cases to pass, `plannedFiles` and predecessors. A plan leaving outcome uncovered, letting parallel items share file (`dir/**` included), naming a criterion twice or touching a required case is refused with the reason; three refused rounds hand goal to master. A role at its registry concurrency defers, never starting fallback. Another identity approves the plan (`goal plan-approve`); loop creates and releases items (`planned`, then `delivering`), dispatching none before its dependencies are delivered. Goal is `delivered` once every item is done and production serves it: loop-recorded deployment covering its merge, plus passing smoke proof where policy asks.
+Goal passes intake, acceptance, approval, planning, approval and delivery. `graphyard goal FILE` records it; acceptance role writes outcomes and required `uat` cases ([validation](validation.md)), non-author-approved. Once merged, `planner` role writes architecture note (at most 400 words) and items, each naming outcomes served, cases to pass, `plannedFiles` and predecessors. A plan leaving outcome uncovered, letting parallel items share file, naming a criterion twice or touching a required case is refused with the reason; three refused rounds hand goal to master. Another identity approves the plan (`goal plan-approve`); loop creates and releases items (`planned`, then `delivering`), dispatching none before its dependencies are delivered. Goal is `delivered` once every item is done and production serves it: loop-recorded deployment covering its merge, plus passing smoke proof where policy asks.
 
 ## Risk lanes
 
 `src/model/policy.ts` sets **risk lane** (`low`, `medium`, `high`) by paths.
 
-- **High** (4h): `migrations/schema`, `auth/credentials`, `src/store/`, authentication, principals, public API and its assembler, credential bootstrap (`src/server/`), operator agent, proof grants, `src/install/`, `deploy/`, Dockerfile, `compose.yaml`, unobserved changes. Producer proofs, `manual:` attestations, two-party rework.
-- **Medium** (60min): remainder; adds producer-run `unit:`/`integration:`.
-- **Low** (30min): test-only, docs-only, single-module. Required CI and one approval only.
+- **High** (4 h): `migrations/schema`, `auth/credentials`, `src/store/`, authentication, principals, public API and its assembler, credential bootstrap (`src/server/`), operator agent, proof grants, `src/install/`, `deploy/`, Dockerfile, `compose.yaml`, unobserved changes. Producer proofs, `manual:` attestations, two-party rework.
+- **Medium** (60 min): remainder; adds producer-run `unit:`/`integration:`.
+- **Low** (30 min): test-only, docs-only, single-module. Required CI and one approval only.
+
+Beside the lane, **risk class** (`sensitive`/`normal`, `src/model/risk-class.ts`) is judged from the merge delta — renames at both ends, CI config and dependency changes included, unknown is sensitive — and shown by `graphyard status` and the item page; lanes still gate github mode.
 
 All lanes require `e2e:` proofs; low/medium reworks need no approver (approved by `graphyard-risk-lane`), nor does any lane's rework whose ground the record shows on the exact head: trusted proof failed on it, approver refused its `manual:` attestation (loop then requests that rework itself), or control plane's own test merge onto moved base conflicted, not GitHub's reading alone (`src/model/rework-ground.ts`). A head already returned to worker has spent its ground (a later retry-cap rework waits). Grounded reworks are no [intervention](dashboard.md).
 
@@ -30,11 +32,11 @@ All lanes require `e2e:` proofs; low/medium reworks need no approver (approved b
 
 ![Bootstrap: one supervised worker; normal operation: a fleet.](diagrams/bootstrap-vs-normal.svg)
 
-Text equivalent: one operator-supervised bootstrap worker; later a master-dispatched fleet.
+Text equivalent: in bootstrap the human operator supervises one worker; later the master dispatches many, each with own credential.
 
 ![Authority of operator, Graphyard, Herdr sessions, reviewer, producer.](diagrams/roles-and-authority.svg)
 
-Text equivalent: operator makes human-only decisions; Herdr hosts master (`coordinator`), slice lead, worker; guarded path merges ([legend](glossary.md#diagram-legend)).
+Text equivalent: operator makes human-only decisions; Herdr hosts master (`coordinator`), slice lead, worker (epoch, worktree); reviewer, producer hold credentials; guarded path merges. Colours: [legend](glossary.md#diagram-legend).
 
 ## Correctness rules
 
@@ -42,4 +44,4 @@ Text equivalent: operator makes human-only decisions; Herdr hosts master (`coord
 
 Text equivalent: mutations, events commit in locked Postgres transactions; reconciliation syncs GitHub, which merges passing heads; webhooks wake jobs.
 
-Gates deterministically check one candidate, `(PR, head SHA, base SHA)`; claims bump epoch; latest trusted proof wins; merge is not [delivery](delivery.md).
+Gates are deterministic checks of one candidate, `(PR, head SHA, base SHA)`; claims bump epoch; latest trusted proof wins; merge is not [delivery](delivery.md).
