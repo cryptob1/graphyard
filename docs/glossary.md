@@ -3,7 +3,7 @@
 
 ### 1. Human operator (human authority)
 
-`admin` with `sessionKind: "human"`; alone decides goals, priorities, spending, accounts, people's credentials. **Canonical usage:** *human operator*; bare *operator* = this person.
+`admin` with `sessionKind: "human"`; alone decides goals, priorities, spending, accounts, people's credentials. **Canonical usage:** *human operator*.
 
 ### 2. AI agent
 

@@ -1633,10 +1633,14 @@ export async function runExecutorTick(identity: ExecutorIdentity, effects: Execu
   if (!kinds.length) return step(null, 'idle', 'this executor has no handler for any action kind');
   const hold = kinds.some(kind => launchingKinds.includes(kind)) && effects.launchHold ? await effects.launchHold().catch(() => null) : null;
   const claimable = hold ? kinds.filter(kind => !launchingKinds.includes(kind)) : kinds;
-  // Presence records what this executor serves, not what the hold lets it claim this tick (GY-1539):
-  // a deliberate deferral must never read as a fleet that lacks the kind.
-  if (!claimable.length) { await effects.present?.({ host: identity.host, executor: identity.id, kinds, serves: kinds }).catch(() => {}); return step(null, 'idle', `claims nothing: ${hold}`); }
+  // A launch hold defers rows; it does not change what this executor serves. The claim names only
+  // the kinds it may take now, and a claim is also presence, so the control plane would read the
+  // held launching kinds as served by nobody and file the wait as a configuration fault (GY-1538).
+  // Presence names every kind this executor runs, sent after the claim, which would narrow it.
+  const declarePresence = async () => { if (hold) await Promise.resolve(effects.present?.({ host: identity.host, executor: identity.id, kinds, serves: kinds })).catch(() => {}); };
+  if (!claimable.length) { await declarePresence(); return step(null, 'idle', `claims nothing: ${hold}`); }
   const claimed = await effects.claim({ host: identity.host, executor: identity.id, kinds: claimable, serves: kinds });
+  await declarePresence();
   const action = claimed.action;
   if (!action) return step(null, 'idle', hold ? `the queue has no action this executor can run without launching a session, and it launches none: ${hold}` : 'the queue has no action this executor can run');
   // The handlers are not bounded by the claim lease: a dispatch prepares a worktree and waits on

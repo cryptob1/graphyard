@@ -22,7 +22,7 @@ One retry: **passed**; **failed** (both); **flaky** (retry passed at same served
 
 Flaky required cases block promotion until `evidence` decision (`{"case":ID,"runId":RUN,"sha":FULL_SHA}` on hold item, another agent approving) accepts; refused unless both attempts recorded at that SHA. `release promote` reads only that run's and SHA's applied decisions. Workflow's `release promote ID` (`GRAPHYARD_URL`, `GRAPHYARD_TOKEN`) promotes only passing UATs.
 
-`e2e/contract.json` lists required customer outcomes: `id`, `title`, optional `criteria`, proving `cases` (shareable). Pre-cut `graphyard release contract` refuses `release cut`, naming outcome, case, when bound case is missing, invalid, not `uat`-targeted or optional, or required case proves nothing.
+`e2e/contract.json` lists required customer outcomes: `id`, `title`, optional `criteria`, proving `cases` (shareable). Pre-cut `graphyard release contract` refuses `release cut`, naming outcome and case, when a bound case is missing, invalid, not `uat`-targeted, optional, or proves nothing.
 
 ## Flake ledger
 
