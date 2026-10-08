@@ -56,8 +56,8 @@ test('manual:fault-class-resources — GY-1515 docs: the set inside its band is 
   // Instance 2 as the loop read it: 15,639 of 16,000 words on origin/main (361 left, within 3%).
   const inBand = await docsHeadroomStatus('/repository', 'main', (_, ref) => ref === 'origin/main' ? counted(15_639) : null);
   assert.equal(inBand.attention.length, 1, 'the master still sees the line');
-  assert.match(inBand.attention[0].text, /^The documentation \(README\.md, docs\/\) on origin\/main is 15639 of its 16000-word budget \(361 left, within 3% of it\): unit:docs-word-budget refuses every change that adds a word to it until the set is under 15520\. Trim to 15200 or fewer/);
   assert.deepEqual(faults(inBand), [], 'REPRODUCE: the base counted the set inside its band as a resource-bound resources fault');
+  assert.match(inBand.attention[0].text, /^The documentation \(README\.md, docs\/\) on origin\/main is 15639 of its 16000-word budget \(361 left, within 3% of it\): unit:docs-word-budget refuses every change that adds a word to it until the set is under 15520\. Trim to 15200 or fewer/);
   // The trim item is still filed for it, once.
   const filed: unknown[] = [], work: Work[] = [];
   await fileDocsTrim(state, { persist: async () => {}, fileFaultClass: async input => { filed.push(input); return { key: 'GY-1517', title: (input as { title: string }).title, stage: 'backlog' } as unknown as Work; } }, work, inBand.docs, () => now, []);
@@ -75,14 +75,14 @@ test('manual:fault-class-resources — GY-1515 docs: replaying the day\'s merges
   // The base has no gate: every change lands. Read through the namespace so this file loads on the base.
   const judge = (documentation as { docsBudgetJudgement?: typeof documentation.docsBudgetJudgement }).docsBudgetJudgement ?? (() => ({ failed: null, warning: null }));
   // The merges of 8 October (every one passed the warn-only budget test on the base), after GY-1503's trim to 14,972.
-  const merges = [14_972, 15_406, 15_532, 15_986, 16_001, 16_335];
+  const merges = [14_972, 15_406, 15_532, 15_986, 16_001, 16_335, 15_287, 15_639];
   let main = merges[0], faultsOnMain = 0;
   for (const total of merges.slice(1)) {
     if (!judge(set(total), BUDGET, set(main)).failed) main = total;
     faultsOnMain += await resourcesFaults(main);
   }
-  // On the base main reads 15,532 (in the band, a fault there), then 15,986, 16,001 and 16,335 (over the budget): every reading after the first merge is a resources fault.
+  // On the base main reads 15,532 (in the band, a fault there), then 15,986, 16,001 and 16,335 (over the budget), then after the trim 15,287 and 15,639 (in the band again): every reading after the first merge is a resources fault.
   assert.equal(faultsOnMain, 0, `REPRODUCE: the loop read main at ${main} words and raised ${faultsOnMain} resources fault(s) on docs through its own fault path`);
-  assert.ok(main <= 15_520 && main >= 15_406, `the candidate stops at the band: ${main}`);
+  assert.ok(main <= 15_520 && main >= 15_287, `the candidate stops at the band: ${main}`);
   assert.equal(await resourcesFaults(main), 0, 'the candidate\'s main never reads as a resources fault');
 });
