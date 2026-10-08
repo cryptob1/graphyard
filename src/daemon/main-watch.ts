@@ -1,10 +1,11 @@
-// Concern: the main watch (GY-1519) — main's first-parent history classified against what Graphyard recorded, report-only attention, the promotion freeze.
+// Concern: the main watch (GY-1519) — main's first-parent history classified against what Graphyard recorded (candidate reverts included, GY-1526), report-only attention, the promotion freeze.
 import { z } from 'zod';
 import type { ChildRun } from '../child-runner.js';
 import type { MasterConfig } from '../master.js';
 import type { Work } from '../model.js';
 import type { AttentionItem } from '../master/attention.js';
 import { ledgerMergeShas, type MergeLedgerState } from '../model/merge-ledger.js';
+import { candidateRevertsOf } from '../release-revert.js';
 import { type DaemonState, storeAction } from './state.js';
 import type { Cycle } from './cycle.js';
 
@@ -135,13 +136,14 @@ export function classifyMainCommits(history: readonly MainWatchCommit[], inputs:
   });
 }
 
-/** The classifier's inputs as the loop's snapshot holds them: ledger states, deliveries and main guard reverts per item. */
+/** The classifier's inputs as the loop's snapshot holds them: ledger states, deliveries, main guard reverts and candidate reverts (GY-1526) per item. */
 export function mainWatchInputs(work: readonly Work[], directMergeWindows: MainWatchInputs['directMergeWindows']): MainWatchInputs {
   return {
     ledger: Object.fromEntries(work.flatMap(item => item.mergeLedger ? [[item.key, item.mergeLedger] as const] : [])),
     deliveries: work.flatMap(item => item.delivery ? [{ key: item.key, mergeSha: item.delivery.mergeSha }, ...(item.delivery.children ?? []).map(child => ({ key: child.key, mergeSha: child.mergeSha }))] : []),
     mainGuardReverts: work.flatMap(item => (item.mainGuardReverts ?? []).map(revert => ({ key: item.key, revertSha: revert.revertSha }))),
-    candidateReverts: [],
+    // A revert the merge writer pushed for a failed release candidate (release-revert.ts) is explained by the item's record of it, labelled `candidate-revert`.
+    candidateReverts: candidateRevertsOf(work),
     directMergeWindows,
   };
 }

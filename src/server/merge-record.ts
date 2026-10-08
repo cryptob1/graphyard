@@ -10,6 +10,7 @@ import { save } from '../store.js';
 import { lockedWork } from '../store/locked-read.js';
 import { gitRunnerFor, type GitRunner } from '../merge-writer/local-observation.js';
 import { mergeRecordKinds, type MergeRecordEvent } from '../merge-writer/executor.js';
+import { applyCandidateRevert, candidateRevertReason, revertLedgerKind, type CandidateRevert } from '../release-revert.js';
 import type { Engine } from '../engine.js';
 import type { Services } from './routes.js';
 
@@ -24,7 +25,8 @@ import type { Services } from './routes.js';
  * row gone, all in the one transaction, saved as `merge-writer.delivered`; one for a merge commit
  * the base branch does not hold is refused, since nothing landed, and so is one (or a `pushed`)
  * for a merge commit the item's own open intent of its submitted head does not name, since a
- * commit main holds for another item or none delivers nothing here.
+ * commit main holds for another item or none delivers nothing here. A `revert` (GY-1526) is the
+ * candidate revert of a delivered item's merge, in its own phases, recorded as `merge.revert`.
  */
 const sha = z.string().regex(/^[0-9a-f]{40}$/i).transform(value => value.toLowerCase());
 const instant = z.string().max(64).refine(value => Number.isFinite(Date.parse(value)), 'an ISO 8601 instant');
@@ -38,6 +40,27 @@ export const mergeRecordBodySchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('refused'), head: sha, reason: z.string().min(1).max(2000) }).strict(),
 ]);
 export type MergeRecordBody = z.infer<typeof mergeRecordBodySchema>;
+/**
+ * GY-1526: the revert of a delivered item's merge for a failed release candidate, in the same
+ * phases a merge takes (release-revert.ts `revertCandidateItem`), each recorded as `merge.revert`.
+ * The `reconciled` phase, once the base branch holds the revert commit, records the revert on the
+ * item (`candidateReverts`) and reopens it with a rework naming the case and step.
+ */
+const revertPhase = { kind: z.literal('revert'), mergeSha: sha, candidate: z.string().min(1).max(100), case: z.string().min(1).max(200), step: z.string().min(1).max(500), at: instant };
+export const revertRecordBodySchema = z.discriminatedUnion('phase', [
+  z.object({ ...revertPhase, phase: z.literal('intent'), revertSha: sha, baseTip: sha }).strict(),
+  z.object({ ...revertPhase, phase: z.literal('trial'), revertSha: sha, baseTip: sha, build: z.enum(['pass', 'fail']), tests, durationMs: z.number().int().min(0) }).strict(),
+  z.object({ ...revertPhase, phase: z.literal('pushed'), revertSha: sha, pushedAt: instant }).strict(),
+  z.object({ ...revertPhase, phase: z.literal('reconciled'), revertSha: sha, observedTip: sha }).strict(),
+  z.object({ ...revertPhase, phase: z.literal('refused'), reason: z.string().min(1).max(2000) }).strict(),
+]);
+export type RevertRecordBody = z.infer<typeof revertRecordBodySchema>;
+/** The save reason a reconciled revert reopens the item under. */
+export const revertReopenedReason = 'candidate-revert.reopened';
+/** The refusal of a revert record naming a merge the item did not deliver. */
+export const unrevertableRefusal = (key: string, mergeSha: string, delivered: string | null) => `${key} ${delivered ? `delivered ${delivered.slice(0, 12)}, not` : 'delivered nothing, so not'} ${mergeSha.slice(0, 12)}; a candidate revert is recorded only against the merge the item delivered`;
+/** The refusal of a revert reconciliation naming a revert commit the base branch does not hold. */
+export const unheldRevertRefusal = (revertSha: string, base: string) => `${base} does not hold ${revertSha.slice(0, 12)}; a revert is reconciled only once the base branch holds its commit`;
 /** The save reason a reconciliation delivers under; the ledger's `merge-writer.<kind>` saves carry every other step. */
 export const deliveredReason = 'merge-writer.delivered';
 /** The refusal of a reconciliation naming a merge commit the base branch does not hold. */
@@ -66,20 +89,41 @@ async function foldItemLedger(db: pg.PoolClient, work: Work, data: MergeRecordBo
 
 export async function recordMergeEvent(services: Services, actor: Principal, id: string, body: unknown, key: string) {
   demand(actor.role === 'coordinator', 'Only the loop\'s coordinator identity records the merge writer\'s ledger', 403);
-  const data = mergeRecordBodySchema.parse(body);
+  const data = (body as { kind?: unknown } | null)?.kind === 'revert' ? revertRecordBodySchema.parse(body) : mergeRecordBodySchema.parse(body);
   demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
   const fingerprint = createHash('sha256').update(JSON.stringify({ id, data })).digest('hex');
   const engine = services.engine, base = engine.baseBranch;
-  // Whether the base branch holds the merge commit is read from the checkout before the transaction, as every provider read is.
+  // Whether the base branch holds the merge (or revert) commit is read from the checkout before the transaction, as every provider read is.
   let held: boolean | null = null;
-  if (data.kind === 'reconciled') held = (await gitRunner(engine)(['merge-base', '--is-ancestor', data.mergeSha, `refs/remotes/origin/${base}`])).status === 0;
+  const reconciledSha = data.kind === 'reconciled' ? data.mergeSha : data.kind === 'revert' && data.phase === 'reconciled' ? data.revertSha : null;
+  if (reconciledSha) held = (await gitRunner(engine)(['merge-base', '--is-ancestor', reconciledSha, `refs/remotes/origin/${base}`])).status === 0;
   return engine.store.transaction(async (db: pg.PoolClient, now: Date) => {
     const replay = (await db.query('SELECT * FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];
     if (replay) { demand(replay.fingerprint === fingerprint, 'Idempotency key reused with different input'); return replay.result; }
     const all = await lockedWork(db, [id]);
     const work = all.find(item => item.id === id || item.key === id); demand(work, 'Work item not found', 404);
     const receipt = async (result: unknown) => { await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]); return result; };
-    const answer = () => ({ recorded: true, key: work!.key, kind: data.kind, stage: work!.stage, mergeLedger: work!.mergeLedger ?? null, delivery: work!.delivery ?? null });
+    const answer = () => ({ recorded: true, key: work!.key, kind: data.kind, stage: work!.stage, mergeLedger: work!.mergeLedger ?? null, delivery: work!.delivery ?? null, ...(data.kind === 'revert' ? { candidateReverts: work!.candidateReverts ?? [] } : {}) });
+    if (data.kind === 'revert') {
+      // GY-1526: a revert is about the merge the item delivered; its reconcile records the revert and reopens the item.
+      const delivered = work!.delivery?.mergeSha.toLowerCase() ?? null, already = (work!.candidateReverts ?? []).find(entry => entry.mergeSha === data.mergeSha);
+      // The item already reopened under this very revert: a record whose receipt was lost, answered as it stands.
+      if (already && 'revertSha' in data && already.revertSha === data.revertSha) return receipt(answer());
+      demand(delivered === data.mergeSha, unrevertableRefusal(work!.key, data.mergeSha, delivered), 409);
+      if (data.phase === 'reconciled') demand(held, unheldRevertRefusal(data.revertSha, base), 409);
+      const { kind: _kind, ...payload } = data;
+      await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work!.id, actor.id, revertLedgerKind, JSON.stringify({ key: work!.key, ...payload })]);
+      if (data.phase !== 'reconciled') { await save(db, work!, actor.id, `merge-writer.revert.${data.phase}`, now, payload); return receipt(answer()); }
+      const revert: CandidateRevert = { mergeSha: data.mergeSha, revertSha: data.revertSha, candidate: data.candidate, case: data.case, step: data.step, at: data.at };
+      const { reopened } = applyCandidateRevert(work!, revert, now);
+      const reason = candidateRevertReason(work!, revert);
+      if (reopened) {
+        engine.evaluate(work!, all, now);
+        await (engine as unknown as { recordDispatch(db: pg.PoolClient, work: Work, now: Date): Promise<void> }).recordDispatch(db, work!, now);
+      }
+      await save(db, work!, actor.id, reopened ? revertReopenedReason : 'merge-writer.revert.reconciled', now, { revert, reopened, rework: reason });
+      return receipt(answer());
+    }
     const candidate = work!.candidate?.sha.toLowerCase() ?? null;
     // Every record is about the item's own submitted head (AC-4): an intent, a trial or a refusal
     // names it; a push or a reconciliation names the merge commit the item's open intent of that
