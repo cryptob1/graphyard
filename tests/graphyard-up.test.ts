@@ -1319,11 +1319,11 @@ function mobilePage(options: { landing: string; codes?: string[]; expireAfter?: 
   return { page, sleep, clicked, now: () => new Date(clock.t), timeoutMs: 600_000 };
 }
 
-/** An administration-ledger entry in CHECKOUT recording the GitHub logins PROFILE was driven as. */
-async function recordProfileLogin(checkout: string, profile: string, logins: { browser: string | null; cli: string | null }) {
+/** CHECKOUT's administration ledger, oldest first, with one entry per LOGINS recording the GitHub logins PROFILE was driven as. */
+async function recordProfileLogin(checkout: string, profile: string, ...logins: { browser: string | null; cli: string | null }[]) {
   await mkdir(join(checkout, '.graphyard/master-actions'), { recursive: true });
-  const actor = { ...logins, profile, os: 'operator', host: 'host', coordinator: null };
-  await writeFile(join(checkout, '.graphyard/master-actions/ledger.json'), JSON.stringify({ version: 1, entries: [{ id: randomUUID(), flow: 'protection', actor }] }));
+  const entries = logins.map(each => ({ id: randomUUID(), flow: 'protection', actor: { ...each, profile, os: 'operator', host: 'host', coordinator: null } }));
+  await writeFile(join(checkout, '.graphyard/master-actions/ledger.json'), JSON.stringify({ version: 1, entries }));
 }
 
 test('unit:up-agent-defaults-browser-profile — with no --browser-profile, agent mode drives the profile another install on this host recorded for the same GitHub login and says so; with none, it refuses as before', async () => {
@@ -1341,35 +1341,51 @@ test('unit:up-agent-defaults-browser-profile — with no --browser-profile, agen
   await writeFile(join(units, 'graphyard-executor@.service'), `[Service]\nWorkingDirectory=/elsewhere\n`);
   assert.deepEqual(hostInstallRoots(units), [stranger, other], 'every master loop unit names its install');
 
-  // Each install's ledger records the GitHub login its profile was signed in as (else the gh login that drove it).
-  await recordProfileLogin(other, 'Default', { browser: null, cli: 'Acme' });
+  // Each install's ledger records the GitHub login its profile's browser was observed signed in as.
+  // A later no-op entry, which never read the browser and records only the gh login, says nothing about the profile.
+  await recordProfileLogin(other, 'Default', { browser: 'Acme', cli: 'Acme' }, { browser: null, cli: 'someone' });
   await recordProfileLogin(stranger, 'Theirs', { browser: 'someone', cli: 'Acme' });
+  const neverAsked = () => { throw new Error('an observed profile is not opened'); };
   // The other install's profile, for the same login (case aside) though its repository has another owner, naming where it came from.
-  assert.deepEqual(upBrowserProfile(fresh, request({ agent: true, repository: 'org-b/service' }), [stranger, other], () => 'acme'), { profile: 'Default', executable: '/usr/bin/google-chrome-stable', from: other, login: 'Acme' });
+  assert.deepEqual(upBrowserProfile(fresh, request({ agent: true, repository: 'org-b/service' }), [stranger, other], () => 'acme', neverAsked), { profile: 'Default', executable: '/usr/bin/google-chrome-stable', from: other, login: 'Acme' });
+  assert.equal(upBrowserProfile(fresh, request({ agent: true, repository: 'org-b/service' }), [other], () => 'someone', neverAsked), null, 'the no-op entry\'s gh login never claims the profile');
   // An explicit or own recorded profile still wins; another login's install is never borrowed, whatever its repository's owner.
   assert.deepEqual(upBrowserProfile(fresh, request({ agent: true, browserProfile: 'Work' }), [other], () => { throw new Error('not asked'); }), { profile: 'Work' });
-  assert.equal(upBrowserProfile(fresh, request({ agent: true, repository: 'Acme/shop' }), [stranger, other], () => 'someone-else'), null);
-  assert.equal(upBrowserProfile(fresh, request({ agent: true }), [stranger, other], () => null), null, 'no login on this host: nothing is borrowed');
-  // The signed-in browser's login decides over the gh login that drove it: stranger's profile is someone's.
-  assert.equal(upBrowserProfile(fresh, request({ agent: true }), [stranger], () => 'acme'), null);
-  assert.equal(upBrowserProfile(fresh, request({ agent: true }), [stranger], () => 'Someone')?.profile, 'Theirs');
-  // A profile no ledger names a login for is never borrowed, even for its repository's owner.
-  const unrecorded = await temporaryDirectory('graphyard-up-unrecorded-install');
-  await mkdir(join(unrecorded, '.graphyard'), { recursive: true });
-  await writeFile(join(unrecorded, '.graphyard/master.json'), JSON.stringify({ repository: 'Acme/api', browser: { profile: 'Other' } }));
-  assert.equal(upBrowserProfile(fresh, request({ agent: true }), [unrecorded], () => 'acme'), null);
+  assert.equal(upBrowserProfile(fresh, request({ agent: true, repository: 'Acme/shop' }), [stranger, other], () => 'someone-else', neverAsked), null);
+  assert.equal(upBrowserProfile(fresh, request({ agent: true }), [stranger, other], () => null, neverAsked), null, 'no login on this host: nothing is borrowed');
+  // The browser's observed login decides, not the gh login that drove it: stranger's profile is someone's.
+  assert.equal(upBrowserProfile(fresh, request({ agent: true }), [stranger], () => 'acme', neverAsked), null);
+  assert.equal(upBrowserProfile(fresh, request({ agent: true }), [stranger], () => 'Someone', neverAsked)?.profile, 'Theirs');
+  // A profile no entry observed (none, or only gh logins) is opened to read who is signed in; signed out or unreadable, it is never borrowed.
+  const unobserved = await temporaryDirectory('graphyard-up-unobserved-install');
+  await mkdir(join(unobserved, '.graphyard'), { recursive: true });
+  await writeFile(join(unobserved, '.graphyard/master.json'), JSON.stringify({ repository: 'Acme/api', browser: { profile: 'Other' } }));
+  await recordProfileLogin(unobserved, 'Other', { browser: null, cli: 'acme' });
+  const asked: string[] = [];
+  assert.equal(upBrowserProfile(fresh, request({ agent: true }), [unobserved], () => 'acme', ({ profile }) => { asked.push(profile); return 'bob'; }), null, 'signed in as bob: not acme\'s, whatever gh drove it as');
+  assert.deepEqual(asked, ['Other']);
+  assert.deepEqual(upBrowserProfile(fresh, request({ agent: true }), [unobserved], () => 'acme', () => 'ACME'), { profile: 'Other', from: unobserved, login: 'ACME' });
+  assert.equal(upBrowserProfile(fresh, request({ agent: true }), [unobserved], () => 'acme', () => null), null, 'signed out');
+  assert.equal(upBrowserProfile(fresh, request({ agent: true }), [unobserved], () => 'acme', () => { throw new Error('profile locked'); }), null, 'cannot be opened');
+  // Reading the login opens GitHub in the profile and reads its user-login tag, then closes the session.
+  const { browserProfileLogin } = await up();
+  const calls: string[] = [];
+  const fake = (login: string | null) => (session: string) => ({ open: (url: string) => { calls.push(`${session} open ${url}`); }, meta: (name: string) => { calls.push(`meta ${name}`); return login; }, close: () => { calls.push('close'); } }) as any;
+  assert.equal(browserProfileLogin({ profile: 'Profile 1' }, fake('acme')), 'acme');
+  assert.deepEqual(calls, ['graphyard-up-login-profile-1 open https://github.com/', 'meta user-login', 'close']);
+  assert.equal(browserProfileLogin({ profile: 'Default' }, fake(null)), null);
 
   // The real dependencies read this host's installs and say which profile drives the App pages.
   const previous = process.env.XDG_CONFIG_HOME;
   process.env.XDG_CONFIG_HOME = config;
   try {
     const notes: UpEvent[] = [];
-    const deps = upDependencies(fresh, '/nonexistent/graphyard.mjs', request({ agent: true, repository: 'org-b/service' }), event => { notes.push(event); }, () => 'acme');
+    const deps = upDependencies(fresh, '/nonexistent/graphyard.mjs', request({ agent: true, repository: 'org-b/service' }), event => { notes.push(event); }, () => 'acme', neverAsked);
     assert.equal(typeof deps.driveApp, 'function', 'agent mode drives the App pages in the borrowed profile');
-    assert.deepEqual(notes.map(event => event.kind === 'note' ? event.text : ''), [`No --browser-profile given: the App pages are driven in Chrome profile Default, which the Graphyard install at ${other} recorded for the GitHub login Acme; pass --browser-profile to use another.`]);
+    assert.deepEqual(notes.map(event => event.kind === 'note' ? event.text : ''), [`No --browser-profile given: the App pages are driven in Chrome profile Default, which the Graphyard install at ${other} uses, signed in to GitHub as Acme, the login gh uses here; pass --browser-profile to use another.`]);
     // No install for this login: no drive, so agent mode refuses as it did before.
     const none: UpEvent[] = [];
-    const refusedDeps = upDependencies(fresh, '/nonexistent/graphyard.mjs', request({ agent: true }), event => { none.push(event); }, () => 'nobody');
+    const refusedDeps = upDependencies(fresh, '/nonexistent/graphyard.mjs', request({ agent: true }), event => { none.push(event); }, () => 'nobody', () => null);
     assert.equal(refusedDeps.driveApp, undefined);
     assert.deepEqual(none, []);
   } finally { if (previous === undefined) delete process.env.XDG_CONFIG_HOME; else process.env.XDG_CONFIG_HOME = previous; }
@@ -1456,6 +1472,12 @@ test('unit:setup-docs-one-command — the one-command line in docs/setup-from-ze
   await writeFile(join(other, '.graphyard/master.json'), JSON.stringify({ repository: 'ELSEWHERE/graphyard', browser: { profile: 'Default' } }));
   await recordProfileLogin(other, 'Default', { browser: 'operator', cli: 'operator' });
   assert.equal(upBrowserProfile(await temporaryDirectory('graphyard-up-docs-fresh'), { ...parsed, repository: 'OWNER/REPO' }, [other], () => 'operator')?.profile, 'Default');
+  // A profile its install never observed is opened to read its login, so the same command works there too.
+  const unobserved = await temporaryDirectory('graphyard-up-docs-unobserved');
+  await mkdir(join(unobserved, '.graphyard'), { recursive: true });
+  await writeFile(join(unobserved, '.graphyard/master.json'), JSON.stringify({ repository: 'ELSEWHERE/graphyard', browser: { profile: 'Default' } }));
+  await recordProfileLogin(unobserved, 'Default', { browser: null, cli: 'operator' });
+  assert.equal(upBrowserProfile(await temporaryDirectory('graphyard-up-docs-fresh'), { ...parsed, repository: 'OWNER/REPO' }, [unobserved], () => 'operator', () => 'operator')?.profile, 'Default');
   assert.match(section, /only human step: approving a GitHub Mobile prompt/i);
   // Net growth of the page is at most 20 words over its 999 words before GY-1510.
   assert.ok(page.split(/\s+/).filter(Boolean).length <= 999 + 20, 'docs/setup-from-zero.md grew by at most 20 words');
