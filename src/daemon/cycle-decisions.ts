@@ -46,7 +46,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
   const note = async (key: string, item: Work, kind: DaemonActionKind, outcome: 'done' | 'failed', detail: string, at = now(), faultKind?: FaultKind | null) =>
     performed.push(await record(state, key, { kind, work: item.key, principal: null, state: outcome, detail, attempts: (state.actions[key]?.attempts ?? 0) + 1, epoch: item.epoch, cycle: state.cycle }, at, effects.persist, faultKind));
   const approvers = createApproverSupervisor(cycle, effects, stamp, note, capacities, approversSpent);
-  const { sessions, invalidate, closeApprover, endApproverSession, launch, capacityRelaunchWaits, approverExhausted, escalateUnjudged, actOnStep } = approvers;
+  const { sessions, invalidate, closeApprover, endApproverSession, endWatchSession, launch, capacityRelaunchWaits, approverExhausted, escalateUnjudged, actOnStep } = approvers;
   /** Request the decision (or adopt the one already standing) and put it to an approver. */
   const request = async (item: Work, decision: RoutineDecision, key: string, carried: ApprovalWatch | null) => {
     const verdict = decision.action === 'rework' && !carried ? standingVerdict(item) : null;
@@ -553,7 +553,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     // An item no longer open has no pane to close, but its registry session still holds a slot.
     let closed = true;
     if (item) closed = await closeApprover(item, watch, `${watch.work} no longer needs ${watch.action} decision ${watch.decision}`);
-    else if (watch.session && effects.endRegistrySession) closed = await effects.endRegistrySession(watch.session, `${watch.work} is no longer open`).then(() => { watch.session = null; return true; }, () => { watch.closeAttempts += 1; return false; });
+    else closed = await endWatchSession(watch, `${watch.work} is no longer open`);
     // A tab that will not close, or a request that cannot be taken back, is left to the operator
     // after a few tries; the session name is this decision's alone, so it can refuse no other launch.
     // A registry session is not: its id is the only way to end it, and while it lives it holds the

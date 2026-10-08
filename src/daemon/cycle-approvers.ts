@@ -6,7 +6,7 @@ import { type ApprovalWatch, approvalWatchSchema, type DaemonActionKind, message
 import { readyToRetry } from './sessions.js';
 import { approvalStep, type ApprovalStep, approverLaunchKey, approverPrefixes, boundDetail, handWatchPrefix, maxApproverCloses, maxApproverLaunches, maxDecisionRequests, maxLostApproverRuns, lostRunRefunded, recordWatchEnded } from './decisions.js';
 import { type DaemonEffects, failoverKey, record, stoppedStates } from './effects.js';
-import { capacityRefusal } from '../fleet.js';
+import { capacityRefusal, unknownRegistrySession } from '../fleet.js';
 import type { Cycle } from './cycle.js';
 import { sessionExhaustion } from './cycle-sessions.js';
 import { resumedApplication } from './decision-reads.js';
@@ -26,6 +26,7 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
   let inventory: { agents: HerdrAgent[]; available: boolean } | null = null;
   const sessions = async () => inventory ??= await effects.herdr?.() ?? { agents: await effects.agents(), available: true };
   const invalidate = () => { inventory = null; };
+  const unknownSessionDetail = (session: string, error: unknown) => `Approver registry session ${session} is taken as ended: the registry no longer knows this session (${message(error)})`;
   /**
    * End the agent registry session a watch's launch holds (GY-182). At a role concurrency of 1 a
    * live one refuses the next decision's approver, so it goes wherever the approver is closed or
@@ -33,14 +34,36 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
    * ended on the next try, which the registry answers the same way when it is already ended.
    * GY-1375: a registry the plane's outage or restart kept from answering (planeWideRefusal) is no
    * session-liveness fault of the item's — on 6 October 2026 GY-1359's close met the startup 503.
+   * GY-1504: a session aged out of the registry's bounded history answers 404 Unknown session on
+   * every try, so that answer ends it here, once, rather than being retried every cycle forever.
    */
   const endApproverSession = async (item: Work, watch: ApprovalWatch, why: string) => {
     if (!watch.session || !effects.endRegistrySession) return true;
     try { await effects.endRegistrySession(watch.session, why.slice(0, 500)); watch.session = null; return true; }
     catch (error) {
+      if (unknownRegistrySession(error)) {
+        const session = watch.session!; watch.session = null;
+        await note(`close:approver-session:${watch.decision}:${session}`, item, 'close', 'done', unknownSessionDetail(session, error));
+        return true;
+      }
       const unanswered = planeWideRefusal(error);
       await note(`close:approver-session:${watch.decision}:${watch.session}`, item, 'close', 'failed', `Could not end approver registry session ${watch.session}${unanswered ? ' (the control plane did not answer, so it is ended on the next try)' : ''}: ${message(error)}`, undefined, unanswered ? null : undefined);
       return false;
+    }
+  };
+  /**
+   * End the registry session of a watch whose item is no longer open (GY-1504): no item to note it
+   * on, so an Unknown-session answer is recorded on the watch's key. False only when the registry
+   * could not be told, which counts a close attempt and leaves the id for the next cycle.
+   */
+  const endWatchSession = async (watch: ApprovalWatch, why: string) => {
+    if (!watch.session || !effects.endRegistrySession) return true;
+    try { await effects.endRegistrySession(watch.session, why.slice(0, 500)); watch.session = null; return true; }
+    catch (error) {
+      if (!unknownRegistrySession(error)) { watch.closeAttempts += 1; return false; }
+      const session = watch.session!; watch.session = null;
+      performed.push(await record(state, `close:approver-session:${watch.decision}:${session}`, { kind: 'close', work: watch.work, principal: null, state: 'done', detail: unknownSessionDetail(session, error), attempts: 1, cycle: state.cycle }, now(), effects.persist));
+      return true;
     }
   };
   /**
@@ -416,8 +439,7 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
       if (listed && !why) continue;
       // A session gone on its own has no pane to close, only a registry session to end.
       if (!item) {
-        if (watch.session && effects.endRegistrySession) await effects.endRegistrySession(watch.session, why!).then(() => { watch.session = null; }, () => { watch.closeAttempts += 1; });
-        if (!watch.session || !effects.endRegistrySession) delete state.approvals[key];
+        if (await endWatchSession(watch, why!)) delete state.approvals[key];
         continue;
       }
       if (!listed) why ??= `approver session ${watch.agentName} is gone`;
@@ -441,5 +463,5 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
     for (const entry of ended) performed.push(await record(state, `registry:end:${entry.session}`, { kind: 'close', work: entry.work, principal: null, state: 'done',
       detail: `Ended the ${entry.role} registry session ${entry.session} on ${entry.account}${entry.work ? ` for ${entry.work}` : ''}: ${entry.reason}`, attempts: 1, cycle: state.cycle }, now(), effects.persist));
   }); };
-  return { sessions, invalidate, endApproverSession, closeApprover, capacityRelaunchWaits, launch, approverExhausted, escalateUnjudged, actOnStep, superviseHandApprovers, reconcileRegistrySessions };
+  return { sessions, invalidate, endApproverSession, endWatchSession, closeApprover, capacityRelaunchWaits, launch, approverExhausted, escalateUnjudged, actOnStep, superviseHandApprovers, reconcileRegistrySessions };
 }
