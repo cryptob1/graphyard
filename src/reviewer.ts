@@ -9,6 +9,9 @@ import { consentAnswerSchema } from './consent-prompt.js';
 import { defaultChildRun, type ChildRun } from './child-runner.js';
 import { closeFailedLaunch, launchStartMs, withLaunchClose, accountLaunch, acknowledgeLaunch, acknowledgementMs, agentLaunchPlan, allocateManagedCheckout, assertOutsideWorktrees, atomicPrivateWrite, autonomousSession, createdHerdrTab, deliverPrompt, herdrJson, loadMasterConfig, loadStoredMasterConfig, markReprompted, neverStarted, onSelectedSession, readCredentialFile, prepareSessionHarness, privateFile, profileAtLimit, profileConcurrency, registrySessionOf, profileSessions, readSessionScreen, reviewerIdentitySchema, reviewerProfileSchema, closeHerdrPane, selectAccount, sessionActivity, sessionAgentName, settleCheckout, settlementDue, settlementReason, sharedGitDirectory, startAgentSession, stopCreatedHerdrTab, writeFailure, type HerdrAgent, type PromptDelivery, type StartBounds, type MasterConfig, type RequestDelivery, type ReviewerIdentity, type ReviewerProfile } from './master.js';
 import { sessionSlotsGrant } from './master/harness.js';
+import { sessionConfinement } from './master/launch.js';
+import { underTestRunner } from './supervisor.js';
+import { runtimeSandboxes, sessionWritablePaths, verifyWorkerSandbox, type SandboxExec } from './worker-sandbox.js';
 import { withVerificationPath } from './master/verification-slots.js';
 import { clientErrorStatus, retryStopAttention } from './retry-stop.js';
 import { defaultReviewRoundCap, pastReviewCap, reviewRoundCapOf, reviewRoundStatus, type ReviewRoundStatus } from './review-cap.js';
@@ -544,7 +547,7 @@ export function reviewRoundSection(sha: string, history?: ReviewHistory, rounds?
   if (!history && !rounds?.capped) return '';
   history ??= { changesRequested: 0 };
   const cap = rounds?.cap ?? reviewRoundCap;
-  return (history.previousHead ? `You already reviewed an earlier head of this pull request, ${history.previousHead}. This round reviews only what changed since then: git fetch origin ${history.previousHead} ${sha} && git diff ${history.previousHead}..${sha}, plus the still-unresolved review threads. `
+  return (history.previousHead ? `You already reviewed an earlier head of this pull request, ${history.previousHead}. This round reviews only what changed since then: git fetch --no-write-fetch-head origin ${history.previousHead} ${sha} && git diff ${history.previousHead}..${sha}, plus the still-unresolved review threads. `
       + 'Do not raise findings on code that is unchanged since that head unless an acceptance criterion is unmet. ' : '')
     + (rounds?.capped || history.changesRequested >= cap ? `${rounds?.capped ? `This is review round ${rounds.round} of this item, past its cap of ${cap} rounds` : `This pull request has already had ${history.changesRequested} rounds of requested changes under this policy revision`}, the most review holds a change for: this round only an unmet acceptance criterion may request changes, and every other finding must be listed as a FOLLOW-UP. `
       + 'Name each blocking finding — an acceptance criterion not met, wrong behaviour, or a security defect — on its own line starting BLOCKING: in the body of REQUEST_CHANGES, and mention every other finding briefly as a nit; a change request with no BLOCKING: line is withdrawn by Graphyard and the head reviewed again, with nothing filed, and one with a blocking finding is escalated to an independent approver rather than reworked. ' : '')
@@ -608,6 +611,32 @@ export async function anchorSessionCheckout(root: string, directory: string, run
 }
 
 /**
+ * GY-1507: what a reviewer's or producer's runtime sandbox is granted — the session directory and the
+ * same narrow Git paths a worker gets (worker-sandbox.ts sessionWritablePaths), never the common Git
+ * directory — plus the host's verification lock directory.
+ */
+export async function sessionWritable(root: string, config: MasterConfig, directory: string) {
+  return [...sessionWritablePaths(directory, await sharedGitDirectory(root)), ...sessionSlotsGrant(root, config)];
+}
+/** Where a reviewer's or producer's sandbox probe runs: on the host by default, never under the test runner unless a test substitutes one. */
+export type SessionSandboxProbe = SandboxExec | 'host' | null;
+/**
+ * GY-1507: before a reviewer or producer session starts, the runtime's own sandbox probe
+ * (`runtimeSandboxes[kind].probe`) proves it can write every granted path, behind the coordinator
+ * confinement the session will run in, as a worker launch does. A sandbox that cannot run a command
+ * fails the launch naming the runtime and the path, rather than starting a session that dies at its
+ * first command and is recorded as never started. A runtime without a write-restricting sandbox is
+ * not probed here.
+ */
+export async function verifySessionSandbox(role: 'reviewer' | 'producer', launch: { kind?: string; args: string[]; environment?: Record<string, string> }, directory: string, writable: string[], probe: SessionSandboxProbe | undefined, ownGitHubCredential = false) {
+  const run = probe === undefined ? (underTestRunner() ? null : 'host') : probe;
+  const sandbox = launch.kind ? runtimeSandboxes[launch.kind] : undefined;
+  if (!run || !sandbox || sandbox.mode(launch.args) === null) return null;
+  const confinement = await sessionConfinement(launch.kind!, launch.args, { directory, cwd: directory, ownGitHubCredential });
+  return verifyWorkerSandbox({ ...launch, role, ...(confinement?.wrapper.length ? { confinement: confinement.wrapper } : {}) }, directory, writable, run === 'host' ? undefined : run);
+}
+
+/**
  * GY-866: an interactive approver's or escalation handler's own directory under the managed
  * worktree root, never the coordinator checkout, anchored like a reviewer's so `gh` and `git`
  * reads reach the repository from where it starts. Its launch hands it the coordinator root in
@@ -641,7 +670,7 @@ export function reviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<
     + repetitionReviewSection(documentation?.files)
     + (research ? researchReviewSection(research) : '')
     + (threads?.failure ? threadReadFailureSection(threads.failure) : threads?.unresolved.length ? threadSection(binding.sha, threads.unresolved, threads.total) : '')
-    + (checkout ? `When judging the diff needs the surrounding code, read it from a detached checkout of the exact head, created only at the path Graphyard allocated for this session under its managed worktree root and never under a temporary directory: git fetch origin ${binding.sha} && git worktree add --detach ${checkout.worktree} ${binding.sha}. Read there and change nothing; Graphyard removes ${checkout.directory} when this session ends. ` : '')
+    + (checkout ? `When judging the diff needs the surrounding code, read it from a detached checkout of the exact head, created only at the path Graphyard allocated for this session under its managed worktree root and never under a temporary directory: git fetch --no-write-fetch-head origin ${binding.sha} && git worktree add --detach ${checkout.worktree} ${binding.sha}. Read there and change nothing; Graphyard removes ${checkout.directory} when this session ends. ` : '')
     + 'This session is read-only: do not edit, stage, commit, push, rebase, or merge anything, do not run the project\'s build, tests, or servers, do not claim Graphyard work, and do not submit evidence. '
     + reviewPostSection(config.cliPath ?? launcherPath, 'only when a BLOCKING finding stands')
     + `Judge whether this diff meets what ${binding.key} requires by that rule; never weaken a requirement to let it pass, and never hold a change that meets its criteria over a FOLLOW-UP. `
@@ -751,6 +780,8 @@ export async function launchReview(root: string, work: Work, profileName: string
   threads?: (repository: string, pr: number) => Promise<LaunchThread[]>;
   /** How a bot round's head is read to verify it as the bot commit (GY-971): with the loop's own GitHub access by default, none for a test launch that substitutes `mint` and not this. */
   observeCommit?: (sha: string) => Promise<{ parents: string[]; files: string[]; at: string }>;
+  /** How the runtime's sandbox probe runs before the session starts (GY-1507); on the host by default. */
+  sandbox?: SessionSandboxProbe;
 } = {}) {
   const now = dependencies.now ?? (() => new Date());
   // The automatic profile's unset concurrency reads as its default here too (GY-1072), so the launch names and counts its sessions as the dispatcher does.
@@ -864,12 +895,14 @@ export async function launchReview(root: string, work: Work, profileName: string
         await writeReviewBinding(sessionDirectory, { repository: config.repository, key: binding.key, pr: binding.pr, sha: binding.sha, baseSha: binding.baseSha, policyRevision: binding.policyRevision, criteriaOnly: true,
           ...(threadReadFailure ? { threadReadFailure } : { threadsListed: listed.map(thread => thread.id), ...(listedThreadAliases(listed) ? { threadAliases: listedThreadAliases(listed) } : {}) }) });
       } catch (error) { await rm(sessionDirectory, { recursive: true, force: true }); await discard(); throw error; }
-      const launch = accountLaunch(profile, selected.account, { writable: [checkout.directory, await sharedGitDirectory(root), ...sessionSlotsGrant(root, config)].filter((path): path is string => !!path) });
+      const writable = await sessionWritable(root, config, checkout.directory);
+      const launch = accountLaunch(profile, selected.account, { writable });
       let pane: string | undefined, tabId: string | undefined, delivery: RequestDelivery | undefined, consent: z.infer<typeof consentAnswerSchema>[] = [];
       try {
         // The reviewer loads its own role rules, never the master's: it may post this one verdict.
         // The harness follows the account's runtime, so a cross-runtime failover keeps its role rules.
         const harness = await prepareSessionHarness(root, config, { role: 'reviewer', kind: launch.kind, profile: profile.name, pr: binding.pr, checkout: checkout.worktree });
+        await verifySessionSandbox('reviewer', { ...launch, args: [...launch.args, ...harness.args] }, checkout.directory, writable, dependencies.sandbox, true);
         const environment = { ...withVerificationPath(harness.environment, launch.environment), GH_CONFIG_DIR: sessionDirectory, GRAPHYARD_REVIEW: `${binding.key}@${binding.sha}` };
         startedTab = true;
         const created = createdHerdrTab(await herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', checkout.directory,

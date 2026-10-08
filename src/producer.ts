@@ -5,20 +5,20 @@ import { z } from 'zod';
 import { consentAnswerSchema } from './consent-prompt.js';
 import { LaunchRefusedError } from './harness.js';
 import { defaultChildRun, type ChildRun } from './child-runner.js';
-import { closeFailedLaunch, launchStartMs, withLaunchClose, accountLaunch, acknowledgeLaunch, acknowledgementMs, allocateManagedCheckout, atomicPrivateWrite, autonomousSession, closeHerdrPane, createdHerdrTab, deliverPrompt, destructivePromptGuidance, herdrJson, loadMasterConfig, markReprompted, neverStarted, onSelectedSession, prepareSessionHarness, privateFile, profileAtLimit, profileSessions, registrySessionOf, readProducerCredential, readSessionScreen, repromptText, selectAccount, selectRegistryAccount, sessionActivity, sessionAgentName, settleCheckout, settlementDue, settlementReason, sharedGitDirectory, startAgentSession, stopCreatedHerdrTab, writeFailure, type PromptDelivery, type StartBounds, type HerdrAgent, type MasterConfig, type ProducerProfile, type RequestDelivery, type SessionRetryReport } from './master.js';
+import { closeFailedLaunch, launchStartMs, withLaunchClose, accountLaunch, acknowledgeLaunch, acknowledgementMs, allocateManagedCheckout, atomicPrivateWrite, autonomousSession, closeHerdrPane, createdHerdrTab, deliverPrompt, destructivePromptGuidance, herdrJson, loadMasterConfig, markReprompted, neverStarted, onSelectedSession, prepareSessionHarness, privateFile, profileAtLimit, profileSessions, registrySessionOf, readProducerCredential, readSessionScreen, repromptText, selectAccount, selectRegistryAccount, sessionActivity, sessionAgentName, settleCheckout, settlementDue, settlementReason, startAgentSession, stopCreatedHerdrTab, writeFailure, type PromptDelivery, type StartBounds, type HerdrAgent, type MasterConfig, type ProducerProfile, type RequestDelivery, type SessionRetryReport } from './master.js';
 import type { FleetProbe, selectFleetSession } from './fleet.js';
 import { implementerIdentities, type Work } from './model.js';
 import type { DispatchRequest } from './model/dispatch.js';
 import { evidenceProves } from './model/mechanical-proofs.js';
 import { reclaimSessionCheckouts, removeSessionCheckout, sessionCheckout, worktreeRoot, type CheckoutReclaimReport, type FilesystemProbe, type SessionCheckout } from './install/worktree-root.js';
-import { anchorSessionCheckout, assertSessionLedgerRoom, boundSessionLedger, readReviewLedger, releaseClosedRequests, unrecordedPaneStopped, type SessionLedgerSpec } from './reviewer.js';
+import { anchorSessionCheckout, sessionWritable, verifySessionSandbox, type SessionSandboxProbe, assertSessionLedgerRoom, boundSessionLedger, readReviewLedger, releaseClosedRequests, unrecordedPaneStopped, type SessionLedgerSpec } from './reviewer.js';
 import { escalationSessionMs, readApproverLaunches, readEscalationSessions } from './master/autonomy.js';
 import { closedQuestionFor } from './model/closed-question.js';
 import { paneAlreadyGone, withPaneGone } from './request-settlement.js';
 import { narrowRoleRuntime, piRuntimeSchema } from './runner/payloads.js';
 import { liveRun, liveRunCheckouts, registeredRun, unendedRunOnDisk, type RunAdopter } from './runner/registry.js';
 import type { EvidencePayload } from './runner/payloads.js';
-import { sessionSlotsGrant, sessionVerificationEnvironment } from './master/harness.js';
+import { sessionVerificationEnvironment } from './master/harness.js';
 import { withVerificationPath } from './master/verification-slots.js';
 import { liveInstallGuidance, liveInstallProof, liveInstallRequiredEnv, liveInstallSshKeyEnv, narrowRunner, piProducerPrompt, producerRunOptions, registryRunner, runOutcome, startNarrowRun, submitEvidence } from './runner/roles.js';
 import { runRecordSchema, type RunRecord, type Runner } from './runner/types.js';
@@ -377,7 +377,7 @@ export function producerPrompt(config: Pick<MasterConfig, 'repository' | 'cliPat
     + (memorySection || '')
     + `Your Graphyard credential is the file named by GRAPHYARD_TOKEN_FILE and is used only by node ${config.cliPath}; never print, copy, cat, or echo it or any other credential, and never read .graphyard/connection.json, .graphyard/credentials.json, .env, or anything under ~/.config. `
     + liveInstallGuidance(binding.proofs, checkout.directory, binding.key, binding.sha)
-    + `Work in a detached worktree of the exact head, created only at the path Graphyard allocated for this session under its managed worktree root — never in the repository's own checkout, never under .graphyard/worktrees and never under a temporary directory: git fetch origin ${binding.sha} && git worktree add --detach ${worktree} ${binding.sha}. Install and build there, then run what establishes each proof — start from the tests and scripts named for the proof (grep the proof name under tests/ and scripts/) and the acceptance criteria in node ${config.cliPath} status ${binding.key}. Run the project's tests through its own runners — node ${config.cliPath} verify ${binding.key} in that worktree, or npm test — which withhold every GRAPHYARD_* and HERDR_* variable from the tests and reserve free test ports themselves; a proof's cases are the ones whose title begins with its name, counted from a run of its whole test file, never narrowed with --test-name-pattern, and that title rule applies to unit: and integration: proofs only. A manual: proof is judged, not counted from titles: its executed is the number of test cases and checks you ran to judge the criterion, recorded with its exercise record. `
+    + `Work in a detached worktree of the exact head, created only at the path Graphyard allocated for this session under its managed worktree root — never in the repository's own checkout, never under .graphyard/worktrees and never under a temporary directory: git fetch --no-write-fetch-head origin ${binding.sha} && git worktree add --detach ${worktree} ${binding.sha}. Install and build there, then run what establishes each proof — start from the tests and scripts named for the proof (grep the proof name under tests/ and scripts/) and the acceptance criteria in node ${config.cliPath} status ${binding.key}. Run the project's tests through its own runners — node ${config.cliPath} verify ${binding.key} in that worktree, or npm test — which withhold every GRAPHYARD_* and HERDR_* variable from the tests and reserve free test ports themselves; a proof's cases are the ones whose title begins with its name, counted from a run of its whole test file, never narrowed with --test-name-pattern, and that title rule applies to unit: and integration: proofs only. A manual: proof is judged, not counted from titles: its executed is the number of test cases and checks you ran to judge the criterion, recorded with its exercise record. `
     + 'Do not edit, commit, push, rebase or merge the candidate, do not claim Graphyard work, do not post a review, and never weaken, skip or narrow a test to make a proof pass. '
     + `A proof that passes against an unchanged tree proves nothing, so for each proof that passes also show it exercises its criterion: in a second detached worktree of the same head at ${stripped} (git worktree add --detach ${stripped} ${binding.sha}), remove the behaviour the criterion the proof is attached to describes — revert or stub exactly the lines of the change that implement it — and run the same proof there. `
     + `For each proof write a JSON file such as ${evidenceFile(binding.proofs[0])} of the form {"proof":"${binding.proofs[0]}","sha":"${binding.sha}","baseSha":"${binding.baseSha}","policyRevision":${binding.policyRevision},"result":"pass"|"fail","executed":N,"skipped":0,"environment":"<runtime and how it was produced>","scopeFiles":["<paths the proof depends on>"],"exercise":{"criterion":"<the criterion id, such as AC-1>","behaviour":"<the behaviour you removed, in words a worker can find in the diff>","result":"pass"|"fail","executed":N}} — exactly this sha, baseSha and policyRevision, executed as the number of cases actually run, a failing or incomplete run submitted as result fail rather than omitted, and exercise as the stripped run's true outcome: a proof that still passes there is recorded as not exercising its criterion rather than as passing, which is the finding, not something to hide — and submit it with node ${config.cliPath} evidence ${binding.key} FILE. `
@@ -398,6 +398,8 @@ export async function launchProducer(root: string, work: Work, request: Dispatch
   filesystem?: FilesystemProbe;
   /** How closed-question proofs are judged before the launch (GY-109); the control plane's route by default. */
   judge?: ClosedQuestionJudge;
+  /** How the runtime's sandbox probe runs before the session starts (GY-1507); on the host by default. */
+  sandbox?: SessionSandboxProbe;
   /** The headless runner a `pi` producer runs on (GY-169); the configured Pi runner by default. */
   runner?: Runner;
   fetcher?: typeof fetch;
@@ -468,12 +470,14 @@ export async function launchProducer(root: string, work: Work, request: Dispatch
     // left, outside every worktree — and is the only place beside the Git directory it may write.
     const checkout = await allocateManagedCheckout(root, config, 'proof', binding.key, binding.sha, id, dependencies.filesystem);
     await anchorSessionCheckout(root, checkout.directory);
-    const launch = accountLaunch(profile, selected.account, { writable: [checkout.directory, await sharedGitDirectory(root), ...sessionSlotsGrant(root, config)].filter((path): path is string => !!path) });
+    const writable = await sessionWritable(root, config, checkout.directory);
+    const launch = accountLaunch(profile, selected.account, { writable });
     // The producer loads its own role rules, never the master's. The harness follows the account's
     // runtime, so a cross-runtime failover keeps its role rules.
     let pane: string | undefined, tabId: string | undefined, delivery: RequestDelivery | undefined, consent: z.infer<typeof consentAnswerSchema>[] = [];
     try {
       const harness = await prepareSessionHarness(root, config, { role: 'producer', kind: launch.kind, profile: profile.name, credentialFiles: [profile.credentialFile] });
+      await verifySessionSandbox('producer', { ...launch, args: [...launch.args, ...harness.args] }, checkout.directory, writable, dependencies.sandbox);
       // The producer secrets never reach Herdr's argv: they are exported from a 0600 file as the runtime starts.
       const environment = { ...withVerificationPath(harness.environment, launch.environment), GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: profile.credentialFile, GRAPHYARD_HOST_ID: config.hostId, GRAPHYARD_PRODUCER: `${binding.key}@${binding.sha}`,
         GRAPHYARD_PRODUCER_BINDING: `${binding.key}@${binding.sha}@${binding.baseSha}@${binding.policyRevision}` };
