@@ -25,7 +25,7 @@ graphyard up --agent --goal GOAL.md
 7. A passing candidate is promoted to production and checked there: production verified.
 8. A failure anywhere is reverted or fixed forward by a new work item.
 
-Only Graphyard writes to main: it merges the pull requests that pass every check.
+Only Graphyard writes to main, merging pull requests that pass every check.
 
 ```mermaid
 flowchart LR
