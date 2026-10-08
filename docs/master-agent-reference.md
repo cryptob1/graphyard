@@ -45,7 +45,7 @@ Unacted producer requests (never started, launch refused, exited at launch) rela
 
 ## Shadow merge gate
 
-`run.shadowGate` (`enabled`, default true; `timeoutMinutes`, default 20): each cycle trial-merges the oldest untried submitted head, builds and affected-tests it in a credential-free `trial` checkout (no TMPDIR), pushes nothing; `shadow.verdict` (failing: `logTail`, last 4000 characters) joins GitHub's outcome in `master status` `shadowGate` (`shadow-only-fail`/`shadow-missed`: one line each until explained); errors and timeouts record nothing; third timeout per tip gets one line. Explain: `GET /api/shadow-disagreements` (loop: `/api/shadow-explanations`), `POST /api/work/:id/shadow-explain` (coordinator/admin; `{head,baseTip,reason}`; `Idempotency-Key`).
+`run.shadowGate` (`enabled`, default true; `timeoutMinutes`, default 20): each cycle trial-merges the oldest untried submitted head, builds and affected-tests it in a credential-free `trial` checkout (no TMPDIR), pushes nothing; `shadow.verdict` (failing: `logTail`, last 4000 characters) joins GitHub's outcome in `master status` `shadowGate` (`shadow-only-fail`/`shadow-missed`: one line each until explained); errors and timeouts record nothing; third timeout per tip gets one line. Explain: `GET /api/shadow-disagreements` (loop: `/api/shadow-explanations?pair=KEY:HEAD:BASETIP`, ≤50), `POST /api/work/:id/shadow-explain` (coordinator/admin; `{head,baseTip,reason}`; `Idempotency-Key`).
 
 ## Pipeline speed
 

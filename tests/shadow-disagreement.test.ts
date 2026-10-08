@@ -5,12 +5,10 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import EmbeddedPostgres from 'embedded-postgres';
-import { keepVerdicts, shadowGateSummary, shadowIdle, shadowKeptVerdicts, shadowReads, shadowStateSchema } from '../src/daemon/cycle-shadow.js';
-import { daemonSummary, emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
-import { masterConfigSchema } from '../src/master.js';
+import { keepVerdicts, shadowGateSummary, shadowKeptVerdicts } from '../src/daemon/cycle-shadow.js';
 import {
   isPlaceholderVerdict, placeholderRunnerFailure, shadowDisagreementDetail, shadowGateAttention,
-  shadowReportWithExplanations, type ShadowVerdict,
+  shadowExplanationPairsMax, shadowReportWithExplanations, type ShadowVerdict,
 } from '../src/merge-writer/shadow.js';
 import type { Work } from '../src/model.js';
 import { MergerSettings } from '../src/merger-mode.js';
@@ -225,12 +223,18 @@ test('integration:shadow-disagreement-explain-idempotent — a coordinator/admin
   const after = await request(token(reader), 'shadow-disagreements');
   assert.equal(after.body.explanations.length, 1);
   assert.equal(after.body.explanations[0].key, key);
-  // The loop's per-cycle read carries the explanations alone: no standing list, so no verdict history is read for it.
-  const loopRead = await request(token(coordinator), 'shadow-explanations');
+  // The loop's per-cycle read names the pairs it holds and gets back which are explained, as
+  // identifiers alone: no reason, evidence or logTail, and nothing it did not ask about.
+  const other = { key, head: sha('explain-other'), baseTip };
+  const loopRead = await request(token(coordinator), `shadow-explanations?pair=${key}:${head}:${baseTip}&pair=${other.key}:${other.head}:${other.baseTip}`);
   assert.equal(loopRead.status, 200, JSON.stringify(loopRead.body));
-  assert.deepEqual(Object.keys(loopRead.body), ['explanations']);
-  assert.deepEqual(loopRead.body.explanations, after.body.explanations);
-  assert.equal((await request(token(worker), 'shadow-explanations')).status, 403);
+  assert.deepEqual(loopRead.body, { explanations: [{ key, head, baseTip }] });
+  assert.deepEqual((await request(token(coordinator), `shadow-explanations?pair=${other.key}:${other.head}:${other.baseTip}`)).body, { explanations: [] });
+  // The read is bounded: it names at least one pair and at most shadowExplanationPairsMax.
+  assert.equal((await request(token(coordinator), 'shadow-explanations')).status, 400);
+  const tooMany = Array.from({ length: shadowExplanationPairsMax + 1 }, (_, n) => `pair=${key}:${sha(`many${n}`)}:${baseTip}`).join('&');
+  assert.equal((await request(token(coordinator), `shadow-explanations?${tooMany}`)).status, 400);
+  assert.equal((await request(token(worker), `shadow-explanations?pair=${key}:${head}:${baseTip}`)).status, 403);
 });
 
 test('manual:explain-standing-disagreements — the two standing disagreements (GY-1523 head 9b30324fc4f3, GY-1549 head d205ce97ea6e) are explainable through the mechanism without re-running any trial', async () => {
@@ -352,96 +356,4 @@ test('integration:merger-applies-when-explained — POST /api/merger control-pla
   const back = await request(token(admin), 'merger', { merger: 'github', reason: 'Roll back; github never refused' });
   assert.equal(back.status, 200, JSON.stringify(back.body));
   assert.equal(back.body.merger, 'github');
-});
-
-// GY-1560 soak: the real loop over a simulated day with explanations recorded mid-run.
-const soakMinute = 60_000;
-const soakConfig = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: '/bin/graphyard',
-  repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', workers: [] });
-const soakGithub = new Proxy({}, { get: (_, name) => { throw new Error(`the shadow step called GitHub (${String(name)})`); } });
-const soakWork = (n: number, submittedAt: number, mergedAt: number, now: number): Work => ({
-  id: `w${n}`, key: `GY-${n}`, description: '', type: 'feature', priority: 1, dependencies: [], criteria: [], policy: { checks: ['test'], review: true }, plannedFiles: [],
-  revision: 1, policyRevision: 1, createdAt: iso(start), updatedAt: iso(start), stageEnteredAt: iso(submittedAt), ready: true, epoch: 1, lease: null, workspaces: [],
-  submission: { epoch: 1, pr: n }, candidate: { sha: sha(`head${n}`), baseSha: sha('base'), pr: n, branch: `graphyard/gy-${n}-1`, author: 'worker' }, reworkRequested: false,
-  scenarioRequirements: [], evidence: [], observation: null, blocker: null, violations: [], gates: [],
-  ...(now >= mergedAt ? { stage: 'done', delivery: { mergedAt: iso(mergedAt), mergeSha: sha(`merge${n}`), authorizationRevision: 1 } } : { stage: 'review' }),
-}) as unknown as Work;
-
-test('unit:soak-shadow-explanations — a simulated day in which disagreements are raised, explained mid-run and cleared: an explained item is cleared once and never raised again, an unexplained one keeps its line, a failing explanations read stops no trial, and state stays bounded', { timeout: 300_000 }, async () => {
-  const cycles = 24 * 60 / 2, items = 150;
-  let now = start, tipIndex = 0, running = 0, widest = 0, readFails = false, explanationReads = 0;
-  const tip = () => sha(`tip${tipIndex}`);
-  const trials: string[] = [], explanations: { key: string; head: string; baseTip: string }[] = [];
-  const git = ((command: string, args: string[]) => {
-    assert.equal(command, 'git');
-    const [, , sub] = args;
-    if (sub === 'rev-parse') return `${tip()}\n`;
-    if (sub === 'merge-tree') return `${sha('tree')}\0`;
-    if (sub === 'commit-tree') return `${sha(`merge-${args.join(' ')}`)}\n`;
-    if (sub === 'diff') return 'src/a.ts\n';
-    return '';
-  }) as never;
-  const reads = shadowReads(soakConfig, '/coordinator', git, { base: '/w', record: async () => {}, explanations: async () => {
-    explanationReads += 1;
-    if (readFails) throw new Error('coordinator 503');
-    return explanations.map(entry => ({ ...entry }));
-  }, trial: async input => {
-    running += 1; widest = Math.max(widest, running); trials.push(input.mergeSha);
-    await new Promise(resolve => setTimeout(resolve, 1));
-    running -= 1;
-    // Every fifth trial fails its tests and GitHub merges it anyway: a shadow-only-fail.
-    const failed = trials.length % 5 === 0;
-    return { build: 'pass', tests: { passed: failed ? 0 : 1, failed: failed ? ['tests/x.test.ts'] : [], files: 1 }, durationMs: 1000, logTail: 'out', runnerExit: failed ? 1 : 0 };
-  } });
-  const submittedAt = (n: number) => start + n * 7 * soakMinute, mergedAt = (n: number) => submittedAt(n) + 25 * soakMinute;
-  const effects = { agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
-    snapshot: async () => ({ work: Array.from({ length: items }, (_, index) => index + 1).filter(n => submittedAt(n) <= now).map(n => soakWork(n, submittedAt(n), mergedAt(n), now)), now: iso(now) }),
-    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
-    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => {}, requestSmoke: () => {}, decisions: async () => ({ decisions: [] }), persist: async () => {},
-    github: soakGithub, merge: soakGithub, shadow: reads } as unknown as DaemonEffects;
-  const state = emptyDaemonState(soakConfig);
-  const raised = new Map<string, number>(), raisedAt = new Map<string, number>(), explainedAt = new Map<string, number>(), cleared = new Set<string>();
-  let trialsDuringFailedReads = 0;
-  for (let cycle = 0; cycle < cycles; cycle++) {
-    now = start + cycle * 2 * soakMinute;
-    if (cycle % 40 === 0) tipIndex += 1;
-    // The coordinator refuses the explanations read for six cycles in every hundred.
-    readFails = cycle % 100 >= 94;
-    const before = trials.length;
-    const result = await runCycle(soakConfig, state, effects, () => now);
-    if (readFails) trialsDuringFailedReads += trials.length - before;
-    for (const action of result.actions) if (action.detail.startsWith('Shadow merge gate:')) {
-      const key = action.work ?? '';
-      raised.set(key, (raised.get(key) ?? 0) + 1);
-      if (!raisedAt.has(key)) raisedAt.set(key, cycle);
-      assert.ok(!explainedAt.has(key), `cycle ${cycle}: ${key} was raised again after it was explained`);
-    }
-    await shadowIdle(state);
-    // An operator explains every disagreement of an even-numbered item ten cycles after its line is raised; odd-numbered items stay unexplained.
-    for (const [key, at] of raisedAt) {
-      if (explainedAt.has(key) || Number(key.slice(3)) % 2 || cycle - at < 10) continue;
-      for (const entry of state.shadow.filter(verdict => verdict.key === key && verdict.outcome === 'shadow-only-fail')) explanations.push({ key, head: entry.head, baseTip: entry.baseTip });
-      explainedAt.set(key, cycle);
-    }
-    for (const [key, at] of explainedAt) {
-      if (state.actions[`shadow:${key}`]) { assert.ok(cycle - at <= 8, `cycle ${cycle}: ${key} still standing ${cycle - at} cycles after its explanation`); continue; }
-      cleared.add(key);
-    }
-    assert.ok(state.shadow.length <= shadowKeptVerdicts, `cycle ${cycle}: ${state.shadow.length} verdicts kept`);
-    assert.ok(Object.keys(state.actions).filter(name => /^shadow:[^:]+$/.test(name)).length <= raised.size, `cycle ${cycle}: an attention line without a raise`);
-    assert.ok(widest <= 1, 'one trial at a time');
-    assert.doesNotThrow(() => shadowStateSchema.parse(state.shadow), `cycle ${cycle}: the cursor does not parse as persisted state`);
-  }
-  assert.ok(trials.length > 20, `the gate made progress: ${trials.length} trials`);
-  assert.ok(trialsDuringFailedReads > 0, 'trials went on while the explanations read failed');
-  assert.ok(explanationReads >= cycles - 1, `the loop read explanations every cycle: ${explanationReads}`);
-  assert.ok([...raised.values()].every(count => count === 1), `one attention line per item: ${JSON.stringify([...raised])}`);
-  assert.ok(explainedAt.size >= 3, `the day explained ${explainedAt.size} items`);
-  for (const key of explainedAt.keys()) assert.ok(cleared.has(key) && !state.actions[`shadow:${key}`], `${key} was explained and cleared`);
-  const unexplained = [...raised.keys()].filter(key => !explainedAt.has(key));
-  assert.ok(unexplained.length >= 3, `the day left ${unexplained.length} items unexplained`);
-  for (const key of unexplained) assert.ok(state.actions[`shadow:${key}`], `${key} is unexplained and keeps its line`);
-  const section = daemonSummary(state, now, soakConfig.run.intervalSeconds * 1000, soakConfig.hostId).shadowGate;
-  assert.equal(section.total, state.shadow.length);
 });

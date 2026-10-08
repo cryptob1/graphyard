@@ -6,7 +6,7 @@ import type { Work } from '../model.js';
 import { classifyRisk } from '../model/risk-class.js';
 import { shadowGateSettings } from '../master/merge-writer-settings.js';
 import { runTrial, trialMerge, trialNeedsLog, TrialCleanupError, TrialRunnerError, TrialTimeoutError, type TrialRun } from '../merge-writer/trial.js';
-import { judgedVerdicts, shadowDisagreement, shadowDisagreementDetail, shadowOutcomes, shadowDue, shadowPairExplained, shadowReportWithExplanations, trialLogTailLength, type ShadowExplanationRef, type ShadowVerdict } from '../merge-writer/shadow.js';
+import { judgedVerdicts, shadowDisagreement, shadowDisagreementDetail, shadowOutcomes, shadowDue, shadowExplanationPairsMax, shadowPairExplained, shadowReportWithExplanations, trialLogTailLength, type ShadowExplanationRef, type ShadowVerdict } from '../merge-writer/shadow.js';
 import { storeAction, type DaemonState } from './state.js';
 import type { Cycle } from './cycle.js';
 
@@ -33,11 +33,12 @@ export interface ShadowReads {
   /** Posts the verdict to the coordinator (`POST /api/work/:id/shadow-verdict`). */
   record(work: Work, verdict: Omit<ShadowVerdict, 'outcome'>): Promise<void>;
   /**
-   * GY-1560: every recorded disagreement explanation (`GET /api/shadow-explanations`, which reads
-   * no verdict history), so the cursor clears a standing disagreement once explained. Absent, the
-   * step raises and never clears; a failed read skips only that cycle's clearing.
+   * GY-1560: which of the named disagreement pairs are explained (`GET /api/shadow-explanations`,
+   * identifiers only, at most `shadowExplanationPairsMax` pairs per read), so the cursor clears a
+   * standing disagreement once explained. Absent, the step raises and never clears; a failed read
+   * skips only that cycle's clearing.
    */
-  explanations?(): Promise<ShadowExplanationRef[]>;
+  explanations?(pairs: readonly ShadowExplanationRef[]): Promise<ShadowExplanationRef[]>;
 }
 
 /** The body `POST /api/work/:id/shadow-verdict` takes (with the log tail when the verdict carries one), and the idempotency key one (head, baseTip) pair keeps across retries. */
@@ -197,11 +198,16 @@ export async function shadowStep(cycle: Cycle) {
   // per item until an explanation stands for every unexplained pair on that item (GY-1560).
   // A failed read of the explanations stops nothing: raising treats none as recorded, and the
   // clearing step waits for a cycle whose read succeeds; trials and re-judgement go on.
-  let explanations: ShadowExplanationRef[] = [], explanationsRead = true;
-  if (reads.explanations) {
-    try { explanations = await reads.explanations(); } catch { explanationsRead = false; }
-  }
+  // The loop asks only about the disagreements its bounded cursor holds, in bounded chunks, and
+  // makes no read while it holds none.
   const judged = judgedVerdicts(state.shadow, snapshot.work);
+  let explanations: ShadowExplanationRef[] = [], explanationsRead = true;
+  const asked = judged.filter(verdict => shadowDisagreement(verdict.outcome)).map(verdict => ({ key: verdict.key, head: verdict.head, baseTip: verdict.baseTip }));
+  if (reads.explanations && asked.length) {
+    try {
+      for (let at = 0; at < asked.length; at += shadowExplanationPairsMax) explanations.push(...await reads.explanations(asked.slice(at, at + shadowExplanationPairsMax)));
+    } catch { explanations = []; explanationsRead = false; }
+  }
   for (const [index, verdict] of judged.entries()) {
     const current = state.shadow[index]!;
     if (verdict.outcome === current.outcome && verdict.delivered?.mergeSha === current.delivered?.mergeSha) continue;

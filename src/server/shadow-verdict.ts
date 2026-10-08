@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { demand, type Principal, type Work } from '../model.js';
 import {
   compareVerdicts, githubOutcome, isPlaceholderVerdict, placeholderRunnerFailure, shadowDisagreement,
-  shadowDisagreementPair, trialLogTailLength, type ShadowVerdict,
+  shadowDisagreementPair, shadowExplanationPairsMax, trialLogTailLength, type ShadowExplanationRef, type ShadowVerdict,
 } from '../merge-writer/shadow.js';
 import { DELIVERY_EVENT_PREDICATE } from '../store/tables/production.js';
 import { defineRoutes, parseJson, type Services } from './routes.js';
@@ -87,6 +87,26 @@ export async function listShadowDisagreementExplanations(db: Queryable): Promise
     }];
   });
 }
+
+/**
+ * Which of the named (key, head, baseTip) pairs carry an explanation, as identifiers alone: the
+ * loop's per-cycle read (GY-1560). It reads only the named items' own events through their index,
+ * at most `shadowExplanationPairsMax` pairs, so its cost follows the pairs asked, not the ledger.
+ */
+export async function explainedShadowPairs(db: Queryable, pairs: readonly ShadowExplanationRef[]): Promise<ShadowExplanationRef[]> {
+  if (!pairs.length) return [];
+  const rows = (await db.query(
+    `SELECT DISTINCT i.key, lower(e.payload->>'head') AS head, lower(e.payload->>'baseTip') AS base_tip
+     FROM work_index i JOIN events e ON e.work_id = i.id
+     JOIN unnest($2::text[], $3::text[], $4::text[]) AS wanted(key, head, base_tip)
+       ON wanted.key = i.key AND wanted.head = lower(e.payload->>'head') AND wanted.base_tip = lower(e.payload->>'baseTip')
+     WHERE i.key = ANY($2::text[]) AND e.kind = $1`,
+    [shadowDisagreementExplainedEvent, pairs.map(pair => pair.key), pairs.map(pair => pair.head.toLowerCase()), pairs.map(pair => pair.baseTip.toLowerCase())],
+  )).rows as { key: string; head: string; base_tip: string }[];
+  return rows.map(row => ({ key: row.key, head: row.head, baseTip: row.base_tip }));
+}
+
+const pairQuery = z.array(z.string().regex(/^[^:\s]{1,200}:[0-9a-fA-F]{40}:[0-9a-fA-F]{40}$/)).min(1).max(shadowExplanationPairsMax);
 
 /** The shadow.verdict event for one (key, head, baseTip), or null when none is recorded. */
 async function verdictEvidence(db: Queryable, key: string, head: string, baseTip: string) {
@@ -241,9 +261,9 @@ export async function shadowDisagreementStatus(db: Queryable, work: readonly Wor
 }
 
 /**
- * GY-1560 routes: list explanations with the standing disagreements (master status), list the
- * explanations alone (the loop, every cycle: it reads no verdict history, so its cost does not grow
- * with the ledger), and record one per work item.
+ * GY-1560 routes: list explanations with their evidence and the standing disagreements (master
+ * status), answer which named pairs are explained (the loop, every cycle: identifiers only, for the
+ * disagreements its cursor holds, so its cost does not grow with the ledger), and record one per work item.
  * Registered ahead of the operator-agent guard like the main watch (routes.ts).
  */
 export const shadowDisagreementRoutes = defineRoutes('shadow-disagreements', [
@@ -256,9 +276,12 @@ export const shadowDisagreementRoutes = defineRoutes('shadow-disagreements', [
   },
   {
     method: 'GET', path: '/api/shadow-explanations',
-    async handle({ actor, services }) {
+    async handle({ actor, services, url }) {
       demand(['admin', 'coordinator', 'reader', 'operator-agent'].includes(actor.role), 'Shadow disagreement explanations are readable by admin, coordinator, reader and operator-agent identities', 403);
-      return { explanations: await listShadowDisagreementExplanations(services.engine.store.pool) };
+      const asked = pairQuery.safeParse(url.searchParams.getAll('pair'));
+      demand(asked.success, `Name 1 to ${shadowExplanationPairsMax} pairs as pair=KEY:HEAD:BASETIP; the full explanations are at /api/shadow-disagreements`, 400);
+      const pairs = asked.data.map(pair => { const [key, head, baseTip] = pair.split(':') as [string, string, string]; return { key, head, baseTip }; });
+      return { explanations: await explainedShadowPairs(services.engine.store.pool, pairs) };
     },
   },
   {

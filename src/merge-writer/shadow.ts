@@ -132,6 +132,9 @@ export const isPlaceholderVerdict = (verdict: Pick<ShadowVerdict, 'build' | 'tes
 /** One explanation of a (key, head, baseTip) disagreement, as the ledger and the status read it. */
 export interface ShadowExplanationRef { key: string; head: string; baseTip: string }
 
+/** The most pairs one loop read of `GET /api/shadow-explanations` names; the loop asks in chunks of this size. */
+export const shadowExplanationPairsMax = 50;
+
 /** The (work key, head, baseTip) pair an explanation and a standing disagreement share. */
 export const shadowDisagreementPair = (entry: Pick<ShadowExplanationRef, 'key' | 'head' | 'baseTip'>) =>
   `${entry.key}:${entry.head.toLowerCase()}:${entry.baseTip.toLowerCase()}`;

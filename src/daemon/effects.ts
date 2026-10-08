@@ -687,8 +687,9 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       return shadowReads(config, root, run, {
         base: worktreeRoot(root, config),
         record: (work, verdict) => mutate(`work/${work.id}/shadow-verdict`, shadowVerdictBody(verdict), shadowVerdictKey(work, verdict)),
-        explanations: async () => {
-          const body = await asCoordinator('shadow-explanations') as { explanations?: { key: string; head: string; baseTip: string }[] };
+        explanations: async pairs => {
+          const query = pairs.map(pair => `pair=${encodeURIComponent(`${pair.key}:${pair.head}:${pair.baseTip}`)}`).join('&');
+          const body = await asCoordinator(`shadow-explanations?${query}`) as { explanations?: { key: string; head: string; baseTip: string }[] };
           return body?.explanations ?? [];
         },
       });
