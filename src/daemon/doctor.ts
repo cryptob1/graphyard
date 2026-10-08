@@ -22,7 +22,7 @@ import { readyToRetry } from './sessions.js';
 import { stoppedStates, record } from './effects.js';
 import { maxApproverLaunches } from './decisions.js';
 import { decisionReadConcurrency } from './decision-reads.js';
-import { message, refusedFilingsBound, type DaemonAction, type DaemonState } from './state.js';
+import { message, refusedFilingsTtlMs, type DaemonAction, type DaemonState } from './state.js';
 import type { Cycle } from './cycle.js';
 
 // ---------------------------------------------------------------------------
@@ -307,14 +307,18 @@ export const unregisteredScenario = (error: unknown) => /Register E2E scenario (
 /** The refused content's identity: what create judges (class, title, files, criteria), not the evidence prose, which carries a fresh timestamp every run. */
 export const filingDigest = (file: DoctorFile) => createHash('sha256').update(JSON.stringify([file.faultClass, file.title, file.plannedFiles, file.criteria])).digest('hex').slice(0, 32);
 
-/** The digest as the most recently seen refusal: a filing the doctor keeps reporting is never the one the bound evicts. */
-const renewRefusal = (digests: string[], digest: string) => [...digests.filter(entry => entry !== digest), digest].slice(-refusedFilingsBound);
+/**
+ * The digest as seen refusal at `at`. No count evicts a refusal: one leaves only after the doctor has not
+ * reported that content for refusedFilingsTtlMs, so a filing that keeps recurring is never submitted again.
+ */
+const renewRefusal = (refused: DaemonState['doctor']['refusedFilings'], digest: string, at: number) => [...refused.filter(entry => entry.digest !== digest && at - entry.at < refusedFilingsTtlMs), { digest, at }];
+const isRefused = (refused: DaemonState['doctor']['refusedFilings'], digest: string) => refused.some(entry => entry.digest === digest);
 
 async function dropRefusedFiling(cycle: Pick<Cycle, 'state' | 'effects' | 'performed'>, key: string, file: DoctorFile, error: unknown, attempts: number, now: () => number) {
   const { state, effects: daemon, performed } = cycle;
   state.doctor.pendingFiles = state.doctor.pendingFiles.filter(entry => entry.key !== key);
   // The refusal outlives this run's key: a later run reporting the same content is not filed again, corrected content is.
-  state.doctor.refusedFilings = renewRefusal(state.doctor.refusedFilings, filingDigest(file));
+  state.doctor.refusedFilings = renewRefusal(state.doctor.refusedFilings, filingDigest(file), now());
   // A pending retry that met the plane's outage opened a plane-unavailable run on this key (GY-1404),
   // and a key's later failures are noted against its standing run whatever their kind. The plane has
   // answered now, so that run is over: ended here, the refusal opens the proof instance it is.
@@ -359,7 +363,7 @@ export async function applyDoctorRun(cycle: Cycle, effects: DoctorEffects, run: 
   for (const { file, covered } of deduped) {
     if (covered) { await note('installation', `Not filing "${file.title}": the ${file.faultClass} fault class is already covered by an open item`); continue; }
     const filingKey = `${key}:file:${file.faultClass}`;
-    if (state.doctor.refusedFilings.includes(filingDigest(file))) { state.doctor.refusedFilings = renewRefusal(state.doctor.refusedFilings, filingDigest(file)); await note('installation', `Not filing "${file.title}" again: master create refused this content earlier and the escalation for it stands; it is filed again only when the doctor corrects it`); continue; }
+    if (isRefused(state.doctor.refusedFilings, filingDigest(file))) { state.doctor.refusedFilings = renewRefusal(state.doctor.refusedFilings, filingDigest(file), now()); await note('installation', `Not filing "${file.title}" again: master create refused this content earlier and the escalation for it stands; it is filed again only when the doctor corrects it`); continue; }
     if (!fresh) {
       state.doctor.pendingFiles = [...state.doctor.pendingFiles.filter(entry => entry.key !== filingKey), { key: filingKey, at: run.at, file }].slice(-40);
       await note('installation', `Not filing "${file.title}" yet: the open items could not be read when the run settled, so it is filed on a later cycle if no open item covers the ${file.faultClass} fault class`);
@@ -433,7 +437,7 @@ export async function retryDoctorFile(cycle: Cycle, effects: DoctorEffects, pend
   };
   if (openFaultClassItem(snapshot.work, pending.file.faultClass)) return drop(`Not filing "${pending.file.title}" on retry: the ${pending.file.faultClass} fault class is now covered by an open item`, null, 'done');
   // Queued through an outage beside another run's copy, the same content may already have been refused.
-  if (state.doctor.refusedFilings.includes(filingDigest(pending.file))) { state.doctor.refusedFilings = renewRefusal(state.doctor.refusedFilings, filingDigest(pending.file)); return drop(`Not filing "${pending.file.title}" on retry: master create refused this content earlier and the escalation for it stands`, null, 'done'); }
+  if (isRefused(state.doctor.refusedFilings, filingDigest(pending.file))) { state.doctor.refusedFilings = renewRefusal(state.doctor.refusedFilings, filingDigest(pending.file), now()); return drop(`Not filing "${pending.file.title}" on retry: master create refused this content earlier and the escalation for it stands`, null, 'done'); }
   let input: DoctorFileInput;
   try { input = doctorFileItem(pending.file, `The pipeline doctor found a ${pending.file.faultClass} fault no open item covers: ${pending.file.description.slice(0, 1500)}`); }
   catch (error) {

@@ -243,3 +243,51 @@ test('unit:soak-invariants-hold — over a simulated day the doctor drops and cl
   assert.ok(!state.doctor.runs.some(run => run.state !== 'reported'), `every retained doctor run applied its report: ${state.doctor.runs.map(run => run.state).join(', ')}`);
   clearDoctorRuns(); clearDiagnoses();
 });
+
+test('unit:soak-refused-filing-outlives-the-ledger-count — over more than a week of the real loop a refusal create gave once is never repeated, however many other filings it refused before the doctor reported that content again', async () => {
+  clearDoctorRuns();
+  let now = start;
+  const state = emptyDaemonState(config());
+  const control = item('GY-50', start - 2 * hour, { title: 'Refresh stale merge observations', type: 'feature' });
+  const submitted: string[] = [];
+  let next = 100;
+  const create = async (input: any): Promise<Work> => {
+    // The loop's own recurring-fault items are accepted; only the doctor's filings are refused.
+    if (/^Recurring /.test(input.title)) return item(`GY-${next++}`, now, { title: input.title, description: input.description });
+    submitted.push(input.title);
+    throw new RefusedResponse(`Graphyard refused work (409): Register E2E scenario ${unregistered.loop} before creating work that requires it`, 409, { error: `Register E2E scenario ${unregistered.loop} before creating work that requires it` });
+  };
+  const distinct = 1100;
+  let doctorRuns = 0;
+  const doctor: DoctorEffects = {
+    settings: { ...doctorSettingsSchema.parse({}), command: 'pi' }, cwd: '/soak/checkout', env: {},
+    runner: async () => ({ runtime: 'pi', model: 'soak/doctor', release: async () => {}, runner: { name: 'pi', start: (_prompt: string, options: { tool: string }) => {
+      const index = doctorRuns++;
+      // The first filing, then more distinct refused filings than the old ledger kept, then the first one reported again, twice.
+      const reported = index === 0 || index > distinct ? filing('loop', 'Master loop cannot restart or self-upgrade', [`e2e:${unregistered.loop}`]) : filing('merge', `Malformed filing ${index}`, [`e2e:${unregistered.loop}`]);
+      const payload = { findings: [], actions: [], filed: [{ ...reported, faultClass: index === 0 || index > distinct ? 'loop' as FaultClass : (['merge', 'containment', 'decision', 'deployment'] as FaultClass[])[index % 4] }] };
+      return { id: `soak-doctor-${index}`, events: [], onEvent: () => () => {}, cancel: () => {}, result: async () => ({ ok: true as const, tool: options.tool, payload, payloads: [payload] }) };
+    } } as unknown as Runner }),
+    file: create,
+    recordRun: async () => {},
+  };
+  const effects = {
+    agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
+    snapshot: async () => ({ work: [structuredClone(control)], now: iso(now) }),
+    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, persist: async () => {},
+    observeDeployment: async () => ({ source: 'endpoint', sha: 'd'.repeat(40), at: iso(now), reason: null, deployed: [], pending: [] }), recordDeployment: async () => {}, requestSmoke: () => {},
+    faultClassPolicy: policy, fileFaultClass: create, doctor,
+  } as unknown as DaemonEffects;
+  const violations: string[] = [];
+  for (let cycle = 0; doctorRuns < distinct + 3 && cycle < 100_000; cycle++, now += 10 * minute) {
+    await runCycle(config(), state, effects, () => now);
+    await doctorRunsSettled();
+    for (const check of state.invariants.report) if (!check.holds) violations.push(`cycle ${cycle}: ${check.invariant} — ${check.reading}`);
+  }
+  assert.ok(doctorRuns >= distinct + 3, `the doctor ran past the old bound: ${doctorRuns}`);
+  assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
+  assert.equal(submitted.filter(title => title === 'Master loop cannot restart or self-upgrade').length, 1, 'the first refused content reached create exactly once, however many refusals came after it');
+  assert.deepEqual(submitted.filter((title, i) => submitted.indexOf(title) !== i).slice(0, 5), [], 'no content reached create twice');
+  assert.deepEqual(state.doctor.pendingFiles, [], 'nothing stays pending');
+  clearDoctorRuns();
+});

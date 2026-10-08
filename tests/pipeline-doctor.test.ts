@@ -1018,7 +1018,7 @@ test('unit:doctor-e2e-scenario-refusal-drops-pending-file — a pending filing w
   clearDoctorRuns();
 });
 
-test('unit:doctor-refused-filing-survives-history-bound — a refused filing the doctor keeps reporting stays refused across more distinct refusals than the ledger keeps, and is never submitted to create again', async () => {
+test('unit:doctor-refused-filing-survives-history-bound — a refused filing stays refused across any number of other distinct refusals, and is never submitted to create again', async () => {
   clearDoctorRuns();
   const filed: string[] = [];
   const doctor: DoctorEffects = { ...filingDoctor([], async (input, key) => { filed.push(input.title); throw scenarioRefusal('no-such-scenario'); }), settings: doctorSettingsSchema.parse({ enabled: false }) as DoctorEffects['settings'] };
@@ -1027,12 +1027,10 @@ test('unit:doctor-refused-filing-survives-history-bound — a refused filing the
   const retry = async (file: ReturnType<typeof selfUpgradeFiling>, n: number) => { state.cycle += 1; state.doctor.pendingFiles = [{ key: `doctor:k${n}:file:loop`, at: observedAt, file }]; await doctorStep(cycle([item()], { doctor, state })); };
   await retry(first, 0);
   assert.deepEqual(filed, [first.title], 'refused once');
-  // More distinct refusals than the bound keeps, the first filing reported again every hundred.
-  for (let n = 1; n <= historyBound + 50; n++) {
-    await retry({ ...selfUpgradeFiling(['e2e:no-such-scenario']), title: `Other malformed filing ${n}` }, n);
-    if (n % 100 === 0) await retry(first, 10_000 + n);
-  }
-  assert.equal(state.doctor.refusedFilings.length, historyBound, 'the ledger stays bounded');
+  // Many distinct refusals: the first filing recurs only after all of them, when a count-bounded ledger would have evicted it.
+  for (let n = 1; n <= historyBound + 50; n++) await retry({ ...selfUpgradeFiling(['e2e:no-such-scenario']), title: `Other malformed filing ${n}` }, n);
+  await retry(first, 20_000);
+  assert.equal(state.doctor.refusedFilings.length, historyBound + 51, 'no refusal is evicted by the others');
   assert.equal(filed.filter(title => title === first.title).length, 1, 'the first filing was submitted to create exactly once');
   clearDoctorRuns();
 });

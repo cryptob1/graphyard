@@ -390,8 +390,8 @@ export const loopReleaseSchema = z.object({ commit: z.string().regex(/^[0-9a-f]{
 export type LoopRelease = z.infer<typeof loopReleaseSchema>;
 
 /** The causes an owed self-upgrade restart stalls on (GY-1445). */
-/** How many refused filings' digests the ledger keeps (32 characters each): far past the distinct malformed filings a doctor reports between repeats of one. */
-export const refusedFilingsBound = 1000;
+/** How long a refused filing's digest is kept after the doctor last reported that content: a count never evicts one, so unchanged content is not submitted to create again while it recurs. */
+export const refusedFilingsTtlMs = 90 * 24 * 60 * 60_000;
 export const upgradeStallCauses = ['executors-refused', 'executors-unavailable', 'supervisor-unreachable', 'checkout-dirty', 'checkout-not-detached', 'fetch-failed', 'checkout-failed'] as const;
 export type UpgradeStallCause = typeof upgradeStallCauses[number];
 export const upgradeStallSchema = z.object({ cause: z.enum(upgradeStallCauses), reason: z.string().max(500), since: z.string(), at: z.string() }).strict();
@@ -541,8 +541,8 @@ export const daemonStateSchema = z.object({
     unposted: z.array(z.string().max(40)).max(40).default([]),
     /** Filings the control plane did not accept when their run applied: filed again on later cycles, under the same key, until one is. */
     pendingFiles: z.array(doctorPendingFileSchema).max(40).default([]),
-    /** GY-1530: digests of filings the create route refused as written, least recently seen first: a later run reporting the same content is not filed again. A digest is renewed each time its filing is reported, so only one the doctor has not reported for a whole bound of other refused filings leaves. */
-    refusedFilings: z.array(z.string().max(80)).max(refusedFilingsBound).default([]),
+    /** GY-1530: digests of filings the create route refused as written, with when the doctor last reported each: a later run reporting the same content is not filed again. A digest is renewed each time its filing is reported and leaves only after refusedFilingsTtlMs without a report, never because other refusals crowded it out. */
+    refusedFilings: z.array(z.object({ digest: z.string().max(80), at: z.number() }).strict()).default([]),
     /** When the approver remedy last read each open item's decision history, by item id. */
     decisionsCheckedAt: z.record(z.string(), z.string()).default({}),
   }).strict().default(() => ({ runs: [], unposted: [], pendingFiles: [], refusedFilings: [], decisionsCheckedAt: {} })),
