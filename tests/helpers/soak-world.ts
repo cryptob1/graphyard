@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import type { Run, RunEvent, RunOptions, RunResult, Runner } from '../../src/runner/types.js';
 import { RerunPending, landingCheck, scopeLookupBudget, type GitHub, type LandingGitHub } from '../../src/github.js';
 import type { HerdrAgent } from '../../src/master.js';
+import type { HerdrPane } from '../../src/master/herdr.js';
 import type { Observation, Work } from '../../src/model.js';
 import type { AgentReview, ReviewRequest } from '../../src/model/review.js';
 import { landableCheckCurrent, landableCheckRun, type LandableCheckRun } from '../../src/landable-check.js';
@@ -874,14 +875,15 @@ export class SimulatedHerdr {
     if (!this.agents.has(pane) && !this.shells.has(pane)) throw Object.assign(new Error(`Herdr refused the operation: pane_not_found`), { herdrCode: 'pane_not_found' });
     this.agents.delete(pane); this.shells.delete(pane); this.closed.push(pane); this.closedAt.set(pane, this.now());
   }
-  /** The agent inventory: every session with its agent, and every bare shell with none. */
-  list(): HerdrAgent[] {
-    const named = [...this.agents.values()].map(agent => ({ ...agent }));
-    const bare = [...this.shells.keys()].map(pane => ({ pane_id: pane, agent: null as string | null, agent_status: 'unknown', cwd: this.shells.get(pane) }));
-    return [...named, ...bare];
+  /** The agent inventory (`herdr agent list`): every session with its agent, and never a bare shell (GY-1533). */
+  list(): HerdrAgent[] { return [...this.agents.values()].map(agent => ({ ...agent })); }
+  /** The pane inventory (`herdr pane list`): every pane with its cwd and agent; a bare shell has no agent and status unknown. */
+  paneList(): HerdrPane[] {
+    return [...new Set([...this.agents.keys(), ...this.shells.keys()])].map(pane_id => {
+      const agent = this.agents.get(pane_id);
+      return agent ? { pane_id, cwd: agent.cwd, agent: agent.agent, agent_status: agent.agent_status } : { pane_id, cwd: this.shells.get(pane_id), agent_status: 'unknown' };
+    });
   }
-  /** The pane inventory (`herdr pane list`): every pane, with or without an agent in it. */
-  paneList(): { pane_id: string }[] { return [...new Set([...this.agents.keys(), ...this.shells.keys()])].map(pane_id => ({ pane_id })); }
   byName(name: string) { return [...this.agents.values()].find(agent => agent.name === name); }
 }
 
