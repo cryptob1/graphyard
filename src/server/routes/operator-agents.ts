@@ -1,6 +1,7 @@
 import { demand } from '../../model.js';
 import { DirectMerges } from '../../direct-merge.js';
 import { MergerSettings } from '../../merger-mode.js';
+import { CoordinatorRecovery } from '../../coordinator-recovery.js';
 import { defineRoutes, parseJson, type Services } from '../routes.js';
 import { humanSignIn } from '../auth.js';
 
@@ -38,6 +39,8 @@ export const operatorAgentRoutes = defineRoutes('operator-agents', [
   // The merger setting (merger-mode.ts): read like direct-merge mode, set with an admin credential only.
   { method: 'GET', path: '/api/merger', handle: ({ actor, services }) => mergerSettings(services).status(actor) },
   { method: 'POST', path: '/api/merger', handle: async context => mergerSettings(context.services).change(context.actor, await parseJson(context), context.idempotencyKey()) },
+  // GY-1529: the known-good coordinator's recovery, recorded with an admin credential only.
+  { method: 'POST', path: '/api/coordinator/recovered', handle: async context => new CoordinatorRecovery(context.services.engine.store).record(context.actor, await parseJson(context), context.idempotencyKey()) },
   // The operator's own sign-in link (GY-738): only their configured admin credential asks for one.
   { method: 'POST', path: '/api/sign-in-links', handle: async ({ actor, services }) => humanSignIn(services).issue(actor, services.principals.some(entry => entry.actor.id === actor.id && entry.actor.role === 'admin')) },
 ]);

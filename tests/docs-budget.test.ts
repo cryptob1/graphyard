@@ -86,6 +86,8 @@ const REQUIRED_STATEMENTS: [string, RegExp][] = [
   ['docs/delivery.md', /Under a `control-plane` merger the loop cuts \(`run\.candidates\.everyMerges` 10, `idleMinutes` 15\), validates, promotes and verifies .*no workflow.*a failed required E2E case reverts the newest candidate item a matching verification map covers \(`candidateReverts`; reopened\); a main-watch freeze holds all/],
   // GY-1523 AC-8: the head form of submit, its CLI and the change number it allocates.
   ['docs/protocol/work-commands.md', /`\{"epoch":1,"head":SHA\}` \(`complete GY-N EPOCH --head \[SHA\]`.*allocates one change number per head into `candidate\.pr`\/`submission\.pr`/],
+  // GY-1529 AC-5: the Coordinator recovery section names its symptoms, the recover command and how promotion resumes.
+  ['docs/recovery.md', /## Coordinator recovery\n\nSelf-merge stalled the loop, or main-watch froze: `graphyard master recover \[--to SHA\] --admin-token-stdin` repins, restarts; verified promotions repin\./],
 ];
 
 test('unit:docs-word-budget — the pages graphyard.json budgets (README.md and every docs page) keep every page within its per-page budget and 200 words under it, counted as wc -w counts them; a total within 3% of the budget fails a change that adds to it and warns otherwise', () => {
@@ -107,6 +109,8 @@ test('unit:docs-word-budget — the pages graphyard.json budgets (README.md and 
   // Statements a criterion requires the budgeted pages to keep (GY-1142 AC-2): the budget holds
   // with them in, and a trim that drops one fails here instead of passing silently.
   for (const [page, statement] of REQUIRED_STATEMENTS) assert.match(read(page), statement, `${page} states ${statement}`);
+  const coordinatorRecovery = read('docs/recovery.md').split(/^## Coordinator recovery$/m)[1]?.split(/\n## /)[0] ?? '';
+  assert.ok(coordinatorRecovery && words(coordinatorRecovery) <= 120, `docs/recovery.md's Coordinator recovery section is at most 120 words: ${words(coordinatorRecovery)}`);
 });
 
 test('unit:docs-budget-growth-gate — a saturated total fails a change that adds to it and passes with the warning one that adds none, the base branch itself or an uncounted base; a page over its cap or past its headroom still fails', () => {
