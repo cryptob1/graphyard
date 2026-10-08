@@ -17,7 +17,7 @@ One stateless container, Postgres: `node "$GRAPHYARD_CLI" install --provider rai
 | `GRAPHYARD_MIN_REVIEWERS` | Reviewers with a lead (1)
 | `GRAPHYARD_MAX_REVIEWERS` | ≥ `producer` count (2)
 
-Installers derive limits; unset ones are `delegationLimits` drift.
+Unset limits are `delegationLimits` drift.
 
 ### CI producer
 
