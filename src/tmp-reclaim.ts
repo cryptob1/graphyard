@@ -224,7 +224,10 @@ export async function reclaimTmpDirectories(options: TmpReclaimOptions = {}): Pr
   const pass: PassState = { now, minAge, limit: options.limit ?? tmpReclaimLimitPerCycle, uid: process.getuid?.(), held: options.held ?? null,
     workMs: options.workMs ?? Number.POSITIVE_INFINITY, deadline: null, unfinished: options.unfinished ?? unfinishedRemovals, retryMs: options.retryMs ?? tmpReclaimRetryMs };
   for (const path of pass.unfinished) if (!existsSync(path)) pass.unfinished.delete(path);
-  for (const { path, real } of roots) await reclaimRoot(path, real, pass, report);
+  for (const { path, real } of roots) {
+    await reclaimRoot(path, real, pass, report);
+    await reclaimTsxCache(path, real, pass, report);
+  }
   return report;
 }
 
@@ -306,6 +309,57 @@ async function reclaimRoot(root: string, real: string, pass: PassState, report: 
     } catch (error) { pass.unfinished.add(path); report.errors.push(`${path}: ${error instanceof Error ? error.message : String(error)}`); }
   }
   report.kept += Math.max(0, removable.length - (report.removed.length - removedBefore));
+}
+
+/** The name of this user's tsx compile cache directory in a temporary directory, or null where there are no uids. */
+export const tsxCacheName = (uid = process.getuid?.()) => uid === undefined ? null : `tsx-${uid}`;
+/** The regular files under `directory`, recursively, following no symlink: what a cache sweep may take. */
+async function cacheFiles(directory: string): Promise<string[]> {
+  const files: string[] = [];
+  const entries = await readdir(directory, { withFileTypes: true }).catch(() => [] as Dirent[]);
+  for (const entry of entries) {
+    const path = join(directory, entry.name);
+    if (entry.isFile()) files.push(path);
+    else if (entry.isDirectory()) files.push(...await cacheFiles(path));
+  }
+  return files;
+}
+/**
+ * One root's tsx compile cache, aged file by file (GY-1512). Test runs write content-hashed compile
+ * files into `tsx-<uid>` all day, so the directory itself is never old enough to go whole: on
+ * 8 October 2026 it held 89,896 entries, 8,174 of them from the previous 90 minutes. The pass takes
+ * this user's regular files in it older than the cache's age bound, oldest first, within what the
+ * pass's entry and work bounds have left; the directory, its subdirectories and the IPC sockets
+ * live tsx processes listen on are never removed, nor a file a live process holds open.
+ */
+async function reclaimTsxCache(root: string, real: string, pass: PassState, report: TmpReclaimReport) {
+  const name = tsxCacheName(pass.uid), limit = pass.limit - report.removed.length;
+  const maxAgeMs = name === null ? null : pass.minAge(name);
+  if (name === null || maxAgeMs === null || limit <= 0) return;
+  const cache = join(root, name);
+  const own = await lstat(cache).catch(() => null);
+  if (!own?.isDirectory() || own.uid !== pass.uid) return;
+  const old: { path: string; mtime: number; bytes: number }[] = [];
+  for (const path of await cacheFiles(cache)) {
+    let info;
+    try { info = await lstat(path); } catch { continue; }
+    if (!info.isFile() || info.uid !== pass.uid || pass.now - info.mtimeMs < maxAgeMs) continue;
+    old.push({ path, mtime: info.mtimeMs, bytes: info.size });
+  }
+  if (!old.length) return;
+  const held = pass.held ??= await heldOpenPaths();
+  // /proc names a holder by its resolved path, so a root reached through a symlink is matched by its realpath.
+  const removable = old.filter(file => !held.has(join(real, file.path.slice(root.length + 1)))).sort((first, second) => first.mtime - second.mtime);
+  for (const { path, bytes } of removable.slice(0, limit)) {
+    const at = Date.now();
+    pass.deadline ??= at + pass.workMs;
+    if (at > pass.deadline) break;
+    try {
+      await rm(path, { force: true });
+      report.removed.push({ path, bytes });
+      report.bytes += bytes;
+    } catch (error) { report.errors.push(`${path}: ${error instanceof Error ? error.message : String(error)}`); }
+  }
 }
 
 /** One line for the loop's reclaim record and `master status`: what a pass gave back. */
