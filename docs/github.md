@@ -30,13 +30,13 @@ A reviewer App is never granted Contents: write, Checks, or Administration; work
 
 ## Reusing an App without sudo
 
-GitHub returns an App's private key once: `--reuse-app SLUG` needs a key saved locally. An App created elsewhere: generate a key on its settings page, then `graphyard app import --app-id ID --key-file PEM [--role control-plane|reviewer|revert-approver] [--repo OWNER/NAME]` proves the key by an App JWT and saves the App `0600` as `imported-app-SLUG.json` in the install directory, never printing the key; a control-plane App whose webhook serves another install is refused. `graphyard app list` names each saved App's reusable roles or why not.
+`--reuse-app SLUG` needs a key saved locally (GitHub returns it once). For an App created elsewhere, generate a key on its settings page, then `graphyard app import --app-id ID --key-file PEM [--role control-plane|reviewer|revert-approver] [--repo OWNER/NAME]` proves the key by an App JWT and saves the App `0600` as `imported-app-SLUG.json` in the install directory; a control-plane App whose webhook serves another install is refused. `graphyard app list` names each saved App's reusable roles or why not.
 
 Refused workflow syncs: `sync GY-N --push-via-control-plane COMMIT` (`POST /api/work/:id/sync-push`) pushes COMMIT, fast-forwarding and merging `origin/BASE` (`sync.workflow-push`).
 
 ## Require the check
 
-Require `Graphyard / merge`, `graphyard/landable` ([landability](coordination.md)) from control-plane App: `strict` **off**, admin-enforced, no force push/deletion (`master protection --apply`, `master browser protection`). GitHub merges only mergeable non-draft PRs whose approved head is green on `GITHUB_CI_APP_IDS`, required checks ([one delivery path](delivery.md#one-delivery-path)); restrict other merge identities (lease-less workers still push).
+Require `Graphyard / merge`, `graphyard/landable` ([landability](coordination.md)) from control-plane App: `strict` **off**, admin-enforced, no force push/deletion (`master protection --apply`, `master browser protection`). GitHub merges only mergeable non-draft PRs whose approved head is green on `GITHUB_CI_APP_IDS` ([one delivery path](delivery.md#one-delivery-path)).
 
 ## Failed checks
 
@@ -48,7 +48,7 @@ Binding and carry rules: [leases](protocol/leases.md), [webhook](protocol/github
 
 ### Proofs in CI
 
-Protected `pull_request_target` workflow per `graphyard/*` push: **plan** finds `unit:*`/`integration:*` proofs; **exercise** runs one secret-free job on base-merged candidate; **publish** via `ciRun`-bound [CI producer](deployment.md#ci-producer). Dependencies, database image, candidate layers cached. Manual proofs stay producer sessions. `"deploySmoke": true` smoke-installs once release serves merge; failure: [delivered with failure](operations-reference.md#delivered-with-a-failed-smoke-proof).
+Protected `pull_request_target` workflow per `graphyard/*` push: **plan** finds `unit:*`/`integration:*` proofs; **exercise** runs one secret-free job on base-merged candidate; **publish** via `ciRun`-bound [CI producer](deployment.md#ci-producer). Layers cached. Manual proofs stay producer sessions. `"deploySmoke": true` smoke-installs once release serves merge; failure: [delivered with failure](operations-reference.md#delivered-with-a-failed-smoke-proof).
 
 ## Identity-bound agent review
 
