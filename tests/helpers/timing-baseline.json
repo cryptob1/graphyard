@@ -693,6 +693,8 @@
     "tests/shadow-gate.test.ts": 2153,
     "tests/merge-executor.test.ts": 4000,
     "tests/trial-merge.test.ts": 2528,
-    "tests/soak-shadow-gate.test.ts": 5943
+    "tests/soak-shadow-gate.test.ts": 5943,
+    "tests/candidate-cut.test.ts": 700,
+    "tests/release-revert.test.ts": 4000
   }
 }

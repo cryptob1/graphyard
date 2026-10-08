@@ -1,4 +1,4 @@
-// Concern: the merge writer's `run.shadowGate` (GY-1522) and `run.mergeWriter` (GY-1524) settings and the defaults they resolve to.
+// Concern: the merge writer's `run.shadowGate` (GY-1522), `run.mergeWriter` (GY-1524) and `run.candidates` (GY-1526) settings and the defaults they resolve to.
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { z } from 'zod';
@@ -51,4 +51,32 @@ const expandHome = (path: string, home: string) => path === '~' ? home : path.st
 export const mergeWriterSettings = (run: { mergeWriter?: MergeWriterSettings }, installId: string, home: string = homedir()) => ({
   deployKeyFile: expandHome(run.mergeWriter?.deployKeyFile ?? defaultDeployKeyFile(installId, home), home),
   retrials: run.mergeWriter?.retrials ?? defaultMergeWriterRetrials,
+});
+
+// ---- The loop-driven candidate cut (GY-1526) ------------------------------------------------------
+
+/** A candidate is cut once this many first-parent merges have landed after the newest cut (the workflow's own cap, GY-1491). */
+export const defaultCandidateEveryMerges = 10;
+/** A candidate is cut once any merge after the newest cut has waited this long, main quiet or not: a lone merge never waits for nine more. */
+export const defaultCandidateIdleMinutes = 15;
+/** The widest cut an install may ask for: past this a failed candidate implicates too many changes to revert by area. */
+export const maxCandidateEveryMerges = 100;
+/** The longest a merge may wait for its candidate: a day, past which the cut is no longer continuous delivery. */
+export const maxCandidateIdleMinutes = 24 * 60;
+
+/**
+ * `run.candidates` in .graphyard/master.json: when the loop cuts a release candidate itself
+ * (control-plane mode, daemon/candidate-cut.ts). Unset, it cuts at `defaultCandidateEveryMerges`
+ * merges or `defaultCandidateIdleMinutes` idle minutes.
+ */
+export const candidateSettingsSchema = z.object({
+  everyMerges: z.number().int().min(1).max(maxCandidateEveryMerges).optional(),
+  idleMinutes: z.number().int().min(1).max(maxCandidateIdleMinutes).optional(),
+}).strict();
+export type CandidateSettings = z.infer<typeof candidateSettingsSchema>;
+
+/** The settings with their defaults applied. */
+export const candidateSettings = (run: { candidates?: CandidateSettings }) => ({
+  everyMerges: run.candidates?.everyMerges ?? defaultCandidateEveryMerges,
+  idleMinutes: run.candidates?.idleMinutes ?? defaultCandidateIdleMinutes,
 });

@@ -84,17 +84,22 @@ export const candidateId = (now: Date) => now.toISOString().replace(/[-:]/g, '')
 /**
  * The delivered items a range of main's first-parent commits carries. A Graphyard branch merge
  * names its item in the branch (`graphyard/gy-1094-1`); a squash or a hand-written subject names
- * it as `GY-N:`. A commit naming no item (a docs touch, a direct fix) is not a delivery.
+ * it as `GY-N:`. A commit naming no item (a docs touch, a direct fix) is not a delivery, and neither
+ * is a revert of an item's merge or the merge it reverted (GY-1526).
  */
 export function itemsFromCommits(commits: readonly CommitSummary[]): CandidateItem[] {
   const items: CandidateItem[] = [];
-  const seen = new Set<string>();
+  const seen = new Set<string>(), reverted = new Set<string>();
   for (const commit of commits) {
     // The subject names the merged branch; a body may mention other items' branches in passing.
     const branchIn = (text: string) => /\bgraphyard\/([a-z][a-z0-9]*-\d+)-\d+\b/i.exec(text)?.[1];
     const namedIn = (text: string) => /^([A-Z][A-Z0-9]*-\d+):/m.exec(text)?.[1];
     const key = (branchIn(commit.subject) ?? namedIn(commit.subject) ?? branchIn(commit.body) ?? namedIn(commit.body))?.toUpperCase();
-    if (!key || seen.has(key)) continue;
+    // GY-1526: a revert of an item's merge (`Revert "Merge pull request #N from …/graphyard/gy-N-E"`, as the
+    // loop's candidate revert or the main guard writes it) delivers nothing, and the older merge it undoes
+    // is no delivery either: the item is reopened, and its next merge names it afresh.
+    if (key && /^Revert "/.test(commit.subject)) { reverted.add(key); continue; }
+    if (!key || seen.has(key) || reverted.has(key)) continue;
     seen.add(key);
     const pr = /#(\d+)\b/.exec(commit.subject);
     items.push({ key, mergeSha: commit.sha, pr: pr ? Number(pr[1]) : null });
