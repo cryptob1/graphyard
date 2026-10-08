@@ -14,6 +14,8 @@ import { deliveryPolicySchema, generatedWorkflowFiles, requiredPullRequestChecks
 import { renderReleasePipeline } from './install/release-pipeline.js';
 import { assertUnitOwned, executorGlob, executorInstance, executorInstancePattern, legacyExecutorTemplate, legacyInstallUnits, readInstallUnits, resolveInstallUnits, type InstallUnits } from './install/units.js';
 import { containedInstall, npmCiEnvironment } from './cli/test-isolation.js';
+import { herdrTarget, type HerdrInstance } from './master/herdr.js';
+import { herdrSync } from './herdr-host.js';
 
 export const hostIdSchema = z.string().trim().min(1).max(200);
 export const connectionSchema = z.object({ url: z.string(), cliPath: z.string(), hostId: hostIdSchema, token: z.string().min(32).optional(), principal: z.string().optional() }).strict();
@@ -154,19 +156,34 @@ const urlOrigin = (value: string) => { try { return new URL(value).origin; } cat
  * plugin for another server would silently repoint it (GY-1413). A config.json that exists but
  * cannot be read, is not JSON or names no server is a binding nobody can inspect: `url` is null
  * and `bound` says why, so callers refuse to overwrite it without --herdr-rebind rather than
- * mistaking it for no binding at all.
+ * mistaking it for no binding at all. READ reads that file: this machine's, or a host's over its
+ * transport (GY-1511), whose missing file rejects with code ENOENT.
  */
-export async function herdrPluginBinding(runHerdr: (args: string[]) => string | Promise<string>): Promise<{ configDirectory: string; url: string | null; bound: string } | null> {
+export async function herdrPluginBinding(runHerdr: (args: string[]) => string | Promise<string>, read: (file: string) => Promise<string> = file => readFile(file, 'utf8')): Promise<{ configDirectory: string; url: string | null; bound: string } | null> {
   let configDirectory: string;
   try { configDirectory = String(await runHerdr(['plugin', 'config-dir', 'graphyard'])).trim(); } catch { return null; }
   if (!configDirectory || !isAbsolute(configDirectory) || /[\r\n\0]/.test(configDirectory)) return null;
   const file = resolve(configDirectory, 'config.json');
   const uninspectable = (reason: string) => ({ configDirectory, url: null, bound: `a configuration that cannot be inspected (${file}: ${reason})` });
   let text: string;
-  try { text = await readFile(file, 'utf8'); } catch (error: any) { if (error.code === 'ENOENT') return null; return uninspectable(error.code ?? error.message); }
+  try { text = await read(file); } catch (error: any) { if (error.code === 'ENOENT') return null; return uninspectable(error.code ?? error.message); }
   let config: any;
   try { config = JSON.parse(text); } catch { return uninspectable('not valid JSON'); }
   return typeof config?.url === 'string' && config.url ? { configDirectory, url: config.url, bound: config.url } : uninspectable('it names no server url');
+}
+
+/**
+ * Whether Herdr reports its `graphyard` plugin enabled (`plugin list --plugin graphyard --json`): a
+ * config.json written for the right server says nothing of an enable that failed after it, or a
+ * plugin disabled since (GY-1511). False when the plugin is not installed; null when Herdr cannot say.
+ */
+export async function herdrPluginEnabled(runHerdr: (args: string[]) => string | Promise<string>): Promise<boolean | null> {
+  try {
+    const parsed = JSON.parse(String(await runHerdr(['plugin', 'list', '--plugin', 'graphyard', '--json'])));
+    const plugins = parsed?.result?.plugins ?? parsed?.plugins;
+    if (!Array.isArray(plugins)) return null;
+    return plugins.find((plugin: any) => plugin?.plugin_id === 'graphyard')?.enabled === true;
+  } catch { return null; }
 }
 
 /** True when a plugin binding points anywhere but `target`, an uninspectable one included. */
@@ -179,7 +196,7 @@ export function herdrRebindRefusal(bound: string, target: string, flag = '--herd
   return `Herdr's graphyard plugin on this machine is bound to ${bound}; linking it for ${target} would repoint every Herdr session there with a new worker token. Rerun with ${flag} to repoint it on purpose, or without Herdr to leave it bound where it is. Nothing was changed.`;
 }
 
-export async function setupRepository(root: string, input: Connection, options: { herdr?: boolean; herdrRebind?: boolean; runHerdr?: (args: string[]) => string; fetcher?: typeof fetch; executors?: false | { run?: SystemctlRunner; unitDirectory?: string; node?: string } } = {}) {
+export async function setupRepository(root: string, input: Connection, options: { herdr?: boolean; herdrRebind?: boolean; herdrInstance?: HerdrInstance | null; runHerdr?: (args: string[]) => string; fetcher?: typeof fetch; executors?: false | { run?: SystemctlRunner; unitDirectory?: string; node?: string } } = {}) {
   const connection = connectionSchema.parse(input); connection.url = serverOrigin(connection.url);
   delete connection.principal; // Identity is established only by the authenticated server response.
   if (!isAbsolute(connection.cliPath) || !(await lstat(connection.cliPath)).isFile()) throw new Error('CLI path must be an existing absolute launcher path');
@@ -198,7 +215,8 @@ export async function setupRepository(root: string, input: Connection, options: 
   let existing = ''; try { existing = await readFile(instructionsFile, 'utf8'); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
   const instructions = managedInstructions(existing, connection.url);
   const runHerdr = options.runHerdr ?? ((args: string[]) => {
-    try { return execFileSync('herdr', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim(); } catch { throw new Error('Herdr setup command failed; check installation and rerun init. No credentials were printed.'); }
+    // GY-1511: an install with its own Herdr instance links the plugin there, never in the default one.
+    try { return herdrSync(args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }, options.herdrInstance === undefined ? herdrTarget() : options.herdrInstance).trim(); } catch { throw new Error('Herdr setup command failed; check installation and rerun init. No credentials were printed.'); }
   });
   if (options.herdr) runHerdr(['plugin', '--help']);
   // Refused before any write: a plugin another server owns is repointed only on purpose.

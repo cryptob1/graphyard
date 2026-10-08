@@ -101,7 +101,7 @@ function dependencies(w: World, root: string, events: UpEvent[], extra: Partial<
       for (const prefix of w.failOnce) if (joined.startsWith(prefix)) { w.failOnce.delete(prefix); return { code: 1, stdout: '{"error":"interrupted"}' }; }
       if (args[0] === 'install' && args.includes('--plan')) {
         return { code: 0, stdout: JSON.stringify({ installId: 'acme-shop', installDirectory: '/install/acme-shop', ...(w.browserApps ? { browserApps: w.browserApps } : {}), ...(w.host ? { host: { units: [] } } : {}), principals: [{ id: 'acme-shop-operator', role: 'admin', sessionKind: 'human' }, { id: 'acme-shop-master', role: 'coordinator', sessionKind: 'ai' }],
-          preflight: [{ name: 'GitHub CLI', ok: true }, ...(w.priceUnconfirmed && !args.includes('--confirm-price') ? [{ name: 'Monthly price', ok: false, detail: 'cx33 (8 GB) at fsn1: 6.49 EUR/month; not confirmed, so nothing will be created' }] : []), ...(w.herdrElsewhere && !args.includes('--no-herdr') ? [{ name: 'Herdr plugin', ok: false, detail: 'bound to https://other.example' }] : [])] }) };
+          preflight: [{ name: 'GitHub CLI', ok: true }, ...(w.priceUnconfirmed && !args.includes('--confirm-price') ? [{ name: 'Monthly price', ok: false, detail: 'cx33 (8 GB) at fsn1: 6.49 EUR/month; not confirmed, so nothing will be created' }] : []), ...(w.herdrElsewhere && !args.includes('--no-herdr') && !args.includes('--herdr-instance') ? [{ name: 'Herdr plugin', ok: false, detail: 'bound to https://other.example' }] : [])] }) };
       }
       if (args[0] === 'install' && args.includes('--apply')) {
         w.installed = true;
@@ -199,14 +199,14 @@ test('unit:graphyard-up-resumable — a fresh run walks every step in order; an 
   assert.match(identities?.detail ?? '', /provisioned on graphyard-acme-shop, where its loop runs/);
   assert.deepEqual(requestedView(`#claim=${CODE}&setup`), { view: 'setup', hash: `#claim=${CODE}` });
 
-  // Herdr bound to another server: the install runs with --no-herdr and never with --herdr-rebind.
+  // Herdr bound to another server: the install gets its own Herdr instance (GY-1511), never --herdr-rebind.
   const herdrRoot = await temporaryDirectory('graphyard-up-herdr');
   const herdr = world({ app: true, reviewer: true, accounts: true, herdrElsewhere: true });
   const herdrEvents: UpEvent[] = [];
   assert.equal((await runUp(request(), dependencies(herdr, herdrRoot, herdrEvents))).exitCode, 0);
-  assert.ok(herdr.calls.filter(args => args[0] === 'install' && args.includes('--apply')).every(args => args.includes('--no-herdr')));
+  assert.ok(herdr.calls.filter(args => args[0] === 'install' && args.includes('--apply')).every(args => args.includes('--herdr-instance') && !args.includes('--no-herdr')));
   assert.ok(!herdr.calls.flat().includes('--herdr-rebind'));
-  assert.ok(herdrEvents.some(event => event.kind === 'note' && /left as it is/.test(event.text)));
+  assert.ok(herdrEvents.some(event => event.kind === 'note' && /own Herdr instance/.test(event.text)));
 
   // A failed machine prerequisite stops before anything is installed, naming it.
   const preflightRoot = await temporaryDirectory('graphyard-up-preflight');
@@ -426,7 +426,9 @@ test('unit:graphyard-up-agent-mode — up --agent reaches a green checklist with
 /** Visible text of rendered markup: what a person reads. */
 const visible = (markup: string) => markup.replace(/<[^>]+>/g, ' ').replace(/&#x27;/g, "'").replace(/&amp;/g, '&').replace(/\s+/g, ' ').trim();
 const render = async (state: any) => { const { SetupView } = await import('../web/pages/setup.js'); return renderToStaticMarkup(createElement(SetupView, { status: state, onConnect: () => {}, onSubmitGoal: () => {} })); };
-/** A command, a sha or a file path: what the Setup page never shows. */
+/** The checklist and goal, without the Herdr section: the one place the page shows commands, for whoever uses a terminal (GY-1511). */
+const withoutHerdr = (markup: string) => markup.replace(/<section aria-label="Watch your agents in Herdr">[\s\S]*?<\/section>/, '');
+/** A command, a sha or a file path: what the Setup page's checklist never shows. */
 const JARGON: [string, RegExp][] = [
   ['a command', /\b(graphyard|gy|gh|npm|node|git) [a-z-]+|(^|\s)--[a-z]/],
   ['a sha', /\b[0-9a-f]{7,40}\b/],
@@ -464,7 +466,8 @@ test('unit:setup-wizard-states — the Setup page shows each checklist state wit
     }
     // Every item carries one plain-language line and at most one action.
     for (const item of items) assert.equal((markup.match(new RegExp(`data-setup-action="${item.id}"`, 'g')) ?? []).length, item.done ? 0 : 1, `${state.name}: ${item.id} has ${item.done ? 'no' : 'one'} action`);
-    const text = visible(markup);
+    assert.match(markup, /<section aria-label="Watch your agents in Herdr">/, `${state.name}: the Herdr section is shown`);
+    const text = visible(withoutHerdr(markup));
     for (const [what, pattern] of JARGON) assert.doesNotMatch(text, pattern, `${state.name}: the page shows ${what}: ${text.match(pattern)?.[0]}`);
   }
   // Settings → Agents opens the Setup page for the admin who signed in another way.
@@ -989,7 +992,7 @@ test('unit:onboarding-pr-visible — while the onboarding pull request is open, 
   assert.ok(text.includes(wait.line), 'the checklist line names what it waits for and the time waited');
   assert.match(text, /1 of 7 steps left/);
   assert.doesNotMatch(open, /Describe what you want built/, 'the goal waits for the merge, as up does');
-  for (const [what, pattern] of JARGON) assert.doesNotMatch(text, pattern, `the onboarding step shows no ${what}`);
+  for (const [what, pattern] of JARGON) assert.doesNotMatch(visible(withoutHerdr(open)), pattern, `the onboarding step shows no ${what}`);
   // Merged, on merge evidence: the step is done and the goal box is offered.
   const delivered = { ...item, stage: 'done', delivery: { mergedAt: new Date(now).toISOString(), mergeSha: 'a'.repeat(40) } };
   const merged = page([delivered]);

@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react';
-import { checklistGreen, goalLimits, goalSubmission, requestedView, setupChecklist, statusSupervised, type SetupItem } from '../../src/model/setup-checklist';
+import { checklistGreen, goalLimits, goalSubmission, paneServer, requestedView, setupChecklist, statusSupervised, type SetupItem } from '../../src/model/setup-checklist';
+import { herdrConnectCommands, type HerdrWatch } from '../../src/herdr-connect';
+import { CopyButton } from './workers';
 import { findOnboardingWork, onboardingWait, type OnboardingWait } from '../../src/model/onboarding-work';
 import { PageHeader, PageSection } from '../components/page-layout';
 import type { Dashboard } from './dashboard';
@@ -7,9 +9,10 @@ import type { Dashboard } from './dashboard';
 /**
  * The first-run Setup page (GY-1419): the checklist a new installation needs, each item's live
  * state read from the control plane, one plain sentence and one button. `graphyard up` prints this
- * page's address and waits on the same checklist (src/model/setup-checklist.ts). Nothing here names
- * a command, a sha or a file: the person reading it may never open a terminal. Once every item is
- * green it asks what to build and submits that as the first work item.
+ * page's address and waits on the same checklist (src/model/setup-checklist.ts). The checklist names
+ * no command, sha or file: the person reading it may never open a terminal. Once every item is
+ * green it asks what to build and submits that as the first work item. Beside it, the commands that
+ * open the install's agents in Herdr, for whoever does use a terminal (GY-1511).
  */
 
 let opened: string | undefined;
@@ -57,6 +60,26 @@ export function SetupChecklist({ items, onConnect, onboarding }: { items: SetupI
   </ol>;
 }
 
+/**
+ * Where to watch the agents (GY-1511): the copyable commands that attach to the Herdr server holding
+ * this install's sessions, on its host and from another machine, and whether that server is running.
+ */
+export function HerdrConnect({ watch }: { watch: HerdrWatch }) {
+  const commands = herdrConnectCommands(watch);
+  const rows = [
+    { id: 'local', label: 'On this host', text: commands.local },
+    { id: 'ssh', label: 'From another machine, through SSH', text: commands.ssh },
+    { id: 'remote', label: 'From another machine, with Herdr\'s remote attach', text: commands.remote },
+  ];
+  return <div data-herdr-connect={watch.session ? 'instance' : 'default'}>
+    <p data-herdr-running={watch.running === null ? 'unknown' : watch.running ? 'yes' : 'no'}>
+      {watch.running === null ? 'Whether the Herdr server is running is not known yet.' : watch.running ? <span className="green">The Herdr server is running.</span> : <span className="amber">The Herdr server is not running; rerun the setup command on the host to start it.</span>}
+      {!watch.host && ' Replace HOST with the machine\'s name or tailnet address.'}
+    </p>
+    <ul>{rows.map(row => <li key={row.id} data-herdr-command={row.id}>{row.label}: <code>{row.text}</code> <CopyButton text={row.text} label="Copy"/></li>)}</ul>
+  </div>;
+}
+
 export function GoalForm({ onSubmit, busy, error, submitted }: { onSubmit: (text: string) => void; busy?: boolean; error?: string; submitted?: string | null }) {
   const [text, setText] = useState('');
   if (submitted) return <p className="notice" data-goal-submitted>Thanks — your goal is recorded as {submitted}. Graphyard drafts how it will be accepted, plans it and starts building.</p>;
@@ -85,6 +108,7 @@ export function SetupView({ status, work, workUnread, now, onConnect, onSubmitGo
     <PageHeader title="Set up Graphyard">{green ? 'Everything is ready.' : !left ? 'Checking whether the onboarding change has merged. This page updates by itself.' : `${left} of ${total} steps left. This page updates by itself as each one finishes.`}</PageHeader>
     {supervised && <p className="notice" data-supervised>You review and merge each change on GitHub; no agent reviews or approves on your behalf.</p>}
     <PageSection title="Checklist" label="Setup checklist"><SetupChecklist items={items} onConnect={onConnect} onboarding={onboarding}/></PageSection>
+    <PageSection title="Watch your agents in Herdr" label="Watch your agents in Herdr"><HerdrConnect watch={paneServer(status)}/></PageSection>
     {green && <PageSection title="Your first goal" label="First goal"><GoalForm onSubmit={onSubmitGoal} busy={busy} error={error} submitted={submitted}/></PageSection>}
   </>;
 }

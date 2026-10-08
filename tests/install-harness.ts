@@ -62,6 +62,10 @@ export function hostResponses(files: Map<string, BundleFileRecord>, state: { ins
     { match: 'systemctl --version', result: 'systemd 255 (255.4-1ubuntu8)' },
     { match: 'hostname', result: 'graphyard-host' },
     { match: 'command -v', result: (line: string) => `/usr/bin/${line.split(' ').pop()}` },
+    // Herdr on the host (GY-1511): its servers running, and the default instance's graphyard plugin
+    // configured where Herdr keeps it, so a host whose plugin another install holds is a written file.
+    { match: 'status server', result: 'status: running\n' },
+    { match: 'plugin config-dir graphyard', result: (line: string) => `${/XDG_CONFIG_HOME=(\S+)/.exec(line)?.[1] ?? '/home/graphyard/.config'}/herdr/plugins/config/graphyard\n` },
     { match: 'workspace list', result: JSON.stringify({ id: 'cli:workspace:list', result: { type: 'workspace_list', workspaces: [] } }) },
     { match: 'workspace create', result: JSON.stringify({ id: 'cli:workspace:create', result: { type: 'workspace_info', workspace: { workspace_id: 'w1', label: 'graphyard-owner-project' } } }) },
     { match: 'is-active graphyard-postgres.service', result: 'active\nactive\nactive\n' },

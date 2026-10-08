@@ -19,8 +19,8 @@ export async function registerLocalProfiles(request: ProfileRequest): Promise<Pr
   const worker = request.workerTokens[0];
   if (worker) {
     try {
-      const result = await setupRepository(request.root, { url: request.url, cliPath: request.cliPath, hostId: request.hostId, token: worker.token }, { herdr: request.herdr.available, herdrRebind: !!request.herdrRebind, ...(request.runHerdr ? { runHerdr: request.runHerdr } : {}) });
-      registration.repository = { connected: result.connected, herdr: result.pluginConfigured, detail: result.pluginConfigured ? `repository connected and the Herdr plugin is linked and enabled${result.herdr?.relinked ? ` (repointed from ${result.herdr.previous} by --herdr-rebind)` : ''}` : `repository connected; ${request.herdr.reason}` };
+      const result = await setupRepository(request.root, { url: request.url, cliPath: request.cliPath, hostId: request.hostId, token: worker.token }, { herdr: request.herdr.available, herdrRebind: !!request.herdrRebind, herdrInstance: request.herdrInstance ?? null, ...(request.runHerdr ? { runHerdr: request.runHerdr } : {}) });
+      registration.repository = { connected: result.connected, herdr: result.pluginConfigured, detail: result.pluginConfigured ? `repository connected and the Herdr plugin is linked and enabled${request.herdrInstance ? ` in this installation's own Herdr instance (session ${request.herdrInstance.session})` : ''}${result.herdr?.relinked ? ` (repointed from ${result.herdr.previous} by --herdr-rebind)` : ''}` : `repository connected; ${request.herdr.reason}` };
     } catch (error: any) { registration.repository = { connected: false, herdr: false, detail: `repository setup did not complete: ${error.message}` }; }
   }
 

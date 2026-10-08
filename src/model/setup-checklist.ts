@@ -116,6 +116,21 @@ export function setupChecklist(status: any | null, options: { appSetupUrl?: stri
   return items;
 }
 
+/**
+ * The pane server that holds this install's agent sessions, as the master loop reports it (GY-1511):
+ * its own instance (a config home and a session name) when the host's default one serves another
+ * install, else the default (both null); the host the loop runs on, when recorded; and whether the
+ * loop last reached that server (null while unknown). A sibling module outside the model turns it into commands.
+ */
+export interface PaneServer { configHome: string | null; session: string | null; host: string | null; running: boolean | null }
+/** The value `status.setup.panes` carries, or the default instance on an unknown host when it carries none. */
+export function paneServer(status: any | null): PaneServer {
+  const reported = status?.setup?.panes;
+  const text = (value: unknown) => typeof value === 'string' && value.trim() ? value.trim() : null;
+  const configHome = text(reported?.configHome), session = text(reported?.session);
+  return { configHome: configHome && session ? configHome : null, session: configHome && session ? session : null, host: text(reported?.host), running: typeof reported?.running === 'boolean' ? reported.running : null };
+}
+
 export const checklistGreen = (items: readonly SetupItem[]) => items.every(item => item.done);
 
 /** The goal box's limits: a sentence to a few paragraphs, within a goal statement's bound. */

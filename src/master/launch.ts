@@ -12,7 +12,7 @@ import type { PartialWork } from '../model/capacity.js';
 import { type ConsentPrompt, detectConsentPrompt, settingsWarning, type ConsentAnswer, sameConsentPrompt } from '../consent-prompt.js';
 import { bwrapOnPath, checkoutGitDirectory, checkoutGitProblem, checkoutWorktreeAdminDirectory, confinementRefusalText, coordinatorCheckoutRoot, coordinatorConfinement, coordinatorConfinementRefusal, mountNamespaceProbeResult, isSocketPath, readOnlyMountWrapper, secretsBusPath, type CoordinatorConfinement, type ConfinementInput } from './profiles.js';
 import type { MasterRun } from './profiles.js';
-import { type HerdrAgent, herdrJson, herdrRun, stopCreatedHerdrTab } from './herdr.js';
+import { type HerdrAgent, herdrCall, herdrJson, herdrRun, stopCreatedHerdrTab } from './herdr.js';
 import { keyringEndpointWarning, keyringProbeBackoff } from './launch-keyring.js';
 
 /**
@@ -274,7 +274,7 @@ export class SessionStartError extends Error {
 export const consentAnswerAttempts = 2, consentSettleMs = 5_000;
 /** The pane's terminal as text, unwrapped; null when Herdr cannot read it. */
 export async function readPaneScreen(pane: string, run: ChildRun = defaultChildRun, lines = 40) {
-  try { return String(await run('herdr', ['pane', 'read', pane, '--source', 'recent-unwrapped', '--lines', String(lines)])); } catch { return null; }
+  try { return String(await herdrCall(run, ['pane', 'read', pane, '--source', 'recent-unwrapped', '--lines', String(lines)])); } catch { return null; }
 }
 /** The pane's last non-empty line, bounded for a record. */
 export function paneLastLine(text: string | null, limit = paneLineLimit) {
@@ -638,7 +638,7 @@ export const activeStates = ['working', 'blocked'];
 export const screenDigest = (text: string) => createHash('sha256').update(text).digest('hex').slice(0, 32);
 /** The session's terminal, as text; null when Herdr cannot read it. */
 export async function readSessionScreen(target: string, run: ChildRun = defaultChildRun, lines = 80): Promise<string | null> {
-  try { return String(await run('herdr', ['agent', 'read', target, '--source', 'recent-unwrapped', '--lines', String(lines)])); } catch { return null; }
+  try { return String(await herdrCall(run, ['agent', 'read', target, '--source', 'recent-unwrapped', '--lines', String(lines)])); } catch { return null; }
 }
 /** How a session's screen is read when the judgement needs it: a stub in a test, one Herdr read in the process. */
 export type ScreenReader = () => string | null | Promise<string | null>;

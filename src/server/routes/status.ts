@@ -4,7 +4,7 @@ import type { IntegrationJob } from '../../coordination.js';
 import { parseEventHistoryQuery, readEventHistory } from '../../events-history.js';
 import { catchUpPipelineTimelines, pipelineBackfillState, readPipelineTimelines } from '../../pipeline-backfill.js';
 import { delegationSnapshot } from '../../delegation.js';
-import { describeUnserved, durablePresence, executorRegistry, executorReport, loopPresenceHeader, loopPresenceInterval, loopRegistry, loopSupervision, loopSupervisionHeader, presenceQuery, reportedLoopMerger } from '../../model/executor-presence.js';
+import { describeUnserved, durablePresence, executorRegistry, executorReport, loopPresenceHeader, loopPresenceInterval, loopPanes, loopPanesHeader, loopPanesRegistry, loopRegistry, loopSupervision, loopSupervisionHeader, presenceQuery, reportedLoopMerger } from '../../model/executor-presence.js';
 import { installationSettingsUrl, mainGuardStatus } from '../../github.js';
 import { controlPlanePermissions, requiredPermissions } from '../../github-permissions.js';
 import { releaseInfo, schemaVersion } from '../../release.js';
@@ -106,7 +106,9 @@ export const statusRoutes = defineRoutes('status', [
         // checks (the merge check is added after the first pull request reports it), else `off` — and
         // whether a master loop is live, and who reviews and merges as the live loop names it (GY-1501):
         // `supervised` drops the reviewer App and reviewing account from the Setup checklist.
-        setup: { protection: await setupProtection(github), loop: !!executors.loop?.live, supervision: loopRegistry(engine).live(observedAt)?.supervision ?? null },
+        setup: { protection: await setupProtection(github), loop: !!executors.loop?.live, supervision: loopRegistry(engine).live(observedAt)?.supervision ?? null,
+          // and the pane server its agents run in as that loop last named it (GY-1511).
+          panes: loopRegistry(engine).live(observedAt) ? loopPanesRegistry(engine).latest : null },
         now: observedAt.toISOString(), release: releaseInfo(), schema: schemaVersion };
     },
   },
@@ -195,6 +197,7 @@ export const statusRoutes = defineRoutes('status', [
       // The loop's own read is its presence (GY-916): it merges while it lives, however long nothing is mergeable.
       const loopInterval = actor.role === 'coordinator' ? loopPresenceInterval(req.headers[loopPresenceHeader.toLowerCase()]) : null;
       if (loopInterval !== null) loopRegistry(services.engine).observe({ principal: actor.id, intervalSeconds: loopInterval, supervision: loopSupervision(req.headers[loopSupervisionHeader.toLowerCase()]) }, new Date());
+      if (loopInterval !== null) loopPanesRegistry(services.engine).observe(loopPanes(req.headers[loopPanesHeader.toLowerCase()]));
       // Bounded catch-up: items that predate the per-item timeline gain one from their own
       // ledger before the snapshot every speed report is derived from is read. The ledger is read
       // outside the coordination lock, one run at a time; it converges and then costs one small

@@ -3,6 +3,7 @@ import { executorRunnableKinds } from './action-kinds.js';
 import type { NextActionKind } from './next-action.js';
 import type { Work } from './work.js';
 import type { ReportedLoopMerger } from './loop-presence.js';
+import type { PaneServer } from './setup-checklist.js';
 
 export * from './loop-presence.js';
 
@@ -247,4 +248,35 @@ export function describeUnserved(report: Pick<ExecutorReport, 'live' | 'unserved
     return { kind, keys: rows.map(row => row.key), waitedMs: longest.waitedMs, start: longest.start,
       text: `Nothing can run ${kind}: ${longest.key} has waited ${wait(longest.waitedMs)}${others} for an executor that serves it, and ${fleet}. It is not queued behind other work — ${longest.start}` };
   }).sort((a, b) => b.waitedMs - a.waitedMs);
+}
+
+/**
+ * The header on the loop's coordination reads naming the pane server that holds the install's agent
+ * sessions (GY-1511), as the loop knows it — its own instance's config home and session (null for the
+ * host's default), the host the loop runs on, and whether the loop last reached that server —
+ * URI-encoded JSON. The control plane keeps the latest beside the loop's presence for /api/status.
+ */
+export const loopPanesHeader = 'X-Graphyard-Loop-Panes';
+export const encodeLoopPanes = (panes: PaneServer) => encodeURIComponent(JSON.stringify(panes));
+/** The pane server a loop read names, or null when it names none or one that does not parse. */
+export function loopPanes(header: string | string[] | undefined): PaneServer | null {
+  const value = Array.isArray(header) ? header[0] : header;
+  if (!value || value.length > 2_000) return null;
+  try {
+    const parsed = JSON.parse(decodeURIComponent(value));
+    const text = (field: unknown) => typeof field === 'string' && field.trim() && field.length <= 500 ? field.trim() : null;
+    const configHome = text(parsed?.configHome), session = text(parsed?.session);
+    return { configHome: configHome && session ? configHome : null, session: configHome && session ? session : null, host: text(parsed?.host), running: typeof parsed?.running === 'boolean' ? parsed.running : null };
+  } catch { return null; }
+}
+/** The pane server the loop last named, kept per engine like the loop's presence; a read naming none keeps the last. */
+export class LoopPanesRegistry {
+  latest: PaneServer | null = null;
+  observe(panes: PaneServer | null) { if (panes) this.latest = panes; }
+}
+const loopPanesRegistries = new WeakMap<object, LoopPanesRegistry>();
+export function loopPanesRegistry(owner: object): LoopPanesRegistry {
+  let registry = loopPanesRegistries.get(owner);
+  if (!registry) { registry = new LoopPanesRegistry(); loopPanesRegistries.set(owner, registry); }
+  return registry;
 }
