@@ -714,6 +714,29 @@ test('unit:main-guard-flake-recorded a rerun that passes leaves main green with 
   mainGuard.applyMainGuardFlakes(itemA, many);
   assert.equal(itemA.mainGuardFlakes!.length, 20);
   assert.equal(itemA.mainGuardFlakes!.at(-1)!.failedRunId, 24);
+
+  // A rerun main no longer names — a later merge passed above it — is read on the tick that settles
+  // it and then forgotten: never reverted, never recorded as a flake, never polled again.
+  for (const ending of ['failure', null] as const) {
+    const [P, Q] = ['p6', 'q7'].map(sha), itemP = delivered('GY-6', P, 706), itemQ = delivered('GY-7', Q, 707);
+    const history: MainCommit[] = [{ sha: P, parent: base }, { sha: base, parent: null }];
+    const stale = world(history, [itemP, itemQ]);
+    stale.checks.set(base, green); stale.checks.set(P, runs({ test: 'failure', typecheck: 'success' }));
+    const rerun = withFailedReruns(stale, P), reads = { P: 0 };
+    const checks = stale.ports.checks;
+    stale.ports.checks = async commit => { if (commit === P) reads.P++; return checks(commit); };
+    const staleOptions = { required, ciAppIds: [ci], now: new Date(at), verdicts: new Map(), reruns: new Map() };
+    assert.equal((await runMainGuard(stale.ports, staleOptions)).main.state, 'pending');
+    history.unshift({ sha: Q, parent: P }); stale.checks.set(Q, green);
+    if (ending) rerun.conclude(ending);
+    tick = await runMainGuard(stale.ports, staleOptions);
+    assert.deepEqual(tick.main, { state: 'green' }); assert.deepEqual(tick.flakes, []);
+    assert.equal(staleOptions.reruns.size, 0, `${ending ?? 'running'}: the stale rerun is forgotten on the tick that settles it`);
+    const settled = reads.P;
+    for (let index = 0; index < 3; index++) await runMainGuard(stale.ports, staleOptions);
+    assert.equal(reads.P, settled, `${ending ?? 'running'}: the stale merge is not polled again`);
+    assert.deepEqual(stale.calls.opened, []); assert.equal(itemP.mainGuardFlakes, undefined); assert.deepEqual(rerun.reruns, [0]);
+  }
 });
 
 test('unit:main-guard-cancel-bound-escalates a run still cancelled past the rerun bound is reported once to the master as an infrastructure fault naming the run, never reverted', async () => {

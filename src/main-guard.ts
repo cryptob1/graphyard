@@ -408,10 +408,13 @@ export async function runMainGuard(ports: MainGuardPorts, options: MainGuardOpti
   try {
     tick.main = await readMain(await ports.history(), verdict);
   } catch (error) { tick.errors.push(`reading main: ${message(error)}`); return tick; }
-  // A rerun that passed was a flake (GY-1497): main reverts nothing and the item records it.
+  // A rerun that passed was a flake (GY-1497): main reverts nothing and the item records it. A rerun
+  // of a merge main no longer names (a later commit passed above it, or it left the history read) is
+  // read once more for its flake and then forgotten, so it is never polled again.
+  const current = tick.main.state === 'pending' ? tick.main.probe : tick.main.state === 'broken' ? tick.main.culprit : null;
   for (const [sha, rerun] of reruns) {
     try {
-      if ((await verdict(sha)).verdict !== 'pass') continue;
+      if ((await verdict(sha)).verdict !== 'pass') { if (sha !== current) reruns.delete(sha); continue; }
       const work = await ports.culprit(sha);
       const flakes = rerun.failing.map(check => ({ mergeSha: sha, check, failedRunId: rerun.failed[check] ?? null, rerunRunId: rerun.passed?.[check] ?? null, at }));
       if (work) await (ports.recordFlakes ? ports.recordFlakes(work, flakes) : applyMainGuardFlakes(work, flakes));
@@ -433,7 +436,7 @@ export async function runMainGuard(ports: MainGuardPorts, options: MainGuardOpti
   try { work = await ports.culprit(broken.culprit); } catch (error) { tick.errors.push(`finding the item of ${broken.culprit.slice(0, 12)}: ${message(error)}`); return tick; }
   // A merge already reverted or abandoned is never tried again; a commit no item delivered is not the guard's to revert.
   // A cancelled run reported as an infrastructure fault reverted nothing, so a real failure after it still is.
-  if (!work || work.mainGuardReverts?.some(entry => entry.mergeSha === broken.culprit && entry.cause !== 'cancelled') || work.stage !== 'done' || work.delivery?.mergeSha !== broken.culprit) return tick;
+  if (!work || work.mainGuardReverts?.some(entry => entry.mergeSha === broken.culprit && entry.cause !== 'cancelled') || work.stage !== 'done' || work.delivery?.mergeSha !== broken.culprit) { reruns.delete(broken.culprit); return tick; }
   let note = '';
   try {
     const decided = timedOut ? { pending: false as const, note: `; its rerun did not conclude within ${Math.round(timeoutMs / 60_000)} minutes` } : await rerunFailed(ports, broken, reruns, options, now, timeoutMs);
