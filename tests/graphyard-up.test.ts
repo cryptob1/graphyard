@@ -1231,3 +1231,55 @@ test('unit:research-worktree-managed-repo — the loop makes its research scratc
   await openResearchScratch(researchScratchSource(config2), config2, managed.head, line => fromCli.push(line));
   assert.match(fromCli.join('\n'), /holds no worktree of/);
 });
+
+test('unit:up-surfaces-child-error — a failing install\'s own last output lines, credentials redacted, are in up\'s next, naming the step', async () => {
+  const { runUp, childTailLines } = await up();
+  const root = await temporaryDirectory('graphyard-up-child-error');
+  const w = world({ app: true, reviewer: true, accounts: true });
+  const base = dependencies(w, root, []);
+  // GY-1509: the compose server cannot bind its port; install's own error is on its stderr, after 30 lines of progress.
+  const progress = Array.from({ length: 30 }, (_, index) => `progress line ${index + 1}`);
+  const stderr = [...progress, 'Error response from daemon: Bind for 127.0.0.1:4310 failed: port is already allocated', `retrying with token=${'s'.repeat(40)} at ${SERVER}/#claim=${CODE}`].join('\n');
+  const result = await runUp(request(), { ...base, cli: async (args, options) => args[0] === 'install' && args.includes('--apply') ? { code: 1, stdout: '', stderr } : base.cli(args, options) });
+  assert.equal(result.exitCode, 1);
+  assert.match(result.next, /^control-plane: graphyard install exited 1; its last output:\n/);
+  assert.ok(result.next.includes('Bind for 127.0.0.1:4310 failed: port is already allocated'), result.next);
+  const tail = result.next.split('\n').slice(1);
+  assert.equal(tail.length, childTailLines);
+  assert.equal(tail[0], 'progress line 13', 'only the last 20 lines');
+  assert.ok(!result.next.includes('s'.repeat(40)) && !result.next.includes(CODE), `credentials are redacted: ${result.next}`);
+  assert.match(result.next, /token=\[redacted\]/);
+
+  // A step run through the shared runner (onboarding) carries its child's output the same way.
+  const other = world({ app: true, reviewer: true, accounts: true });
+  const otherBase = dependencies(other, await temporaryDirectory('graphyard-up-child-error-run'), []);
+  const failed = await runUp(request(), { ...otherBase, cli: async (args, options) => args.join(' ') === 'init --scan' ? { code: 2, stdout: '{"partial":true}', stderr: 'graphyard.json: unknown delivery mode "nightly"' } : otherBase.cli(args, options) });
+  assert.equal(failed.next, 'onboarding: graphyard init exited 2; its last output:\n{"partial":true}\ngraphyard.json: unknown delivery mode "nightly"');
+});
+
+test('unit:up-uses-chosen-port — the connection, the Setup address and the sign-in link up prints follow the port the install chose', async () => {
+  const { runUp } = await up();
+  const { composeAdapter } = await import('../src/install/adapters.js');
+  const { fakeTransport } = await import('../src/install/transport.js');
+  const { Vault } = await import('../src/install/secrets.js');
+  const root = await temporaryDirectory('graphyard-up-chosen-port');
+  // Another install holds 4310 on this host: the compose preflight's bind probe fails there only.
+  const transport = fakeTransport({ responses: [{ match: 'listen(4310,', result: { stdout: '', stderr: '', code: 1 } }] });
+  const context = { provider: 'compose', repository: 'acme/shop', installId: 'acme-shop', service: 'graphyard-acme-shop', domain: null, image: 'graphyard-local:acme-shop',
+    workdir: `${root}/compose`, sourceRoot: root, sshHost: null, sshUser: 'root', sshKey: null, workspace: null, serverType: 'cx22', serverTypeExplicit: false, plannedAgents: 2, location: 'nbg1',
+    databasePassword: 'p'.repeat(32), port: 4310, dataPath: null, railwayDir: `${root}/railway`, host: null, spend: { maxMonthly: null, confirmPrice: null },
+    wait: async () => {}, transport, ssh: () => transport, fetch, vault: new Vault() } as Parameters<typeof composeAdapter.url>[0];
+  assert.ok((await composeAdapter.preflight(context)).every(item => item.ok));
+  // The install records its connection at the URL its adapter serves, on the port preflight chose: up reads it from there.
+  const chosen = await composeAdapter.url(context);
+  assert.equal(chosen, 'http://127.0.0.1:4311');
+  const w = world({ app: true, reviewer: true, accounts: true });
+  const base = dependencies(w, root, []);
+  const result = await runUp(request(), { ...base, serverUrl: async () => w.installed ? chosen : null,
+    signIn: async file => { w.signIns.push(file); return file === OPERATOR_TOKEN ? `${chosen}/#sign-in=${CODE}` : null; } });
+  assert.equal(result.exitCode, 0, result.next);
+  assert.equal(result.setupUrl, `${chosen}/#setup`);
+  assert.equal(result.signIn, `${chosen}/#sign-in=${CODE}&setup`);
+  assert.ok(result.next.includes(`${chosen}/#sign-in=${CODE}`), result.next);
+  assert.ok(!JSON.stringify(result).includes('127.0.0.1:4310'), 'nothing up records or prints names the port another install holds');
+});

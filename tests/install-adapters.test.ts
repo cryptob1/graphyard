@@ -479,3 +479,48 @@ test('a failing local command reports its exit code and the tail of its stderr',
   const tolerated = await transport.exec('sh', ['-c', 'echo failed >&2; exit 4'], { allowFailure: true });
   assert.deepEqual({ code: tolerated.code, stderr: tolerated.stderr.trim() }, { code: 4, stderr: 'failed' });
 });
+
+test('unit:compose-port-chosen-and-persisted — a Compose install whose port another process holds publishes the first free one from 4310, a rerun keeps the port its own server serves, and an explicit taken --port is refused', async () => {
+  // GY-1509: the host's loopback ports, as the preflight's bind probe finds them; the bundle a run
+  // wrote is what `cat` reads back, as on a real machine.
+  const taken = new Set([4310]);
+  let written: string | null = null;
+  const configHome = await temporaryDirectory('config');
+  const workdir = `${configHome}/owner-project/compose`;
+  const extraResponses = [
+    { match: "require('net')", result: (line: string) => taken.has(Number(/listen\((\d+),/.exec(line)![1])) ? { stdout: '', stderr: '', code: 1 } : '' },
+    { match: `cat ${workdir}/compose.yaml`, result: () => written ?? { stdout: '', stderr: 'No such file', code: 1 } },
+  ];
+  const portItem = (plan: Awaited<ReturnType<typeof buildPlan>>) => plan.preflight.find(item => item.name === 'Server port')!;
+  const first = await harness({ provider: 'compose', configHome, extraResponses });
+  let second: Harness | undefined;
+  try {
+    // Another install already serves 4310: this one takes 4311 and its URL, bundle and connection follow.
+    const connections: string[] = [];
+    const session = await prepareInstall(first.root, inputsFor('compose'), { ...first.deps, registerProfiles: async request => { connections.push(request.url); return first.deps.registerProfiles!(request); } });
+    const plan = await buildPlan(session);
+    assert.deepEqual(portItem(plan), { name: 'Server port', ok: true, detail: '127.0.0.1:4310 is taken by another process; this installation publishes 127.0.0.1:4311' });
+    const summary = await applyInstall(session, plan);
+    assert.equal(summary.url, 'http://127.0.0.1:4311');
+    assert.ok(connections.length && connections.every(url => url === 'http://127.0.0.1:4311'), `the master's connection is the chosen port: ${connections.join(', ')}`);
+    assert.equal(JSON.parse(await readFile(join(configHome, 'owner-project', 'install.json'), 'utf8')).url, 'http://127.0.0.1:4311');
+    written = bundle(first, 'compose.yaml')!.content;
+    assert.match(written, /ports: \["127\.0\.0\.1:4311:4310"\]/);
+
+    // The rerun (an upgrade): 4311 is now held by this install's own running server, which keeps it.
+    taken.add(4311);
+    second = await harness({ provider: 'compose', installed: true, protection: satisfiedProtection(null), root: first.root, configHome, extraResponses });
+    const rerun = await prepareInstall(second.root, inputsFor('compose'), second.deps);
+    const replanned = await buildPlan(rerun);
+    assert.deepEqual(portItem(replanned), { name: 'Server port', ok: true, detail: '127.0.0.1:4311 serves this installation' });
+    assert.equal((await applyInstall(rerun, replanned)).url, 'http://127.0.0.1:4311');
+    assert.match(bundle(second, 'compose.yaml')!.content, /ports: \["127\.0\.0\.1:4311:4310"\]/);
+
+    // A port the operator named is never moved: taken, it fails preflight instead.
+    const explicit = await prepareInstall(second.root, { ...inputsFor('compose'), port: 4310 }, second.deps);
+    const refused = portItem(await buildPlan(explicit));
+    assert.equal(refused.ok, false);
+    assert.match(refused.detail, /127\.0\.0\.1:4310 is taken by another process/);
+    assert.equal(explicit.context.port, 4310);
+  } finally { await first.cleanup(); if (second) await second.cleanup(); }
+});

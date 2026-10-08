@@ -367,7 +367,7 @@ export async function prepareInstall(cwd: string, rawInputs: InstallRequest & Re
     workspace: inputs.workspace ?? null,
     serverType: inputs.serverType ?? 'cx22', serverTypeExplicit: !!inputs.serverType, location: inputs.location ?? 'nbg1',
     plannedAgents: workers + 1,
-    databasePassword, port: inputs.port ?? SERVER_PORT, dataPath,
+    databasePassword, port: inputs.port ?? SERVER_PORT, portExplicit: inputs.port !== undefined, dataPath,
     railwayDir: `${directory}/railway`,
     host: selfContained ? {
       layout: hostLayout(installId, workdir, dataPath ?? `/var/lib/graphyard/${installId}`), local: !!inputs.local, workers, executors: 2,

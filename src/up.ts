@@ -12,6 +12,7 @@ import { masterCredential, planeRequest } from './setup-from-zero.js';
 import { fileOnboardingWork, onboardingChecks } from './onboarding.js';
 import { findOnboardingWork, onboardingBranch, onboardingWait, waitedFor, type OnboardingWait } from './model/onboarding-work.js';
 import { coordinatorCheckoutRefusal, coordinatorCheckoutRoot, dirtyCheckoutPaths, readCoordinatorCheckout } from './master/profiles.js';
+import { redactString } from './evidence-replay.js';
 
 /**
  * `graphyard up` (GY-1419): every machine step of a first installation, in order — preflight,
@@ -87,8 +88,8 @@ export type Handoff = (sentence: string, link: { url?: string | null; code?: str
 
 export interface UpDependencies {
   root: string;
-  /** Runs one graphyard command; stderr lines go to onLine as they arrive. */
-  cli(args: string[], options?: { stdin?: string; env?: Record<string, string>; onLine?: (line: string) => void; signal?: AbortSignal }): Promise<{ code: number; stdout: string }>;
+  /** Runs one graphyard command; stderr lines go to onLine as they arrive, and its tail comes back as stderr (GY-1509). */
+  cli(args: string[], options?: { stdin?: string; env?: Record<string, string>; onLine?: (line: string) => void; signal?: AbortSignal }): Promise<{ code: number; stdout: string; stderr?: string }>;
   /** The control plane's /api/status as the recorded master identity, or null while none answers. */
   status(): Promise<any | null>;
   /** The control plane's address once the install recorded it. */
@@ -266,6 +267,23 @@ export function tailnetShare(server: string, tailnet: Tailnet | null): { command
   return { command: ['tailscale', 'serve', '--bg', `--http=${port}`, `http://127.0.0.1:${port}`], url: `http://${host}${port === '80' ? '' : `:${port}`}` };
 }
 /** A sign-in link (`SERVER/#sign-in=CODE`) moved onto BASE: the code is the server's, whichever address opens it. */
+/** GY-1509: how many of a failed child's last output lines up's `next` carries. */
+export const childTailLines = 20;
+/**
+ * GY-1509: the last lines a failed child printed, its stdout then its stderr (where install writes
+ * its error), each passed through the evidence redaction rule plus the one-time sign-in and claim
+ * codes, so a credential install would mask stays masked here; empty when it printed nothing.
+ */
+export function childTail(result: { stdout: string; stderr?: string }, lines = childTailLines) {
+  const text = [result.stdout, result.stderr ?? ''].map(part => part.trim()).filter(Boolean).join('\n');
+  return text ? text.split('\n').slice(-lines).map(line => redactString(line).replace(/#(sign-in|claim)=[^\s"']+/g, '#$1=[redacted]')).join('\n') : '';
+}
+/** A failed step's message: the command that exited, then its own last output lines. */
+const childFailure = (step: string, args: string[], result: { code: number; stdout: string; stderr?: string }, more = '') => {
+  const tail = childTail(result);
+  return `${step}: graphyard ${args[0]}${args[1] && !args[1].startsWith('-') ? ` ${args[1]}` : ''} exited ${result.code}${more}${tail ? `; its last output:\n${tail}` : ''}`;
+};
+
 export const signInAt = (link: string, base: string) => { const at = link.indexOf('#'); return at < 0 ? link : `${base.replace(/\/+$/, '')}/${link.slice(at)}`; };
 /** Both of the master's agent identities are recorded in master.json and their credential files are readable. */
 async function provisioned(root: string) {
@@ -371,7 +389,7 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
   };
   const run = async (step: UpStep, args: string[], options: { stdin?: string; env?: Record<string, string>; onLine?: (line: string) => void } = {}) => {
     const result = await deps.cli(args, options);
-    if (result.code !== 0) throw new UpStop(`${step}: graphyard ${args[0]}${args[1] && !args[1].startsWith('-') ? ` ${args[1]}` : ''} exited ${result.code}${result.stdout.trim() ? `: ${result.stdout.trim().split('\n').slice(-1)[0].slice(0, 400)}` : ''}`, upExitCodes.failed);
+    if (result.code !== 0) throw new UpStop(childFailure(step, args, result), upExitCodes.failed);
     return result.stdout;
   };
   const passed = request.install ?? {};
@@ -476,7 +494,7 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
         if (result.code === 0) return 'control plane installed with its GitHub Apps';
         const paused = parseJson(result.stdout);
         const drove = gaveUp.length ? `; the browser could not finish the App page (${gaveUp.join('; ')}), its record is under .graphyard/master-actions` : '';
-        if (!paused?.resume || deps.now() >= deadline) throw new UpStop(`control-plane: graphyard install exited ${result.code}${drove}${paused?.resume ? '; the App page is still unconfirmed, rerun graphyard up to resume' : ''}`, paused?.resume ? upExitCodes.waiting : upExitCodes.failed);
+        if (!paused?.resume || deps.now() >= deadline) throw new UpStop(paused?.resume ? `control-plane: graphyard install exited ${result.code}${drove}; the App page is still unconfirmed, rerun graphyard up to resume` : childFailure('control-plane', ['install'], result, drove), paused?.resume ? upExitCodes.waiting : upExitCodes.failed);
         deps.emit({ kind: 'note', text: 'The App page is still waiting for a person; serving it again' });
       }
     });
@@ -996,15 +1014,17 @@ export function upDependencies(root: string, cliPath: string, request: UpRequest
       const child = spawn(process.execPath, [cliPath, ...args], { cwd: root, stdio: ['pipe', 'pipe', 'pipe'], ...(options.signal ? { signal: options.signal } : {}), ...(options.env ? { env: { ...process.env, ...options.env } } : {}) });
       children.add(child);
       child.on('exit', () => children.delete(child));
-      let stdout = '', pending = '';
+      let stdout = '', pending = '', stderr = '';
       child.stdout.on('data', chunk => { stdout += chunk; });
       child.stderr.on('data', chunk => {
         pending += chunk;
+        // Bounded: only the tail is ever shown (childTail).
+        stderr = (stderr + chunk).slice(-64_000);
         const lines = pending.split('\n'); pending = lines.pop() ?? '';
         for (const line of lines) { if (!request.agent) process.stderr.write(`${line}\n`); options.onLine?.(line); }
       });
       child.on('error', reject);
-      child.on('close', code => { if (pending) options.onLine?.(pending); accept({ code: code ?? 1, stdout }); });
+      child.on('close', code => { if (pending) options.onLine?.(pending); accept({ code: code ?? 1, stdout, stderr }); });
       child.stdin.end(options.stdin ?? '');
     }),
     status: async () => {
