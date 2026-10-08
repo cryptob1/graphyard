@@ -3,7 +3,6 @@ import type { CliCommand } from './registry.js';
 import { installCommands } from './install.js';
 import { dbCommands } from './db.js';
 import { masterCommands } from './master.js';
-import { mergerCommands } from './merger.js';
 import { workCommands } from './work.js';
 import { policyCommands } from './policy.js';
 import { validationCommands } from './validation.js';
@@ -25,7 +24,7 @@ import { scopeGuardCommands } from './scope-guard.js';
  * one module, or adds a module here; nothing else in the launcher changes.
  */
 export const commands: readonly CliCommand[] = [
-  ...installCommands, ...dbCommands, ...mergerCommands, ...masterCommands, ...workCommands, ...policyCommands,
+  ...installCommands, ...dbCommands, ...masterCommands, ...workCommands, ...policyCommands,
   ...validationCommands, ...deliveryCommands, ...releaseCommands, ...runnerCommands, ...scenarioCommands,
   ...grantsCommands, ...operatorAgentCommands, ...operatorCommands, ...leaseCommands, ...workspaceCommands,
   ...goalCommands, ...reviewCommands, ...scopeGuardCommands,

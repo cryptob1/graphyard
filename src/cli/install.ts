@@ -16,8 +16,7 @@ import { readSecretFromStdin } from './context.js';
 import { documentationDrift } from '../model/documentation.js';
 import { agentEnvironmentRoot } from '../master/environments.js';
 import { masterCredential, planeAnswers, planeRequest, setupFromZeroChecks, setupLine, setupNext } from '../setup-from-zero.js';
-import { mergerDoctorLine } from './merger.js';
-import { upCommand, upHelpRequested, upUsage } from '../up.js';
+import { mergerDoctorLine } from './merger.js'; import { upCommand, upHelpRequested, upUsage } from '../up.js';
 
 const interactiveGithubSetup = (root: string) => async (repository: string, deployment: string) => {
   const setup = await startGithubSetup(root, repository, deployment);
@@ -276,8 +275,7 @@ export const installCommands = defineCommands([
         build: live?.build ?? null,
         delegationLimits: delegationLimits ? { limits: delegationLimits.limits, deployed: delegationLimits.deployed, drift: delegationLimits.drift, attention: delegationLimits.attention } : null,
         production: production ? { provider: production.provider, serving: production.serving, running: production.running, aheadBy: production.ahead?.by ?? null, incidents: production.incidents, attention: production.attention, error: production.error } : null,
-        documentation,
-        merger: mergerDoctorLine(live?.mergeWriter),
+        documentation, merger: mergerDoctorLine(live?.mergeWriter),
         setupFromZero,
         readiness,
         next,
