@@ -200,9 +200,45 @@ function mergeFiles(merge: string): { path: string; previousPath?: string }[] {
   return files;
 }
 
+const sampleSize = 50;
+const commitPresent = (rev: string) => { try { git(['rev-parse', '--verify', '-q', `${rev}^{commit}`]); return true; } catch { return false; } };
+const newestMerges = () => git(['log', '--first-parent', '--merges', `-${sampleSize}`, '--format=%H']).split('\n').filter(Boolean);
+/** The sample is whole when it holds the newest 50 first-parent merges and the oldest one's first parent, so every diff is real. */
+const sampleWhole = (merges: string[]) => merges.length === sampleSize && commitPresent(`${merges[sampleSize - 1]}^1`);
+
+/**
+ * Deepens a shallow checkout's history from origin by `commits` commits past its shallow boundary.
+ * CI checks a pull request out two commits deep (.github/workflows/ci.yml), which holds only the
+ * synthetic merge onto the base: the sample must never shrink to that. The fetch names the head's
+ * own commit (GitHub serves every reachable commit; the checkout keeps its credentials) and falls
+ * back to the remote refs the checkout tracks for it, never the remote's whole branch list.
+ */
+function deepen(commits: number): void {
+  const head = git(['rev-parse', 'HEAD']);
+  const refs = git(['for-each-ref', '--points-at', head, '--format=%(refname)', 'refs/remotes/']).split('\n').filter(Boolean)
+    .map(ref => ref.replace(/^refs\/remotes\/origin\//, 'refs/heads/').replace(/^refs\/remotes\/pull\//, 'refs/pull/'));
+  const errors: string[] = [];
+  for (const want of [head, ...refs]) {
+    try { git(['fetch', '--quiet', '--no-tags', `--deepen=${commits}`, 'origin', want]); return; }
+    catch (error) { errors.push(`${want}: ${String((error as { stderr?: string }).stderr ?? (error as Error).message).trim()}`); }
+  }
+  throw new Error(`the shallow checkout cannot be deepened from origin: ${errors.join('; ')}`);
+}
+
+/** The newest 50 first-parent merges of this repository, deepening a shallow checkout until it holds them and their parents. */
+function repositorySample(): string[] {
+  let merges = newestMerges();
+  for (let round = 0; !sampleWhole(merges) && round < 10 && git(['rev-parse', '--is-shallow-repository']) === 'true'; round++) {
+    deepen(100);
+    merges = newestMerges();
+  }
+  return merges;
+}
+
 test('unit:risk-class-repository-sample — the newest 50 first-parent merges of this repository: every merge touching src/store/ or src/install/ is sensitive, every docs-only merge is normal, and every sensitive verdict names a file of the merge', () => {
-  const merges = git(['log', '--first-parent', '--merges', '-50', '--format=%H']).split('\n').filter(Boolean);
-  assert.ok(merges.length >= 1 && merges.length <= 50, `the sample is this checkout's first-parent merge history (${merges.length} merges; a shallow checkout holds fewer than 50)`);
+  const merges = repositorySample();
+  assert.equal(merges.length, sampleSize, `the sample is exactly the newest ${sampleSize} first-parent merges (${merges.length} found; a shallow checkout is deepened, never sampled short)`);
+  assert.ok(commitPresent(`${merges[sampleSize - 1]}^1`), `the first parent of the oldest sampled merge ${merges[sampleSize - 1].slice(0, 12)} is present, so its delta is the real one`);
   const sample = merges.map(merge => ({ merge, files: mergeFiles(merge), verdict: classifyRisk(mergeFiles(merge)) }));
   const paths = (entry: typeof sample[number]) => deltaPaths(entry.files);
   for (const entry of sample) {
@@ -212,6 +248,14 @@ test('unit:risk-class-repository-sample — the newest 50 first-parent merges of
     if (!touched.length) assert.deepEqual(entry.verdict.reasons, [unknownChangeReason], `${entry.merge.slice(0, 12)} applied no file`);
     for (const reason of entry.verdict.reasons) if (reason !== unknownChangeReason) assert.ok(touched.some(path => reason.startsWith(`${path}: `)), `${entry.merge.slice(0, 12)}: ${reason} names a file of the merge`);
   }
-  const counts = { sensitive: sample.filter(entry => entry.verdict.risk === 'sensitive').length, normal: sample.filter(entry => entry.verdict.risk === 'normal').length };
-  console.log(`unit:risk-class-repository-sample: ${sample.length} merges, ${counts.sensitive} sensitive, ${counts.normal} normal`);
+  const counts = {
+    sensitive: sample.filter(entry => entry.verdict.risk === 'sensitive').length, normal: sample.filter(entry => entry.verdict.risk === 'normal').length,
+    storeOrInstall: sample.filter(entry => paths(entry).some(path => /^src\/(store|install)\//.test(path))).length,
+    docsOnly: sample.filter(entry => paths(entry).length > 0 && paths(entry).every(path => path.startsWith('docs/'))).length,
+  };
+  // The sensitive implication is exercised by the sample itself, not vacuously: this repository
+  // merges a store or install change every few merges. Docs-only merges are rarer, so their count
+  // is reported rather than required.
+  assert.ok(counts.storeOrInstall >= 1, `the newest ${sampleSize} merges include a merge touching src/store/ or src/install/`);
+  console.log(`unit:risk-class-repository-sample: ${sample.length} merges, ${counts.sensitive} sensitive, ${counts.normal} normal, ${counts.storeOrInstall} touching src/store/ or src/install/, ${counts.docsOnly} docs-only`);
 });
