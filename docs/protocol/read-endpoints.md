@@ -2,7 +2,7 @@
 # Read endpoints
 
 - `GET /healthz` (unauthenticated); `/api/status`: principal, integrations, `appPermissions`, held/failed jobs, `githubBudget`, clock; `/api/github/installation` (coordinator): live App permissions.
-- `GET /api/work-snapshot`: `{work, now}`, `autoDispatch`; settled deliveries `summary: true`; `view=coordination` trims open items, `view=full` exports all; else pages by `cursor` (last number), `pageSize` (≤1000, default 100) → `hasMore`, `nextCursor`.
+- `GET /api/work-snapshot`: `{work, now}`, `autoDispatch`; settled deliveries `summary: true`; `view=coordination` trims open items, `view=full` exports all; else pages by `cursor` (last number), `pageSize` (≤1000, default 100) → `hasMore`, `nextCursor`. `GET /api/pipeline-timelines`: `{timelines: [{id, key, pipeline}]}`, which `master status` attaches to the coordination view for `speed`.
 - `GET /api/work/ID|KEY`: one item (CLI name resolution); `/api/work`: all, whole; other reads, observation claim: open items whole, settled deliveries summarized.
 - `GET /api/interventions?window=7|30|90`: ledger rows (`ledger.since`; catalogue matches `catalogue`, `catalogued`). Not counted: loop's rework for required check failed on head (binding `SHA:ci:CHECKS`), loop-grounded widenings, approver-settled routed asks; hand reworks and master-authored widenings count (partly widened ask once).
 - `GET /api/retro`: artefacts (newest first), registries' `standing` revisions; `/api/retro/standing` (any role): applied entries ([`retroStanding`](../operations-reference.md#retro-synthesis), `retroCatalogued`).

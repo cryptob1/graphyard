@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { demand, type Work } from '../../model.js';
 import type { IntegrationJob } from '../../coordination.js';
 import { parseEventHistoryQuery, readEventHistory } from '../../events-history.js';
-import { catchUpPipelineTimelines, pipelineBackfillState } from '../../pipeline-backfill.js';
+import { catchUpPipelineTimelines, pipelineBackfillState, readPipelineTimelines } from '../../pipeline-backfill.js';
 import { delegationSnapshot } from '../../delegation.js';
 import { describeUnserved, durablePresence, executorRegistry, executorReport, loopPresenceHeader, loopPresenceInterval, loopRegistry, presenceQuery, reportedLoopMerger } from '../../model/executor-presence.js';
 import { installationSettingsUrl, mainGuardStatus } from '../../github.js';
@@ -240,6 +240,15 @@ export const statusRoutes = defineRoutes('status', [
         if (cut) { trimmedView.omitted.evidence += cut.evidence; trimmedView.omitted.dispatchHistory += cut.dispatchHistory; trimmedView.omitted.queueHistory += cut.queueHistory; trimmedView.omitted.actionHistory += cut.actionHistory; trimmedView.omitted.sessions += cut.sessions; }
       }
       return trimmedView;
+    },
+  },
+  {
+    // Every item's timeline alone (GY-1489): `master status` reads the coordination view, which
+    // drops them, and attaches these to measure speed. The same bounded catch-up runs first.
+    method: 'GET', path: '/api/pipeline-timelines',
+    async handle({ services, operatorVisible }) {
+      await catchUpPipelineTimelines(services.engine.store);
+      return { timelines: operatorVisible(await readPipelineTimelines(services.engine.store)) };
     },
   },
   { method: 'GET', path: '/api/work', handle: async ({ services, operatorVisible }) => operatorVisible(await services.engine.store.list()) },
