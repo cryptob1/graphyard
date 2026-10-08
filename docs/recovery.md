@@ -38,3 +38,7 @@ Executor claims (`POST /api/delivery/rollback-claim`; retries return same operat
 ```
 
 `"automaticRollback": true` rolls degraded generations back when fenced automatic executors cover every service, else `automaticRollbackRefusal`.
+
+## Main watch
+
+The loop classifies main's first-parent commits since the last promotion against deliveries, the merge ledger, reverts and direct-merge windows; an unexplained commit is reported once (`master status` `mainWatch`). With `GRAPHYARD_MAIN_WATCH_FREEZE=true` promotion freezes until an admin acknowledges it: `graphyard master main-watch acknowledge SHA --reason TEXT --admin-token-stdin` (admin token on stdin) or `POST /api/main-watch/acknowledge` `{"sha","reason"}` (`Idempotency-Key`); `GET /api/main-watch` lists them.
