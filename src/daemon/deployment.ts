@@ -400,11 +400,17 @@ export const promotionLedgerReadMs = 5 * 60_000;
  * GY-1398: the promotion reads' reuse windows at a loop interval. A window at or under the interval
  * is no window at all — every cycle reads — so at 300s both reads ran each cycle. The ledger is
  * reused for max(5 min, 3 intervals) and the run list for max(60 s, one interval) while nothing is in
- * validation, one interval (`inFlightMs`) while a candidate is (GY-1513); a promotion then waits at
- * most three intervals for a move of main and one for the conclusion of the candidate before it.
+ * validation; a promotion then waits at most three intervals for a move of main.
  */
 export function promotionReadWindows(intervalMs: number) {
-  return { ledgerMs: Math.max(promotionLedgerReadMs, 3 * intervalMs), runsMs: Math.max(promotionRunsReadMs, intervalMs), inFlightMs: intervalMs };
+  return { ledgerMs: Math.max(promotionLedgerReadMs, 3 * intervalMs), runsMs: Math.max(promotionRunsReadMs, intervalMs) };
+}
+/**
+ * GY-1513: while a candidate is in validation the run list is reused for one interval only, so the
+ * conclusion the next dispatch waits for is seen within one interval of it, whatever the interval.
+ */
+export function promotionInFlightReadMs(intervalMs: number) {
+  return intervalMs;
 }
 /**
  * GY-1488: how long the loop's own dispatch that GitHub does not list yet counts as a candidate in
@@ -482,7 +488,7 @@ export async function promotionCycle(previous: PromotionState | null, reads: Pro
   const sinceLast = base.lastDispatchAt ? options.now - Date.parse(base.lastDispatchAt) : Number.POSITIVE_INFINITY;
   const gapReason = (since: number) => `The last promotion was dispatched ${Math.round(since / 60_000)} minute(s) ago; the next is due no sooner than ${options.everyMinutes} minute(s) after it`;
   // GY-1513: in flight, the runs are read once an interval, so the conclusion the next dispatch waits for is seen within one.
-  const runsDue = !base.runsReadAt || options.now - Date.parse(base.runsReadAt) >= (base.inFlight ? windows.inFlightMs : windows.runsMs);
+  const runsDue = !base.runsReadAt || options.now - Date.parse(base.runsReadAt) >= (base.inFlight ? promotionInFlightReadMs(options.intervalMs ?? 0) : windows.runsMs);
   // While a candidate is in flight its runs are still read, so a promotion it made inside the gap is seen (GY-1513).
   if (sinceLast < everyMs && !(base.inFlight && runsDue)) return done(base, gapReason(sinceLast), true);
   let state = base;

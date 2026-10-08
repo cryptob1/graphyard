@@ -793,7 +793,7 @@ test('unit:release-candidate-pr-cap — a backlog of 23 merges is cut into candi
 // concluded. The soak now runs in a workflow of its own, dispatched with the candidate's SHA.
 /** One soak run as the loop keeps it; imported lazily below so this file still loads without GY-1513. */
 type SoakRun = { sha: string; status: string; conclusion: string | null; createdAt: string; url: string | null };
-const soakExports = async () => await import('../src/daemon/deployment.js') as unknown as { soakWorkflow: string; soakRuns: (listed: unknown) => SoakRun[] };
+const soakExports = async () => await import('../src/daemon/deployment.js') as unknown as { soakWorkflow: string; soakRuns: (listed: unknown) => SoakRun[]; promotionInFlightReadMs: (intervalMs: number) => number };
 /** The soak's ledger record (rc-soak/ID) as src/release-candidate.ts keeps it, imported lazily for the same reason. */
 type LedgerSoakRecord = { id: string; sha: string; result: 'passed' | 'failed' | 'cancelled'; at: string; run: string | null; report: string | null };
 const ledgerExports = async () => await import('../src/release-candidate.js') as unknown as { soakTagPrefix: string;
@@ -955,8 +955,8 @@ test('unit:promotion-ignores-running-soak — with main ahead of production, the
   }
   assert.equal(state.inFlight, true);
   // In flight, the runs are read once an interval (GY-1513), not once a minute: the conclusion is what the next dispatch waits for.
-  assert.equal(promotionReadWindows(interval).inFlightMs, interval);
-  assert.equal(promotionReadWindows(interval).runsMs, 60_000, 'nothing in flight, once a minute still');
+  assert.equal((await soakExports()).promotionInFlightReadMs(interval), interval);
+  assert.deepEqual(promotionReadWindows(interval), { ledgerMs: 5 * 60_000, runsMs: 60_000 }, 'nothing in flight, once a minute still, and the windows keep their shape');
   const lastRead = now - interval;
   assert.equal(state.runsReadAt, iso(lastRead), 'the last cycle read the runs');
   // The release run concludes at promote one second after that read; A's soak runs on for another ~17 minutes.
