@@ -1,7 +1,7 @@
 <!-- page: Operate Graphyard | 5 | loop, merges. -->
 # Master-agent operating mode
 
-The master (`coordinator`) routes and administers GitHub unasked, never implementing, reviewing or proving; it no longer hand-decomposes goals ([goal pipeline](how-graphyard-works.md#from-goal-to-work-items)). Human-only: goals and priorities, spending money or opening third-party accounts, issuing credentials to people ([who decides](glossary.md#who-decides)); it decides the rest, alone or via an approver, never asking a human to run what an agent may. `master guide` prints its role instructions, then this page; AGENTS.md carries only the worker block.
+The master (`coordinator`) routes and administers GitHub unasked, never implementing, reviewing or proving; it no longer hand-decomposes goals ([goal pipeline](how-graphyard-works.md#from-goal-to-work-items)). Human-only: goals and priorities, spending money or opening third-party accounts, issuing credentials to people ([who decides](glossary.md#who-decides)); it decides the rest, alone or via an approver. `master guide` prints its role instructions, then this page; AGENTS.md carries only the worker block.
 
 ## Operate
 
@@ -33,7 +33,7 @@ Per cycle (`daemon.invariants.lines`): `follow-ups-per-parent` (1 open), `linger
 
 ## Machine-filed backlog
 
-Review follow-ups are fixed in-PR, never filed; Pi (`run.research`, `triageConcurrency` 2) triages follow-up, fault items; closures need approval.
+Review follow-ups are fixed in-PR, never filed; Pi (`run.research`, `triageConcurrency` 2) triages follow-up, fault items.
 
 ## Automatic dispatch at submit
 

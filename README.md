@@ -36,4 +36,4 @@ flowchart LR
   I -.->|failure: new work item| C
 ```
 
-Text equivalent: goal, planner, work items; a worker builds each; Graphyard checks the merged tree and merges to main; review before the merge for sensitive changes, after it for the rest; every ten or so merges a release candidate runs UAT + E2E and a passing one is promoted and production verified; a failure comes back as a new work item.
+Text equivalent: the numbered steps above.
