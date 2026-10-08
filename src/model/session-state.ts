@@ -174,7 +174,7 @@ export function launchingSession(work: Pick<Work, 'lease'>, handle: Pick<Session
  * recorded end (its pipeline timeline), the cause the loop kept its interrupted work for, and the
  * fresh lease a later attempt runs under — the relaunch a genuine disappearance ends in.
  */
-export function settledPurpose(work: Pick<Work, 'key' | 'lease' | 'submission' | 'autoDispatch' | 'capacity'> & { pipeline?: PipelineTimeline }, handle: Pick<SessionHandle, 'id' | 'kind' | 'epoch'>, clock: number): string | null {
+export function settledPurpose(work: Pick<Work, 'key' | 'lease' | 'submission' | 'autoDispatch' | 'capacity'> & { pipeline?: PipelineTimeline; candidate?: { sha: string } | null; reviewVerdicts?: { sha: string; verdicts: unknown[] } | null }, handle: Pick<SessionHandle, 'id' | 'kind' | 'epoch'> & { head?: string | null }, clock: number): string | null {
   if (handle.kind === 'implementation') {
     const epoch = handleEpoch(handle), lease = work.lease;
     if (!Number.isFinite(epoch) || (lease && lease.epoch === epoch && Date.parse(lease.expiresAt) > clock)) return null;
@@ -190,8 +190,26 @@ export function settledPurpose(work: Pick<Work, 'key' | 'lease' | 'submission' |
     return `attempt ${epoch} of ${work.key} ${end}${fresh}`;
   }
   const request = dispatchRequestOf(work, handle);
-  if (!request || request.state === 'requested') return null;
+  if (!request) return handByHandPurpose(work, handle);
+  if (request.state === 'requested') return null;
   return `its ${request.kind} request was ${request.state}${request.resolvedAt ? ` at ${request.resolvedAt}` : ''}${request.resolution ? ` (${request.resolution.slice(0, 160)})` : ''}`;
+}
+/**
+ * A review session no request names (`master review` by hand, under `review:SHA`) is over when the
+ * head it reviews is no longer the candidate, when a request for that head was answered or
+ * cancelled, or when the head's verdict is recorded; until one of those it is held, never lost.
+ */
+const reviewedHead = (handle: Pick<SessionHandle, 'id'> & { head?: string | null }) => handle.head ?? (handle.id.startsWith('review:') ? handle.id.slice(7) : null);
+function handByHandPurpose(work: Parameters<typeof settledPurpose>[0], handle: Pick<SessionHandle, 'id' | 'kind'> & { head?: string | null }): string | null {
+  if (handle.kind !== 'review') return null;
+  const head = reviewedHead(handle);
+  if (!head) return null;
+  const dispatch = work.autoDispatch;
+  const answered = [dispatch?.review, ...(dispatch?.history ?? [])].find(entry => entry?.kind === 'review' && entry.sha === head && entry.state !== 'requested');
+  if (answered) return `its review request for ${head.slice(0, 12)} was ${answered.state}${answered.resolvedAt ? ` at ${answered.resolvedAt}` : ''}`;
+  if (work.reviewVerdicts?.sha === head && work.reviewVerdicts.verdicts.length) return `a review verdict for ${head.slice(0, 12)} is recorded`;
+  if (work.candidate?.sha !== head) return `the candidate no longer is ${head.slice(0, 12)}${work.candidate ? ` (it is ${work.candidate.sha.slice(0, 12)})` : ''}`;
+  return null;
 }
 /** The dispatch request a review or proof session was launched for: the one its handle's id names. */
 function dispatchRequestOf(work: Pick<Work, 'autoDispatch'>, handle: Pick<SessionHandle, 'id' | 'kind'>) {
@@ -203,11 +221,11 @@ function dispatchRequestOf(work: Pick<Work, 'autoDispatch'>, handle: Pick<Sessio
  * Whether the item's own facts end this handle in time, so absence alone never has to (GY-1532): a
  * worker handle with an epoch ends with its attempt — every lease lapses, and every attempt ends on
  * the record — and a reviewer's or producer's that a dispatch request names ends with that request.
- * A coordination handle, or a review session no request names (`master review` by hand), answers
- * to the runtime alone and is lost when absent.
+ * A review session no request names (`master review` by hand) ends with the head it reviews. A
+ * coordination handle answers to the runtime alone and is lost when absent.
  */
-export const endedByFact = (work: Pick<Work, 'autoDispatch'>, handle: Pick<SessionHandle, 'id' | 'kind' | 'epoch'>) =>
-  handle.kind === 'implementation' ? Number.isFinite(handleEpoch(handle)) : !!dispatchRequestOf(work, handle);
+export const endedByFact = (work: Pick<Work, 'autoDispatch'>, handle: Pick<SessionHandle, 'id' | 'kind' | 'epoch'> & { head?: string | null }) =>
+  handle.kind === 'implementation' ? Number.isFinite(handleEpoch(handle)) : !!dispatchRequestOf(work, handle) || (handle.kind === 'review' && !!reviewedHead(handle));
 export function observeSessions(all: Work[], runtime: RuntimeSession[] | null, now: Date, options: ObserveOptions = {}): SessionReport {
   const entries: SessionReportEntry[] = [], missing: Record<string, string> = {};
   // A runtime that could not be read is a gap in the reports, not a report of absence.

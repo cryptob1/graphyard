@@ -335,10 +335,14 @@ test('unit:session-liveness-model — GY-1532: a session whose attempt or reques
   assert.equal(endedByFact(asked, asked.sessions![0]), true, 'a reviewer handle ends with its request');
   assert.deepEqual(report(item({ ...asked, sessions: [reviewer({ missedReports: 1 })] }), []).map(entry => [entry.missedReports, entry.closed]), [[2, null]], 'and the second miss holds it rather than losing it');
   // A review session no request names (`master review` by hand, under `review:SHA`): nothing but
-  // its head ends it, so absence still does, at the second consecutive report.
-  const byHand = item({ sessions: [reviewer({ id: `review:${request.sha}`, missedReports: 1 })] });
-  assert.equal(endedByFact(byHand, byHand.sessions![0]), false);
-  assert.equal(report(byHand, [])[0].closed, 'lost');
+  // its head or verdict ends it: held while that head stands unanswered, never lost, and ended with
+  // that fact once the candidate moves on.
+  const byHand = item({ candidate: { sha: request.sha }, sessions: [reviewer({ id: `review:${request.sha}`, missedReports: 1 })] } as Partial<Work>);
+  assert.equal(endedByFact(byHand, byHand.sessions![0]), true);
+  assert.equal(report(byHand, [])[0].closed, null);
+  const moved = item({ candidate: { sha: 'c'.repeat(40) }, sessions: [reviewer({ id: `review:${request.sha}`, missedReports: 1 })] } as Partial<Work>);
+  assert.match(report(moved, [])[0].outcome!, /the candidate no longer is aaaaaaaaaaaa \(it is cccccccccccc\), so the session is over$/);
+  assert.equal(report(moved, [])[0].closed, 'ended');
   const answered = item({ autoDispatch: { review: null, producers: [], history: [{ ...request, state: 'satisfied', resolvedAt: ago(20_000), resolution: 'approved by graphyard-reviewer[bot]' }] }, sessions: [reviewer({})] });
   const [verdict] = report(answered, []);
   assert.equal(verdict.closed, 'ended');
