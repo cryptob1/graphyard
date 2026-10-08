@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import EmbeddedPostgres from 'embedded-postgres';
 import { daemonStateSchema, daemonSummary, emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { keepVerdicts, shadowErrorKey, shadowKeptVerdicts, shadowLeftoverKey, shadowReads, shadowIdle, shadowStateSchema, shadowTimeoutKey, shadowTimeoutRetries, shadowVerdictBody, shadowVerdictKey } from '../src/daemon/cycle-shadow.js';
-import { compareVerdicts, githubOutcome, shadowDue, shadowGateAttention, shadowReport, submittedAtOf, type ShadowVerdict } from '../src/merge-writer/shadow.js';
+import { compareVerdicts, githubOutcome, judgedVerdicts, shadowDue, shadowGateAttention, shadowReport, submittedAtOf, type ShadowVerdict } from '../src/merge-writer/shadow.js';
 import { TrialCleanupError, TrialTimeoutError } from '../src/merge-writer/trial.js';
 import { daemonEffects } from '../src/daemon/effects.js';
 import { maxShadowTimeoutMinutes, shadowGateSettings, shadowGateSettingsSchema } from '../src/master/merge-writer-settings.js';
@@ -101,6 +101,29 @@ test('unit:shadow-compare — compareVerdicts gives agree-pass, agree-fail, shad
   const reverted = item({ id: 'r', key: 'GY-5', stage: 'done', candidate: { sha: pass.head }, delivery: { mergedAt: iso(start), mergeSha: sha('r'), authorizationRevision: 1 }, mainGuardReverts: [{ mergeSha: sha('r'), pr: 5, failing: ['test'], revert: null, state: 'merged', at: iso(start), settledAt: iso(start), revertSha: sha('rr'), reason: null }] });
   const red = submitted(6, 1, { observation: { candidate: { sha: sha('head6') }, checks: [{ name: 'test', result: 'failure', appId: 15368 }] } });
   assert.deepEqual([githubOutcome(delivered, pass.head), githubOutcome(reverted, pass.head), githubOutcome(red, sha('head6')), githubOutcome(red, sha('older')), githubOutcome(undefined, pass.head)], ['merged', 'reverted', 'failed', 'pending', 'pending']);
+  // Only a revert of this head's own merge counts. An earlier delivery of the item the main guard reverted, fixed and
+  // redelivered under a new head, leaves its revert on the record; that record says nothing about the new merge.
+  const revertOf = (mergeSha: string, state: 'opened' | 'merged' | 'abandoned', fields: Record<string, unknown> = {}) => ({ mergeSha, pr: 5, failing: ['test'], revert: null, state, at: iso(start), settledAt: state === 'opened' ? null : iso(start), revertSha: null, reason: null, ...fields });
+  const delivery = (mergeSha: string) => ({ mergedAt: iso(start + minute), mergeSha, authorizationRevision: 1 });
+  const redelivered = item({ id: 'rd', key: 'GY-8', stage: 'done', candidate: { sha: pass.head }, delivery: delivery(sha('second-merge')), mainGuardReverts: [revertOf(sha('first-merge'), 'merged', { revertSha: sha('rr') })] });
+  assert.equal(githubOutcome(redelivered, pass.head), 'merged', 'the revert of the earlier merge does not revert the redelivered head');
+  assert.equal(compareVerdicts(pass, githubOutcome(redelivered, pass.head)), 'agree-pass');
+  assert.equal(compareVerdicts(fail, githubOutcome(redelivered, pass.head)), 'shadow-only-fail');
+  // A revert the guard opened or abandoned already judged the merge; a record whose cause is a cancelled CI run judged nothing.
+  const guarded = (revert: Record<string, unknown>) => item({ id: 'g', key: 'GY-9', stage: 'done', candidate: { sha: pass.head }, delivery: delivery(sha('g-merge')), mainGuardReverts: [revert] });
+  assert.deepEqual([githubOutcome(guarded(revertOf(sha('g-merge'), 'opened')), pass.head), githubOutcome(guarded(revertOf(sha('g-merge'), 'abandoned', { cause: 'conflict' })), pass.head), githubOutcome(guarded(revertOf(sha('g-merge'), 'abandoned', { cause: 'cancelled' })), pass.head)], ['reverted', 'reverted', 'merged']);
+  // A reverted item is reopened with its delivery and candidate cleared. The verdict remembers the merge it saw delivered, so the
+  // revert of exactly that merge still reads through the rework and the redelivery, while the new head is judged on its own merge.
+  const first = sha('merge-1'), second = sha('merge-2'), newHead = sha('new-head');
+  const seen = judgedVerdicts([pass], [item({ id: pass.id, key: 'GY-1', stage: 'done', candidate: { sha: pass.head }, delivery: delivery(first) })]);
+  assert.deepEqual([seen[0]!.delivered, seen[0]!.outcome], [{ mergeSha: first }, 'agree-pass'], 'the merge of the head is remembered on the verdict');
+  const reopened = item({ id: pass.id, key: 'GY-1', stage: 'ready', candidate: null, submission: null, mainGuardReverts: [revertOf(first, 'merged', { revertSha: sha('rr') })] });
+  assert.equal(githubOutcome(reopened, pass.head), 'pending', 'a snapshot alone no longer links the head to its merge');
+  assert.equal(judgedVerdicts(seen, [reopened])[0]!.outcome, 'shadow-missed', 'the remembered merge does');
+  const again = item({ id: pass.id, key: 'GY-1', stage: 'done', candidate: { sha: newHead }, delivery: delivery(second), mainGuardReverts: [revertOf(first, 'merged', { revertSha: sha('rr') })] });
+  const later = judgedVerdicts([...seen, verdict('GY-1', { head: newHead, at: iso(start + minute) })], [again]);
+  assert.deepEqual(later.map(entry => [entry.outcome, entry.delivered?.mergeSha]), [['shadow-missed', first], ['agree-pass', second]], 'each head against its own merge');
+  assert.deepEqual(shadowStateSchema.parse(later.map(entry => ({ ...entry }))), later, 'the remembered merge persists in the loop state');
   const many = Array.from({ length: 12 }, (_, index) => verdict(`GY-${100 + index}`, { tests: failedTests, at: iso(start + index * minute), durationMs: (index + 1) * 1000, id: `w${index}` }));
   const work = many.map((entry, index) => item({ id: `w${index}`, key: entry.key, stage: 'done', candidate: { sha: entry.head }, delivery: { mergedAt: iso(start), mergeSha: sha(`x${index}`), authorizationRevision: 1 } }));
   const report = shadowReport([pass, ...many], work);
@@ -236,10 +259,12 @@ test('unit:shadow-status — master status lists the gate report and, for each i
   assert.deepEqual([summary.total, summary.p50Ms, summary.p90Ms, summary.disagreements.map(entry => entry.key).sort()], [3, 1000, 1000, ['GY-2', 'GY-3']]);
   // The step raises each disagreement once, however many cycles follow.
   const git = recordingGit(), now = () => start;
-  let delivered = false;
-  const open = submitted(1, 30);
+  let delivered = false, reverted = false;
+  const open = submitted(1, 30), fields = open as unknown as Record<string, unknown>;
   const reads = shadowReads(config, '/coordinator', git.run, { base: '/w', record: async () => {}, trial: async () => ({ ...trialRun, tests: failedTests }) });
-  const state = emptyDaemonState(config), effects = effectsFor({ work: () => [delivered ? item({ ...(open as unknown as Record<string, unknown>), stage: 'done', delivery: { mergedAt: iso(start), mergeSha: sha('d'), authorizationRevision: 1 } }) : open], now, shadow: reads });
+  const snapshotItem = () => reverted ? item({ ...fields, stage: 'ready', candidate: null, submission: null, mainGuardReverts: [{ mergeSha: sha('d'), pr: 1, failing: ['test'], revert: null, state: 'merged', at: iso(start), settledAt: iso(start), revertSha: sha('rr'), reason: null }] })
+    : delivered ? item({ ...fields, stage: 'done', delivery: { mergedAt: iso(start), mergeSha: sha('d'), authorizationRevision: 1 } }) : open;
+  const state = emptyDaemonState(config), effects = effectsFor({ work: () => [snapshotItem()], now, shadow: reads });
   await runCycle(config, state, effects, now); await shadowIdle(state);
   await runCycle(config, state, effects, now);
   assert.equal(state.shadow[0]?.outcome, 'pending');
@@ -248,9 +273,16 @@ test('unit:shadow-status — master status lists the gate report and, for each i
   for (let cycle = 0; cycle < 3; cycle++) raised.push(...(await runCycle(config, state, effects, now)).actions.filter(action => action.detail.startsWith('Shadow merge gate:')).map(action => action.detail));
   assert.equal(state.shadow[0]?.outcome, 'shadow-only-fail');
   assert.equal(raised.length, 1, 'raised once');
+  assert.equal(state.shadow[0]?.delivered?.mergeSha, sha('d'), 'the step keeps the merge GitHub made of the head');
   const section = daemonSummary(state, now(), config.run.intervalSeconds * 1000, config.hostId).shadowGate;
   assert.equal(section.counts['shadow-only-fail'], 1);
   assert.deepEqual(section.disagreements.map(entry => entry.key), ['GY-1'], 'master status carries the shadowGate section with the report');
+  // The main guard reverts that merge and the item is reopened without its delivery or candidate: the verdict follows, to agree-fail, under no new line.
+  reverted = true;
+  const afterRevert = await runCycle(config, state, effects, now);
+  assert.equal(state.shadow[0]?.outcome, 'agree-fail', 'the revert of the remembered merge is read after the reopen');
+  assert.equal(afterRevert.actions.filter(action => action.detail.startsWith('Shadow merge gate:')).length, 0);
+  assert.equal(daemonSummary(state, now(), config.run.intervalSeconds * 1000, config.hostId).shadowGate.counts['agree-fail'], 1);
   // master status: one attention line per disagreeing item, from the item's newest verdict, however many verdicts it has.
   const lines = shadowGateAttention([...entries, verdict('GY-2', { outcome: 'agree-pass', at: iso(start + minute) }), verdict('GY-3', { outcome: 'shadow-missed', at: iso(start - minute) })]);
   assert.deepEqual(lines.map(line => [line.subject, line.role, line.human, line.text.startsWith('Shadow merge gate: GY-3')]), [['shadow-gate', 'master', false, true]], 'GY-2 is agreed at its newest verdict; GY-3 keeps its one line');

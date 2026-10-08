@@ -17,6 +17,7 @@ export const shadowVerdictSchema = z.object({
   risk: z.enum(['sensitive', 'normal']), build: z.enum(['pass', 'fail']),
   tests: z.object({ passed: z.number().int().min(0), failed: z.array(z.string().max(300)).max(100), files: z.number().int().min(0) }).strict(),
   conflict: z.array(z.string().max(500)).max(100), durationMs: z.number().int().min(0), at: z.string().max(64), outcome: z.enum(shadowOutcomes).default('pending'),
+  delivered: z.object({ mergeSha: z.string().max(64) }).strict().optional(),
 }).strict();
 export const shadowStateSchema = z.array(shadowVerdictSchema).max(shadowKeptVerdicts);
 
@@ -150,12 +151,15 @@ export async function shadowStep(cycle: Cycle) {
       performed.push(storeAction(state, `shadow-record:${owed.verdict.head}:${owed.verdict.baseTip}`, { kind: 'merge', work: owed.verdict.key, principal: null, state: 'failed', detail: `The shadow verdict for ${owed.verdict.key} is not yet recorded by the coordinator and is retried next cycle: ${error instanceof Error ? error.message : String(error)}`.slice(0, 1900), attempts: 1, epoch: null, cycle: state.cycle, at: new Date(now()).toISOString() }, null));
     }
   }
-  // Outcomes follow GitHub's gate as the snapshot shows it; a disagreement is raised once per item.
+  // Outcomes follow GitHub's gate as the snapshot shows it, and a verdict keeps the merge GitHub
+  // made of its head (the revert of a reopened item is matched by it); a disagreement is raised once per item.
   const judged = judgedVerdicts(state.shadow, snapshot.work);
   for (const [index, verdict] of judged.entries()) {
-    if (verdict.outcome === state.shadow[index]!.outcome) continue;
-    state.shadow[index] = { ...state.shadow[index]!, outcome: verdict.outcome };
+    const current = state.shadow[index]!;
+    if (verdict.outcome === current.outcome && verdict.delivered?.mergeSha === current.delivered?.mergeSha) continue;
+    state.shadow[index] = verdict;
     changed = true;
+    if (verdict.outcome === current.outcome) continue;
     const key = shadowAttentionKey(verdict.key);
     if (shadowDisagreement(verdict.outcome) && !state.actions[key]) performed.push(storeAction(state, key, { kind: 'escalation', work: verdict.key, principal: null, state: 'done', detail: shadowDisagreementDetail(verdict), attempts: 1, epoch: null, cycle: state.cycle, at: new Date(now()).toISOString() }, null));
   }

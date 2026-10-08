@@ -10,6 +10,8 @@ export interface ShadowVerdict {
   key: string; id: string; head: string; baseTip: string; mergeSha: string | null; risk: 'sensitive' | 'normal';
   build: 'pass' | 'fail'; tests: { passed: number; failed: string[]; files: number }; conflict: string[];
   durationMs: number; at: string; outcome: ShadowOutcome;
+  /** The merge commit GitHub made of this head, remembered once seen: a reverted item is reopened with its delivery and candidate cleared, and the revert is matched by this commit. */
+  delivered?: { mergeSha: string };
 }
 /** What GitHub's gate did with the head: nothing yet, merged and kept, merged then reverted by the main guard, or failed its required checks. */
 export type GithubOutcome = 'pending' | 'merged' | 'reverted' | 'failed';
@@ -43,11 +45,23 @@ export function shadowDue(work: readonly Work[], verdicts: readonly Pick<ShadowV
   return owed.sort((a, b) => submittedAtOf(a) - submittedAtOf(b) || a.key.localeCompare(b.key))[0] ?? null;
 }
 
-/** GitHub's side of the comparison for a verdict's head, from the item as the snapshot holds it. Only a delivery of this very head counts: an earlier, reworked head that a later one superseded was never merged. */
-export function githubOutcome(item: Pick<Work, 'stage' | 'candidate' | 'baseRefresh' | 'delivery' | 'mainGuardReverts' | 'observation' | 'policy'> | undefined, head: string): GithubOutcome {
+/** The merge commit GitHub made of this very head, as the snapshot holds it: a done item's delivery while its candidate is still this head. An earlier, reworked head that a later one superseded was never merged. */
+export const deliveredMerge = (item: Pick<Work, 'stage' | 'candidate' | 'baseRefresh' | 'delivery'>, head: string): string | null =>
+  item.stage === 'done' && item.delivery && ownHeads(item).includes(head.toLowerCase()) ? item.delivery.mergeSha.toLowerCase() : null;
+
+/**
+ * GitHub's side of the comparison for a verdict's head. The head's own merge decides, from the
+ * snapshot or as the verdict remembers it (`delivered`): a main-guard revert of exactly that merge
+ * commit makes it `reverted`, since a revert the guard opened, merged or abandoned is its judgement
+ * that the merge broke main (a record whose cause is a cancelled CI run judged nothing); without
+ * one the merge was kept, `merged`. A revert of an earlier delivery of the same item, fixed and
+ * redelivered under a new head, says nothing about this head. With no merge of this head, the
+ * current candidate's failed required check is `failed`; everything else is still `pending`.
+ */
+export function githubOutcome(item: Pick<Work, 'stage' | 'candidate' | 'baseRefresh' | 'delivery' | 'mainGuardReverts' | 'observation' | 'policy'> | undefined, head: string, delivered?: { mergeSha: string } | null): GithubOutcome {
   if (!item) return 'pending';
-  const own = ownHeads(item).includes(head.toLowerCase());
-  if (item.stage === 'done' && item.delivery) return !own ? 'pending' : item.mainGuardReverts?.length ? 'reverted' : 'merged';
+  const mergeSha = delivered?.mergeSha.toLowerCase() ?? deliveredMerge(item, head);
+  if (mergeSha) return item.mainGuardReverts?.some(revert => revert.mergeSha.toLowerCase() === mergeSha && revert.cause !== 'cancelled') ? 'reverted' : 'merged';
   if (item.candidate?.sha.toLowerCase() !== head.toLowerCase()) return 'pending';
   const observed = item.observation;
   if (observed?.candidate.sha.toLowerCase() !== head.toLowerCase()) return 'pending';
@@ -71,9 +85,14 @@ export interface ShadowReport {
   total: number; counts: Record<ShadowOutcome, number>; p50Ms: number | null; p90Ms: number | null;
   disagreements: { outcome: ShadowOutcome; key: string; head: string; mergeSha: string | null }[];
 }
-/** Outcomes re-judged against the items still in `work`; a verdict whose item is not there keeps its recorded outcome. */
+/** Outcomes re-judged against the items still in `work`, each verdict remembering the merge GitHub made of its head once seen; a verdict whose item is not there keeps its recorded outcome. */
 export const judgedVerdicts = (verdicts: readonly ShadowVerdict[], work: readonly Work[]): ShadowVerdict[] =>
-  verdicts.map(verdict => { const item = work.find(candidate => candidate.id === verdict.id || candidate.key === verdict.key); return item ? { ...verdict, outcome: compareVerdicts(verdict, githubOutcome(item, verdict.head)) } : verdict; });
+  verdicts.map(verdict => {
+    const item = work.find(candidate => candidate.id === verdict.id || candidate.key === verdict.key);
+    if (!item) return verdict;
+    const mergeSha = verdict.delivered?.mergeSha ?? deliveredMerge(item, verdict.head), delivered = mergeSha ? { mergeSha } : null;
+    return { ...verdict, ...(delivered ? { delivered } : {}), outcome: compareVerdicts(verdict, githubOutcome(item, verdict.head, delivered)) };
+  });
 
 /** Counts per outcome, p50 and p90 trial duration, and the newest ten disagreements with item key, head and merge sha. */
 export function shadowReport(verdicts: readonly ShadowVerdict[], work: readonly Work[]): ShadowReport {
