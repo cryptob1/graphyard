@@ -620,6 +620,7 @@
     "tests/sudo-code-entry.test.ts": 1000,
     "tests/sudo-form-capture.test.ts": 1000,
     "tests/sudo-fallback.test.ts": 1500,
+    "tests/supervised-local.test.ts": 1000,
     "tests/supervisor-renewal.test.ts": 80263,
     "tests/sync-no-tags.test.ts": 700,
     "tests/sync-restore.test.ts": 2355,

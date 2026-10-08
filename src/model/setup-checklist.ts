@@ -70,7 +70,11 @@ function roleReady(fleet: any, role: RequiredSetupRole) {
  * The checklist for STATUS (the control plane's `/api/status` answer, or null while it does not
  * answer). Items stay in the order a new installation completes them.
  */
-export function setupChecklist(status: any | null, options: { appSetupUrl?: string } = {}): SetupItem[] {
+/**
+ * SUPERVISED (GY-1501, `up --local`): the operator reviews and merges on GitHub, so the reviewer App
+ * and the reviewing agent account are not part of this installation and are never reported missing.
+ */
+export function setupChecklist(status: any | null, options: { appSetupUrl?: string; supervised?: boolean } = {}): SetupItem[] {
   const appUrl = options.appSetupUrl ?? defaultAppSetupUrl;
   const repository = status?.githubRepository?.fullName ?? status?.githubRepository ?? status?.repository ?? null;
   const missing: unknown[] = status?.appPermissions?.missing ?? [];
@@ -84,10 +88,11 @@ export function setupChecklist(status: any | null, options: { appSetupUrl?: stri
     action: appDone ? null : appBound && status?.appPermissions?.installationUrl ? { kind: 'link', label: 'Accept the new permissions', href: status.appPermissions.installationUrl }
       : { kind: 'link', label: 'Create the GitHub App', href: appUrl } });
   const reviewerDone = Array.isArray(status?.reviewerApps) && status.reviewerApps.length > 0;
-  items.push({ id: 'reviewer-app', title: 'Reviewer App', done: reviewerDone, human: true,
+  if (!options.supervised) items.push({ id: 'reviewer-app', title: 'Reviewer App', done: reviewerDone, human: true,
     line: reviewerDone ? 'A second App signs the independent code reviews.' : 'Create a second App so every change is reviewed by someone other than its author.',
     action: reviewerDone ? null : appBound ? { kind: 'link', label: 'Create the reviewer App', href: appUrl } : { kind: 'wait', label: 'Waiting for the GitHub App' } });
   for (const role of requiredSetupRoles) {
+    if (options.supervised && role === 'reviewer') continue;
     const done = roleReady(status?.fleet, role);
     items.push({ id: `account:${role}`, title: roleTitle[role], done, human: true,
       line: done ? 'Connected and signed in.' : role === 'worker' ? 'Connect an AI coding account (an API key or a subscription sign-in) to write the code.' : 'Connect an AI coding account to review the code. It may be the same account.',

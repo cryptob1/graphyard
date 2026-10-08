@@ -76,7 +76,7 @@ export async function setupAutonomy(root: string, input: { adminToken?: string; 
     await assertOutsideWorktrees(root, identity.credentialFile, `${identity.id} credential file`);
     changes.push(`${identity.id}: ${current ? 'credential rotated' : 'provisioned'}`);
   }
-  const next = { ...config, operatorAgent: { id: plan.operatorAgent.id, credentialFile: plan.operatorAgent.credentialFile }, approver: { id: plan.approver.id, credentialFile: plan.approver.credentialFile } };
+  const next = { ...config, supervision: 'autonomous' as const, operatorAgent: { id: plan.operatorAgent.id, credentialFile: plan.operatorAgent.credentialFile }, approver: { id: plan.approver.id, credentialFile: plan.approver.credentialFile } };
   await atomicPrivateWrite(resolve(await localDirectory(root), 'master.json'), masterConfigSchema.parse(next));
   const harness = await writeHarnessPermissions(root, masterHarness(root, next, input.harness ?? 'claude'), true);
   return { applied: true, identities: describe, changes, humanOnly: humanOnlyDecisions, harness,

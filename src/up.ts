@@ -13,6 +13,7 @@ import { fileOnboardingWork, onboardingChecks } from './onboarding.js';
 import { findOnboardingWork, onboardingBranch, onboardingWait, waitedFor, type OnboardingWait } from './model/onboarding-work.js';
 import { coordinatorCheckoutRefusal, coordinatorCheckoutRoot, dirtyCheckoutPaths, readCoordinatorCheckout } from './master/profiles.js';
 import { redactString } from './evidence-replay.js';
+import { recordSupervision } from './master/config.js';
 
 /**
  * `graphyard up` (GY-1419): every machine step of a first installation, in order — preflight,
@@ -33,8 +34,14 @@ import { redactString } from './evidence-replay.js';
  * a GitHub Mobile or passkey approval, a subscription login's browser approval — is handed off, as
  * one sentence plus a link or code; the run resumes on its own once it completes. Agent mode with
  * no browser profile stops before anything runs: App creation is never handed to a person.
+ *
+ * `up --local` sets up supervised mode (GY-1501): no reviewer App, no master-autonomy identities, and
+ * master.json records `supervision: supervised` with the operator's GitHub login, so the operator
+ * reviews and merges each pull request on GitHub and nothing claims autonomy.
  */
 
+/** `up --local` installs supervised (GY-1501): the operator reviews and merges on GitHub. */
+export const upSupervised = (request: Pick<UpRequest, 'provider'>) => request.provider === 'local';
 export const upSteps = ['preflight', 'control-plane', 'host-supervisor', 'master-autonomy', 'onboarding', 'accounts', 'harness', 'master-loop', 'goal'] as const;
 export type UpStep = typeof upSteps[number];
 
@@ -138,6 +145,11 @@ export interface UpDependencies {
   cliCheckout?(): Promise<{ root: string; dirty: string[] }>;
   /** GY-1480: why the master loop refuses to run, as the loop itself words it, or null while nothing stops it. */
   loopRefusal?(): Promise<string | null>;
+  /**
+   * GY-1501: record supervised mode in master.json with the operator's GitHub login, read from gh's
+   * own session as a name only: the gh credential is used for setup and never written anywhere.
+   */
+  supervise?(): Promise<{ operatorLogin: string | null }>;
   /** Agent mode: drive the App manifest page at URL in the master's browser profile, recorded as a master browser flow. */
   driveApp?(url: string, handoff: Handoff): Promise<DriveOutcome>;
   /** GY-1477: this host's Tailscale node (its MagicDNS name and tailnet address), or null without a running Tailscale. */
@@ -298,7 +310,8 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
   const pollMs = deps.pollMs ?? 5_000;
   const humanWaitMs = deps.humanWaitMs ?? upWaitMs(request);
   const machineWaitMs = deps.machineWaitMs ?? 600_000;
-  let setupUrl: string | null = null, prompts = 0, last: SetupItem[] = setupChecklist(null), claim: string | null = null, operator: string | null = null, onboarding: OnboardingWait | null = null, signIn: string | null = null;
+  const supervised = upSupervised(request);
+  let setupUrl: string | null = null, prompts = 0, last: SetupItem[] = setupChecklist(null, { supervised }), claim: string | null = null, operator: string | null = null, onboarding: OnboardingWait | null = null, signIn: string | null = null;
   const handoffs: UpResult['handoffs'] = [];
   const handedOff = new Set<string>();
   const handoff = (step: UpStep): Handoff => (sentence, link) => {
@@ -308,7 +321,7 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
     const entry = { step, sentence, url: link.url ?? null, code: link.code ?? null };
     handoffs.push(entry); deps.emit({ kind: 'handoff', ...entry });
   };
-  const checklist = async () => (last = setupChecklist(await deps.status().catch(() => null)));
+  const checklist = async () => (last = setupChecklist(await deps.status().catch(() => null), { supervised }));
   let reached = false;
   /**
    * GY-1477: the dashboard's address from the operator's other devices, worked out once a server is
@@ -393,7 +406,8 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
     return result.stdout;
   };
   const passed = request.install ?? {};
-  const installArgs = (mode: '--plan' | '--apply') => ['install', '--provider', request.provider, '--repo', request.repository, '--reviewer', request.reviewer, mode, ...(state.noHerdr ? ['--no-herdr'] : []),
+  // Supervised installs register no reviewer App (GY-1501): the operator is the reviewer.
+  const installArgs = (mode: '--plan' | '--apply') => ['install', '--provider', request.provider, '--repo', request.repository, ...(supervised ? [] : ['--reviewer', request.reviewer]), mode, ...(state.noHerdr ? ['--no-herdr'] : []),
     ...([['--confirm-price', passed.confirmPrice], ['--max-monthly', passed.maxMonthly], ['--ssh-key', passed.sshKey], ['--ssh-host', passed.sshHost], ['--ssh-user', passed.sshUser]] as const).flatMap(([flag, value]) => value ? [flag, value] : []),
     ...(request.reuseApps ?? []).flatMap(slug => ['--reuse-app', slug])];
   const rerun = () => `graphyard up --repo ${request.repository} --provider ${request.provider}${request.agent ? ' --agent' : ''}`;
@@ -506,11 +520,17 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
       if (!token) throw new UpStop('host-supervisor: no master credential is recorded for the installed control plane', upExitCodes.failed);
       await run('host-supervisor', ['master', 'init', '--token-stdin', ...(request.browserProfile ? ['--browser-profile', request.browserProfile] : [])], { stdin: token });
     });
+    // Recorded on every run (idempotent), so a resumed run that skipped master init still installs supervised.
+    if (supervised && deps.supervise) {
+      const { operatorLogin } = await deps.supervise();
+      deps.emit({ kind: 'note', text: `Supervised mode: you review and merge each pull request on GitHub${operatorLogin ? ` (as ${operatorLogin}; a pull request your own login opens needs another person's approval)` : ''}; no agent reviewer or approver runs.` });
+    }
 
     // GY-1479: the master's operator-agent and approver identities (`master autonomy --apply`), provisioned
     // with the admin credential the install saved, so the new master creates, releases and unblocks work
     // with no further command. That credential is never something an agent session may read.
-    await step('master-autonomy', async () => {
+    if (supervised) deps.emit({ kind: 'step', step: 'master-autonomy', state: 'skipped', detail: 'supervised: the operator reviews and merges, so no operator-agent or approver identity is provisioned' });
+    else await step('master-autonomy', async () => {
       // A host install provisions them on the host, where its loop runs and the admin credential stays.
       if (state.identitiesHost) return `the master's agent identities were provisioned on ${state.identitiesHost}, where its loop runs`;
       const admin = await deps.operatorToken?.(state.operatorTokenFile ?? null).catch(() => null) ?? null;
@@ -545,7 +565,7 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
     });
 
     await step('accounts', async () => {
-      const accounts: SetupItemId[] = ['account:worker', 'account:reviewer'];
+      const accounts: SetupItemId[] = supervised ? ['account:worker'] : ['account:worker', 'account:reviewer'];
       // In either mode (GY-1477), login homes and keys already on this host become the fleet; nothing is signed in here.
       await run('accounts', ['master', 'registry', 'propose', '--apply']);
       // The registry's first fold may lag the apply by a poll; only a role still empty after it is asked for:
@@ -576,7 +596,7 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
       const deadline = deps.now() + humanWaitMs;
       let shown = '';
       for (let polls = 0; !(await deps.onboardingMerged(pullRequest)); polls++) {
-        if (polls === 0) deps.emit({ kind: 'note', text: `Waiting for the onboarding pull request ${pullRequest} to merge: it adds Graphyard's delivery workflows to the base branch.${state.onboardingWork ? ` The loop reviews and merges it as ${state.onboardingWork}.` : ''}` });
+        if (polls === 0) deps.emit({ kind: 'note', text: `Waiting for the onboarding pull request ${pullRequest} to merge: it adds Graphyard's delivery workflows to the base branch.${supervised ? ' Your own gh login opened it, so your approval does not count: merge it on GitHub as a repository admin, or have someone else approve it.' : state.onboardingWork ? ` The loop reviews and merges it as ${state.onboardingWork}.` : ''}` });
         // The current setup step (GY-1478 AC-2): the item's URL, what it waits for, how long; shown again whenever what it waits for changes.
         const work = state.onboardingWork ? findOnboardingWork(await deps.work?.().catch(() => null), state.onboardingWork) : null;
         if (work) {
@@ -1030,6 +1050,13 @@ export function upDependencies(root: string, cliPath: string, request: UpRequest
     status: async () => {
       const url = await serverUrl(), token = await masterToken();
       return url && token ? planeRequest(url, token)('status') : null;
+    },
+    supervise: async () => {
+      // Only the login's name is read; gh's token stays in gh, used for setup alone (GY-1501).
+      let login: string | null = null;
+      try { login = execFileSync('gh', ['api', 'user', '--jq', '.login'], { encoding: 'utf8', timeout: 30_000, stdio: ['ignore', 'pipe', 'ignore'] }).trim() || null; } catch { /* recorded without it */ }
+      const recorded = await recordSupervision(root, 'supervised', login);
+      return { operatorLogin: recorded.operatorLogin };
     },
     // Each App page gets its own recorded drive, so each has its own record directory.
     ...(browser ? { driveApp: (url: string, handoff: Handoff) => recordedAppDriver(root, request, browser, undefined, { emit }).drive(url, handoff) } : {}),

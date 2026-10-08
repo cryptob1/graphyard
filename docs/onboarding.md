@@ -88,6 +88,10 @@ Installs share hosts: units named per repository (`graphyard-executor-OWNER-NAME
 
 Every `run.doctor.intervalMinutes` (10) a Pi **doctor** fixes stuck, overdue work via `master scope`, `requirements`, `unblock`, `decide`+`approver`, `settle-containment`, `close`, `create`, `release` (never merging, dispatching or evidencing); posts findings, summary (`master status` `doctor`); escalates the rest or files fault items, deduplicated against open ones at settle (proof IDs normalised; create refusals escalate, control-plane ones retry). Reportless (models died, loop stopped) or restart-lost runs record failed, no `loop` fault; the next re-covers. Loop settles submitted lapsed fences, clears covered blockers, relaunches unanswered approvers. Off: `run.doctor.enabled=false`.
 
+### Supervised mode (up --local)
+
+`graphyard up --local` writes `"supervision": "supervised"` and your login (`operatorLogin`) to `master.json`; absent is autonomous. It registers no reviewer App and skips `master autonomy`; the Setup checklist omits the reviewer App and reviewing account. Items keep `review: true`: your GitHub approval of the exact head passes the review gate and auto-merge lands it. The loop launches no reviewer, approver or escalation session; the master requests no two-party decision. `gh` serves setup only, never a role credential; `master status` prints one `supervision` line and flags pull requests your login authored (your approval would not be independent). Promote: `master reviewer setup`, then `master autonomy --admin-token-stdin --apply` (writes `autonomous`).
+
 ## 4. Prove the first PR
 
 `graphyard doctor --profile through-merge` names gaps; `master run` dispatches small item, merged once protection requires `Graphyard / merge`; `"systemDriven": false` allows [hand actions](master-agent.md#system-driven-items).
