@@ -476,6 +476,7 @@
     "tests/merge-refusal-lift.test.ts": 2339,
     "tests/merge-stall-attention.test.ts": 1067,
     "tests/merge-version-skew.test.ts": 735,
+    "tests/merger-setting.test.ts": 3000,
     "tests/mergeability-unknown.test.ts": 609,
     "tests/migration-under-load.test.ts": 5169,
     "tests/module-budgets.test.ts": 723,
