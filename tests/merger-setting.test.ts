@@ -90,7 +90,10 @@ test('integration:merger-setting-status-field — /api/status carries mergeWrite
 /** One item from creation to an observed open pull request; the parts of the result that must not depend on the setting. */
 async function scenario(n: number) {
   let w = await engine.execute(operator, 'create', null, { title: `Merger scenario ${n}`, plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:claim-safety'] }] }, randomUUID());
-  w = await engine.execute(operator, 'ready', w.id, {}, randomUUID()); w = await engine.execute(worker, 'claim', w.id, {}, randomUUID());
+  w = await engine.execute(operator, 'ready', w.id, {}, randomUUID());
+  // Dispatch: the ready item is offered as an implementation dispatch and the worker pulls exactly that assignment.
+  const pulled = await engine.pullAssignment(worker, { work: w.id }, randomUUID());
+  assert.equal(pulled.assigned?.id, w.id, JSON.stringify(pulled.refused)); w = pulled.assigned!;
   w = await engine.execute(worker, 'workspace', w.id, { epoch: 1, host: 'test', path: `/tmp/merger-${n}`, branch: `graphyard/merger-${n}` }, randomUUID());
   w = await engine.execute(worker, 'submit', w.id, { epoch: 1, pr: 900 + n }, randomUUID());
   const observation: Observation = { clockOffset: { min: 0, max: 0 }, candidate: { sha: sha('merger-scenario'), baseSha: 'b'.repeat(40), pr: 900 + n, branch: w.workspaces[0].branch, author: 'implementer' },
@@ -100,10 +103,10 @@ async function scenario(n: number) {
   const dispatched = (item: typeof observed) => [item.autoDispatch?.review, ...(item.autoDispatch?.producers ?? [])].filter(Boolean).map((request: any) => ({ kind: request.kind, state: request.state, sha: request.sha, proofs: request.proofs ?? null }));
   const view = (item: typeof observed) => JSON.parse(JSON.stringify({ stage: item.stage, ready: item.ready, violations: item.violations, gates: item.gates.map(gate => ({ name: gate.name, passed: gate.passed, reasons: gate.reasons })), nextAction: item.nextAction ?? null, dispatch: dispatched(item) })
     .replace(/"requestId":"[0-9a-f]{32}"/g, '"requestId":"R"').split(item.key).join('GY-N').split(item.id).join('ID').split(`"pr":${900 + n}`).join('"pr":0'));
-  return { submitted: view(w), observed: view(observed) };
+  return { dispatched: { offered: pulled.offered, refused: pulled.refused, lease: !!pulled.assigned?.lease, epoch: pulled.assigned?.lease?.epoch }, submitted: view(w), observed: view(observed) };
 }
 
-test('integration:merger-setting-no-behaviour-change — the same submit, observe and evaluate scenario gives identical results with the setting recorded github and control-plane', async () => {
+test('integration:merger-setting-no-behaviour-change — the same submit, observe, evaluate and dispatch scenario gives identical results with the setting recorded github and control-plane', async () => {
   assert.equal((await recordedMergerMode(store.pool)).merger, 'github');
   const github = await scenario(1);
   assert.equal((await request(token(operator), 'merger', { merger: 'control-plane', reason: 'Compare behaviour' })).status, 200);

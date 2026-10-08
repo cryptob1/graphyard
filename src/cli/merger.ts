@@ -1,6 +1,7 @@
 import { parseArgs } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import { mergerModes } from '../merger-mode.js';
+import { defineCommands } from './registry.js';
 import { openMasterSession, unhandled, type MasterSession } from './master/session.js';
 
 /** The one line `graphyard doctor` prints for the merger setting (src/merger-mode.ts), from /api/status `mergeWriter`. */
@@ -19,3 +20,14 @@ export async function mergerCommand(session: MasterSession, env: NodeJS.ProcessE
   // Changing the setting needs an admin credential: the operator's GRAPHYARD_TOKEN, since the master's own is coordinator.
   return print(await masterMutation('merger', { merger: mode, reason: values.reason.trim() }, env.GRAPHYARD_REQUEST_ID ?? randomUUID(), env.GRAPHYARD_TOKEN?.trim() || masterToken));
 }
+
+/** `graphyard merger ...` is the same command without the `master` word; `graphyard master merger ...` (master.ts) is the documented form. */
+export const mergerCommands = defineCommands([{
+  name: 'merger',
+  help: ['  merger [github|control-plane --reason TEXT]  Same as master merger'],
+  readsConnection: () => false,
+  async run(context) {
+    const session = await openMasterSession(context, context.repositoryRoot());
+    if (await mergerCommand({ ...session, id: 'merger', args: [context.id, ...context.args].filter(Boolean) } as MasterSession) === unhandled) throw new Error('Use merger [github|control-plane --reason TEXT]');
+  },
+}]);
