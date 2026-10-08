@@ -67,17 +67,13 @@ The repository needs a GitHub `origin` and an Actions `pull_request` test workfl
 
 GitHub merger only (`control-plane`: `PASS github-app: not required (merger: control-plane)`). `--apply` serves `http://127.0.0.1:4311` and prints it; it opens no browser ([900 s, then `resume`](install.md#step-3-app-confirmation)). **HUMAN:** create the App, install it on OWNER/REPO only. **Verify:** `github-app` passes; on `missing permissions`, `gy github-setup --update-permissions --wait 600` ([permissions](github.md#app-permissions)).
 
-## 5. Reviewer and revert-approver Apps
-
-GitHub merger only. `--reviewer claude` registers the reviewer App and revert approver. **Verify:** `reviewer-app` and `revert-approver` pass.
+## 5
 
 ## 6. Onboard the checkout
 
 `gy init --scan`, then `gy init --scan --apply --url http://127.0.0.1:4310`; merge `AGENTS.md .gitignore graphyard.json .github/workflows` to the base (never `.graphyard/`). Control-plane: worker block says `complete GY-N EPOCH --head SHA`. **Verify:** readiness `setup-proposal` is `ready` ([onboarding](onboarding.md#documentation-policy)).
 
-## 7. Branch protection
-
-GitHub merger only. `--apply` protects the base branch; rerun it once a pull request shows `Graphyard / merge`. **Verify:** `branch-protection` passes.
+## 7. Protection
 
 ## 8. Agent environments
 
