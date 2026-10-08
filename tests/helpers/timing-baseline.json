@@ -601,6 +601,7 @@
     "tests/snapshot-bounded-reads.test.ts": 5143,
     "tests/soak-acceptance.test.ts": 14000,
     "tests/soak-budgets.test.ts": 57277,
+    "tests/soak-checkout-restart.test.ts": 20000,
     "tests/soak-day.test.ts": 112848,
     "tests/soak-decisions.test.ts": 227396,
     "tests/soak-dispatch.test.ts": 23662,
