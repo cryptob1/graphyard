@@ -29,7 +29,7 @@ export const hostPassthrough = ['PATH', 'HOME', 'USER', 'SHELL', 'LANG', 'LC_ALL
 export function stepEnvironment(url: string, secrets: Record<string, string>, host: NodeJS.ProcessEnv = process.env): Record<string, string> {
   const env: Record<string, string> = {};
   for (const name of hostPassthrough) if (host[name] !== undefined) env[name] = host[name]!;
-  return { ...env, TARGET_URL: url, ...secrets };
+  return { ...env, ...secrets, TARGET_URL: url };
 }
 
 export interface ProcessResult { code: number | null; output: string; timedOut: boolean }

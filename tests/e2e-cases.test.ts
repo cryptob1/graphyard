@@ -431,6 +431,7 @@ test('unit:e2e-command-and-agent-steps — a case accepts command and agent step
   assert.match(refusal(file, { ...agentCase('general'), steps: [{ kind: 'agent', goal: 'win', success: [], path: '/' }] })!, /general\.json: steps\.0\.success: /);
   assert.match(refusal(file, { ...agentCase('general'), steps: [{ kind: 'agent', goal: 'win', success: ['won'], path: 'games' }] })!, /general\.json: steps\.0\.path: a path starts with \//);
   assert.match(refusal(file, { ...agentCase('general'), secrets: ['not a name'] })!, /general\.json: secrets\.0: a variable name/);
+  assert.match(refusal(file, { ...agentCase('general'), secrets: ['TARGET_URL'] })!, /general\.json: secrets: TARGET_URL is the case target/);
   assert.match(refusal(file, { ...agentCase('general'), secrets: ['A', 'A'] })!, /general\.json: secrets: a secret is declared once/);
   // The old kinds and checks are as they were.
   assert.equal(refusal(file, http200('general')), null);
@@ -539,6 +540,7 @@ test('unit:e2e-step-environment-isolated — a step\'s process holds TARGET_URL,
   assert.equal(declared.PLAYER_PASSWORD, '[secret:PLAYER_PASSWORD]', 'the declared secret is set, and redacted in the record');
   assert.equal(declared.OTHER_SECRET, undefined, 'an undeclared secret in the file is not exposed');
   assert.equal(declared.GRAPHYARD_TOKEN, undefined);
+  assert.equal(stepEnvironment('http://t', { TARGET_URL: 'http://evil' }, {}).TARGET_URL, 'http://t', 'a secret never replaces the case target');
   assert.deepEqual(Object.keys(stepEnvironment('http://t', { A: '1' }, { PATH: '/bin', GRAPHYARD_TOKEN: 'x', HOME: '/h', GH_TOKEN: 'y' })).sort(), ['A', 'HOME', 'PATH', 'TARGET_URL']);
 });
 

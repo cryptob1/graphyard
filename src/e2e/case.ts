@@ -86,6 +86,7 @@ export const caseSchema = z.object({
 }).strict().superRefine((entry, context) => {
   if (!entry.steps.some(s => s.kind !== 'browser' || s.action === 'expectText')) context.addIssue({ code: 'custom', path: ['steps'], message: 'a case checks something: at least one http, command or agent step or browser expectText step' });
   if (new Set(entry.secrets).size !== entry.secrets.length) context.addIssue({ code: 'custom', path: ['secrets'], message: 'a secret is declared once' });
+  if (entry.secrets.includes('TARGET_URL')) context.addIssue({ code: 'custom', path: ['secrets'], message: 'TARGET_URL is the case target and cannot be a secret' });
   entry.steps.forEach((s, index) => { if (JSON.stringify(s).length > 2000) context.addIssue({ code: 'custom', path: ['steps', index], message: 'a step is at most 2000 characters of JSON' }); });
 });
 export type E2eCase = z.infer<typeof caseSchema>;
