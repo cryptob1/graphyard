@@ -20,6 +20,16 @@ export function leaseLossEpoch(escalation: Escalation): number | null {
 export function lapsedBeforeStart(work: Pick<Work, 'sessions'>, escalation: Escalation): boolean {
   const epoch = leaseLossEpoch(escalation), owner = /^Worker (.+) lost lease epoch \d+$/.exec(escalation.reason)?.[1];
   const session = epoch === null ? undefined : (work.sessions ?? []).find(entry => entry.kind === 'implementation' && entry.id === `${owner}:${epoch}`);
+  return launchFailedBeforeStart(session);
+}
+/**
+ * Whether a session record is a launch that failed before its runtime started (registeredLaunch
+ * ends it with that outcome and no pane). Its failure is the dispatch step's to record and classify,
+ * so neither its lapse (GY-1375) nor the minute its attempt's lease outlives it (GY-1561: GY-1525's
+ * one blocked launch counted once as its dispatch failure and twice as an ended session) is a
+ * session-liveness instance of its own.
+ */
+export function launchFailedBeforeStart(session: { state?: string; pane?: string | null; outcome?: string | null } | null | undefined): boolean {
   return !!session && session.state === 'finished' && !session.pane && !!session.outcome?.startsWith('the launch failed before the session started');
 }
 // An implementation lease ends at `submit`: the candidate is bound and the worker's job is
