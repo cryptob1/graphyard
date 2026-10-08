@@ -3,15 +3,15 @@
 
 ## Runner capacity and request diagnostics
 
-`validation capacity` classes requests: `queued-starved`, `queued-waiting-for-slot`, `queued-resource-held`/`awaiting-settlement` (`validation settle`), `unacknowledged`/`retryable` (`validation retry`), `heartbeat-missing`, `collection-stalled`.
+`validation capacity`: `queued-starved`, `queued-waiting-for-slot`, `queued-resource-held`/`awaiting-settlement` (`validation settle`), `unacknowledged`/`retryable` (`validation retry`), `heartbeat-missing`, `collection-stalled`.
 
 ## Artifact backends, capacity and migration
 
-Postgres (default) or S3 (`GRAPHYARD_ARTIFACT_BACKEND=s3`, `GRAPHYARD_ARTIFACT_S3_ENDPOINT`, `_BUCKET`, `_REGION`, `_ACCESS_KEY_ID`, `_SECRET_ACCESS_KEY`, `_PREFIX`); over `GRAPHYARD_ARTIFACT_CAPACITY_BYTES` (2GiB): 507. `validation artifact-migrate s3|postgres [LIMIT]` moves ≤100.
+Postgres or S3 (`GRAPHYARD_ARTIFACT_BACKEND=s3`, `GRAPHYARD_ARTIFACT_S3_*`); over `GRAPHYARD_ARTIFACT_CAPACITY_BYTES` (2GiB): 507; `validation artifact-migrate s3|postgres [LIMIT]` moves ≤100.
 
 ## Rollback
 
-Completes when [verified](delivery.md#observe-and-verify); executor:
+Completes when [verified](delivery.md#observe-and-verify):
 
 ```json
 {"kind":"registration","id":"production-rollback","expectedRevision":0,"principalId":"railway-rollback","role":"rollback","environment":{"id":"production","revision":1},"adapterVersion":"custom-v1","proofs":[],"enabled":true,"services":["api","web"],"rollback":{"fencing":"provider","automatic":true}}
@@ -45,4 +45,4 @@ Executors claim (`POST /api/delivery/rollback-claim`), report `applied`/`failed`
 
 ## Coordinator recovery
 
-The loop runs from a pinned checkout, `<install dir>/coordinator/current`. If it stalls after a self-merge or main-watch freeze, run `graphyard master recover [--to SHA] --admin-token-stdin` (repins, restarts, records `policy.coordinator.recovered`). Promotion resumes; failed pins retry.
+Loop stalled after a self-merge or main-watch freeze: `graphyard master recover [--to SHA] --admin-token-stdin` repins `<install dir>/coordinator/current`, restarts, records `policy.coordinator.recovered`; promotion resumes.

@@ -1,7 +1,7 @@
 <!-- page: Operate Graphyard | 5 | loop, merges. -->
 # Master-agent operating mode
 
-The master (`coordinator`) routes and administers GitHub unasked, never implementing, reviewing or proving. Human-only: goals and priorities, spending money or opening third-party accounts, issuing credentials to people ([who decides](glossary.md#who-decides)); it decides the rest, never asking a human to run what an agent may. `master guide` prints its role instructions, then this page; AGENTS.md carries the worker block.
+The master (`coordinator`) routes and administers GitHub unasked, never implementing, reviewing or proving; it no longer hand-decomposes goals ([goal pipeline](how-graphyard-works.md#from-goal-to-work-items)). Human-only: goals and priorities, spending money or opening third-party accounts, issuing credentials to people ([who decides](glossary.md#who-decides)); it decides the rest, never asking a human to run what an agent may. `master guide` prints its role instructions, then this page; AGENTS.md carries the worker block.
 
 ## Operate
 
@@ -17,7 +17,7 @@ Unless created `"systemDriven": false`, items refuse hand `dispatch`, `merge`, `
 
 ### Session liveness is reconciled, not trusted
 
-**The control plane reconciles session liveness; closing sessions is not the master's manual duty.** A sweep runs every automatic-dispatch tick (`run.dispatchIntervalSeconds`, default 10, 30 at most); a coordination handle closes at the second consecutive sweep that misses it; a handle a lease or dispatch request names is held until it ends; an unobserved one is left alone for its first 3 minutes; a paneless worker handle reads `launching` under its lease. Closures: **Vanished** (named by no attempt or request, missing twice; a request-less review is recorded ended and relaunched), **Ended** (agentless pane or terminal state; `idle`, `done` and `blocked` are deliberately not terminal; also unlisted after its attempt or request ended, recorded), **Superseded** (review or proof session for a head the item moved past, delivered items too; implementation sessions follow lease), **Duplicate** (older session per role and head). A closure decides no gate, ends no lease, stops no process; concurrency and busy names count live sessions only. A session past its role's maximum (4h implementation, 1h review, `run.producerTimeoutMinutes` for a producer, 12h coordination) is flagged, not closed.
+**The control plane reconciles session liveness; closing sessions is not the master's manual duty.** A sweep runs every automatic-dispatch tick (`run.dispatchIntervalSeconds`, default 10, 30 at most); a coordination handle closes at the second consecutive sweep that misses it; a handle a lease or dispatch request names is held until it ends; an unobserved one is left alone for its first 3 minutes; a paneless worker handle reads `launching` under its lease. A handle another host launched is left to that host's loop. Closures: **Vanished** (named by no attempt or request, missing twice; a request-less review is recorded ended and relaunched), **Ended** (agentless pane or terminal state; `idle`, `done` and `blocked` are deliberately not terminal; also unlisted after its attempt or request ended, recorded), **Superseded** (review or proof session for a head the item moved past, delivered items too; implementation sessions follow lease), **Duplicate** (older session per role and head). A closure decides no gate, ends no lease, stops no process; concurrency and busy names count live sessions only. A session past its role's maximum (4h implementation, 1h review, `run.producerTimeoutMinutes` for a producer, 12h coordination) is flagged, not closed.
 
 **Instead of closing sessions by hand:** do nothing for a finished or dead session (`graphyard master run --once` sweeps); attach to an overlong one with its handle's command. Never mark another session's handle finished to free a slot.
 
@@ -29,7 +29,7 @@ Per cycle (`daemon.invariants.lines`): `follow-ups-per-parent` (1 open), `linger
 
 ## Research and diagnosis
 
-`Recurring <class>` and `invariant:` faults past `invariantBoundMinutes` get a read-only diagnostician (`run.diagnostician`; none for human-only parks); quota refusals wait in `daemon.diagnoses` until `retryAt`; `stale`/`withdrawn` decisions, stale backlog releases: re-requested ≤3 times, then escalated (`decision-stale`); a refused fix `create` is `fix-item`, never re-filed; runs stopped at their bound: `overlong-session`.
+`Recurring <class>` and `invariant:` faults past `invariantBoundMinutes` get a read-only diagnostician (`run.diagnostician`; none for human-only parks); quota refusals wait in `daemon.diagnoses` until `retryAt`; `stale`/`withdrawn` decisions, stale backlog releases: re-requested ≤3 times, then escalated (`decision-stale`); raced, delivered, [plane-wide](operations.md#incident-decision-tree) requests retry faultless; a refused fix `create` is `fix-item`, never re-filed; runs stopped at their bound: `overlong-session`; no `loop` fault for restart-lost diagnoses, approver refusals, nor `merge` for base conflicts under 30m.
 
 ## Machine-filed backlog
 
