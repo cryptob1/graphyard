@@ -33,6 +33,7 @@ import { probeSupervisorAbsence } from '../containment-probe.js';
 import { httpFleetClient, reconcileFleetSessions, selectFleetSession, settledRecordSessions } from '../fleet.js';
 import { type ContainmentRetention, type DaemonAction, type DaemonState, type LoopRelease, storeAction, type DeploymentObservation, message, writeDaemonState } from './state.js';
 import { writeProjectMemory } from '../project-memory.js';
+import { flakeLedgerStore, type FlakeLedgerStore } from '../flake-ledger.js';
 import { answeringWidening } from './reconcile.js';
 import { type OrphanSupervisor, readyToRetry, stopWatchSupervisor } from './sessions.js';
 import { neededDecision, type ExhaustedProof, type RoutineDecisionAction } from './decisions.js';
@@ -349,6 +350,8 @@ export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffec
   /** Files the one backlog item a recurring fault class gets (GY-173), as the operator-agent identity, keyed by the class and its instances. */
   // Absent while no such identity is provisioned: the classes are still recorded and reported.
   fileFaultClass?: (input: LoopFiledItem, key: string) => Promise<Work>;
+  /** The flake ledger file (GY-1498, .graphyard/flake-ledger.json); absent, the flake step reads and files nothing. */
+  flakeLedger?: FlakeLedgerStore;
   /** The pipeline doctor (GY-711, src/daemon/doctor.ts): absent while `run.doctor.enabled` is false or the operator-agent identity is missing, the loop then running only the deterministic remedies. */
   doctor?: DoctorEffects;
   /** Clears an item's blocker as the operator-agent identity, bound to the revision the loop read (GY-711 remedy 2): only for a scope refusal plannedFiles already covers. */
@@ -705,6 +708,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       await mutate('production-environment', { environment });
       publishedEnvironment = environment;
     },
+    flakeLedger: flakeLedgerStore(root),
     selfProvision: async () => (await import('../cli/master-setup.js')).loopSelfProvision(root, current()), // imported when first run: only this step reads the install modules
     publishMergeSettings: async () => {
       const config = { rerunFailedChecks: rerunFailedChecks(current()) };
