@@ -9,6 +9,7 @@ import { dependencyDirectories, diskExhaustion, diskPressure, diskPressureAttent
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import type { Work } from '../src/model.js';
 import { runChild } from '../src/child-runner.js';
+import * as worktrees from '../src/master/worktrees.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-79: worktrees and their dependency trees filled the host's disk mid-cycle. The master loop
@@ -589,4 +590,64 @@ test('unit:worktree-orphan-reclaimed — a delivered item\'s directory Git no lo
     const audit = (await readFile(worktreeReclaimAuditFile(root), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
     assert.deepEqual(audit.map(entry => [entry.action, entry.key]), [['orphan-remove', 'GY-160']]);
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+// GY-1515 (manual:fault-class-resources): on 8 October 2026 at 04:11Z the loop's reclaim pass met one
+// tree Git refused to judge (`rev-list` on GY-860-1 failed) and recorded the pass as a failed
+// `reclaim:trees` action, a resources fault. A refused tree was never remembered as held, so a
+// backlog that ran the pass every cycle re-ran the same refused command and recorded a fresh
+// failure, one instance per cycle, while nothing about the tree had changed.
+test('manual:fault-class-resources — GY-1515 reclaim: a tree Git refuses is one failed pass, then held and kept like a dirty tree while the backlog drains, and tried again after a day without a second fault', async () => {
+  const root = await host(false), credentials = await temporaryDirectory('reclaim-refusal');
+  try {
+    const token = join(credentials, 'coordinator.token'); await writeFile(token, coordinatorToken, { mode: 0o600 });
+    // Namespace-read so this file loads on the base, which has no retry bound, and the REPRODUCE assertions below run there.
+    const refusalRetryMs = (worktrees as { worktreeRefusalRetryMs?: number }).worktreeRefusalRetryMs ?? 24 * hour;
+    const master = config(token, { worktreeRemovalLimit: 1 });
+    const refused = assignment(root, 'GY-200', 1), second = assignment(root, 'GY-201', 1), third = assignment(root, 'GY-202', 1);
+    await idleFor(refused.path, 6 * hour); await idleFor(second.path, 5 * hour); await idleFor(third.path, 4 * hour);
+    const snapshot = [refused, second, third].map((tree, index) => work(`GY-${200 + index}`, { stage: 'done', workspaces: [workspace(tree.path, tree.branch, 1)] }));
+    const revLists: string[] = [];
+    const run = (command: string, args: string[]) => {
+      if (args.includes('rev-list') && args[1] === refused.path) { revLists.push(args.join(' ')); throw new Error(`Command failed: git -C ${refused.path} rev-list -n 1 HEAD --not --remotes refs/heads/main`); }
+      return runChild(command, args);
+    };
+    const passes: Awaited<ReturnType<typeof removeReclaimableWorktrees>>[] = [];
+    const reclaim = async (items: Work[], now?: number) => {
+      const removal = await removeReclaimableWorktrees(root, items, { idleMs: reclaimIdleMs(master), run, baseBranch: 'main', limit: master.run.worktreeRemovalLimit, now });
+      passes.push(removal);
+      await writeWorktreeInventoryCache(root, { at: removal.at, entries: removal.entries, held: removal.held });
+      return { ...await reclaimWorktrees(root, items, { idleMs: reclaimIdleMs(master), entries: removal.entries }), trees: removal };
+    };
+    const state = emptyDaemonState(master);
+    const resourcesFaults = () => state.faults.instances.filter(entry => entry.faultClass === 'resources').map(entry => entry.kind);
+    const treesActions = () => Object.entries(state.actions).filter(([key]) => key.startsWith('reclaim:trees:')).map(([, action]) => action);
+    const first = await runCycle(master, state, effects({ snapshot: async () => ({ work: snapshot, now: new Date().toISOString() }), reclaim: items => reclaim(items) }));
+    // Pass 1: the oldest tree is examined first, Git refuses it, and the pass is recorded as failed — one fault.
+    assert.equal(passes[0].removed.length, 0); assert.equal(passes[0].backlog, 2);
+    assert.match(passes[0].errors[0], /GY-200-1: .*rev-list/);
+    assert.equal(treesActions().length, 1); assert.equal(treesActions()[0].state, 'failed');
+    assert.match(first.actions.find(action => action.kind === 'reclaim')!.detail, /1 could not be removed: .*GY-200-1: .*rev-list/);
+    assert.deepEqual(resourcesFaults(), ['action:reclaim'], 'the refusal is one resources fault');
+    assert.equal(revLists.length, 1);
+    // Pass 2, the next cycle (the backlog drains on consecutive cycles): the refused tree is held and kept, Git is not asked again, and the pass succeeds on the next tree.
+    await runCycle(master, state, effects({ snapshot: async () => ({ work: snapshot, now: new Date().toISOString() }), reclaim: items => reclaim(items) }));
+    assert.equal(revLists.length, 1, 'REPRODUCE: the base re-ran the refused rev-list on the next pass');
+    assert.deepEqual(passes[1].errors, [], 'REPRODUCE: the base reported the same refusal as a new failure');
+    assert.deepEqual(passes[1].removed.map(entry => entry.key), ['GY-201']);
+    assert.match(passes[1].kept.find(entry => entry.key === 'GY-200')!.reason, /^Git refused: .*rev-list/);
+    assert.match(passes[1].held.find(entry => entry.path === refused.path)!.reason, /^Git refused: .*rev-list.*; tried again after \d{4}-/);
+    const second2 = treesActions().find(action => action.state === 'done');
+    assert.ok(second2, 'REPRODUCE: the base recorded the second pass as failed too');
+    assert.match(second2!.detail, /^Removed 1 finished worktree\(s\) with git worktree remove; 1 more are reclaimable and go on the next cycle \(at most 1 per cycle\); 1 kept as dirty, unpushed, unregistered or refused by Git, first .*GY-200-1: Git refused: /);
+    assert.deepEqual(resourcesFaults(), ['action:reclaim'], 'REPRODUCE: the base counted a second resources fault for the same standing refusal');
+    // Pass 3 drains the backlog with the refused tree still held; a pass a day later tries it again, in case the refusal cleared.
+    const third3 = (await reclaim(snapshot)).trees;
+    assert.deepEqual(third3.removed.map(entry => entry.key), ['GY-202']); assert.deepEqual(third3.errors, []); assert.equal(revLists.length, 1);
+    const retried = (await reclaim(snapshot, Date.now() + refusalRetryMs + 1_000)).trees;
+    assert.equal(revLists.length, 2, 'after the retry bound the tree is examined again');
+    assert.deepEqual(retried.errors, [], 'a refusal that stands across the retry is held again, never reported as a new failure');
+    assert.match(retried.held.find(entry => entry.path === refused.path)!.reason, /^Git refused: .*rev-list.*; tried again after \d{4}-/);
+    assert.equal(await exists(refused.path), true, 'the refused tree is never removed');
+  } finally { await rm(root, { recursive: true, force: true }); await rm(credentials, { recursive: true, force: true }); }
 });

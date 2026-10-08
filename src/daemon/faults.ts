@@ -67,7 +67,8 @@ export interface FaultSources {
  * restates a fault the item's own record shows (the same kind, or a kind in `restatements`) is that
  * fault, so it is not counted twice; a different fault of the same class on the item is its own
  * instance. Nor is the one-hour dwell line (`gate`) or containment grace window (`containment-grace`) counted,
- * nor a lapsed fence the loop is still settling (containmentInMotion) or the owed line restating its escalation (owedContainmentLine), nor an escalation inside the master's turn (owedEscalationInMotion), nor a line whose `inMotionUntil` has not passed (GY-1315), which are the ordinary pace of work — a gate nothing moves is `stalled-item`. Failed actions are not read here:
+ * nor a lapsed fence the loop is still settling (containmentInMotion) or the owed line restating its escalation (owedContainmentLine), nor an escalation inside the master's turn (owedEscalationInMotion), nor a line whose `inMotionUntil` has not passed (GY-1315), which are the ordinary pace of work — a gate nothing moves is `stalled-item`. Nor is the documentation
+ * set inside its headroom band (`docs-headroom`, GY-1515): the budget test refuses every change that would grow it and the trim item restores it, so only a set over its budget is a resources fault. Failed actions are not read here:
  * the action history retains failures long after they stopped mattering, so each is noted once, as it happens, by storeAction.
  */
 export function cycleFaults(state: DaemonState, snapshot: Work[], now: number, sources: FaultSources = {}): FaultObservation[] {
@@ -91,7 +92,7 @@ export function cycleFaults(state: DaemonState, snapshot: Work[], now: number, s
     }
     const listed = { work: status.work, attentionItems: [...(sources.loop ?? []), ...status.attentionItems, ...(sources.reported ?? [])] };
     for (const item of classifyAttention(sources.attribute ? sources.attribute(listed) : listed.attentionItems))
-      if (item.kind !== 'gate' && item.kind !== 'containment-grace' && !(sources.herdrUnavailable && herdrFaultKinds.has(item.kind))
+      if (item.kind !== 'gate' && item.kind !== 'containment-grace' && item.kind !== 'docs-headroom' && !(sources.herdrUnavailable && herdrFaultKinds.has(item.kind))
         && !(containmentKinds.has(item.kind) && containmentInMotion(byKey.get(item.subject), now))
         && !(item.kind === 'base-conflict' && baseConflictInMotion(byKey.get(item.subject), now))
         && !(item.kind === 'merge-base-dismissed' && mergeBaseDismissalInMotion(byKey.get(item.subject), now))
@@ -403,7 +404,11 @@ export async function docsHeadroomStatus(root: string, baseBranch: string, count
     const counted = await count(root, ref);
     if (!counted) continue;
     const headroom = docsHeadroom(counted.pages, counted.budget), text = docsHeadroomText(headroom, ref);
-    return { docs: { base: ref, headroom }, attention: text ? [{ subject: 'docs', text, kind: 'resource-bound', faultClass: 'resources', ...agentOwner('master', 'The loop files one trim item for it (a docs-trim bug naming the largest pages); dispatch it ahead of items that add documentation') }] : [] };
+    // GY-1515: inside the band the set is what the budget test holds (no change may add a word to it) and the trim
+    // item restores; that line is attention, never a fault (cycleFaults). Over the budget the band was overrun by
+    // changes merged together and the budget test fails on the base: the set is a resource at its bound.
+    const kind = headroom.remaining < 0 ? 'resource-bound' : 'docs-headroom';
+    return { docs: { base: ref, headroom }, attention: text ? [{ subject: 'docs', text, kind, faultClass: 'resources', ...agentOwner('master', 'The loop files one trim item for it (a docs-trim bug naming the largest pages); dispatch it ahead of items that add documentation') }] : [] };
   }
   return { docs: null, attention: [] };
 }
