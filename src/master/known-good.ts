@@ -7,7 +7,10 @@
 // `graphyard master recover` can repoint at it; the one before that is removed.
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { ChildRun } from '../child-runner.js';
+import { defaultChildRun, type ChildRun } from '../child-runner.js';
+import { installDirectory } from '../install/secrets.js';
+import { installIdFor } from '../install/types.js';
+import { productionTagPrefix } from '../release-candidate.js';
 
 export const knownGoodDirectory = (installDir: string) => join(installDir, 'coordinator');
 /** The CLI the master unit runs while a pin exists. */
@@ -144,4 +147,25 @@ export function coordinatorDoctorLine(pinned: string | null, production: string 
   const same = !!pinned && !!production && (pinned.startsWith(production) || production.startsWith(pinned));
   const stale = !!pinned && !!production && !same && (behind === null || behind > 1);
   return { line: stale || failing ? `FAIL ${line}` : line, ok: !stale && !failing };
+}
+
+/** The promoted SHAs newest first, read from the repository's `rc-production/` tags; empty when unreadable. */
+export async function promotedShas(root: string, run: ChildRun = defaultChildRun): Promise<string[]> {
+  try {
+    const out = await run('git', ['-C', root, 'for-each-ref', '--sort=-refname', '--format=%(contents)%00', `refs/tags/${productionTagPrefix}`], { timeoutMs: 10_000 });
+    return out.split('\0').flatMap(body => { try { return [String(JSON.parse(body.trim()).sha).toLowerCase()]; } catch { return []; } });
+  } catch { return []; }
+}
+
+/** `graphyard doctor`'s coordinator line for this install's pin against production's SHA; a FAIL sets exit code 1. Prints nothing with no pin and no production. */
+export async function coordinatorDoctor(root: string, repository: string | null | undefined, production: { serving?: string | null } | null | undefined, options: { run?: ChildRun; print?: (line: string) => void; installDir?: string } = {}) {
+  const { run = defaultChildRun, print = (line: string) => console.error(line) } = options;
+  try {
+    const installDir = options.installDir ?? installDirectory(installIdFor(repository ?? '')), pinned = knownGoodState(installDir), failing = pendingPin(installDir), serving = production?.serving ?? null;
+    if (!pinned && !serving && !failing) return null;
+    const doctor = coordinatorDoctorLine(pinned?.sha ?? null, serving, pinned ? promotionsBehind(pinned.sha, await promotedShas(root, run)) : null, failing);
+    print(doctor.line);
+    if (!doctor.ok) process.exitCode = 1;
+    return doctor;
+  } catch { return null; }
 }

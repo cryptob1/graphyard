@@ -9,7 +9,7 @@ import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import type { ChildRun } from '../src/child-runner.js';
-import { coordinatorDoctorLine, knownGoodCli, knownGoodDirectory, knownGoodState, launcher, pendingPin, pinAfterVerify, pinKnownGood, pinningVerify, promotionsBehind, retryPendingPin } from '../src/master/known-good.js';
+import { coordinatorDoctor, coordinatorDoctorLine, knownGoodCli, knownGoodDirectory, knownGoodState, launcher, pendingPin, pinAfterVerify, pinKnownGood, pinningVerify, promotionsBehind, retryPendingPin } from '../src/master/known-good.js';
 import { loopUnitText } from '../src/supervisor.js';
 import { operationsCommand } from '../src/cli/master/operations.js';
 import type { MasterSession } from '../src/cli/master/session.js';
@@ -114,10 +114,29 @@ test('unit:known-good-doctor-line — doctor prints the pinned and production SH
   assert.equal(coordinatorDoctorLine(null, c, null).ok, true);
 });
 
+test('unit:known-good-doctor-line — doctor reads the install pin and the rc-production tags: one promotion behind passes, two FAIL with exit code 1, nothing pinned and nothing served prints nothing', async () => {
+  const w = await world();
+  await pinKnownGood(w.pin, w.shas[0], w.run);
+  const tag = (index: number) => git(w.repository, 'tag', '-a', `rc-production/rc-${index}`, '-m', JSON.stringify({ id: `rc-${index}`, sha: w.shas[index], at: new Date(Date.UTC(2026, 9, 8, index)).toISOString() }), w.shas[index]);
+  tag(0); tag(1);
+  const lines: string[] = [], exitCode = process.exitCode;
+  const doctor = (serving: string | null) => coordinatorDoctor(w.repository, 'owner/project', { serving }, { run: w.run, installDir: w.installDir, print: line => lines.push(line) });
+  try {
+    assert.equal((await doctor(w.shas[1]))?.ok, true, 'one promotion behind production passes');
+    assert.equal(lines[0], `coordinator: pinned ${short(w.shas[0])} (production ${short(w.shas[1])})`);
+    tag(2);
+    assert.equal((await doctor(w.shas[2]))?.ok, false, 'two promotions behind fails');
+    assert.equal(lines[1], `FAIL coordinator: pinned ${short(w.shas[0])} (production ${short(w.shas[2])})`);
+    assert.equal(process.exitCode, 1);
+    assert.equal(await coordinatorDoctor(w.repository, 'owner/project', null, { run: w.run, installDir: join(w.installDir, 'none'), print: line => lines.push(line) }), null);
+    assert.equal(lines.length, 2);
+  } finally { process.exitCode = exitCode; }
+});
+
 let pg: EmbeddedPostgres, store: Store, http: ReturnType<typeof server>, url: string;
 const admin = { id: 'human-operator', role: 'admin' as const, sessionKind: 'human' as const, token: `human-operator-token-${'x'.repeat(32)}` };
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 183;
+  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1529;
   pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('known-good-pg'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('known_good_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/known_good_test`); await store.init();
@@ -144,7 +163,7 @@ test('integration:master-recover-repins-and-records — master recover repins th
     const host = { home, platform: 'linux' as const, temporaryDirectories: [join(home, 'tmp-elsewhere')], run: (_command: string, args: string[]) => args[1] === 'is-enabled' ? 'enabled' : args[1] === 'is-active' ? 'active' : '' };
     const restarts: string[] = [];
     writeFileSync(join(unitDirectory, 'graphyard-master.service'), loopUnitText({ root, cliPath: master.cliPath, repository: master.repository, intervalSeconds: 60, installDir }));
-    const effects = { run: w.run, host, restart: (unit: string) => { restarts.push(unit); } };
+    const effects = { run: w.run, host, restart: async (unit: string) => { restarts.push(unit); } };
     const pin = { installDir, repository: root };
     await pinKnownGood(pin, w.shas[0], w.run); await pinKnownGood(pin, w.shas[1], w.run);
     const session = (args: string[], stdin = admin.token) => ({

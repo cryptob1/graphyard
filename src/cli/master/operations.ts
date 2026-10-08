@@ -14,7 +14,6 @@ import { acknowledgeCommand, mainWatchAttention } from '../../daemon/main-watch.
 import { shadowGateSummary } from '../../daemon/cycle-shadow.js';
 import { shadowGateAttention } from '../../merge-writer/shadow.js';
 import { mergeWriterSummary } from '../../daemon/cycle-merge-writer.js';
-import { execFileSync } from 'node:child_process';
 import { defaultChildRun } from '../../child-runner.js';
 import { installDirectory } from '../../install/secrets.js';
 import { installIdFor } from '../../install/types.js';
@@ -32,8 +31,8 @@ export const recoverUsage = 'Use master recover [--to SHA] [--reason TEXT] --adm
 export const githubMergesAnswer = 'GitHub merges: a pull request whose build, review and required checks pass on its head is merged by GitHub on its branch protection, and Graphyard records the delivery from the merged observation. There is no Graphyard merge to run.';
 
 /** What `master recover` does outside this process; a test hands in its own so no real unit is touched. */
-export interface RecoverEffects { run: ChildRun; host: LoopSupervisorHost; restart: (unit: string) => void }
-const recoverEffects: RecoverEffects = { run: defaultChildRun, host: {}, restart: unit => { execFileSync('systemctl', ['--user', 'restart', unit], { encoding: 'utf8', timeout: 60_000 }); } };
+export interface RecoverEffects { run: ChildRun; host: LoopSupervisorHost; restart: (unit: string) => Promise<unknown> }
+const recoverEffects: RecoverEffects = { run: defaultChildRun, host: {}, restart: unit => defaultChildRun('systemctl', ['--user', 'restart', unit], { timeoutMs: 60_000 }) };
 
 /** Reading status and acting on one item: settle a quarantine, dispatch, merge, verify a deployment. */
 export async function operationsCommand(session: MasterSession, effects: RecoverEffects = recoverEffects): Promise<unknown> {
@@ -133,7 +132,7 @@ export async function operationsCommand(session: MasterSession, effects: Recover
     const pinned = await pinKnownGood({ installDir, repository: root }, to, effects.run);
     const unit = await alignLoopUnit({ root, cliPath: master.cliPath, repository: master.repository, intervalSeconds: master.run.intervalSeconds, installDir }, effects.host);
     if (unit.wrote === 'refused') throw new Error(`The coordinator was repinned to ${to}, but its unit was not rewritten: ${unit.reason}`);
-    effects.restart(loopUnitOf(root, undefined, effects.host.home));
+    await effects.restart(loopUnitOf(root, undefined, effects.host.home));
     const reason = values.reason?.trim() || (values.to ? `recovered to ${to}` : 'recovered to the previous known-good SHA');
     const event = await masterMutation('coordinator/recovered', { from: before?.sha ?? null, to, reason }, undefined, token);
     return print({ recovered: true, from: before?.sha ?? null, to, previous: pinned.previous, unit: loopUnitOf(root, undefined, effects.host.home), unitFile: unit.wrote, event });
