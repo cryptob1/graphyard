@@ -17,6 +17,9 @@ import * as e2eCase from '../src/e2e/case.js';
 import { e2eSuite, type E2eReport } from '../src/e2e/runner.js';
 import type { HoldRecord } from '../src/release-holds.js';
 import { readRecords } from '../src/release-candidate.js';
+import { defaultPromoteEveryMinutes, promotionCycle, promotionReadWindows, type PromotionLedger, type PromotionReads, type PromotionRun } from '../src/daemon/deployment.js';
+import { promotionStateSchema, type PromotionState } from '../src/daemon/state.js';
+import { defaultDeliverySpeedTargets, deliverySpeed, deliverySpeedBreaches } from '../src/flow-analytics.js';
 
 const run = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 
@@ -590,4 +593,110 @@ test('unit:release-candidate-zero-touch-suite — every release candidate runs t
   const green = await validateAndRecord(repo.git, second.id, 'https://uat.example.test', [scenario(passed)],
     { base: 'main', push: true, timeoutMs: 60_000, fetcher: deployment([next]).fetcher, sleep: async () => {}, file: async item => { filed.push(item); return 'GY-972'; } });
   assert.equal(green.record.result, 'passed', JSON.stringify(green.record.suites));
+});
+
+// GY-1488: merged→production p90 was 243 minutes because candidates were cut every two hours and a
+// failed one cost another two. The loop now cuts the next candidate as soon as the last concludes.
+const promoSha = (seed: string) => seed.repeat(40).slice(0, 40);
+function promotionStub(ledger: PromotionLedger, runs: PromotionRun[]) {
+  const state = { ledger, runs, dispatches: 0 };
+  const reads: PromotionReads = { ledger: async () => state.ledger, runs: async () => state.runs, dispatch: async () => { state.dispatches++; } };
+  return { state, reads };
+}
+
+test('unit:continuous-promotion — the next candidate is cut as soon as none is in flight and main has moved, held while one is in flight, never re-cut after a failure until main moves past it, and spaced by the 10-minute minimum gap; the cron is only a fallback', async () => {
+  const T = Date.parse('2026-10-07T12:00:00Z'), min = 60_000, iso = (at: number) => new Date(at).toISOString();
+  const PROMOTED = promoSha('a'), A = promoSha('b'), B = promoSha('c'), C = promoSha('d');
+  assert.equal(defaultPromoteEveryMinutes, 10);
+  const every = defaultPromoteEveryMinutes;
+  const cycle = async (previous: PromotionState | null, reads: PromotionReads, now: number) => {
+    const result = await promotionCycle(previous, reads, { now, everyMinutes: every, intervalMs: 20_000 });
+    return { ...result, state: promotionStateSchema.parse(result.state) };
+  };
+
+  // Idle with new commits: a candidate concluded 3 minutes ago (after a 25-minute run), main has moved; dispatched at once, not two hours later.
+  const { state: stub, reads } = promotionStub({ mainSha: A, promotedSha: PROMOTED, promotedAt: iso(T - 3 * min), behind: 2 },
+    [{ status: 'completed', createdAt: iso(T - 28 * min), event: 'workflow_dispatch', headSha: PROMOTED }]);
+  let result = await cycle(null, reads, T);
+  assert.equal(result.dispatched, true);
+  assert.equal(result.state.cutSha, A);
+
+  // In flight: main moves again while the candidate is in validation; nothing more is dispatched however long it runs.
+  stub.ledger = { ...stub.ledger, mainSha: B, behind: 3 };
+  stub.runs = [{ status: 'in_progress', createdAt: iso(T + 5_000), event: 'workflow_dispatch', headSha: A }, ...stub.runs];
+  let state = result.state;
+  for (let now = T + 20_000; now < T + 25 * min; now += 20_000) {
+    result = await cycle(state, reads, now); state = result.state;
+    assert.equal(result.dispatched, false);
+  }
+  assert.equal(state.inFlight, true);
+  assert.match(state.reason ?? '', /in validation/);
+
+  // Failure: the candidate of A concludes without promoting; main still holds A, so A is never cut again.
+  stub.ledger = { ...stub.ledger, mainSha: A, behind: 2 };
+  stub.runs = stub.runs.map((run, index) => index === 0 ? { ...run, status: 'completed' } : run);
+  for (let now = T + 25 * min; now < T + 40 * min; now += 20_000) {
+    result = await cycle(state, reads, now); state = result.state;
+    assert.equal(result.dispatched, false, 'a failed candidate is not cut again while main is unchanged');
+  }
+  assert.equal(state.inFlight, false);
+  assert.match(state.reason ?? '', /did not promote it; the next is dispatched as soon as main moves past it/);
+  assert.equal(state.nextDueAt, null);
+  // Main moves past the failed candidate: the next is dispatched within a ledger read window, not after a fixed interval.
+  stub.ledger = { ...stub.ledger, mainSha: B, behind: 3 };
+  let dispatchedAt: number | null = null;
+  for (let now = T + 40 * min; now < T + 50 * min && dispatchedAt === null; now += 20_000) {
+    result = await cycle(state, reads, now); state = result.state;
+    if (result.dispatched) dispatchedAt = now;
+  }
+  assert.ok(dispatchedAt !== null && dispatchedAt - (T + 40 * min) <= promotionReadWindows(20_000).ledgerMs, 'dispatched as soon as main moved past the failed candidate');
+  assert.equal(state.cutSha, B);
+  assert.equal(stub.dispatches, 2);
+
+  // Minimum gap: a candidate that fails within a minute of its cut, with main already moved, waits out the 10-minute gap.
+  const failedAt = dispatchedAt!;
+  stub.runs = [{ status: 'completed', createdAt: iso(failedAt + 5_000), event: 'workflow_dispatch', headSha: B }, ...stub.runs];
+  stub.ledger = { ...stub.ledger, mainSha: C, behind: 4 };
+  let next: number | null = null;
+  for (let now = failedAt + 20_000; now < failedAt + 20 * min && next === null; now += 20_000) {
+    result = await cycle(state, reads, now); state = result.state;
+    if (result.dispatched) next = now;
+    else if (now - failedAt < every * min) assert.match(state.reason ?? '', /no sooner than 10 minute/);
+  }
+  assert.ok(next !== null && next - failedAt >= every * min && next - failedAt < every * min + 2 * min, `the next cut waited out the gap (${next === null ? 'none' : (next - failedAt) / min} min)`);
+  assert.equal(stub.dispatches, 3);
+
+  // Success: the candidate of C promotes; the ledger is re-read the cycle it concludes, so production at main dispatches nothing.
+  stub.runs = [{ status: 'in_progress', createdAt: iso(next! + 5_000), event: 'workflow_dispatch', headSha: C }, ...stub.runs];
+  result = await cycle(state, reads, next! + 11 * min); state = result.state;
+  assert.equal(state.inFlight, true);
+  stub.runs = stub.runs.map((run, index) => index === 0 ? { ...run, status: 'completed' } : run);
+  stub.ledger = { mainSha: C, promotedSha: C, promotedAt: iso(next! + 25 * min), behind: 0 };
+  result = await cycle(state, reads, next! + 25 * min); state = result.state;
+  assert.equal(result.dispatched, false);
+  assert.equal(state.promotedSha, C, 'the concluded candidate\'s promotion is read at once');
+  assert.match(state.reason ?? '', /nothing to promote/);
+
+  // The workflow's cron stays, only as a fallback: no more often than every six hours.
+  const workflow = await readFile(new URL('../.github/workflows/release-candidate.yml', import.meta.url), 'utf8');
+  assert.match(workflow, /- cron: '0 \*\/6 \* \* \*'/);
+  assert.match(workflow, /fallback/);
+});
+
+test('unit:promotion-latency-target — master status judges merged→production p50/p90 against a 45-minute p90 target', () => {
+  assert.equal(defaultDeliverySpeedTargets.mergedToProductionP90Ms, 45 * 60_000);
+  const now = Date.parse('2026-10-07T12:00:00Z'), hour = 3_600_000, iso = (at: number) => new Date(at).toISOString();
+  // Ten items merged an hour ago, promoted after 40 (within) or 60 minutes (over the target).
+  const item = (index: number, promotedAfterMs: number) => ({
+    id: `id-${index}`, key: `GY-${index}`, stage: 'done', createdAt: iso(now - 5 * hour), closure: null,
+    delivery: { mergedAt: iso(now - 2 * hour), mergedAtRepository: iso(now - 2 * hour) },
+    releaseDeliveries: [{ environment: 'production', verifiedAt: iso(now - 2 * hour + promotedAfterMs) }],
+  }) as any;
+  const within = deliverySpeed(Array.from({ length: 10 }, (_, index) => item(index, 40 * 60_000)), { now, productionEnvironment: 'production' });
+  assert.equal(within.targets.mergedToProductionP90Ms, 45 * 60_000);
+  assert.equal(within.mergedToProduction['7d'].p50Ms, 40 * 60_000);
+  assert.equal(within.mergedToProduction['7d'].p90Ms, 40 * 60_000);
+  assert.deepEqual(deliverySpeedBreaches(within).filter(breach => breach.measure === 'mergedToProduction'), []);
+  const slow = deliverySpeed(Array.from({ length: 10 }, (_, index) => item(index, hour)), { now, productionEnvironment: 'production' });
+  assert.match(deliverySpeedBreaches(slow).find(breach => breach.measure === 'mergedToProduction')?.text ?? '', /p90 is 1h over 7 days \(10 items\), above the 45 min target/);
 });

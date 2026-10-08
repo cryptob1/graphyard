@@ -8,9 +8,11 @@ name: Release candidate
 # release/uat and release/production, never main; `graphyard release` moves them to the exact SHA.
 # A dispatched `sha`, or a pushed rc tag (rc-*), validates that one commit with the long suites alone:
 # it is not a recorded candidate, so it is never deployed or promoted.
+# The master loop dispatches the next cut as soon as the last concludes and main has moved (GY-1488);
+# the six-hourly cron is only a fallback for a loop that is down.
 on:
   schedule:
-    - cron: '0 */2 * * *'
+    - cron: '0 */6 * * *'
   workflow_dispatch:
     inputs:
       sha:

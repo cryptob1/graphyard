@@ -25,8 +25,9 @@ function stubReads(ledger: PromotionLedger, runs: PromotionRun[]) {
 }
 
 test('unit:loop-dispatches-promotion — over three cycles (a candidate still in validation, main moved with nothing in flight, the interval not yet elapsed) the loop dispatches the release-candidate workflow with promote=true exactly once', async () => {
-  const every = defaultPromoteEveryMinutes;
-  assert.equal(every, 120);
+  // GY-1488: the default is a 10-minute minimum gap; a configured 120-minute gap still spaces dispatches.
+  assert.equal(defaultPromoteEveryMinutes, 10);
+  const every = 120;
   // A scheduled candidate cut three hours ago is still in UAT.
   const { reads, api } = stubReads({ mainSha: MAIN, promotedSha: PROMOTED, promotedAt: new Date(T0 - minutes(600)).toISOString(), behind: 3 },
     [{ status: 'in_progress', createdAt: new Date(T0 - minutes(180)).toISOString(), event: 'schedule' },
@@ -53,7 +54,7 @@ test('unit:loop-dispatches-promotion — over three cycles (a candidate still in
   reads.ledger = { ...reads.ledger, mainSha: LATER, behind: 4 };
   ({ state, dispatched } = await promotionCycle(promotionStateSchema.parse(state), api, { now: T0 + minutes(30), everyMinutes: every }));
   assert.equal(dispatched, false);
-  assert.match(state.reason ?? '', /next is due 120 minute/);
+  assert.match(state.reason ?? '', /next is due no sooner than 120 minute/);
 
   assert.equal(reads.dispatches, 1, 'exactly one dispatch across the three cycles');
 });
@@ -133,10 +134,10 @@ test('unit:loop-dispatches-promotion — a failing fetch, run read or dispatch n
   await run(T0 + minutes(480), T0 + minutes(510));
   assert.ok(reads.runReads - runsBefore <= Math.ceil(minutes(30) / promotionRunsReadMs) + 1, `${reads.runReads - runsBefore} failed run reads in half an hour`);
 
-  // Everything recovers: the next promotion is dispatched.
-  failing.runs = false;
+  // Everything recovers and main moves past the candidate cut at 360 minutes: the next promotion is dispatched.
+  failing.runs = false; reads.ledger = { ...reads.ledger, mainSha: LATER, behind: 3 };
   const dispatchesBefore = reads.dispatches;
-  await run(T0 + minutes(510), T0 + minutes(515));
+  await run(T0 + minutes(510), T0 + minutes(520));
   assert.equal(reads.dispatches - dispatchesBefore, 1);
   assert.equal(state!.inFlight, true);
 });
