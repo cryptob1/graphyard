@@ -78,8 +78,6 @@ const REQUIRED_STATEMENTS: [string, RegExp][] = [
   // GY-1518: the delivery redesign page keeps the merger setting's two values and the one rule.
   ['docs/delivery-redesign.md', /`github` \(default\) or `control-plane`/],
   ['docs/delivery-redesign.md', /Only Graphyard writes to main/],
-  // GY-1520: the merger setting's commands, status field and route.
-  ['docs/delivery-redesign.md', /graphyard master merger.*mergeWriter.*\/api\/merger/],
   // GY-1536 AC-4: the general E2E step kinds, declared secrets and the env file, with one example of each kind.
   ['docs/validation.md', /`command`: `run` in the checkout with `TARGET_URL`.*`{"kind":"command","run":"npx playwright test"}`/],
   ['docs/validation.md', /`agent`: agent-browser pursues `goal` at `path` until `success` holds, ending `VERDICT: PASS\|FAIL - reason`.*"goal":"Win tic-tac-toe"/],

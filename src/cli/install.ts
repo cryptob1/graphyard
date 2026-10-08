@@ -266,9 +266,7 @@ export const installCommands = defineCommands([
         : delegationLimits?.drift?.length ? `Set ${delegationLimits.drift.map((entry: any) => `${entry.variable}=${entry.required}`).join(' ')} on the deployment: ${delegationLimits.drift[0].reason}`
         : documentation.drift ? documentation.drift
         : production?.incidents?.length ? `Production has not deployed ${production.incidents.map((incident: any) => incident.key).join(', ')}: ${production.incidents[0].reason}`
-        : readiness.next;
-      // The one merger line goes to stderr so stdout stays the single JSON report the doctor consumers parse.
-      console.error(mergerDoctorLine(live?.mergeWriter));
+        : readiness.next; console.error(mergerDoctorLine(live?.mergeWriter));
       return context.print({ discovered, server: base, cliPath: await context.activeCliPath(), hostId: context.individualHostId(), connected: !!live, githubConfigured: !!live?.github, role: live?.actor?.role, release: live?.release ?? null, failure,
         setup,
         appPermissions: appPermissions ? { verifiedAt: appPermissions.verifiedAt, missing: appPermissions.missing, attention: appPermissions.attention, installationUrl: appPermissions.installationUrl } : null,
@@ -277,7 +275,7 @@ export const installCommands = defineCommands([
         build: live?.build ?? null,
         delegationLimits: delegationLimits ? { limits: delegationLimits.limits, deployed: delegationLimits.deployed, drift: delegationLimits.drift, attention: delegationLimits.attention } : null,
         production: production ? { provider: production.provider, serving: production.serving, running: production.running, aheadBy: production.ahead?.by ?? null, incidents: production.incidents, attention: production.attention, error: production.error } : null,
-        documentation, merger: mergerDoctorLine(live?.mergeWriter),
+        documentation,
         setupFromZero,
         readiness,
         next,
