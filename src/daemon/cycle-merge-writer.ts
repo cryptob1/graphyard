@@ -8,9 +8,10 @@ import type { MergeLedgerState } from '../model/merge-ledger.js';
 import { mergeWriterTrialGround } from '../model/rework-ground.js';
 import { installIdFor } from '../install/types.js';
 import { mergeWriterSettings, shadowGateSettings } from '../master/merge-writer-settings.js';
-import { trialMerge, TrialTimeoutError } from '../merge-writer/trial.js';
+import { runTrial, trialMerge, TrialCleanupError, TrialTimeoutError } from '../merge-writer/trial.js';
 import { criterionProofs, firstParentHolds, mergeOne, mergeQueue, proofTestFiles, pushArgs, pushEnvironment, reconcileIntents, runMergeTrial, staleLeaseRejection, type MergeOutcome, type MergePorts, type MergeRecordEvent } from '../merge-writer/executor.js';
-import { storeAction, type DaemonState } from './state.js';
+import { message, storeAction, type DaemonState } from './state.js';
+import type { LoopFiledItem } from './effects.js';
 import type { Cycle } from './cycle.js';
 
 /** How many queued heads, how many refusals and how many pending rework requests `state.mergeWriter` keeps. */
@@ -39,6 +40,12 @@ export const emptyMergeWriterState = (): MergeWriterState => mergeWriterStateSch
 export interface MergeWriterReads extends MergePorts {
   /** The install's recorded merger (`/api/status` `mergeWriter.merger`), read afresh before every merge decision; the step acts only under `control-plane`. */
   merger(): Promise<MergerMode>;
+  /**
+   * GY-1528: the advisory budget tests (`scripts/ci-tests.mjs advisory`) run once on a merge commit
+   * the writer delivered, in a trial checkout like the merge's own; the failing test files. Absent,
+   * no advisory run is made.
+   */
+  advisory?(mergeSha: string): Promise<{ build: 'pass' | 'fail'; failed: string[] }>;
 }
 /** The idempotency key one recorded step keeps across retries. */
 export { mergeRecordKey } from '../merge-writer/executor.js';
@@ -83,7 +90,102 @@ export function mergeWriterReads(config: Pick<MasterConfig, 'baseBranch' | 'run'
     },
     // The whole first-parent history, not a window of it: an intent older than any bound is still a push (AC-5).
     holds: sha => firstParentHolds(args => git(...args), ref, sha),
+    // The trial's own selection step asks the merge commit's ci-tests for its advisory files instead of the affected ones.
+    advisory: async mergeSha => {
+      const advisoryRun: ChildRun = (command, args, runOptions) => run(command, command === 'node' && args[0] === 'scripts/ci-tests.mjs' && args[1] === 'affected' ? ['scripts/ci-tests.mjs', 'advisory'] : args, runOptions);
+      let verdict;
+      try { verdict = await runTrial({ root, base: options.base, mergeSha, changedFiles: [], timeoutMs: shadow.timeoutMinutes * 60_000, key: 'advisory', run: advisoryRun, environment: options.environment }); }
+      catch (error) { if (error instanceof TrialCleanupError && error.verdict) verdict = error.verdict; else throw error; }
+      return { build: verdict.build, failed: verdict.tests.failed };
+    },
   };
+}
+
+// ---- The advisory budget tests after each merge (GY-1528) -------------------------------------------
+
+/** The chore one failing advisory test files: it names the test and the merge commit, and asks for no revert. */
+export function advisoryChore(test: string, mergeSha: string, key: string) {
+  const short = mergeSha.slice(0, 12);
+  return {
+    title: `Advisory test ${test} fails on ${short}`.slice(0, 200), type: 'chore' as const, priority: 2,
+    description: [
+      `The master loop filed this item itself: the advisory budget test ${test} failed when it ran once after the control plane merged ${key} as ${mergeSha}.`,
+      'Under the control-plane merger the budget tests are advisory (scripts/ci-tests.mjs advisoryTests): nothing was refused or reverted. Bring the budget back within its bound, or record why the bound moves.',
+    ].join('\n\n'),
+    criteria: [{ id: 'AC-1', text: `${test} passes on the base branch again after ${short}, without weakening its budget silently`.slice(0, 2000), proofs: [`manual:advisory-${test.replace(/^tests\//, '').replace(/\.test\.ts$/, '')}`] }],
+    plannedFiles: [test],
+    reason: `The advisory test ${test} failed after merge ${mergeSha}`,
+  };
+}
+/** The action key the chore of one advisory test failing on one merge commit is recorded under. */
+export const advisoryActionKey = (mergeSha: string, test: string) => `merge-writer-advisory:${mergeSha}:${test}`;
+/** How many times filing one advisory chore is tried before the failure is left recorded. */
+export const advisoryFilingAttempts = 5;
+interface AdvisoryRun { key: string; mergeSha: string; settled: { build: 'pass' | 'fail'; failed: string[] } | { error: unknown } | null }
+/** How many merge commits the advisory ledger remembers having run, so one is never run twice. */
+export const advisoryKeptRuns = 50;
+interface AdvisoryLedger { due: { key: string; mergeSha: string }[]; running: AdvisoryRun | null; unfiled: { key: string; mergeSha: string; test: string; attempts: number }[]; ran: string[] }
+const advisories = new WeakMap<DaemonState, AdvisoryLedger>();
+/** Resolves once the advisory run in flight for `state` has settled; for the step's tests. */
+export const advisoryIdle = async (state: DaemonState) => { for (let waited = 0; advisories.get(state)?.running && !advisories.get(state)!.running!.settled && waited < 600_000; waited += 5) await new Promise(resolve => setTimeout(resolve, 5)); };
+
+/**
+ * GY-1528. Each merge the writer delivered gets one advisory run of the budget tests on its merge
+ * commit, beside the cycle so the next merge never waits on it. A failing test file files one chore
+ * item naming the test and the merge commit (`advisoryChore`), idempotent per (merge, test); it is
+ * never a revert or a refusal. Answers whether anything was recorded.
+ */
+export async function advisoryStep(cycle: Pick<Cycle, 'state' | 'effects' | 'now' | 'performed'>, delivered: { key: string; mergeSha: string } | null): Promise<boolean> {
+  const { state, effects, now, performed } = cycle;
+  const reads = effects.mergeWriter;
+  if (!reads?.advisory) return false;
+  const ledger = advisories.get(state) ?? { due: [], running: null, unfiled: [], ran: [] };
+  advisories.set(state, ledger);
+  if (delivered && !ledger.ran.includes(delivered.mergeSha) && !ledger.due.some(entry => entry.mergeSha === delivered.mergeSha)) ledger.due.push(delivered);
+  const at = () => new Date(now()).toISOString();
+  let changed = false;
+  const running = ledger.running;
+  if (running?.settled) {
+    ledger.running = null;
+    if ('error' in running.settled) {
+      performed.push(storeAction(state, `merge-writer-advisory:${running.mergeSha}`, { kind: 'merge', work: running.key, principal: null, state: 'failed', attempts: 1, epoch: null, cycle: state.cycle, at: at(),
+        detail: `The advisory budget tests could not run on ${running.mergeSha} (${message(running.settled.error)}); they are advisory, so nothing is refused or reverted` }, null));
+      changed = true;
+    } else {
+      const failed = running.settled.failed.filter(test => /^tests\/[\w./-]+\.test\.ts$/.test(test));
+      for (const test of failed) ledger.unfiled.push({ key: running.key, mergeSha: running.mergeSha, test, attempts: 0 });
+      if (!failed.length) {
+        performed.push(storeAction(state, `merge-writer-advisory:${running.mergeSha}`, { kind: 'merge', work: running.key, principal: null, state: 'done', attempts: 1, epoch: null, cycle: state.cycle, at: at(),
+          detail: `The advisory budget tests passed on ${running.mergeSha}, merged for ${running.key}` }));
+        changed = true;
+      }
+    }
+  }
+  const kept: AdvisoryLedger['unfiled'] = [];
+  for (const entry of ledger.unfiled) {
+    if (!effects.fileFaultClass) { kept.push(entry); continue; }
+    const key = advisoryActionKey(entry.mergeSha, entry.test), attempts = entry.attempts + 1;
+    try {
+      // A chore, not a bug: the loop's filing effect takes any item type the work route accepts.
+      const filed = await effects.fileFaultClass(advisoryChore(entry.test, entry.mergeSha, entry.key) as unknown as LoopFiledItem, `advisory-test:${entry.mergeSha}:${entry.test}`);
+      performed.push(storeAction(state, key, { kind: 'fault', work: filed.key, principal: null, state: 'done', attempts, epoch: null, cycle: state.cycle, at: at(),
+        detail: `Filed ${filed.key}: the advisory test ${entry.test} failed on ${entry.mergeSha}, merged for ${entry.key}; nothing is reverted` }));
+    } catch (error) {
+      performed.push(storeAction(state, key, { kind: 'fault', work: null, principal: null, state: 'failed', attempts, epoch: null, cycle: state.cycle, at: at(),
+        detail: `Could not file the chore for the advisory test ${entry.test} failing on ${entry.mergeSha}: ${message(error)}`.slice(0, 1900) }, null));
+      if (attempts < advisoryFilingAttempts) kept.push({ ...entry, attempts });
+    }
+    changed = true;
+  }
+  ledger.unfiled = kept;
+  if (!ledger.running && ledger.due.length) {
+    const next = ledger.due.shift()!;
+    ledger.ran = [...ledger.ran, next.mergeSha].slice(-advisoryKeptRuns);
+    const entry: AdvisoryRun = { ...next, settled: null };
+    ledger.running = entry;
+    void reads.advisory(next.mergeSha).then(result => { entry.settled = result; }, error => { entry.settled = { error }; });
+  }
+  return changed;
 }
 
 interface Flight { key: string; id: string; head: string; startedAt: string; settled: { outcome: MergeOutcome; work: Work } | { error: unknown } | null }
@@ -154,7 +256,7 @@ export async function mergeWriterStep(cycle: Cycle) {
   if (!reads) return;
   const writer = state.mergeWriter;
   const at = () => new Date(now()).toISOString();
-  let changed = false;
+  let changed = false, delivered: { key: string; mergeSha: string } | null = null;
   const flight = flights.get(state);
   if (flight?.settled) {
     flights.delete(state);
@@ -169,6 +271,8 @@ export async function mergeWriterStep(cycle: Cycle) {
       const { outcome, work } = flight.settled;
       if (outcome.outcome === 'merged' || outcome.outcome === 'reconciled') {
         writer.lastMergeAt = at();
+        // The advisory budget tests run once on what this merge delivered (GY-1528).
+        delivered = { key: flight.key, mergeSha: outcome.mergeSha };
         action('done', outcome.outcome === 'merged' ? `Merged ${flight.key} head ${flight.head} as ${outcome.mergeSha} onto ${outcome.baseTip} with ${outcome.pushes} push(es); ${reads.baseBranch} observed at ${outcome.observedTip} and the item delivered`
           : `Reconciled ${flight.key} head ${flight.head}: ${reads.baseBranch} already held ${outcome.mergeSha} (observed at ${outcome.observedTip}), so it was delivered without a second push`);
       } else {
@@ -182,6 +286,7 @@ export async function mergeWriterStep(cycle: Cycle) {
       }
     }
   }
+  if (await advisoryStep(cycle, delivered)) changed = true;
   if (await requestPendingReworks(cycle)) changed = true;
   if (!flights.has(state)) {
     if ((await reads.merger()) !== 'control-plane') {

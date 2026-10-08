@@ -53,19 +53,29 @@ export function missingSubmoduleCommits(git: Git, baseTip: string, refused: read
   return missing;
 }
 
+/** What `sync GY-N --restore` says while the control plane is the merge writer (GY-1528): nothing is restored. */
+export const restoreOffLine = 'Restore is off while the control plane is the merge writer: files outside plannedFiles are not refused, so nothing was restored or committed.';
+
 /**
  * `sync GY-N --restore` takes the remedy itself: one plain commit on top of the branch returns
  * every refused file to the base tip, so the PR updates with a plain push and no history is
  * rewritten. The scope is classified again after the commit, and the report says whether any file
- * still differs; one that does fails the command.
+ * still differs; one that does fails the command. While the control plane is the merge writer no
+ * file is refused on plannedFiles (GY-1528), so restore is off: it says so, commits nothing and
+ * exits 0.
  */
 export async function restoreAndReport(git: Git, print: (value: unknown) => void, sync: {
   work: { key: string; plannedFiles?: string[] }; baseBranch: string; baseTip: string; regenerated: string[]; generated: string[]; refused: readonly string[];
   read?: (sha: string) => Promise<string | null>;
-  /** GY-1523: the control plane is the merge writer, so the restore commit is submitted with `complete --head` and nothing is pushed. */
+  /** The control plane is the merge writer (GY-1523), so restore is off (GY-1528). */
   controlPlane?: boolean;
 }): Promise<void> {
   const { work, baseBranch, baseTip, regenerated, generated } = sync;
+  if (sync.controlPlane) {
+    print({ key: work.key, base: `origin/${baseBranch}`, baseTip, head: git('rev-parse', 'HEAD'), merged: true, regenerated, generated, plannedFiles: work.plannedFiles, ok: true, restore: 'off', restored: [],
+      next: `${restoreOffLine} complete ${work.key} EPOCH --head submits the head as it stands.` });
+    return;
+  }
   const missing = missingSubmoduleCommits(git, baseTip, sync.refused);
   if (missing.length) {
     print({ key: work.key, base: `origin/${baseBranch}`, baseTip, head: git('rev-parse', 'HEAD'), merged: true, regenerated, generated, plannedFiles: work.plannedFiles, ok: false,
@@ -80,8 +90,6 @@ export async function restoreAndReport(git: Git, print: (value: unknown) => void
   print({ key: work.key, base: `origin/${baseBranch}`, baseTip, head: git('rev-parse', 'HEAD'), merged: true, regenerated, generated, plannedFiles: work.plannedFiles, ok: !still.length,
     restored, files: after, refused: still.map(finding => `${finding.path}: ${finding.detail}`),
     next: still.length ? `Some files outside plannedFiles still differ from origin/${baseBranch} after the restore commit; rerun sync ${work.key} --restore. A force push is never needed or allowed.`
-      : `Restored ${restored.length} file${restored.length === 1 ? '' : 's'} to origin/${baseBranch} in one new commit. ${sync.controlPlane
-        ? `Nothing is pushed while the control plane is the merge writer: complete ${work.key} EPOCH --head submits the restore commit from the shared object store.`
-        : `Push with a plain git push (a force push is never needed or allowed), then complete ${work.key} EPOCH PR.`}` });
+      : `Restored ${restored.length} file${restored.length === 1 ? '' : 's'} to origin/${baseBranch} in one new commit. Push with a plain git push (a force push is never needed or allowed), then complete ${work.key} EPOCH PR.` });
   if (still.length) process.exitCode = 1;
 }

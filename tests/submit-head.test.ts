@@ -295,9 +295,13 @@ test('unit:sync-control-plane-no-fetch — sync reads mergeWriter from /api/stat
     assert.deepEqual(refused.refused.map((line: string) => line.split(':')[0]), ['README.md']);
     assert.match(refused.next, /^Run sync GY-9 --restore: .* so complete GY-9 EPOCH --head submits it from the shared object store; nothing is pushed; a force push is never needed or allowed\. Do not complete until it reports ok\./);
     assert.ok(!/plain push|updates the PR|Do not push/.test(refused.next), refused.next);
+    // GY-1528: restore is off under the control-plane merger: it says so, commits nothing and exits 0.
+    const before = git(clone, 'rev-parse', 'HEAD');
     const restored = await run(controlPlaneStatus, ['--restore']);
-    assert.equal(restored.ok, true); assert.deepEqual(restored.restored, ['README.md']);
-    assert.match(restored.next, /^Restored 1 file to origin\/main in one new commit\. Nothing is pushed while the control plane is the merge writer: complete GY-9 EPOCH --head submits the restore commit from the shared object store\.$/);
+    assert.equal(restored.ok, true); assert.equal(restored.restore, 'off'); assert.deepEqual(restored.restored, []); assert.equal(process.exitCode ?? 0, 0);
+    assert.match(restored.next, /^Restore is off while the control plane is the merge writer: .* complete GY-9 EPOCH --head submits the head as it stands\.$/);
+    assert.equal(git(clone, 'rev-parse', 'HEAD'), before, 'nothing was committed');
+    git(clone, 'checkout', '-q', sharedTip, '--', 'README.md'); git(clone, 'commit', '-q', '-m', 'restore by hand', '--', 'README.md');
     assert.equal(git(clone, 'rev-parse', 'refs/remotes/origin/main'), sharedTip, 'nothing was fetched for either');
     const controlPlane = await run(controlPlaneStatus);
     assert.equal(controlPlane.fetched, false); assert.equal(controlPlane.merged, true); assert.equal(controlPlane.ok, true);

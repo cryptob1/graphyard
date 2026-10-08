@@ -17,6 +17,7 @@ import { createdHerdrTab, type HerdrAgent, herdrJson, stopCreatedHerdrTab } from
 import type { PreparedWorker } from './dispatch.js';
 import { worktreeRoot } from '../install/worktree-root.js';
 import { scopeGuardCommand, scopeGuardMatcher } from '../scope-guard.js';
+import type { MergerMode } from '../merger-mode.js';
 import { verificationEnvironment, verificationSlotsDirectory } from './verification-slots.js';
 
 /**
@@ -99,6 +100,8 @@ export type SessionRole = 'worker' | 'reviewer' | 'producer' | 'docs-sync';
 export interface SessionHarnessInput { role: SessionRole; kind: string | undefined; cliPath: string; repository: string; baseBranch: string; credentialHome: string; credentialDirectories: string[]; branch?: string; pr?: number;
   /** A worker's own item and epoch, which its scope-guard hook names (GY-1494). */
   key?: string; epoch?: number;
+  /** The recorded merger the launch read (GY-1523); under `control-plane` no scope-guard hook is installed (GY-1528). */
+  mergeWriter?: MergerMode;
   /** The detached checkout Graphyard allocated for a reviewer session under the managed worktree root. */
   checkout?: string }
 export function sessionHarnessPlan(input: SessionHarnessInput): HarnessPlan {
@@ -134,7 +137,7 @@ export function sessionHarnessPlan(input: SessionHarnessInput): HarnessPlan {
     // The same worker rules installWorkerHarness writes into the worktree, plus the shared secret
     // and verdict denies: loaded through --settings they apply even though the worktree's own
     // settings file is not loaded.
-    const worker = workerHarnessPlan({ cliPath: input.cliPath, branch: input.branch, baseBranch: input.baseBranch, credentialHome: input.credentialHome, key: input.key, epoch: input.epoch });
+    const worker = workerHarnessPlan({ cliPath: input.cliPath, branch: input.branch, baseBranch: input.baseBranch, credentialHome: input.credentialHome, key: input.key, epoch: input.epoch, mergeWriter: input.mergeWriter });
     hooks = worker.hooks ?? [];
     const extra = [...secrets, ...noVerdict, { rule: `Bash(${cli} evidence:*)`, why: 'Implementation workers never submit trusted evidence.' }];
     allow = worker.allow;
@@ -417,7 +420,7 @@ export function coordinatorWriteDenials(coordinatorRoot: string): HarnessRule[] 
  */
 export const scopeGuardHook = (cliPath: string, key: string, epoch: number): HarnessHook => ({ event: 'PreToolUse', matcher: scopeGuardMatcher, command: scopeGuardCommand(cliPath, key, epoch), timeout: 30,
   why: 'Deny an edit outside plannedFiles when it happens, naming scope-request, instead of at complete; complete stays the authority.' });
-export function workerHarnessPlan(input: { cliPath: string; branch: string; baseBranch: string; credentialHome: string; key?: string; epoch?: number }): HarnessPlan {
+export function workerHarnessPlan(input: { cliPath: string; branch: string; baseBranch: string; credentialHome: string; key?: string; epoch?: number; mergeWriter?: MergerMode }): HarnessPlan {
   const cli = `node ${input.cliPath}`;
   const allow: HarnessRule[] = [
     ...['status', 'sync', 'restore-branch', 'complete', 'blocked', 'heartbeat', 'events', 'diagnose'].map(command => ({ rule: `Bash(${cli} ${command}:*)`, why: `The worker's own ${command} command on its claimed item; the server checks the lease epoch.` })),
@@ -477,7 +480,8 @@ export function workerHarnessPlan(input: { cliPath: string; branch: string; base
     { rule: `Read(//${input.credentialHome}/**)`, why: 'Credentials are used through the CLI, never read into a transcript.' },
     { rule: 'Read(**/*.token)', why: 'Token files are never read into a session transcript.' },
   ];
-  const hooks = input.key && input.epoch ? [scopeGuardHook(input.cliPath, input.key, input.epoch)] : [];
+  // GY-1528: under the control-plane merger nothing is refused on plannedFiles, so no scope guard is installed.
+  const hooks = input.key && input.epoch && input.mergeWriter !== 'control-plane' ? [scopeGuardHook(input.cliPath, input.key, input.epoch)] : [];
   return { harness: 'claude', file: '.claude/settings.local.json', allow, deny, manual: null, ...(hooks.length ? { hooks } : {}), note: 'Worker rules for one assigned worktree: its own commands and its own branch. A harness rule is a prompt policy; branch protection, leases and the merge gate remain the enforcement.' };
 }
 /**
@@ -537,7 +541,7 @@ export function unrunnableRemedies(work: Work[], input: { cliPath: string; baseB
   });
 }
 /** Install the worker rules in a freshly prepared worktree, only where Git already ignores them. */
-export async function installWorkerHarness(config: MasterConfig, profile: WorkerProfile, key: string, prepared: PreparedWorker) {
+export async function installWorkerHarness(config: MasterConfig, profile: WorkerProfile, key: string, prepared: PreparedWorker, mergeWriter: MergerMode = 'github') {
   // GY-857: a profile whose own settings would turn its runtime's write confinement off is
   // refused here, at the launch, whatever its kind — the worker never starts able to write
   // outside its assigned worktree.
@@ -546,7 +550,7 @@ export async function installWorkerHarness(config: MasterConfig, profile: Worker
   if (profile.kind !== 'claude') return { applied: false, reason: `No generated worker rules for ${profile.kind}` };
   try { await defaultChildRun('git', ['check-ignore', '--quiet', '--', '.claude/settings.local.json'], { cwd: prepared.path }); }
   catch { return { applied: false, reason: 'The worktree does not ignore .claude/settings.local.json, so no rules were written into it' }; }
-  const plan = workerHarnessPlan({ cliPath: config.cliPath, branch: `graphyard/${key.toLowerCase()}-${prepared.epoch}`, baseBranch: config.baseBranch, credentialHome: dirname(dirname(config.credentialFile)), key, epoch: prepared.epoch });
+  const plan = workerHarnessPlan({ cliPath: config.cliPath, branch: `graphyard/${key.toLowerCase()}-${prepared.epoch}`, baseBranch: config.baseBranch, credentialHome: dirname(dirname(config.credentialFile)), key, epoch: prepared.epoch, mergeWriter });
   const written = await writeHarnessPermissions(prepared.path, plan, true);
   return { applied: written.applied, reason: null, added: written.added.length };
 }

@@ -11,7 +11,7 @@ CLI `src/cli/`, routes `src/server/routes/`, rules `src/model/`, tables `src/sto
 npm ci && npm run build && npm test
 ```
 
-`npm test` hides `GRAPHYARD_*`/`HERDR_*`; worktrees need [bubblewrap](install.md#preconditions). CI's `test` aggregates shards balanced by `tests/helpers/timing-baseline.json` (top-level `tests/*.test.ts`); PRs run affected tests (`scripts/ci-tests.mjs`); long suites run on [release candidates](delivery.md#pre-merge-gate-and-release-candidate-validation). Trusted CI runs only protected source: land a harness and `scripts/contracts.mjs` entry before requiring its proof.
+`npm test` hides `GRAPHYARD_*`/`HERDR_*`; worktrees need [bubblewrap](install.md#preconditions). CI's `test` aggregates shards balanced by `tests/helpers/timing-baseline.json` (top-level `tests/*.test.ts`); PRs run affected tests (`scripts/ci-tests.mjs`); long suites run on [release candidates](delivery.md#pre-merge-gate-and-release-candidate-validation). Trusted CI runs only protected source: land a harness and `scripts/contracts.mjs` entry before requiring its proof. Control-plane mode switches off plannedFiles refusals, sync restore, the scope hook, producer sessions, budget-test blockers (advisory after merge) and normal-risk rework approvers.
 
 ### Verification maps
 

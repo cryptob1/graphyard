@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import type pg from 'pg';
 import { z } from 'zod';
 import { demand, type Principal, type Work } from '../model.js';
-import { foldMergeLedger, mergeLedgerKinds, type MergeLedgerState } from '../model/merge-ledger.js';
+import { foldMergeLedger, mergeLedgerKinds, mergeTrialKind, type MergeLedgerState } from '../model/merge-ledger.js';
 import { settleDelivered } from '../model/actions.js';
 import { deliverSplitParent } from '../decomposition.js';
 import { reconciliationRefusalPrefix, unauthorizedMergeViolation } from '../merge-queue.js';
@@ -17,7 +17,7 @@ import type { Services } from './routes.js';
 /**
  * GY-1524. The merge writer's ledger, written by the loop's coordinator identity through
  * `POST /api/work/:id/merge-record`: one event per step of a merge (model/merge-ledger.ts) —
- * `intent`, `trial` (the executor's own record, which the fold ignores), `pushed`, `reconciled` and
+ * `intent`, `trial` (the executor's own record, whose proof counts the fold keeps beside the state, GY-1528), `pushed`, `reconciled` and
  * `refused`. Every record re-folds the item's ledger into `work.mergeLedger`, which the gates read
  * where they read GitHub's checks and mergeability for a control-plane observation (GY-1523), and
  * saves the item. A `reconciled` delivers the item exactly as a direct merge does (direct-merge.ts
@@ -79,7 +79,8 @@ function gitRunner(engine: Engine): GitRunner {
 
 /** The item's ledger, folded from its own rows; a refusal no intent opened (a conflicting merge has no commit to intend) stands as the state alone. */
 async function foldItemLedger(db: pg.PoolClient, work: Work, data: MergeRecordBody): Promise<MergeLedgerState | null> {
-  const kinds = Object.values(mergeLedgerKinds);
+  // The executor's trial rows fold too (GY-1528): their proof counts are what control-plane acceptance reads.
+  const kinds = [...Object.values(mergeLedgerKinds), mergeTrialKind];
   const rows = (await db.query(`SELECT kind, payload FROM events WHERE work_id=$1 AND kind = ANY($2::text[]) ORDER BY seq`, [work.id, kinds])).rows as { kind: string; payload: unknown }[];
   const folded = foldMergeLedger(rows.map(row => ({ kind: row.kind, payload: row.payload, work: work.key })))[work.key];
   if (folded) return folded;

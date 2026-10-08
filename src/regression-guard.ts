@@ -244,8 +244,12 @@ export function landingRegressions(work: Pick<Work, 'plannedFiles'> & { id?: str
 /**
  * Build-gate reasons for the observed candidate. An observation that never compared the diff
  * against the base branch tip proves nothing about scope and is refused until a fresh one does.
+ * The control plane's own observation (GY-1523) is refused nothing on plannedFiles (GY-1528): the
+ * merge writer's trial on the exact merge commit is the gate, and `landingRegressions` still
+ * reports what landing would revert for status.
  */
-export function regressionRefusals(work: Pick<Work, 'key' | 'plannedFiles'> & { id?: string }, observation: Pick<Observation, 'scopeFiles' | 'landing'>, all: Work[], generated: readonly string[] = generatedFiles): string[] {
+export function regressionRefusals(work: Pick<Work, 'key' | 'plannedFiles'> & { id?: string }, observation: Pick<Observation, 'scopeFiles' | 'landing'> & { source?: 'control-plane' }, all: Work[], generated: readonly string[] = generatedFiles): string[] {
+  if (observation.source === 'control-plane') return [];
   if (!observation.scopeFiles) return ['Candidate diff has not been compared against the base branch tip; a fresh GitHub observation is required'];
   const refused = classifyScope(work.plannedFiles ?? [], observation.scopeFiles, generated).filter(finding => finding.refused);
   // The same judgement where the candidate would land: the base it is bound to is held while its

@@ -9,6 +9,7 @@ import { withdrawDecision } from './decision-refusal.js';
 import { laneApprover, mergeWriterApprover, mergeWriterTrialGround, reworkGround, trialFailedGround } from '../model/rework-ground.js';
 import type { Services } from './routes.js';
 import { pastReviewCap } from '../review-cap.js';
+import { riskOf } from '../model/risk-class.js';
 
 // A rework on a low- or medium-lane item needs no approver decision (GY-883 AC-2): the risk lane
 // approves and applies it. So does one on any lane whose ground the record shows (GY-1394,
@@ -21,8 +22,18 @@ import { pastReviewCap } from '../review-cap.js';
 
 // The ledger's approver of a rework its lane (GY-883) or its recorded ground (GY-1394) applied without an approver decision.
 export { laneApprover, mergeWriterApprover } from '../model/rework-ground.js';
-/** The control plane's own approvers (GY-883, GY-1524): a rework they approved is applied at once and resumed at once. */
-export const selfApprover = (id: string | null | undefined) => id === laneApprover || id === mergeWriterApprover;
+/** The ledger's approver of a rework on a normal-risk control-plane item (GY-1528): the risk class applies it. */
+export const riskClassApprover = 'graphyard-risk-class';
+/** The control plane's own approvers (GY-883, GY-1524, GY-1528): a rework they approved is applied at once and resumed at once. */
+export const selfApprover = (id: string | null | undefined) => id === laneApprover || id === mergeWriterApprover || id === riskClassApprover;
+/**
+ * GY-1528. Whether a rework waits for an approver decision: on a control-plane candidate by its
+ * risk class alone (a sensitive change keeps the approver, a normal one needs none), otherwise by
+ * its lane as before (`reworkNeedsApprover`).
+ */
+export function reworkWaitsForApprover(work: Work): boolean {
+  return work.observation?.source === 'control-plane' ? riskOf(work).risk === 'sensitive' : reworkNeedsApprover(work);
+}
 
 /**
  * A decision approved whose application recorded no outcome (GY-1300): neither decision.applied,
@@ -95,13 +106,16 @@ export async function applyLaneRework(services: Services, requested: DecisionRec
     // A high-lane rework still applies at once when the record itself is its ground (GY-1394); the
     // ground is recorded in any lane, and the intervention fold reads it.
     const lane = itemLane(work!), ground = reworkGround(work!, history);
-    if (reworkNeedsApprover(work!) && !ground) return decision;
+    const byRisk = work!.observation?.source === 'control-plane', waits = reworkWaitsForApprover(work!);
+    if (waits && !ground) return decision;
     // GY-1524: the merge writer's own failed trial of the head is the ground, and the writer is the
     // approver, in every lane: it trial-merged, built and tested exactly this candidate itself.
     const trial = trialFailedGround(work!);
     const reason = trial ? `${trial}, so the merge writer is the rework's approver and no approver decision is needed (GY-1524)`
-      : ground && reworkNeedsApprover(work!) ? `${ground}, so the record is the rework's ground and no approver decision is needed (GY-1394)` : `the ${lane} risk lane applies a rework without an approver decision (GY-883)${ground ? `; the record shows its ground: ${ground}` : ''}`;
-    const approver = trial ? { id: mergeWriterApprover, role: 'merge-writer' } : { id: laneApprover, role: 'risk-lane' };
+      : ground && waits ? `${ground}, so the record is the rework's ground and no approver decision is needed (GY-1394)`
+      : byRisk ? `a normal-risk change under the control-plane merger is reworked without an approver decision (GY-1528)${ground ? `; the record shows its ground: ${ground}` : ''}`
+      : `the ${lane} risk lane applies a rework without an approver decision (GY-883)${ground ? `; the record shows its ground: ${ground}` : ''}`;
+    const approver = trial ? { id: mergeWriterApprover, role: 'merge-writer' } : byRisk && !(ground && waits) ? { id: riskClassApprover, role: 'risk-class' } : { id: laneApprover, role: 'risk-lane' };
     await record(db, work!, approver.id, 'decision.approved', { id: decision.id, action: decision.action, reason, requestedBy: decision.requestedBy, approver, lane, ...(ground ? { ground } : {}), ...(trial ? { groundKind: mergeWriterTrialGround } : {}) });
     return (await readDecisions(db, work!)).find(entry => entry.id === requested.id)!;
   });

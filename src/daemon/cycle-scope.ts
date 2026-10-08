@@ -84,8 +84,20 @@ export async function automaticScopeGrounds(item: Work, request: ScopeRequestSta
 }
 
 /** Step 2: decide the open scope requests, and measure the decision budget over what is still waiting. */
+/**
+ * GY-1528. Whether the recorded merger is `control-plane`, read as the merge writer step reads it.
+ * Nothing is refused on plannedFiles then, so the loop raises, decides and widens no scope request
+ * and re-plans nothing. No merge writer reads, or a read that fails, keeps GitHub's behaviour.
+ */
+export async function controlPlaneMerger(cycle: Pick<Cycle, 'effects'>): Promise<boolean> {
+  const reads = cycle.effects.mergeWriter;
+  if (!reads) return false;
+  try { return (await reads.merger()) === 'control-plane'; } catch { return false; }
+}
+
 export async function scopeStep(cycle: Cycle) {
   const { state, effects, now, clock, performed, isolate, open } = cycle;
+  if (await controlPlaneMerger(cycle)) return { settled: new Map<string, Work>(), budget: scopeBudget([], state.scope, clock) };
   // 2. Decide the open scope requests. A worker that needs a file its own criteria — or this
   //    repository's documentation rule — already imply must not wait for a master session to run
   //    a command: the control plane recomputes the decision from the item itself, and the loop
@@ -304,7 +316,7 @@ const baseSuccessors = (effects: Cycle['effects'], item: Work) => effects.baseSu
  */
 export async function successorStep(cycle: Cycle, settled: ReadonlyMap<string, Work> = new Map()) {
   const { state, effects, now, performed, isolate, open } = cycle;
-  if (!effects.baseSuccessions || !effects.replan) return;
+  if (!effects.baseSuccessions || !effects.replan || await controlPlaneMerger(cycle)) return;
   // An item the scope step revised this cycle is re-planned from that revision, never from the
   // snapshot it outdated: the stale revision would be refused, not applied (GY-1235, GY-1293).
   for (const read of open) await isolate('scope', read, read.key, async () => {

@@ -6,6 +6,8 @@ import { evidenceBindsCandidate } from './carry.js';
 import { mechanicalFailure, mechanicalVerdicts, evidenceProves, attestedProof } from './mechanical-proofs.js';
 import { regressionRefusals } from '../regression-guard.js';
 import { itemLane, laneRequiresProof } from './policy.js';
+import { riskOf } from './risk-class.js';
+import type {} from './merge-ledger.js'; // Work.mergeLedger
 
 /**
  * GY-878. One landability verdict. `evaluateLandability` is the single authority on whether a
@@ -53,8 +55,9 @@ function buildFamily(work: Work, all: Work[], now: Date): LandabilityReason[] {
   const candidate = work.candidate, obs = work.observation;
   const current = !!candidate && !!obs && obs.candidate.sha === candidate.sha && obs.candidate.baseSha === candidate.baseSha;
   const conflict = baseRefreshConflict(work);
-  // Mechanical verification precedes review (GY-115).
-  const mechanical = current && work.submission && !work.reworkRequested
+  // Mechanical verification precedes review (GY-115). It is producer evidence, which a
+  // control-plane candidate ignores (GY-1528): the merge writer's trial judges its tests.
+  const mechanical = current && work.submission && !work.reworkRequested && !controlPlaneObserved(work)
     ? mechanicalVerdicts(work, all, now).filter(verdict => verdict.outcome === 'failed').map(verdict => mechanicalFailure(verdict, candidate!.sha)) : [];
   const regressions = current ? regressionRefusals(work, obs!, all) : [];
   const reasons: LandabilityReason[] = [
@@ -67,8 +70,51 @@ function buildFamily(work: Work, all: Work[], now: Date): LandabilityReason[] {
   return reasons;
 }
 
+/** Whether the candidate is the control plane's own observation (GY-1523): the retired gates are off for it (GY-1528). */
+export const controlPlaneObserved = (work: Pick<Work, 'observation'>) => work.observation?.source === 'control-plane';
+
+/**
+ * GY-1528. The acceptance family of a control-plane candidate. The merge writer's trial is the
+ * judge of the tests, not a producer: each criterion's `unit:`/`integration:` proof needs
+ * executed > 0 and failed = 0 in `work.mergeLedger.trial.proofs` for the current head; a `manual:`
+ * attestation is required only of a sensitive change (`riskOf`); an `e2e:` proof is deferred to
+ * release validation; and producer evidence is ignored, so no independence refusal is read.
+ */
+function controlPlaneAcceptance(work: Work, all: Work[], now: Date): (LandabilityReason & { proof?: string })[] {
+  const head = work.candidate?.sha.toLowerCase() ?? null, trial = work.mergeLedger?.trial ?? null;
+  const tried = !!head && trial?.head.toLowerCase() === head ? trial : null;
+  const sensitive = riskOf(work).risk === 'sensitive';
+  const refusal = (proof: string): string | null => {
+    const family = proof.slice(0, Math.max(0, proof.indexOf(':')));
+    if (family === 'unit' || family === 'integration') {
+      const counts = tried?.proofs[proof];
+      if (counts && counts.executed > 0 && counts.failed === 0) return null;
+      const seen = !head ? 'there is no candidate' : !tried ? `the merge writer has not trialled ${head.slice(0, 12)}` : !counts ? 'the trial counted none of its cases' : `the trial ran ${counts.executed} and ${counts.failed} failed`;
+      return `${proof} needs executed > 0 and failed = 0 in the merge writer's trial of this candidate; ${seen}`;
+    }
+    if (family === 'manual') {
+      if (!sensitive) return null;
+      const evidence = currentEvidence(work, proof, now);
+      return evidence && evidenceProves(proof, evidence) ? null : `${proof} needs a trusted passing attestation for this candidate and policy, since the change is sensitive`;
+    }
+    // `e2e:` runs in release validation; any other family was a producer's, whose evidence this mode ignores.
+    return null;
+  };
+  const reasons: (LandabilityReason & { proof?: string })[] = [];
+  for (const ac of work.criteria.filter(criterion => !criterion.bootstrap)) for (const proof of ac.proofs) {
+    const reason = refusal(proof);
+    if (reason) reasons.push({ gate: 'acceptance', reason: `${ac.id}: ${reason}`, proof });
+  }
+  for (const obligation of inheritedObligations(work, all)) {
+    const reason = refusal(obligation.proof);
+    if (reason) reasons.push({ gate: 'acceptance', reason: `Bootstrap obligation inherited from ${obligation.key} ${obligation.criterionId}: ${reason}`, proof: obligation.proof });
+  }
+  return reasons;
+}
+
 /** The acceptance family: exactly the acceptance gate's refusals, each tagged with the proof it demands. */
 function acceptanceFamily(work: Work, all: Work[], now: Date): (LandabilityReason & { proof?: string })[] {
+  if (controlPlaneObserved(work)) return controlPlaneAcceptance(work, all, now);
   // GY-895: the pass rule is per family — a manual: proof is judged as an attestation, so its
   // trusted pass proves it whatever it executed, while every other proof keeps the title-count rule.
   const unproven = (proof: string) => {
@@ -132,7 +178,8 @@ export function evaluateLandability(work: Work, all: Work[], now: Date): Landabi
   const judged = !!candidate && !!obs && obs.candidate.sha === candidate.sha && obs.candidate.baseSha === candidate.baseSha
     && !!work.submission && !work.reworkRequested;
   const tagged = acceptanceFamily(work, all, now);
-  const stray = strayProofFailure(work, all, now, tagged, judged);
+  // A producer's judged failure is producer evidence, which a control-plane candidate ignores (GY-1528).
+  const stray = controlPlaneObserved(work) ? null : strayProofFailure(work, all, now, tagged, judged);
   if (stray) build.push(stray);
   const reasons = [...build, ...tagged.map(({ proof: _proof, ...entry }) => entry)];
   const audit = { version: LANDABILITY_VERSION, inputs: inputsOf(work) };

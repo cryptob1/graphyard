@@ -450,7 +450,7 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
     const args = grantWorkerPaths(launch.kind, launch.args, writable, prepared.path);
     // The worker's own rules go into its worktree before the session starts, so pushing its
     // branch and opening its pull request never wait on a keypress. A failure is reported, not fatal.
-    const harness = await installWorkerHarness(config, { ...profile, kind: launch.kind as WorkerProfile['kind'] }, work.key, prepared).catch(error => ({ applied: false, reason: error instanceof Error ? error.message : 'Worker rules could not be written' }));
+    const harness = await installWorkerHarness(config, { ...profile, kind: launch.kind as WorkerProfile['kind'] }, work.key, prepared, mergeWriter).catch(error => ({ applied: false, reason: error instanceof Error ? error.message : 'Worker rules could not be written' }));
     const memory = await readProjectMemory(root).catch(() => null);
     // A mechanical-fix round (GY-971) is told exactly which findings its one commit fixes.
     const mechanical = await mechanicalRound(root, config, work);
@@ -458,7 +458,7 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
     const maps = await verificationMaps(root, config.baseBranch).catch(() => []);
     const prompt = workerPrompt(config, work, profile, prepared.epoch, prepared.dependencies ?? null, memory, prepared.base, mechanical, maps);
     // The worker loads its own role rules, never the master's: it may push its assigned branch.
-    const sessionHarness = await prepareSessionHarness(root, config, { role: 'worker', kind: launch.kind, profile: profile.name, branch: prepared.branch ?? `graphyard/${work.key.toLowerCase()}-${prepared.epoch}`, key: work.key, epoch: prepared.epoch, credentialFiles: [profile.credentialFile!] });
+    const sessionHarness = await prepareSessionHarness(root, config, { role: 'worker', kind: launch.kind, profile: profile.name, branch: prepared.branch ?? `graphyard/${work.key.toLowerCase()}-${prepared.epoch}`, key: work.key, epoch: prepared.epoch, mergeWriter, credentialFiles: [profile.credentialFile!] });
     let pane: string | undefined, tabId: string | undefined, sandbox: ReturnType<typeof verifyWorkerSandbox> | null = null, ran = false;
     try {
       // Minted before anything starts: a launch that cannot get one is refused and its claim

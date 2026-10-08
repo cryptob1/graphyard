@@ -705,6 +705,8 @@
     "tests/role-scoped-instructions.test.ts": 2000,
     "tests/review-ledger-lock.test.ts": 2000,
     "tests/cli-item-lookup.test.ts": 2000,
-    "tests/zero-touch-control-plane.test.ts": 4000
+    "tests/zero-touch-control-plane.test.ts": 4000,
+    "tests/control-plane-switches.test.ts": 1500,
+    "tests/mode-parity.test.ts": 300
   }
 }

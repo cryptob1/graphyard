@@ -10,7 +10,9 @@
 //                                                         the long suites only release-candidate validation runs
 //   node scripts/ci-tests.mjs shards [N]                  the balanced shards of the full suite
 //   node scripts/ci-tests.mjs affected FILE...            the selection for changed FILEs: `mode: reason`, then
-//                                                         the pre-merge files it runs, one per line (every one when full)
+//                                                         the pre-merge files it runs, one per line (every one when full),
+//                                                         never the advisory budget tests (`advisoryTests`)
+//   node scripts/ci-tests.mjs advisory                     the advisory budget tests, in the `affected` shape
 //   node scripts/ci-tests.mjs durations RECORD.jsonl...   write measured per-file durations into the baseline
 //
 // The dependency map is built from the source itself: every relative import, and every path a file
@@ -51,6 +53,15 @@ export const releaseCandidateTests = {
   ...Object.fromEntries(listTestFiles().filter(file => soakSuite.test(file)).map(file => [file, 'soak'])),
   ...Object.fromEntries(timingBudgetTests.map(file => [file, 'timing-budget'])),
 };
+
+/**
+ * The budget tests that are advisory under the control-plane merger (GY-1528): a document or module
+ * outgrowing its budget is a chore, never a reason to refuse or revert a merge. The merge writer's
+ * trial (`affected`) leaves them out, and the loop runs them once after each merge, filing one chore
+ * item per failing file naming it and the merge commit. GitHub's CI selection (`select`) still runs them.
+ */
+export const advisoryTests = ['tests/docs-budget.test.ts', 'tests/docs-budget-headroom.test.ts', 'tests/module-budgets.test.ts', 'tests/hotspots.test.ts', 'tests/interventions-hotspot-split.test.ts'];
+export const isAdvisoryTest = file => advisoryTests.includes(file);
 
 /** The test files the required `test` check runs: every file except the release-candidate suites. */
 export function preMergeTestFiles(root = repositoryRoot) {
@@ -273,9 +284,14 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     shards.forEach((shard, at) => console.log(`shard ${at + 1}: ${shard.files.length} files, ${Math.round(shard.durationMs / 1000)}s recorded`));
     console.log(`imbalance ${(shardImbalance(shards) * 100).toFixed(1)}%`);
   } else if (command === 'affected') {
-    const selection = selectAffected(args, dependencyMap(), preMergeTestFiles());
+    // The trials' selection (the shadow gate's and the merge writer's) never runs the advisory budget tests (GY-1528).
+    const selection = selectAffected(args, dependencyMap(), preMergeTestFiles().filter(file => !isAdvisoryTest(file)));
     // The files follow in both modes, so a caller (the shadow gate's trial) runs exactly the pre-merge selection and never the release-candidate suites.
     console.log(`${selection.mode}: ${selection.reason}`); if (selection.files.length) console.log(selection.files.join('\n'));
+  } else if (command === 'advisory') {
+    // The advisory budget tests the loop runs once after each control-plane merge (GY-1528), in the `affected` output's shape.
+    const files = advisoryTests.filter(file => tests.includes(file));
+    console.log(`advisory: ${files.length} advisory budget test file(s)`); if (files.length) console.log(files.join('\n'));
   } else if (command === 'durations') {
     if (!args.length) throw new Error('Usage: ci-tests durations RECORD.jsonl...');
     const file = join(repositoryRoot, baselinePath);
@@ -283,6 +299,6 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     writeFileSync(file, `${JSON.stringify(merged, null, 2)}\n`);
     console.log(`Recorded durations for ${Object.keys(merged.files).length} of ${tests.length} test files in ${relative(process.cwd(), file)}`);
   } else {
-    throw new Error('Usage: ci-tests select [--out FILE] | release-candidate [--suite soak|timing-budget] [--out FILE] | shards [N] | affected FILE... | durations RECORD.jsonl...');
+    throw new Error('Usage: ci-tests select [--out FILE] | release-candidate [--suite soak|timing-budget] [--out FILE] | shards [N] | affected FILE... | advisory | durations RECORD.jsonl...');
   }
 }
