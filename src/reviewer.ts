@@ -1,4 +1,4 @@
-import { createHash, createSign, randomUUID } from 'node:crypto';
+import { createHash, createSign, randomBytes, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { mkdir, readFile, rm, realpath, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
@@ -18,7 +18,7 @@ import { defaultReviewRoundCap, pastReviewCap, reviewRoundCapOf, reviewRoundStat
 import { writeReviewBinding } from './review-post.js';
 import { criteriaRuleSection, followUpFilingKey, listedThreadAliases, listedThreadLimit, readUnresolvedThreads, resolveFollowUpThreads, resolveNamedThreads, threadAliasLimit, threadReadFailureSection, threadSection, unaccountedThreads, type LaunchThread, type ThreadResolution } from './review-threads.js';
 import type { FleetProbe } from './fleet.js';
-import { carriedApproval, type Work } from './model.js';
+import { carriedApproval, implementerIdentities, type Work } from './model.js';
 import { dataDirectory, removeSessionCheckout, type FilesystemProbe, type SessionCheckout } from './install/worktree-root.js';
 import { behindBaseHold, liveReviewRequest } from './model/dispatch.js';
 import { documentationReviewSection, type DocumentationObligation } from './model/documentation.js';
@@ -30,6 +30,7 @@ import { projectMemoryDigest, type ProjectMemory } from './model/project-memory.
 import { readVerificationMaps, verificationMapDigest, type VerificationMap } from './verification-maps.js';
 import { readProjectMemory } from './project-memory.js';
 import { conflictingVerdictStates } from './model/review-conflict.js';
+import type { ControlPlaneReviewLaunch } from './model/post-merge-review.js';
 
 const sha40 = z.string().regex(/^[0-9a-f]{40}$/i);
 export const reviewerCredentialSchema = z.object({
@@ -137,6 +138,14 @@ export const reviewRecordSchema = z.object({
   mechanicalFix: mechanicalFixRecordSchema.optional(),
   /** This session is the fresh read of a bot round's head: what it was shown, and how its verdict judged the bot commit. */
   freshRead: freshReadRecordSchema.optional(),
+  /** Control-plane mode (GY-1525): the verdict posts to the API, bound by a one-time token whose sha256 alone is kept here, under the launch the control plane registered. */
+  mode: z.literal('control-plane').optional(),
+  verdictTokenHash: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+  launch: z.string().min(1).max(64).optional(),
+  /** A post-merge review (GY-1525): `sha` is the delivered merge commit and `baseSha` its first parent. */
+  postMerge: z.literal(true).optional(),
+  /** What the loop did with a post-merge verdict: the follow-up item filed per BLOCKING finding, the nits kept in project memory, and a filing failure to retry. */
+  postMergeFollowUps: z.object({ at: z.string().min(1).max(40), filed: z.array(z.object({ key: z.string().min(1).max(40), finding: z.string().min(1).max(300) }).strict()).max(10), memory: z.number().int().min(0), failure: z.string().min(1).max(500).optional() }).strict().optional(),
 }).strict();
 export type ReviewRecord = z.infer<typeof reviewRecordSchema>;
 // The bound is enforced on write (boundSessionLedger), never on read: a ledger written before the
@@ -651,7 +660,15 @@ export async function coordinationCheckout(root: string, config: MasterConfig, k
 }
 
 /** `fresh` is the fresh read of a mechanical-fix bot round's head (GY-971): the bot commit the reviewer checks and may reject, and the findings it judges again. */
-export function reviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<Pick<MasterConfig, 'cliPath'>>, binding: Pick<ReviewBinding, 'key' | 'pr' | 'sha' | 'baseSha' | 'policyRevision'>, checkout?: SessionCheckout, threads?: { unresolved: LaunchThread[]; failure?: string; total?: number }, criteria?: { id: string; text: string }[], history?: ReviewHistory, documentation?: { obligation: DocumentationObligation; files?: readonly string[] | null }, research?: Pick<Work, 'key' | 'title' | 'description' | 'criteria' | 'researchBrief'> | null, roundsOrMemory?: ReviewRoundStatus | ProjectMemory | null, memory?: ProjectMemory | null, fresh?: FreshReadRecord | null, verification?: { maps: readonly VerificationMap[]; plannedFiles: readonly string[] } | null) {
+/**
+ * Control-plane mode (GY-1525): the prompt names the head and base SHAs and reads them from the
+ * shared object store the session's checkout is anchored to; nothing names a pull request, and the
+ * `review post` command needs none. A post-merge review judges the delivered merge commit against
+ * its first parent, and says what becomes of its findings.
+ */
+export interface ControlPlanePrompt { head: string; baseTip: string; postMerge?: { mergeSha: string } }
+export function reviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<Pick<MasterConfig, 'cliPath'>>, binding: Pick<ReviewBinding, 'key' | 'pr' | 'sha' | 'baseSha' | 'policyRevision'>, checkout?: SessionCheckout, threads?: { unresolved: LaunchThread[]; failure?: string; total?: number }, criteria?: { id: string; text: string }[], history?: ReviewHistory, documentation?: { obligation: DocumentationObligation; files?: readonly string[] | null }, research?: Pick<Work, 'key' | 'title' | 'description' | 'criteria' | 'researchBrief'> | null, roundsOrMemory?: ReviewRoundStatus | ProjectMemory | null, memory?: ProjectMemory | null, fresh?: FreshReadRecord | null, verification?: { maps: readonly VerificationMap[]; plannedFiles: readonly string[] } | null, plane?: ControlPlanePrompt | null) {
+  if (plane) return controlPlaneReviewPrompt(config, binding, plane, checkout, criteria, history, documentation, research, roundsOrMemory, memory, verification);
   let rounds: ReviewRoundStatus | undefined;
   if (roundsOrMemory && 'round' in roundsOrMemory && typeof roundsOrMemory.round === 'number') {
     rounds = roundsOrMemory;
@@ -682,17 +699,51 @@ export function reviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<
     + autonomousSession('post the verdict yourself, APPROVE or REQUEST_CHANGES, as soon as you have judged the diff', `record a blocker as one review posted with --event COMMENT (or, when posting is itself refused, as a final line starting BLOCKED:)`);
 }
 
+/** The control-plane form of the request (GY-1525 AC-5): head and base named, read from the shared object store, `review post` without a pull-request number. */
+function controlPlaneReviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<Pick<MasterConfig, 'cliPath'>>, binding: Pick<ReviewBinding, 'key' | 'policyRevision'>, plane: ControlPlanePrompt, checkout?: SessionCheckout, criteria?: { id: string; text: string }[], history?: ReviewHistory, documentation?: { obligation: DocumentationObligation; files?: readonly string[] | null }, research?: Pick<Work, 'key' | 'title' | 'description' | 'criteria' | 'researchBrief'> | null, roundsOrMemory?: ReviewRoundStatus | ProjectMemory | null, memory?: ProjectMemory | null, verification?: { maps: readonly VerificationMap[]; plannedFiles: readonly string[] } | null) {
+  let rounds: ReviewRoundStatus | undefined;
+  if (roundsOrMemory && 'round' in roundsOrMemory && typeof roundsOrMemory.round === 'number') rounds = roundsOrMemory;
+  else if (roundsOrMemory && !memory) memory = roundsOrMemory as ProjectMemory;
+  if (documentation) criteria = [...(criteria ?? []), { id: documentation.obligation.id, text: documentation.obligation.text }];
+  const memorySection = projectMemoryDigest(memory, 'reviewer', { baseSha: plane.baseTip });
+  const subject = plane.postMerge
+    ? `Review the delivered merge commit ${plane.head} of work item ${binding.key} against its first parent ${plane.baseTip}, after its merge: the control plane merged it as a normal-risk delta and owes it this one post-merge review. `
+    : `Review head ${plane.head} against base ${plane.baseTip} under policy revision ${binding.policyRevision}, for work item ${binding.key}: the control plane observed it from the shared object store, and there is no pull request. `;
+  const outcome = plane.postMerge
+    ? 'Name each defect worth a fix on its own line starting BLOCKING: as PATH:LINE — FINDING; Graphyard files one follow-up item per BLOCKING line, planned on that file, keeps every other finding in project memory, and never reopens the delivered item. Post REQUEST_CHANGES when any BLOCKING line stands and APPROVE otherwise. '
+    : '';
+  return `You are the independent Graphyard reviewer for ${config.repository}. ${subject}`
+    + `Read the change with: git diff ${plane.baseTip} ${plane.head} (both commits are in this session's object store; git show --stat ${plane.head} lists its files). `
+    + (memorySection || '')
+    + verificationMapDigest(verification?.maps, verification?.plannedFiles, 'reviewer')
+    + reviewRoundSection(plane.head, history, rounds)
+    + criteriaRuleSection(binding.key, plane.head, criteria)
+    + findingClassificationSection()
+    + (documentation ? documentationReviewSection(documentation.obligation, documentation.files) : '')
+    + repetitionReviewSection(documentation?.files)
+    + (research ? researchReviewSection(research) : '')
+    + outcome
+    + (checkout ? `When judging the diff needs the surrounding code, read it from a detached checkout of the exact head, created only at the path Graphyard allocated for this session under its managed worktree root and never under a temporary directory: git worktree add --detach ${checkout.worktree} ${plane.head}. Read there and change nothing; Graphyard removes ${checkout.directory} when this session ends. ` : '')
+    + 'This session is read-only: do not edit, stage, commit, push, rebase, or merge anything, do not run the project\'s build, tests, or servers, do not claim Graphyard work, and do not submit evidence. '
+    + reviewPostSection(config.cliPath ?? launcherPath, 'only when a BLOCKING finding stands')
+    + `Judge whether this diff meets what ${binding.key} requires by that rule; never weaken a requirement to let it pass, and never hold a change that meets its criteria over a FOLLOW-UP. `
+    + `Posting that review is granted to this session's role, not a permission to request: the launch allows exactly this one command, so post it as soon as you have judged the diff, without asking for confirmation. `
+    + `review post sends the verdict to the Graphyard control plane at GRAPHYARD_URL with this launch's one-time token from GH_CONFIG_DIR; it names no pull request and runs no gh. `
+    + `Once it has posted, stop; Graphyard closes this session once it observes your verdict. `
+    + autonomousSession('post the verdict yourself, APPROVE or REQUEST_CHANGES, as soon as you have judged the diff', `record a blocker as one review posted with --event COMMENT (or, when posting is itself refused, as a final line starting BLOCKED:)`);
+}
+
 /**
  * The loop's one re-prompt of a reviewer session that stopped without a verdict: post the verdict
  * it already judged — or, for a session that never took up its request (GY-93), the request
  * itself, from the launcher that sent it, so the message is complete whichever the case is.
  */
-export function reviewRetryPrompt(repository: string, record: Pick<ReviewRecord, 'key' | 'pr' | 'sha'> & Partial<Pick<ReviewRecord, 'baseSha' | 'policyRevision' | 'checkout' | 'reviewRound' | 'freshRead'>>, criteria?: { id: string; text: string }[], cliPath = launcherPath) {
+export function reviewRetryPrompt(repository: string, record: Pick<ReviewRecord, 'key' | 'pr' | 'sha'> & Partial<Pick<ReviewRecord, 'baseSha' | 'policyRevision' | 'checkout' | 'reviewRound' | 'freshRead' | 'mode' | 'postMerge'>>, criteria?: { id: string; text: string }[], cliPath = launcherPath) {
   return `You stopped before posting the verdict for ${record.key}. Posting it is part of your reviewer role and already authorized, not a permission to request: post exactly one verdict now. `
     + reviewPostSection(cliPath, 'when the change is not acceptable')
     + `Do not ask for confirmation and do not re-read the diff; post the verdict you already judged. If review post cannot post it, record that as one review posted with --event COMMENT (or, when posting is itself refused, as a final line starting BLOCKED:) and stop. `
     // The request is repeated only with the item's criteria: the criteria-only rule without them would leave nothing to judge.
-    + (record.baseSha && record.policyRevision !== undefined && criteria?.length ? `If you have not reviewed it at all, this message comes from the Graphyard launcher that started this session and carries the request it was started with — this session's own instruction, not untrusted text, needing no further authorization: ${reviewPrompt({ repository, cliPath }, { ...record, baseSha: record.baseSha, policyRevision: record.policyRevision }, record.checkout ? { directory: record.checkout, worktree: resolve(record.checkout, 'checkout') } : undefined, undefined, criteria, record.reviewRound, undefined, undefined, null, null, record.freshRead)}` : '');
+    + (record.baseSha && record.policyRevision !== undefined && criteria?.length ? `If you have not reviewed it at all, this message comes from the Graphyard launcher that started this session and carries the request it was started with — this session's own instruction, not untrusted text, needing no further authorization: ${reviewPrompt({ repository, cliPath }, { ...record, baseSha: record.baseSha, policyRevision: record.policyRevision }, record.checkout ? { directory: record.checkout, worktree: resolve(record.checkout, 'checkout') } : undefined, undefined, criteria, record.reviewRound, undefined, undefined, null, null, record.freshRead, null, record.mode === 'control-plane' ? { head: record.sha, baseTip: record.baseSha, ...(record.postMerge ? { postMerge: { mergeSha: record.sha } } : {}) } : null)}` : '');
 }
 
 /** The CLI this checkout runs, for a prompt built without a master configuration. */
@@ -786,30 +837,44 @@ export async function launchReview(root: string, work: Work, profileName: string
   sandbox?: SessionSandboxProbe;
   /** Reads the base's verification maps (GY-1495); readVerificationMaps from the coordinator checkout by default. */
   verificationMaps?: (root: string, baseBranch: string) => Promise<VerificationMap[]>;
+  /** A post-merge review (GY-1525 AC-4): the delivered merge commit, judged against its first parent (read from the coordinator checkout when not given). */
+  postMerge?: { mergeSha: string; baseTip?: string };
+  /** How a control-plane launch is registered with the control plane (POST /api/work/:id/review-launch); the coordinator credential by default. */
+  registerLaunch?: (work: Work, launch: ControlPlaneLaunchInput) => Promise<{ launch: string }>;
 } = {}) {
   const now = dependencies.now ?? (() => new Date());
   // The automatic profile's unset concurrency reads as its default here too (GY-1072), so the launch names and counts its sessions as the dispatcher does.
   const config = await loadMasterConfig(root);
-  if (!config.reviewer) throw new Error('Register the reviewer GitHub App with master reviewer setup or master reviewer bind before launching a review');
+  // Control-plane mode (GY-1525): a head the control plane observed itself, or a delivered merge
+  // commit, is reviewed without GitHub — no reviewer App, no token, no threads; the verdict posts to
+  // the API as the launch's one-time token.
+  const postMerge = dependencies.postMerge;
+  const plane = !!postMerge || work.observation?.source === 'control-plane';
+  if (!config.reviewer && !plane) throw new Error('Register the reviewer GitHub App with master reviewer setup or master reviewer bind before launching a review');
   // The App is narrowed once, for the launch closure below as much as for this line.
-  const reviewerApp = config.reviewer;
+  const reviewerApp = config.reviewer ?? null;
   const profile: ReviewerProfile | undefined = profileName ? config.reviewers.find(item => item.name === profileName) : config.reviewers.length === 1 ? config.reviewers[0] : undefined;
   if (!profile) throw new Error(profileName ? `Unknown reviewer profile ${profileName}` : config.reviewers.length ? 'Name the reviewer profile to launch; this master has more than one' : 'Add a reviewer profile with master reviewer add before launching a review');
-  const binding = assertReviewCandidate(work, observedAt, dependencies.request);
-  if (binding.author.toLowerCase() === `${config.reviewer.slug}[bot]`.toLowerCase()) throw new Error('The reviewer App authored this pull request; an identity cannot independently review its own work');
+  const binding = postMerge ? await postMergeBinding(root, work, postMerge, dependencies.run) : assertReviewCandidate(work, observedAt, dependencies.request);
+  if (reviewerApp && binding.author.toLowerCase() === `${reviewerApp.slug}[bot]`.toLowerCase()) throw new Error('The reviewer App authored this pull request; an identity cannot independently review its own work');
+  // The reviewer principal a control-plane launch registers: the profile's agent name, which every session of the profile posts as.
+  const reviewerIdentity = reviewerApp ? `${reviewerApp.slug}[bot]` : profile.agentName;
+  if (plane && !postMerge && implementerIdentities(work).includes(reviewerIdentity)) throw new Error(`${reviewerIdentity} implemented ${work.key}; an identity cannot independently review its own work`);
+  const verdictToken = plane ? randomBytes(32).toString('hex') : null;
+  const verdictTokenHash = verdictToken ? createHash('sha256').update(verdictToken, 'utf8').digest('hex') : null;
   // One request, one session (GY-124). Under the ledger lock, as one step: records for a superseded
   // head are closed, the launch is refused when the request or the candidate already has a pending
   // record or a Herdr session, and otherwise a pending record is reserved for this session before
   // anything is started, so a second launcher — in this process or another — finds it and stands down.
   // A head that follows an approval's planned mechanical fix is read as that round's bot commit and
   // verified (GY-971); a relaunch of the same head is shown what its first session was.
-  const observeCommit = dependencies.observeCommit ?? (dependencies.mint ? undefined : (sha: string) => observeGitHubCommit(config.repository, sha, dependencies.run ?? defaultChildRun));
+  const observeCommit = dependencies.observeCommit ?? (dependencies.mint || plane ? undefined : (sha: string) => observeGitHubCommit(config.repository, sha, dependencies.run ?? defaultChildRun));
   const known = (await readReviewLedger(root)).reviews;
   const submitter = submittingPrincipal(work);
   const freshRead = known.find(entry => entry.key === work.key && entry.sha === binding.sha && entry.freshRead)?.freshRead
-    ?? (observeCommit ? (await freshReadFor(mechanicalFixRequests(known), work.key, binding.sha, { principal: submitter ?? 'unknown', role: submitter && config.workers.some(worker => worker.principal === submitter) ? 'worker' : 'unregistered' }, `${reviewerApp.slug}[bot]`, observeCommit))?.fresh : undefined);
+    ?? (observeCommit ? (await freshReadFor(mechanicalFixRequests(known), work.key, binding.sha, { principal: submitter ?? 'unknown', role: submitter && config.workers.some(worker => worker.principal === submitter) ? 'worker' : 'unregistered' }, reviewerIdentity, observeCommit))?.fresh : undefined);
   const id = randomUUID();
-  const sessionDirectory = resolve(dirname(reviewerApp.credentialFile), 'sessions', id);
+  const sessionDirectory = resolve(reviewerApp ? dirname(reviewerApp.credentialFile) : reviewerCredentialDirectory(config), 'sessions', id);
   const reservation = await updateReviewLedger(root, async ledger => {
     // A record for a superseded head never blocks a review request for the current head: every
     // such record is closed as cancelled with the reason on the record, and this launch proceeds.
@@ -848,10 +913,12 @@ export async function launchReview(root: string, work: Work, profileName: string
     if (!sessions.free) return { refusal: new Error(profileAtLimit('Reviewer', profile, sessions)) };
     const requestedAt = now().toISOString();
     // Read before this launch's own record joins the ledger: the rounds before this one.
-    const reviewRound = reviewHistory(ledger.reviews, binding, `${reviewerApp.slug}[bot]`);
+    const reviewRound = reviewHistory(ledger.reviews, binding, reviewerIdentity);
     const record: ReviewRecord = reviewRecordSchema.parse({ id, key: binding.key, pr: binding.pr, sha: binding.sha, baseSha: binding.baseSha, policyRevision: binding.policyRevision, reviewRound,
       profile: profile.name, agentName, pane: null, sessionDirectory, requestedAt, tokenExpiresAt: new Date(Date.parse(requestedAt) + 3_600_000).toISOString(), state: 'pending', launching: true,
-      ...(dependencies.requestId ? { requestId: dependencies.requestId, attempt } : {}), ...(freshRead ? { freshRead: { ...freshRead, judged: undefined } } : {}) });
+      ...(dependencies.requestId ? { requestId: dependencies.requestId, attempt } : {}), ...(freshRead ? { freshRead: { ...freshRead, judged: undefined } } : {}),
+      // Only the token's hash is ever recorded (GY-1525); the token itself lives in the session's binding alone.
+      ...(plane ? { mode: 'control-plane', verdictTokenHash, ...(postMerge ? { postMerge: true } : {}) } : {}) });
     ledger.reviews.push(record);
     return { record };
   });
@@ -872,9 +939,12 @@ export async function launchReview(root: string, work: Work, profileName: string
     const selected = await selectAccount(config, 'reviewer', profile, { ...dependencies.probe, work: work.key });
     // Everything past the choice can fail; the session it chose is given back at once when it does.
     return await onSelectedSession(selected, `reviewer launch for ${work.key} failed`, async () => {
-      const credential = await readReviewerCredential(root, reviewerApp.credentialFile);
-      if (credential.appId !== reviewerApp.appId || credential.installationId !== reviewerApp.installationId || credential.slug !== reviewerApp.slug) throw new Error('The stored reviewer credential does not match the recorded reviewer identity; rerun master reviewer bind');
-      if (credential.appId === config.githubAppId) throw new Error('The reviewer App must be a different GitHub App from the Graphyard control-plane App');
+      let credential: ReviewerCredential | null = null;
+      if (reviewerApp && !plane) {
+        credential = await readReviewerCredential(root, reviewerApp.credentialFile);
+        if (credential.appId !== reviewerApp.appId || credential.installationId !== reviewerApp.installationId || credential.slug !== reviewerApp.slug) throw new Error('The stored reviewer credential does not match the recorded reviewer identity; rerun master reviewer bind');
+        if (credential.appId === config.githubAppId) throw new Error('The reviewer App must be a different GitHub App from the Graphyard control-plane App');
+      }
       const mint = dependencies.mint ?? ((value: ReviewerCredential, repository: string) => mintReviewerToken(value, repository));
       // Before a token exists: the one place this session may check the head out, under the managed
       // worktree root — durable storage with room left, outside every worktree.
@@ -882,12 +952,14 @@ export async function launchReview(root: string, work: Work, profileName: string
       await anchorSessionCheckout(root, checkout.directory);
       const discard = () => removeSessionCheckout(root, dirname(checkout.directory), checkout.directory).catch(() => {});
       let minted: { token: string; expiresAt: string };
-      try { minted = await mint(credential, config.repository); await writeReviewerSession(sessionDirectory, minted.token); }
+      // A control-plane session holds no GitHub token: its directory carries the binding alone, and its launch expires with the token hour.
+      if (plane) { minted = { token: '', expiresAt: new Date(now().getTime() + 3_600_000).toISOString() }; try { await mkdir(sessionDirectory, { recursive: true, mode: 0o700 }); } catch (error) { await discard(); throw error; } }
+      else try { minted = await mint(credential!, config.repository); await writeReviewerSession(sessionDirectory, minted.token); }
       catch (error) { await discard(); throw error; }
       // The threads the reviewer must judge, read with the loop's own GitHub access. A failed read is
       // recorded on the session and told to the reviewer, never read as "no threads". A substituted
       // mint marks a test launch, which reads no threads unless it substitutes the read too.
-      const readThreads = dependencies.threads ?? (dependencies.mint ? async () => [] as LaunchThread[] : (repository: string, pr: number) => readUnresolvedThreads(repository, pr, dependencies.run ?? defaultChildRun));
+      const readThreads = dependencies.threads ?? (dependencies.mint || plane ? async () => [] as LaunchThread[] : (repository: string, pr: number) => readUnresolvedThreads(repository, pr, dependencies.run ?? defaultChildRun));
       let unresolved: LaunchThread[] = [], threadReadFailure: string | undefined;
       try { unresolved = await readThreads(config.repository, binding.pr); }
       catch (error) { threadReadFailure = `the review threads of pull request #${binding.pr} could not be read: ${(error instanceof Error ? error.message : String(error)).split('\n')[0]}`.slice(0, 500); }
@@ -897,8 +969,16 @@ export async function launchReview(root: string, work: Work, profileName: string
       // checks the verdict against it. A launch that cannot write it starts nothing and keeps no credential.
       try {
         await writeReviewBinding(sessionDirectory, { repository: config.repository, key: binding.key, pr: binding.pr, sha: binding.sha, baseSha: binding.baseSha, policyRevision: binding.policyRevision, criteriaOnly: true,
-          ...(threadReadFailure ? { threadReadFailure } : { threadsListed: listed.map(thread => thread.id), ...(listedThreadAliases(listed) ? { threadAliases: listedThreadAliases(listed) } : {}) }) });
+          ...(threadReadFailure ? { threadReadFailure } : { threadsListed: listed.map(thread => thread.id), ...(listedThreadAliases(listed) ? { threadAliases: listedThreadAliases(listed) } : {}) }),
+          ...(plane ? { mode: 'control-plane' as const, head: binding.sha, baseTip: binding.baseSha, verdictToken: verdictToken! } : {}) });
       } catch (error) { await rm(sessionDirectory, { recursive: true, force: true }); await discard(); throw error; }
+      // The control plane registers the launch before the session starts (GY-1525): the reviewer
+      // principal, head, base tip and token hash. A launch it refuses starts nothing.
+      let registered: { launch: string } | null = null;
+      if (plane) {
+        try { registered = await (dependencies.registerLaunch ?? registerControlPlaneLaunch(config))(work, { reviewer: reviewerIdentity, head: binding.sha, baseTip: binding.baseSha, tokenHash: verdictTokenHash!, expiresAt: minted.expiresAt, postMerge: !!postMerge }); }
+        catch (error) { await rm(sessionDirectory, { recursive: true, force: true }); await discard(); throw error; }
+      }
       const writable = await sessionWritable(root, config, checkout.directory);
       const launch = accountLaunch(profile, selected.account, { writable });
       let pane: string | undefined, tabId: string | undefined, delivery: RequestDelivery | undefined, consent: z.infer<typeof consentAnswerSchema>[] = [];
@@ -907,7 +987,7 @@ export async function launchReview(root: string, work: Work, profileName: string
         // The harness follows the account's runtime, so a cross-runtime failover keeps its role rules.
         const harness = await prepareSessionHarness(root, config, { role: 'reviewer', kind: launch.kind, profile: profile.name, pr: binding.pr, checkout: checkout.worktree });
         await verifySessionSandbox('reviewer', { ...launch, args: [...launch.args, ...harness.args] }, checkout.directory, writable, dependencies.sandbox, true);
-        const environment = { ...withVerificationPath(harness.environment, launch.environment), GH_CONFIG_DIR: sessionDirectory, GRAPHYARD_REVIEW: `${binding.key}@${binding.sha}` };
+        const environment = { ...withVerificationPath(harness.environment, launch.environment), GH_CONFIG_DIR: sessionDirectory, GRAPHYARD_REVIEW: `${binding.key}@${binding.sha}`, ...(plane ? { GRAPHYARD_URL: config.url } : {}) };
         startedTab = true;
         const created = createdHerdrTab(await herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', checkout.directory,
           '--label', `${binding.key} review · ${agentName}`, ...Object.entries(environment).flatMap(([name, value]) => ['--env', `${name}=${value}`]), '--no-focus'], dependencies.run));
@@ -916,7 +996,7 @@ export async function launchReview(root: string, work: Work, profileName: string
         const maps = await (dependencies.verificationMaps ?? readVerificationMaps)(root, config.baseBranch).catch(() => []);
         // The request is the session's own first message, on the runtime's command line (GY-93), read
         // from the request file in the session's checkout so the typed line stays short (GY-121).
-        ({ delivery, consent } = await startAgentSession(agentName, launch.kind!, created.pane, [...launch.args, ...harness.args], reviewPrompt(config, binding, checkout, { unresolved: listed, total: unresolved.length, failure: threadReadFailure }, work.criteria, reservation.record.reviewRound, work.documentation ? { obligation: work.documentation, files: work.observation?.candidate.sha === binding.sha ? work.observation.files : null } : undefined, work, reviewRoundStatus(work, reviewRoundCapOf(config)), memory, reservation.record.freshRead, { maps, plannedFiles: work.plannedFiles ?? [] }), dependencies.run, { ...dependencies.prompt, ...dependencies.start, timeoutMs: dependencies.start?.timeoutMs ?? launchStartMs(config), directory: checkout.directory, cwd: checkout.directory, environment, ownGitHubCredential: true, role: harness.role, contract: launch.contract }));
+        ({ delivery, consent } = await startAgentSession(agentName, launch.kind!, created.pane, [...launch.args, ...harness.args], reviewPrompt(config, binding, checkout, { unresolved: listed, total: unresolved.length, failure: threadReadFailure }, work.criteria, reservation.record.reviewRound, work.documentation ? { obligation: work.documentation, files: work.observation?.candidate.sha === binding.sha ? work.observation.files : null } : undefined, work, reviewRoundStatus(work, reviewRoundCapOf(config)), memory, reservation.record.freshRead, { maps, plannedFiles: work.plannedFiles ?? [] }, plane ? { head: binding.sha, baseTip: binding.baseSha, ...(postMerge ? { postMerge: { mergeSha: postMerge.mergeSha } } : {}) } : null), dependencies.run, { ...dependencies.prompt, ...dependencies.start, timeoutMs: dependencies.start?.timeoutMs ?? launchStartMs(config), directory: checkout.directory, cwd: checkout.directory, environment, ownGitHubCredential: true, role: harness.role, contract: launch.contract }));
       } catch (error) {
         // A launch that never became a session leaves no checkout behind.
         await discard();
@@ -939,7 +1019,7 @@ export async function launchReview(root: string, work: Work, profileName: string
         record = await updateReviewLedger(root, ledger => {
           const index = ledger.reviews.findIndex(entry => entry.id === id);
           const { launching: _launching, ...reserved } = index >= 0 ? ledger.reviews[index] : reservation.record;
-          const settled: ReviewRecord = reviewRecordSchema.parse({ ...reserved, pane: pane ?? null, tokenExpiresAt: minted.expiresAt, delivery, ...(registrySessionOf(selected) ? { session: registrySessionOf(selected) } : {}), ...(consent.length ? { consent } : {}), checkout: checkout.directory, criteriaOnly: true, ...(threadReadFailure ? { threadReadFailure } : { threadsListed: listed.map(thread => thread.id), ...(listedThreadAliases(listed) ? { threadAliases: listedThreadAliases(listed) } : {}) }) });
+          const settled: ReviewRecord = reviewRecordSchema.parse({ ...reserved, pane: pane ?? null, tokenExpiresAt: minted.expiresAt, delivery, ...(registrySessionOf(selected) ? { session: registrySessionOf(selected) } : {}), ...(consent.length ? { consent } : {}), checkout: checkout.directory, criteriaOnly: true, ...(threadReadFailure ? { threadReadFailure } : { threadsListed: listed.map(thread => thread.id), ...(listedThreadAliases(listed) ? { threadAliases: listedThreadAliases(listed) } : {}) }), ...(registered ? { launch: registered.launch } : {}) });
           if (index >= 0) ledger.reviews[index] = settled; else ledger.reviews.push(settled);
           return settled;
         });
@@ -948,12 +1028,43 @@ export async function launchReview(root: string, work: Work, profileName: string
         await rm(sessionDirectory, { recursive: true, force: true }); await discard(); throw error;
       }
       return { review: record.id, requestId: record.requestId ?? null, work: binding.key, pr: binding.pr, sha: binding.sha, baseSha: binding.baseSha, policyRevision: binding.policyRevision, profile: profile.name, agentName,
-        pane: record.pane, checkout: checkout.directory, reviewer: `${reviewerApp.slug}[bot]`, tokenExpiresAt: minted.expiresAt, approvals: launch.plan.approvals, delivery,
+        pane: record.pane, checkout: checkout.directory, reviewer: reviewerIdentity, tokenExpiresAt: minted.expiresAt, approvals: launch.plan.approvals, delivery, ...(plane ? { mode: 'control-plane' as const, launch: registered?.launch ?? null } : {}),
         account: selected.account ? { environment: selected.account.name, kind: selected.account.kind, quota: selected.health?.quota ?? null, skipped: selected.skipped } : null,
         ...(threadReadFailure ? { threadReadFailure } : {}),
         recorded: 'the request is recorded; master status reconciles the verdict and closes the session' };
     });
   } catch (error) { await release(error); throw error; }
+}
+
+/** What a control-plane launch registers with the control plane (server/review-verdict.ts `reviewLaunchBodySchema`). */
+export interface ControlPlaneLaunchInput { reviewer: string; head: string; baseTip: string; tokenHash: string; expiresAt: string; postMerge: boolean }
+/** The default registration: `POST /api/work/:id/review-launch` with the loop's coordinator credential, keyed on the launch so a retry replays. */
+function registerControlPlaneLaunch(config: Pick<MasterConfig, 'url' | 'credentialFile'>) {
+  return async (work: Work, launch: ControlPlaneLaunchInput): Promise<{ launch: string }> => {
+    const token = await readCredentialFile(config.credentialFile);
+    const response = await fetch(`${config.url}/api/work/${encodeURIComponent(work.id)}/review-launch`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': `review-launch:${launch.tokenHash}` }, body: JSON.stringify(launch), signal: AbortSignal.timeout(30_000) });
+    const result = await response.json().catch(() => ({})) as { launch?: string; error?: string };
+    if (!response.ok) throw new Error(`The control plane refused the reviewer launch of ${work.key} (${response.status}): ${result?.error ?? 'no reason given'}`);
+    if (typeof result.launch !== 'string') throw new Error(`The control plane registered the reviewer launch of ${work.key} without a launch id`);
+    return { launch: result.launch };
+  };
+}
+/**
+ * The binding of a post-merge review (GY-1525 AC-4): the delivered merge commit against its first
+ * parent, under the item's own key, change number and policy revision. The parent is read from the
+ * coordinator checkout's object store, which holds every commit the merge writer pushed.
+ */
+async function postMergeBinding(root: string, work: Work, postMerge: { mergeSha: string; baseTip?: string }, run: ChildRun = defaultChildRun): Promise<ReviewBinding> {
+  if (work.stage !== 'done' || work.delivery?.mergeSha !== postMerge.mergeSha) throw new Error(`${work.key} is not delivered as ${postMerge.mergeSha.slice(0, 12)}; a post-merge review judges the delivered merge commit`);
+  if (work.postMergeReview !== 'owed') throw new Error(`${work.key} owes no post-merge review${work.postMergeReview === 'reviewed' ? ': its verdict is recorded' : ''}`);
+  let baseTip = postMerge.baseTip;
+  if (!baseTip) {
+    const parent = String(await run('git', ['-C', root, 'rev-parse', '--verify', '--quiet', `${postMerge.mergeSha}^1`])).trim();
+    if (!/^[0-9a-f]{40}$/.test(parent)) throw new Error(`The coordinator checkout does not hold ${postMerge.mergeSha.slice(0, 12)}; a post-merge review reads the merge commit from the shared object store`);
+    baseTip = parent;
+  }
+  const pr = work.candidate?.pr || work.submission?.pr || 1;
+  return { key: work.key, pr, sha: postMerge.mergeSha, baseSha: baseTip, policyRevision: work.policyRevision, author: work.candidate?.author ?? submittingPrincipal(work) ?? 'unknown', branch: work.candidate?.branch ?? '' };
 }
 
 /** The identity that submitted the item's candidate: the owner of the submitting attempt, as the control plane recorded its assignment. */
@@ -1034,6 +1145,23 @@ export async function observeReviewVerdict(repository: string, record: ReviewRec
  * needing the same review, and demanding a new head for it would cost a rework round for a
  * candidate nobody found fault with.
  */
+/** The launch the item registers for this control-plane record: the one the record names, or the item's standing launch for the record's head. */
+function controlPlaneLaunch(record: Pick<ReviewRecord, 'key' | 'sha' | 'launch'>, work: Work[] | undefined): ControlPlaneReviewLaunch | null {
+  const launch = work?.find(item => item.key === record.key)?.reviewLaunch;
+  if (!launch) return null;
+  return (record.launch ? launch.id === record.launch : launch.head === record.sha) ? launch : null;
+}
+/** A control-plane session's verdict (GY-1525), read from the item's registered launch; null while none is recorded. */
+export function controlPlaneVerdict(record: Pick<ReviewRecord, 'key' | 'sha' | 'launch'>, work: Work[] | undefined): ObservedVerdict {
+  const verdict = controlPlaneLaunch(record, work)?.verdict;
+  return verdict && verdict.sha === record.sha ? { state: verdict.state, reviewer: verdict.reviewer, reviewId: verdict.reviewId, submittedAt: verdict.submittedAt } : null;
+}
+/** Why a control-plane session's launch was refused by the control plane (independence), so the record settles failed with the reason. */
+export function controlPlaneRefusal(record: Pick<ReviewRecord, 'key' | 'sha' | 'launch'>, work: Work[] | undefined): string | null {
+  const launch = controlPlaneLaunch(record, work);
+  return launch?.refused ? `the control plane refused the verdict: ${launch.refused.reason}`.slice(0, 900) : null;
+}
+
 export function dismissalResolution(record: Pick<ReviewRecord, 'key' | 'sha' | 'baseSha' | 'policyRevision'>, work: Work[] | undefined): string {
   const moved = staleReviewReason(record, work);
   return moved
@@ -1064,9 +1192,11 @@ export const settledCloseAttempts = 3;
 /** The resolutions a judged session that never posted settles with; the dispatcher relaunches these at once. */
 export const unpostedVerdict = /^the reviewer session (?:finished \(|ended waiting on input)/;
 
-export function staleReviewReason(record: Pick<ReviewRecord, 'key' | 'sha' | 'baseSha' | 'policyRevision'>, work: Work[] | undefined): string | null {
+export function staleReviewReason(record: Pick<ReviewRecord, 'key' | 'sha' | 'baseSha' | 'policyRevision'> & Partial<Pick<ReviewRecord, 'postMerge'>>, work: Work[] | undefined): string | null {
   const item = work?.find(candidate => candidate.key === record.key);
   if (!item) return null;
+  // A post-merge review (GY-1525) judges the delivered merge commit: it is stale only when the item is not delivered as that commit.
+  if (record.postMerge) return item.delivery?.mergeSha === record.sha ? null : `the item is not delivered as ${record.sha.slice(0, 12)}`;
   if (item.stage === 'done' || item.observation?.merged) return 'the work is delivered';
   if (item.reworkRequested) return 'rework was requested for the item';
   if (!item.submission || !item.candidate) return 'the item no longer has a submitted candidate';
@@ -1157,9 +1287,10 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
   ledgerLock?: ReviewLedgerLockOptions;
 } = {}) {
   const ledger = await readReviewLedger(root);
-  if (!config.reviewer) return { reviews: ledger.reviews, changed: 0, threads: [] as string[], released: [] as { pane: string; agentName: string }[] };
+  // Control-plane records (GY-1525) reconcile without a reviewer App: their verdicts are read from the work snapshot.
+  if (!config.reviewer && !ledger.reviews.some(record => record.mode === 'control-plane')) return { reviews: ledger.reviews, changed: 0, threads: [] as string[], released: [] as { pane: string; agentName: string }[] };
   const before = new Map(ledger.reviews.map(record => [record.id, JSON.stringify(record)]));
-  const reviewer = `${config.reviewer.slug}[bot]`;
+  const reviewer = config.reviewer ? `${config.reviewer.slug}[bot]` : 'control-plane';
   const observe = dependencies.observe ?? ((record: ReviewRecord, identity: string, answered: Set<number>) => observeReviewVerdict(config.repository, record, identity, dependencies.run ?? defaultChildRun, answered));
   const now = (dependencies.now ?? (() => new Date()))();
   // The retry goes through the same confirmed delivery as the launch: a prompt the stopped
@@ -1168,7 +1299,7 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
   const ackMs = acknowledgementMs(config);
   const threadsRun = dependencies.threadsRun ?? (dependencies.observe ? undefined : dependencies.run ?? defaultChildRun);
   const reviewerApp = config.reviewer;
-  const dismiss = dependencies.dismiss ?? (dependencies.observe ? undefined : (record: ReviewRecord, reviewId: number, message: string) => dismissApproval(root, reviewerApp, config.repository, record.pr, reviewId, message));
+  const dismiss = dependencies.dismiss ?? (dependencies.observe || !reviewerApp ? undefined : (record: ReviewRecord, reviewId: number, message: string) => dismissApproval(root, reviewerApp, config.repository, record.pr, reviewId, message));
   let changed = 0;
   const pendingBefore = new Set(ledger.reviews.filter(record => record.state === 'pending').map(record => record.id));
   for (const record of ledger.reviews) {
@@ -1183,7 +1314,9 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
       continue;
     }
     const answered = new Set(ledger.reviews.filter(entry => entry.id !== record.id && entry.key === record.key && entry.sha === record.sha && entry.verdict).map(entry => entry.verdict!.reviewId));
-    const verdict = record.verdict ?? await observe(record, reviewer, answered) ?? undefined;
+    // A control-plane session's verdict is on the item (`reviewLaunch.verdict`, server/review-verdict.ts), never on GitHub.
+    const verdict = record.verdict ?? (record.mode === 'control-plane' ? controlPlaneVerdict(record, dependencies.work) : await observe(record, reviewer, answered)) ?? undefined;
+    const refusedLaunch = !verdict && record.mode === 'control-plane' ? controlPlaneRefusal(record, dependencies.work) : null;
     // A dismissed approval is not an answer: the session is recorded unanswered, with the
     // dismissal and its cause, so the request is relaunched exactly as any other unanswered
     // session is rather than settling a request the review gate still refuses.
@@ -1198,8 +1331,8 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
     // a session still unacknowledged when the grace ends is recorded as never started — but not
     // before a whole acknowledgement interval has followed the re-prompt (settlementDue), since
     // the interval is configured and the grace is not.
-    let failed: string | null = null;
-    if (!verdict && !expired && !stale && dependencies.agents) {
+    let failed: string | null = refusedLaunch;
+    if (!verdict && !expired && !stale && !failed && dependencies.agents) {
       const agent = dependencies.agents.find(candidate => candidate.name === record.agentName);
       const screen = () => readSessionScreen(record.agentName, dependencies.run);
       const judged = await acknowledgeLaunch(record, agent, { now: now.getTime(), ackMs, result: false, screen });
@@ -1222,7 +1355,7 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
     // incomplete verdict, not an answer: it is withdrawn, so the review gate refuses again, and the
     // session is recorded unanswered, so the request is relaunched as a dismissed approval's is.
     // Until it is withdrawn the record stays pending and is judged again on the next pass.
-    if (verdict?.state === 'APPROVED' && !record.verdict && threadsRun && dismiss) {
+    if (verdict?.state === 'APPROVED' && !record.verdict && threadsRun && dismiss && record.mode !== 'control-plane') {
       const gaps = await approvalGaps(config.repository, record, verdict.reviewId, threadsRun);
       if (typeof gaps === 'string' || gaps.length) {
         const unaccounted = typeof gaps === 'string' ? null : gaps.join(', ');
@@ -1297,7 +1430,7 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
   // A change request the loop withdrew past the review-round cap (GY-1118) is reopened the same way,
   // so the same head is reviewed again rather than the request standing answered by a withdrawn verdict.
   for (const record of ledger.reviews) {
-    if (record.state !== 'completed' || (record.verdict?.state !== 'APPROVED' && record.verdict?.state !== 'CHANGES_REQUESTED')) continue;
+    if (record.state !== 'completed' || record.mode === 'control-plane' || (record.verdict?.state !== 'APPROVED' && record.verdict?.state !== 'CHANGES_REQUESTED')) continue;
     const owner = dependencies.work?.find(item => item.key === record.key), request = owner?.autoDispatch?.review;
     // Only past the cap is a change request ever withdrawn; before it, the head goes back to a worker.
     if (record.verdict.state === 'CHANGES_REQUESTED' && !(owner && pastReviewCap(owner, reviewRoundCapOf(config)))) continue;
@@ -1315,14 +1448,16 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
   // An approval of the current head is read once for its mechanical findings, and a fresh read of a
   // bot round's head is judged against the bot commit (GY-971), before anything is filed or resolved.
   const record = dependencies.recordIntervention ?? (dependencies.observe ? undefined : coordinatorIntervention(config));
-  const mechanical = await planMechanicalFixes(ledger.reviews, dependencies.work, config.repository, threadsRun, now);
-  const judged = await judgeFreshReads(ledger.reviews, config.repository, threadsRun, record, now);
+  // Threads, mechanical rounds and fresh reads are GitHub's; a control-plane record has none of them.
+  const githubRecords = ledger.reviews.filter(entry => entry.mode !== 'control-plane');
+  const mechanical = await planMechanicalFixes(githubRecords, dependencies.work, config.repository, threadsRun, now);
+  const judged = await judgeFreshReads(githubRecords, config.repository, threadsRun, record, now);
   changed += mechanical.changed + judged.changed;
-  const threads = await resolveApprovedThreads(ledger.reviews, reviewer, config.repository, dependencies.work, threadsRun, now);
+  const threads = await resolveApprovedThreads(githubRecords, reviewer, config.repository, dependencies.work, threadsRun, now);
   changed += threads.changed;
   // The threads the approval judged FOLLOW-UP are nits: each is answered with a reply and resolved,
   // so conversation resolution no longer holds the merge on them; nothing is filed (GY-1249).
-  const followUps = await resolveApprovedFollowUps(root, ledger.reviews, reviewer, config.repository, dependencies.work, threadsRun, now, dependencies.followUpLock, dependencies.ledgerLock);
+  const followUps = await resolveApprovedFollowUps(root, githubRecords, reviewer, config.repository, dependencies.work, threadsRun, now, dependencies.followUpLock, dependencies.ledgerLock);
   changed += followUps.changed;
   // A request the control plane no longer holds open releases its records to the retention window.
   if (dependencies.work) changed += releaseClosedRequests(ledger.reviews, dependencies.work, now);

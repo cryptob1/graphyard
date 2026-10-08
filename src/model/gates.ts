@@ -11,6 +11,8 @@ import { mechanicalReviewHold } from '../mechanical-findings.js';
 import { evaluateLandability, landabilityAudit, landabilityRefusals } from './landability.js';
 import { itemLane, laneRequirements, laneSpeedTargets, type Lane } from './policy.js';
 import { isDelivered } from './closure.js';
+import { riskOf } from './risk-class.js';
+import { postMergeReviewMark, sensitiveReviewRefusal, type PostMergeReviewState } from './post-merge-review.js';
 
 // Pure evaluation: neither worker assertions nor UI state can authorize progression.
 declare module './work.js' {
@@ -59,7 +61,7 @@ export { laneRequirements };
  * The item's stage, gates and lane, judged from the record alone. GitHub merges each candidate
  * whose gates pass (docs/delivery.md); nothing here places it in a queue of Graphyard's own.
  */
-export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[]): { stage: Stage; gates: Gate[]; violations: string[]; lane: Lane; speedTarget: number } {
+export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[]): { stage: Stage; gates: Gate[]; violations: string[]; lane: Lane; speedTarget: number; postMergeReview?: PostMergeReviewState | null } {
   const gates: Gate[] = [];
   const add = (name: string, reasons: string[]) => gates.push({ name, passed: reasons.length === 0, reasons });
   // The lane rides the one landability verdict, not beside it (GY-883 AC-3): the verdict
@@ -102,8 +104,15 @@ export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[])
     : work.formalReviewResetRequired ? 'A new independent GitHub approval after the requirement-review baseline is required' : 'Independent approval of the current commit is required';
   // An approval naming mechanical nits waits for its worker-bot round before GitHub may merge (GY-971).
   const mechanicalHold = reviewPassed ? mechanicalReviewHold(work, now.getTime()) : null;
+  // Review by risk (GY-1525): a head the control plane observed itself is judged by the class of its
+  // merge delta (model/risk-class.ts), not by the path lane. A sensitive delta needs the exact-head
+  // approval before it merges; a normal one passes here and owes one post-merge review
+  // (model/post-merge-review.ts), which the evaluation marks on the item. GitHub mode is untouched.
+  const byRisk = current && obs!.source === 'control-plane' && work.policy.review ? riskOf(work) : null;
+  const riskRefusal = byRisk ? byRisk.risk === 'sensitive' && !reviewPassed ? [sensitiveReviewRefusal(byRisk.reasons)] : [] : !reviewPassed ? [reviewRefusal] : [];
+  const postMerge = byRisk ? postMergeReviewMark(work, byRisk.risk, reviewPassed) : {};
   add('review', work.policy.review ? [
-    ...(!reviewPassed ? [reviewRefusal] : []),
+    ...riskRefusal,
     ...(changesRequested ? ['Outstanding change requests must be resolved through a new review'] : []),
     ...(mechanicalHold ? [mechanicalHold] : []),
   ] : []);
@@ -143,5 +152,5 @@ export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[])
   let stage: Stage = !work.ready ? 'backlog' : !work.submission ? (work.lease && Date.parse(work.lease.expiresAt) > now.getTime() ? 'build' : 'ready') : (first?.name === 'ready' ? 'build' : first?.name as Stage ?? 'merge');
   // Delivery history stays complete; later observations cannot rewrite it.
   if (work.stage === 'done') stage = 'done';
-  return { stage, gates, violations, lane, speedTarget };
+  return { stage, gates, violations, lane, speedTarget, ...postMerge };
 }
