@@ -481,10 +481,8 @@ export const daemonStateSchema = z.object({
   profiles: z.record(z.string(), z.object({ failures: z.number().int().min(0), reason: z.string().max(500).nullable(), cooldownUntil: z.string().nullable() }).strict()).default({}),
   metrics: z.array(cycleMetricsSchema).default([]),
   deployment: deploymentObservationSchema.nullable().default(null),
-  /** The loop's promotion drive (GY-1302). */
-  promotion: promotionStateSchema.nullable().default(null),
-  /** The main watch (GY-1519, main-watch.ts): main's unknown commits and the promotion freeze. Lazy: main-watch.ts imports this module. */
-  mainWatch: z.lazy(() => mainWatchStateSchema).nullable().default(null),
+  promotion: promotionStateSchema.nullable().default(null), // the loop's promotion drive (GY-1302)
+  mainWatch: z.lazy(() => mainWatchStateSchema).nullable().default(null), // GY-1519: unknown main commits and the promotion freeze; lazy as main-watch.ts imports this module
   /** The release the running loop process loaded, recorded by each process at its startup (GY-437). */
   release: loopReleaseSchema.nullable().default(null),
   /** The between-cycles self-upgrade's progress (GY-437). */
@@ -595,7 +593,7 @@ export async function readDaemonState(root: string, config: MasterConfig): Promi
   try { raw = await readFile(file, 'utf8'); }
   catch (error: any) { if (error.code === 'ENOENT') return emptyDaemonState(config); throw error; }
   const stored = JSON.parse(raw), dropped = stored && typeof stored === 'object' ? Object.keys(stored).filter(key => !Object.hasOwn(daemonStateSchema.shape, key)) : [];
-  for (const key of dropped) delete stored[key];
+  for (const key of dropped) delete stored[key]; // GY-1542: keys from newer, since reverted code are dropped and named once; declared fields stay strict
   if (dropped.length) console.error(`Master daemon cursor: ignored top-level keys this version does not declare: ${dropped.join(', ')}`);
   const state = daemonStateSchema.parse(stored);
   if (state.url !== config.url || state.repository.toLowerCase() !== config.repository.toLowerCase()) throw new Error('Master daemon state belongs to another Graphyard server or repository; remove it before running the loop');
