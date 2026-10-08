@@ -107,6 +107,35 @@ export function setupChecklist(status: any | null, options: { appSetupUrl?: stri
   return items;
 }
 
+/**
+ * The Herdr server that holds this install's agents, as the master loop reports it (GY-1511):
+ * its own instance (an XDG_CONFIG_HOME and a session name) when the host's default one serves
+ * another install, else the default (both null); the host the loop runs on, when recorded; and
+ * whether the loop last reached that server (null while unknown).
+ */
+export interface HerdrWatch { configHome: string | null; session: string | null; host: string | null; running: boolean | null }
+/** The value `status.setup.herdr` carries, or the default instance on an unknown host when it carries none. */
+export function herdrWatch(status: any | null): HerdrWatch {
+  const reported = status?.setup?.herdr;
+  const text = (value: unknown) => typeof value === 'string' && value.trim() ? value.trim() : null;
+  const configHome = text(reported?.configHome), session = text(reported?.session);
+  return { configHome: configHome && session ? configHome : null, session: configHome && session ? session : null, host: text(reported?.host), running: typeof reported?.running === 'boolean' ? reported.running : null };
+}
+const shellWord = (value: string) => /^[\w@%+=:,./-]+$/.test(value) ? value : `'${value.replaceAll("'", "'\\''")}'`;
+/** Where a remote command names a host it does not know: the operator puts their own in. */
+export const herdrHostPlaceholder = 'HOST';
+/**
+ * The commands that open this install's agents in Herdr (GY-1511): on this host, through SSH, and
+ * through Herdr's own remote attach. Its own instance is attached by its XDG_CONFIG_HOME and session
+ * name; the default instance by plain `herdr`.
+ */
+export function herdrConnectCommands(watch: Pick<HerdrWatch, 'configHome' | 'session' | 'host'>) {
+  const host = shellWord(watch.host ?? herdrHostPlaceholder);
+  const own = watch.configHome && watch.session ? { configHome: watch.configHome, session: watch.session } : null;
+  const local = own ? `XDG_CONFIG_HOME=${shellWord(own.configHome)} herdr session attach ${shellWord(own.session)}` : 'herdr';
+  return { local, ssh: `ssh -t ${host} ${shellWord(local)}`, remote: own ? `herdr --remote ${host} --session ${shellWord(own.session)}` : `herdr --remote ${host}` };
+}
+
 export const checklistGreen = (items: readonly SetupItem[]) => items.every(item => item.done);
 
 /** The goal box's limits: a sentence to a few paragraphs, within a goal statement's bound. */

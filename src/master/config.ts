@@ -12,7 +12,7 @@ import { type LoopSupervisorHost, type LoopSupervisorInstallation, installLoopSu
 import { type FilesystemProbe, worktreeRoot, verifyWorktreeRoot, worktreeRootMinFreeBytes } from '../install/worktree-root.js';
 import { APP_PENDING, type AgentEnvironment, type MasterBrowser, type MasterConfig, masterConfigSchema, type MasterRun, type ProducerProfile, producerProfileSchema, type WorkerProfile, workerProfileSchema, withReviewerDefaults, withRoleDefaults } from './profiles.js';
 import { withoutMasterInstructions } from './instructions.js';
-import { scopeHerdr } from './herdr.js';
+import { scopeHerdr, targetHerdr, type HerdrInstance } from './herdr.js';
 import { agentEnvironmentRoot, agentLaunchPlan, checkAgentEnvironment, discoverAgentEnvironments, type EnvironmentProbe, inspectProfileAccounts, type LaunchRole } from './environments.js';
 import { controlPlaneAttention } from './attention.js';
 import { writeFailure } from './worktrees.js';
@@ -85,8 +85,9 @@ export async function loadStoredMasterConfig(root: string): Promise<MasterConfig
   await externalCredential(root, config.credentialFile, 'Master');
   if (!isAbsolute(config.cliPath)) throw new Error('Master CLI path must be absolute');
   try { if (!(await lstat(config.cliPath)).isFile()) throw new Error(); } catch { throw new Error('Configured Graphyard CLI launcher is unavailable'); }
-  // Every Herdr sweep this process runs acts only within the install's own workspace (GY-1441).
-  scopeHerdr(config.herdrWorkspace);
+  // Every Herdr sweep this process runs acts only within the install's own workspace (GY-1441), and
+  // every herdr call reaches the install's own instance when it records one (GY-1511).
+  applyHerdrConfig(config);
   return config;
 }
 /**
@@ -191,7 +192,7 @@ export async function setupMaster(root: string, input: { url: string; token: str
   await assertOutsideWorktrees(root, credentialDirectory, 'Coordinator credential directory');
   const identity = createHash('sha256').update(`${url}\0${detected.repository}`).digest('hex').slice(0, 20);
   const credentialFile = resolve(credentialDirectory, `${identity}.token`);
-  const config = masterConfigSchema.parse({ version: 1, url, credentialFile, cliPath: resolve(input.cliPath), repository: detected.repository, baseBranch: status.baseBranch, githubAppId: appPending ? APP_PENDING : status.githubAppId, hostId: input.hostId ?? previous?.hostId ?? hostname(), herdrWorkspace: input.herdrWorkspace ?? previous?.herdrWorkspace, masterAgentName: previous?.masterAgentName ?? sessionName('graphyard-master', repositoryName), autoMerge: input.autoMerge ?? previous?.autoMerge ?? true, mergeMethod: input.mergeMethod ?? previous?.mergeMethod ?? 'merge', workers: previous?.workers ?? [], ...(previous?.reviewer ? { reviewer: previous.reviewer } : {}), reviewers: previous?.reviewers ?? [], producers: previous?.producers ?? [], run: { ...previous?.run, ...input.run }, ...(previous?.mergeQueue ? { mergeQueue: previous.mergeQueue } : {}), ...(input.browser ?? previous?.browser ? { browser: input.browser ?? previous?.browser } : {}) });
+  const config = masterConfigSchema.parse({ version: 1, url, credentialFile, cliPath: resolve(input.cliPath), repository: detected.repository, baseBranch: status.baseBranch, githubAppId: appPending ? APP_PENDING : status.githubAppId, hostId: input.hostId ?? previous?.hostId ?? hostname(), herdrWorkspace: input.herdrWorkspace ?? previous?.herdrWorkspace, ...(previous?.herdrInstance ? { herdrInstance: previous.herdrInstance } : {}), masterAgentName: previous?.masterAgentName ?? sessionName('graphyard-master', repositoryName), autoMerge: input.autoMerge ?? previous?.autoMerge ?? true, mergeMethod: input.mergeMethod ?? previous?.mergeMethod ?? 'merge', workers: previous?.workers ?? [], ...(previous?.reviewer ? { reviewer: previous.reviewer } : {}), reviewers: previous?.reviewers ?? [], producers: previous?.producers ?? [], run: { ...previous?.run, ...input.run }, ...(previous?.mergeQueue ? { mergeQueue: previous.mergeQueue } : {}), ...(input.browser ?? previous?.browser ? { browser: input.browser ?? previous?.browser } : {}) });
   const instructionsFile = resolve(root, 'AGENTS.md');
   let existing = ''; let mode = 0o644;
   try { const info = await lstat(instructionsFile); if (!info.isFile()) throw new Error('Refusing to replace a non-regular AGENTS.md'); mode = info.mode & 0o777; existing = await readFile(instructionsFile, 'utf8'); }
@@ -418,6 +419,22 @@ export function masterConfigChanges(current: MasterConfig, next: MasterConfig) {
   const changed = [...new Set([...Object.keys(before), ...Object.keys(after)])].filter(key => JSON.stringify(before[key]) !== JSON.stringify(after[key])).sort();
   return { changed, bound: changed.filter(key => (masterBoundSettings as readonly string[]).includes(key)) };
 }
+/** The Herdr workspace and instance CONFIG names, applied to this process's herdr calls. */
+export function applyHerdrConfig(config: Pick<MasterConfig, 'herdrWorkspace' | 'herdrInstance'>) {
+  scopeHerdr(config.herdrWorkspace);
+  targetHerdr(config.herdrInstance);
+}
+/**
+ * Records this install's own Herdr instance and its workspace in .graphyard/master.json (GY-1511),
+ * changing nothing else; true when the file changed.
+ */
+export async function recordHerdrInstance(root: string, instance: HerdrInstance, workspace: string | null) {
+  const stored = await readMasterConfig(root);
+  const next = masterConfigSchema.parse({ ...stored, herdrInstance: instance, ...(workspace ? { herdrWorkspace: workspace } : {}) });
+  if (JSON.stringify(next) === JSON.stringify(stored)) return false;
+  await atomicPrivateWrite(resolve(await localDirectory(root), 'master.json'), next);
+  return true;
+}
 export interface ConfigReload { config: MasterConfig; changed: string[]; refused: string | null; at: string }
 export function liveMasterConfig(root: string, initial: MasterConfig, load: (root: string) => Promise<MasterConfig> = loadMasterConfig, clock: () => number = Date.now) {
   const live = {
@@ -426,14 +443,14 @@ export function liveMasterConfig(root: string, initial: MasterConfig, load: (roo
       const at = new Date(clock()).toISOString();
       // A refused reload keeps every loaded setting, the Herdr scope included: loading applies the
       // file's workspace, so the scope the loop runs under is put back whenever the reload is refused (GY-1441).
-      const keep = (refused: string): ConfigReload => { scopeHerdr(live.current.herdrWorkspace); return { config: live.current, changed: [], at, refused }; };
+      const keep = (refused: string): ConfigReload => { applyHerdrConfig(live.current); return { config: live.current, changed: [], at, refused }; };
       let next: MasterConfig;
       try { next = await load(root); }
       catch (error) { return keep(`.graphyard/master.json could not be reloaded (${error instanceof Error ? error.message : String(error)}); the loop keeps the settings it last loaded`); }
       const { changed, bound } = masterConfigChanges(live.current, next);
       if (bound.length) return keep(`.graphyard/master.json changes ${bound.join(', ')}, which a running master loop is bound to; restart master run to adopt ${bound.length === 1 ? 'it' : 'them'}. Until then the loop keeps its loaded settings, including every other change`);
       live.current = next;
-      scopeHerdr(next.herdrWorkspace);
+      applyHerdrConfig(next);
       return { config: next, changed, refused: null, at };
     },
   };

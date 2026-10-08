@@ -78,7 +78,26 @@ export interface ReportedLoopMerger { live: boolean; name: string }
  * in whole seconds. Only a coordinator's read counts; the loop is the one coordinator that sends it.
  */
 export const loopPresenceHeader = 'X-Graphyard-Loop-Interval';
-export interface LoopPresence { principal: string; intervalSeconds: number; seenAt: string }
+export interface LoopPresence { principal: string; intervalSeconds: number; seenAt: string; herdr?: LoopHerdr | null }
+/**
+ * The second header on those reads (GY-1511): the Herdr server holding the install's agents, as the
+ * loop knows it — its own instance's config home and session (null for the host's default), the
+ * host the loop runs on, and whether the loop last reached that server — URI-encoded JSON.
+ */
+export const loopHerdrHeader = 'X-Graphyard-Loop-Herdr';
+export interface LoopHerdr { configHome: string | null; session: string | null; host: string | null; running: boolean | null }
+export const encodeLoopHerdr = (herdr: LoopHerdr) => encodeURIComponent(JSON.stringify(herdr));
+/** The Herdr server a loop read names, or null when it names none or one that does not parse. */
+export function loopHerdr(header: string | string[] | undefined): LoopHerdr | null {
+  const value = Array.isArray(header) ? header[0] : header;
+  if (!value || value.length > 2_000) return null;
+  try {
+    const parsed = JSON.parse(decodeURIComponent(value));
+    const text = (field: unknown) => typeof field === 'string' && field.trim() && field.length <= 500 ? field.trim() : null;
+    const configHome = text(parsed?.configHome), session = text(parsed?.session);
+    return { configHome: configHome && session ? configHome : null, session: configHome && session ? session : null, host: text(parsed?.host), running: typeof parsed?.running === 'boolean' ? parsed.running : null };
+  } catch { return null; }
+}
 /**
  * How long one read keeps the loop live: three of its cycles, never under an executor's window —
  * the rule `daemonSummary` applies to the loop's own cursor. The dispatcher beside the cycle reads
@@ -89,8 +108,8 @@ export const loopPresenceLiveMs = (intervalSeconds: number) => Math.max(3 * inte
 /** The loop as the control plane last saw it read, in memory beside the engine like executor presence. */
 export class LoopRegistry {
   private latest: LoopPresence | null = null;
-  observe(poll: { principal: string; intervalSeconds: number }, now: Date) {
-    this.latest = { principal: poll.principal, intervalSeconds: poll.intervalSeconds, seenAt: now.toISOString() };
+  observe(poll: { principal: string; intervalSeconds: number; herdr?: LoopHerdr | null }, now: Date) {
+    this.latest = { principal: poll.principal, intervalSeconds: poll.intervalSeconds, seenAt: now.toISOString(), herdr: poll.herdr ?? this.latest?.herdr ?? null };
   }
   /** Whether this process has ever seen the loop read: once it has, a lapse means the loop stopped. */
   get observed(): boolean { return this.latest !== null; }

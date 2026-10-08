@@ -4,7 +4,8 @@ import { liveMasterConfig } from '../../master.js';
 import { daemonEffects, readDaemonState, retriedSnapshot, runDaemon } from '../../master-daemon.js';
 import { dispatchEffects, dispatchReadTimeoutMs, readDispatchCursor, runAutoDispatch } from '../../auto-dispatch.js';
 import { coordinationViewHeader } from '../../server/work-view.js';
-import { loopPresenceHeader } from '../../model/executor-presence.js';
+import { encodeLoopHerdr, loopHerdrHeader, loopPresenceHeader } from '../../model/executor-presence.js';
+import { herdrServerSeen, herdrTarget } from '../../master/herdr.js';
 import { LoopWake, loopWakeSubjects } from '../../daemon/loop-wake.js';
 import { unhandled, type MasterSession } from './session.js';
 
@@ -25,7 +26,9 @@ export async function loopCommand(session: MasterSession): Promise<unknown> {
     const live = liveMasterConfig(root, master), current = () => live.current, reload = () => live.reload();
     // Each read also names the loop to the control plane (GY-916), which then knows the merger lives.
     const loopInterval = () => values.interval ? intervalSeconds : current().run.intervalSeconds;
-    const coordinationSnapshot = (timeoutMs?: number) => masterApi('work-snapshot', masterToken, timeoutMs, { [coordinationViewHeader]: 'coordination', [loopPresenceHeader]: String(loopInterval()) });
+    // GY-1511: and names the Herdr server holding the install's agents, for the Setup page.
+    const herdr = () => encodeLoopHerdr({ configHome: herdrTarget()?.configHome ?? null, session: herdrTarget()?.session ?? null, host: current().hostId, running: herdrServerSeen() });
+    const coordinationSnapshot = (timeoutMs?: number) => masterApi('work-snapshot', masterToken, timeoutMs, { [coordinationViewHeader]: 'coordination', [loopPresenceHeader]: String(loopInterval()), [loopHerdrHeader]: herdr() });
     const effects = daemonEffects(root, current, { snapshot: retriedSnapshot(() => coordinationSnapshot()), mutate: masterMutation });
     // Automatic dispatch runs beside the cycle on a shorter cadence; it stops with the daemon. Its
     // snapshot fetch is bounded by the tick's own read bound, which grows while ticks fail (GY-1373).

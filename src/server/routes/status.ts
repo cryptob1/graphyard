@@ -4,7 +4,7 @@ import type { IntegrationJob } from '../../coordination.js';
 import { parseEventHistoryQuery, readEventHistory } from '../../events-history.js';
 import { catchUpPipelineTimelines, pipelineBackfillState, readPipelineTimelines } from '../../pipeline-backfill.js';
 import { delegationSnapshot } from '../../delegation.js';
-import { describeUnserved, durablePresence, executorRegistry, executorReport, loopPresenceHeader, loopPresenceInterval, loopRegistry, presenceQuery, reportedLoopMerger } from '../../model/executor-presence.js';
+import { describeUnserved, durablePresence, executorRegistry, executorReport, loopHerdr, loopHerdrHeader, loopPresenceHeader, loopPresenceInterval, loopRegistry, presenceQuery, reportedLoopMerger } from '../../model/executor-presence.js';
 import { installationSettingsUrl, mainGuardStatus } from '../../github.js';
 import { controlPlanePermissions, requiredPermissions } from '../../github-permissions.js';
 import { releaseInfo, schemaVersion } from '../../release.js';
@@ -104,8 +104,8 @@ export const statusRoutes = defineRoutes('status', [
         // the base branch's protection from the shared read (at most every five minutes) — `complete`
         // once it requires Graphyard / merge, `checks` while it requires only the repository's own
         // checks (the merge check is added after the first pull request reports it), else `off` — and
-        // whether a master loop is live.
-        setup: { protection: await setupProtection(github), loop: !!executors.loop?.live },
+        // whether a master loop is live, and the Herdr server its agents run in as that loop last named it (GY-1511).
+        setup: { protection: await setupProtection(github), loop: !!executors.loop?.live, herdr: loopRegistry(engine).live(observedAt)?.herdr ?? null },
         now: observedAt.toISOString(), release: releaseInfo(), schema: schemaVersion };
     },
   },
@@ -193,7 +193,7 @@ export const statusRoutes = defineRoutes('status', [
       const view = z.enum(['bounded', 'full', 'coordination']).parse(Array.isArray(requested) ? requested[0] : requested ?? 'bounded');
       // The loop's own read is its presence (GY-916): it merges while it lives, however long nothing is mergeable.
       const loopInterval = actor.role === 'coordinator' ? loopPresenceInterval(req.headers[loopPresenceHeader.toLowerCase()]) : null;
-      if (loopInterval !== null) loopRegistry(services.engine).observe({ principal: actor.id, intervalSeconds: loopInterval }, new Date());
+      if (loopInterval !== null) loopRegistry(services.engine).observe({ principal: actor.id, intervalSeconds: loopInterval, herdr: loopHerdr(req.headers[loopHerdrHeader.toLowerCase()]) }, new Date());
       // Bounded catch-up: items that predate the per-item timeline gain one from their own
       // ledger before the snapshot every speed report is derived from is read. The ledger is read
       // outside the coordination lock, one run at a time; it converges and then costs one small

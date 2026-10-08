@@ -15,6 +15,7 @@ import { nextActionKinds, type NextActionKind } from './model/next-action.js';
 import { agentOwner, assertOutsideWorktrees, closeHerdrPane, inspectProducerCredentials, listHerdrAgents, profileAccount, profileSessions, readCredentialFile, readEnvironmentLog, recordObservedExhaustion, herdrErrorCode, neverStarted, neverStartedReason, selectionKey, sessionAgentName, SessionStartError, sessionWords, withReviewerDefaults, type StartBounds, type AttentionItem, type ConfigReload, type EnvironmentLog, type HerdrAgent, type MasterConfig, type ObservedExhaustion, type ProducerProfile, type ReviewerProfile } from './master.js';
 import { detectExhaustion, type ExhaustionSignal } from './model/capacity.js';
 import { withLaunchedRuntime } from './master/launch.js';
+import { herdrSubcommand, isHerdrCommand } from './master/herdr.js';
 import { boundedLaunch, launchBoundMs } from './master/launch-bound.js';
 import { capacityRefusal } from './fleet.js';
 import { answeredByPendingReview, launchReview, reconcileReviews, reviewVerdictReminderMs, unpostedVerdict, type ReviewRecord } from './reviewer.js';
@@ -486,15 +487,16 @@ export function watchInstantExit(run: ChildRun, now: () => number = Date.now): I
   let pane: string | null = null, screen: string | null = null, missing: unknown = null;
   const exit = () => { const notice = pane && screen !== null ? detectExhaustion(screen, now()) : null; return notice ? new InstantExitError({ pane: pane!, words: sessionWords(screen), notice }, missing) : null; };
   return {
-    run: (command, args, options) => {
-      const herdr = command === 'herdr';
+    run: (command, given, options) => {
+      // The instance's `--session NAME` (GY-1511) is not part of what the watch reads.
+      const herdr = isHerdrCommand(command), args = herdr ? herdrSubcommand(given) : given;
       if (herdr && args[0] === 'pane' && args[1] === 'run') { pane = args[2] ?? null; screen = null; missing = null; }
       const read = (result: string) => { if (herdr && pane && args[0] === 'pane' && args[1] === 'read' && args[2] === pane) screen = String(result); return result; };
       const refused = (error: unknown): never => { if (herdr && pane && args[0] === 'agent' && args[1] === 'get' && args[2] === pane && herdrErrorCode(error) === 'agent_not_found') missing = error; throw error; };
       // The runner's answer is passed on as it came: a test's table answers at once, the process's
       // bounded runner (GY-125) answers on the event loop, and the watch notes the read either way.
       let result: Promise<string> | string;
-      try { result = run(command, args, options); } catch (error) { return refused(error); }
+      try { result = run(command, given, options); } catch (error) { return refused(error); }
       return typeof result === 'string' ? read(result) : result.then(read, refused);
     },
     // A pane already showing the notice is refused before the pause; otherwise the pause is a timer

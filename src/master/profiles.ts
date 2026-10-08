@@ -326,6 +326,9 @@ export const masterConfigSchema = z.object({
   githubAppId: z.number().int().nonnegative(),
   hostId: z.string().trim().min(1).max(200),
   herdrWorkspace: z.string().trim().min(1).max(200).optional(),
+  // This install's own Herdr instance (GY-1511), when the host's default one serves another install:
+  // every herdr call the install makes carries its XDG_CONFIG_HOME and --session (master/herdr.ts).
+  herdrInstance: z.object({ configHome: z.string().trim().min(1).max(500).refine(isAbsolute, 'must be absolute'), session: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/) }).strict().optional(),
   masterAgentName: sessionNameField,
   autoMerge: z.boolean().default(true),
   // Review rounds before only a blocking finding stands against it (GY-1118; default 3).

@@ -19,6 +19,7 @@ import { assertOutsideRepository, configHome, ensureTokens, fingerprint, install
 import { AppStepPending, readAppFile, readSavedApp, readUninstalledApp, type SavedApp } from './manifest.js';
 import { appRoles, importApp, listApps, publiclyReachable, reuseExistingApp, savedRegistrations, type AppCredentials, type AppRole, type SavedRegistration } from '../github-setup.js';
 import { herdrBoundElsewhere, herdrPluginBinding, herdrRebindRefusal } from '../repository-setup.js';
+import { herdrViaEnv, installHerdrInstance, type HerdrInstance } from '../master/herdr.js';
 import { localTransport, sshTransport, type Transport } from './transport.js';
 import { localDatabaseVariable, localSettings, type LocalSupervisor } from './local.js';
 import { localPaths } from './local-runtime.js';
@@ -66,6 +67,8 @@ export interface ProfileRequest {
   root: string; url: string; cliPath: string; hostId: string; installDirectory: string;
   coordinatorToken: string; workerTokens: { principal: string; token: string }[];
   runtimes: DetectedRuntime[]; herdr: HerdrState; herdrRebind?: boolean;
+  /** GY-1511: this install's own Herdr instance, where the plugin is linked instead of the host's default one. */
+  herdrInstance?: HerdrInstance | null;
   /** True on the registration before the App step: the master is configured with the App still pending. */
   appPending?: boolean;
   workers: WorkerProfileDraft[]; reviewers: ReviewerProfileDraft[]; masterKind: string | null;
@@ -74,10 +77,12 @@ export interface ProfileRequest {
 
 /**
  * What the install does with Herdr's `graphyard` plugin when it is already bound to another server
- * (GY-1413): `rebind` repoints it (`--herdr-rebind`), `skip` leaves Herdr untouched (`--no-herdr`).
- * Without either, a plugin bound elsewhere fails preflight instead of being silently repointed.
+ * (GY-1413): `rebind` repoints it (`--herdr-rebind`), `skip` leaves Herdr untouched (`--no-herdr`),
+ * and `instance` (`--herdr-instance`, GY-1511) links it in this install's own Herdr instance, never
+ * touching the default one. Without any, a plugin bound elsewhere fails preflight instead of being
+ * silently repointed; `graphyard up` answers that with `--herdr-instance`.
  */
-export interface HerdrChoice { herdr?: 'rebind' | 'skip' }
+export interface HerdrChoice { herdr?: 'rebind' | 'skip' | 'instance' }
 /**
  * GY-1442: Apps already installed on the account that the install reuses instead of creating one
  * (`--reuse-app SLUG`, repeatable): each serves the role its saved registration on this host has.
@@ -101,9 +106,9 @@ export function installRequestFromArgs(args: string[]) {
     'server-type': { type: 'string' }, location: { type: 'string' }, port: { type: 'string' }, logs: { type: 'boolean' },
     target: { type: 'string' }, local: { type: 'boolean' }, migrate: { type: 'boolean' }, 'max-monthly': { type: 'string' }, 'confirm-price': { type: 'string' },
     'github-app': { type: 'string' }, 'reuse-app': { type: 'string', multiple: true },
-    'create-environments': { type: 'boolean' }, 'herdr-rebind': { type: 'boolean' }, 'no-herdr': { type: 'boolean' },
+    'create-environments': { type: 'boolean' }, 'herdr-rebind': { type: 'boolean' }, 'no-herdr': { type: 'boolean' }, 'herdr-instance': { type: 'boolean' },
   }, allowPositionals: false });
-  if (values['herdr-rebind'] && values['no-herdr']) throw new Error('Choose either --herdr-rebind or --no-herdr');
+  if ([values['herdr-rebind'], values['no-herdr'], values['herdr-instance']].filter(Boolean).length > 1) throw new Error('Choose one of --herdr-rebind, --no-herdr or --herdr-instance');
   if (!values.repo) throw new Error('Use --repo OWNER/NAME');
   for (const slug of values['reuse-app'] ?? []) if (!/^[a-z0-9][a-z0-9-]{0,99}$/i.test(slug)) throw new Error(`--reuse-app takes an App slug such as graphyard-owner-repo, not ${slug}`);
   // --target names a self-contained install (GY-717): an existing machine, or a Hetzner server it creates.
@@ -119,7 +124,7 @@ export function installRequestFromArgs(args: string[]) {
   // or an unusable port, so a non-numeric value stops the command instead.
   const count = (flag: string, value: string) => { const parsed = Number(value); if (!Number.isSafeInteger(parsed) || parsed < 0) throw new Error(`--${flag} takes a whole number`); return parsed; };
   const request: InstallRequest & ReuseChoice = { repository: values.repo,
-    ...(values['herdr-rebind'] ? { herdr: 'rebind' as const } : values['no-herdr'] ? { herdr: 'skip' as const } : {}), provider: provider as InstallRequest['provider'],
+    ...(values['herdr-rebind'] ? { herdr: 'rebind' as const } : values['no-herdr'] ? { herdr: 'skip' as const } : values['herdr-instance'] ? { herdr: 'instance' as const } : {}), provider: provider as InstallRequest['provider'],
     ...(values.target || provider === 'host' ? { selfContained: true } : {}),
     ...(values.local ? { local: true } : {}), ...(values.migrate ? { migrate: true } : {}),
     ...(values['max-monthly'] ? { maxMonthly: money('max-monthly', values['max-monthly']) } : {}),
@@ -740,7 +745,7 @@ export async function buildPlan(session: InstallSession): Promise<InstallPlan> {
   const herdr = context.host ? null : await observeHerdr(session);
   const herdrTarget = record?.url ?? null;
   const herdrRelink = session.inputs.herdr !== 'skip' && herdrBoundElsewhere(herdr?.binding ?? null, herdrTarget) ? herdr!.binding!.bound : null;
-  if (herdrRelink && session.inputs.herdr !== 'rebind') preflight.push({ name: 'Herdr plugin', ok: false, detail: herdrRebindRefusal(herdrRelink, herdrTarget ?? 'this installation'), fix: 'Rerun with --herdr-rebind to repoint the plugin at this installation, or --no-herdr to leave Herdr untouched' });
+  if (herdrRelink && session.inputs.herdr !== 'rebind') preflight.push({ name: 'Herdr plugin', ok: false, detail: herdrRebindRefusal(herdrRelink, herdrTarget ?? 'this installation'), fix: 'Rerun with --herdr-instance to give this installation its own Herdr instance, --herdr-rebind to repoint the plugin at it, or --no-herdr to leave Herdr untouched' });
   const observation = preflight.every(item => item.ok) ? await adapter.observe(context) : { installed: false, compute: false, database: false, app: false, url: null, variables: {}, detail: ['provider preflight is incomplete; the installation was not inspected'] } as AdapterObservation;
 
   const core = coreEnv(session);
@@ -891,12 +896,16 @@ export async function protectionAvailability(gh: ReturnType<typeof githubCli>, r
   };
 }
 
+/** This install's own Herdr instance under --herdr-instance (GY-1511), else null: the host's default instance. */
+export function ownHerdrInstance(session: Pick<InstallSession, 'installId' | 'inputs'>) {
+  return session.inputs.herdr === 'instance' ? installHerdrInstance(session.installId) : null;
+}
 /** Herdr on this machine and the server its graphyard plugin is bound to, when it is. */
 async function observeHerdr(session: InstallSession) {
   const { deps, context } = session;
   const state = await (deps.detectHerdr ?? detectHerdr)(context.transport);
   if (!state.available || session.inputs.herdr === 'skip') return { state, binding: null };
-  const run = deps.runHerdr ?? (async (args: string[]) => { const result = await context.transport.exec('herdr', args, { allowFailure: true, timeout: 30_000 }); return result.code === 0 ? result.stdout : ''; });
+  const run = deps.runHerdr ?? (async (args: string[]) => { const call = herdrViaEnv(args, ownHerdrInstance(session)); const result = await context.transport.exec(call.command, call.args, { allowFailure: true, timeout: 30_000 }); return result.code === 0 ? result.stdout : ''; });
   return { state, binding: await herdrPluginBinding(run) };
 }
 
@@ -904,6 +913,8 @@ async function observeHerdr(session: InstallSession) {
 function herdrAction(session: InstallSession, herdr: Awaited<ReturnType<typeof observeHerdr>> | null, relink: string | null, target: string | null): PlanAction {
   const steps = 'herdr plugin link, write the plugin config.json {url, worker token}, herdr plugin enable';
   if (session.inputs.herdr === 'skip') return { id: 'local.herdr', target: 'local', state: 'satisfied', title: 'Leave Herdr untouched (--no-herdr): the graphyard plugin is neither linked nor reconfigured' };
+  const own = ownHerdrInstance(session);
+  if (own && herdr?.state.available && !herdr.binding) return { id: 'local.herdr', target: 'local', state: 'create', title: `Link and enable Herdr's graphyard plugin in this installation's own Herdr instance (XDG_CONFIG_HOME ${own.configHome}, session ${own.session}); the default instance is not touched (${steps})` };
   if (!herdr?.state.available) return { id: 'local.herdr', target: 'local', state: 'satisfied', title: 'Herdr is not installed on this machine; nothing to link, and workers start from the CLI' };
   if (relink) return { id: 'local.herdr', target: 'local', state: 'update', title: `Relink Herdr's graphyard plugin, now bound to ${relink}, to ${target ?? 'this installation'} (${steps})${session.inputs.herdr === 'rebind' ? '; --herdr-rebind allows it' : '; refused without --herdr-rebind'}` };
   if (herdr.binding) return { id: 'local.herdr', target: 'local', state: 'satisfied', title: `Herdr's graphyard plugin is already bound to ${herdr.binding.bound}; it keeps that server` };
@@ -1175,7 +1186,7 @@ export function resumeCommand(session: Pick<InstallSession, 'inputs'>) {
     maxMonthly: value('max-monthly', inputs.maxMonthly), confirmPrice: value('confirm-price', inputs.confirmPrice),
     githubAppFile: value('github-app', inputs.githubAppFile),
     createEnvironments: flag('create-environments', inputs.createEnvironments),
-    herdr: inputs.herdr === 'rebind' ? ['--herdr-rebind'] : inputs.herdr === 'skip' ? ['--no-herdr'] : [],
+    herdr: inputs.herdr === 'rebind' ? ['--herdr-rebind'] : inputs.herdr === 'skip' ? ['--no-herdr'] : inputs.herdr === 'instance' ? ['--herdr-instance'] : [],
   };
   return ['graphyard', 'install', ...Object.values(flags).flat(), ...values('reuse-app', inputs.reuseApps), '--apply'].join(' ');
 }
@@ -1293,7 +1304,7 @@ async function registerProfiles(session: InstallSession, url: string, appPending
     coordinatorToken: session.tokens.get(principalOfRole(session.principals, 'coordinator').id)!,
     workerTokens: workerIds.map(principal => ({ principal, token: session.tokens.get(principal)! })),
     runtimes, herdr, workers, reviewers, masterKind: master?.kind ?? null,
-    herdrRebind: session.inputs.herdr === 'rebind', appPending,
+    herdrRebind: session.inputs.herdr === 'rebind', appPending, herdrInstance: ownHerdrInstance(session),
     ...(deps.runHerdr ? { runHerdr: deps.runHerdr } : {}),
   };
   if (deps.registerProfiles) return deps.registerProfiles(request);

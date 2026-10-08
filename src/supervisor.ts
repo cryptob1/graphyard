@@ -8,6 +8,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { clearConsentHold, consentHoldSuffix, consentHoldVerdict, detectConsentPrompt, readConsentHolds, reclassifyConsentHold, writeConsentHold, type ConsentAnswer } from './consent-prompt.js';
 import { unknownWorkCode } from './model/refusal.js';
 import { installUnitsFile, legacyLoopUnit, proposedInstallUnits, readInstallUnits, resolveInstallUnits } from './install/units.js';
+import { herdrCall } from './master/herdr.js';
 
 interface Renewal { lease: { epoch: number; expiresAt: string } | null; updatedAt: string }
 
@@ -133,7 +134,7 @@ export const consentRequestAcceptMs = 8_000;
  * worker only by its profile's agent name, and would otherwise count the profile free and the held
  * worker's supervisor orphaned.
  */
-export function consentHoldProbe(checkout: string = process.cwd(), env: NodeJS.ProcessEnv = process.env, run: (command: string, args: string[]) => string = (command, args) => String(execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 10_000 })), now: () => number = Date.now): () => string | null {
+export function consentHoldProbe(checkout: string = process.cwd(), env: NodeJS.ProcessEnv = process.env, run: (command: string, args: string[], options?: { env?: NodeJS.ProcessEnv }) => string = (command, args, options) => String(execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 10_000, ...(options?.env ? { env: options.env } : {}) })), now: () => number = Date.now): () => string | null {
   return () => {
     const hold = readConsentHolds(checkout)[0];
     if (!hold) return null;
@@ -141,8 +142,8 @@ export function consentHoldProbe(checkout: string = process.cwd(), env: NodeJS.P
     let named = hold.named !== false;
     if (!named) {
       try {
-        run('herdr', ['agent', 'rename', pane, hold.agentName]);
-        const parsed = JSON.parse(run('herdr', ['agent', 'get', pane])), agent = (parsed?.result ?? parsed)?.agent ?? (parsed?.result ?? parsed);
+        herdrCall(run, ['agent', 'rename', pane, hold.agentName]);
+        const parsed = JSON.parse(herdrCall(run, ['agent', 'get', pane])), agent = (parsed?.result ?? parsed)?.agent ?? (parsed?.result ?? parsed);
         named = agent?.name === hold.agentName;
       } catch { named = false; }
       if (named) {
@@ -151,14 +152,14 @@ export function consentHoldProbe(checkout: string = process.cwd(), env: NodeJS.P
       }
     }
     let screen: string | null = null;
-    try { screen = run('herdr', ['pane', 'read', pane, '--source', 'recent-unwrapped', '--lines', '40']); } catch { screen = null; }
+    try { screen = herdrCall(run, ['pane', 'read', pane, '--source', 'recent-unwrapped', '--lines', '40']); } catch { screen = null; }
     const verdict = consentHoldVerdict(hold, screen, now());
     if (verdict === 'changed') {
       const prompt = detectConsentPrompt(screen)!, stem = hold.path.slice(0, -consentHoldSuffix.length);
       let answer: ConsentAnswer | undefined;
       if (prompt.rule && prompt.keys) {
         try {
-          run('herdr', ['pane', 'send-keys', pane, ...prompt.keys]);
+          herdrCall(run, ['pane', 'send-keys', pane, ...prompt.keys]);
           answer = { rule: prompt.rule.id, kind: prompt.kind, prompt: prompt.text, answer: prompt.rule.answer, keys: prompt.keys, at: new Date(now()).toISOString() };
         } catch { /* unanswered, it stays held for a human */ }
       }
@@ -174,7 +175,7 @@ export function consentHoldProbe(checkout: string = process.cwd(), env: NodeJS.P
       // delivery is tried again on the next check and, past the bound, gives the slot back.
       if (hold.request) {
         try {
-          run('herdr', ['agent', 'prompt', pane, readFileSync(hold.request, 'utf8'), '--wait', '--until', 'working', '--until', 'blocked', '--timeout', String(consentRequestAcceptMs)]);
+          herdrCall(run, ['agent', 'prompt', pane, readFileSync(hold.request, 'utf8'), '--wait', '--until', 'working', '--until', 'blocked', '--timeout', String(consentRequestAcceptMs)]);
         } catch (error) {
           return now() >= Date.parse(hold.releaseAt) ? `its session never took its request: the ${hold.kind} consent prompt was answered, but the request could not be delivered by the hold bound (${hold.releaseAt}): ${error instanceof Error ? error.message.split('\n')[0].slice(0, 200) : String(error)}` : null;
         }
@@ -194,12 +195,12 @@ const processAlive = (pid: number) => { try { process.kill(pid, 0); return true;
  * inferred from a working directory an agent may leave. A query that fails answers `null`: an
  * unreachable Herdr is a signal that could not be collected, never an absence.
  */
-export function herdrSessionProbe(env: NodeJS.ProcessEnv = process.env, run: (command: string, args: string[]) => string = (command, args) => String(execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 10_000 }))): () => boolean | null {
+export function herdrSessionProbe(env: NodeJS.ProcessEnv = process.env, run: (command: string, args: string[], options?: { env?: NodeJS.ProcessEnv }) => string = (command, args, options) => String(execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 10_000, ...(options?.env ? { env: options.env } : {}) }))): () => boolean | null {
   const pane = env.HERDR_PANE_ID;
   if (env.HERDR_ENV !== '1' || !pane) return () => null;
   return () => {
     try {
-      const parsed = JSON.parse(run('herdr', ['agent', 'list']));
+      const parsed = JSON.parse(herdrCall(run, ['agent', 'list']));
       const agents = (parsed?.result ?? parsed)?.agents;
       return Array.isArray(agents) ? agents.some((agent: { pane_id?: string }) => agent?.pane_id === pane) : null;
     } catch { return null; }
