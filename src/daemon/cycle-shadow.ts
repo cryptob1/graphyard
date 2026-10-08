@@ -5,7 +5,7 @@ import type { MasterConfig } from '../master.js';
 import type { Work } from '../model.js';
 import { classifyRisk } from '../model/risk-class.js';
 import { shadowGateSettings } from '../master/merge-writer-settings.js';
-import { runTrial, trialMerge, trialNeedsLog, TrialCleanupError, TrialTimeoutError, type TrialRun } from '../merge-writer/trial.js';
+import { runTrial, trialMerge, trialNeedsLog, TrialCleanupError, TrialRunnerError, TrialTimeoutError, type TrialRun } from '../merge-writer/trial.js';
 import { judgedVerdicts, shadowDisagreement, shadowDisagreementDetail, shadowOutcomes, shadowDue, shadowReport, trialLogTailLength, type ShadowVerdict } from '../merge-writer/shadow.js';
 import { storeAction, type DaemonState } from './state.js';
 import type { Cycle } from './cycle.js';
@@ -101,7 +101,28 @@ export const shadowTimeoutKey = (head: string, baseTip: string) => `shadow-timeo
 export const shadowTimeoutRetries = 3;
 /** The action key of a leftover trial checkout, recorded beside the verdict its trial reached. */
 export const shadowLeftoverKey = (head: string, baseTip: string) => `shadow-leftover:${head}:${baseTip}`;
-const timeouts = (state: DaemonState, head: string, baseTip: string) => { const action = state.actions[shadowTimeoutKey(head, baseTip)]; return action?.state === 'failed' ? action.attempts : 0; };
+/**
+ * The action key of a head's runner failures against one tip (GY-1548): the diagnostic record of a
+ * trial whose runner exited naming no failing test, counting them; the pair stays owed until
+ * `shadowRunnerRetries` of them.
+ */
+export const shadowRunnerKey = (head: string, baseTip: string) => `shadow-runner:${head}:${baseTip}`;
+/** How many trials of one (head, tip) pair may end in a runner failure before the pair is given up against that tip and one attention line names it. */
+export const shadowRunnerRetries = 2;
+const failures = (state: DaemonState, key: string) => { const action = state.actions[key]; return action?.state === 'failed' ? action.attempts : 0; };
+const timeouts = (state: DaemonState, head: string, baseTip: string) => failures(state, shadowTimeoutKey(head, baseTip));
+const runnerFailures = (state: DaemonState, head: string, baseTip: string) => failures(state, shadowRunnerKey(head, baseTip));
+/**
+ * The diagnostic record of a runner failure: the pair and its trial merge, the phase, the exit
+ * status or signal, the failing group's size and how many of its files finished, then the child's
+ * bounded output tail, within one action's detail. The trial ran credential-free, so the tail is.
+ */
+export function shadowRunnerDetail(flight: { key: string; head: string; baseTip: string }, error: TrialRunnerError, attempts: number, given: boolean) {
+  const exit = error.signal ? `signal ${error.signal}` : `status ${error.status ?? 'unknown'}`;
+  const group = error.files.length ? `, ${error.finished} of the group's ${error.files.length} file(s) finished (${error.files.slice(0, 5).join(', ')}${error.files.length > 5 ? ', …' : ''})` : '';
+  const prose = `Shadow trial of ${flight.key} head ${flight.head} on ${flight.baseTip} (trial merge ${error.mergeSha}) met a runner failure (${attempts} of ${shadowRunnerRetries}): its ${error.phase} runner exited (${exit}) naming no failing test${group}; a runner exit naming no test measures the host, not the merge, so it is no verdict and ${given ? 'the pair is given up against this tip' : 'the pair is tried again once no other head is due'}. Output tail: `;
+  return `${prose}${error.outputTail.slice(-Math.max(0, 1900 - prose.length))}`;
+}
 
 /**
  * Cycle step 6b' (after the merge step). One trial runs at a time, beside the cycle: the step
@@ -112,7 +133,10 @@ const timeouts = (state: DaemonState, head: string, baseTip: string) => { const 
  * step does nothing. A trial that errs records no verdict and is not retried against the same tip.
  * A timeout measures the host, not the merge: it records no verdict either, and the pair stays
  * owed, tried again once no other head is due, until `shadowTimeoutRetries` timeouts give it up
- * against that tip under one attention line.
+ * against that tip under one attention line. A runner that exits naming no failing test is the
+ * same kind of thing (GY-1548): its diagnostic record is kept under `shadowRunnerKey`, no verdict
+ * and so no `shadow-only-fail` follows, and `shadowRunnerRetries` such exits give the pair up
+ * under one attention line. A named failing test is the merge's and stays a failing verdict.
  */
 export async function shadowStep(cycle: Cycle) {
   const { state, effects, now, snapshot, performed } = cycle;
@@ -129,6 +153,10 @@ export async function shadowStep(cycle: Cycle) {
         const attempts = timeouts(state, flight.head, flight.baseTip) + 1, given = attempts >= shadowTimeoutRetries;
         performed.push(storeAction(state, shadowTimeoutKey(flight.head, flight.baseTip), { kind: 'merge', work: flight.key, principal: null, state: 'failed', detail: `Shadow trial of ${flight.key} head ${flight.head} on ${flight.baseTip} timed out (${attempts} of ${shadowTimeoutRetries}): ${error.message}; a timeout measures the host, not the merge, so it is no verdict and ${given ? 'the pair is given up against this tip' : 'the pair is tried again once no other head is due'}`.slice(0, 1900), attempts, epoch: null, cycle: state.cycle, at }, null));
         if (given) performed.push(storeAction(state, `shadow-timeouts:${flight.key}:${flight.baseTip}`, { kind: 'escalation', work: flight.key, principal: null, state: 'done', detail: `Shadow merge gate timeouts: ${flight.key} head ${flight.head} timed out ${attempts} times on ${flight.baseTip}, so it has no verdict against this tip; a slow host or a slow merge, nothing is changed`.slice(0, 1900), attempts, epoch: null, cycle: state.cycle, at }, null));
+      } else if (error instanceof TrialRunnerError) {
+        const attempts = runnerFailures(state, flight.head, flight.baseTip) + 1, given = attempts >= shadowRunnerRetries;
+        performed.push(storeAction(state, shadowRunnerKey(flight.head, flight.baseTip), { kind: 'merge', work: flight.key, principal: null, state: 'failed', detail: shadowRunnerDetail(flight, error, attempts, given), attempts, epoch: null, cycle: state.cycle, at }, null));
+        if (given) performed.push(storeAction(state, `shadow-runner-failures:${flight.key}:${flight.baseTip}`, { kind: 'escalation', work: flight.key, principal: null, state: 'done', detail: `Shadow merge gate runner failure: ${flight.key} head ${flight.head} on ${flight.baseTip} ended ${attempts} trials with its ${error.phase} runner exiting (${error.signal ? `signal ${error.signal}` : `status ${error.status ?? 'unknown'}`}) and no failing test named, so it has no verdict against this tip; read the record under ${shadowRunnerKey(flight.head, flight.baseTip)}, nothing is changed`.slice(0, 1900), attempts, epoch: null, cycle: state.cycle, at }, null));
       } else {
         const reason = error instanceof Error ? error.message : String(error);
         performed.push(storeAction(state, shadowErrorKey(flight.head, flight.baseTip), { kind: 'merge', work: flight.key, principal: null, state: 'failed', detail: `Shadow trial of ${flight.key} head ${flight.head} on ${flight.baseTip} could not run, so no verdict was recorded: ${reason}`.slice(0, 1900), attempts: 1, epoch: null, cycle: state.cycle, at }, null));
@@ -168,10 +196,12 @@ export async function shadowStep(cycle: Cycle) {
   if (!flights.has(state) && !unrecorded.has(state)) {
     const tip = await reads.mainTip();
     // A head whose trial could not run against this tip is not tried again against it; one that timed
-    // out waits its turn behind every head not yet tried, and is given up after `shadowTimeoutRetries`.
+    // out or met a runner failure waits its turn behind every head not yet tried, and is given up
+    // after `shadowTimeoutRetries` timeouts or `shadowRunnerRetries` runner failures.
     const open = snapshot.work.filter(item => !item.candidate || !state.actions[shadowErrorKey(item.candidate.sha.toLowerCase(), tip ?? '')]);
-    const timedOut = (item: Work) => timeouts(state, item.candidate!.sha.toLowerCase(), tip ?? '');
-    const fresh = open.filter(item => !item.candidate || !timedOut(item)), retryable = open.filter(item => item.candidate && timedOut(item) && timedOut(item) < shadowTimeoutRetries);
+    const deferred = (item: Work) => timeouts(state, item.candidate!.sha.toLowerCase(), tip ?? '') + runnerFailures(state, item.candidate!.sha.toLowerCase(), tip ?? '');
+    const givenUp = (item: Work) => timeouts(state, item.candidate!.sha.toLowerCase(), tip ?? '') >= shadowTimeoutRetries || runnerFailures(state, item.candidate!.sha.toLowerCase(), tip ?? '') >= shadowRunnerRetries;
+    const fresh = open.filter(item => !item.candidate || !deferred(item)), retryable = open.filter(item => item.candidate && deferred(item) && !givenUp(item));
     const due = tip ? shadowDue(fresh, state.shadow, tip) ?? shadowDue(retryable, state.shadow, tip) : null;
     if (tip && due?.candidate) {
       const head = due.candidate.sha.toLowerCase(), branch = due.candidate.branch, started = now();

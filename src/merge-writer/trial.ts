@@ -67,9 +67,25 @@ export function trialEnvironment(environment: NodeJS.ProcessEnv = process.env): 
  * null (or absent, from a trial stub) when no runner ran: a failed install or build, a failed
  * selection, or an empty one.
  */
-export interface TrialRun { build: 'pass' | 'fail'; tests: { passed: number; failed: string[]; files: number }; durationMs: number; logTail: string; runnerExit?: number | null }
+export interface TrialRun { build: 'pass' | 'fail'; tests: { passed: number; failed: string[]; files: number }; durationMs: number; logTail: string; runnerExit?: number | null; groups?: TrialGroup[] }
+/** One runner process of a trial (GY-1548): the files it ran, how it ended, and the failing files its records or log named. */
+export interface TrialGroup { files: string[]; status: number | null; signal: string | null; failed: string[] }
 /** Whether a verdict's log tail is worth recording: the build did not pass, a test file failed, or the runner did not exit 0. */
 export const trialNeedsLog = (run: Pick<TrialRun, 'build' | 'tests' | 'runnerExit'>) => run.build !== 'pass' || run.tests.failed.length > 0 || (run.runnerExit != null && run.runnerExit !== 0);
+/**
+ * How many test files one runner process of a trial runs at most (GY-1548). A full selection of
+ * 486 files in one `node --test` process outgrew the child runner's 16 MiB output capture, so the
+ * runner was killed with every file passing and the verdict named only tests/helpers/run-tests.ts.
+ */
+export const trialTestGroupSize = 40;
+/** The groups a selection runs in: its own order, cut every `size` files, so every file runs once and a failing group is a short list. */
+export function groupTestFiles(files: readonly string[], size = trialTestGroupSize): string[][] {
+  const bound = Math.max(1, Math.floor(size)), groups: string[][] = [];
+  for (let at = 0; at < files.length; at += bound) groups.push(files.slice(at, at + bound));
+  return groups;
+}
+/** How much of a failing runner child's output its diagnostic record keeps: enough to read the exit, little enough for one daemon action. */
+export const runnerDiagnosticTailLength = 1200;
 /**
  * A trial that outran `timeoutMs` measures the host, not the merge: it is no verdict, so runTrial
  * rejects with this (the phase it was in and the log so far) instead of answering a fail.
@@ -78,6 +94,21 @@ export class TrialTimeoutError extends Error {
   constructor(readonly phase: 'install' | 'build' | 'selection' | 'tests', readonly durationMs: number, readonly logTail: string) {
     super(`The trial timed out during its ${phase} after ${Math.round(durationMs / 1000)}s`);
     this.name = 'TrialTimeoutError';
+  }
+}
+/**
+ * A runner child that ended without naming a failing test (GY-1548): a test group whose process
+ * exited non-zero or on a signal while its records and log name no failing file, or an install or
+ * build child a signal ended or the host could not start. That measures the host or the runner,
+ * not the merge, so it is no verdict: runTrial rejects with this, carrying the exit status or
+ * signal, the phase, the files of the failing group (how many of them finished, by the runner's
+ * records), the last `runnerDiagnosticTailLength` characters of that child's output, and the
+ * trial merge sha. The child ran under `trialEnvironment`, so the tail holds no credential.
+ */
+export class TrialRunnerError extends Error {
+  constructor(readonly phase: 'install' | 'build' | 'tests', readonly status: number | null, readonly signal: string | null, readonly files: string[], readonly finished: number, readonly outputTail: string, readonly mergeSha: string, readonly durationMs: number) {
+    super(`The trial's ${phase} runner exited (${signal ? `signal ${signal}` : `status ${status ?? 'unknown'}`}) naming no failing test${files.length ? `; ${finished} of its ${files.length} file(s) finished` : ''}`);
+    this.name = 'TrialRunnerError';
   }
 }
 /**
@@ -105,6 +136,8 @@ export interface RunTrialInput {
   now?: () => number;
   /** Removes the trial checkout afterwards; the managed-root removal unless a test injects one. */
   remove?: typeof removeSessionCheckout;
+  /** The most files one runner process runs; `trialTestGroupSize` unless a test narrows it. */
+  groupSize?: number;
 }
 const tailLength = 4000;
 const testFile = /tests\/[\w./-]+\.test\.ts/g;
@@ -135,11 +168,15 @@ export function runnerRecords(text: string): { file: string; passed: boolean }[]
 /**
  * Check the merge commit out detached as a `trial` checkout, run `npm run build`, then the affected
  * pre-merge selection of scripts/ci-tests.mjs through tests/helpers/run-tests.ts, all under one
- * deadline and `trialEnvironment`. The runner always gets the selected file list, so a full
+ * deadline and `trialEnvironment`. The runner always gets a selected file list, so a full
  * selection runs every pre-merge file and never the release-candidate suites, and the verdict
- * counts the files that ran. The checkout is removed afterwards, pass or fail; a removal that
+ * counts the files that ran. The selection runs in groups of at most `trialTestGroupSize` files,
+ * each its own runner process over the same checkout, so a full selection never fills one
+ * process; the verdict's failing files are the union the groups' records name, and `groups`
+ * says how each process ended. The checkout is removed afterwards, pass or fail; a removal that
  * fails rejects with TrialCleanupError carrying the verdict. Past the deadline it rejects with
- * TrialTimeoutError: a timeout is no verdict against the merge.
+ * TrialTimeoutError, and a runner that ends naming no failing test with TrialRunnerError: neither
+ * is a verdict against the merge.
  */
 export async function runTrial(input: RunTrialInput): Promise<TrialRun> {
   const run = input.run ?? defaultChildRun, now = input.now ?? Date.now, startedAt = now(), deadline = startedAt + input.timeoutMs;
@@ -160,26 +197,32 @@ export async function runTrial(input: RunTrialInput): Promise<TrialRun> {
     const cause = failed.cause instanceof Error ? failed.cause.message : failed.cause === undefined ? null : String(failed.cause);
     return `[exit ${failed.signal ? `signal ${failed.signal}` : `status ${failed.status ?? 'unknown'}`}${cause ? `: ${cause}` : ''}]`;
   };
-  const exitCode = (error: unknown) => {
-    const failed = error as { status?: number | null; signal?: NodeJS.Signals | null; cause?: unknown };
-    if (failed.cause !== undefined) return -1;
-    if (typeof failed.status === 'number') return failed.status;
-    return failed.signal ? 128 + (constants.signals[failed.signal] ?? 0) : -1;
+  /** How a failed child ended, as the verdict's `runnerExit` counts it: the status, 128 plus the signal's number, or -1 when it never ran to an exit of its own. */
+  const exitCode = (ended: { status: number | null; signal: string | null; cause: unknown }) => {
+    if (ended.cause !== undefined) return -1;
+    if (typeof ended.status === 'number') return ended.status;
+    return ended.signal ? 128 + (constants.signals[ended.signal as NodeJS.Signals] ?? 0) : -1;
   };
-  const child = async (phase: TrialTimeoutError['phase'], command: string, args: string[], options: { env?: NodeJS.ProcessEnv } = {}) => {
+  type Ended = { ok: boolean; out: string; status: number | null; signal: string | null; cause: unknown };
+  const child = async (phase: TrialTimeoutError['phase'], command: string, args: string[], options: { env?: NodeJS.ProcessEnv } = {}): Promise<Ended> => {
     let out: string;
     try { out = String(await run(command, args, { cwd: checkout.worktree, env: (options.env ?? env) as Record<string, string>, timeoutMs: remaining() })); }
     catch (error) {
       const out = output(error);
       log.push(`$ ${command} ${args.join(' ')}\n${out}\n${ending(error)}`);
       if ((error as { timedOut?: boolean }).timedOut || now() >= deadline) throw new TrialTimeoutError(phase, Math.max(0, now() - startedAt), tail());
-      return { ok: false, out, exit: exitCode(error) };
+      const failed = error as { status?: number | null; signal?: string | null; cause?: unknown };
+      return { ok: false, out, status: typeof failed.status === 'number' ? failed.status : null, signal: failed.signal ?? null, cause: failed.cause };
     }
     log.push(`$ ${command} ${args.join(' ')}\n${out}`);
     if (now() >= deadline) throw new TrialTimeoutError(phase, Math.max(0, now() - startedAt), tail());
-    return { ok: true, out, exit: 0 };
+    return { ok: true, out, status: 0, signal: null, cause: undefined };
   };
-  const finish = (build: TrialRun['build'], tests: TrialRun['tests'], runnerExit: number | null = null): TrialRun => ({ build, tests, durationMs: Math.max(0, now() - startedAt), logTail: tail(), runnerExit });
+  // A child a signal ended, or one the host could not start or capture, says nothing about the merge.
+  const hostEnded = (ended: Ended) => !ended.ok && (ended.signal !== null || ended.cause !== undefined);
+  const runnerFailure = (phase: TrialRunnerError['phase'], ended: Ended, files: string[] = [], finished = 0) =>
+    new TrialRunnerError(phase, ended.status, ended.signal, files, finished, `${ended.out}\n${ending({ status: ended.status, signal: ended.signal, cause: ended.cause })}`.slice(-runnerDiagnosticTailLength), input.mergeSha, Math.max(0, now() - startedAt));
+  const finish = (build: TrialRun['build'], tests: TrialRun['tests'], runnerExit: number | null = null, groups?: TrialGroup[]): TrialRun => ({ build, tests, durationMs: Math.max(0, now() - startedAt), logTail: tail(), runnerExit, ...(groups ? { groups } : {}) });
   const listed = (out: string) => out.split('\n').map(line => line.trim()).filter(line => testFileLine.test(line));
   const trial = async (): Promise<TrialRun> => {
     try {
@@ -188,8 +231,13 @@ export async function runTrial(input: RunTrialInput): Promise<TrialRun> {
       const lockfile = (dir: string) => readFile(join(dir, 'package-lock.json'), 'utf8').catch(() => null);
       const [own, merged] = await Promise.all([lockfile(input.root), lockfile(checkout.worktree)]);
       if (existsSync(join(input.root, 'node_modules')) && own !== null && own === merged) await symlink(join(input.root, 'node_modules'), join(checkout.worktree, 'node_modules'));
-      else if (!(await child('install', 'npm', npmCiArgs, { env: npmCiEnvironment(env) })).ok) return finish('fail', { passed: 0, failed: [], files: 0 });
+      else {
+        const installed = await child('install', 'npm', npmCiArgs, { env: npmCiEnvironment(env) });
+        if (hostEnded(installed)) throw runnerFailure('install', installed);
+        if (!installed.ok) return finish('fail', { passed: 0, failed: [], files: 0 });
+      }
       const built = await child('build', 'npm', ['run', 'build']);
+      if (hostEnded(built)) throw runnerFailure('build', built);
       if (!built.ok) return finish('fail', { passed: 0, failed: [], files: 0 });
       const selection = await child('selection', 'node', ['scripts/ci-tests.mjs', 'affected', ...input.changedFiles]);
       if (!selection.ok) return finish('pass', { passed: 0, failed: ['scripts/ci-tests.mjs affected'], files: 0 });
@@ -202,16 +250,27 @@ export async function runTrial(input: RunTrialInput): Promise<TrialRun> {
       }
       // An affected selection of nothing runs nothing.
       if (!files.length) return finish('pass', { passed: 0, failed: [], files: 0 });
-      const list = join(checkout.directory, 'affected-tests.txt'), records = join(checkout.directory, 'test-results.jsonl');
-      await writeFile(list, `${files.join('\n')}\n`);
-      // The runner's own per-file records decide which files failed; the human-readable log is only read when they are missing.
-      const tests = await child('tests', 'node', ['--import', 'tsx', 'tests/helpers/run-tests.ts', '--files-from', list, '--durations', records]);
-      const recorded = runnerRecords(await readFile(records, 'utf8').catch(() => ''));
-      const failing = [...new Set(recorded.length ? recorded.filter(record => !record.passed).map(record => record.file) : tests.ok ? [] : failingFilesInLog(tests.out))];
-      if (tests.ok && !failing.length) return finish('pass', { passed: files.length, failed: [], files: files.length }, 0);
-      return finish('pass', { passed: Math.max(0, files.length - failing.length), failed: failing.length ? failing : ['tests/helpers/run-tests.ts'], files: files.length }, tests.exit);
+      // Each group is one runner process over the same checkout. Its own per-file records decide which
+      // files failed; the human-readable log is only read when they are missing. A group that ends
+      // non-zero naming no failing file is a runner failure, unless another group named one: a named
+      // failing test is the merge's, and stays a failing verdict.
+      const groups: TrialGroup[] = [];
+      let unattributed: TrialRunnerError | null = null;
+      for (const [index, group] of groupTestFiles(files, input.groupSize).entries()) {
+        const list = join(checkout.directory, `tests-${index + 1}.txt`), records = join(checkout.directory, `tests-${index + 1}.jsonl`);
+        await writeFile(list, `${group.join('\n')}\n`);
+        const tests = await child('tests', 'node', ['--import', 'tsx', 'tests/helpers/run-tests.ts', '--files-from', list, '--durations', records]);
+        const recorded = runnerRecords(await readFile(records, 'utf8').catch(() => ''));
+        const failing = [...new Set(recorded.length ? recorded.filter(record => !record.passed).map(record => record.file) : tests.ok ? [] : failingFilesInLog(tests.out))];
+        groups.push({ files: group, status: tests.status, signal: tests.signal, failed: failing });
+        if (!tests.ok && !failing.length) unattributed ??= runnerFailure('tests', tests, group, recorded.filter(record => group.includes(record.file)).length);
+      }
+      const failed = [...new Set(groups.flatMap(group => group.failed))];
+      if (!failed.length && unattributed) throw unattributed;
+      const worst = groups.find(group => group.status !== 0);
+      return finish('pass', { passed: Math.max(0, files.length - failed.length), failed, files: files.length }, worst ? exitCode({ status: worst.status, signal: worst.signal, cause: undefined }) : 0, groups);
     } catch (error) {
-      if (error instanceof TrialTimeoutError) throw error;
+      if (error instanceof TrialTimeoutError || error instanceof TrialRunnerError) throw error;
       log.push(`trial checkout failed: ${error instanceof Error ? error.message : String(error)}`);
       if ((error as { timedOut?: boolean }).timedOut || now() >= deadline) throw new TrialTimeoutError('install', Math.max(0, now() - startedAt), tail());
       return finish('fail', { passed: 0, failed: [], files: 0 });

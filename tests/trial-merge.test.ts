@@ -7,7 +7,12 @@ import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { defaultChildRun } from '../src/child-runner.js';
-import { runTrial, trialAuthor, trialEnvironment, trialMerge, trialRef, TrialCleanupError, TrialTimeoutError, withheldTrialVariables, type RunTrialInput } from '../src/merge-writer/trial.js';
+import { groupTestFiles, runnerDiagnosticTailLength, runTrial, trialAuthor, trialEnvironment, trialMerge, trialNeedsLog, trialRef, trialTestGroupSize, TrialCleanupError, TrialRunnerError, TrialTimeoutError, withheldTrialVariables, type RunTrialInput } from '../src/merge-writer/trial.js';
+import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
+import { shadowErrorKey, shadowIdle, shadowReads, shadowRunnerKey, shadowRunnerRetries } from '../src/daemon/cycle-shadow.js';
+import { masterConfigSchema } from '../src/master.js';
+import type { Work } from '../src/model.js';
+import { preMergeTestFiles } from '../scripts/ci-tests.mjs';
 import { checkoutKinds } from '../src/install/worktree-root.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -22,6 +27,9 @@ const gitIn = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd
 const gitFor = (root: string) => async (args: string[], env: Record<string, string> = {}) => String(await defaultChildRun('git', ['-C', root, ...args], { env: { ...process.env, ...identity, ...env } }));
 // The install this checkout resolves, wherever it sits above it.
 const installedModules = resolve(dirname(createRequire(import.meta.url).resolve('tsx/package.json')), '..');
+const start = Date.parse('2030-03-01T00:00:00Z'), iso = (at: number) => new Date(at).toISOString();
+const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: '/bin/graphyard',
+  repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', workers: [] });
 
 async function repository(files: Record<string, string>) {
   const root = await temporaryDirectory('trial-merge-repo', tmpdir());
@@ -79,14 +87,24 @@ const fixtureFiles = {
   '.gitignore': 'node_modules\n',
   'package.json': JSON.stringify({ name: 'fixture', scripts: { build: 'node build.js' } }),
   'package-lock.json': '{"lockfileVersion":3}\n',
-  'build.js': "const { existsSync } = require('node:fs'); console.log('ENV:' + JSON.stringify({ keys: Object.keys(process.env), global: process.env.GIT_CONFIG_GLOBAL, nosystem: process.env.GIT_CONFIG_NOSYSTEM, home: process.env.HOME, tmpdir: require('node:os').tmpdir() })); if (existsSync('break-build')) { console.error('build broke'); process.exit(1); }\n",
+  // With a `kill-build` marker the build child dies on a signal, as a host out of memory ends it.
+  'build.js': "const { existsSync } = require('node:fs'); console.log('ENV:' + JSON.stringify({ keys: Object.keys(process.env), global: process.env.GIT_CONFIG_GLOBAL, nosystem: process.env.GIT_CONFIG_NOSYSTEM, home: process.env.HOME, tmpdir: require('node:os').tmpdir() })); if (existsSync('break-build')) { console.error('build broke'); process.exit(1); } if (existsSync('kill-build')) { console.error('build killed'); process.kill(process.pid, 'SIGKILL'); }\n",
   // The stand-in for scripts/ci-tests.mjs: `affected` answers the changed test files, or a full selection (every pre-merge
   // file, never a soak) when package.json changed; with a `full-silent` marker it lists nothing for a full selection, as the
   // script did before GY-1522. `select` lists the pre-merge suite, as the real one does outside Actions.
   'scripts/ci-tests.mjs': "import { existsSync, readdirSync } from 'node:fs'; const [command, ...files] = process.argv.slice(2); const suite = () => readdirSync('tests').filter(name => name.endsWith('.test.ts') && !name.startsWith('soak')).sort().map(name => 'tests/' + name);\n"
     + "if (command === 'select') console.log(suite().join('\\n')); else if (files.includes('package.json')) { console.log('full: package.json changes the install'); if (!existsSync('full-silent')) console.log(suite().join('\\n')); } else { console.log('affected: selected'); for (const file of files) if (file.startsWith('tests/')) console.log(file); }\n",
-  // The stand-in runner: it runs only the listed files and refuses to run without a list.
-  'tests/helpers/run-tests.ts': "import { readFileSync } from 'node:fs'; const at = process.argv.indexOf('--files-from'); if (at < 0) { console.error('no --files-from: the runner would run every test file'); process.exit(2); } const files = readFileSync(process.argv[at + 1], 'utf8').split('\\n').filter(Boolean); for (const file of files) console.log((file.includes('bad') ? 'not ok - ' : 'ok - ') + file); if (files.some(file => file.includes('bad'))) process.exit(1);\n",
+  // The stand-in runner: it runs only the listed files and refuses to run without a list. It writes the real runner's
+  // per-file records under --durations (a `bad` file fails), names the tree it ran in (`tree-marker`), and ends as a
+  // runner that names no failing test does: with a `crash` file listed it prints every credential-shaped variable it sees and exits 3 after
+  // every file passed, with a `killed` file listed a signal ends it.
+  'tests/helpers/run-tests.ts': "import { existsSync, readFileSync, writeFileSync } from 'node:fs'; const at = process.argv.indexOf('--files-from'); if (at < 0) { console.error('no --files-from: the runner would run every test file'); process.exit(2); } const files = readFileSync(process.argv[at + 1], 'utf8').split('\\n').filter(Boolean);\n"
+    + "console.log('group: ' + files.length + ' file(s)' + (existsSync('tree-marker') ? ' in ' + readFileSync('tree-marker', 'utf8').trim() : ''));\n"
+    + "for (const file of files) console.log((file.includes('bad') ? 'not ok - ' : 'ok - ') + file);\n"
+    + "const durations = process.argv.indexOf('--durations'); if (durations >= 0) writeFileSync(process.argv[durations + 1], files.map(file => JSON.stringify({ file, durationMs: 1, passed: !file.includes('bad') })).join('\\n') + '\\n');\n"
+    + "if (files.some(file => file.includes('crash'))) { console.error('the runner process is leaving without a verdict'); console.error('credentials seen: ' + JSON.stringify(Object.fromEntries(Object.entries(process.env).filter(([name]) => /TOKEN|SECRET|SOCK|AUTH/.test(name))))); process.exit(3); }\n"
+    + "if (files.some(file => file.includes('killed'))) process.kill(process.pid, 'SIGKILL');\n"
+    + "if (files.some(file => file.includes('bad'))) process.exit(1);\n",
 };
 const fixture = async () => {
   const repo = await repository(fixtureFiles);
@@ -259,4 +277,109 @@ test('integration:trial-run-build-and-tests — a trial that outruns its time bu
   await assert.rejects(runTrial({ root: repo.root, base, mergeSha: merged.mergeSha, changedFiles: ['src/a.ts'], timeoutMs: 120_000, key: 'GY-9', environment: { PATH: process.env.PATH! }, run: slow, now: () => clock }),
     (error: unknown) => error instanceof TrialTimeoutError && error.phase === 'build' && error.durationMs === 200_000);
   assert.equal(existsSync(base) ? readdirSync(base).length : 0, 0);
+});
+
+// ——— GY-1548: a runner exit that names no failing test is a runner failure, never a failing verdict; the selection runs in bounded groups. ———
+const mergeOf = async (repo: Awaited<ReturnType<typeof fixture>>, head: string) => { const merged = await trialMerge(gitFor(repo.root), { head, baseTip: repo.base }); assert.ok('mergeSha' in merged); return merged.mergeSha; };
+const planted: NodeJS.ProcessEnv = { PATH: process.env.PATH!, GH_TOKEN: 'gh-secret-token', GITHUB_TOKEN: 'github-secret-token', GRAPHYARD_TOKEN: 'graphyard-secret-token', SSH_AUTH_SOCK: '/nowhere/agent.sock' };
+const secrets = ['gh-secret-token', 'github-secret-token', 'graphyard-secret-token', '/nowhere/agent.sock'];
+
+test('integration:shadow-trial-failure-diagnostics — a runner that exits non-zero naming a failing file is a failing verdict with the exit, the group and the files; one that exits non-zero or on a signal naming none (every record passed) rejects with TrialRunnerError carrying the phase, status or signal, the group\'s files and how many finished, a bounded credential-free output tail and the trial merge sha, as does a build a signal ended; and the loop records it against head, base tip and merge sha, retried twice then given up under one attention line, never as a verdict', async () => {
+  const repo = await fixture();
+  // A named failing test file: the merge's, so a failing verdict, with how the runner ended beside it.
+  const named = repo.commitOnBase({ 'tests/bad.test.ts': 'x\n', 'tests/ok.test.ts': 'x\n' }, 'named failure');
+  const verdict = await runTrial({ root: repo.root, base: await temporaryDirectory('trial-merge-root', tmpdir()), mergeSha: await mergeOf(repo, named), changedFiles: ['tests/bad.test.ts', 'tests/ok.test.ts'], timeoutMs: 120_000, key: 'GY-9', environment: planted });
+  assert.deepEqual([verdict.build, verdict.tests, verdict.runnerExit], ['pass', { passed: 1, failed: ['tests/bad.test.ts'], files: 2 }, 1], verdict.logTail);
+  assert.deepEqual(verdict.groups, [{ files: ['tests/bad.test.ts', 'tests/ok.test.ts'], status: 1, signal: null, failed: ['tests/bad.test.ts'] }], 'the group record names the failing file and the exit status');
+  assert.ok(trialNeedsLog(verdict));
+  // A runner that exits 3 after every file passed, records and all: no test is named, so no verdict; the record says how it ended and holds no credential.
+  const crashed = repo.commitOnBase({ 'tests/crash.test.ts': 'x\n', 'tests/ok.test.ts': 'x\n' }, 'runner exit');
+  const crashedMerge = await mergeOf(repo, crashed), crashedBase = await temporaryDirectory('trial-merge-root', tmpdir());
+  await assert.rejects(runTrial({ root: repo.root, base: crashedBase, mergeSha: crashedMerge, changedFiles: ['tests/crash.test.ts', 'tests/ok.test.ts'], timeoutMs: 120_000, key: 'GY-9', environment: planted }), (error: unknown) => {
+    assert.ok(error instanceof TrialRunnerError, String(error));
+    assert.deepEqual([error.phase, error.status, error.signal, error.files, error.finished, error.mergeSha], ['tests', 3, null, ['tests/crash.test.ts', 'tests/ok.test.ts'], 2, crashedMerge]);
+    assert.match(error.message, /tests runner exited \(status 3\) naming no failing test; 2 of its 2 file\(s\) finished/);
+    assert.ok(error.outputTail.length <= runnerDiagnosticTailLength && error.outputTail.includes('the runner process is leaving without a verdict') && error.outputTail.includes('[exit status 3]'), error.outputTail);
+    assert.ok(error.outputTail.includes('credentials seen: {'), 'the child printed every credential-shaped variable it saw into the tail');
+    for (const secret of secrets) assert.ok(!error.outputTail.includes(secret) && !error.message.includes(secret), `the record carries ${secret}`);
+    assert.ok(error.durationMs >= 0);
+    return true;
+  });
+  assert.equal(existsSync(crashedBase) ? readdirSync(crashedBase).length : 0, 0, 'the trial checkout is removed after a runner failure');
+  // A signal that ends the runner, as the output cap or the OOM killer does, is the same: the signal is recorded, not a status.
+  const killed = repo.commitOnBase({ 'tests/killed.test.ts': 'x\n' }, 'runner killed');
+  await assert.rejects(runTrial({ root: repo.root, base: await temporaryDirectory('trial-merge-root', tmpdir()), mergeSha: await mergeOf(repo, killed), changedFiles: ['tests/killed.test.ts'], timeoutMs: 120_000, key: 'GY-9', environment: planted }),
+    (error: unknown) => error instanceof TrialRunnerError && error.phase === 'tests' && error.status === null && error.signal === 'SIGKILL' && error.outputTail.includes('[exit signal SIGKILL]') && error.files.length === 1);
+  // A build child a signal ended measures the host too; one that exits non-zero is still the merge's failed build.
+  const buildKilled = repo.commitOnBase({ 'kill-build': '', 'tests/ok.test.ts': 'x\n' }, 'build killed');
+  await assert.rejects(runTrial({ root: repo.root, base: await temporaryDirectory('trial-merge-root', tmpdir()), mergeSha: await mergeOf(repo, buildKilled), changedFiles: ['tests/ok.test.ts'], timeoutMs: 120_000, key: 'GY-9', environment: planted }),
+    (error: unknown) => error instanceof TrialRunnerError && error.phase === 'build' && error.signal === 'SIGKILL' && error.files.length === 0 && error.outputTail.includes('build killed'));
+  const buildBroken = repo.commitOnBase({ 'break-build': '', 'tests/ok.test.ts': 'x\n' }, 'build broken');
+  assert.equal((await runTrial({ root: repo.root, base: await temporaryDirectory('trial-merge-root', tmpdir()), mergeSha: await mergeOf(repo, buildBroken), changedFiles: ['tests/ok.test.ts'], timeoutMs: 120_000, key: 'GY-9', environment: planted })).build, 'fail');
+
+  // The loop's record of the runner exit, through the shadow step over this repository: against head, base tip and trial merge sha, with the exit and the tail.
+  const run = ((command: string, args: string[], options: unknown) => command === 'git' && args[2] === 'fetch' ? '' : defaultChildRun(command, args, options as never)) as never;
+  const reads = shadowReads(config, repo.root, run, { base: await temporaryDirectory('trial-merge-root', tmpdir()), record: async () => { assert.fail('a runner failure records no verdict'); } });
+  const work = [{ id: 'w1', key: 'GY-1548', description: '', type: 'bug', priority: 1, dependencies: [], criteria: [], policy: { checks: ['test'], review: true }, plannedFiles: [], revision: 1, policyRevision: 1,
+    createdAt: iso(start), updatedAt: iso(start), stageEnteredAt: iso(start), ready: true, epoch: 1, lease: null, workspaces: [], submission: { epoch: 1, pr: 1 }, candidate: { sha: crashed, baseSha: repo.base, pr: 1, branch: 'graphyard/gy-1548-1', author: 'w' },
+    reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null, violations: [], gates: [], stage: 'build' }] as unknown as Work[];
+  const effects = { agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}), snapshot: async () => ({ work, now: iso(start) }),
+    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(start), reason: 'not configured', deployed: [], pending: [] }),
+    recordDeployment: async () => {}, requestSmoke: () => {}, decisions: async () => ({ decisions: [] }), persist: async () => {}, github: {}, merge: {}, shadow: reads } as unknown as DaemonEffects;
+  const state = emptyDaemonState(config), now = () => start;
+  const attention: string[] = [];
+  for (let cycle = 0; cycle < 5; cycle++) { attention.push(...(await runCycle(config, state, effects, now)).actions.filter(action => action.detail.startsWith('Shadow merge gate runner failure:')).map(action => action.detail)); await shadowIdle(state); }
+  const record = state.actions[shadowRunnerKey(crashed, repo.base)];
+  assert.ok(record, 'the diagnostic record is keyed by head and base tip');
+  // The loop made its own trial merge of the head (the trial ref holds the newest); the record names that commit.
+  const loopMerge = gitIn(repo.root, 'rev-parse', trialRef(crashed));
+  assert.equal(record.state, 'failed');
+  assert.equal(record.attempts, shadowRunnerRetries, 'tried again once, then given up');
+  for (const named of [crashed, repo.base, loopMerge, 'tests runner exited (status 3)', '2 of the group\'s 2 file(s) finished', 'tests/crash.test.ts', 'given up against this tip', 'the runner process is leaving without a verdict', '[exit status 3]']) assert.ok(record.detail.includes(named), `the record names ${named}:\n${record.detail}`);
+  assert.ok(record.detail.length <= 2000);
+  assert.deepEqual(state.shadow, [], 'no verdict, so no shadow-only-fail can follow');
+  assert.equal(attention.length, 1, `one attention line, once: ${attention.join(' / ')}`);
+  assert.match(attention[0]!, /^Shadow merge gate runner failure: GY-1548 head [0-9a-f]{40} on [0-9a-f]{40} ended 2 trials with its tests runner exiting \(status 3\) and no failing test named/);
+  assert.ok(!state.actions[shadowErrorKey(crashed, repo.base)], 'a runner failure is not a trial error');
+});
+
+test('integration:shadow-trial-bounded-test-groups — the selection runs in groups of at most trialTestGroupSize files, each its own runner process over the exact trial merge tree, every file once and in order; a failing group names its files, whether a record names the failing test or the runner exited naming none; and the real pre-merge suite never fits one group', async () => {
+  const repo = await fixture();
+  const suite = Object.fromEntries(Array.from({ length: 8 }, (_, index) => [`tests/t${index}.test.ts`, 'x\n']));
+  const files = Object.keys(suite).sort();
+  // Eight passing files in groups of three: three runner processes, each in the merge's tree (the head adds the marker), together exactly the selection.
+  const head = repo.commitOnBase({ ...suite, 'tree-marker': 'merge-of-head\n' }, 'eight files');
+  const base = await temporaryDirectory('trial-merge-root', tmpdir());
+  const result = await runTrial({ root: repo.root, base, mergeSha: await mergeOf(repo, head), changedFiles: files, timeoutMs: 120_000, key: 'GY-9', environment: { PATH: process.env.PATH! }, groupSize: 3 });
+  assert.deepEqual(result.tests, { passed: 8, failed: [], files: 8 }, result.logTail);
+  assert.deepEqual(result.groups?.map(group => group.files), [files.slice(0, 3), files.slice(3, 6), files.slice(6)], 'every file runs once, in the selection\'s order, at most three to a process');
+  assert.equal(result.logTail.match(/run-tests\.ts --files-from \S+tests-\d\.txt --durations \S+tests-\d\.jsonl/g)?.length, 3, 'three runner processes, each with its own list and records');
+  assert.equal(result.logTail.match(/^group: \d file\(s\) in merge-of-head$/gm)?.length, 3, `every group ran the trial merge tree:\n${result.logTail}`);
+  assert.deepEqual([result.runnerExit, result.groups?.every(group => group.status === 0 && group.signal === null)], [0, true]);
+  assert.equal(existsSync(base) ? readdirSync(base).length : 0, 0, 'the checkout is removed');
+  // A failing test in the second group: the verdict names the file, and the group record says which process failed.
+  const named = repo.commitOnBase({ ...suite, 'tests/t4bad.test.ts': 'x\n' }, 'one failing file');
+  const namedFiles = [...files, 'tests/t4bad.test.ts'].sort();
+  const failing = await runTrial({ root: repo.root, base, mergeSha: await mergeOf(repo, named), changedFiles: namedFiles, timeoutMs: 120_000, key: 'GY-9', environment: { PATH: process.env.PATH! }, groupSize: 3 });
+  assert.deepEqual([failing.tests, failing.runnerExit], [{ passed: 8, failed: ['tests/t4bad.test.ts'], files: 9 }, 1]);
+  assert.deepEqual(failing.groups?.map(group => [group.files.length, group.status, group.failed]), [[3, 0, []], [3, 1, ['tests/t4bad.test.ts']], [3, 0, []]], 'the failing group is the one holding the file');
+  // A runner exit naming no test in the second group, with a named failure in the third: the named failure is the verdict, the exit rides along in the group record.
+  const mixed = repo.commitOnBase({ ...suite, 'tests/t4crash.test.ts': 'x\n', 'tests/t9bad.test.ts': 'x\n' }, 'a crash and a failure');
+  const mixedFiles = [...files, 'tests/t4crash.test.ts', 'tests/t9bad.test.ts'].sort();
+  const both = await runTrial({ root: repo.root, base, mergeSha: await mergeOf(repo, mixed), changedFiles: mixedFiles, timeoutMs: 120_000, key: 'GY-9', environment: { PATH: process.env.PATH! }, groupSize: 3 });
+  assert.deepEqual(both.tests.failed, ['tests/t9bad.test.ts'], 'a named failing test stays the verdict');
+  assert.deepEqual(both.groups?.map(group => [group.status, group.failed]), [[0, []], [3, []], [0, []], [1, ['tests/t9bad.test.ts']]], both.logTail);
+  // The same exit with no failing test named anywhere: a runner failure naming exactly the group's files.
+  const crashOnly = repo.commitOnBase({ ...suite, 'tests/crash.test.ts': 'x\n' }, 'a crash');
+  const crashFiles = [...files, 'tests/crash.test.ts'].sort();
+  await assert.rejects(runTrial({ root: repo.root, base, mergeSha: await mergeOf(repo, crashOnly), changedFiles: crashFiles, timeoutMs: 120_000, key: 'GY-9', environment: { PATH: process.env.PATH! }, groupSize: 3 }),
+    (error: unknown) => error instanceof TrialRunnerError && error.status === 3 && error.files.length === 3 && error.files.includes('tests/crash.test.ts') && error.finished === 3);
+  // The bound itself: this repository's pre-merge suite, as scripts/ci-tests.mjs selects it, never runs in one process.
+  const suiteFiles = preMergeTestFiles();
+  const groups = groupTestFiles(suiteFiles);
+  assert.ok(suiteFiles.length > 400 && groups.length >= Math.ceil(suiteFiles.length / trialTestGroupSize) && groups.length > 1, `${suiteFiles.length} files run in ${groups.length} groups`);
+  assert.ok(groups.every(group => group.length <= trialTestGroupSize && group.length > 0));
+  assert.deepEqual(groups.flat(), suiteFiles, 'every selected file, once, in order');
+  assert.deepEqual([groupTestFiles([]), groupTestFiles(['a'], 0)], [[], [['a']]], 'an empty selection has no group; a bound under one is one');
+  assert.equal(trialTestGroupSize, 40);
 });
