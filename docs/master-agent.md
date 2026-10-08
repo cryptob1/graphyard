@@ -1,15 +1,15 @@
 <!-- page: Operate Graphyard | 5 | loop, merges. -->
 # Master-agent operating mode
 
-The master (`coordinator`) routes and administers GitHub unasked, never implementing, reviewing or proving; it no longer hand-decomposes goals ([goal pipeline](how-graphyard-works.md#from-goal-to-work-items)). Human-only: goals and priorities, spending money or opening third-party accounts, issuing credentials to people ([who decides](glossary.md#who-decides)); it decides the rest, alone or via an approver, never asking a human to run what an agent may. `master guide` prints its role instructions, then this page; AGENTS.md carries only the worker block.
+The master (`coordinator`) routes and administers GitHub unasked, never implementing, reviewing or proving; it no longer hand-decomposes goals ([goal pipeline](how-graphyard-works.md#from-goal-to-work-items)). Human-only: goals and priorities, spending money or opening third-party accounts, issuing credentials to people ([who decides](glossary.md#who-decides)); it decides the rest, alone or via an approver, never asking a human to run what an agent may. `master guide` prints its role instructions, then this page.
 
 ## Operate
 
-Keep cycling: `master status`; `master run` dispatches (`schedule.order`); merge gate-passing candidates; rework findings; deployment verification (`master verify-deployment GY-N`, [refusals](operations-reference.md#perpetual-master-loop)); Close finished agent sessions. Stop only when every in-scope item is Done or has a genuinely external blocker recorded in Graphyard, and every merge is verified against the exact deployed release or deployment-blocked. Ordinary review findings, rework, idle workers, and proof setup are not stopping conditions. `controlPlane.production` flags main ahead of production.
+Keep cycling: `master status`; `master run` dispatches (`schedule.order`); merge gate-passing candidates; rework findings; deployment verification (`master verify-deployment GY-N`, [refusals](operations-reference.md#perpetual-master-loop)); Close finished agent sessions. Stop only when every in-scope item is Done or has a genuinely external blocker recorded, and every merge is verified against the deployed release or deployment-blocked.
 
 `master run` is unit `graphyard-master.service` ([supervision](onboarding.md#the-loop-must-be-supervised)); on `daemon.liveness` `stalled`/`absent`: `systemctl --user restart graphyard-master`, never from a [dirty or non-forward checkout](master-agent-sessions.md#the-coordinator-checkout-is-confined-at-the-os-level).
 
-**Cycle cadence.** Between cycles the loop sleeps `run.intervalSeconds`, at most 30 s while anything is actionable. The dispatcher tick wakes it early, once per new subject its next cycle acts on (claimable item, freed launch profile, scope request on a live lease, routine decision), no sooner than one `run.dispatchIntervalSeconds` after the cycle, logged `woken Ns before the … wait ended: REASONS`; a failed cycle's backoff is never cut short.
+**Cycle cadence.** Between cycles the loop sleeps `run.intervalSeconds`, at most 30 s while anything is actionable. The dispatcher tick wakes it early, once per new subject its next cycle acts on (claimable item, freed launch profile, scope request on a live lease, routine decision), no sooner than one `run.dispatchIntervalSeconds` after the cycle, logged `woken Ns before the … wait ended: REASONS`.
 
 ### System-driven items
 
