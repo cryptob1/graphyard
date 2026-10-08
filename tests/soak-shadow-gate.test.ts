@@ -2,8 +2,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { daemonSummary, emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
-import { shadowIdle, shadowKeptVerdicts, shadowReads, shadowStateSchema } from '../src/daemon/cycle-shadow.js';
+import { shadowIdle, shadowKeptVerdicts, shadowReads, shadowRunnerRetries, shadowStateSchema } from '../src/daemon/cycle-shadow.js';
 import { trialLogTailLength } from '../src/merge-writer/shadow.js';
+import { TrialRunnerError } from '../src/merge-writer/trial.js';
 import { masterConfigSchema } from '../src/master.js';
 import type { Work } from '../src/model.js';
 
@@ -14,7 +15,10 @@ import type { Work } from '../src/model.js';
  * tries each (head, tip) pair at most once, keeps at most 200 verdicts, raises one attention line
  * per disagreeing item, and never stalls delivery (it only reads). GY-1549: every failing verdict it
  * posts carries the trial's log tail, bounded to `trialLogTailLength`, through every retry of a
- * refused post; a passing verdict posts none; and the loop's cursor never holds one.
+ * refused post; a passing verdict posts none; and the loop's cursor never holds one. GY-1548: a
+ * trial whose runner exits naming no failing test records no verdict and no disagreement, is
+ * retried at most `shadowRunnerRetries` times per (head, tip) under one diagnostic record, and
+ * never posts.
  */
 const minute = 60_000;
 const start = Date.parse('2030-03-01T00:00:00Z');
@@ -32,7 +36,7 @@ const work = (n: number, submittedAt: number, mergedAt: number, now: number): Wo
   ...(now >= mergedAt ? { stage: 'done', delivery: { mergedAt: iso(mergedAt), mergeSha: sha(`merge${n}`), authorizationRevision: 1 } } : { stage: 'review' }),
 }) as unknown as Work;
 
-test('unit:soak-shadow-gate — a simulated day: bounded trials, one verdict per (head, tip), at most 200 kept, one attention line per disagreeing item, delivery unaffected, every failing post carries a bounded log tail and no passing post or cursor entry does', { timeout: 300_000 }, async () => {
+test('unit:soak-shadow-gate — a simulated day: bounded trials, one verdict per (head, tip), at most 200 kept, one attention line per disagreeing item, delivery unaffected, every failing post carries a bounded log tail and no passing post or cursor entry does, and a runner exit naming no test is retried at most twice per pair and never posted', { timeout: 300_000 }, async () => {
   const cycles = 24 * 60 / 2, items = 150;
   let now = start, tipIndex = 0, failPosts = 0, running = 0, widest = 0;
   const tip = () => sha(`tip${tipIndex}`);
@@ -61,6 +65,8 @@ test('unit:soak-shadow-gate — a simulated day: bounded trials, one verdict per
     running += 1; widest = Math.max(widest, running); trials.push(input.mergeSha);
     await new Promise(resolve => setTimeout(resolve, 1));
     running -= 1;
+    // Every thirteenth trial's runner dies naming no test, and one pair in seventeen does so every time it is tried: host failures, so no verdict follows from them.
+    if (trials.length % 13 === 0 || parseInt(input.mergeSha.slice(0, 2), 16) % 17 === 0) throw new TrialRunnerError('tests', null, 'SIGKILL', ['tests/x.test.ts'], 0, output, input.mergeSha, 1000);
     // Every seventh trial fails its tests: GitHub merges those anyway, a disagreement. Every trial's full output comes back; the step decides what the verdict carries.
     const failed = trials.length % 7 === 0;
     return { build: 'pass', tests: { passed: failed ? 0 : 1, failed: failed ? ['tests/x.test.ts'] : [], files: 1 }, durationMs: 1000, logTail: output, runnerExit: failed ? 1 : 0 };
@@ -73,13 +79,14 @@ test('unit:soak-shadow-gate — a simulated day: bounded trials, one verdict per
     recordDeployment: async () => {}, requestSmoke: () => {}, decisions: async () => ({ decisions: [] }), persist: async () => {},
     github: githubDouble, merge: githubDouble, shadow: reads } as unknown as DaemonEffects;
   const state = emptyDaemonState(config);
-  const raised = new Map<string, number>();
+  const raised = new Map<string, number>(), runnerLines = new Map<string, number>();
   for (let cycle = 0; cycle < cycles; cycle++) {
     now = start + cycle * 2 * minute;
     if (cycle % 40 === 0) tipIndex += 1;
     if (cycle % 90 < 3) failPosts = 1;
     const result = await runCycle(config, state, effects, () => now);
     for (const action of result.actions) if (action.detail.startsWith('Shadow merge gate:')) raised.set(action.work ?? '', (raised.get(action.work ?? '') ?? 0) + 1);
+    for (const action of result.actions) if (action.detail.startsWith('Shadow merge gate runner failure:')) runnerLines.set(action.detail.replace(/ ended .*$/s, ''), (runnerLines.get(action.detail.replace(/ ended .*$/s, '')) ?? 0) + 1);
     await shadowIdle(state);
     assert.ok(state.shadow.length <= shadowKeptVerdicts, `cycle ${cycle}: ${state.shadow.length} verdicts kept`);
     assert.ok(widest <= 1, 'one trial at a time');
@@ -103,6 +110,15 @@ test('unit:soak-shadow-gate — a simulated day: bounded trials, one verdict per
   }
   assert.ok([...raised.values()].every(count => count === 1), `one attention line per item: ${JSON.stringify([...raised])}`);
   assert.ok(raised.size > 0, 'a disagreement was raised');
+  // Runner failures: one bounded diagnostic record per (head, tip), never more than shadowRunnerRetries trials, one attention line once given up, and no verdict for a pair given up.
+  const records = Object.entries(state.actions).filter(([key]) => key.startsWith('shadow-runner:'));
+  assert.ok(records.length >= 5, `the day met ${records.length} runner failures`);
+  for (const [key, record] of records) {
+    assert.ok(record.attempts <= shadowRunnerRetries && record.state === 'failed' && /met a runner failure \(\d of 2\): its tests runner exited \(signal SIGKILL\) naming no failing test/.test(record.detail), `${key}: ${record.detail.slice(0, 200)}`);
+    if (record.attempts === shadowRunnerRetries) assert.ok(!posts.some(post => post.endsWith(key.slice('shadow-runner:'.length))), `${key} was given up, so it has no verdict`);
+  }
+  assert.ok(records.some(([, record]) => record.attempts === shadowRunnerRetries), 'some pair was given up');
+  assert.ok([...runnerLines.values()].every(count => count === 1) && runnerLines.size === records.filter(([, record]) => record.attempts === shadowRunnerRetries).length, `one attention line per given-up pair: ${JSON.stringify([...runnerLines])}`);
   const section = daemonSummary(state, now, config.run.intervalSeconds * 1000, config.hostId).shadowGate;
   assert.equal(section.total, state.shadow.length);
   assert.ok(section.disagreements.length <= 10);
