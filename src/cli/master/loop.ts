@@ -31,8 +31,9 @@ export async function loopCommand(session: MasterSession): Promise<unknown> {
     // snapshot fetch is bounded by the tick's own read bound, which grows while ticks fail (GY-1373).
     const dispatchCursor = await readDispatchCursor(root, master);
     const stopping = new AbortController();
-    // GY-1490: the dispatcher's tick wakes the loop's sleep for anything new its next cycle acts on.
-    const wake = new LoopWake();
+    // GY-1490: the dispatcher's tick wakes the loop's sleep for anything new its next cycle acts on,
+    // never sooner than one dispatch interval after the cycle before.
+    const wake = new LoopWake(() => current().run.dispatchIntervalSeconds * 1000);
     const daemonRun = runDaemon(master, state, effects, { once: values.once, intervalMs: values.interval ? intervalSeconds * 1000 : () => current().run.intervalSeconds * 1000, identity: { pid: process.pid, host: master.hostId }, reload, repository: root, wake }).finally(() => stopping.abort());
     const dispatching = { ...dispatchEffects(root, current, { snapshot: (timeoutMs = dispatchReadTimeoutMs) => coordinationSnapshot(timeoutMs) }),
       observeLoopSubjects: (work: Parameters<typeof loopWakeSubjects>[0], agents: Parameters<typeof loopWakeSubjects>[3], clock: number) => { wake.observe(loopWakeSubjects(work, current(), clock, agents)); } };

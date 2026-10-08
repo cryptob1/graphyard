@@ -19,7 +19,8 @@ import { neededDecision } from './decisions.js';
  *
  * The tick already reads the snapshot and Herdr's agents every 10 s. `loopWakeSubjects` names, from
  * those, what the loop's next cycle would act on, and `LoopWake.observe` wakes the sleep for every
- * subject the tick before did not hold, so a subject wakes the loop once rather than every tick.
+ * subject it does not already hold, so a subject wakes the loop once rather than every tick, and no
+ * sooner than one dispatch tick after the cycle before (GY-1490 review).
  */
 
 /** One thing the loop's next cycle acts on, keyed so the same standing subject is never a second wake. */
@@ -57,43 +58,76 @@ export function loopWakeSubjects(work: readonly Work[], config: WakeConfig, now:
   return subjects;
 }
 
-/** The most reasons one wake carries into the loop's log line. */
+/** The most reasons one wake carries into the loop's log line; the newest are kept. */
 export const loopWakeReasonLimit = 20;
 
 /**
- * The loop's sleep between cycles, which the dispatcher can end early. A wake that lands while the
- * loop is cycling is kept, so the next sleep returns at once: the running cycle may have read its
- * snapshot before the subject appeared. The first observation only records what stands — the loop
- * cycles on start anyway — and a subject that stays is never a second wake.
+ * The least a woken sleep lasts after the cycle before it, by default one tick at the dispatcher's
+ * default cadence (`run.dispatchIntervalSeconds`, 10 s; `master run` passes the configured one). However
+ * many subjects the ticks see, woken cycles stand at least that far apart, so the per-cycle reads and
+ * refreshes the system invariants bound grow by a known factor at most, never to back-to-back cycles.
+ */
+export const loopWakeFloorMs = 10_000;
+
+/** How many consecutive ticks a subject is absent before it is forgotten, and could wake the loop again. */
+export const loopWakeForgetTicks = 2;
+
+/**
+ * The loop's sleep between cycles, which the dispatcher can end early, never before `floorMs` after
+ * the cycle. A wake that lands while the loop is cycling is kept for the next sleep: the running cycle
+ * may have read its snapshot before the subject appeared. The first observation only records what
+ * stands — the loop cycles on start anyway — and a subject that stays is never a second wake, nor one
+ * absent for a single tick (Herdr unreadable once, an agent status that flips): only a subject absent
+ * `loopWakeForgetTicks` ticks in a row is forgotten.
  */
 export class LoopWake {
-  private seen: Set<string> | null = null;
+  private seen: Map<string, number> | null = null;
   private pending: string[] = [];
   private release: (() => void) | null = null;
+  constructor(private readonly floor: number | (() => number) = loopWakeFloorMs) {}
+  get floorMs(): number { return typeof this.floor === 'function' ? this.floor() : this.floor; }
 
-  /** Record one tick's subjects; wakes the loop for those the tick before did not hold, and returns them. */
+  /** Record one tick's subjects; wakes the loop for those it does not hold, and returns them. */
   observe(subjects: readonly LoopSubject[]): LoopSubject[] {
-    const fresh = this.seen ? subjects.filter(subject => !this.seen!.has(subject.key)) : [];
-    this.seen = new Set(subjects.map(subject => subject.key));
+    const present = new Map(subjects.map(subject => [subject.key, subject]));
+    const fresh = this.seen ? [...present.values()].filter(subject => !this.seen!.has(subject.key)) : [];
+    const seen = new Map<string, number>();
+    for (const [key, absent] of this.seen ?? []) if (!present.has(key) && absent + 1 < loopWakeForgetTicks) seen.set(key, absent + 1);
+    for (const key of present.keys()) seen.set(key, 0);
+    this.seen = seen;
     if (fresh.length) this.wake(fresh.map(subject => subject.reason));
     return fresh;
   }
 
   wake(reasons: readonly string[]) {
-    this.pending = [...this.pending, ...reasons].slice(0, loopWakeReasonLimit);
+    this.pending = [...this.pending, ...reasons].slice(-loopWakeReasonLimit);
     this.release?.();
   }
 
-  /** Sleep up to `ms`, or until woken or `signal` aborts; answers the wake's reasons, empty when none woke it. */
-  async sleep(ms: number, signal?: AbortSignal): Promise<string[]> {
-    if (!this.pending.length && !signal?.aborted) await new Promise<void>(resolve => {
-      const done = () => { clearTimeout(timer); signal?.removeEventListener('abort', done); this.release = null; resolve(); };
-      const timer = setTimeout(done, ms);
-      this.release = done;
-      signal?.addEventListener('abort', done, { once: true });
-    });
+  /** Whether a sleep of `waitMs` that has lasted `sleptMs` ends now: its wait is over, or it is woken and past the floor. */
+  due(sleptMs: number, waitMs: number): boolean {
+    return sleptMs >= waitMs || (this.pending.length > 0 && sleptMs >= Math.min(waitMs, this.floorMs));
+  }
+
+  /** The wake's reasons, cleared: the cycle about to run acts on them. */
+  take(): string[] {
     const reasons = this.pending;
     this.pending = [];
     return reasons;
+  }
+
+  /** Sleep up to `ms`, or until woken (never before the floor) or `signal` aborts; answers the wake's reasons, empty when none woke it. */
+  async sleep(ms: number, signal?: AbortSignal): Promise<string[]> {
+    const started = Date.now(), floor = Math.min(ms, this.floorMs);
+    if (!signal?.aborted) await new Promise<void>(resolve => {
+      let timer: NodeJS.Timeout | undefined;
+      const done = () => { clearTimeout(timer); signal?.removeEventListener('abort', done); this.release = null; resolve(); };
+      const end = (at: number) => { clearTimeout(timer); timer = setTimeout(done, Math.max(0, at - Date.now())); };
+      end(started + ms);
+      this.release = () => end(started + floor);
+      if (this.pending.length) this.release();
+      signal?.addEventListener('abort', done, { once: true });
+    });
+    return this.take();
   }
 }

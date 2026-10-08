@@ -6,7 +6,9 @@ import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { emptyDaemonState, runDaemon, type DaemonEffects } from '../src/master-daemon.js';
 import { emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
-import { LoopWake, loopWakeSubjects } from '../src/daemon/loop-wake.js';
+import { LoopWake, loopWakeReasonLimit, loopWakeSubjects } from '../src/daemon/loop-wake.js';
+import { gateMerge, type MergeGateClient } from '../src/github.js';
+import type { GitHubMergeQueueState } from '../src/merge-queue.js';
 import { masterConfigSchema, type HerdrAgent, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import type { Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -109,7 +111,8 @@ async function until(condition: () => boolean, boundMs: number) {
 
 test('unit:pipeline-wait-hotspots — ready→claim: a ready item with free capacity is claimed within one dispatch tick of its release, not after the loop\'s 300 s idle sleep', async () => {
   const { master } = await setup();
-  const work = { current: [waiting({ ready: false })] }, agents = { current: [] as HerdrAgent[] }, wake = new LoopWake();
+  // A 200 ms floor stands in for the dispatch interval the real loop waits at least after a cycle.
+  const work = { current: [waiting({ ready: false })] }, agents = { current: [] as HerdrAgent[] }, wake = new LoopWake(200);
   const tick = () => runDispatchTick(master, emptyDispatchCursor(master), tickEffects(master, work, agents, wake));
   const log = await withLoop(master, work, agents, wake, async log => {
     // The first cycle finds nothing to act on, so the loop sleeps its whole interval.
@@ -127,7 +130,7 @@ test('unit:pipeline-wait-hotspots — ready→claim: a ready item with free capa
   assert.deepEqual(log.dispatches, ['alpha']);
 });
 
-test('unit:pipeline-wait-hotspots — ready→claim: a worker slot that frees while ready work waits wakes the loop within one tick, instead of the next 30 s actionable cycle', async () => {
+test('unit:pipeline-wait-hotspots — ready→claim: a worker slot that frees while ready work waits wakes the loop at the floor after its cycle, instead of the next 30 s actionable cycle', async () => {
   const { master } = await setup();
   // Both profiles are busy on other attempts: the ready item waits for capacity.
   const busy = { current: [working('agent-alpha'), working('agent-beta')] };
@@ -141,13 +144,13 @@ test('unit:pipeline-wait-hotspots — ready→claim: a worker slot that frees wh
   assert.deepEqual(subjects([working('agent-beta')]), ['dispatch:GY-1490:0']);
   assert.deepEqual(subjects(null as unknown as HerdrAgent[], freed), ['dispatch:GY-1490:0']);
 
-  const wake = new LoopWake();
+  const wake = new LoopWake(100);
   assert.deepEqual(wake.observe(loopWakeSubjects(work.current, master, clock, busy.current)), [], 'the first tick only records what stands');
   assert.deepEqual(wake.observe(loopWakeSubjects(work.current, master, clock, busy.current)).length, 0, 'an item that keeps waiting is no second wake');
   const started = Date.now(), sleeping = wake.sleep(30_000);
   assert.deepEqual(wake.observe(loopWakeSubjects(freed, master, clock, [working('agent-beta')])).map(subject => subject.key), ['slot:alpha']);
   assert.deepEqual(await sleeping, ['worker profile alpha is free while GY-1490 waits']);
-  assert.ok(Date.now() - started < 1_000, 'the 30 s actionable wait ended at the wake');
+  assert.ok(Date.now() - started >= 90 && Date.now() - started < 1_000, `the 30 s actionable wait ended at the floor, not before it: ${Date.now() - started} ms`);
 });
 
 test('unit:pipeline-wait-hotspots — ready→first push: a scope request the executor refused wakes the loop for its grounded widening once, not after the idle sleep', async () => {
@@ -163,7 +166,7 @@ test('unit:pipeline-wait-hotspots — ready→first push: a scope request the ex
   assert.deepEqual(keys([leased('GY-1462', 'alpha-principal', { lease: { owner: 'alpha-principal', epoch: 1, expiresAt: iso(-1) }, scopeRequest: { ...request, decision: refused } } as Partial<Work>)]), []);
   assert.deepEqual(keys([leased('GY-1462', 'alpha-principal', { scopeRequest: { ...request, epoch: 0, decision: refused } } as Partial<Work>)]), []);
 
-  const wake = new LoopWake();
+  const wake = new LoopWake(100);
   wake.observe(loopWakeSubjects([leased('GY-1462', 'alpha-principal')], master, clock, []));
   const started = Date.now(), sleeping = wake.sleep(300_000);
   wake.observe(loopWakeSubjects(asking(refused), master, clock, []));
@@ -177,7 +180,7 @@ test('unit:pipeline-wait-hotspots — ready→first push: a scope request the ex
 test('unit:pipeline-wait-hotspots — approval→merge: a standing verdict wakes the loop to request its rework round within one tick, once', async () => {
   const { master } = await setup();
   assert.deepEqual(loopWakeSubjects([failedCheck()], master, clock, []).map(subject => subject.key), [`decision:GY-1468:rework:${head}:ci:test`]);
-  const wake = new LoopWake();
+  const wake = new LoopWake(100);
   const passing = failedCheck();
   passing.observation!.checks = [{ appId: 15368, name: 'test', result: 'pending' } as never];
   wake.observe(loopWakeSubjects([passing], master, clock, []));
@@ -206,7 +209,7 @@ test('unit:pipeline-wait-hotspots — the dispatcher tick hands its snapshot and
 test('unit:pipeline-wait-hotspots — a wake ends only the sleep after a cycle that ran: a failed cycle\'s backoff is not cut short, and a wake during a cycle is kept for the next sleep', async () => {
   const { master } = await setup();
   // Kept: woken while no sleep runs, the next sleep returns at once with the reasons.
-  const kept = new LoopWake();
+  const kept = new LoopWake(50);
   kept.wake(['GY-1 is claimable']);
   assert.deepEqual(await kept.sleep(300_000), ['GY-1 is claimable']);
   // A stop ends the sleep too, with no reasons.
@@ -215,7 +218,7 @@ test('unit:pipeline-wait-hotspots — a wake ends only the sleep after a cycle t
   assert.deepEqual(await stopped, []);
 
   // A loop whose every cycle fails is woken by nothing: its next attempt waits out its backoff.
-  const wake = new LoopWake(), signal = 'SIGUSR2' as NodeJS.Signals;
+  const wake = new LoopWake(0), signal = 'SIGUSR2' as NodeJS.Signals;
   let reads = 0;
   const effects = { ...loopEffects({ current: [] }, { current: [] }, { dispatches: [], snapshots: 0 }), snapshot: async () => { reads++; throw new Error('the plane is down'); } };
   const running = runDaemon(master, emptyDaemonState(master), effects, { intervalMs: 300_000, identity: { pid: process.pid, host: 'machine-a' }, signals: [signal], log: () => {}, wake, checkout: () => clean(master.cliPath) });
@@ -225,4 +228,64 @@ test('unit:pipeline-wait-hotspots — a wake ends only the sleep after a cycle t
     await sleep(300);
     assert.equal(reads, 1, 'the failed cycle backs off whatever the dispatcher sees');
   } finally { process.emit(signal); await running; }
+});
+
+test('unit:pipeline-wait-hotspots — the wake is bounded: woken cycles stand one floor apart, a subject absent for one tick (Herdr unreadable once) never wakes the loop again, and the log keeps the newest reasons', async () => {
+  // The floor: a wake that stands when the sleep begins still waits the floor out, and the default floor is one 10 s dispatch tick.
+  assert.equal(new LoopWake().floorMs, 10_000);
+  let floor = 250;
+  const spaced = new LoopWake(() => floor);
+  spaced.wake(['GY-1 is claimable']);
+  const started = Date.now();
+  assert.deepEqual(await spaced.sleep(300_000), ['GY-1 is claimable']);
+  assert.ok(Date.now() - started >= 240 && Date.now() - started < 2_000, `the woken sleep lasted the floor: ${Date.now() - started} ms`);
+  floor = 10_000;
+  spaced.wake(['GY-2 is claimable']);
+  assert.equal(spaced.due(5_000, 300_000), false, 'woken inside the floor (read live from the configured dispatch interval): not yet due');
+  assert.equal(spaced.due(10_000, 300_000), true, 'woken past the floor: due');
+  assert.equal(spaced.due(10_000, 8_000), true, 'a wait shorter than the floor ends at the wait');
+  assert.deepEqual(spaced.take(), ['GY-2 is claimable']);
+  assert.equal(spaced.due(10_000, 300_000), false, 'nothing woke it: it sleeps its wait');
+
+  // Hysteresis: a slot subject that drops out for one tick and comes back is no second wake; one gone for two ticks is.
+  const wake = new LoopWake(0), claimable = { key: 'dispatch:GY-1:0', reason: 'GY-1 is claimable' }, slot = { key: 'slot:alpha', reason: 'alpha is free' };
+  wake.observe([claimable, slot]);
+  assert.deepEqual(wake.observe([claimable]), [], 'Herdr unreadable for one tick: the slot drops out');
+  assert.deepEqual(wake.observe([claimable, slot]), [], 'and back the next tick: no wake');
+  wake.observe([claimable]); wake.observe([claimable]);
+  assert.deepEqual(wake.observe([claimable, slot]).map(subject => subject.key), ['slot:alpha'], 'gone two ticks, it is a new subject');
+  assert.deepEqual(wake.take(), ['alpha is free']);
+  // A flapping subject that is absent every other tick across a simulated hour wakes the loop never.
+  for (let tick = 0; tick < 360; tick++) assert.deepEqual(wake.observe(tick % 2 ? [claimable] : [claimable, slot]), []);
+
+  // The log line keeps the newest reasons when a wake carries more than its limit.
+  const many = new LoopWake(0);
+  many.wake(Array.from({ length: loopWakeReasonLimit + 5 }, (_, index) => `reason ${index}`));
+  const reasons = many.take();
+  assert.equal(reasons.length, loopWakeReasonLimit);
+  assert.equal(reasons.at(-1), `reason ${loopWakeReasonLimit + 4}`);
+  assert.equal(reasons[0], 'reason 5');
+});
+
+test('unit:pipeline-wait-hotspots — approval→merge: a candidate whose gates all pass is enqueued for merge by the same observation that publishes its verdict, with no loop cycle between', async () => {
+  const candidate = { sha: head, baseSha: base, pr: 963, branch: 'graphyard/gy-1489-1', author: 'worker' };
+  const passing = waiting({ id: 'work-1489', key: 'GY-1489', stage: 'merge', epoch: 1, policyRevision: 2, candidate, submission: { epoch: 1, pr: 963 },
+    gates: [{ name: 'merge', passed: true, reasons: [] }], mergeAuthorization: { sha: head, baseSha: base, policyRevision: 2, at: iso() } } as unknown as Partial<Work>);
+  const calls: string[] = [];
+  const github = {
+    publish: async () => { calls.push('publish'); },
+    mergeQueueState: async () => { calls.push('read'); return { mode: 'none', head, queue: false, mergeStateStatus: 'BLOCKED', position: null, entryState: null, groupHead: null, pullRequestId: 'PR_963', requestedAt: null } as unknown as GitHubMergeQueueState; },
+    enqueuePullRequest: async (_state: GitHubMergeQueueState, sha: string) => { calls.push(`enqueue ${sha.slice(0, 4)}`); },
+    dequeuePullRequest: async () => { calls.push('dequeue'); },
+    publishGroupCheck: async () => { calls.push('group'); },
+  } as unknown as MergeGateClient;
+  // The request is the passing gate itself (GY-1235): the observation that first finds the candidate authorized records it.
+  const request = { sha: head, baseSha: base, policyRevision: 2, requestedBy: 'graphyard', at: iso() };
+  const gated = await gateMerge(github, passing, request);
+  assert.equal(gated.action.kind, 'enqueue', gated.action.reason);
+  assert.deepEqual(calls, ['publish', 'read', 'enqueue aaaa'], 'verdict published, then enqueued bound to that head, in one observation');
+  // A gate that does not pass withdraws the authorization: nothing is enqueued.
+  calls.length = 0;
+  assert.equal((await gateMerge(github, { ...passing, gates: [{ name: 'test', passed: false, reasons: ['test is pending'] }] } as Work, request)).action.kind, 'hold');
+  assert.ok(!calls.some(call => call.startsWith('enqueue')));
 });
