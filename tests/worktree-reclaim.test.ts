@@ -9,7 +9,7 @@ import { dependencyDirectories, diskExhaustion, diskPressure, diskPressureAttent
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import type { Work } from '../src/model.js';
 import { runChild } from '../src/child-runner.js';
-import { worktreeRefusalRetryMs } from '../src/master/worktrees.js';
+import * as worktrees from '../src/master/worktrees.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-79: worktrees and their dependency trees filled the host's disk mid-cycle. The master loop
@@ -601,6 +601,8 @@ test('manual:fault-class-resources — GY-1515 reclaim: a tree Git refuses is on
   const root = await host(false), credentials = await temporaryDirectory('reclaim-refusal');
   try {
     const token = join(credentials, 'coordinator.token'); await writeFile(token, coordinatorToken, { mode: 0o600 });
+    // Namespace-read so this file loads on the base, which has no retry bound, and the REPRODUCE assertions below run there.
+    const refusalRetryMs = (worktrees as { worktreeRefusalRetryMs?: number }).worktreeRefusalRetryMs ?? 24 * hour;
     const master = config(token, { worktreeRemovalLimit: 1 });
     const refused = assignment(root, 'GY-200', 1), second = assignment(root, 'GY-201', 1), third = assignment(root, 'GY-202', 1);
     await idleFor(refused.path, 6 * hour); await idleFor(second.path, 5 * hour); await idleFor(third.path, 4 * hour);
@@ -642,7 +644,7 @@ test('manual:fault-class-resources — GY-1515 reclaim: a tree Git refuses is on
     // Pass 3 drains the backlog with the refused tree still held; a pass a day later tries it again, in case the refusal cleared.
     const third3 = (await reclaim(snapshot)).trees;
     assert.deepEqual(third3.removed.map(entry => entry.key), ['GY-202']); assert.deepEqual(third3.errors, []); assert.equal(revLists.length, 1);
-    const retried = (await reclaim(snapshot, Date.now() + worktreeRefusalRetryMs + 1_000)).trees;
+    const retried = (await reclaim(snapshot, Date.now() + refusalRetryMs + 1_000)).trees;
     assert.equal(revLists.length, 2, 'after the retry bound the tree is examined again');
     assert.deepEqual(retried.errors, [], 'a refusal that stands across the retry is held again, never reported as a new failure');
     assert.match(retried.held.find(entry => entry.path === refused.path)!.reason, /^Git refused: .*rev-list.*; tried again after \d{4}-/);

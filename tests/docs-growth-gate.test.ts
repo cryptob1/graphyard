@@ -68,22 +68,21 @@ test('manual:fault-class-resources — GY-1515 docs: the set inside its band is 
   assert.deepEqual(faults(over), [['resource-bound', 'docs']], 'a set over its budget is a resource at its bound');
 });
 
-test('manual:fault-class-resources — GY-1515 docs: replaying the day\'s merges through the loop\'s own fault path, the base reached both instances and the candidate stops at the band', async () => {
+test('manual:fault-class-resources — GY-1515 docs: replaying the day\'s merges through the loop\'s own fault path, the base\'s main reaches both instances and the candidate\'s stops at the band', async () => {
   const state = emptyDaemonState(config());
   const resourcesFaults = async (total: number) => cycleFaults(state, [], 0, { config: config(), reported: (await docsHeadroomStatus('/repository', 'main', () => counted(total))).attention })
     .filter(fault => fault.faultClass === 'resources' && fault.subject === 'docs').length;
-  // The merges of 8 October as the base took them (every one passed the warn-only budget test), after GY-1503's trim to 14,972.
+  // The base has no gate: every change lands. Read through the namespace so this file loads on the base.
+  const judge = (documentation as { docsBudgetJudgement?: typeof documentation.docsBudgetJudgement }).docsBudgetJudgement ?? (() => ({ failed: null, warning: null }));
+  // The merges of 8 October (every one passed the warn-only budget test on the base), after GY-1503's trim to 14,972.
   const merges = [14_972, 15_406, 15_532, 15_986, 16_001, 16_335];
-  let base = 0, candidate = merges[0], previous = merges[0];
+  let main = merges[0], faultsOnMain = 0;
   for (const total of merges.slice(1)) {
-    base += await resourcesFaults(total) > 0 ? 1 : 0;
-    // The candidate refuses each change that adds a word once the set is within its band, so main stops where it stood.
-    const judged = documentation.docsBudgetJudgement(set(total), BUDGET, set(candidate));
-    if (!judged.failed) candidate = total;
-    previous = total;
+    if (!judge(set(total), BUDGET, set(main)).failed) main = total;
+    faultsOnMain += await resourcesFaults(main);
   }
-  assert.equal(previous, 16_335, 'the base took every merge');
-  assert.ok(base >= 2, 'REPRODUCE: on the base the replay reaches resources faults on docs (inside the band and over the budget)');
-  assert.ok(candidate < 15_520 + 1 && candidate >= 15_406, `the candidate stops at the band: ${candidate}`);
-  assert.equal(await resourcesFaults(candidate), 0, 'the candidate\'s main never reads as a resources fault');
+  // On the base main reads 15,532 (in the band, a fault there), then 15,986, 16,001 and 16,335 (over the budget): every reading after the first merge is a resources fault.
+  assert.equal(faultsOnMain, 0, `REPRODUCE: the loop read main at ${main} words and raised ${faultsOnMain} resources fault(s) on docs through its own fault path`);
+  assert.ok(main <= 15_520 && main >= 15_406, `the candidate stops at the band: ${main}`);
+  assert.equal(await resourcesFaults(main), 0, 'the candidate\'s main never reads as a resources fault');
 });
