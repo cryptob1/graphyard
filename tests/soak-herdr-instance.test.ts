@@ -5,7 +5,7 @@ import { delimiter, join } from 'node:path';
 import { herdrSubcommand, installHerdrInstance, isHerdrCommand, herdrTarget, listHerdrAgents, targetHerdr, type HerdrAgent, type HerdrInstance } from '../src/master/herdr.js';
 import { atomicPrivateWrite, liveMasterConfig, loadMasterConfig, recordHerdrInstance } from '../src/master/config.js';
 import { loopHerdrReport } from '../src/cli/master/loop.js';
-import { LoopRegistry, loopPanes } from '../src/model/executor-presence.js';
+import { LoopPanesRegistry, loopPanes } from '../src/model/executor-presence.js';
 import { hour, minute } from './helpers/soak-world.js';
 import { FailoverWorld, failoverInstalled, soakControlPlanes } from './helpers/soak-plane.js';
 import { simulateDay } from './helpers/soak-simulation.js';
@@ -88,7 +88,7 @@ test('unit:soak-invariants-hold — an install with its own Herdr instance runs 
     // bound change and an unreadable file are refused, and the target the loop runs under is put back.
     const live = liveMasterConfig(root, master);
     const stored = JSON.parse(await readFile(join(root, '.graphyard/master.json'), 'utf8'));
-    const registry = new LoopRegistry(), headers = new Set<string>();
+    const registry = new LoopPanesRegistry(), headers = new Set<string>();
     for (let cycle = 0; cycle < 96; cycle++) {
       const edit = cycle % 4;
       if (edit === 0) await atomicPrivateWrite(join(root, '.graphyard/master.json'), { ...stored, run: { ...stored.run, intervalSeconds: 20 + (cycle % 8) } });
@@ -108,8 +108,8 @@ test('unit:soak-invariants-hold — an install with its own Herdr instance runs 
       const header = loopHerdrReport(live.current.hostId);
       headers.add(header);
       assert.ok(header.length < 2_000, 'one bounded header');
-      registry.observe({ principal: 'master', intervalSeconds: 20, panes: loopPanes(header) }, new Date(Date.UTC(2026, 9, 8) + cycle * 20_000));
-      assert.deepEqual(registry.live(new Date(Date.UTC(2026, 9, 8) + cycle * 20_000))?.panes, { configHome: instance.configHome, session: instance.session, host: master.hostId, running: reachable });
+      registry.observe(loopPanes(header));
+      assert.deepEqual(registry.latest, { configHome: instance.configHome, session: instance.session, host: master.hostId, running: reachable });
     }
     assert.equal(headers.size, 2, `the presence is one of two values, running or not, never growing: ${[...headers].join(' | ')}`);
     assert.deepEqual(world.strays, [], 'no reload or read reached the default server');

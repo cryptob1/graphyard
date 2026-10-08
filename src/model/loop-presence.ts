@@ -1,5 +1,4 @@
 import { executorLiveMs } from './executor-presence.js';
-import type { PaneServer } from './setup-checklist.js';
 
 // The master loop as the control plane sees it (GY-916): which loop merges on this installation, and
 // who reviews and merges there (GY-1501). Split from `executor-presence.ts`, which re-exports it.
@@ -26,25 +25,7 @@ export const loopPresenceHeader = 'X-Graphyard-Loop-Interval';
  */
 export const loopSupervisionHeader = 'X-Graphyard-Loop-Supervision';
 export type LoopSupervision = 'supervised' | 'autonomous';
-export interface LoopPresence { principal: string; intervalSeconds: number; seenAt: string; supervision?: LoopSupervision; panes?: PaneServer | null }
-/**
- * The third header (GY-1511): the pane server holding the install's agent sessions, as the loop knows
- * it — its own instance's config home and session (null for the host's default), the host the loop
- * runs on, and whether the loop last reached that server — URI-encoded JSON.
- */
-export const loopPanesHeader = 'X-Graphyard-Loop-Panes';
-export const encodeLoopPanes = (panes: PaneServer) => encodeURIComponent(JSON.stringify(panes));
-/** The pane server a loop read names, or null when it names none or one that does not parse. */
-export function loopPanes(header: string | string[] | undefined): PaneServer | null {
-  const value = Array.isArray(header) ? header[0] : header;
-  if (!value || value.length > 2_000) return null;
-  try {
-    const parsed = JSON.parse(decodeURIComponent(value));
-    const text = (field: unknown) => typeof field === 'string' && field.trim() && field.length <= 500 ? field.trim() : null;
-    const configHome = text(parsed?.configHome), session = text(parsed?.session);
-    return { configHome: configHome && session ? configHome : null, session: configHome && session ? session : null, host: text(parsed?.host), running: typeof parsed?.running === 'boolean' ? parsed.running : null };
-  } catch { return null; }
-}
+export interface LoopPresence { principal: string; intervalSeconds: number; seenAt: string; supervision?: LoopSupervision }
 /**
  * How long one read keeps the loop live: three of its cycles, never under an executor's window —
  * the rule `daemonSummary` applies to the loop's own cursor. The dispatcher beside the cycle reads
@@ -55,9 +36,8 @@ export const loopPresenceLiveMs = (intervalSeconds: number) => Math.max(3 * inte
 /** The loop as the control plane last saw it read, in memory beside the engine like executor presence. */
 export class LoopRegistry {
   private latest: LoopPresence | null = null;
-  observe(poll: { principal: string; intervalSeconds: number; supervision?: LoopSupervision | null; panes?: PaneServer | null }, now: Date) {
-    const panes = poll.panes ?? this.latest?.panes ?? null;
-    this.latest = { principal: poll.principal, intervalSeconds: poll.intervalSeconds, seenAt: now.toISOString(), ...(poll.supervision ? { supervision: poll.supervision } : {}), ...(panes ? { panes } : {}) };
+  observe(poll: { principal: string; intervalSeconds: number; supervision?: LoopSupervision | null }, now: Date) {
+    this.latest = { principal: poll.principal, intervalSeconds: poll.intervalSeconds, seenAt: now.toISOString(), ...(poll.supervision ? { supervision: poll.supervision } : {}) };
   }
   /** Whether this process has ever seen the loop read: once it has, a lapse means the loop stopped. */
   get observed(): boolean { return this.latest !== null; }

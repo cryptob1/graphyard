@@ -422,7 +422,11 @@ test('unit:herdr-calls-target-install-instance — every herdr call an install w
   const walk = async (directory: string) => { for (const entry of await readdir(directory, { withFileTypes: true })) { const path = join(directory, entry.name); if (entry.isDirectory()) await walk(path); else if (/\.tsx?$/.test(entry.name)) files.push(path); } };
   await walk(src);
   assert.ok(files.some(file => relative(src, file) === join('install', 'host.ts')), 'the walk reaches host setup');
-  const bypass = files.filter(file => relative(src, file) !== join('master', 'herdr.ts')).flatMap(file => {
+  // The adapter is two files: src/master/herdr.ts, which the loop reaches, and src/herdr-host.ts, host
+  // setup's synchronous half, whose one runner spells each call with the shared herdrInvocation.
+  const adapter = [join('master', 'herdr.ts'), 'herdr-host.ts'];
+  assert.match(await readFile(join(src, 'herdr-host.ts'), 'utf8'), /async function herdrAt\([^)]*\) \{\n  const call = herdrInvocation\(args, instance\);/);
+  const bypass = files.filter(file => !adapter.includes(relative(src, file))).flatMap(file => {
     const text = execFileSync('cat', [file], { encoding: 'utf8' });
     return text.split('\n').map((line, index) => ({ file: relative(src, file), line: index + 1, text: line })).filter(entry => spawnsHerdr(entry.text));
   });
@@ -622,7 +626,7 @@ test('unit:setup-page-herdr-connect-instructions — the Setup page shows copyab
   const { SetupView } = await import('../web/pages/setup.js');
   const { paneServer } = await import('../src/model/setup-checklist.js');
   const { herdrConnectCommands } = await import('../src/herdr-connect.js');
-  const { loopPanes, encodeLoopPanes, LoopRegistry } = await import('../src/model/executor-presence.js');
+  const { loopPanes, encodeLoopPanes, LoopPanesRegistry } = await import('../src/model/executor-presence.js');
   const page = (herdrReport: unknown) => renderToStaticMarkup(createElement(SetupView, { status: { setup: { protection: 'off', loop: true, panes: herdrReport } }, onConnect: () => {}, onSubmitGoal: () => {} }));
   const decode = (html: string) => html.replaceAll('&#x27;', '\'').replaceAll('&quot;', '"').replaceAll('&amp;', '&');
 
@@ -647,7 +651,8 @@ test('unit:setup-page-herdr-connect-instructions — the Setup page shows copyab
   const header = encodeLoopPanes(own);
   assert.deepEqual(loopPanes(header), own);
   assert.equal(loopPanes('%7Bnot json'), null);
-  const registry = new LoopRegistry(), now = new Date();
-  registry.observe({ principal: 'coordinator-1', intervalSeconds: 20, panes: loopPanes(header) }, now);
-  assert.deepEqual(registry.live(now)?.panes, own);
+  const registry = new LoopPanesRegistry();
+  registry.observe(loopPanes(header));
+  registry.observe(null);
+  assert.deepEqual(registry.latest, own, 'a read naming none keeps the last');
 });
