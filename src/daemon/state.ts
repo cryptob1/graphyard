@@ -162,10 +162,19 @@ export const promotionStateSchema = z.object({
   behind: z.number().int().min(0).nullable(),
   /** When the base branch tip and the promotion record were last fetched; reused for `promotionLedgerReadMs`. */
   ledgerReadAt: z.string().nullable().default(null),
-  inFlight: z.boolean(), runsReadAt: z.string().nullable(),
-  dispatchedAt: z.string().nullable(), lastDispatchAt: z.string().nullable(),
-  cutSha: z.string().nullable().optional(), candidateAtDispatch: z.string().max(100).nullable().optional(),
-  candidates: z.array(z.object({ id: z.string().max(100), sha: z.string().max(64), cutAt: z.string().max(64), prs: z.number().int().min(0).nullable(), queued: z.number().int().min(0).nullable() }).strict()).max(5).optional(),
+  inFlight: z.boolean(),
+  runsReadAt: z.string().nullable(),
+  dispatchedAt: z.string().nullable(),
+  lastDispatchAt: z.string().nullable(),
+  cutSha: z.string().nullable().optional(),
+  candidateAtDispatch: z.string().max(100).nullable().optional(),
+  candidates: z.array(z.object({
+    id: z.string().max(100),
+    sha: z.string().max(64),
+    cutAt: z.string().max(64),
+    prs: z.number().int().min(0).nullable(),
+    queued: z.number().int().min(0).nullable(),
+  }).strict()).max(5).optional(),
   nextDueAt: z.string().nullable(),
   reason: z.string().max(500).nullable(),
 }).strict();
