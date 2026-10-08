@@ -11,6 +11,13 @@ export const flakeLedgerPath = (root: string) => resolve(root, '.graphyard', 'fl
 /** Where the loop keeps the ledger between its cycles. */
 export interface FlakeLedgerStore { read: () => Promise<FlakeLedger>; write: (ledger: FlakeLedger) => Promise<void> }
 
+/** The loop's effect for the ledger, spread into the daemon's effects. */
+export interface FlakeLedgerEffects {
+  /** The flake ledger file (GY-1498, .graphyard/flake-ledger.json); absent, the flake step reads and files nothing. */
+  flakeLedger?: FlakeLedgerStore;
+}
+export const flakeLedgerEffects = (root: string): FlakeLedgerEffects => ({ flakeLedger: flakeLedgerStore(root) });
+
 /** The ledger file under `root`. A missing or unreadable file reads as an empty ledger. */
 export function flakeLedgerStore(root: string): FlakeLedgerStore {
   const file = flakeLedgerPath(root);
