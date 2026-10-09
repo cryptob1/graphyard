@@ -77,9 +77,10 @@ const collapse = (lines: string[]) => {
  * `What do you want to do?` — `1. Stop and wait for limit to reset`, `2. Wait here, then continue
  * automatically at …`, `3. Switch to usage credits` (later `Add funds to continue with usage
  * credits`) — and the session, blocked rather than stopped, holds its lease for as long as nobody answers. The menu is the runtime's own dialog:
- * its question directly above, its stop-and-wait choice beside a wait or credits choice, and at
- * most a key hint below it, the last thing on the screen. An agent's prose about a quota has none
- * of that shape, so it is never read as this menu.
+ * its question directly above, its stop-and-wait choice beside a wait or credits choice, its cursor
+ * on a choice and its key hint below, the last thing on the screen. An agent's prose about a quota,
+ * even one quoting the notice, the question and the choices, has no cursor or key hint, so it is
+ * never read as this menu.
  */
 const limitMenuQuestion = /^What do you want to do\?$/i;
 const limitMenuStop = /^Stop and wait\b.*\blimit\b/i;
@@ -87,19 +88,26 @@ const limitMenuWait = /^Wait here\b.*\bcontinue automatically\b/i;
 const limitMenuCredits = /\b(?:usage credits|extra usage|add funds)\b/i;
 /** How far above the menu its limit notice may sit: the notice, its hint line, a blank and the question. */
 const limitMenuNoticeLines = 12;
-function usageLimitMenu(above: string[], options: { number: string; label: string }[], below: number, now: number): ExhaustionSignal | null {
+/** What only the runtime draws around its menu: the selection cursor on a choice, and its key hint below. */
+const limitMenuCursor = /^[\s│┃║]*[❯>›▶→]/, limitMenuHint = /\bEnter to confirm\b|\bEsc to cancel\b/i;
+function usageLimitMenu(above: string[], options: { number: string; label: string }[], drawn: string[], below: string[], now: number): ExhaustionSignal | null {
   const frameless = (entry: string) => entry.replace(/^[^A-Za-z0-9]+/, '').replace(/[│┃|]\s*$/, '').trim().replace(/\s{2,}/g, ' ');
-  if (below > 2 || !options.some(option => limitMenuStop.test(option.label))) return null;
+  if (below.length > 2 || !options.some(option => limitMenuStop.test(option.label))) return null;
+  // An agent quoting the question, its choices and even the notice is not the dialog: the runtime's own cursor and key hint must be there.
+  if (!drawn.some(entry => limitMenuCursor.test(entry)) || !below.some(entry => limitMenuHint.test(entry))) return null;
   if (!options.some(option => limitMenuWait.test(option.label) || limitMenuCredits.test(option.label))) return null;
   const lines = above.slice(-limitMenuNoticeLines).map(frameless).filter(Boolean);
   if (!limitMenuQuestion.test(lines.at(-1) ?? '')) return null;
   // The menu vouches for the notice above it, so the notice need not lead its line here.
   const claude = providerLimitNotices.claude;
-  const notice = [...lines].reverse().find(line => line.length <= exhaustionNoticeMaxLength && claude.some(pattern => pattern.test(line.replace(severityLabel, ''))));
+  const noticeAt = (line: string) => Math.min(...claude.map(pattern => pattern.exec(line)?.index ?? Infinity));
+  const found = [...lines].reverse().find(line => line.length <= exhaustionNoticeMaxLength && noticeAt(line) < Infinity);
+  // The notice as the provider wrote it, without the label the runtime drew in front of it.
+  const notice = found ? found.slice(noticeAt(found)) : undefined;
   // The wait choice names the same reset ("continue automatically at Oct 10, 10pm") when the notice does not.
   const waitChoice = options.find(option => limitMenuWait.test(option.label))?.label.replace(/^.*?\bcontinue automatically\b\s*(?:at|on)?\s*/i, 'resets ');
   const resetsAt = (notice ? parseResetTime(notice, now) : null) ?? (waitChoice ? parseResetTime(waitChoice, now) : null);
-  return { reason: (notice ?? `Claude's usage-limit menu: ${lines.at(-1)}`).replace(severityLabel, '').slice(0, 300), resetsAt };
+  return { reason: (notice ?? `Claude's usage-limit menu: ${lines.at(-1)}`).slice(0, 300), resetsAt };
 }
 
 /**
@@ -124,7 +132,8 @@ export function classifyRuntimePrompt(screen: string | null | undefined, now = D
     const question = filled.slice(Math.max(0, start - 8), start).map(({ entry }) => entry);
     const text = collapse([...question, ...options.map(option => `${option.number}. ${option.label}`)]);
     // Claude's usage-limit menu is never answered: its choices wait on the spent account or spend money.
-    const exhaustion = usageLimitMenu(filled.slice(0, start).map(({ entry }) => entry), options, filled.length - 1 - end, now);
+    const entries = (from: number, to?: number) => filled.slice(from, to).map(({ entry }) => entry);
+    const exhaustion = usageLimitMenu(entries(0, start), options, entries(start, end + 1), entries(end + 1), now);
     if (exhaustion) return { kind: 'usage-limit', text, keys: null, answer: null, exhaustion };
     const yes = options.find(option => affirmative.test(option.label)), no = options.find(option => negative.test(option.label));
     if (yes && no && destructivePrompt(question)) return { kind: 'destructive-command', text, keys: [no.number], answer: `${no.number}. ${no.label}` };

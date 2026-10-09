@@ -74,7 +74,10 @@ export function parseResetTime(text: string, now: number): string | null {
   const iso = /\b(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)\s*(Z|UTC|[+-]\d{2}:?\d{2})?/i.exec(text);
   if (iso) {
     const zone = !iso[3] ? '' : /^(?:z|utc)$/i.test(iso[3]) ? 'Z' : iso[3];
-    const parsed = Date.parse(`${iso[1]}T${iso[2]}${zone}`);
+    // A zone-less timestamp beside a named zone (`2026-10-10 22:00 (America/Los_Angeles)`) is that zone's wall clock.
+    const named = zone ? null : namedZone(text);
+    const wall = Date.parse(`${iso[1]}T${iso[2]}${named ? 'Z' : zone}`);
+    const parsed = named ? wall - wallOffset(wall - wallOffset(wall, named), named) : wall;
     if (Number.isFinite(parsed)) return new Date(parsed).toISOString();
   }
   const unix = /(?:\||reset[s_ ]*(?:at)?[=: ]+)\s*(\d{10})\b/i.exec(text);

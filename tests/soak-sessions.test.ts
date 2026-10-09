@@ -327,6 +327,49 @@ test('unit:soak-invariants-hold — sessions Herdr reports working whose runtime
   assert.ok(!approverAccounts.some(entry => entry.account === 'approver-a' && entry !== approverAccounts.find(first => first.key === items[approver - 1].key)), 'no approver launched on the held account after it was held');
 });
 
+test('unit:soak-invariants-hold — a worker blocked on Claude\'s usage-limit menu is failed over once by the real loop across the day: never answered, its account held until the reset its notice names, its attempt ended and the item delivered on another account, while a worker blocked over its own prose about a quota is left to its work, and every invariant holds', { timeout: 600_000 }, async () => {
+  // GY-1566: the loop reads every blocked worker's screen on every cycle. One worker's first
+  // attempt stops on Claude's usage-limit menu, five minutes in; another blocks for three minutes
+  // over its own words quoting the notice, the question and the choices, then carries on.
+  const worker = 2, prose = 4;
+  const { items, final, violations, failures, lost, sessions, state, heldAccounts, limitMenuDay, menuReset, menuNotice } = await simulateDay({
+    hours: 6, limitMenu: { worker, prose },
+    plan: { items: 6, leftovers: 2, slowRecompute: 0, workMs: 15 * minute, rework: new Set(), deaths: new Set(), flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set(), misread: new Set(), exits: new Set(), spentProducer: 0, lostRuns: 0, outOfQueue: { item: 6, afterMs: 99 * hour }, blind: { from: 99 * hour, to: 100 * hour }, split: { at: 99 * hour, item: 6 } },
+  });
+  assert.deepEqual(violations, [], 'every system invariant holds across the failover');
+  assert.deepEqual(failures, [], 'no cycle failed');
+  assert.deepEqual(lost, [], 'no lease was lost: the blocked attempt was ended by the loop');
+  assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}`), [], 'every item is delivered, the spent one included');
+  const resetsAt = menuReset.toISOString();
+
+  // Bounded and once only: exactly one failover across the day's cycles, of the spent attempt, in one attempt.
+  const failovers = Object.entries(state.actions).filter(([, action]) => action.kind === 'failover');
+  const spent = items[worker - 1];
+  assert.deepEqual(failovers.map(([, action]) => [action.work, action.state, action.attempts]), [[spent.key, 'done', 1]], `exactly the menu's session was failed over, once: ${JSON.stringify(failovers)}`);
+  const [, failover] = failovers[0];
+  assert.ok(failover.detail.includes(`mid-session (${menuNotice}; resets ${resetsAt})`), failover.detail);
+  assert.deepEqual(limitMenuDay.holds.map(entry => [entry.account, entry.resetsAt]), [[failover.detail.match(/exhausted (account-\S+) mid-session/)![1], resetsAt]], 'one account held, once, until the reset the notice names in its own zone');
+  assert.deepEqual(limitMenuDay.answered, [], 'the loop never chose on the menu, least of all "Switch to usage credits"');
+
+  // The spent attempt was stopped within a cycle or two of the menu, and the item went to another account, which delivered it.
+  const attempts = sessions.filter(session => session.key === spent.key);
+  assert.equal(attempts[0].state, 'failed-over', attempts.map(session => `${session.epoch}:${session.state}`).join(', '));
+  const menuAt = attempts[0].dispatchAt + 5 * minute;
+  assert.ok(Date.parse(failover.at) - menuAt <= 2 * minute, `failed over within two cycles of the menu: ${JSON.stringify({ menuAt: new Date(menuAt), failoverAt: failover.at })}`);
+  assert.deepEqual(limitMenuDay.stoppedAt.map(entry => `${entry.key}:${entry.epoch}`), [`${spent.key}:${attempts[0].epoch}`], 'its supervisor stopped on the ended lease, once');
+  const exhaustion = final.find(item => item.id === spent.id)!.capacity!.exhaustions[0];
+  assert.deepEqual([exhaustion.account, exhaustion.reason, exhaustion.resetsAt, exhaustion.partialWork.state], [`account-${attempts[0].profile.name}`, menuNotice, resetsAt, 'committed']);
+  assert.equal(heldAccounts.get(`account-${attempts[0].profile.name}`)?.resetsAt, resetsAt, 'the spent account is held until it resets');
+  assert.ok(attempts.length >= 2 && attempts[1].profile.name !== attempts[0].profile.name, `redispatched to a healthy account: ${attempts.map(session => session.profile.name).join(', ')}`);
+  assert.ok(attempts[1].dispatchAt - Date.parse(failover.at) <= 2 * minute, 'within a cycle or two of the failover, with no master action');
+  assert.deepEqual(sessions.filter(session => session.profile.name === attempts[0].profile.name && session.dispatchAt > Date.parse(failover.at)).map(session => session.key), [], 'no launch went to the held account after the failover');
+
+  // GY-402: the prose session blocked over its own words, was read on those cycles, and was neither failed over nor held.
+  assert.deepEqual(limitMenuDay.proseBlocked, [items[prose - 1].key], 'the prose session blocked over its own words');
+  const proseAttempts = sessions.filter(session => session.key === items[prose - 1].key);
+  assert.deepEqual(proseAttempts.map(session => session.state), ['submitted'], `its one attempt carried on and submitted: ${proseAttempts.map(session => `${session.epoch}:${session.state}`).join(', ')}`);
+});
+
 test('unit:soak-invariants-hold — containment quarantines of dead workers stand across many cycles while the timed clock read fails and then answers slowly, one read a cycle and none without an assessable quarantine, each escalation recorded once, and they settle once reads are fast, with every invariant holding', { timeout: 600_000 }, async () => {
   // GY-811: every supervised launch raises a containment quarantine; two workers die, so their
   // fences outlive them and only the loop can lower them. The work snapshot takes 6 s to read, so

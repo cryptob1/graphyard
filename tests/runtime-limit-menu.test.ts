@@ -11,6 +11,7 @@ import { Store } from '../src/store.js';
 import { emptyDaemonState, failoverKey, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { classifyRuntimePrompt, inspectProfileAccounts, masterConfigSchema, observedExhaustions, preservePartialWork, recordObservedExhaustion, readEnvironmentLog, selectAccount, type MasterConfig } from '../src/master.js';
 import { detectRuntimeExhaustion } from '../src/master/environments.js';
+import { parseResetTime } from '../src/model/capacity.js';
 import type { Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -73,6 +74,9 @@ test('unit:runtime-limit-menu-detected — Claude\'s usage-limit menu is the acc
   const bare = limitMenu.replace(/^.*weekly limit.*$/m, '');
   assert.equal(classifyRuntimePrompt(bare, now)!.kind, 'usage-limit');
   assert.equal(classifyRuntimePrompt(bare, now)!.exhaustion!.resetsAt, new Date(2026, 9, 10, 22, 0).toISOString(), 'the wait choice is read in the host\'s zone');
+  // A zone-less timestamp beside the zone the notice names is that zone's wall clock, whatever the host's.
+  assert.equal(parseResetTime('resets 2026-10-10 22:00 (America/Los_Angeles)', now), '2026-10-11T05:00:00.000Z');
+  assert.equal(parseResetTime('resets 2026-10-10 22:00:00Z (America/Los_Angeles)', now), '2026-10-10T22:00:00.000Z', 'an explicit offset wins');
 
   // An agent's prose about the menu or about a quota is not the menu.
   for (const prose of [
@@ -82,6 +86,12 @@ test('unit:runtime-limit-menu-detected — Claude\'s usage-limit menu is the acc
     `${notice}\n 1. Stop and wait for limit to reset\n 3. Switch to usage credits`,
     // The question, but not the runtime's choices.
     ` What do you want to do?\n ❯ 1. Yes\n   2. No`,
+    // The question and its choices quoted bare, as an agent's summary ends, with no notice, cursor or key hint.
+    ` What do you want to do?\n 1. Stop and wait for limit to reset\n 2. Wait here, then continue automatically at Oct 10, 10pm\n 3. Switch to usage credits`,
+    // The notice, the question and the choices all quoted in an agent's prose: no cursor, no key hint.
+    `● Claude prints "${notice}" and then asks:\n What do you want to do?\n 1. Stop and wait for limit to reset\n 2. Wait here, then continue automatically\n 3. Switch to usage credits\n● Writing the fixture next.`,
+    // A cursor, but no key hint below.
+    ` What do you want to do?\n ❯ 1. Stop and wait for limit to reset\n   2. Wait here, then continue automatically at Oct 10, 10pm`,
     // The stop choice alone.
     ` What do you want to do?\n ❯ 1. Stop and wait for limit to reset\n   2. Something else`,
     '● tmp disk quota is exhausted (a known local issue). Clearing the tsx cache, then rerunning.',
