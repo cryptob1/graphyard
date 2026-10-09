@@ -26,7 +26,7 @@ Goal passes intake, acceptance, approval, planning, approval and delivery. `grap
 
 Beside the lane, **risk class** (`sensitive`/`normal`) is judged from the merge delta (unknown is sensitive) and shown by `graphyard status`; lanes still gate github mode.
 
-All lanes require `e2e:` proofs; low/medium reworks need no approver (approved by `graphyard-risk-lane`), nor does any lane's rework whose ground the record shows on the exact head: trusted proof failed on it, approver refused its `manual:` attestation (loop then requests that rework itself), or control plane's own test merge onto moved base conflicted, not GitHub's reading alone (`src/model/rework-ground.ts`). A head already returned to worker has spent its ground (a later retry-cap rework waits). Grounded reworks are no [intervention](dashboard.md).
+All lanes require `e2e:` proofs; low/medium reworks need no approver (by `graphyard-risk-lane`), nor any lane's rework grounded by the record on the exact head: trusted proof failed on it, approver refused its `manual:` attestation (loop requests that rework itself), or control plane's own test merge onto moved base conflicted, not GitHub's reading alone. A head returned to worker has spent its ground; without lease or fence another rework is refused (retry-cap reworks wait). Grounded reworks are no [intervention](dashboard.md).
 
 ## Who holds which authority
 

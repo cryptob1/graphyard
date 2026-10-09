@@ -4,6 +4,7 @@ import type { Work } from '../model.js';
 import type { ExhaustionRecord } from '../model/capacity.js';
 import type { DaemonState } from './state.js';
 import { credentialBlockedMarker } from '../worker-credential.js';
+import { capBindingPrefix } from '../model/approval.js';
 
 /**
  * GY-867. Unblocking an attempt only re-prompts the same session (cycle-sessions 1e). When what
@@ -103,7 +104,7 @@ export function attemptHoldCauses(ends: ExhaustionRecord[]): string[] {
 }
 
 /** The binding a cap-resolution decision carries: the run it judged, by item and third failure. */
-export const capBindingPrefix = 'overlong-cap:';
+export { capBindingPrefix } from '../model/approval.js';
 export const capBinding = (item: Pick<Work, 'key'>, boundAt: number) => `${capBindingPrefix}${item.key}:${new Date(boundAt).toISOString()}`;
 
 /** What the dispatch step holds an item for while its retry ladder runs, or null to dispatch as usual. */

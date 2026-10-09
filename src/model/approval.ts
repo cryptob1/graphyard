@@ -268,6 +268,17 @@ export const reworkBoundHead = (input: unknown): string | null => {
   const binding = (input as { binding?: unknown } | null)?.binding;
   return typeof binding === 'string' ? /^([0-9a-f]{40}):/.exec(binding)?.[1] ?? null : null;
 };
+/** The binding prefix of the attempt cap's rework decision (GY-885): `overlong-cap:KEY:BOUND-AT`. */
+export const capBindingPrefix = 'overlong-cap:';
+
+/** Why a rework on an item already returned to a worker changes nothing, naming what its next dispatch waits on. */
+function reworkAlreadyStanding(work: Work): string {
+  const waits = [...(work.blocker ? [`its blocker (${work.blocker})`] : []), ...(work.ready ? [] : ['its release (the item is not ready)']),
+    ...(work.dependencies.length ? [`its ${work.dependencies.length === 1 ? 'dependency' : `${work.dependencies.length} dependencies`} being done`] : [])];
+  return `${work.key} already holds an applied rework: it stands returned to a worker with no lease and no containment fence, so a second rework changes nothing about it. `
+    + `Its next attempt waits on dispatch${waits.length ? `, which waits on ${waits.join(' and ')}` : ''}; read why with graphyard master status ${work.key}`;
+}
+
 /** The item must still be in the state the decision was requested against. */
 export function decisionPrecondition(action: DecisionAction, input: any, work: Work): string | null {
   if (action === 'recover') return work.stage === 'done' && work.containmentQuarantine ? null : 'Containment recovery applies to delivered work that is still quarantined';
@@ -283,6 +294,12 @@ export function decisionPrecondition(action: DecisionAction, input: any, work: W
       return `The decision names ${String(input.sha).slice(0, 12)} but the current candidate is ${work.candidate?.sha.slice(0, 12) ?? 'none'} at policy revision ${work.policyRevision}`;
   }
   if (action === 'rework' && !work.submission) return 'Rework applies to submitted work';
+  // GY-1576, observed on GY-1522 (decision bd40dc45, 2026-10-08): an item an applied rework already
+  // returned to a worker, with no lease to discard and no containment fence to settle, is changed by
+  // nothing a second rework does; the approver can only refuse it. Its next attempt waits on dispatch.
+  // The attempt cap's own binding is the one exception: it approves a fresh round past the cap (GY-885).
+  if (action === 'rework' && work.reworkRequested && !work.lease && !work.containmentQuarantine
+    && !(typeof input?.binding === 'string' && input.binding.startsWith(capBindingPrefix))) return reworkAlreadyStanding(work);
   // GY-1386: a rework situated on a head (its binding, GY-407) answers grounds read from that head; once the
   // candidate moved on — a base refresh carried it cleanly onto the tip — those grounds no longer describe it.
   const bound = action === 'rework' ? reworkBoundHead(input) : null;
