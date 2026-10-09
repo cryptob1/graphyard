@@ -1,5 +1,4 @@
 // Concern: restarting the master loop — through its supervising unit when one runs it (GY-1603), detached otherwise — and the loop's own exit once stopped.
-import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { readFile } from 'node:fs/promises';
@@ -9,10 +8,11 @@ import { loopStopTimeoutSeconds, loopUnitDirectory, loopUnitOf, type LoopSupervi
 import type { MasterConfig } from './profiles.js';
 import { agentOwner } from './attention.js';
 import { atomicPrivateText } from './config.js';
+import { defaultChildRun } from '../child-runner.js';
 
-/** `systemctl --user ARGS`, returning stdout and throwing on a failed command. */
-export type UserSystemctl = (args: string[], timeoutMs?: number) => string;
-const userSystemctl: UserSystemctl = (args, timeoutMs = 30_000) => execFileSync('systemctl', ['--user', ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: timeoutMs });
+/** `systemctl --user ARGS`, returning stdout and throwing on a failed command; through the bounded asynchronous runner, since the loop reaches this module (GY-125). */
+export type UserSystemctl = (args: string[], timeoutMs?: number) => Promise<string> | string;
+const userSystemctl: UserSystemctl = (args, timeoutMs = 30_000) => defaultChildRun('systemctl', ['--user', ...args], { timeoutMs });
 
 type LoopLock = { pid: number; host: string; heartbeatAt: string; startedAt?: string };
 /** This install's loop unit, as systemd reports it: its name, whether it is up (a restart wait counts) and its main process (0 between restarts). */
@@ -22,32 +22,32 @@ export interface RestartOptions { timeoutMs?: number; systemctl?: UserSystemctl;
 const canonical = (path: string) => { try { return realpathSync(path); } catch { return resolve(path); } };
 const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch (error: any) { return error?.code === 'EPERM'; } };
 
-function unitProperties(systemctl: UserSystemctl, unit: string) {
-  const text = systemctl(['show', '--property=LoadState', '--property=ActiveState', '--property=MainPID', '--property=WorkingDirectory', unit]);
+async function unitProperties(systemctl: UserSystemctl, unit: string) {
+  const text = await systemctl(['show', '--property=LoadState', '--property=ActiveState', '--property=MainPID', '--property=WorkingDirectory', '--property=ExecStart', unit]);
   return Object.fromEntries(text.split(/\r?\n/).filter(line => line.includes('=')).map(line => [line.slice(0, line.indexOf('=')), line.slice(line.indexOf('=') + 1).trim()]));
 }
 /** systemd states in which the unit is up, starting, waiting out RestartSec, or stopping on its way to a queued restart. */
 const supervisedStates = ['active', 'activating', 'reloading', 'refreshing', 'deactivating'];
 /** Whether systemd holds a start or restart job for UNIT: `list-jobs` rows are `ID UNIT TYPE STATE`. */
-function startQueued(systemctl: UserSystemctl, unit: string) {
-  return systemctl(['list-jobs', '--no-legend', '--plain', unit]).split(/\r?\n/).some(line => {
+async function startQueued(systemctl: UserSystemctl, unit: string) {
+  return (await systemctl(['list-jobs', '--no-legend', '--plain', unit])).split(/\r?\n/).some(line => {
     const [, name, type] = line.trim().split(/\s+/);
     return name === unit && /^(start|restart|try-restart|reload-or-start)$/.test(type ?? '');
   });
 }
 /**
  * The unit supervising this install's loop: this install's recorded unit (or the legacy alias),
- * loaded, up, waiting to restart, stopping or with a start queued, and running `master run` from exactly ROOT. A unit of the same
+ * loaded, up, waiting to restart, stopping or with a start queued, and running `master run` (its effective ExecStart) from exactly ROOT. A unit of the same
  * name rooted in another checkout is another install's loop and never this one's. Null when there is
  * none; throws when systemd cannot be asked but this checkout's unit file is installed, since spawning a second,
  * unsupervised loop beside a unit that may be running is what this module exists to prevent.
  */
-export function supervisingUnit(root: string, options: Pick<RestartOptions, 'systemctl' | 'host' | 'platform'> = {}): SupervisingUnit | null {
+export async function supervisingUnit(root: string, options: Pick<RestartOptions, 'systemctl' | 'host' | 'platform'> = {}): Promise<SupervisingUnit | null> {
   if ((options.platform ?? process.platform) !== 'linux') return null;
   const systemctl = options.systemctl ?? userSystemctl, host = options.host ?? {};
   const unit = loopUnitOf(root, loopUnitDirectory(host), host.home);
   let properties: Record<string, string>;
-  try { systemctl(['show-environment']); properties = unitProperties(systemctl, unit); }
+  try { await systemctl(['show-environment']); properties = await unitProperties(systemctl, unit); }
   catch (error) {
     // Only a unit file rooted in this checkout is this install's loop; any other leaves the detached restart.
     const file = join(loopUnitDirectory(host), unit), home = host.home ?? homedir();
@@ -58,10 +58,14 @@ export function supervisingUnit(root: string, options: Pick<RestartOptions, 'sys
   if (properties.LoadState !== 'loaded') return null;
   const directory = (properties.WorkingDirectory ?? '').replace(/^[-!+]+/, '');
   if (!directory || canonical(directory) !== canonical(root)) return null;
+  // The effective command, drop-ins applied: `ExecStart={ path=… ; argv[]=NODE CLI master run ; … }`. A unit
+  // whose command was overridden to anything but `master run` is not this loop's supervisor, and
+  // restarting it would report a restart while no loop runs.
+  if (!/argv\[\]=[^;]*\smaster run(\s|;|$)/.test(properties.ExecStart ?? '')) return null;
   // A unit stopping (deactivating) or down with a start or restart queued is still this loop's
   // supervisor: a detached `master run` now would contend for the lock with the loop systemd is
   // about to start.
-  if (!supervisedStates.includes(properties.ActiveState ?? '') && !startQueued(systemctl, unit)) return null;
+  if (!supervisedStates.includes(properties.ActiveState ?? '') && !await startQueued(systemctl, unit)) return null;
   return { unit, mainPid: Number(properties.MainPID) || 0 };
 }
 
@@ -87,12 +91,12 @@ export async function restartMasterLoop(root: string, config: MasterConfig, lock
   if (lock && lock.host !== config.hostId && Date.now() - Date.parse(lock.heartbeatAt) < 3 * config.run.intervalSeconds * 1000) throw new Error(`The master loop runs on ${lock.host} (pid ${lock.pid}); restart it on that host`);
   const timeoutMs = options.timeoutMs ?? 30_000, systemctl = options.systemctl ?? userSystemctl;
   const holder = lock && lock.host === config.hostId && alive(lock.pid) ? lock.pid : null;
-  const supervisor = supervisingUnit(root, options);
+  const supervisor = await supervisingUnit(root, options);
   if (supervisor) {
     const unsupervised = holder !== null && holder !== supervisor.mainPid ? { pid: holder, result: await stopProcess(holder, timeoutMs) } : null;
     // Blocking: systemd stops the loop (SIGTERM, SIGKILL past TimeoutStopSec) and starts the next before it returns.
-    systemctl(['restart', supervisor.unit], (loopStopTimeoutSeconds + 60) * 1000);
-    const started = Number(unitProperties(systemctl, supervisor.unit).MainPID) || null;
+    await systemctl(['restart', supervisor.unit], (loopStopTimeoutSeconds + 60) * 1000);
+    const started = Number((await unitProperties(systemctl, supervisor.unit)).MainPID) || null;
     return { supervisor: supervisor.unit, stopped: supervisor.mainPid || null, unsupervised, started, log: null };
   }
   let stopped: number | null = null;
