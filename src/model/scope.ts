@@ -2,7 +2,7 @@ import { documentationGlobMatches } from './documentation-glob.js';
 import { companionGround as recordCompanionGround, followUpPaths, timingBaseline, type FollowUpSource } from './scope-companions.js';
 export { followUpPaths, plannedCompanions } from './scope-companions.js';
 import { addsTestFile, timingBaselinePath } from './timing-companion.js';
-import { type CollapsedScope, collapseArea, collapsePlannedFiles, describeWidening, plannedFilesCovered, routableScopeRequest, terminalScopeRefusal } from './scope-collapse.js';
+import { type CollapsedScope, askIdentity, collapseArea, collapsePlannedFiles, describeWidening, plannedFilesCovered, routableScopeRequest, terminalScopeRefusal } from './scope-collapse.js';
 // Deliberately bounded scope syntax: exact paths or directory prefixes ending /, /*, /**.
 // Unsupported glob expressions are not interpreted as semantic dependency knowledge.
 export function pathScope(value: string) {
@@ -63,9 +63,10 @@ export interface ScopeCriterion { id: string; text: string; proofs?: readonly st
 export interface ScopeRequestState {
   epoch: number; paths: string[]; reason: string; requestedBy: string; at: string;
   /** Planned paths the request would drop, and criteria it would rewrite: never decided here. */
-  remove?: string[];
-  criteria?: ScopeCriterion[];
+  remove?: string[]; criteria?: ScopeCriterion[];
   decision?: ScopeDecision | null;
+  /** The attempt that asked, when a claim inherited the ask (GY-1568): its routed decision still answers that epoch. */
+  askedEpoch?: number;
 }
 export interface ScopeDecision {
   state: 'approved' | 'refused';
@@ -287,9 +288,8 @@ export { terminalScopeRefusal };
 /** The requested paths the item's plannedFiles do not yet cover — what is still being asked for. */
 export const unplannedPaths = (plannedFiles: readonly string[] | undefined, paths: readonly string[]) =>
   [...new Set(paths)].filter(path => !(plannedFiles ?? []).some(planned => pathScopeContains(planned, path)));
-
-/** One requested decision per request: the instant the worker recorded it identifies the ask. */
-export const scopeDecisionBinding = (request: Pick<ScopeRequestState, 'epoch' | 'at'>) => `scope:${request.epoch}:${request.at}`;
+/** One requested decision per request: the epoch and instant the worker asked at identify the ask, through a claim's inheritance too. */
+export const scopeDecisionBinding = (request: Pick<ScopeRequestState, 'epoch' | 'at' | 'askedEpoch'>) => `scope:${askIdentity(request).epoch}:${request.at}`;
 
 /**
  * What the approver is asked to judge, within the control plane's 2000-character reason bound: the

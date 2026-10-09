@@ -29,7 +29,7 @@ import { retroCheckRefusals } from './model/retro-synthesis.js';
 import { readAppliedRetroChecks } from './retro-synthesis.js';
 import { ciFamilyAllows, ciProofFamilies, ciRunBindingSchema, ciRunRefusal, isCiProducer, refuseCiProducer, staleCiAttemptRefusal, type CiRunObservation } from './model/ci-proofs.js';
 import { decideScopeRequest, liveScopeWidening, scopeRefusalBlocker, unplannedPaths, type ScopeDecision, type ScopeRequestState } from './model/scope.js';
-import { mergedScopeRequest, plannedFilesCovered, widenedPlannedFiles } from './model/scope-collapse.js';
+import { askIdentity, mergedScopeRequest, plannedFilesCovered, widenedPlannedFiles } from './model/scope-collapse.js';
 import { handScopeWideningRefusal, routedScopeAsk } from './model/scope-provenance.js';
 import { routedScopeDecisions } from './server/scope-holds.js';
 import { configuredDocumentation, documentationObligation, recordDocumentationSubmission, type DocumentationPolicy } from './model/documentation.js';
@@ -310,7 +310,8 @@ export function inheritedScopeRequest(work: Pick<Work, 'plannedFiles' | 'carried
   const carried = work.carriedScopeRequest;
   if (!carried) return null;
   const paths = unplannedPaths(work.plannedFiles, carried.paths);
-  return paths.length ? { ...carried, paths, epoch, decision: carried.decision ? { ...carried.decision, epoch } : carried.decision } : null;
+  // The epoch that asked is kept (GY-1568): the decision routed for the ask answers it, so a claim before the approver judges neither withdraws nor orphans it.
+  return paths.length ? { ...carried, paths, epoch, askedEpoch: askIdentity(carried).epoch, decision: carried.decision ? { ...carried.decision, epoch } : carried.decision } : null;
 }
 /** The commands that end an attempt, or clear what an ended one left behind, and so close its scope request. */
 // A blocker ends its attempt (GY-1008); a cleared one (`blocked GY-N EPOCH -`) keeps the lease, so its request stays open.
@@ -1189,8 +1190,9 @@ export class Engine {
         // that is moot and refused here, in the same transaction.
         if (data.answers) {
           demand(widening, 'Only an additive planned-files widening answers a scope request');
-          const open = work.scopeRequest?.epoch === data.answers.epoch && work.scopeRequest?.at === data.answers.at;
-          const held = leaseLive && work.lease!.epoch === data.answers.epoch;
+          // An ask a claim inherited (GY-1568) is answered under the epoch that asked it and held by the attempt that inherited it.
+          const open = !!work.scopeRequest && askIdentity(work.scopeRequest).epoch === data.answers.epoch && work.scopeRequest.at === data.answers.at;
+          const held = leaseLive && work.lease!.epoch === (open ? work.scopeRequest!.epoch : data.answers.epoch);
           // GY-1484: the independent approver's verified judgement of the worker's reason and the
           // criteria (no head named) does not evaporate with the request: the approval routinely lands
           // minutes after the ask, when the wait window or the asking attempt may already have ended.
