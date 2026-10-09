@@ -296,6 +296,15 @@ test('integration:capped-refusal-remedy-runs-markless — GY-1573 f84ee922: the 
   assert.equal(cappedRefusalRequest(run.world.item, H, config, [markless('refused')], [run.world.item, followUp, unrelated]), run.world.withdrawn[0].message, 'the launched reviewer reads the same request');
   await run.cycle();
   assert.equal(run.world.withdrawn.length, 1, 'withdrawn once');
+
+  // On a revised item whose record cannot date the undated, markless refusal against the revision, its binding still answers the round.
+  const revised = harness({ ...capped('BLOCKING: former hotspot files exceed their size budgets.'), policyRevision: 3, formalReviewResetRequired: true, formalReviewBaseline: undefined, reviewRequest: null } as Work);
+  revised.world.history = [markless('refused')];
+  await revised.cycle();
+  assert.deepEqual(revised.world.withdrawn.map(entry => entry.reviewId), [4242], 'withdrawn under revision 3 as under revision 1');
+  assert.deepEqual(revised.world.wakes, ['GY-1573']);
+  assert.equal(revised.state.actions[cappedRereviewKey(revised.world.item, H)]?.state, 'done');
+  assert.equal(revised.state.actions[cappedEscalationKey(revised.world.item, H)], undefined);
 });
 
 test('unit:capped-refusal-unmatched-escalates — a refused capped rework on the head that binds it under none of its readings escalates naming the decision, never returns silently', async () => {
@@ -398,11 +407,13 @@ test('unit:unmarked-capped-refusal-rereviews — GY-1573 round 8: an unmarked re
   await stale.cycle();
   assert.deepEqual(stale.world.withdrawn, [], 'the earlier judgement withdraws nothing');
   assert.equal(stale.performed.length, 0, 'the loop has yet to ask under revision 5, so the round waits for that request');
-  // Nor can a change request the baseline already holds, from before the revision, be dated after it.
-  assert.equal(refusedCappedRework([unmarked()], { ...judged, reviewId: 5466311316 }, run.world.item), null);
-  // A baseline of another revision, or none on a revised item, dates nothing: the unmarked refusal binds no change request.
-  assert.equal(refusedCappedRework([unmarked()], judged, { ...run.world.item, formalReviewBaseline: { pr: 1047, policyRevision: 4, reviewIds: [] } }), null);
-  assert.equal(refusedCappedRework([unmarked()], judged, { ...run.world.item, formalReviewBaseline: undefined, reviewRequest: null }), null);
+  // GY-1579 AC-1: where the item's record cannot date the refusal against the revision — a change request the baseline already
+  // holds, a baseline of another revision, none on a revised item, no time at all — its binding is the record's answer, and it binds.
+  assert.ok(refusedCappedRework([unmarked()], { ...judged, reviewId: 5466311316 }, run.world.item));
+  assert.ok(refusedCappedRework([unmarked()], judged, { ...run.world.item, formalReviewBaseline: { pr: 1047, policyRevision: 4, reviewIds: [] } }));
+  assert.ok(refusedCappedRework([unmarked()], judged, { ...run.world.item, formalReviewBaseline: undefined, reviewRequest: null }));
+  assert.ok(refusedCappedRework([{ ...unmarked(), requestedAt: undefined as unknown as string, refusal: { approver: 'graphyard-approver-graphyard', reason: refusalReason } as { approver: string; reason: string; at?: string } }], judged, run.world.item), 'an undated refusal binds by its binding');
+  assert.equal(refusedCappedRework([before], judged, { ...run.world.item, formalReviewBaseline: undefined, reviewRequest: null })?.id, before.id, 'with nothing to date it by, even an older refusal binds');
   // An agent review request posted under the current revision dates it as the baseline does.
   const agentRequest = { commentId: 1, sha: D, baseSha: B, policyRevision: 5, body: '', createdAt: '2026-10-09T08:10:00Z' };
   assert.ok(refusedCappedRework([unmarked()], judged, { ...run.world.item, formalReviewBaseline: undefined, reviewRequest: agentRequest }));

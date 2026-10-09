@@ -3,7 +3,8 @@ import type pg from 'pg';
 import { z } from 'zod';
 import { Refusal, demand, resolveEscalation, standingEscalations, type Principal, type Work } from '../model.js';
 import { save, wakeJob } from '../store.js';
-import { approvalConflict, approveCapability, assertDecisionAuthority, decisionApprovalSchema, decisionInputs, decisionPrecondition, decisionRequestSchema, decisionSituation, foldDecisions, judgedSame, requiredDecisionCapabilities, standingRefusal, approvalApplyGraceMs, type Decision, type DecisionState } from '../model/approval.js';
+import { approvalConflict, approveCapability, assertDecisionAuthority, decisionApprovalSchema, decisionInputs, decisionPrecondition, decisionRequestSchema, foldDecisions, judgedSame, requiredDecisionCapabilities, standingRefusal, approvalApplyGraceMs, type Decision, type DecisionState } from '../model/approval.js';
+import { lapsedReauthorization, reworkSituation } from './held-rework.js';
 import { canonical, decisionRace, readDecisions, resolvePin, samePin, type DecisionRecord, type StaleRace } from './decision-ledger.js';
 import type { Services } from './routes.js';
 import { revisionRebase } from '../engine.js';
@@ -107,17 +108,10 @@ async function recordRequest(services: Services, caller: Principal, id: string, 
     const precondition = decisionPrecondition(data.action, input, work!) ?? await flakyEvidence(db, data.action, input); demand(!precondition, precondition!, 409);
     // An approved decision the item has moved past never blocks this request (GY-1297): it settles superseded here, in this transaction.
     const history = await supersedeMoved(db, work!, (await readDecisions(db, work!)).filter(decision => decision.state === 'approved'), actor).then(() => readDecisions(db, work!));
-    // A refused decision is answered, never retried unchanged (GY-141). A rework or recover
-    // refusal judged the candidate and base it was requested against, and stands only for those (GY-229).
-    const situation = decisionSituation(data.action, work!);
-    // GY-1579: a rework the item's live state already holds is refused here, naming the applied decision, rather than put to an approver.
-    const held = data.action === 'rework' ? heldRework(work!, history) : null;
-    if (held && heldSameGrounds(held, situation))
-      throw new Refusal(heldReworkRefusal(work!, held), 409, { heldRework: { decision: held.id } });
-    // The rework this request would re-authorize travels beside its situation, so refusals and duplicates key on the record.
-    const recorded = situation && held ? { ...situation, reauthorizes: held.id } : situation;
+    // A refused decision is answered, never retried unchanged (GY-141), on the situation it judged (held-rework.ts).
+    const situation = reworkSituation(data.action, work!, history, input);
     // The refused decision travels as a field beside the message (GY-265), so the loop answers it by id.
-    const repeated = standingRefusal(history, data.action, input, data.reason, (a, b) => JSON.stringify(canonical(a)) === JSON.stringify(canonical(b)), data.precedent ?? [], recorded);
+    const repeated = standingRefusal(history, data.action, input, data.reason, (a, b) => JSON.stringify(canonical(a)) === JSON.stringify(canonical(b)), data.precedent ?? [], situation);
     if (repeated) throw new Refusal(repeated.message, 409, { standingRefusal: { decision: repeated.decision, action: repeated.action, legacy: repeated.legacy } });
     const pending = history.find(decision => decision.action === data.action && (decision.state === 'requested' || decision.state === 'approved'));
     const cited = data.precedent ? [...new Set(data.precedent)].sort() : null;
@@ -135,7 +129,7 @@ async function recordRequest(services: Services, caller: Principal, id: string, 
     // A spawned handler that reaches the same line as a standing request — same action, same
     // input, same precedent — is following it, not competing with it: its judgement is appended
     // to that decision as a concurrence and the standing decision is returned.
-    if (pending && cited && judgedSame(data.action, pending, recorded) && JSON.stringify(canonical(pending.input)) === JSON.stringify(canonical(input)) && JSON.stringify([...pending.precedent].sort()) === JSON.stringify(cited)) {
+    if (pending && cited && judgedSame(data.action, pending, situation) && JSON.stringify(canonical(pending.input)) === JSON.stringify(canonical(input)) && JSON.stringify([...pending.precedent].sort()) === JSON.stringify(cited)) {
       await record(db, work!, actor.id, 'decision.concurred', { id: pending.id, action: data.action, reason: data.reason, precedent: cited, context: data.context ?? null, requester: { id: actor.id, role: actor.role } });
       const result = (await readDecisions(db, work!)).find(decision => decision.id === pending.id)!;
       await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]);
@@ -147,29 +141,12 @@ async function recordRequest(services: Services, caller: Principal, id: string, 
       : `Decision ${pending?.id} (${data.action}) is already ${pending?.state} on ${work!.key}; wait for it before requesting another`, 409);
     const decisionId = randomUUID();
     await record(db, work!, actor.id, 'decision.requested', { id: decisionId, action: data.action, input, reason: data.reason, requester: { id: actor.id, role: actor.role }, capabilities: requiredDecisionCapabilities(data.action, input, work!),
-      ...(cited ? { precedent: cited } : {}), ...(noPrecedent ? { noPrecedent } : {}), ...(data.context ? { context: data.context } : {}), ...(data.action === 'resolve' ? { pin: resolvePin(work!) } : {}), ...(recorded ? { situation: recorded } : {}) });
+      ...(cited ? { precedent: cited } : {}), ...(noPrecedent ? { noPrecedent } : {}), ...(data.context ? { context: data.context } : {}), ...(data.action === 'resolve' ? { pin: resolvePin(work!) } : {}), ...(situation ? { situation } : {}) });
     const result = (await readDecisions(db, work!)).find(decision => decision.id === decisionId)!;
     await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]);
     return result;
   });
 }
-
-/**
- * GY-1579. The applied rework decision the item's live state still holds, or null: `reworkRequested`
- * stands (no worker has submitted since) and the item's newest applied rework is the one that set it.
- * On GY-1522 a hand rework was put to an approver while 8da1e201 already held the item, and the
- * approver's session was spent saying so; the held state answers such a request on the record.
- */
-export function heldRework<D extends Pick<Decision, 'id' | 'action'> & { state: string; situation?: Decision['situation'] }>(work: Pick<Work, 'reworkRequested'>, history: readonly D[]): D | null {
-  if (!work.reworkRequested) return null;
-  return [...history].reverse().find(decision => decision.action === 'rework' && decision.state === 'applied') ?? null;
-}
-/** Whether a request judges the grounds the held rework already answers: the same candidate head and base (a rework recorded before situations were kept judged an unnamed one, so it holds every request). */
-export const heldSameGrounds = (held: { situation?: Decision['situation'] }, situation: Decision['situation']) =>
-  !held.situation || ((held.situation.sha ?? null) === (situation?.sha ?? null) && (held.situation.baseSha ?? null) === (situation?.baseSha ?? null));
-export const heldReworkRefusal = (work: Pick<Work, 'key'>, held: Pick<Decision, 'id'> & { situation?: Decision['situation'] }) =>
-  `${work.key} already holds rework: decision ${held.id} was applied${held.situation?.sha ? ` for head ${held.situation.sha.slice(0, 12)}` : ''} and no worker has submitted since, so the item waits for a worker on it and a second rework authorizes nothing. `
-  + `If no worker takes it, what holds its dispatch (an unfinished dependency, a blocker, a fenced launch) is the lever, not another rework`;
 
 // A refused approval is part of the item's history even though its transaction rolled back.
 async function recordRefusal(services: Services, actor: Principal, workId: string, decision: string, conflict: string) {
@@ -208,7 +185,7 @@ export async function approveDecision(services: Services, caller: Principal, id:
       const actor = await authenticated(services, db, now, caller);
       const replay = await receipt(db, actor, key, fingerprint); if (replay) return replay;
       const work = await findWork(db, id); demand(work, 'Work item not found', 404);
-      const decision = (await readDecisions(db, work!)).find(entry => entry.id === data.decision);
+      const history = await readDecisions(db, work!), decision = history.find(entry => entry.id === data.decision);
       demand(decision, `Decision ${data.decision} does not exist on ${work!.key}`, 404);
       // Separation of duties is judged before authority, so a conflicted identity is told the
       // conflict, whatever else it lacks.
@@ -236,14 +213,15 @@ export async function approveDecision(services: Services, caller: Principal, id:
       // GY-1296, GY-1463: a revision that moved only in what cannot affect the decision's grounds (the
       // loop's bookkeeping, lease renewals, observations, sessions) is judged and applied at the current revision; see revisionRebase.
       const { judged, change } = await revisionRebase(db, decision!, work!);
-      if (!resuming) precondition = (judged !== decision ? decisionPrecondition(judged.action, judged.input, work!) : precondition) ?? await flakyEvidence(db, judged.action, judged.input);
+      if (!resuming) precondition = (judged !== decision ? decisionPrecondition(judged.action, judged.input, work!) : precondition) ?? await flakyEvidence(db, judged.action, judged.input)
+        ?? lapsedReauthorization(decision!, work!, history)?.reason ?? null; // GY-1579
       // GY-1463: a revision that moved in its grounds says what moved them.
       const moved = !!change && !!precondition?.startsWith('Task revision changed');
       if (moved) precondition = `${change![0].toUpperCase()}${change!.slice(1)} since revision ${decision!.input.expectedRevision} moved the decision's grounds: ${precondition}`;
       if (precondition) {
         // A pin the item has moved past can never hold again, so the decision would stay
         // 'requested' forever and block every re-request; settle it as stale instead.
-        const race = decisionRace(decision!, work!);
+        const race = decisionRace(decision!, work!) ?? lapsedReauthorization(decision!, work!, history)?.race;
         if (race) stale.value = { actor, workId: work!.id, decision: decision!, reason: `${precondition}; the decision was not applied`, ...race };
         demand(false, `${precondition}; the decision was not applied`, 409);
       }

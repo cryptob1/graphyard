@@ -7,7 +7,8 @@ import { server } from '../src/server.js';
 import { Store } from '../src/store.js';
 import type { Principal } from '../src/model.js';
 import type { Observation, Work } from '../src/model/work.js';
-import { heldRework, requestDecision } from '../src/server/decisions.js';
+import { requestDecision } from '../src/server/decisions.js';
+import { heldRework } from '../src/server/held-rework.js';
 import { foldDecisions, judgedSame, standingRefusal } from '../src/model/approval.js';
 import type { Services } from '../src/server/routes.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -84,6 +85,14 @@ test('unit:decide-route-records-rework-situation — a decide-route rework recor
   events.push({ actor: 'graphyard-approver', kind: 'decision.declined', payload: { id: second.id, reason: 'Not on these grounds' }, created_at: new Date(clock + 200).toISOString() });
   await assert.rejects(requestDecision(services, operator, work.current.id, { action: 'rework', input: { previousWorkerStopped: true, binding: `${shaB}:conflict` }, reason: 'The refreshed head conflicts with its base' }, 'key-3'),
     (error: any) => error.status === 409 && error.details?.standingRefusal?.decision === second.id);
+  // On the held head itself: a bare request is refused naming the held rework, while a binding it did not carry names newer
+  // grounds (the retry cap's, after attempts that never submitted) and is recorded, naming the rework it re-authorizes.
+  work.current = item(shaA, true);
+  await assert.rejects(requestDecision(services, operator, work.current.id, { action: 'rework', input: { previousWorkerStopped: true }, reason: 'The previous worker stopped' }, 'key-4'),
+    (error: any) => error.status === 409 && error.details?.heldRework?.decision === first.id);
+  const capped = await requestDecision(services, operator, work.current.id, { action: 'rework', input: { previousWorkerStopped: true, binding: `overlong-cap:${work.current.id}:2030-01-01T12:00:00Z` }, reason: 'held: 3 attempts in a row ended without submitting' }, 'key-5');
+  assert.equal(capped.state, 'requested');
+  assert.deepEqual(capped.situation, { sha: shaA, baseSha: base, reauthorizes: first.id });
   // Once a worker submitted, the rework no longer holds, and nothing is re-authorized.
   assert.equal(heldRework(item(shaB, false), [{ ...first, state: 'applied' }]), null);
 });
@@ -145,13 +154,35 @@ test('integration:held-rework-request-refused-mechanically — a rework request 
   assert.ok(String(again.body.error).includes(`decision ${requested.body.id} was applied for head ${shaA.slice(0, 12)}`), again.body.error);
   assert.match(again.body.error, /a second rework authorizes nothing/);
   assert.deepEqual(again.body.heldRework, { decision: requested.body.id }, 'the applied decision travels as a field beside the message');
-  // A request on other grounds for the same head is held all the same: the item already waits for a worker.
-  const grounded = await send(master.token, `work/${work.key}/decide`, { action: 'rework', input: { previousWorkerStopped: true, binding: `${shaA}:verdict:graphyard-reviewer[bot]` }, reason: 'The verdict stands' });
-  assert.equal(grounded.status, 409, JSON.stringify(grounded.body));
-  assert.deepEqual(grounded.body.heldRework, { decision: requested.body.id });
 
   // Nothing was recorded, so no request stands for the loop to launch an approver on.
   const ledger = await decisions(work.key);
   assert.deepEqual(ledger.map(entry => [entry.id, entry.state]), [[requested.body.id, 'applied']]);
   assert.equal(ledger.filter(entry => entry.state === 'requested').length, 0, 'no decision awaits an approver');
+
+  // A base refresh moves the head while the rework holds: a request on the new head is recorded, naming the rework it re-authorizes.
+  const observe = async (sha: string) => {
+    const current = (await store.list()).find(entry => entry.id === work.id)! as Work;
+    return engine.observe(work.id, current.revision, { candidate: { ...candidate, sha }, checks: [{ name: 'test', result: 'success', appId: 15368 }], reviews: [{ reviewer: 'graphyard-reviewer[bot]', sha, state: 'CHANGES_REQUESTED', submittedAt: new Date().toISOString() }],
+      merged: false, mergeSha: null, mergeable: true, protected: true, files: paths, at: new Date().toISOString(),
+      scopeFiles: paths.map(path => ({ path, status: 'modified' as const, sha: 'e'.repeat(40), additions: 1, deletions: 1, binary: false })) } as unknown as Observation);
+  };
+  await observe(shaB);
+  const reauthorizing = await send(master.token, `work/${work.key}/decide`, { action: 'rework', input: { previousWorkerStopped: true, binding: `${shaB}:verdict:graphyard-reviewer[bot]` }, reason: 'The verdict stands on the refreshed head' });
+  assert.equal(reauthorizing.body.state, 'requested', JSON.stringify(reauthorizing.body));
+  assert.equal(reauthorizing.body.situation.reauthorizes, requested.body.id);
+  // Before its approver answers, a worker takes the held rework and submits: the hold it was asked to re-authorize clears, on the same head.
+  let resumed = await engine.execute(implementer, 'claim', work.id, {}, randomUUID());
+  resumed = await engine.execute(implementer, 'workspace', resumed.id, { epoch: resumed.epoch, host: 'held-host', path: `/tmp/held/${resumed.id}-${resumed.epoch}`, branch: candidate.branch }, randomUUID());
+  resumed = await engine.execute(implementer, 'submit', resumed.id, { epoch: resumed.epoch, pr: 1579 }, randomUUID());
+  assert.equal(resumed.reworkRequested, false);
+  await observe(shaB);
+  // Approving it now would send the fresh submission back for a rework nobody judged: it is refused and settled stale, never applied.
+  const late = await send(approver.token, `work/${work.key}/approve`, { decision: reauthorizing.body.id, reason: 'The verdict stands' });
+  assert.equal(late.status, 409, JSON.stringify(late.body));
+  assert.match(late.body.error, new RegExp(`re-authorize applied rework ${requested.body.id}, but ${work.key} no longer holds it \\(a worker has submitted since\\)`));
+  const settled = (await decisions(work.key)).find(entry => entry.id === reauthorizing.body.id);
+  assert.notEqual(settled.state, 'requested', 'settled, so it blocks no later request');
+  assert.notEqual(settled.state, 'applied');
+  assert.equal(((await store.list()).find(entry => entry.id === work.id)! as Work).reworkRequested, false, 'the fresh submission is not sent back');
 });

@@ -210,7 +210,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
    * GY-1575: the day runs with a reviewer App that withdraws a refused round's change request; the re-review of each of `again` requests changes once more.
    * GY-1579: each of `unmatched` already holds, on its capped head, a refusal a prior release recorded for another reviewer slug and with no revision mark.
    * GY-1577: the loop reads the refused capped rework of each of `legacy` as one requested before GY-1575's revision mark (its reason
-   * unmarked), and of each of `undated` unmarked and with no time it was requested or refused, so nothing places it under the item's revision.
+   * unmarked), and of each of `undated` unmarked and with no time it was requested or refused, so nothing dates it before the item's revision (GY-1579: it binds).
    */
   reviewCap?: { cap: number; items: number[]; refused: number[]; again?: number[]; unmatched?: number[]; legacy?: number[]; undated?: number[] };
   /**
