@@ -17,6 +17,7 @@ import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { nextAction } from '../src/model/next-action.js';
 import { humanNeeded } from '../src/model/concerns.js';
 import { terminalDecisions } from '../src/cli/decision-report.js';
+import { refusedOnOtherGrounds } from '../src/daemon/decisions.js';
 
 // GY-1579, observed on GY-1522 at 2026-10-08T11:38:06Z: the master requested rework bd40dc45 by hand,
 // input { previousWorkerStopped: true } with no binding, on an item that already held applied rework
@@ -218,14 +219,14 @@ test('integration:held-rework-request-refused-mechanically — a rework request 
 const reviewer = 'graphyard-reviewer[bot]';
 const cappedBinding = `${shaA}:capped:${reviewer}`, ciBinding = `${shaA}:ci:test`;
 const cappedId = '0a5116d0-013f-4e58-8e9e-a97481d8e202';
-function failingHead(at: number): Work {
+function failingHead(at: number, test = 'failure'): Work {
   const work = item(shaA, false);
-  const observation = { candidate: work.candidate, checks: [{ name: 'test', result: 'failure', appId: 15368, id: 7, attempt: 2 }, { name: 'typecheck', result: 'success', appId: 15368, id: 8 }],
+  const observation = { candidate: work.candidate, checks: [{ name: 'test', result: test, appId: 15368, id: 7, attempt: 2 }, { name: 'typecheck', result: 'success', appId: 15368, id: 8 }],
     reviews: [{ reviewer, sha: shaA, state: 'CHANGES_REQUESTED', submittedAt: new Date(clock - 600_000).toISOString(), id: 5475323343 }], merged: false, mergeSha: null, mergeable: true, protected: true,
     files: ['src/loop.ts'], scopeFiles: [], at: new Date(at).toISOString(), prState: 'open', draft: false, baseTip: base, baseTree: base, baseTipContained: true, conversations: { required: true, unresolved: [] } };
   return { ...work, stage: 'review', policy: { checks: ['test', 'typecheck'], review: true }, pipeline: { reworkRounds: 3 }, observation,
     gates: [{ name: 'build', passed: true, reasons: [] }, { name: 'review', passed: false, reasons: [`Outstanding change requests from ${reviewer}`] },
-      { name: 'test', passed: false, reasons: ['Required CI check test has not passed on the current candidate'], ciAppIds: [15368] }] } as unknown as Work;
+      test === 'success' ? { name: 'test', passed: true, reasons: [] } : { name: 'test', passed: false, reasons: ['Required CI check test has not passed on the current candidate'], ciAppIds: [15368] }] } as unknown as Work;
 }
 const cappedRework = (state: 'requested' | 'refused') => ({ id: cappedId, action: 'rework', state, input: { previousWorkerStopped: true, binding: cappedBinding }, requestedBy: 'graphyard-master-operator',
   requestedAt: new Date(clock - 120_000).toISOString(), reason: '[Capped review under policy revision 1.] a blocking finding', approvedBy: null,
@@ -278,6 +279,24 @@ test('unit:ci-rework-after-review-refusal — a refused capped review rework nev
   await runCycle(config, freshState, { ...fresh.effects, snapshot: async () => ({ work: [failingHead(clock)], now: new Date(clock).toISOString() }) }, () => clock);
   assert.deepEqual(fresh.decided.map(entry => entry.input.binding), [ciBinding]);
 
+  // A refusal judged only the checks it named: a refused `ci:test` rework does not judge `ci:lint` or `ci:lint,test`.
+  assert.equal(refusedOnOtherGrounds(ciBinding, `${shaA}:ci:lint`), true);
+  assert.equal(refusedOnOtherGrounds(ciBinding, `${shaA}:ci:lint,test`), true);
+  assert.equal(refusedOnOtherGrounds(`${shaA}:ci:lint,test`, ciBinding), false, 'a check it judged is not other grounds');
+  assert.equal(refusedOnOtherGrounds(ciBinding, ciBinding), false);
+  assert.equal(refusedOnOtherGrounds(`${shaA}:threads:1,2`, `${shaA}:threads:3`), false, 'a moved thread set is the same grounds');
+
+  // The failed check clears while the adopted capped request stands; its approver then refuses it. The watch comes back to the
+  // capped binding and the refusal is answered there: no second capped rework is requested on the head.
+  const cleared = { current: [cappedRework('requested')] as any[] };
+  const back = loop(cleared), backState = emptyDaemonState(config);
+  await runCycle(config, backState, { ...back.effects, snapshot: async () => ({ work: [failingHead(clock)], now: new Date(clock).toISOString() }) }, () => clock);
+  assert.ok(Object.keys(backState.approvals).some(key => key.includes(':ci:test:')), 'adopted under the failed-check binding');
+  cleared.current = [cappedRework('refused')];
+  for (const at of [later, later + 30_000]) await runCycle(config, backState, { ...back.effects, snapshot: async () => ({ work: [failingHead(at, 'success')], now: new Date(at).toISOString() }) }, () => at);
+  assert.deepEqual(back.decided, [], 'the refused capped rework is not requested again');
+  assert.ok(Object.entries(backState.approvals).some(([key, watch]) => key.includes(':capped:') && watch.decision === cappedId && watch.settledAt), 'its watch settled under the capped binding');
+  assert.equal(backState.actions[`escalation:decision-refused:${cappedId}`], undefined);
 });
 
 test('unit:ci-rework-after-review-refusal — master status names the failed-check rework, never the refused review rework, and asks nobody to answer the refusal by hand', async () => {
