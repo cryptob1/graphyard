@@ -27,6 +27,7 @@ export const agentRegistryRoutes = defineRoutes('agent-registry', [
   { method: 'GET', path: '/api/agent-registry/history', handle: ({ actor, url, services }) => services.agentRegistry.history(actor, Number(url.searchParams.get('limit') ?? 100)) },
   { method: 'POST', path: '/api/agent-registry/apply', handle: async context => context.services.agentRegistry.mutate(context.actor, 'apply', await parseJson(context), context.idempotencyKey()) },
   { method: 'POST', path: '/api/agent-registry/select', handle: async context => context.services.agentRegistry.select(context.actor, await parseJson(context), context.idempotencyKey()) },
+  { method: 'POST', path: '/api/agent-registry/observe', handle: async context => context.services.agentRegistry.observe(context.actor, await parseJson(context), context.idempotencyKey()) },
   {
     method: 'POST', path: /^\/api\/agent-registry\/sessions\/([0-9a-f-]{36})\/end$/,
     handle: async (context, [id]) => context.services.agentRegistry.endSession(context.actor, id, await parseJson(context), context.idempotencyKey()),

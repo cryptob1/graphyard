@@ -426,7 +426,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
   // of a second or more is recorded with its step, and the slowest is named on the cycle's line.
   const run = timedRun(deps.run ?? childRunner({ timeoutMs: 90_000, ledger }));
   const fetcher = timedFetch(deps.fetcher ?? fetch, () => current().url);
-  const snapshot = () => timedCall('server', 'GET work-snapshot', deps.snapshot);
+  const snapshot = async () => { await (await import('../master/environments.js')).reportPendingExhaustions(current(), { fetch: fetcher }).catch(() => {}); return timedCall('server', 'GET work-snapshot', deps.snapshot); }; // resending first any account hold the agent registry has not heard of (GY-1573)
   const mutate = (path: string, data: unknown, requestId?: string) => timedCall('server', serverCallName('POST', path), () => deps.mutate(path, data, requestId));
   /**
    * One call as the master's own operator-agent identity — the identity that requests decisions.
@@ -582,7 +582,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       if (!workspace || workspace.host !== current().hostId) return { state: 'not-applicable', detail: workspace ? `the attempt worktree is on ${workspace.host}, not this host; its commits stay on ${workspace.branch}` : 'the attempt registered no workspace' };
       return preservePartialWork(workspace.path, `${work.key} attempt ${epoch} ${cause}`, run);
     },
-    holdAccount: (account, observed) => recordObservedExhaustion(current(), account, observed),
+    holdAccount: (account, observed) => recordObservedExhaustion(current(), account, observed, undefined, { fetch: fetcher }),
     endSession: async (session, resolution) => {
       // A pane that is already gone is closed (GY-137): the record still settles, and says so.
       let paneGone = false;
