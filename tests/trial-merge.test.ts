@@ -100,15 +100,17 @@ const fixtureFiles = {
   // every file passed, with a `killed` file listed a signal ends it. A `partial` file listed writes passing records for
   // every other file, prints a named failure for itself without a completion record, and exits 1 — as a runner that dies
   // mid-group after some files finished (GY-1548).
-  'tests/helpers/run-tests.ts': "import { existsSync, readFileSync, writeFileSync } from 'node:fs'; const at = process.argv.indexOf('--files-from'); if (at < 0) { console.error('no --files-from: the runner would run every test file'); process.exit(2); } const files = readFileSync(process.argv[at + 1], 'utf8').split('\\n').filter(Boolean);\n"
+  'tests/helpers/run-tests.ts': "import { existsSync, readFileSync, writeFileSync } from 'node:fs'; import { tmpdir } from 'node:os'; import { dirname, join } from 'node:path'; const at = process.argv.indexOf('--files-from'); if (at < 0) { console.error('no --files-from: the runner would run every test file'); process.exit(2); } const files = readFileSync(process.argv[at + 1], 'utf8').split('\\n').filter(Boolean);\n"
     + "console.log('group: ' + files.length + ' file(s)' + (existsSync('tree-marker') ? ' in ' + readFileSync('tree-marker', 'utf8').trim() : ''));\n"
     + "const durations = process.argv.indexOf('--durations');\n"
     + "if (files.some(file => file.includes('partial'))) { const done = files.filter(file => !file.includes('partial')); for (const file of done) console.log('ok - ' + file); const failed = files.find(file => file.includes('partial')); console.log('not ok - ' + failed); console.log('  test at ' + failed + ':1:1'); if (durations >= 0) writeFileSync(process.argv[durations + 1], done.map(file => JSON.stringify({ file, durationMs: 1, passed: true })).join('\\n') + (done.length ? '\\n' : '')); process.exit(1); }\n"
-    + "for (const file of files) console.log((file.includes('bad') ? 'not ok - ' : 'ok - ') + file);\n"
-    + "if (durations >= 0) writeFileSync(process.argv[durations + 1], files.map(file => JSON.stringify({ file, durationMs: 1, passed: !file.includes('bad') })).join('\\n') + '\\n');\n"
+    + "let shadowed = null; for (let dir = tmpdir(); process.env.LOOKUP_ROOT && dir.startsWith(process.env.LOOKUP_ROOT); dir = dirname(dir)) if (existsSync(join(dir, 'node_modules'))) { shadowed = join(dir, 'node_modules'); break; }\n"
+    + "const bad = file => file.includes('bad') || (file.includes('lookup') && shadowed !== null);\n"
+    + "for (const file of files) console.log((bad(file) ? 'not ok - ' : 'ok - ') + file + (file.includes('lookup') && shadowed ? ' — the upward lookup found ' + shadowed : ''));\n"
+    + "if (durations >= 0) writeFileSync(process.argv[durations + 1], files.map(file => JSON.stringify({ file, durationMs: 1, passed: !bad(file) })).join('\\n') + '\\n');\n"
     + "if (files.some(file => file.includes('crash'))) { console.error('the runner process is leaving without a verdict'); console.error('credentials seen: ' + JSON.stringify(Object.fromEntries(Object.entries(process.env).filter(([name]) => /TOKEN|SECRET|SOCK|AUTH|PASSWORD|PASSWD|PRIVATE_KEY|API_KEY|ACCESS_KEY|CREDENTIAL/.test(name))))); process.exit(3); }\n"
     + "if (files.some(file => file.includes('killed'))) process.kill(process.pid, 'SIGKILL');\n"
-    + "if (files.some(file => file.includes('bad'))) process.exit(1);\n",
+    + "if (files.some(bad)) process.exit(1);\n",
 };
 const fixture = async () => {
   const repo = await repository(fixtureFiles);
@@ -289,6 +291,32 @@ test('unit:trial-tmpdir-isolated — the trial child gets a fresh, empty, short 
   assert.equal(new Set(directories).size, directories.length, 'every trial gets a fresh directory');
   assert.deepEqual(readdirSync(shared).sort(), ['.git', 'node_modules'], 'the host\'s tmp is left as it was');
   assert.deepEqual(readdirSync(clean), [], 'and nothing of the trials is left in the clean root');
+});
+
+test('integration:shadow-trial-stable-green — three consecutive trials of one head, on a host whose shared tmp holds a stray node_modules, pass every time: a test whose upward lookup from its tmpdir would resolve that node_modules (as tests/worktree-reclaim.test.ts did on vishrog) runs under the trial\'s own tmpdir and never sees it, while the shared tmp stays dirty (GY-1565)', async () => {
+  // The host: its shared tmp poisoned as vishrog's /tmp is, a persistent tmp beside it, and the managed worktree root.
+  const host = await temporaryDirectory('trial-stable-host', tmpdir());
+  const shared = join(host, 'tmp'), persistent = join(host, 'var-tmp');
+  mkdirSync(join(shared, 'node_modules', '.vite'), { recursive: true }); mkdirSync(join(shared, '.git')); mkdirSync(persistent);
+  const environment: NodeJS.ProcessEnv = { PATH: process.env.PATH!, TMPDIR: shared, TMP: shared, TEMP: shared, LOOKUP_ROOT: host };
+  const repo = await fixture();
+  const head = repo.commitOnBase({ 'src/a.ts': 'export {};\n', 'tests/lookup.test.ts': 'x\n', 'tests/ok.test.ts': 'x\n' }, 'one submitted head');
+  const merged = await trialMerge(gitFor(repo.root), { head, baseTip: repo.base });
+  assert.ok('mergeSha' in merged);
+  // The stand-in lookup does detect the contamination: run as the trial ran before GY-1565, with the host's shared tmp as
+  // the platform's own, it fails as the GY-1535 trials did.
+  const list = join(host, 'lookup.txt'); writeFileSync(list, 'tests/lookup.test.ts\n');
+  assert.throws(() => execFileSync('node', ['tests/helpers/run-tests.ts', '--files-from', list], { cwd: repo.root, env: { ...trialEnvironment(environment), TMPDIR: shared }, encoding: 'utf8', stdio: 'pipe' }),
+    (error: { stdout?: string }) => /not ok - tests\/lookup\.test\.ts — the upward lookup found .*\/tmp\/node_modules/.test(String(error.stdout)), 'under the shared tmp the lookup resolves the stray node_modules');
+  for (const attempt of [1, 2, 3]) {
+    const base = join(host, `worktrees-${attempt}`);
+    const result = await runTrial({ root: repo.root, base, mergeSha: merged.mergeSha, changedFiles: ['tests/lookup.test.ts', 'tests/ok.test.ts'], timeoutMs: 120_000, key: 'GY-1535', environment, temporaryRoots: [shared, persistent] });
+    assert.equal(result.build, 'pass', result.logTail);
+    assert.deepEqual(result.tests, { passed: 2, failed: [], files: 2 }, `trial ${attempt} has no shadow-only-fail from the contamination: ${result.logTail}`);
+    assert.equal(result.runnerExit, 0);
+    assert.doesNotMatch(result.logTail, /the upward lookup found/);
+  }
+  assert.deepEqual(readdirSync(shared).sort(), ['.git', 'node_modules'], 'the shared tmp stays dirty throughout');
 });
 
 test('integration:trial-run-build-and-tests — a merge that changes the lockfile installs its own dependencies with npm ci, and one that leaves it alone reuses the coordinator\'s install', async () => {
