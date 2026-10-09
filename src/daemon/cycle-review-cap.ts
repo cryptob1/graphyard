@@ -275,7 +275,9 @@ export async function reviewCapStep(cycle: Cycle) {
     const judged = capped.kind === 'escalate';
     // A loop that requests decisions asks its approver for this round itself (neededDecision, GY-1389).
     if (judged && (!effects.decide || !effects.approver)) return escalate();
-    const history = await decisionHistory();
+    // GY-1583: a nits-only change request reads the history only where it bears on the outcome — beside a withdrawal
+    // already made on the head, or once a withdrawal is due — so a quiet cycle over a held item reads none.
+    const history = judged || earlier ? await decisionHistory() : null;
     const refused = history ? refusedCappedRework(history, capped, item) : null;
     // Until the approver refuses the rework the loop requested, the round is the approver's to judge.
     if (judged && !refused) {
@@ -288,15 +290,22 @@ export async function reviewCapStep(cycle: Cycle) {
       if (unmatched) return escalate(`${capped.reason}; independent approver ${capRefusalOf(unmatched).approver} refused capped rework decision ${unmatched.id} on ${capped.sha.slice(0, 12)}, but its record binds ${capped.reviewer}'s change request under none of its readings (binding ${String(unmatched.input?.binding ?? 'none')}, no policy revision mark), so the loop cannot withdraw the request on it`, [capRefusalOf(unmatched)]);
       return;
     }
-    // The cursor's row may be pruned; a change request submitted after the refusal is the re-review's all the same (GY-1575).
-    if (refused && (state.actions[cappedRereviewKey(item, capped.sha)]?.state === 'done' || requestedSinceRefusal(capped, capRefusalOf(refused)))) {
-      refusal = capRefusalOf(refused);
+    /** The re-review of a refused capped head (GY-1575): `'escalated'`, the refusals it is withdrawn on, or null when it is no re-review. */
+    const rereviewed = async (history: NonNullable<Awaited<ReturnType<typeof decisionHistory>>>, refused: NonNullable<ReturnType<typeof refusedCappedRework<typeof history[number]>>>) => {
+      // The cursor's row may be pruned; a change request submitted after the refusal is the re-review's all the same (GY-1575).
+      if (state.actions[cappedRereviewKey(item, capped.sha)]?.state !== 'done' && !requestedSinceRefusal(capped, capRefusalOf(refused))) return null;
+      const first = capRefusalOf(refused);
       // GY-1580: the master's answer to that escalation, refused as non-blocking too, has it withdrawn once more; a
       // change request after that withdrawal escalates, never withdrawn a third time (`refusedAnswerStanding`).
-      const standing = refusedAnswerStanding(history!, refused, capped.sha, capped.submittedAt);
-      if (standing.answer && state.actions[answeredRereviewKey(item, capped.sha)]?.state !== 'done') answer = capRefusalOf(standing.answer);
-      else return escalate(standing.answer || standing.judged.length ? thrice : again, [refusal, ...standing.judged.map(capRefusalOf)]);
-    } else if (judged) refusal = capRefusalOf(refused!);
+      const standing = refusedAnswerStanding(history, refused, capped.sha, capped.submittedAt);
+      if (standing.answer && state.actions[answeredRereviewKey(item, capped.sha)]?.state !== 'done') return { refusal: first, answer: capRefusalOf(standing.answer) };
+      await escalate(standing.answer || standing.judged.length ? thrice : again, [first, ...standing.judged.map(capRefusalOf)]);
+      return 'escalated' as const;
+    };
+    const standing = refused ? await rereviewed(history!, refused) : null;
+    if (standing === 'escalated') return;
+    if (standing) ({ refusal, answer } = standing);
+    else if (judged) refusal = capRefusalOf(refused!);
     if (judged) {
       const own = !!config.reviewer && capped.reviewer.toLowerCase() === `${config.reviewer.slug}[bot]`.toLowerCase();
       if (!own || capped.reviewId === null)
@@ -310,6 +319,11 @@ export async function reviewCapStep(cycle: Cycle) {
     if (previous && previous.attempts >= maxCappedFilingAttempts) return escalate(`${capped.reason}; withdrawing it failed ${previous.attempts} times (${previous.detail.slice(0, 300)})`);
     if (!readyToRetry(previous, state.cycle)) return;
     if (closing.has(item.key) || await closeStanding(reads, item, cycle.snapshot.work, closing)) return;
+    if (!history) {
+      const due = await decisionHistory(), refused = due ? refusedCappedRework(due, capped, item) : null, standing = refused ? await rereviewed(due!, refused) : null;
+      if (standing === 'escalated') return;
+      if (standing) ({ refusal, answer } = standing);
+    }
     const followUps = refusal ? capFollowUps(item, [refusal, ...answer ? [answer] : []], cycle.snapshot.work) : [];
     const reason = answer && refusal
       ? `Review round ${capped.round} of ${item.key} is past its cap of ${capped.cap}: independent approver ${answer.approver} refused the master's answer (decision ${answer.id}) to the re-review of refused capped rework ${refusal.id} as non-blocking, so ${capped.reviewer}'s change request ${capped.reviewId} on ${capped.sha.slice(0, 12)} is withdrawn once more and the head re-reviewed with both refusals' findings as FOLLOW-UP`

@@ -175,11 +175,13 @@ export class Store {
     try {
       await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
       // A settled delivery is served from the work index (GY-203): its document is never read.
-      // Every other item's document is trimmed in SQL, and only those documents are read.
+      // Every other item's document is trimmed in SQL, and only those documents are read. The trimmed
+      // document is built once per row (`OFFSET 0`): inlined, every `x.document` the trim counts read
+      // built it again, five times a row (GY-1583).
       const settled = (await client.query('SELECT number, summary AS document, trimmed FROM work_index WHERE settled')).rows;
       const live = (await client.query(`SELECT d.number, x.document, ${coordinationTrimSql('x.document', coordinationTail)} AS trimmed
         FROM (SELECT w.number, ${detoasted('w.document')} AS document FROM work_items w WHERE NOT EXISTS (SELECT 1 FROM work_index i WHERE i.id = w.id AND i.settled) OFFSET 0) d
-        CROSS JOIN ${coordinationRelevance(coordinationTail)} CROSS JOIN LATERAL (SELECT ${coordinationDocumentSql} AS document) x`)).rows;
+        CROSS JOIN ${coordinationRelevance(coordinationTail)} CROSS JOIN LATERAL (SELECT ${coordinationDocumentSql} AS document OFFSET 0) x`)).rows;
       const rows = [...settled, ...live].sort((a, b) => Number(a.number) - Number(b.number));
       const meta = (await client.query("SELECT statement_timestamp() AS observed_at, (SELECT COALESCE(jsonb_agg(jsonb_build_object('work_id',work_id,'available_at',available_at,'locked_until',locked_until,'error',error,'held_until',held_until,'deferred_reason',deferred_reason,'unobserved',unobserved)), '[]'::jsonb) FROM jobs) AS jobs")).rows[0];
       await client.query('COMMIT');
