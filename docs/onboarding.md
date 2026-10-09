@@ -80,7 +80,7 @@ Adding workers: worker count `W` and `G` proof groups need `⌈W/2⌉` review an
 
 ### The loop must be supervised
 
-`master init` (coordinator checkout; worker checkouts, temp directories refused) writes `~/.config/systemd/user/graphyard-master-OWNER-NAME.service`, runs `systemctl --user enable --now`, `loginctl enable-linger` (restart on crash, reboot, hang). Move: `master init --token-stdin --replace-supervisor` from new checkout. `master status`: `setup.supervisor`. The loop and `graphyard up` preflight (exit 2, naming paths) refuse a dirty CLI checkout. Research scratch is a managed-repository worktree. `master restart` uses the unit only if its effective ExecStart runs node, `cliPath`, `master run`; else restarts detached, reporting `mismatch`.
+`master init` (coordinator checkout; worker checkouts, temp directories refused) writes `~/.config/systemd/user/graphyard-master-OWNER-NAME.service`, runs `systemctl --user enable --now`, `loginctl enable-linger` (restart on crash, reboot, hang). Move: `master init --token-stdin --replace-supervisor` from new checkout. `master status`: `setup.supervisor`. The loop and `graphyard up` preflight (exit 2, naming paths) refuse a dirty CLI checkout. Research scratch is a managed-repository worktree. `master restart`: see [operating mode](master-agent.md#operate).
 
 Installs share hosts: units named per repository (`graphyard-executor-OWNER-NAME@N.service` too) in `.graphyard/units.json` (legacy `graphyard-master.service` kept as recorded alias); setup never touches another checkout's unit. Each install needs its own `--herdr-workspace`.
 

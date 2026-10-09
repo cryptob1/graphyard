@@ -4,6 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { knownGoodCli } from '../src/master/known-good.js';
 import { restartMasterLoop, supervisingUnit } from '../src/master/loop-restart.js';
 import type { MasterConfig } from '../src/master/profiles.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -46,7 +47,10 @@ const launchedText = async (file: string) => {
 test('unit:loop-restart-execstart — a unit whose effective ExecStart names another CLI or a non-node executable is not restarted; the mismatch is reported and the detached restart taken', async () => {
   const { root, home, launched, cliPath, config, host } = await install();
   try {
+    // The known-good pin (GY-1529) is a distinct CLI path from config.cliPath: a unit running it is passed over too.
+    const pinned = knownGoodCli(join(home, 'install'));
     const cases = [
+      { path: '/usr/bin/node', argv: `/usr/bin/node ${pinned} master run`, reason: new RegExp(`runs the CLI ${pinned}, not this install's ${cliPath};`) },
       { path: '/usr/bin/node', argv: `/usr/bin/node ${join(home, 'other-cli.mjs')} master run`, reason: new RegExp(`runs the CLI ${join(home, 'other-cli.mjs')}, not this install's ${cliPath}`) },
       { path: '/usr/bin/bun', argv: `/usr/bin/bun ${cliPath} master run`, reason: /executable \/usr\/bin\/bun is not node/ },
       { path: '/usr/bin/python3', argv: `/usr/bin/node ${cliPath} master run`, reason: /executable \/usr\/bin\/python3 is not node/ },

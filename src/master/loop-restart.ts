@@ -9,9 +9,6 @@ import type { MasterConfig } from './profiles.js';
 import { agentOwner } from './attention.js';
 import { atomicPrivateText } from './config.js';
 import { defaultChildRun } from '../child-runner.js';
-import { knownGoodCli, knownGoodState } from './known-good.js';
-import { installDirectory } from '../install/secrets.js';
-import { installIdFor } from '../install/types.js';
 
 /** `systemctl --user ARGS`, returning stdout and throwing on a failed command; through the bounded asynchronous runner, since the loop reaches this module (GY-125). */
 export type UserSystemctl = (args: string[], timeoutMs?: number) => Promise<string> | string;
@@ -21,21 +18,15 @@ type LoopLock = { pid: number; host: string; heartbeatAt: string; startedAt?: st
 /** This install's loop unit, as systemd reports it: its name, whether it is up (a restart wait counts) and its main process (0 between restarts). */
 export interface SupervisingUnit { unit: string; mainPid: number }
 export interface RestartOptions { timeoutMs?: number; systemctl?: UserSystemctl; host?: LoopSupervisorHost; platform?: NodeJS.Platform }
-/** This install's loop command, as `master init` writes it into the unit: its CLI launcher and repository (whose known-good pin, GY-1529, the unit may run instead). */
-export type LoopInstall = Pick<MasterConfig, 'cliPath' | 'repository'>;
+/** This install's loop command: its configured CLI launcher, the only CLI a unit restarted through systemd may run (GY-1616). */
+export type LoopInstall = Pick<MasterConfig, 'cliPath'>;
 
 const canonical = (path: string) => { try { return realpathSync(path); } catch { return resolve(path); } };
-/** The CLIs this install's unit may run: the configured launcher, and the known-good pin when one is promoted. */
-function installClis(install: LoopInstall) {
-  const clis = [canonical(install.cliPath)];
-  try { const directory = installDirectory(installIdFor(install.repository)); if (knownGoodState(directory)) clis.push(canonical(knownGoodCli(directory))); } catch { /* no install directory: the launcher alone */ }
-  return clis;
-}
 /**
  * Why the unit's effective ExecStart (drop-ins applied: `{ path=… ; argv[]=NODE CLI master run ; … }`)
- * does not start this install's loop, or null when it does: exactly a Node interpreter running one of
- * this install's CLIs with `master run`. Any other executable or CLI — even one whose arguments end in
- * `master run` — would let a restart report a new MainPID while no coordinator loop runs.
+ * does not start this install's loop, or null when it does: exactly a Node interpreter running this
+ * install's config.cliPath with `master run`. Any other executable or CLI — the known-good pin
+ * included, and even one whose arguments end in `master run` — would let a restart report a new MainPID while no coordinator loop runs.
  */
 function execStartMismatch(execStart: string, install: LoopInstall): string | null {
   const path = /(?:^|[{;\s])path=([^;\s]+)/.exec(execStart)?.[1];
@@ -45,8 +36,7 @@ function execStartMismatch(execStart: string, install: LoopInstall): string | nu
   const node = (file: string) => /^node(js)?(\d[\d.]*)?$/.test(basename(file));
   const foreign = [path, argv[0]].find(file => file && !node(file));
   if (foreign) return `its effective ExecStart executable ${foreign} is not node`;
-  const clis = installClis(install);
-  if (!clis.includes(canonical(argv[1]))) return `its effective ExecStart runs the CLI ${argv[1]}, not this install's ${clis.join(' or ')}`;
+  if (canonical(argv[1]) !== canonical(install.cliPath)) return `its effective ExecStart runs the CLI ${argv[1]}, not this install's ${install.cliPath}`;
   return null;
 }
 const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch (error: any) { return error?.code === 'EPERM'; } };
