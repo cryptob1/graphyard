@@ -390,8 +390,8 @@ export type DoctorPendingFile = z.infer<typeof doctorPendingFileSchema>;
 export const loopReleaseSchema = z.object({ commit: z.string().regex(/^[0-9a-f]{40}$/).nullable(), dirty: z.boolean().nullable() }).strict();
 export type LoopRelease = z.infer<typeof loopReleaseSchema>;
 
-/** The causes an owed self-upgrade restart stalls on (GY-1445). */
-export const upgradeStallCauses = ['executors-refused', 'executors-unavailable', 'supervisor-unreachable', 'checkout-dirty', 'checkout-not-detached', 'fetch-failed', 'checkout-failed'] as const;
+/** The causes an owed self-upgrade restart stalls on (GY-1445); `release-lagged` (GY-1585) is a held restart, not a fault. */
+export const upgradeStallCauses = ['executors-refused', 'executors-unavailable', 'supervisor-unreachable', 'checkout-dirty', 'checkout-not-detached', 'fetch-failed', 'checkout-failed', 'release-lagged'] as const;
 export type UpgradeStallCause = typeof upgradeStallCauses[number];
 export const upgradeStallSchema = z.object({ cause: z.enum(upgradeStallCauses), reason: z.string().max(500), since: z.string(), at: z.string() }).strict();
 export type UpgradeStall = z.infer<typeof upgradeStallSchema>;

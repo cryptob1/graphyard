@@ -10,7 +10,10 @@
 // executors load, it restarts the fleet through `master executors restart` and then re-executes
 // itself through the supervisor unit it runs under. A checkout that is dirty or not detached is
 // never touched: the refusal is on the cursor, and `master status` names it until it clears.
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
+import { mkdir, readdir, rename, rm, writeFile } from 'node:fs/promises';
+import { dirname, isAbsolute, join, relative, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { ChildRun } from '../child-runner.js';
 import { shortCommit, type ExecutorRestartResult } from '../executor-fleet.js';
 import type { MasterConfig } from '../master.js';
@@ -36,6 +39,43 @@ export const fleetWaitMs = 15 * 60_000;
 const sameCommit = (a: string | null | undefined, b: string | null | undefined) => !!a && !!b && (a.startsWith(b) || b.startsWith(a));
 export function upgradeTouchesCode(paths: readonly string[]): boolean {
   return paths.some(path => loadedFiles.includes(path) || loadedPrefixes.some(prefix => path.startsWith(prefix)));
+}
+
+/** Where the launcher reads the release a held restart pins the CLI to (GY-1585): `{ commit, root, loop }`. */
+export const heldCliPointer = (root: string) => join(root, '.graphyard', 'held-cli.json');
+const heldCliSnapshots = (root: string) => join(root, '.graphyard', 'held-cli');
+/**
+ * Pins the CLI the checkout's launcher runs to `commit` while a restart is held (GY-1585), or lifts
+ * the pin (null). The checkout already holds the merged tip, but every process `bin/graphyard.mjs`
+ * starts — watch, claim, heartbeat, the credential push the loop and the executors spawn — must
+ * speak the protocol of the release production serves: a shared clone of that release is checked
+ * out under `.graphyard/held-cli/`, and the pointer naming it is written by rename, so a launcher
+ * reads the old pin or the new one. Snapshots other than the new pin and the one it replaces (a
+ * process started under it may still be loading modules) are removed. The executor entry reads the
+ * same pointer, so a supervised executor loads the snapshot and takes its commit for the checkout's.
+ */
+export async function holdCliAt(root: string, run: ChildRun, commit: string | null): Promise<void> {
+  const pointer = heldCliPointer(root);
+  if (!commit) { await rm(pointer, { force: true }); return; }
+  let current: { commit?: unknown; root?: unknown } | null = null;
+  try { current = JSON.parse(readFileSync(pointer, 'utf8')); } catch { /* no pin yet */ }
+  const snapshots = heldCliSnapshots(root), target = join(snapshots, commit.slice(0, 12));
+  if (current?.commit === commit && current.root === target && existsSync(join(target, 'src', 'cli.ts'))) return;
+  await rm(target, { recursive: true, force: true });
+  await run('git', ['clone', '-q', '--shared', '--no-checkout', root, target]);
+  await run('git', ['-C', target, 'checkout', '-q', '--detach', commit]);
+  // `loop`: whether a loop restarted onto the snapshot reads the hold's cursor and keeps holding — a
+  // release from before GY-1585 would refuse its `release-lagged` stall, so the launcher keeps such a
+  // restarted loop on the checkout's code instead.
+  let loop = false;
+  try { loop = readFileSync(join(target, 'src', 'daemon', 'state.ts'), 'utf8').includes("'release-lagged'"); } catch { /* no state module: not a loop that holds */ }
+  await mkdir(dirname(pointer), { recursive: true });
+  await writeFile(`${pointer}.tmp`, `${JSON.stringify({ commit, root: target, loop })}\n`);
+  await rename(`${pointer}.tmp`, pointer);
+  for (const entry of await readdir(snapshots)) {
+    const path = join(snapshots, entry);
+    if (path !== target && path !== current?.root) await rm(path, { recursive: true, force: true });
+  }
 }
 
 /** The supervisor unit the loop itself runs under, when systemd supervises it: read from the process's own cgroup, like an executor's. */
@@ -153,6 +193,10 @@ export interface SelfUpgradeDeps {
    * (`alignLoopUnit`), before the loop re-executes itself through it (GY-916).
    */
   alignUnit?: () => Promise<{ wrote: string; reason: string | null }>;
+  /** Pins the CLI the checkout's launcher runs to the served release while a restart is held, null lifts it (GY-1585); `holdCliAt` on `root` by default. */
+  holdCli?: (commit: string | null) => Promise<void>;
+  /** The file this module was loaded from: under a held snapshot when the launcher pinned `master run` (GY-1585). */
+  loadedFrom?: string;
   now?: () => number;
   persist?: (state: DaemonState) => Promise<void>;
 }
@@ -176,13 +220,26 @@ export interface SelfUpgradeDeps {
  * the next cycle to finish; the loop's own re-execution is last, and everything the next process
  * needs to know is on the cursor before it goes. A refusal that has stood `fleetWaitMs` no longer
  * holds the loop (GY-1473): it re-executes onto the checkout alone, and the executor restart stays
- * owed for the process that starts. Nothing here throws: every failure is a recorded action.
+ * owed for the process that starts. A loaded-code move production is observed not serving yet is
+ * held (GY-1585): the checkout moves, but the executors and the loop restart onto it only once the
+ * served release contains it, under the `release-lagged` stall. Nothing here throws: every failure
+ * is a recorded action.
  */
 export async function performSelfUpgrade(config: MasterConfig, state: DaemonState, deps: SelfUpgradeDeps): Promise<SelfUpgradeOutcome> {
   const now = deps.now ?? Date.now, at = () => new Date(now()).toISOString();
   const git = (...args: string[]) => deps.run('git', ['-C', deps.root, ...args]);
   const persist = async () => { if (deps.persist) await deps.persist(state); };
-  const key = `upgrade:${state.deployment?.sha ?? 'none'}`;
+  const key = `upgrade:${state.deployment?.sha ?? 'none'}`, heldKey = 'upgrade:held';
+  const holdCli = deps.holdCli ?? (commit => holdCliAt(deps.root, deps.run, commit));
+  // GY-1585: a loop its supervisor restarts while a restart is held runs the held snapshot of the
+  // served release, as every command the launcher starts does, but it read its release from the
+  // checkout, which holds the move. It is recorded as running the snapshot's commit, so the pass
+  // that lifts the hold still re-executes it onto the checkout.
+  const snapshot = relative(heldCliSnapshots(deps.root), deps.loadedFrom ?? fileURLToPath(import.meta.url)).split(sep)[0];
+  if (snapshot && snapshot !== '..' && !isAbsolute(snapshot)) {
+    const commit = await Promise.resolve(deps.run('git', ['-C', join(heldCliSnapshots(deps.root), snapshot), 'rev-parse', 'HEAD'])).then(out => out.trim(), () => '');
+    if (commit && state.release?.commit !== commit) state.release = { commit, dirty: false };
+  }
   const note = async (detail: string, failure: boolean, actionKey = key) => {
     storeAction(state, actionKey, { kind: 'config', work: null, principal: null, state: failure ? 'failed' : 'done', detail, attempts: (state.actions[actionKey]?.attempts ?? 0) + 1, epoch: null, cycle: state.cycle, at: at() });
     await persist();
@@ -232,17 +289,71 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
       }
     }
   };
-  /** Completes the restarts one alignment owes, with the checkout already at the tip. */
-  const finish = async (pending: { from: string | null; to: string; code: boolean }): Promise<SelfUpgradeOutcome> => {
+  /**
+   * The release production is observed serving, when it does not contain `commit` yet (GY-1585):
+   * null while production is unobserved (GY-1445/GY-1464: an unobservable plane never pins the loop
+   * on stale code), when the served release is the commit or descends from it, and when git cannot
+   * place the two — only a definite "not an ancestor" (exit status 1) holds a restart.
+   */
+  const lagging = async (commit: string): Promise<string | null> => {
+    if (!observed) return null;
+    const served = observation!.sha!;
+    if (sameCommit(served, commit)) return null;
+    try { await git('merge-base', '--is-ancestor', commit, served); return null; }
+    catch (error: any) { return error?.status === 1 ? served : null; }
+  };
+  /**
+   * Completes the restarts one alignment owes, with the checkout already at the tip. A held restart
+   * (GY-1585) the served release has since moved past aligns no release: the pass after it aligns
+   * the checkout with what production serves now, so the loop does not stay on the held commit
+   * until a later promotion.
+   */
+  /** One pin per pass, whichever step places it first: the move pins before its checkout, the hold after. */
+  let pinning: { commit: string; result: Promise<string> } | null = null;
+  const pin = (commit: string) => {
+    if (pinning?.commit !== commit) pinning = { commit, result: holdCli(commit).then(() => '', error => `; the CLI it spawns could not be pinned to ${shortCommit(commit)}: ${message(error)}`) };
+    return pinning.result;
+  };
+  const finish = async (pending: { from: string | null; to: string; code: boolean }, held = false): Promise<SelfUpgradeOutcome> => {
+    const aligned = held && !sameCommit(release, pending.to) ? state.upgrade.alignedRelease : release ?? state.upgrade.alignedRelease;
     if (!pending.code) {
       state.upgrade.pending = null;
       state.upgrade.last = { at: at(), from: pending.from, to: pending.to, code: false, executors: null, self: false };
-      state.upgrade.alignedRelease = release ?? state.upgrade.alignedRelease;
+      state.upgrade.alignedRelease = aligned;
       state.upgrade.refused = null;
       unstall();
       await persist();
       return { outcome: 'upgraded', from: pending.from, to: pending.to, code: false, executors: null, self: false };
     }
+    // GY-1585: loaded code restarted before the plane serves it speaks a protocol the serving
+    // registry's strict schemas still refuse (400 Invalid input on every launch). While production
+    // is observed serving a release that does not contain the move, the restart is held, owed on
+    // the cursor under a named stall, and the first pass whose observation serves it completes it.
+    // The hold is one `upgrade:held` row whichever release it was observed under, its attempts grown
+    // only when what it names changes, its time the latest held pass (the owed restart's attempt clock
+    // master status reads), and settled by the pass that lifts it: a standing hold grows nothing, and
+    // no waiting row outlives the hold it describes.
+    // The CLI processes the loop and the executors spawn run from the checkout, which already holds
+    // the move: they are pinned to the served release for as long as the hold stands.
+    const lag = await lagging(pending.to);
+    if (lag) {
+      const pinned = await pin(lag);
+      const reason = `restart held: production serves release ${shortCommit(lag)}, which does not contain ${shortCommit(pending.to)} yet; the executors and the loop restart onto ${shortCommit(pending.to)} on the first pass whose deployment observation serves it${pinned}`;
+      state.upgrade.pending = { from: pending.from, to: pending.to, code: true };
+      stall('release-lagged', reason);
+      const standing = state.actions[heldKey];
+      if (standing?.state !== 'waiting' || detailChanged(standing, reason))
+        storeAction(state, heldKey, { kind: 'config', work: null, principal: null, state: 'waiting', detail: reason, attempts: (standing?.attempts ?? 0) + 1, epoch: null, cycle: state.cycle, at: at() });
+      else standing.at = at();
+      await persist();
+      return { outcome: 'pending', reason, to: pending.to };
+    }
+    if (state.actions[heldKey]?.state === 'waiting') {
+      const lifted = observed ? `production serves release ${shortCommit(observation!.sha!)}, which contains ${shortCommit(pending.to)}` : 'production is no longer observed, and an unobserved plane never holds the loop on stale code';
+      storeAction(state, heldKey, { kind: 'config', work: null, principal: null, state: 'done', detail: `The restart onto ${shortCommit(pending.to)} is no longer held: ${lifted}`, attempts: state.actions[heldKey]!.attempts, epoch: null, cycle: state.cycle, at: at() });
+      await persist();
+    }
+    await holdCli(null).catch(() => {});
     if (!deps.restartExecutors) return failed('loaded code moved but this loop cannot restart the executors', 'executors-unavailable');
     const executors = await deps.restartExecutors(pending.to).catch(error => ({ result: 'refused' as const, reason: message(error), coordinator: { commit: pending.to }, held: [], restarted: [], unsupervised: [], forgotten: [] }));
     if (executors.result === 'refused') {
@@ -283,7 +394,7 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
     // a re-execution that fails restores it with its first attempt kept.
     const prior = state.upgrade.stalled;
     state.upgrade.pending = null;
-    state.upgrade.alignedRelease = release ?? state.upgrade.alignedRelease;
+    state.upgrade.alignedRelease = aligned;
     state.upgrade.refused = null;
     unstall();
     await persist();
@@ -343,6 +454,14 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
     }
   }
 
+  // A restart held for the release (GY-1585) completes on the first pass whose observation serves
+  // the commit the checkout holds — or on which production is unobserved — before a newer tip is fetched: moving on to a tip the promotion
+  // has not served yet would hold it again, and a busy base branch would hold the loop forever.
+  // While the release still lags, the pass holds the same target without fetching: advancing it to
+  // every newer tip would keep it ahead of each promotion, and the loop would never restart.
+  const held = state.upgrade.pending;
+  if (held?.code && state.upgrade.stalled?.cause === 'release-lagged' && (await checkoutState(deps.root, deps.run)).commit === held.to) return finish(held, true);
+
   // 2. The base tip, from a fresh fetch.
   let to: string;
   try {
@@ -399,6 +518,10 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
     code = owed || upgradeTouchesCode(changed);
   } catch (error) { return unaligned(`the diff from ${shortCommit(base)} to ${shortCommit(to)} could not be read: ${message(error)}`, 'checkout-failed'); }
   await note(`Checking out base tip ${shortCommit(to)} (from ${shortCommit(from)}): ${changed.length} path(s) changed${code ? ', loaded code among them' : ', none of them loaded code'}`, false);
+  //    A loaded-code move production does not serve yet is pinned before the checkout moves (GY-1585):
+  //    an executor rereads the commit it runs before every claim, and one that saw the moved checkout
+  //    unpinned would stand down and its supervisor would start it on code the plane refuses.
+  if (code) { const lag = await lagging(to); if (lag) await pin(lag); }
   try { await git('checkout', '--detach', '--quiet', to); }
   catch (error) { return unaligned(`checking out ${shortCommit(to)} failed: ${message(error)}`, 'checkout-failed'); }
   state.upgrade.pending = { from, to, code };
