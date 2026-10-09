@@ -233,10 +233,9 @@ test('unit:tmp-reclaim-per-root — each scanned root is measured on its own vol
   await settleTmpReclaim();
   await reclaimResources(root, { reviewers: [], producers: [] }, { work: [], agents: [] }, options);
   await settleTmpReclaim();
-  const devices: Record<string, number> = { [healthy]: 1, [low]: 2 };
   const readTmpRoots = (resources as { readTmpRoots?: (...args: unknown[]) => Promise<unknown[]> }).readTmpRoots;
   assert.equal(typeof readTmpRoots, 'function', 'the reading reads every scanned root');
-  const tmp = await readTmpRoots!(root, [healthy, low], volume, undefined, async (path: string) => devices[path]!) as NonNullable<Awaited<ReturnType<typeof readTmpInodes>>>[];
+  const tmp = await readTmpRoots!(root, [healthy, low], volume) as NonNullable<Awaited<ReturnType<typeof readTmpInodes>>>[];
   assert.deepEqual(tmp.map(entry => ({ path: entry.path, free: entry.freeInodes })), [{ path: healthy, free: 3_000 }, { path: low, free: 100 }]);
   const input: ResourceInputs = { now: Date.now(), reviews: [], producers: [], agents: [], work: [], plane: null, loop: null, revision: null, disk: null, tmp, profiles: { workers: [], reviewers: [], producers: [] } };
   const readings = readResources(input).filter(entry => entry.resource === 'tmp-inodes');
@@ -248,9 +247,27 @@ test('unit:tmp-reclaim-per-root — each scanned root is measured on its own vol
   assert.match(attention[0]!.text, new RegExp(`the top /tmp consumers are ${leaker} \\(31 entries, owner ${userInfo().username}\\)`), 'and its top consumers by path, entry count and owner');
   assert.doesNotMatch(attention[0]!.text, new RegExp(quiet), 'never the healthy root\'s entries');
 
-  // Two roots on one filesystem are read once.
-  const shared = await readTmpRoots!(root, [healthy, low], volume, undefined, async () => 7) as unknown[];
-  assert.equal(shared.length, 1, 'one filesystem, one reading');
+  // A pass that removed entries yet left the root below the bound, even above a tenth free, answers nothing there.
+  const removedStillLow: ResourceInputs = { ...input, tmp: tmp.map(entry => ({ ...entry, freeInodes: entry.path === low ? 800 : entry.freeInodes, latest: { ...entry.latest!, removed: 3 } })) };
+  const stillLow = resourceAttention(readResources(removedStillLow).filter(entry => entry.resource === 'tmp-inodes'));
+  assert.deepEqual(stillLow.map(line => line.subject), [`resource:tmp-inodes:${low}`], 'a removing pass that left the root at 20% free still raises its attention');
+  assert.match(stillLow[0]!.text, new RegExp(`the top /tmp consumers are ${leaker}`));
+
+  // Distinct roots on one filesystem are each read, each with its own census: the low reading of the
+  // shared volume names the second root and its consumers, not only the first root's.
+  const sharedVolume = async () => ({ files: 4000, ffree: 100 });
+  const sharedOptions = { tmpRoots: [healthy, low], tmpPass: (pass: Parameters<typeof reclaimTmpDirectories>[0]) => reclaimTmpDirectories({ ...pass, held: new Set(), volume: sharedVolume }) };
+  await reclaimResources(root, { reviewers: [], producers: [] }, { work: [], agents: [] }, sharedOptions);
+  await settleTmpReclaim();
+  await reclaimResources(root, { reviewers: [], producers: [] }, { work: [], agents: [] }, sharedOptions);
+  await settleTmpReclaim();
+  const shared = await readTmpRoots!(root, [healthy, low, `${low}/.`], sharedVolume) as NonNullable<Awaited<ReturnType<typeof readTmpInodes>>>[];
+  assert.deepEqual(shared.map(entry => entry.path), [healthy, low], 'one reading per distinct root; an alias of a root is read once');
+  const sharedLines = resourceAttention(readResources({ ...input, tmp: shared }).filter(entry => entry.resource === 'tmp-inodes'));
+  assert.deepEqual(sharedLines.map(line => line.subject), ['resource:tmp-inodes', `resource:tmp-inodes:${low}`]);
+  assert.match(sharedLines[1]!.text, new RegExp(`the top /tmp consumers are ${leaker} \\(31 entries`), 'the second root names its own consumers');
+  assert.match(sharedLines[0]!.text, new RegExp(`the top /tmp consumers are ${quiet}`), 'and the first root its own');
+  assert.doesNotMatch(sharedLines[0]!.text, new RegExp(leaker));
 });
 
 test('unit:tmp-reclaim-per-root — the census charges every top-level entry to its budget: a root of more top-level entries than the budget stops there and reports itself partial', async () => {

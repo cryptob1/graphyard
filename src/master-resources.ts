@@ -126,6 +126,8 @@ export interface TmpInodes {
    * stopped at its budget (GY-1602): another root's consumers never stand in for this one's.
    */
   consumers?: TmpConsumer[]; censusPartial?: boolean;
+  /** Whether the latest pass measured this directory still below its headroom at its end (GY-1602). */
+  belowAfterPass?: boolean;
 }
 
 export interface ResourceDefinition {
@@ -463,9 +465,9 @@ export const resourceRegistry: ResourceDefinition[] = [
     // The quarter-free line is an early warning on a filesystem-wide count every process on the host
     // fills (GY-1379): while the loop's latest pass is current and scanned the measured directory, it
     // has taken back all it may, so a reading above a tenth free is reported and raises nothing — unless
-    // that pass removed 0 and named the consumers it could not reach (GY-1597).
-    // One row per filesystem the pass scans (GY-1602): a low /tmp raises its own attention, naming
-    // its own consumers, whatever the volume under the loop's TMPDIR reads.
+    // that pass itself left the directory below the headroom, whatever it removed (GY-1597, GY-1602).
+    // One row per root the pass scans (GY-1602): a low /tmp raises its own attention, naming its own
+    // consumers, whatever the loop's TMPDIR reads, even when both sit on one filesystem.
     read: input => {
       const roots = !input.tmp ? [] : Array.isArray(input.tmp) ? input.tmp as readonly TmpInodes[] : [input.tmp as TmpInodes];
       if (!roots.length) return [{ id: '', used: null, bound: null, detail: 'the host temporary directory\'s inodes could not be read', reclaimable: 0 }];
@@ -483,13 +485,13 @@ export const tmpPassCurrentMs = 30 * 60_000;
 /**
  * Whether the loop's own /tmp pass answers a low tmp-inodes reading (GY-1379): it finished within
  * `tmpPassCurrentMs`, scanned the measured directory, and the volume is still above a tenth free.
- * A pass that escalated, removed 0 entries and still left the bound standing, so named the top
- * consumers, answers nothing (GY-1597): what fills /tmp is outside its reach, and the attention
- * must carry the consumers it named until someone stops the leaker.
+ * A pass that left this directory below its headroom at its end, so named its top consumers,
+ * answers nothing, whatever it removed (GY-1597, GY-1602): what still fills it is outside the
+ * pass's reach, and the attention must carry the consumers it named until someone stops the leaker.
  */
 export function tmpPassAnswers(tmp: TmpInodes, now: number) {
   const at = tmp.latest ? Date.parse(tmp.latest.at) : Number.NaN;
-  if (tmp.latest && tmp.latest.removed === 0 && consumersOf(tmp).length) return false;
+  if (tmp.belowAfterPass || consumersOf(tmp).length) return false;
   return Number.isFinite(at) && now - at < tmpPassCurrentMs && tmp.measuredScanned === true && tmp.freeInodes >= tenthOf(tmp.totalInodes);
 }
 const entries = (count: number) => `${count} entr${count === 1 ? 'y' : 'ies'}`;
@@ -768,21 +770,22 @@ export async function readTmpInodes(root: string, path?: string, volume: TmpVolu
     let pressure: TmpRootPressure | undefined;
     for (const entry of latest?.pressure ?? []) if (!pressure && await real(entry.root) === measured) pressure = entry;
     // A pass that measured its roots but not this one named nothing here.
-    const census = pressure ? { consumers: pressure.consumers ?? [], ...(pressure.partial ? { censusPartial: true } : {}) } : latest?.pressure ? { consumers: [] } : {};
+    const census = pressure ? { consumers: pressure.consumers ?? [], ...(pressure.partial ? { censusPartial: true } : {}), ...(pressure.below ? { belowAfterPass: true } : {}) } : latest?.pressure ? { consumers: [] } : {};
     return { path, totalInodes, freeInodes, removed: last ? last.tmp.removed : null, removedAt: last?.at ?? null, latest, measuredScanned, own, ...census };
   } catch { return null; }
 }
 /**
  * `readTmpInodes` for each directory the loop's pass scans (GY-1602): its own tmpdir and /tmp, by
- * default, each measured on its own filesystem. Directories that resolve to one path, or sit on
- * one filesystem, are read once, the first named standing for both; an unreadable one is left out.
+ * default, each measured on its own filesystem. Directories that resolve to one path are read once;
+ * distinct directories on one filesystem are each read, since each carries its own census, and an
+ * unreadable one is left out.
  */
-export async function readTmpRoots(root: string, paths: readonly string[] = hostTmpRoots(), volume: TmpVolume = statfs, uid = process.getuid?.(), device = async (path: string) => (await stat(path)).dev): Promise<TmpInodes[]> {
+export async function readTmpRoots(root: string, paths: readonly string[] = hostTmpRoots(), volume: TmpVolume = statfs, uid = process.getuid?.()): Promise<TmpInodes[]> {
   const seen = new Set<string>(), readings: TmpInodes[] = [];
   for (const path of paths) {
-    const real = await realpath(path).catch(() => path), dev = await device(path).then(id => `dev:${id}`, () => null);
-    if (seen.has(real) || (dev && seen.has(dev))) continue;
-    seen.add(real); if (dev) seen.add(dev);
+    const real = await realpath(path).catch(() => path);
+    if (seen.has(real)) continue;
+    seen.add(real);
     const reading = await readTmpInodes(root, path, volume, uid);
     if (reading) readings.push(reading);
   }
