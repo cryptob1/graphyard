@@ -426,6 +426,25 @@ test('unit:soak-invariants-hold — a worker spent on Claude\'s usage-limit menu
   }
   assert.ok(limitMenuDay.remoteReads.filter(read => read.elapsed < holdStart).every(read => read.ineligible['remote-twin'] === null), 'before the hold the remote twin was eligible');
   assert.ok(remoteAfter.length > 0 && remoteAfter.every(read => read.ineligible['remote-twin'] === null && read.ineligible['remote-other'] === null), 'both return at the reset');
+  // GY-1581: this host's ordinary probe of its own accounts is folded into the registry every cycle after the report, and
+  // never lifts it: the spent account and its shared-login twin stay held until the named reset, then both return.
+  const localBetween = limitMenuDay.localReads.filter(read => read.elapsed > holdStart && read.elapsed < releaseAt), localAfter = limitMenuDay.localReads.filter(read => read.elapsed >= releaseAt);
+  assert.ok(localBetween.length >= 60, `the local accounts were probed and judged across many cycles: ${localBetween.length}`);
+  for (const read of localBetween) {
+    assert.ok(read.ineligible[`account-${spentProfile}`]?.startsWith(`account-${spentProfile} quota is exhausted until ${resetsAt}`), `at ${read.elapsed}: ${read.ineligible[`account-${spentProfile}`]}`);
+    assert.ok(read.ineligible[`account-${twin}`]?.startsWith(`account-${twin} quota is exhausted until ${resetsAt}: it is the same provider login as account-${spentProfile}`), `at ${read.elapsed}: ${read.ineligible[`account-${twin}`]}`);
+    assert.equal(read.ineligible['account-three'], null, 'the other subscription stays eligible');
+  }
+  assert.ok(localAfter.length > 0 && localAfter.every(read => Object.values(read.ineligible).every(reason => reason === null)), `the spent account and its twin return at the reset: ${JSON.stringify(localAfter[0])}`);
+  // GY-1581: a guessed session hold, resent by its host on every selection after the sibling's probe and so always the plan's newest
+  // observation, holds only its own account: the healthy sibling on a third host stays eligible every cycle of the guessed hour.
+  const guessedBetween = limitMenuDay.guessedReads.filter(read => read.elapsed >= hour && read.elapsed < 2 * hour);
+  assert.ok(guessedBetween.length >= 30, `the guessed hold was resent across many cycles: ${guessedBetween.length}`);
+  for (const read of guessedBetween) {
+    assert.ok(read.ineligible['guessed-spent']?.startsWith(`guessed-spent quota is exhausted until ${read.until}`), `at ${read.elapsed}: ${read.ineligible['guessed-spent']}`);
+    assert.equal(read.ineligible['guessed-sibling'], null, `the sibling on the plan stays eligible at ${read.elapsed}`);
+  }
+  assert.ok(limitMenuDay.guessedReads.filter(read => read.elapsed >= 2 * hour).every(read => read.ineligible['guessed-spent'] === null && read.ineligible['guessed-sibling'] === null), 'both are free once the guessed hour ends');
 });
 
 test('unit:soak-invariants-hold — containment quarantines of dead workers stand across many cycles while the timed clock read fails and then answers slowly, one read a cycle and none without an assessable quarantine, each escalation recorded once, and they settle once reads are fast, with every invariant holding', { timeout: 600_000 }, async () => {

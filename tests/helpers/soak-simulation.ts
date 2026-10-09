@@ -15,7 +15,7 @@ import { DispatchReservedError, type HerdrAgent, type MasterConfig, type WorkerP
 import { withSupervision } from '../../src/master/profiles.js';
 import { readAccountStartFailures, workerLaunchStatus, worktreeFailure } from '../../src/master/dispatch.js';
 import { readControlPlaneClock } from '../../src/master/containment.js';
-import { inspectProfileAccounts, providerIdentity, recordObservedExhaustion } from '../../src/master/environments.js';
+import { type ObservedExhaustion, heldObservation, inspectProfileAccounts, providerIdentity, recordObservedExhaustion } from '../../src/master/environments.js';
 import { accountIneligibility, applyRegistryMutation, emptyRegistry, foldObservations, proposedRuntimes, type QuotaObservation } from '../../src/model/registry.js';
 import { timedCall } from '../../src/master/timings.js';
 import { containmentSettlementRefusals, containmentVerificationSchema, loopEndedAttempt } from '../../src/quarantine.js';
@@ -656,7 +656,11 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     /** GY-1573: every account read the loop made on the twin-login day, with each account it found unavailable and why. */
     twinReads: [] as { elapsed: number; unavailable: Record<string, string> }[],
     /** The hold reports the loop sent the agent registry, and what the registry judged of the accounts placed on another host at each read. */
-    observed: [] as { elapsed: number; accounts: string[]; changed: boolean }[], remoteReads: [] as { elapsed: number; ineligible: Record<string, string | null> }[] };
+    observed: [] as { elapsed: number; accounts: string[]; changed: boolean }[], remoteReads: [] as { elapsed: number; ineligible: Record<string, string | null> }[],
+    /** GY-1581: what the registry judged of this host's own accounts each cycle, after folding this host's ordinary probe of them. */
+    localReads: [] as { elapsed: number; ineligible: Record<string, string | null> }[],
+    /** GY-1581: on an explicitly shared plan, a guessed session hold its host resends on every selection, and what the registry judged of it and its sibling on a third host. */
+    guessedReads: [] as { elapsed: number; until: string; ineligible: Record<string, string | null> }[] };
   // GY-973: what each pane's screen tail shows, where it is not a session at work, and the
   // accounts the loop held. OpenCode 1.18 on a spent account prints its limit banner with a retry
   // marker and retries for ever, so Herdr keeps the session `working` and only the screen tells.
@@ -691,13 +695,19 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     // The control plane's agent registry, in memory and judged by the real model: the local accounts, and
     // two placed on another host whose logins this host cannot read: `remote-twin` on the spent
     // subscription, `remote-other` on the healthy one. The other host reports their identities each cycle.
-    const remoteHost = 'soak-remote-host', at = new Date(dayStart).toISOString();
+    const remoteHost = 'soak-remote-host', thirdHost = 'soak-third-host', at = new Date(dayStart).toISOString();
+    // GY-1581: the guessed hold stands one hour from an hour into the day; its host resends it over its own read on every selection.
+    const guessedHold: ObservedExhaustion = { at: new Date(dayStart + hour).toISOString(), until: new Date(dayStart + 2 * hour).toISOString(), resetsAt: null, reason: 'Claude usage limit reached', role: 'worker', profile: 'worker', work: 'GY-0' };
     const identity = { 'subscription-1': await providerIdentity('claude', environments[0].home), 'subscription-2': await providerIdentity('claude', environments[2].home) };
     const remote = [{ name: 'remote-twin', identity: identity['subscription-1'] }, { name: 'remote-other', identity: identity['subscription-2'] }];
     const registry = applyRegistryMutation(emptyRegistry(), 'apply', {
       runtimes: [proposedRuntimes.find(runtime => runtime.name === 'claude')!], models: [{ name: 'opus', id: 'claude-opus-5' }],
       accounts: [...environments.map(environment => ({ name: environment.name, runtime: 'claude', model: 'opus', credential: { host: soakConfig.hostId, home: environment.home } })),
-        ...remote.map(account => ({ name: account.name, runtime: 'claude', model: 'opus', credential: { host: remoteHost, home: `/home/remote/${account.name}` } }))],
+        ...remote.map(account => ({ name: account.name, runtime: 'claude', model: 'opus', credential: { host: remoteHost, home: `/home/remote/${account.name}` } })),
+        // GY-1581: two more on one explicitly shared plan: `guessed-spent` on the other host, whose session ran out naming no reset,
+        // and `guessed-sibling`, healthy, on a third host.
+        { name: 'guessed-spent', runtime: 'claude', model: 'opus', plan: 'soak-team', credential: { host: remoteHost, home: '/home/remote/guessed-spent' } },
+        { name: 'guessed-sibling', runtime: 'claude', model: 'opus', plan: 'soak-team', credential: { host: thirdHost, home: '/home/third/guessed-sibling' } }],
       roles: [{ name: 'worker', accounts: [...environments.map(environment => environment.name), ...remote.map(account => account.name)], concurrency: 4 }], reason: 'soak fixture',
     }, { actor: 'operator', at }).registry;
     const probed = (identity: string | null | undefined): QuotaObservation => ({ loggedIn: true, state: 'unknown', usage: [], resetsAt: null, reason: null, identity });
@@ -707,11 +717,23 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
       limitMenuDay.observed.push({ elapsed: clock.now() - dayStart, accounts: request.observations.map(entry => entry.account), changed });
       return { changed };
     } };
+    // GY-1581: this host's executor probes its own accounts every cycle too, an ordinary probe reading quota unknown on a
+    // spent Claude login; folded after the session's report, it must not lift that report before its reset.
+    const localIdentities = await Promise.all(environments.map(async environment => ({ account: environment.name, identity: await providerIdentity('claude', environment.home) })));
     // What the other host sees of its own accounts, folded as its selection would fold it, and what the registry then judges of them for that host.
     const readRemote = () => {
       const now = clock.now();
+      foldObservations(registry, { host: soakConfig.hostId, observations: localIdentities.map(entry => ({ account: entry.account, quota: probed(entry.identity) })) }, { actor: 'executor', at: new Date(now).toISOString() });
+      limitMenuDay.localReads.push({ elapsed: now - dayStart, ineligible: Object.fromEntries(environments.map(environment => [environment.name, accountIneligibility(registry, registry.accounts.find(entry => entry.name === environment.name)!, now, soakConfig.hostId)])) });
       foldObservations(registry, { host: remoteHost, observations: remote.map(account => ({ account: account.name, quota: probed(account.identity) })) }, { actor: 'remote-executor', at: new Date(now).toISOString() });
       limitMenuDay.remoteReads.push({ elapsed: now - dayStart, ineligible: Object.fromEntries(remote.map(account => [account.name, accountIneligibility(registry, registry.accounts.find(entry => entry.name === account.name)!, now, remoteHost)])) });
+      // The sibling's host probes it available; then the spent account's host selects, resending its guessed hold while it stands: the plan's newest observation.
+      const team = 'claude:' + 'e'.repeat(32), read = { ...probed(team), state: 'available' as const };
+      foldObservations(registry, { host: thirdHost, observations: [{ account: 'guessed-sibling', quota: read }] }, { actor: 'third-executor', at: new Date(now - 1_000).toISOString() });
+      const holding = now >= Date.parse(guessedHold.at) && now < Date.parse(guessedHold.until);
+      foldObservations(registry, { host: remoteHost, observations: [{ account: 'guessed-spent', quota: holding ? heldObservation('guessed-spent', guessedHold, read) : read }] }, { actor: 'remote-executor', at: new Date(now).toISOString() });
+      limitMenuDay.guessedReads.push({ elapsed: now - dayStart, until: guessedHold.until, ineligible: { 'guessed-spent': accountIneligibility(registry, registry.accounts.find(entry => entry.name === 'guessed-spent')!, now, remoteHost),
+        'guessed-sibling': accountIneligibility(registry, registry.accounts.find(entry => entry.name === 'guessed-sibling')!, now, thirdHost) } });
     };
     return { config: { environments, credentialFile: join(root, 'master.token'), run: soakConfig.run, hostId: soakConfig.hostId } as unknown as Pick<MasterConfig, 'environments' | 'credentialFile' | 'run' | 'hostId'>, client, readRemote };
   })() : null;

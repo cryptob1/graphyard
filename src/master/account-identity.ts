@@ -30,10 +30,10 @@ export const describeObservedExhaustion = (environment: string, held: ObservedEx
 /**
  * What this host reports of an account a session saw spent: exhausted until the hold ends. Only a
  * reset the session named is the subscription's (GY-1573); the hour assumed when it named none is
- * this host's guess, so that report names no login and holds no other account.
+ * this host's guess, so that report names no login and holds no other account (GY-1581: nor its plan).
  */
 export const heldObservation = (environment: string, held: ObservedExhaustion, read: QuotaObservation = { loggedIn: true, state: 'unknown', usage: [], resetsAt: null, reason: null }): QuotaObservation =>
-  ({ ...read, state: 'exhausted', resetsAt: held.until, reason: describeObservedExhaustion(environment, held).slice(0, 500), identity: !held.resetsAt ? null : held.identity !== undefined ? held.identity : read.identity });
+  ({ ...read, state: 'exhausted', session: held.resetsAt ? 'named' : 'guessed', resetsAt: held.until, reason: describeObservedExhaustion(environment, held).slice(0, 500), identity: !held.resetsAt ? null : held.identity !== undefined ? held.identity : read.identity });
 /**
  * A hold as the agent registry is told of it, with the login it was spent on (GY-1573). A hold saved
  * before identities were recorded is given one, kept on the hold once reported so a source home logged

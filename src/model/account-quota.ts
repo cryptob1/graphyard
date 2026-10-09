@@ -6,7 +6,8 @@ import type { AgentRegistry, FleetAccount, QuotaObservation } from './registry.j
  * Fold an executor's probe into what the registry knows. An operator's exhausted mark stands until
  * its reset passes or an operator clears it, whatever a probe reads meanwhile: the mark exists for
  * what a probe cannot see — a plan the provider cut off, a runtime whose quota Graphyard cannot
- * read — so only the login state and its identity are taken from the probe while it holds. Returns whether anything
+ * read — so only the login state and its identity are taken from the probe while it holds. A session's exhaustion
+ * report holds the same way until its reset (GY-1581). Returns whether anything
  * an eligibility decision reads has changed, so a steady state appends nothing to the ledger.
  */
 export function foldObservation(account: FleetAccount, observed: QuotaObservation, context: { actor: string; at: string }) {
@@ -17,12 +18,20 @@ export function foldObservation(account: FleetAccount, observed: QuotaObservatio
     if ((observed.loggedIn === null || observed.loggedIn === held.loggedIn) && identity === (held.identity ?? null)) return false;
     account.quota = { ...held, loggedIn: observed.loggedIn ?? held.loggedIn, identity }; return true;
   }
+  // A session's report of an exhaustion (GY-1581) is what a probe cannot see either, so it stands until the reset it
+  // named: a later ordinary probe takes only the login state, and the spent login it was reported on stays, so its
+  // shared-login twin stays held too. Another session's report replaces it.
+  const sessionHold = !!held.session && held.state === 'exhausted' && !!held.resetsAt && Date.parse(held.resetsAt) > now;
+  if (sessionHold && !observed.session) {
+    if (observed.loggedIn === null || observed.loggedIn === held.loggedIn) return false;
+    account.quota = { ...held, loggedIn: observed.loggedIn }; return true;
+  }
   // A provider restates the same reset to the millisecond or not at all; only a reset that really moved is a change.
   const moved = (held.resetsAt === null) !== (observed.resetsAt === null) || !!held.resetsAt && !!observed.resetsAt && Math.abs(Date.parse(held.resetsAt) - Date.parse(observed.resetsAt)) > 60_000;
   // A probe that could not read the login file leaves the identity last read; one that read a login naming no account (an
   // API key, a logout) clears it, so a home logged in afresh is never held under its former login.
   const identity = observed.identity === undefined ? held.identity ?? null : observed.identity;
-  const changed = held.loggedIn !== observed.loggedIn || held.state !== observed.state || moved || held.source !== 'probe' || identity !== (held.identity ?? null);
+  const changed = held.loggedIn !== observed.loggedIn || held.state !== observed.state || moved || held.source !== 'probe' || identity !== (held.identity ?? null) || held.session !== observed.session;
   account.quota = { ...observed, identity, observedAt: context.at, observedBy: context.actor, source: 'probe' };
   return changed;
 }
