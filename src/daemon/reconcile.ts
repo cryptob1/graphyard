@@ -1,7 +1,7 @@
 // Concern: cursor action keys, and reconciling pending actions against Graphyard after a restart.
 import type { Work } from '../model.js';
 import { type ScopeRequestState, unplannedPaths } from '../model/scope.js';
-import { widenedPlannedFiles } from '../model/scope-collapse.js';
+import { askIdentity, widenedPlannedFiles } from '../model/scope-collapse.js';
 import type { WorkerProfile } from '../master.js';
 import { faultActionKey, storeAction, type DaemonAction, type DaemonActionKind, type DaemonState } from './state.js';
 import { openFaultClassItem, type FaultClass } from '../model/fault-classes.js';
@@ -92,7 +92,7 @@ export const closeKey = (profile: WorkerProfile, pane: string) => `close:${profi
 /** One routine decision per action, item, binding (the head, or the quarantined epoch) and policy revision. */
 export const decisionKey = (work: Work, decision: Pick<RoutineDecision, 'action' | 'binding'>) => `decision:${decision.action}:${work.id}:${decision.binding}:${work.policyRevision}`;
 /** One decision per request: the instant the worker recorded it identifies the ask. */
-export const scopeKey = (work: Work, request: ScopeRequestState) => `scope:${work.id}:${request.epoch}:${request.at}`;
+export const scopeKey = (work: Work, request: ScopeRequestState) => `scope:${work.id}:${askIdentity(request).epoch}:${request.at}`;
 /**
  * The requirements revision that widens `work` by `paths` in answer to `request`, or null when no
  * fold represents the widening within the plannedFiles cap: the loop refuses before posting rather
