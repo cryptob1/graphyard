@@ -84,7 +84,7 @@ export const cycleMetricsSchema = z.object({
    */
   childWaitMs: z.number().int().min(0).optional(),
   workMs: z.number().int().min(0).optional(),
-  /** Of `durationMs`, the time spent on requests the control plane did not answer (GY-1344), left out of `workMs`. Absent when none. */
+  /** Of `durationMs`, the time at least one request was in flight on the control plane, answered or not (GY-1344, GY-1562), left out of `workMs`. Absent when none. */
   planeWaitMs: z.number().int().min(0).optional(),
   /** Where `durationMs` went, step by step. Absent on a cycle recorded before the loop measured its steps. */
   steps: cycleStepsSchema.optional(),

@@ -24,7 +24,8 @@ import { noteCycleFailure, type CycleCost } from '../src/daemon/liveness.js';
 // A namespace import for what GY-1355 adds, so a run against the base fails its cases rather than the module's load.
 import * as livenessModule from '../src/daemon/liveness.js';
 import type { CycleMetrics } from '../src/daemon/state.js';
-import { timedCall } from '../src/master/timings.js';
+import { Timings, timedCall, withTimings } from '../src/master/timings.js';
+import { checkInvariants, emptyInvariantRecord } from '../src/model/invariants.js';
 import * as deploymentModule from '../src/daemon/deployment.js';
 import { execFileSync } from 'node:child_process';
 import { writeFileSync, mkdirSync } from 'node:fs';
@@ -1215,7 +1216,7 @@ async function replayOutageCycle(answer: 'timeout' | 'slow') {
   const master = burstConfig(), state = emptyDaemonState(master);
   const effects = quietEffects(() => now, () => [], {
     controlPlane: async () => {
-      for (let read = 0; read < 12; read++) await timedCall('server', 'GET status', async () => { now += 31_000; if (answer === 'timeout') throw timedOut(); return {}; }).catch(() => undefined);
+      for (let read = 0; read < 12; read++) await timedCall('server', 'GET status', async () => { now += 31_000; if (answer === 'timeout') throw timedOut(); return new Response('{}', { status: 200 }); }, () => now).catch(() => undefined);
       if (answer === 'timeout') throw timedOut();
       return {};
     },
@@ -1229,15 +1230,92 @@ test(`manual:fault-class-loop — ${gy1344Instances[3].id}: a cycle's time on re
   assert.ok(cost.durationMs > intervalMs, `the cycle still took ${cost.durationMs}ms in all`);
   assert.ok(cost.withinInterval, `its own work fits the interval: ${cost.breakdown}`);
   assert.equal(cost.planeWaitMs, 12 * 31_000);
-  assert.match(cost.breakdown, /372s on requests the control plane did not answer/);
+  assert.match(cost.breakdown, /372s in flight on the control plane/);
 });
 
-test(`manual:fault-class-loop — ${gy1344Instances[3].id}: a server that answers slowly is still the loop's cost`, async () => {
-  const { result } = await replayOutageCycle('slow');
+// GY-1562 reverses the stance this case held under GY-1344 ("a server that answers slowly is still the loop's cost"):
+// cycle-p90 (GY-1537) judges workMs, and a plane answering in 8–17 s pushed it over its bound with no loop work to shorten.
+test(`integration:loop-faults-slow-answers-not-loop-cost — ${gy1344Instances[3].id}: a cycle crawling on a slow-answering plane files no loop-cost fault, and the plane's slowness stays visible`, async () => {
+  const { result, state } = await replayOutageCycle('slow');
   const cost = cycleCost(result.metrics, intervalMs)!;
-  assert.ok(!cost.withinInterval, `answered requests are the loop's work: ${cost.breakdown}`);
-  assert.equal(cost.planeWaitMs ?? 0, 0);
-  assert.equal(cost.culprit?.step, 'faults', 'the reads were the faults step\'s observation, and the cost names it');
+  assert.ok(cost.durationMs > intervalMs, `the cycle still took ${cost.durationMs}ms in all`);
+  assert.ok(cost.withinInterval, `answered requests in flight are the plane's time, not the loop's work: ${cost.breakdown}`);
+  assert.equal(cost.planeWaitMs, 12 * 31_000, 'the slow answers are recorded as plane wait');
+  assert.match(cost.breakdown, /372s in flight on the control plane/);
+  const calls = result.metrics.timings!.calls;
+  assert.ok(calls.length > 0 && calls.every(call => call.kind === 'server' && call.name === 'GET status' && call.ms === 31_000), 'each slow answer is a recorded slow server call');
+  assert.equal(result.metrics.timings!.slowCalls, 12);
+  assert.deepEqual(state.faults.instances.filter(entry => entry.kind === 'loop-cost'), [], 'no loop-cost fault');
+  assert.equal(loopAttention({ liveness: { state: 'running', lagMs: 1_000, stalledAfterMs: 2 * intervalMs, cycle: cost.cycle, lock: null, detail: '', restart: '', cost }, cost }).filter(line => line.kind === 'loop-cost').length, 0, 'and no loop-cost attention');
+});
+
+test(`integration:loop-faults-plane-unavailable — ${gy1344Instances[3].id}: a plane that times out, refuses or answers 502–504 is still the outage: its wait is left out of the loop's work and it raises plane-unavailable, never a loop fault`, async () => {
+  const { result } = await replayOutageCycle('timeout');
+  const cost = cycleCost(result.metrics, intervalMs)!;
+  assert.equal(cost.planeWaitMs, 12 * 31_000);
+  assert.ok(cost.withinInterval, cost.breakdown);
+  for (const error of [railway('work-snapshot'), timedOut(), new TypeError('fetch failed', { cause: Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' }) })]) {
+    const master = config(), state = emptyDaemonState(master);
+    for (let attempt = 0; attempt < 3; attempt++) await noteCycleFailure(state, error, 'cycle', { now: Date.parse('2026-10-06T01:45:00.000Z') + attempt * minute, intervalMs, persist: async () => {} });
+    assert.deepEqual(state.faults.instances.map(entry => [entry.kind, entry.faultClass]), [['plane-unavailable', 'deployment']], String(error));
+  }
+});
+
+test('unit:cycle-p90-slow-answered-plane-holds — cycle 13964 replayed: 95.8 s of wall time, 12.1 s on children and the rest in flight on 2xx control-plane answers, holds cycle-p90; the same cycle working for itself violates', async () => {
+  const cycleAt = Date.parse('2026-10-08T22:29:05.802Z');
+  let now = cycleAt - 95_846;
+  const answers = [17_583, 14_349, 13_265, 11_282, 3_597, 12_569, 14_627];
+  const effects = quietEffects(() => now, () => [], {
+    controlPlane: async () => {
+      for (const ms of answers) await timedCall('server', 'POST work/:id/session', async () => { now += ms; return new Response('{}', { status: 200 }); }, () => now);
+      return {};
+    },
+  } as Partial<DaemonEffects>);
+  const { metrics } = await runCycle(burstConfig(), emptyDaemonState(burstConfig()), effects, () => now);
+  assert.equal(metrics.planeWaitMs, answers.reduce((sum, ms) => sum + ms, 0), 'every answered request\'s in-flight window is plane wait');
+  assert.ok(metrics.workMs! < 30_000, `the loop's own work: ${metrics.workMs}ms`);
+  const window = (workMs: number) => Array.from({ length: 29 }, (_, index) => ({ at: iso(cycleAt - index * 2 * minute), durationMs: 95_846, workMs }));
+  const p90 = (workMs: number) => checkInvariants(emptyInvariantRecord(), { work: [], now: cycleAt, metrics: window(workMs) }).find(entry => entry.invariant === 'cycle-p90')!;
+  assert.equal(p90(metrics.workMs!).holds, true, p90(metrics.workMs!).line);
+  assert.equal(p90(83_739).holds, false, 'the workMs the cycle recorded before GY-1562 violated');
+});
+
+test('unit:plane-wait-in-flight-successes — timedCall records the in-flight window of every server request the plane answered, as a Response of any status or any other value; other kinds record none', async () => {
+  let clock = 0;
+  const timings = new Timings(() => clock);
+  await withTimings(timings, async () => {
+    await timedCall('server', 'GET work-snapshot', async () => { clock += 8_000; return new Response('{}', { status: 200 }); }, () => clock);
+    await timedCall('server', 'POST work/:id/session', async () => { clock += 4_000; return new Response('{}', { status: 409 }); }, () => clock);
+    await timedCall('server', 'GET status', async () => { clock += 2_000; return { ok: true }; }, () => clock);
+    await timedCall('github', 'gh api graphql', async () => { clock += 5_000; return {}; }, () => clock);
+  });
+  assert.equal(timings.planeWaitMs(), 14_000);
+  const report = timings.report();
+  assert.equal(report.planeWaitMs, 14_000);
+  assert.deepEqual(report.calls.map(call => [call.kind, call.ms]), [['server', 8_000], ['github', 5_000], ['server', 4_000], ['server', 2_000]], 'each is still a recorded slow call');
+  const fast = new Timings(() => clock);
+  await withTimings(fast, () => timedCall('server', 'GET status', async () => { clock += 40; return {}; }, () => clock));
+  assert.equal(fast.report().planeWaitMs, 40, 'a fast answer is plane time too, and no slow call');
+  assert.equal(fast.report().slowCalls, 0);
+});
+
+test('unit:plane-wait-outage-unchanged — unanswered requests (timed out, refused, 502–504) still record plane wait, overlapping in-flight windows merged once, and the error still reaches the caller', async () => {
+  let clock = 0;
+  const timings = new Timings(() => clock);
+  const pending: Promise<unknown>[] = [];
+  await withTimings(timings, async () => {
+    let release!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    // Two requests in flight together from 0 to 30 s: one times out, one gets a proxy's 504.
+    pending.push(timedCall('server', 'GET status', async () => { await held; throw timedOut(); }, () => clock).catch(error => error));
+    pending.push(timedCall('server', 'GET work-snapshot', async () => { await held; return new Response('', { status: 504 }); }, () => clock));
+    clock = 30_000; release();
+    const [error, response] = await Promise.all(pending);
+    assert.equal((error as DOMException).name, 'TimeoutError');
+    assert.equal((response as Response).status, 504);
+    await assert.rejects(timedCall('server', 'POST work/:id/decide', async () => { clock += 10_000; throw railway('work/x/decide'); }, () => clock), RefusedResponse);
+  });
+  assert.equal(timings.planeWaitMs(), 40_000, 'the overlapping 30 s counted once, then the refused 10 s');
 });
 
 test(`manual:fault-class-loop — ${gy1344Instances[4].id}: a class filing the plane answers 502 is retried with no loop fault`, async () => {

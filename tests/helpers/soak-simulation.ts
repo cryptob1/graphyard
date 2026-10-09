@@ -15,6 +15,7 @@ import { DispatchReservedError, type HerdrAgent, type MasterConfig, type WorkerP
 import { withSupervision } from '../../src/master/profiles.js';
 import { readAccountStartFailures, workerLaunchStatus, worktreeFailure } from '../../src/master/dispatch.js';
 import { readControlPlaneClock } from '../../src/master/containment.js';
+import { timedCall } from '../../src/master/timings.js';
 import { containmentSettlementRefusals, containmentVerificationSchema, loopEndedAttempt } from '../../src/quarantine.js';
 import { type SupervisorProbeReport } from '../../src/containment-probe.js';
 import { coordinatorConfinementRefusal, rerunFailedChecks } from '../../src/master/profiles.js';
@@ -165,7 +166,7 @@ export interface MainWatchLanding { sha: string; at: number; subject: string; au
  * effect. tests/soak-supervised.test.ts checks the real effects leave each of them absent.
  */
 export const supervisedAbsentEffects = ['decide', 'approver', 'docsSync', 'withdraw', 'resume', 'decisions', 'decisionChanges', 'replan', 'widenScope', 'withdrawReview', 'diagnostician', 'acceptance', 'planner', 'fileFaultClass', 'unblock', 'doctor'] as const;
-export async function simulateDay(options: { hours: number; backlog?: boolean; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number; working?: { from: number; retryAt: number } }; regression?: ('approvers-left-open' | 'docs-syncs-left-open')[]; headless?: boolean; handApprovers?: boolean; stranded?: boolean | 'resume'; staleRework?: boolean; staleMerge?: number; capacityWait?: { from: number; to: number }; diagnosisLimit?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; workspaceFailure?: { item: number; until: number }; credentialBlocked?: { recovers: number; never: number }; blockers?: boolean; retrying?: { worker: number; approver: number }; unbounded?: { stuck: number; progressing: number; pushedOnce: number; rework: number }; starved?: { items: number[]; dropFirst: number }; docs?: { budget: { total: number; perPage: number } }; dispatchFailing?: { constant: number; changing: number; refuseBlocks: number; unblockAfterMs: number }; mainGuard?: MainGuardDay; containment?: { failUntil: number; slowUntil: number; refuseSettle?: number }; mechanical?: { applied: number; rejected: number }; slowDecisions?: { from: number; to: number; ms: number }; slowObservation?: { from: number; to: number; attentionMs: number }; lateReading?: boolean; slowDeployment?: { from: number; to: number; observationMs: number }; selfProvision?: { redeployFails: { from: number; to: number } }; plan?: Partial<typeof basePlan>; github806?: boolean; remedies?: boolean;
+export async function simulateDay(options: { hours: number; backlog?: boolean; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number; working?: { from: number; retryAt: number } }; regression?: ('approvers-left-open' | 'docs-syncs-left-open')[]; headless?: boolean; handApprovers?: boolean; stranded?: boolean | 'resume'; staleRework?: boolean; staleMerge?: number; capacityWait?: { from: number; to: number }; diagnosisLimit?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; workspaceFailure?: { item: number; until: number }; credentialBlocked?: { recovers: number; never: number }; blockers?: boolean; retrying?: { worker: number; approver: number }; unbounded?: { stuck: number; progressing: number; pushedOnce: number; rework: number }; starved?: { items: number[]; dropFirst: number }; docs?: { budget: { total: number; perPage: number } }; dispatchFailing?: { constant: number; changing: number; refuseBlocks: number; unblockAfterMs: number }; mainGuard?: MainGuardDay; containment?: { failUntil: number; slowUntil: number; refuseSettle?: number }; mechanical?: { applied: number; rejected: number }; slowDecisions?: { from: number; to: number; ms: number }; slowAnswers?: { from: number; to: number; ms: number }; slowObservation?: { from: number; to: number; attentionMs: number }; lateReading?: boolean; slowDeployment?: { from: number; to: number; observationMs: number }; selfProvision?: { redeployFails: { from: number; to: number } }; plan?: Partial<typeof basePlan>; github806?: boolean; remedies?: boolean;
   decomposition?: { broadItems: number[]; concurrency?: number };
   /** GY-1294: the loop's own write moves a diagnosed item's revision before its approver reads the diagnosis decision, so the decision settles stale. */
   staleDiagnosis?: boolean;
@@ -1960,6 +1961,18 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     effects.wakeObservation = async work => { await slow(); return wakeObservation!(work); };
     effects.withdraw = async (work, decision, reason) => { budgetDay.withdrawn.push({ key: work.key, cycle: cycles }); return withdraw!(work, decision, reason); };
   }
+  // ---- GY-1562: the slow-answering plane. Inside the window the loop's snapshot read is answered,
+  // ---- 200, only after `ms` of the clock, timed as the server request it is (cycle 13964's 95.8 s,
+  // ---- 83.7 s of it on 2xx answers): the cycle crawls on the plane, and its own work stays small.
+  const slowPlaneDay = { cycles: [] as { cycle: number; elapsed: number; durationMs: number; workMs: number; planeWaitMs: number; slowCalls: number }[], slowReads: 0 };
+  if (options.slowAnswers) {
+    const window = options.slowAnswers, { snapshot: read } = effects;
+    effects.snapshot = () => timedCall('server', 'GET work-snapshot', async () => {
+      const at = clock.now() - dayStart;
+      if (at >= window.from && at < window.to) { slowPlaneDay.slowReads++; fenced.drift += window.ms; await moveClock(window.ms); }
+      return read();
+    }, clock.now);
+  }
   // ---- GY-1345: the slow-observation day. Inside the window the attention master status adds answers
   // ---- `attentionMs` after it is asked, as cycle 12621's did in 350.8s: the cycle that asks spends the
   // ---- faults step's whole budget on it and is cut, and the read stays in flight across cycles.
@@ -2691,6 +2704,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
         if (acceptance) await draftsSettled();
         if (planner) await plansSettled();
         if (options.staleRelease) { staleReleaseDay.steps.push({ elapsed, ms: result.metrics.steps?.decisions?.ms ?? 0, backlogReads: staleReleaseDay.backlogReads }); staleReleaseDay.backlogReads = 0; }
+        if (options.slowAnswers) slowPlaneDay.cycles.push({ cycle: cycles - 1, elapsed, durationMs: result.metrics.durationMs, workMs: result.metrics.workMs ?? result.metrics.durationMs, planeWaitMs: result.metrics.planeWaitMs ?? 0, slowCalls: result.metrics.timings?.slowCalls ?? 0 });
         if (options.slowDecisions) budgetDay.cycles.push({ cycle: cycles - 1, elapsed, spentMs: clock.now() - cycleStart, slow: budgetDay.cycleSlow, deferred: [...state.decisionsDeferred] });
         if (options.slowDeployment) deploymentDay.cycles.push({ cycle: cycles - 1, elapsed, spentMs: clock.now() - cycleStart, cut: result.actions.some(action => action.kind === 'deployment' && /spent its \d+s budget/.test(action.detail)), pending: deploymentStep.deploymentReadsPending(state) });
         if (options.slowObservation) observationDay.cycles.push({ cycle: cycles - 1, elapsed, spentMs: clock.now() - cycleStart, cut: result.actions.some(action => action.kind === 'fault' && /spent its \d+s observation budget/.test(action.detail)), pending: faultsStep.observationReadsPending(state) });
@@ -2876,7 +2890,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     mergeQueuePosts, config, refused, decideCalls, restarted, approverPanes, failing, herdrClosed: herdr.closed, diagnosisModel: settings.model, diagnosisRuns: diagnosed, baseBreak, capacityRefused, capacityLaunched, capacityWaiters,
     decided, misreads, prompts, screens, heldAccounts, approverAccounts, retryReset, exitedLive, exitedClosed, exitedRowsSeen, reassign, workspaceFailures, workspaceCooled, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, fenced, mergeStallSightings, master, baseFailure,
     blockerEvents, blockerProbes, blockerDecisions, blockerActions, blockerKeysPeak, attempts, lanesSeen, laneApplications, approverWorks, approverDecisions, failover, webhook, remedies, observeRequests, starvation, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size }, mechanical: { ledger, botRounds, misclassified, reviewHolds }, shared, charges: { ...charged, b: charged.b.length, instancesSeen: [...charged.instancesSeen], restarts: chargeRestarts },
-    wakes, lateReading, staleMerges, restartLog, hostDay, guardDay, mainWatchDay, budgetDay, observationDay, deploymentDay, decompositionDay: decompositionHistory, diagnosisRaces, diagnosisRequestRaces, transientRefused, lateReads, staleReleaseDay, drain, acceptanceDay: acceptance?.day ?? null, plannerDay: planner?.day ?? null, loopWakeDay: loopWakeDay || null,
+    wakes, lateReading, staleMerges, restartLog, hostDay, guardDay, mainWatchDay, budgetDay, slowPlaneDay, observationDay, deploymentDay, decompositionDay: decompositionHistory, diagnosisRaces, diagnosisRequestRaces, transientRefused, lateReads, staleReleaseDay, drain, acceptanceDay: acceptance?.day ?? null, plannerDay: planner?.day ?? null, loopWakeDay: loopWakeDay || null,
     restartDay: options.checkoutRestart ? restartDay : null, failedLaunches };
 }
 
