@@ -1563,7 +1563,7 @@ export function dispatchEffects(root: string, config: MasterConfig | (() => Mast
     endSession: (closure: SessionClosure) => mutate(`work/${closure.workId}/session`, closureHandle(closure), randomUUID()),
     // The same three moves the coordination loop makes for a session exhausted mid-work.
     selectedAccount: async (role, profile) => (await readEnvironmentLog(current())).selected?.[selectionKey(role, profile)] ?? null,
-    holdAccount: (account, observed) => recordObservedExhaustion(current(), account, observed, deps.now?.()),
+    holdAccount: (account, observed) => recordObservedExhaustion(current(), account, observed, deps.now?.(), {}),
     reportCapacity: (work, event) => mutate(`work/${work.id}/capacity`, event),
     persist: cursor => writeDispatchCursor(current(), cursor, onRepair),
   };
