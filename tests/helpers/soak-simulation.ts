@@ -166,7 +166,7 @@ export interface MainWatchLanding { sha: string; at: number; subject: string; au
  * effect. tests/soak-supervised.test.ts checks the real effects leave each of them absent.
  */
 export const supervisedAbsentEffects = ['decide', 'approver', 'docsSync', 'withdraw', 'resume', 'decisions', 'decisionChanges', 'replan', 'widenScope', 'withdrawReview', 'diagnostician', 'acceptance', 'planner', 'fileFaultClass', 'unblock', 'doctor'] as const;
-export async function simulateDay(options: { hours: number; backlog?: boolean; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number; working?: { from: number; retryAt: number } }; regression?: ('approvers-left-open' | 'docs-syncs-left-open')[]; headless?: boolean; handApprovers?: boolean; stranded?: boolean | 'resume'; staleRework?: boolean; staleMerge?: number; capacityWait?: { from: number; to: number }; diagnosisLimit?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; workspaceFailure?: { item: number; until: number }; credentialBlocked?: { recovers: number; never: number }; blockers?: boolean; retrying?: { worker: number; approver: number }; unbounded?: { stuck: number; progressing: number; pushedOnce: number; rework: number }; starved?: { items: number[]; dropFirst: number }; docs?: { budget: { total: number; perPage: number } }; dispatchFailing?: { constant: number; changing: number; refuseBlocks: number; unblockAfterMs: number }; mainGuard?: MainGuardDay; containment?: { failUntil: number; slowUntil: number; refuseSettle?: number }; mechanical?: { applied: number; rejected: number }; slowDecisions?: { from: number; to: number; ms: number }; slowAnswers?: { from: number; to: number; ms: number }; slowObservation?: { from: number; to: number; attentionMs: number }; lateReading?: boolean; slowDeployment?: { from: number; to: number; observationMs: number }; selfProvision?: { redeployFails: { from: number; to: number } }; plan?: Partial<typeof basePlan>; github806?: boolean; remedies?: boolean;
+export async function simulateDay(options: { hours: number; backlog?: boolean; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number; working?: { from: number; retryAt: number } }; regression?: ('approvers-left-open' | 'docs-syncs-left-open')[]; headless?: boolean; handApprovers?: boolean; stranded?: boolean | 'resume'; staleRework?: boolean; staleMerge?: number; capacityWait?: { from: number; to: number }; diagnosisLimit?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; workspaceFailure?: { item: number; until: number }; credentialBlocked?: { recovers: number; never: number }; blockers?: boolean; retrying?: { worker: number; approver: number }; limitMenu?: { worker: number; prose: number }; unbounded?: { stuck: number; progressing: number; pushedOnce: number; rework: number }; starved?: { items: number[]; dropFirst: number }; docs?: { budget: { total: number; perPage: number } }; dispatchFailing?: { constant: number; changing: number; refuseBlocks: number; unblockAfterMs: number }; mainGuard?: MainGuardDay; containment?: { failUntil: number; slowUntil: number; refuseSettle?: number }; mechanical?: { applied: number; rejected: number }; slowDecisions?: { from: number; to: number; ms: number }; slowAnswers?: { from: number; to: number; ms: number }; slowObservation?: { from: number; to: number; attentionMs: number }; lateReading?: boolean; slowDeployment?: { from: number; to: number; observationMs: number }; selfProvision?: { redeployFails: { from: number; to: number } }; plan?: Partial<typeof basePlan>; github806?: boolean; remedies?: boolean;
   decomposition?: { broadItems: number[]; concurrency?: number };
   /** GY-1294: the loop's own write moves a diagnosed item's revision before its approver reads the diagnosis decision, so the decision settles stale. */
   staleDiagnosis?: boolean;
@@ -613,10 +613,14 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
 
   // ---- Workers: the loop dispatches, the simulated session claims, works, pushes and submits (or dies). ----
   interface Session { work: string; key: string; branch: string; profile: WorkerProfile; epoch: number; attempt: number; pane: string; pushAt: number; diesAt: number | null; exitsAt: number | null; dispatchAt: number; state: 'working' | 'submitted' | 'dead' | 'exited' | 'idling' | 'reclaimed' | 'credential-blocked' | 'blocked' | 'failed-over'; syncs: number; syncedFor?: string; refusedSince?: number;
-    scopeAt: number | null; misreadAt: number | null; misread: boolean; credentialAt: number | null; blockAt: number | null; retryingAt: number | null; settlementToken?: string; files?: string[]; bot?: MechanicalFixRequest;
+    scopeAt: number | null; misreadAt: number | null; misread: boolean; credentialAt: number | null; blockAt: number | null; retryingAt: number | null; settlementToken?: string;
+    /** GY-1566: when the session stops on Claude's usage-limit menu, or blocks a while over its own prose about a quota, and when that block clears. */
+    limitMenuAt?: number | null; proseAt?: number | null; proseClearsAt?: number | null; files?: string[]; bot?: MechanicalFixRequest;
     /** GY-1460: the unbounded day's attempt that renews without submitting (a first attempt, or a rework on the linked pull request), the one that pushes once and stalls, or the long one that pushes as it goes, and when it last pushed. */
     unbounded?: 'stuck' | 'progressing' | 'pushed-once'; pushedAt?: number }
   const sessions: Session[] = [], lost: string[] = [], launches: number[] = [];
+  // GY-1566: what the usage-limit-menu day saw: each account the loop held, each spent session stopped, any keys sent, and the prose session's block.
+  const limitMenuDay = { holds: [] as { account: string; resetsAt: string | null; elapsed: number }[], stoppedAt: [] as { key: string; epoch: number; elapsed: number }[], answered: [] as { pane: string; keys: string[] }[], proseBlocked: [] as string[] };
   // GY-973: what each pane's screen tail shows, where it is not a session at work, and the
   // accounts the loop held. OpenCode 1.18 on a spent account prints its limit banner with a retry
   // marker and retries for ever, so Herdr keeps the session `working` and only the screen tells.
@@ -625,6 +629,16 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   const retryReset = new Date(Math.ceil((dayStart + 2 * 24 * hour) / 1000) * 1000);
   const hostWallClock = (instant: Date) => { const pad = (value: number) => String(value).padStart(2, '0'); return `${instant.getFullYear()}-${pad(instant.getMonth() + 1)}-${pad(instant.getDate())} ${pad(instant.getHours())}:${pad(instant.getMinutes())}:${pad(instant.getSeconds())}`; };
   const retryBanner = `┃ Reading src/model/capacity.ts\n\n  ■⬝⬝⬝⬝⬝⬝⬝  Weekly/Monthly Limit Exhausted. Your limit will reset at ${hostWallClock(retryReset)} [retrying in 4s attempt #5]${' '.repeat(96)}… esc interrupt • OpenCode 1.18.32  \n`;
+  // GY-1566: Claude on a spent account prints its limit notice, the reset as a wall clock in the
+  // zone it names, and then its usage-limit menu, and blocks on the menu holding its lease. The
+  // reset is a whole hour, as Claude names it. The notice stands behind the runtime's error label,
+  // more label words than the line scan of a stopped session admits, so only the menu reads it.
+  const menuReset = new Date(Math.ceil((dayStart + 2 * 24 * hour) / hour) * hour);
+  const losAngeles = (instant: Date) => { const parts = Object.fromEntries(new Intl.DateTimeFormat('en-US', { timeZone: 'America/Los_Angeles', month: 'short', day: 'numeric', hour: 'numeric', hour12: true }).formatToParts(instant).map(part => [part.type, part.value])); return `${parts.month} ${parts.day}, ${parts.hour}${parts.dayPeriod.toLowerCase()}`; };
+  const menuNotice = `You've hit your weekly limit · resets ${losAngeles(menuReset)} (America/Los_Angeles)`;
+  const limitMenuScreen = `● Reading src/model/capacity.ts before editing.\n  ⎿  API Error: Claude Code · ${menuNotice}\n\n What do you want to do?\n\n ❯ 1. Stop and wait for limit to reset\n   2. Wait here, then continue automatically at ${losAngeles(menuReset)}\n   3. Switch to usage credits\n\n Enter to confirm · Esc to cancel\n`;
+  // An agent blocked over its own words about a quota, the notice and the menu quoted among them: not its provider's (GY-402).
+  const proseScreen = `● Claude prints "${menuNotice}" and then asks:\n What do you want to do?\n 1. Stop and wait for limit to reset\n 2. Wait here, then continue automatically\n 3. Switch to usage credits\n● tmp disk quota is exhausted (a known local issue). Clearing the tsx cache, then rerunning.\n`;
   const accountHeld = (account: string) => { const hold = heldAccounts.get(account); return !!hold && (!hold.resetsAt || Date.parse(hold.resetsAt) > clock.now()); };
   // GY-888: every session launch the day makes carries the coordinator confinement through the
   // launcher's own logic, and the same launch where the mount namespace cannot be built is
@@ -824,7 +838,8 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
       scopeAt: !idling && plan.scoped.has(n) && attempt === 1 ? clock.now() + plan.scopeAfterMs : null, misreadAt: !idling && plan.misread.has(n) && attempt === 1 ? clock.now() + plan.misreadAfterMs : null, misread: false,
       // GY-1008: the blocked day's first attempts record their blocker; the repeating item's every attempt does.
       blockAt: options.blockers && blockerPlan.classes[n] && (attempt === 1 || n === blockerPlan.repeating) ? clock.now() + blockerPlan.blockAfterMs : null,
-      credentialAt: credentialBlocks ? clock.now() + 5 * minute : null, retryingAt: options.retrying?.worker === n && attempt === 1 ? clock.now() + 5 * minute : null, settlementToken, files: sessionFiles, ...(bot ? { bot } : {}) });
+      credentialAt: credentialBlocks ? clock.now() + 5 * minute : null, retryingAt: options.retrying?.worker === n && attempt === 1 ? clock.now() + 5 * minute : null,
+      limitMenuAt: options.limitMenu?.worker === n && attempt === 1 ? clock.now() + 5 * minute : null, proseAt: options.limitMenu?.prose === n && attempt === 1 ? clock.now() + 5 * minute : null, settlementToken, files: sessionFiles, ...(bot ? { bot } : {}) });
     // A scope scenario asks the moment it holds the lease, as a worker does, and keeps working
     // while the control plane decides. An ask carries at most fifty paths, so a wide ask is
     // filed in batches, which one open request of the attempt merges.
@@ -896,6 +911,12 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
       // GY-973: the session's runtime hits the spent account and retries on it for ever — still
       // `working` to Herdr, never pushing, its supervisor renewing the lease until the loop ends it.
       if (session.retryingAt !== null && now >= session.retryingAt) { session.retryingAt = null; session.pushAt = Number.MAX_SAFE_INTEGER; screens.set(session.pane, retryBanner); }
+      // GY-1566: the session stops on Claude's usage-limit menu — blocked to Herdr, never pushing,
+      // its supervisor renewing the lease until the loop ends it — and nobody answers the menu.
+      if (session.limitMenuAt && now >= session.limitMenuAt) { session.limitMenuAt = null; session.pushAt = Number.MAX_SAFE_INTEGER; screens.set(session.pane, limitMenuScreen); herdr.status(session.pane, 'blocked'); }
+      // The prose session blocks three minutes over its own words, then carries on to its push.
+      if (session.proseAt && now >= session.proseAt) { session.proseAt = null; session.proseClearsAt = now + 3 * minute; session.pushAt += 3 * minute; screens.set(session.pane, proseScreen); herdr.status(session.pane, 'blocked'); limitMenuDay.proseBlocked.push(session.key); }
+      if (session.proseClearsAt && now >= session.proseClearsAt) { session.proseClearsAt = null; screens.delete(session.pane); herdr.status(session.pane, 'working'); }
       // Herdr misreads the live agent for exactly one cycle: its pane shows no agent, then shows it again.
       const listed = herdr.agents.get(session.pane);
       if (session.misread && listed) { listed.agent = 'claude'; session.misread = false; }
@@ -946,7 +967,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
           herdr.kill(session.pane);
           if (session.state === 'idling') { session.state = 'reclaimed'; continue; }
           // The loop failed the retrying session over, ending its lease: its supervisor stops it.
-          if (screens.has(session.pane)) { session.state = 'failed-over'; continue; }
+          if (screens.has(session.pane)) { session.state = 'failed-over'; if (options.limitMenu) limitMenuDay.stoppedAt.push({ key: session.key, epoch: session.epoch, elapsed: now - dayStart }); continue; }
           session.state = 'dead'; lost.push(`${session.key} epoch ${session.epoch}: ${error.message}`);
         }
         // The refused ask stands for hours; near the day's end the worker releases the item with
@@ -1726,10 +1747,12 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     // loop ends; the other days' dead workers lapse as they always did.
     // GY-973: the retrying day reads each pane's screen tail, and each worker profile runs on an
     // account of its own, which the loop holds when a session spends it.
-    ...(options.retrying ? {
+    ...(options.retrying || options.limitMenu ? {
       sessionOutput: (agent: HerdrAgent) => screens.get(agent.pane_id ?? '') ?? `● Working as ${agent.name}…\n`,
       selectedAccount: async (role: string, profile: string) => role === 'worker' ? { environment: `account-${profile}`, kind: null } : null,
-      holdAccount: async (account: string, observed: { resetsAt: string | null }) => { heldAccounts.set(account, { resetsAt: observed.resetsAt }); },
+      holdAccount: async (account: string, observed: { resetsAt: string | null }) => { heldAccounts.set(account, { resetsAt: observed.resetsAt }); if (options.limitMenu) limitMenuDay.holds.push({ account, resetsAt: observed.resetsAt, elapsed: clock.now() - dayStart }); },
+      // GY-1566: the loop never chooses on the usage-limit menu; any keys it sends are recorded.
+      ...(options.limitMenu ? { answerSession: async (agent: HerdrAgent, keys: string[]) => { limitMenuDay.answered.push({ pane: agent.pane_id ?? '', keys }); } } : {}),
     } : {}),
     // GY-1460: stopping a supervisor stops its session, so the lease it renewed lapses.
     ...(options.unbounded ? {
@@ -1739,7 +1762,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
         if (session && (session.state === 'working' || session.state === 'idling')) { herdr.kill(session.pane); session.state = 'reclaimed'; }
       },
     } : {}),
-    ...(options.reassigned || options.credentialBlocked || options.retrying || options.unbounded ? {
+    ...(options.reassigned || options.credentialBlocked || options.retrying || options.limitMenu || options.unbounded ? {
       reportCapacity: async (work: Work, event: Record<string, unknown>) => api(principals.coordinator, 'POST', `work/${work.id}/capacity`, event),
       preserveWork: async (work: Work, epoch: number) => {
         const current = (await store.list()).find(item => item.id === work.id)!;
@@ -2888,7 +2911,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   engine.execute = executeAll;
   return { readinessDay, supervisedDay, stuck, unboundedDay, provisionDay, promotion, throughput, reconciled, outside, items, final, github, sessions, docsSyncRuns, docsSyncRoot, lost, launches, violations, faulted, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, headless, herdr, hand, stranded, withdrawals, resumes, strandedLaunches, escalations, spent, attestations, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, guardReads, checkout, landingRefusals, foreignPane, previousWorktrees, closedLeased,
     mergeQueuePosts, config, refused, decideCalls, restarted, approverPanes, failing, herdrClosed: herdr.closed, diagnosisModel: settings.model, diagnosisRuns: diagnosed, baseBreak, capacityRefused, capacityLaunched, capacityWaiters,
-    decided, misreads, prompts, screens, heldAccounts, approverAccounts, retryReset, exitedLive, exitedClosed, exitedRowsSeen, reassign, workspaceFailures, workspaceCooled, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, fenced, mergeStallSightings, master, baseFailure,
+    decided, misreads, prompts, screens, heldAccounts, approverAccounts, retryReset, limitMenuDay, menuReset, menuNotice, exitedLive, exitedClosed, exitedRowsSeen, reassign, workspaceFailures, workspaceCooled, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, fenced, mergeStallSightings, master, baseFailure,
     blockerEvents, blockerProbes, blockerDecisions, blockerActions, blockerKeysPeak, attempts, lanesSeen, laneApplications, approverWorks, approverDecisions, failover, webhook, remedies, observeRequests, starvation, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size }, mechanical: { ledger, botRounds, misclassified, reviewHolds }, shared, charges: { ...charged, b: charged.b.length, instancesSeen: [...charged.instancesSeen], restarts: chargeRestarts },
     wakes, lateReading, staleMerges, restartLog, hostDay, guardDay, mainWatchDay, budgetDay, slowPlaneDay, observationDay, deploymentDay, decompositionDay: decompositionHistory, diagnosisRaces, diagnosisRequestRaces, transientRefused, lateReads, staleReleaseDay, drain, acceptanceDay: acceptance?.day ?? null, plannerDay: planner?.day ?? null, loopWakeDay: loopWakeDay || null,
     restartDay: options.checkoutRestart ? restartDay : null, failedLaunches };

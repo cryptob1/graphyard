@@ -66,14 +66,18 @@ const unitMs: Record<string, number> = { d: 86_400_000, h: 3_600_000, m: 60_000,
  * The reset time a limit notice names, as an instant. Providers say it four ways: an absolute
  * timestamp, a Unix time after a separator, a wait ("try again in 3 days 4 hours"), or a wall
  * clock the account's own host reads ("resets 3pm", "resets Sep 26, 9am", "on 10/8"). A wall
- * clock is read in the host's zone, and a time of day already past means tomorrow's. Anything
- * else is unknown, and an unknown reset is recorded as unknown rather than guessed.
+ * clock is read in the zone the notice names in parentheses (Claude's `resets Oct 10, 10pm
+ * (America/Los_Angeles)`, GY-1566) and otherwise in the host's, and a time of day already past
+ * means tomorrow's. Anything else is unknown, and an unknown reset is recorded as unknown rather than guessed.
  */
 export function parseResetTime(text: string, now: number): string | null {
   const iso = /\b(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)\s*(Z|UTC|[+-]\d{2}:?\d{2})?/i.exec(text);
   if (iso) {
     const zone = !iso[3] ? '' : /^(?:z|utc)$/i.test(iso[3]) ? 'Z' : iso[3];
-    const parsed = Date.parse(`${iso[1]}T${iso[2]}${zone}`);
+    // A zone-less timestamp beside a named zone (`2026-10-10 22:00 (America/Los_Angeles)`) is that zone's wall clock.
+    const named = zone ? null : namedZone(text);
+    const wall = Date.parse(`${iso[1]}T${iso[2]}${named ? 'Z' : zone}`);
+    const parsed = named ? wall - wallOffset(wall - wallOffset(wall, named), named) : wall;
     if (Number.isFinite(parsed)) return new Date(parsed).toISOString();
   }
   const unix = /(?:\||reset[s_ ]*(?:at)?[=: ]+)\s*(\d{10})\b/i.exec(text);
@@ -86,7 +90,16 @@ export function parseResetTime(text: string, now: number): string | null {
   }
   const clause = /\b(?:resets?|renews?|available again|try again)(?:\s+(?:at|on|by))?[\s:]+(.{1,60})/i.exec(text)?.[1] ?? /\bon\s+((?:\d{1,2}\/\d{1,2}|[A-Za-z]{3,9}\.?\s+\d{1,2}).{0,20})/i.exec(text)?.[1];
   if (!clause) return null;
-  const today = new Date(now);
+  const zone = namedZone(clause);
+  // The wall clock of `zone` (or the host's) at `now`, and the instant a wall-clock time there names.
+  const shift = (instant: number) => zone ? wallOffset(instant, zone) : 0;
+  const today = new Date(now + shift(now));
+  const at = (year: number, month: number, day: number, hours: number, minutes: number) => {
+    if (!zone) return new Date(year, month, day, hours, minutes);
+    const wall = Date.UTC(year, month, day, hours, minutes);
+    return new Date(wall - shift(wall - shift(wall)));
+  };
+  const parts = zone ? { year: today.getUTCFullYear(), month: today.getUTCMonth(), date: today.getUTCDate() } : { year: today.getFullYear(), month: today.getMonth(), date: today.getDate() };
   const named = /\b([A-Za-z]{3})[a-z]*\.?\s+(\d{1,2})\b/.exec(clause), slashed = /\b(\d{1,2})\/(\d{1,2})\b/.exec(clause);
   const month = named && months.includes(named[1].toLowerCase()) ? months.indexOf(named[1].toLowerCase()) : slashed ? Number(slashed[1]) - 1 : null;
   const day = named && month !== null && !slashed ? Number(named[2]) : slashed ? Number(slashed[2]) : null;
@@ -97,15 +110,26 @@ export function parseResetTime(text: string, now: number): string | null {
     minutes = Number(clock[2] ?? 0);
   }
   if (month !== null && day !== null && month >= 0 && month < 12 && day >= 1 && day <= 31) {
-    const candidate = new Date(today.getFullYear(), month, day, hours, minutes);
     // A date already behind the notice is next year's: a limit never resets in the past.
-    if (candidate.getTime() <= now) candidate.setFullYear(candidate.getFullYear() + 1);
-    return candidate.toISOString();
+    const candidate = at(parts.year, month, day, hours, minutes);
+    return (candidate.getTime() <= now ? at(parts.year + 1, month, day, hours, minutes) : candidate).toISOString();
   }
   if (!clock) return null;
-  const candidate = new Date(today.getFullYear(), today.getMonth(), today.getDate(), hours, minutes);
-  if (candidate.getTime() <= now) candidate.setDate(candidate.getDate() + 1);
-  return candidate.toISOString();
+  const candidate = at(parts.year, parts.month, parts.date, hours, minutes);
+  return (candidate.getTime() <= now ? at(parts.year, parts.month, parts.date + 1, hours, minutes) : candidate).toISOString();
+}
+
+/** The IANA zone a notice names in parentheses, such as `(America/Los_Angeles)`, when the runtime knows it. */
+function namedZone(text: string): string | null {
+  const zone = /\(\s*([A-Za-z]+(?:\/[A-Za-z0-9_+-]+)+|UTC)\s*\)/.exec(text)?.[1];
+  if (!zone) return null;
+  try { new Intl.DateTimeFormat('en-US', { timeZone: zone }); return zone; } catch { return null; }
+}
+/** How far `zone`'s wall clock runs ahead of UTC at `instant`, in milliseconds. */
+function wallOffset(instant: number, zone: string): number {
+  const fields = Object.fromEntries(new Intl.DateTimeFormat('en-US', { timeZone: zone, hourCycle: 'h23', year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric', second: 'numeric' })
+    .formatToParts(new Date(instant)).filter(part => part.type !== 'literal').map(part => [part.type, Number(part.value)]));
+  return Date.UTC(fields.year, fields.month - 1, fields.day, fields.hour, fields.minute, fields.second) - Math.floor(instant / 1000) * 1000;
 }
 
 /**
