@@ -625,7 +625,7 @@ test('unit:master-restart-supervised — master restart goes through this instal
   execFileSync('git', ['init', '-q', root]);
   const launched = join(root, 'launched.txt'), cliPath = join(root, 'cli.mjs');
   await writeFile(cliPath, `import { writeFileSync } from 'node:fs'; writeFileSync(${JSON.stringify(launched)}, process.argv.slice(2).join(' '));\n`);
-  const config = { hostId: 'this-host', cliPath, run: { intervalSeconds: 20 } } as unknown as MasterConfig;
+  const config = { hostId: 'this-host', cliPath, repository: 'owner/project', run: { intervalSeconds: 20 } } as unknown as MasterConfig;
   const host = { home }, unit = 'graphyard-master.service';
   // A fake user manager: the unit's state, and every command it was given.
   const systemd = (state: { active: string; directory: string; mainPid: number; next?: number; reachable?: boolean; jobs?: string; command?: string }) => {
@@ -653,7 +653,7 @@ test('unit:master-restart-supervised — master restart goes through this instal
   await new Promise(done => setTimeout(done, 300));
   assert.equal(existsSync(launched), false, 'no detached master run is spawned beside the unit');
   // A unit waiting out its RestartSec (MainPID 0) is still the supervisor.
-  assert.deepEqual(await supervisingUnit(root, { systemctl: systemd({ active: 'activating', directory: root, mainPid: 0 }).systemctl, host, platform: 'linux' }), { unit, mainPid: 0 });
+  assert.deepEqual(await supervisingUnit(root, config, { systemctl: systemd({ active: 'activating', directory: root, mainPid: 0 }).systemctl, host, platform: 'linux' }), { unit, mainPid: 0 });
   // A unit stopping on its way to a queued restart (deactivating), or down with a start or restart
   // job queued, is still the supervisor: master restart goes through it, never a detached run that
   // the queued restart's loop would then contend with for the lock.
@@ -661,21 +661,29 @@ test('unit:master-restart-supervised — master restart goes through this instal
   const raced = await restartMasterLoop(root, config, null, { systemctl: stopping.systemctl, host, platform: 'linux' });
   assert.deepEqual({ supervisor: raced.supervisor, stopped: raced.stopped, started: raced.started, log: raced.log }, { supervisor: unit, stopped: 6161, started: 7171, log: null });
   assert.ok(stopping.calls.some(args => args.join(' ') === `restart ${unit}`), 'a deactivating unit is restarted through systemd');
-  assert.deepEqual(await supervisingUnit(root, { systemctl: systemd({ active: 'deactivating', directory: root, mainPid: 6161 }).systemctl, host, platform: 'linux' }), { unit, mainPid: 6161 }, 'deactivating with no job listed');
+  assert.deepEqual(await supervisingUnit(root, config, { systemctl: systemd({ active: 'deactivating', directory: root, mainPid: 6161 }).systemctl, host, platform: 'linux' }), { unit, mainPid: 6161 }, 'deactivating with no job listed');
   for (const job of ['restart', 'start'])
-    assert.deepEqual(await supervisingUnit(root, { systemctl: systemd({ active: 'failed', directory: root, mainPid: 0, jobs: `90 ${unit} ${job} waiting\n` }).systemctl, host, platform: 'linux' }), { unit, mainPid: 0 }, `failed with a ${job} job queued`);
+    assert.deepEqual(await supervisingUnit(root, config, { systemctl: systemd({ active: 'failed', directory: root, mainPid: 0, jobs: `90 ${unit} ${job} waiting\n` }).systemctl, host, platform: 'linux' }), { unit, mainPid: 0 }, `failed with a ${job} job queued`);
   await new Promise(done => setTimeout(done, 300));
   assert.equal(existsSync(launched), false, 'no detached master run beside a stopping unit');
   // Another checkout's unit, an inactive unit (a queued stop or another unit's job is no restart), or no systemd: not this install's supervisor.
   for (const state of [{ active: 'active', directory: home, mainPid: 9 }, { active: 'inactive', directory: root, mainPid: 0 }, { active: 'inactive', directory: root, mainPid: 0, jobs: `91 ${unit} stop waiting\n92 other.service restart waiting\n` }])
-    assert.equal(await supervisingUnit(root, { systemctl: systemd(state).systemctl, host, platform: 'linux' }), null);
-  assert.equal(await supervisingUnit(root, { systemctl: systemd({ active: 'active', directory: root, mainPid: 9 }).systemctl, host, platform: 'darwin' }), null);
-  // A unit rooted here whose effective ExecStart (a drop-in override) no longer runs `master run` is not the loop's supervisor.
-  for (const command of ['/usr/bin/sleep infinity', `/usr/bin/node ${cliPath} master status`])
-    assert.equal(await supervisingUnit(root, { systemctl: systemd({ active: 'active', directory: root, mainPid: 9, command }).systemctl, host, platform: 'linux' }), null, command);
+    assert.equal(await supervisingUnit(root, config, { systemctl: systemd(state).systemctl, host, platform: 'linux' }), null);
+  assert.equal(await supervisingUnit(root, config, { systemctl: systemd({ active: 'active', directory: root, mainPid: 9 }).systemctl, host, platform: 'darwin' }), null);
+  // A unit rooted here whose effective ExecStart (a drop-in override) no longer runs this install's
+  // `master run` — another command, another executable or another CLI, even one ending in `master run` — is not the loop's supervisor.
+  for (const command of ['/usr/bin/sleep infinity', `/usr/bin/node ${cliPath} master status`, '/bin/echo master run', `/bin/echo ${cliPath} master run`, `/usr/bin/node ${join(home, 'cli.mjs')} master run`, `/usr/bin/node ${cliPath} master run --once`])
+    assert.equal(await supervisingUnit(root, config, { systemctl: systemd({ active: 'active', directory: root, mainPid: 9, command }).systemctl, host, platform: 'linux' }), null, command);
+  const echoing = systemd({ active: 'active', directory: root, mainPid: 9, command: '/bin/echo master run' });
+  assert.equal((await restartMasterLoop(root, config, null, { systemctl: echoing.systemctl, host, platform: 'linux' })).supervisor, null, 'a unit running another executable is never restarted as the loop');
+  assert.ok(!echoing.calls.some(args => args[0] === 'restart'), 'no systemctl restart of a unit that would start no coordinator loop');
+  for (let attempt = 0; attempt < 50 && !existsSync(launched); attempt++) await new Promise(done => setTimeout(done, 100));
+  assert.equal(await readFile(launched, 'utf8'), 'master run', 'it takes the detached restart instead'); await rm(launched);
+  // The install's own Node, under any interpreter path, running its own CLI is the loop.
+  assert.deepEqual(await supervisingUnit(root, config, { systemctl: systemd({ active: 'active', directory: root, mainPid: 9, command: `/home/operator/.nvm/versions/node/v22.4.0/bin/node ${cliPath} master run` }).systemctl, host, platform: 'linux' }), { unit, mainPid: 9 });
   // An unreachable manager with this checkout's unit file installed refuses rather than spawn a second loop.
   const unreachable = systemd({ active: 'active', directory: root, mainPid: 9, reachable: false });
-  assert.equal(await supervisingUnit(root, { systemctl: unreachable.systemctl, host, platform: 'linux' }), null, 'no unit file: the detached restart stands');
+  assert.equal(await supervisingUnit(root, config, { systemctl: unreachable.systemctl, host, platform: 'linux' }), null, 'no unit file: the detached restart stands');
   await mkdir(join(home, '.config/systemd/user'), { recursive: true });
   await writeFile(join(home, '.config/systemd/user', unit), `[Service]\nWorkingDirectory=${root}\nExecStart=node cli.mjs master run\n`);
   await assert.rejects(restartMasterLoop(root, config, null, { systemctl: unreachable.systemctl, host, platform: 'linux' }), /could not be asked about graphyard-master\.service.*systemctl --user restart graphyard-master\.service/);
