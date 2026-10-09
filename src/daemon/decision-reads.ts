@@ -1,7 +1,7 @@
 // Concern: the decision histories the decisions step reads, kept across cycles (GY-1142).
 import type { Work } from '../model.js';
 import { approvalApplyGraceMs, situationLabel, stalledApproval, supersededSituation, type DecisionSituation } from '../model/approval.js';
-import { routableScopeRequest } from '../model/scope.js';
+import { routedScopeRequest } from '../model/scope.js';
 import type { ApprovalWatch, DaemonAction, DaemonState } from './state.js';
 import type { FaultKind } from '../model/fault-classes.js';
 import { planeUnavailableText } from '../model/refusal.js';
@@ -142,7 +142,7 @@ export async function decisionReads(effects: DaemonEffects, held: HeldDecisions,
   } });
   // The waiting scope requests' and open watches' histories are read ahead, a bounded few at a time, while the step works.
   const keys = new Set(watched.filter(watch => !watch.settledAt).map(watch => watch.work));
-  const scoped = open.filter(item => item.stage !== 'done' && !!routableScopeRequest(item, clock));
+  const scoped = open.filter(item => item.stage !== 'done' && !!routedScopeRequest(item, clock));
   const watching = open.filter(item => keys.has(item.key) && !scoped.includes(item));
   // Last, the unreleased backlog the stale-release step reads (GY-1315), so a cold backlog is read while the step works, not when it reaches them.
   const backlog = staleReleaseCandidates(open).filter(item => !scoped.includes(item) && !watching.includes(item));

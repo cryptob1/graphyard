@@ -1,6 +1,6 @@
 // Concern: routine decisions — standing verdicts, decision reasons and the approver step.
 import { type Work, type AgentReview, reviewProviderOf, RefusedResponse } from '../model.js';
-import { routableScopeRequest, scopeDecisionBinding, scopeDecisionReason, scopeRefusalBlocker, unplannedPaths } from '../model/scope.js';
+import { routedScopeRequest, scopeDecisionBinding, scopeDecisionReason, scopeRefusalBlocker, unplannedPaths } from '../model/scope.js';
 import { widenedPlannedFiles } from '../model/scope-collapse.js';
 import { itemBlockerClass, maxAutomaticClears, uncoveredBlockerPaths } from '../model/blocker-class.js';
 import { baseRefreshConflict, checkRerunHeld, ciAppIdsOf, requiredCheck, requiredCheckRun, requiredChecksOf, threadsAwaitReview, botThread, openThreads, pendingBaseRefresh, type ReviewThread, describeThread } from '../merge-queue.js';
@@ -197,7 +197,8 @@ export const situatedInput = (decision: Pick<RoutineDecision, 'action' | 'bindin
  */
 export function scopeRoutineDecision(work: Work, now: number, judged: boolean): RoutineDecision | null {
   if (!judged || work.stage === 'done') return null;
-  const routable = routableScopeRequest(work, now);
+  // GY-1568: an ask carried past its attempt's end stays the approver's; its binding is unchanged, so the decision stands.
+  const routable = routedScopeRequest(work, now);
   if (!routable) return null;
   const { request, paths, plannedFiles, collapsed } = routable;
   let broad: string | null = null;

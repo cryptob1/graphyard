@@ -6,11 +6,12 @@ import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { Store } from '../src/store.js';
 import { decisionInput } from '../src/master.js';
-import { approverJudgeBoundMs, approverSettleMs } from '../src/daemon/decisions.js';
+import { approverJudgeBoundMs, approverSettleMs, scopeRoutineDecision } from '../src/daemon/decisions.js';
 import { awaitScopeOutcome } from '../src/cli/session-commands.js';
 // A namespace import, so a tree without the change still loads and the case fails on what it exercises.
 import * as sessionCommands from '../src/cli/session-commands.js';
-import { scopeBlockedBudgetMs, scopeRequestOutcome } from '../src/model/scope.js';
+import { scopeBlockedBudgetMs, scopeDecisionBinding, scopeRequestOutcome } from '../src/model/scope.js';
+import { scopeAskCommand } from '../src/model/scope-provenance.js';
 import type { Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -146,4 +147,45 @@ test('integration:scope-request-survives-epoch-end — a request whose attempt e
   const [unblockClose] = (await store.pool.query(`SELECT payload FROM events WHERE work_id=$1 AND kind='unblock' ORDER BY seq DESC LIMIT 1`, [unblocked.id])).rows;
   assert.equal(unblockClose.payload.details.closedScopeRequest?.by, 'unblock', 'the ledger records the closed carried ask');
   assert.equal((await claim(unblocked.id)).scopeRequest ?? null, null, 'the next attempt inherits nothing');
+});
+
+// GY-1568: GY-1520's worker asked for a file, the rule refused, the loop routed the ask to the
+// approver — and the worker submitted 25 seconds later. The ended attempt carried the ask, but the
+// loop read only live asks, so it withdrew the routed decision as one the item had moved past, and
+// a master widened by hand nine minutes later: a scope-widening intervention. The carried ask now
+// stays the approver's — the same decision under the same binding — and the hand widening that
+// would pre-empt it is refused while the approver holds it.
+test('integration:carried-scope-ask-stays-routed — an ask whose attempt ends right after asking keeps its routed decision, and no hand widening pre-empts it', async () => {
+  let work = await ok(master.token, 'POST', 'work', { title: 'Ask then submit', plannedFiles: [layout], criteria: [{ id: 'AC-1', text: 'The widget layout renders', proofs: ['unit:layout'] }], reason: 'Scope carry fixture' }) as Work;
+  work = await ok(master.token, 'POST', `work/${work.id}/ready`, { expectedRevision: work.revision, reason: 'Ready for the attempt' }) as Work;
+  work = await claim(work.id);
+  await ok(token(implementer), 'POST', `work/${work.id}/scope`, { epoch: work.epoch, paths: [daemon], reason: 'AC-1 needs the cycle module' });
+  work = await ok(token(coordinator), 'POST', `work/${work.id}/autoscope`, { epoch: work.epoch }) as Work;
+  const asked = work.scopeRequest!;
+  const live = scopeRoutineDecision(work, Date.now(), true)!;
+  assert.equal(live.binding, scopeDecisionBinding(asked), 'the loop routes the live ask');
+  const decision = await ok(master.token, 'POST', `work/${work.id}/decide`, { action: 'requirements', input: decisionInput('requirements', work, live.input), reason: live.reason });
+
+  // The attempt ends seconds later, before any approver judged the ask.
+  await engine.execute(implementer, 'release', work.id, { epoch: work.epoch }, randomUUID());
+  let item = await reload(work.id);
+  assert.equal(item.scopeRequest, null);
+  assert.equal(item.carriedScopeRequest?.at, asked.at);
+  const carried = scopeRoutineDecision(item, Date.now(), true);
+  assert.ok(carried, 'the carried ask is still the approver\'s: the loop still needs its decision, so it is not withdrawn');
+  assert.deepEqual([carried!.binding, carried!.input], [live.binding, live.input], 'the same decision, under the same binding and input');
+  assert.equal(scopeAskCommand(item, Date.now(), [{ id: decision.id, ended: false }]), `graphyard master decisions ${item.key}`, 'the board names the pending decision, not master scope');
+
+  // A master's hand widening of the carried ask is refused while the approver holds it.
+  const hand = await call(master.token, 'POST', `work/${work.id}/requirements`, { expectedPolicyRevision: item.policyRevision, criteria: item.criteria, dependencies: item.dependencies, plannedFiles: [layout, daemon], exclusiveResources: item.exclusiveResources ?? [], producerProofs: item.producerProofs ?? [], reason: 'Additive scope: the cycle module' });
+  assert.equal(hand.status, 409, JSON.stringify(hand.body));
+  assert.match(hand.body.error, /independent approver's to judge/);
+
+  // The approval lands with no attempt holding the item: the widening applies and answers the carried ask.
+  await ok(approver.token, 'POST', `work/${work.id}/approve`, { decision: decision.id, reason: 'Additive and required by AC-1' });
+  item = await reload(work.id);
+  assert.deepEqual(item.plannedFiles, [layout, daemon]);
+  assert.equal(item.carriedScopeRequest ?? null, null, 'the carried ask is answered');
+  assert.deepEqual([item.scopeDecision?.state, item.scopeDecision?.decidedBy, item.scopeDecision?.requestedAt], ['approved', approver.id, asked.at]);
+  assert.equal(scopeRoutineDecision(item, Date.now(), true), null, 'nothing is left to route');
 });
