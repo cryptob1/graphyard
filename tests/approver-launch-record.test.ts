@@ -330,8 +330,8 @@ test('unit:approver-stall-followup — stall checks date a session only by its o
       // AC-1: the loop adopts a same-named session in pane-new whose launch could not write its record; the latest record of the
       // name is an earlier launch's, in pane-old, past the bound. It dates nothing: the session is judged from when the loop saw it.
       await autonomy.saveApproverLaunch(root, { agentName: name, account: null, runtime: 'claude', session: 'registry-earlier', launchedAt: new Date(Date.now() - bound - 60_000).toISOString(), work: work.key, decision, pane: 'pane-old' });
-      const panes = new Set(['pane-new']), closed: string[] = [], launched: string[] = [];
-      const listed = (): HerdrAgent[] => [...panes].map(pane_id => ({ name, pane_id, agent: 'claude', agent_status: pane_id === 'pane-new' ? 'done' : 'working' }));
+      const panes = new Set(['pane-new']), closed: string[] = [], launched: string[] = [], done = new Set(['pane-new']);
+      const listed = (): HerdrAgent[] => [...panes].map(pane_id => ({ name, pane_id, agent: 'claude', agent_status: done.has(pane_id) ? 'done' : 'working' }));
       const state = emptyDaemonState(config);
       const loop = (at: number): DaemonEffects => ({
         agents: listed, credentials: async () => ({}), snapshot: async () => ({ work: [work], now: new Date(at).toISOString() }),
@@ -355,6 +355,19 @@ test('unit:approver-stall-followup — stall checks date a session only by its o
       await runCycle(config, state, loop(seenAt + bound + 60_000), () => seenAt + bound + 60_000);
       assert.deepEqual(closed, ['pane-new'], 'past the bound from the loop\'s own observation it is a stall, closed');
       assert.deepEqual(launched, ['pane-relaunched'], 'and replaced');
+      // The watch already exists when `master approver` replaces its pane and the replacement's record cannot be written: the watch is
+      // rebound to the new pane and dated from when the loop first saw it, never judged by the replaced launch's age.
+      const relaunchedAt = seenAt + bound + 60_000, replacedAt = relaunchedAt + bound + 60_000;
+      panes.clear(); panes.add('pane-replaced'); done.add('pane-replaced');
+      const rebound = await runCycle(config, state, loop(replacedAt), () => replacedAt);
+      assert.deepEqual(closed, ['pane-new'], `the already-watched replacement is not closed by the earlier launch's age: ${JSON.stringify(rebound.actions.map(action => action.detail))}`);
+      assert.equal(watch.pane, 'pane-replaced', 'the watch is rebound to the replacement\'s pane');
+      assert.equal(watch.launchedAt, new Date(replacedAt).toISOString(), 'and dated from when the loop first saw it');
+      assert.match(rebound.actions.find(action => action.detail.includes('which replaced the one the watch held'))?.detail ?? '', /no launch record names that pane, so it is dated from /);
+      await runCycle(config, state, loop(replacedAt + bound / 2), () => replacedAt + bound / 2);
+      assert.deepEqual(closed, ['pane-new'], 'still within the bound from the replacement the loop observed');
+      await runCycle(config, state, loop(replacedAt + bound + 60_000), () => replacedAt + bound + 60_000);
+      assert.deepEqual(closed, ['pane-new', 'pane-replaced'], 'past it the replacement is a stall, closed');
 
       // AC-2: the approver role allows one live session, held by the stalled session's launch. `master approver` closes the stalled
       // pane and ends that registry session before choosing the replacement, so the replacement is not refused for its slot.
@@ -368,6 +381,7 @@ test('unit:approver-stall-followup — stall checks date a session only by its o
         selectedAt: new Date(Date.now() - bound - 60_000).toISOString(), selectedBy: 'coordinator', reason: 'fixture', skipped: [], endedAt: null, endReason: null };
       registry = { ...registry, sessions: [stalled] };
       const order: string[] = [];
+      let endRefused = true;
       // A strict registry: no supersession, so only an explicit end frees the slot.
       const client: FleetClient = {
         document: async () => structuredClone(registry),
@@ -379,12 +393,18 @@ test('unit:approver-stall-followup — stall checks date a session only by its o
           registry.sessions.push(session);
           return { selected: true, reason: choice.reason, skipped: choice.skipped, session, account: choice.account, runtime: choice.runtime, model: choice.model, policy: choice.policy, revision: registry.revision };
         },
-        end: async (id, reason) => { order.push(`end ${id}`); const session = registry.sessions.find(entry => entry.id === id); if (session && !session.endedAt) Object.assign(session, { endedAt: new Date().toISOString(), endReason: reason }); },
+        end: async (id, reason) => { order.push(`end ${id}`); if (endRefused) throw new Error('registry unavailable'); const session = registry.sessions.find(entry => entry.id === id); if (session && !session.endedAt) Object.assign(session, { endedAt: new Date().toISOString(), endReason: reason }); },
       };
       panes.clear(); panes.add('pane-stalled'); closed.length = 0;
       await autonomy.saveApproverLaunch(root, { agentName: name, account: 'claude-a', runtime: 'claude', session: 'registry-stalled', launchedAt: stalled.selectedAt, work: work.key, decision, pane: 'pane-stalled' });
       const herdr = stubHerdr(panes, closed);
       const stalledAgent: HerdrAgent = { name, pane_id: 'pane-stalled', agent: 'claude', agent_status: 'done' };
+      // An end the registry refuses leaves the slot held: the launch is refused naming the session, and no replacement is chosen.
+      await assert.rejects(autonomy.launchApprover(root, work, decision, undefined, { agents: [stalledAgent], available: true }, herdr, { registry: client, quota: false, cacheMs: 0 }, async () => ({}), { screenPauseMs: 0 }),
+        (error: Error & { registrySession?: string }) => error.registrySession === 'registry-stalled' && /registry session registry-stalled could not be ended, so it still holds its slot and no replacement was chosen: registry unavailable/.test(error.message));
+      assert.deepEqual(closed, ['pane-stalled'], 'the stalled pane is closed');
+      assert.deepEqual(order, ['end registry-stalled'], 'and no replacement is selected against the slot it still holds');
+      endRefused = false; order.length = 0; closed.length = 0; panes.add('pane-stalled');
       const replaced = await autonomy.launchApprover(root, work, decision, undefined, { agents: [stalledAgent], available: true }, herdr, { registry: client, quota: false, cacheMs: 0 }, async () => ({}), { screenPauseMs: 0 });
       assert.deepEqual(closed, ['pane-stalled'], 'the stalled pane is closed');
       assert.equal(replaced.pane, 'pane-new', 'and the replacement launched');

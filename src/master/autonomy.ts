@@ -18,7 +18,7 @@ import { assertOutsideWorktrees, atomicPrivateText, atomicPrivateWrite, external
 import { type AccountSkip, accountLaunch, agentLaunchPlan, describeObservedExhaustion, type EnvironmentProbe, heldAwareProbe, inspectProfileAccounts, type LaunchRole, NoHealthyAccountError, observedExhaustions, ownLoginHold, type ProfileAccountHealth, recordEnvironmentLog, selectAccount, setupAgentEnvironments } from './environments.js';
 import { closeFailedLaunch, launchStartMs, readSessionScreen, type RequestDelivery, startAgentSession, withLaunchClose, withLaunchedRuntime } from './launch.js';
 import { closeHerdrPane, createdHerdrTab, type HerdrAgent, herdrJson } from './herdr.js';
-import { boundLaunch, judgeApproverStall, stallScreenLines, withoutPane } from './approver-stall.js';
+import { boundLaunch, freeStalledSlot, judgeApproverStall, stallScreenLines, withoutPane } from './approver-stall.js';
 import { allocateManagedCheckout, failureText, settleCheckout } from './worktrees.js';
 import { herdrAttach } from './dispatch.js';
 import type { SessionHandleInput } from '../model/sessions.js';
@@ -340,9 +340,9 @@ async function closeUnstartedApprover(root: string, config: MasterConfig, agent:
   const own = boundLaunch(await readApproverLaunches(root), agent), verdict = await judgeApproverStall(agent, own?.launchedAt, launchStartMs(config), Date.now(), () => readSessionScreen(agent.pane_id!, run, stallScreenLines), decision, pauseMs);
   if (!verdict.close) throw new Error(`Approver session ${agent.name} is already visible in Herdr; let it finish or close it first (${verdict.why})`);
   await closeHerdrPane(agent.pane_id!, run);
-  const replaced = `closed approver session ${agent.name} (pane ${agent.pane_id}): ${verdict.why}`, fleet = own?.session ? await readFleet(config, 'approver', probe).catch(() => null) : null;
-  // GY-1604: its registry session is ended before the replacement is chosen, freeing the slot; one not ended now the loop's reconciliation ends.
-  if (fleet?.managed) await fleet.client.end(own!.session!, `${replaced}, to launch its replacement`.slice(0, 500)).catch(() => {});
+  const replaced = `closed approver session ${agent.name} (pane ${agent.pane_id}): ${verdict.why}`;
+  // GY-1604: its registry session is ended before the replacement is chosen, freeing the slot; one that cannot be ended refuses the launch.
+  if (own?.session) await freeStalledSlot(own.session, replaced, async (session, reason) => { const fleet = await readFleet(config, 'approver', probe); if (fleet.managed) await fleet.client.end(session, reason); });
   return { replaced, pane: agent.pane_id! };
 }
 /**
