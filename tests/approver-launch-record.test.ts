@@ -5,7 +5,12 @@ import { existsSync } from 'node:fs';
 import { chmod, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { approverSessionName, atomicPrivateWrite, loadMasterConfig, runAutonomyCommand, setupMaster, type MasterConfig } from '../src/master.js';
+import { approverSessionName, atomicPrivateWrite, loadMasterConfig, runAutonomyCommand, setupMaster, type HerdrAgent, type MasterConfig } from '../src/master.js';
+import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
+import { approvalWatchSchema } from '../src/daemon/state.js';
+import { handWatchPrefix } from '../src/daemon/decisions.js';
+import { terminalDecisions } from '../src/cli/decision-report.js';
+import { launchStartMs } from '../src/master/launch.js';
 // A namespace import, so the base exercise (where approverLaunchesFile does not exist) loads the file and fails the cases.
 import * as autonomy from '../src/master/autonomy.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
@@ -153,4 +158,84 @@ test('unit:approver-launch-record-writable — the launch record is written unde
   // Checkout records past a day are aged out on read, since that file is rewritten only on failover.
   await writeFile(checkoutFile, JSON.stringify([{ ...launch('gy-approver-old'), launchedAt: new Date(Date.now() - 2 * 86_400_000).toISOString() }]));
   assert.equal((await autonomy.readApproverLaunches(root, environment)).some(entry => entry.agentName === 'gy-approver-old'), false);
+});
+
+// GY-1598, 2026-10-09 19:34Z: the loop launched gy-approver-gy-1594-68c808bd, whose pane sat at an
+// empty Claude prompt with its request never run. master status called it a stall and named
+// `master approver GY-1594 DECISION`, which refused because the tab was still visible in Herdr; the
+// decision waited 11 minutes for the master to close the tab by hand. A same-named approver that is
+// not working past its start bound is now closed, with why, and the launch goes on — from the loop
+// and from the command master status names alike. One proof: unit:approver-idle-stall-relaunch.
+
+/** A Herdr stub holding `panes`: a close removes the pane from every later list, and the launch creates pane-new. */
+function stubHerdr(panes: Set<string>, closed: string[]) {
+  return (_command: string, args: string[]) => {
+    if (args[0] === 'tab' && args[1] === 'create') { panes.add('pane-new'); return JSON.stringify({ result: { root_pane: { pane_id: 'pane-new', tab_id: 'tab-new' } } }); }
+    if (args[0] === 'pane' && args[1] === 'close') { closed.push(args[2]!); panes.delete(args[2]!); return JSON.stringify({ result: {} }); }
+    if (args[0] === 'pane' && args[1] === 'list') return JSON.stringify({ result: { panes: [...panes].map(pane_id => ({ pane_id })) } });
+    return startedAtOnce(args) ?? JSON.stringify({ result: {} });
+  };
+}
+
+test('unit:approver-idle-stall-relaunch — an approver idle past its start bound with its request never run is closed and relaunched by the loop and by master approver, and a working one still refuses', async () => {
+  const { root, config, cleanup } = await boundCheckout('idle-approver');
+  const dataHome = await temporaryDirectory('idle-approver-data');
+  try {
+    await withDataHome(dataHome, async () => {
+      const work = item(), name = approverSessionName(work, decision);
+      const bound = launchStartMs(config);
+      const recordLaunch = (ageMs: number) => autonomy.saveApproverLaunch(root, { agentName: name, account: null, runtime: 'claude', session: null, launchedAt: new Date(Date.now() - ageMs).toISOString(), work: work.key, decision });
+      const statusFor = (status: string): HerdrAgent => ({ name, pane_id: 'pane-old', agent: 'claude', agent_status: status });
+
+      // AC-1: the loop. Its watch of the decision holds no live session (its last launch did not
+      // stand), while the earlier session's tab sits idle in Herdr past its start bound.
+      await recordLaunch(bound + 60_000);
+      const panes = new Set(['pane-old']), closed: string[] = [];
+      const herdr = stubHerdr(panes, closed);
+      const listed = (): HerdrAgent[] => [...panes].map(pane => pane === 'pane-old' ? statusFor('done') : { name, pane_id: pane, agent: 'claude', agent_status: 'working' });
+      const state = emptyDaemonState(config);
+      state.approvals[`${handWatchPrefix}${decision}`] = approvalWatchSchema.parse({ work: work.key, action: 'requirements', decision, requestedAt: new Date(Date.now() - 600_000).toISOString(), launches: 1 });
+      const loop: DaemonEffects = {
+        agents: listed, credentials: async () => ({}), snapshot: async () => ({ work: [work], now: new Date().toISOString() }),
+        closeSession: pane => { closed.push(pane); panes.delete(pane); }, dispatch: async () => {}, requestProof: () => {}, requestSmoke: () => {}, persist: async () => {},
+        observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date().toISOString(), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {},
+        decisions: async () => ({ decisions: [{ id: decision, action: 'requirements', state: 'requested', input: {}, approvedBy: null, requestedAt: new Date(Date.now() - 600_000).toISOString() }] }),
+        approverLaunches: () => autonomy.readApproverLaunches(root),
+        // The loop's approver effect: the real launcher against what Herdr lists now.
+        approver: async (subject, id) => { const launched = await autonomy.launchApprover(root, subject, id, 'claude', { agents: listed(), available: true }, herdr, {}, async () => ({})); return { agentName: launched.agentName, pane: launched.pane, runtime: launched.runtime, session: launched.session, ...(launched.replaced ? { replaced: launched.replaced } : {}) }; },
+      };
+      const result = await runCycle(config, state, loop, () => Date.now());
+      assert.deepEqual(closed, ['pane-old'], 'the idle session that never ran its request is closed within one cycle');
+      assert.ok(panes.has('pane-new'), 'and a fresh approver is launched for the same decision');
+      const launch = result.actions.find(action => action.kind === 'decision' && action.state === 'done' && action.detail.includes('launched independent approver session'));
+      assert.ok(launch, `the relaunch is recorded: ${JSON.stringify(result.actions.map(action => action.detail))}`);
+      assert.match(launch.detail, new RegExp(`closed approver session ${name} \\(pane pane-old\\): done in Herdr \\d+s after its launch, past the ${bound / 1000}s start bound without running its request; launched independent approver session ${name}`), 'with why the old session was closed');
+      assert.equal(state.approvals[`${handWatchPrefix}${decision}`]?.agentName, name);
+
+      // AC-2: master status names the stall and the command that answers it, and that command
+      // succeeds in the state it describes: it closes the idle session of the same name first.
+      panes.clear(); panes.add('pane-old'); closed.length = 0;
+      await recordLaunch(bound + 60_000);
+      const report = await terminalDecisions(async () => ({ decisions: [{ id: decision, action: 'requirements', state: 'requested', requestedAt: new Date(Date.now() - 660_000).toISOString() }] }),
+        [{ id: work.id, key: work.key, stage: 'build' }], { approvals: [], runtime: { available: true, agents: [statusFor('done')] }, now: Date.now() });
+      const stall = report.attentionItems.find(entry => entry.text.includes(decision));
+      assert.match(stall?.text ?? '', new RegExp(`approver session ${name} sits idle in Herdr and recorded no outcome — a stall`));
+      assert.match(JSON.stringify(stall), new RegExp(`graphyard master approver ${work.key} ${decision} \\[AGENT_KIND\\] closes ${name} and puts it to a fresh approver`));
+      const command = (agents: HerdrAgent[]) => runAutonomyCommand(root, config, 'approver', [work.key, decision, 'claude'], {
+        coordinator: async () => ({ work: [work], now: new Date().toISOString() }), readSecret: async () => '', agents: () => agents, daemonLock: async () => null, runtime: herdr, mutate: async () => ({}),
+      }) as Promise<{ agentName: string; pane: string | null; replaced?: string }>;
+      const relaunched = await command([statusFor('done')]);
+      assert.deepEqual(closed, ['pane-old'], 'master approver closes the idle, never-started session');
+      assert.equal(relaunched.pane, 'pane-new');
+      assert.match(relaunched.replaced ?? '', /closed approver session .* without running its request/);
+
+      // It still refuses while that session is working, or while it is within its start bound.
+      for (const [status, ageMs, why] of [['working', bound + 60_000, /already visible in Herdr; let it finish or close it first \(it is working\)/], ['idle', 5_000, /already visible in Herdr; let it finish or close it first \(it is within its start bound\)/]] as const) {
+        panes.clear(); panes.add('pane-old'); closed.length = 0;
+        await recordLaunch(ageMs);
+        await assert.rejects(command([statusFor(status)]), why);
+        assert.deepEqual(closed, [], `a ${status} session is never closed under it`);
+      }
+    });
+  } finally { await cleanup(); await rm(dataHome, { recursive: true, force: true }); }
 });

@@ -9,7 +9,7 @@ import type { Closure } from '../model/closure.js';
 
 type DecisionRow = { id: string; action: string; state: string; input?: any; requestedAt: string; staleAt?: string; requestedBy?: string; outcome?: string | null; race?: unknown; refusal?: { approver: string; reason: string; at: string } | null };
 type ApprovalWatch = { work: string; decision: string; agentName: string | null; settledAt?: string | null; ended?: string[]; launches?: number; launchedAt?: string | null; exhaustedAt?: string | null };
-export interface UnansweredDecision { work: string; id: string; action: string; requestedAt: string; session: string; ageMs: number; age: string; ended?: string[]; inMotionUntil?: string }
+export interface UnansweredDecision { work: string; id: string; action: string; requestedAt: string; session: string; ageMs: number; age: string; ended?: string[]; inMotionUntil?: string; /** GY-1598: its tab is still in Herdr, idle. */ visible?: boolean }
 
 /**
  * GY-1337. How long after its approver's latest launch an unanswered decision the loop still
@@ -60,6 +60,7 @@ export function unansweredInMotionUntil(watch: ApprovalWatch | undefined, reques
  * launched for it — or, for one a master launched by hand, the name `master approver` gives it —
  * is gone from Herdr or reports `done`, and no outcome was ever recorded. That is a stall, not a
  * judgement: an approver that declines records `master refuse`, and its decision ends `refused`.
+ * A session still listed `done` keeps its tab (GY-1598): `master approver` and the loop close it past its start bound before launching the next.
  * Nothing is concluded while Herdr cannot be read. An item waiting for an approver account to
  * reset is not one: the loop launches no approver before then, and master status names that wait
  * once, as the approver capacity line, not as a stall per decision (GY-182).
@@ -77,7 +78,7 @@ export function unansweredDecisions(items: { key: string; decisions: DecisionRow
     // decision here, not only in the escalation detail. A decision the loop never watched has none.
     const inMotionUntil = unansweredInMotionUntil(watch, decision.requestedAt);
     return [{ work: item.key, id: decision.id, action: decision.action, requestedAt: decision.requestedAt, session, ageMs, age: elapsed(ageMs),
-      ...(watch?.ended?.length ? { ended: watch.ended } : {}), ...(inMotionUntil ? { inMotionUntil } : {}) }];
+      ...(watch?.ended?.length ? { ended: watch.ended } : {}), ...(inMotionUntil ? { inMotionUntil } : {}), ...(live ? { visible: true } : {}) }];
   }));
 }
 
@@ -139,8 +140,8 @@ export async function terminalDecisions(masterApi: (path: string) => Promise<any
   }
   const unanswered = unansweredDecisions(histories, sessions.approvals, sessions.runtime, sessions.now);
   for (const entry of unanswered)
-    attentionItems.push({ subject: entry.work, text: `Decision ${entry.id} (${entry.action}) is unanswered after ${entry.age}: approver session ${entry.session} is not running and recorded no outcome${entry.ended?.length ? ` (${entry.ended.join('; ')})` : ''} — a stall, not a refusal`,
-      ...agentOwner('master', `graphyard master approver ${entry.work} ${entry.id} [AGENT_KIND] puts it to a fresh approver`, 'approver'), ...(entry.inMotionUntil ? { inMotionUntil: entry.inMotionUntil } : {}) });
+    attentionItems.push({ subject: entry.work, text: `Decision ${entry.id} (${entry.action}) is unanswered after ${entry.age}: approver session ${entry.session} ${entry.visible ? 'sits idle in Herdr' : 'is not running'} and recorded no outcome${entry.ended?.length ? ` (${entry.ended.join('; ')})` : ''} — a stall, not a refusal`,
+      ...agentOwner('master', `graphyard master approver ${entry.work} ${entry.id} [AGENT_KIND] ${entry.visible ? `closes ${entry.session} and ` : ''}puts it to a fresh approver`, 'approver'), ...(entry.inMotionUntil ? { inMotionUntil: entry.inMotionUntil } : {}) });
   return { listed, attentionItems, unanswered, refused };
 }
 

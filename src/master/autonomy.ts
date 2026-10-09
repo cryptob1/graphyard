@@ -17,7 +17,7 @@ import { type AgentEnvironment, agentKindSchema, type EnvironmentKind, environme
 import { assertOutsideWorktrees, atomicPrivateText, atomicPrivateWrite, externalCredential, loadMasterConfig, loadStoredMasterConfig, privateFile, readCredentialFile } from './config.js';
 import { type AccountSkip, accountLaunch, agentLaunchPlan, describeObservedExhaustion, type EnvironmentProbe, heldAwareProbe, inspectProfileAccounts, type LaunchRole, NoHealthyAccountError, observedExhaustions, ownLoginHold, type ProfileAccountHealth, recordEnvironmentLog, selectAccount, setupAgentEnvironments } from './environments.js';
 import { closeFailedLaunch, launchStartMs, type RequestDelivery, startAgentSession, withLaunchClose, withLaunchedRuntime } from './launch.js';
-import { createdHerdrTab, type HerdrAgent, herdrJson } from './herdr.js';
+import { closeHerdrPane, createdHerdrTab, type HerdrAgent, herdrJson } from './herdr.js';
 import { allocateManagedCheckout, failureText, settleCheckout } from './worktrees.js';
 import { herdrAttach } from './dispatch.js';
 import type { SessionHandleInput } from '../model/sessions.js';
@@ -262,8 +262,7 @@ export async function selectApproverAccount(config: MasterConfig, work: string |
   }
   const spent = new NoHealthyAccountError(`No healthy agent account for the approver: ${skipped.map(entry => entry.reason).join('; ')}`, skipped);
   if (spent.capacityExhausted) throw spent;
-  // A named account that is logged out or unconfigured is a fault to fix, not a wait: the approver
-  // runs on the runtime's own login, as it did before it had accounts, unless that one is spent too.
+  // A named account logged out or unconfigured is a fault, not a wait: the approver runs on the runtime's own login unless that is spent too.
   await selectAccount(config, 'approver', { name: approverProfile, kind }, { ...probe, work: work ?? undefined });
   return { fleet: null, account: null, profile: approverProfile, skipped };
 }
@@ -286,8 +285,7 @@ export async function heldRuntimeLogin(config: MasterConfig, role: LaunchRole, p
  * (`registrySession`), so the caller keeps the only id that can free the role's slot later.
  */
 async function abandonLaunch(error: unknown, pane: string | undefined, tabId: string | undefined, selected: { release: (reason: string) => Promise<boolean>; account: FleetLaunchAccount } | null, reason: string, run?: ChildRun) {
-  // Closed through the loop's own close path before the session is given back, and the failure
-  // records it (GY-413); a close Herdr could not confirm is recorded too.
+  // Closed through the loop's own close path before the session is given back, and the failure records it, confirmed or not (GY-413).
   let failure = error instanceof Error ? error : new Error(failureText(error));
   if (pane || tabId) {
     try { failure = withLaunchClose(failure, await closeFailedLaunch(pane, tabId, run)); }
@@ -333,6 +331,13 @@ async function startHeadlessApprover(root: string, config: MasterConfig, work: W
   return { ...started, settled: started.settled.finally(() => settleCheckout(root, checkout.directory)) };
 }
 export type SessionRegistrar = (handle: SessionHandleInput) => Promise<unknown>;
+/** GY-1598. A same-named approver in Herdr refuses the launch only while working or within its start bound; past it, idle, its request never ran: closed, with why. */
+async function closeUnstartedApprover(root: string, config: MasterConfig, agent: HerdrAgent, run?: ChildRun, now = Date.now()) {
+  const since = now - Date.parse((await readApproverLaunch(root, agent.name!))?.launchedAt ?? ''), bound = launchStartMs(config), status = agent.agent_status ?? 'unknown';
+  if (status === 'working' || since < bound || !agent.pane_id) throw new Error(`Approver session ${agent.name} is already visible in Herdr; let it finish or close it first${status === 'working' ? ' (it is working)' : since < bound ? ' (it is within its start bound)' : ''}`);
+  await closeHerdrPane(agent.pane_id, run);
+  return `closed approver session ${agent.name} (pane ${agent.pane_id}): ${status} in Herdr ${Number.isFinite(since) ? `${Math.round(since / 1000)}s after its launch, ` : 'with no launch record, '}past the ${bound / 1000}s start bound without running its request`;
+}
 /**
  * `herdr` is this host's Herdr inventory and whether it could be read at all (GY-205): the role's
  * registry sessions are judged live or gone against it, and an inventory that could not be read
@@ -347,7 +352,7 @@ export async function launchApprover(root: string, work: Work, decision: string,
   const attest = await carriesAttestation(config, work, decision, headless.fetcher ?? fetch);
   const retry = `graphyard master approver ${work.key} ${decision} [AGENT_KIND]`;
   const name = nameForLaunch(retry, () => approverSessionName(work, decision));
-  if (agents.some(agent => agent.name === name)) throw new Error(`Approver session ${name} is already visible in Herdr; let it finish or close it first`);
+  const visible = agents.find(agent => agent.name === name), replaced = visible ? await closeUnstartedApprover(root, config, visible, run) : null;
   // GY-169: with the approver's runtime set to `pi` (and no AGENT_KIND override) the approver is a
   // headless run under the same session name. Its verdict comes back as a validated
   // graphyard_decide call and is applied here as the approver identity, on the route `master
@@ -360,19 +365,18 @@ export async function launchApprover(root: string, work: Work, decision: string,
     let started: Awaited<ReturnType<typeof startHeadlessApprover>>;
     try { started = await startHeadlessApprover(root, config, work, decision, attest, name, token, headless.runner ?? registryRunner(registry.account), headless); }
     catch (error) { await registry.release(`approver run for ${work.key} failed to start: ${failureText(error).slice(0, 300)}`); throw error; }
-    // The run is the session: the registry's slot is given back the moment it ends.
-    // Its outcome counts toward the account's runs without a result (GY-446).
+    // The run is the session: the registry's slot is given back the moment it ends; its outcome counts toward runs without a result (GY-446).
     const settled = started.settled.then(async run => { await registry.release(`the headless approver run for ${work.key} ended`, runOutcome(run)); return run; },
       async error => { await registry.release(`the headless approver run for ${work.key} ended`, 'no-result'); throw error; });
     settled.catch(() => { /* the run's own record carries its failure */ });
     return { agentName: name, work: work.key, decision, identity: config.approver!.id, pane: null as string | null, runtime: 'pi' as const, delivery: 'request' as RequestDelivery, focusChanged: false, session: registry.account.fleet.session,
       account: { environment: registry.account.name, kind: registry.account.kind, quota: registry.health?.quota ?? null, skipped: registry.skipped },
-      run: started.record, settled: settled as Promise<RunRecord> | undefined };
+      run: started.record, settled: settled as Promise<RunRecord> | undefined, ...(replaced ? { replaced } : {}) };
   }
   if (!registry && !explicitKind && narrowRoleRuntime(config.run, 'approver') === 'pi') {
     const started = await startHeadlessApprover(root, config, work, decision, attest, name, token, headless.runner ?? narrowRunner(config.run.pi), headless);
     return { agentName: name, work: work.key, decision, identity: config.approver!.id, pane: null as string | null, runtime: 'pi' as const, delivery: 'request' as RequestDelivery, focusChanged: false, session: null, account: null,
-      run: started.record, settled: started.settled as Promise<RunRecord> | undefined };
+      run: started.record, settled: started.settled as Promise<RunRecord> | undefined, ...(replaced ? { replaced } : {}) };
   }
   // The approver's runtime and account come from the registry's approver role. An explicit
   // AGENT_KIND is the operator's override; an installation whose registry has no approver role
@@ -385,8 +389,7 @@ export async function launchApprover(root: string, work: Work, decision: string,
     : registry ? { fleet: registry, account: registry.account, profile: approverProfile, skipped: registry.skipped } satisfies ApproverSelection
     : await selectApproverAccount(config, work.key, config.approver!.id, { runtime: herdr, ...probe });
   const selected = chosen?.fleet ?? null;
-  // Nothing here names a runtime: the role's account decides, then the operator's own argument,
-  // then a runtime this installation already configured for another session.
+  // Nothing here names a runtime: the role's account decides, then the operator's argument, then a runtime configured for another session.
   const kind = chosen?.account?.kind ?? explicitKind ?? approverRuntime(config);
   // A launch refused for its runtime gives the chosen session back at once (GY-184).
   const plan = () => {
@@ -405,8 +408,7 @@ export async function launchApprover(root: string, work: Work, decision: string,
   try {
     checkout = await (await import('../reviewer.js')).coordinationCheckout(root, config, work.key, work.candidate?.sha, headless.filesystem); const created = createdHerdrTab(await herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', checkout.directory, '--label', `Approver · ${work.key}`, '--env', `GRAPHYARD_URL=${config.url}`, '--env', `GRAPHYARD_REPOSITORY_ROOT=${root}`, '--env', `GRAPHYARD_TOKEN_FILE=${config.approver!.credentialFile}`, '--env', 'GRAPHYARD_APPROVER=1', '--env', `GRAPHYARD_HOST_ID=${config.hostId}`, ...Object.entries(launch.environment).flatMap(([key, value]) => ['--env', `${key}=${value}`]), '--no-focus'], run));
     pane = created.pane; tabId = created.tab;
-    // Registered with its pane before its runtime starts (GY-172 AC-2), so the session report
-    // observes this approver like every other session and closes it once it is gone.
+    // Registered with its pane before its runtime starts (GY-172 AC-2): the session report observes it and closes it once it is gone.
     ({ delivery } = await registeredLaunch(register, { id: approverSessionId(decision), kind: 'coordination', role: 'approver', principal: config.approver!.id, runtime: kind, host: config.hostId,
       agentName: name, pane: created.pane, attach: herdrAttach(created.pane, config.herdrWorkspace), ...(config.herdrWorkspace ? { workspace: config.herdrWorkspace } : {}),
       subject: `${work.key}: judge decision ${decision}`, state: 'running' }, () => startAgentSession(name, kind, created.pane, launch.args, prompt, run, { directory: checkout!.directory, cwd: checkout!.directory, retry, contract: launch.contract, environment: launch.environment, timeoutMs: launchStartMs(config) }), () => undefined));
@@ -414,8 +416,7 @@ export async function launchApprover(root: string, work: Work, decision: string,
     if (checkout) await settleCheckout(root, checkout.directory); throw await abandonLaunch(error, pane, tabId, selected, `approver launch for ${work.key} failed: ${failureText(error).slice(0, 300)}`, run);
   }
   const spentOn = selected?.account.name ?? chosen?.account?.name ?? null;
-  // The registry session is kept with the launch: the loop ends it once the decision is judged, or
-  // the moment the session is spent.
+  // The registry session is kept with the launch: the loop ends it once the decision is judged, or the moment the session is spent.
   const session = selected?.account.fleet.session ?? null;
   // The record names the spent account, registry slot, item and decision (GY-403), so the loop adopts and closes the session.
   // Kept off the checkout (GY-1339): an unwritable location leaves it unrecorded and the started runtime judging; other failures close it.
@@ -423,7 +424,7 @@ export async function launchApprover(root: string, work: Work, decision: string,
   try { record = await saveApproverLaunch(root, { agentName: name, account: spentOn, runtime: kind, session, launchedAt: new Date().toISOString(), work: work.key, decision, checkout: checkout.directory }); }
   catch (error) { const failure = await abandonLaunch(error, pane, tabId, selected, `approver launch record for ${work.key} could not be written: ${failureText(error).slice(0, 300)}`, run); await settleCheckout(root, checkout.directory); throw failure; }
   return { agentName: name, work: work.key, decision, identity: config.approver!.id, pane: pane! as string | null, delivery, focusChanged: false, runtime: kind as string, session,
-    ...(record.unrecorded ? { unrecorded: record.unrecorded } : {}),
+    ...(record.unrecorded ? { unrecorded: record.unrecorded } : {}), ...(replaced ? { replaced } : {}),
     account: selected ? { environment: selected.account.name, kind, reason: selected.selection.reason, skipped: selected.skipped }
       : chosen?.account ? { environment: chosen.account.name, kind, reason: `the first healthy account of profile ${chosen.profile}`, skipped: chosen.skipped } : null,
     run: null as RunRecord | null, settled: undefined as Promise<RunRecord> | undefined };
@@ -532,8 +533,7 @@ export async function saveEscalationSession(root: string, work: string, trigger:
   const current = (entry: EscalationSession) => now - Date.parse(entry.waiting ? entry.waiting.retryAt : entry.launchedAt) < escalationSessionMs;
   const kept = (await readEscalationSessions(root)).filter(entry => !(entry.work === work && entry.trigger === trigger) && current(entry));
   const file = await escalationSessionsPath(root); await mkdir(dirname(file), { recursive: true, mode: 0o700 });
-  // The count bounds running and finished records only: a waiting one is the loop's only way to
-  // launch its escalation again, so it stays until the time filter above lets it go.
+  // The count bounds running and finished records only: a waiting one is how the loop launches its escalation again, kept until the time filter drops it.
   const all = [...kept, ...(session ? [session] : [])], launched = all.filter(entry => !entry.waiting);
   const evicted = new Set(launched.slice(0, Math.max(0, launched.length - retainedEscalationSessions)));
   await atomicPrivateWrite(file, all.filter(entry => !evicted.has(entry)));

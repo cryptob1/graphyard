@@ -211,7 +211,7 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
     // A headless approver (GY-169) reports its run when it ends; the watch keeps it, and the next
     // cycle reads the verdict it applied back from the control plane like any other.
     launched?.settled?.then(async record => { if (watch.agentName === launched.agentName) { watch.run = record; await effects.persist(state); } }).catch(() => { /* the next cycle judges the decision itself */ });
-    return `launched independent approver session ${watch.agentName}${watch.account ? ` on ${watch.account}` : ''} (launch ${watch.launches} of ${maxApproverLaunches})`;
+    return `${launched?.replaced ? `${launched.replaced}; ` : ''}launched independent approver session ${watch.agentName}${watch.account ? ` on ${watch.account}` : ''} (launch ${watch.launches} of ${maxApproverLaunches})`;
   };
   /**
    * An approver that stopped on its provider's limit notice (GY-182) has judged nothing and never
