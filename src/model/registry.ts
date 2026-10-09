@@ -83,12 +83,8 @@ export const quotaObservationSchema = z.object({
    * probe could not read the login file just now and the identity last read stands.
    */
   identity: z.string().regex(/^[a-z][a-z0-9-]{0,39}:[0-9a-f]{16,64}$/, 'A provider identity is a runtime kind and a hex digest').nullable().optional(),
-  /**
-   * The exhaustion was reported from a session that ran out mid-work (GY-1581), not read by a probe:
-   * the registry keeps it until its reset whatever a later probe reads, since a probe cannot see it.
-   * `named` when the provider named that reset, which holds the whole plan; `guessed` when the host
-   * assumed one, which holds only the account it was spent on.
-   */
+  /** A session that ran out mid-work reported this exhaustion (GY-1581); it stands against later probes until its reset.
+   * `named`: the provider named the reset, holding the whole plan; `guessed`: the host assumed one, holding only this account. */
   session: z.enum(['named', 'guessed']).optional(),
 }).strict();
 export type QuotaObservation = z.infer<typeof quotaObservationSchema>;
