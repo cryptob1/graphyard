@@ -431,6 +431,46 @@ test('integration:throughput-escalation-answerable — an answered population st
   }
 });
 
+test('integration:throughput-escalation-answerable — a failed re-measure never erases the recorded escalated miss: the answered owner is still succeeded in the cycle that closes it, and further failed attempts leave the unverified release owned', async () => {
+  const { throughputEscalationKey } = await import('../src/daemon/cycle-delivery.js');
+  const { loopThroughputMeasurement, throughputMeasurementDirectory, throughputStatus } = await import('../src/throughput.js');
+  const { readThroughputLedger, throughputPursuit } = await import('../src/throughput-ledger.js');
+  const { standingThroughputStall } = await import('../src/daemon/throughput-effect.js');
+  const directory = await temporaryDirectory('throughput-escalation-failed-remeasure');
+  try {
+    const clock = { now: base + 3 * 24 * 60 * minute };
+    const owner = openOwner('GY-1471');
+    const work: Work[] = [...accumulated(staleRework(10, null)), owner];
+    const { master, state, effects, filed, closed } = await convergenceLoop(directory, work, clock);
+    await runCycle(master, state, effects, () => clock.now);
+    assert.equal(state.actions[throughputEscalationKey('GY-1471', 1)]?.state, 'done', 'the escalated miss is asked on the open owner');
+
+    // From here every re-measure fails: the plane cannot be read, so the ledger's newest attempt is a failure.
+    effects.measureThroughput = (items, observedSha) => loopThroughputMeasurement(directory, { work: items, observedSha, now: () => clock.now, origin: 'https://example.invalid',
+      status: async () => { throw new Error('the measurement could not parse the plane\'s status'); }, readItem: async id => work.find(item => item.id === id)!, contains: async () => true });
+    owner.policyRevision = 2;
+    clock.now += 61 * minute;
+    await runCycle(master, state, effects, () => clock.now);
+    const ledger = await readThroughputLedger(join(directory, throughputMeasurementDirectory));
+    assert.equal(ledger.entries.at(-1)?.outcome, 'failed', 'the due re-measure failed and was ledgered');
+    assert.equal(throughputPursuit(ledger, clock.now)?.blocker, 'measurement-failed');
+    assert.equal((await standingThroughputStall(directory, () => clock.now)(revision))?.cause, 'escalated-miss', 'the recorded miss still stands');
+    assert.deepEqual(closed, ['GY-1471'], 'the answer closes the owner');
+    assert.equal(filed.length, 1, 'the closing cycle files its successor although the re-measure failed');
+    const successor = openThroughputOwner(work)!;
+    assert.equal(successor.key, filed[0]!.key);
+
+    for (let cycle = 0; cycle < 3; cycle++) { clock.now += 61 * minute; await runCycle(master, state, effects, () => clock.now); }
+    assert.equal((await readThroughputLedger(join(directory, throughputMeasurementDirectory))).entries.filter(entry => entry.outcome === 'failed').length >= 2, true);
+    assert.equal(openThroughputOwner(work)?.key, successor.key, 'further failures leave the release owned by the successor');
+    assert.equal(filed.length, 1, 'and file no second successor');
+    assert.equal(Object.keys(state.actions).filter(entry => entry.startsWith('escalation:throughput:')).length, 1, 'the answered decision is not raised again on this release');
+    const status = await throughputStatus(directory, { release: { version: '1', revision } }, work, clock.now);
+    assert.equal(status.owner.item, successor.key);
+    assert.equal(status.stall, null, 'answered on this release, it is not asked again');
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
 test('integration:throughput-owner-converges — after the fix the open owner reaches a closure path within one re-measure: a window whose only miss was GY-468\'s unrunnable superseded span verifies and the loop closes the owner, leaving no unowned unverified claim and no repeating escalation', async () => {
   const { recordThroughputMeasurement, throughputRemeasureMs, throughputStatus, readThroughputMeasurement } = await import('../src/throughput.js');
   const directory = await temporaryDirectory('throughput-owner-converges');

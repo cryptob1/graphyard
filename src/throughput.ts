@@ -1,7 +1,7 @@
 import { mkdir, readdir, readFile, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { agentOwner, humanOwner, type AttentionItem } from './master.js';
-import { appendThroughputLedger, failedEntry, readThroughputLedger, recordedEntry, throughputEscalationMs, throughputPursuit, type ThroughputPursuit } from './throughput-ledger.js';
+import { appendThroughputLedger, failedEntry, readThroughputLedger, recordedEntry, reportBlocker, throughputEscalationMs, throughputPursuit, type ThroughputPursuit } from './throughput-ledger.js';
 import { actionIdleMs, actionRetryDelay, type ActionRecord, type ActionRow } from './model/actions.js';
 import { acceptedMergeAt, nearestRankPercentiles, pipelineSpeed, type Percentiles } from './pipeline-speed.js';
 import type { Work } from './model.js';
@@ -622,14 +622,17 @@ export function throughputStall(report: ThroughputReport, owner: string | null =
 /**
  * The needs-decision an accumulating population raises (GY-1587): the measured release contains the
  * claim, at least `throughputClaim.minimumDeliveries` deliveries are admitted, the budgets still
- * miss, and the ledger's pursuit is escalated on that miss (`claim-missed`, past
- * `throughputEscalationMs`). `throughputStall` asks only when nothing can accumulate, so without
- * this a population that accumulates while a budget misses had no answerable exit: the owner could
+ * miss (`claim-missed` on the recorded report), and the ledger's pursuit is escalated (past
+ * `throughputEscalationMs`), whatever its newest attempt's blocker: a failed attempt measures
+ * nothing. `throughputStall` asks only when nothing can accumulate, so without this a population that accumulates while a budget misses had no answerable exit: the owner could
  * close only on a verification that never came. Null otherwise — inside the bound the loop carries
  * the claim, and a report judged under a superseded rule is re-measured, not decided.
  */
-export function throughputEscalatedMiss(report: ThroughputReport, pursuit: Pick<ThroughputPursuit, 'escalated' | 'blocker'> | null, owner: string | null = null): ThroughputStall | null {
-  if (!pursuit?.escalated || pursuit.blocker !== 'claim-missed') return null;
+export function throughputEscalatedMiss(report: ThroughputReport, pursuit: Pick<ThroughputPursuit, 'escalated'> | null, owner: string | null = null): ThroughputStall | null {
+  // The miss is read from the recorded report, never from the ledger's newest attempt: a failed
+  // re-measure after it appends a `measurement-failed` attempt but leaves the recorded miss
+  // standing, and the decision with it, so the verification is never left without an owner.
+  if (!pursuit?.escalated || reportBlocker(report) !== 'claim-missed') return null;
   if (report.verdict === 'verified' || report.deployed?.containsClaim !== true || throughputRuleSuperseded(report)) return null;
   const admitted = report.population?.admitted ?? 0, delivered = report.population?.delivered ?? 0;
   if (admitted < throughputClaim.minimumDeliveries) return null;
@@ -643,7 +646,7 @@ export function throughputEscalatedMiss(report: ThroughputReport, pursuit: Pick<
 }
 
 /** The needs-decision standing on a recorded measurement, whichever way it arose: a stall, or an escalated miss over an accumulating population (GY-1587). */
-export const throughputDecision = (report: ThroughputReport, pursuit: Pick<ThroughputPursuit, 'escalated' | 'blocker'> | null, owner: string | null = null) =>
+export const throughputDecision = (report: ThroughputReport, pursuit: Pick<ThroughputPursuit, 'escalated'> | null, owner: string | null = null) =>
   throughputStall(report, owner) ?? throughputEscalatedMiss(report, pursuit, owner);
 
 /**
