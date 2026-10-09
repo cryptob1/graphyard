@@ -33,6 +33,28 @@ export const productionTagPrefix = 'rc-production/';
 export const soakTagPrefix = 'rc-soak/';
 /** The request id that makes filing a failed candidate's follow-up idempotent across retries. */
 export const followUpRequestId = (id: string) => `release-candidate-follow-up:${id}`;
+/**
+ * GY-1614. The identity a release environment files follow-ups and holds as: an operator agent
+ * holding only `intent:create` over this repository with wildcard work scope, which the create path
+ * admits (src/engine.ts `authorizeOperatorCommand`) and which can claim, complete, record evidence
+ * for and approve nothing. Its token is the uat environment's `GRAPHYARD_RELEASE_TOKEN`.
+ */
+export const releaseFilingIdentity = { id: 'graphyard-release-follow-up', capabilities: ['intent:create'] as const };
+/** The reason an operator-agent filing must carry; the create path refuses one without it. */
+export const filingReason = 'A failed release candidate files its follow-up';
+/**
+ * Pure: why the control plane would refuse to create work as `actor`, the principal a release
+ * environment's filing credential names (its `/api/status` actor), or null when it is admitted.
+ */
+export function followUpFilingRefusal(actor: { id?: string; role?: string; capabilities?: string[]; scope?: { repositories?: string[]; workItems?: string[] } } | null | undefined, repository: string | null | undefined) {
+  if (!actor?.role) return 'the filing credential names no principal';
+  if (actor.role === 'admin') return null;
+  if (actor.role !== 'operator-agent') return `${actor.id} has role ${actor.role}, which cannot create work (Operator permission required)`;
+  if (!actor.capabilities?.includes('intent:create')) return `operator agent ${actor.id} lacks intent:create`;
+  if (!repository || !actor.scope?.repositories?.includes(repository)) return `operator agent ${actor.id}'s scope does not include ${repository ?? 'the repository'}`;
+  if (!actor.scope?.workItems?.includes('*')) return `operator agent ${actor.id} lacks wildcard work scope, which creating work requires`;
+  return null;
+}
 
 export type CutTrigger = 'schedule' | 'manual';
 export interface CandidateItem { key: string; mergeSha: string; pr: number | null }
@@ -213,7 +235,7 @@ export function followUpItem(candidate: ReleaseCandidate, uat: UatRecord, except
     title: `Release candidate ${candidate.id} failed UAT suite ${first.name} at ${candidate.sha.slice(0, 12)}`,
     description: `Release candidate ${candidate.id} at ${candidate.sha} failed UAT. Failing suite${failing.length > 1 ? 's' : ''}: ${failing.map(suite => `${suite.name} — ${suite.detail}`).join('; ')}. `
       + `It carried ${carried}; those deliveries stay delivered and are not reworked. Fix forward on main; the next candidate cut after the fix carries it to UAT.`,
-    type: 'bug', priority: 1,
+    type: 'bug', priority: 1, reason: filingReason,
     criteria: [{ id: 'AC-1', text: `The ${first.name} suite that failed on candidate ${candidate.id} (${candidate.sha}) passes against the UAT deployment of a later candidate`, proofs: ['manual:release-candidate-uat-pass'] }],
     policy: { checks: ['test', 'typecheck'], review: true },
   };

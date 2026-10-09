@@ -254,7 +254,10 @@ export const installCommands = defineCommands([
         validation: definitions ? summarizeDefinitions(definitions) : null,
       });
       // The machine-local prerequisites docs/setup-from-zero.md depends on (GY-1352), each naming its step.
-      const checks = await setupFromZeroChecks({ root, status: live, failure, reachable: !!live || await planeAnswers(base), masterCredential: master?.file, environments: agentEnvironmentRoot() });
+      // GY-1614: the release filing credential, when this environment carries it, is judged as the plane would.
+      const releaseToken = process.env.GRAPHYARD_RELEASE_TOKEN;
+      const releaseFiling = releaseToken ? await planeRequest(base, releaseToken)('status').then(status => ({ status }), (error: any) => ({ status: null, failure: String(error.message) })) : undefined;
+      const checks = await setupFromZeroChecks({ root, status: live, failure, reachable: !!live || await planeAnswers(base), masterCredential: master?.file, environments: agentEnvironmentRoot(), releaseFiling });
       const setupFromZero = { ready: checks.every(check => check.status === 'pass'), lines: checks.map(setupLine) };
       // A ready checklist still deploys nothing: once every item is ready, capacity drift and
       // an undeployed merge are the next actions; until then the checklist's own gap comes first.

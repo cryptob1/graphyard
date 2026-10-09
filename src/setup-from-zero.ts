@@ -7,6 +7,7 @@ import { checkAgentEnvironment, discoverAgentEnvironments } from './master/envir
 import type { AgentEnvironment } from './master/profiles.js';
 import { sharedGitPaths, workerPaths } from './worker-sandbox.js';
 import { mergerNotRequired, statusControlPlaneMerger } from './model/setup-checklist.js';
+import { followUpFilingRefusal } from './release-candidate.js';
 
 /**
  * The prerequisites docs/setup-from-zero.md depends on that `graphyard doctor` can check from this
@@ -20,6 +21,7 @@ export const setupSteps = {
   protection: 'docs/setup-from-zero.md step 4 (branch protection)',
   environments: 'docs/setup-from-zero.md step 8 (agent environments)',
   sandbox: 'docs/setup-from-zero.md step 9 (worker sandbox)',
+  releaseFiling: 'docs/delivery.md#release-filing-credential',
 } as const;
 
 export interface SetupCheck { id: string; status: 'pass' | 'fail'; detail: string; step: string }
@@ -41,6 +43,8 @@ export interface SetupFromZeroInput {
   github?: ProtectionRun;
   /** Probes that the worker confinement can write PATHS; null when it can, else the reason. */
   sandbox?: (paths: string[]) => string | null;
+  /** GY-1614: the `/api/status` answer to GRAPHYARD_RELEASE_TOKEN when it is set, or the failure it met. */
+  releaseFiling?: { status: any | null; failure?: string };
 }
 
 const writable = async (path: string) => { try { await access(path, constants.W_OK); return true; } catch { return false; } };
@@ -172,6 +176,16 @@ function protectionCheck(status: any, github: ProtectionRun): SetupCheck {
   return check(!gaps.length, gaps.length ? gaps.join('; ') : `${baseBranch} requires Graphyard / merge and graphyard/landable from App ${githubAppId}`);
 }
 
+/**
+ * GY-1614: whether the control plane would admit the follow-up a failed release candidate files
+ * with GRAPHYARD_RELEASE_TOKEN, judged from the principal that token authenticates as.
+ */
+export function releaseFilingCheck(filing: NonNullable<SetupFromZeroInput['releaseFiling']>, repository: string | null): SetupCheck {
+  const refusal = filing.status ? followUpFilingRefusal(filing.status.actor, repository ?? filing.status.repository) : `the control plane did not accept the credential: ${filing.failure ?? 'no answer'}`;
+  return { id: 'release-filing', status: refusal ? 'fail' : 'pass', step: setupSteps.releaseFiling,
+    detail: refusal ? `GRAPHYARD_RELEASE_TOKEN would be refused filing a failed candidate's follow-up: ${refusal}` : `GRAPHYARD_RELEASE_TOKEN files follow-ups as ${filing.status.actor.id}` };
+}
+
 /** One printable line per check: `PASS id: detail`, or `FAIL id: detail (fix: step)`. */
 export const setupLine = (check: SetupCheck) => check.status === 'pass' ? `PASS ${check.id}: ${check.detail}` : `FAIL ${check.id}: ${check.detail} (fix: ${check.step})`;
 
@@ -199,5 +213,6 @@ export async function setupFromZeroChecks(input: SetupFromZeroInput): Promise<Se
   }
   lines.push(...await environmentChecks(input.environments));
   lines.push(await sandboxCheck(input.root, input.sandbox ?? bubblewrapProbe));
+  if (input.releaseFiling) lines.push(releaseFilingCheck(input.releaseFiling, status?.repository ?? null));
   return lines;
 }
