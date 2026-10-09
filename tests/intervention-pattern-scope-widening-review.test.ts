@@ -1,11 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { workerPrompt } from '../src/master.js';
 import { appliedReworkBrief, readReworkDecisions, ReworkDecisionsUnreadError, reworkBriefMax, reworkBriefSection, type ReworkDecisionRow } from '../src/master/rework-brief.js';
 import { planeWideFailure } from '../src/model/blocker-class.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-1569 names this file for its proof: manual:intervention-pattern-scope-widening-review. Five
 // scope-widening interventions were needed at the review stage between 2026-10-02 and 2026-10-09,
@@ -82,7 +82,7 @@ test('manual:intervention-pattern-scope-widening-review — a first attempt carr
 });
 
 test('manual:intervention-pattern-scope-widening-review — a decisions read that fails refuses the rework launch, never starts it without its brief', async () => {
-  const credentialFile = join(await mkdtemp(join(tmpdir(), 'rework-brief-')), 'master.token');
+  const credentialFile = join(await temporaryDirectory('rework-brief'), 'master.token');
   await writeFile(credentialFile, 'master-token-'.padEnd(40, 'x'), { mode: 0o600 });
   const config = { url: 'https://graphyard.example', credentialFile }, work = { id: 'w-1', key: 'GY-7' };
   const answer = (response: () => Response | Promise<Response>) => (async () => response()) as unknown as typeof fetch;
