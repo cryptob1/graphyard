@@ -12,7 +12,7 @@ import type { Cycle } from './cycle.js';
 import { defaultDeploymentReuseMinutes, defaultPromoteEveryMinutes, deploymentDetail, deploymentStepBudgetMs, promotionCycle, promotionWorkflow, reusableDeployment, stillVerifying, withinDeploymentBudget } from './deployment.js';
 import { mainGuardAttention } from '../main-guard.js';
 import { promotionFreeze } from './main-watch.js';
-import { openThroughputOwner, throughputOwnerAnsweredBy, throughputOwnerClosure, throughputOwnerItem, throughputRemeasureAt, throughputStallText, type ThroughputStall } from '../throughput.js';
+import { openThroughputOwner, throughputAnsweredAt, throughputOwnerAnsweredBy, throughputOwnerClosure, throughputOwnerItem, throughputRemeasureAt, throughputStallText, type ThroughputStall } from '../throughput.js';
 
 /**
  * GY-710. Wake the item's observation job for a step refused on a stale observation — a rework —
@@ -306,7 +306,9 @@ export function throughputEscalatedAt(actions: Record<string, DaemonAction>, own
  * after a refusal or a lost reply sends the same body under the same key and is answered from the
  * stored receipt. A measurement showing the population cannot accumulate raises the typed
  * needs-decision on the owner once per owner: it stands until answered, so a re-measure that finds
- * the same — or more of the same — never raises it again. Filing and closing go through the
+ * the same — or more of the same — never raises it again. GY-1587: so does a miss the ledger's
+ * pursuit escalated over an accumulating population (`throughputEscalatedMiss`), asked once per
+ * release: after its answer the successor owns the release until a measurement verifies it. Filing and closing go through the
  * operator-agent; a failure backs off on the action.
  */
 async function throughputOwnerStep(cycle: Pick<Cycle, 'state' | 'effects' | 'now' | 'performed'>, revision: string, work: Work[], stall: ThroughputStall | null) {
@@ -367,6 +369,10 @@ async function throughputOwnerStep(cycle: Pick<Cycle, 'state' | 'effects' | 'now
     } catch (error) { performed.push(await note(predecessor, 'failed', `Could not file the item that owns GY-87's throughput verification on ${revision.slice(0, 12)}${predecessor ? `, succeeding ${predecessor}` : ''}: ${message(error)}`)); }
   }
   if (!stall || !owner || throughputEscalatedAt(state.actions, owner) !== null) return;
+  // GY-1587: an escalated miss over an accumulating population is asked once per release. Once an
+  // owner of this release closed on its answer, its successor carries the verification without a
+  // second ask, so an answered decision never repeats; the next release asks afresh.
+  if (stall.cause === 'escalated-miss' && (answered || throughputAnsweredAt(work, revision) !== null)) return;
   performed.push(await record(state, throughputEscalationKey(owner.key, owner.policyRevision), { kind: 'escalation', work: owner.key, principal: null, state: 'done', detail: throughputStallText({ ...stall, owner: owner.key }), attempts: 1, cycle: state.cycle }, now(), effects.persist));
 }
 
