@@ -7,7 +7,7 @@ import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { defaultChildRun } from '../src/child-runner.js';
-import { credentialTrialVariable, groupTestFiles, runnerDiagnosticTailLength, runTrial, trialAuthor, trialEnvironment, trialMerge, trialNeedsLog, trialRef, lookupPoisoned, trialLookupEntries, trialTemporaryPrefix, trialTemporaryRoot, trialTemporaryRoots, trialTemporaryVariables, trialTestGroupSize, TrialCleanupError, TrialRunnerError, TrialTimeoutError, withheldTrialVariables, type RunTrialInput } from '../src/merge-writer/trial.js';
+import { credentialTrialVariable, groupTestFiles, runnerDiagnosticTailLength, runTrial, trialAuthor, trialEnvironment, trialMerge, trialNeedsLog, trialRef, lookupPoisoned, trialLookupEntries, reclaimTrialTemporaries, trialTemporaryPrefix, trialTemporaryRoot, trialTemporaryRoots, trialTemporaryVariables, trialTestGroupSize, TrialCleanupError, TrialRunnerError, TrialTimeoutError, withheldTrialVariables, type RunTrialInput } from '../src/merge-writer/trial.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { shadowErrorKey, shadowIdle, shadowReads, shadowRunnerKey, shadowRunnerRetries } from '../src/daemon/cycle-shadow.js';
 import { masterConfigSchema } from '../src/master.js';
@@ -15,7 +15,7 @@ import type { Work } from '../src/model.js';
 import { preMergeTestFiles } from '../scripts/ci-tests.mjs';
 import { checkoutKinds } from '../src/install/worktree-root.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-import { reclaimTmpDirectories, tempOwnerMarker, testTempPatterns, writeTempOwner } from '../src/tmp-reclaim.js';
+import { tempOwnerMarker, testTempPatterns, writeTempOwner } from '../src/tmp-reclaim.js';
 
 // GY-1522: the shadow gate's trial merge — the exact merge commit made in the object store, and its
 // build and affected tests run in a detached, credential-free checkout that is always removed.
@@ -247,7 +247,7 @@ test('unit:trial-run-credential-free — the trial child sees none of GH_CONFIG_
   assert.notEqual(seen.tmpdir, '/var/tmp', 'the host\'s TMPDIR is withheld (GY-1549); the trial\'s own replaces it (GY-1565)');
 });
 
-test('unit:trial-tmpdir-isolated — the trial child gets a fresh, empty, short temporary directory made for the trial in the first of /tmp and /var/tmp that no stray node_modules, .git or package.json sits in or above (else its session directory), never the host\'s TMPDIR, so a fixture\'s upward lookup cannot resolve one; the directory is removed with the checkout, pass or fail, and one a crashed trial left behind is the tmp reclaim\'s to take back (GY-1565)', async () => {
+test('unit:trial-tmpdir-isolated — the trial child gets a fresh, empty, short temporary directory made for the trial in the first of /tmp and /var/tmp that no stray node_modules, .git or package.json sits in or above (else its session directory), never the host\'s TMPDIR, so a fixture\'s upward lookup cannot resolve one; the directory is removed with the checkout, pass or fail, and one a crashed trial left behind is taken back by the next trial and carries a name the tmp reclaim takes (GY-1565)', async () => {
   assert.deepEqual([...trialTemporaryRoots], ['/tmp', '/var/tmp']);
   assert.deepEqual([...trialLookupEntries], ['node_modules', '.git', 'package.json']);
   assert.deepEqual(trialTemporaryVariables('/var/tmp/gyt-x'), { TMPDIR: '/var/tmp/gyt-x', TMP: '/var/tmp/gyt-x', TEMP: '/var/tmp/gyt-x' });
@@ -294,19 +294,23 @@ test('unit:trial-tmpdir-isolated — the trial child gets a fresh, empty, short 
   assert.equal(new Set(directories).size, directories.length, 'every trial gets a fresh directory');
   assert.deepEqual(readdirSync(shared).sort(), ['.git', 'node_modules'], 'the host\'s tmp is left as it was');
   assert.deepEqual(readdirSync(clean), [], 'and nothing of the trials is left in the clean root');
-  // A merge writer that crashed mid-trial never ran the cleanup: its directory, marked with an owner that is gone, is the
-  // tmp reclaim's at once, whatever its age; a running trial's, marked by this live process, is kept.
-  const crashed = join(clean, `${trialTemporaryPrefix}crashed`), running = join(clean, `${trialTemporaryPrefix}running`);
+  // A merge writer that crashed mid-trial never ran the cleanup: its directory, marked with an owner that is gone, and a
+  // marker left without its directory, go before the next trial in that root makes its own; a running trial's, marked by
+  // this live process, is kept. The name is the loop's tmp pass's too, so a root that pass scans is swept by it as well.
+  const crashed = join(clean, `${trialTemporaryPrefix}crashed`), running = join(clean, `${trialTemporaryPrefix}running`), orphan = join(clean, `${trialTemporaryPrefix}gone`);
   for (const directory of [crashed, running]) { mkdirSync(join(directory, 'graphyard-pg-data'), { recursive: true }); writeFileSync(join(directory, 'graphyard-pg-data', 'PG_VERSION'), '16\n'); }
   writeFileSync(tempOwnerMarker(crashed), `${JSON.stringify({ pid: process.pid, startedAt: -1, at: new Date().toISOString() })}\n`);
+  writeFileSync(tempOwnerMarker(orphan), `${JSON.stringify({ pid: process.pid, startedAt: -1, at: new Date().toISOString() })}\n`);
   await writeTempOwner(running);
-  const reclaimed = await reclaimTmpDirectories({ tmpRoot: clean, held: new Set(), unfinished: new Set() });
-  assert.deepEqual(reclaimed.removed.map(entry => entry.path), [crashed], 'the crashed trial\'s directory is taken back');
-  assert.deepEqual(readdirSync(clean).sort(), [`${trialTemporaryPrefix}running`, `${trialTemporaryPrefix}running.owner`], 'the running trial\'s directory stays');
-  // A marker whose directory is already gone is clutter, taken whatever its age.
-  writeFileSync(tempOwnerMarker(join(clean, `${trialTemporaryPrefix}gone`)), '{}\n');
-  await reclaimTmpDirectories({ tmpRoot: clean, held: new Set(), unfinished: new Set() });
-  assert.deepEqual(readdirSync(clean).sort(), [`${trialTemporaryPrefix}running`, `${trialTemporaryPrefix}running.owner`], 'an orphaned trial marker is taken back');
+  const head = repo.commitOnBase({ 'tests/a.test.ts': 'x\n' }, 'after a crash');
+  const merged = await trialMerge(gitFor(repo.root), { head, baseTip: repo.base });
+  assert.ok('mergeSha' in merged);
+  const result = await runTrial({ root: repo.root, base: await temporaryDirectory('trial-merge-root', tmpdir()), mergeSha: merged.mergeSha, changedFiles: ['tests/a.test.ts'], timeoutMs: 120_000, key: 'GY-9', environment: host, temporaryRoots: [clean] });
+  assert.equal(result.build, 'pass', result.logTail);
+  // Under a poisoned host tmp the trial made its directory in its session directory instead, and swept that: sweep this root as it would.
+  if (!usable) assert.deepEqual((await reclaimTrialTemporaries(clean)).sort(), [crashed, orphan]);
+  assert.deepEqual(readdirSync(clean).sort(), [`${trialTemporaryPrefix}running`, `${trialTemporaryPrefix}running.owner`], 'the crashed trial\'s directory and the orphaned marker are taken back; the running trial\'s stays');
+  assert.deepEqual(await reclaimTrialTemporaries(clean), [], 'and a sweep while it runs keeps it');
 });
 
 test('integration:shadow-trial-stable-green — three consecutive trials of one head, on a host whose shared tmp holds a stray node_modules, pass every time: a test whose upward lookup from its tmpdir would resolve that node_modules (as tests/worktree-reclaim.test.ts did on vishrog) runs under the trial\'s own tmpdir and never sees it, while the shared tmp stays dirty (GY-1565)', async () => {
