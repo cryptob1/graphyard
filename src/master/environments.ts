@@ -14,8 +14,8 @@ import { atomicPrivateText, atomicPrivateWrite, externalCredential, loadStoredMa
 import { failureText } from './worktrees.js';
 import { shellQuote } from './dispatch.js';
 import { timedCall } from './timings.js';
-import { describeObservedExhaustion, heldObservation, heldOverlay, heldTwin, providerIdentity, reconstructedHold, registryHome, spentHere } from './account-identity.js';
-export { describeObservedExhaustion, heldObservation, heldOverlay, heldTwin, providerIdentity, registryHome, spentHere } from './account-identity.js';
+import { describeObservedExhaustion, heldObservation, heldOverlay, heldTwin, providerIdentity, reconstructedHold, registryHoldObservations, registryLogin, spentHere } from './account-identity.js';
+export { describeObservedExhaustion, heldObservation, heldOverlay, heldTwin, providerIdentity, registryHoldObservations, registryLogin, spentHere } from './account-identity.js';
 import { getCachedPlanUsage, setCachedPlanUsage, parseZaiUsage, type ProviderUsageResult } from '../provider-usage.js';
 
 /** One reading of a shared plan's quota, with the limit flag its provider reported (GY-1260). */
@@ -324,7 +324,7 @@ const environmentLogSchema = z.object({
   // The account each profile's latest launch selected, by `role:profile`, so an exhausted session can be traced to its account.
   selected: z.record(z.string(), z.object({ environment: z.string().nullable(), kind: z.string().nullable(), at: z.string(), work: z.string().nullable() }).strict()).default({}),
   exhausted: z.record(z.string(), z.object({ at: z.string(), until: z.string(), resetsAt: z.string().nullable(), reason: z.string().max(500), role: z.enum(quotaRoles), profile: z.string(), work: z.string().nullable(),
-    identity: z.string().nullable().optional(), home: z.string().optional(), reported: z.boolean().optional() }).strict()).default({}),
+    identity: z.string().nullable().optional(), home: z.string().optional(), kind: z.string().optional(), reported: z.boolean().optional() }).strict()).default({}),
 }).strict();
 /**
  * An account a running session exhausted. The provider's own usage endpoint may lag behind the
@@ -332,10 +332,10 @@ const environmentLogSchema = z.object({
  * session printed is kept here and every launch skips the account until `until`: the reset time
  * the notice named, or an hour when it named none. `identity` is the provider login the account held
  * when it was spent (GY-1573), so a home logged in afresh later neither frees the spent subscription's
- * other accounts nor passes the hold to its new one; absent when it could not be read. `home` is the home the session ran in (GY-1574). `reported` false
+ * other accounts nor passes the hold to its new one; absent when it could not be read. `home` and `kind` are the home and runtime the session ran on (GY-1574). `reported` false
  * marks a hold the agent registry has not yet heard of, so every loop cycle sends it again until it has.
  */
-export interface ObservedExhaustion { at: string; until: string; resetsAt: string | null; reason: string; role: LaunchRole; profile: string; work: string | null; identity?: string | null; home?: string; reported?: boolean }
+export interface ObservedExhaustion { at: string; until: string; resetsAt: string | null; reason: string; role: LaunchRole; profile: string; work: string | null; identity?: string | null; home?: string; kind?: string; reported?: boolean }
 export const unknownResetHoldMs = 3_600_000;
 export interface AccountSelection { environment: string | null; kind: string | null; at: string; work: string | null }
 export type EnvironmentLog = { version: 1; environments: Record<string, EnvironmentHealth>; skipped: AccountSkip[]; selected: Record<string, AccountSelection>; exhausted: Record<string, ObservedExhaustion> };
@@ -383,7 +383,7 @@ export async function recordObservedExhaustion(config: Pick<MasterConfig, 'crede
   const read = home ? await providerIdentity(home.kind, home.home) : undefined;
   const identity = observed.identity !== undefined ? observed.identity : read !== undefined ? read : launched?.identity;
   const future = Number.isFinite(reset) && reset > now; // a reset already past (a notice read late) names none: the fallback hour holds the account alone
-  const entry: ObservedExhaustion = { ...observed, resetsAt: future ? observed.resetsAt : null, reason: observed.reason.slice(0, 500), until: new Date(future ? reset : now + unknownResetHoldMs).toISOString(), ...identity === undefined ? {} : { identity }, ...home ? { home: home.home } : {},
+  const entry: ObservedExhaustion = { ...observed, resetsAt: future ? observed.resetsAt : null, reason: observed.reason.slice(0, 500), until: new Date(future ? reset : now + unknownResetHoldMs).toISOString(), ...identity === undefined ? {} : { identity }, ...home ? { home: home.home, kind: home.kind } : {},
     ...report && reportable(environment) ? { reported: false } : {} };
   log.exhausted = { ...Object.fromEntries(Object.entries(log.exhausted).filter(([, held]) => Date.parse(held.until) > now)), [environment]: entry };
   await atomicPrivateWrite(environmentLogPath(config), log);
@@ -401,9 +401,9 @@ export async function reportPendingExhaustions(config: Pick<MasterConfig, 'crede
   if (pending.some(([name, held]) => known.exhausted[name].identity === undefined && held.identity !== undefined)) await keepIdentities(config, pending); // kept before any report (GY-1574): a source relogin while it fails moves no hold
   if (!pending.length || !config.hostId) return 0;
   const registry = report.registry ?? (config.url ? httpFleetClient({ url: config.url, credentialFile: config.credentialFile }, report.fetch ?? fetch, report.timeoutMs ?? observeTimeoutMs) : null); if (!registry?.observe) return 0;
-  const document = registry.document && await registry.document(), own = pending.filter(([name, held]) => { const home = registryHome(document, config.hostId, name); return !home || spentHere(held, { home }, known.environments[name]); }); // a same-named hold spent on another home (a legacy configured environment) is not reported as the registry account's own (GY-1574)
-  if (own.length) await registry.observe({ host: config.hostId, observations: own.map(([name, held]) => ({ account: name, quota: heldObservation(name, held) })) });
-  await keepIdentities(config, own, true); return own.length;
+  const document = registry.document && await registry.document(), sends = pending.map(([name, held]) => [name, held, registryHoldObservations(document, config.hostId!, name, held, known.environments[name])] as const); // a hold spent on another home or runtime goes to the accounts on its login, never as the same-named one (GY-1574)
+  const observations = sends.flatMap(([, , quota]) => quota ?? []), settled = sends.filter(([, , quota]) => quota).map(([name, held]) => [name, held] as const); if (observations.length) await registry.observe({ host: config.hostId, observations });
+  await keepIdentities(config, settled, true); return observations.length; // a hold naming no shared login owes nothing and settles too
 }
 async function keepIdentities(config: Pick<MasterConfig, 'credentialFile'>, pending: (readonly [string, ObservedExhaustion])[], reported?: true) { // each pending hold keeps its login, marked reported once delivered; one recorded again meanwhile stays pending
   const log = await readEnvironmentLog(config); for (const [name, held] of pending) if (log.exhausted[name]?.at === held.at && log.exhausted[name]?.until === held.until) log.exhausted[name] = { ...log.exhausted[name], ...held.identity === undefined ? {} : { identity: held.identity }, ...reported ? { reported } : {} };
@@ -457,7 +457,7 @@ export async function heldAwareProbe(config: Pick<MasterConfig, 'credentialFile'
   const client = probe.registry ?? (config.url && config.hostId ? httpFleetClient({ url: config.url, credentialFile: config.credentialFile }, probe.fetch ?? fetch, probe.timeoutMs ?? fleetRequestTimeoutMs) : null); if (!client) return probe;
   let document: Awaited<ReturnType<FleetClient['document']>> | undefined; const launched = (await readEnvironmentLog(config)).environments; // a same-named hold is judged by the registry account's home (GY-1574)
   return { ...probe, registry: { document: async () => (document = await client.document()), end: (session, reason, outcome) => client.end(session, reason, outcome),
-    select: async request => { const registry = document ?? await client.document().catch(() => undefined); return client.select({ ...request, observations: request.observations.map(entry => ({ ...entry, quota: heldOverlay(held, entry.account, entry.quota, registryHome(registry, config.hostId, entry.account), launched[entry.account]) })) }); } } };
+    select: async request => { const registry = document ?? await client.document().catch(() => undefined); return client.select({ ...request, observations: request.observations.map(entry => ({ ...entry, quota: heldOverlay(held, entry.account, entry.quota, registryLogin(registry, config.hostId, entry.account), launched[entry.account]) })) }); } } };
 }
 /** The registry's choice for a role it defines, recorded in the environment log; null when the registry does not define the role. */
 export async function selectRegistryAccount(config: Pick<MasterConfig, 'credentialFile' | 'run'> & Partial<Pick<MasterConfig, 'url' | 'hostId'>>, role: LaunchRole, profile: { name: string; principal?: string }, probe: FleetProbe = {}) {

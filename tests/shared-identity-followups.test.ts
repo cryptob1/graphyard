@@ -140,15 +140,15 @@ test('unit:legacy-environment-twin-by-home — a legacy configured environment n
   assert.equal(environments.heldOverlay(held, 'claude-a', probedQuota(held['claude-a'].identity)).state, 'exhausted', 'the spent login reads spent');
   assert.equal(environments.heldOverlay(held, 'claude-a', probedQuota(null)).state, 'exhausted', 'with no registry home to judge by, an unknown login is held by the name');
   // The registry account's own home decides, whatever either login reads.
-  assert.equal(environments.heldOverlay(held, 'claude-a', probedQuota(null), homes['claude-c']).state, 'available', 'a registry claude-a on another home with an unknown login is not held by the name');
-  assert.equal(environments.heldOverlay(held, 'claude-a', probedQuota(other), homes['claude-c']).state, 'available');
-  assert.equal(environments.heldOverlay(held, 'claude-a', probedQuota(null), homes['claude-a']).state, 'exhausted', 'the account spent in its own home is held, its login unknown or not');
-  assert.equal(environments.heldOverlay(held, 'claude-a', probedQuota(other), homes['claude-a']).state, 'exhausted');
-  assert.match(environments.heldOverlay(held, 'claude-a', probedQuota(held['claude-a'].identity), homes['claude-c']).reason!, /^claude-a is the same provider login as claude-a/, 'another home on the spent login is held as a twin');
+  assert.equal(environments.heldOverlay(held, 'claude-a', probedQuota(null), { home: homes['claude-c'] }).state, 'available', 'a registry claude-a on another home with an unknown login is not held by the name');
+  assert.equal(environments.heldOverlay(held, 'claude-a', probedQuota(other), { home: homes['claude-c'] }).state, 'available');
+  assert.equal(environments.heldOverlay(held, 'claude-a', probedQuota(null), { home: homes['claude-a'] }).state, 'exhausted', 'the account spent in its own home is held, its login unknown or not');
+  assert.equal(environments.heldOverlay(held, 'claude-a', probedQuota(other), { home: homes['claude-a'] }).state, 'exhausted');
+  assert.match(environments.heldOverlay(held, 'claude-a', probedQuota(held['claude-a'].identity), { home: homes['claude-c'] }).reason!, /^claude-a is the same provider login as claude-a/, 'another home on the spent login is held as a twin');
   // A legacy environment's API-key login (identity null) spent on another home holds a registry account on a known login not at all.
   const keyLogin = { 'claude-a': { ...spent, until: resetsAt, identity: null, home: homes['claude-c'] } };
-  assert.equal(environments.heldOverlay(keyLogin, 'claude-a', probedQuota(held['claude-a'].identity), homes['claude-a']).state, 'available');
-  assert.equal(environments.heldOverlay(keyLogin, 'claude-a', probedQuota(null), homes['claude-a']).state, 'available');
+  assert.equal(environments.heldOverlay(keyLogin, 'claude-a', probedQuota(held['claude-a'].identity), { home: homes['claude-a'] }).state, 'available');
+  assert.equal(environments.heldOverlay(keyLogin, 'claude-a', probedQuota(null), { home: homes['claude-a'] }).state, 'available');
 
   // Every role's selection judges by the registry's home: heldAwareProbe reads the document and reports the account unspent.
   const selections: QuotaObservation[] = [], onHomeA = registryOf([{ name: 'claude-a', home: homes['claude-a'] }, { name: 'claude', home: homes.claude }]);
@@ -174,6 +174,41 @@ test('unit:legacy-environment-twin-by-home — a legacy configured environment n
     assert.equal(await reportPendingExhaustions(reporting, { registry: client }, now), 1);
     assert.equal(account(registry, 'claude-a').quota.state, 'exhausted');
     assert.match(accountIneligibility(registry, account(registry, 'claude'), now, HOST)!, /same provider login as claude-a/);
+  }
+
+  // A legacy claude-a spent in home C on login L is not registry claude-a's (home A, another login), but L reaches the registry
+  // through the accounts it knows here on L, so their twins are held on every host; with none known yet the hold stays pending.
+  {
+    const reporting = { credentialFile: join(root, 'report-spent-login.token'), hostId: HOST };
+    const registry = registryOf([{ name: 'claude-a', home: homes['claude-a'] }, { name: 'claude-c', home: homes['claude-c'] }, { name: 'claude-o', host: 'otherhost' }]);
+    probed(registry, HOST, [{ account: 'claude-a', identity: held['claude-a'].identity! }]);
+    probed(registry, 'otherhost', [{ account: 'claude-o', identity: other! }]);
+    await writeHolds(reporting, { 'claude-a': { ...spent, until: resetsAt, identity: other, home: homes['claude-c'], kind: 'claude', reported: false } });
+    const sent: ObserveRequest[] = [], client = { document: async () => registry, observe: async (request: ObserveRequest) => { sent.push(request); return foldObservations(registry, request, { actor: 'executor', at: new Date(now).toISOString() }); } };
+    assert.equal(await reportPendingExhaustions(reporting, { registry: client }, now), 0, 'no account here is known on L yet');
+    assert.equal((await observedExhaustions(reporting, now))['claude-a'].reported, false, 'so the hold stays pending');
+    assert.equal(accountIneligibility(registry, account(registry, 'claude-o'), now, 'otherhost'), null);
+    probed(registry, HOST, [{ account: 'claude-c', identity: other! }]);
+    assert.equal(await reportPendingExhaustions(reporting, { registry: client }, now), 1);
+    assert.deepEqual(sent.flatMap(request => request.observations.map(entry => entry.account)), ['claude-c'], 'L is delivered on the account here on L, never as claude-a');
+    assert.equal(account(registry, 'claude-c').quota.identity, other, 'the delivery keeps the account\'s login');
+    assert.notEqual(account(registry, 'claude-a').quota.state, 'exhausted', 'registry claude-a is not marked');
+    assert.match(accountIneligibility(registry, account(registry, 'claude-o'), now, 'otherhost')!, /same provider login as claude-c/, 'the twin on the other host is held');
+    assert.equal((await observedExhaustions(reporting, now))['claude-a'].reported, true);
+  }
+
+  // A login in the same directory on another runtime is not the registry account's either: home and runtime both decide.
+  {
+    const codex = { 'claude-a': { ...spent, until: resetsAt, identity: 'codex:' + 'b'.repeat(32), home: homes['claude-a'], kind: 'codex' } };
+    assert.equal(environments.spentHere(codex['claude-a'], { home: homes['claude-a'], kind: 'claude' }), false);
+    assert.equal(environments.spentHere(codex['claude-a'], { home: homes['claude-a'], kind: 'codex' }), true);
+    assert.equal(environments.heldOverlay(codex, 'claude-a', probedQuota(null), { home: homes['claude-a'], kind: 'claude' }).state, 'available');
+    const reporting = { credentialFile: join(root, 'report-runtime.token'), hostId: HOST }, registry = registryOf([{ name: 'claude-a', home: homes['claude-a'] }]);
+    assert.deepEqual(environments.registryLogin(registry, HOST, 'claude-a'), { home: homes['claude-a'], kind: 'claude' });
+    await writeHolds(reporting, codex);
+    const sent: ObserveRequest[] = [], client = { document: async () => registry, observe: async (request: ObserveRequest) => { sent.push(request); return false; } };
+    assert.equal(await reportPendingExhaustions(reporting, { registry: client }, now), 0);
+    assert.deepEqual(sent, [], 'a codex exhaustion is not reported as the claude account in the same directory');
   }
 
   // An unreadable login falls back to the identity the log recorded only when it was read from the same home.
