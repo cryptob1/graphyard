@@ -1084,14 +1084,18 @@ export function describeReclaim(report: ResourceReclaimReport) {
  * scanned root's volume stayed below its inode headroom (GY-1600): what it scanned, why nothing
  * was eligible, how far it escalated and the consumers it named. Null for any other pass, so a
  * pass that took entries back, or one with the bound clear, records only what `describeReclaim` says.
+ * Only what the pass measured is claimed: its counts are the last sweep's (an escalation step's
+ * sweep covers only the roots still below headroom), and a tsx cache file it could not remove is
+ * either younger than the final cache age or held open, which the pass does not tell apart.
  */
 export function describeStandingTmpPass(report: ResourceReclaimReport) {
   const pass = report.tmpPass;
   if (!pass?.boundStands || report.tmp.removed) return null;
   const roots = pass.roots?.length ? pass.roots.join(' and ') : 'its temporary directories';
   const top = pass.escalated?.at(-1);
+  const sweep = top ? `; its last step, over the roots still below headroom, examined` : ':';
   return [
-    `/tmp reclaim removed 0 entries while the inode bound stands: scanned ${roots}, ${entries(pass.scanned)} with this user's test temp names, ${pass.kept} kept (younger than ${testTempMinAgeMs / 3_600_000} hours, a live owner or a live holder), and no tsx cache file of this user's old enough`,
+    `/tmp reclaim removed 0 entries while the inode bound stands: scanned ${roots}${sweep} ${entries(pass.scanned)} with this user's test temp names, ${pass.kept} kept (younger than ${testTempMinAgeMs / 3_600_000} hours, a live owner or holder, or past the pass's bounds), and no tsx cache file of this user's it could remove (each younger than ${minutes(top?.cacheAgeMs ?? tmpReclaimMinAgeMs)} or held open by a live process)`,
     top ? `escalated to ${top.limit} per cycle and tsx cache files older than ${minutes(top.cacheAgeMs)} (${pass.escalated!.map(step => step.removed).join(' + ')} removed)` : '',
     pass.consumers?.length ? `what fills it is outside the pass's reach; top consumers: ${pass.consumers.map(consumer => `${consumer.path} (${consumer.capped ? 'at least ' : ''}${entries(consumer.entries)}, owner ${consumer.owner})`).join(', ')}` : '',
     report.errors.length ? `${report.errors.length} could not be reclaimed: ${report.errors[0]}` : '',

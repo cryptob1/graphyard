@@ -14,6 +14,7 @@ import { describeReclaim, describeStandingTmpPass, readReclaimReports, readResou
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { loadMasterConfig, setupMaster } from '../src/master.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
+import { standingTmpKey } from '../src/daemon/cycle-reclaim.js';
 
 // GY-421: test runs used to leak their temporary directories — by 25 September 2026 the host held
 // 11,511 /tmp/graphyard-* embedded-Postgres data dirs a run had left behind on failing or being
@@ -418,8 +419,9 @@ test('unit:tmp-reclaim-zero-escalates — a /tmp pass that removes 0 entries whi
   assert.equal(action.kind, 'reclaim');
   assert.equal(action.state, 'done');
   assert.match(action.detail, /^\/tmp reclaim removed 0 entries while the inode bound stands/);
-  assert.match(action.detail, new RegExp(`scanned ${tmp}, 1 entry with this user's test temp names, 1 kept`), 'it names what it scanned and kept');
-  assert.match(action.detail, /no tsx cache file of this user's old enough/, 'it says why nothing was eligible');
+  assert.match(action.detail, new RegExp(`scanned ${tmp}; its last step, over the roots still below headroom, examined 1 entry with this user's test temp names, 1 kept`), 'it names what it scanned and kept, and which sweep the counts are');
+  assert.match(action.detail, /no tsx cache file of this user's it could remove \(each younger than 10 minutes or held open by a live process\)/, 'it says why nothing was eligible without claiming one unmeasured cause');
+  assert.doesNotMatch(action.detail, /old enough/);
   assert.match(action.detail, /escalated to 20000 per cycle and tsx cache files older than 10 minutes \(0 \+ 0 removed\)/);
   assert.match(action.detail, new RegExp(`top consumers: ${leaker} \\(42 entries, owner ${userInfo().username}\\)`));
   assert.equal(existsSync(join(tmp, 'graphyard-young')), true, 'recording the pass removes nothing');
@@ -432,4 +434,86 @@ test('unit:tmp-reclaim-zero-escalates — a /tmp pass that removes 0 entries whi
   // A pass that took entries back is reported by describeReclaim, never as a standing zero.
   assert.equal(describeStandingTmpPass({ ...clear, tmp: { removed: 3, bytes: 3 }, tmpPass: { ...clear.tmpPass!, boundStands: true } }), null);
   assert.deepEqual(await cycle(async () => clear), [], 'a pass with the bound clear adds no record');
+});
+
+// GY-1600 review of 52628aeeacc3: the zero-removal record must not grow the ledger by one row per
+// cycle while the bound stands for days. Three simulated days of the real loop's cycles, the bound
+// standing on all of them but two stretches where it clears: every system invariant holds after
+// every cycle, each run of standing passes is one row whose attempts count its passes, a run that
+// ends is filed under its last pass, and a pass with errors fails its row without a second fault.
+test('unit:tmp-reclaim-zero-escalates — over three days of standing zero-removal /tmp passes the ledger holds one row per run of them and every system invariant holds', { timeout: 120_000 }, async () => {
+  const root = await temporaryDirectory('zero-pass-soak');
+  const credentials = await temporaryDirectory('zero-pass-soak-credentials');
+  execFileSync('git', ['init', '-q', root]);
+  execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
+  await setupMaster(root, { url: 'https://graphyard.example', token: 'coordinator-token-'.padEnd(40, 'x'), cliPath: fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url)), credentialDirectory: credentials },
+    (async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }))) as typeof fetch);
+  const config = await loadMasterConfig(root);
+  const minute = 60_000, day = 24 * 60 * minute, cycleMs = 5 * minute, start = Date.now();
+  // The bound clears for an hour on each of the first two days; one pass on day three meets an error.
+  const clear = (at: number) => [day / 2, day + day / 2].some(from => at - start >= from && at - start < from + 60 * minute);
+  const erring = start + 2 * day + day / 2;
+  let now = start;
+  const reclaimResources = async () => {
+    const stands = !clear(now), errors = now === erring ? ['Tmp reclaim: /tmp/graphyard-held: EBUSY'] : [];
+    return { at: new Date(now).toISOString(), reaped: { review: 0, producer: 0 }, closed: [], released: [], tmp: { removed: 0, bytes: 0 }, errors,
+      tmpPass: { roots: ['/tmp'], scanned: 3, kept: 3, boundStands: stands, ...(stands ? { escalated: [{ limit: 20_000, cacheAgeMs: 10 * minute, removed: 0 }], consumers: [{ path: '/tmp/leaker', entries: 90_000, owner: 'someone' }] } : {}) } };
+  };
+  const effects = {
+    agents: () => [], credentials: async () => ({}), snapshot: async () => ({ work: [], now: new Date(now).toISOString() }), closeSession: () => {},
+    dispatch: async () => {}, requestProof: () => {}, recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date(now).toISOString(), reason: 'not configured', deployed: [], pending: [] }),
+    reclaimResources,
+  } as unknown as DaemonEffects;
+  const state = emptyDaemonState(config), violations: string[] = [];
+  let cycles = 0, mostRows = 0;
+  for (; now < start + 3 * day; now += cycleMs, cycles++) {
+    await runCycle(config, state, effects, () => now);
+    for (const check of state.invariants.report) if (!check.holds) violations.push(`cycle ${cycles}: ${check.invariant} — ${check.reading}`);
+    mostRows = Math.max(mostRows, Object.keys(state.actions).filter(key => key.startsWith('reclaim:tmp:')).length);
+  }
+  assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
+  assert.ok(cycles > 800, `three days of cycles ran: ${cycles}`);
+  const rows = Object.entries(state.actions).filter(([key]) => key.startsWith('reclaim:tmp:'));
+  // Three runs of standing passes, split by the two clear hours: two filed, one still standing.
+  assert.equal(rows.length, 3, `one row per run of standing passes: ${rows.map(([key]) => key)}`);
+  assert.equal(mostRows, 3, 'the ledger never held more than one row per run');
+  const filed = rows.filter(([key]) => key !== standingTmpKey);
+  assert.equal(filed.length, 2);
+  for (const [key, action] of filed) assert.equal(key, `reclaim:tmp:${action.at}`, 'a finished run is filed under its last pass');
+  const current = state.actions[standingTmpKey];
+  assert.ok(current, 'the run still standing has its row');
+  const cleared = 2 * (60 * minute / cycleMs), standingPasses = cycles - cleared;
+  assert.equal(filed.reduce((total, [, action]) => total + action.attempts, 0) + current.attempts, standingPasses, 'every standing pass is counted, none twice');
+  assert.match(current.detail, new RegExp(`^Pass ${current.attempts} in a row: /tmp reclaim removed 0 entries while the inode bound stands`));
+  assert.match(current.detail, /top consumers: \/tmp\/leaker/);
+  assert.equal(current.state, 'done', 'a later clean pass leaves the run done');
+  // The erring pass failed the run's row while it was the latest, and its fault is the resources row's alone.
+  assert.equal(Object.values(state.actions).filter(action => action.kind === 'reclaim' && action.state === 'failed').length, 1, 'only the resources row records the failure');
+  assert.equal(state.faults.instances.filter(entry => entry.faultClass === 'resources').length <= 1, true, 'the erring pass is at most one resources fault');
+});
+
+test('unit:tmp-reclaim-zero-escalates — a standing zero-removal pass with errors fails its row and adds no fault of its own', async () => {
+  const root = await temporaryDirectory('zero-pass-errors');
+  const credentials = await temporaryDirectory('zero-pass-errors-credentials');
+  execFileSync('git', ['init', '-q', root]);
+  execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
+  await setupMaster(root, { url: 'https://graphyard.example', token: 'coordinator-token-'.padEnd(40, 'x'), cliPath: fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url)), credentialDirectory: credentials },
+    (async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }))) as typeof fetch);
+  const config = await loadMasterConfig(root), clock = Date.now();
+  const effects = {
+    agents: () => [], credentials: async () => ({}), snapshot: async () => ({ work: [], now: new Date(clock).toISOString() }), closeSession: () => {},
+    dispatch: async () => {}, requestProof: () => {}, recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date(clock).toISOString(), reason: 'not configured', deployed: [], pending: [] }),
+    reclaimResources: async () => ({ at: new Date(clock).toISOString(), reaped: { review: 0, producer: 0 }, closed: [], released: [], tmp: { removed: 0, bytes: 0 }, errors: ['Tmp reclaim: /tmp/graphyard-held: EBUSY'],
+      tmpPass: { roots: ['/tmp'], scanned: 1, kept: 1, boundStands: true } }),
+  } as unknown as DaemonEffects;
+  const state = emptyDaemonState(config);
+  await runCycle(config, state, effects, () => clock);
+  const row = state.actions[standingTmpKey];
+  assert.equal(row?.state, 'failed', 'a pass that met errors is not recorded as done');
+  assert.match(row.detail, /1 could not be reclaimed: Tmp reclaim: \/tmp\/graphyard-held: EBUSY/);
+  assert.equal(row.faultClass, undefined, 'the row carries no fault of its own');
+  assert.equal(state.faults.failing[standingTmpKey], undefined);
+  assert.deepEqual(Object.entries(state.actions).filter(([, action]) => action.kind === 'reclaim' && action.state === 'failed').map(([key]) => key.split(':').slice(0, 2).join(':')).sort(), ['reclaim:resources', 'reclaim:tmp'], 'the resources row and the /tmp row');
 });
