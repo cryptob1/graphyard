@@ -339,10 +339,10 @@ export type SessionRegistrar = (handle: SessionHandleInput) => Promise<unknown>;
 async function closeUnstartedApprover(root: string, config: MasterConfig, agent: HerdrAgent, decision: string, probe: FleetProbe, run?: ChildRun, pauseMs?: number) {
   const own = boundLaunch(await readApproverLaunches(root), agent), verdict = await judgeApproverStall(agent, own?.launchedAt, launchStartMs(config), Date.now(), () => readSessionScreen(agent.pane_id!, run, stallScreenLines), decision, pauseMs);
   if (!verdict.close) throw new Error(`Approver session ${agent.name} is already visible in Herdr; let it finish or close it first (${verdict.why})`);
+  const stalled = `approver session ${agent.name} (pane ${agent.pane_id}): ${verdict.why}`, replaced = `closed ${stalled}`;
+  // GY-1604: its registry session is ended before its pane is closed, freeing the slot; one that cannot be ended refuses with the pane open, for a retry to end.
+  if (own?.session) await freeStalledSlot(own.session, stalled, async (session, reason) => { const fleet = await readFleet(config, 'approver', probe); if (fleet.managed) await fleet.client.end(session, reason); });
   await closeHerdrPane(agent.pane_id!, run);
-  const replaced = `closed approver session ${agent.name} (pane ${agent.pane_id}): ${verdict.why}`;
-  // GY-1604: its registry session is ended before the replacement is chosen, freeing the slot; one that cannot be ended refuses the launch.
-  if (own?.session) await freeStalledSlot(own.session, replaced, async (session, reason) => { const fleet = await readFleet(config, 'approver', probe); if (fleet.managed) await fleet.client.end(session, reason); });
   return { replaced, pane: agent.pane_id! };
 }
 /**

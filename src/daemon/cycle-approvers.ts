@@ -120,8 +120,10 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
       await effects.persist(state);
       return `the decision waits: ${capacityWait()}`;
     }
-    // An adopted session keeps the account its launch chose: that is the account it spends.
-    const adopted = listed ? await effects.approverLaunch?.(name).catch(() => null) ?? null : null;
+    // An adopted session keeps the account its launch chose: that is the account it spends. GY-1604: only a record naming the pane it is
+    // listed in is its launch's; an earlier same-name launch's record (the replacement's could not be written) gives it nothing of its own.
+    const recorded = listed ? await effects.approverLaunch?.(name).catch(() => null) ?? null : null;
+    const adopted = recorded?.pane && recorded.pane === listed?.pane_id ? recorded : null;
     // A session the watch still holds past its close attempts is ended before the watch forgets it.
     // While the registry cannot be told, its id stays on the watch and no replacement is launched:
     // at a role concurrency of 1 the live slot would refuse it, and the id is the only way to end it.
@@ -457,11 +459,13 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
         // GY-1604: a session listed under the watch's name in a pane other than the one it holds, now gone, is another launch (`master approver`
         // replaced it), never judged by the earlier launch's age: it is rebound to the record naming its pane, or dated from now, when
         // the loop first saw it. The registry session, account and runtime of the replaced launch are not the new pane's: its session is
-        // ended here (one the registry refuses is ended with its gone runtime by step 4d) and the watch keeps only what the pane's own record names.
+        // ended here, before the rebind, and the watch keeps only what the pane's own record names.
         const moved = watch.pane && !seen.agents.some(candidate => candidate.pane_id === watch.pane) ? seen.agents.find(candidate => candidate.name === watch.agentName && candidate.pane_id && candidate.pane_id !== watch.pane) : undefined;
         if (moved) {
           const fresh = boundLaunch(records, moved);
-          if (watch.session && watch.session !== fresh?.session) await endApproverSession(item, watch, `approver session ${moved.name} in pane ${watch.pane} was replaced by pane ${moved.pane_id}`);
+          // One the registry could not be told keeps its id on the watch, unbound, and is ended again next cycle before the rebind: the
+          // replacement shares its name, so step 4d cannot tell the predecessor's slot from a live one, and a lost id would hold it for good.
+          if (watch.session && watch.session !== fresh?.session && !await endApproverSession(item, watch, `approver session ${moved.name} in pane ${watch.pane} was replaced by pane ${moved.pane_id}`)) continue;
           Object.assign(watch, { pane: moved.pane_id, launchedAt: fresh?.launchedAt ?? stamp, closeAttempts: 0, account: fresh?.account ?? null, runtime: fresh?.runtime ?? null, session: fresh?.session ?? null });
           await note(`approver:${watch.decision}:rebound:${moved.pane_id}`, item, 'decision', 'done', `Watching approver session ${moved.name} in pane ${moved.pane_id}, which replaced the one the watch held${fresh ? '' : `; no launch record names that pane, so it is dated from ${stamp}, when the loop first saw it`}`);
         }

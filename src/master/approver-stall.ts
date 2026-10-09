@@ -67,13 +67,13 @@ export async function judgeApproverStall(agent: Pick<HerdrAgent, 'agent_status' 
 export const withoutPane = <T extends { agents: { name?: string | null; pane_id?: string | null }[] }>(inventory: T, pane: string, name: string): T =>
   ({ ...inventory, agents: inventory.agents.filter(agent => agent.pane_id ? agent.pane_id !== pane : agent.name !== name) });
 /**
- * GY-1604. End a closed stalled approver's registry `session` before its replacement is chosen, freeing the role's slot. One that cannot be
- * ended still holds that slot, so the launch is refused here, naming it (`registrySession`) for the caller to keep and end, rather than
- * choosing a replacement the slot would refuse; the loop's reconciliation also ends it, its pane now gone.
+ * GY-1604. End a stalled approver's registry `session` before its pane is closed and its replacement chosen, freeing the role's slot. One
+ * that cannot be ended still holds that slot, so the launch is refused here, naming it (`registrySession`), with the pane left open: the
+ * next attempt finds the same pane and launch record and ends the session again before anything else, rather than losing its id.
  */
-export async function freeStalledSlot(session: string, replaced: string, end: (session: string, reason: string) => Promise<unknown>) {
-  try { await end(session, `${replaced}, to launch its replacement`.slice(0, 500)); }
+export async function freeStalledSlot(session: string, stalled: string, end: (session: string, reason: string) => Promise<unknown>) {
+  try { await end(session, `closing stalled ${stalled}, to launch its replacement`.slice(0, 500)); }
   catch (error) {
-    throw Object.assign(new Error(`${replaced}, but its approver registry session ${session} could not be ended, so it still holds its slot and no replacement was chosen: ${error instanceof Error ? error.message : String(error)}`), { registrySession: session });
+    throw Object.assign(new Error(`Stalled ${stalled}; its approver registry session ${session} could not be ended, so it still holds its slot, its pane is left open and no replacement was chosen: ${error instanceof Error ? error.message : String(error)}`), { registrySession: session });
   }
 }

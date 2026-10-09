@@ -99,7 +99,7 @@ export function unansweredDecisions(items: { key: string; decisions: DecisionRow
     if (live && status !== 'done' && status !== 'idle') return [];
     const screen = status === 'idle' ? starts.screens?.[session] ?? 'unreadable' : undefined;
     if (screen && screen !== 'still') return [];
-    const verdict = live ? approverStallVerdict(live, boundLaunch(starts.records, live)?.launchedAt, starts.boundMs, now, screen) : null;
+    const verdict = live ? approverStallVerdict(live, paneLaunchedAt(starts.records, watch, live), starts.boundMs, now, screen) : null;
     if (verdict && !verdict.close && verdict.why.startsWith('it is within')) return [];
     const ageMs = Math.max(0, now - Date.parse(decision.requestedAt));
     // How the loop's earlier sessions for this decision ended (GY-551): the reasons sit beside the
@@ -109,6 +109,13 @@ export function unansweredDecisions(items: { key: string; decisions: DecisionRow
       ...(watch?.ended?.length ? { ended: watch.ended } : {}), ...(inMotionUntil ? { inMotionUntil } : {}), ...(verdict ? { visible: { status, ...(verdict.close ? { closes: true as const } : { closes: false as const, pane: live!.pane_id ?? session, why: verdict.why }) } } : {}) }];
   }));
 }
+
+/**
+ * When a listed approver was launched (GY-1604): by the launch record bound to its pane or, with none, by the loop's watch of that pane,
+ * which dates an unrecorded replacement it rebound from the cycle that first saw it. A record or watch naming another pane dates nothing.
+ */
+const paneLaunchedAt = (records: ApproverStarts['records'], watch: ApprovalWatch | undefined, agent: HerdrAgent) =>
+  boundLaunch(records, agent)?.launchedAt ?? (watch?.pane && watch.pane === agent.pane_id ? watch.launchedAt : undefined);
 
 /** Why an approver Herdr does not list by name is still starting, and until when (`StartingApprover`); null when it is not. */
 function startingApprover(watch: ApprovalWatch | undefined, session: string, agents: readonly HerdrAgent[], starts: ApproverStarts, now: number): { why: string; until: string } | null {
@@ -180,8 +187,8 @@ export async function terminalDecisions(masterApi: (path: string) => Promise<any
   }
   // GY-1598: an idle session named for a requested decision is judged on its screen across a pause, as `master approver` judges it.
   const starts = sessions.starts, idle = !starts?.read || !sessions.runtime.available ? [] : histories.flatMap(item => item.decisions.filter(decision => decision.state === 'requested')
-    .flatMap(decision => sessions.runtime.agents.filter(agent => agent.name === approverOf(item, decision, sessions.approvals).session && agent.agent_status === 'idle'
-      && !approverStallVerdict(agent, boundLaunch(starts.records, agent)?.launchedAt, starts.boundMs, sessions.now).why.startsWith('it is within')).map(agent => ({ agent, decision: decision.id }))));
+    .flatMap(decision => { const { watch, session } = approverOf(item, decision, sessions.approvals); return sessions.runtime.agents.filter(agent => agent.name === session && agent.agent_status === 'idle'
+      && !approverStallVerdict(agent, paneLaunchedAt(starts.records, watch, agent), starts.boundMs, sessions.now).why.startsWith('it is within')).map(agent => ({ agent, decision: decision.id })); }));
   const screens = Object.fromEntries(await Promise.all(idle.map(async ({ agent, decision }) => [agent.name!, await screenMotion(() => starts!.read!(agent), decision, starts!.pauseMs ?? idleScreenPauseMs)] as const)));
   const starting: StartingApprover[] = [];
   const unanswered = unansweredDecisions(histories, sessions.approvals, sessions.runtime, sessions.now, starts && { ...starts, screens: { ...starts.screens, ...screens } }, starting);
