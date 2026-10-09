@@ -443,7 +443,7 @@ export const resourceRegistry: ResourceDefinition[] = [
     // not readable without quotactl, so the reading warns early rather than claiming to track it.
     bound: 'the inode count of the filesystem holding the host temporary directory (filesystem-wide, not the per-user quota, which can break shells first), so it warns at a quarter free',
     usage: 'statfs of the host temporary directory (os.tmpdir() of the reading process)', owner: 'test runs and sessions on the coordinator host, and the loop\'s /tmp reclaim pass (src/tmp-reclaim.ts)',
-    reclaim: `the loop's reclaim pass scans its own tmpdir, /tmp and /var/tmp, each once, and removes this user's test temp entries (${testTempPatterns.map(pattern => `${pattern.source.slice(1)}*`).join(', ')}) older than ${testTempMinAgeMs / 3_600_000} hours, and the regular files in this user's tsx compile cache (tsx-<uid>) older than ${tmpReclaimMinAgeMs / 3_600_000} hours, that no live process holds, at most ${tmpReclaimLimitPerCycle} per cycle`,
+    reclaim: `the loop's reclaim pass scans its own tmpdir and /tmp, each once, and removes this user's test temp entries (${testTempPatterns.map(pattern => `${pattern.source.slice(1)}*`).join(', ')}) older than ${testTempMinAgeMs / 3_600_000} hours, and the regular files in this user's tsx compile cache (tsx-<uid>) older than ${tmpReclaimMinAgeMs / 3_600_000} hours, that no live process holds, at most ${tmpReclaimLimitPerCycle} per cycle`,
     remedy: 'graphyard master run --once reclaims now; find what else fills /tmp (ls /tmp | sort | uniq -c) and stop the process leaking it',
     warnBelow: bound => Math.ceil(bound / 4), symptoms: [],
     // The quarter-free line is an early warning on a filesystem-wide count every process on the host
@@ -848,7 +848,7 @@ export function owedUpgrade(state: { upgrade?: { pending: { from: string | null;
 /**
  * The loop's bounds for one /tmp pass — at most `tmpReclaimLimitPerCycle` directories and
  * `tmpReclaimWorkMsPerCycle` of removal — over `tmpRoots`, or the host's temporary directories
- * (`hostTmpRoots`: this process's tmpdir, /tmp and /var/tmp, each once, GY-1368, GY-1565) unless the caller names
+ * (`hostTmpRoots`: this process's tmpdir and /tmp, each once, GY-1368) unless the caller names
  * others (a test's scratch roots, so it never sweeps the developer's real /tmp).
  */
 export const loopTmpReclaimOptions = (tmpRoots?: readonly string[]): TmpReclaimOptions => ({ limit: tmpReclaimLimitPerCycle, workMs: tmpReclaimWorkMsPerCycle, tmpRoots: tmpRoots ?? hostTmpRoots() });

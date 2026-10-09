@@ -172,17 +172,16 @@ test('unit:loop-sweeps-stale-test-temp — the pass considers only this user\'s 
 test('unit:tmp-reclaim-scans-every-root — with TMPDIR elsewhere one pass removes stale test temps from /tmp too, keeps young, owned and held entries in both, scans a root once when TMPDIR is /tmp, and status names the roots', async () => {
   const root = await temporaryDirectory('every-root');
   await mkdir(join(root, '.graphyard'));
-  // Stand-ins: `own` for the loop's TMPDIR (/var/tmp on 6 October 2026), `shared` for /tmp, `persistent` for /var/tmp
-  // under a loop whose TMPDIR is elsewhere: where a shadow trial makes its directory when /tmp is poisoned (GY-1565).
-  const own = join(root, 'own-tmp'), shared = join(root, 'tmp'), persistent = join(root, 'var-tmp');
-  await mkdir(own); await mkdir(shared); await mkdir(persistent);
-  // The loop's default roots are its own tmpdir, /tmp and /var/tmp, whatever TMPDIR says.
+  // Stand-ins: `own` for the loop's TMPDIR (/var/tmp on 6 October 2026), `shared` for /tmp.
+  const own = join(root, 'var-tmp'), shared = join(root, 'tmp');
+  await mkdir(own); await mkdir(shared);
+  // The loop's default roots are its own tmpdir and /tmp, whatever TMPDIR says.
   const savedTmpdir = process.env.TMPDIR;
   process.env.TMPDIR = own;
-  try { assert.deepEqual(loopTmpReclaimOptions().tmpRoots, [own, '/tmp', '/var/tmp']); }
+  try { assert.deepEqual(loopTmpReclaimOptions().tmpRoots, [own, '/tmp']); }
   finally { if (savedTmpdir === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = savedTmpdir; }
-  const roots = tmpReclaim.hostTmpRoots(own, shared, persistent);
-  assert.deepEqual(roots, [own, shared, persistent]);
+  const roots = tmpReclaim.hostTmpRoots(own, shared);
+  assert.deepEqual(roots, [own, shared]);
 
   const old = testTempMinAgeMs + 30 * 60_000, young = testTempMinAgeMs - 30 * 60_000;
   const make = async (directory: string, name: string, age: number) => {
@@ -217,7 +216,7 @@ test('unit:tmp-reclaim-scans-every-root — with TMPDIR elsewhere one pass remov
   // TMPDIR resolving to /tmp — the same path, or a symlink to it — is one root, scanned once.
   const link = join(root, 'tmp-link');
   await symlink(shared, link);
-  for (const same of [tmpReclaim.hostTmpRoots(shared, shared, shared), tmpReclaim.hostTmpRoots(link, shared, link)]) {
+  for (const same of [tmpReclaim.hostTmpRoots(shared, shared), tmpReclaim.hostTmpRoots(link, shared)]) {
     const once = await reclaimTmpDirectories({ tmpRoots: same, held });
     assert.deepEqual(once.roots, [same[0]]);
     assert.equal(once.scanned, 3, 'each of the root\'s three candidates is scanned once');
@@ -230,7 +229,7 @@ test('unit:tmp-reclaim-scans-every-root — with TMPDIR elsewhere one pass remov
   assert.deepEqual({ roots: covered?.latest?.roots, measuredScanned: covered?.measuredScanned }, { roots: roots, measuredScanned: true });
   const input: ResourceInputs = { now: Date.now(), reviews: [], producers: [], agents: [], work: [], plane: null, loop: null, revision: null, disk: null, tmp: covered, profiles: { workers: [], reviewers: [], producers: [] } };
   const reading = readResources(input).find(entry => entry.id === 'tmp-inodes');
-  assert.match(reading?.detail ?? '', new RegExp(`^measured ${shared}: 200 of 1000 inodes free; .*the loop's latest /tmp pass removed ${stale.length} entries at [^;]*, scanning ${own} and ${shared} and ${persistent}`));
+  assert.match(reading?.detail ?? '', new RegExp(`^measured ${shared}: 200 of 1000 inodes free; .*the loop's latest /tmp pass removed ${stale.length} entries at [^;]*, scanning ${own} and ${shared}`));
   assert.doesNotMatch(reading?.detail ?? '', /did not scan/);
   // A pass over the loop's own tmpdir alone — the 6 October fault — is visible against /tmp.
   await reclaimResources(root, { reviewers: [], producers: [] }, { work: [], agents: [] }, { ...options, tmpRoots: [own] });

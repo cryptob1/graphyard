@@ -28,12 +28,9 @@ export const tmpReclaimMinAgeMs = 6 * 3_600_000;
  * `native-*` from GitHub fixture runs, embedded Postgres's `pg-password-*` files (written by
  * initdb's caller and left behind when that process is killed mid-init) and Playwright's
  * `playwright_chromiumdev_profile-*` browser profiles. On 1 October 2026 these filled /tmp to
- * three quarters of its inodes within hours and the per-user quota broke every worker shell. A
- * shadow trial's own `gyt-*` directory (GY-1565) is one too when a crashed merge writer leaves it.
+ * three quarters of its inodes within hours and the per-user quota broke every worker shell.
  */
-export const testTempPatterns: readonly RegExp[] = [/^graphyard-/, /^gy-/, /^gyt-/, /^landing-merge-result/, /^native-/, /^pg-password/, /^playwright_chromiumdev_profile/];
-/** The names whose directories carry an owner marker, so a marker left without its directory is clutter. */
-const markedTempPattern = /^(?:graphyard|gyt)-/;
+export const testTempPatterns: readonly RegExp[] = [/^graphyard-/, /^gy-/, /^landing-merge-result/, /^native-/, /^pg-password/, /^playwright_chromiumdev_profile/];
 /** How old a test temp entry — file or directory — must be before the loop's pass removes it. */
 export const testTempMinAgeMs = 2 * 3_600_000;
 /** The most directories one pass removes, and the most wall-clock time it spends removing: reclaim is bounded per cycle, whatever the backlog. */
@@ -155,13 +152,11 @@ async function sizeOf(path: string): Promise<number> {
 
 /**
  * The temporary directories a test run on this host may write to, each once (GY-1368): this
- * process's own tmpdir, `/tmp` and `/var/tmp`, deduplicated by realpath, in that order. The loop's
- * unit can run with TMPDIR=/var/tmp while the test runs, worker and producer sessions that leak
- * entries write under /tmp, so a pass over the loop's own tmpdir alone removed nothing for a day.
- * A shadow trial makes its own temporary directory in /var/tmp when /tmp is poisoned (GY-1565,
- * `trialTemporaryRoots`), whatever the loop's own tmpdir is, so that root is scanned too.
+ * process's own tmpdir and `/tmp`, deduplicated by realpath, in that order. The loop's unit can run
+ * with TMPDIR=/var/tmp while the test runs, worker and producer sessions that leak entries write
+ * under /tmp, so a pass over the loop's own tmpdir alone removed nothing for a day.
  */
-export const hostTmpRoots = (own = tmpdir(), shared = '/tmp', persistent = '/var/tmp'): string[] => [own, shared, persistent];
+export const hostTmpRoots = (own = tmpdir(), shared = '/tmp'): string[] => [own, shared];
 /** `roots` with every path that resolves to an earlier one dropped, each with its realpath; a root that cannot be resolved is its own. */
 async function distinctRoots(roots: readonly string[]): Promise<{ path: string; real: string }[]> {
   const distinct: { path: string; real: string }[] = [];
@@ -265,7 +260,7 @@ async function reclaimRoot(root: string, real: string, pass: PassState, report: 
     if (removable.length >= limit) break;
     const path = join(root, entry.name);
     // A marker whose directory is already gone is clutter: take it back, whatever the bound.
-    if (markedTempPattern.test(entry.name) && entry.name.endsWith('.owner') && !existsSync(path.slice(0, -'.owner'.length))) {
+    if (entry.name.startsWith('graphyard-') && entry.name.endsWith('.owner') && !existsSync(path.slice(0, -'.owner'.length))) {
       try { await rm(path, { force: true }); } catch { /* the next pass tries again */ }
       continue;
     }
