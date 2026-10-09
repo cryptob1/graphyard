@@ -16,6 +16,7 @@ import { readyToRetry } from './sessions.js';
 import { boundDetail, detailChanged, namePaths } from './decisions.js';
 import { findingRecheckMs, record } from './effects.js';
 import type { Cycle } from './cycle.js';
+import type { MergerMode } from '../merger-mode.js';
 
 /** A requested path the loop grants without an approver, and the audited ground it stands on; `companion` marks a GY-955 companion. */
 export interface ScopeGround { path: string; ground: string; companion?: boolean }
@@ -83,18 +84,27 @@ export async function automaticScopeGrounds(item: Work, request: ScopeRequestSta
   return grounds.length ? { grounds, refusal: refusals.join('; ') } : { refusal: refusals.join('; ') };
 }
 
-/** Step 2: decide the open scope requests, and measure the decision budget over what is still waiting. */
+/** The merger each loop state last read, so a failed read keeps the known mode (GY-1528). */
+const knownMerger = new WeakMap<object, MergerMode>();
 /**
- * GY-1528. Whether the recorded merger is `control-plane`, read as the merge writer step reads it.
- * Nothing is refused on plannedFiles then, so the loop raises, decides and widens no scope request
- * and re-plans nothing. No merge writer reads, or a read that fails, keeps GitHub's behaviour.
+ * GY-1528. Whether the scope actions are off this cycle: the recorded merger is `control-plane`,
+ * read as the merge writer step reads it. Nothing is refused on plannedFiles then, so the loop
+ * raises, decides and widens no scope request and re-plans nothing. No merge writer reads keeps
+ * GitHub's behaviour. A read that fails keeps the mode this loop last read; with none read yet it
+ * fails closed, and the scope actions wait for a cycle whose read succeeds, so a transient status
+ * error never raises a scope request under the control plane.
  */
-export async function controlPlaneMerger(cycle: Pick<Cycle, 'effects'>): Promise<boolean> {
+export async function controlPlaneMerger(cycle: Pick<Cycle, 'effects' | 'state'>): Promise<boolean> {
   const reads = cycle.effects.mergeWriter;
   if (!reads) return false;
-  try { return (await reads.merger()) === 'control-plane'; } catch { return false; }
+  try {
+    const mode = await reads.merger();
+    knownMerger.set(cycle.state, mode);
+    return mode === 'control-plane';
+  } catch { return knownMerger.get(cycle.state) !== 'github'; }
 }
 
+/** Step 2: decide the open scope requests, and measure the decision budget over what is still waiting. */
 export async function scopeStep(cycle: Cycle) {
   const { state, effects, now, clock, performed, isolate, open } = cycle;
   if (await controlPlaneMerger(cycle)) return { settled: new Map<string, Work>(), budget: scopeBudget([], state.scope, clock) };

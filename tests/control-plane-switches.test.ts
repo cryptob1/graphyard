@@ -12,7 +12,7 @@ import { evaluateLandability, landabilityRefusals } from '../src/model/landabili
 import { reconcileAutoDispatch } from '../src/model/dispatch.js';
 import { foldMergeLedger, mergeTrialKind } from '../src/model/merge-ledger.js';
 import { reworkWaitsForApprover, riskClassApprover, selfApprover } from '../src/server/lane-rework.js';
-import { advisoryActionKey, advisoryChore, advisoryIdle, mergeWriterIdle, mergeWriterStep, type MergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
+import { advisoryActionKey, advisoryChore, advisoryIdle, advisoryStep, mergeWriterIdle, mergeWriterStep, type MergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
 import { emptyDaemonState, type DaemonEffects } from '../src/master-daemon.js';
 import { masterConfigSchema } from '../src/master.js';
 import type { MergePorts, MergeRecordEvent } from '../src/merge-writer/executor.js';
@@ -95,11 +95,33 @@ test('unit:scope-switches-github-snapshot — under the github merger each switc
     assert.deepEqual(workerHarnessPlan({ ...workerInput, mergeWriter }).hooks, [hook]);
     assert.deepEqual(sessionHarnessPlan({ ...workerInput, mergeWriter, role: 'worker', kind: 'claude', repository: 'owner/project', credentialDirectories: ['/creds/a'] }).hooks, [hook]);
   }
-  // No merge writer reads, a github merger or a failed read all keep the scope step running.
-  const cycleOf = (mergeWriter: unknown) => ({ effects: { mergeWriter } }) as unknown as Cycle;
+  // No merge writer reads, a github merger, or a failed read after a github one keep the scope step running.
+  const state = emptyDaemonState(config);
+  let read: () => Promise<string> = async () => 'github';
+  const cycleOf = (mergeWriter: unknown) => ({ state, effects: { mergeWriter } }) as unknown as Cycle;
+  const reads = { merger: () => read() };
   assert.equal(await controlPlaneMerger(cycleOf(null)), false);
-  assert.equal(await controlPlaneMerger(cycleOf({ merger: async () => 'github' })), false);
-  assert.equal(await controlPlaneMerger(cycleOf({ merger: async () => { throw new Error('status unreadable'); } })), false);
+  assert.equal(await controlPlaneMerger(cycleOf(reads)), false);
+  read = async () => { throw new Error('status unreadable'); };
+  assert.equal(await controlPlaneMerger(cycleOf(reads)), false, 'a failed read keeps the github mode last read');
+});
+
+test('unit:scope-switches-control-plane — a failed merger read never re-enables the scope actions under the control plane: it keeps the mode last read, and with none read yet it fails closed', async () => {
+  let read: () => Promise<string> = async () => 'control-plane';
+  const reads = { merger: () => read() };
+  const known = { state: emptyDaemonState(config), effects: { mergeWriter: reads } } as unknown as Cycle;
+  assert.equal(await controlPlaneMerger(known), true);
+  read = async () => { throw new Error('status unreadable'); };
+  assert.equal(await controlPlaneMerger(known), true, 'the control-plane mode last read stands');
+  const fresh = { state: emptyDaemonState(config), effects: { mergeWriter: reads } } as unknown as Cycle;
+  assert.equal(await controlPlaneMerger(fresh), true, 'nothing read yet: the scope actions are off');
+  // The scope step itself: a failed read decides nothing and records nothing.
+  const decided: string[] = [];
+  const effects = { mergeWriter: reads, decideScope: async (work: Work) => { decided.push(work.key); return work; }, persist: async () => {} } as unknown as DaemonEffects;
+  const asking = item('control-plane', ['src/app.ts'], { lease: { epoch: 1, owner: 'worker', expiresAt: iso(start + 600_000) }, scopeRequest: { epoch: 1, at: iso(start), paths: ['src/other.ts'], requestedBy: 'worker', reason: 'needs it' } });
+  const cycle = { state: emptyDaemonState(config), effects, now: () => start, clock: start, performed: [], open: [asking], isolate: async (_k: unknown, _i: unknown, _n: unknown, body: () => Promise<unknown>) => body() } as unknown as Cycle;
+  const { settled } = await scopeStep(cycle);
+  assert.deepEqual([decided, settled.size, cycle.performed], [[], 0, []]);
 });
 
 test('unit:landability-control-plane-ledger-proofs — a control-plane candidate\'s acceptance reads unit:/integration: counts from work.mergeLedger.trial for the current head, asks manual: only of a sensitive change, defers e2e:, and ignores producer evidence', () => {
@@ -198,6 +220,44 @@ test('integration:advisory-failure-files-chore — after the merge writer delive
   assert.ok(!events.some(event => (event as { kind: string }).kind === 'revert'), 'nothing is reverted');
   for (let again = 0; again < 2; again++) await mergeWriterStep(cycle());
   assert.deepEqual([filed.length, advised.length], [1, 1], 'neither the run nor the chore repeats');
+});
+
+test('integration:advisory-failure-files-chore — the advisory obligation is read from the merge ledger and kept in the persisted state: a restart mid-run runs it again, a delivery an open intent\'s reconciliation made is owed a run though no flight supplied it, and nothing delivered before the ledger was first read is owed', async () => {
+  let clock = start;
+  const delivered = (key: string, mergeSha: string, at: number) => ({ ...item('control-plane', ['src/app.ts']), key, id: key, stage: 'done',
+    mergeLedger: { key, state: 'reconciled', head: sha(`head:${key}`), baseTip: base, mergeSha, risk: 'normal', intentAt: iso(at), pushedAt: iso(at + 1), observedTip: mergeSha, refusal: null, events: 3 } }) as unknown as Work;
+  const old = delivered('GY-2', sha('merge:old'), start - 60_000);
+  const work: Work[] = [old];
+  const advised: string[] = [], filed: string[] = [];
+  let answer: () => Promise<{ build: 'pass' | 'fail'; failed: string[] }> = async () => ({ build: 'pass', failed: ['tests/module-budgets.test.ts'] });
+  const reads = { merger: async () => 'control-plane', advisory: (mergeSha: string) => { advised.push(mergeSha); return answer(); } } as unknown as MergeWriterReads;
+  const effects = { mergeWriter: reads, persist: async () => {}, fileFaultClass: async (input: any) => { filed.push(input.title); return { key: `GY-${900 + filed.length}` } as Work; } } as unknown as DaemonEffects;
+  let state = emptyDaemonState(config);
+  const step = () => advisoryStep({ state, effects, now: () => clock, performed: [], snapshot: { work } } as unknown as Cycle, null);
+  await step();
+  assert.equal(state.mergeWriter.advisory?.since, iso(start), 'the ledger is first read now');
+  assert.deepEqual(advised, [], 'a delivery from before the ledger was first read is owed nothing');
+  // A reconciled intent: no flight in this process, the ledger alone shows the delivery.
+  clock = start + 60_000;
+  const reconciled = sha('merge:reconciled');
+  work.push(delivered('GY-3', reconciled, start + 30_000));
+  // The run hangs; the loop restarts: its persisted state comes back through JSON, the run in flight does not.
+  answer = () => new Promise(() => {});
+  await step();
+  assert.deepEqual(advised, [reconciled]);
+  assert.deepEqual(state.mergeWriter.advisory?.due.map(entry => entry.mergeSha), [reconciled], 'owed until its run settles');
+  state = JSON.parse(JSON.stringify(state));
+  answer = async () => ({ build: 'pass', failed: ['tests/module-budgets.test.ts'] });
+  await step();
+  assert.deepEqual(advised, [reconciled, reconciled], 'the restarted loop runs the interrupted obligation again');
+  await advisoryIdle(state);
+  await step();
+  assert.deepEqual(filed, [`Advisory test tests/module-budgets.test.ts fails on ${reconciled.slice(0, 12)}`]);
+  assert.deepEqual([state.mergeWriter.advisory?.due, state.mergeWriter.advisory?.ran.map(entry => entry.mergeSha)], [[], [reconciled]]);
+  // Another restart: nothing runs or files twice.
+  state = JSON.parse(JSON.stringify(state));
+  for (let again = 0; again < 3; again++) { await step(); await advisoryIdle(state); }
+  assert.deepEqual([advised.length, filed.length], [2, 1]);
 });
 
 test('unit:rework-approver-by-risk — a control-plane rework waits for an approver only for a sensitive change, applied otherwise by graphyard-risk-class; github keeps reworkNeedsApprover by lane', () => {

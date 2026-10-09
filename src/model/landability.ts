@@ -83,7 +83,7 @@ export const controlPlaneObserved = (work: Pick<Work, 'observation'>) => work.ob
 function controlPlaneAcceptance(work: Work, all: Work[], now: Date): (LandabilityReason & { proof?: string })[] {
   const head = work.candidate?.sha.toLowerCase() ?? null, trial = work.mergeLedger?.trial ?? null;
   const tried = !!head && trial?.head.toLowerCase() === head ? trial : null;
-  const sensitive = riskOf(work).risk === 'sensitive';
+  const sensitive = controlPlaneObserved(work) && riskOf(work).risk === 'sensitive';
   const refusal = (proof: string): string | null => {
     const family = proof.slice(0, Math.max(0, proof.indexOf(':')));
     if (family === 'unit' || family === 'integration') {

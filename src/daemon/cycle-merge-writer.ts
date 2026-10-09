@@ -32,6 +32,8 @@ export const mergeWriterStateSchema = z.object({
   inFlight: z.object({ key: z.string().max(100), id: z.string().max(100), head: shaField, startedAt: instant }).strict().nullable().default(null),
   refusals: z.array(z.object({ key: z.string().max(100), head: shaField, reason: z.string().max(2000), at: instant }).strict()).max(mergeWriterKeptRefusals).default([]),
   reworks: z.array(pendingReworkSchema).max(mergeWriterKeptReworks).default([]),
+  /** The advisory budget runs owed after merges (GY-1528); absent until the advisory step first runs. */
+  advisory: z.lazy(() => advisoryStateSchema).optional(),
 }).strict();
 export type MergeWriterState = z.infer<typeof mergeWriterStateSchema>;
 export const emptyMergeWriterState = (): MergeWriterState => mergeWriterStateSchema.parse({});
@@ -121,48 +123,92 @@ export function advisoryChore(test: string, mergeSha: string, key: string) {
 export const advisoryActionKey = (mergeSha: string, test: string) => `merge-writer-advisory:${mergeSha}:${test}`;
 /** How many times filing one advisory chore is tried before the failure is left recorded. */
 export const advisoryFilingAttempts = 5;
-interface AdvisoryRun { key: string; mergeSha: string; settled: { build: 'pass' | 'fail'; failed: string[] } | { error: unknown } | null }
-/** How many merge commits the advisory ledger remembers having run, so one is never run twice. */
-export const advisoryKeptRuns = 50;
-interface AdvisoryLedger { due: { key: string; mergeSha: string }[]; running: AdvisoryRun | null; unfiled: { key: string; mergeSha: string; test: string; attempts: number }[]; ran: string[] }
-const advisories = new WeakMap<DaemonState, AdvisoryLedger>();
+/** How many merge commits the advisory ledger remembers having run, how many it holds owed, and how many chores it holds unfiled. */
+export const advisoryKeptRuns = 50, advisoryKeptDue = 50, advisoryKeptUnfiled = 100;
+const advisoryMerge = z.object({ key: z.string().max(100), mergeSha: shaField, deliveredAt: instant }).strict();
+/**
+ * `state.mergeWriter.advisory` (GY-1528), persisted with the loop's state so an obligation outlives
+ * a restart: the merges owed a run oldest first (the head stays owed until its run settles), the
+ * chores still to file, the merges already run, and `since`, the delivery instant at or before
+ * which the merge ledger owes nothing (set when the ledger is first read, and moved forward past
+ * a run the bounded `ran` list forgets).
+ */
+export const advisoryStateSchema = z.object({
+  since: instant.nullable().default(null),
+  due: z.array(advisoryMerge).max(advisoryKeptDue).default([]),
+  unfiled: z.array(z.object({ key: z.string().max(100), mergeSha: shaField, test: z.string().max(500), attempts: z.number().int().min(0).max(100) }).strict()).max(advisoryKeptUnfiled).default([]),
+  ran: z.array(advisoryMerge).max(advisoryKeptRuns).default([]),
+}).strict();
+export type AdvisoryState = z.infer<typeof advisoryStateSchema>;
+interface AdvisoryRun { mergeSha: string; settled: { build: 'pass' | 'fail'; failed: string[] } | { error: unknown } | null }
+/** The one advisory run in flight per loop state; process memory only, since its merge stays owed in the persisted state until it settles. */
+const advisoryRuns = new WeakMap<DaemonState, AdvisoryRun>();
 /** Resolves once the advisory run in flight for `state` has settled; for the step's tests. */
-export const advisoryIdle = async (state: DaemonState) => { for (let waited = 0; advisories.get(state)?.running && !advisories.get(state)!.running!.settled && waited < 600_000; waited += 5) await new Promise(resolve => setTimeout(resolve, 5)); };
+export const advisoryIdle = async (state: DaemonState) => { for (let waited = 0; advisoryRuns.get(state) && !advisoryRuns.get(state)!.settled && waited < 600_000; waited += 5) await new Promise(resolve => setTimeout(resolve, 5)); };
+
+/**
+ * The merges the ledger shows the writer delivered after `since`: an item whose ledger state is
+ * `reconciled` from an intent the writer itself recorded. This is what makes the obligation
+ * survive a restart and cover a delivery an open intent's reconciliation made, which no flight in
+ * this process supplied.
+ */
+export function ledgerDeliveries(work: readonly Work[], since: string): { key: string; mergeSha: string; deliveredAt: string }[] {
+  const after = Date.parse(since);
+  return work.flatMap(item => {
+    const ledger = item.mergeLedger;
+    if (!ledger || ledger.state !== 'reconciled' || !ledger.mergeSha || !ledger.intentAt) return [];
+    const deliveredAt = ledger.pushedAt ?? ledger.intentAt;
+    return Date.parse(deliveredAt) > after ? [{ key: item.key, mergeSha: ledger.mergeSha.toLowerCase(), deliveredAt }] : [];
+  }).sort((a, b) => Date.parse(a.deliveredAt) - Date.parse(b.deliveredAt) || a.key.localeCompare(b.key));
+}
 
 /**
  * GY-1528. Each merge the writer delivered gets one advisory run of the budget tests on its merge
- * commit, beside the cycle so the next merge never waits on it. A failing test file files one chore
- * item naming the test and the merge commit (`advisoryChore`), idempotent per (merge, test); it is
- * never a revert or a refusal. Answers whether anything was recorded.
+ * commit, beside the cycle so the next merge never waits on it. The obligation is read from the
+ * merge ledger every cycle (`ledgerDeliveries`) as well as from the flight that settled, and kept
+ * in the persisted state, so neither a restart nor a reconciled intent loses it; a run interrupted
+ * by a restart runs again. A failing test file files one chore item naming the test and the merge
+ * commit (`advisoryChore`), idempotent per (merge, test); it is never a revert or a refusal.
+ * Answers whether anything was recorded.
  */
-export async function advisoryStep(cycle: Pick<Cycle, 'state' | 'effects' | 'now' | 'performed'>, delivered: { key: string; mergeSha: string } | null): Promise<boolean> {
+export async function advisoryStep(cycle: Pick<Cycle, 'state' | 'effects' | 'now' | 'performed'> & { snapshot?: Pick<Cycle['snapshot'], 'work'> }, delivered: { key: string; mergeSha: string } | null): Promise<boolean> {
   const { state, effects, now, performed } = cycle;
   const reads = effects.mergeWriter;
   if (!reads?.advisory) return false;
-  const ledger = advisories.get(state) ?? { due: [], running: null, unfiled: [], ran: [] };
-  advisories.set(state, ledger);
-  if (delivered && !ledger.ran.includes(delivered.mergeSha) && !ledger.due.some(entry => entry.mergeSha === delivered.mergeSha)) ledger.due.push(delivered);
+  const writer = state.mergeWriter;
+  const advisory = writer.advisory ??= advisoryStateSchema.parse({});
   const at = () => new Date(now()).toISOString();
   let changed = false;
-  const running = ledger.running;
+  // The ledger owes nothing delivered before it was first read: the advisory run is new with GY-1528.
+  if (advisory.since === null) { advisory.since = at(); changed = true; }
+  const known = (mergeSha: string) => advisory.ran.some(entry => entry.mergeSha === mergeSha) || advisory.due.some(entry => entry.mergeSha === mergeSha);
+  const owed = [...(delivered ? [{ ...delivered, mergeSha: delivered.mergeSha.toLowerCase(), deliveredAt: at() }] : []), ...ledgerDeliveries(cycle.snapshot?.work ?? [], advisory.since)];
+  for (const entry of owed) if (!known(entry.mergeSha) && advisory.due.length < advisoryKeptDue) { advisory.due.push(entry); changed = true; }
+  const running = advisoryRuns.get(state);
   if (running?.settled) {
-    ledger.running = null;
-    if ('error' in running.settled) {
-      performed.push(storeAction(state, `merge-writer-advisory:${running.mergeSha}`, { kind: 'merge', work: running.key, principal: null, state: 'failed', attempts: 1, epoch: null, cycle: state.cycle, at: at(),
-        detail: `The advisory budget tests could not run on ${running.mergeSha} (${message(running.settled.error)}); they are advisory, so nothing is refused or reverted` }, null));
-      changed = true;
-    } else {
-      const failed = running.settled.failed.filter(test => /^tests\/[\w./-]+\.test\.ts$/.test(test));
-      for (const test of failed) ledger.unfiled.push({ key: running.key, mergeSha: running.mergeSha, test, attempts: 0 });
-      if (!failed.length) {
-        performed.push(storeAction(state, `merge-writer-advisory:${running.mergeSha}`, { kind: 'merge', work: running.key, principal: null, state: 'done', attempts: 1, epoch: null, cycle: state.cycle, at: at(),
-          detail: `The advisory budget tests passed on ${running.mergeSha}, merged for ${running.key}` }));
-        changed = true;
+    advisoryRuns.delete(state);
+    const index = advisory.due.findIndex(entry => entry.mergeSha === running.mergeSha);
+    const merge = index >= 0 ? advisory.due.splice(index, 1)[0]! : null;
+    if (merge) {
+      const ran = [...advisory.ran, merge];
+      // A run the bounded list forgets moves `since` past it, so the ledger never owes it again.
+      for (const forgotten of ran.slice(0, Math.max(0, ran.length - advisoryKeptRuns))) if (Date.parse(forgotten.deliveredAt) > Date.parse(advisory.since!)) advisory.since = forgotten.deliveredAt;
+      advisory.ran = ran.slice(-advisoryKeptRuns);
+      if ('error' in running.settled) {
+        performed.push(storeAction(state, `merge-writer-advisory:${merge.mergeSha}`, { kind: 'merge', work: merge.key, principal: null, state: 'failed', attempts: 1, epoch: null, cycle: state.cycle, at: at(),
+          detail: `The advisory budget tests could not run on ${merge.mergeSha} (${message(running.settled.error)}); they are advisory, so nothing is refused or reverted`.slice(0, 1900) }, null));
+      } else {
+        const failed = running.settled.failed.filter(test => /^tests\/[\w./-]+\.test\.ts$/.test(test));
+        for (const test of failed) advisory.unfiled.push({ key: merge.key, mergeSha: merge.mergeSha, test, attempts: 0 });
+        advisory.unfiled = advisory.unfiled.slice(-advisoryKeptUnfiled);
+        if (!failed.length) performed.push(storeAction(state, `merge-writer-advisory:${merge.mergeSha}`, { kind: 'merge', work: merge.key, principal: null, state: 'done', attempts: 1, epoch: null, cycle: state.cycle, at: at(),
+          detail: `The advisory budget tests passed on ${merge.mergeSha}, merged for ${merge.key}` }));
       }
     }
+    changed = true;
   }
-  const kept: AdvisoryLedger['unfiled'] = [];
-  for (const entry of ledger.unfiled) {
+  const kept: AdvisoryState['unfiled'] = [];
+  for (const entry of advisory.unfiled) {
     if (!effects.fileFaultClass) { kept.push(entry); continue; }
     const key = advisoryActionKey(entry.mergeSha, entry.test), attempts = entry.attempts + 1;
     try {
@@ -177,13 +223,12 @@ export async function advisoryStep(cycle: Pick<Cycle, 'state' | 'effects' | 'now
     }
     changed = true;
   }
-  ledger.unfiled = kept;
-  if (!ledger.running && ledger.due.length) {
-    const next = ledger.due.shift()!;
-    ledger.ran = [...ledger.ran, next.mergeSha].slice(-advisoryKeptRuns);
-    const entry: AdvisoryRun = { ...next, settled: null };
-    ledger.running = entry;
-    void reads.advisory(next.mergeSha).then(result => { entry.settled = result; }, error => { entry.settled = { error }; });
+  advisory.unfiled = kept;
+  // The oldest owed merge runs next, one at a time; it stays owed until its run settles.
+  if (!advisoryRuns.has(state) && advisory.due.length) {
+    const entry: AdvisoryRun = { mergeSha: advisory.due[0]!.mergeSha, settled: null };
+    advisoryRuns.set(state, entry);
+    void reads.advisory(entry.mergeSha).then(result => { entry.settled = result; }, error => { entry.settled = { error }; });
   }
   return changed;
 }

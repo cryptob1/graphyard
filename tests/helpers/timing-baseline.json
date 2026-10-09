@@ -707,6 +707,7 @@
     "tests/cli-item-lookup.test.ts": 2000,
     "tests/zero-touch-control-plane.test.ts": 4000,
     "tests/control-plane-switches.test.ts": 1500,
-    "tests/mode-parity.test.ts": 300
+    "tests/mode-parity.test.ts": 3000,
+    "tests/soak-control-plane-switches.test.ts": 3000
   }
 }
