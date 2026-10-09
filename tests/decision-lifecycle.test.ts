@@ -15,6 +15,7 @@ import { Store } from '../src/store.js';
 import { MERGE_PROTOCOL } from '../src/protocol-version.js';
 import { samePin } from '../src/server/decision-ledger.js';
 import { workFaults } from '../src/model/fault-classes.js';
+import { exemption } from '../src/intervention-exemptions.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-75: a decision whose approval is refused on a revision race must never stay 'requested'
@@ -178,6 +179,10 @@ test('unit:decision-requirements-approval-resolves-weakening — the requirement
   assert.equal(details.approvalReason, approvalReason);
   assert.equal(details.resolvedBy, master.id);
   assert.match(details.escalation.reason, /retires AC-2/);
+  // GY-1570: the escalation names the decision that raised it, the one that resolved it, so the
+  // interventions fold reads it as the approval's audit line, not an escalation somebody answered.
+  assert.equal(details.escalation.decision, requested.body.id);
+  assert.equal(exemption({ at: 'escalation-resolved', details }), 'approved-decision-weakening');
   // A replay of the approval answers from its receipt and resolves nothing twice.
   const listed = await ok(master.token, 'GET', `work/${work.key}/decisions`);
   assert.match(listed.decisions.find((entry: any) => entry.id === requested.body.id).outcome, /requirement-weakening it raised is resolved by this approval/);
