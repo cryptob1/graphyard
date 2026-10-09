@@ -100,10 +100,13 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
     const own = boundLaunch(await effects.approverLaunches?.().catch(() => []) ?? [], agent);
     // A leftover its own record already dates stalled past its start bound is no new launch: the relaunch's launcher closes it (GY-1598).
     if (own && approverStallVerdict(agent, own.launchedAt, launchStartMs(config), clock).close) return;
+    // GY-1612: the cycle that first saw the pane is stamped before the end below is tried, so registry refusals delay none of its bound.
+    if (watch.movedPane?.pane !== agent.pane_id) { watch.movedPane = { pane: agent.pane_id!, at: stamp }; await effects.persist(state); }
+    const firstSeen = watch.movedPane!.at;
     // A registry session the failed launch left (step `start`) is not this pane's: it is ended first, and the bind waits while it cannot be.
     if (watch.session && watch.session !== own?.session && !await endApproverSession(item, watch, `approver for ${watch.work} decision ${watch.decision} was launched by hand in pane ${agent.pane_id}`)) return;
-    Object.assign(watch, { launches: watch.launches + 1, agentName: name, pane: agent.pane_id, launchedAt: own?.launchedAt ?? stamp, closeAttempts: 0, account: own?.account ?? null, runtime: own?.runtime ?? null, session: own?.session ?? null, capacity: null });
-    await note(`approver:${watch.decision}:bound:${agent.pane_id}`, item, 'decision', 'done', `Watching approver session ${name} in pane ${agent.pane_id}, launched by hand for ${item.key} decision ${watch.decision} while the watch held no session${own ? '' : `; no launch record names that pane, so it is dated from ${stamp}, when the loop first saw it`}`);
+    Object.assign(watch, { launches: watch.launches + 1, agentName: name, pane: agent.pane_id, launchedAt: own?.launchedAt ?? firstSeen, closeAttempts: 0, account: own?.account ?? null, runtime: own?.runtime ?? null, session: own?.session ?? null, capacity: null, movedPane: null });
+    await note(`approver:${watch.decision}:bound:${agent.pane_id}`, item, 'decision', 'done', `Watching approver session ${name} in pane ${agent.pane_id}, launched by hand for ${item.key} decision ${watch.decision} while the watch held no session${own ? '' : `; no launch record names that pane, so it is dated from ${firstSeen}, when the loop first saw it`}`);
   };
   /**
    * GY-1604. A session listed under the watch's name in a pane other than the one it holds, now gone, is another launch (`master approver`
@@ -341,6 +344,26 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
     await note(`escalation:decision-unjudged:${watch.decision}`, item, 'escalation', 'failed', `${detail}. ${watch.launches} approver session(s) and ${watch.requests} request(s) have not produced a judgement${watch.ended.length ? ` (${watch.ended.join('; ')})` : ''}, so the loop has stopped spending sessions on it: read it with graphyard master decisions ${item.key}, then put it to a fresh approver with graphyard master approver ${item.key} ${watch.decision}, or take the request back and decide what the item needs instead`);
   };
   /**
+   * GY-1612. Whether a relaunch whose last launch did not stand adopts the session already listed under the decision's approver name —
+   * a `master approver` launch, or the pane of a launch that failed after it was made — rather than replacing it. Only a launch record
+   * naming that session's own pane judges it (GY-1604): one its own record shows never started past its start bound is replaced, as
+   * the launcher replaces it (GY-1598); any session that has started is adopted, since the launcher refuses to replace it, and one with
+   * no record of its own is adopted and dated from now, the loop's first sight of it. `wait` while a registry session the failed launch left
+   * is still unended.
+   */
+  const adoptable = async (item: Work, watch: ApprovalWatch): Promise<'adopt' | 'replace' | 'wait'> => {
+    const name = approverSessionName(item, watch.decision), seen = await sessions();
+    const agent = seen.available ? seen.agents.find(candidate => candidate.name === name) : undefined;
+    if (!agent?.pane_id) return 'replace';
+    const own = boundLaunch(await effects.approverLaunches?.().catch(() => []) ?? [], agent);
+    // The launcher's own never-started predicate decides, not the watch's step: a session that has started (working past the judge
+    // bound, blocked) is one the launcher refuses to replace, so only adopting it lets supervision reach it.
+    if (own && approverStallVerdict(agent, own.launchedAt, launchStartMs(config), clock).close) return 'replace';
+    // A registry session the failed launch left, which the bind could not end this cycle, is never dropped by adopting over it: the
+    // bind ends it and takes the session on a later cycle, dated from the cycle that first saw it.
+    return watch.session && watch.session !== own?.session ? 'wait' : 'adopt';
+  };
+  /**
    * Act on a supervision step once its early guards have passed: put down the session that ended,
    * then make the replacement, record how this one ended, and escalate a decision no session will
    * judge. Shared by the loop's own watches and the hand watches (GY-779), so the two supervision
@@ -349,22 +372,6 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
    * can do that, so it takes its bound and re-request from there. `wait` means the ended session
    * could not be put down yet, so the step is taken again next cycle.
    */
-  /**
-   * GY-1612. Whether a relaunch whose last launch did not stand adopts the session already listed under the decision's approver name —
-   * a `master approver` launch, or the pane of a launch that failed after it was made — rather than replacing it. Only a launch record
-   * naming that session's own pane judges it (GY-1604): one its own record shows never started past its start bound is replaced, as
-   * the launcher replaces it (GY-1598); any session that has started is adopted, since the launcher refuses to replace it, and one with
-   * no record of its own is adopted and dated from now, the loop's first sight of it.
-   */
-  const adoptable = async (item: Work, watch: ApprovalWatch) => {
-    const name = approverSessionName(item, watch.decision), seen = await sessions();
-    const agent = seen.available ? seen.agents.find(candidate => candidate.name === name) : undefined;
-    if (!agent?.pane_id) return false;
-    const own = boundLaunch(await effects.approverLaunches?.().catch(() => []) ?? [], agent);
-    // The launcher's own never-started predicate decides, not the watch's step: a session that has started (working past the judge
-    // bound, blocked) is one the launcher refuses to replace, so only adopting it lets supervision reach it.
-    return !own || !approverStallVerdict(agent, own.launchedAt, launchStartMs(config), clock).close;
-  };
   const actOnStep = async (item: Work, watch: ApprovalWatch, step: ApprovalStep): Promise<'wait' | 'rerequest' | 'done'> => {
     const base = `approver:${watch.decision}`;
     // While the ended session cannot be put down, its name or registry slot still refuses a
@@ -377,7 +384,9 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
       if (capacityRelaunchWaits(watch)) return 'wait';
       if (watch.capacity) capacityRelaunchHanded = true;
       const waited = watch.capacity ? 'waited for an approver slot' : 'had its last approver launch refused';
-      try { await note(`${base}:launch:${watch.launches + 1}`, item, 'decision', 'done', `${item.key}'s ${watch.action} decision ${watch.decision} ${waited}; ${await launch(item, watch, await adoptable(item, watch))}`); }
+      const adopt = await adoptable(item, watch);
+      if (adopt === 'wait') return 'wait';
+      try { await note(`${base}:launch:${watch.launches + 1}`, item, 'decision', 'done', `${item.key}'s ${watch.action} decision ${watch.decision} ${waited}; ${await launch(item, watch, adopt === 'adopt')}`); }
       catch (error) { const detail = `${item.key}'s ${watch.action} decision ${watch.decision} ${waited}; its approver session could not be launched: ${message(error)}`; await note(`${base}:launch:${watch.launches + 1}`, item, 'decision', 'failed', detail, undefined, decisionFailureKind(state, item.key, detail)); }
       return 'done';
     }

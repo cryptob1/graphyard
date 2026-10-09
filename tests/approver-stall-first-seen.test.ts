@@ -137,6 +137,12 @@ test('unit:approver-stall-first-seen — a loop watch whose last launch failed a
   assert.equal(approvalStep(watch, { state: 'requested' }, seen, at + bound * 0.9, { startMs: bound }).step, 'wait', 'it is not judged by the older record\'s age');
   assert.equal(approvalStep(watch, { state: 'requested' }, seen, at + bound * 1.1, { startMs: bound }).step, 'relaunch', 'past the bound from its first observation it is');
 
+  // A registry session the failed launch left and the registry has not yet ended is never dropped by adopting across it: the step
+  // waits, launching nothing, until the bind has ended it.
+  const orphaned = supervise([listed], null), holding = approvalWatchSchema.parse({ ...failed(), session: 'registry-orphan' });
+  assert.equal(await orphaned.supervisor.actOnStep(work, holding, relaunch), 'wait');
+  assert.deepEqual([launches, holding.agentName, holding.pane, holding.session], [[], null, null, 'registry-orphan'], 'nothing adopted or launched while the failed launch\'s session stands');
+
   // A record naming the listed pane is the session's own: within its start bound it is adopted on that record's account and session.
   const own = supervise([listed], { pane: 'pane-listed', ageMs: bound / 2 }), recorded = failed();
   await own.supervisor.actOnStep(work, recorded, relaunch);
