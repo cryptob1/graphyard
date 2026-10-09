@@ -459,3 +459,12 @@ test('unit:approver-stall-followup — stall checks date a session only by its o
     });
   } finally { await cleanup(); await rm(dataHome, { recursive: true, force: true }); await rm(claudeHome, { recursive: true, force: true }); }
 });
+
+test('a stalled approver whose registry session was already ended is freed on retry, not refused (GY-1604)', async () => {
+  const { freeStalledSlot } = await import('../src/master/approver-stall.js');
+  const { FleetUnreachableError } = await import('../src/fleet.js');
+  // A retry after the pane failed to close: the registry ended the session the first time and now answers it unknown.
+  await freeStalledSlot('registry-gone', 'approver session x (pane p)', async () => { throw new FleetUnreachableError('The agent registry at http://registry answered 404: Unknown session'); });
+  await assert.rejects(freeStalledSlot('registry-held', 'approver session x (pane p)', async () => { throw new FleetUnreachableError('The agent registry at http://registry answered 503: unavailable'); }),
+    (error: Error & { registrySession?: string }) => error.registrySession === 'registry-held', 'any other refusal still leaves the slot held');
+});
