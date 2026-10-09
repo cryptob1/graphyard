@@ -1,7 +1,7 @@
 // Concern: approver sessions — launch, supervise, fail over, close and record how they ended, for the loop's own and hand-launched approvers.
 import type { Work } from '../model.js';
 import { approverRuntime } from '../master/autonomy.js';
-import { type ScreenMotion, screenMotion, stallScreenLines } from '../master/approver-stall.js';
+import { type ScreenMotion, boundLaunch, screenMotion, stallScreenLines } from '../master/approver-stall.js';
 import { launchStartMs } from '../master/launch.js';
 import { type HerdrAgent, type RoleCapacity, approverProfile, ownLoginAccounts, approverSessionId, approverSessionName } from '../master.js';
 import { type ApprovalWatch, approvalWatchSchema, type DaemonActionKind, message } from './state.js';
@@ -382,7 +382,11 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
     const watched = Object.values(state.approvals);
     for (const agent of seen.agents) {
       if (!agent.name || !agent.pane_id || watched.some(watch => watch.agentName === agent.name)) continue;
-      const record = records.findLast(entry => entry.agentName === agent.name && entry.work && entry.decision);
+      // The latest record of its name says which item and decision it judges (its name is derived from them), but only one bound
+      // to its pane dates it, holds its account or names its registry session (GY-1604): a launch whose record could not be written
+      // leaves an earlier session's record, whose age would let this pane be closed before its own start bound. Undated, it is
+      // judged from when the loop first saw it.
+      const record = records.findLast(entry => entry.agentName === agent.name && entry.work && entry.decision), own = boundLaunch(records, agent);
       const item = snapshot.work.find(candidate => record ? candidate.key === record.work : approverPrefixes(candidate.key).some(prefix => agent.name!.startsWith(prefix)));
       if (!item) continue;
       let decision = record?.decision ?? null;
@@ -395,9 +399,9 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
       // Another watch holds this decision: the loop's own supervision decides its approver.
       if (!decision || watched.some(watch => watch.decision === decision)) continue;
       const watch = state.approvals[`${handWatchPrefix}${decision}`] = approvalWatchSchema.parse({ work: item.key, action: 'unknown', decision, requestedAt: stamp, agentName: agent.name, pane: agent.pane_id,
-        launchedAt: record?.launchedAt ?? null, launches: 1, account: record?.account ?? null, runtime: record?.runtime ?? null, session: record?.session ?? null });
+        launchedAt: own?.launchedAt ?? null, launches: 1, account: own?.account ?? null, runtime: own?.runtime ?? null, session: own?.session ?? null });
       watched.push(watch);
-      await note(`approver:${decision}:watched`, item, 'decision', 'done', `Watching approver session ${agent.name}, which no request of the loop's launched, for ${item.key} decision ${decision}${record ? ' (launched with graphyard master approver)' : ''}`);
+      await note(`approver:${decision}:watched`, item, 'decision', 'done', `Watching approver session ${agent.name}, which no request of the loop's launched, for ${item.key} decision ${decision}${record ? ` (launched with graphyard master approver${own ? '' : `; no launch record names its pane ${agent.pane_id}, so it is dated from ${stamp}, when the loop first saw it`})` : ''}`);
     }
     // A `master approver` session that ended before any cycle listed it is known by its launch
     // record alone (GY-551): while its decision still waits for a judgement it is watched as gone,
@@ -445,7 +449,7 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
         if (watch.exhaustedAt) {
           const agent = seen.agents.find(candidate => candidate.name === watch.agentName);
           if (!agent?.pane_id) continue;
-          const fresh = records.findLast(entry => entry.agentName === watch.agentName);
+          const fresh = boundLaunch(records, agent);
           if (fresh ? !(Date.parse(fresh.launchedAt) > Date.parse(watch.exhaustedAt)) : watch.closeAttempts >= maxApproverCloses) continue;
           Object.assign(watch, { exhaustedAt: null, launches: 1, closeAttempts: 0, pane: agent.pane_id, launchedAt: fresh?.launchedAt ?? stamp, account: fresh?.account ?? null, runtime: fresh?.runtime ?? null, session: fresh?.session ?? watch.session, capacity: null, reportedExhaustion: null, heldExhaustion: null });
           await note(`approver:${watch.decision}:rewatched:${watch.launchedAt}`, item, 'decision', 'done', `Watching approver session ${agent.name}, put to ${item.key} decision ${watch.decision} again after its earlier sessions were spent`);

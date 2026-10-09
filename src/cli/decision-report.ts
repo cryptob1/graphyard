@@ -10,13 +10,21 @@ import { convergibleClose, staleAttentionAttempts, staleRun } from '../model/sta
 import type { Closure } from '../model/closure.js';
 
 type DecisionRow = { id: string; action: string; state: string; input?: any; requestedAt: string; staleAt?: string; requestedBy?: string; outcome?: string | null; race?: unknown; refusal?: { approver: string; reason: string; at: string } | null };
-type ApprovalWatch = { work: string; decision: string; agentName: string | null; settledAt?: string | null; ended?: string[]; launches?: number; launchedAt?: string | null; exhaustedAt?: string | null };
+type ApprovalWatch = { work: string; decision: string; agentName: string | null; pane?: string | null; settledAt?: string | null; ended?: string[]; launches?: number; launchedAt?: string | null; exhaustedAt?: string | null };
 export interface UnansweredDecision { work: string; id: string; action: string; requestedAt: string; session: string; ageMs: number; age: string; ended?: string[]; inMotionUntil?: string; /** GY-1598: its tab is still in Herdr, `done` or `idle` at a still screen: `closes` when `master approver` closes it, else the pane to close first. */ visible?: { status: string } & ({ closes: true } | { closes: false; pane: string; why: string }) }
 /**
  * The approver launch records `master approver` judges a listed session's age by (GY-1598), each only for the pane it names, and its
  * start bound. `screens` holds how each idle session's screen behaved across a pause, still only when it showed no trace of its decision, read by `terminalDecisions` through `read`; an idle one with none is unread.
  */
 export interface ApproverStarts { records: { agentName: string; launchedAt: string; pane?: string | null }[]; boundMs: number; screens?: Record<string, ScreenMotion>; read?: (agent: HerdrAgent) => Promise<string | null>; pauseMs?: number }
+/**
+ * GY-1604. An unanswered decision whose approver Herdr does not list by name is no stall while that session is still starting: a pane
+ * its launch named is listed at work, or its latest launch — the loop's own, or the record `master approver` wrote — is within the start
+ * bound. A launch is listed in Herdr only once its runtime starts, and the loop's own inventory is read at its cycle's start, before the
+ * launch it made in that cycle; on 9 October 2026 decision 275a5b76's approver was named not running 34 s after its launch while its
+ * pane worked, and the attention named a relaunch.
+ */
+export interface StartingApprover { work: string; id: string; action: string; session: string; why: string; until: string }
 const approverOf = (item: { key: string }, decision: { id: string }, approvals: ApprovalWatch[]) => {
   const watch = approvals.find(entry => entry.decision === decision.id);
   return { watch, session: watch?.agentName ?? approverSessionName(item, decision.id) };
@@ -80,12 +88,14 @@ export function unansweredInMotionUntil(watch: ApprovalWatch | undefined, reques
  * once, as the approver capacity line, not as a stall per decision (GY-182).
  */
 export function unansweredDecisions(items: { key: string; decisions: DecisionRow[]; capacity?: CapacityState | null }[], approvals: ApprovalWatch[], runtime: { available: boolean; agents: HerdrAgent[] }, now: number,
-  starts: ApproverStarts = { records: [], boundMs: launchStartMs({ run: {} }) }): UnansweredDecision[] {
+  starts: ApproverStarts = { records: [], boundMs: launchStartMs({ run: {} }) }, starting: StartingApprover[] = []): UnansweredDecision[] {
   if (!runtime.available) return [];
   return items.flatMap(item => standingCapacity(item, 'approver').length ? [] : item.decisions.flatMap(decision => {
     if (decision.state !== 'requested') return [];
     const { watch, session } = approverOf(item, decision, approvals);
     const live = runtime.agents.find(agent => agent.name === session), status = live?.agent_status ?? '';
+    const still = live ? null : startingApprover(watch, session, runtime.agents, starts, now);
+    if (still) { starting.push({ work: item.key, id: decision.id, action: decision.action, session, ...still }); return []; }
     if (live && status !== 'done' && status !== 'idle') return [];
     const screen = status === 'idle' ? starts.screens?.[session] ?? 'unreadable' : undefined;
     if (screen && screen !== 'still') return [];
@@ -98,6 +108,18 @@ export function unansweredDecisions(items: { key: string; decisions: DecisionRow
     return [{ work: item.key, id: decision.id, action: decision.action, requestedAt: decision.requestedAt, session, ageMs, age: elapsed(ageMs),
       ...(watch?.ended?.length ? { ended: watch.ended } : {}), ...(inMotionUntil ? { inMotionUntil } : {}), ...(verdict ? { visible: { status, ...(verdict.close ? { closes: true as const } : { closes: false as const, pane: live!.pane_id ?? session, why: verdict.why }) } } : {}) }];
   }));
+}
+
+/** Why an approver Herdr does not list by name is still starting, and until when (`StartingApprover`); null when it is not. */
+function startingApprover(watch: ApprovalWatch | undefined, session: string, agents: readonly HerdrAgent[], starts: ApproverStarts, now: number): { why: string; until: string } | null {
+  const own = watch?.agentName === session ? watch : undefined, record = starts.records.findLast(entry => entry.agentName === session);
+  const launchedAt = Math.max(...[own?.launchedAt, record?.launchedAt].map(at => Date.parse(at ?? '')).filter(Number.isFinite), Number.NEGATIVE_INFINITY);
+  const panes = [own?.pane, record?.pane].filter((pane): pane is string => !!pane);
+  const working = agents.find(agent => agent.pane_id && panes.includes(agent.pane_id) && agent.agent_status !== 'done' && agent.agent_status !== 'idle');
+  if (working) return { why: `is ${working.agent_status ?? 'listed'} in Herdr in pane ${working.pane_id}, the pane its launch named`, until: new Date(Math.max(now, Number.isFinite(launchedAt) ? launchedAt : now) + approverJudgeBoundMs).toISOString() };
+  if (now - launchedAt >= starts.boundMs) return null;
+  const until = new Date(launchedAt + starts.boundMs).toISOString();
+  return { why: `was launched ${Math.round((now - launchedAt) / 1000)}s ago and is within its ${starts.boundMs / 1000}s start bound until ${until}, before Herdr lists a starting runtime`, until };
 }
 
 /**
@@ -161,7 +183,10 @@ export async function terminalDecisions(masterApi: (path: string) => Promise<any
     .flatMap(decision => sessions.runtime.agents.filter(agent => agent.name === approverOf(item, decision, sessions.approvals).session && agent.agent_status === 'idle'
       && !approverStallVerdict(agent, boundLaunch(starts.records, agent)?.launchedAt, starts.boundMs, sessions.now).why.startsWith('it is within')).map(agent => ({ agent, decision: decision.id }))));
   const screens = Object.fromEntries(await Promise.all(idle.map(async ({ agent, decision }) => [agent.name!, await screenMotion(() => starts!.read!(agent), decision, starts!.pauseMs ?? idleScreenPauseMs)] as const)));
-  const unanswered = unansweredDecisions(histories, sessions.approvals, sessions.runtime, sessions.now, starts && { ...starts, screens: { ...starts.screens, ...screens } });
+  const starting: StartingApprover[] = [];
+  const unanswered = unansweredDecisions(histories, sessions.approvals, sessions.runtime, sessions.now, starts && { ...starts, screens: { ...starts.screens, ...screens } }, starting);
+  for (const entry of starting) attentionItems.push({ subject: entry.work, inMotionUntil: entry.until, text: `Decision ${entry.id} (${entry.action}) has no outcome yet: approver session ${entry.session} ${entry.why} — in motion, not a stall`,
+    ...agentOwner('master', `Nothing to run while it starts: it judges the decision once its runtime runs, and master status names a stall only if it has not by ${entry.until}`, 'approver') });
   for (const entry of unanswered) {
     const shown = entry.visible, sits = shown && `sits ${shown.status}${shown.status === 'idle' ? ' at a still screen' : ''} in Herdr`;
     const state = !shown ? 'is not running' : shown.closes ? `${sits} past its start bound` : `${sits}, but ${shown.why}`;

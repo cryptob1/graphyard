@@ -15,6 +15,8 @@ import { launchStartMs } from '../src/master/launch.js';
 import * as autonomy from '../src/master/autonomy.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
 import type { Work } from '../src/model.js';
+import type { FleetClient, FleetSelection } from '../src/fleet.js';
+import { applyRegistryMutation, chooseSession, emptyRegistry, proposedRuntimes, type AgentRegistry, type FleetSession } from '../src/model/registry.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-1339, 2026-10-06 ~01:16Z: the doctor ran its sanctioned `master approver GY-1335 DECISION`
@@ -310,4 +312,107 @@ test('unit:approver-idle-stall-relaunch — an approver idle past its start boun
       assert.match(still.replaced ?? '', /idle in Herdr \d+s after its launch, past the \d+s start bound without running its request, its screen still/);
     });
   } finally { await cleanup(); await rm(dataHome, { recursive: true, force: true }); }
+});
+
+// GY-1604, follow-up of GY-1598. Observed 2026-10-09T20:58:29Z: decision 275a5b76's approver was named by master status "not
+// running and recorded no outcome — a stall" 34 s after its launch while its pane worked, and the attention named a relaunch.
+// The GY-1598 review also found (PRRT_kwDOUZby-s6q76sx) that the loop's adoption dated a fresh pane by an earlier same-named launch
+// record when the fresh launch's record could not be written, and (PRRT_kwDOUZby-s6q8c9h) that replacing a stalled approver at the
+// role's concurrency limit was refused for the slot the closed session still held. One proof: unit:approver-stall-followup.
+test('unit:approver-stall-followup — stall checks date a session only by its own launch record, a closed stalled approver frees its registry slot before the replacement, and status never calls a starting or working approver not running', async () => {
+  const { root, config, cleanup } = await boundCheckout('approver-followup');
+  const dataHome = await temporaryDirectory('approver-followup-data'), claudeHome = await temporaryDirectory('approver-followup-claude');
+  try {
+    await withDataHome(dataHome, async () => {
+      const work = item(), name = approverSessionName(work, decision), bound = launchStartMs(config);
+      const requested = new Date(Date.now() - 600_000).toISOString();
+
+      // AC-1: the loop adopts a same-named session in pane-new whose launch could not write its record; the latest record of the
+      // name is an earlier launch's, in pane-old, past the bound. It dates nothing: the session is judged from when the loop saw it.
+      await autonomy.saveApproverLaunch(root, { agentName: name, account: null, runtime: 'claude', session: 'registry-earlier', launchedAt: new Date(Date.now() - bound - 60_000).toISOString(), work: work.key, decision, pane: 'pane-old' });
+      const panes = new Set(['pane-new']), closed: string[] = [], launched: string[] = [];
+      const listed = (): HerdrAgent[] => [...panes].map(pane_id => ({ name, pane_id, agent: 'claude', agent_status: pane_id === 'pane-new' ? 'done' : 'working' }));
+      const state = emptyDaemonState(config);
+      const loop = (at: number): DaemonEffects => ({
+        agents: listed, credentials: async () => ({}), snapshot: async () => ({ work: [work], now: new Date(at).toISOString() }),
+        closeSession: pane => { closed.push(pane); panes.delete(pane); }, dispatch: async () => {}, requestProof: () => {}, requestSmoke: () => {}, persist: async () => {},
+        observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date(at).toISOString(), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {},
+        decisions: async () => ({ decisions: [{ id: decision, action: 'requirements', state: 'requested', input: {}, approvedBy: null, requestedAt: requested }] }),
+        approverLaunches: () => autonomy.readApproverLaunches(root),
+        approver: async () => { panes.add('pane-relaunched'); launched.push('pane-relaunched'); return { agentName: name, pane: 'pane-relaunched', runtime: 'claude', session: null }; },
+      });
+      const seenAt = Date.now();
+      const first = await runCycle(config, state, loop(seenAt), () => seenAt);
+      const watch = state.approvals[`${handWatchPrefix}${decision}`];
+      assert.ok(watch, `the loop watches the session: ${JSON.stringify(first.actions.map(action => action.detail))}`);
+      assert.equal(watch.launchedAt, null, 'the earlier pane\'s record does not date the session');
+      assert.equal(watch.session, null, 'nor does it name the session\'s registry slot');
+      assert.equal(watch.requestedAt, new Date(seenAt).toISOString(), 'it is dated from when the loop first saw it');
+      assert.deepEqual(closed, [], 'a done session whose own launch the loop saw within the start bound is not closed');
+      assert.match(first.actions.find(action => action.detail.startsWith(`Watching approver session ${name}`))?.detail ?? '', /no launch record names its pane pane-new, so it is dated from /);
+      await runCycle(config, state, loop(seenAt + bound / 2), () => seenAt + bound / 2);
+      assert.deepEqual(closed, [], 'still within the bound from the launch the loop observed');
+      await runCycle(config, state, loop(seenAt + bound + 60_000), () => seenAt + bound + 60_000);
+      assert.deepEqual(closed, ['pane-new'], 'past the bound from the loop\'s own observation it is a stall, closed');
+      assert.deepEqual(launched, ['pane-relaunched'], 'and replaced');
+
+      // AC-2: the approver role allows one live session, held by the stalled session's launch. `master approver` closes the stalled
+      // pane and ends that registry session before choosing the replacement, so the replacement is not refused for its slot.
+      await writeFile(join(claudeHome, '.credentials.json'), JSON.stringify({ claudeAiOauth: { accessToken: 'a', refreshToken: 'r', expiresAt: Date.now() + 3_600_000 } }));
+      let registry: AgentRegistry = applyRegistryMutation(emptyRegistry(), 'apply', {
+        runtimes: proposedRuntimes.filter(runtime => runtime.name === 'claude'), models: [{ name: 'opus', id: 'claude-opus-5' }],
+        accounts: [{ name: 'claude-a', runtime: 'claude', model: 'opus', credential: { host: config.hostId, home: claudeHome } }],
+        roles: [{ name: 'approver', accounts: ['claude-a'], concurrency: 1, policy: { args: [], tools: [], model: null } }], reason: 'fixture',
+      }, { actor: 'operator', at: new Date().toISOString() }).registry;
+      const stalled: FleetSession = { id: 'registry-stalled', role: 'approver', account: 'claude-a', runtime: 'claude', model: 'opus', host: config.hostId!, work: work.key, principal: null, group: null,
+        selectedAt: new Date(Date.now() - bound - 60_000).toISOString(), selectedBy: 'coordinator', reason: 'fixture', skipped: [], endedAt: null, endReason: null };
+      registry = { ...registry, sessions: [stalled] };
+      const order: string[] = [];
+      // A strict registry: no supersession, so only an explicit end frees the slot.
+      const client: FleetClient = {
+        document: async () => structuredClone(registry),
+        select: async request => {
+          order.push('select');
+          const choice = chooseSession(registry, request, Date.now());
+          if (!choice.account) return { selected: false, reason: choice.reason, skipped: choice.skipped, session: null, account: null, runtime: null, model: null, revision: registry.revision } satisfies FleetSelection;
+          const session: FleetSession = { ...stalled, id: 'registry-replacement', selectedAt: new Date().toISOString(), reason: choice.reason };
+          registry.sessions.push(session);
+          return { selected: true, reason: choice.reason, skipped: choice.skipped, session, account: choice.account, runtime: choice.runtime, model: choice.model, policy: choice.policy, revision: registry.revision };
+        },
+        end: async (id, reason) => { order.push(`end ${id}`); const session = registry.sessions.find(entry => entry.id === id); if (session && !session.endedAt) Object.assign(session, { endedAt: new Date().toISOString(), endReason: reason }); },
+      };
+      panes.clear(); panes.add('pane-stalled'); closed.length = 0;
+      await autonomy.saveApproverLaunch(root, { agentName: name, account: 'claude-a', runtime: 'claude', session: 'registry-stalled', launchedAt: stalled.selectedAt, work: work.key, decision, pane: 'pane-stalled' });
+      const herdr = stubHerdr(panes, closed);
+      const stalledAgent: HerdrAgent = { name, pane_id: 'pane-stalled', agent: 'claude', agent_status: 'done' };
+      const replaced = await autonomy.launchApprover(root, work, decision, undefined, { agents: [stalledAgent], available: true }, herdr, { registry: client, quota: false, cacheMs: 0 }, async () => ({}), { screenPauseMs: 0 });
+      assert.deepEqual(closed, ['pane-stalled'], 'the stalled pane is closed');
+      assert.equal(replaced.pane, 'pane-new', 'and the replacement launched');
+      assert.equal(replaced.session, 'registry-replacement', 'on the slot the stalled session held');
+      assert.deepEqual(order.slice(0, 2), ['end registry-stalled', 'select'], 'its registry session is ended before the replacement is chosen');
+      assert.match(registry.sessions.find(entry => entry.id === 'registry-stalled')?.endReason ?? '', /closed approver session .* past the \d+s start bound without running its request, to launch its replacement/);
+
+      // AC-3: master status. A session the loop launched 34 s ago, not yet listed by Herdr (the loop's inventory predates its launch),
+      // and one listed at work in the pane its launch named under no name, are in motion, never "not running".
+      const report = (approvals: { work: string; decision: string; agentName: string; pane: string; launchedAt: string; launches: number }[], agents: HerdrAgent[], records: autonomy.ApproverLaunch[] = []) =>
+        terminalDecisions(async () => ({ decisions: [{ id: decision, action: 'requirements', state: 'requested', requestedAt: requested }] }),
+          [{ id: work.id, key: work.key, stage: 'build' }], { approvals, runtime: { available: true, agents }, now: Date.now(), starts: { records, boundMs: bound } });
+      const watched = (ageMs: number) => [{ work: work.key, decision, agentName: name, pane: 'pane-34', launchedAt: new Date(Date.now() - ageMs).toISOString(), launches: 1 }];
+      const starting = await report(watched(34_000), []);
+      assert.deepEqual(starting.unanswered, [], 'a session within its start bound is no unanswered decision');
+      const motion = starting.attentionItems.find(entry => entry.text.includes(decision));
+      assert.match(motion?.text ?? '', new RegExp(`approver session ${name} was launched 34s ago and is within its ${bound / 1000}s start bound until .* — in motion, not a stall`));
+      assert.doesNotMatch(JSON.stringify(motion), /not running|fresh approver/, 'it names no stall and no relaunch');
+      assert.ok(motion?.inMotionUntil && Date.parse(motion.inMotionUntil) > Date.now(), 'it is in motion until its start bound passes');
+      const working = await report(watched(bound + 60_000), [{ pane_id: 'pane-34', agent: 'claude', agent_status: 'working' }]);
+      assert.deepEqual(working.unanswered, []);
+      assert.match(working.attentionItems.find(entry => entry.text.includes(decision))?.text ?? '', /is working in Herdr in pane pane-34, the pane its launch named — in motion, not a stall/);
+      // A hand launch known only by its record is judged alike, and one gone past its bound is still the stall it was.
+      const recorded = await report([], [], [{ agentName: name, account: null, runtime: 'claude', session: null, launchedAt: new Date(Date.now() - 10_000).toISOString(), work: work.key, decision, pane: 'pane-hand' }]);
+      assert.deepEqual(recorded.unanswered, []);
+      const gone = await report(watched(bound + 60_000), []);
+      assert.equal(gone.unanswered.length, 1);
+      assert.match(gone.attentionItems.find(entry => entry.text.includes(decision))?.text ?? '', new RegExp(`approver session ${name} is not running and recorded no outcome — a stall`));
+    });
+  } finally { await cleanup(); await rm(dataHome, { recursive: true, force: true }); await rm(claudeHome, { recursive: true, force: true }); }
 });
