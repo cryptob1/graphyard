@@ -157,3 +157,63 @@ test('unit:approver-stall-followup — soak: over a simulated day the real loop 
     });
   } finally { mock.timers.reset(); await cleanup(); await rm(dataHome, { recursive: true, force: true }); }
 });
+
+test('unit:approver-stall-followup — soak: a watch whose loop relaunch failed binds the approver master approver then starts by hand for its decision, dated from the cycle that first saw it, and the loop launches nothing beside it', { timeout: 300_000 }, async () => {
+  const { root, config: bare, cleanup } = await boundCheckout('approver-failed-launch-soak');
+  const dataHome = await temporaryDirectory('approver-failed-launch-soak-data');
+  try {
+    await withDataHome(dataHome, async () => {
+      await atomicPrivateWrite(join(root, '.graphyard/master.json'), { ...await loadMasterConfig(root), run: { ...bare.run, launchStartSeconds: 300 } });
+      const config: MasterConfig = { ...await loadMasterConfig(root), workers: [] };
+      const bound = launchStartMs(config), minute = 60_000, hour = 60 * minute;
+      mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-10-09T00:00:00.000Z') });
+      const start = Date.now(), subject: Work = { ...item(), id: 'work-1703', key: 'GY-1703' }, decision = 'cccccccc-0000-4000-8000-0000000016c3';
+      const name = approverSessionName(subject, decision);
+      let judged = 'requested';
+      type Pane = { pane: string; status: string; since: number };
+      const panes = new Map<string, Pane>(), closedWithinBound: string[] = [], closedWhileWorking: string[] = [], failures: string[] = [], violations: string[] = [];
+      // The recorded launch never starts: done at an empty prompt, so once past its start bound the loop closes it and relaunches.
+      panes.set('pane-recorded', { pane: 'pane-recorded', status: 'done', since: start });
+      await autonomy.saveApproverLaunch(root, { agentName: name, account: null, runtime: 'claude', session: null, launchedAt: new Date(start).toISOString(), work: subject.key, decision, pane: 'pane-recorded' });
+      const watchKey = `${handWatchPrefix}${decision}`;
+      const state = emptyDaemonState(config);
+      state.approvals[watchKey] = approvalWatchSchema.parse({ work: subject.key, action: 'requirements', decision, requestedAt: new Date(start).toISOString(), agentName: name, pane: 'pane-recorded', launchedAt: new Date(start).toISOString(), launches: 1 });
+      const listed = (): HerdrAgent[] => [...panes.values()].map(session => ({ name, pane_id: session.pane, agent: 'claude', agent_status: session.status }));
+      let relaunches = 0, handAt: number | null = null;
+      const loop: DaemonEffects = {
+        agents: listed, credentials: async () => ({}), snapshot: async () => ({ work: [subject], now: new Date().toISOString() }),
+        closeSession: pane => {
+          const session = panes.get(pane); if (!session) return;
+          if (session.status === 'working') closedWhileWorking.push(pane);
+          if (Date.now() - session.since < bound) closedWithinBound.push(`${pane} after ${(Date.now() - session.since) / 1000}s`);
+          panes.delete(pane);
+        },
+        dispatch: async () => {}, requestProof: () => {}, requestSmoke: () => {}, persist: async () => {},
+        observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date().toISOString(), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {},
+        decisions: async () => ({ decisions: [{ id: decision, action: 'requirements', state: judged, input: {}, approvedBy: null, requestedAt: new Date(start).toISOString() }] }),
+        approverLaunches: () => autonomy.readApproverLaunches(root),
+        sessionOutput: () => '╭─\n│ > \n╰─', idleScreenPauseMs: 0,
+        // The loop's relaunch fails, leaving the watch with no session; only that one is expected.
+        approver: async () => { relaunches += 1; throw new Error('Herdr refused to create the approver tab'); },
+      };
+      for (let now = start; now < start + 2 * hour; now += 2 * minute) {
+        mock.timers.setTime(now);
+        // The cycle after the failed relaunch, `master approver` starts a working session by hand; its record cannot be written.
+        if (relaunches === 1 && handAt === null) { handAt = now; panes.set(`pane-hand-${now}`, { pane: `pane-hand-${now}`, status: 'working', since: now }); }
+        for (const session of panes.values()) if (session.status === 'working' && now - session.since >= 8 * minute) { session.status = 'done'; judged = 'applied'; }
+        const result = await runCycle(config, state, loop, () => Date.now());
+        failures.push(...result.actions.filter(action => action.state === 'failed').map(action => `${new Date(now).toISOString()} ${action.detail}`));
+        for (const check of state.invariants.report as InvariantCheck[]) if (!check.holds) violations.push(`${new Date(now).toISOString()} ${check.line}`);
+      }
+
+      assert.ok(handAt !== null, `the loop's relaunch was made and failed: ${failures.join('; ')}`);
+      assert.equal(relaunches, 1, `nothing is launched beside the hand-started approver: ${failures.join('; ')}`);
+      assert.equal(judged, 'applied', 'the hand-started approver judged its decision');
+      assert.deepEqual(closedWithinBound, [], 'no approver is closed within its start bound');
+      assert.deepEqual(closedWhileWorking, [], 'no approver at work is closed under it');
+      assert.deepEqual(listed(), [], 'its session is closed once the decision is applied');
+      assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
+      assert.deepEqual(failures.filter(detail => /approver/i.test(detail) && !/Herdr refused to create the approver tab/.test(detail)), [], 'no approver close or launch failed but the refused relaunch');
+    });
+  } finally { mock.timers.reset(); await cleanup(); await rm(dataHome, { recursive: true, force: true }); }
+});

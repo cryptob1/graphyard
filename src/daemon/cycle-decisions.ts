@@ -46,7 +46,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
   const note = async (key: string, item: Work, kind: DaemonActionKind, outcome: 'done' | 'failed', detail: string, at = now(), faultKind?: FaultKind | null) =>
     performed.push(await record(state, key, { kind, work: item.key, principal: null, state: outcome, detail, attempts: (state.actions[key]?.attempts ?? 0) + 1, epoch: item.epoch, cycle: state.cycle }, at, effects.persist, faultKind));
   const approvers = createApproverSupervisor(cycle, effects, stamp, note, capacities, approversSpent);
-  const { sessions, invalidate, closeApprover, endApproverSession, endWatchSession, launch, capacityRelaunchWaits, approverExhausted, stallInputs, escalateUnjudged, actOnStep } = approvers;
+  const { sessions, invalidate, closeApprover, endApproverSession, endWatchSession, launch, capacityRelaunchWaits, approverExhausted, bindHandLaunch, stallInputs, escalateUnjudged, actOnStep } = approvers;
   /** Request the decision (or adopt the one already standing) and put it to an approver. */
   const request = async (item: Work, decision: RoutineDecision, key: string, carried: ApprovalWatch | null) => {
     const verdict = decision.action === 'rework' && !carried ? standingVerdict(item) : null;
@@ -301,6 +301,8 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     if (cycle.launcher.busy(approverLaunchKey(watch.decision))) return;
     const history = effects.decisions ? await effects.decisions(item).then(result => result.decisions, () => undefined) : undefined;
     const judged = history === undefined ? undefined : history.find(entry => entry.id === watch.decision) ?? null;
+    // GY-1604: an approver launched by hand while the watch held no session is the one it has, bound before anything is judged.
+    if (!judged || judged.state === 'requested') await bindHandLaunch(item, watch, await sessions());
     if ((!judged || judged.state === 'requested') && await approverExhausted(item, watch)) return;
     // What the silence measure names this wait (GY-1298): an approval owed its settlement is not an approver judging it.
     if (judged?.state === 'approved') Object.assign(watch, { approvedAt: judged.approvedAt ?? null, approvedBy: judged.approvedBy });
