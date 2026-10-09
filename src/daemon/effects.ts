@@ -211,7 +211,7 @@ export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffec
    */
   approver?: (work: Work, decision: string) => Promise<{ agentName: string; pane: string | null; account?: string | null; runtime?: string | null; session?: string | null; run?: RunRecord | null; settled?: Promise<RunRecord>; /** GY-1598: why a same-named session that never ran its request was closed first. */ replaced?: string }>;
   /** The account and runtime a listed approver session was launched on, so an adopted session's exhaustion holds the account it spent. */
-  approverLaunch?: (agentName: string) => Promise<{ account: string | null; runtime: string | null; session?: string | null; pane?: string | null } | null>;
+  approverLaunch?: (agentName: string) => Promise<{ account: string | null; runtime: string | null; session?: string | null; pane?: string | null; launchedAt?: string } | null>;
   /** Every approver launch recorded on this host, with the item and decision each judges (GY-403). */
   approverLaunches?: () => Promise<{ agentName: string; account: string | null; runtime: string | null; session: string | null; launchedAt: string; work: string | null; decision: string | null }[]>;
   /**

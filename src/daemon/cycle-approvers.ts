@@ -1,7 +1,7 @@
 // Concern: approver sessions — launch, supervise, fail over, close and record how they ended, for the loop's own and hand-launched approvers.
 import type { Work } from '../model.js';
 import { approverRuntime } from '../master/autonomy.js';
-import { type ScreenMotion, approverStallVerdict, boundLaunch, screenMotion, stallScreenLines } from '../master/approver-stall.js';
+import { type ScreenMotion, approverStallVerdict, boundLaunch, judgeApproverStall, screenMotion, stallScreenLines } from '../master/approver-stall.js';
 import { launchStartMs } from '../master/launch.js';
 import { type HerdrAgent, type RoleCapacity, approverProfile, ownLoginAccounts, approverSessionId, approverSessionName } from '../master.js';
 import { type ApprovalWatch, approvalWatchSchema, type DaemonActionKind, message } from './state.js';
@@ -194,7 +194,7 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
       watch.ended = [...watch.ended, `approver run ${watch.agentName ?? name} was lost${refunded ? '' : `, past the ${maxLostApproverRuns} lost runs given back`}: ${watch.run.result.detail}`.slice(0, 300)].slice(-10);
       Object.assign(watch, refunded ? { launches: Math.max(0, watch.launches - 1), lostRuns: watch.lostRuns + 1, run: null } : { run: null });
     }
-    Object.assign(watch, { launches: watch.launches + 1, agentName: name, pane: listed?.pane_id ?? null, launchedAt: stamp, account: adopted?.account ?? null, runtime: adopted?.runtime ?? null, session: adopted?.session ?? null });
+    Object.assign(watch, { launches: watch.launches + 1, agentName: name, pane: listed?.pane_id ?? null, launchedAt: adopted?.launchedAt ?? stamp, account: adopted?.account ?? null, runtime: adopted?.runtime ?? null, session: adopted?.session ?? null });
     // GY-920: adopting a session that is already judging the decision ends any capacity wait the
     // watch still carried. The wait described a launch that never happened; kept, it would have
     // `master status` report "waiting for approver capacity" beside a live approver.
@@ -347,8 +347,8 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
    * GY-1612. Whether a relaunch whose last launch did not stand adopts the session already listed under the decision's approver name —
    * a `master approver` launch, or the pane of a launch that failed after it was made — rather than replacing it. Only a launch record
    * naming that session's own pane judges it (GY-1604): one its own record shows never started past its start bound is replaced, as
-   * the launcher replaces it (GY-1598); any session that has started is adopted, since the launcher refuses to replace it, and one with
-   * no record of its own is adopted and dated from now, the loop's first sight of it. `wait` while a registry session the failed launch left
+   * the launcher replaces it (GY-1598), an idle one's screen read first as the launcher reads it; any session that has started is adopted,
+   * dated from its own record, since the launcher refuses to replace it, and one with no record of its own is adopted and dated from now, the loop's first sight of it. `wait` while a registry session the failed launch left
    * is still unended.
    */
   const adoptable = async (item: Work, watch: ApprovalWatch): Promise<'adopt' | 'replace' | 'wait'> => {
@@ -357,8 +357,10 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
     if (!agent?.pane_id) return 'replace';
     const own = boundLaunch(await effects.approverLaunches?.().catch(() => []) ?? [], agent);
     // The launcher's own never-started predicate decides, not the watch's step: a session that has started (working past the judge
-    // bound, blocked) is one the launcher refuses to replace, so only adopting it lets supervision reach it.
-    if (own && approverStallVerdict(agent, own.launchedAt, launchStartMs(config), clock).close) return 'replace';
+    // bound, blocked) is one the launcher refuses to replace, so only adopting it lets supervision reach it. An idle one's screen is read
+    // as the launcher reads it: a moving screen, or one showing its decision, has started, and a loop reading no screens adopts it.
+    const read = effects.sessionOutput ? () => effects.sessionOutput!(agent, stallScreenLines) : null;
+    if (own && (await judgeApproverStall(agent, own.launchedAt, launchStartMs(config), clock, read, watch.decision, effects.idleScreenPauseMs)).close) return 'replace';
     // A registry session the failed launch left, which the bind could not end this cycle, is never dropped by adopting over it: the
     // bind ends it and takes the session on a later cycle, dated from the cycle that first saw it.
     return watch.session && watch.session !== own?.session ? 'wait' : 'adopt';

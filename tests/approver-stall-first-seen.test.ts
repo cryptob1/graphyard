@@ -104,7 +104,7 @@ test('unit:approver-stall-first-seen — a moved pane is dated from the cycle th
 test('unit:approver-stall-first-seen — a loop watch whose last launch failed adopts the session listed under its approver name and judges it only by its own pane-bound record', async () => {
   const work = item(), name = approverSessionName(work, decision), at = clock;
   const launches: string[] = [];
-  const supervise = (agents: HerdrAgent[], record: { pane: string; ageMs: number } | null) => {
+  const supervise = (agents: HerdrAgent[], record: { pane: string; ageMs: number } | null, screens?: string[]) => {
     const state = emptyDaemonState(config);
     const cycle = { config, state, now: () => at, clock: at, performed: [], snapshot: { work: [work], now: iso(at) }, isolate: async () => {}, detached: false,
       launcher: { busy: () => false } } as unknown as Cycle;
@@ -112,6 +112,7 @@ test('unit:approver-stall-first-seen — a loop watch whose last launch failed a
     const launch = record && { agentName: name, account: 'claude-recorded', runtime: 'claude', session: 'registry-recorded', launchedAt: iso(at - record.ageMs), work: work.key, decision, pane: record.pane };
     const effects = {
       agents: () => agents, persist: async () => {},
+      ...screens && { sessionOutput: () => screens.shift() ?? null, idleScreenPauseMs: 0 },
       approverLaunch: async () => launch, approverLaunches: async () => launch ? [launch] : [],
       approver: async () => { launches.push('launched'); return { agentName: name, pane: 'pane-launched', runtime: 'claude', session: null }; },
     } as unknown as DaemonEffects;
@@ -147,6 +148,9 @@ test('unit:approver-stall-first-seen — a loop watch whose last launch failed a
   const own = supervise([listed], { pane: 'pane-listed', ageMs: bound / 2 }), recorded = failed();
   await own.supervisor.actOnStep(work, recorded, relaunch);
   assert.deepEqual([recorded.pane, recorded.account, recorded.session], ['pane-listed', 'claude-recorded', 'registry-recorded']);
+  assert.equal(recorded.launchedAt, iso(at - bound / 2), 'and dated from that record, not from its adoption');
+  assert.equal(approvalStep(recorded, { state: 'requested' }, seen, at + bound * 0.4, { startMs: bound }).step, 'wait', 'within its bound by its own record it waits');
+  assert.equal(approvalStep(recorded, { state: 'requested' }, seen, at + bound * 0.6, { startMs: bound }).step, 'relaunch', 'past its bound by its own record, not a fresh interval from adoption, it is judged');
   assert.deepEqual(launches, [], 'still nothing launched');
   // And its own record is the start check: one that record shows done past its start bound is a stall, replaced rather than adopted.
   const stalled = supervise([listed], { pane: 'pane-listed', ageMs: bound * 2 }), replaced = failed();
@@ -160,5 +164,20 @@ test('unit:approver-stall-first-seen — a loop watch whose last launch failed a
     assert.equal(await started.supervisor.actOnStep(work, kept, relaunch), 'done');
     assert.deepEqual(launches, ['launched'], `a ${status} session is never replaced`);
     assert.deepEqual([kept.agentName, kept.pane, kept.session], [name, 'pane-listed', 'registry-recorded'], `a ${status} session is adopted on its own record`);
+    // Adoption keeps the record's launch time: supervision judges the session's real age, past its bounds, not a fresh interval.
+    assert.equal(kept.launchedAt, iso(at - bound * 20), `a ${status} session keeps its own launch time`);
   }
+  // An idle session past its bound is judged by its screen as the launcher judges it: a moving screen, or one showing its decision,
+  // has started, so it is adopted on its own record rather than replaced and refused by the launcher every cycle.
+  const idle: HerdrAgent = { ...listed, agent_status: 'idle' };
+  for (const [motion, screens] of [['moving', ['one', 'two']], ['started', [`request ${decision}`, `request ${decision}`]]] as const) {
+    const reading = supervise([idle], { pane: 'pane-listed', ageMs: bound * 2 }, [...screens]), kept = failed();
+    assert.equal(await reading.supervisor.actOnStep(work, kept, relaunch), 'done');
+    assert.deepEqual(launches, ['launched'], `an idle session with a ${motion} screen is never replaced`);
+    assert.deepEqual([kept.pane, kept.session, kept.launchedAt], ['pane-listed', 'registry-recorded', iso(at - bound * 2)], `an idle session with a ${motion} screen is adopted on its own record`);
+  }
+  // A still, untouched screen is the launcher's never-started session: it is replaced.
+  const still = supervise([idle], { pane: 'pane-listed', ageMs: bound * 2 }, ['$', '$']), stillWatch = failed();
+  await still.supervisor.actOnStep(work, stillWatch, relaunch);
+  assert.deepEqual(launches, ['launched', 'launched'], 'an idle session with a still screen is replaced');
 });
