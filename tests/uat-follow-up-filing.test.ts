@@ -10,6 +10,7 @@ import type { Principal } from '../src/model.js';
 import { Store } from '../src/store.js';
 import { cut, followUpFilingRefusal, followUpItem, followUpRequestId, gitIn, readLedger, releaseFilingIdentity, validateAndRecord, type Suite } from '../src/release-candidate.js';
 import { releaseFilingCheck, setupFromZeroChecks, setupLine } from '../src/setup-from-zero.js';
+import { loadCases, syncCases } from '../src/e2e/case.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-1614: the uat job's validateAndRecord files a failed candidate's follow-up with the uat
@@ -22,6 +23,8 @@ const coordinator = { id: 'graphyard-coordinator', role: 'coordinator' as const,
 const credentials = [{ ...operator, token: `uat-filing-operator-${'x'.repeat(32)}` }, coordinator];
 const release = { id: releaseFilingIdentity.id, token: `release-follow-up-${'r'.repeat(32)}`, capabilities: [...releaseFilingIdentity.capabilities] };
 const master = { id: 'master-operator', token: `master-operator-${'m'.repeat(32)}`, capabilities: ['intent:create', 'intent:ready'] };
+// The uat job's E2E recording identity (docs/validation.md): the candidate's own checkout runs `e2e record` with it.
+const recorder = { id: 'graphyard-e2e-recorder', token: `e2e-recorder-${'e'.repeat(32)}`, capabilities: ['e2e:record'] };
 let database: EmbeddedPostgres, store: Store, http: ReturnType<typeof server>, url: string;
 
 const call = async (credential: string, method: 'GET' | 'POST', path: string, body?: unknown, key: string = randomUUID()) => {
@@ -30,7 +33,7 @@ const call = async (credential: string, method: 'GET' | 'POST', path: string, bo
 };
 
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1614;
+  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 198;
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('uat-follow-up-filing'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('uat_filing_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/uat_filing_test`); await store.init();
@@ -39,7 +42,7 @@ before(async () => {
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
   // The provisioning docs/delivery.md#release-filing-credential names: an admin issues each identity with operator-agent setup.
-  for (const agent of [release, master]) {
+  for (const agent of [release, master, recorder]) {
     const provisioned = await call(credentials[0].token, 'POST', 'operator-agents', { id: agent.id, displayName: agent.id, capabilities: agent.capabilities, scope: { repositories: [repository], workItems: ['*'] }, token: agent.token, reason: 'Provision the release filing identity' });
     assert.equal(provisioned.status, 200, JSON.stringify(provisioned.body));
   }
@@ -148,4 +151,45 @@ test('integration:uat-follow-up-filing — a failed candidate files its follow-u
   assert.deepEqual(await doctor(), [], 'no line when this environment carries no filing credential');
   assert.deepEqual(await doctor(release.token), [`PASS release-filing: GRAPHYARD_RELEASE_TOKEN files follow-ups as ${release.id}`]);
   assert.deepEqual(await doctor(coordinator.token), ["FAIL release-filing: GRAPHYARD_RELEASE_TOKEN would be refused filing a failed candidate's follow-up: graphyard-coordinator has role coordinator, which cannot create work (Operator permission required) (fix: docs/delivery.md#release-filing-credential)"]);
+});
+
+test('integration:uat-e2e-recording — the uat job records E2E case runs as an e2e:record operator agent, which reaches repository cases on the scenario routes and nothing an admin credential would', async () => {
+  const api = (token: string) => async (path: string, data?: unknown, requestId?: string) => {
+    const answer = await call(token, data === undefined ? 'GET' : 'POST', path, data, requestId);
+    if (answer.status !== 200) throw new Error(answer.body.error);
+    return answer.body;
+  };
+  // `graphyard e2e record` syncs the report's cases, then appends each run to the revision it measured.
+  const [shipped] = (await loadCases(new URL('..', import.meta.url).pathname)).filter(entry => entry.definition.target === 'uat');
+  const [synced] = await syncCases(api(recorder.token), [shipped]);
+  assert.equal(synced.change, 'created');
+  const run = { revision: synced.revision, runId: 'uat-run-1', baseUrl: 'https://uat.example.test', sha: 'b'.repeat(40), environment: 'uat', durationMs: 10, outcome: 'pass', executed: 1, failingStep: null };
+  const recorded = await call(recorder.token, 'POST', `scenarios/${synced.id}/runs`, run);
+  assert.equal(recorded.status, 200, JSON.stringify(recorded.body));
+  assert.equal(recorded.body.producer, recorder.id);
+  assert.equal((await call(recorder.token, 'POST', `scenarios/${synced.id}/runs`, run)).body.seq, recorded.body.seq, 'a retried report is the same run');
+
+  // Only repository E2E cases: never a case defined by hand, whether new, revised or recorded against.
+  const hand = { id: 'hand-defined', title: 'Hand case', purpose: 'Defined by an operator', steps: ['do it'], expected: ['done'], environment: 'uat', runner: 'manual', testPath: 'tests/x.test.ts' };
+  const refusedHand = await call(recorder.token, 'POST', 'scenarios', hand);
+  assert.equal(refusedHand.status, 403);
+  assert.match(refusedHand.body.error, /records repository E2E cases \(runner graphyard-e2e\) only/);
+  assert.equal((await call(credentials[0].token, 'POST', 'scenarios', hand)).status, 200);
+  assert.equal((await call(recorder.token, 'POST', 'scenarios/hand-defined/runs', { ...run, revision: 1 })).status, 403);
+  assert.equal((await call(recorder.token, 'POST', 'scenarios', { ...hand, runner: 'graphyard-e2e', expectedRevision: 1 })).status, 403);
+
+  // Nothing beyond recording: the candidate checkout holding this credential cannot create, claim,
+  // approve, administer identities or read other operator routes.
+  const create = await call(recorder.token, 'POST', 'work', { title: 'Forged', type: 'bug', priority: 1, reason: 'Forge work', criteria: [{ id: 'AC-1', text: 'Forged work passes', proofs: ['unit:forged'] }], policy: { checks: ['test'], review: true } });
+  assert.equal(create.status, 403);
+  assert.equal(create.body.error, 'Capability intent:create is required');
+  const [anyItem] = await listed();
+  for (const [path, body] of [[`work/${anyItem.key}/claim`, {}], ['operator-agents', { id: 'escalated', displayName: 'x', capabilities: ['decision:approve'], scope: { repositories: [repository], workItems: ['*'] }, token: `escalated-${'z'.repeat(32)}`, reason: 'Escalate' }], ['tests', undefined]] as const) {
+    const answer = await call(recorder.token, body === undefined ? 'GET' : 'POST', path, body);
+    assert.equal(answer.status, 403, `${path} is refused: ${JSON.stringify(answer.body)}`);
+  }
+  // And the filing identity, holding only intent:create, is refused the scenario routes.
+  const filingRecord = await call(release.token, 'POST', `scenarios/${synced.id}/runs`, { ...run, runId: 'uat-run-2' });
+  assert.equal(filingRecord.status, 403);
+  assert.equal(filingRecord.body.error, 'Route is not available to operator agents');
 });

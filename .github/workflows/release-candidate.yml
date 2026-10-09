@@ -307,7 +307,9 @@ jobs:
         # Best effort and after the verdict: recording never decides promotion. The suite command
         # never holds a control-plane credential, so this step records the report it wrote. It uses
         # its own GRAPHYARD_E2E_RECORD_TOKEN (GY-1614): the release filing credential above is an
-        # operator agent holding only intent:create, which the scenario routes refuse.
+        # operator agent holding only intent:create, which the scenario routes refuse. This step runs
+        # the candidate's own checkout, so that token is an operator agent holding only e2e:record,
+        # never an admin credential: it reaches repository E2E cases on the scenario routes alone.
         if: ${{ !cancelled() }}
         continue-on-error: true
         shell: bash

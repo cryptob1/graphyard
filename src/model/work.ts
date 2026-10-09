@@ -63,8 +63,10 @@ export const createSchema = z.object({
 export type Create = z.infer<typeof createSchema>;
 // The `decision:*` capabilities request a two-party decision (see model/approval.ts); an agent
 // holding one still needs a second, independent agent holding `decision:approve` to apply it.
+// `e2e:record` (GY-1614) admits only the scenario registry and its run route, for repository E2E
+// cases: the credential a candidate's own checkout records its UAT case runs with.
 export const operatorCapabilities = ['intent:create', 'intent:ready', 'intent:unblock', 'policy:requirements', 'policy:review-provider', 'policy:bootstrap',
-  'decision:resolve', 'decision:attest', 'decision:merge', 'decision:rework', 'decision:grant', 'decision:approve'] as const;
+  'decision:resolve', 'decision:attest', 'decision:merge', 'decision:rework', 'decision:grant', 'decision:approve', 'e2e:record'] as const;
 export type OperatorCapability = typeof operatorCapabilities[number];
 export const operatorCredentialHash = Symbol('operatorCredentialHash');
 export interface Principal {

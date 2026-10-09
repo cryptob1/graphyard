@@ -288,6 +288,10 @@ test('unit:release-candidate-e2e-suite — UAT runs every case targeted at uat a
   assert.match(recordStep, /GRAPHYARD_TOKEN: \$\{\{ secrets\.GRAPHYARD_E2E_RECORD_TOKEN \}\}/, 'recording uses its own credential');
   assert.doesNotMatch(recordStep, /GRAPHYARD_RELEASE_TOKEN \}\}/, 'recording never uses the intent:create filing credential');
   assert.match(validateStep, /GRAPHYARD_TOKEN: \$\{\{ secrets\.GRAPHYARD_RELEASE_TOKEN \}\}/, 'filing keeps the release credential');
+  // The candidate's checkout runs the recording command, so its credential is documented as the narrow e2e:record identity, never admin.
+  const delivery = await readFile(new URL('../docs/delivery.md', import.meta.url), 'utf8');
+  assert.match(delivery, /`e2e record` uses `GRAPHYARD_E2E_RECORD_TOKEN`, likewise `graphyard-e2e-recorder` with only `e2e:record`, never admin/);
+  assert.doesNotMatch(delivery + workflow, /admin `?GRAPHYARD_E2E_RECORD_TOKEN/, 'no admin credential reaches the candidate checkout');
   assert.match(workflow, /- name: Record the E2E case runs[^]*?continue-on-error: true/, 'recording never decides promotion');
   const shipped = await loadCases(new URL('..', import.meta.url).pathname);
   assert.ok(shipped.filter(entry => entry.definition.target === 'uat').length >= 5, 'the shipped cases run on UAT');

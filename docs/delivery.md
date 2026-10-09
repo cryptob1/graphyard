@@ -18,7 +18,7 @@ Main → candidate → uat → production; `.railway/railway.ts` deploys `releas
 
 ### Release filing credential
 
-The uat environment's `GRAPHYARD_TOKEN` (`GRAPHYARD_RELEASE_TOKEN`) files holds and follow-ups as operator agent `graphyard-release-follow-up`: role `operator-agent`, only `intent:create`, scope repository and work items `*`; it cannot claim, complete, record evidence or approve. Issue it: `graphyard operator-agent setup FILE --token-stdin` (`{"id":"graphyard-release-follow-up","displayName":"Release follow-up","capabilities":["intent:create"],"scope":{"repositories":["OWNER/REPO"],"workItems":["*"]},"reason":"..."}`). `doctor` with `GRAPHYARD_RELEASE_TOKEN` set prints `FAIL release-filing` if refused or broader in capability or repository. E2E recording uses admin `GRAPHYARD_E2E_RECORD_TOKEN`.
+The uat environment's `GRAPHYARD_TOKEN` (`GRAPHYARD_RELEASE_TOKEN`) files holds and follow-ups as operator agent `graphyard-release-follow-up` (role `operator-agent`, only `intent:create`, work items `*`; no claim, complete, evidence or approval). Issue it: `graphyard operator-agent setup FILE --token-stdin` (`{"id":"graphyard-release-follow-up","displayName":"Release follow-up","capabilities":["intent:create"],"scope":{"repositories":["OWNER/REPO"],"workItems":["*"]},"reason":"..."}`); `doctor` prints `FAIL release-filing` if refused or broader. The candidate checkout's `e2e record` uses `GRAPHYARD_E2E_RECORD_TOKEN`, likewise `graphyard-e2e-recorder` with only `e2e:record`, never admin.
 
 ### Pre-merge gate and release-candidate validation
 
