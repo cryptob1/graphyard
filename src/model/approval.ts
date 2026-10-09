@@ -110,9 +110,11 @@ export interface Decision {
  * on when the request was made; the grounds it judges travel in the request's `binding` input
  * (GY-407). The server records both with the request, and a refusal stands only against a request
  * made for the same pair and the same grounds (GY-229, GY-407): their input is otherwise the bare
- * attestation `{ previousWorkerStopped: true }`, identical for every request on the item.
+ * attestation `{ previousWorkerStopped: true }`, identical for every request on the item. A rework
+ * requested while an applied rework still holds the item names that decision (`reauthorizes`,
+ * GY-1579): it judged re-authorizing that one, so its refusal stands only against a request that would.
  */
-export interface DecisionSituation { sha: string | null; baseSha: string | null }
+export interface DecisionSituation { sha: string | null; baseSha: string | null; reauthorizes?: string }
 export const situatedDecisionActions: readonly DecisionAction[] = ['rework', 'recover'];
 export const decisionSituation = (action: string, work: Pick<Work, 'candidate'>): DecisionSituation | null =>
   situatedDecisionActions.includes(action as DecisionAction) ? { sha: work.candidate?.sha ?? null, baseSha: work.candidate?.baseSha ?? null } : null;
@@ -125,10 +127,11 @@ const sameSituation = (recorded: DecisionSituation | null | undefined, current: 
  * request whose binding differs, whatever the head. A refusal recorded before situations were
  * kept judged a candidate nobody can name any more, so it still stands against every request
  * whose input it shares — today, one that names no binding — until one cites it, as it always
- * did; the loop cites it with its new grounds.
+ * did; the loop cites it with its new grounds. A situated refusal also judged the applied rework its
+ * request would re-authorize, or none (GY-1579): a request re-authorizing another one is new grounds.
  */
-const judgedSame = (action: DecisionAction, decision: { situation?: DecisionSituation | null }, situation: DecisionSituation | null | undefined) =>
-  !situatedDecisionActions.includes(action) || sameSituation(decision.situation, situation);
+export const judgedSame = (action: DecisionAction, decision: { situation?: DecisionSituation | null }, situation: DecisionSituation | null | undefined) =>
+  !situatedDecisionActions.includes(action) || (sameSituation(decision.situation, situation) && (!decision.situation || (decision.situation.reauthorizes ?? null) === (situation?.reauthorizes ?? null)));
 // GY-1297. An approved decision left without an outcome refused its action forever (GY-949): one bound to a head
 // and base the item has left is `superseded`, naming both; one whose situation holds is resumed past the grace.
 export const approvalApplyGraceMs = 60_000, approvedDecisionBoundMs = 300_000;
@@ -149,7 +152,7 @@ export function foldDecisions(workId: string, events: DecisionEvent[]): Decision
       decisions.set(details.id, { id: details.id, workId, action: details.action, input: details.input, reason: details.reason, requestedBy: event.actor, requestedAt: event.at, state: 'requested',
         approvedBy: null, approvedAt: null, approvalReason: null, outcome: null, refusals: [], refusal: null,
         precedent: Array.isArray(details.precedent) ? [...details.precedent] : [], context: typeof details.context === 'string' ? details.context : null, noPrecedent: typeof details.noPrecedent === 'string' ? details.noPrecedent : null, concurrences: [],
-        situation: details.situation && typeof details.situation === 'object' ? { sha: details.situation.sha ?? null, baseSha: details.situation.baseSha ?? null } : null });
+        situation: details.situation && typeof details.situation === 'object' ? { sha: details.situation.sha ?? null, baseSha: details.situation.baseSha ?? null, ...(typeof details.situation.reauthorizes === 'string' ? { reauthorizes: details.situation.reauthorizes } : {}) } : null });
       continue;
     }
     const decision = decisions.get(details.id);

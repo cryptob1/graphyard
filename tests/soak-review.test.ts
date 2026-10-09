@@ -282,3 +282,36 @@ test('unit:soak-invariants-hold — change requests naming a blocking finding pa
     }
   }
 });
+
+test('unit:soak-invariants-hold — refused capped reworks whose record binds the capped change request under none of the step\'s readings, on two items\' capped heads under the real loop: each is escalated once by its decision id, never withdrawn on, and the loop\'s own capped round is still judged and delivered, with every invariant holding', { timeout: 300_000 }, async () => {
+  // GY-1579: a prior release recorded each refusal for another reviewer slug and with no revision mark, so
+  // refusedCappedRework cannot read it. The review-cap step runs over every open capped item on every cycle;
+  // the escalation it adds must stay one per head, whatever the cycles, heads and items.
+  const reviewCap = { cap: 1, items: [1, 2, 3], refused: [], unmatched: [2, 3] };
+  const { items, final, violations, failures, lost, escalations, actionKeys, approverDecisions, github, state, unmatchedRefusals } = await simulateDay({
+    hours: 6, reviewCap,
+    plan: { items: 4, leftovers: 0, slowRecompute: 0, workMs: 15 * minute, rework: new Set(), deaths: new Set(), flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set(), misread: new Set(), exits: new Set(), spentProducer: 0, lostRuns: 0, exhaustedReviewer: 0, outOfQueue: { item: 4, afterMs: 99 * hour }, blind: { from: 99 * hour, to: 100 * hour }, split: { at: 99 * hour, item: 4 } },
+  });
+  assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'every item is delivered');
+  assert.deepEqual(violations, [], 'every system invariant holds across the capped rounds');
+  assert.deepEqual(failures, [], 'no cycle failed');
+  assert.deepEqual(lost, [], 'no lease was lost');
+  assert.deepEqual(github.dismissals, [], 'no change request is withdrawn on a refusal the step cannot bind, nor on an approved round');
+  assert.deepEqual(unmatchedRefusals.map(entry => entry.key).sort(), [items[1].key, items[2].key].sort(), 'each unmatched item held its refusal on its capped head');
+  for (const work of items.slice(0, 3)) {
+    const decisions = (await api(principals.operatorAgent, 'GET', `work/${encodeURIComponent(work.id)}/decisions`)).decisions as { id: string; action: string; state: string; input?: { binding?: string } }[];
+    const own = decisions.filter(entry => entry.action === 'rework' && (entry.input?.binding ?? '').endsWith(':capped:graphyard-reviewer[bot]'));
+    assert.equal(own.length, 1, `${work.key}: the loop requested its own capped round once: ${JSON.stringify(decisions.map(entry => [entry.action, entry.state, entry.input?.binding]))}`);
+    assert.equal(own[0].state, 'applied', `${work.key}: the approver judged it, and it was reworked`);
+    assert.equal([...actionKeys].filter(key => key.startsWith(`decision:rework:${work.id}:`) && key.includes(':capped:')).length, 1, `${work.key}: requested once across every cycle`);
+    assert.equal(approverDecisions.filter(decision => decision === own[0].id).length, 1, `${work.key}: one approver session judged it`);
+    const stray = unmatchedRefusals.find(entry => entry.key === work.key);
+    const raised = escalations.filter(detail => detail.includes(work.key) && /under none of its readings/.test(detail));
+    if (!stray) { assert.deepEqual(raised, [], `${work.key}: nothing unmatched, nothing escalated`); continue; }
+    const escalation = state.actions[`escalation:review-cap:${work.id}:${stray.sha}`];
+    assert.equal(escalation?.state, 'done', `${work.key}: the unmatched refusal on its capped head was escalated`);
+    assert.match(escalation!.detail, new RegExp(`refused capped rework decision ${stray.decision} on ${stray.sha.slice(0, 12)}`));
+    assert.equal(escalation!.attempts, 1, `${work.key}: escalated once, not on every cycle`);
+    assert.equal(raised.length, 1, `${work.key}: one escalation across the day: ${JSON.stringify(raised)}`);
+  }
+});

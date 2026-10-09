@@ -103,8 +103,8 @@ export function refusedCappedRework<D extends CappedRecord>(history: readonly D[
 }
 /**
  * GY-1579. A refused capped rework on `capped`'s head that `refusedCappedRework` cannot read, or null:
- * its binding names the head as capped (or, binding none, its situation or reason names the head and
- * the cap) but not this reviewer, and its reason carries no revision mark either. Such a refusal answers
+ * its binding names the head as capped (or, binding none or in another format, its situation or reason
+ * names the head and the cap) but not this reviewer, and its reason carries no revision mark either. Such a refusal answers
  * the round all the same, so the review-cap step escalates it by id rather than waiting on it silently.
  * A refusal marked under another policy revision is not one: it judged a change request that no longer stands.
  */
@@ -112,8 +112,9 @@ export function unmatchedCappedRefusal<D extends CappedRecord>(history: readonly
   const binding = cappedReworkBinding(capped.sha, capped.reviewer).slice(0, decisionBindingMax);
   return history.find(entry => {
     if (!refusedRework(entry) || entry.input?.binding === binding || cappedRevisionOf(entry.reason) !== null) return false;
+    // A capped binding names its head outright; any other binding, or none, leaves the head and the cap to the situation and reason.
     const bound = typeof entry.input?.binding === 'string' ? entry.input.binding as string : null;
-    if (bound) return bound.startsWith(`${capped.sha}:capped:`);
+    if (bound?.includes(':capped:')) return bound.startsWith(`${capped.sha}:capped:`);
     return (entry.situation?.sha === capped.sha || !!entry.reason?.includes(capped.sha)) && /\bpast (?:its|the) (?:review-round )?cap\b|\bcapped\b/i.test(entry.reason ?? '');
   }) ?? null;
 }

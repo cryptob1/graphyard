@@ -8,6 +8,7 @@ import { Store } from '../src/store.js';
 import type { Principal } from '../src/model.js';
 import type { Observation, Work } from '../src/model/work.js';
 import { heldRework, requestDecision } from '../src/server/decisions.js';
+import { foldDecisions, judgedSame, standingRefusal } from '../src/model/approval.js';
 import type { Services } from '../src/server/routes.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -68,6 +69,21 @@ test('unit:decide-route-records-rework-situation — a decide-route rework recor
   assert.equal(recorded.payload.id, second.id);
   assert.deepEqual(recorded.payload.input, { previousWorkerStopped: true, binding: `${shaB}:conflict` });
   assert.deepEqual(recorded.payload.situation, { sha: shaB, baseSha: base, reauthorizes: first.id }, 'the applied rework it would re-authorize is recorded beside the situation');
+  // The decision read back keeps it: readDecisions folds the reauthorization identity with the head and base.
+  assert.deepEqual(second.situation, { sha: shaB, baseSha: base, reauthorizes: first.id }, 'the route returns the decision as read back from the ledger');
+  const [, read] = foldDecisions(work.current.id, events.map(event => ({ kind: event.kind, actor: event.actor, at: event.created_at, payload: event.payload })));
+  assert.deepEqual(read!.situation, { sha: shaB, baseSha: base, reauthorizes: first.id });
+  // Refusals and duplicates key on it: refused, the request stands against one re-authorizing the same rework, never against one re-authorizing another or none.
+  const refused = { ...read!, state: 'refused' as const, refusal: { approver: 'graphyard-approver', reason: 'Not on these grounds', at: new Date(clock).toISOString() } };
+  const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+  assert.equal(standingRefusal([refused], 'rework', refused.input, 'Retry', same, [], { sha: shaB, baseSha: base, reauthorizes: first.id })?.decision, second.id);
+  assert.equal(standingRefusal([refused], 'rework', refused.input, 'Retry', same, [], { sha: shaB, baseSha: base, reauthorizes: 'another-applied-rework' }), null);
+  assert.equal(standingRefusal([refused], 'rework', refused.input, 'Retry', same, [], { sha: shaB, baseSha: base }), null);
+  assert.ok(judgedSame('rework', read!, { sha: shaB, baseSha: base, reauthorizes: first.id }) && !judgedSame('rework', read!, { sha: shaB, baseSha: base }));
+  // Through the route: the same request again is refused naming that refusal, by the recorded field.
+  events.push({ actor: 'graphyard-approver', kind: 'decision.declined', payload: { id: second.id, reason: 'Not on these grounds' }, created_at: new Date(clock + 200).toISOString() });
+  await assert.rejects(requestDecision(services, operator, work.current.id, { action: 'rework', input: { previousWorkerStopped: true, binding: `${shaB}:conflict` }, reason: 'The refreshed head conflicts with its base' }, 'key-3'),
+    (error: any) => error.status === 409 && error.details?.standingRefusal?.decision === second.id);
   // Once a worker submitted, the rework no longer holds, and nothing is re-authorized.
   assert.equal(heldRework(item(shaB, false), [{ ...first, state: 'applied' }]), null);
 });

@@ -316,6 +316,19 @@ test('unit:capped-refusal-unmatched-escalates — a refused capped rework on the
   // A binding-null hand rework whose situation names the head and the cap is read the same way.
   const hand = { ...markless('refused'), id: 'ef1f554b-1111-4c51-9a2e-3b8e7a6f5d40', input: { previousWorkerStopped: true }, situation: { sha: H, baseSha: B } };
   assert.equal(unmatchedCappedRefusal([hand], judged)?.id, hand.id);
+  // So is one whose binding is in another format: its situation names the head and its reason the cap.
+  const other = { ...markless('refused'), id: '5d0c7a1e-2222-4c51-9a2e-3b8e7a6f5d40', input: { previousWorkerStopped: true, binding: `${H}:verdict:${reviewer}` }, situation: { sha: H, baseSha: B } };
+  assert.equal(refusedCappedRework([other], judged, 1), null);
+  assert.equal(unmatchedCappedRefusal([other], judged)?.id, other.id, 'a binding in another format leaves the head and cap to the other readings');
+  assert.equal(unmatchedCappedRefusal([{ ...other, situation: { sha: 'c'.repeat(40), baseSha: B }, reason: 'GY-1573 is past its cap of 3.' }], judged), null, 'and is not read for another head');
+  assert.equal(unmatchedCappedRefusal([{ ...other, reason: 'The verdict stands on the head.' }], judged), null, 'nor without naming the cap');
+  const formatted = harness(capped('BLOCKING: former hotspot files exceed their size budgets.'));
+  formatted.world.history = [other];
+  await formatted.cycle();
+  await formatted.cycle();
+  assert.equal(formatted.world.withdrawn.length, 0);
+  assert.match(formatted.state.actions[cappedEscalationKey(formatted.world.item, H)]!.detail, new RegExp(`refused capped rework decision ${other.id} on f1ea5b764ac7.*binding ${H}:verdict:`));
+  assert.equal(formatted.performed.filter(entry => entry.kind === 'escalation').length, 1, 'escalated by id, once');
   // Neither is a refusal marked under another revision (it judged a change request that no longer stands), nor one for another head.
   assert.equal(unmatchedCappedRefusal([decision('refused', 1)], judged), null);
   assert.equal(unmatchedCappedRefusal([{ ...stray, input: { binding: cappedReworkBinding('c'.repeat(40), reviewer), previousWorkerStopped: true } }], judged), null);
