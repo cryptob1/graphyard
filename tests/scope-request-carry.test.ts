@@ -164,7 +164,7 @@ test('integration:carried-scope-ask-stays-routed — an ask whose attempt ends r
   const asked = work.scopeRequest!;
   const live = scopeRoutineDecision(work, Date.now(), true)!;
   assert.equal(live.binding, scopeDecisionBinding(asked), 'the loop routes the live ask');
-  const decision = await ok(master.token, 'POST', `work/${work.id}/decide`, { action: 'requirements', input: decisionInput('requirements', work, live.input), reason: live.reason });
+  const decision = await ok(master.token, 'POST', `work/${work.id}/decide`, { action: 'requirements', input: decisionInput('requirements', work, live.input!), reason: live.reason });
 
   // The attempt ends seconds later, before any approver judged the ask.
   await engine.execute(implementer, 'release', work.id, { epoch: work.epoch }, randomUUID());
@@ -188,4 +188,27 @@ test('integration:carried-scope-ask-stays-routed — an ask whose attempt ends r
   assert.equal(item.carriedScopeRequest ?? null, null, 'the carried ask is answered');
   assert.deepEqual([item.scopeDecision?.state, item.scopeDecision?.decidedBy, item.scopeDecision?.requestedAt], ['approved', approver.id, asked.at]);
   assert.equal(scopeRoutineDecision(item, Date.now(), true), null, 'nothing is left to route');
+});
+
+// GY-1568 (review): the approver's refusal of a carried ask is its answer too. It is recorded where
+// `status` reads it and the carried ask is cleared, so the next claim inherits nothing to route afresh.
+test('integration:carried-scope-ask-refused — the approver refusing an ask carried past its attempt clears it, so the next attempt inherits nothing', async () => {
+  let work = await ok(master.token, 'POST', 'work', { title: 'Ask then release, refused', plannedFiles: [layout], criteria: [{ id: 'AC-1', text: 'The widget layout renders', proofs: ['unit:layout'] }], reason: 'Scope carry fixture' }) as Work;
+  work = await ok(master.token, 'POST', `work/${work.id}/ready`, { expectedRevision: work.revision, reason: 'Ready for the attempt' }) as Work;
+  work = await claim(work.id);
+  await ok(token(implementer), 'POST', `work/${work.id}/scope`, { epoch: work.epoch, paths: [daemon], reason: 'Wanted' });
+  work = await ok(token(coordinator), 'POST', `work/${work.id}/autoscope`, { epoch: work.epoch }) as Work;
+  const asked = work.scopeRequest!;
+  await engine.execute(implementer, 'release', work.id, { epoch: work.epoch }, randomUUID());
+  let item = await reload(work.id);
+  const routed = scopeRoutineDecision(item, Date.now(), true)!;
+  assert.ok(routed, 'the carried ask is routed');
+  const decision = await ok(master.token, 'POST', `work/${work.id}/decide`, { action: 'requirements', input: decisionInput('requirements', item, routed.input!), reason: routed.reason });
+  await ok(approver.token, 'POST', `work/${work.id}/approve`, { action: 'refuse', decision: decision.id, reason: 'Not implied by the criteria' });
+  item = await reload(work.id);
+  assert.equal(item.carriedScopeRequest ?? null, null, 'the refused carried ask is cleared');
+  assert.deepEqual(item.plannedFiles, [layout]);
+  assert.deepEqual([item.scopeDecision?.state, item.scopeDecision?.decidedBy, item.scopeDecision?.requestedAt, item.scopeDecision?.reason], ['refused', approver.id, asked.at, 'Not implied by the criteria']);
+  assert.equal(scopeRoutineDecision(item, Date.now(), true), null, 'nothing is left to route');
+  assert.equal((await claim(work.id)).scopeRequest ?? null, null, 'the next attempt inherits nothing');
 });

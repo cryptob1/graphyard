@@ -126,6 +126,16 @@ async function answerScopeRequest(db: Parameters<typeof save>[0], work: Work, de
   // no attempt to answer, and its item is not written to on that attempt's behalf.
   const live = !!work.lease && work.lease.epoch === answers?.epoch && Date.parse(work.lease.expiresAt) > now.getTime();
   const current = decision.input?.expectedPolicyRevision === work.policyRevision;
+  // GY-1568: the ask an ended attempt carried is routed too, so its refusal is the answer: it is
+  // recorded and the carried ask cleared, or the next claim would inherit it and route it afresh.
+  const carried = work.carriedScopeRequest;
+  if (answers && !request && carried && carried.epoch === answers.epoch && carried.at === answers.at && current) {
+    const paths = unplannedPaths(work.plannedFiles, carried.paths);
+    work.scopeDecision = { state: 'refused', reason, at: now.toISOString(), decidedBy: actor.id, waitedMs: Math.max(0, now.getTime() - Date.parse(carried.at)), paths: paths.length ? paths : carried.paths, requestedBy: carried.requestedBy, requestedAt: carried.at, epoch: carried.epoch };
+    work.carriedScopeRequest = null;
+    await save(db, work, actor.id, 'scope.refused', now, { decision: decision.id, epoch: carried.epoch, requestedAt: carried.at, paths: work.scopeDecision.paths, approver: actor.id, reason, carried: true });
+    return;
+  }
   if (!answers || !request || request.epoch !== answers.epoch || request.at !== answers.at || !live || !current) return;
   // What was refused is what the approver judged: the paths still outside plannedFiles, not those a
   // partial widening has planned since the worker asked.
