@@ -118,10 +118,9 @@ export function accountIneligibility(registry: AgentRegistry, account: FleetAcco
   const plan = deriveAccountPlan(account, registry.accounts);
   const planAccounts = registry.accounts.filter(other => other.name === account.name || deriveAccountPlan(other, registry.accounts).planId === plan.planId);
   const held = (other: FleetAccount) => other.quota.state === 'exhausted' && (!other.quota.resetsAt || Date.parse(other.quota.resetsAt) > now);
-  // An operator hold on the plan wins, and so does a session's report of an exhaustion until the reset it named (GY-1581):
-  // neither is a probe's reading, so no probe on the plan outranks it. Otherwise the newest probe on the plan decides, so a
-  // stale exhaustion one host reported without a reset is superseded by a later probe elsewhere (GY-1158). A pure read:
-  // nothing is rewritten here.
+  // An operator hold on the plan wins, and so does a session's exhaustion report until its named reset (GY-1581): no probe
+  // outranks either. Otherwise the newest probe on the plan decides, so a stale exhaustion one host reported without a
+  // reset is superseded by a later probe elsewhere (GY-1158). A pure read: nothing is rewritten here.
   const reported = (other: FleetAccount) => other.quota.session === true && !!other.quota.resetsAt && held(other);
   const probes = planAccounts.filter(other => other.quota.source === 'probe' && other.quota.observedAt && other.quota.state !== 'unknown')
     .sort((a, b) => Date.parse(b.quota.observedAt!) - Date.parse(a.quota.observedAt!));
