@@ -166,13 +166,13 @@ const settledFence: FoldRule = ({ row, entry, details, stage, source, emit }) =>
   entry.quarantine = null;
 };
 
-/** A standing escalation resolved: an escalation, unless exempt. */
+/** A standing escalation resolved. */
 const escalationResolved: FoldRule = ({ row, entry, details, stage, source, emit }) => {
   const escalation = details.escalation ?? {};
   const key = `${details.trigger}@${escalation.at}`;
   const open = entry.escalations.get(key);
   if (details.trigger === 'lease-loss' && entry.quarantine) entry.quarantine.concernAt ??= text(escalation.at, row.at);
-  if (!exemption({ at: 'escalation-resolved', details })) emit(row, 'escalation', { id: `escalation:${row.workId}:${key}`, requestedAt: text(escalation.at, open?.at ?? row.at), blocked: text(escalation.reason, open?.reason ?? String(details.trigger)), stage: open?.stage ?? stage, resolvedAt: row.at, resolvedBy: details.approvedBy ? `${text(details.resolvedBy, row.actor)} approved by ${details.approvedBy}` : text(details.resolvedBy, row.actor), resolution: text(details.reason, 'resolved'), trigger: String(details.trigger), sources: [...(open ? [{ seq: open.seq, kind: 'raised' }] : []), source] });
+  emit(row, 'escalation', { id: `escalation:${row.workId}:${key}`, requestedAt: text(escalation.at, open?.at ?? row.at), blocked: text(escalation.reason, open?.reason ?? String(details.trigger)), stage: open?.stage ?? stage, resolvedAt: row.at, resolvedBy: details.approvedBy ? `${text(details.resolvedBy, row.actor)} approved by ${details.approvedBy}` : text(details.resolvedBy, row.actor), resolution: text(details.reason, 'resolved'), trigger: String(details.trigger), sources: [...(open ? [{ seq: open.seq, kind: 'raised' }] : []), source] });
   entry.escalations.delete(key);
 };
 
