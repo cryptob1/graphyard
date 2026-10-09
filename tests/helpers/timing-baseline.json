@@ -242,6 +242,7 @@
     "tests/approver-name.test.ts": 1041,
     "tests/approver-refusal.test.ts": 6509,
     "tests/approver-session-close.test.ts": 851,
+    "tests/approver-stall-first-seen.test.ts": 1000,
     "tests/assignment.test.ts": 1095,
     "tests/async-runner.test.ts": 2742,
     "tests/attempt-timebox.test.ts": 889,
