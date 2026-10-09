@@ -8,7 +8,7 @@ import { encodeLoopPanes, loopPanesHeader, loopPresenceHeader, loopSupervisionHe
 import { herdrServerSeen, herdrTarget } from '../../master/herdr.js';
 import { LoopWake, loopWakeSubjects } from '../../daemon/loop-wake.js';
 import { unhandled, type MasterSession } from './session.js';
-import { exitWhenStopped, recordLockRefusal } from '../../master/loop-restart.js';
+import { exitWhenStopped, recordingLockRefusal } from '../../master/loop-restart.js';
 
 /** The durable coordination loop and the dispatcher beside it, until stopped. */
 /** The Herdr server the loop names on each read (GY-1511): the instance its herdr calls target, its host, and whether it last answered. */
@@ -44,9 +44,8 @@ export async function loopCommand(session: MasterSession): Promise<unknown> {
     // GY-1603: a stopped loop's process exits within its unit's stop bound, whatever handle is left open.
     const exit = exitWhenStopped();
     const held = state.lock && state.lock.pid !== process.pid ? state.lock : null;
-    const daemonRun = runDaemon(master, state, effects, { once: values.once, intervalMs: values.interval ? intervalSeconds * 1000 : () => current().run.intervalSeconds * 1000, identity: { pid: process.pid, host: master.hostId }, reload, repository: root, wake })
-      // A run refused on another loop's lock is recorded for master status, which names a holder outside the unit.
-      .catch(async error => { if (held && String(error?.message).startsWith('Another Graphyard master loop holds')) await recordLockRefusal(root, held).catch(() => {}); throw error; })
+    // A run refused on another loop's lock is recorded for master status, which names a holder outside the unit.
+    const daemonRun = recordingLockRefusal(root, held, runDaemon(master, state, effects, { once: values.once, intervalMs: values.interval ? intervalSeconds * 1000 : () => current().run.intervalSeconds * 1000, identity: { pid: process.pid, host: master.hostId }, reload, repository: root, wake }))
       .finally(() => stopping.abort());
     const dispatching = { ...dispatchEffects(root, current, { snapshot: (timeoutMs = dispatchReadTimeoutMs) => coordinationSnapshot(timeoutMs) }),
       observeLoopSubjects: (work: Parameters<typeof loopWakeSubjects>[0], agents: Parameters<typeof loopWakeSubjects>[3], clock: number) => { wake.observe(loopWakeSubjects(work, current(), clock, agents)); } };

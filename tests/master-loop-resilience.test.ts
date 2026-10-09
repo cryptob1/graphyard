@@ -628,12 +628,13 @@ test('unit:master-restart-supervised — master restart goes through this instal
   const config = { hostId: 'this-host', cliPath, run: { intervalSeconds: 20 } } as unknown as MasterConfig;
   const host = { home }, unit = 'graphyard-master.service';
   // A fake user manager: the unit's state, and every command it was given.
-  const systemd = (state: { active: string; directory: string; mainPid: number; next?: number; reachable?: boolean }) => {
+  const systemd = (state: { active: string; directory: string; mainPid: number; next?: number; reachable?: boolean; jobs?: string }) => {
     const calls: string[][] = [];
     const systemctl = (args: string[]) => {
       calls.push(args);
       if (state.reachable === false) throw new Error('Failed to connect to bus: No medium found');
       if (args[0] === 'restart') state.mainPid = state.next ?? state.mainPid + 1;
+      if (args[0] === 'list-jobs') return state.jobs ?? '';
       return args[0] === 'show' ? `LoadState=loaded\nActiveState=${state.active}\nMainPID=${state.mainPid}\nWorkingDirectory=${state.directory}\n` : '';
     };
     return { calls, systemctl };
@@ -653,8 +654,20 @@ test('unit:master-restart-supervised — master restart goes through this instal
   assert.equal(existsSync(launched), false, 'no detached master run is spawned beside the unit');
   // A unit waiting out its RestartSec (MainPID 0) is still the supervisor.
   assert.deepEqual(supervisingUnit(root, { systemctl: systemd({ active: 'activating', directory: root, mainPid: 0 }).systemctl, host, platform: 'linux' }), { unit, mainPid: 0 });
-  // Another checkout's unit, an inactive unit, or no systemd: not this install's supervisor.
-  for (const state of [{ active: 'active', directory: home, mainPid: 9 }, { active: 'inactive', directory: root, mainPid: 0 }])
+  // A unit stopping on its way to a queued restart (deactivating), or down with a start or restart
+  // job queued, is still the supervisor: master restart goes through it, never a detached run that
+  // the queued restart's loop would then contend with for the lock.
+  const stopping = systemd({ active: 'deactivating', directory: root, mainPid: 6161, next: 7171, jobs: `812 ${unit} restart waiting\n` });
+  const raced = await restartMasterLoop(root, config, null, { systemctl: stopping.systemctl, host, platform: 'linux' });
+  assert.deepEqual({ supervisor: raced.supervisor, stopped: raced.stopped, started: raced.started, log: raced.log }, { supervisor: unit, stopped: 6161, started: 7171, log: null });
+  assert.ok(stopping.calls.some(args => args.join(' ') === `restart ${unit}`), 'a deactivating unit is restarted through systemd');
+  assert.deepEqual(supervisingUnit(root, { systemctl: systemd({ active: 'deactivating', directory: root, mainPid: 6161 }).systemctl, host, platform: 'linux' }), { unit, mainPid: 6161 }, 'deactivating with no job listed');
+  for (const job of ['restart', 'start'])
+    assert.deepEqual(supervisingUnit(root, { systemctl: systemd({ active: 'failed', directory: root, mainPid: 0, jobs: `90 ${unit} ${job} waiting\n` }).systemctl, host, platform: 'linux' }), { unit, mainPid: 0 }, `failed with a ${job} job queued`);
+  await new Promise(done => setTimeout(done, 300));
+  assert.equal(existsSync(launched), false, 'no detached master run beside a stopping unit');
+  // Another checkout's unit, an inactive unit (a queued stop or another unit's job is no restart), or no systemd: not this install's supervisor.
+  for (const state of [{ active: 'active', directory: home, mainPid: 9 }, { active: 'inactive', directory: root, mainPid: 0 }, { active: 'inactive', directory: root, mainPid: 0, jobs: `91 ${unit} stop waiting\n92 other.service restart waiting\n` }])
     assert.equal(supervisingUnit(root, { systemctl: systemd(state).systemctl, host, platform: 'linux' }), null);
   assert.equal(supervisingUnit(root, { systemctl: systemd({ active: 'active', directory: root, mainPid: 9 }).systemctl, host, platform: 'darwin' }), null);
   // An unreachable manager with this checkout's unit file installed refuses rather than spawn a second loop.

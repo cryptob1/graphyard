@@ -26,9 +26,18 @@ function unitProperties(systemctl: UserSystemctl, unit: string) {
   const text = systemctl(['show', '--property=LoadState', '--property=ActiveState', '--property=MainPID', '--property=WorkingDirectory', unit]);
   return Object.fromEntries(text.split(/\r?\n/).filter(line => line.includes('=')).map(line => [line.slice(0, line.indexOf('=')), line.slice(line.indexOf('=') + 1).trim()]));
 }
+/** systemd states in which the unit is up, starting, waiting out RestartSec, or stopping on its way to a queued restart. */
+const supervisedStates = ['active', 'activating', 'reloading', 'refreshing', 'deactivating'];
+/** Whether systemd holds a start or restart job for UNIT: `list-jobs` rows are `ID UNIT TYPE STATE`. */
+function startQueued(systemctl: UserSystemctl, unit: string) {
+  return systemctl(['list-jobs', '--no-legend', '--plain', unit]).split(/\r?\n/).some(line => {
+    const [, name, type] = line.trim().split(/\s+/);
+    return name === unit && /^(start|restart|try-restart|reload-or-start)$/.test(type ?? '');
+  });
+}
 /**
  * The unit supervising this install's loop: this install's recorded unit (or the legacy alias),
- * loaded, up or waiting to restart, and running `master run` from exactly ROOT. A unit of the same
+ * loaded, up, waiting to restart, stopping or with a start queued, and running `master run` from exactly ROOT. A unit of the same
  * name rooted in another checkout is another install's loop and never this one's. Null when there is
  * none; throws when systemd cannot be asked but this checkout's unit file is installed, since spawning a second,
  * unsupervised loop beside a unit that may be running is what this module exists to prevent.
@@ -46,9 +55,13 @@ export function supervisingUnit(root: string, options: Pick<RestartOptions, 'sys
     if (!rooted || canonical(rooted) !== canonical(root)) return null;
     throw new Error(`The systemd user manager could not be asked about ${unit}, which is installed for this loop, so it was not restarted (a second, unsupervised loop is never started beside it): ${error instanceof Error ? error.message.split('\n')[0] : String(error)}. From a host shell: systemctl --user restart ${unit}`);
   }
-  if (properties.LoadState !== 'loaded' || !['active', 'activating', 'reloading'].includes(properties.ActiveState ?? '')) return null;
+  if (properties.LoadState !== 'loaded') return null;
   const directory = (properties.WorkingDirectory ?? '').replace(/^[-!+]+/, '');
   if (!directory || canonical(directory) !== canonical(root)) return null;
+  // A unit stopping (deactivating) or down with a start or restart queued is still this loop's
+  // supervisor: a detached `master run` now would contend for the lock with the loop systemd is
+  // about to start.
+  if (!supervisedStates.includes(properties.ActiveState ?? '') && !startQueued(systemctl, unit)) return null;
   return { unit, mainPid: Number(properties.MainPID) || 0 };
 }
 
@@ -128,6 +141,18 @@ export async function recordLockRefusal(root: string, holder: LoopLock, at = new
   const record: LockRefusal = { holder: { pid: holder.pid, host: holder.host, startedAt: holder.startedAt ?? null }, refusedAt: at.toISOString(), count: same ? previous.count + 1 : 1 };
   await atomicPrivateText(await refusalFile(root), `${JSON.stringify(record)}\n`);
   return record;
+}
+/**
+ * A `master run` (RUN), with its refusal on another live loop's lock recorded for `master status`
+ * when HELD is that lock as the run read it. The refusal is rethrown: the run still fails, and its
+ * supervisor restarts it into the same refusal, each one counted.
+ */
+export async function recordingLockRefusal<T>(root: string, held: LoopLock | null, run: Promise<T>): Promise<T> {
+  try { return await run; }
+  catch (error) {
+    if (held && String((error as Error)?.message).startsWith('Another Graphyard master loop holds')) await recordLockRefusal(root, held).catch(() => {});
+    throw error;
+  }
 }
 export async function readLockRefusal(root: string): Promise<LockRefusal | null> {
   try { return JSON.parse(await readFile(await refusalFile(root), 'utf8')) as LockRefusal; } catch { return null; }
