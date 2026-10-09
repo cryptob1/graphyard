@@ -29,15 +29,15 @@ One stateless container, Postgres: `node "$GRAPHYARD_CLI" install --provider rai
 
 ### Production deployment observation
 
-A merge unserved five minutes after new `GRAPHYARD_BUILD_SHA` is `delivery.deployment-incident`; before then, or with a provider attempt in flight, `production` shows `aheadBy`, `rollingOut: true`, no attention. Deployments: Railway's API (`RAILWAY_API_TOKEN`/`RAILWAY_TOKEN`), else GitHub deployments under [production environment name](#production-environment-name); failures name their log URL. A fresh `master verify-deployment` observation (`servingSource: endpoint`) outranks a lagging list; the build's `/healthz` commit (`servingSource: build`) outranks both. Probe: `master init --deployment-url https://YOUR-DOMAIN/healthz --deployment-sha-field commit`. While nothing pends, the loop reuses its last verified observation `run.deploymentReuseMinutes` (15; `0` every cycle).
+A merge unserved five minutes after new `GRAPHYARD_BUILD_SHA` is `delivery.deployment-incident`; before then, or mid-deploy, `production` shows `aheadBy`, `rollingOut: true`, no attention. Deployments: Railway's API (`RAILWAY_API_TOKEN`/`RAILWAY_TOKEN`), else GitHub deployments under [production environment name](#production-environment-name); failures name their log URL. A fresh `master verify-deployment` observation (`servingSource: endpoint`) outranks a lagging list; the build's `/healthz` commit (`servingSource: build`) outranks both. Probe: `master init --deployment-url https://YOUR-DOMAIN/healthz --deployment-sha-field commit`. While nothing pends, the loop reuses its last verified observation `run.deploymentReuseMinutes` (15; `0` every cycle).
 
-Release lag and the `loaded-revision` [resource](operations-reference.md#control-plane-resources) skip deliveries awaiting [promotion](delivery.md). Self-upgrade restarts wait until production serves their target; `release-lagged`/`upgrade:held` name both commits; `.graphyard/held-cli.json` pins `bin/graphyard.mjs`, executors and restarted loops to the served release.
+Release lag and the `loaded-revision` [resource](operations-reference.md#control-plane-resources) skip deliveries awaiting [promotion](delivery.md). Self-upgrades wait until production serves their target; `release-lagged`/`upgrade:held` name both commits; `.graphyard/held-cli.json` pins `bin/graphyard.mjs`, executors and restarted loops to the served release.
 
-Post-deploy the loop records throughput (`.graphyard/measurements/throughput`, `scripts/measure-throughput.mjs --record`) without operator-touched deliveries or grant-refused superseded idle; ≥20 all excluded, or ≥10 missing 48h+, escalates once/release (`escalation:throughput:GY-N:REV`).
+Post-deploy the loop records throughput (`.graphyard/measurements/throughput`, `scripts/measure-throughput.mjs --record`) without operator-touched deliveries or grant-refused superseded idle, charging idle-but-actionable time from the window start; ≥20 all excluded, or ≥10 missing 48h+, escalates once/release (`escalation:throughput:GY-N:REV`).
 
 ### Deployment incident
 
-Railway deploys `release/production` within a minute. `/healthz` `commit` at tip: `graphyard master verify-deployment GY-N` per pending delivery; else `railway deployment list --service graphyard --environment production` shows the failure; redeploy tip ([manual fallback](#manual-fallback)), verify.
+Railway deploys `release/production` within a minute. `/healthz` `commit` at tip: `graphyard master verify-deployment GY-N` per pending delivery; else `railway deployment list --service graphyard --environment production` shows failures; redeploy tip ([manual fallback](#manual-fallback)), verify.
 
 #### Production environment name
 
