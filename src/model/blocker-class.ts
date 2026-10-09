@@ -4,6 +4,7 @@ import { RefusedResponse, planeUnavailable } from './refusal.js';
 import { blockedAttemptMarker } from './capacity.js';
 import { namedPaths, pathScopeContains, scopeRefusalBlocker, unplannedPaths } from './scope.js';
 import { widenedPlannedFiles } from './scope-collapse.js';
+import { blockerPaths, githubOutage, runtimeDenial, runtimeExhaustion } from './runtime-blockers.js';
 // Types only from work.ts: work.ts reaches this module through its own field types.
 import type { Work } from './work.js';
 
@@ -22,11 +23,12 @@ import type { Work } from './work.js';
 // ---------------------------------------------------------------------------
 
 export const blockerClasses = ['github-credential', 'control-plane-error', 'sandbox-path', 'worktree-mismatch', 'outside-scope-test-failure',
-  'dispatch-failure', 'host-supervisor', 'planned-file-scope', 'needs-decision', 'human-only', 'genuine'] as const;
+  'dispatch-failure', 'host-supervisor', 'runtime-denial', 'runtime-exhaustion', 'github-outage', 'planned-file-scope', 'needs-decision', 'human-only', 'genuine'] as const;
 export type BlockerClass = typeof blockerClasses[number];
 
 /** The classes whose cause lies outside the item: the loop probes each, every cycle, and clears the blocker once its probe passes. */
-export const environmentalBlockerClasses: readonly BlockerClass[] = ['github-credential', 'control-plane-error', 'sandbox-path', 'worktree-mismatch', 'outside-scope-test-failure', 'dispatch-failure', 'host-supervisor'];
+export const environmentalBlockerClasses: readonly BlockerClass[] = ['github-credential', 'control-plane-error', 'sandbox-path', 'worktree-mismatch', 'outside-scope-test-failure', 'dispatch-failure', 'host-supervisor',
+  'runtime-denial', 'runtime-exhaustion', 'github-outage'];
 /** Only these need a person (the master, or the human for a human-only decision); every other class is resolved by the loop. */
 export const needsSomeone = (blockerClass: BlockerClass) => blockerClass === 'genuine' || blockerClass === 'human-only';
 /** How many times in a row the loop clears an item's blocker before it stops and leaves it to the master: a cause that keeps coming back is not routine. */
@@ -41,6 +43,9 @@ export const blockerClassMeaning: Record<BlockerClass, string> = {
   'outside-scope-test-failure': "a suite failed in files outside the item's plannedFiles; cleared once the base branch has moved past the tip it failed on",
   'dispatch-failure': "the master loop stopped redispatching the item after repeated launches no worker profile could take; cleared once a profile can take a launch again",
   'host-supervisor': "a host check failed only from the worker's sandbox, where the systemd user bus is masked; cleared once the loop, on the host, reaches the user manager and finds its own unit active",
+  'runtime-denial': "the worker's runtime refused git push or gh pr at its permission prompt, which a fresh session does not carry; cleared once the attempt has ended, since the next launch is a fresh session",
+  'runtime-exhaustion': "the worker's runtime account reached its usage limit; cleared once a worker profile can take a launch, which resumes the kept work",
+  'github-outage': 'GitHub answered a git or gh operation with its own server error; cleared once githubstatus.com reports Git Operations, API Requests and Pull Requests operational and git ls-remote and a dry-run push pass inside the worker confinement',
   'planned-file-scope': 'the change needs named files outside plannedFiles; becomes an additive widening decision for the independent approver, cleared once plannedFiles cover them',
   'needs-decision': 'the item waits on a requested two-party decision; its approver is launched, and the blocker is cleared once the decision is judged',
   'human-only': 'one of the three decisions only a human may make',
@@ -156,6 +161,10 @@ export function classifyBlocker(text: string | null | undefined, context: { huma
   // The loop's own record of repeated launch failures on a fleet-idle cause (GY-1322), whatever else its cause quotes.
   if (dispatchFailureBlocker.test(blocker) && fleetIdleCause(blocker)) return { class: 'dispatch-failure', ...none };
   if (githubCredential(blocker)) return { class: 'github-credential', ...none };
+  // GY-1567: the worker's session or GitHub, not the item: each clears without anyone.
+  if (runtimeDenial(blocker)) return { class: 'runtime-denial', ...none };
+  if (runtimeExhaustion(blocker)) return { class: 'runtime-exhaustion', ...none };
+  if (githubOutage(blocker)) return { class: 'github-outage', ...none };
   if (worktree.test(blocker)) return { class: 'worktree-mismatch', ...none };
   if (userBusRefusal.test(blocker)) return { class: 'host-supervisor', ...none };
   // A suite that fails outside the item is that, whatever its output says about servers or permissions.
@@ -165,7 +174,7 @@ export function classifyBlocker(text: string | null | undefined, context: { huma
   if (readOnlyFileSystem.test(blocker) || (fileRefusal.test(blocker) && path)) return { class: 'sandbox-path', ...none, path };
   if (blocker.startsWith(scopeRefusalBlocker) || scopeWords.test(blocker)) {
     const unlinked = unlinkedText(blocker);
-    const paths = namedPaths(unlinked);
+    const paths = blockerPaths(unlinked, namedPaths(unlinked));
     const unclaimed = (token: string) => !paths.some(path => path.includes(token));
     const commit = [...unlinked.matchAll(namedCommit)].map(match => match[1].toLowerCase()).find(unclaimed) ?? unlinked.match(commitToken)?.find(unclaimed) ?? null;
     return paths.length && commit ? { class: 'planned-file-scope', ...none, paths, commit } : { class: 'genuine', ...none };
@@ -204,7 +213,7 @@ export function itemBlockerClass(work: Pick<Work, 'blocker' | 'humanRequest'> & 
   if (!work.blocker) return null;
   const classification = classifyBlocker(work.blocker, { humanRequest: !!work.humanRequest && !work.humanRequest.answer });
   if (classification.class !== 'genuine' || work.blocker.startsWith(scopeRefusalBlocker) || !scopeWords.test(work.blocker)) return classification;
-  const paths = namedPaths(unlinkedText(work.blocker)), commit = paths.length ? blockedAttemptCommit(work) : null;
+  const unlinked = unlinkedText(work.blocker), paths = blockerPaths(unlinked, namedPaths(unlinked)), commit = paths.length ? blockedAttemptCommit(work) : null;
   return commit ? { ...classification, class: 'planned-file-scope', paths, commit } : classification;
 }
 

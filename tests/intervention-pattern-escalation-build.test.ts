@@ -1,7 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { blockerView, classifyBlocker, environmentalBlockerClasses, needsSomeone } from '../src/model/blocker-class.js';
-import { probeBlocker } from '../src/daemon/blocker-probes.js';
+import { githubDegraded, probeBlocker } from '../src/daemon/blocker-probes.js';
+import { readFileSync } from 'node:fs';
+import { uncoveredBlockerPaths } from '../src/model/blocker-class.js';
+import { branchRewriteGuidance, workerPrompt } from '../src/master.js';
 import { loopUnitName } from '../src/supervisor.js';
 import { docsHeadroom, docsTrimItem, docsTrimLatitude, docsWordBudgetOf } from '../src/model/documentation.js';
 import { workerPushPermissions } from '../src/worker-credential.js';
@@ -87,4 +90,96 @@ test('manual:intervention-pattern-escalation-build — GY-1292: the docs-trim it
 test('manual:intervention-pattern-escalation-build — GY-417: worker push credentials carry workflows: write', () => {
   assert.match(blocked['GY-417-1115774'], /without workflows permission/);
   assert.equal(workerPushPermissions.workflows, 'write');
+});
+
+// GY-1567 names this file for the same proof. Nine more escalation interventions at the build stage
+// between 2026-10-02 and 2026-10-09, each a worker's `blocked` report the master cleared by hand
+// (tests/fixtures/gy-1567-escalations.json holds each blocker as the ledger row recorded it):
+//
+//   - GY-1519 (blocked#2410502): the runtime refused `git push` and `gh pr create` at its permission
+//     prompt; a fresh launch pushed normally. Now `runtime-denial`: cleared once the attempt ends.
+//   - GY-1519 (blocked#2398155): the worker's account reached its usage limit; another profile
+//     resumed the kept work. Now `runtime-exhaustion`: cleared once a worker profile can take a launch.
+//   - GY-1477 (blocked#2385228): the worker asked for a force-push and was told to fix forward. The
+//     worker request now says that itself, and a refused force-push is no runtime fault.
+//   - GY-1461 (blocked#2372384): GitHub rejected a push with its own Internal Server Error during its
+//     incident; the loop read it as the Graphyard server's and handed it on. Now `github-outage`:
+//     cleared once githubstatus.com reports delivery operational and the push path answers.
+//   - GY-1292 (blocked#2345717, #2356429, #2359935): the same docs-trim item's limit chasing main,
+//     removed at the source by GY-1366 as above: the trim item the loop files carries the latitude.
+//   - GY-1272 (blocked#2259050): the scope blocker's prose (`GET /compare/:range`, `req/min`, `e.g`,
+//     bare `sync.ts`) was read as files no widening could cover, so it never cleared after the
+//     approver widened plannedFiles. Only repository paths count now.
+//   - GY-1459 (blocked#2372121): a fixture only the operator's signed-in browser can record. It is
+//     the one genuine instance left, so the build stage stays under 3 per 7 days.
+const escalations = JSON.parse(readFileSync(new URL('./fixtures/gy-1567-escalations.json', import.meta.url), 'utf8')) as Record<string, string>;
+const statusOf = (statuses: Record<string, string>) => (async () => new Response(JSON.stringify({ components: Object.entries(statuses).map(([name, status]) => ({ name, status })) }))) as unknown as typeof fetch;
+
+test('manual:intervention-pattern-escalation-build — GY-1567: every instance but GY-1459 is a class the loop clears without anyone', () => {
+  const expected: Record<string, string> = {
+    'GY-1519-2410502': 'runtime-denial', 'GY-1519-2398155': 'runtime-exhaustion', 'GY-1461-2372384': 'github-outage', 'GY-1272-2259050': 'planned-file-scope',
+    'GY-1477-2385228': 'genuine', 'GY-1459-2372121': 'genuine',
+  };
+  for (const [instance, blockerClass] of Object.entries(expected)) {
+    assert.equal(classifyBlocker(escalations[instance]).class, blockerClass, instance);
+    if (blockerClass !== 'genuine') {
+      assert.ok(environmentalBlockerClasses.includes(blockerClass as never) || blockerClass === 'planned-file-scope', instance);
+      assert.equal(blockerView(item(instance.slice(0, 7), escalations[instance]))!.needsSomeone, false, `${instance}: the board asks nobody`);
+    }
+  }
+  // The GY-1292 three were the docs-trim item filed before GY-1366; the trim item now carries the latitude they asked for.
+  for (const instance of ['GY-1292-2345717', 'GY-1292-2356429', 'GY-1292-2359935']) assert.match(escalations[instance], /AC-1's [\d,]+-word limit/, instance);
+});
+
+test('manual:intervention-pattern-escalation-build — GY-1519: a refused delivery push clears once the attempt has ended, a refused rewrite or other command does not', async () => {
+  const text = escalations['GY-1519-2410502'];
+  const classification = classifyBlocker(text);
+  const live = { ...item('GY-1519', text), lease: { epoch: 8, owner: 'graphyard-claude-2', expiresAt: '2026-10-08T11:00:00.000Z' } } as unknown as Work;
+  const during = await probeBlocker(live, classification, { run: () => '', launch: null, cwd: '/srv', clock: Date.parse('2026-10-08T10:30:00.000Z') });
+  assert.equal(during?.passed, false);
+  const after = await probeBlocker(item('GY-1519', text), classification, { run: () => '', launch: null, cwd: '/srv', clock: Date.parse('2026-10-08T10:30:00.000Z') });
+  assert.equal(after?.passed, true);
+  assert.match(after!.detail, /a fresh session/);
+  // The force-push GY-1477 asked for and GY-1459's browser capture are refusals a fresh session meets again.
+  assert.notEqual(classifyBlocker(escalations['GY-1477-2385228']).class, 'runtime-denial');
+  assert.notEqual(classifyBlocker(escalations['GY-1459-2372121']).class, 'runtime-denial');
+  assert.equal(classifyBlocker("Permission to use Bash with command git push --force origin HEAD has been denied.").class, 'genuine');
+});
+
+test('manual:intervention-pattern-escalation-build — GY-1477: the worker request says a pushed branch is fixed forward, never force-pushed', () => {
+  const request = workerPrompt({ cliPath: '/srv/bin/graphyard.mjs' }, { key: 'GY-1477', title: 'scope' }, { principal: 'graphyard-claude-1' }, 1);
+  assert.ok(request.includes(branchRewriteGuidance));
+  assert.match(branchRewriteGuidance, /Never force-push[^.]*: [^.]*fix a pushed commit forward with a new commit and push normally/);
+});
+
+test("manual:intervention-pattern-escalation-build — GY-1461: GitHub's own server error is github-outage, probed on GitHub and the push path, not the Graphyard server", async () => {
+  const text = escalations['GY-1461-2372384'];
+  const classification = classifyBlocker(text);
+  assert.equal(classification.class, 'github-outage');
+  const ran: string[] = [];
+  const run = (command: string, args: string[]) => { ran.push(`${command} ${args.join(' ')}`); return ''; };
+  const incident = await probeBlocker(item('GY-1461', text), classification, { run, launch: null, cwd: '/srv', clock: Date.now(), githubStatus: async () => ['Git Operations (partial_outage)'] });
+  assert.equal(incident?.passed, false);
+  assert.match(incident!.detail, /Git Operations \(partial_outage\)/);
+  assert.deepEqual(ran, [], 'nothing pushes while GitHub reports its incident');
+  const resolved = await probeBlocker(item('GY-1461', text), classification, { run, launch: null, cwd: '/srv', clock: Date.now(), githubStatus: async () => [] });
+  assert.equal(resolved?.passed, true);
+  assert.match(ran[0], /git push --dry-run/);
+  // The status page read: only the delivery components count, and an unreadable page is null, not a pass.
+  assert.deepEqual(await githubDegraded(statusOf({ 'Git Operations': 'operational', 'API Requests': 'degraded_performance', 'Pull Requests': 'operational', Codespaces: 'major_outage' })), ['API Requests (degraded_performance)']);
+  assert.deepEqual(await githubDegraded(statusOf({ 'Git Operations': 'operational', 'API Requests': 'operational', 'Pull Requests': 'operational' })), []);
+  assert.equal(await githubDegraded((async () => { throw new Error('offline'); }) as unknown as typeof fetch), null);
+  // The Graphyard server's own 500 stays control-plane-error.
+  assert.equal(classifyBlocker('graphyard complete failed: HTTP 500 Internal Server Error from the server').class, 'control-plane-error');
+});
+
+test('manual:intervention-pattern-escalation-build — GY-1272: only repository paths count, so the widened plannedFiles clear the scope blocker', () => {
+  const text = escalations['GY-1272-2259050'];
+  const classification = classifyBlocker(text);
+  assert.deepEqual(classification.paths, ['src/github.ts', 'tests/github-rate-budget.test.ts']);
+  // Requirements decision 728d01a2 widened plannedFiles to these before the master cleared the blocker.
+  const widened = ['src/daemon/faults.ts', 'src/master-status.ts', 'src/master/attention.ts', 'tests/resource-fault-recurrence.test.ts', 'tests/fault-classes.test.ts', 'docs/master-agent-reference.md', 'src/github.ts', 'tests/github-rate-budget.test.ts'];
+  assert.deepEqual(uncoveredBlockerPaths({ plannedFiles: widened }, classification), []);
+  // Directory scopes, root files and dotfiles still count.
+  assert.deepEqual(classifyBlocker('SCOPE NEEDED: docs/, tests/*, package.json and .gitignore for commit 1a2b3c4d').paths, ['docs/', 'tests/*', 'package.json', '.gitignore']);
 });

@@ -21,7 +21,7 @@ Unless created `"systemDriven": false`, items refuse hand `dispatch`, `merge`, `
 
 **Instead of closing sessions by hand:** do nothing for a finished or dead session (`graphyard master run --once` sweeps); attach to an overlong one with its handle's command. Never mark another session's handle finished to free a slot.
 
-`blocked` frees its slot; [classes](protocol/leases.md#blocked-work-unblocks-itself) `github-credential`, `control-plane-error`, `sandbox-path`, `worktree-mismatch`, `outside-scope-test-failure`, `dispatch-failure`, `host-supervisor`, `planned-file-scope`, `needs-decision` self-clear; `genuine`/`human-only` escalate.
+`blocked` frees its slot; [classes](protocol/leases.md#blocked-work-unblocks-itself) `github-credential`, `control-plane-error`, `sandbox-path`, `worktree-mismatch`, `outside-scope-test-failure`, `dispatch-failure`, `host-supervisor`, `runtime-denial`, `runtime-exhaustion`, `github-outage`, `planned-file-scope`, `needs-decision` self-clear; `genuine`/`human-only` escalate.
 
 ### System invariants
 

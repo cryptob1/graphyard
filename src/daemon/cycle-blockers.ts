@@ -67,7 +67,7 @@ export async function blockerStep(cycle: Cycle) {
     const workspace = item.workspaces.find(entry => entry.epoch === item.epoch && entry.host === config.hostId);
     const launch = `${item.lease?.owner ?? item.lastAssignment?.owner ?? ''}:${workspace?.path ?? `item:${item.id}`}`;
     const memo = classification.class === 'control-plane-error' || classification.class === 'outside-scope-test-failure' || classification.class === 'host-supervisor' ? classification.class
-      : classification.class === 'worktree-mismatch' ? `${classification.class}:${item.id}` : `${classification.class}:${launch}:${classification.path ?? ''}`;
+      : classification.class === 'worktree-mismatch' || classification.class === 'runtime-denial' ? `${classification.class}:${item.id}` : `${classification.class}:${launch}:${classification.path ?? ''}`;
     if (!probes.has(memo)) {
       const running = effects.probeBlocker ? slots(() => effects.probeBlocker!(item, classification)) : Promise.resolve(null);
       // Started ahead of the item's turn: a failure is met when the item awaits it, inside its isolation.
@@ -83,7 +83,7 @@ export async function blockerStep(cycle: Cycle) {
   // independent probes in distinct worktrees run side by side rather than one after another.
   for (const item of open) {
     const classification = itemBlockerClass(item);
-    if (!classification || !item.blocker || !environmentalBlockerClasses.includes(classification.class) || classification.class === 'dispatch-failure') continue;
+    if (!classification || !item.blocker || !environmentalBlockerClasses.includes(classification.class) || launchableClass(classification)) continue;
     if ((item.blockerProbe?.clears ?? 0) >= maxAutomaticClears || item.blocker.startsWith(scopeRefusalBlocker)) continue;
     if (classification.class === 'control-plane-error' && itemSpecificPlaneError(item.blocker)) continue;
     void probe(item, classification);
@@ -123,7 +123,7 @@ export async function blockerStep(cycle: Cycle) {
 
     let result: BlockerProbeResult | null = null;
     if (environmentalBlockerClasses.includes(classification.class)) {
-      result = classification.class === 'dispatch-failure' ? launchableProbe(cycle) : await probe(item, classification);
+      result = launchableClass(classification) ? launchableProbe(cycle) : await probe(item, classification);
       if (!result) return;
       // A cause that keeps failing its probe is reported to the master once it has failed for
       // `blockerEscalateMs`; the loop keeps probing it, and clears it if the cause goes.
@@ -229,6 +229,9 @@ async function endCredentialBlockedSession(cycle: Cycle, item: Work) {
   performed.push(await record(state, key, { kind: 'session', work: item.key, principal: owner, epoch, state: 'done', attempts: 1, cycle: state.cycle,
     detail: boundDetail(`${profile.agentName} on ${item.key} recorded a GitHub credential failure, which ended epoch ${epoch} with its work kept; ${closed}, and ${item.key} is launched again with a freshly minted push credential once its blocker clears`) }, now(), effects.persist));
 }
+
+/** The classes cleared once a worker profile can take a launch: a fleet-idle dispatch failure (GY-1322), and a runtime account at its usage limit (GY-1567). */
+const launchableClass = (classification: BlockerClassification) => classification.class === 'dispatch-failure' || classification.class === 'runtime-exhaustion';
 
 /**
  * GY-1322: a dispatch-failure blocker clears once a worker profile can take a launch again, read

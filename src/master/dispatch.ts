@@ -543,6 +543,11 @@ export function autonomousSession(outcome: string, blocker: string) {
  * on one waits for a person (GY-197). Worker and producer requests say how to never trigger it.
  */
 export const destructivePromptGuidance = 'Avoid any command that triggers your runtime\'s destructive-operation prompt, which waits for a person and no person will answer it: never give rm or mv a glob or a variable as its target (such as DIR/* or "$DIR") outside a directory you created yourself with mktemp -d. Name explicit paths inside your worktree instead, and for scratch files create a directory with mktemp -d and remove only that directory by its exact path. ';
+/**
+ * A worker that asked for a force-push once it had pushed a wrong commit waited on the master to say
+ * "fix forward" (GY-1477, GY-1567): rewriting a pushed branch is never granted, so the request says so.
+ */
+export const branchRewriteGuidance = 'Never force-push or rewrite a branch you have pushed: your runtime refuses it, so fix a pushed commit forward with a new commit and push normally. ';
 export function workerPrompt(
   config: Pick<MasterConfig, 'cliPath'> & Partial<Pick<MasterConfig, 'repository'>>,
   work: Pick<Work, 'key' | 'title'> & Partial<Pick<Work, 'capacity' | 'humanRequests' | 'documentation' | 'description' | 'criteria' | 'researchBrief' | 'candidate' | 'plannedFiles'>>,
@@ -587,6 +592,7 @@ export function workerPrompt(
     + (work.documentation ? documentationWorkerSection(work.documentation, work.key, epoch, config.cliPath) : '')
     + submissionPolicyRule
     + destructivePromptGuidance
+    + branchRewriteGuidance
     + (config.repository && mechanical ? mechanicalWorkerSection(config.repository, config.cliPath, { key: work.key, candidate: work.candidate ?? null }, epoch, mechanical.requests, mechanical.reviewId) : '')
     + resumedAttempt(work)
     + `If the item cannot continue without a decision only a human may make — ${humanOnlyDecisions.join('; ')} — do not wait and do not write it as a blocker: record it with node ${config.cliPath} park ${work.key} ${epoch} KIND NEEDED --ask ASK --recommend TEXT --why SENTENCE -- REASON (KIND is goals-and-priorities, money-or-accounts or credentials-for-people; NEEDED is the exact thing the human must provide: every human step the item still needs, in this one request; ASK is one plain sentence naming the human's action; TEXT is the choice you recommend, or the safest way to obtain a value, such as a fine-grained token scoped to one repository with a short expiry and only the permissions needed, and SENTENCE is one plain sentence of why; a scope widening is never a park, ask for it with scope-request), which ends your lease and parks the item for the human, then stop. `

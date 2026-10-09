@@ -128,6 +128,9 @@ const incidents: [string, BlockerClass][] = [
   ['The two criteria contradict each other about the retry order', 'genuine'],
   ['Dispatch failed 3 consecutive times with the same cause since 2026-10-05T18:28:08.000Z, so the master loop stopped redispatching GY-1310: no worker profile can take GY-1310 [attempts 1, 2, 3 each ended without a submission]', 'dispatch-failure'],
   ["Blocked command: systemctl --user show-environment -> 'Failed to connect to user scope bus via local transport: Connection refused'", 'host-supervisor'],
+  ["Cannot push: 'git push -u origin HEAD' was denied by the runtime permission prompt", 'runtime-denial'],
+  ["Worker session's usage limit was reached before the rework could be verified", 'runtime-exhaustion'],
+  ["git push failed: ! [remote rejected] HEAD -> graphyard/gy-1461-1 (Internal Server Error)", 'github-outage'],
 ];
 
 test('unit:blocker-classified — the 2026-09-30 blocker texts fall into their named classes, unrecognised text is genuine, and only genuine and human-only need someone', () => {
@@ -156,7 +159,7 @@ test('unit:blocker-classified — the 2026-09-30 blocker texts fall into their n
   assert.equal(classifyBlocker('').class, 'genuine');
   assert.equal(classifyBlocker('Environment, not the item: the codex sandbox cannot write /srv/wt/.git/FETCH_HEAD, so required command \'sync GY-1\' failed: EROFS').path, '/srv/wt/.git/FETCH_HEAD');
   for (const name of blockerClasses) assert.equal(needsSomeone(name), name === 'genuine' || name === 'human-only', name);
-  assert.deepEqual([...environmentalBlockerClasses].sort(), ['control-plane-error', 'dispatch-failure', 'github-credential', 'host-supervisor', 'outside-scope-test-failure', 'sandbox-path', 'worktree-mismatch']);
+  assert.deepEqual([...environmentalBlockerClasses].sort(), ['control-plane-error', 'dispatch-failure', 'github-credential', 'github-outage', 'host-supervisor', 'outside-scope-test-failure', 'runtime-denial', 'runtime-exhaustion', 'sandbox-path', 'worktree-mismatch']);
 });
 
 test('unit:blocked-attempt-frees-slot — recording a blocker ends the attempt in the same transaction, keeps its partial work and releases the lease, so the slot is free on the next dispatch', async () => {

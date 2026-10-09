@@ -13,6 +13,7 @@ import { readFleet, type FleetLaunchAccount, type FleetProbe } from '../fleet.js
 import { rolePolicy } from '../model/registry.js';
 import { sessionConfinement } from '../master/launch.js';
 import { loopUnitName, loopUnitOf } from '../supervisor.js';
+import { deliveryComponents } from '../model/runtime-blockers.js';
 
 /** What the loop writes on the item for one probe (POST work/ID/blocker-probe). */
 export interface BlockerProbeRecord { blocker: string; class: BlockerClass; probe: string; result: 'pass' | 'fail'; detail: string; nextAt: string | null }
@@ -65,6 +66,8 @@ export interface BlockerProbeDeps {
   /** Where the next attempt runs: the blocked attempt's worktree on this host, else this checkout. */
   cwd: string;
   clock: number;
+  /** GitHub's status components that are not operational, by name; null when the status page could not be read (GY-1567). */
+  githubStatus?: () => Promise<string[] | null>;
   /** The loop unit this install recorded (GY-1441); the legacy name when omitted. */
   loopUnit?: string;
 }
@@ -106,9 +109,17 @@ export async function probeBlocker(item: Work, classification: BlockerClassifica
         return { probe, passed: true, detail: `the user manager answers and ${loopUnit} is active; the worker sandbox masks the user bus, not the host` };
       } catch (error) { return { probe, passed: false, detail: bound(firstLine(error)) }; }
     }
+    case 'github-outage': {
+      // GY-1567: GitHub's own incident first, read where the master read it; an unreadable status page
+      // leaves the verdict to the operations the next attempt runs, inside its confinement.
+      const degraded = await deps.githubStatus?.().catch(() => null) ?? null;
+      if (degraded?.length) return { probe: 'githubstatus.com reports the delivery components operational', passed: false, detail: `not operational: ${degraded.join(', ')}` };
+      return confined('gh auth status, git ls-remote origin and a dry-run push', credentialScript);
+    }
+    case 'runtime-denial':
     case 'worktree-mismatch': {
       const live = !!item.lease && Date.parse(item.lease.expiresAt) > deps.clock;
-      return { probe: 'the blocked attempt has ended', passed: !live, detail: live ? `attempt ${item.lease!.epoch} still holds the lease` : `no attempt holds ${item.key}; the next one is given its own worktree` };
+      return { probe: 'the blocked attempt has ended', passed: !live, detail: live ? `attempt ${item.lease!.epoch} still holds the lease` : `no attempt holds ${item.key}; the next one is given ${classification.class === 'runtime-denial' ? 'a fresh session' : 'its own worktree'}` };
     }
     case 'outside-scope-test-failure': {
       if (!deps.baseTip) return null;
@@ -223,7 +234,7 @@ export async function blockedAttemptLaunch(config: MasterConfig, root: string, w
 }
 
 /** The classes whose probe runs inside the worker's confinement, and so needs its launch. */
-const confinedClasses: readonly BlockerClass[] = ['github-credential', 'sandbox-path'];
+const confinedClasses: readonly BlockerClass[] = ['github-credential', 'sandbox-path', 'github-outage'];
 
 /**
  * The probe as the loop wires it: the worker profile the next attempt would get (the blocked
@@ -245,6 +256,24 @@ export function loopBlockerProbe(config: MasterConfig, root: string, run: ChildR
     return probeBlocker(work, classification, { run: (command, args, options) => run(command, args, { ...options, timeoutMs: 30_000 }), planeHealth,
       baseTip: async () => String(await run('git', ['-C', root, 'ls-remote', 'origin', `refs/heads/${config.baseBranch}`])).split(/\s/)[0] ?? '',
       failedBase: async () => cwd === root ? null : String(await run('git', ['-C', cwd, 'merge-base', 'HEAD', `refs/remotes/origin/${config.baseBranch}`])).trim() || null,
-      launch, cwd, clock: Date.now(), loopUnit: loopUnitOf(root) });
+      githubStatus: () => githubDegraded(), launch, cwd, clock: Date.now(), loopUnit: loopUnitOf(root) });
   };
+}
+
+/**
+ * The delivery components githubstatus.com reports as anything but operational (GY-1567), or null when
+ * the page cannot be read within 10 s: GitHub's incident is GitHub's to report, and its git
+ * endpoints can answer reads while they reject pushes.
+ */
+export async function githubDegraded(read: typeof fetch = fetch): Promise<string[] | null> {
+  try {
+    const response = await read('https://www.githubstatus.com/api/v2/components.json', { signal: AbortSignal.timeout(10_000) });
+    if (!response.ok) return null;
+    const { components } = await response.json() as { components?: { name?: string; status?: string }[] };
+    if (!Array.isArray(components)) return null;
+    return deliveryComponents.flatMap(name => {
+      const status = components.find(entry => entry.name === name)?.status;
+      return status && status !== 'operational' ? [`${name} (${status})`] : [];
+    });
+  } catch { return null; }
 }
