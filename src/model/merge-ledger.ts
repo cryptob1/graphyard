@@ -14,6 +14,12 @@ export const mergeLedgerKinds = {
   refused: 'merge.refused',
 } as const;
 export type MergeLedgerKind = typeof mergeLedgerKinds[keyof typeof mergeLedgerKinds];
+/**
+ * GY-1528: the executor's `merge.trial` record beside the ledger. It moves no state; the fold keeps
+ * the newest trial's head and per-proof counts on the state, which the control-plane acceptance
+ * family reads (model/landability.ts) in place of producer evidence.
+ */
+export const mergeTrialKind = 'merge.trial';
 
 const sha = z.string().trim().regex(/^[0-9a-f]{40}$/i).transform(value => value.toLowerCase());
 const instant = z.string().refine(value => Number.isFinite(Date.parse(value)), 'an ISO 8601 instant');
@@ -31,6 +37,11 @@ export type MergeIntent = z.infer<typeof mergeIntentSchema>;
 export type MergePushed = z.infer<typeof mergePushedSchema>;
 export type MergeReconciled = z.infer<typeof mergeReconciledSchema>;
 export type MergeRefused = z.infer<typeof mergeRefusedSchema>;
+const proofCounts = z.record(z.string().max(200), z.object({ executed: z.number().int().min(0), failed: z.number().int().min(0) }).passthrough());
+/** `merge.trial`: the trial of `head` on `mergeSha`, with each `unit:`/`integration:` proof's executed and failed cases. */
+export const mergeTrialSchema = z.object({ head: sha, mergeSha: sha, proofs: proofCounts }).passthrough();
+/** The newest trial the fold kept: the head it tried, the merge commit and each proof's counts. */
+export interface MergeLedgerTrial { head: string; mergeSha: string; proofs: Record<string, { executed: number; failed: number }> }
 
 /** One ledger row as the fold reads it: its kind and payload, and the item key it was written under when it was. */
 export interface MergeLedgerEvent { kind: string; payload: unknown; work?: string | null; at?: string | null; seq?: string | number | null }
@@ -47,6 +58,8 @@ export interface MergeLedgerState {
   pushedAt: string | null;
   observedTip: string | null;
   refusal: { kind: 'merge' | 'revert'; reason: string } | null;
+  /** The newest `merge.trial` of this state's intent (GY-1528); absent when none was folded. */
+  trial?: MergeLedgerTrial | null;
   /** How many ledger rows folded into this state. */
   events: number;
 }
@@ -99,6 +112,12 @@ export function foldMergeLedger(events: readonly MergeLedgerEvent[]): Record<str
       const state = refused && find(event, byHead, refused.head);
       if (!refused || !state) continue;
       Object.assign(state, { state: 'refused', head: refused.head, refusal: { kind: refused.kind, reason: refused.reason }, events: state.events + 1 });
+    } else if (event.kind === mergeTrialKind) {
+      // A trial moves no state and counts no event: it is kept beside the state it tried.
+      const trial = parsed(mergeTrialSchema, event.payload);
+      const state = trial && find(event, byHead, trial.head);
+      if (!trial || !state) continue;
+      state.trial = { head: trial.head, mergeSha: trial.mergeSha, proofs: Object.fromEntries(Object.entries(trial.proofs).map(([proof, counts]) => [proof, { executed: counts.executed, failed: counts.failed }])) };
     }
   }
   return states;

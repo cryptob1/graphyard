@@ -1690,7 +1690,8 @@ export class Engine {
         if (observed) {
           demand(observed.candidate.pr === number, 'Observed pull request does not match the submission');
           demand(work.workspaces.some(w => w.epoch === data.epoch && w.branch === observed!.candidate.branch), 'PR branch does not match the assigned workspace');
-          const regressions = regressionRefusals(work, observed, all);
+          // GY-1528: under the control-plane merger the submit refuses nothing on plannedFiles.
+          const regressions = merger === 'control-plane' ? [] : regressionRefusals(work, observed, all);
           demand(!regressions.length, `Submission refused for ${work.key}: ${regressions.join('; ')}`);
           // Checks registered by approved retro artefacts (GY-970) run against the observed candidate.
           const retroChecks = retroCheckRefusals(work, observed, await readAppliedRetroChecks(db));
