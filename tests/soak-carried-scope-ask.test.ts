@@ -19,7 +19,7 @@ import { scopeRefusalBlocker, type ScopeRequestState } from '../src/model/scope.
  * a fresh attempt before the approver answers (review on 4eceac56): the claim inherits the ask under
  * its own epoch, and the routed decision must still be the one standing. After every cycle every
  * system invariant holds. At the end: exactly one decision and one approver launch per ask, never a
- * withdrawal and never a re-request; every approved ask widened by its decision and the refused one
+ * withdrawal and never a re-request; every approved ask widened by its decision and the refused ones
  * left unplanned; the loop never widened on its own; and nothing asked once every ask was answered.
  */
 const minute = 60_000, hour = 60 * minute, day = 24 * hour, start = Date.parse('2026-10-08T00:00:00.000Z');
