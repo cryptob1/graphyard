@@ -74,6 +74,8 @@ export interface ActionExecution {
   supersededUnexecuted: boolean;
   /** The longest this row was actionable with nobody running it, and when that wait started. */
   idleMs: number; idleSince: string | null;
+  /** Every span of this row that went idle before the measurement window opened, clipped to it (GY-1595). */
+  clippedIdle?: ClippedIdleSpan[];
   resolution: string | null;
   /**
    * Set when no executor could have run this row, for a cause the row itself records
@@ -82,6 +84,13 @@ export interface ActionExecution {
    */
   unrunnable?: string | null;
 }
+
+/**
+ * An idle span that opened before the measurement window (GY-1595): `since` is when it went idle,
+ * `chargedFrom` the window start it is charged from, `ms` what it is charged — nothing when it
+ * ended before the window opened — and `unclippedMs` the whole span as the row recorded it.
+ */
+export interface ClippedIdleSpan { since: string; chargedFrom: string; ms: number; unclippedMs: number }
 
 /** One delivery as the report names it: its figures, its action rows, and why it is in or out. */
 export interface DeliveryRecord {
@@ -93,6 +102,8 @@ export interface DeliveryRecord {
   idle: { ms: number; action: string; kind: string; since: string | null } | null;
   /** Idle spans left out of `idle` because no executor could have run the row (`unrunnableCause`), each with the cause its row records. */
   unrunnableIdle?: { ms: number; action: string; kind: string; since: string | null; cause: string }[];
+  /** Idle spans that opened before the window start, each charged only from it, with its original idleSince (GY-1595). */
+  clippedIdle?: (ClippedIdleSpan & { action: string; kind: string })[];
   admitted: boolean;
   /** Empty when admitted; otherwise every reason this delivery is not in the population. */
   exclusions: string[];
@@ -180,9 +191,16 @@ export function claimWindow(claim: Work | undefined, given?: string | null): { s
  * Records are bounded (`actionRecordLimit`), so a long-lived row may have lost its `requested`
  * entry. The row's own `requestedAt` opens the walk for that case and is overwritten by the first
  * open marker in the records, which makes an untrimmed row read identically.
+ *
+ * A measurement judges the release serving from `windowStart` (GY-1595), so a span that went idle
+ * before it is charged only from the window start to its claim (or its settlement when it was never
+ * claimed), and one that ended before the window opened charges nothing; such a span keeps its
+ * original `from` and records `clippedFrom` and `unclippedMs`. A span that went idle inside the
+ * window is charged whole.
  */
-export function actionIdleSpans(row: Pick<ActionRow, 'requestedAt' | 'history' | 'state'> & Partial<Pick<ActionRow, 'attempts'>>, now: number): { from: string; ms: number }[] {
-  const spans: { from: string; ms: number }[] = [];
+export function actionIdleSpans(row: Pick<ActionRow, 'requestedAt' | 'history' | 'state'> & Partial<Pick<ActionRow, 'attempts'>>, now: number, windowStart?: string | null): { from: string; ms: number; clippedFrom?: string; unclippedMs?: number }[] {
+  const spans: { from: string; ms: number; clippedFrom?: string; unclippedMs?: number }[] = [];
+  const windowAt = time(windowStart);
   const recordedClaims = (row.history ?? []).filter(record => record.event === 'claimed').length;
   // History is bounded, while attempts is not. Start before the retained claims so a failed span
   // still gets the same delay the engine assigned when older claim records have been trimmed.
@@ -193,9 +211,11 @@ export function actionIdleSpans(row: Pick<ActionRow, 'requestedAt' | 'history' |
     const from = openSince, start = time(from);
     openSince = null;
     if (from === null || start === null) return;
-    const ms = Math.max(0, (time(at) ?? start) - start - deliberateMs);
+    const end = time(at) ?? start, idleFrom = start + deliberateMs;
+    const ms = Math.max(0, end - idleFrom);
     deliberateMs = 0;
-    spans.push({ from, ms });
+    if (windowAt !== null && idleFrom < windowAt) spans.push({ from, ms: Math.max(0, end - windowAt), clippedFrom: windowStart!, unclippedMs: ms });
+    else spans.push({ from, ms });
   };
   for (const record of row.history ?? ([] as ActionRecord[])) {
     if (record.event === 'requested' || record.event === 'reopened' || record.event === 'reclaimed') open(record.at);
@@ -246,12 +266,14 @@ export function unrunnableCause(row: Pick<ActionRow, 'refusal' | 'inputs' | 'his
 }
 
 /** One row as the report names it: the executor that claimed it, what it did, and its longest idle span. */
-export function actionExecution(row: ActionRow, now: number): ActionExecution {
+export function actionExecution(row: ActionRow, now: number, windowStart?: string | null): ActionExecution {
   const records = row.history ?? [];
   const claimed = records.find(record => record.event === 'claimed') ?? null;
   const settled = [...records].reverse().find(record => record.event === 'completed' || record.event === 'failed') ?? null;
-  const spans = actionIdleSpans(row, now);
+  const spans = actionIdleSpans(row, now, windowStart);
   const longest = spans.reduce((worst, span) => !worst || span.ms > worst.ms ? span : worst, null as { from: string; ms: number } | null);
+  const clippedIdle = spans.filter(span => span.clippedFrom !== undefined)
+    .map(span => ({ since: span.from, chargedFrom: span.clippedFrom!, ms: span.ms, unclippedMs: span.unclippedMs! }));
   return {
     id: row.id, kind: row.kind, key: row.key,
     // Settling a row clears its claim, so a finished action's host is read from the words the
@@ -263,15 +285,16 @@ export function actionExecution(row: ActionRow, now: number): ActionExecution {
     result: settled?.event === 'completed' ? 'done' : settled?.event === 'failed' ? 'failed' : null,
     supersededUnexecuted: records.some(record => record.event === 'cancelled') && claimed === null,
     idleMs: longest?.ms ?? 0, idleSince: longest?.from ?? null,
+    ...(clippedIdle.length ? { clippedIdle } : {}),
     resolution: row.resolution ?? null,
     unrunnable: unrunnableCause(row),
   };
 }
 
 /** Every action row this item recorded, retired and open alike, oldest request first. */
-export function deliveryActions(work: Work, now: number): ActionExecution[] {
+export function deliveryActions(work: Work, now: number, windowStart?: string | null): ActionExecution[] {
   const rows = [...(work.actionQueue?.history ?? []), ...(work.actionQueue?.actions ?? [])];
-  return rows.map(row => actionExecution(row, now)).sort((a, b) => Date.parse(a.requestedAt) - Date.parse(b.requestedAt) || a.id.localeCompare(b.id));
+  return rows.map(row => actionExecution(row, now, windowStart)).sort((a, b) => Date.parse(a.requestedAt) - Date.parse(b.requestedAt) || a.id.localeCompare(b.id));
 }
 
 /**
@@ -325,10 +348,13 @@ export function exclusionClass(exclusion: string): { reason: string; coordinator
   return { reason: exclusion.split(' (')[0]!.replace(/\d+/g, 'N').trim(), coordinator: false };
 }
 
-/** One delivery, measured and judged, whether or not it is admitted. */
-export function deliveryRecord(work: Work, now: number): DeliveryRecord {
+/**
+ * One delivery, measured and judged, whether or not it is admitted. `windowStart` is the start of
+ * the measurement window: idle time accrued before it is not charged (GY-1595, `actionIdleSpans`).
+ */
+export function deliveryRecord(work: Work, now: number, windowStart?: string | null): DeliveryRecord {
   const speed = pipelineSpeed(work, now);
-  const actions = deliveryActions(work, now);
+  const actions = deliveryActions(work, now, windowStart);
   const executed = actions.filter(action => action.executor && action.result === 'done');
   // GY-1587: a row no executor could have run (`unrunnableCause`) is no executor's idleness; its
   // span is listed beside the budget's figure, never inside it. Every other row counts in full.
@@ -336,6 +362,7 @@ export function deliveryRecord(work: Work, now: number): DeliveryRecord {
   const idle = runnable.reduce((worst, action) => !worst || action.idleMs > worst.idleMs ? action : worst, null as ActionExecution | null);
   const unrunnableIdle = actions.filter(action => action.unrunnable && action.idleMs > 0)
     .map(action => ({ ms: action.idleMs, action: action.id, kind: action.kind, since: action.idleSince, cause: action.unrunnable! }));
+  const clippedIdle = actions.flatMap(action => (action.clippedIdle ?? []).map(span => ({ action: action.id, kind: action.kind, ...span })));
   const exclusions = [...unrealReasons(work), ...coordinatorFingerprints(work)];
   if (speed.submitToMergeMs === null) exclusions.push(`its timeline records no submission (${speed.coverage}), so submit→merge cannot be measured for it`);
   // The claim is stated over routine deliveries, in the same words the speed target uses: at most
@@ -350,6 +377,7 @@ export function deliveryRecord(work: Work, now: number): DeliveryRecord {
     actions, executors: [...new Set(actions.map(action => action.executor).filter((name): name is string => !!name))].sort(),
     idle: idle && idle.idleMs > 0 ? { ms: idle.idleMs, action: idle.id, kind: idle.kind, since: idle.idleSince } : null,
     ...(unrunnableIdle.length ? { unrunnableIdle } : {}),
+    ...(clippedIdle.length ? { clippedIdle } : {}),
     admitted: exclusions.length === 0, exclusions,
   };
 }
@@ -375,7 +403,7 @@ export function verifyThroughput(work: Work[], now: number, options: { deployed:
   const claimKey = options.claimKey ?? throughputClaim.item;
   const window = claimWindow(work.find(item => item.key === claimKey), options.since);
   const inWindow = windowDeliveries(work, window.since, options.until);
-  const records = inWindow.map(item => deliveryRecord(item, now)).sort((a, b) => Date.parse(a.mergedAt) - Date.parse(b.mergedAt));
+  const records = inWindow.map(item => deliveryRecord(item, now, window.since)).sort((a, b) => Date.parse(a.mergedAt) - Date.parse(b.mergedAt));
   // "Real" is judged before the coordinator rule, so the population line separates a fixture from
   // a delivery a master drove; both are excluded, and they are not the same fact.
   const real = records.filter(record => !unrealReasons(inWindow.find(item => item.id === record.work)!).length);
@@ -457,7 +485,8 @@ export function renderDelivery(record: DeliveryRecord): string {
   const actions = record.actions.map(action => `${action.kind}→${action.executor ?? 'unclaimed'}${action.result ? `(${action.result})` : ''}`).join(', ');
   const speed = record.submitToMergeMs === null ? 'submit→merge unmeasured' : `submit→merge ${minutes(record.submitToMergeMs)}`;
   const unrunnable = (record.unrunnableIdle ?? []).map(span => `; not counted: ${minutes(span.ms)} on ${span.kind} no executor could run (${span.cause.slice(0, 160)})`).join('');
-  const idle = `${record.idle ? `longest idle ${minutes(record.idle.ms)} on ${record.idle.kind}` : 'never idle past a claim'}${unrunnable}`;
+  const clipped = (record.clippedIdle ?? []).map(span => `; clipped to the window: ${span.kind} idle since ${span.since} charged ${minutes(span.ms)} from ${span.chargedFrom} of ${minutes(span.unclippedMs)}`).join('');
+  const idle = `${record.idle ? `longest idle ${minutes(record.idle.ms)} on ${record.idle.kind}` : 'never idle past a claim'}${unrunnable}${clipped}`;
   return `${record.key} (PR ${record.pr ?? '?'}, merged ${record.mergedAt}): ${speed}; ${idle}; actions ${actions || 'none recorded'}${record.admitted ? '' : `; EXCLUDED — ${record.exclusions.join('; ')}`}`;
 }
 

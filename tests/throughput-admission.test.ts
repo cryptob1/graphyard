@@ -283,8 +283,10 @@ function supersededAfter(kind: string, from: string, waited: number, refusal: st
 }
 const gy468Span = Date.parse('2026-10-02T03:17:10.987Z') - Date.parse('2026-09-28T06:11:33.492Z');
 const gy468Row = (refusal: string | null = appRefusal) => supersededAfter('request-rework', '2026-09-28T06:11:33.492Z', gy468Span, refusal);
-/** Ten plain admitted deliveries and GY-468 carrying `extra` beside its executed review. */
-const idleWindow = (extra: ActionRow) => [claim, ...Array.from({ length: throughputClaim.minimumDeliveries - 1 }, (_, index) => delivery(`GY-${600 + index}`)),
+/** A release that began serving before GY-468's row went idle, so its whole span lies inside the window (GY-1595 clips the rest). */
+const servingSinceSeptember = { ...claim, delivery: { ...claim.delivery, deployment: { sha: revision, observedAt: '2026-09-28T00:00:00.000Z' } } } as unknown as Work;
+/** Ten plain admitted deliveries and GY-468 carrying `extra` beside its executed review, in the window `release` opens. */
+const idleWindow = (extra: ActionRow, release: Work = servingSinceSeptember) => [release, ...Array.from({ length: throughputClaim.minimumDeliveries - 1 }, (_, index) => delivery(`GY-${600 + index}`)),
   delivery('GY-468', { history: [executed('request-review', 11), extra] })];
 
 test('unit:throughput-superseded-row-span — GY-468\'s superseded request-rework, which no executor could run for the App permission its own refusal records, is reported and left out of the idle-actionable budget; a runnable superseded row idle past 5 min, or one an executor claimed, still fails the claim in full; the budgets are unchanged', async () => {
@@ -361,4 +363,55 @@ test('unit:throughput-superseded-row-span — GY-468\'s superseded request-rewor
     assert.equal(again.verdict, 'verified', again.detail);
     assert.equal((await readThroughputMeasurement(root))!.report.verdict, 'verified', 'the newest recorded verdict reflects the fixed rule');
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+// GY-1595: the window opens when the claim's release began serving, so a delivery merged inside it
+// is charged only the idle time it waited inside the window — never what accrued before it opened.
+test('unit:throughput-idle-window-clip — an action idle before the window start is charged only from the window start to its claim or settlement, one idle wholly before it charges nothing, one idle inside the window is charged whole, and the report names each clipped span with its original idleSince; the budgets are unchanged', async () => {
+  const { actionIdleSpans, renderThroughput } = await import('../src/throughput.js');
+  assert.deepEqual({ p50: throughputClaim.submitToMergeP50Ms, idle: throughputClaim.idleActionableMs, deliveries: throughputClaim.minimumDeliveries }, { p50: 30 * minute, idle: 5 * minute, deliveries: 10 }, 'the budgets are GY-87\'s own');
+  const windowStart = at(-60); // the claim's deployment observation opens the window
+
+  // GY-468's shape: a runnable request-rework idle from long before the window, superseded 3 min into it.
+  const straddling = supersededAfter('request-rework', at(-60 - 5000), 5003 * minute);
+  const clipped = verifyThroughput(idleWindow(straddling, claim), now, { deployed });
+  assert.equal(clipped.window.since, windowStart);
+  const gy468 = clipped.deliveries.find(record => record.key === 'GY-468')!;
+  assert.equal(gy468.idle?.ms, 3 * minute, 'charged only from the window start to its settlement');
+  assert.equal(gy468.idle?.since, at(-60 - 5000), 'the idle figure keeps its original idleSince');
+  assert.deepEqual(gy468.clippedIdle, [{ action: straddling.id, kind: 'request-rework', since: at(-60 - 5000), chargedFrom: windowStart, ms: 3 * minute, unclippedMs: 5003 * minute }]);
+  assert.equal(clipped.verdict, 'verified', clipped.reason);
+  assert.match(renderThroughput(clipped), new RegExp(`clipped to the window: request-rework idle since ${at(-60 - 5000).replace(/\./g, '\\.')} charged 3 min from ${windowStart.replace(/\./g, '\\.')} of 5003 min`));
+
+  // A claimed row idle before the window is charged from the window start to its claim.
+  const claimedRow = row('request-review', [
+    { at: at(-80), event: 'requested', requester: 'graphyard', executor: null, result: null, reason: '' },
+    { at: at(-58), event: 'claimed', requester: 'graphyard', executor: 'executor-a', result: null, reason: 'attempt 1 claimed by executor-a on host-a' },
+    { at: at(-57), event: 'completed', requester: 'graphyard', executor: 'executor-a', result: 'done', reason: '' },
+  ]);
+  assert.deepEqual(actionIdleSpans(claimedRow, now, windowStart), [{ from: at(-80), ms: 2 * minute, clippedFrom: windowStart, unclippedMs: 22 * minute }]);
+  assert.deepEqual(actionIdleSpans(claimedRow, now), [{ from: at(-80), ms: 22 * minute }], 'with no window the whole span is charged, unchanged');
+
+  // An action idle wholly before the window start charges nothing, and is still named.
+  const before = supersededAfter('request-rework', at(-60 - 5000), 4000 * minute);
+  const none = verifyThroughput(idleWindow(before, claim), now, { deployed });
+  const gy468Before = none.deliveries.find(record => record.key === 'GY-468')!;
+  assert.notEqual(gy468Before.idle?.action, before.id, 'the pre-window row is not the delivery\'s idle figure');
+  assert.ok((gy468Before.idle?.ms ?? 0) <= minute, 'only the executed review\'s 1 min wait is charged');
+  assert.deepEqual(gy468Before.clippedIdle?.map(span => [span.since, span.ms, span.unclippedMs]), [[at(-60 - 5000), 0, 4000 * minute]]);
+  assert.equal(none.verdict, 'verified', none.reason);
+
+  // An action that went idle inside the window is charged its whole span, and past 5 min still fails the claim.
+  const inside = supersededAfter('request-rework', at(-50), 6 * minute);
+  const whole = verifyThroughput(idleWindow(inside, claim), now, { deployed });
+  const gy468Inside = whole.excluded.concat(whole.deliveries).find(record => record.key === 'GY-468')!;
+  assert.equal(gy468Inside.idle?.ms, 6 * minute);
+  assert.equal(gy468Inside.clippedIdle, undefined, 'nothing clipped inside the window');
+  assert.equal(whole.verdict, 'unverified');
+  assert.deepEqual(whole.shortfall!.missed.map(entry => entry.metric), ['idle-actionable']);
+  // A straddling span whose in-window part exceeds 5 min still fails the claim.
+  const longInside = verifyThroughput(idleWindow(supersededAfter('request-rework', at(-70), 16 * minute), claim), now, { deployed });
+  assert.equal(longInside.idle.maxMs, 6 * minute);
+  assert.equal(longInside.verdict, 'unverified');
+  assert.deepEqual(longInside.shortfall!.missed.map(entry => entry.metric), ['idle-actionable']);
 });
