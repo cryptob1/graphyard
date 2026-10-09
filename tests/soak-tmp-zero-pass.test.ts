@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { loadMasterConfig, setupMaster } from '../src/master.js';
-import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
+import { emptyDaemonState, pruneDaemonState, retainedActions, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { standingTmpKey } from '../src/daemon/cycle-reclaim.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -77,4 +77,45 @@ test('unit:tmp-reclaim-zero-escalates — over three days of standing zero-remov
   // The erring pass failed the run's row while it was the latest, and its fault is the resources row's alone.
   assert.deepEqual(erred, ['failed', 'no fault'], 'the erring pass failed the /tmp row without a fault of its own');
   assert.equal(Object.values(state.actions).filter(action => action.kind === 'reclaim' && action.state === 'failed').length, 1, 'only the resources row still records the failure');
+});
+
+/**
+ * GY-1600 (review of e4ab44256e3a). On a busy fleet a cycle records more resolved actions after its
+ * reclaim than the ledger keeps, and pruning retires the oldest first. The standing /tmp pass row is
+ * its run's only count, so it must survive that pruning while the bound stands: over a day of such
+ * cycles the run's count keeps rising by one per pass instead of restarting at one.
+ */
+test('unit:tmp-reclaim-zero-escalates — a busy cycle that records more newer actions than the ledger keeps does not retire the standing /tmp pass row, so its run count never restarts', { timeout: 300_000 }, async () => {
+  const root = await temporaryDirectory('soak-tmp-zero-busy');
+  const credentials = await temporaryDirectory('soak-tmp-zero-busy-credentials');
+  execFileSync('git', ['init', '-q', root]);
+  execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
+  await setupMaster(root, { url: 'https://graphyard.example', token: 'coordinator-token-'.padEnd(40, 'x'), cliPath: fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url)), credentialDirectory: credentials },
+    (async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }))) as typeof fetch);
+  const config = await loadMasterConfig(root);
+  const start = Date.now();
+  let now = start;
+  const effects = {
+    agents: () => [], credentials: async () => ({}), snapshot: async () => ({ work: [], now: new Date(now).toISOString() }), closeSession: () => {},
+    dispatch: async () => {}, requestProof: () => {}, recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date(now).toISOString(), reason: 'not configured', deployed: [], pending: [] }),
+    reclaimResources: async () => ({ at: new Date(now).toISOString(), reaped: { review: 0, producer: 0 }, closed: [], released: [], tmp: { removed: 0, bytes: 0 }, errors: [],
+      tmpPass: { roots: ['/tmp'], scanned: 3, kept: 3, boundStands: true, consumers: [{ path: '/tmp/leaker', entries: 90_000, owner: 'someone' }] } }),
+  } as unknown as DaemonEffects;
+  const state = emptyDaemonState(config), counts: number[] = [], violations: string[] = [];
+  const busy = retainedActions + 100;
+  let cycles = 0;
+  for (; now < start + day; now += cycleMs) {
+    await runCycle(config, state, effects, () => now);
+    cycles++;
+    // The rest of this busy cycle: more resolved actions than the ledger keeps, each newer than the reclaim's row, then the cycle's prune.
+    for (let i = 0; i < busy; i++) state.actions[`busy:${cycles}:${i}`] = { kind: 'reclaim', work: null, principal: null, epoch: null, state: 'done', detail: 'A busy cycle\'s action', attempts: 1, cycle: state.cycle, at: new Date(now + 1 + i).toISOString() };
+    pruneDaemonState(state);
+    for (const check of state.invariants.report) if (!check.holds) violations.push(`cycle ${cycles}: ${check.invariant} — ${check.reading}`);
+    counts.push(state.actions[standingTmpKey]?.attempts ?? 0);
+  }
+  assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
+  assert.ok(Object.keys(state.actions).filter(key => key.startsWith('busy:')).length <= retainedActions, 'pruning did retire the busy rows past its bound');
+  assert.deepEqual(counts, counts.map((_, index) => index + 1), 'the standing row survived every busy prune and counts each pass of its run');
+  assert.match(state.actions[standingTmpKey].detail, new RegExp(`^Pass ${cycles} in a row: /tmp reclaim removed 0 entries while the inode bound stands`));
 });

@@ -567,6 +567,8 @@ export const daemonStateSchema = z.object({
 }).strict();
 export type DaemonState = z.infer<typeof daemonStateSchema>;
 
+/** The one row for the current run of /tmp passes that removed 0 under the standing inode bound (GY-1600). */
+export const standingTmpKey = 'reclaim:tmp:standing';
 export const retainedActions = 500, retainedMetrics = 100, profileCooldownMs = 600_000, maxProofAttempts = 3, retainedScopeDecisions = 200;
 export const retainedSamples = 200, retainedClocks = 500, retainedBaseFailures = 200;
 /** How many items' dispatch-failure runs (GY-1078) are kept; a run is retired when its item dispatches or is blocked, so this only catches items the loop stopped seeing. */
@@ -617,7 +619,10 @@ export function pruneDaemonState(state: DaemonState) {
   // once while it stands (upgrade:refused, a dirty checkout) went oldest, was retired by this bound
   // within the hour, and its next refusal opened a new instance — six in a day for one cause. It is
   // kept while its run stands; endFailingRuns ends a run the window no longer sees attempted.
-  const resolved = entries.filter(([key, action]) => (action.state === 'done' || action.state === 'failed') && !state.faults.failing[key]);
+  // The standing /tmp pass row (GY-1600) is likewise the only count of its run: it exists only while
+  // the inode bound stands (the cycle files it under its last pass once a pass ends the run), so it
+  // is kept while it stands, and a busy cycle's newer rows cannot restart that run at one.
+  const resolved = entries.filter(([key, action]) => (action.state === 'done' || action.state === 'failed') && !state.faults.failing[key] && key !== standingTmpKey);
   if (resolved.length > retainedActions) {
     for (const [key] of resolved.sort((a, b) => Date.parse(a[1].at) - Date.parse(b[1].at)).slice(0, resolved.length - retainedActions)) delete state.actions[key];
   }

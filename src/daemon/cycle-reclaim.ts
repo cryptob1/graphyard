@@ -2,7 +2,7 @@
 import { describeReclaim, describeStandingTmpPass, tmpPassErrors, graphyardWorktree, paneReclaimStatus, agentlessPaneAttentionBound, finishedSessionGraceMs } from '../master-resources.js';
 import { diskThresholdBytes, containmentPhase } from '../master.js';
 import { worktreeRootMinFreeBytes } from '../install/worktree-root.js';
-import { actionDetailMax, gigabytes, message, reclaimIntervalMs, reclaimSummarySchema } from './state.js';
+import { actionDetailMax, gigabytes, message, reclaimIntervalMs, reclaimSummarySchema, standingTmpKey } from './state.js';
 import { unboundedAttemptKey } from '../model/fault-classes.js';
 import { readyToRetry } from './sessions.js';
 import { boundDetail, detailChanged } from './decisions.js';
@@ -143,8 +143,7 @@ export async function settleQuarantine(cycle: Cycle, item: Work, assessment: Con
 
 /** How long the loop waits, across the actions of one cycle that ended attempts, for the supervisors it stopped to be verified gone (GY-1155). */
 export const endedFenceWaitMs = 10_000;
-/** The one row for the current run of /tmp passes that removed 0 under the standing inode bound (GY-1600). */
-export const standingTmpKey = 'reclaim:tmp:standing';
+export { standingTmpKey };
 /** The most attempts an action row holds (storeAction clamps to the schema's bound): past it a run's count reads as a floor. */
 const actionAttemptsMax = 1000;
 /** The deadline each cycle's ended-attempt waits share, so a cycle ending several fenced attempts stalls one bound, not one per attempt. */
