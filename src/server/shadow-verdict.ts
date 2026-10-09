@@ -3,7 +3,7 @@ import type pg from 'pg';
 import { z } from 'zod';
 import { demand, type Principal, type Work } from '../model.js';
 import {
-  compareVerdicts, githubOutcome, isPlaceholderVerdict, trialFailureCause, placeholderRunnerFailure, shadowDisagreement,
+  compareVerdicts, githubOutcome, isPlaceholderVerdict, recordedFailureCause, placeholderRunnerFailure, shadowDisagreement,
   shadowDisagreementPair, shadowExplanationPairsMax, trialLogTailLength, type ShadowExplanationRef, type ShadowVerdict,
 } from '../merge-writer/shadow.js';
 import { DELIVERY_EVENT_PREDICATE } from '../store/tables/production.js';
@@ -204,7 +204,7 @@ async function recoveredDeliveredMerges(db: Queryable, pairs: readonly { key: st
 export interface StandingShadowDisagreement {
   key: string; head: string; baseTip: string; outcome: 'shadow-only-fail' | 'shadow-missed';
   mergeSha: string | null; build: 'pass' | 'fail'; tests: ShadowVerdict['tests']; conflict: string[]; at: string; explained: boolean;
-  /** The failing cause the recorded log tail names, or null when the record names none (GY-1564); the log itself stays on the ledger. */
+  /** The failing cause the recorded log tail names, the shared-tmp contamination included (GY-1565), or null when the record names none (GY-1564); the log itself stays on the ledger. */
   cause: string | null;
 }
 
@@ -247,7 +247,7 @@ export async function standingShadowDisagreements(db: Queryable, work?: readonly
     standing.push({
       key: verdict.key, head: verdict.head, baseTip: verdict.baseTip, outcome,
       mergeSha: verdict.mergeSha, build: verdict.build, tests: verdict.tests, conflict: verdict.conflict, at: verdict.at,
-      cause: trialFailureCause(verdict.logTail),
+      cause: recordedFailureCause(verdict.logTail),
       explained: explained.has(shadowDisagreementPair(verdict)),
     });
   }

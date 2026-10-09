@@ -294,7 +294,9 @@ test('unit:test-isolation the managed worktree installs dependencies when packag
     assert.deepEqual(contained.args.slice(0, 11), ['--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', '--unshare-all', '--share-net', '--die-with-parent', '--new-session'],
       'the filesystem is read-only and every namespace but the network is the install\'s own: its /proc shows only its processes, all killed when it ends');
     assert.ok(!contained.args.includes('--dev-bind'), 'nothing of the host is mounted writable wholesale');
-    assert.deepEqual(pairs('--tmpfs'), ['/tmp', home, runtime], '/tmp (the token file\'s directory in it), the home and the runtime directories are emptied');
+    // The token file's directory is emptied inside /tmp when the fixture lies under it, as CI's does, and as its own
+    // tmpfs under any other TMPDIR (a shadow trial's, GY-1565).
+    assert.deepEqual(pairs('--tmpfs'), ['/tmp', home, runtime, ...(outside.startsWith('/tmp/') ? [] : [outside])], '/tmp, the home, the runtime directories and the token file\'s directory are emptied');
     assert.ok(contained.args.join(' ').includes('--setenv TMPDIR /tmp'));
     assert.deepEqual(pairs('--symlink'), ['26.10.0'], 'the version symlink on the way to npm is recreated');
     assert.ok(pairs('--ro-bind').includes(join(tool, '26.10.0', 'bin')) && pairs('--ro-bind').includes(join(home, '.npmrc')), 'npm and the registry config are put back, read-only');

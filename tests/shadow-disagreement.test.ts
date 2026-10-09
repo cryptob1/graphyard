@@ -5,10 +5,13 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import EmbeddedPostgres from 'embedded-postgres';
-import { keepVerdicts, shadowGateSummary, shadowKeptVerdicts, shadowVerdictSchema } from '../src/daemon/cycle-shadow.js';
+import { keepVerdicts, shadowGateSummary, shadowIdle, shadowKeptVerdicts, shadowReads, shadowStateSchema, shadowVerdictSchema } from '../src/daemon/cycle-shadow.js';
+import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
+import { masterConfigSchema } from '../src/master.js';
+import type { TrialRun } from '../src/merge-writer/trial.js';
 import {
-  cursorVerdict, isPlaceholderVerdict, placeholderRunnerFailure, shadowDisagreementDetail, shadowGateAttention,
-  shadowExplanationPairsMax, trialCauseLength, trialFailureCause, shadowReportWithExplanations, type ShadowVerdict,
+  cursorVerdict, isPlaceholderVerdict, placeholderRunnerFailure, recordedFailureCause, shadowDisagreementDetail, shadowGateAttention,
+  shadowExplanationPairsMax, sharedTmpDependencySource, trialCauseLength, trialFailureCause, shadowReportWithExplanations, type ShadowVerdict,
 } from '../src/merge-writer/shadow.js';
 import type { Work } from '../src/model.js';
 import { MergerSettings } from '../src/merger-mode.js';
@@ -139,6 +142,98 @@ test('unit:attention-omits-explained — master status shadowGate attention list
   assert.deepEqual(shadowGateAttention([a, later]).map(line => line.text.match(/GY-\d+/)?.[0]), ['GY-1']);
   assert.equal(shadowGateAttention([a, later], [{ key: 'GY-1', head: a.head, baseTip: tip }]).length, 0);
 });
+
+// GY-1565: the GY-1535 verdict's log tail (ledger seq 2439123), the dependency-share signature of a stray /tmp/node_modules.
+const contaminationTail = [
+  '✖ integration:worktree-dependency-reuse — a fresh attempt starts from a clean checkout of its exact head and shares one install instead of paying for a private copy (138.148351ms)',
+  '  AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal:',
+  '  + actual - expected', '', '  + []', '  - [', '  -   {', "  -     path: 'node_modules',",
+  "  -     source: '/tmp/graphyard-reclaim-OWwNuA/node_modules'", '  -   }', '  - ]', '',
+  '      at TestContext.<anonymous> (/home/vish/.local/share/graphyard/worktrees/graphyard-7dc8733c9f87/graphyard-trial-gy-1535-953e1ac-718e5425/checkout/tests/worktree-reclaim.test.ts:231:12)',
+  '[exit status 1]',
+].join('\n');
+const coreTests = { passed: 480, failed: ['tests/worktree-reclaim.test.ts', 'tests/graphyard-up.test.ts'], files: 490 };
+// The GY-1560 placeholder line, word for word: GY-1565 leaves it as it was.
+const placeholderLine = (key: string, head: string, mergeSha: string) => `Shadow merge gate: ${key} head ${head} is shadow-only-fail (trial merge ${mergeSha}); `
+  + 'the failure is the fabricated-runner-failure placeholder tests/helpers/run-tests.ts (pre-GY-1548: the runner died naming no test while every file passed). Report only: nothing is changed';
+
+test('unit:cycle-shadow-disagreement-explanation — a standing shadow-only-fail whose record shows the dependency-share signature (a deep-equal expecting a node_modules mirror sourced under the shared /tmp, actual []) gets an attention line naming the trial-environment contamination; the GY-1523/GY-1549 placeholder lines resolve unchanged; a failing record with no extractable cause states the missing evidence (GY-1565)', () => {
+  assert.equal(sharedTmpDependencySource(contaminationTail), '/tmp/graphyard-reclaim-OWwNuA/node_modules');
+  const named = recordedFailureCause(contaminationTail)!;
+  assert.match(named, /^trial-environment contamination of the host's shared tmp \(pre-GY-1565\): integration:worktree-dependency-reuse: AssertionError/);
+  assert.match(named, /sourced at \/tmp\/graphyard-reclaim-OWwNuA\/node_modules and got \[\], because a stray \/tmp\/node_modules shadowed it, a trial-environment-only false positive$/);
+  assert.ok(named.length <= trialCauseLength);
+  const head = '77da3de0b3866447cf5fac627474dfd5195ae531', mergeSha = '953e1ac6' + '0'.repeat(32);
+  const line = shadowDisagreementDetail(verdict('GY-1535', { head, mergeSha, tests: coreTests, logTail: contaminationTail }));
+  assert.match(line, /^Shadow merge gate: GY-1535 head 77da3de0b3866447cf5fac627474dfd5195ae531 is shadow-only-fail \(trial merge 953e1ac6/);
+  assert.match(line, /; the failure is trial-environment contamination of the host's shared tmp/);
+  assert.match(line, /a trial-environment-only false positive\. Report only: nothing is changed$/);
+  assert.doesNotMatch(line, /missing evidence/);
+  // The cause read from the record survives where the log does not: the cursor keeps `cause`, the ledger's standing list carries it.
+  const kept = cursorVerdict(verdict('GY-1535', { head, mergeSha, tests: coreTests, logTail: contaminationTail }));
+  assert.equal('logTail' in kept, false);
+  assert.equal(kept.cause, named);
+  assert.equal(shadowVerdictSchema.safeParse(kept).success, true);
+  const cursorRow = verdict('GY-1535', { head, mergeSha, tests: coreTests }), ledgerRow = { ...cursorRow, cause: named };
+  for (const rows of [[cursorRow, ledgerRow], [ledgerRow, cursorRow]]) {
+    const attention = shadowGateAttention(rows);
+    assert.equal(attention.length, 1, 'one line per pair');
+    assert.match(attention[0]!.text, /the failure is trial-environment contamination/, 'whichever copy of the pair is newest, the cause one of them read is named');
+  }
+  // A GY-1564 cursor row persisted before the upgrade carries the generic cause; the ledger's row, read afresh, names the
+  // contamination, and that wins whichever copy is newer.
+  const staleRow = { ...cursorRow, cause: trialFailureCause(contaminationTail)!, at: iso(start + 60_000) };
+  for (const rows of [[staleRow, ledgerRow], [ledgerRow, staleRow]]) assert.match(shadowGateAttention(rows)[0]!.text, /the failure is trial-environment contamination/, 'a stale generic cursor cause never hides the contamination');
+  assert.equal(cursorVerdict({ ...staleRow, logTail: contaminationTail }).cause, named, 'a cursor row written with its log reads the cause afresh');
+  // A colored log carries the same signature.
+  assert.equal(sharedTmpDependencySource(contaminationTail.split('\n').map(entry => entry && `\u001b[31m${entry}\u001b[39m`).join('\n')), '/tmp/graphyard-reclaim-OWwNuA/node_modules');
+  // Not the signature: a mirror sourced under the trial's own tmp, or a non-empty actual side, names the failing test as before.
+  // Nor fragments from separate assertions, nor a source under a trial's own tmpdir, which a trial since GY-1565 prints.
+  const split = [contaminationTail.split('\n').slice(0, 5).join('\n'), '      at TestContext.<anonymous> (tests/a.test.ts:1:1)',
+    '✖ another (1ms)', '  AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal:', '  + actual - expected', '', "  + [ 'x' ]", "  -     source: '/tmp/graphyard-reclaim-OWwNuA/node_modules'"].join('\n');
+  for (const other of [contaminationTail.replace("'/tmp/graphyard-reclaim", "'/home/u/trial/tmp/graphyard-reclaim"), contaminationTail.replace('  + []', "  + [ { path: 'x' } ]"),
+    contaminationTail.replace("'/tmp/graphyard-reclaim", "'/tmp/gy-tAbC123/graphyard-reclaim"), contaminationTail.replace('  + []', "  + []\n  + [ 'extra' ]"), split]) {
+    assert.equal(sharedTmpDependencySource(other), null);
+    assert.equal(recordedFailureCause(other), trialFailureCause(other));
+  }
+  // GY-1523 and GY-1549: the placeholder class keeps its line, with or without the log tail GY-1549 recorded.
+  const gy1523 = verdict('GY-1523', { head: '9b30324fc4f3b10d1b74c63efcb35df6d5f05071', tests: placeholderTests });
+  const gy1549 = verdict('GY-1549', { head: 'd205ce97ea6e' + '0'.repeat(28), tests: placeholderTests, logTail: 'ok 486 - tests/z.test.ts\n[exit status 1]' });
+  for (const entry of [gy1523, gy1549]) assert.equal(shadowDisagreementDetail(entry), placeholderLine(entry.key, entry.head, entry.mergeSha!));
+  // A failing record with no extractable cause says so.
+  assert.match(shadowDisagreementDetail(verdict('GY-1', {})), /the record names no failing cause .* missing evidence/);
+  assert.match(shadowDisagreementDetail(verdict('GY-2', { logTail: 'some output\n[exit status 1]' })), /the record names no failing cause .* missing evidence/);
+  // A shadow-missed passed the trial: there is no failure for a record to name.
+  assert.match(shadowDisagreementDetail(verdict('GY-3', { outcome: 'shadow-missed', tests: { passed: 3, failed: [], files: 3 } })), /the shadow trial passed it but the main guard reverted it\. Report only/);
+});
+
+const loopConfig = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: '/bin/graphyard',
+  repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', workers: [] });
+const loopItem = (n: number, fields: Record<string, unknown> = {}) => ({
+  id: `w${n}`, key: `GY-${n}`, title: `GY-${n}`, description: '', type: 'bug', priority: 1, dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:item'] }],
+  policy: { checks: ['test', 'typecheck'], review: true }, plannedFiles: [], revision: 1, policyRevision: 1, createdAt: iso(start), updatedAt: iso(start),
+  stageEnteredAt: iso(start - n * 60_000), ready: true, epoch: 1, lease: null, workspaces: [], submission: { epoch: 1, pr: n }, reworkRequested: false,
+  candidate: { sha: sha(`loop-head${n}`), baseSha: sha('base'), pr: n, branch: `graphyard/gy-${n}-1`, author: 'worker' },
+  scenarioRequirements: [], evidence: [], observation: null, blocker: null, violations: [], gates: [], stage: 'build', ...fields,
+}) as unknown as Work;
+const loopGit = (async (_command: string, args: string[]) => {
+  const sub = args[2];
+  if (sub === 'rev-parse') return `${tip}\n`;
+  if (sub === 'merge-tree') return `${sha('tree')}\0`;
+  if (sub === 'commit-tree') return `${sha('merge')}\n`;
+  if (sub === 'diff') return 'src/a.ts\n';
+  return '';
+}) as never;
+const loopEffects = (work: () => Work[], shadow: ReturnType<typeof shadowReads>) => {
+  const refuse = new Proxy({}, { get: (_, name) => { throw new Error(`the shadow step called GitHub (${String(name)})`); } });
+  return {
+    agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
+    snapshot: async () => ({ work: work(), now: iso(start) }), closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(start), reason: 'not configured', deployed: [], pending: [] }),
+    recordDeployment: async () => {}, requestSmoke: () => {}, decisions: async () => ({ decisions: [] }), persist: async () => {},
+    github: refuse, merge: refuse, shadow,
+  } as unknown as DaemonEffects;
+};
 
 test('unit:docs-word-budget — docs/delivery-redesign.md states the merger refuses while a shadow disagreement stands unexplained in at most 25 net words', () => {
   const docs = readFileSync(fileURLToPath(new URL('../docs/delivery-redesign.md', import.meta.url)), 'utf8');
@@ -325,6 +420,55 @@ test('integration:merger-refused-reopened-shadow-missed — a shadow-passed head
   });
 });
 
+test('unit:cycle-shadow-record-regression — the loop keeps the cause a failing verdict\'s log names in its cursor (never the log), so the escalation it raises once GitHub merges the head names the contamination, the placeholder, or the failing test; and the ledger\'s standing list carries the cause it reads from the recorded verdict (GY-1565)', async () => {
+  const runs: Record<string, TrialRun> = {
+    'GY-1': { build: 'pass', tests: coreTests, durationMs: 1000, logTail: contaminationTail, runnerExit: 1 },
+    'GY-2': { build: 'pass', tests: placeholderTests, durationMs: 1000, logTail: 'ok 486 - tests/z.test.ts\n[exit status 1]', runnerExit: 1 },
+    'GY-3': { build: 'pass', tests: { passed: 1, failed: ['tests/x.test.ts'], files: 2 }, durationMs: 1000, logTail: 'not ok 1 - tests/x.test.ts\n[exit status 1]', runnerExit: 1 },
+    'GY-4': { build: 'pass', tests: { passed: 2, failed: [], files: 2 }, durationMs: 1000, logTail: 'ok', runnerExit: 0 },
+  };
+  let work = [1, 2, 3, 4].map(n => loopItem(n));
+  const reads = shadowReads(loopConfig, '/coordinator', loopGit, { base: '/worktrees', record: async () => {}, trial: async input => runs[input.key!]! });
+  const state = emptyDaemonState(loopConfig), effects = loopEffects(() => work, reads), now = () => start;
+  for (let cycle = 0; cycle < 6; cycle++) { await runCycle(loopConfig, state, effects, now); await shadowIdle(state); }
+  const causes = Object.fromEntries(state.shadow.map(entry => [entry.key, entry.cause]));
+  assert.equal(causes['GY-1'], recordedFailureCause(contaminationTail), 'the contaminated verdict keeps the contamination cause');
+  assert.equal(causes['GY-3'], 'tests/x.test.ts');
+  assert.deepEqual([causes['GY-2'], causes['GY-4']], [undefined, undefined], 'a log naming nothing, or a passing verdict, keeps no cause');
+  assert.ok(state.shadow.every(entry => !('logTail' in entry)), 'the cursor never carries the log');
+  assert.deepEqual(shadowStateSchema.parse(JSON.parse(JSON.stringify(state.shadow))), state.shadow, 'the cause round-trips through the cursor schema');
+  // GitHub merges and keeps every head: the three failing ones become shadow-only-fails, each raised once with its record's cause.
+  work = work.map(entry => ({ ...entry, stage: 'done', delivery: { mergedAt: iso(start), mergeSha: sha(`delivered-${entry.key}`), authorizationRevision: 1 } }) as Work);
+  await runCycle(loopConfig, state, effects, now);
+  const detail = (key: string) => (state.actions[`shadow:${key}`] as { detail?: string } | undefined)?.detail ?? '';
+  assert.match(detail('GY-1'), /is shadow-only-fail .*; the failure is trial-environment contamination of the host's shared tmp/);
+  assert.equal(detail('GY-2'), placeholderLine('GY-2', sha('loop-head2'), sha('merge')));
+  assert.match(detail('GY-3'), /the trial log names tests\/x\.test\.ts\. Report only/);
+  assert.doesNotMatch(detail('GY-3'), /contamination/);
+  assert.equal(state.actions['shadow:GY-4'], undefined, 'an agree-pass raises nothing');
+  // The ledger: the standing list reads the cause from the recorded verdict, so a pair the cursor dropped keeps it.
+  const contaminated = await deliveredDisagreement(sha('ledger-contaminated'), sha('ledger-tip'), coreTests, { logTail: contaminationTail });
+  const silent = await deliveredDisagreement(sha('ledger-silent'), sha('ledger-tip'), { passed: 1, failed: ['tests/q.test.ts'], files: 2 });
+  const listing = await request(token(coordinator), 'shadow-disagreements');
+  const cause = (key: string) => (listing.body.disagreements as { key: string; cause: unknown }[]).find(entry => entry.key === key)?.cause;
+  assert.deepEqual([cause(contaminated.key), cause(silent.key)], [recordedFailureCause(contaminationTail), null]);
+  for (const entry of [contaminated, silent]) await request(token(admin), `work/${entry.id}/shadow-explain`, { head: entry.head, baseTip: entry.baseTip, reason: 'Explained so the record-regression test cleans up' });
+});
+
+test('unit:merger-mode-refuses-unexplained-disagreement — POST /api/merger control-plane stays refused while a disagreement stands unexplained, whether its record names the contamination cause or yields none: naming a cause is not explaining it (GY-1565)', async () => {
+  const named = await deliveredDisagreement(sha('merger-named'), sha('merger-tip'), coreTests, { logTail: contaminationTail });
+  const gap = await deliveredDisagreement(sha('merger-gap'), sha('merger-tip'), { passed: 1, failed: ['tests/q.test.ts'], files: 2 });
+  const switchTo = () => request(token(admin), 'merger', { merger: 'control-plane', reason: 'Switch while disagreements stand' });
+  let refused = await switchTo();
+  assert.equal(refused.status, 409, JSON.stringify(refused.body));
+  assert.match(JSON.stringify(refused.body), new RegExp(`unexplained shadow disagreements stand:.*${named.key}.*${gap.key}`));
+  await request(token(admin), `work/${named.id}/shadow-explain`, { head: named.head, baseTip: named.baseTip, reason: 'Trial-environment contamination of the shared /tmp (GY-1565)' });
+  refused = await switchTo();
+  assert.equal(refused.status, 409, 'the record with no extractable cause still refuses the switch');
+  assert.match(JSON.stringify(refused.body), new RegExp(`stand: ${gap.key}"`));
+  await request(token(admin), `work/${gap.id}/shadow-explain`, { head: gap.head, baseTip: gap.baseTip, reason: 'Explained so the merger test cleans up' });
+});
+
 test('integration:merger-applies-when-explained — POST /api/merger control-plane applies once every disagreement is explained; github is never refused', async () => {
   const head = sha('apply-head'), baseTip = sha('apply-tip');
   const { id, key } = await deliveredDisagreement(head, baseTip, { passed: 2, failed: ['tests/y.test.ts'], files: 3 });
@@ -452,12 +596,13 @@ test('unit:cycle-shadow-disagreement-explanation — the GY-1535 head 77da3de0 (
     'integration:worktree-dependency-reuse (tests/worktree-reclaim.test.ts): AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal');
   const gy1528Line = shadowDisagreementDetail({ ...verdict('GY-1528', { head: gy1528.head, baseTip: gy1528.baseTip, mergeSha: gy1528.mergeSha, tests: gy1528.tests }), logTail: gy1528.logTail });
   assert.match(gy1528Line, /GY-1528 head 2186dd853a8d089129e2b2f0ba87a9a9a8d5d62a is shadow-only-fail \(trial merge c30d4b1624deae333183d6112a5a1261fca3e027\); the shadow trial failed it but GitHub merged it: 10 of 497 test files failed/);
-  assert.match(gy1528Line, /the trial log names integration:worktree-dependency-reuse \(tests\/worktree-reclaim\.test\.ts\): AssertionError \[ERR_ASSERTION\]: Expected values to be strictly deep-equal\. Report only/);
+  // Its log carries the dependency-share signature, so the line names the contamination and the failing test it broke (GY-1565).
+  assert.match(gy1528Line, /the failure is trial-environment contamination of the host's shared tmp \(pre-GY-1565\): integration:worktree-dependency-reuse \(tests\/worktree-reclaim\.test\.ts\): AssertionError \[ERR_ASSERTION\]: Expected values to be strictly deep-equal expected a dependency mirror sourced at \/tmp\/graphyard-reclaim-N6oAPH\/node_modules/);
   const second = await deliveredDisagreement(gy1528.head, gy1528.baseTip, gy1528.tests, { logTail: gy1528.logTail, trialMergeSha: gy1528.mergeSha });
   const standing1528 = ((await request(token(reader), 'shadow-disagreements')).body.disagreements as { key: string; cause: string | null }[]).find(entry => entry.key === second.key)!;
-  assert.equal(standing1528.cause, trialFailureCause(gy1528.logTail));
+  assert.equal(standing1528.cause, recordedFailureCause(gy1528.logTail));
   const [line1528] = shadowGateAttention([verdict(second.key, { head: gy1528.head, baseTip: gy1528.baseTip, mergeSha: gy1528.mergeSha, tests: gy1528.tests, cause: standing1528.cause! })]);
-  assert.match(line1528!.text, /the trial log names integration:worktree-dependency-reuse/);
+  assert.match(line1528!.text, /the failure is trial-environment contamination .*integration:worktree-dependency-reuse/);
   assert.doesNotMatch(line1528!.text, /merged it\. Report only/, 'not the bare line');
   await request(token(admin), `work/${second.id}/shadow-explain`, { head: gy1528.head, baseTip: gy1528.baseTip, reason: 'GY-1564 test cleanup' });
 });
