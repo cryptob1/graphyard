@@ -218,12 +218,16 @@ export function actionIdleSpans(row: Pick<ActionRow, 'requestedAt' | 'history' |
 
 /**
  * A provider refusal that itself establishes a permission the installation lacks: a 403 whose
- * recorded reason names the missing grant (the preflight's `App … lacks …`, an installed App that
- * `lacks a permission`, or GitHub's `Resource not accessible by integration`). No executor holding
- * that installation can run the request. Any other 401/403 — a secondary rate limit, a rerun of a
- * run still in progress, rejected credentials — is a refusal a later attempt can clear (GY-1587).
+ * recorded reason names the missing grant — the preflight's recorded shortfall (`App … lacks …`),
+ * or an installed App that `lacks a permission` as GY-468's row recorded it. No executor holding
+ * that installation can run the request. GitHub's bare `Resource not accessible by integration`
+ * does not establish a shortfall (src/github.ts permissionHint), nor does any other 401/403 — a
+ * secondary rate limit, a rerun of a run still in progress, rejected credentials — so those are
+ * refusals a later attempt can clear (GY-1587).
  */
-const permissionRefusal = /\brefused: [^;]*\(403\).*?(?:\bApp \S+ lacks \S|\blacks a permission\b|\bResource not accessible by integration\b)/i;
+const permissionRefusal = /\brefused: [^;]*\(403\).*?(?:\bApp \S+ lacks \S|\blacks a permission\b)/i;
+/** A row whose own record says its preflight found nothing missing never establishes a shortfall. */
+const noShortfallFound = /\bfound no missing permission\b/i;
 
 /**
  * Why no executor could have run this row, read from the row alone, or null when one could have
@@ -237,7 +241,7 @@ export function unrunnableCause(row: Pick<ActionRow, 'refusal' | 'inputs' | 'his
   const records = row.history ?? [];
   if (records.some(record => record.event === 'claimed') || !records.some(record => record.event === 'cancelled')) return null;
   const detail = (row.inputs as { detail?: unknown } | null | undefined)?.detail;
-  for (const recorded of [row.refusal, typeof detail === 'string' ? detail : null]) if (recorded && permissionRefusal.test(recorded)) return recorded;
+  for (const recorded of [row.refusal, typeof detail === 'string' ? detail : null]) if (recorded && permissionRefusal.test(recorded) && !noShortfallFound.test(recorded)) return recorded;
   return null;
 }
 
