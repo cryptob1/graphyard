@@ -134,21 +134,24 @@ function endedStall(row: ActionRow) {
 }
 
 /**
- * Record one attempt of a loop-applied remedy on the open row it was applied for. Refused unless
- * the row is still stalled on the reason the remedy was applied for, or completed straight out of
- * that run (`endedStall`), and no attempt is recorded for that run yet: one record per unchanged
- * run, whoever asks.
+ * Record one attempt of a loop-applied remedy on the row it was applied for. Refused unless the
+ * row is still stalled on the reason the remedy was applied for, or completed straight out of that
+ * run (`endedStall`), and no attempt is recorded for that run yet: one record per unchanged run,
+ * whoever asks. A completed row the item's reconciliation already retired is found in the queue's
+ * history: settlement wakes that reconciliation, so it can run before the record lands (GY-1586).
  */
 export function recordStallRemedy(work: Work, id: string, input: Omit<RemedyRecord, 'at' | 'by'>, by: string, now: Date): ActionRow {
-  const row = work.actionQueue?.actions.find(entry => entry.id === id);
+  const open = work.actionQueue?.actions.find(entry => entry.id === id);
+  const row = open ?? work.actionQueue?.history.findLast(entry => entry.id === id && endedStall(entry));
   demand(row, 'Action is not open on this work item', 404);
-  const live = actionStall(row!), stall = live ?? endedStall(row!);
+  const live = open ? actionStall(row!) : null, stall = live ?? endedStall(row!);
   demand(stall && stall.reason === input.reason, 'The row is no longer stalled on the reason the remedy was applied for', 409);
   const bound = stallRemedy(input.reason);
   demand(bound?.applies === 'loop' && bound.kind === input.remedy, `The reason does not bind to the ${input.remedy} remedy`, 409);
   // The completion that ended the run would read as a fresh run to `standingRemedy`, so an ended run is
   // read without it. Not the run's first failure either: a long run outgrows the row's retained history.
-  const run = live ? work : { actionQueue: { ...work.actionQueue!, actions: work.actionQueue!.actions.map(entry => entry === row ? { ...entry, history: entry.history.slice(0, -1) } : entry) } };
+  const ended = (entry: ActionRow) => entry === row ? { ...entry, history: entry.history.slice(0, -1) } : entry;
+  const run = live ? work : { actionQueue: { actions: work.actionQueue!.actions.map(ended), history: work.actionQueue!.history.map(ended) } };
   demand(!standingRemedy(run, id, input.reason), 'A remedy is already recorded for this unchanged run', 409);
   row!.remedy = { ...input, at: now.toISOString(), by };
   return row!;

@@ -225,6 +225,16 @@ test('unit:stall-remedy-recorded-once — the remedy is applied and recorded onc
   assert.ok(Date.parse(endedSince(e.row)) > Date.parse(e.row.remedy!.at), 'the retained history no longer reaches back to the record');
   assert.throws(() => recordStallRemedy(e.work, e.row.id, { ...late, reason: held }, 'graphyard-master', new Date(shift(at, (actionRecordLimit + 2) * 60_000))), /already recorded for this unchanged run/);
   assert.equal(e.row.remedy?.outcome, 'refused', 'the run\'s recorded refusal is kept');
+
+  // Settlement wakes the item's reconciliation, which can retire the completed row to the queue's
+  // history before the record lands: the record lands on that retired copy, once.
+  const f = stalledItem('GY-1589', 'dispatch', holdReason('GY-1589'), at), retiredFor = f.row.stall!.reason;
+  f.row.history.push({ at: shift(at, 60_000), event: 'completed', requester: 'graphyard', executor: 'x', result: 'done', reason: 'the held job resumed' });
+  Object.assign(f.row, { state: 'done', result: 'done', resolution: 'GY-1589 no longer needs this action' });
+  f.work.actionQueue = { actions: [], history: [f.row] };
+  assert.equal(recordStallRemedy(f.work, f.row.id, { ...late, reason: retiredFor }, 'graphyard-master', new Date(shift(at, 90_000))), f.row);
+  assert.equal(f.row.remedy?.outcome, 'applied');
+  assert.throws(() => recordStallRemedy(f.work, f.row.id, { ...late, reason: retiredFor }, 'graphyard-master', new Date(shift(at, 120_000))), /already recorded for this unchanged run/);
 });
 
 // ---- AC-3 -----------------------------------------------------------------------------------------

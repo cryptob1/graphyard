@@ -277,12 +277,37 @@ test('unit:stall-remedy-recorded-once — the control plane records the loop\'s 
   const escalated = await reload(item);
   assert.equal(escalated.nextAction?.kind, 'escalate', 'the refused remedy is escalated in the same transaction');
   assert.match(escalated.nextAction!.binding, new RegExp(`^stalled:${last!.id}:remedy:`));
-  await assert.rejects(engine.recordActionRemedy(coordinator, last!.id, { ...body, outcome: 'applied' }), /Action is not open on any work item/);
+  await assert.rejects(engine.recordActionRemedy(coordinator, last!.id, { ...body, outcome: 'applied' }), /Action is not open on (any|this) work item/);
   const stored = [...escalated.actionQueue!.actions, ...escalated.actionQueue!.history].find(row => row.id === last!.id)!;
   assert.equal(stored.remedy?.outcome, 'refused', 'one record, the first');
   // The escalation now owns the stall and names what the remedy did; no generic stalled line is left.
   assert.match(escalated.nextAction!.reason, /installation-accept remedy \(installation-accept\) was refused at .*Confirm access was not approved/);
   assert.deepEqual(stalledActionAttention(await snapshotOf()).filter(entry => entry.subject === item.key), []);
+});
+
+test('unit:stall-remedy-recorded-once — a granted remedy is recorded once on a held row its executor completed and the item\'s reconciliation retired to history before the record landed (GY-1586)', async () => {
+  const item = await release(await created());
+  const hold = `${item.key}: no observation newer than the claim was saved; its observation job is held: App graphyard-owner-project lacks Actions: write, which failed CI reruns needs to rerun failed workflow jobs on the unchanged candidate; accept the pending permission request at https://github.com/settings/installations/91011; the claim woke it and leaves the row waiting for the observation`;
+  for (let failure = 0; failure < actionStallThreshold; failure++) {
+    await attempt(item, async () => hold);
+    await elapse(item, actionStallMaxMs);
+  }
+  // The remedy cleared the hold: the held job resumed and the executor completed the row, and the
+  // reconciliation that settlement wakes retired the completed row to history, all before the loop's record.
+  const claimed = await engine.claimNextAction(executor, { host: identity.host, kinds: ['dispatch'], work: item.key }, randomUUID());
+  const done = (await engine.settleClaimedAction(executor, claimed.action!.id, { result: 'done', reason: 'the held job resumed' }, randomUUID())).action as ActionRow;
+  const current = await reload(item);
+  const retired = { ...current.actionQueue!.actions.find(row => row.id === done.id)!, resolution: `${item.key} no longer needs this action` };
+  const queue = { actions: current.actionQueue!.actions.filter(row => row.id !== done.id), history: [...current.actionQueue!.history, retired] };
+  await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{actionQueue}',$2::jsonb) WHERE id=$1", [item.id, JSON.stringify(queue)]);
+
+  const body = { remedy: 'installation-accept', reason: hold, outcome: 'applied', detail: 'granted', flows: ['installation-accept'] };
+  const recorded = await engine.recordActionRemedy(coordinator, done.id, body);
+  assert.equal(recorded.action.remedy?.outcome, 'applied', 'the record finds the retired row instead of answering 404');
+  // A second record is refused: by the retired run's record, or, once the item opens the row afresh, by the new run not being stalled.
+  await assert.rejects(engine.recordActionRemedy(coordinator, done.id, body), /already recorded for this unchanged run|no longer stalled on the reason/, 'and lands once');
+  const stored = (await reload(item)).actionQueue!.history.filter(row => row.id === done.id);
+  assert.deepEqual(stored.map(row => row.remedy?.outcome), ['applied'], 'on the retired row itself');
 });
 
 // ---- AC-4: backoff does not outlive the condition it was earned against ----------------------

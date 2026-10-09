@@ -1834,11 +1834,15 @@ export class Engine {
     }, { lane: leaseCommands.has(command) ? 'lease' : 'request', itemLock: id ?? undefined });
   }
 
-  /** The one item holding action row `id`, found by containment rather than by loading every document. */
-  private async actionOwner(db: { query: (text: string, values: unknown[]) => Promise<{ rows: { document: Work }[] }> }, id: string, item?: string): Promise<Work | undefined> {
+  /**
+   * The one item holding action row `id`, found by containment rather than by loading every document.
+   * `retired` also finds an item that has moved the row to its queue's history (GY-1586).
+   */
+  private async actionOwner(db: { query: (text: string, values: unknown[]) => Promise<{ rows: { document: Work }[] }> }, id: string, item?: string, retired = false): Promise<Work | undefined> {
     // Given the owning item's id, the owner is read again by its primary key instead of found by a scan (GY-1276).
     const scope = item === undefined ? 'w.id IN (SELECT id FROM work_index WHERE NOT settled)' : 'w.id=$2::uuid AND w.id IN (SELECT id FROM work_index WHERE NOT settled)';
-    return (await db.query(`SELECT document FROM work_items w WHERE ${scope} AND document->'actionQueue'->'actions' @> jsonb_build_array(jsonb_build_object('id', $1::text)) ORDER BY number LIMIT 1`, item === undefined ? [id] : [id, item])).rows[0]?.document;
+    const holds = (list: string) => `document->'actionQueue'->'${list}' @> jsonb_build_array(jsonb_build_object('id', $1::text))`;
+    return (await db.query(`SELECT document FROM work_items w WHERE ${scope} AND (${retired ? `${holds('actions')} OR ${holds('history')}` : holds('actions')}) ORDER BY number LIMIT 1`, item === undefined ? [id] : [id, item])).rows[0]?.document;
   }
   /**
    * Claim the next action for a stateless executor.
@@ -1919,7 +1923,7 @@ export class Engine {
     demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
     const data = actionRemedySchema.parse(input);
     return this.store.transaction(async (db, now) => {
-      const work = await this.actionOwner(db, id);
+      const work = await this.actionOwner(db, id, undefined, true);
       demand(work, 'Action is not open on any work item', 404);
       const row = recordStallRemedy(work!, id, data, actor.id, now);
       const all = (await lockedWork(db, [work!.id])).map(item => item.id === work!.id ? work! : item);
