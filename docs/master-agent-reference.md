@@ -35,6 +35,10 @@ Declared slot not `active` (systemd, else `PRINCIPAL@HOST/N` presence): `resourc
 
 Dead supervisor fences its item; `containment` lists survivors' pid, cmdline and cwd: `settleable: true` → `master settle-containment GY-N REASON`, else stop recorded scope unit (`containment.scope`), request `rework`. Unexplained lapses raise `lease-loss` (`blocked-awaiting-operator`, `stopped-by-attestation`: history); any admin settles explained ones: `resolve GY-N lease-loss --attestation blocked|stopped-worker "reason"` ([settling](delegation.md#who-may-settle-what)). `master escalation GY-N` spawns handler answering `master decide GY-N resolve … --context FINGERPRINT REASON`.
 
+### Shared provider logins
+
+Executor probes read each account's provider identity from its login (Claude `.claude.json` OAuth account and organization, Codex `account_id`, Cursor user; digested; OpenCode/Pi and API keys: unknown). An account recorded exhausted with a reset (session notice, probe or `master registry account quota`) holds every registry account and agent environment with the same identity until that reset; `master registry` names the twin: `claude quota is exhausted until T: it is the same provider login as claude-a, whose quota is exhausted (…)`. Unknown or differing identities are unaffected.
+
 ### Producer-runtime faults
 
 Unacted producer requests (never started, launch refused, exited at launch) relaunch on untried profile without rework.

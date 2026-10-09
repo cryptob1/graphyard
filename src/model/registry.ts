@@ -76,10 +76,16 @@ export const quotaObservationSchema = z.object({
   usage: z.array(usageSchema).max(10).default([]),
   resetsAt: z.string().datetime().nullable().default(null),
   reason: text(500).nullable().default(null),
+  /**
+   * The provider login behind the account (GY-1573): its runtime kind and a digest of the provider's own
+   * account and organization ids, read from the login home. Two accounts with one identity are one
+   * subscription, spent together; null when the login names none Graphyard can read.
+   */
+  identity: z.string().regex(/^[a-z][a-z0-9-]{0,39}:[0-9a-f]{16,64}$/, 'A provider identity is a runtime kind and a hex digest').nullable().optional(),
 }).strict();
 export type QuotaObservation = z.infer<typeof quotaObservationSchema>;
 export interface ObservedQuota extends QuotaObservation { observedAt: string | null; observedBy: string | null; source: 'probe' | 'operator' | null }
-export const unobservedQuota: ObservedQuota = { loggedIn: null, state: 'unknown', usage: [], resetsAt: null, reason: null, observedAt: null, observedBy: null, source: null };
+export const unobservedQuota: ObservedQuota = { loggedIn: null, state: 'unknown', usage: [], resetsAt: null, reason: null, identity: null, observedAt: null, observedBy: null, source: null };
 
 /**
  * One login of a runtime. The credential is held by reference: the host whose filesystem holds
@@ -269,7 +275,8 @@ export function applyRegistryMutation(current: AgentRegistry, kind: RegistryMuta
     const data = registryMutationSchemas[kind].parse(input); reasonText = data.reason;
     const account = next.accounts.find(entry => entry.name === data.name);
     demandRegistry(account, `Unknown account ${data.name}`);
-    account.quota = { ...data.quota, reason: data.quota.reason ?? data.reason.slice(0, 500), observedAt: context.at, observedBy: context.actor, source: 'operator' };
+    // An operator marks the quota, not the login: the identity a probe read stays unless the mark names one.
+    account.quota = { ...data.quota, reason: data.quota.reason ?? data.reason.slice(0, 500), identity: data.quota.identity ?? account.quota.identity ?? null, observedAt: context.at, observedBy: context.actor, source: 'operator' };
   }
   else if (kind === 'role.set') { const data = registryMutationSchemas[kind].parse(input); reasonText = data.reason; setRole(data.role); }
   else if (kind === 'role.remove') {
@@ -295,20 +302,23 @@ export function applyRegistryMutation(current: AgentRegistry, kind: RegistryMuta
  * Fold an executor's probe into what the registry knows. An operator's exhausted mark stands until
  * its reset passes or an operator clears it, whatever a probe reads meanwhile: the mark exists for
  * what a probe cannot see — a plan the provider cut off, a runtime whose quota Graphyard cannot
- * read — so only the login state is taken from the probe while it holds. Returns whether anything
+ * read — so only the login state and its identity are taken from the probe while it holds. Returns whether anything
  * an eligibility decision reads has changed, so a steady state appends nothing to the ledger.
  */
 export function foldObservation(account: FleetAccount, observed: QuotaObservation, context: { actor: string; at: string }) {
   const held = account.quota, now = Date.parse(context.at);
   const operatorHold = held.source === 'operator' && held.state === 'exhausted' && (!held.resetsAt || Date.parse(held.resetsAt) > now);
   if (operatorHold) {
-    if (observed.loggedIn === null || observed.loggedIn === held.loggedIn) return false;
-    account.quota = { ...held, loggedIn: observed.loggedIn }; return true;
+    const identity = observed.identity ?? held.identity ?? null;
+    if ((observed.loggedIn === null || observed.loggedIn === held.loggedIn) && identity === (held.identity ?? null)) return false;
+    account.quota = { ...held, loggedIn: observed.loggedIn ?? held.loggedIn, identity }; return true;
   }
   // A provider restates the same reset to the millisecond or not at all; only a reset that really moved is a change.
   const moved = (held.resetsAt === null) !== (observed.resetsAt === null) || !!held.resetsAt && !!observed.resetsAt && Math.abs(Date.parse(held.resetsAt) - Date.parse(observed.resetsAt)) > 60_000;
-  const changed = held.loggedIn !== observed.loggedIn || held.state !== observed.state || moved || held.source !== 'probe';
-  account.quota = { ...observed, observedAt: context.at, observedBy: context.actor, source: 'probe' };
+  // A probe that could not read the login's identity leaves the one last read: the login is the same until the account changes.
+  const identity = observed.identity ?? held.identity ?? null;
+  const changed = held.loggedIn !== observed.loggedIn || held.state !== observed.state || moved || held.source !== 'probe' || identity !== (held.identity ?? null);
+  account.quota = { ...observed, identity, observedAt: context.at, observedBy: context.actor, source: 'probe' };
   return changed;
 }
 

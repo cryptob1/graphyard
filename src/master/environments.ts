@@ -1,4 +1,5 @@
 // Concern: agent environments and accounts — discovery, health, quota, selection and the launch plan.
+import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { readdir, stat, mkdir, readFile, access } from 'node:fs/promises';
 import { resolve, dirname, basename } from 'node:path';
@@ -80,6 +81,8 @@ export interface EnvironmentHealth {
   loggedIn: boolean; quota: 'available' | 'exhausted' | 'unknown'; usage: AccountUsage[];
   /** Launchable: logged in and not exhausted. Unknown quota is launchable; the runtime reports its own limit. */
   healthy: boolean; reason: string | null; note: string | null; login: string | null;
+  /** The provider login behind the home (GY-1573): accounts that share one share one quota. Null when unreadable. */
+  identity?: string | null;
 }
 export interface EnvironmentProbe {
   fetch?: typeof fetch; now?: () => number; ceilingPercent?: number; timeoutMs?: number; cacheMs?: number;
@@ -236,6 +239,22 @@ async function zaiAccount(environment: ProbedEnvironment, probe: EnvironmentProb
   }
 }
 
+/**
+ * The provider login an account home holds (GY-1573), as its kind and a digest of the provider's own
+ * ids, so two homes logged in to one subscription read alike and nothing identifying leaves the host:
+ * Claude Code's OAuth account and organization, Codex's ChatGPT account, Cursor's user. OpenCode and
+ * Pi name no single login (each provider keeps its own), and an API-key login names no account, so
+ * those read null: unknown, which holds nothing.
+ */
+export async function providerIdentity(kind: string, home: string): Promise<string | null> {
+  const ids = kind === 'claude' ? (account => [account?.accountUuid, account?.organizationUuid])((await readJsonFile(resolve(home, '.claude.json')))?.oauthAccount)
+    : kind === 'codex' ? [(await readJsonFile(resolve(home, 'auth.json')))?.tokens?.account_id]
+    : kind === 'cursor' ? [(await readJsonFile(resolve(home, 'cli-config.json')))?.authInfo?.userId]
+    : [];
+  if (!ids.length || !ids.every(id => typeof id === 'string' && id.trim() || typeof id === 'number')) return null;
+  return `${kind}:${createHash('sha256').update(ids.map(String).join('\0')).digest('hex').slice(0, 32)}`;
+}
+
 export async function checkAgentEnvironment(environment: ProbedEnvironment, probe: EnvironmentProbe = {}): Promise<EnvironmentHealth> {
   const now = probe.now?.() ?? Date.now(), ceiling = probe.ceilingPercent ?? defaultQuotaCeilingPercent;
   const planId = environment.plan ?? (
@@ -277,7 +296,8 @@ export async function checkAgentEnvironment(environment: ProbedEnvironment, prob
   const reason = !account.loggedIn ? `${environment.name} is not logged in`
     : exhausted ? `${environment.name} quota is exhausted (${(spent.length ? spent : account.usage).map(usage => `${usage.window} window at ${usage.percent}%${usage.resetsAt ? ` until ${usage.resetsAt}` : ''}`).join(', ')}; ceiling ${ceiling}%)` : null;
   const health: EnvironmentHealth = { name: environment.name, kind: environment.kind, home: environment.home, variable: environmentVariable[environment.kind], checkedAt: new Date(now).toISOString(),
-    loggedIn: account.loggedIn, quota, usage: account.usage, healthy: !reason, reason, note: account.note, login: account.loggedIn ? null : loginCommand(environment) };
+    loggedIn: account.loggedIn, quota, usage: account.usage, healthy: !reason, reason, note: account.note, login: account.loggedIn ? null : loginCommand(environment),
+    identity: account.loggedIn ? await providerIdentity(environment.kind, environment.home) : null };
   healthCache.set(cacheKey, { at: now, health });
   return health;
 }
@@ -373,6 +393,22 @@ export async function observedExhaustions(config: Pick<MasterConfig, 'credential
 }
 export const describeObservedExhaustion = (environment: string, held: ObservedExhaustion) =>
   `${environment} exhausted its quota mid-session at ${held.at} (${held.reason}); ${held.resetsAt ? `it resets ${held.resetsAt}` : `its reset time is unknown, so it is tried again after ${held.until}`}`;
+/**
+ * A held account on the same provider login as `name` (GY-1573): one a session saw spent with a known
+ * reset holds every configured environment logged in to that subscription until the same reset. An
+ * environment whose identity is unknown, or a hold with no reset, holds nothing beyond its own name.
+ */
+export async function heldTwin(environments: readonly AgentEnvironment[], held: Record<string, ObservedExhaustion>, name: string) {
+  const candidates = Object.entries(held).filter(([other, entry]) => other !== name && entry.resetsAt);
+  const self = candidates.length ? environments.find(environment => environment.name === name) : undefined;
+  const identity = self ? await providerIdentity(self.kind, self.home) : null;
+  if (!identity) return null;
+  for (const [other, entry] of candidates) {
+    const twin = environments.find(environment => environment.name === other);
+    if (twin && await providerIdentity(twin.kind, twin.home) === identity) return { name: other, held: entry, reason: `${name} is the same provider login as ${describeObservedExhaustion(other, entry)}` };
+  }
+  return null;
+}
 export async function recordEnvironmentLog(config: Pick<MasterConfig, 'credentialFile'>, health: EnvironmentHealth[], skipped: AccountSkip[] = [], selection?: { key: string } & AccountSelection) {
   if (!health.length && !skipped.length && !selection) return;
   const log = await readEnvironmentLog(config);
@@ -449,6 +485,8 @@ export async function selectAccount(config: Pick<MasterConfig, 'environments' | 
     if (profile.kind && environment.kind !== profile.kind && sameRuntimeRoles.includes(role)) { skipped.push({ at, role, profile: profile.name, environment: name, reason: crossRuntimeSkip(role, profile, environment), work: probe.work ?? null, cause: 'cross-runtime' }); continue; }
     // What a session itself reported outranks the provider's usage read, which may lag or not exist.
     if (held[name]) { skipped.push({ at, role, profile: profile.name, environment: name, reason: describeObservedExhaustion(name, held[name]), work: probe.work ?? null, cause: 'exhausted' }); continue; }
+    const twin = await heldTwin(config.environments ?? [], held, name);
+    if (twin) { skipped.push({ at, role, profile: profile.name, environment: name, reason: twin.reason, work: probe.work ?? null, cause: 'exhausted' }); continue; }
     const health = await checkAgentEnvironment(environment, { ...probe, ceilingPercent: probe.ceilingPercent ?? config.run.quotaCeilingPercent });
     checked.push(health);
     if (health.healthy) {
@@ -604,6 +642,8 @@ export async function inspectProfileAccounts<T extends { available: boolean; rea
       // As selectAccount passes it over (GY-1306), an account of another runtime launches nothing for this role.
       if (profile.kind && environment.kind !== profile.kind && sameRuntimeRoles.includes(role)) { accounts.push({ environment: name, healthy: false, reason: crossRuntimeSkip(role, profile, environment), quota: 'unknown', resetsAt: null }); continue; }
       if (held[name]) { accounts.push({ environment: name, healthy: false, reason: describeObservedExhaustion(name, held[name]), quota: 'exhausted', resetsAt: held[name].resetsAt }); continue; }
+      const twin = await heldTwin(config.environments ?? [], held, name);
+      if (twin) { accounts.push({ environment: name, healthy: false, reason: twin.reason, quota: 'exhausted', resetsAt: twin.held.resetsAt }); continue; }
       const checked = await checkAgentEnvironment(environment, { ...probe, ceilingPercent: probe.ceilingPercent ?? config.run.quotaCeilingPercent });
       // The reset that matters is the latest among the spent windows: the account launches again only when all of them have.
       const ceiling = probe.ceilingPercent ?? config.run.quotaCeilingPercent ?? defaultQuotaCeilingPercent;

@@ -97,6 +97,18 @@ export const smokeFailureDue = (account: FleetAccount, now: number) =>
   account.smoke?.result === 'fail' && now - Date.parse(account.smoke.at) >= smokeRetestMs;
 const until = (iso: string | null) => iso ? ` until ${iso}` : '';
 /**
+ * Another registry account on the same provider login as `account` that is recorded exhausted with
+ * a reset still ahead (GY-1573): two accounts on one subscription share one limit, so the twin is
+ * spent until that reset whatever its own probe last read. An account whose identity is unknown has
+ * no twin, and an exhaustion with no reset time holds only the account it was recorded on.
+ */
+export function exhaustedTwin(registry: Pick<AgentRegistry, 'accounts'>, account: FleetAccount, now: number): FleetAccount | null {
+  const identity = account.quota.identity ?? null;
+  if (!identity) return null;
+  return registry.accounts.find(other => other.name !== account.name && (other.quota.identity ?? null) === identity && other.quota.state === 'exhausted'
+    && !!other.quota.resetsAt && Date.parse(other.quota.resetsAt) > now) ?? null;
+}
+/**
  * Why an account cannot take a session right now, whatever role asks — null when it can. `host`
  * is the executor asking: an account is placed where its login lives, so every other host is
  * refused it. Without a host the placement is not judged (a report has no single asking host).
@@ -126,6 +138,8 @@ export function accountIneligibility(registry: AgentRegistry, account: FleetAcco
     ?? (probes.length ? [probes[0]].find(held) : [account, ...planAccounts].find(held));
   if (exhausted?.name === account.name) return `${account.name} quota is exhausted${until(account.quota.resetsAt)}${account.quota.reason ? ` (${account.quota.reason})` : ''}`;
   if (exhausted) return `${account.name} quota is exhausted on plan ${plan.planName} (${exhausted.name} quota is ${exhausted.quota.source === 'operator' ? 'marked exhausted by operator' : 'exhausted'}${until(exhausted.quota.resetsAt)}${exhausted.quota.reason ? `: ${exhausted.quota.reason}` : ''})`;
+  const twin = exhaustedTwin(registry, account, now);
+  if (twin) return `${account.name} quota is exhausted${until(twin.quota.resetsAt)}: it is the same provider login as ${twin.name}, whose quota is ${twin.quota.source === 'operator' ? 'marked exhausted by operator' : 'exhausted'}${twin.quota.reason ? ` (${twin.quota.reason})` : ''}`;
   const running = liveSessions(registry).filter(session => session.account === account.name).length;
   if (account.maxSessions !== null && running >= account.maxSessions) return `${account.name} is at its session limit (${running} of ${account.maxSessions} live)`;
   return null;
