@@ -23,19 +23,25 @@ import { limitHost, limitLoop, type LimitPlane } from './helpers/limit-loop.js';
 // account its own launch record names, and an account an item's consecutive launches each ended
 // on is held before the next launch is chosen.
 
-/** The menu every one of those sessions opened on, as Claude Code drew it. */
+/**
+ * The menu every one of those sessions opened on, as Claude Code drew it. Its reset is three days
+ * ahead of the real clock on the hour, in the zone the menu names, so the replay never ages out.
+ */
+const reset = new Date(Math.ceil(Date.now() / 3_600_000) * 3_600_000 + 3 * 86_400_000).toISOString();
+const wall = Object.fromEntries(new Intl.DateTimeFormat('en-US', { timeZone: 'America/Los_Angeles', month: 'short', day: 'numeric', hour: 'numeric', hour12: true })
+  .formatToParts(new Date(reset)).map(part => [part.type, part.value]));
+const resetLabel = `${wall.month} ${wall.day}, ${wall.hour}${wall.dayPeriod.toLowerCase()}`;
 const limitMenu = `● Reading the item before editing.
-  ⎿  You've hit your weekly limit · resets Oct 12, 3pm (America/Los_Angeles)
+  ⎿  You've hit your weekly limit · resets ${resetLabel} (America/Los_Angeles)
 
    What do you want to do?
 
    ❯ 1. Stop and wait for limit to reset
-     2. Wait here, then continue automatically at Oct 12, 3pm
+     2. Wait here, then continue automatically at ${resetLabel}
      3. Add funds to continue with usage credits
 
    Enter to confirm · Esc to cancel
 `;
-const reset = '2026-10-12T22:00:00.000Z';
 
 const repository = 'owner/exhaustion-launch-account';
 const operator: Principal = { id: 'human-operator', role: 'admin', sessionKind: 'human' };
@@ -211,7 +217,7 @@ test('unit:repeated-limit-launch-holds-account — an item whose two consecutive
 
   await cycle(state);
   assert.deepEqual(launches.map(entry => [entry.epoch, entry.account]), [[1, 'claude-b']], `the real dispatch launched it on claude-b: ${JSON.stringify(refused)}`);
-  spend(launches.at(-1)!, 'Oct 12, 3pm');
+  spend(launches.at(-1)!, resetLabel);
   await cycle(state);
   assert.equal(state.actions[failoverKey('worker', work, 1)]?.state, 'done', state.actions[failoverKey('worker', work, 1)]?.detail);
   await lapse();
@@ -219,7 +225,7 @@ test('unit:repeated-limit-launch-holds-account — an item whose two consecutive
   // One limit notice is not yet a repeat: with no hold standing, claude-b is chosen again.
   await cycle(state);
   assert.deepEqual(launches.at(-1) && [launches.at(-1)!.epoch, launches.at(-1)!.account], [2, 'claude-b'], JSON.stringify(refused));
-  spend(launches.at(-1)!, 'Oct 12, 3pm');
+  spend(launches.at(-1)!, resetLabel);
   await cycle(state);
   assert.equal(state.actions[failoverKey('worker', work, 2)]?.state, 'done');
   await lapse();
@@ -282,14 +288,14 @@ test('unit:repeated-limit-launch-holds-account — notices of launches that were
   // Epoch 1 ends on claude-b's limit notice; epoch 2, on claude-b too, ends another way (released, no notice).
   await cycle(state);
   assert.deepEqual(last(), [1, 'claude-b'], JSON.stringify(refused));
-  spend(launches.at(-1)!, 'Oct 12, 3pm'); await cycle(state); await lapse();
+  spend(launches.at(-1)!, resetLabel); await cycle(state); await lapse();
   await cycle(state);
   assert.deepEqual(last(), [2, 'claude-b'], JSON.stringify(refused));
   await end(launches.at(-1)!);
   // Epoch 3 ends on claude-b's notice again: two notices, but of epochs 1 and 3, not consecutive launches.
   await cycle(state);
   assert.deepEqual(last(), [3, 'claude-b'], JSON.stringify(refused));
-  spend(launches.at(-1)!, 'Oct 12, 3pm'); await cycle(state); await lapse();
+  spend(launches.at(-1)!, resetLabel); await cycle(state); await lapse();
   work = await reload(work.id);
   assert.deepEqual(work.capacity!.exhaustions.map(entry => [entry.epoch, entry.account]), [[1, 'claude-b'], [3, 'claude-b']]);
   assert.equal(repeatedLimitAccount(work), null, 'epoch 2 between them ended another way');
@@ -299,7 +305,7 @@ test('unit:repeated-limit-launch-holds-account — notices of launches that were
   assert.equal((await observedExhaustions(config))['claude-b'], undefined, 'and no hold was placed');
 
   // Epoch 4 ends on its notice too: epochs 3 and 4 are adjacent, the repeat AC-2 names.
-  spend(launches.at(-1)!, 'Oct 12, 3pm'); await cycle(state); await lapse();
+  spend(launches.at(-1)!, resetLabel); await cycle(state); await lapse();
   work = await reload(work.id);
   const repeat = repeatedLimitAccount(work);
   assert.deepEqual(repeat && [repeat.account, repeat.records.map(entry => entry.epoch)], ['claude-b', [3, 4]]);
