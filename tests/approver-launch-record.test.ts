@@ -248,6 +248,24 @@ test('unit:approver-idle-stall-relaunch — an approver idle past its start boun
       assert.match(JSON.stringify(unknown), /herdr pane close pane-old \(master approver refuses it while it has no launch record, so its age is unknown\), then graphyard master approver/);
       assert.deepEqual(closed, [], 'nothing was closed under a session within its bound');
 
+      // An idle session is judged by status on the same verdict and screen reading as the command: idle at a still screen past
+      // its bound is a stall whose named command closes it and launches; idle with a moving or unread screen is at work or
+      // unknown, so status raises nothing and the command refuses it alike.
+      const reportIdle = async (screens: (string | null)[]) => terminalDecisions(async () => ({ decisions: [{ id: decision, action: 'requirements', state: 'requested', requestedAt: new Date(Date.now() - 660_000).toISOString() }] }),
+        [{ id: work.id, key: work.key, stage: 'build' }], { approvals: [], runtime: { available: true, agents: [statusFor('idle')] }, now: Date.now(),
+          starts: { records: await autonomy.readApproverLaunches(root), boundMs: bound, pauseMs: 0, read: async () => { const screen = screens.shift(); return screen === undefined ? null : screen; } } });
+      reset(); await recordLaunch(bound + 60_000);
+      const idleStall = (await reportIdle(['╭─\n│ > \n╰─', '╭─\n│ > \n╰─'])).attentionItems.find(entry => entry.text.includes(decision));
+      assert.match(idleStall?.text ?? '', new RegExp(`approver session ${name} sits idle at a still screen in Herdr past its start bound and recorded no outcome — a stall`));
+      assert.match(JSON.stringify(idleStall), new RegExp(`"graphyard master approver ${work.key} ${decision} \\[AGENT_KIND\\] closes ${name} and puts it to a fresh approver"`));
+      const idleRelaunch = await autonomy.launchApprover(root, work, decision, 'claude', { agents: [statusFor('idle')], available: true }, stubHerdr(panes, closed, ['╭─\n│ > \n╰─', '╭─\n│ > \n╰─']), {}, async () => ({}), { screenPauseMs: 0 });
+      assert.deepEqual(closed, ['pane-old'], 'the command status names closes the idle session it described');
+      assert.equal(idleRelaunch.pane, 'pane-new');
+      for (const screens of [['⏺ Bash(npm test)\n  ⎿ running 1s', '⏺ Bash(npm test)\n  ⎿ running 2s'], [null, null]]) {
+        reset(); await recordLaunch(bound + 60_000);
+        assert.equal((await reportIdle([...screens])).attentionItems.some(entry => entry.text.includes(decision)), false, `an idle session whose screen is ${screens[0] === null ? 'unread' : 'moving'} is no stall`);
+      }
+
       // It still refuses while that session is working, blocked at a tool call, idle with a moving
       // screen (a long command), idle with a screen Herdr cannot read, within its bound, or of unknown age.
       const refusals: [string, number | null, (string | null)[], RegExp][] = [

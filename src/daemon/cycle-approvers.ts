@@ -1,10 +1,12 @@
 // Concern: approver sessions — launch, supervise, fail over, close and record how they ended, for the loop's own and hand-launched approvers.
 import type { Work } from '../model.js';
 import { approverRuntime } from '../master/autonomy.js';
+import { screenMotion } from '../master/approver-stall.js';
+import { launchStartMs } from '../master/launch.js';
 import { type HerdrAgent, type RoleCapacity, approverProfile, ownLoginAccounts, approverSessionId, approverSessionName } from '../master.js';
 import { type ApprovalWatch, approvalWatchSchema, type DaemonActionKind, message } from './state.js';
 import { readyToRetry } from './sessions.js';
-import { approvalStep, type ApprovalStep, approverLaunchKey, approverPrefixes, boundDetail, handWatchPrefix, maxApproverCloses, maxApproverLaunches, maxDecisionRequests, maxLostApproverRuns, lostRunRefunded, recordWatchEnded } from './decisions.js';
+import { approvalStep, type ApprovalStep, approverLaunchKey, approverSettleMs, approverPrefixes, boundDetail, handWatchPrefix, maxApproverCloses, maxApproverLaunches, maxDecisionRequests, maxLostApproverRuns, lostRunRefunded, recordWatchEnded } from './decisions.js';
 import { type DaemonEffects, failoverKey, record, stoppedStates } from './effects.js';
 import { capacityRefusal, unknownRegistrySession } from '../fleet.js';
 import type { Cycle } from './cycle.js';
@@ -263,6 +265,17 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
     }
     return true;
   };
+  /**
+   * GY-1598. What `approvalStep` needs to end a stopped approver the way `master approver` would: its start bound, and for an idle
+   * one past it, whether its screen stays still across a pause. Herdr reports a long command as idle while its output moves, so the
+   * loop reads the screen before ending it; a loop that reads no screens judges by status and age alone.
+   */
+  const stallInputs = async (watch: ApprovalWatch, judged: { state: string } | null | undefined, seen: { agents: HerdrAgent[]; available: boolean }) => {
+    const startMs = launchStartMs(config), agent = seen.available && judged?.state === 'requested' ? seen.agents.find(candidate => candidate.name === watch.agentName) : undefined;
+    const age = clock - Date.parse(watch.launchedAt ?? '');
+    if (agent?.agent_status !== 'idle' || !effects.sessionOutput || !(age >= Math.max(approverSettleMs, startMs))) return { startMs };
+    return { startMs, screen: await screenMotion(() => effects.sessionOutput!(agent), effects.idleScreenPauseMs) };
+  };
   const escalateUnjudged = async (item: Work, watch: ApprovalWatch, detail: string) => {
     watch.exhaustedAt = stamp;
     await note(`escalation:decision-unjudged:${watch.decision}`, item, 'escalation', 'failed', `${detail}. ${watch.launches} approver session(s) and ${watch.requests} request(s) have not produced a judgement${watch.ended.length ? ` (${watch.ended.join('; ')})` : ''}, so the loop has stopped spending sessions on it: read it with graphyard master decisions ${item.key}, then put it to a fresh approver with graphyard master approver ${item.key} ${watch.decision}, or take the request back and decide what the item needs instead`);
@@ -421,7 +434,7 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
           await note(`approver:${watch.decision}:rewatched:${watch.launchedAt}`, item, 'decision', 'done', `Watching approver session ${agent.name}, put to ${item.key} decision ${watch.decision} again after its earlier sessions were spent`);
         }
         if ((!judged || judged.state === 'requested') && await approverExhausted(item, watch)) continue;
-        const step = approvalStep({ ...watch, launchedAt: watch.launchedAt ?? watch.requestedAt }, judged, seen, clock);
+        const step = approvalStep({ ...watch, launchedAt: watch.launchedAt ?? watch.requestedAt }, judged, seen, clock, await stallInputs({ ...watch, launchedAt: watch.launchedAt ?? watch.requestedAt }, judged, seen));
         if (step.step === 'wait') continue;
         // GY-1300: an approved decision is judged. Its session is put down, never replaced, and the control plane is asked to apply
         // what was approved; the next cycle finds it settled and lets the watch go.
@@ -463,5 +476,5 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
     for (const entry of ended) performed.push(await record(state, `registry:end:${entry.session}`, { kind: 'close', work: entry.work, principal: null, state: 'done',
       detail: `Ended the ${entry.role} registry session ${entry.session} on ${entry.account}${entry.work ? ` for ${entry.work}` : ''}: ${entry.reason}`, attempts: 1, cycle: state.cycle }, now(), effects.persist));
   }); };
-  return { sessions, invalidate, endApproverSession, endWatchSession, closeApprover, capacityRelaunchWaits, launch, approverExhausted, escalateUnjudged, actOnStep, superviseHandApprovers, reconcileRegistrySessions };
+  return { sessions, invalidate, endApproverSession, endWatchSession, closeApprover, capacityRelaunchWaits, launch, approverExhausted, stallInputs, escalateUnjudged, actOnStep, superviseHandApprovers, reconcileRegistrySessions };
 }

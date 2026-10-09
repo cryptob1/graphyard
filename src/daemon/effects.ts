@@ -264,7 +264,7 @@ export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffec
    * records what the loop observed on the item. A loop wired without the two never fails a
    * session over and never escalates capacity: it cycles exactly as it did before.
    */
-  sessionOutput?: (agent: HerdrAgent) => string | null | Promise<string | null>;
+  sessionOutput?: (agent: HerdrAgent) => string | null | Promise<string | null>; /** GY-1598: how long the loop watches an idle approver's screen before ending it. */ idleScreenPauseMs?: number;
   /**
    * A blocked session's runtime prompt (GY-197). `answerSession` sends the keys that choose the prompt's
    * non-destructive answer into the session's pane; `promptSession` then gives it the one instruction to carry on

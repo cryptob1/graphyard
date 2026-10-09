@@ -3,7 +3,6 @@ import { createHash, randomUUID, randomBytes } from 'node:crypto';
 import { wholeDocument } from '../model/work-summary.js';
 import { readFile, mkdir, lstat } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
-import { setTimeout as sleep } from 'node:timers/promises';
 import { z } from 'zod';
 import { type ChildRun, type ChildRunOptions, defaultChildRun } from '../child-runner.js';
 import { distinctSessionName, sessionNameLimit, sessionName, nameForLaunch } from '../session-name.js';
@@ -19,7 +18,7 @@ import { assertOutsideWorktrees, atomicPrivateText, atomicPrivateWrite, external
 import { type AccountSkip, accountLaunch, agentLaunchPlan, describeObservedExhaustion, type EnvironmentProbe, heldAwareProbe, inspectProfileAccounts, type LaunchRole, NoHealthyAccountError, observedExhaustions, ownLoginHold, type ProfileAccountHealth, recordEnvironmentLog, selectAccount, setupAgentEnvironments } from './environments.js';
 import { closeFailedLaunch, launchStartMs, readSessionScreen, type RequestDelivery, startAgentSession, withLaunchClose, withLaunchedRuntime } from './launch.js';
 import { closeHerdrPane, createdHerdrTab, type HerdrAgent, herdrJson } from './herdr.js';
-import { approverStallVerdict } from './approver-stall.js';
+import { judgeApproverStall } from './approver-stall.js';
 import { allocateManagedCheckout, failureText, settleCheckout } from './worktrees.js';
 import { herdrAttach } from './dispatch.js';
 import type { SessionHandleInput } from '../model/sessions.js';
@@ -333,15 +332,12 @@ async function startHeadlessApprover(root: string, config: MasterConfig, work: W
   return { ...started, settled: started.settled.finally(() => settleCheckout(root, checkout.directory)) };
 }
 export type SessionRegistrar = (handle: SessionHandleInput) => Promise<unknown>;
-/** An `idle` one also needs a still screen across `pauseMs`: Herdr reports a long command as idle while its output and timer move. */
-async function closeUnstartedApprover(root: string, config: MasterConfig, agent: HerdrAgent, run?: ChildRun, pauseMs = 2_000) {
-  const verdict = approverStallVerdict(agent, (await readApproverLaunch(root, agent.name!))?.launchedAt, launchStartMs(config), Date.now()), idle = agent.agent_status === 'idle';
-  const refuse = (why: string) => new Error(`Approver session ${agent.name} is already visible in Herdr; let it finish or close it first (${why})`);
-  if (!verdict.close) throw refuse(verdict.why);
-  const first = idle ? await readSessionScreen(agent.pane_id!, run) : null, second = idle ? await sleep(pauseMs).then(() => readSessionScreen(agent.pane_id!, run)) : null;
-  if (idle && (first === null || first !== second)) throw refuse(`it is idle with a screen that ${first === null || second === null ? 'Herdr could not read' : 'is still changing, as while a long command runs'}`);
+/** An `idle` one also needs a still screen across `pauseMs` (`judgeApproverStall`): Herdr reports a long command as idle while its output moves. */
+async function closeUnstartedApprover(root: string, config: MasterConfig, agent: HerdrAgent, run?: ChildRun, pauseMs?: number) {
+  const verdict = await judgeApproverStall(agent, (await readApproverLaunch(root, agent.name!))?.launchedAt, launchStartMs(config), Date.now(), () => readSessionScreen(agent.pane_id!, run), pauseMs);
+  if (!verdict.close) throw new Error(`Approver session ${agent.name} is already visible in Herdr; let it finish or close it first (${verdict.why})`);
   await closeHerdrPane(agent.pane_id!, run);
-  return `closed approver session ${agent.name} (pane ${agent.pane_id}): ${verdict.why}${idle ? ', its screen still' : ''}`;
+  return `closed approver session ${agent.name} (pane ${agent.pane_id}): ${verdict.why}`;
 }
 /**
  * `herdr` is this host's Herdr inventory and whether it could be read at all (GY-205): the role's
