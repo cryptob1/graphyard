@@ -85,11 +85,22 @@ test('unit:decide-route-records-rework-situation — a decide-route rework recor
   events.push({ actor: 'graphyard-approver', kind: 'decision.declined', payload: { id: second.id, reason: 'Not on these grounds' }, created_at: new Date(clock + 200).toISOString() });
   await assert.rejects(requestDecision(services, operator, work.current.id, { action: 'rework', input: { previousWorkerStopped: true, binding: `${shaB}:conflict` }, reason: 'The refreshed head conflicts with its base' }, 'key-3'),
     (error: any) => error.status === 409 && error.details?.standingRefusal?.decision === second.id);
-  // On the held head itself: a bare request is refused naming the held rework, while a binding it did not carry names newer
-  // grounds (the retry cap's, after attempts that never submitted) and is recorded, naming the rework it re-authorizes.
+  // On the held head itself: a bare request is refused naming the held rework, and so is one naming a binding the held rework did
+  // not carry while nothing on the record is newer (the binding is the requester's free text, never grounds on its own).
   work.current = item(shaA, true);
   await assert.rejects(requestDecision(services, operator, work.current.id, { action: 'rework', input: { previousWorkerStopped: true }, reason: 'The previous worker stopped' }, 'key-4'),
     (error: any) => error.status === 409 && error.details?.heldRework?.decision === first.id);
+  for (const [index, binding] of [`${shaA}:verdict:someone-else`, `overlong-cap:${work.current.id}:2030-01-01T12:00:00Z`].entries())
+    await assert.rejects(requestDecision(services, operator, work.current.id, { action: 'rework', input: { previousWorkerStopped: true, binding }, reason: 'Another ground, same head' }, `key-4-${index}`),
+      (error: any) => error.status === 409 && error.details?.heldRework?.decision === first.id, `${binding} on the held head with no attempt since is refused`);
+  // An attempt claimed before the rework was decided is no newer ground either; one claimed after it is (the retry cap's, after
+  // attempts that never submitted), and the request is recorded, naming the rework it re-authorizes.
+  work.current = { ...item(shaA, true), lastAssignment: { owner: 'worker', epoch: 1, claimedAt: new Date(clock - 60_000).toISOString() } };
+  await assert.rejects(requestDecision(services, operator, work.current.id, { action: 'rework', input: { previousWorkerStopped: true, binding: `overlong-cap:${work.current.id}:2030-01-01T12:00:00Z` }, reason: 'Another ground, same head' }, 'key-4-stale'),
+    (error: any) => error.status === 409 && error.details?.heldRework?.decision === first.id);
+  work.current = { ...item(shaA, true), epoch: 4, lastAssignment: { owner: 'worker', epoch: 4, claimedAt: new Date(clock + 500).toISOString() } };
+  await assert.rejects(requestDecision(services, operator, work.current.id, { action: 'rework', input: { previousWorkerStopped: true }, reason: 'The previous worker stopped' }, 'key-4-bare'),
+    (error: any) => error.status === 409 && error.details?.heldRework?.decision === first.id, 'a bare request names no newer grounds even after attempts');
   const capped = await requestDecision(services, operator, work.current.id, { action: 'rework', input: { previousWorkerStopped: true, binding: `overlong-cap:${work.current.id}:2030-01-01T12:00:00Z` }, reason: 'held: 3 attempts in a row ended without submitting' }, 'key-5');
   assert.equal(capped.state, 'requested');
   assert.deepEqual(capped.situation, { sha: shaA, baseSha: base, reauthorizes: first.id });

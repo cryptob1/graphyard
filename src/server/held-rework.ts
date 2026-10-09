@@ -10,18 +10,25 @@ import type { StaleRace } from './decision-ledger.js';
  * On GY-1522 a hand rework was put to an approver while 8da1e201 already held the item, and the
  * approver's session was spent saying so; the held state answers such a request on the record.
  */
-export function heldRework<D extends Pick<Decision, 'id' | 'action'> & { state: string; situation?: Decision['situation'] }>(work: Pick<Work, 'reworkRequested'>, history: readonly D[]): D | null {
+export function heldRework<D extends Pick<Decision, 'id' | 'action'> & { requestedAt?: string; approvedAt?: string | null; state: string; situation?: Decision['situation'] }>(work: Pick<Work, 'reworkRequested'>, history: readonly D[]): D | null {
   if (!work.reworkRequested) return null;
   return [...history].reverse().find(decision => decision.action === 'rework' && decision.state === 'applied') ?? null;
 }
 /**
- * Whether a request judges the grounds the held rework already answers: no binding other than the held one's, on the same
- * candidate head and base (a rework recorded before situations were kept judged an unnamed one, so it holds every such request).
- * A binding the held rework did not carry names newer grounds, such as the retry cap's after attempts that never submitted (GY-885).
+ * Whether a request judges the grounds the held rework already answers: on the same candidate head and base (a rework recorded
+ * before situations were kept judged an unnamed one, so it holds every such request), it names no binding, the held one's, or one
+ * the record gives no newer grounds for. A binding is the requester's free text, so on its own it never re-opens the hold: only a
+ * worker attempt claimed since the held rework was decided does (such as the retry cap's after attempts that never submitted, GY-885).
  */
-export const heldSameGrounds = (held: { input?: any; situation?: Decision['situation'] }, situation: Decision['situation'], input: { binding?: unknown }) =>
-  (input.binding === undefined || input.binding === held.input?.binding)
+export const heldSameGrounds = (held: { input?: any; situation?: Decision['situation']; requestedAt?: string; approvedAt?: string | null }, situation: Decision['situation'],
+  input: { binding?: unknown }, work: Pick<Work, 'lastAssignment'>) =>
+  (input.binding === undefined || input.binding === held.input?.binding || !attemptSince(work, held.approvedAt ?? held.requestedAt))
   && (!held.situation || ((held.situation.sha ?? null) === (situation?.sha ?? null) && (held.situation.baseSha ?? null) === (situation?.baseSha ?? null)));
+/** Whether a worker claimed the item after `at`: the record's own newer grounds on an unchanged head. */
+const attemptSince = (work: Pick<Work, 'lastAssignment'>, at: string | undefined) => {
+  const claimed = Date.parse(work.lastAssignment?.claimedAt ?? ''), decided = Date.parse(at ?? '');
+  return Number.isFinite(claimed) && (!Number.isFinite(decided) || claimed > decided);
+};
 /**
  * GY-1579. Why a rework requested to re-authorize applied rework `situation.reauthorizes` no longer applies, or null:
  * the item no longer holds that rework (a worker submitted, clearing `reworkRequested`, or a newer rework holds it).
@@ -40,11 +47,11 @@ export const heldReworkRefusal = (work: Pick<Work, 'key'>, held: Pick<Decision, 
 /**
  * The situation a request records: a rework or recover refusal judged the candidate and base it was requested against, and
  * stands only for those (GY-229). For a rework (GY-1579 AC-3, AC-4), one the item's held rework already answers is refused, naming that
- * decision, before an approver is asked; one on newer grounds records the applied rework it would re-authorize beside its situation.
+ * decision, before an approver is asked, whatever binding it names; one on newer grounds records the applied rework it would re-authorize beside its situation.
  */
-export function reworkSituation(action: string, work: Pick<Work, 'key' | 'reworkRequested' | 'candidate'>, history: Parameters<typeof heldRework>[1], input: { binding?: unknown }): DecisionSituation | null {
+export function reworkSituation(action: string, work: Pick<Work, 'key' | 'reworkRequested' | 'candidate' | 'lastAssignment'>, history: Parameters<typeof heldRework>[1], input: { binding?: unknown }): DecisionSituation | null {
   const situation = decisionSituation(action, work);
   const held = action === 'rework' ? heldRework(work, history) : null;
-  if (held && heldSameGrounds(held, situation, input)) throw new Refusal(heldReworkRefusal(work, held), 409, { heldRework: { decision: held.id } });
+  if (held && heldSameGrounds(held, situation, input, work)) throw new Refusal(heldReworkRefusal(work, held), 409, { heldRework: { decision: held.id } });
   return situation && held ? { ...situation, reauthorizes: held.id } : situation;
 }
