@@ -81,32 +81,6 @@ export const cappedReworkBinding = (head: string, reviewer: string) => `${head}:
  * head unchanged, so the mark is what binds the approver's judgement to that revision's change request.
  */
 export const cappedRevisionMark = (policyRevision: number) => `[Capped review under policy revision ${policyRevision}.]`;
-/**
- * GY-1575. The approver's refusal of the rework the loop requested for a capped change request on
- * `capped`'s head and reviewer under `policyRevision`, or null: the approver judged its findings
- * non-blocking, so the review-cap step withdraws the request and has the head re-reviewed with the
- * refusal's reasoning. A refusal judged under an earlier policy revision binds no later change request.
- */
-export function refusedCappedRework<D extends { action: string; state: string; input?: any; reason?: string }>(history: readonly D[], capped: Pick<CappedReview, 'sha' | 'reviewer'>, policyRevision: number): D | null {
-  const binding = cappedReworkBinding(capped.sha, capped.reviewer).slice(0, decisionBindingMax), mark = cappedRevisionMark(policyRevision);
-  return history.find(entry => entry.action === 'rework' && entry.state === 'refused' && entry.input?.binding === binding && !!entry.reason?.includes(mark)) ?? null;
-}
-/**
- * GY-1580. The master's own answer to a refused capped head's escalation, refused in turn: the earliest hand
- * rework (no grounds binding) on `sha` that cites `refused` by id, as precedent or in its reason, requested
- * after `since` (the refusal's time). An approver who refused it judged the re-review's finding non-blocking
- * too, so the review-cap step withdraws the change request it answered (one submitted before it was requested)
- * once more; a change request submitted after it is escalated. Read from the history and the review alone,
- * that guard outlives the cursor's pruned rows.
- */
-export function refusedCapAnswer<D extends { id: string; action: string; state: string; input?: any; reason?: string; requestedAt?: string; precedent?: string[]; situation?: { sha: string | null } | null }>(
-  history: readonly D[], refused: Pick<D, 'id'>, sha: string, since: string | undefined): D | null {
-  const after = Date.parse(since ?? '');
-  const cites = (entry: D) => !!entry.precedent?.includes(refused.id) || !!entry.reason?.includes(refused.id.slice(0, 8));
-  return history.filter(entry => entry.id !== refused.id && entry.action === 'rework' && entry.state === 'refused' && entry.input?.binding === undefined
-    && (!entry.situation?.sha || entry.situation.sha === sha) && cites(entry) && Date.parse(entry.requestedAt ?? '') > after)
-    .sort((a, b) => Date.parse(a.requestedAt!) - Date.parse(b.requestedAt!))[0] ?? null;
-}
 export function cappedReview(work: Work, config: Partial<Pick<MasterConfig, 'reviewRoundCap' | 'reviewer'>>): CappedReview | null {
   const cap = reviewRoundCapOf(config);
   if (work.stage === 'done' || !pastReviewCap(work, cap)) return null;
