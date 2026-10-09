@@ -1,6 +1,7 @@
 // Concern: the review-round cap step (GY-1118) — a change request past the cap is withdrawn, or escalated; nothing is filed (GY-1249).
 import { cappedReview, cappedReworkBinding, cappedRevisionMark, detailChanged, refusedCappedRework, refusedCappedReworks, type CappedReview } from './decisions.js';
 import { decisionKey } from './reconcile.js';
+import { decisionSituation, uncitedRefusals, type DecisionSituation } from '../model/approval.js';
 import { reviewRound, reviewRoundCapOf } from '../review-cap.js';
 import { record } from './effects.js';
 import { readyToRetry } from './sessions.js';
@@ -88,15 +89,19 @@ const pendingReworkStates = new Set(['requested', 'approved']);
  * already asked under it (`requested`: its approval watch), so nothing would request one. The reason names
  * the refused decision; the escalation (`cappedEscalation`) adds the commands that answer it.
  */
-export function strandedCappedRefusal(work: Pick<Work, 'key' | 'policyRevision'>, capped: CappedReview, history: readonly { id: string; action: string; state: string; input?: any; reason?: string; outcome?: string | null; refusal?: { approver?: string; reason?: string; at?: string } | null }[], requested: boolean): string | null {
+export function strandedCappedRefusal(work: Pick<Work, 'key' | 'policyRevision' | 'candidate'>, capped: CappedReview, history: readonly { id: string; action: string; state: string; input?: any; reason?: string; outcome?: string | null; refusal?: { approver?: string; reason?: string; at?: string } | null; precedent?: string[]; situation?: DecisionSituation | null }[], requested: boolean): string | null {
   const refused = refusedCappedReworks(history, capped);
   if (!refused.length || !requested) return null;
   const binding = refused[0].input.binding, mark = cappedRevisionMark(work.policyRevision);
   // Only a request still before its approver, or approved and awaiting its apply, has an actor; a superseded, failed, stale or withdrawn one has none (GY-1577 review).
   if (history.some(entry => entry.action === 'rework' && pendingReworkStates.has(entry.state) && entry.input?.binding === binding && !!entry.reason?.includes(mark))) return null;
-  const latest = capRefusalOf(refused[0]);
+  // A new request must answer every refusal still standing for this candidate: the server's standingRefusal follows citations from the
+  // newest, so the escalation names each uncited refusal (newest last, as readDecisions lists them), never only the oldest (GY-1577 review).
+  const leaves = uncitedRefusals(refused.map(entry => ({ ...entry, input: entry.input, reason: entry.reason ?? '' })), 'rework', refused[0].input, () => true, decisionSituation('rework', work));
+  const cite = leaves.length ? leaves : [refused.at(-1)!.id];
+  const latest = capRefusalOf(refused.find(entry => entry.id === cite.at(-1))!);
   return `${capped.reason}; independent approver ${latest.approver} refused its capped rework (decision ${latest.id}), but that refusal does not bind this change request under policy revision ${work.policyRevision} `
-    + `(it predates the revision, or its time cannot be placed after it), and no capped rework under revision ${work.policyRevision} stands for an approver, so the review-cap step can neither withdraw it nor wait on a judgement; a new request cites ${latest.id} (--precedent ${latest.id})`;
+    + `(it predates the revision, or its time cannot be placed after it), and no capped rework under revision ${work.policyRevision} stands for an approver, so the review-cap step can neither withdraw it nor wait on a judgement; a new request cites ${cite.join(', ')} (--precedent ${cite.join(',')})`;
 }
 
 /** The escalation's detail: the round, the cap, the findings, and the decision the independent approver is asked for. */

@@ -8,6 +8,7 @@ import { emptyHeldDecisions } from '../src/daemon/decision-reads.js';
 import { cappedEscalationKey, cappedFilingKey, cappedRefusalRequest, cappedRereviewKey, refusalFollowUps, reviewCapStep } from '../src/daemon/cycle-review-cap.js';
 import { decisionKey } from '../src/daemon/reconcile.js';
 import { actionId, reconcileActions } from '../src/model/actions.js';
+import { standingRefusal } from '../src/model/approval.js';
 import type { NextAction } from '../src/model/next-action.js';
 import type { Cycle } from '../src/daemon/cycle.js';
 import { writeFile } from 'node:fs/promises';
@@ -386,4 +387,26 @@ test('unit:capped-refusal-never-silent — a refused capped rework the review-ca
   const escalated = moved.performed.filter(entry => entry.kind === 'escalation');
   assert.equal(escalated.length, 2, 'one escalation per revision, not one per cycle');
   assert.match(escalated[1].detail, /does not bind this change request under policy revision 6/);
+
+  // A newer refusal that cites an older one leaves only the newer uncited: the escalation cites it, which answers the chain on the
+  // server (standingRefusal), never the oldest alone. Two uncited refusals are both cited.
+  const older = unmarked('2026-10-09T07:20:00Z', '2026-10-09T07:10:00Z', '0a0a0a0a-0000-4000-8000-000000000001');
+  const newer = { ...unmarked('2026-10-09T07:40:00Z', '2026-10-09T07:30:00Z'), reason: `${unmarked().reason} Answers refusal ${older.id}.` };
+  const chain = harness(round8());
+  chain.world.history = [older, newer];
+  asked(chain);
+  await chain.cycle();
+  const chained = chain.state.actions[cappedEscalationKey(chain.world.item, D)]!.detail;
+  assert.match(chained, /refused its capped rework \(decision f84ee922-9b67-4a8e-aa96-a2ca189a9ccb\)/);
+  assert.match(chained, /a new request cites f84ee922-9b67-4a8e-aa96-a2ca189a9ccb \(--precedent f84ee922-9b67-4a8e-aa96-a2ca189a9ccb\)/, 'the newest uncited refusal, not the oldest');
+  assert.equal(standingRefusal([older, newer] as unknown as Parameters<typeof standingRefusal>[0], 'rework', older.input, `New grounds; cites ${newer.id}.`, (a, b) => JSON.stringify(a) === JSON.stringify(b), ['f84ee922-9b67-4a8e-aa96-a2ca189a9ccb']), null, 'citing the escalation\'s precedent answers the whole chain');
+  const forked = harness(round8());
+  forked.world.history = [older, unmarked('2026-10-09T07:40:00Z', '2026-10-09T07:30:00Z')];
+  asked(forked);
+  await forked.cycle();
+  assert.match(forked.state.actions[cappedEscalationKey(forked.world.item, D)]!.detail, /a new request cites 0a0a0a0a-0000-4000-8000-000000000001, f84ee922-9b67-4a8e-aa96-a2ca189a9ccb \(--precedent 0a0a0a0a-0000-4000-8000-000000000001,f84ee922-9b67-4a8e-aa96-a2ca189a9ccb\)/);
+
+  // The refused verdict is the head's: an unmarked refusal recorded while the head sat on an earlier base still binds it, as a marked one does.
+  const rebased = { ...unmarked(), situation: { sha: D, baseSha: 'e'.repeat(40) } } as ReturnType<typeof unmarked>;
+  assert.ok(refusedCappedRework([rebased], cappedReview(round8(), config)!, round8()), 'main moving under the head does not unbind the refusal');
 });

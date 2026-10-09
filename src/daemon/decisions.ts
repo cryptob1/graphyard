@@ -114,6 +114,8 @@ export function sinceRevision(work: Pick<Work, 'policyRevision' | 'formalReviewR
 export function refusedCappedRework<D extends { action: string; state: string; input?: any; reason?: string; requestedAt?: string; refusal?: { at?: string } | null }>(history: readonly D[],
   capped: Pick<CappedReview, 'sha' | 'reviewer'> & Partial<Pick<CappedReview, 'reviewId' | 'submittedAt'>>, work: Parameters<typeof sinceRevision>[0]): D | null {
   const mark = cappedRevisionMark(work.policyRevision);
+  // The binding names the head and reviewer whose verdict was judged; a base the head later sits on does not change that verdict, so the
+  // refusal's recorded base is not compared, marked or unmarked (GY-1577 review): the candidate's base follows main and would strand it.
   return refusedCappedReworks(history, capped).find(entry => entry.reason?.includes(mark)
     || !revisionMarked(entry.reason) && sinceRevision(work, capped, entry.refusal?.at ?? entry.requestedAt)) ?? null;
 }
