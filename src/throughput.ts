@@ -1,7 +1,7 @@
 import { mkdir, readdir, readFile, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { agentOwner, humanOwner, type AttentionItem } from './master.js';
-import { appendThroughputLedger, failedEntry, readThroughputLedger, recordedEntry, throughputPursuit, type ThroughputPursuit } from './throughput-ledger.js';
+import { appendThroughputLedger, failedEntry, readThroughputLedger, recordedEntry, reportBlocker, throughputEscalationMs, throughputPursuit, type ThroughputPursuit } from './throughput-ledger.js';
 import { actionIdleMs, actionRetryDelay, type ActionRecord, type ActionRow } from './model/actions.js';
 import { acceptedMergeAt, nearestRankPercentiles, pipelineSpeed, type Percentiles } from './pipeline-speed.js';
 import type { Work } from './model.js';
@@ -75,6 +75,12 @@ export interface ActionExecution {
   /** The longest this row was actionable with nobody running it, and when that wait started. */
   idleMs: number; idleSince: string | null;
   resolution: string | null;
+  /**
+   * Set when no executor could have run this row, for a cause the row itself records
+   * (`unrunnableCause`, GY-1587): it was superseded before any claim, and its own refusal names a
+   * provider permission it lacked. Its idle span is reported here and left out of the idle budget.
+   */
+  unrunnable?: string | null;
 }
 
 /** One delivery as the report names it: its figures, its action rows, and why it is in or out. */
@@ -85,6 +91,8 @@ export interface DeliveryRecord {
   /** Every executor that claimed one of this delivery's actions, so a reader can check who was present. */
   executors: string[];
   idle: { ms: number; action: string; kind: string; since: string | null } | null;
+  /** Idle spans left out of `idle` because no executor could have run the row (`unrunnableCause`), each with the cause its row records. */
+  unrunnableIdle?: { ms: number; action: string; kind: string; since: string | null; cause: string }[];
   admitted: boolean;
   /** Empty when admitted; otherwise every reason this delivery is not in the population. */
   exclusions: string[];
@@ -208,6 +216,35 @@ export function actionIdleSpans(row: Pick<ActionRow, 'requestedAt' | 'history' |
   return spans;
 }
 
+/**
+ * A provider refusal that itself establishes a permission the installation lacks: a 403 whose
+ * recorded reason names the missing grant — the preflight's recorded shortfall (`App … lacks …`),
+ * or an installed App that `lacks a permission` as GY-468's row recorded it. No executor holding
+ * that installation can run the request. GitHub's bare `Resource not accessible by integration`
+ * does not establish a shortfall (src/github.ts permissionHint), nor does any other 401/403 — a
+ * secondary rate limit, a rerun of a run still in progress, rejected credentials — so those are
+ * refusals a later attempt can clear (GY-1587).
+ */
+const permissionRefusal = /\brefused: [^;]*\(403\).*?(?:\bApp \S+ lacks \S|\blacks a permission\b)/i;
+/** A row whose own record says its preflight found nothing missing never establishes a shortfall. */
+const noShortfallFound = /\bfound no missing permission\b/i;
+
+/**
+ * Why no executor could have run this row, read from the row alone, or null when one could have
+ * (GY-1587). Only a row nobody ever claimed before it was superseded qualifies — a row an executor
+ * claimed was runnable by definition — and only when its own refusal (or the detail it was requested
+ * with) records the provider refusing it for a permission the installation lacks, as on GY-468's
+ * request-rework 4ccba8e9 (the CI rerun refused 403 for a missing App permission). Every other
+ * superseded row was one anybody could have run and nobody did, and its wait counts in full.
+ */
+export function unrunnableCause(row: Pick<ActionRow, 'refusal' | 'inputs' | 'history'>): string | null {
+  const records = row.history ?? [];
+  if (records.some(record => record.event === 'claimed') || !records.some(record => record.event === 'cancelled')) return null;
+  const detail = (row.inputs as { detail?: unknown } | null | undefined)?.detail;
+  for (const recorded of [row.refusal, typeof detail === 'string' ? detail : null]) if (recorded && permissionRefusal.test(recorded) && !noShortfallFound.test(recorded)) return recorded;
+  return null;
+}
+
 /** One row as the report names it: the executor that claimed it, what it did, and its longest idle span. */
 export function actionExecution(row: ActionRow, now: number): ActionExecution {
   const records = row.history ?? [];
@@ -227,6 +264,7 @@ export function actionExecution(row: ActionRow, now: number): ActionExecution {
     supersededUnexecuted: records.some(record => record.event === 'cancelled') && claimed === null,
     idleMs: longest?.ms ?? 0, idleSince: longest?.from ?? null,
     resolution: row.resolution ?? null,
+    unrunnable: unrunnableCause(row),
   };
 }
 
@@ -292,7 +330,12 @@ export function deliveryRecord(work: Work, now: number): DeliveryRecord {
   const speed = pipelineSpeed(work, now);
   const actions = deliveryActions(work, now);
   const executed = actions.filter(action => action.executor && action.result === 'done');
-  const idle = actions.reduce((worst, action) => !worst || action.idleMs > worst.idleMs ? action : worst, null as ActionExecution | null);
+  // GY-1587: a row no executor could have run (`unrunnableCause`) is no executor's idleness; its
+  // span is listed beside the budget's figure, never inside it. Every other row counts in full.
+  const runnable = actions.filter(action => !action.unrunnable);
+  const idle = runnable.reduce((worst, action) => !worst || action.idleMs > worst.idleMs ? action : worst, null as ActionExecution | null);
+  const unrunnableIdle = actions.filter(action => action.unrunnable && action.idleMs > 0)
+    .map(action => ({ ms: action.idleMs, action: action.id, kind: action.kind, since: action.idleSince, cause: action.unrunnable! }));
   const exclusions = [...unrealReasons(work), ...coordinatorFingerprints(work)];
   if (speed.submitToMergeMs === null) exclusions.push(`its timeline records no submission (${speed.coverage}), so submit→merge cannot be measured for it`);
   // The claim is stated over routine deliveries, in the same words the speed target uses: at most
@@ -306,6 +349,7 @@ export function deliveryRecord(work: Work, now: number): DeliveryRecord {
     submittedAt: speed.submittedAt, submitToMergeMs: speed.submitToMergeMs,
     actions, executors: [...new Set(actions.map(action => action.executor).filter((name): name is string => !!name))].sort(),
     idle: idle && idle.idleMs > 0 ? { ms: idle.idleMs, action: idle.id, kind: idle.kind, since: idle.idleSince } : null,
+    ...(unrunnableIdle.length ? { unrunnableIdle } : {}),
     admitted: exclusions.length === 0, exclusions,
   };
 }
@@ -412,7 +456,8 @@ export function verifyThroughput(work: Work[], now: number, options: { deployed:
 export function renderDelivery(record: DeliveryRecord): string {
   const actions = record.actions.map(action => `${action.kind}→${action.executor ?? 'unclaimed'}${action.result ? `(${action.result})` : ''}`).join(', ');
   const speed = record.submitToMergeMs === null ? 'submit→merge unmeasured' : `submit→merge ${minutes(record.submitToMergeMs)}`;
-  const idle = record.idle ? `longest idle ${minutes(record.idle.ms)} on ${record.idle.kind}` : 'never idle past a claim';
+  const unrunnable = (record.unrunnableIdle ?? []).map(span => `; not counted: ${minutes(span.ms)} on ${span.kind} no executor could run (${span.cause.slice(0, 160)})`).join('');
+  const idle = `${record.idle ? `longest idle ${minutes(record.idle.ms)} on ${record.idle.kind}` : 'never idle past a claim'}${unrunnable}`;
   return `${record.key} (PR ${record.pr ?? '?'}, merged ${record.mergedAt}): ${speed}; ${idle}; actions ${actions || 'none recorded'}${record.admitted ? '' : `; EXCLUDED — ${record.exclusions.join('; ')}`}`;
 }
 
@@ -486,14 +531,19 @@ export function throughputOwnerItem(revision: string, admitted: number | null) {
   };
 }
 
+/** How an owner's closure reason names an answered escalated miss (`throughputOwnerClosure`, GY-1587). */
+const escalatedMissAnswer = ' on an escalated budget miss';
+
 /**
  * Why the loop closes the owner now, or null while it must stay open: the newest answer for the
  * serving release verified the claim, or its needs-decision was answered. Nothing else closes it,
  * so a release that is still unverified always has an open owner.
  */
-export function throughputOwnerClosure(owner: Pick<Work, 'key' | 'policyRevision'>, serving: { revision: string; verdict: ThroughputReport['verdict'] | null }, raisedAt: number | null): string | null {
+export function throughputOwnerClosure(owner: Pick<Work, 'key' | 'policyRevision'>, serving: { revision: string; verdict: ThroughputReport['verdict'] | null }, raisedAt: number | null,
+  cause: ThroughputStall['cause'] = 'stall'): string | null {
   if (serving.verdict === 'verified') return `${throughputClaim.item}'s throughput claim verified on the serving release ${serving.revision}; the loop closes ${owner.key}, which owned that verification`;
-  if (throughputOwnerAnswered(owner, raisedAt)) return `${owner.key}'s needs-decision (raised at its requirements revision ${raisedAt}) was answered by its requirements revision ${owner.policyRevision}; the loop closes it, and files a second owner for ${serving.revision.slice(0, 12)} only while a measurement of it under the applied rule still shows a needs-decision standing, in this same cycle: the next release it measures unverified files a new one`;
+  // GY-1587: the reason names an escalated miss it answered, so `throughputAnsweredAt` tells that answer from a stall's.
+  if (throughputOwnerAnswered(owner, raisedAt)) return `${owner.key}'s needs-decision (raised at its requirements revision ${raisedAt}${cause === 'escalated-miss' ? escalatedMissAnswer : ''}) was answered by its requirements revision ${owner.policyRevision}; the loop closes it, and files a second owner for ${serving.revision.slice(0, 12)} only while a measurement of it under the applied rule still shows a needs-decision standing, in this same cycle: the next release it measures unverified files a new one`;
   return null;
 }
 
@@ -503,7 +553,7 @@ export function throughputOwnerClosure(owner: Pick<Work, 'key' | 'policyRevision
  * successor's idempotency key names it, so one is filed per (release, answered revision) (GY-1467).
  */
 export function throughputOwnerAnsweredBy(owner: Pick<Work, 'closure'> | undefined): number | null {
-  const answered = /needs-decision \(raised at its requirements revision \d+\) was answered by its requirements revision (\d+)/.exec(owner?.closure?.reason ?? '');
+  const answered = /needs-decision \(raised at its requirements revision \d+(?: on an escalated budget miss)?\) was answered by its requirements revision (\d+)/.exec(owner?.closure?.reason ?? '');
   return answered ? Number(answered[1]) : null;
 }
 
@@ -517,6 +567,13 @@ export const throughputStallBound = 2 * throughputClaim.minimumDeliveries;
 /** The typed needs-decision a stalled population raises: the rule, and every exclusion reason counted. */
 export interface ThroughputStall {
   kind: 'needs-decision';
+  /**
+   * What raised it: `stall`, a population that cannot accumulate (`throughputStall`), or
+   * `escalated-miss`, a population that did accumulate past the claim's minimum while the budgets
+   * still missed past the pursuit's escalation bound (`throughputEscalatedMiss`, GY-1587). Absent on
+   * records written before GY-1587, which were all stalls.
+   */
+  cause?: 'stall' | 'escalated-miss';
   /** The open owner item the decision is asked on; null while none is filed. */
   owner: string | null;
   revision: string | null;
@@ -562,8 +619,53 @@ export function throughputStall(report: ThroughputReport, owner: string | null =
   const revision = report.deployed?.revision ?? null, rule = report.population?.rule ?? populationRule;
   const finding = `session-free deliveries cannot accumulate on ${revision?.slice(0, 12) ?? 'the measured release'} — ${admitted} admitted of ${delivered} deliveries in the window (bound ${throughputStallBound}), every one carrying a coordinator fingerprint, so no further delivery made the same way reaches the claim's ${throughputClaim.minimumDeliveries}. `
     + `Exclusions: ${reasons.map(entry => `${entry.deliveries} × ${entry.reason}`).join('; ')}. Population rule: ${rule}`;
-  const stall = { kind: 'needs-decision' as const, owner, revision, measuredAt: report.measuredAt, rule, admitted, delivered, bound: throughputStallBound, reasons, finding };
+  const stall = { kind: 'needs-decision' as const, cause: 'stall' as const, owner, revision, measuredAt: report.measuredAt, rule, admitted, delivered, bound: throughputStallBound, reasons, finding };
   return { ...stall, text: throughputStallText(stall) };
+}
+
+/**
+ * The needs-decision an accumulating population raises (GY-1587): the measured release contains the
+ * claim, at least `throughputClaim.minimumDeliveries` deliveries are admitted, the budgets still
+ * miss (`claim-missed` on the recorded report), and the ledger's pursuit is escalated (past
+ * `throughputEscalationMs`), whatever its newest attempt's blocker: a failed attempt measures
+ * nothing. `throughputStall` asks only when nothing can accumulate, so without this a population that accumulates while a budget misses had no answerable exit: the owner could
+ * close only on a verification that never came. Null otherwise — inside the bound the loop carries
+ * the claim, and a report judged under a superseded rule is re-measured, not decided.
+ */
+export function throughputEscalatedMiss(report: ThroughputReport, pursuit: Pick<ThroughputPursuit, 'escalated'> | null, owner: string | null = null): ThroughputStall | null {
+  // The miss is read from the recorded report, never from the ledger's newest attempt: a failed
+  // re-measure after it appends a `measurement-failed` attempt but leaves the recorded miss
+  // standing, and the decision with it, so the verification is never left without an owner.
+  if (!pursuit?.escalated || reportBlocker(report) !== 'claim-missed') return null;
+  if (report.verdict === 'verified' || report.deployed?.containsClaim !== true || throughputRuleSuperseded(report)) return null;
+  const admitted = report.population?.admitted ?? 0, delivered = report.population?.delivered ?? 0;
+  if (admitted < throughputClaim.minimumDeliveries) return null;
+  const missed = (report.shortfall?.missed ?? []).filter(entry => entry.metric === 'submit-to-merge-p50' || entry.metric === 'idle-actionable');
+  if (!missed.length) return null;
+  const revision = report.deployed?.revision ?? null, rule = report.population?.rule ?? populationRule;
+  const finding = `${throughputClaim.item}'s budgets missed on ${revision?.slice(0, 12) ?? 'the measured release'} past the ${Math.round(throughputEscalationMs / 3_600_000)}h escalation bound over an accumulating population — ${admitted} admitted of ${delivered} deliveries in the window, at least the ${throughputClaim.minimumDeliveries} the claim is judged over — so further deliveries do not answer it. `
+    + `Missed: ${missed.map(entry => entry.metric).join(', ')}. Population rule: ${rule}`;
+  const decision = { kind: 'needs-decision' as const, cause: 'escalated-miss' as const, owner, revision, measuredAt: report.measuredAt, rule, admitted, delivered, bound: throughputClaim.minimumDeliveries, reasons: [], finding };
+  return { ...decision, text: throughputStallText(decision) };
+}
+
+/** The needs-decision standing on a recorded measurement, whichever way it arose: a stall, or an escalated miss over an accumulating population (GY-1587). */
+export const throughputDecision = (report: ThroughputReport, pursuit: Pick<ThroughputPursuit, 'escalated'> | null, owner: string | null = null) =>
+  throughputStall(report, owner) ?? throughputEscalatedMiss(report, pursuit, owner);
+
+/**
+ * When an escalated miss on `revision` was last answered: the latest closure of an owner filed for
+ * that release that the loop closed on the answer to an escalated-miss needs-decision
+ * (`throughputOwnerClosure` with that cause), or null. An escalated miss is asked once per release
+ * (GY-1587): after its answer the release stays owned by the successor, which closes when a
+ * measurement verifies, and the next release asks afresh. An answered stall is a different decision
+ * and never stands in for it: a population that accumulates after its stall was answered still has
+ * its escalated miss asked.
+ */
+export function throughputAnsweredAt(work: readonly Pick<Work, 'title' | 'closure'>[], revision: string): number | null {
+  const title = throughputOwnerItem(revision, null).title;
+  const answered = work.filter(item => item.title === title && throughputOwnerAnsweredBy(item) !== null && (item.closure?.reason ?? '').includes(escalatedMissAnswer)).map(item => time(item.closure?.at)).filter((at): at is number => at !== null);
+  return answered.length ? Math.max(...answered) : null;
 }
 
 /**
@@ -585,10 +687,17 @@ export const supersededActionExclusion = /^its \S+ action was superseded before 
 /** A delivery's exclusions as the settled rule judges them: the superseded control-plane family dropped (GY-1465). */
 export const settledExclusions = (exclusions: readonly string[]) => exclusions.filter(exclusion => !supersededActionExclusion.test(exclusion));
 
+const escalatedMissDecide = 'Decide whether the coordination that leaves the claim missing its budgets changes';
+/** What raised the needs-decision an escalation action records, read from its text (`throughputStallText`). */
+export const throughputDecisionCause = (detail: string | null | undefined): NonNullable<ThroughputStall['cause']> => detail?.includes(escalatedMissDecide) ? 'escalated-miss' : 'stall';
+
 /** The needs-decision as the escalation and the attention word it, asked on the owner item it names. */
 export function throughputStallText(stall: Omit<ThroughputStall, 'text'>) {
+  const decide = stall.cause === 'escalated-miss'
+    ? `${escalatedMissDecide} or ${throughputClaim.item}'s claim stands unverified on this release`
+    : 'Decide whether the population rule or the coordination that leaves these fingerprints changes';
   return `needs decision on ${stall.owner ?? 'the item that owns the verification (the loop files it)'}: ${stall.finding}. `
-    + `Decide whether the population rule or the coordination that leaves these fingerprints changes; the budgets stay as ${throughputClaim.item} stated them (measured ${stall.measuredAt})`;
+    + `${decide}; the budgets stay as ${throughputClaim.item} stated them (measured ${stall.measuredAt})`;
 }
 
 /**
@@ -698,7 +807,7 @@ export interface LoopThroughputOutcome {
   revision: string | null;
   /** The verdict of the release's newest measurement, when there is one (`recorded` or `current`). */
   verdict?: ThroughputReport['verdict'];
-  /** Set when that measurement shows session-free deliveries cannot accumulate (`throughputStall`). */
+  /** Set when a needs-decision stands on that measurement (`throughputDecision`): a stall, or an escalated miss over an accumulating population (GY-1587). */
   stall?: ThroughputStall | null;
   detail: string;
   file?: string;
@@ -751,7 +860,8 @@ export async function loopThroughputMeasurement(root: string, input: {
     // A verified release is never measured again; an unverified one once its record is an hour old.
     if (measured && !throughputRemeasureDue(previous!.report, now)) {
       const verified = previous!.report.verdict === 'verified';
-      return { outcome: 'current', settled: verified, revision, file: previous!.file, verdict: previous!.report.verdict, stall: throughputStall(previous!.report),
+      const pursuit = verified ? null : throughputPursuit(await readThroughputLedger(ledger), now);
+      return { outcome: 'current', settled: verified, revision, file: previous!.file, verdict: previous!.report.verdict, stall: throughputDecision(previous!.report, pursuit),
         detail: `${claimKey}'s throughput is already measured for ${revision.slice(0, 12)} (${previous!.report.verdict}, ${previous!.file})${verified ? '' : `; measured again from ${throughputRemeasureFrom(previous!.report.measuredAt)} as deliveries accumulate`}` };
     }
     const mergeSha = claim.delivery.mergeSha;
@@ -771,8 +881,8 @@ export async function loopThroughputMeasurement(root: string, input: {
   }
   const { report, read } = measurement;
   const file = await recordThroughputMeasurement(root, report);
-  await appendThroughputLedger(ledger, recordedEntry(report, { source: 'loop', file, output: renderThroughput(report) }));
-  return { outcome: 'recorded', settled: report.verdict === 'verified', revision: revision!, file, report, read, verdict: report.verdict, stall: throughputStall(report),
+  const pursuit = throughputPursuit(await appendThroughputLedger(ledger, recordedEntry(report, { source: 'loop', file, output: renderThroughput(report) })), Date.parse(report.measuredAt));
+  return { outcome: 'recorded', settled: report.verdict === 'verified', revision: revision!, file, report, read, verdict: report.verdict, stall: throughputDecision(report, pursuit),
     detail: `${remeasure ? 'Re-measured' : 'Recorded'} ${claimKey}'s throughput measurement for ${revision!.slice(0, 12)} in ${file}, reading ${read.length} deliveries whole: ${report.verdict}: ${report.reason}${report.verdict === 'verified' ? '' : `; measured again from ${throughputRemeasureFrom(report.measuredAt)} as deliveries accumulate`}` };
 }
 
@@ -824,13 +934,17 @@ export interface ThroughputVisibility {
  * states that none remains and names the loop's re-measure, never `master decide` for the answered one.
  */
 export function throughputClaimVisibility(measurement: { report: ThroughputReport; file: string } | null, deployed: { revision: string | null; version: string | null }, deliveries: number,
-  pursuit: ThroughputPursuit | null = null, ownerItem: Pick<Work, 'key'> | null = null): ThroughputVisibility {
+  pursuit: ThroughputPursuit | null = null, ownerItem: Pick<Work, 'key'> | null = null, answeredAt: number | null = null): ThroughputVisibility {
   const command = throughputMeasurementCommand;
   const admitted = measurement?.report.population?.admitted ?? 0, ownerKey = ownerItem?.key ?? null;
   const owner = { item: ownerKey, admitted, needed: throughputClaim.minimumDeliveries, measuredAt: measurement?.report.measuredAt ?? null };
   const progress = `${ownerKey ? `${ownerKey} owns the verification` : 'No open item owns the verification yet (the loop files one on its next unverified measurement of a release whose owner has not closed on an answered needs-decision, and within one cycle while a needs-decision stands)'}: ${admitted} admitted of ${throughputClaim.minimumDeliveries}${measurement ? ` in the newest recorded measurement (${measurement.report.measuredAt}, of ${measurement.report.deployed?.revision?.slice(0, 12) ?? 'an unnamed release'})` : ', nothing measured yet'}`;
   const serving = Boolean(measurement && deployed.revision && deployed.revision !== 'unknown' && measurement.report.deployed?.revision === deployed.revision);
-  const stall = serving ? throughputStall(measurement!.report, ownerKey) : null, decideOn = ownerKey ?? 'GY-N';
+  const decision = serving ? throughputDecision(measurement!.report, pursuit, ownerKey) : null, decideOn = ownerKey ?? 'GY-N';
+  // GY-1587: an escalated miss is asked once per release; once answered, the release stays owned
+  // and the line says so, rather than repeating the escalation or asking the answered decision again.
+  const answered = decision?.cause === 'escalated-miss' && answeredAt !== null ? new Date(answeredAt).toISOString() : null;
+  const stall = answered ? null : decision;
   // GY-1458: a measurement judged under a population rule since revised and applied asks no decision —
   // that one is answered — so the line says none remains and when the loop re-measures under the applied rule.
   const superseded = serving && throughputRuleSuperseded(measurement!.report)
@@ -839,15 +953,23 @@ export function throughputClaimVisibility(measurement: { report: ThroughputRepor
   // The ledger's pursuit (GY-1437): inside its bound the loop carries the claim, so the line is in
   // motion until it is due; past the bound it escalates to the operator, naming the blocker. A
   // population shown unable to accumulate is the typed needs-decision on the owner item (GY-1438).
+  // GY-1587: the command asks the decision the stall raised. An escalated miss has an admitted
+  // population and no fingerprint problem, so its revision settles the coordination behind the
+  // budget miss or records the claim as unverified on this release, never the population rule.
+  const settles = stall?.cause === 'escalated-miss'
+    ? `settles whether the coordination that leaves ${throughputClaim.item}'s claim missing its budgets changes, or records that its claim stands unverified on this release (the budgets unchanged)`
+    : `settles the population rule ${throughputClaim.item}'s claim is judged over or the coordination that leaves these fingerprints`;
   const attention = (reason: string): AttentionItem => {
     if (stall) return { subject: 'throughput', kind: 'throughput', text: `${throughputClaim.item}'s throughput claim is unverified against the deployed release and ${stall.text}`,
-      ...agentOwner('master', `graphyard master decide ${decideOn} requirements @revision.json "REASON" with a revision that settles the population rule ${throughputClaim.item}'s claim is judged over or the coordination that leaves these fingerprints, then graphyard master approver ${decideOn} DECISION; the loop closes ${decideOn} once it is applied`, 'approver') };
+      ...agentOwner('master', `graphyard master decide ${decideOn} requirements @revision.json "REASON" with a revision that ${settles}, then graphyard master approver ${decideOn} DECISION; the loop closes ${decideOn} once it is applied`, 'approver') };
     const text = `${throughputClaim.item}'s throughput claim is unverified against the deployed release: ${reason}. ${progress}${superseded}`;
     if (!pursuit) return { subject: 'throughput', kind: 'throughput', text: `${text}; the loop re-measures the serving release at most every ${Math.round(throughputRemeasureMs / 60_000)} min while it stays unverified`, ...agentOwner('master', command) };
     if (!pursuit.escalated) return { subject: 'throughput', kind: 'throughput', text: `${text}; ${pursuit.text}`, inMotionUntil: pursuit.dueAt, ...agentOwner('master', command) };
     // Past the bound the line names the blocker. Only two blockers are a human's to remove (AGENTS.md):
     // a credential for the measurement, or whether deliveries may run with no master session at all.
     // An unreachable plane, an unconfirmed release or a failed or missed measurement stays the master's.
+    if (answered) return { subject: 'throughput', kind: 'throughput', text: `${text}; its needs-decision on this release was answered at ${answered}, so ${ownerKey ?? 'the owner the loop files'} carries the verification until a recorded measurement verifies it, and the next release measured unverified past the bound asks afresh`,
+      ...agentOwner('master', command) };
     const escalated = `${text}; escalated: ${pursuit.text}`;
     if (pursuit.blocker === 'missing-credentials') return { subject: 'throughput', kind: 'throughput', text: escalated,
       ...humanOwner('issuing credentials to people', `Issue the measurement a coordinator or reader credential for the control plane, then run ${command}`) };
@@ -875,5 +997,6 @@ export async function throughputStatus(root: string, coordinator: Parameters<typ
   return throughputClaimVisibility(await readThroughputMeasurement(root).catch(() => null),
     { revision: deployedRevision(coordinator).revision, version: coordinator?.release?.version ?? null },
     work.filter(item => item.stage === 'done' && item.delivery).length,
-    throughputPursuit(await readThroughputLedger(join(root, throughputMeasurementDirectory)), now), openThroughputOwner(work));
+    throughputPursuit(await readThroughputLedger(join(root, throughputMeasurementDirectory)), now), openThroughputOwner(work),
+    throughputAnsweredAt(work, deployedRevision(coordinator).revision ?? ''));
 }

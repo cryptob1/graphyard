@@ -33,7 +33,7 @@ A merge unserved five minutes after new `GRAPHYARD_BUILD_SHA` is `delivery.deplo
 
 Deliveries awaiting not-yet-due or validating [promotion](delivery.md) are skipped by release lag and the `loaded-revision` [resource](operations-reference.md#control-plane-resources). Observed production holds self-upgrade's loaded-code restarts (target fixed) until served; stall/waiting `release-lagged`/`upgrade:held` name both commits; `.graphyard/held-cli.json` pins `bin/graphyard.mjs`, executors, hold-aware restarted loops to the served release.
 
-After verified deployment the loop records served-release throughput in `.graphyard/measurements/throughput` (`scripts/measure-throughput.mjs --record`), excluding hand-touched deliveries; all ≥20 window deliveries excluded files one owner item (`escalation:throughput:GY-N:REV`).
+Post-deploy the loop records throughput (`.graphyard/measurements/throughput`, `scripts/measure-throughput.mjs --record`) without operator-touched deliveries or grant-refused superseded idle; ≥20 all excluded, or ≥10 missing 48h+, escalates once/release (`escalation:throughput:GY-N:REV`).
 
 ### Deployment incident
 

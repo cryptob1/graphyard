@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { reviewProviderOf, reviewerProfileFor, exhaustedReviewerProfiles, deploySmokeRequired, deliveryState, rollbackGuidance } from '../model.js';
 import { type Work } from '../model.js';
 import { mergedWithoutAuthorization, unauthorizedMergeViolation } from '../merge-queue.js';
-import { boundDeployment, type DaemonAction, deploymentObservationSchema, maxProofAttempts, message, retainedActions } from './state.js';
+import { boundDeployment, type DaemonAction, type DaemonState, deploymentObservationSchema, maxProofAttempts, message, retainedActions, storeAction } from './state.js';
 import { candidateKey } from './reconcile.js';
 import { readyToRetry } from './sessions.js';
 import { detailChanged, exhaustedProofEscalation, exhaustedProofKey, githubPause, observationWakeDue, standingVerdict } from './decisions.js';
@@ -12,7 +12,7 @@ import type { Cycle } from './cycle.js';
 import { defaultDeploymentReuseMinutes, defaultPromoteEveryMinutes, deploymentDetail, deploymentStepBudgetMs, promotionCycle, promotionWorkflow, reusableDeployment, stillVerifying, withinDeploymentBudget } from './deployment.js';
 import { mainGuardAttention } from '../main-guard.js';
 import { promotionFreeze } from './main-watch.js';
-import { openThroughputOwner, throughputOwnerAnsweredBy, throughputOwnerClosure, throughputOwnerItem, throughputRemeasureAt, throughputStallText, type ThroughputStall } from '../throughput.js';
+import { openThroughputOwner, throughputAnsweredAt, throughputDecisionCause, throughputOwnerAnsweredBy, throughputOwnerClosure, throughputOwnerItem, throughputRemeasureAt, throughputStallText, type ThroughputStall } from '../throughput.js';
 
 /**
  * GY-710. Wake the item's observation job for a step refused on a stale observation — a rework —
@@ -284,12 +284,27 @@ export function answeredVerdict(answer: DaemonAction | undefined): 'verified' | 
 export const throughputOwnerSuccessions = 8;
 export const throughputOwnerKey = (revision: string) => `throughput:owner:${revision}`;
 export const throughputEscalationKey = (owner: string, policyRevision: number) => `escalation:throughput:${owner}:${policyRevision}`;
-/** The owner's requirements revision at which the loop raised its needs-decision (the earliest, should a key repeat), or null when it raised none. */
+/**
+ * The owner's requirements revision at which the loop raised its needs-decision (the earliest, should a key repeat), or null when it raised none.
+ * GY-1587: the escalation is recorded `waiting` until its owner is closed, so the cursor's bound on
+ * resolved actions never drops the revision its answer is judged against; it is settled `done` then.
+ */
 export function throughputEscalatedAt(actions: Record<string, DaemonAction>, owner: Pick<Work, 'key'>): number | null {
   const prefix = `escalation:throughput:${owner.key}:`;
-  const raised = Object.entries(actions).filter(([key, action]) => key.startsWith(prefix) && action.state === 'done' && action.work === owner.key)
+  const raised = Object.entries(actions).filter(([key, action]) => key.startsWith(prefix) && (action.state === 'waiting' || action.state === 'done') && action.work === owner.key)
     .map(([key]) => Number(key.slice(prefix.length))).filter(Number.isInteger);
   return raised.length ? Math.min(...raised) : null;
+}
+
+/**
+ * An escalation waits while its owner is open (`throughputEscalatedAt`); once that owner is closed, by
+ * the loop on its answer or by anyone, its answer is consumed, and the row is settled `done` (raise time
+ * kept) so the cursor's bound may retire it. `open` is the owner still open, whose escalation stands.
+ */
+function settleThroughputEscalations(state: DaemonState, open: string | null) {
+  for (const [key, action] of Object.entries(state.actions)) {
+    if (key.startsWith('escalation:throughput:') && action.state === 'waiting' && action.work !== open) storeAction(state, key, { ...action, state: 'done' }, null);
+  }
 }
 
 /**
@@ -306,7 +321,9 @@ export function throughputEscalatedAt(actions: Record<string, DaemonAction>, own
  * after a refusal or a lost reply sends the same body under the same key and is answered from the
  * stored receipt. A measurement showing the population cannot accumulate raises the typed
  * needs-decision on the owner once per owner: it stands until answered, so a re-measure that finds
- * the same — or more of the same — never raises it again. Filing and closing go through the
+ * the same — or more of the same — never raises it again. GY-1587: so does a miss the ledger's
+ * pursuit escalated over an accumulating population (`throughputEscalatedMiss`), asked once per
+ * release: after its answer the successor owns the release until a measurement verifies it. Filing and closing go through the
  * operator-agent; a failure backs off on the action.
  */
 async function throughputOwnerStep(cycle: Pick<Cycle, 'state' | 'effects' | 'now' | 'performed'>, revision: string, work: Work[], stall: ThroughputStall | null) {
@@ -314,16 +331,20 @@ async function throughputOwnerStep(cycle: Pick<Cycle, 'state' | 'effects' | 'now
   const verdict = answeredVerdict(answer);
   const ownerKey = throughputOwnerKey(revision);
   const note = (work: string | null, outcome: DaemonAction['state'], detail: string) => record(state, ownerKey, { kind: 'deployment', work, principal: null, state: outcome, detail, attempts: (state.actions[ownerKey]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist);
-  let owner = openThroughputOwner(work), answered: { key: string; by: number } | null = null;
+  let owner = openThroughputOwner(work), answered: { key: string; by: number; cause: ReturnType<typeof throughputDecisionCause> } | null = null;
+  settleThroughputEscalations(state, owner?.key ?? null);
   if (owner) {
     // Without a reason it stays open: the claim is not verified and its needs-decision is not answered.
-    const reason = throughputOwnerClosure(owner, { revision, verdict }, throughputEscalatedAt(state.actions, owner)), ownerAction = state.actions[ownerKey];
+    // GY-1587: the closure names which decision it answered, read from the escalation that asked it.
+    const raisedAt = throughputEscalatedAt(state.actions, owner), cause = throughputDecisionCause(raisedAt === null ? null : state.actions[throughputEscalationKey(owner.key, raisedAt)]?.detail);
+    const reason = throughputOwnerClosure(owner, { revision, verdict }, raisedAt, cause), ownerAction = state.actions[ownerKey];
     if (reason) {
       if (effects.closeThroughputOwner && (ownerAction?.state !== 'failed' || readyToRetry(ownerAction, state.cycle))) try {
         if (await effects.closeThroughputOwner(owner, reason, `throughput-owner:close:${owner.id}:${owner.revision}`)) {
+          settleThroughputEscalations(state, null);
           performed.push(await note(owner.key, 'done', `Closed ${owner.key}: ${reason}`));
           // Closed on its answer, not a verified claim: its successor is judged in this same cycle.
-          if (verdict !== 'verified') answered = { key: owner.key, by: owner.policyRevision };
+          if (verdict !== 'verified') answered = { key: owner.key, by: owner.policyRevision, cause };
         }
       } catch (error) { performed.push(await note(owner.key, 'failed', `Could not close ${owner.key}: ${message(error)}`)); }
       if (!answered) return;
@@ -367,7 +388,12 @@ async function throughputOwnerStep(cycle: Pick<Cycle, 'state' | 'effects' | 'now
     } catch (error) { performed.push(await note(predecessor, 'failed', `Could not file the item that owns GY-87's throughput verification on ${revision.slice(0, 12)}${predecessor ? `, succeeding ${predecessor}` : ''}: ${message(error)}`)); }
   }
   if (!stall || !owner || throughputEscalatedAt(state.actions, owner) !== null) return;
-  performed.push(await record(state, throughputEscalationKey(owner.key, owner.policyRevision), { kind: 'escalation', work: owner.key, principal: null, state: 'done', detail: throughputStallText({ ...stall, owner: owner.key }), attempts: 1, cycle: state.cycle }, now(), effects.persist));
+  // GY-1587: an escalated miss over an accumulating population is asked once per release. Once an
+  // owner of this release closed on the answer to that escalated miss, its successor carries the
+  // verification without a second ask; the next release asks afresh. An answered stall is a
+  // different decision and never suppresses it.
+  if (stall.cause === 'escalated-miss' && (answered?.cause === 'escalated-miss' || throughputAnsweredAt(work, revision) !== null)) return;
+  performed.push(await record(state, throughputEscalationKey(owner.key, owner.policyRevision), { kind: 'escalation', work: owner.key, principal: null, state: 'waiting', detail: throughputStallText({ ...stall, owner: owner.key }), attempts: 1, cycle: state.cycle }, now(), effects.persist));
 }
 
 /** Record a budget-cut step, so the journal and `master status` say verification is in flight rather than blind; a full step supersedes the last cut once. */

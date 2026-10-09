@@ -267,3 +267,98 @@ test('integration:throughput-remeasure-cadence — a loop cycle that finds the s
     assert.equal(after.attention, null, 'the attention retires on its own, with no new requirements decision');
   } finally { await rm(root, { recursive: true, force: true }); }
 });
+
+// GY-1587: the idle-actionable budget leaves out only a span no executor could have run, for a cause
+// the row itself records — GY-468's request-rework 4ccba8e9, requested after the CI rerun was refused
+// for a missing App permission and superseded 5585.6 min later — while a superseded row any executor
+// could have run still counts in full.
+const appRefusal = 'Required CI check test has not passed on the current candidate; rerun: refused: GitHub POST /repos/cryptob1/graphyard/actions/runs/36272630910/rerun-failed-jobs failed (403): the installed App lacks a permission this request needs; compare its installation at https://github.com/settings/installations/161493384 with graphyard github-setup --update-permissions';
+/** A row requested at `from` and superseded `waited` ms later, never claimed; it carries `refusal` as GY-468's row does. */
+function supersededAfter(kind: string, from: string, waited: number, refusal: string | null = null, claimed = false): ActionRow {
+  const until = new Date(Date.parse(from) + waited).toISOString();
+  const history: ActionRow['history'] = [{ at: from, event: 'requested', requester: 'graphyard', executor: null, result: null, reason: refusal ? `GY-468 needs a new head: ${refusal}` : '' }];
+  if (claimed) history.push({ at: from, event: 'claimed', requester: 'graphyard', executor: 'executor-a', result: null, reason: 'attempt 1 claimed by executor-a on host-a' });
+  history.push({ at: until, event: 'cancelled', requester: 'graphyard', executor: null, result: null, reason: 'GY-468 now needs dispatch instead' });
+  return { ...row(kind, history), id: `${kind}-${from}-${refusal ? 'refused' : 'runnable'}${claimed ? '-claimed' : ''}`, inputs: { kind, ...(refusal ? { detail: refusal } : {}) }, refusal, state: 'pending', attempts: claimed ? 1 : 0, result: undefined } as unknown as ActionRow;
+}
+const gy468Span = Date.parse('2026-10-02T03:17:10.987Z') - Date.parse('2026-09-28T06:11:33.492Z');
+const gy468Row = (refusal: string | null = appRefusal) => supersededAfter('request-rework', '2026-09-28T06:11:33.492Z', gy468Span, refusal);
+/** Ten plain admitted deliveries and GY-468 carrying `extra` beside its executed review. */
+const idleWindow = (extra: ActionRow) => [claim, ...Array.from({ length: throughputClaim.minimumDeliveries - 1 }, (_, index) => delivery(`GY-${600 + index}`)),
+  delivery('GY-468', { history: [executed('request-review', 11), extra] })];
+
+test('unit:throughput-superseded-row-span — GY-468\'s superseded request-rework, which no executor could run for the App permission its own refusal records, is reported and left out of the idle-actionable budget; a runnable superseded row idle past 5 min, or one an executor claimed, still fails the claim in full; the budgets are unchanged', async () => {
+  const { unrunnableCause, renderThroughput, loopThroughputMeasurement, readThroughputMeasurement, recordThroughputMeasurement, throughputRemeasureMs } = await import('../src/throughput.js');
+  assert.deepEqual({ p50: throughputClaim.submitToMergeP50Ms, idle: throughputClaim.idleActionableMs, deliveries: throughputClaim.minimumDeliveries }, { p50: 30 * minute, idle: 5 * minute, deliveries: 10 }, 'the budgets are GY-87\'s own');
+  assert.equal(Math.round(gy468Span / 6000) / 10, 5585.6, 'the recorded span');
+
+  // GY-468's row: unclaimed, superseded, and its own refusal names the App permission it lacked.
+  const refused = gy468Row();
+  assert.equal(unrunnableCause(refused), appRefusal);
+  const forgiven = verifyThroughput(idleWindow(refused), now, { deployed });
+  const gy468 = forgiven.deliveries.find(record => record.key === 'GY-468')!;
+  assert.ok(gy468, 'GY-468 stays admitted: the superseded row is the loop machinery of record');
+  assert.ok((gy468.idle?.ms ?? 0) <= throughputClaim.idleActionableMs, 'its span is not the delivery\'s idle figure');
+  assert.deepEqual(gy468.unrunnableIdle, [{ ms: gy468Span, action: refused.id, kind: 'request-rework', since: '2026-09-28T06:11:33.492Z', cause: appRefusal }], 'the span is reported with the cause its row records');
+  assert.equal(forgiven.population.admitted, throughputClaim.minimumDeliveries);
+  assert.equal(forgiven.verdict, 'verified', forgiven.reason);
+  assert.ok((forgiven.idle.maxMs ?? 0) <= throughputClaim.idleActionableMs);
+  assert.match(renderThroughput(forgiven), /not counted: 5585\.6 min on request-rework no executor could run \(Required CI check/);
+
+  // The same row with nothing on it saying why it could not run: anybody could have, nobody did.
+  const runnable = gy468Row(null);
+  assert.equal(unrunnableCause(runnable), null);
+  const counted = verifyThroughput(idleWindow(runnable), now, { deployed });
+  assert.equal(counted.verdict, 'unverified');
+  assert.equal(counted.idle.maxMs, gy468Span);
+  assert.match(counted.reason, /GY-468 left its request-rework actionable and unclaimed for 5585\.6 min, 5580\.6 min past the 5 min bound/);
+  // A short runnable superseded row just past the bound fails the claim too.
+  const justPast = verifyThroughput(idleWindow(supersededAfter('request-review', at(12), 6 * minute)), now, { deployed });
+  assert.equal(justPast.verdict, 'unverified');
+  assert.deepEqual(justPast.shortfall!.missed.map(entry => entry.metric), ['idle-actionable']);
+  // A refusal on a row an executor claimed proves it was runnable: its wait is not forgiven, and
+  // a refusal for anything but a permission (a timeout) is not a cause no executor could clear.
+  assert.equal(unrunnableCause(supersededAfter('request-rework', at(12), 6 * minute, appRefusal, true)), null);
+  assert.equal(unrunnableCause(supersededAfter('request-rework', at(12), 6 * minute, 'rerun: refused: GitHub POST … failed (502): bad gateway')), null);
+  const timedOut = verifyThroughput(idleWindow(supersededAfter('request-rework', at(12), 6 * minute, 'the rerun timed out')), now, { deployed });
+  assert.equal(timedOut.verdict, 'unverified');
+  // A 401/403 that does not itself establish a missing permission is one a later attempt clears:
+  // a secondary rate limit, a rerun of a run still in progress, rejected credentials, or a 403 whose
+  // preflight found nothing missing — GitHub's generic "Resource not accessible by integration"
+  // included, which names no grant. Its row was runnable, and its wait fails the 5 min budget.
+  for (const runnable403 of [
+    'rerun: refused: GitHub POST /repos/cryptob1/graphyard/actions/runs/1/rerun-failed-jobs failed (403) "Resource not accessible by integration": the App permission preflight at 2026-09-28T06:00:00.000Z found no missing permission',
+    'rerun: refused: GitHub POST /repos/cryptob1/graphyard/actions/runs/1/rerun-failed-jobs failed (403) "Resource not accessible by integration": GitHub gave no reason; no App permission preflight has run yet',
+    'rerun: refused: GitHub POST /repos/cryptob1/graphyard/actions/runs/1/rerun-failed-jobs failed (403): secondary rate limit; retry later',
+    'rerun: refused: GitHub POST /repos/cryptob1/graphyard/actions/runs/1/rerun-failed-jobs failed (403) "This workflow is already running": the App permission preflight at 2026-09-28T06:00:00.000Z found no missing permission',
+    'rerun: refused: GitHub POST /repos/cryptob1/graphyard/actions/runs/1/rerun-failed-jobs failed (401): the App credentials were rejected; check GITHUB_APP_ID, GITHUB_INSTALLATION_ID and the private key',
+  ]) {
+    const rateLimited = supersededAfter('request-rework', at(12), 6 * minute, runnable403);
+    assert.equal(unrunnableCause(rateLimited), null, runnable403);
+    const missed = verifyThroughput(idleWindow(rateLimited), now, { deployed });
+    assert.equal(missed.verdict, 'unverified', runnable403);
+    assert.deepEqual(missed.shortfall!.missed.map(entry => entry.metric), ['idle-actionable'], runnable403);
+    assert.equal(missed.idle.maxMs, 6 * minute);
+  }
+  // The refusals that do establish the missing grant: the preflight's recorded shortfall.
+  for (const missing of [
+    'rerun: refused: GitHub POST /repos/cryptob1/graphyard/actions/runs/1/rerun-failed-jobs failed (403): App graphyard lacks Actions: write (installed with read), which CI reruns needs to rerun failed jobs; accept the pending permission request at https://github.com/settings/installations/1',
+  ]) assert.equal(unrunnableCause(supersededAfter('request-rework', at(12), 6 * minute, missing)), missing);
+
+  // The loop's next re-measure of the serving release — within one throughputRemeasureMs of the
+  // pre-fix record — records the verdict under the fixed rule.
+  const { rm } = await import('node:fs/promises');
+  const { temporaryDirectory } = await import('./helpers/temp-dirs.js');
+  const root = await temporaryDirectory('throughput-superseded-row-span');
+  try {
+    const takenAt = now - 30 * minute, items = idleWindow(refused);
+    await recordThroughputMeasurement(root, verifyThroughput(idleWindow(runnable), takenAt, { deployed }));
+    const input = (clock: number) => ({ work: items, observedSha: revision, now: () => clock, origin: 'https://example.invalid',
+      status: async () => ({ now: new Date(clock).toISOString(), release: { version: '1', revision } }), readItem: async (id: string) => items.find(item => item.id === id)!, contains: async () => true });
+    assert.equal((await loopThroughputMeasurement(root, input(takenAt + throughputRemeasureMs - minute))).outcome, 'current');
+    const again = await loopThroughputMeasurement(root, input(takenAt + throughputRemeasureMs));
+    assert.equal(again.outcome, 'recorded');
+    assert.equal(again.verdict, 'verified', again.detail);
+    assert.equal((await readThroughputMeasurement(root))!.report.verdict, 'verified', 'the newest recorded verdict reflects the fixed rule');
+  } finally { await rm(root, { recursive: true, force: true }); }
+});

@@ -276,3 +276,228 @@ test('unit:throughput-standing-stall-recorded — the production read of a stand
     assert.equal(await read(revision), null, 'the newest measurement is judged under the settled rule');
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
+
+// GY-1587: an accumulating population whose budgets miss past the pursuit's escalation bound raises
+// the answerable needs-decision on the open owner, and the owner reaches one of its closure paths.
+const ownerTitle = () => throughputOwnerItem(revision, null).title;
+const claimItem = { id: 'claim-87', key: 'GY-87', title: 'The throughput claim', stage: 'done', policy: { checks: [], review: true },
+  delivery: { mergeSha: sha('c'), mergedAt: at(-120), deployment: { sha: revision, observedAt: at(-60) } } } as unknown as Work;
+const refusal = 'rerun: refused: GitHub POST /repos/cryptob1/graphyard/actions/runs/1/rerun-failed-jobs failed (403): the installed App lacks a permission this request needs';
+/** A request-rework superseded `waited` minutes after it was requested, never claimed; `cause` is the refusal its row records, if any. */
+const staleRework = (waited: number, cause: string | null) => ({ ...row('request-rework', [
+  { at: at(12), event: 'requested', requester: 'graphyard', executor: null, result: null, reason: '' },
+  { at: at(12 + waited), event: 'cancelled', requester: 'graphyard', executor: null, result: null, reason: 'now needs dispatch instead' },
+]), id: `rework-${cause ? 'refused' : 'runnable'}`, refusal: cause, attempts: 0 }) as unknown as ActionRow;
+/** Ten admitted deliveries, the last carrying `rework`: the claim's minimum, accumulated. */
+const accumulated = (rework: ActionRow) => [claimItem, ...Array.from({ length: 9 }, (_, index) => delivery(`GY-${600 + index}`)),
+  delivery('GY-468', { history: [executed('request-review', 11), rework] })];
+const openOwner = (key: string, policyRevision = 1) => ({ ...delivery(key), id: key.toLowerCase(), title: ownerTitle(), stage: 'backlog', criteria: [], ready: false, epoch: 0, lease: null, blocker: null, submission: null, reworkRequested: false, dependencies: [], evidence: [], delivery: undefined, closure: undefined, policyRevision, revision: 1 } as unknown as Work);
+
+async function convergenceLoop(directory: string, work: Work[], clock: { now: number }) {
+  const { appendThroughputLedger, recordedEntry } = await import('../src/throughput-ledger.js');
+  const { loopThroughputMeasurement, throughputMeasurementDirectory } = await import('../src/throughput.js');
+  const { standingThroughputStall } = await import('../src/daemon/throughput-effect.js');
+  const token = join(directory, 'coordinator.token');
+  await writeFile(token, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
+  const master = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: token, cliPath: join(directory, 'graphyard.mjs'), repository: 'owner/project', baseBranch: 'main',
+    githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [], run: { deploymentReuseMinutes: 0 } });
+  const state = emptyDaemonState(master);
+  state.lock = { id: 'lock', pid: process.pid, host: master.hostId, startedAt: new Date().toISOString(), heartbeatAt: new Date().toISOString() };
+  // The pursuit opened past the 48h bound on a claim-missed attempt, as GY-1471's did.
+  const opened = verifyThroughput(accumulated(staleRework(10, null)), clock.now - 49 * 60 * minute, { deployed });
+  await appendThroughputLedger(join(directory, throughputMeasurementDirectory), recordedEntry(opened, { source: 'loop', file: null, output: '' }));
+  const filed: Work[] = [], closed: string[] = [];
+  let next = 7600;
+  const effects: DaemonEffects = {
+    agents: () => [], credentials: async profiles => Object.fromEntries(profiles.map(item => [item.name, { available: true, reason: null }])),
+    snapshot: async () => ({ work, now: new Date(clock.now).toISOString() }), closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
+    observeDeployment: async () => ({ source: 'endpoint', sha: revision, at: new Date(clock.now).toISOString(), reason: null, deployed: [], pending: [], requests: 0 }) as any,
+    recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+    measureThroughput: (items, observedSha) => loopThroughputMeasurement(directory, { work: items, observedSha, now: () => clock.now, origin: 'https://example.invalid',
+      status: async () => ({ now: new Date(clock.now).toISOString(), release: { version: '1', revision } }), readItem: async id => work.find(item => item.id === id)!, contains: async () => true }),
+    standingThroughputStall: standingThroughputStall(directory, () => clock.now),
+    fileThroughputOwner: async input => {
+      const owner = { ...openOwner(`GY-${next++}`), title: input.title, criteria: input.criteria } as Work;
+      filed.push(owner); work.push(owner); return owner;
+    },
+    closeThroughputOwner: async (owner, reason) => {
+      closed.push(owner.key);
+      Object.assign(owner, { stage: 'done', closure: { kind: 'obsolete', reason, ref: null, by: 'operator-agent', at: new Date(clock.now).toISOString(), from: 'backlog' } });
+      return owner;
+    },
+  };
+  return { master, state, effects, filed, closed };
+}
+
+test('integration:throughput-escalation-answerable — an escalated claim-missed pursuit over at least ten admitted deliveries records the typed needs-decision on the open owner, so a requirements revision applied after it answers and closes the owner, and the answered decision is never raised again on this release', async () => {
+  const { throughputEscalatedAt, throughputEscalationKey } = await import('../src/daemon/cycle-delivery.js');
+  const { throughputOwnerAnswered, throughputOwnerClosure, throughputStatus } = await import('../src/throughput.js');
+  const directory = await temporaryDirectory('throughput-escalation-answerable');
+  try {
+    const clock = { now: base + 3 * 24 * 60 * minute };
+    const owner = openOwner('GY-1471');
+    const work: Work[] = [...accumulated(staleRework(10, null)), owner];
+    const { master, state, effects, filed, closed } = await convergenceLoop(directory, work, clock);
+
+    await runCycle(master, state, effects, () => clock.now);
+    const measured = (await import('../src/throughput.js')).readThroughputMeasurement;
+    const report = (await measured(directory))!.report;
+    assert.equal(report.population.admitted, 10, 'the population accumulated to the claim\'s minimum');
+    assert.equal(report.verdict, 'unverified');
+    assert.deepEqual(report.shortfall!.missed.map(entry => entry.metric), ['idle-actionable'], 'the runnable superseded row still counts in full');
+    const key = throughputEscalationKey('GY-1471', 1);
+    assert.equal(state.actions[key]?.state, 'waiting', 'the needs-decision is recorded on the open owner, and waits there until it is answered');
+    assert.equal(state.actions[key]!.work, 'GY-1471');
+    assert.match(state.actions[key]!.detail, /needs decision on GY-1471: .*budgets missed .* past the 48h escalation bound over an accumulating population — 10 admitted/);
+    assert.equal(throughputEscalatedAt(state.actions, owner), 1);
+    const status = await throughputStatus(directory, { release: { version: '1', revision } }, work, clock.now);
+    assert.equal(status.stall?.cause, 'escalated-miss');
+    assert.match(status.attention!.next, /graphyard master decide GY-1471 requirements .* graphyard master approver GY-1471 DECISION/);
+    // The command asks the escalated miss's own decision, never the population rule or fingerprints.
+    assert.match(status.attention!.next, /with a revision that settles whether the coordination that leaves GY-87's claim missing its budgets changes, or records that its claim stands unverified on this release/);
+    assert.doesNotMatch(status.attention!.next, /population rule|fingerprints/);
+    assert.equal(status.attention!.approvedBy, 'approver');
+    assert.equal(throughputOwnerClosure(owner, { revision, verdict: 'unverified' }, 1), null, 'unanswered, it stays open');
+
+    // The master's requirements revision, applied after the raise and independently approved, answers it.
+    owner.policyRevision = 2;
+    assert.equal(throughputOwnerAnswered(owner, throughputEscalatedAt(state.actions, owner)), true);
+    assert.ok(throughputOwnerClosure(owner, { revision, verdict: 'unverified' }, 1));
+    clock.now += minute;
+    await runCycle(master, state, effects, () => clock.now);
+    assert.deepEqual(closed, ['GY-1471'], 'the loop closes the owner on its answer');
+    assert.equal(state.actions[key]?.state, 'done', 'its answer consumed, the escalation is settled');
+    assert.equal(filed.length, 1, 'the release stays owned by a successor');
+    const successor = openThroughputOwner(work)!;
+    assert.equal(successor.key, filed[0]!.key);
+    for (let cycle = 0; cycle < 3; cycle++) { clock.now += 61 * minute; await runCycle(master, state, effects, () => clock.now); }
+    assert.equal(Object.keys(state.actions).filter(entry => entry.startsWith('escalation:throughput:')).length, 1, 'the answered decision is not raised again on this release');
+    const after = await throughputStatus(directory, { release: { version: '1', revision } }, work, clock.now);
+    assert.equal(after.owner.item, successor.key);
+    assert.equal(after.stall, null);
+    assert.doesNotMatch(after.attention!.text, /needs decision|escalated:/);
+    assert.match(after.attention!.text, new RegExp(`its needs-decision on this release was answered at .*, so ${successor.key} carries the verification`));
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('integration:throughput-escalation-answerable — an answered population stall on the release never stands in for the escalated miss: once deliveries accumulate and the budgets miss past the escalation bound, the open successor is asked that distinct decision, both when the stall was answered in an earlier cycle and in the cycle that closes its owner', async () => {
+  const { throughputEscalatedAt, throughputEscalationKey } = await import('../src/daemon/cycle-delivery.js');
+  const { throughputAnsweredAt, throughputOwnerClosure, throughputStatus } = await import('../src/throughput.js');
+  const stallText = 'needs decision on GY-1470: session-free deliveries cannot accumulate — 0 admitted of 20 deliveries in the window. Decide whether the population rule or the coordination that leaves these fingerprints changes; the budgets stay as GY-87 stated them';
+  // The stall was answered in an earlier cycle: its owner is closed with a stall's answer on this release.
+  {
+    const directory = await temporaryDirectory('throughput-stall-then-miss');
+    try {
+      const clock = { now: base + 3 * 24 * 60 * minute };
+      const answeredStall = { ...openOwner('GY-1470', 2), stage: 'done' } as Work;
+      answeredStall.closure = { kind: 'obsolete', reason: throughputOwnerClosure(answeredStall, { revision, verdict: 'unverified' }, 1)!, ref: null, by: 'operator-agent', at: new Date(clock.now - 60 * minute).toISOString(), from: 'backlog' } as Work['closure'];
+      assert.equal(throughputAnsweredAt([answeredStall], revision), null, 'an answered stall is not an answered escalated miss');
+      const owner = openOwner('GY-1471');
+      const work: Work[] = [...accumulated(staleRework(10, null)), answeredStall, owner];
+      const { master, state, effects, filed } = await convergenceLoop(directory, work, clock);
+      await runCycle(master, state, effects, () => clock.now);
+      assert.equal(filed.length, 0);
+      assert.equal(state.actions[throughputEscalationKey('GY-1471', 1)]?.state, 'waiting', 'the escalated miss is asked on the open successor');
+      assert.match(state.actions[throughputEscalationKey('GY-1471', 1)]!.detail, /over an accumulating population — 10 admitted/);
+      const status = await throughputStatus(directory, { release: { version: '1', revision } }, work, clock.now);
+      assert.equal(status.stall?.cause, 'escalated-miss');
+      assert.match(status.attention!.next, /graphyard master decide GY-1471 requirements/);
+      // Its answer closes the owner naming the escalated miss, which then suppresses a second ask on this release.
+      owner.policyRevision = 2;
+      clock.now += minute;
+      await runCycle(master, state, effects, () => clock.now);
+      assert.match(owner.closure!.reason, /raised at its requirements revision 1 on an escalated budget miss\) was answered by its requirements revision 2/);
+      assert.equal(throughputAnsweredAt(work, revision), Date.parse(owner.closure!.at));
+      assert.equal(filed.length, 1);
+      assert.equal(throughputEscalatedAt(state.actions, filed[0]!), null, 'the answered escalated miss is not asked again');
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  }
+  // The stall is answered in this very cycle: the owner closes on the stall's answer and its successor is asked the escalated miss.
+  {
+    const directory = await temporaryDirectory('throughput-stall-then-miss-same-cycle');
+    try {
+      const clock = { now: base + 3 * 24 * 60 * minute };
+      const owner = openOwner('GY-1471', 2);
+      const work: Work[] = [...accumulated(staleRework(10, null)), owner];
+      const { master, state, effects, filed, closed } = await convergenceLoop(directory, work, clock);
+      state.actions[throughputEscalationKey('GY-1471', 1)] = { kind: 'escalation', work: 'GY-1471', principal: null, state: 'done', detail: stallText, attempts: 1, epoch: null, cycle: 0, at: new Date(clock.now - 2 * 60 * minute).toISOString() };
+      await runCycle(master, state, effects, () => clock.now);
+      assert.deepEqual(closed, ['GY-1471'], 'the stall\'s answer closes its owner');
+      assert.match(owner.closure!.reason, /raised at its requirements revision 1\) was answered by its requirements revision 2/, 'named as a stall\'s answer');
+      assert.equal(filed.length, 1, 'the release stays owned');
+      const successor = filed[0]!;
+      assert.equal(state.actions[throughputEscalationKey(successor.key, successor.policyRevision)]?.state, 'waiting', 'the distinct escalated miss is asked on the successor in the same cycle');
+      assert.equal(state.actions[throughputEscalationKey('GY-1471', 1)]?.state, 'done', 'the answered stall is settled');
+      assert.match(state.actions[throughputEscalationKey(successor.key, successor.policyRevision)]!.detail, new RegExp(`needs decision on ${successor.key}: .*over an accumulating population`));
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  }
+});
+
+test('integration:throughput-escalation-answerable — a failed re-measure never erases the recorded escalated miss: the answered owner is still succeeded in the cycle that closes it, and further failed attempts leave the unverified release owned', async () => {
+  const { throughputEscalationKey } = await import('../src/daemon/cycle-delivery.js');
+  const { loopThroughputMeasurement, throughputMeasurementDirectory, throughputStatus } = await import('../src/throughput.js');
+  const { readThroughputLedger, throughputPursuit } = await import('../src/throughput-ledger.js');
+  const { standingThroughputStall } = await import('../src/daemon/throughput-effect.js');
+  const directory = await temporaryDirectory('throughput-escalation-failed-remeasure');
+  try {
+    const clock = { now: base + 3 * 24 * 60 * minute };
+    const owner = openOwner('GY-1471');
+    const work: Work[] = [...accumulated(staleRework(10, null)), owner];
+    const { master, state, effects, filed, closed } = await convergenceLoop(directory, work, clock);
+    await runCycle(master, state, effects, () => clock.now);
+    assert.equal(state.actions[throughputEscalationKey('GY-1471', 1)]?.state, 'waiting', 'the escalated miss is asked on the open owner');
+
+    // From here every re-measure fails: the plane cannot be read, so the ledger's newest attempt is a failure.
+    effects.measureThroughput = (items, observedSha) => loopThroughputMeasurement(directory, { work: items, observedSha, now: () => clock.now, origin: 'https://example.invalid',
+      status: async () => { throw new Error('the measurement could not parse the plane\'s status'); }, readItem: async id => work.find(item => item.id === id)!, contains: async () => true });
+    owner.policyRevision = 2;
+    clock.now += 61 * minute;
+    await runCycle(master, state, effects, () => clock.now);
+    const ledger = await readThroughputLedger(join(directory, throughputMeasurementDirectory));
+    assert.equal(ledger.entries.at(-1)?.outcome, 'failed', 'the due re-measure failed and was ledgered');
+    assert.equal(throughputPursuit(ledger, clock.now)?.blocker, 'measurement-failed');
+    assert.equal((await standingThroughputStall(directory, () => clock.now)(revision))?.cause, 'escalated-miss', 'the recorded miss still stands');
+    assert.deepEqual(closed, ['GY-1471'], 'the answer closes the owner');
+    assert.equal(filed.length, 1, 'the closing cycle files its successor although the re-measure failed');
+    const successor = openThroughputOwner(work)!;
+    assert.equal(successor.key, filed[0]!.key);
+
+    for (let cycle = 0; cycle < 3; cycle++) { clock.now += 61 * minute; await runCycle(master, state, effects, () => clock.now); }
+    assert.equal((await readThroughputLedger(join(directory, throughputMeasurementDirectory))).entries.filter(entry => entry.outcome === 'failed').length >= 2, true);
+    assert.equal(openThroughputOwner(work)?.key, successor.key, 'further failures leave the release owned by the successor');
+    assert.equal(filed.length, 1, 'and file no second successor');
+    assert.equal(Object.keys(state.actions).filter(entry => entry.startsWith('escalation:throughput:')).length, 1, 'the answered decision is not raised again on this release');
+    const status = await throughputStatus(directory, { release: { version: '1', revision } }, work, clock.now);
+    assert.equal(status.owner.item, successor.key);
+    assert.equal(status.stall, null, 'answered on this release, it is not asked again');
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('integration:throughput-owner-converges — after the fix the open owner reaches a closure path within one re-measure: a window whose only miss was GY-468\'s unrunnable superseded span verifies and the loop closes the owner, leaving no unowned unverified claim and no repeating escalation', async () => {
+  const { recordThroughputMeasurement, throughputRemeasureMs, throughputStatus, readThroughputMeasurement } = await import('../src/throughput.js');
+  const directory = await temporaryDirectory('throughput-owner-converges');
+  try {
+    const clock = { now: base + 3 * 24 * 60 * minute };
+    const owner = openOwner('GY-1471');
+    const work: Work[] = [...accumulated(staleRework(5585.6, refusal)), owner];
+    const { master, state, effects, filed, closed } = await convergenceLoop(directory, work, clock);
+    // The release's newest record before the fix: the same window, the unrunnable span counted.
+    const takenAt = clock.now - throughputRemeasureMs;
+    const before = verifyThroughput(accumulated(staleRework(5585.6, null)), takenAt, { deployed });
+    assert.match(before.reason, /GY-468 left its request-rework actionable and unclaimed for 5585\.6 min/);
+    await recordThroughputMeasurement(directory, before);
+
+    await runCycle(master, state, effects, () => clock.now);
+    const newest = (await readThroughputMeasurement(directory))!.report;
+    assert.equal(newest.measuredAt, new Date(clock.now).toISOString(), 're-measured within one throughputRemeasureMs');
+    assert.equal(newest.verdict, 'verified', newest.reason);
+    assert.deepEqual(closed, ['GY-1471'], 'the loop closes the owner on the verified measurement');
+    assert.match(work.find(item => item.key === 'GY-1471')!.closure!.reason, /throughput claim verified on the serving release/);
+    assert.equal(filed.length, 0, 'a verified release needs no successor');
+    assert.equal(Object.keys(state.actions).filter(entry => entry.startsWith('escalation:throughput:')).length, 0);
+    const status = await throughputStatus(directory, { release: { version: '1', revision } }, work, clock.now);
+    assert.equal(status.verdict, 'verified');
+    assert.equal(status.attention, null, 'no unverified claim stands, owned or not, and no escalation repeats');
+    assert.equal(status.pursuit, null);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});

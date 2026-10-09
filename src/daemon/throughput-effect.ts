@@ -3,7 +3,9 @@ import type { ChildRun } from '../child-runner.js';
 import type { ControlPlaneStatus, MasterConfig } from '../master.js';
 import type { Work } from '../model.js';
 import { localAncestry } from './deployment.js';
-import { loopThroughputMeasurement, readThroughputMeasurement, throughputStall, type LoopThroughputOutcome, type ThroughputStall, type throughputOwnerItem } from '../throughput.js';
+import { join } from 'node:path';
+import { loopThroughputMeasurement, readThroughputMeasurement, throughputDecision, throughputMeasurementDirectory, type LoopThroughputOutcome, type ThroughputStall, type throughputOwnerItem } from '../throughput.js';
+import { readThroughputLedger, throughputPursuit } from '../throughput-ledger.js';
 
 export interface ThroughputEffects {
   /**
@@ -20,8 +22,9 @@ export interface ThroughputEffects {
    */
   fileThroughputOwner?: (input: ReturnType<typeof throughputOwnerItem>, key: string) => Promise<Work | null>;
   /**
-   * The needs-decision standing on the newest recorded measurement of `revision` (`throughputStall`,
-   * as master status judges it), or null; read when no owner is open after one was filed (GY-1465).
+   * The needs-decision standing on the newest recorded measurement of `revision` (`throughputDecision`
+   * over the ledger's pursuit, as master status judges it), or null; read when no owner is open after
+   * one was filed (GY-1465).
    */
   standingThroughputStall?: (revision: string) => Promise<ThroughputStall | null>;
   /** Closes the owner item as the operator-agent once the claim verifies or its needs-decision is answered; null, closing nothing, without that identity. */
@@ -47,8 +50,12 @@ export function throughputEffects(root: string, current: () => MasterConfig, run
   };
 }
 
-/** The needs-decision standing on the newest measurement recorded under `root` when it measured `revision` (`throughputStall`), else null. */
-export const standingThroughputStall = (root: string) => async (revision: string): Promise<ThroughputStall | null> => {
+/**
+ * The needs-decision standing on the newest measurement recorded under `root` when it measured
+ * `revision` (`throughputDecision`: a stall, or a miss the ledger's pursuit escalated, GY-1587), else null.
+ */
+export const standingThroughputStall = (root: string, now: () => number = Date.now) => async (revision: string): Promise<ThroughputStall | null> => {
   const newest = await readThroughputMeasurement(root);
-  return newest?.report.deployed?.revision === revision ? throughputStall(newest.report) : null;
+  if (newest?.report.deployed?.revision !== revision) return null;
+  return throughputDecision(newest.report, throughputPursuit(await readThroughputLedger(join(root, throughputMeasurementDirectory)), now()));
 };
