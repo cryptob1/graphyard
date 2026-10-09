@@ -282,3 +282,50 @@ test('unit:soak-invariants-hold — change requests naming a blocking finding pa
     }
   }
 });
+
+test('unit:soak-invariants-hold — refused capped reworks read as requested before the revision mark under the real loop: a legacy refusal dated under the item\'s revision withdraws its change request once and the item is delivered, its re-review requesting changes again escalates once, and an undated one that binds nothing is escalated once, naming the decision and the next command, never withdrawn and never left silent, with every invariant holding', { timeout: 300_000 }, async () => {
+  // GY-1577, the GY-1573 round-8 shape repeated per item and cycle: the loop asked for each capped round, the approver refused
+  // it, and the history the loop reads holds the refusal without GY-1575's revision mark. The first item's refusal is dated after
+  // its (only) policy revision, so it binds; the second's likewise, and its re-review requests changes again; the third's carries
+  // no time at all, so the review-cap step can neither withdraw nor wait, and must say so once rather than return silently.
+  const reviewCap = { cap: 1, items: [1, 2, 3], refused: [1, 2, 3], again: [2], legacy: [1, 2], undated: [3] };
+  const { items, final, violations, failures, lost, escalations, github, state } = await simulateDay({
+    hours: 6, reviewCap,
+    plan: { items: 4, leftovers: 0, slowRecompute: 0, workMs: 15 * minute, rework: new Set(), deaths: new Set(), flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set(), misread: new Set(), exits: new Set(), spentProducer: 0, lostRuns: 0, exhaustedReviewer: 0, outOfQueue: { item: 4, afterMs: 99 * hour }, blind: { from: 99 * hour, to: 100 * hour }, split: { at: 99 * hour, item: 4 } },
+  });
+  const [legacy, again, undated] = items;
+  assert.deepEqual(violations, [], 'every system invariant holds across the legacy refusals');
+  assert.deepEqual(failures, [], 'no cycle failed');
+  assert.deepEqual(lost, [], 'no lease was lost');
+  assert.deepEqual(final.filter(item => ![again.key, undated.key].includes(item.key) && item.stage !== 'done').map(item => `${item.key} ${item.stage}`), [], 'the legacy item and the uncapped one are delivered');
+  for (const work of [legacy, again, undated]) {
+    const decisions = (await api(principals.operatorAgent, 'GET', `work/${encodeURIComponent(work.id)}/decisions`)).decisions as { id: string; action: string; state: string; input?: { binding?: string } }[];
+    const capped = decisions.filter(entry => entry.action === 'rework' && /:capped:/.test(entry.input?.binding ?? ''));
+    assert.deepEqual(capped.map(entry => entry.state), ['refused'], `${work.key}: one capped rework, refused, requested once across every cycle`);
+    const head = capped[0].input!.binding!.split(':')[0]!, item = final.find(entry => entry.key === work.key)!;
+    const dismissed = github.dismissals.filter(entry => entry.key === work.key), raised = state.actions[`escalation:review-cap:${work.id}:${head}`];
+    assert.equal(item.pipeline?.reworkRounds, reviewCap.cap, `${work.key}: the refused round was not reworked`);
+    if (work === undated) {
+      assert.deepEqual(dismissed, [], `${work.key}: a refusal that binds nothing withdraws nothing`);
+      assert.equal(item.stage, 'review', `${work.key}: its change request stands, so it waits in review`);
+      assert.equal(raised?.state, 'done', `${work.key}: the stranded change request was escalated, not left silent`);
+      assert.match(raised!.detail, new RegExp(`refused its capped rework \\(decision ${capped[0].id}\\), but that refusal does not bind this change request under policy revision 1`));
+      assert.match(raised!.detail, new RegExp(`--precedent ${capped[0].id}.*graphyard master decide ${work.key} rework REASON .*graphyard master approver ${work.key} DECISION`));
+      assert.equal(raised!.attempts, 1, `${work.key}: escalated once, not on every cycle it stood`);
+      assert.equal(escalations.filter(detail => detail.includes(capped[0].id) && /does not bind this change request/.test(detail)).length, 1, `${work.key}: the review-cap step escalated it once across the day, beside the decisions step's own report of the refusal`);
+      continue;
+    }
+    assert.equal(dismissed.length, 1, `${work.key}: the legacy refusal withdrew its change request exactly once: ${JSON.stringify(dismissed)}`);
+    assert.equal(dismissed[0].sha, head);
+    assert.match(dismissed[0].message, new RegExp(`\\(decision ${capped[0].id}\\)`), `${work.key}: the withdrawal names the unmarked refusal`);
+    assert.equal(state.actions[`review-cap:rereview:${work.id}:${head}`]?.state, 'done', `${work.key}: one re-review requested for its head`);
+    if (work === legacy) {
+      assert.ok(item.delivery, `${work.key}: its re-review approved the head, which was delivered`);
+      assert.equal(raised, undefined, `${work.key}: nothing escalated`);
+    } else {
+      assert.equal(item.stage, 'review', `${work.key}: its re-review requested changes again, so it waits in review`);
+      assert.match(raised!.detail, /requested changes again, so it is not withdrawn a second time/);
+      assert.equal(raised!.attempts, 1, `${work.key}: escalated once, not on every cycle`);
+    }
+  }
+});
