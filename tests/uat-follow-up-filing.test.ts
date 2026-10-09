@@ -126,7 +126,12 @@ test('integration:uat-follow-up-filing — a failed candidate files its follow-u
   assert.equal(followUpFilingRefusal(status.actor, status.repository), null);
   assert.equal(releaseFilingCheck({ status }, repository).status, 'pass');
   const masterStatus = (await call(master.token, 'GET', 'status')).body;
-  assert.equal(releaseFilingCheck({ status: masterStatus }, repository).status, 'pass', 'any operator agent the create path admits passes');
+  const broad = releaseFilingCheck({ status: masterStatus }, repository);
+  assert.equal(broad.status, 'fail', 'an operator agent holding more than intent:create is reported');
+  assert.match(broad.detail, /broader than filing needs: operator agent master-operator also holds intent:ready;/);
+  const admin = releaseFilingCheck({ status: (await call(credentials[0].token, 'GET', 'status')).body }, repository);
+  assert.equal(admin.status, 'fail', 'an admin credential is reported');
+  assert.match(admin.detail, /broader than filing needs: .* is an admin/);
   const refusedLine = releaseFilingCheck({ status: (await call(coordinator.token, 'GET', 'status')).body }, repository);
   assert.equal(refusedLine.status, 'fail');
   assert.match(refusedLine.detail, /graphyard-coordinator has role coordinator, which cannot create work/);

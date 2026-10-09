@@ -7,7 +7,7 @@ import { checkAgentEnvironment, discoverAgentEnvironments } from './master/envir
 import type { AgentEnvironment } from './master/profiles.js';
 import { sharedGitPaths, workerPaths } from './worker-sandbox.js';
 import { mergerNotRequired, statusControlPlaneMerger } from './model/setup-checklist.js';
-import { followUpFilingRefusal } from './release-candidate.js';
+import { followUpFilingExcess, followUpFilingRefusal } from './release-candidate.js';
 
 /**
  * The prerequisites docs/setup-from-zero.md depends on that `graphyard doctor` can check from this
@@ -178,12 +178,15 @@ function protectionCheck(status: any, github: ProtectionRun): SetupCheck {
 
 /**
  * GY-1614: whether the control plane would admit the follow-up a failed release candidate files
- * with GRAPHYARD_RELEASE_TOKEN, judged from the principal that token authenticates as.
+ * with GRAPHYARD_RELEASE_TOKEN, judged from the principal that token authenticates as, and whether
+ * that principal holds more than the filing identity's `intent:create`.
  */
 export function releaseFilingCheck(filing: NonNullable<SetupFromZeroInput['releaseFiling']>, repository: string | null): SetupCheck {
   const refusal = filing.status ? followUpFilingRefusal(filing.status.actor, repository ?? filing.status.repository) : `the control plane did not accept the credential: ${filing.failure ?? 'no answer'}`;
-  return { id: 'release-filing', status: refusal ? 'fail' : 'pass', step: setupSteps.releaseFiling,
-    detail: refusal ? `GRAPHYARD_RELEASE_TOKEN would be refused filing a failed candidate's follow-up: ${refusal}` : `GRAPHYARD_RELEASE_TOKEN files follow-ups as ${filing.status.actor.id}` };
+  const excess = refusal ? null : followUpFilingExcess(filing.status.actor);
+  return { id: 'release-filing', status: refusal || excess ? 'fail' : 'pass', step: setupSteps.releaseFiling,
+    detail: refusal ? `GRAPHYARD_RELEASE_TOKEN would be refused filing a failed candidate's follow-up: ${refusal}`
+      : excess ? `GRAPHYARD_RELEASE_TOKEN is broader than filing needs: ${excess}` : `GRAPHYARD_RELEASE_TOKEN files follow-ups as ${filing.status.actor.id}` };
 }
 
 /** The plane's answer to GRAPHYARD_RELEASE_TOKEN, at the server the CLI addresses (src/cli/context.ts), or undefined when it is unset. */

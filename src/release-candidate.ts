@@ -55,6 +55,15 @@ export function followUpFilingRefusal(actor: { id?: string; role?: string; capab
   if (!actor.scope?.workItems?.includes('*')) return `operator agent ${actor.id} lacks wildcard work scope, which creating work requires`;
   return null;
 }
+/**
+ * Pure: what `actor` holds beyond the filing identity, or null when it holds only `intent:create`.
+ * The credential sits in CI, so an admin or a broader operator agent is reported, not tolerated.
+ */
+export function followUpFilingExcess(actor: { id?: string; role?: string; capabilities?: string[] }) {
+  if (actor.role === 'admin') return `${actor.id} is an admin, which can claim, approve and administer far beyond filing`;
+  const extra = (actor.capabilities ?? []).filter(capability => !(releaseFilingIdentity.capabilities as readonly string[]).includes(capability));
+  return extra.length ? `operator agent ${actor.id} also holds ${extra.join(', ')}; the filing credential holds only intent:create` : null;
+}
 
 export type CutTrigger = 'schedule' | 'manual';
 export interface CandidateItem { key: string; mergeSha: string; pr: number | null }

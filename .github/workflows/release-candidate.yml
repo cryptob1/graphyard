@@ -305,15 +305,18 @@ jobs:
           GRAPHYARD_TOKEN: ${{ secrets.GRAPHYARD_RELEASE_TOKEN }}
       - name: Record the E2E case runs on the control plane's Tests page
         # Best effort and after the verdict: recording never decides promotion. The suite command
-        # never holds the release credential, so this step records the report it wrote.
+        # never holds a control-plane credential, so this step records the report it wrote. It uses
+        # its own GRAPHYARD_E2E_RECORD_TOKEN (GY-1614): the release filing credential above is an
+        # operator agent holding only intent:create, which the scenario routes refuse.
         if: ${{ !cancelled() }}
         continue-on-error: true
         shell: bash
         run: |
-          if [[ -f "$RUNNER_TEMP/e2e-report.json" ]]; then node bin/graphyard.mjs e2e record "$RUNNER_TEMP/e2e-report.json"; else echo 'The e2e suite wrote no report; nothing to record'; fi
+          if [[ -z "$GRAPHYARD_TOKEN" ]]; then echo 'GRAPHYARD_E2E_RECORD_TOKEN is not set; the E2E case runs are not recorded'
+          elif [[ -f "$RUNNER_TEMP/e2e-report.json" ]]; then node bin/graphyard.mjs e2e record "$RUNNER_TEMP/e2e-report.json"; else echo 'The e2e suite wrote no report; nothing to record'; fi
         env:
           GRAPHYARD_URL: ${{ vars.GRAPHYARD_URL }}
-          GRAPHYARD_TOKEN: ${{ secrets.GRAPHYARD_RELEASE_TOKEN }}
+          GRAPHYARD_TOKEN: ${{ secrets.GRAPHYARD_E2E_RECORD_TOKEN }}
   promote:
     needs: [candidate, uat]
     if: needs.uat.result == 'success' && (github.event_name == 'schedule' || inputs.promote)
