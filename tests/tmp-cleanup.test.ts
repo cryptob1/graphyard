@@ -4,10 +4,13 @@ import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { existsSync, writeFileSync } from 'node:fs';
 import { chmod, mkdir, readdir, readFile, stat, utimes, writeFile } from 'node:fs/promises';
+import { userInfo } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describeTmpReclaim, readTempOwner, reclaimTmpDirectories, tempOwnerMarker, writeTempOwner } from '../src/tmp-reclaim.js';
-import { describeReclaim, readReclaimReports, reclaimResources, settleTmpReclaim, takeTmpReclaim } from '../src/master-resources.js';
+// A namespace import: on a base without GY-1597's census the case fails, not the file's load.
+import * as tmpReclaim from '../src/tmp-reclaim.js';
+import { describeReclaim, readReclaimReports, readResources, readTmpInodes, reclaimResources, resourceAttention, settleTmpReclaim, takeTmpReclaim, type ResourceInputs } from '../src/master-resources.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-421: test runs used to leak their temporary directories — by 25 September 2026 the host held
@@ -284,4 +287,91 @@ test('unit:tmp-reclaim-error-isolated — one entry\'s removal failure leaves th
   assert.deepEqual(second.removed.map(removed => removed.path), [stuck]);
   assert.equal(existsSync(stuck), false);
   assert.equal(unfinished.size, 0, 'nothing is left carried once it is removed');
+});
+
+// GY-1597: a pass that removes 0 entries while /tmp stays below its inode headroom must neither
+// repeat silently nor leave the leaker unnamed.
+const leakingRoot = async (name: string) => {
+  const tmp = await temporaryDirectory(name);
+  // One large leaker directory, a family of same-stem siblings, and a cache of fresh files: nothing the pass may take.
+  const leaker = join(tmp, 'chrome-cache');
+  await mkdir(join(leaker, 'deep'), { recursive: true });
+  for (let index = 0; index < 40; index++) await writeFile(join(leaker, 'deep', `blob-${index}`), 'x');
+  for (let index = 0; index < 12; index++) await writeFile(join(tmp, `core-dump-${index}a7f`), 'x');
+  const uid = process.getuid?.();
+  if (uid !== undefined) { await mkdir(join(tmp, `tsx-${uid}`)); for (let index = 0; index < 5; index++) await writeFile(join(tmp, `tsx-${uid}`, `fresh-${index}`), 'x'); }
+  return { tmp, leaker };
+};
+const lowVolume = async () => ({ files: 4000, ffree: 100 });
+
+test('unit:tmp-leaks — a pass below the inode headroom that removes 0 entries escalates through every step in the same run and names the top /tmp consumers by path, entry count and owner', async () => {
+  const { tmp, leaker } = await leakingRoot('zero-pass-escalates');
+  const report = await reclaimTmpDirectories({ tmpRoot: tmp, held: new Set(), limit: 100, workMs: 150, volume: lowVolume });
+  assert.deepEqual(report.errors, []);
+  assert.deepEqual(report.removed, [], 'nothing here is the pass\'s to take');
+  assert.deepEqual(report.escalated?.map(step => step.limit), [2_000, 20_000], 'the cap rose at each step, in the same run');
+  assert.deepEqual(report.escalated?.map(step => step.cacheAgeMs), [3_600_000, 600_000], 'the cache age fell at each step');
+  assert.equal(report.boundStands, true);
+  const owner = userInfo().username;
+  assert.deepEqual(report.consumers?.slice(0, 2), [
+    { path: leaker, entries: 1 + 1 + 40, owner },
+    { path: `${join(tmp, 'core-dump')}* (12 top-level)`, entries: 12, owner },
+  ], 'the largest consumers lead, siblings of one stem counted as one family');
+  assert.equal(existsSync(leaker), true, 'naming a consumer removes nothing');
+  // A census is bounded: past its entry budget it names what it reached as capped.
+  const capped = await tmpReclaim.tmpConsumers([tmp], 10);
+  assert.ok(capped.some(consumer => consumer.capped), 'a census past its bound says so');
+  // Top-level entries count against the same budget: a root of flat files stops at the bound, and every family it names is capped.
+  const flat = await temporaryDirectory('zero-pass-flat');
+  for (let index = 0; index < 12; index++) await writeFile(join(flat, `leak-${index}x`), 'x');
+  const stopped = await tmpReclaim.tmpConsumers([flat], 5);
+  assert.equal(stopped.reduce((total, consumer) => total + consumer.entries, 0), 5, 'the census counted no more top-level entries than its bound');
+  assert.ok(stopped.length > 0 && stopped.every(consumer => consumer.capped), 'a census stopped among top-level entries marks what it names as capped');
+});
+
+test('unit:tmp-cleanup — the loop records the escalated pass and the consumers it named, and the tmp-inodes attention carries them', async () => {
+  const root = await temporaryDirectory('zero-pass-attention');
+  await mkdir(join(root, '.graphyard'));
+  const { tmp, leaker } = await leakingRoot('zero-pass-attention-tmp');
+  const options = { tmpRoot: tmp, tmpPass: (pass: Parameters<typeof reclaimTmpDirectories>[0]) => reclaimTmpDirectories({ ...pass, held: new Set(), volume: lowVolume }) };
+  await reclaimResources(root, { reviewers: [], producers: [] }, { work: [], agents: [] }, options);
+  await settleTmpReclaim();
+  await reclaimResources(root, { reviewers: [], producers: [] }, { work: [], agents: [] }, options);
+  await settleTmpReclaim();
+  const inodes = await readTmpInodes(root, tmp, lowVolume);
+  assert.deepEqual(inodes?.latest?.escalated?.map(step => step.removed), [0, 0]);
+  assert.equal(inodes?.latest?.consumers?.[0]?.path, leaker);
+  const input: ResourceInputs = { now: Date.now(), reviews: [], producers: [], agents: [], work: [], plane: null, loop: null, revision: null, disk: null, tmp: inodes, profiles: { workers: [], reviewers: [], producers: [] } };
+  const reading = readResources(input).find(entry => entry.id === 'tmp-inodes')!;
+  assert.equal(reading.state, 'low');
+  const [line] = resourceAttention([reading]);
+  assert.match(line?.text ?? '', /below the inode headroom it escalated to 20000 per cycle and tsx cache files older than 10 minutes \(0 \+ 0 removed by the escalated steps\)/);
+  assert.match(line?.text ?? '', new RegExp(`the top /tmp consumers are ${leaker} \\(42 entries, owner ${userInfo().username}\\)`));
+  assert.match(reading.reclaim, /escalates .* names the top \/tmp consumers/, 'the registry describes the escalation');
+});
+
+test('unit:tmp-cleanup — a zero-removal pass that leaves /tmp between a tenth and a quarter free still raises the tmp-inodes attention naming the consumers', async () => {
+  const root = await temporaryDirectory('zero-pass-gap');
+  await mkdir(join(root, '.graphyard'));
+  const { tmp, leaker } = await leakingRoot('zero-pass-gap-tmp');
+  // 209,715 of 1,048,576 free: above a tenth, below the 262,144 quarter-free headroom.
+  const gapVolume = async () => ({ files: 1_048_576, ffree: 209_715 });
+  const options = { tmpRoot: tmp, tmpPass: (pass: Parameters<typeof reclaimTmpDirectories>[0]) => reclaimTmpDirectories({ ...pass, held: new Set(), volume: gapVolume }) };
+  await reclaimResources(root, { reviewers: [], producers: [] }, { work: [], agents: [] }, options);
+  await settleTmpReclaim();
+  await reclaimResources(root, { reviewers: [], producers: [] }, { work: [], agents: [] }, options);
+  await settleTmpReclaim();
+  const inodes = await readTmpInodes(root, tmp, gapVolume);
+  assert.equal(inodes?.latest?.removed, 0);
+  assert.equal(inodes?.measuredScanned, true, 'the pass is current over the measured directory');
+  const input: ResourceInputs = { now: Date.now(), reviews: [], producers: [], agents: [], work: [], plane: null, loop: null, revision: null, disk: null, tmp: inodes, profiles: { workers: [], reviewers: [], producers: [] } };
+  const reading = readResources(input).find(entry => entry.id === 'tmp-inodes')!;
+  assert.equal(reading.state, 'low');
+  assert.ok(!reading.answered, 'a pass that removed 0 and named consumers answers nothing');
+  const [line] = resourceAttention([reading]);
+  assert.equal(line?.subject, 'resource:tmp-inodes');
+  assert.match(line?.text ?? '', new RegExp(`the top /tmp consumers are ${leaker} \\(42 entries`));
+  // The same reading after a pass that took entries back stays answered, as GY-1379 set out.
+  const progressed: ResourceInputs = { ...input, tmp: { ...inodes!, latest: { ...inodes!.latest!, removed: 3 } } };
+  assert.equal(resourceAttention(readResources(progressed).filter(entry => entry.id === 'tmp-inodes')).length, 0);
 });

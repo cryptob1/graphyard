@@ -7,7 +7,7 @@ import { agentOwner, atomicPrivateWrite, closeHerdrPane, diskThresholdBytes, isP
 import type { HerdrPane } from './master/herdr.js';
 import { pinnedSessionRecords, readReviewLedger, sessionLedgerBound, SessionLedgerFullError, sessionLedgerRefusal, terminalSessionStates, updateReviewLedger, type ReviewRecord } from './reviewer.js';
 import { readProducerLedger, saveProducerLedger, type ProducerRecord } from './producer.js';
-import { describeTmpReclaim, hostTmpRoots, reclaimTmpDirectories, testTempMinAgeMs, testTempPatterns, tmpReclaimLimitPerCycle, tmpReclaimMinAgeMs, tmpReclaimWorkMsPerCycle, tsxCacheName, type TmpReclaimOptions, type TmpReclaimReport } from './tmp-reclaim.js';
+import { describeTmpReclaim, hostTmpRoots, reclaimTmpDirectories, testTempMinAgeMs, testTempPatterns, tmpInodeHeadroom, tmpReclaimEscalation, tmpReclaimLimitPerCycle, tmpReclaimMinAgeMs, tmpReclaimWorkMsPerCycle, tsxCacheName, type TmpConsumer, type TmpReclaimOptions, type TmpReclaimReport } from './tmp-reclaim.js';
 import { alignKey, upgradeTouchesCode } from './daemon/upgrade.js';
 import type { UpgradeStall } from './daemon/state.js';
 import { workerReclaimBoundMs, workerSubmissionBoundMs } from './model/attempt-bound.js';
@@ -32,6 +32,8 @@ import { runChild } from './child-runner.js';
  * the reclaim pass gives each one back; and `/healthz` reports the plane unhealthy while it cannot record.
  */
 
+/** A duration as the registry and the tmp-inodes detail spell it: whole hours, else minutes. */
+const minutes = (ms: number) => ms >= 3_600_000 ? `${ms / 3_600_000} hour${ms === 3_600_000 ? '' : 's'}` : `${ms / 60_000} minutes`;
 export const resourceIds = ['review-ledger', 'producer-ledger', 'agent-names', 'session-slots', 'github-budget', 'executor-liveness', 'loaded-revision', 'database-capacity', 'worktree-disk', 'tmp-inodes'] as const;
 export type ResourceId = typeof resourceIds[number];
 export type ResourceState = 'ok' | 'low' | 'exhausted' | 'unknown';
@@ -94,8 +96,12 @@ export interface ResourceInputs {
   /** The host temporary directory's inodes, and what the loop's last /tmp pass removed (GY-1074); absent or null when unread. */
   tmp?: TmpInodes | null;
 }
-/** The latest finished /tmp pass: its count, when it was recorded and the directories it scanned (GY-1081, GY-1368). */
-export interface TmpPassRecord { removed: number; at: string; roots?: string[] }
+/**
+ * The latest finished /tmp pass: its count, when it was recorded and the directories it scanned
+ * (GY-1081, GY-1368); the escalation steps it ran below the inode headroom and, when the bound
+ * still stood at its end, the top consumers it named (GY-1597).
+ */
+export interface TmpPassRecord { removed: number; at: string; roots?: string[]; escalated?: TmpReclaimReport['escalated']; consumers?: TmpConsumer[] }
 export interface TmpInodes {
   path: string; totalInodes: number; freeInodes: number;
   /** What the last /tmp pass to remove anything removed, and when it was recorded. */
@@ -443,12 +449,13 @@ export const resourceRegistry: ResourceDefinition[] = [
     // not readable without quotactl, so the reading warns early rather than claiming to track it.
     bound: 'the inode count of the filesystem holding the host temporary directory (filesystem-wide, not the per-user quota, which can break shells first), so it warns at a quarter free',
     usage: 'statfs of the host temporary directory (os.tmpdir() of the reading process)', owner: 'test runs and sessions on the coordinator host, and the loop\'s /tmp reclaim pass (src/tmp-reclaim.ts)',
-    reclaim: `the loop's reclaim pass scans its own tmpdir and /tmp, each once, and removes this user's test temp entries (${testTempPatterns.map(pattern => `${pattern.source.slice(1)}*`).join(', ')}) older than ${testTempMinAgeMs / 3_600_000} hours, and the regular files in this user's tsx compile cache (tsx-<uid>) older than ${tmpReclaimMinAgeMs / 3_600_000} hours, that no live process holds, at most ${tmpReclaimLimitPerCycle} per cycle`,
+    reclaim: `the loop's reclaim pass scans its own tmpdir and /tmp, each once, and removes this user's test temp entries (${testTempPatterns.map(pattern => `${pattern.source.slice(1)}*`).join(', ')}) older than ${testTempMinAgeMs / 3_600_000} hours, and the regular files in this user's tsx compile cache (tsx-<uid>) older than ${tmpReclaimMinAgeMs / 3_600_000} hours, that no live process holds, at most ${tmpReclaimLimitPerCycle} per cycle; while /tmp stays below a quarter of its inodes free the same pass escalates (${tmpReclaimEscalation.map(step => `${step.limit} per cycle and cache files older than ${minutes(step.cacheAgeMs)}`).join(', then ')}) and, if the bound still stands, names the top /tmp consumers by path, entry count and owner`,
     remedy: 'graphyard master run --once reclaims now; find what else fills /tmp (ls /tmp | sort | uniq -c) and stop the process leaking it',
-    warnBelow: bound => Math.ceil(bound / 4), symptoms: [],
+    warnBelow: tmpInodeHeadroom, symptoms: [],
     // The quarter-free line is an early warning on a filesystem-wide count every process on the host
     // fills (GY-1379): while the loop's latest pass is current and scanned the measured directory, it
-    // has taken back all it may, so a reading above a tenth free is reported and raises nothing.
+    // has taken back all it may, so a reading above a tenth free is reported and raises nothing — unless
+    // that pass removed 0 and named the consumers it could not reach (GY-1597).
     read: input => {
       if (!input.tmp) return [{ id: '', used: null, bound: null, detail: 'the host temporary directory\'s inodes could not be read', reclaimable: 0 }];
       const answered = tmpPassAnswers(input.tmp, input.now);
@@ -463,9 +470,13 @@ export const tmpPassCurrentMs = 30 * 60_000;
 /**
  * Whether the loop's own /tmp pass answers a low tmp-inodes reading (GY-1379): it finished within
  * `tmpPassCurrentMs`, scanned the measured directory, and the volume is still above a tenth free.
+ * A pass that escalated, removed 0 entries and still left the bound standing, so named the top
+ * consumers, answers nothing (GY-1597): what fills /tmp is outside its reach, and the attention
+ * must carry the consumers it named until someone stops the leaker.
  */
 export function tmpPassAnswers(tmp: TmpInodes, now: number) {
   const at = tmp.latest ? Date.parse(tmp.latest.at) : Number.NaN;
+  if (tmp.latest && tmp.latest.removed === 0 && tmp.latest.consumers?.length) return false;
   return Number.isFinite(at) && now - at < tmpPassCurrentMs && tmp.measuredScanned === true && tmp.freeInodes >= tenthOf(tmp.totalInodes);
 }
 const entries = (count: number) => `${count} entr${count === 1 ? 'y' : 'ies'}`;
@@ -474,6 +485,10 @@ function describeTmpInodes(tmp: TmpInodes) {
   const parts = [`measured ${tmp.path}: ${tmp.freeInodes} of ${tmp.totalInodes} inodes free`];
   if (tmp.own) parts.push(`${tmp.own.capped ? 'at least ' : ''}${entries(tmp.own.entries)} are this user's (${tmp.own.testTemp} top-level with test temp names${tmp.own.tsxCache ? `, ${entries(tmp.own.tsxCache.entries)} under its tsx compile cache ${tmp.own.tsxCache.name}` : ''}); the per-user quota itself is not readable`);
   if (tmp.latest) parts.push(`the loop's latest /tmp pass removed ${entries(tmp.latest.removed)} at ${tmp.latest.at}${tmp.latest.roots ? `, scanning ${tmp.latest.roots.join(' and ')}` : ''}`);
+  // Below the headroom the pass escalated in the same run (GY-1597): say how far, and what it could not reach.
+  const top = tmp.latest?.escalated?.at(-1);
+  if (top) parts.push(`below the inode headroom it escalated to ${top.limit} per cycle and tsx cache files older than ${minutes(top.cacheAgeMs)} (${tmp.latest!.escalated!.map(step => step.removed).join(' + ')} removed by the escalated steps)`);
+  if (tmp.latest?.consumers?.length) parts.push(`the bound still stood, so the top /tmp consumers are ${tmp.latest.consumers.map(consumer => `${consumer.path} (${consumer.capped ? 'at least ' : ''}${entries(consumer.entries)}, owner ${consumer.owner})`).join(', ')}`);
   // A pass over another directory than the one warned about removes nothing here: say so (GY-1368).
   if (tmp.measuredScanned === false) parts.push(`that pass did not scan ${tmp.path}`);
   if (tmp.removed === null) parts.push('the loop has recorded no /tmp pass that removed anything');
@@ -849,9 +864,11 @@ export function owedUpgrade(state: { upgrade?: { pending: { from: string | null;
  * The loop's bounds for one /tmp pass — at most `tmpReclaimLimitPerCycle` directories and
  * `tmpReclaimWorkMsPerCycle` of removal — over `tmpRoots`, or the host's temporary directories
  * (`hostTmpRoots`: this process's tmpdir and /tmp, each once, GY-1368) unless the caller names
- * others (a test's scratch roots, so it never sweeps the developer's real /tmp).
+ * others (a test's scratch roots, so it never sweeps the developer's real /tmp). Over the host's
+ * roots the pass measures their volumes and escalates while one is below its inode headroom
+ * (GY-1597); a caller's own roots keep the base bounds.
  */
-export const loopTmpReclaimOptions = (tmpRoots?: readonly string[]): TmpReclaimOptions => ({ limit: tmpReclaimLimitPerCycle, workMs: tmpReclaimWorkMsPerCycle, tmpRoots: tmpRoots ?? hostTmpRoots() });
+export const loopTmpReclaimOptions = (tmpRoots?: readonly string[]): TmpReclaimOptions => ({ limit: tmpReclaimLimitPerCycle, workMs: tmpReclaimWorkMsPerCycle, tmpRoots: tmpRoots ?? hostTmpRoots(), ...(tmpRoots ? {} : { volume: statfs }) });
 /** The loop's /tmp pass in flight, and the report of the last one to finish, not yet recorded. */
 let tmpPass: Promise<void> | null = null;
 let tmpFinished: TmpReclaimReport | null = null;
@@ -1029,7 +1046,7 @@ export async function reclaimResources(root: string, config: Pick<ProfileSet, 'r
   }
   const took = !!(report.reaped.review || report.reaped.producer || report.closed.length || report.released.length || report.tmp.removed || report.errors.length);
   // A finished pass is recorded as the latest even when it removed nothing, so status never shows an old count as current.
-  const tmpLatest = tmp ? { removed: tmp.removed.length, at: report.at, ...(tmp.roots ? { roots: tmp.roots } : {}) } : file.tmpLatest ?? null;
+  const tmpLatest = tmp ? { removed: tmp.removed.length, at: report.at, ...(tmp.roots ? { roots: tmp.roots } : {}), ...(tmp.escalated ? { escalated: tmp.escalated } : {}), ...(tmp.consumers ? { consumers: tmp.consumers } : {}) } : file.tmpLatest ?? null;
   if (took || tmp || JSON.stringify(seen) !== JSON.stringify(file.seen)) {
     try {
       await withReclaimLock(root, async () => {

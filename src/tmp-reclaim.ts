@@ -16,7 +16,7 @@
 // gone" checkable rather than guessed from a modification time.
 
 import { existsSync, readFileSync, type Dirent } from 'node:fs';
-import { lstat, readdir, readFile, readlink, realpath, rm, stat, writeFile } from 'node:fs/promises';
+import { lstat, opendir, readdir, readFile, readlink, realpath, rm, stat, statfs, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -35,6 +35,28 @@ export const testTempPatterns: readonly RegExp[] = [/^graphyard-/, /^gy-/, /^lan
 export const testTempMinAgeMs = 2 * 3_600_000;
 /** The most directories one pass removes, and the most wall-clock time it spends removing: reclaim is bounded per cycle, whatever the backlog. */
 export const tmpReclaimLimitPerCycle = 100, tmpReclaimWorkMsPerCycle = 150;
+/**
+ * The inode headroom a temporary directory's volume must keep: a quarter of its inodes free, the
+ * line the tmp-inodes reading warns at (262,144 on the host's 1,048,576-inode /tmp).
+ */
+export const tmpInodeHeadroom = (totalInodes: number) => Math.ceil(totalInodes / 4);
+/**
+ * The steps a pass escalates through, in the same run, while a scanned root's volume stays below
+ * `tmpInodeHeadroom` (GY-1597). On 9 October 2026 the tsx compile cache grew ~450 entries per five
+ * minutes while the base bounds — 100 entries per cycle, cache files older than six hours — removed
+ * nothing for an hour. Each step raises the per-cycle cap and the work bound and lowers the age a
+ * tsx cache file must reach; the test temp names keep their own age bound, and every other rule of
+ * the pass — this user's entries only, only regular files under the cache, never one a live process
+ * holds — is the same at every step.
+ */
+export const tmpReclaimEscalation: readonly { limit: number; cacheAgeMs: number; workMs: number }[] = [
+  { limit: 2_000, cacheAgeMs: 3_600_000, workMs: 5_000 },
+  { limit: 20_000, cacheAgeMs: 10 * 60_000, workMs: 30_000 },
+];
+/** The most entries one consumer census walks, across every top-level entry it counts: naming the leaker stays bounded on a host with millions. */
+export const tmpConsumersScanBound = 500_000;
+/** How many of the largest consumers a census names. */
+export const tmpConsumersNamed = 5;
 /** How long one entry's removal retries a tree that refills or is still being released (ENOTEMPTY, EBUSY) before the pass reports it and the next retries it (GY-1401). */
 export const tmpReclaimRetryMs = 2_000;
 const retryable = new Set(['ENOTEMPTY', 'EBUSY', 'EPERM', 'EMFILE', 'ENFILE']), unfinishedRemovals = new Set<string>();
@@ -178,7 +200,19 @@ export interface TmpReclaimReport {
   /** Directories kept: a live owner, an open holder, or past the per-pass bound. */
   kept: number;
   errors: string[];
+  /**
+   * The escalation steps the pass ran past its base bounds because a root's volume stayed below its
+   * inode headroom (GY-1597), each with what it removed; absent when the bound never stood. With
+   * steps run, `scanned` and `kept` are the last step's.
+   */
+  escalated?: { limit: number; cacheAgeMs: number; removed: number }[];
+  /** Whether a scanned root's volume was still below its inode headroom when the pass ended; absent when no volume was measured. */
+  boundStands?: boolean;
+  /** The largest consumers of the scanned roots, named when the bound still stood at the pass's end: what to stop, since the pass took all it may. */
+  consumers?: TmpConsumer[];
 }
+/** One consumer of a temporary directory: a top-level entry, or a family of same-stem siblings, with the entries under it and their owner. */
+export interface TmpConsumer { path: string; entries: number; owner: string; capped?: boolean }
 export interface TmpReclaimOptions {
   now?: number;
   /** The directory scanned; the host's temporary directory by default. */
@@ -193,10 +227,19 @@ export interface TmpReclaimOptions {
   maxAgeMs?: number;
   /** The most wall-clock time the pass spends removing, when set; the loop passes `tmpReclaimWorkMsPerCycle`. */
   workMs?: number;
+  /** The steps a pass below its inode headroom escalates through; `tmpReclaimEscalation` by default. */
+  escalation?: readonly { limit: number; cacheAgeMs: number; workMs: number }[];
   /** The live-holder set, when the caller has one; a fresh /proc scan runs when omitted. */
   held?: Set<string>;
   /** Entries an earlier pass failed to finish removing, retried ahead of their age bound (this process's own set by default), and how long one removal retries. */
   unfinished?: Set<string>; retryMs?: number;
+  /**
+   * Measures a root's volume: given, the default pass escalates through `tmpReclaimEscalation`
+   * while a root's free inodes stay below `tmpInodeHeadroom`, and names the top consumers when they
+   * still do at its end (GY-1597). The loop passes statfs for the host's roots; without it the pass
+   * keeps its base bounds.
+   */
+  volume?: (path: string) => Promise<{ files: number | bigint; ffree: number | bigint }>;
 }
 /** The age an entry of this name must reach before the default pass removes it whole, or null when the name is not the pass's. */
 const defaultMinAge = (name: string) => testTempPatterns.some(pattern => pattern.test(name)) ? testTempMinAgeMs : null;
@@ -226,16 +269,110 @@ export async function reclaimTmpDirectories(options: TmpReclaimOptions = {}): Pr
   // A caller's own prefixes never sweep the tsx cache; the default pass ages its files by the cache's bound.
   const cacheAge = options.prefixes ? null : options.maxAgeMs ?? tmpReclaimMinAgeMs;
   const pass: PassState = { now, minAge, cacheAge, limit: options.limit ?? tmpReclaimLimitPerCycle, uid: process.getuid?.(), held: options.held ?? null,
-    workMs: options.workMs ?? Number.POSITIVE_INFINITY, deadline: null, unfinished: options.unfinished ?? unfinishedRemovals, retryMs: options.retryMs ?? tmpReclaimRetryMs };
+    workMs: options.workMs ?? Number.POSITIVE_INFINITY, started: null, unfinished: options.unfinished ?? unfinishedRemovals, retryMs: options.retryMs ?? tmpReclaimRetryMs };
   for (const path of pass.unfinished) if (!existsSync(path)) pass.unfinished.delete(path);
-  for (const { path, real } of roots) {
-    await reclaimRoot(path, real, pass, report);
-    await reclaimTsxCaches(path, real, pass, report);
+  const sweep = async (scanned = roots) => {
+    for (const { path, real } of scanned) {
+      await reclaimRoot(path, real, pass, report);
+      await reclaimTsxCaches(path, real, pass, report);
+    }
+  };
+  await sweep();
+  // A pass that cannot hold the headroom does not silently repeat (GY-1597): while a root's volume
+  // stays below it, the same run escalates — a higher cap, a longer work bound, a younger tsx cache
+  // age — and, if the bound still stands once every step has run, names what fills the roots.
+  const volume = options.prefixes ? undefined : options.volume;
+  if (!volume) return report;
+  // Which roots are low, not merely whether one is: a healthy TMPDIR on another volume must not
+  // spend the escalated cap the low /tmp needs, nor crowd its consumers out of the census.
+  const low = async () => (await Promise.all(roots.map(async root => await belowHeadroom(root.path, volume) ? root : null))).filter(root => root !== null);
+  let lowRoots = await low();
+  report.boundStands = lowRoots.length > 0;
+  for (const step of options.escalation ?? tmpReclaimEscalation) {
+    if (!report.boundStands) break;
+    const before = report.removed.length;
+    // A step's bounds are the whole pass's, base sweep included: 20,000 per cycle means 20,000, not
+    // 20,000 more, and 30 s of removing is counted from the pass's first removal, not the step's.
+    Object.assign(pass, { limit: Math.max(before, step.limit), cacheAge: Math.min(cacheAge ?? step.cacheAgeMs, step.cacheAgeMs), workMs: step.workMs });
+    report.scanned = 0; report.kept = 0;
+    await sweep(lowRoots);
+    (report.escalated ??= []).push({ limit: step.limit, cacheAgeMs: pass.cacheAge!, removed: report.removed.length - before });
+    lowRoots = await low();
+    report.boundStands = lowRoots.length > 0;
   }
+  if (report.boundStands) report.consumers = await tmpConsumers(lowRoots.map(root => root.path));
   return report;
 }
 
-interface PassState { now: number; minAge: (name: string) => number | null; cacheAge: number | null; limit: number; uid: number | undefined; held: Set<string> | null; workMs: number; deadline: number | null; unfinished: Set<string>; retryMs: number }
+/** Whether `path`'s volume has fewer free inodes than its headroom; a volume without fixed inodes, or one that cannot be read, never does. */
+async function belowHeadroom(path: string, volume: NonNullable<TmpReclaimOptions['volume']>) {
+  try {
+    const info = await volume(path), total = Number(info.files), free = Number(info.ffree);
+    return Number.isFinite(total) && total > 0 && free < tmpInodeHeadroom(total);
+  } catch { return false; }
+}
+
+/** The name a uid has in /etc/passwd, or `uid N` when it has none there. */
+function ownerNames(passwd = '/etc/passwd') {
+  const names = new Map<number, string>();
+  try { for (const line of readFileSync(passwd, 'utf8').split('\n')) { const [name, , uid] = line.split(':'); if (name && uid && /^\d+$/.test(uid)) names.set(Number(uid), name); } } catch { /* no passwd: uids stand */ }
+  return (uid: number) => names.get(uid) ?? `uid ${uid}`;
+}
+/** The family a top-level name belongs to: its name without a trailing run-specific part (`graphyard-reclaim-Ab3xYz` → `graphyard-reclaim`), so a leaker's thousands of siblings count as one consumer. */
+const consumerStem = (name: string) => name.replace(/([-_.][^-_.]*\d[^-_.]*)+$/, '') || name;
+/**
+ * The largest consumers of `roots`, every user's entries included (GY-1597): each top-level entry
+ * counts itself and every entry under it, siblings of one stem and owner are summed as one family,
+ * and the `tmpConsumersNamed` largest are named with their owner. The census — top-level entries and the walk under them — stops at
+ * `tmpConsumersScanBound` entries and marks what it could not finish as capped; it reads only, and
+ * a directory it may not read, or one on another device than its root, counts as itself.
+ */
+export async function tmpConsumers(roots: readonly string[], bound = tmpConsumersScanBound): Promise<TmpConsumer[]> {
+  const owner = ownerNames(), families = new Map<string, { root: string; stem: string; first: string; members: number; entries: number; uid: number; capped: boolean }>();
+  let budget = bound;
+  // The census stays on the measured volume: a mount under /tmp is another filesystem's inodes, so
+  // a directory on another device counts as itself and is not descended.
+  const walk = async (path: string, device: number): Promise<{ entries: number; capped: boolean }> => {
+    let entries = 0;
+    const stack = [path];
+    while (stack.length) {
+      const directory = stack.pop()!, dirents = await readdir(directory, { withFileTypes: true }).catch(() => [] as Dirent[]);
+      for (const entry of dirents) {
+        if (budget <= 0) return { entries, capped: true };
+        budget--; entries++;
+        if (!entry.isDirectory()) continue;
+        const child = join(directory, entry.name);
+        if ((await lstat(child).catch(() => null))?.dev === device) stack.push(child);
+      }
+    }
+    return { entries, capped: false };
+  };
+  // Top-level entries count against the same budget, read as a stream: a /tmp of a million flat
+  // files is neither materialised nor stat'ed past the bound, and what the census never reached
+  // marks every family it names as capped.
+  let truncated = false;
+  census: for (const root of new Set(roots)) {
+    let directory, device;
+    try { device = (await stat(root)).dev; directory = await opendir(root); } catch { continue; }
+    for await (const entry of directory) {
+      if (budget <= 0) { truncated = true; break census; }
+      budget--;
+      const name = entry.name, path = join(root, name);
+      let info;
+      try { info = await lstat(path); } catch { continue; }
+      const inside = info.isDirectory() && info.dev === device && budget > 0 ? await walk(path, device) : { entries: 0, capped: info.isDirectory() && info.dev === device };
+      const stem = consumerStem(name), key = `${root}\0${stem}\0${info.uid}`;
+      const family = families.get(key) ?? { root, stem, first: path, members: 0, entries: 0, uid: info.uid, capped: false };
+      family.members++; family.entries += 1 + inside.entries; family.capped ||= inside.capped;
+      families.set(key, family);
+    }
+  }
+  if (truncated) for (const family of families.values()) family.capped = true;
+  return [...families.values()].sort((first, second) => second.entries - first.entries).slice(0, tmpConsumersNamed)
+    .map(family => ({ path: family.members === 1 ? family.first : `${join(family.root, family.stem)}* (${family.members} top-level)`, entries: family.entries, owner: owner(family.uid), ...(family.capped ? { capped: true } : {}) }));
+}
+
+interface PassState { now: number; minAge: (name: string) => number | null; cacheAge: number | null; limit: number; uid: number | undefined; held: Set<string> | null; workMs: number; started: number | null; unfinished: Set<string>; retryMs: number }
 /** Remove `path` recursively, retrying while its tree refills or is still being released, for at most `retryMs`. */
 async function removeTree(path: string, retryMs: number) {
   const until = Date.now() + retryMs;
@@ -302,8 +439,8 @@ async function reclaimRoot(root: string, real: string, pass: PassState, report: 
   const removedBefore = report.removed.length;
   for (const { path } of removable.slice(0, limit)) {
     const at = Date.now();
-    pass.deadline ??= at + pass.workMs;
-    if (at > pass.deadline) break;
+    pass.started ??= at;
+    if (at > pass.started + pass.workMs) break;
     try {
       const bytes = await sizeOf(path);
       await removeTree(path, pass.retryMs);
@@ -361,8 +498,8 @@ async function reclaimTsxCaches(root: string, real: string, pass: PassState, rep
   report.kept += Math.max(0, removable.length - limit);
   for (const { path, bytes } of removable.slice(0, limit)) {
     const at = Date.now();
-    pass.deadline ??= at + pass.workMs;
-    if (at > pass.deadline) break;
+    pass.started ??= at;
+    if (at > pass.started + pass.workMs) break;
     try {
       await rm(path, { force: true });
       report.removed.push({ path, bytes });
