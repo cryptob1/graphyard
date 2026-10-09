@@ -204,6 +204,8 @@ export const selectionRequestSchema = z.object({
   observations: z.array(z.object({ account: entryName, quota: quotaObservationSchema, smoke: smokeObservationSchema.optional() }).strict()).max(200).default([]),
 }).strict();
 export type SelectionRequest = z.infer<typeof selectionRequestSchema>;
+/** What an executor reports of its own host's accounts between selections (GY-1573): a hold a session just saw. */
+export const observationRequestSchema = selectionRequestSchema.pick({ host: true, observations: true }).strict();
 
 /** How an executor names itself on a read, so placement is judged for it (by header, so an older server ignores it). */
 export const executorHostHeader = 'X-Graphyard-Host';

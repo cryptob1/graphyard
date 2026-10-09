@@ -38,6 +38,8 @@ export interface FleetClient {
   select(request: { role: FleetRoleName; host: string; work: string | null; group: string | null; principal: string | null; observations: { account: string; quota: QuotaObservation; smoke?: SmokeObservation }[] }): Promise<FleetSelection>;
   /** `outcome` is how a headless run on the session ended: with a result or without one (GY-446). */
   end(session: string, reason: string, outcome?: RunOutcome): Promise<void>;
+  /** Report what the executor observed of its own host's accounts without asking for a session, as a hold is seen (GY-1573). */
+  observe?(request: { host: string; observations: { account: string; quota: QuotaObservation }[] }): Promise<unknown>;
 }
 export interface FleetSelection { selected: boolean; reason: string; skipped: SessionSkip[]; session: FleetSession | null; account: FleetAccount | null; runtime: FleetRuntime | null; model: FleetModel | null;
   /** The role's launch policy the choice was made under (GY-170); a server that predates it sends none, and the document's is used. */
@@ -137,7 +139,8 @@ export async function fleetRequest(config: Required<Pick<FleetConfig, 'url'>> & 
 
 export function httpFleetClient(config: Required<Pick<FleetConfig, 'url'>> & Pick<FleetConfig, 'credentialFile'>, fetcher: typeof fetch = fetch, timeoutMs = fleetRequestTimeoutMs): FleetClient {
   const call = (path: string, body?: unknown) => fleetRequest(config, path, { body, fetch: fetcher, timeoutMs });
-  return { document: () => call('agent-registry/document'), select: request => call('agent-registry/select', request), end: async (session, reason, outcome) => { await call(`agent-registry/sessions/${session}/end`, { reason, ...(outcome ? { outcome } : {}) }); } };
+  return { document: () => call('agent-registry/document'), select: request => call('agent-registry/select', request), end: async (session, reason, outcome) => { await call(`agent-registry/sessions/${session}/end`, { reason, ...(outcome ? { outcome } : {}) }); },
+    observe: request => call('agent-registry/observe', request) };
 }
 
 // The registry as this executor last read it, kept beside the coordinator's other private state.

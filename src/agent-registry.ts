@@ -3,7 +3,7 @@ import type pg from 'pg';
 import { z } from 'zod';
 import { demand, type Principal } from './model.js';
 import type { Store } from './store.js';
-import { RegistryError, applyRegistryMutation, chooseSession, emptyRegistry, fleetView, foldObservations, liveSessions, endRegistrySession, runOutcomes, refusalHistoryLimit, registryMutationSchemas, selectionRequestSchema, settleSessions, supersededByRequest,
+import { RegistryError, applyRegistryMutation, chooseSession, emptyRegistry, fleetView, foldObservations, liveSessions, endRegistrySession, runOutcomes, refusalHistoryLimit, registryMutationSchemas, observationRequestSchema, selectionRequestSchema, settleSessions, supersededByRequest,
   type AgentRegistry as RegistryDocument, type FleetSession, type RegistryMutation } from './model/registry.js';
 import { implementerProvider, type ReviewDiversity } from './model/review-diversity.js';
 
@@ -147,6 +147,28 @@ export class AgentRegistry {
         if (!repeated || changed) { registry.revision++; registry.updatedAt = at; await this.append(db, actor, repeated ? 'observed' : 'refused', registry, repeated ? { host: request.host } : { refusal: registry.refusals.at(-1) }); }
         result = { selected: false, reason: choice.reason, skipped: choice.skipped, session: null, account: null, runtime: null, model: null, revision: registry.revision };
       }
+      await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]);
+      return result;
+    });
+  }
+
+  /**
+   * What an executor observed of the accounts on its own host, reported the moment a session sees one
+   * spent rather than with its next selection (GY-1573), so an account on the same provider login is
+   * refused on every host at once. Folded as a selection folds it; appends only on a change.
+   */
+  async observe(actor: Principal, input: unknown, key: string) {
+    demand((configurators as readonly string[]).includes(actor.role), 'Observations are reported by the executor\'s coordinator identity (or an admin)', 403);
+    demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
+    const request = observationRequestSchema.parse(input);
+    const fingerprint = digest({ kind: 'observe', request });
+    return this.store.transaction(async (db, now) => {
+      const receipt = (await db.query('SELECT * FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];
+      if (receipt) { demand(receipt.fingerprint === fingerprint, 'Idempotency key reused with different input'); return receipt.result; }
+      const registry = await readRegistry(db), at = now.toISOString();
+      const changed = foldObservations(registry, request, { actor: actor.id, at });
+      if (changed) { registry.revision++; registry.updatedAt = at; await this.append(db, actor, 'observed', registry, { host: request.host }); }
+      const result = { changed, revision: registry.revision };
       await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]);
       return result;
     });

@@ -582,7 +582,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       if (!workspace || workspace.host !== current().hostId) return { state: 'not-applicable', detail: workspace ? `the attempt worktree is on ${workspace.host}, not this host; its commits stay on ${workspace.branch}` : 'the attempt registered no workspace' };
       return preservePartialWork(workspace.path, `${work.key} attempt ${epoch} ${cause}`, run);
     },
-    holdAccount: (account, observed) => recordObservedExhaustion(current(), account, observed),
+    holdAccount: (account, observed) => recordObservedExhaustion(current(), account, observed, undefined, { fetch: fetcher }),
     endSession: async (session, resolution) => {
       // A pane that is already gone is closed (GY-137): the record still settles, and says so.
       let paneGone = false;

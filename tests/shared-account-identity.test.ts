@@ -7,7 +7,7 @@ import type { FleetClient, FleetSelection } from '../src/fleet.js';
 import { masterConfigSchema, selectAccount, type MasterConfig } from '../src/master.js';
 import * as environments from '../src/master/environments.js';
 import { observedExhaustions, recordObservedExhaustion } from '../src/master/environments.js';
-import { accountIneligibility, applyRegistryMutation, chooseSession, emptyRegistry, fleetView, foldObservations, proposedRuntimes, type AgentRegistry, type FleetSession } from '../src/model/registry.js';
+import { accountIneligibility, applyRegistryMutation, chooseSession, emptyRegistry, fleetView, foldObservations, proposedRuntimes, type AgentRegistry, type FleetSession, type QuotaObservation } from '../src/model/registry.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
@@ -30,6 +30,7 @@ const directories: string[] = [];
 // Read off the module, so a checkout without them fails these cases rather than the file's import.
 const providerIdentity = (kind: string, home: string) => environments.providerIdentity(kind, home);
 const heldTwin: typeof environments.heldTwin = (...args) => environments.heldTwin(...args);
+const heldObservation: typeof environments.heldObservation = (...args) => environments.heldObservation(...args);
 after(async () => { for (const directory of directories) await rm(directory, { recursive: true, force: true }); });
 
 function registryOf(accounts: { name: string; home?: string | null }[]): AgentRegistry {
@@ -100,6 +101,35 @@ test('unit:shared-identity-exhaustion-holds-twin — an account recorded exhaust
   const unbounded = registryOf([{ name: 'claude-a' }, { name: 'claude' }]);
   observe(unbounded, [{ account: 'claude-a', state: 'exhausted', resetsAt: null, reason: 'limit reached', identity: shared }, { account: 'claude', state: 'unknown', identity: shared }], spentAt);
   assert.equal(accountIneligibility(unbounded, unbounded.accounts.find(account => account.name === 'claude')!, now, HOST), null);
+  // So does a session notice naming no reset: the hour the host assumes is its guess, not the subscription's reset, so its report names no login.
+  const guessed = registryOf([{ name: 'claude-a' }, { name: 'claude' }]);
+  observe(guessed, [{ account: 'claude-a', state: 'unknown', identity: shared }, { account: 'claude', state: 'unknown', identity: shared }], spentAt);
+  const unknownReset = { at: new Date(spentAt).toISOString(), until: new Date(spentAt + 3_600_000).toISOString(), resetsAt: null, reason: 'limit reached', role: 'worker' as const, profile: 'builder', work: 'GY-1571', identity: shared };
+  foldObservations(guessed, { host: HOST, observations: [{ account: 'claude-a', quota: heldObservation('claude-a', unknownReset, { loggedIn: true, state: 'unknown', usage: [], resetsAt: null, reason: null, identity: shared }) }] }, { actor: 'executor', at: new Date(now).toISOString() });
+  assert.match(accountIneligibility(guessed, guessed.accounts.find(account => account.name === 'claude-a')!, now, HOST)!, /^claude-a quota is exhausted/, 'the source itself is held for the hour');
+  assert.equal(accountIneligibility(guessed, guessed.accounts.find(account => account.name === 'claude')!, now, HOST), null, 'its twin is not held by a guessed reset');
+
+  // The hold reaches the registry the moment a session sees it, so a twin placed on another host is refused before this host asks for anything.
+  const hosts = applyRegistryMutation(registryOf([{ name: 'claude-a' }]), 'account.set', { account: { name: 'claude', runtime: 'claude', model: 'opus', credential: { host: 'otherhost', home: '/home/operator/.coding_agents/claude' } }, reason: 'fixture' }, { actor: 'operator', at: new Date(spentAt).toISOString() }).registry;
+  observe(hosts, [{ account: 'claude-a', state: 'unknown', identity: shared }], spentAt);
+  foldObservations(hosts, { host: 'otherhost', observations: [{ account: 'claude', quota: { loggedIn: true, state: 'unknown', usage: [], resetsAt: null, reason: null, identity: shared } }] }, { actor: 'executor', at: new Date(spentAt).toISOString() });
+  const reported = await temporaryDirectory('shared-identity-report'); directories.push(reported);
+  const registryClient = { observe: async (request: { host: string; observations: { account: string; quota: QuotaObservation }[] }) => foldObservations(hosts, request, { actor: 'executor', at: new Date(now).toISOString() }) };
+  await recordObservedExhaustion({ credentialFile: join(reported, 'coordinator.token'), hostId: HOST }, 'claude-a', { at: new Date(spentAt).toISOString(), resetsAt, reason: notice, role: 'worker', profile: 'builder', work: 'GY-1571' }, now, { registry: registryClient });
+  assert.match(accountIneligibility(hosts, hosts.accounts.find(account => account.name === 'claude')!, now, 'otherhost')!, /^claude quota is exhausted until 2026-10-11T05:00:00\.000Z: it is the same provider login as claude-a/);
+
+  // A spent home logged in afresh to another subscription moves no hold: the login recorded at exhaustion stays held, the new one is free.
+  const relogin = await temporaryDirectory('shared-identity-relogin'); directories.push(relogin);
+  const reloginHomes = await claudeHomes(relogin);
+  const configured = Object.entries(reloginHomes).map(([name, home]) => ({ name, kind: 'claude' as const, home }));
+  const spent = await recordObservedExhaustion({ credentialFile: join(relogin, 'coordinator.token'), environments: configured }, 'claude-a', { at: new Date(spentAt).toISOString(), resetsAt, reason: notice, role: 'worker', profile: 'builder', work: 'GY-1571' }, now);
+  assert.equal(spent.identity, await providerIdentity('claude', reloginHomes.claude), 'the hold keeps the login it was spent on');
+  await writeFile(join(reloginHomes['claude-a'], '.claude.json'), JSON.stringify({ oauthAccount: { accountUuid: 'account-2', organizationUuid: 'org-account-2' } }));
+  const heldNow = await observedExhaustions({ credentialFile: join(relogin, 'coordinator.token') }, now);
+  assert.match((await heldTwin(configured, heldNow, 'claude'))!.reason, /^claude is the same provider login as claude-a/, 'the spent subscription stays held');
+  assert.equal(await heldTwin(configured, heldNow, 'claude-c'), null, 'the source\'s new subscription inherits nothing');
+  const observation = heldObservation('claude-a', heldNow['claude-a'], { loggedIn: true, state: 'available', usage: [], resetsAt: null, reason: null, identity: await providerIdentity('claude', reloginHomes['claude-a']) });
+  assert.equal(observation.identity, spent.identity, 'the registry is told the spent login, not the new one');
 
   // The identity is read from the login itself: two homes on one Claude OAuth account and organization read alike.
   const scratch = await temporaryDirectory('shared-identity'); directories.push(scratch);
@@ -149,9 +179,11 @@ test('unit:shared-identity-dispatch-replay — replaying 2026-10-09 05:30Z (clau
       return { selected: true, reason: choice.reason, skipped: choice.skipped, session, account: choice.account, runtime: choice.runtime, model: choice.model, policy: choice.policy, revision: registry.revision };
     },
     end: async () => {},
+    observe: async request => foldObservations(registry, request, { actor: 'executor', at: new Date(now).toISOString() }),
   };
-  // 05:30:28Z: the loop reads claude-a's session notice and holds claude-a until its reset.
-  await recordObservedExhaustion(config, 'claude-a', { at: new Date(spentAt).toISOString(), resetsAt, reason: notice, role: 'worker', profile: 'builder', work: 'GY-1571' }, spentAt);
+  // 05:30:28Z: the loop reads claude-a's session notice, holds claude-a until its reset and tells the registry at once.
+  await recordObservedExhaustion(config, 'claude-a', { at: new Date(spentAt).toISOString(), resetsAt, reason: notice, role: 'worker', profile: 'builder', work: 'GY-1571' }, spentAt, { registry: client });
+  assert.equal(registry.accounts.find(account => account.name === 'claude-a')!.quota.state, 'exhausted', 'the registry holds claude-a before any launch asks');
 
   // GY-1571 is ready: the next worker launch asks the registry for a session. Usage is not read (claude's would say unknown).
   const selected = await selectAccount(config, 'worker', { name: 'builder', principal: 'graphyard-claude-2' }, { registry: client, quota: false, cacheMs: 0, now: () => now, work: 'GY-1571' });
