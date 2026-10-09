@@ -1,7 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { blockerView, classifyBlocker, environmentalBlockerClasses, needsSomeone } from '../src/model/blocker-class.js';
-import { probeBlocker } from '../src/daemon/blocker-probes.js';
+import { githubDegraded, githubStatusMs, probeBlocker, sharedGithubStatus } from '../src/daemon/blocker-probes.js';
+import { readFileSync } from 'node:fs';
+import { mkdir, writeFile } from 'node:fs/promises';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { join } from 'node:path';
+import { launchableProbe } from '../src/daemon/cycle-blockers.js';
+import type { Cycle } from '../src/daemon/cycle.js';
+import { uncoveredBlockerPaths } from '../src/model/blocker-class.js';
+import { branchRewriteGuidance, inspectProfileAccounts, selectAccount, workerPrompt, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import { loopUnitName } from '../src/supervisor.js';
 import { docsHeadroom, docsTrimItem, docsTrimLatitude, docsWordBudgetOf } from '../src/model/documentation.js';
 import { workerPushPermissions } from '../src/worker-credential.js';
@@ -87,4 +95,206 @@ test('manual:intervention-pattern-escalation-build — GY-1292: the docs-trim it
 test('manual:intervention-pattern-escalation-build — GY-417: worker push credentials carry workflows: write', () => {
   assert.match(blocked['GY-417-1115774'], /without workflows permission/);
   assert.equal(workerPushPermissions.workflows, 'write');
+});
+
+// GY-1567 names this file for the same proof. Nine more escalation interventions at the build stage
+// between 2026-10-02 and 2026-10-09, each a worker's `blocked` report the master cleared by hand
+// (tests/fixtures/gy-1567-escalations.json holds each blocker as the ledger row recorded it):
+//
+//   - GY-1519 (blocked#2410502): the runtime refused `git push` and `gh pr create` at its permission
+//     prompt; a fresh launch pushed normally. Now `runtime-denial`: cleared once the attempt ends.
+//   - GY-1519 (blocked#2398155): the worker's account reached its usage limit; another profile
+//     resumed the kept work. Now `runtime-exhaustion`: cleared once a worker profile can take a launch.
+//   - GY-1477 (blocked#2385228): the worker asked for a force-push and was told to fix forward. The
+//     worker request now says that itself, and a refused force-push is no runtime fault.
+//   - GY-1461 (blocked#2372384): GitHub rejected a push with its own Internal Server Error during its
+//     incident; the loop read it as the Graphyard server's and handed it on. Now `github-outage`:
+//     cleared once githubstatus.com reports delivery operational and the push path answers.
+//   - GY-1292 (blocked#2345717, #2356429, #2359935): the same docs-trim item's limit chasing main,
+//     removed at the source by GY-1366 as above: the trim item the loop files carries the latitude.
+//   - GY-1272 (blocked#2259050): the scope blocker's prose (`GET /compare/:range`, `req/min`, `e.g`,
+//     bare `sync.ts`) was read as files no widening could cover, so it never cleared after the
+//     approver widened plannedFiles. Only repository paths count now.
+//   - GY-1459 (blocked#2372121): a fixture only the operator's signed-in browser can record. It is
+//     the one genuine instance left, so the build stage stays under 3 per 7 days.
+const escalations = JSON.parse(readFileSync(new URL('./fixtures/gy-1567-escalations.json', import.meta.url), 'utf8')) as Record<string, string>;
+const statusOf = (statuses: Record<string, string>) => (async () => new Response(JSON.stringify({ components: Object.entries(statuses).map(([name, status]) => ({ name, status })) }))) as unknown as typeof fetch;
+
+test('manual:intervention-pattern-escalation-build — GY-1567: every instance but GY-1459 is a class the loop clears without anyone', () => {
+  const expected: Record<string, string> = {
+    'GY-1519-2410502': 'runtime-denial', 'GY-1519-2398155': 'runtime-exhaustion', 'GY-1461-2372384': 'github-outage', 'GY-1272-2259050': 'planned-file-scope',
+    'GY-1477-2385228': 'genuine', 'GY-1459-2372121': 'genuine',
+  };
+  for (const [instance, blockerClass] of Object.entries(expected)) {
+    assert.equal(classifyBlocker(escalations[instance]).class, blockerClass, instance);
+    if (blockerClass !== 'genuine') {
+      assert.ok(environmentalBlockerClasses.includes(blockerClass as never) || blockerClass === 'planned-file-scope', instance);
+      assert.equal(blockerView(item(instance.slice(0, 7), escalations[instance]))!.needsSomeone, false, `${instance}: the board asks nobody`);
+    }
+  }
+  // The GY-1292 three were the docs-trim item filed before GY-1366; the trim item now carries the latitude they asked for.
+  for (const instance of ['GY-1292-2345717', 'GY-1292-2356429', 'GY-1292-2359935']) assert.match(escalations[instance], /AC-1's [\d,]+-word limit/, instance);
+});
+
+test('manual:intervention-pattern-escalation-build — GY-1519: a refused delivery push clears once the attempt has ended, a refused rewrite or other command does not', async () => {
+  const text = escalations['GY-1519-2410502'];
+  const classification = classifyBlocker(text);
+  const live = { ...item('GY-1519', text), lease: { epoch: 8, owner: 'graphyard-claude-2', expiresAt: '2026-10-08T11:00:00.000Z' } } as unknown as Work;
+  const during = await probeBlocker(live, classification, { run: () => '', launch: null, cwd: '/srv', clock: Date.parse('2026-10-08T10:30:00.000Z') });
+  assert.equal(during?.passed, false);
+  const after = await probeBlocker(item('GY-1519', text), classification, { run: () => '', launch: null, cwd: '/srv', clock: Date.parse('2026-10-08T10:30:00.000Z') });
+  assert.equal(after?.passed, true);
+  assert.match(after!.detail, /a fresh session/);
+  // The force-push GY-1477 asked for and GY-1459's browser capture are refusals a fresh session meets again.
+  assert.notEqual(classifyBlocker(escalations['GY-1477-2385228']).class, 'runtime-denial');
+  assert.notEqual(classifyBlocker(escalations['GY-1459-2372121']).class, 'runtime-denial');
+  assert.equal(classifyBlocker("Permission to use Bash with command git push --force origin HEAD has been denied.").class, 'genuine');
+});
+
+test('manual:intervention-pattern-escalation-build — GY-1477: the worker request says a pushed branch is fixed forward, never force-pushed', () => {
+  const request = workerPrompt({ cliPath: '/srv/bin/graphyard.mjs' }, { key: 'GY-1477', title: 'scope' }, { principal: 'graphyard-claude-1' }, 1);
+  assert.ok(request.includes(branchRewriteGuidance));
+  assert.match(branchRewriteGuidance, /Never force-push[^.]*: [^.]*fix a pushed commit forward with a new commit and push normally/);
+});
+
+test("manual:intervention-pattern-escalation-build — GY-1461: GitHub's own server error is github-outage, probed on GitHub and the push path, not the Graphyard server", async () => {
+  const text = escalations['GY-1461-2372384'];
+  const classification = classifyBlocker(text);
+  assert.equal(classification.class, 'github-outage');
+  const ran: string[] = [];
+  const run = (command: string, args: string[]) => { ran.push(`${command} ${args.join(' ')}`); return ''; };
+  const incident = await probeBlocker(item('GY-1461', text), classification, { run, launch: null, cwd: '/srv', clock: Date.now(), githubStatus: async () => ['Git Operations (partial_outage)'] });
+  assert.equal(incident?.passed, false);
+  assert.match(incident!.detail, /Git Operations \(partial_outage\)/);
+  assert.deepEqual(ran, [], 'nothing pushes while GitHub reports its incident');
+  const resolved = await probeBlocker(item('GY-1461', text), classification, { run, launch: null, cwd: '/srv', clock: Date.now(), githubStatus: async () => [] });
+  assert.equal(resolved?.passed, true);
+  assert.match(ran[0], /git push --dry-run/);
+  // The status page read: only the delivery components count, and an unreadable page is null, not a pass.
+  assert.deepEqual(await githubDegraded(statusOf({ 'Git Operations': 'operational', 'API Requests': 'degraded_performance', 'Pull Requests': 'operational', Codespaces: 'major_outage' })), ['API Requests (degraded_performance)']);
+  assert.deepEqual(await githubDegraded(statusOf({ 'Git Operations': 'operational', 'API Requests': 'operational', 'Pull Requests': 'operational' })), []);
+  assert.equal(await githubDegraded((async () => { throw new Error('offline'); }) as unknown as typeof fetch), null);
+  // The Graphyard server's own 500 stays control-plane-error.
+  assert.equal(classifyBlocker('graphyard complete failed: HTTP 500 Internal Server Error from the server').class, 'control-plane-error');
+  // Naming the status page is no incident: only the page reporting one is (review of GY-1567).
+  assert.equal(classifyBlocker('complete failed with HTTP 500; githubstatus reports all operational').class, 'control-plane-error');
+  assert.equal(classifyBlocker('git push hangs; githubstatus.com shows no incident').class, 'genuine');
+  assert.equal(classifyBlocker('git push hangs; githubstatus.com reports an incident on Git Operations').class, 'github-outage');
+});
+
+test('manual:intervention-pattern-escalation-build — GY-1272: only repository paths count, so the widened plannedFiles clear the scope blocker', () => {
+  const text = escalations['GY-1272-2259050'];
+  const classification = classifyBlocker(text);
+  assert.deepEqual(classification.paths, ['src/github.ts', 'tests/github-rate-budget.test.ts']);
+  // Requirements decision 728d01a2 widened plannedFiles to these before the master cleared the blocker.
+  const widened = ['src/daemon/faults.ts', 'src/master-status.ts', 'src/master/attention.ts', 'tests/resource-fault-recurrence.test.ts', 'tests/fault-classes.test.ts', 'docs/master-agent-reference.md', 'src/github.ts', 'tests/github-rate-budget.test.ts'];
+  assert.deepEqual(uncoveredBlockerPaths({ plannedFiles: widened }, classification), []);
+  // Directory scopes, root files and dotfiles still count.
+  assert.deepEqual(classifyBlocker('SCOPE NEEDED: docs/, tests/*, package.json and .gitignore for commit 1a2b3c4d').paths, ['docs/', 'tests/*', 'package.json', '.gitignore']);
+});
+
+test('manual:intervention-pattern-escalation-build — GY-1567 review: however many items stand on a GitHub incident, the status page is read at most once per minute', async () => {
+  let reads = 0;
+  const status = sharedGithubStatus(async () => { reads++; return ['Git Operations (major_outage)']; });
+  const at = Date.parse('2026-10-09T05:00:00.000Z');
+  const answers = await Promise.all(Array.from({ length: 40 }, () => status(at)));
+  assert.equal(reads, 1, 'forty blocked items in one cycle share one read');
+  assert.deepEqual(answers[39], ['Git Operations (major_outage)']);
+  await status(at + githubStatusMs - 1);
+  assert.equal(reads, 1, 'the next cycle inside the minute reuses it');
+  await status(at + githubStatusMs);
+  assert.equal(reads, 2, 'a minute later the page is read again');
+  // A read that throws is an unreadable page, never a pass, and is not retried within the minute.
+  const failing = sharedGithubStatus(async () => { reads++; throw new Error('offline'); });
+  assert.equal(await failing(at), null);
+  assert.equal(await failing(at + 1), null);
+  assert.equal(reads, 3);
+});
+
+test('manual:intervention-pattern-escalation-build — GY-1567 review: a host quota is no runtime exhaustion, and a bare source file still counts when no full path stands beside it', () => {
+  // tests/exhaustion-notice.test.ts already reads this prose as no provider's: neither is it the worker's runtime account.
+  for (const text of ['The suite failed: tmp disk quota is exhausted (a known local issue)', 'write failed: Disk quota exceeded', 'cp: EDQUOT while copying fixtures; quota is exhausted'])
+    assert.notEqual(classifyBlocker(text).class, 'runtime-exhaustion', text);
+  for (const text of ["Worker session's usage limit was reached", 'The runtime account ran out of credits mid-verify', "The provider's quota was exhausted before the push"])
+    assert.equal(classifyBlocker(text).class, 'runtime-exhaustion', text);
+  // A bare root source file is a path when the blocker spells none with its directory.
+  assert.deepEqual(classifyBlocker('SCOPE NEEDED: index.ts for commit 8106499e9f').paths, ['index.ts']);
+  assert.equal(classifyBlocker('SCOPE NEEDED: index.ts for commit 8106499e9f').class, 'planned-file-scope');
+  assert.deepEqual(classifyBlocker('SCOPE NEEDED: server.js and build.sh for commit 8106499e9f').paths, ['server.js', 'build.sh']);
+});
+
+test('manual:intervention-pattern-escalation-build — GY-1567 review: a usage limit counts only as the runtime\'s, a status page only when it reports an incident, and a requested root file is kept beside full paths', async () => {
+  // A usage limit an outside-scope test quotes is no runtime account's; one beside its session or runtime is.
+  for (const text of ['Outside scope: tests/billing.test.ts failed with "API usage limit was reached" from the stub', 'The fixture asserts that the usage limit was reached and the client retries'])
+    assert.notEqual(classifyBlocker(text).class, 'runtime-exhaustion', text);
+  for (const text of ['Claude hit its usage limit before the push', 'The usage limit was reached on the worker account', 'Codex session reached its usage limit mid-verify'])
+    assert.equal(classifyBlocker(text).class, 'runtime-exhaustion', text);
+
+  // A status page or GitHub denying or dating an incident is no outage; the Graphyard server's own 500 stays control-plane-error.
+  for (const text of ['complete failed with HTTP 500; githubstatus.com reports no active incident', 'complete failed with HTTP 500; githubstatus.com showed an incident earlier today, now resolved', 'complete failed with HTTP 500; GitHub reports no incident'])
+    assert.equal(classifyBlocker(text).class, 'control-plane-error', text);
+  for (const text of ['gh pr create failed: GitHub returned HTTP 500', 'git push hangs; githubstatus.com is investigating degraded Git Operations'])
+    assert.equal(classifyBlocker(text).class, 'github-outage', text);
+
+  // An API-originated outage is probed on the API too: a push path that answers while pulls return 500 does not clear it.
+  const classification = classifyBlocker('gh pr create failed: GitHub returned HTTP 500');
+  const ran: string[] = [];
+  const result = await probeBlocker(item('GY-1567', 'gh pr create failed: GitHub returned HTTP 500'), classification, { run: (command, args) => { ran.push(args.join(' ')); return ''; }, launch: null, cwd: '/srv', clock: Date.now(), githubStatus: async () => [] });
+  assert.equal(result?.passed, true);
+  assert.match(ran[0], /git push --dry-run[^]*&& gh api --silent 'repos\/\{owner\}\/\{repo\}\/pulls\?per_page=1'/);
+  assert.match(result!.probe, /pull-request API read/);
+
+  // Root source files a scope request names are kept beside full paths; a basename of one, or prose outside the request, is not.
+  assert.deepEqual(classifyBlocker('SCOPE NEEDED: src/a.ts and index.ts for commit 8106499e9f').paths, ['src/a.ts', 'index.ts']);
+  assert.deepEqual(classifyBlocker('SCOPE NEEDED: src/foo.ts and server.js for commit 8106499e9f').paths, ['src/foo.ts', 'server.js']);
+  // A short root file is one too; one letter either side of a dot (`e.g`) is prose.
+  assert.deepEqual(classifyBlocker('SCOPE NEEDED: main.c for commit 8106499e9f').paths, ['main.c']);
+  assert.deepEqual(classifyBlocker('SCOPE NEEDED: a.ts for commit 8106499e9f').paths, ['a.ts']);
+  assert.equal(classifyBlocker('SCOPE NEEDED: e.g a wider scope for commit 8106499e9f').class, 'genuine');
+  assert.deepEqual(classifyBlocker('SCOPE NEEDED: src/sync.ts (sync.ts reads aheadBy) for commit 8106499e9f').paths, ['src/sync.ts']);
+  assert.deepEqual(classifyBlocker('SCOPE NEEDED: src/github.ts for commit 8106499e9f. The compares come from sync.ts and upgrade.ts too.').paths, ['src/github.ts']);
+  assert.deepEqual(uncoveredBlockerPaths({ plannedFiles: ['src/a.ts'] }, classifyBlocker('SCOPE NEEDED: src/a.ts and index.ts for commit 8106499e9f')), ['index.ts'], 'the blocker stands until the root file is widened too');
+});
+
+test('manual:intervention-pattern-escalation-build — GY-1567 review: a spent runtime account clears only once dispatch would choose an account for a profile', async () => {
+  // The probe reads the cycle's `credentials`, which the loop takes from inspectProfileAccounts, the
+  // account health dispatch launches by. Each case below is checked against selectAccount itself.
+  const directory = await temporaryDirectory('gy-1567-accounts');
+  const credentialFile = join(directory, 'master.token'), now = Date.now(), hour = 3_600_000;
+  const home = async (name: string, login: boolean, percent?: number) => {
+    const path = join(directory, name); await mkdir(path, { recursive: true });
+    if (login) await writeFile(join(path, 'auth.json'), JSON.stringify({ OPENAI_API_KEY: null, tokens: { access_token: `${name}-token`, refresh_token: 'r', id_token: 'i', account_id: 'a' } }), { mode: 0o600 });
+    if (percent !== undefined) {
+      const day = join(path, 'sessions/2026/10/09'); await mkdir(day, { recursive: true });
+      const event = { timestamp: new Date(now).toISOString(), type: 'event_msg', payload: { type: 'token_count', info: null, rate_limits: { limit_id: 'codex', primary: { used_percent: percent, window_minutes: 10080, resets_at: Math.floor((now + hour) / 1000) }, secondary: null, rate_limit_reached_type: null } } };
+      await writeFile(join(day, 'rollout-2026-10-09T05-00-00-session.jsonl'), `${JSON.stringify({ type: 'session_meta', payload: {} })}\n${JSON.stringify(event)}\n`);
+    }
+    return { name, kind: 'codex' as const, home: path };
+  };
+  const environments = [await home('codex-spent', true, 100), await home('codex-out', false), await home('codex-held', true, 10), await home('codex-ok', true, 10)];
+  const hold = { at: new Date(now - hour).toISOString(), until: new Date(now + 2 * hour).toISOString(), resetsAt: null, reason: 'usage limit reached', role: 'worker', profile: 'one', work: 'GY-1519' };
+  await writeFile(join(directory, 'master.environments.json'), JSON.stringify({ version: 1, environments: {}, skipped: [], selected: {}, exhausted: { 'codex-held': hold } }));
+  const config = { environments, credentialFile, run: {} } as unknown as MasterConfig, probe = { now: () => now, cacheMs: 0 };
+  const profile = (accounts: string[]) => ({ name: 'one', principal: 'worker-one', agentName: 'soak-worker-one', mode: 'launch', kind: 'codex', credentialFile: '/outside/one.token', agentArgs: [], approvals: 'auto', environment: {}, accounts }) as unknown as WorkerProfile;
+  const judge = async (accounts: string[]) => {
+    const worker = profile(accounts);
+    const credentials = await inspectProfileAccounts(config, 'worker', [worker], { one: { available: true, reason: null as string | null } }, probe);
+    const cycle = { config: { workers: [worker] }, credentials, agents: [], state: { profiles: {} }, clock: now, snapshot: { work: [] } } as unknown as Cycle;
+    const dispatched = await selectAccount(config, 'worker', worker, probe).then(selected => selected.account?.name ?? 'own login', () => null);
+    return { probe: launchableProbe(cycle, true), dispatched };
+  };
+  // An unconfigured account, a provider quota at its ceiling, a logged-out home and an observed hold each keep it standing.
+  for (const [accounts, reason] of [[['codex-missing'], /codex-missing is not a configured agent environment/], [['codex-spent'], /codex-spent/], [['codex-out'], /codex-out/], [['codex-held'], /codex-held exhausted its quota mid-session/],
+    [['codex-missing', 'codex-spent', 'codex-out', 'codex-held'], /No healthy agent account/]] as const) {
+    const { probe: result, dispatched } = await judge([...accounts]);
+    assert.equal(dispatched, null, `dispatch chooses no account among ${accounts.join(', ')}`);
+    assert.equal(result.passed, false, `the blocker stands on ${accounts.join(', ')}`);
+    assert.match(result.detail, reason);
+  }
+  // One account dispatch would choose clears it, naming that account.
+  const { probe: cleared, dispatched } = await judge(['codex-spent', 'codex-held', 'codex-ok']);
+  assert.equal(dispatched, 'codex-ok');
+  assert.equal(cleared.passed, true);
+  assert.equal(cleared.detail, 'profile one is launchable on codex-ok');
+  assert.equal(cleared.probe, 'a worker profile can take a launch on an eligible account');
 });
