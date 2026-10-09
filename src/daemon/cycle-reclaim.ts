@@ -1,5 +1,5 @@
 // Concern: cycle step 3 — reclaim disk, bounded resources and dead sessions' quarantines.
-import { describeReclaim, graphyardWorktree, paneReclaimStatus, agentlessPaneAttentionBound, finishedSessionGraceMs } from '../master-resources.js';
+import { describeReclaim, describeStandingTmpPass, graphyardWorktree, paneReclaimStatus, agentlessPaneAttentionBound, finishedSessionGraceMs } from '../master-resources.js';
 import { diskThresholdBytes, containmentPhase } from '../master.js';
 import { worktreeRootMinFreeBytes } from '../install/worktree-root.js';
 import { actionDetailMax, gigabytes, message, reclaimIntervalMs, reclaimSummarySchema } from './state.js';
@@ -430,6 +430,9 @@ export async function reclaimStep(cycle: Cycle) {
       const report = await effects.reclaimResources(snapshot.work, inventory ? (inventory.available ? inventory.agents : null) : agents);
       const detail = describeReclaim(report);
       if (detail) performed.push(await record(state, `reclaim:resources:${report.at}`, { kind: 'reclaim', work: null, principal: null, state: report.errors.length ? 'failed' : 'done', detail, attempts: 1, cycle: state.cycle }, now(), effects.persist));
+      // A /tmp pass that removed 0 while the inode bound stands is recorded too (GY-1600), never dropped as a pass with nothing to say.
+      const standing = describeStandingTmpPass(report);
+      if (standing) performed.push(await record(state, `reclaim:tmp:${report.at}`, { kind: 'reclaim', work: null, principal: null, state: 'done', detail: boundDetail(standing), attempts: 1, cycle: state.cycle }, now(), effects.persist));
     } catch (error) {
       performed.push(await record(state, `reclaim:resources:${new Date(clock).toISOString()}`, { kind: 'reclaim', work: null, principal: null, state: 'failed', detail: `Resource reclaim failed: ${message(error)}`, attempts: 1, cycle: state.cycle }, now(), effects.persist));
     }

@@ -756,6 +756,12 @@ export interface ResourceReclaimReport {
   released: { name: string; ledger: 'review' | 'producer'; reason: string }[];
   /** The stale /tmp entries the pass removed and the bytes they freed (GY-421, GY-1074). */
   tmp: { removed: number; bytes: number };
+  /**
+   * What the finished /tmp pass scanned, kept and found of its volume (GY-1600): the roots, the
+   * candidates it examined and kept, whether the inode bound still stood, its escalation steps and
+   * the consumers it named. Absent when no pass finished this cycle.
+   */
+  tmpPass?: Pick<TmpReclaimReport, 'roots' | 'scanned' | 'kept' | 'boundStands' | 'escalated' | 'consumers'>;
   errors: string[];
 }
 export const resourceReportFile = (root: string) => resolve(root, '.graphyard/resource-reclaims.json');
@@ -1042,6 +1048,7 @@ export async function reclaimResources(root: string, config: Pick<ProfileSet, 'r
   const tmp = namesOnly ? null : takeTmpReclaim(() => (options.tmpPass ?? reclaimTmpDirectories)(loopTmpReclaimOptions(options.tmpRoots ?? (options.tmpRoot === undefined ? undefined : [options.tmpRoot]))));
   if (tmp) {
     report.tmp = { removed: tmp.removed.length, bytes: tmp.bytes };
+    report.tmpPass = { roots: tmp.roots, scanned: tmp.scanned, kept: tmp.kept, boundStands: tmp.boundStands, escalated: tmp.escalated, consumers: tmp.consumers };
     report.errors.push(...tmp.errors.map(error => `Tmp reclaim: ${error}`));
   }
   const took = !!(report.reaped.review || report.reaped.producer || report.closed.length || report.released.length || report.tmp.removed || report.errors.length);
@@ -1070,6 +1077,25 @@ export function describeReclaim(report: ResourceReclaimReport) {
     report.errors.length ? `${report.errors.length} could not be reclaimed: ${report.errors[0]}` : '',
   ].filter(Boolean);
   return parts.length ? `Resource reclaim: ${parts.join('; ')}` : null;
+}
+
+/**
+ * One line for the loop's action record when the finished /tmp pass removed 0 entries while a
+ * scanned root's volume stayed below its inode headroom (GY-1600): what it scanned, why nothing
+ * was eligible, how far it escalated and the consumers it named. Null for any other pass, so a
+ * pass that took entries back, or one with the bound clear, records only what `describeReclaim` says.
+ */
+export function describeStandingTmpPass(report: ResourceReclaimReport) {
+  const pass = report.tmpPass;
+  if (!pass?.boundStands || report.tmp.removed) return null;
+  const roots = pass.roots?.length ? pass.roots.join(' and ') : 'its temporary directories';
+  const top = pass.escalated?.at(-1);
+  return [
+    `/tmp reclaim removed 0 entries while the inode bound stands: scanned ${roots}, ${entries(pass.scanned)} with this user's test temp names, ${pass.kept} kept (younger than ${testTempMinAgeMs / 3_600_000} hours, a live owner or a live holder), and no tsx cache file of this user's old enough`,
+    top ? `escalated to ${top.limit} per cycle and tsx cache files older than ${minutes(top.cacheAgeMs)} (${pass.escalated!.map(step => step.removed).join(' + ')} removed)` : '',
+    pass.consumers?.length ? `what fills it is outside the pass's reach; top consumers: ${pass.consumers.map(consumer => `${consumer.path} (${consumer.capped ? 'at least ' : ''}${entries(consumer.entries)}, owner ${consumer.owner})`).join(', ')}` : '',
+    report.errors.length ? `${report.errors.length} could not be reclaimed: ${report.errors[0]}` : '',
+  ].filter(Boolean).join('; ');
 }
 
 // ---- The host's panes (GY-842) -----------------------------------------------------------------
