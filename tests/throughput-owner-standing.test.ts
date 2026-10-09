@@ -346,7 +346,7 @@ test('integration:throughput-escalation-answerable — an escalated claim-missed
     assert.equal(report.verdict, 'unverified');
     assert.deepEqual(report.shortfall!.missed.map(entry => entry.metric), ['idle-actionable'], 'the runnable superseded row still counts in full');
     const key = throughputEscalationKey('GY-1471', 1);
-    assert.equal(state.actions[key]?.state, 'done', 'the needs-decision is recorded on the open owner');
+    assert.equal(state.actions[key]?.state, 'waiting', 'the needs-decision is recorded on the open owner, and waits there until it is answered');
     assert.equal(state.actions[key]!.work, 'GY-1471');
     assert.match(state.actions[key]!.detail, /needs decision on GY-1471: .*budgets missed .* past the 48h escalation bound over an accumulating population — 10 admitted/);
     assert.equal(throughputEscalatedAt(state.actions, owner), 1);
@@ -366,6 +366,7 @@ test('integration:throughput-escalation-answerable — an escalated claim-missed
     clock.now += minute;
     await runCycle(master, state, effects, () => clock.now);
     assert.deepEqual(closed, ['GY-1471'], 'the loop closes the owner on its answer');
+    assert.equal(state.actions[key]?.state, 'done', 'its answer consumed, the escalation is settled');
     assert.equal(filed.length, 1, 'the release stays owned by a successor');
     const successor = openThroughputOwner(work)!;
     assert.equal(successor.key, filed[0]!.key);
@@ -396,7 +397,7 @@ test('integration:throughput-escalation-answerable — an answered population st
       const { master, state, effects, filed } = await convergenceLoop(directory, work, clock);
       await runCycle(master, state, effects, () => clock.now);
       assert.equal(filed.length, 0);
-      assert.equal(state.actions[throughputEscalationKey('GY-1471', 1)]?.state, 'done', 'the escalated miss is asked on the open successor');
+      assert.equal(state.actions[throughputEscalationKey('GY-1471', 1)]?.state, 'waiting', 'the escalated miss is asked on the open successor');
       assert.match(state.actions[throughputEscalationKey('GY-1471', 1)]!.detail, /over an accumulating population — 10 admitted/);
       const status = await throughputStatus(directory, { release: { version: '1', revision } }, work, clock.now);
       assert.equal(status.stall?.cause, 'escalated-miss');
@@ -425,7 +426,8 @@ test('integration:throughput-escalation-answerable — an answered population st
       assert.match(owner.closure!.reason, /raised at its requirements revision 1\) was answered by its requirements revision 2/, 'named as a stall\'s answer');
       assert.equal(filed.length, 1, 'the release stays owned');
       const successor = filed[0]!;
-      assert.equal(state.actions[throughputEscalationKey(successor.key, successor.policyRevision)]?.state, 'done', 'the distinct escalated miss is asked on the successor in the same cycle');
+      assert.equal(state.actions[throughputEscalationKey(successor.key, successor.policyRevision)]?.state, 'waiting', 'the distinct escalated miss is asked on the successor in the same cycle');
+      assert.equal(state.actions[throughputEscalationKey('GY-1471', 1)]?.state, 'done', 'the answered stall is settled');
       assert.match(state.actions[throughputEscalationKey(successor.key, successor.policyRevision)]!.detail, new RegExp(`needs decision on ${successor.key}: .*over an accumulating population`));
     } finally { await rm(directory, { recursive: true, force: true }); }
   }
@@ -443,7 +445,7 @@ test('integration:throughput-escalation-answerable — a failed re-measure never
     const work: Work[] = [...accumulated(staleRework(10, null)), owner];
     const { master, state, effects, filed, closed } = await convergenceLoop(directory, work, clock);
     await runCycle(master, state, effects, () => clock.now);
-    assert.equal(state.actions[throughputEscalationKey('GY-1471', 1)]?.state, 'done', 'the escalated miss is asked on the open owner');
+    assert.equal(state.actions[throughputEscalationKey('GY-1471', 1)]?.state, 'waiting', 'the escalated miss is asked on the open owner');
 
     // From here every re-measure fails: the plane cannot be read, so the ledger's newest attempt is a failure.
     effects.measureThroughput = (items, observedSha) => loopThroughputMeasurement(directory, { work: items, observedSha, now: () => clock.now, origin: 'https://example.invalid',

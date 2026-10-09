@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto';
 import { readdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
+import { retainedActions } from '../src/daemon/state.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { loopThroughputMeasurement, openThroughputOwner, throughputClaim, throughputMeasurementDirectory, throughputMeasurementRetention, throughputRemeasureMs, throughputStallBound, throughputStatus, verifyThroughput } from '../src/throughput.js';
 import { appendThroughputLedger, recordedEntry, throughputEscalationMs, throughputLedgerFile } from '../src/throughput-ledger.js';
@@ -233,17 +234,26 @@ test('unit:soak-throughput-escalated-miss — over simulated days of one release
     for (let index = 1; index < recorded.length; index++) assert.ok(recorded[index].at - recorded[index - 1].at >= throughputRemeasureMs, 're-measures stay spaced');
     assert.ok(recorded.length <= day / throughputRemeasureMs + 2, `re-measures stay bounded: ${recorded.length}`);
 
+    // A busy fleet resolves more actions than the cursor keeps before the answer lands, and the loop prunes the oldest
+    // every cycle: the escalation waits on its owner, so the bound never drops the revision its answer is judged against.
+    const raisedKey = raised[0][0];
+    for (let index = 0; index < retainedActions + 100; index++) state.actions[`soak:busy:${index}`] = { kind: 'dispatch', work: null, principal: null, state: 'done', detail: 'resolved', attempts: 1, epoch: null, cycle: state.cycle, at: new Date(missing.now()).toISOString() };
+    await missing.cycles(missing.now() + 2 * minute);
+    assert.ok(Object.values(state.actions).filter(action => action.state === 'done' || action.state === 'failed').length <= retainedActions, 'the loop pruned the cursor to its bound');
+    assert.equal(state.actions[raisedKey]?.state, 'waiting', 'the escalation outlives the prune while its owner is open');
+
     // The answer: an approved requirements revision applied after the raise. The loop closes the owner on it, and one successor
     // carries the release; the answered decision is not asked again over the next half day of the same misses.
     owner.policyRevision = 2;
     await missing.cycles(start + day + 12 * hour);
     assert.deepEqual(closed, [owner.key]);
     assert.match(work.find(item => item.key === owner.key)!.closure!.reason, /on an escalated budget miss\) was answered by its requirements revision 2/);
+    assert.notEqual(state.actions[raisedKey]?.state, 'waiting', 'its answer consumed, the escalation is settled, and the bound may retire it');
     const successor = openThroughputOwner(work)!;
     assert.ok(successor && successor.key !== owner.key);
     assert.deepEqual(filed, [owner.key, successor.key], 'one successor, filed once');
     assert.equal(missing.keys.length, 2, 'one filing each, never retried once filed');
-    assert.deepEqual(missing.escalations().map(([, action]) => action.work), [owner.key], 'the answered escalated miss is not raised on the successor');
+    assert.deepEqual(missing.escalations().filter(([, action]) => action.work !== owner.key), [], 'the answered escalated miss is not raised on the successor');
     const after = await status(missing.now());
     assert.equal(after.stall, null);
     assert.equal(after.owner.item, successor.key);

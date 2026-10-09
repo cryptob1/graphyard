@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { reviewProviderOf, reviewerProfileFor, exhaustedReviewerProfiles, deploySmokeRequired, deliveryState, rollbackGuidance } from '../model.js';
 import { type Work } from '../model.js';
 import { mergedWithoutAuthorization, unauthorizedMergeViolation } from '../merge-queue.js';
-import { boundDeployment, type DaemonAction, deploymentObservationSchema, maxProofAttempts, message, retainedActions } from './state.js';
+import { boundDeployment, type DaemonAction, type DaemonState, deploymentObservationSchema, maxProofAttempts, message, retainedActions, storeAction } from './state.js';
 import { candidateKey } from './reconcile.js';
 import { readyToRetry } from './sessions.js';
 import { detailChanged, exhaustedProofEscalation, exhaustedProofKey, githubPause, observationWakeDue, standingVerdict } from './decisions.js';
@@ -284,12 +284,27 @@ export function answeredVerdict(answer: DaemonAction | undefined): 'verified' | 
 export const throughputOwnerSuccessions = 8;
 export const throughputOwnerKey = (revision: string) => `throughput:owner:${revision}`;
 export const throughputEscalationKey = (owner: string, policyRevision: number) => `escalation:throughput:${owner}:${policyRevision}`;
-/** The owner's requirements revision at which the loop raised its needs-decision (the earliest, should a key repeat), or null when it raised none. */
+/**
+ * The owner's requirements revision at which the loop raised its needs-decision (the earliest, should a key repeat), or null when it raised none.
+ * GY-1587: the escalation is recorded `waiting` until its owner is closed, so the cursor's bound on
+ * resolved actions never drops the revision its answer is judged against; it is settled `done` then.
+ */
 export function throughputEscalatedAt(actions: Record<string, DaemonAction>, owner: Pick<Work, 'key'>): number | null {
   const prefix = `escalation:throughput:${owner.key}:`;
-  const raised = Object.entries(actions).filter(([key, action]) => key.startsWith(prefix) && action.state === 'done' && action.work === owner.key)
+  const raised = Object.entries(actions).filter(([key, action]) => key.startsWith(prefix) && (action.state === 'waiting' || action.state === 'done') && action.work === owner.key)
     .map(([key]) => Number(key.slice(prefix.length))).filter(Number.isInteger);
   return raised.length ? Math.min(...raised) : null;
+}
+
+/**
+ * An escalation waits while its owner is open (`throughputEscalatedAt`); once that owner is closed, by
+ * the loop on its answer or by anyone, its answer is consumed, and the row is settled `done` (raise time
+ * kept) so the cursor's bound may retire it. `open` is the owner still open, whose escalation stands.
+ */
+function settleThroughputEscalations(state: DaemonState, open: string | null) {
+  for (const [key, action] of Object.entries(state.actions)) {
+    if (key.startsWith('escalation:throughput:') && action.state === 'waiting' && action.work !== open) storeAction(state, key, { ...action, state: 'done' }, null);
+  }
 }
 
 /**
@@ -317,6 +332,7 @@ async function throughputOwnerStep(cycle: Pick<Cycle, 'state' | 'effects' | 'now
   const ownerKey = throughputOwnerKey(revision);
   const note = (work: string | null, outcome: DaemonAction['state'], detail: string) => record(state, ownerKey, { kind: 'deployment', work, principal: null, state: outcome, detail, attempts: (state.actions[ownerKey]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist);
   let owner = openThroughputOwner(work), answered: { key: string; by: number; cause: ReturnType<typeof throughputDecisionCause> } | null = null;
+  settleThroughputEscalations(state, owner?.key ?? null);
   if (owner) {
     // Without a reason it stays open: the claim is not verified and its needs-decision is not answered.
     // GY-1587: the closure names which decision it answered, read from the escalation that asked it.
@@ -325,6 +341,7 @@ async function throughputOwnerStep(cycle: Pick<Cycle, 'state' | 'effects' | 'now
     if (reason) {
       if (effects.closeThroughputOwner && (ownerAction?.state !== 'failed' || readyToRetry(ownerAction, state.cycle))) try {
         if (await effects.closeThroughputOwner(owner, reason, `throughput-owner:close:${owner.id}:${owner.revision}`)) {
+          settleThroughputEscalations(state, null);
           performed.push(await note(owner.key, 'done', `Closed ${owner.key}: ${reason}`));
           // Closed on its answer, not a verified claim: its successor is judged in this same cycle.
           if (verdict !== 'verified') answered = { key: owner.key, by: owner.policyRevision, cause };
@@ -376,7 +393,7 @@ async function throughputOwnerStep(cycle: Pick<Cycle, 'state' | 'effects' | 'now
   // verification without a second ask; the next release asks afresh. An answered stall is a
   // different decision and never suppresses it.
   if (stall.cause === 'escalated-miss' && (answered?.cause === 'escalated-miss' || throughputAnsweredAt(work, revision) !== null)) return;
-  performed.push(await record(state, throughputEscalationKey(owner.key, owner.policyRevision), { kind: 'escalation', work: owner.key, principal: null, state: 'done', detail: throughputStallText({ ...stall, owner: owner.key }), attempts: 1, cycle: state.cycle }, now(), effects.persist));
+  performed.push(await record(state, throughputEscalationKey(owner.key, owner.policyRevision), { kind: 'escalation', work: owner.key, principal: null, state: 'waiting', detail: throughputStallText({ ...stall, owner: owner.key }), attempts: 1, cycle: state.cycle }, now(), effects.persist));
 }
 
 /** Record a budget-cut step, so the journal and `master status` say verification is in flight rather than blind; a full step supersedes the last cut once. */
