@@ -8,6 +8,7 @@ import { encodeLoopPanes, loopPanesHeader, loopPresenceHeader, loopSupervisionHe
 import { herdrServerSeen, herdrTarget } from '../../master/herdr.js';
 import { LoopWake, loopWakeSubjects } from '../../daemon/loop-wake.js';
 import { unhandled, type MasterSession } from './session.js';
+import { exitWhenStopped, recordLockRefusal } from '../../master/loop-restart.js';
 
 /** The durable coordination loop and the dispatcher beside it, until stopped. */
 /** The Herdr server the loop names on each read (GY-1511): the instance its herdr calls target, its host, and whether it last answered. */
@@ -40,12 +41,19 @@ export async function loopCommand(session: MasterSession): Promise<unknown> {
     // GY-1490: the dispatcher's tick wakes the loop's sleep for anything new its next cycle acts on,
     // never sooner than one dispatch interval after the cycle before.
     const wake = new LoopWake(() => current().run.dispatchIntervalSeconds * 1000);
-    const daemonRun = runDaemon(master, state, effects, { once: values.once, intervalMs: values.interval ? intervalSeconds * 1000 : () => current().run.intervalSeconds * 1000, identity: { pid: process.pid, host: master.hostId }, reload, repository: root, wake }).finally(() => stopping.abort());
+    // GY-1603: a stopped loop's process exits within its unit's stop bound, whatever handle is left open.
+    const exit = exitWhenStopped();
+    const held = state.lock && state.lock.pid !== process.pid ? state.lock : null;
+    const daemonRun = runDaemon(master, state, effects, { once: values.once, intervalMs: values.interval ? intervalSeconds * 1000 : () => current().run.intervalSeconds * 1000, identity: { pid: process.pid, host: master.hostId }, reload, repository: root, wake })
+      // A run refused on another loop's lock is recorded for master status, which names a holder outside the unit.
+      .catch(async error => { if (held && String(error?.message).startsWith('Another Graphyard master loop holds')) await recordLockRefusal(root, held).catch(() => {}); throw error; })
+      .finally(() => stopping.abort());
     const dispatching = { ...dispatchEffects(root, current, { snapshot: (timeoutMs = dispatchReadTimeoutMs) => coordinationSnapshot(timeoutMs) }),
       observeLoopSubjects: (work: Parameters<typeof loopWakeSubjects>[0], agents: Parameters<typeof loopWakeSubjects>[3], clock: number) => { wake.observe(loopWakeSubjects(work, current(), clock, agents)); } };
     const dispatchRun = runAutoDispatch(master, dispatchCursor, dispatching, { once: values.once, intervalMs: () => current().run.dispatchIntervalSeconds * 1000, signal: stopping.signal, reload });
     const [result, dispatched] = await Promise.all([daemonRun, dispatchRun]);
     // A cycle that threw was recorded and retried in-process (GY-119); it is reported here, never as an exit.
+    if (result.stopped) exit.stopped();
     return print({ repository: master.repository, coordinator: coordinator.actor.id, intervalSeconds, dispatchIntervalSeconds: master.run.dispatchIntervalSeconds, cycles: result.cycles.length, failedCycles: result.failed.length, stopped: result.stopped ? 'signal' : 'completed', last: result.cycles.at(-1) ?? null, lastFailure: result.failed.at(-1) ?? null,
       dispatch: { ticks: dispatched.ticks.length, launched: dispatched.ticks.reduce((total, tick) => total + tick.launched.length, 0), refused: dispatched.ticks.reduce((total, tick) => total + tick.refused.length, 0), last: dispatched.ticks.at(-1) ?? null } });
   }

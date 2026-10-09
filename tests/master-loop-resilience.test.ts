@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { chmod, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID, generateKeyPairSync } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -615,4 +616,84 @@ test('unit:autonomous-session-prompts — reviewer, producer and worker sessions
     assert.match(failed.detail, /Worker session engineering-claude-1 on GY-69 \(epoch 4\) is waiting on input \(Herdr reports it blocked\) instead of deciding on its own/);
     assert.equal((await runCycle(master, state, effects, () => clock + 1000)).actions.filter(action => action.kind === 'session').length, 0, 'recorded once per pane and epoch');
   } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('unit:master-restart-supervised — master restart goes through this install\'s active unit and reports its new MainPID, a stopped loop\'s process exits within its bound, and a holder outside the unit is named in status', async () => {
+  const { restartMasterLoop, supervisingUnit, recordLockRefusal, readLockRefusal, unsupervisedHolderAttention } = await import('../src/master/loop-restart.js');
+  const { spawn } = await import('node:child_process');
+  const root = await temporaryDirectory('restart-supervised'), home = await temporaryDirectory('restart-home');
+  execFileSync('git', ['init', '-q', root]);
+  const launched = join(root, 'launched.txt'), cliPath = join(root, 'cli.mjs');
+  await writeFile(cliPath, `import { writeFileSync } from 'node:fs'; writeFileSync(${JSON.stringify(launched)}, process.argv.slice(2).join(' '));\n`);
+  const config = { hostId: 'this-host', cliPath, run: { intervalSeconds: 20 } } as unknown as MasterConfig;
+  const host = { home }, unit = 'graphyard-master.service';
+  // A fake user manager: the unit's state, and every command it was given.
+  const systemd = (state: { active: string; directory: string; mainPid: number; next?: number; reachable?: boolean }) => {
+    const calls: string[][] = [];
+    const systemctl = (args: string[]) => {
+      calls.push(args);
+      if (state.reachable === false) throw new Error('Failed to connect to bus: No medium found');
+      if (args[0] === 'restart') state.mainPid = state.next ?? state.mainPid + 1;
+      return args[0] === 'show' ? `LoadState=loaded\nActiveState=${state.active}\nMainPID=${state.mainPid}\nWorkingDirectory=${state.directory}\n` : '';
+    };
+    return { calls, systemctl };
+  };
+  const exited = (child: ReturnType<typeof spawn>) => new Promise<number | null>(done => child.exitCode !== null || child.signalCode !== null ? done(child.exitCode) : child.once('exit', code => done(code)));
+
+  // AC-1: an active unit rooted here is restarted through systemd; the loop holding the lock outside
+  // it is stopped first, no detached `master run` is spawned, and the unit's new MainPID is reported.
+  const outside = spawn('sleep', ['30']);
+  const supervised = systemd({ active: 'active', directory: root, mainPid: 4242, next: 5151 });
+  const restarted = await restartMasterLoop(root, config, { pid: outside.pid!, host: 'this-host', heartbeatAt: new Date().toISOString() }, { systemctl: supervised.systemctl, host, platform: 'linux' });
+  assert.equal(restarted.supervisor, unit); assert.equal(restarted.started, 5151); assert.equal(restarted.stopped, 4242); assert.equal(restarted.log, null);
+  assert.deepEqual(restarted.unsupervised, { pid: outside.pid, result: 'stopped' });
+  await exited(outside);
+  assert.ok(supervised.calls.some(args => args.join(' ') === `restart ${unit}`), 'systemctl --user restart of the unit');
+  await new Promise(done => setTimeout(done, 300));
+  assert.equal(existsSync(launched), false, 'no detached master run is spawned beside the unit');
+  // A unit waiting out its RestartSec (MainPID 0) is still the supervisor.
+  assert.deepEqual(supervisingUnit(root, { systemctl: systemd({ active: 'activating', directory: root, mainPid: 0 }).systemctl, host, platform: 'linux' }), { unit, mainPid: 0 });
+  // Another checkout's unit, an inactive unit, or no systemd: not this install's supervisor.
+  for (const state of [{ active: 'active', directory: home, mainPid: 9 }, { active: 'inactive', directory: root, mainPid: 0 }])
+    assert.equal(supervisingUnit(root, { systemctl: systemd(state).systemctl, host, platform: 'linux' }), null);
+  assert.equal(supervisingUnit(root, { systemctl: systemd({ active: 'active', directory: root, mainPid: 9 }).systemctl, host, platform: 'darwin' }), null);
+  // An unreachable manager with this checkout's unit file installed refuses rather than spawn a second loop.
+  const unreachable = systemd({ active: 'active', directory: root, mainPid: 9, reachable: false });
+  assert.equal(supervisingUnit(root, { systemctl: unreachable.systemctl, host, platform: 'linux' }), null, 'no unit file: the detached restart stands');
+  await mkdir(join(home, '.config/systemd/user'), { recursive: true });
+  await writeFile(join(home, '.config/systemd/user', unit), `[Service]\nWorkingDirectory=${root}\nExecStart=node cli.mjs master run\n`);
+  await assert.rejects(restartMasterLoop(root, config, null, { systemctl: unreachable.systemctl, host, platform: 'linux' }), /could not be asked about graphyard-master\.service.*systemctl --user restart graphyard-master\.service/);
+  assert.equal(existsSync(launched), false);
+
+  // Without an active unit, today's detached restart: the loop is stopped and `master run` started detached.
+  const loop = spawn('sleep', ['30']);
+  const detached = await restartMasterLoop(root, config, { pid: loop.pid!, host: 'this-host', heartbeatAt: new Date().toISOString() }, { systemctl: systemd({ active: 'inactive', directory: root, mainPid: 0 }).systemctl, host, platform: 'linux' });
+  assert.equal(detached.supervisor, null); assert.equal(detached.stopped, loop.pid); assert.ok(detached.started && detached.log);
+  for (let attempt = 0; attempt < 50 && !existsSync(launched); attempt++) await new Promise(done => setTimeout(done, 100));
+  assert.equal(await readFile(launched, 'utf8'), 'master run');
+
+  // AC-2: a loop that was signalled exits within its stop bound though a handle would keep it alive,
+  // and one that printed its stop summary exits after the grace.
+  const module = new URL('../src/master/loop-restart.ts', import.meta.url).href;
+  const child = (body: string) => spawn(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', `const { exitWhenStopped } = await import(${JSON.stringify(module)}); ${body} setInterval(() => {}, 1000); console.log('ready');`], { stdio: ['ignore', 'pipe', 'inherit'] });
+  const ready = (process: ReturnType<typeof spawn>) => new Promise<void>(done => process.stdout!.once('data', () => done()));
+  const signalled = child(`exitWhenStopped(process, { boundMs: 300 }); process.on('SIGTERM', () => console.log('stopping'));`);
+  await ready(signalled);
+  const signalledAt = Date.now(); signalled.kill('SIGTERM');
+  assert.equal(await exited(signalled), 0); assert.ok(Date.now() - signalledAt < 5_000, 'exited within the bound');
+  const summarised = child(`exitWhenStopped(process, { graceMs: 100 }).stopped();`);
+  await ready(summarised);
+  assert.equal(await exited(summarised), 0);
+
+  // AC-3: a refused run records the holder; status names a live holder outside the unit, never the unit's own MainPID.
+  const lock = { pid: process.pid, host: 'this-host', heartbeatAt: new Date().toISOString(), startedAt: '2026-10-09T18:40:00.000Z' };
+  await recordLockRefusal(root, lock); const refusal = await recordLockRefusal(root, lock);
+  assert.equal(refusal.count, 2); assert.deepEqual(await readLockRefusal(root), refusal);
+  const item = unsupervisedHolderAttention({ refusal, lock, hostId: 'this-host', unit: { unit, mainPid: 0 } });
+  assert.ok(item); assert.equal(item.subject, 'loop'); assert.equal(item.role, 'master');
+  assert.match(item.text, new RegExp(`pid ${process.pid} on this-host, started 2026-10-09T18:40:00.000Z.*outside graphyard-master\\.service.*refused on it 2 time`));
+  assert.match(item.next, new RegExp(`kill -TERM ${process.pid} && systemctl --user restart graphyard-master\\.service`));
+  assert.equal(unsupervisedHolderAttention({ refusal, lock, hostId: 'this-host', unit: { unit, mainPid: process.pid } }), null, 'the unit\'s own loop is not an unsupervised holder');
+  assert.equal(unsupervisedHolderAttention({ refusal, lock, hostId: 'this-host', unit: null }), null, 'no unit, no supervisor crash-loop');
+  assert.equal(unsupervisedHolderAttention({ refusal, lock, hostId: 'this-host', unit: { unit, mainPid: 0 }, alive: () => false }), null, 'a holder that is gone raises nothing');
 });

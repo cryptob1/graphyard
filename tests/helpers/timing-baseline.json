@@ -476,7 +476,7 @@
     "tests/master-config-retired-keys.test.ts": 525,
     "tests/master-daemon.test.ts": 1912,
     "tests/master-harness-merge-endpoints.test.ts": 608,
-    "tests/master-loop-resilience.test.ts": 3495,
+    "tests/master-loop-resilience.test.ts": 5100,
     "tests/master-restart-stop.test.ts": 12000,
     "tests/master-status-headroom.test.ts": 645,
     "tests/master-supervision.test.ts": 11184,

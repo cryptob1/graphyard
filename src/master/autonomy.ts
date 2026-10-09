@@ -29,6 +29,7 @@ import { applyDecision, approverRunContext, approverRunOptions, narrowRunner, pi
 import type { Runner, RunRecord } from '../runner/types.js';
 import { autonomyPlan, autonomyReason, humanOnlyDecisions, masterHarness } from './harness.js';
 import { attemptKey, unblockWithRetry } from './unblock.js';
+import { restartMasterLoop } from './loop-restart.js';
 
 type AutonomyFetch = typeof fetch;
 async function adminCall(config: MasterConfig, token: string, fetcher: AutonomyFetch, path: string, body?: unknown) {
@@ -178,26 +179,7 @@ export async function readProposedRoster(root: string) {
   if (unknown.length) throw new Error(`sessionKind is "human" or "ai", as the deployment parses it; ${unknown.join(', ')} would fail the redeployed server at start-up`);
   return parsed.map(entry => ({ id: entry.id as string, role: entry.role as string, sessionKind: entry.sessionKind === 'human' || entry.sessionKind === 'ai' ? entry.sessionKind as string : null }));
 }
-/** Stop this host's master loop, if one runs, and start it again detached, logging beside the config. */
-export async function restartMasterLoop(root: string, config: MasterConfig, lock: { pid: number; host: string; heartbeatAt: string } | null, options: { timeoutMs?: number } = {}) {
-  const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch (error: any) { return error?.code === 'EPERM'; } };
-  let stopped: number | null = null;
-  if (lock && lock.host !== config.hostId && Date.now() - Date.parse(lock.heartbeatAt) < 3 * config.run.intervalSeconds * 1000) throw new Error(`The master loop runs on ${lock.host} (pid ${lock.pid}); restart it on that host`);
-  if (lock && lock.host === config.hostId && alive(lock.pid)) {
-    process.kill(lock.pid, 'SIGTERM'); stopped = lock.pid;
-    const deadline = Date.now() + (options.timeoutMs ?? 30_000);
-    while (alive(lock.pid)) {
-      if (Date.now() > deadline) throw new Error(`Master loop pid ${lock.pid} did not stop within ${Math.round((options.timeoutMs ?? 30_000) / 1000)} seconds; it was not restarted`);
-      await new Promise(done => setTimeout(done, 200));
-    }
-  }
-  const log = resolve(await localDirectory(root), 'master-run.log');
-  const { openSync } = await import('node:fs'); const { spawn } = await import('node:child_process');
-  const output = openSync(log, 'a', 0o600);
-  const child = spawn(process.execPath, [config.cliPath, 'master', 'run'], { cwd: root, detached: true, stdio: ['ignore', output, output] });
-  child.unref();
-  return { stopped, started: child.pid ?? null, log };
-}
+export { restartMasterLoop } from './loop-restart.js';
 
 /**
  * Launch the independent approver session for one decision: its own Herdr tab, its own
