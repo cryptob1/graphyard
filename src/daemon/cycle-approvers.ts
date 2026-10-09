@@ -105,6 +105,25 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
     Object.assign(watch, { launches: watch.launches + 1, agentName: name, pane: agent.pane_id, launchedAt: own?.launchedAt ?? stamp, closeAttempts: 0, account: own?.account ?? null, runtime: own?.runtime ?? null, session: own?.session ?? null, capacity: null });
     await note(`approver:${watch.decision}:bound:${agent.pane_id}`, item, 'decision', 'done', `Watching approver session ${name} in pane ${agent.pane_id}, launched by hand for ${item.key} decision ${watch.decision} while the watch held no session${own ? '' : `; no launch record names that pane, so it is dated from ${stamp}, when the loop first saw it`}`);
   };
+  /**
+   * GY-1604. A session listed under the watch's name in a pane other than the one it holds, now gone, is another launch (`master approver`
+   * replaced it), never judged by the earlier launch's age: it is rebound to the record naming its pane, or dated from this cycle, when the
+   * loop first saw it. The loop's own decision watches and hand watches are rebound alike, before their step is judged. The registry
+   * session, account and runtime of the replaced launch are not the new pane's: its session is ended here, before the rebind, and the
+   * watch keeps only what the pane's own record names. False while that end is refused: the watch is not judged this cycle.
+   */
+  const rebindReplacedPane = async (item: Work, watch: ApprovalWatch, seen: { agents: HerdrAgent[]; available: boolean }, records?: Awaited<ReturnType<NonNullable<DaemonEffects['approverLaunches']>>>) => {
+    if (!watch.pane || !watch.agentName || watch.settledAt || !seen.available || seen.agents.some(candidate => candidate.pane_id === watch.pane)) return true;
+    const moved = seen.agents.find(candidate => candidate.name === watch.agentName && candidate.pane_id && candidate.pane_id !== watch.pane);
+    if (!moved) return true;
+    const fresh = boundLaunch(records ?? await effects.approverLaunches?.().catch(() => []) ?? [], moved);
+    // One the registry could not be told keeps its id on the watch, unbound, and is ended again next cycle before the rebind: the
+    // replacement shares its name, so step 4d cannot tell the predecessor's slot from a live one, and a lost id would hold it for good.
+    if (watch.session && watch.session !== fresh?.session && !await endApproverSession(item, watch, `approver session ${moved.name} in pane ${watch.pane} was replaced by pane ${moved.pane_id}`)) return false;
+    Object.assign(watch, { pane: moved.pane_id, launchedAt: fresh?.launchedAt ?? stamp, closeAttempts: 0, account: fresh?.account ?? null, runtime: fresh?.runtime ?? null, session: fresh?.session ?? null });
+    await note(`approver:${watch.decision}:rebound:${moved.pane_id}`, item, 'decision', 'done', `Watching approver session ${moved.name} in pane ${moved.pane_id}, which replaced the one the watch held${fresh ? '' : `; no launch record names that pane, so it is dated from ${stamp}, when the loop first saw it`}`);
+    return true;
+  };
   const approverCapacity = capacities.find(capacity => capacity.role === 'approver');
   const capacityWait = () => `every approver account is spent, so no approver is launched before ${approverCapacity?.retryAt ?? 'an account reports quota again'}`;
   /**
@@ -476,19 +495,8 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
         }
         // GY-1604: a watch left holding no session binds an approver launched by hand for its decision (see `bindHandLaunch`).
         if (!judged || judged.state === 'requested') await bindHandLaunch(item, watch, seen);
-        // GY-1604: a session listed under the watch's name in a pane other than the one it holds, now gone, is another launch (`master approver`
-        // replaced it), never judged by the earlier launch's age: it is rebound to the record naming its pane, or dated from now, when
-        // the loop first saw it. The registry session, account and runtime of the replaced launch are not the new pane's: its session is
-        // ended here, before the rebind, and the watch keeps only what the pane's own record names.
-        const moved = watch.pane && !seen.agents.some(candidate => candidate.pane_id === watch.pane) ? seen.agents.find(candidate => candidate.name === watch.agentName && candidate.pane_id && candidate.pane_id !== watch.pane) : undefined;
-        if (moved) {
-          const fresh = boundLaunch(records, moved);
-          // One the registry could not be told keeps its id on the watch, unbound, and is ended again next cycle before the rebind: the
-          // replacement shares its name, so step 4d cannot tell the predecessor's slot from a live one, and a lost id would hold it for good.
-          if (watch.session && watch.session !== fresh?.session && !await endApproverSession(item, watch, `approver session ${moved.name} in pane ${watch.pane} was replaced by pane ${moved.pane_id}`)) continue;
-          Object.assign(watch, { pane: moved.pane_id, launchedAt: fresh?.launchedAt ?? stamp, closeAttempts: 0, account: fresh?.account ?? null, runtime: fresh?.runtime ?? null, session: fresh?.session ?? null });
-          await note(`approver:${watch.decision}:rebound:${moved.pane_id}`, item, 'decision', 'done', `Watching approver session ${moved.name} in pane ${moved.pane_id}, which replaced the one the watch held${fresh ? '' : `; no launch record names that pane, so it is dated from ${stamp}, when the loop first saw it`}`);
-        }
+        // GY-1604: a replacement listed under the watch's name in another pane is rebound before its step is judged (see `rebindReplacedPane`).
+        if (!await rebindReplacedPane(item, watch, seen, records)) continue;
         if ((!judged || judged.state === 'requested') && await approverExhausted(item, watch)) continue;
         const step = approvalStep({ ...watch, launchedAt: watch.launchedAt ?? watch.requestedAt }, judged, seen, clock, await stallInputs({ ...watch, launchedAt: watch.launchedAt ?? watch.requestedAt }, judged, seen));
         if (step.step === 'wait') continue;
@@ -532,5 +540,5 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
     for (const entry of ended) performed.push(await record(state, `registry:end:${entry.session}`, { kind: 'close', work: entry.work, principal: null, state: 'done',
       detail: `Ended the ${entry.role} registry session ${entry.session} on ${entry.account}${entry.work ? ` for ${entry.work}` : ''}: ${entry.reason}`, attempts: 1, cycle: state.cycle }, now(), effects.persist));
   }); };
-  return { sessions, invalidate, endApproverSession, endWatchSession, closeApprover, capacityRelaunchWaits, launch, bindHandLaunch, approverExhausted, stallInputs, escalateUnjudged, actOnStep, superviseHandApprovers, reconcileRegistrySessions };
+  return { sessions, invalidate, endApproverSession, endWatchSession, closeApprover, capacityRelaunchWaits, launch, bindHandLaunch, rebindReplacedPane, approverExhausted, stallInputs, escalateUnjudged, actOnStep, superviseHandApprovers, reconcileRegistrySessions };
 }
