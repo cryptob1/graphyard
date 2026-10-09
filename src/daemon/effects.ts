@@ -426,7 +426,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
   // of a second or more is recorded with its step, and the slowest is named on the cycle's line.
   const run = timedRun(deps.run ?? childRunner({ timeoutMs: 90_000, ledger }));
   const fetcher = timedFetch(deps.fetcher ?? fetch, () => current().url);
-  const snapshot = () => timedCall('server', 'GET work-snapshot', deps.snapshot);
+  const snapshot = async () => { await (await import('../master/environments.js')).reportPendingExhaustions(current(), { fetch: fetcher }).catch(() => {}); return timedCall('server', 'GET work-snapshot', deps.snapshot); }; // resending first any account hold the agent registry has not heard of (GY-1573)
   const mutate = (path: string, data: unknown, requestId?: string) => timedCall('server', serverCallName('POST', path), () => deps.mutate(path, data, requestId));
   /**
    * One call as the master's own operator-agent identity — the identity that requests decisions.

@@ -324,7 +324,7 @@ const environmentLogSchema = z.object({
   // The account each profile's latest launch selected, by `role:profile`, so an exhausted session can be traced to its account.
   selected: z.record(z.string(), z.object({ environment: z.string().nullable(), kind: z.string().nullable(), at: z.string(), work: z.string().nullable() }).strict()).default({}),
   exhausted: z.record(z.string(), z.object({ at: z.string(), until: z.string(), resetsAt: z.string().nullable(), reason: z.string().max(500), role: z.enum(quotaRoles), profile: z.string(), work: z.string().nullable(),
-    identity: z.string().nullable().optional() }).strict()).default({}),
+    identity: z.string().nullable().optional(), reported: z.boolean().optional() }).strict()).default({}),
 }).strict();
 /**
  * An account a running session exhausted. The provider's own usage endpoint may lag behind the
@@ -332,9 +332,10 @@ const environmentLogSchema = z.object({
  * session printed is kept here and every launch skips the account until `until`: the reset time
  * the notice named, or an hour when it named none. `identity` is the provider login the account held
  * when it was spent (GY-1573), so a home logged in afresh later neither frees the spent subscription's
- * other accounts nor passes the hold to its new one; absent when it could not be read.
+ * other accounts nor passes the hold to its new one; absent when it could not be read. `reported` false
+ * marks a hold the agent registry has not yet heard of, so every loop cycle sends it again until it has.
  */
-export interface ObservedExhaustion { at: string; until: string; resetsAt: string | null; reason: string; role: LaunchRole; profile: string; work: string | null; identity?: string | null }
+export interface ObservedExhaustion { at: string; until: string; resetsAt: string | null; reason: string; role: LaunchRole; profile: string; work: string | null; identity?: string | null; reported?: boolean }
 export const unknownResetHoldMs = 3_600_000;
 export interface AccountSelection { environment: string | null; kind: string | null; at: string; work: string | null }
 export type EnvironmentLog = { version: 1; environments: Record<string, EnvironmentHealth>; skipped: AccountSkip[]; selected: Record<string, AccountSelection>; exhausted: Record<string, ObservedExhaustion> };
@@ -367,27 +368,44 @@ export async function readEnvironmentLog(config: Pick<MasterConfig, 'credentialF
 }
 /**
  * Record that a session exhausted `environment` mid-work, so no launch selects it before it resets,
- * with the login it was spent on: a configured home's as it reads now, else a registry account's as
- * its launch last read it. Given `report`, the hold also goes to the agent registry at once (GY-1573),
- * so an account on the same login is refused on every host before this one asks for another session.
+ * with the login it was spent on: read from the home its launch last ran in (a registry account's own
+ * home, not a same-named configured one), else a configured home's, else the identity last recorded.
+ * Given `report`, the hold also goes to the agent registry at once (GY-1573), so an account on the same
+ * login is refused on every host before this one asks for another session; a report that fails stays
+ * pending and is sent again by `reportPendingExhaustions` every cycle until the registry has it.
  */
 export async function recordObservedExhaustion(config: Pick<MasterConfig, 'credentialFile'> & Partial<Pick<MasterConfig, 'environments' | 'url' | 'hostId'>>, environment: string, observed: Omit<ObservedExhaustion, 'until'>, now = Date.now(),
   report?: { registry?: Pick<FleetClient, 'observe'>; fetch?: typeof fetch }) {
   const log = await readEnvironmentLog(config);
   const reset = observed.resetsAt ? Date.parse(observed.resetsAt) : Number.NaN;
-  const home = config.environments?.find(entry => entry.name === environment);
+  const launched = log.environments[environment] as EnvironmentHealth | undefined;
+  const home = launched?.home ? { kind: launched.kind, home: launched.home } : config.environments?.find(entry => entry.name === environment);
   // A login file unreadable just now (a runtime mid-write) falls back to the identity the log last read for it.
   const read = home ? await providerIdentity(home.kind, home.home) : undefined;
-  const identity = observed.identity !== undefined ? observed.identity : read !== undefined ? read : (log.environments[environment] as EnvironmentHealth | undefined)?.identity;
-  const entry: ObservedExhaustion = { ...observed, reason: observed.reason.slice(0, 500), until: new Date(Number.isFinite(reset) && reset > now ? reset : now + unknownResetHoldMs).toISOString(), ...identity === undefined ? {} : { identity } };
+  const identity = observed.identity !== undefined ? observed.identity : read !== undefined ? read : launched?.identity;
+  const entry: ObservedExhaustion = { ...observed, reason: observed.reason.slice(0, 500), until: new Date(Number.isFinite(reset) && reset > now ? reset : now + unknownResetHoldMs).toISOString(), ...identity === undefined ? {} : { identity },
+    ...report && reportable(environment) ? { reported: false } : {} };
   log.exhausted = { ...Object.fromEntries(Object.entries(log.exhausted).filter(([, held]) => Date.parse(held.until) > now)), [environment]: entry };
   await atomicPrivateWrite(environmentLogPath(config), log);
-  const registry = report?.registry ?? (report && config.url && config.hostId ? httpFleetClient({ url: config.url, credentialFile: config.credentialFile }, report.fetch ?? fetch, observeTimeoutMs) : null);
-  // Best effort: the next selection from this host reports the same hold through heldAwareProbe.
-  if (registry?.observe && config.hostId) await registry.observe({ host: config.hostId, observations: [{ account: environment, quota: heldObservation(environment, entry) }] }).catch(() => {});
+  if (report) await reportPendingExhaustions(config, report, now).catch(() => {});
   return entry;
 }
-const observeTimeoutMs = 5_000;
+const reportable = (environment: string) => /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$/.test(environment), observeTimeoutMs = 5_000; // a profile's or runtime's own login stays on this host
+/**
+ * Send the agent registry every hold this host recorded that it has not yet heard of (GY-1573), apart from any role's
+ * selection, so a report lost to a control-plane timeout cannot leave a shared-login twin launchable on another host.
+ */
+export async function reportPendingExhaustions(config: Pick<MasterConfig, 'credentialFile'> & Partial<Pick<MasterConfig, 'url' | 'hostId'>>, report: { registry?: Pick<FleetClient, 'observe'>; fetch?: typeof fetch } = {}, now = Date.now()) {
+  const pending = Object.entries(await observedExhaustions(config, now)).filter(([name, held]) => held.reported === false && reportable(name));
+  if (!pending.length || !config.hostId) return 0;
+  const registry = report.registry ?? (config.url ? httpFleetClient({ url: config.url, credentialFile: config.credentialFile }, report.fetch ?? fetch, observeTimeoutMs) : null);
+  if (!registry?.observe) return 0;
+  await registry.observe({ host: config.hostId, observations: pending.map(([name, held]) => ({ account: name, quota: heldObservation(name, held) })) });
+  const log = await readEnvironmentLog(config); // a hold recorded again meanwhile is a new report, still pending
+  for (const [name, held] of pending) if (log.exhausted[name]?.at === held.at && log.exhausted[name]?.until === held.until) log.exhausted[name] = { ...log.exhausted[name], reported: true };
+  await atomicPrivateWrite(environmentLogPath(config), log);
+  return pending.length;
+}
 /** The accounts still held by an observed exhaustion at `now`. */
 export async function observedExhaustions(config: Pick<MasterConfig, 'credentialFile'>, now = Date.now()): Promise<Record<string, ObservedExhaustion>> {
   const log = await readEnvironmentLog(config);

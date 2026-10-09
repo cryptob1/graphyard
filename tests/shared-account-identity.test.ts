@@ -160,6 +160,41 @@ test('unit:shared-identity-exhaustion-holds-twin — an account recorded exhaust
   assert.match((await heldTwin(midConfig.environments, await observedExhaustions(midConfig, now), 'claude', midLog.environments))!.reason, /^claude is the same provider login as claude-a/, 'an unreadable twin login is still held');
   await environments.recordEnvironmentLog(midConfig, [{ ...midLog.environments.claude, identity: undefined }]);
   assert.equal((await environments.readEnvironmentLog(midConfig)).environments.claude.identity, known, 'a read that caught the file mid-write keeps the identity last read');
+
+  // An operator mark naming identity null clears the login it held: an account whose login is now unknown is nobody's twin.
+  const cleared = registryOf([{ name: 'claude-a' }, { name: 'claude' }]);
+  observe(cleared, [{ account: 'claude-a', state: 'unknown', identity: shared }, { account: 'claude', state: 'unknown', identity: shared }], spentAt);
+  const unknownLogin = applyRegistryMutation(cleared, 'account.quota', { name: 'claude-a', quota: { state: 'exhausted', resetsAt, identity: null }, reason: 'weekly limit; now an API-key login' }, { actor: 'operator', at: new Date(spentAt).toISOString() }).registry;
+  assert.equal(unknownLogin.accounts.find(account => account.name === 'claude-a')!.quota.identity, null, 'an explicit null clears the identity');
+  assert.equal(accountIneligibility(unknownLogin, unknownLogin.accounts.find(account => account.name === 'claude')!, now, HOST), null, 'an unknown identity holds no twin');
+
+  // A registry account named like a configured environment with another home is spent on the home its launch ran in, not the configured one.
+  const named = await temporaryDirectory('shared-identity-registry-home'); directories.push(named);
+  const namedHomes = await claudeHomes(named);
+  const legacy = { credentialFile: join(named, 'coordinator.token'), environments: [{ name: 'claude-a', kind: 'claude' as const, home: namedHomes['claude-c'] }] };
+  await environments.recordEnvironmentLog(legacy, [{ name: 'claude-a', kind: 'claude', home: namedHomes['claude-a'], variable: 'CLAUDE_CONFIG_DIR', checkedAt: new Date(spentAt).toISOString(), loggedIn: true, quota: 'unknown', usage: [], healthy: true, reason: null, note: null, login: null, identity: await providerIdentity('claude', namedHomes['claude-a']) }]);
+  const registrySpent = await recordObservedExhaustion(legacy, 'claude-a', { at: new Date(spentAt).toISOString(), resetsAt, reason: notice, role: 'worker', profile: 'builder', work: 'GY-1571' }, now);
+  assert.equal(registrySpent.identity, await providerIdentity('claude', namedHomes.claude), 'the hold names the registry home\'s login, shared with claude');
+  assert.notEqual(registrySpent.identity, await providerIdentity('claude', namedHomes['claude-c']), 'not the same-named configured home\'s');
+
+  // A report the control plane missed is sent again apart from any selection, until the registry has it; a profile's own login is never sent.
+  const retried = applyRegistryMutation(registryOf([{ name: 'claude-a' }]), 'account.set', { account: { name: 'claude', runtime: 'claude', model: 'opus', credential: { host: 'otherhost', home: '/home/operator/.coding_agents/claude' } }, reason: 'fixture' }, { actor: 'operator', at: new Date(spentAt).toISOString() }).registry;
+  observe(retried, [{ account: 'claude-a', state: 'unknown', identity: shared }], spentAt);
+  foldObservations(retried, { host: 'otherhost', observations: [{ account: 'claude', quota: { loggedIn: true, state: 'unknown', usage: [], resetsAt: null, reason: null, identity: shared } }] }, { actor: 'executor', at: new Date(spentAt).toISOString() });
+  const outage = await temporaryDirectory('shared-identity-retry'); directories.push(outage);
+  const outageConfig = { credentialFile: join(outage, 'coordinator.token'), hostId: HOST };
+  const sent: string[][] = [];
+  const down = { observe: async () => { throw new Error('observe timed out'); } };
+  const up = { observe: async (request: { host: string; observations: { account: string; quota: QuotaObservation }[] }) => { sent.push(request.observations.map(entry => entry.account)); return foldObservations(retried, request, { actor: 'executor', at: new Date(now).toISOString() }); } };
+  await recordObservedExhaustion(outageConfig, 'claude-a', { at: new Date(spentAt).toISOString(), resetsAt, reason: notice, role: 'worker', profile: 'builder', work: 'GY-1571' }, now, { registry: down });
+  await recordObservedExhaustion(outageConfig, 'profile:builder', { at: new Date(spentAt).toISOString(), resetsAt, reason: notice, role: 'worker', profile: 'builder', work: 'GY-1571' }, now, { registry: down });
+  assert.equal((await observedExhaustions(outageConfig, now))['claude-a'].reported, false, 'the missed report stays pending');
+  assert.equal(accountIneligibility(retried, retried.accounts.find(account => account.name === 'claude')!, now, 'otherhost'), null, 'the registry has not heard of the hold yet');
+  await assert.rejects(environments.reportPendingExhaustions(outageConfig, { registry: down }, now), /observe timed out/);
+  assert.equal(await environments.reportPendingExhaustions(outageConfig, { registry: up }, now), 1);
+  assert.deepEqual(sent, [['claude-a']]);
+  assert.match(accountIneligibility(retried, retried.accounts.find(account => account.name === 'claude')!, now, 'otherhost')!, /same provider login as claude-a/, 'the twin on the other host is held once the report lands');
+  assert.equal(await environments.reportPendingExhaustions(outageConfig, { registry: up }, now), 0, 'a delivered report is not sent again');
 });
 
 /** Claude login homes as Claude Code writes them: the OAuth token and the account it belongs to. */

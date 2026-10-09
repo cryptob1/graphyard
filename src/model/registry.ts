@@ -279,8 +279,9 @@ export function applyRegistryMutation(current: AgentRegistry, kind: RegistryMuta
     const data = registryMutationSchemas[kind].parse(input); reasonText = data.reason;
     const account = next.accounts.find(entry => entry.name === data.name);
     demandRegistry(account, `Unknown account ${data.name}`);
-    // An operator marks the quota, not the login: the identity a probe read stays unless the mark names one.
-    account.quota = { ...data.quota, reason: data.quota.reason ?? data.reason.slice(0, 500), identity: data.quota.identity ?? account.quota.identity ?? null, observedAt: context.at, observedBy: context.actor, source: 'operator' };
+    // An operator marks the quota, not the login: the identity a probe read stays unless the mark names one, and a mark
+    // naming null clears it, so an account whose login is now unknown is no longer anyone's twin (GY-1573).
+    account.quota = { ...data.quota, reason: data.quota.reason ?? data.reason.slice(0, 500), identity: data.quota.identity !== undefined ? data.quota.identity : account.quota.identity ?? null, observedAt: context.at, observedBy: context.actor, source: 'operator' };
   }
   else if (kind === 'role.set') { const data = registryMutationSchemas[kind].parse(input); reasonText = data.reason; setRole(data.role); }
   else if (kind === 'role.remove') {
