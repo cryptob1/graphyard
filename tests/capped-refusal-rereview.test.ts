@@ -9,10 +9,10 @@ import { cappedEscalationKey, cappedFilingKey, cappedRefusalRequest, cappedRerev
 import { actionId, reconcileActions } from '../src/model/actions.js';
 import type { NextAction } from '../src/model/next-action.js';
 import type { Cycle } from '../src/daemon/cycle.js';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { readCappedRefusal, reviewPrompt } from '../src/reviewer.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-1575, observed on GY-1573 (PR #1047, review round 5 of cap 3), 2026-10-09: the reviewer App
 // requested changes naming a BLOCKING: finding, the loop requested the capped rework decision, and
@@ -176,8 +176,8 @@ test('unit:capped-refusal-rereview-context — the re-review request carries the
   assert.equal(cappedRefusalRequest(run.world.item, H, config, [decision('requested')], [followUp]), null, 'no refusal, no re-review context');
   assert.equal(cappedRefusalRequest(run.world.item, 'c'.repeat(40), config, [decision('refused')], [followUp]), null, 'a refusal binds its own head only');
 
-  const directory = await mkdtemp(join(tmpdir(), 'gy-1575-'));
-  try {
+  const directory = await temporaryDirectory('gy-1575');
+  {
     const credentialFile = join(directory, 'master.token');
     await writeFile(credentialFile, 'c'.repeat(40), { mode: 0o600 });
     const reads: string[] = [];
@@ -203,5 +203,5 @@ test('unit:capped-refusal-rereview-context — the re-review request carries the
     assert.ok(prompt.includes('GY-1574') && prompt.includes(refusalReason));
     assert.match(reviewPrompt(config, binding, undefined, undefined, run.world.item.criteria, undefined, undefined, null, { round: 5, cap: 3, capped: true }, null, null, null, null, failed), /could not read whether an independent approver refused this head's capped rework \(GET \/api\/work\/work-1573\/decisions answered 503\)/);
     assert.doesNotMatch(reviewPrompt(config, binding, undefined, undefined, run.world.item.criteria, undefined, undefined, null, { round: 5, cap: 3, capped: true }), /independent approver refused/, 'an ordinary review carries no refusal');
-  } finally { await rm(directory, { recursive: true, force: true }); }
+  }
 });
