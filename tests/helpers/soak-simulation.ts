@@ -634,7 +634,9 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     /** GY-1573: every account read the loop made on the twin-login day, with each account it found unavailable and why. */
     twinReads: [] as { elapsed: number; unavailable: Record<string, string> }[],
     /** The hold reports the loop sent the agent registry, and what the registry judged of the accounts placed on another host at each read. */
-    observed: [] as { elapsed: number; accounts: string[]; changed: boolean }[], remoteReads: [] as { elapsed: number; ineligible: Record<string, string | null> }[] };
+    observed: [] as { elapsed: number; accounts: string[]; changed: boolean }[], remoteReads: [] as { elapsed: number; ineligible: Record<string, string | null> }[],
+    /** GY-1581: what the registry judged of this host's own accounts each cycle, after folding this host's ordinary probe of them. */
+    localReads: [] as { elapsed: number; ineligible: Record<string, string | null> }[] };
   // GY-973: what each pane's screen tail shows, where it is not a session at work, and the
   // accounts the loop held. OpenCode 1.18 on a spent account prints its limit banner with a retry
   // marker and retries for ever, so Herdr keeps the session `working` and only the screen tells.
@@ -685,9 +687,14 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
       limitMenuDay.observed.push({ elapsed: clock.now() - dayStart, accounts: request.observations.map(entry => entry.account), changed });
       return { changed };
     } };
+    // GY-1581: this host's executor probes its own accounts every cycle too, an ordinary probe reading quota unknown on a
+    // spent Claude login; folded after the session's report, it must not lift that report before its reset.
+    const localIdentities = await Promise.all(environments.map(async environment => ({ account: environment.name, identity: await providerIdentity('claude', environment.home) })));
     // What the other host sees of its own accounts, folded as its selection would fold it, and what the registry then judges of them for that host.
     const readRemote = () => {
       const now = clock.now();
+      foldObservations(registry, { host: soakConfig.hostId, observations: localIdentities.map(entry => ({ account: entry.account, quota: probed(entry.identity) })) }, { actor: 'executor', at: new Date(now).toISOString() });
+      limitMenuDay.localReads.push({ elapsed: now - dayStart, ineligible: Object.fromEntries(environments.map(environment => [environment.name, accountIneligibility(registry, registry.accounts.find(entry => entry.name === environment.name)!, now, soakConfig.hostId)])) });
       foldObservations(registry, { host: remoteHost, observations: remote.map(account => ({ account: account.name, quota: probed(account.identity) })) }, { actor: 'remote-executor', at: new Date(now).toISOString() });
       limitMenuDay.remoteReads.push({ elapsed: now - dayStart, ineligible: Object.fromEntries(remote.map(account => [account.name, accountIneligibility(registry, registry.accounts.find(entry => entry.name === account.name)!, now, remoteHost)])) });
     };

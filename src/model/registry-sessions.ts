@@ -118,11 +118,14 @@ export function accountIneligibility(registry: AgentRegistry, account: FleetAcco
   const plan = deriveAccountPlan(account, registry.accounts);
   const planAccounts = registry.accounts.filter(other => other.name === account.name || deriveAccountPlan(other, registry.accounts).planId === plan.planId);
   const held = (other: FleetAccount) => other.quota.state === 'exhausted' && (!other.quota.resetsAt || Date.parse(other.quota.resetsAt) > now);
-  // An operator hold on the plan wins; otherwise the newest probe on the plan decides, so a stale exhaustion one host
-  // reported without a reset is superseded by a later probe elsewhere (GY-1158). A pure read: nothing is rewritten here.
+  // An operator hold on the plan wins, and so does a session's report of an exhaustion until the reset it named (GY-1581):
+  // neither is a probe's reading, so no probe on the plan outranks it. Otherwise the newest probe on the plan decides, so a
+  // stale exhaustion one host reported without a reset is superseded by a later probe elsewhere (GY-1158). A pure read:
+  // nothing is rewritten here.
+  const reported = (other: FleetAccount) => other.quota.session === true && !!other.quota.resetsAt && held(other);
   const probes = planAccounts.filter(other => other.quota.source === 'probe' && other.quota.observedAt && other.quota.state !== 'unknown')
     .sort((a, b) => Date.parse(b.quota.observedAt!) - Date.parse(a.quota.observedAt!));
-  const exhausted = planAccounts.find(other => other.quota.source === 'operator' && held(other))
+  const exhausted = planAccounts.find(other => other.quota.source === 'operator' && held(other)) ?? [account, ...planAccounts].find(reported)
     ?? (probes.length ? [probes[0]].find(held) : [account, ...planAccounts].find(held));
   if (exhausted?.name === account.name) return `${account.name} quota is exhausted${until(account.quota.resetsAt)}${account.quota.reason ? ` (${account.quota.reason})` : ''}`;
   if (exhausted) return `${account.name} quota is exhausted on plan ${plan.planName} (${exhausted.name} quota is ${exhausted.quota.source === 'operator' ? 'marked exhausted by operator' : 'exhausted'}${until(exhausted.quota.resetsAt)}${exhausted.quota.reason ? `: ${exhausted.quota.reason}` : ''})`;

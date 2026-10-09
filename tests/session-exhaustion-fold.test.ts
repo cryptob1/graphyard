@@ -17,10 +17,10 @@ const shared = 'claude:' + 'a'.repeat(32);
 const held: ObservedExhaustion = { at: new Date(spentAt).toISOString(), until: resetsAt, resetsAt, reason: `You've hit your weekly limit`, role: 'worker', profile: 'worker', work: 'GY-1571', identity: shared };
 const probe: QuotaObservation = { loggedIn: true, state: 'unknown', usage: [], resetsAt: null, reason: null, identity: shared };
 
-function registryOf(names: string[]): AgentRegistry {
+function registryOf(names: string[], plan?: string): AgentRegistry {
   return applyRegistryMutation(emptyRegistry(), 'apply', {
     runtimes: [proposedRuntimes.find(runtime => runtime.name === 'claude')!], models: [{ name: 'opus', id: 'claude-opus-5' }],
-    accounts: names.map(name => ({ name, runtime: 'claude', model: 'opus', credential: { host: HOST, home: `/home/operator/.coding_agents/${name}` } })),
+    accounts: names.map(name => ({ name, runtime: 'claude', model: 'opus', ...plan ? { plan } : {}, credential: { host: HOST, home: `/home/operator/.coding_agents/${name}` } })),
     roles: [{ name: 'worker', accounts: names, concurrency: 4 }], reason: 'fixture',
   }, { actor: 'operator', at: new Date(spentAt - 3_600_000).toISOString() }).registry;
 }
@@ -64,4 +64,21 @@ test('a probe-read exhaustion is still replaced by a later probe before its rese
   fold(registry, [{ account: 'claude-a', quota: heldObservation('claude-a', held) }], spentAt + 120_000);
   fold(registry, [{ account: 'claude-a', quota: heldObservation('claude-a', { ...held, until: later, resetsAt: later }) }], spentAt + 180_000);
   assert.equal(registry.accounts[0]!.quota.resetsAt, later);
+});
+
+test('unit:session-exhaustion-survives-later-probe — on an explicitly shared plan, a later probe of another account reading available does not outrank the session-reported mark: the spent account and its plan stay held until the named reset', () => {
+  const registry = registryOf(['claude-a', 'claude-b'], 'team-max');
+  const other = 'claude:' + 'b'.repeat(32);
+  fold(registry, [{ account: 'claude-a', quota: heldObservation('claude-a', held) }, { account: 'claude-b', quota: { ...probe, identity: other } }], spentAt);
+  const before = Date.parse(resetsAt) - 60_000;
+  // The plan's newest probe reads claude-b available, after the session's report.
+  fold(registry, [{ account: 'claude-b', quota: { ...probe, state: 'available', identity: other } }], before - 60_000);
+  fold(registry, [{ account: 'claude-a', quota: probe }], before - 30_000);
+  assert.equal(registry.accounts.find(account => account.name === 'claude-a')!.quota.state, 'exhausted');
+  assert.match(ineligible(registry, 'claude-a', before) ?? '', new RegExp(`^claude-a quota is exhausted until ${resetsAt}`));
+  assert.match(ineligible(registry, 'claude-b', before) ?? '', /^claude-b quota is exhausted on plan .*\(claude-a quota is exhausted until/);
+
+  const after = Date.parse(resetsAt) + 60_000;
+  assert.equal(ineligible(registry, 'claude-a', after), null, 'the mark lapses at its reset even before a probe replaces it');
+  assert.equal(ineligible(registry, 'claude-b', after), null);
 });
