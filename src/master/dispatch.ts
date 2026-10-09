@@ -25,6 +25,7 @@ import { containmentHold, stopLaunchSupervisor } from './containment.js';
 import { dependencyDirectories, failureText, type SharedDependencies, shareDependencies } from './worktrees.js';
 import { humanOnlyDecisions, installWorkerHarness, prepareSessionHarness, sessionSlotsGrant, submissionPolicyRule } from './harness.js';
 import { withVerificationPath } from './verification-slots.js';
+import { holdRepeatedLimitAccount, repeatedLimitAccount } from './launch-account.js';
 import { currentAgents, dispatchedFile, DispatchReservedError, launchedSinceSnapshot, profileLaunchedFile, reclaimableAgent, reserveDispatch, watchSupervisorRunning } from './dispatch-reservation.js';
 import { projectMemoryDigest, type ProjectMemory } from '../model/project-memory.js';
 import { readProjectMemory } from '../project-memory.js';
@@ -239,13 +240,22 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
       // or out of quota claims nothing, and the refusal names every account it skipped and why. An
       // account whose runtime already failed to start under this dispatch is passed over, so the
       // fallback lands on the next account rather than the same one again (GY-417).
+      // An account this item's last launches each ended on with its limit notice is held before the
+      // choice, so the attempt is routed to an eligible account rather than onto it a third time (GY-1582).
+      // A hold that cannot be read or written refuses the dispatch before anything is claimed: launching
+      // without it could hand the same spent account back, and the loop's retry takes it from there.
+      // On the snapshot's clock, as dispatchability is judged, and the choice reads holds at the same instant.
+      const holdAt = options.probe?.now?.() ?? Date.parse(observedAt), clock = { now: () => holdAt };
+      await holdRepeatedLimitAccount(config, work, holdAt, {}).catch((error: unknown) => {
+        throw new Error(`${work.key}'s last worker launches each ended on ${repeatedLimitAccount(work, holdAt)?.account ?? 'one account'}'s limit notice, and the hold that keeps the next launch off it could not be placed: ${failureText(error).slice(0, 300)}; nothing was claimed`, { cause: error });
+      });
       let startError: unknown = null;
       for (;;) {
         const accounts = profile.accounts?.length ? profile.accounts.filter(name => !startFailures.some(failure => failure.account === name)) : undefined;
         if (accounts && !accounts.length)
           throw new Error(`${describeStartFailures(startFailures, null)}; no further account of profile ${profile.name} to fall back to`, { cause: startError });
         try {
-          selected = await selectAccount(config, 'worker', accounts && accounts.length < (profile.accounts?.length ?? 0) ? { ...profile, accounts } : profile, { ...options.probe, work: work.key });
+          selected = await selectAccount(config, 'worker', accounts && accounts.length < (profile.accounts?.length ?? 0) ? { ...profile, accounts } : profile, { ...clock, ...options.probe, work: work.key });
         } catch (error) {
           if (!startFailures.length || !(error instanceof NoHealthyAccountError)) throw error;
           throw new Error(`${describeStartFailures(startFailures, null)}; no further account of profile ${profile.name} could be launched: ${failureText(error).slice(0, 300)}`, { cause: error });

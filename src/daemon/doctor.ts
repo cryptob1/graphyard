@@ -12,6 +12,7 @@ import { scopeRefusalBlocker, unplannedPaths } from '../model/scope.js';
 import { approverSessionName, guardBroadScope } from '../master/autonomy.js';
 import { containmentPhase, type MasterConfig } from '../master.js';
 import { selectFleetSession } from '../fleet.js';
+import { heldAwareProbe } from '../master/environments.js';
 import { registryHeadlessLaunch, registryRunner, runConfinement } from '../runner/roles.js';
 import { piRunner } from '../runner/pi.js';
 import { doctorActionSchema, doctorFindingsSchema, doctorFiledSchema, doctorRunRecordSchema, type DoctorAction, type DoctorFinding, type DoctorFiled, type DoctorPendingFile, type DoctorRunRecord } from './state.js';
@@ -88,7 +89,7 @@ export const doctorEffects = (config: MasterConfig, root: string, post: Operator
     env: { GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: config.operatorAgent!.credentialFile, GRAPHYARD_HOST_ID: config.hostId, GRAPHYARD_DOCTOR_CLI: config.cliPath },
     runner: async attempt => {
       if (attempt === 'primary') {
-        const fleet = await selectFleetSession(config, doctorRole, { name: doctorRole, principal: config.operatorAgent!.id }, {});
+        const fleet = await selectFleetSession(config, doctorRole, { name: doctorRole, principal: config.operatorAgent!.id }, await heldAwareProbe(config)); // an account held here, or its twin, is spent (GY-1574)
         if (fleet) {
           const launch = registryHeadlessLaunch(fleet.account);
           // The doctor's command allowlist is the Pi extension's: a registry doctor role on any other runtime would run unguarded, so it is not used.
