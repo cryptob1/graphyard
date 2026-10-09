@@ -5,6 +5,7 @@
 // query, so the command the board names is never one the guard refuses.
 import type { Work } from '../model/work.js';
 import type { RoutedScopeDecision } from '../model/scope-provenance.js';
+import { askIdentity } from '../model/scope-collapse.js';
 
 type Queryable = { query: (text: string, values?: unknown[]) => Promise<{ rows: any[] }> };
 const ends = `'decision.applied','decision.failed','decision.declined','decision.superseded','decision.stale','decision.withdrawn'`;
@@ -25,7 +26,7 @@ export async function routedScopeDecisions(db: Queryable, work: readonly Pick<Wo
     FROM events r WHERE r.work_id = ANY($1::uuid[]) AND r.kind='decision.requested' AND r.payload->>'action'='requirements' AND r.payload->'input'->'answers' IS NOT NULL`, [asks.map(item => item.id)]);
   for (const row of rows) {
     const found = asks.find(item => item.id === row.work_id), request = found && ask(found);
-    if (request && row.at === request.at && row.epoch === request.epoch) held.get(row.work_id)!.push({ id: row.id, ended: row.ended });
+    if (request && row.at === request.at && row.epoch === askIdentity(request).epoch) held.get(row.work_id)!.push({ id: row.id, ended: row.ended });
   }
   return held;
 }

@@ -212,3 +212,46 @@ test('integration:carried-scope-ask-refused — the approver refusing an ask car
   assert.equal(scopeRoutineDecision(item, Date.now(), true), null, 'nothing is left to route');
   assert.equal((await claim(work.id)).scopeRequest ?? null, null, 'the next attempt inherits nothing');
 });
+
+// GY-1568 (review): a claim before the approver answers inherits the carried ask under its own
+// epoch. The ask keeps the epoch that asked it, so the loop still routes the same decision — not
+// withdrawn and re-asked under the new epoch — and either answer of it lands on the inherited ask.
+test('integration:carried-scope-ask-claimed-before-answer — an ask a claim inherits before the approver answers keeps its routed decision, and its approval or refusal answers the inherited ask', async () => {
+  for (const verdict of ['approve', 'refuse'] as const) {
+    let work = await ok(master.token, 'POST', 'work', { title: `Ask, release, claim, ${verdict}`, plannedFiles: [layout], criteria: [{ id: 'AC-1', text: 'The widget layout renders', proofs: ['unit:layout'] }], reason: 'Scope carry fixture' }) as Work;
+    work = await ok(master.token, 'POST', `work/${work.id}/ready`, { expectedRevision: work.revision, reason: 'Ready for the attempt' }) as Work;
+    work = await claim(work.id);
+    await ok(token(implementer), 'POST', `work/${work.id}/scope`, { epoch: work.epoch, paths: [daemon], reason: 'AC-1 needs the cycle module' });
+    work = await ok(token(coordinator), 'POST', `work/${work.id}/autoscope`, { epoch: work.epoch }) as Work;
+    const asked = work.scopeRequest!, live = scopeRoutineDecision(work, Date.now(), true)!;
+    const decision = await ok(master.token, 'POST', `work/${work.id}/decide`, { action: 'requirements', input: decisionInput('requirements', work, live.input!), reason: live.reason });
+    await engine.execute(implementer, 'release', work.id, { epoch: work.epoch }, randomUUID());
+
+    // The next attempt claims before the approver judged the ask: it inherits the ask as its own.
+    let item = await claim(work.id);
+    assert.equal(item.epoch, asked.epoch + 1);
+    assert.deepEqual([item.scopeRequest?.epoch, item.scopeRequest?.askedEpoch, item.scopeRequest?.at], [item.epoch, asked.epoch, asked.at], 'the inherited ask keeps the epoch that asked it');
+    const inherited = scopeRoutineDecision(item, Date.now(), true)!;
+    assert.deepEqual([inherited.binding, inherited.input], [live.binding, live.input], 'the same decision, under the same binding and input: nothing to withdraw or re-ask');
+    assert.equal(scopeAskCommand(item, Date.now(), [{ id: decision.id, ended: false }]), `graphyard master decisions ${item.key}`, 'the board names the pending decision');
+    const hand = await call(master.token, 'POST', `work/${work.id}/requirements`, { expectedPolicyRevision: item.policyRevision, criteria: item.criteria, dependencies: item.dependencies, plannedFiles: [layout, daemon], exclusiveResources: item.exclusiveResources ?? [], producerProofs: item.producerProofs ?? [], reason: 'Additive scope: the cycle module' });
+    assert.equal(hand.status, 409, 'no hand widening pre-empts the approver');
+
+    if (verdict === 'approve') {
+      await ok(approver.token, 'POST', `work/${work.id}/approve`, { decision: decision.id, reason: 'Additive and required by AC-1' });
+      item = await reload(work.id);
+      assert.deepEqual(item.plannedFiles, [layout, daemon]);
+      assert.equal(item.scopeRequest ?? null, null, 'the inherited ask is answered');
+      assert.deepEqual([item.scopeDecision?.state, item.scopeDecision?.decidedBy, item.scopeDecision?.requestedAt], ['approved', approver.id, asked.at]);
+    } else {
+      await ok(approver.token, 'POST', `work/${work.id}/approve`, { action: 'refuse', decision: decision.id, reason: 'Not implied by the criteria' });
+      item = await reload(work.id);
+      assert.deepEqual(item.plannedFiles, [layout]);
+      assert.deepEqual([item.scopeRequest?.decision?.state, item.scopeRequest?.decision?.decidedBy, item.scopeDecision?.reason], ['refused', approver.id, 'Not implied by the criteria'], 'the refusal is attached to the inherited ask');
+      // As for a live ask the approver refused: its refused decision stands under the same binding, so nothing is asked anew.
+      assert.equal(scopeRoutineDecision(item, Date.now(), true)?.binding, live.binding);
+      continue;
+    }
+    assert.equal(scopeRoutineDecision(item, Date.now(), true), null, 'nothing is left to route');
+  }
+});

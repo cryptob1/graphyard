@@ -156,6 +156,9 @@ export function routableCarriedRequest(item: { plannedFiles?: readonly string[];
   return routableWidening(item, request);
 }
 
+/** The epoch and instant that identify an ask: a claim that inherits it keeps the epoch that asked (GY-1568), so its routed decision still answers it. */
+export const askIdentity = (request: Pick<ScopeRequestState, 'epoch' | 'at' | 'askedEpoch'>) => ({ epoch: request.askedEpoch ?? request.epoch, at: request.at });
+
 /** The ask the independent approver judges for the item: its live attempt's routed request, or the one an ended attempt carried. */
 export const routedScopeRequest = (item: Parameters<typeof routableScopeRequest>[0] & Parameters<typeof routableCarriedRequest>[0], now: number) =>
   routableScopeRequest(item, now) ?? routableCarriedRequest(item);
