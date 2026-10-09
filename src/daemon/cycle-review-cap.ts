@@ -26,35 +26,55 @@ export const refusedCappedReworks = <D extends { action: string; state: string; 
   return history.filter(entry => entry.action === 'rework' && entry.state === 'refused' && entry.input?.binding === binding);
 };
 /**
- * GY-1577. Whether `at` falls after the item's policy revision last changed. A decision record keeps no revision and the
- * item no time of its last revision, so this reads what that revision reset: a GitHub review the requirement-review baseline
- * does not hold was submitted after it (the rule the review gate applies, src/model/review.ts), and an agent review request
- * binds the revision it was posted under. An item never revised has no earlier revision to predate. Anything else is unknown, so false.
+ * GY-1577, GY-1579. Whether `at` provably falls before the item's policy revision last changed. A decision record keeps no
+ * revision and the item no time of its last revision, so this reads what that revision reset: a GitHub review the
+ * requirement-review baseline does not hold was submitted after it (the rule the review gate applies, src/model/review.ts),
+ * and an agent review request binds the revision it was posted under. An item never revised has no earlier revision to
+ * predate. Anything else is unknown, and unknown is not before: a refusal its binding names is the record's answer, mark or
+ * none (GY-1579 AC-1), so only a refusal the item's own record dates before the revision is set aside.
  */
-export function sinceRevision(work: Pick<Work, 'policyRevision' | 'formalReviewResetRequired' | 'formalReviewBaseline' | 'reviewRequest' | 'candidate'>, capped: Partial<Pick<CappedReview, 'reviewId' | 'submittedAt'>>, at: string | undefined): boolean {
+export function beforeRevision(work: Pick<Work, 'policyRevision' | 'formalReviewResetRequired' | 'formalReviewBaseline' | 'reviewRequest' | 'candidate'>, capped: Partial<Pick<CappedReview, 'reviewId' | 'submittedAt'>>, at: string | undefined): boolean {
   const time = Date.parse(at ?? '');
   if (!Number.isFinite(time)) return false;
-  if (!work.formalReviewResetRequired && work.policyRevision === 1) return true;
+  if (!work.formalReviewResetRequired && work.policyRevision === 1) return false;
   const baseline = work.formalReviewBaseline, request = work.reviewRequest, id = capped.reviewId;
+  const before = (since: string | undefined) => { const start = Date.parse(since ?? ''); return Number.isFinite(start) && time < start; };
   if (baseline && baseline.pr === work.candidate?.pr && baseline.policyRevision === work.policyRevision && Number.isSafeInteger(id) && id! > 0 && !baseline.reviewIds.includes(id!))
-    return time >= Date.parse(capped.submittedAt ?? '');
-  return !!request && request.policyRevision === work.policyRevision && time >= Date.parse(request.createdAt);
+    return before(capped.submittedAt);
+  return !!request && request.policyRevision === work.policyRevision && before(request.createdAt);
 }
 /**
  * GY-1575. The approver's refusal of the rework the loop requested for a capped change request on
  * `capped`'s head and reviewer under the item's policy revision, or null: the approver judged its findings
  * non-blocking, so the review-cap step withdraws the request and has the head re-reviewed with the
  * refusal's reasoning. A refusal judged under an earlier policy revision binds no later change request.
- * GY-1577: a refusal requested before the mark existed carries none; it counts as judged under the current
- * revision when it was refused after that revision last changed (`sinceRevision`), and binds nothing otherwise.
+ * GY-1577, GY-1579: a refusal requested before the mark existed carries none; its binding alone names the head and
+ * reviewer it judged, so it binds unless the item's record dates it before the revision last changed (`beforeRevision`).
  */
 export function refusedCappedRework<D extends { action: string; state: string; input?: any; reason?: string; requestedAt?: string; refusal?: { at?: string } | null }>(history: readonly D[],
-  capped: Pick<CappedReview, 'sha' | 'reviewer'> & Partial<Pick<CappedReview, 'reviewId' | 'submittedAt'>>, work: Parameters<typeof sinceRevision>[0]): D | null {
+  capped: Pick<CappedReview, 'sha' | 'reviewer'> & Partial<Pick<CappedReview, 'reviewId' | 'submittedAt'>>, work: Parameters<typeof beforeRevision>[0]): D | null {
   const mark = cappedRevisionMark(work.policyRevision);
   // The binding names the head and reviewer whose verdict was judged; a base the head later sits on does not change that verdict, so the
   // refusal's recorded base is not compared, marked or unmarked (GY-1577 review): the candidate's base follows main and would strand it.
   return refusedCappedReworks(history, capped).find(entry => entry.reason?.includes(mark)
-    || !revisionMarked(entry.reason) && sinceRevision(work, capped, entry.refusal?.at ?? entry.requestedAt)) ?? null;
+    || !revisionMarked(entry.reason) && !beforeRevision(work, capped, entry.refusal?.at ?? entry.requestedAt)) ?? null;
+}
+/**
+ * GY-1579. A refused capped rework on `capped`'s head that `refusedCappedReworks` cannot read, or null:
+ * its binding names the head as capped (or, binding none or in another format, its situation or reason
+ * names the head and the cap) but not this reviewer, and its reason carries no revision mark either. Such a refusal answers
+ * the round all the same, so the review-cap step escalates it by id rather than waiting on it silently.
+ * A refusal marked under a policy revision is not one: it judged that revision's change request.
+ */
+export function unmatchedCappedRefusal<D extends { action: string; state: string; input?: any; reason?: string; situation?: { sha: string | null } | null }>(history: readonly D[], capped: Pick<CappedReview, 'sha' | 'reviewer'>): D | null {
+  const binding = cappedReworkBinding(capped.sha, capped.reviewer).slice(0, decisionBindingMax);
+  return history.find(entry => {
+    if (entry.action !== 'rework' || entry.state !== 'refused' || entry.input?.binding === binding || revisionMarked(entry.reason)) return false;
+    // A capped binding names its head outright; any other binding, or none, leaves the head and the cap to the situation and reason.
+    const bound = typeof entry.input?.binding === 'string' ? entry.input.binding as string : null;
+    if (bound?.includes(':capped:')) return bound.startsWith(`${capped.sha}:capped:`);
+    return (entry.situation?.sha === capped.sha || !!entry.reason?.includes(capped.sha)) && /\bpast (?:its|the) (?:review-round )?cap\b|\bcapped\b/i.test(entry.reason ?? '');
+  }) ?? null;
 }
 /**
  * GY-1580. The master's own answers to a refused capped head's escalation, refused in turn, earliest first: the
@@ -262,7 +282,11 @@ export async function reviewCapStep(cycle: Cycle) {
       // GY-1577: a refusal of this head's capped rework the step cannot act on, with no request under this revision before
       // the approver and none still owed by the loop, would strand the change request with no actor: it escalates instead.
       const stranded = history ? strandedCappedRefusal(item, capped, history, !!state.approvals[decisionKey(item, { action: 'rework', binding: cappedReworkBinding(capped.sha, capped.reviewer) })]) : null;
-      return stranded ? escalate(stranded) : undefined;
+      if (stranded) return escalate(stranded);
+      // GY-1579: a refusal of this head's capped round its record does not bind to this reviewer is still an answer; it is escalated by id, never left unacted.
+      const unmatched = history ? unmatchedCappedRefusal(history, capped) : null;
+      if (unmatched) return escalate(`${capped.reason}; independent approver ${capRefusalOf(unmatched).approver} refused capped rework decision ${unmatched.id} on ${capped.sha.slice(0, 12)}, but its record binds ${capped.reviewer}'s change request under none of its readings (binding ${String(unmatched.input?.binding ?? 'none')}, no policy revision mark), so the loop cannot withdraw the request on it`, [capRefusalOf(unmatched)]);
+      return;
     }
     // The cursor's row may be pruned; a change request submitted after the refusal is the re-review's all the same (GY-1575).
     if (refused && (state.actions[cappedRereviewKey(item, capped.sha)]?.state === 'done' || requestedSinceRefusal(capped, capRefusalOf(refused)))) {
