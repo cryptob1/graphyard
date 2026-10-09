@@ -351,6 +351,7 @@
     "tests/executor-release.test.ts": 131911,
     "tests/executor-supervision.test.ts": 39277,
     "tests/exhausted-proof-runtime.test.ts": 636,
+    "tests/exhaustion-launch-account.test.ts": 2000,
     "tests/exhaustion-notice.test.ts": 2891,
     "tests/exited-worker-pane.test.ts": 813,
     "tests/failed-launch-pane.test.ts": 1909,

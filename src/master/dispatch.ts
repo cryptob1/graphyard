@@ -25,6 +25,7 @@ import { containmentHold, stopLaunchSupervisor } from './containment.js';
 import { dependencyDirectories, failureText, type SharedDependencies, shareDependencies } from './worktrees.js';
 import { humanOnlyDecisions, installWorkerHarness, prepareSessionHarness, sessionSlotsGrant, submissionPolicyRule } from './harness.js';
 import { withVerificationPath } from './verification-slots.js';
+import { holdRepeatedLimitAccount } from './launch-account.js';
 import { currentAgents, dispatchedFile, DispatchReservedError, launchedSinceSnapshot, profileLaunchedFile, reclaimableAgent, reserveDispatch, watchSupervisorRunning } from './dispatch-reservation.js';
 import { projectMemoryDigest, type ProjectMemory } from '../model/project-memory.js';
 import { readProjectMemory } from '../project-memory.js';
@@ -239,6 +240,9 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
       // or out of quota claims nothing, and the refusal names every account it skipped and why. An
       // account whose runtime already failed to start under this dispatch is passed over, so the
       // fallback lands on the next account rather than the same one again (GY-417).
+      // An account this item's last launches each ended on with its limit notice is held before the
+      // choice, so the attempt is routed to an eligible account rather than onto it a third time (GY-1582).
+      await holdRepeatedLimitAccount(config, work, options.probe?.now?.() ?? Date.now(), {}).catch(() => null);
       let startError: unknown = null;
       for (;;) {
         const accounts = profile.accounts?.length ? profile.accounts.filter(name => !startFailures.some(failure => failure.account === name)) : undefined;

@@ -136,8 +136,9 @@ export async function closeStep(cycle: Cycle) {
     /** The runtime a launched role's profile names, for the notice the loop reads off its pane. */
     const profileRuntime = (role: string, profile: string) =>
       (role === 'reviewer' ? config.reviewers : role === 'producer' ? config.producers : []).find(entry => entry.name === profile)?.kind;
-    const held = async (role: CapacityRole, profile: string, item: Work, signal: { reason: string; resetsAt: string | null }) => {
-      const selected = await effects.selectedAccount?.(role, profile) ?? null;
+    // A worker attempt is charged to the account its own launch record names, not the profile's (GY-1582).
+    const held = async (role: CapacityRole, profile: string, item: Work, signal: { reason: string; resetsAt: string | null }, epoch?: number) => {
+      const selected = await effects.selectedAccount?.(role, profile, epoch === undefined ? undefined : { work: item.key, epoch }) ?? null;
       const account = selected?.environment ?? null;
       // A session on no named account spent its runtime's own login, which other roles launch on too.
       const own = (role === 'worker' ? config.workers : role === 'reviewer' ? config.reviewers : role === 'producer' ? config.producers : []).find(entry => entry.name === profile) ?? { name: profile };
@@ -158,7 +159,7 @@ export async function closeStep(cycle: Cycle) {
       await record(state, key, { kind: 'failover', work: item.key, principal: profile.principal, epoch, state: 'started', detail: `${profile.agentName} on ${item.key} (epoch ${epoch}) ${onNotice(agent)} its provider's limit notice: ${signal.reason}`, attempts, cycle: state.cycle }, now(), effects.persist);
       try {
         const partialWork = await effects.preserveWork?.(item, epoch) ?? { state: 'not-applicable' as const, detail: 'this loop has no access to the attempt worktree' };
-        const { account, runtime } = await held('worker', profile.name, item, signal);
+        const { account, runtime } = await held('worker', profile.name, item, signal, epoch);
         await effects.reportCapacity!(item, { event: 'exhausted', role: 'worker', epoch, profile: profile.name, account, runtime: runtime ?? profile.kind ?? null, reason: signal.reason, resetsAt: signal.resetsAt, partialWork });
         // The lease is over on the record; the supervisor is stopped through the containment scope
         // it recorded, and the fence it leaves is settled in this action once the host verifies it
