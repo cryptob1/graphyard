@@ -8,7 +8,7 @@ import { recordSettledDecision } from '../model/project-memory.js';
 import { type ApprovalWatch, approvalWatchSchema, carriedSession, type DaemonActionKind, latencySampleSchema, message, scopeMeasurementSchema } from './state.js';
 import { decisionKey, scopeAnsweredAt, scopeKey, scopeOutcomeAnswered } from './reconcile.js';
 import { readyToRetry } from './sessions.js';
-import { adoptedWatch, approvalStep, recordWatchEnded, approverLaunchKey, attestDecisions, boundDetail, cappedReworkBound, refusedOnOtherGrounds, exhaustedProofKey, decisionReasonMax, detailChanged, fitDecisionReason, githubPause, handWatchPrefix, maxApproverCloses, maxRefusalAnswers, maxDecisionRequests, namePaths, neededDecision, observedFrom, overtakenDecision, resolveCovers, reworkDecisionReason, refusalNamedIn, standingNamedIn, adoptedOnRefusal, conflictReworkOverdue, reworkObservationWait, routineDecision, type RoutineDecision, sameAnswers, scopeRoutineDecision, blockerScopeDecision, standingVerdict, uncountedScopeFailure, withheldDecision } from './decisions.js';
+import { approvalStep, recordWatchEnded, approverLaunchKey, attestDecisions, boundDetail, cappedReworkBound, exhaustedProofKey, decisionReasonMax, detailChanged, fitDecisionReason, githubPause, handWatchPrefix, maxApproverCloses, maxRefusalAnswers, maxDecisionRequests, namePaths, neededDecision, observedFrom, overtakenDecision, resolveCovers, reworkDecisionReason, refusalNamedIn, standingNamedIn, adoptedOnRefusal, conflictReworkOverdue, reworkObservationWait, routineDecision, type RoutineDecision, sameAnswers, scopeRoutineDecision, blockerScopeDecision, standingVerdict, uncountedScopeFailure, withheldDecision } from './decisions.js';
 import { candidateMovedMeanwhile, decisionFailureKind, decisionReads, deliveredMeanwhile, lateDecisionRead, resumedApplication, selfHealingDecisionFailure } from './decision-reads.js';
 import { refusedAttestationWatch, type RefusedAttestation } from '../model/rework-ground.js';
 import { record } from './effects.js';
@@ -21,6 +21,35 @@ import { createApproverSupervisor } from './cycle-approvers.js';
 import { decisionBudget, deferredFirst, settleDeferred } from './decision-budget.js';
 import { staleReleaseStep } from './stale-releases.js';
 import { closeStanding, closingItems, recordingWrites, staleCloseStep } from './stale-closes.js';
+
+/** The head, grounds kind and grounds a routine rework binding names (`${sha}:${kind}:…`), or null for any other binding. */
+const reworkGrounds = (binding: unknown) => {
+  const match = typeof binding === 'string' ? /^([0-9a-f]{40}:[^:]+)(?::(.*))?$/.exec(binding) : null;
+  return match ? { kind: match[1], rest: match[2] ?? '' } : null;
+};
+/**
+ * GY-1606. Whether a refused rework judged other grounds than `binding`'s: both name a head and a grounds kind, and
+ * either the kind differs or, for a failed-check binding, `binding` names a check the refused one did not. GY-1598's
+ * failed-check rework adopted capped review rework a5116d00 while it stood requested; its refusal settled the CI
+ * binding's watch, and no failed-check rework was requested for 24 minutes. A refused `ci:test` adopted under
+ * `ci:lint` judged nothing of lint either. A binding whose thread set moved is the same grounds.
+ */
+export const refusedOnOtherGrounds = (refused: unknown, binding: string) => {
+  const judged = reworkGrounds(refused), needed = reworkGrounds(binding);
+  if (!judged || !needed) return false;
+  if (judged.kind !== needed.kind) return true;
+  if (!/:ci$/.test(needed.kind)) return false;
+  const checks = new Set(judged.rest.split(','));
+  return needed.rest.split(',').some(check => !checks.has(check));
+};
+/**
+ * GY-1606. The unsettled watch, under another key of `work`'s, whose decision was requested on `binding` itself: a capped
+ * review rework a failed-check binding adopted, once that failure has cleared. It is this binding's to supervise.
+ */
+export function adoptedWatch(approvals: Record<string, ApprovalWatch>, history: readonly { id: string; input?: { binding?: unknown } | null }[], work: string, action: string, binding: string, key: string) {
+  return Object.entries(approvals).find(([other, watch]) => other !== key && watch.work === work && watch.action === action && !watch.settledAt
+    && !other.startsWith(handWatchPrefix) && history.find(entry => entry.id === watch.decision)?.input?.binding === binding) ?? null;
+}
 
 /** The approval-watch key prefix of a hand-launched approver, re-exported for the blocker step (GY-403). */
 export { handWatchPrefix };

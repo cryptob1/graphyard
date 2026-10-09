@@ -17,7 +17,7 @@ import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { nextAction } from '../src/model/next-action.js';
 import { humanNeeded } from '../src/model/concerns.js';
 import { terminalDecisions } from '../src/cli/decision-report.js';
-import { refusedOnOtherGrounds } from '../src/daemon/decisions.js';
+import { refusedOnOtherGrounds } from '../src/daemon/cycle-decisions.js';
 
 // GY-1579, observed on GY-1522 at 2026-10-08T11:38:06Z: the master requested rework bd40dc45 by hand,
 // input { previousWorkerStopped: true } with no binding, on an item that already held applied rework
