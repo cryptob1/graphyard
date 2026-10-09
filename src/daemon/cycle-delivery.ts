@@ -285,7 +285,8 @@ export const throughputOwnerSuccessions = 8;
 export const throughputOwnerKey = (revision: string) => `throughput:owner:${revision}`;
 /**
  * GY-1609: how often an open owner with no needs-decision raised reads the one standing on the
- * newest recorded measurement: well inside the minutes a decision and its approver take.
+ * newest recorded measurement: well inside the minutes a decision and its approver take. A filing's
+ * own read counts, so a cycle that files an owner never reads the ledger a second time.
  */
 export const throughputStandingReadMs = 60_000;
 const standingReads = new WeakMap<DaemonState, number>();
@@ -363,6 +364,8 @@ async function throughputOwnerStep(cycle: Pick<Cycle, 'state' | 'effects' | 'now
     // whatever the latest ask answered — a failed re-measure or a wait on the plane leaves the
     // recorded measurement, and its needs-decision, standing — so the attention is never left with
     // no item to decide on. Without an unverified answer only a standing decision files one.
+    // The read the owner step below would take again this cycle: one parse of the ledger answers both (GY-1609).
+    standingReads.set(state, now());
     const recorded = await effects.standingThroughputStall?.(revision).catch(() => null) ?? null, ownerAction = state.actions[ownerKey];
     stall ??= recorded;
     if (verdict !== 'unverified' && !stall) return;

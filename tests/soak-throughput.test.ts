@@ -87,7 +87,7 @@ async function world(root: string, initiallyBlocked: boolean, submittedMs: numbe
     observeDeployment: async delivered => ({ source: 'endpoint', sha: serving, at: new Date(now).toISOString(), reason: null, deployed: delivered.map(item => item.key), pending: [], requests: 0 }) as never,
     recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
     // The production read (`throughputEffects`): the needs-decision standing on the newest measurement recorded under `root`.
-    standingThroughputStall: standingThroughputStall(root),
+    standingThroughputStall: standingThroughputStall(root, () => now),
     measureThroughput: async (snapshot, observedSha) => {
       const outcome = await loopThroughputMeasurement(root, { work: snapshot, observedSha, now: () => now, origin: 'https://graphyard.example', claimKey: claim.key,
         status: async () => { counts.statusReads++; return { now: new Date(now).toISOString(), release: { version: '0.9.1', revision: serving } }; },
