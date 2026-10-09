@@ -146,9 +146,10 @@ export function recordStallRemedy(work: Work, id: string, input: Omit<RemedyReco
   demand(stall && stall.reason === input.reason, 'The row is no longer stalled on the reason the remedy was applied for', 409);
   const bound = stallRemedy(input.reason);
   demand(bound?.applies === 'loop' && bound.kind === input.remedy, `The reason does not bind to the ${input.remedy} remedy`, 409);
-  // The completion that ended the run would read as a fresh run to `standingRemedy`: the ended run's record is one made since it began.
-  const recorded = live ? standingRemedy(work, id, input.reason) : row!.remedy?.reason === input.reason && Date.parse(row!.remedy.at) >= Date.parse(stall!.since);
-  demand(!recorded, 'A remedy is already recorded for this unchanged run', 409);
+  // The completion that ended the run would read as a fresh run to `standingRemedy`, so an ended run is
+  // read without it. Not the run's first failure either: a long run outgrows the row's retained history.
+  const run = live ? work : { actionQueue: { ...work.actionQueue!, actions: work.actionQueue!.actions.map(entry => entry === row ? { ...entry, history: entry.history.slice(0, -1) } : entry) } };
+  demand(!standingRemedy(run, id, input.reason), 'A remedy is already recorded for this unchanged run', 409);
   row!.remedy = { ...input, at: now.toISOString(), by };
   return row!;
 }

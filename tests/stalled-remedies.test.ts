@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import type { Work } from '../src/model.js';
 import { actionId, type ActionRecord, type ActionRow } from '../src/model/actions.js';
-import { actionStall, actionStallThreshold } from '../src/model/action-progress.js';
+import { actionRecordLimit, actionStall, actionStallThreshold } from '../src/model/action-progress.js';
 import type { NextAction } from '../src/model/action-kinds.js';
 import { livenessCarry, livenessRetryLimit } from '../src/model/liveness.js';
 import { stalledActionAttention } from '../src/cli/master-status.js';
@@ -26,6 +26,8 @@ const holdReason = (key: string) => `${key}: no observation newer than the claim
 const fullProfile = (name: string) => `${name} (role worker is at its concurrency limit (8 of 8 live))`;
 const saturationReason = (key: string) => `no worker profile can take ${key}: ${['claude-primary', 'claude-secondary', 'opencode-primary', 'opencode-secondary', 'claude-quinary', 'claude-senary', 'claude-tertiary', 'claude-quaternary', 'cursor-primary', 'cursor-secondary'].map(fullProfile).join('; ')}; bootstrap-existing (Existing sessions are observed only; Graphyard will not inject new work into an unsupervised process)`;
 const generic = /Clear what that reason names/;
+/** When the run a completed row's last event ended began, as far as the row's retained history tells. */
+const endedSince = (row: ActionRow) => actionStall({ ...row, history: row.history.slice(0, -1) })!.since;
 const shift = (at: string, ms: number) => new Date(Date.parse(at) + ms).toISOString();
 
 /** An open item whose `kind` row failed `failures` times for `reason`, the last at `at`. */
@@ -207,6 +209,22 @@ test('unit:stall-remedy-recorded-once — the remedy is applied and recorded onc
   const d = stalledItem('GY-1587', 'dispatch', holdReason('GY-1587'), at);
   d.row.history.push({ at: shift(at, 60_000), event: 'completed', requester: 'graphyard', executor: 'x', result: 'done', reason: 'done' }, { at: shift(at, 70_000), event: 'requested', requester: 'graphyard', executor: null, result: null, reason: 'again' });
   assert.throws(() => recordStallRemedy(d.work, d.row.id, { ...late, reason: d.row.stall!.reason }, 'graphyard-master', new Date(shift(at, 90_000))), /no longer stalled on the reason/, 'only a completion that is the row\'s last event ended the run the record names');
+
+  // A record made early in a run outlives the run's first failures once same-reason retries trim them
+  // from the row's history: the completion that ends the run takes no second record, and the first stands.
+  const e = stalledItem('GY-1588', 'dispatch', holdReason('GY-1588'), at), held = e.row.stall!.reason;
+  const refusal = { ...late, reason: held, outcome: 'refused' as const, detail: 'a sudo confirmation is pending' };
+  recordStallRemedy(e.work, e.row.id, refusal, 'graphyard-master', new Date(shift(at, 10_000)));
+  for (let n = 1; n <= actionRecordLimit; n++) {
+    const failedAt = shift(at, n * 60_000);
+    e.row.history.push({ at: shift(failedAt, -10_000), event: 'claimed', requester: 'graphyard', executor: 'x', result: null, reason: 'again' }, { at: failedAt, event: 'failed', requester: 'graphyard', executor: 'x', result: 'failed', reason: held });
+  }
+  e.row.history.push({ at: shift(at, (actionRecordLimit + 1) * 60_000), event: 'completed', requester: 'graphyard', executor: 'x', result: 'done', reason: 'the held job resumed' });
+  e.row.history = e.row.history.slice(-actionRecordLimit);
+  Object.assign(e.row, { state: 'done', result: 'done' });
+  assert.ok(Date.parse(endedSince(e.row)) > Date.parse(e.row.remedy!.at), 'the retained history no longer reaches back to the record');
+  assert.throws(() => recordStallRemedy(e.work, e.row.id, { ...late, reason: held }, 'graphyard-master', new Date(shift(at, (actionRecordLimit + 2) * 60_000))), /already recorded for this unchanged run/);
+  assert.equal(e.row.remedy?.outcome, 'refused', 'the run\'s recorded refusal is kept');
 });
 
 // ---- AC-3 -----------------------------------------------------------------------------------------
