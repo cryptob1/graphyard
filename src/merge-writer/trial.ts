@@ -7,6 +7,7 @@ import { dirname, join, parse } from 'node:path';
 import { defaultChildRun, type ChildRun } from '../child-runner.js';
 import { allocateSessionCheckout, removeSessionCheckout } from '../install/worktree-root.js';
 import { isolatedTestEnvironment, npmCiArgs, npmCiEnvironment } from '../cli/test-isolation.js';
+import { tempOwnerMarker, writeTempOwner } from '../tmp-reclaim.js';
 
 /** One git call in the coordinator's object store: the arguments after `git -C <root>`, the child's stdout. */
 export type TrialGit = (args: string[], env?: Record<string, string>) => Promise<string>;
@@ -89,6 +90,13 @@ export function lookupPoisoned(directory: string): boolean {
  */
 export const trialTemporaryRoot = (sessionDirectory: string, roots: readonly string[] = trialTemporaryRoots) =>
   roots.find(root => existsSync(root) && !lookupPoisoned(root)) ?? sessionDirectory;
+/**
+ * The name prefix of a trial's temporary directory: the tmp reclaim's own `graphyard-` pattern, so a
+ * directory a crashed merge writer left behind is taken back (GY-1565). runTrial marks it with its
+ * owner, so the loop's pass and the test runner's sweep remove it as soon as that process is gone,
+ * and keep it while the trial runs.
+ */
+export const trialTemporaryPrefix = 'graphyard-trial-';
 /** The variables that point the trial child's temporary files at `directory`. */
 export const trialTemporaryVariables = (directory: string) => ({ TMPDIR: directory, TMP: directory, TEMP: directory });
 
@@ -214,10 +222,15 @@ export function runnerRecords(text: string): { file: string; passed: boolean }[]
 export async function runTrial(input: RunTrialInput): Promise<TrialRun> {
   const run = input.run ?? defaultChildRun, now = input.now ?? Date.now, startedAt = now(), deadline = startedAt + input.timeoutMs;
   const checkout = await allocateSessionCheckout(input.base, 'trial', input.key ?? 'trial', input.mergeSha, randomUUID());
-  // A fresh, empty temporary directory made for this trial alone, removed with its checkout.
-  let temporary: string;
-  try { temporary = await mkdtemp(join(trialTemporaryRoot(checkout.directory, input.temporaryRoots), 'gyt-')); }
-  catch (error) { await (input.remove ?? removeSessionCheckout)(input.root, input.base, checkout.directory, input.run).catch(() => {}); throw error; }
+  // A fresh, empty temporary directory made for this trial alone, removed with its checkout, and
+  // marked as this process's so a crash before the cleanup leaves it to the tmp reclaim.
+  let temporary: string | null = null;
+  try { temporary = await mkdtemp(join(trialTemporaryRoot(checkout.directory, input.temporaryRoots), trialTemporaryPrefix)); await writeTempOwner(temporary); }
+  catch (error) {
+    if (temporary) await rm(temporary, { recursive: true, force: true }).catch(() => {});
+    await (input.remove ?? removeSessionCheckout)(input.root, input.base, checkout.directory, input.run).catch(() => {});
+    throw error;
+  }
   const env = { ...trialEnvironment(input.environment), ...trialTemporaryVariables(temporary) };
   const log: string[] = [];
   const remaining = () => Math.max(1000, deadline - now());
@@ -331,7 +344,7 @@ export async function runTrial(input: RunTrialInput): Promise<TrialRun> {
   let settled: { verdict: TrialRun } | { error: unknown };
   try { settled = { verdict: await trial() }; } catch (error) { settled = { error }; }
   // The temporary directory goes with it: a failure to remove either is the cleanup's, and neither stops the other.
-  const removed = await Promise.allSettled([rm(temporary, { recursive: true, force: true }), (input.remove ?? removeSessionCheckout)(input.root, input.base, checkout.directory, input.run)]);
+  const removed = await Promise.allSettled([rm(temporary, { recursive: true, force: true }).then(() => rm(tempOwnerMarker(temporary), { force: true })), (input.remove ?? removeSessionCheckout)(input.root, input.base, checkout.directory, input.run)]);
   const failure = removed.find((result): result is PromiseRejectedResult => result.status === 'rejected');
   if (failure) {
     const cause = failure.reason;

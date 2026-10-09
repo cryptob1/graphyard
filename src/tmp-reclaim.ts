@@ -152,11 +152,13 @@ async function sizeOf(path: string): Promise<number> {
 
 /**
  * The temporary directories a test run on this host may write to, each once (GY-1368): this
- * process's own tmpdir and `/tmp`, deduplicated by realpath, in that order. The loop's unit can run
- * with TMPDIR=/var/tmp while the test runs, worker and producer sessions that leak entries write
- * under /tmp, so a pass over the loop's own tmpdir alone removed nothing for a day.
+ * process's own tmpdir, `/tmp` and `/var/tmp`, deduplicated by realpath, in that order. The loop's
+ * unit can run with TMPDIR=/var/tmp while the test runs, worker and producer sessions that leak
+ * entries write under /tmp, so a pass over the loop's own tmpdir alone removed nothing for a day.
+ * A shadow trial makes its own temporary directory in /var/tmp when /tmp is poisoned (GY-1565,
+ * `trialTemporaryRoots`), whatever the loop's own tmpdir is, so that root is scanned too.
  */
-export const hostTmpRoots = (own = tmpdir(), shared = '/tmp'): string[] => [own, shared];
+export const hostTmpRoots = (own = tmpdir(), shared = '/tmp', persistent = '/var/tmp'): string[] => [own, shared, persistent];
 /** `roots` with every path that resolves to an earlier one dropped, each with its realpath; a root that cannot be resolved is its own. */
 async function distinctRoots(roots: readonly string[]): Promise<{ path: string; real: string }[]> {
   const distinct: { path: string; real: string }[] = [];

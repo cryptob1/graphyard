@@ -848,7 +848,7 @@ export function owedUpgrade(state: { upgrade?: { pending: { from: string | null;
 /**
  * The loop's bounds for one /tmp pass — at most `tmpReclaimLimitPerCycle` directories and
  * `tmpReclaimWorkMsPerCycle` of removal — over `tmpRoots`, or the host's temporary directories
- * (`hostTmpRoots`: this process's tmpdir and /tmp, each once, GY-1368) unless the caller names
+ * (`hostTmpRoots`: this process's tmpdir, /tmp and /var/tmp, each once, GY-1368, GY-1565) unless the caller names
  * others (a test's scratch roots, so it never sweeps the developer's real /tmp).
  */
 export const loopTmpReclaimOptions = (tmpRoots?: readonly string[]): TmpReclaimOptions => ({ limit: tmpReclaimLimitPerCycle, workMs: tmpReclaimWorkMsPerCycle, tmpRoots: tmpRoots ?? hostTmpRoots() });
