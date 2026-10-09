@@ -19,7 +19,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
  * survives; once it resets the twin is free again. Every system invariant the loop checks holds after
  * every cycle.
  */
-const start = Date.parse('2026-10-09T05:30:00Z'), resetsAt = '2026-10-11T05:00:00.000Z', reset = Date.parse(resetsAt);
+const start = Date.parse('2026-10-09T05:30:00Z'), reset = start + 47 * hour + 30 * minute, resetsAt = new Date(reset).toISOString();
 const outage = { from: 0, to: 2 * hour }, lapsing = { at: 32 * hour, resetsIn: hour };
 const spent = { at: new Date(start).toISOString(), resetsAt, reason: 'You\'ve hit your weekly limit · resets Oct 10, 10pm (America/Los_Angeles)', role: 'worker' as const, profile: 'builder', work: 'GY-1571' };
 const directories: string[] = [];
