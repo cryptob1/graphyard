@@ -186,3 +186,21 @@ test('unit:tmp-reclaim-tsx-cache — escalation sweeps and names only the roots 
   assert.ok(report.consumers?.length, 'the bound still stands, so consumers are named');
   assert.ok(report.consumers!.every(consumer => consumer.path.startsWith(low)), `only the low root's consumers are named (${report.consumers!.map(consumer => consumer.path).join(', ')})`);
 });
+
+test('unit:tmp-reclaim-tsx-cache — an escalation step\'s work bound is counted from the pass\'s first removal, not restarted by the step: a step whose window the base sweep already spent removes nothing', { skip: ownCache() === null ? 'no uids on this platform' : false }, async () => {
+  const tmp = await temporaryDirectory('tsx-cache-escalate-work');
+  const cache = join(tmp, ownCache()!);
+  await mkdir(cache);
+  const now = Date.now();
+  const stale = join(tmp, 'pg-password-stale');
+  await writeFile(stale, 'x'); await backdate(stale, testTempMinAgeMs + 3_600_000, now);
+  for (let index = 0; index < 20; index++) { const path = join(cache, `compiled-${index}`); await writeFile(path, 'x'); await backdate(path, 2 * 3_600_000, now); }
+  await backdate(cache, 9 * 3_600_000, now);
+  // The base sweep's one removal starts the pass's clock; measuring the volume then takes longer than
+  // the step's whole window, so a step that restarted the clock would take the cache files.
+  const volume = async () => { await new Promise(done => setTimeout(done, 120)); return { files: 4000, ffree: 100 }; };
+  const report = await reclaimTmpDirectories({ tmpRoot: tmp, held: new Set(), limit: 100, workMs: 60_000, volume, escalation: [{ limit: 2_000, cacheAgeMs: 3_600_000, workMs: 60 }] });
+  assert.deepEqual(report.errors, []);
+  assert.equal(existsSync(stale), false, 'the base sweep removed the stale temp');
+  assert.deepEqual(report.escalated?.map(step => step.removed), [0], 'the step\'s 60 ms were spent before it ran');
+});
