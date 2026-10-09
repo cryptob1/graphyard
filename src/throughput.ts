@@ -200,6 +200,16 @@ export function claimWindow(claim: Work | undefined, given?: string | null, end?
 }
 
 /**
+ * Where a window's selection ends: `--until` when given. A trailing window without it ends at the
+ * measurement time, because its start was counted back from there, so a merge stamped later (clock
+ * skew, a ledger read ahead of the clock) is neither read nor judged. A window starting at the
+ * claim's floor or a given start keeps no upper bound without `--until`, as it always has.
+ */
+function windowEnd(window: { basis: WindowBasis }, until: string | null | undefined, now: number): string | null | undefined {
+  return until ?? (window.basis === 'trailing-72h' ? new Date(now).toISOString() : until);
+}
+
+/**
  * Every idle span of one action row, from the row's own history.
  *
  * A row is actionable from the instant it is requested, reopened or reclaimed, and stops being
@@ -424,8 +434,7 @@ export const populationRule = 'A delivery is counted when it is a merged pull re
 export function verifyThroughput(work: Work[], now: number, options: { deployed: DeployedRelease; since?: string | null; until?: string | null; claimKey?: string }): ThroughputReport {
   const claimKey = options.claimKey ?? throughputClaim.item;
   const window = claimWindow(work.find(item => item.key === claimKey), options.since, time(options.until ?? null) ?? now);
-  // The window ends at --until or, without it, at the measurement time: a merge stamped later is not in it.
-  const inWindow = windowDeliveries(work, window.since, options.until ?? new Date(now).toISOString());
+  const inWindow = windowDeliveries(work, window.since, windowEnd(window, options.until, now));
   const records = inWindow.map(item => deliveryRecord(item, now, window.since)).sort((a, b) => Date.parse(a.mergedAt) - Date.parse(b.mergedAt));
   // "Real" is judged before the coordinator rule, so the population line separates a fixture from
   // a delivery a master drove; both are excluded, and they are not the same fact.
@@ -793,7 +802,7 @@ export async function measureThroughput(summaries: Work[], readItem: (id: string
   const claim = summaries.find(item => item.key === claimKey);
   const window = claimWindow(claim, options.since, time(options.until ?? null) ?? now);
   // No established window means no release of the claim to measure: nothing is read.
-  const wanted = window.since === null && window.basis === 'unknown' ? [] : windowDeliveries(summaries, window.since, options.until ?? new Date(now).toISOString());
+  const wanted = window.since === null && window.basis === 'unknown' ? [] : windowDeliveries(summaries, window.since, windowEnd(window, options.until, now));
   const whole = new Map<string, Work>(), queue = [...wanted];
   await Promise.all(Array.from({ length: Math.min(throughputReadConcurrency, queue.length) }, async () => {
     for (let next = queue.shift(); next; next = queue.shift()) whole.set(next.id, await readItem(next.id));
