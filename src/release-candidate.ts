@@ -251,16 +251,18 @@ export type AnyGit = Git | AsyncGit;
 const awaited = (git: AnyGit): AsyncGit => async args => await git(args);
 export const gitIn = (cwd: string): Git => args => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024 });
 
+/** The read of every record under one tag prefix (GY-1535: a caller can answer it ahead of a sync reader). */
+export const recordsArguments = (prefix: string) => ['for-each-ref', '--sort=-refname', '--format=%(refname:strip=2)%00%(contents)%00%00', `refs/tags/${prefix}`];
 /** Every record under one tag prefix, newest first, read from annotated tag messages. */
 export function readRecords<T>(git: Git, prefix: string): T[] {
-  const out = git(['for-each-ref', '--sort=-refname', '--format=%(refname:strip=2)%00%(contents)%00%00', `refs/tags/${prefix}`]);
+  const out = git(recordsArguments(prefix));
   return out.split('\0\0').map(entry => entry.replace(/^\n/, '')).filter(Boolean).flatMap(entry => {
     const [, body] = entry.split('\0');
     try { return [JSON.parse(body.trim()) as T]; } catch { return []; }
   });
 }
-export async function readRecordsAsync<T>(git: AsyncGit, prefix: string): Promise<T[]> {
-  const out = await git(['for-each-ref', '--sort=-refname', '--format=%(refname:strip=2)%00%(contents)%00%00', `refs/tags/${prefix}`]);
+async function readRecordsAsync<T>(git: AsyncGit, prefix: string): Promise<T[]> {
+  const out = await git(recordsArguments(prefix));
   return out.split('\0\0').map(entry => entry.replace(/^\n/, '')).filter(Boolean).flatMap(entry => {
     const [, body] = entry.split('\0');
     try { return [JSON.parse(body.trim()) as T]; } catch { return []; }

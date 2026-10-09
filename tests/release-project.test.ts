@@ -79,6 +79,8 @@ test('unit:candidate-runs-project-cases — every required case of a managed rep
   await write('e2e/cases/level-two.json', { id: 'level-two', title: 'A player reaches level two', tags: ['api'], target: 'any', required: true, steps: [http('/level-2.json', [{ path: 'level', equals: 2 }])] });
   await write('e2e/cases/credits.json', { id: 'credits', title: 'Credits are listed', tags: ['api'], target: 'uat', required: false, steps: [http('/credits.html')] });
   await write('e2e/cases/unit-only.json', { id: 'unit-only', title: 'Optional and not uat', tags: ['api'], target: 'any', required: false, steps: [http('/never.json')] });
+  // The contract binds level two to its customer outcome, so its failure is held per outcome (src/release-holds.ts).
+  await write('e2e/contract.json', { outcomes: [{ id: 'progress', title: 'A player progresses', criteria: ['Level two opens'], cases: ['level-two'] }] });
   git(checkout, 'add', '-A'); git(checkout, 'commit', '-q', '-m', 'game and its cases'); git(checkout, 'push', '-q', 'origin', 'main');
   const ledger = gitIn(checkout);
   const filed: { item: any; requestId: string }[] = [];
@@ -109,8 +111,11 @@ test('unit:candidate-runs-project-cases — every required case of a managed rep
   assert.equal(e2e.cases.find(entry => entry.case === 'level-two')!.failingStep!.name, 'read /level-2.json');
   assert.deepEqual(failingRequiredCases(first.run.record).map(entry => entry.case), ['level-two'], 'the failing required case is what the related-item revert reads');
   assert.ok(visits.some(url => url.startsWith('http://127.0.0.1:')), `the browser case drove the loopback UAT: ${visits.join(', ')}`);
-  assert.equal(first.run.followUp, 'GY-901', 'the failed candidate files its follow-up');
-  assert.match(JSON.stringify(filed[0]!.item), /level-two/);
+  // The failed bound case opens its outcome's hold, filed as one item and recorded as a hold tag through the loop's async git; the hold answers the e2e failure, so no follow-up is filed.
+  assert.deepEqual(first.run.record.holds!.map(entry => [entry.kind, entry.outcome, entry.item]), [['open', 'progress', 'GY-901']]);
+  assert.equal(first.run.followUp, null);
+  assert.equal(filed.length, 1); assert.match(JSON.stringify(filed[0]!.item), /level-two/);
+  assert.match(git(origin, 'tag', '--list', 'rc-hold/*'), new RegExp(`rc-hold/progress/${first.candidate.id}`), 'the hold record is pushed beside the candidate');
   // The verdict is the candidate's record, in the ledger every later step reads.
   syncLedger(ledger, 'main');
   assert.equal(readLedger(ledger).uat.find(record => record.id === first.candidate.id)!.result, 'failed');
@@ -122,6 +127,7 @@ test('unit:candidate-runs-project-cases — every required case of a managed rep
   assert.equal(second.run.record.result, 'passed', JSON.stringify(second.run.record.suites));
   assert.deepEqual(Object.fromEntries(second.run.record.e2e!.cases.map(entry => [entry.case, entry.verdict])), { credits: 'passed', home: 'passed', 'level-two': 'passed', scores: 'passed' });
   assert.deepEqual(second.run.record.e2e!.blocking, []);
+  assert.deepEqual(second.run.record.holds!.map(entry => [entry.kind, entry.outcome]), [['clear', 'progress']], 'its bound case passing on the newer candidate clears the hold');
 
   // 3. A build that fails fails the candidate as its own suite.
   await write('README.md', 'next\n');

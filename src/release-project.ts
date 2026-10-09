@@ -4,8 +4,8 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { contractFile, loadCases, loadContract } from './e2e/case.js';
 import { e2eSuite, type E2eLauncher, type E2eReport } from './e2e/runner.js';
-import { releaseHolds } from './release-holds.js';
-import { findCandidate, readLedgerAsync, serveStaticSite, syncLedgerAsync, validateAndRecord, type AnyGit, type StaticUat, type Suite } from './release-candidate.js';
+import { holdTagPrefix, releaseHolds } from './release-holds.js';
+import { findCandidate, readLedgerAsync, recordsArguments, serveStaticSite, syncLedgerAsync, validateAndRecord, type AnyGit, type AsyncGit, type Git, type HoldOutcome, type ReleaseCandidate, type StaticUat, type Suite, type UatRecord } from './release-candidate.js';
 
 /**
  * GY-1535: a managed repository's own cases as the candidate's `e2e` suite — every required case
@@ -26,6 +26,23 @@ export function projectCaseSuite(root: string, token: string, options: { fetcher
     },
   };
 }
+
+/**
+ * The release holds (src/release-holds.ts) over async git, so the loop never blocks on a child: the
+ * hold records are read ahead and answered to the holds' own sync read, and the hold tags they write
+ * are kept in order and written through `git` when the outcome's `write` runs.
+ */
+const asyncHolds = (git: AsyncGit, options: Parameters<typeof releaseHolds>[1]) => async (candidate: ReleaseCandidate, record: UatRecord): Promise<HoldOutcome> => {
+  const read = recordsArguments(holdTagPrefix), listed = await git(read), writes: string[][] = [];
+  const replay: Git = args => {
+    if (args.join('\0') === read.join('\0')) return listed;
+    if (!args.includes('tag') && args[0] !== 'push') throw new Error(`the release holds ran git ${args.join(' ')}, which is not a hold record's read or write`);
+    writes.push(args);
+    return '';
+  };
+  const outcome = await releaseHolds(replay, options)(candidate, record);
+  return { ...outcome, write: async () => { outcome.write(); for (const args of writes) await git(args); } };
+};
 
 /** The UAT a managed repository's candidate is validated on: a deployment's URL, or a static site's build output served on loopback (optionally built first by `build`, a shell command run in the checkout). */
 export type ProjectUat = { url: string } | { static: { directory: string; build?: string | null } };
@@ -63,7 +80,7 @@ export async function validateProjectCandidate(sourceGit: AnyGit, id: string, op
   suites.push(projectCaseSuite(options.checkout, options.token, { fetcher: options.fetcher, launcher: options.launcher, stepTimeoutMs: options.stepTimeoutMs, report: value => { report = value; } }));
   try {
     const contract = existsSync(join(options.checkout, contractFile)) ? await loadContract(options.checkout).catch(() => null) : null;
-    const holds = releaseHolds(git, { contract, push: options.push, file: options.file, now: options.now, report: async () => report });
+    const holds = asyncHolds(git, { contract, push: options.push, file: options.file, now: options.now, report: async () => report });
     return await validateAndRecord(git, id, url, suites, { base: options.base, push: options.push, timeoutMs: options.timeoutMs, file: options.file, holds, now: options.now, fetcher: options.fetcher });
   } finally { await served?.close(); }
 }
