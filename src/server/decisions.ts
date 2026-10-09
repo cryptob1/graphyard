@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { Refusal, demand, resolveEscalation, standingEscalations, type Principal, type Work } from '../model.js';
 import { save, wakeJob } from '../store.js';
 import { approvalConflict, approveCapability, assertDecisionAuthority, decisionApprovalSchema, decisionInputs, decisionPrecondition, decisionRequestSchema, foldDecisions, judgedSame, requiredDecisionCapabilities, standingRefusal, approvalApplyGraceMs, type Decision, type DecisionState } from '../model/approval.js';
-import { lapsedReauthorization, reworkSituation } from './held-rework.js';
+import { lapsedReauthorization, reworkSituation, standingRequest } from './held-rework.js';
 import { canonical, decisionRace, readDecisions, resolvePin, samePin, type DecisionRecord, type StaleRace } from './decision-ledger.js';
 import type { Services } from './routes.js';
 import { revisionRebase } from '../engine.js';
@@ -108,12 +108,12 @@ async function recordRequest(services: Services, caller: Principal, id: string, 
     const precondition = decisionPrecondition(data.action, input, work!) ?? await flakyEvidence(db, data.action, input); demand(!precondition, precondition!, 409);
     // An approved decision the item has moved past never blocks this request (GY-1297): it settles superseded here, in this transaction.
     const history = await supersedeMoved(db, work!, (await readDecisions(db, work!)).filter(decision => decision.state === 'approved'), actor).then(() => readDecisions(db, work!));
-    // A refused decision is answered, never retried unchanged (GY-141), on the situation it judged (held-rework.ts).
+    // A refused decision is answered, never retried unchanged (GY-141), on its situation (held-rework.ts).
     const situation = reworkSituation(data.action, work!, history, input);
     // The refused decision travels as a field beside the message (GY-265), so the loop answers it by id.
     const repeated = standingRefusal(history, data.action, input, data.reason, (a, b) => JSON.stringify(canonical(a)) === JSON.stringify(canonical(b)), data.precedent ?? [], situation);
     if (repeated) throw new Refusal(repeated.message, 409, { standingRefusal: { decision: repeated.decision, action: repeated.action, legacy: repeated.legacy } });
-    const pending = history.find(decision => decision.action === data.action && (decision.state === 'requested' || decision.state === 'approved'));
+    const pending = await standingRequest(history, data.action, work!, (decision, lapsed) => staleEvent(db, { actor, workId: work!.id, decision, ...lapsed }));
     const cited = data.precedent ? [...new Set(data.precedent)].sort() : null;
     // The ledger's "precedent it relied on" is only worth following if it names real decisions:
     // every cited id must be a recorded decision of this same action, on any item of the graph.
@@ -214,7 +214,7 @@ export async function approveDecision(services: Services, caller: Principal, id:
       // loop's bookkeeping, lease renewals, observations, sessions) is judged and applied at the current revision; see revisionRebase.
       const { judged, change } = await revisionRebase(db, decision!, work!);
       if (!resuming) precondition = (judged !== decision ? decisionPrecondition(judged.action, judged.input, work!) : precondition) ?? await flakyEvidence(db, judged.action, judged.input)
-        ?? lapsedReauthorization(decision!, work!, history)?.reason ?? null; // GY-1579
+        ?? lapsedReauthorization(decision!, work!, history)?.reason ?? null;
       // GY-1463: a revision that moved in its grounds says what moved them.
       const moved = !!change && !!precondition?.startsWith('Task revision changed');
       if (moved) precondition = `${change![0].toUpperCase()}${change!.slice(1)} since revision ${decision!.input.expectedRevision} moved the decision's grounds: ${precondition}`;

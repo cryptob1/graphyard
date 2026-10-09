@@ -41,6 +41,18 @@ export function lapsedReauthorization(decision: Pick<Decision, 'id' | 'action'> 
   return { reason: `Rework decision ${decision.id} was requested to re-authorize applied rework ${reauthorizes}, but ${work.key} no longer holds it (${held ? `rework ${held.id} holds it now` : 'a worker has submitted since'}), so it judged a hold that has cleared`,
     race: { expected: { reauthorizes }, current: { held: held?.id ?? null } } };
 }
+/**
+ * The request of `action` standing on the item, requested or approved, once a requested re-authorization whose hold has cleared is
+ * settled stale through `settle` (GY-1579 review): a lapsed one awaiting a slow approver never holds off a request on the fresh submission.
+ */
+export async function standingRequest<D extends Parameters<typeof lapsedReauthorization>[0] & { state: string }>(history: readonly D[], action: string, work: Pick<Work, 'key' | 'reworkRequested'>,
+  settle: (decision: D, lapsed: { reason: string } & StaleRace) => Promise<unknown>): Promise<D | undefined> {
+  const pending = history.find(decision => decision.action === action && (decision.state === 'requested' || decision.state === 'approved'));
+  const lapsed = pending?.state === 'requested' ? lapsedReauthorization(pending, work, history as Parameters<typeof heldRework>[1]) : null;
+  if (!lapsed) return pending;
+  await settle(pending!, { reason: `${lapsed.reason}; the decision was not applied`, ...lapsed.race });
+  return undefined;
+}
 export const heldReworkRefusal = (work: Pick<Work, 'key'>, held: Pick<Decision, 'id'> & { situation?: Decision['situation'] }) =>
   `${work.key} already holds rework: decision ${held.id} was applied${held.situation?.sha ? ` for head ${held.situation.sha.slice(0, 12)}` : ''} and no worker has submitted since, so the item waits for a worker on it and a second rework authorizes nothing. `
   + `If no worker takes it, what holds its dispatch (an unfinished dependency, a blocker, a fenced launch) is the lever, not another rework`;

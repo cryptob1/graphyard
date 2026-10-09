@@ -106,6 +106,13 @@ test('unit:decide-route-records-rework-situation — a decide-route rework recor
   assert.deepEqual(capped.situation, { sha: shaA, baseSha: base, reauthorizes: first.id });
   // Once a worker submitted, the rework no longer holds, and nothing is re-authorized.
   assert.equal(heldRework(item(shaB, false), [{ ...first, state: 'applied' }]), null);
+  // A request on the fresh submission is not held off by that re-authorization, still awaiting its approver: it settles stale, and the request is recorded.
+  work.current = item(shaB, false);
+  const fresh = await requestDecision(services, operator, work.current.id, { action: 'rework', input: { previousWorkerStopped: true, binding: `${shaB}:verdict:graphyard-reviewer[bot]` }, reason: 'The fresh submission has a new finding' }, 'key-6');
+  assert.equal(fresh.state, 'requested');
+  assert.deepEqual(fresh.situation, { sha: shaB, baseSha: base });
+  const stale = events.find(event => event.kind === 'decision.stale' && event.payload.id === capped.id);
+  assert.match(stale?.payload.reason ?? '', new RegExp(`re-authorize applied rework ${first.id}, but GY-1522 no longer holds it \\(a worker has submitted since\\)`));
 });
 
 let teardown: (() => Promise<void>) | null = null;
