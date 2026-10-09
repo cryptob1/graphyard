@@ -195,6 +195,29 @@ test('unit:shared-identity-exhaustion-holds-twin — an account recorded exhaust
   assert.deepEqual(sent, [['claude-a']]);
   assert.match(accountIneligibility(retried, retried.accounts.find(account => account.name === 'claude')!, now, 'otherhost')!, /same provider login as claude-a/, 'the twin on the other host is held once the report lands');
   assert.equal(await environments.reportPendingExhaustions(outageConfig, { registry: up }, now), 0, 'a delivered report is not sent again');
+
+  // A hold saved before `reported` existed is pending too, reported with the login last read for its account.
+  const legacyHold = await temporaryDirectory('shared-identity-legacy-hold'); directories.push(legacyHold);
+  const legacyConfig = { credentialFile: join(legacyHold, 'coordinator.token'), hostId: HOST };
+  await environments.recordEnvironmentLog(legacyConfig, [{ name: 'claude-a', kind: 'claude', home: '/nonexistent/claude-a', variable: 'CLAUDE_CONFIG_DIR', checkedAt: new Date(spentAt).toISOString(), loggedIn: true, quota: 'unknown', usage: [], healthy: true, reason: null, note: null, login: null, identity: shared }]);
+  const log = await environments.readEnvironmentLog(legacyConfig);
+  log.exhausted = { 'claude-a': { at: new Date(spentAt).toISOString(), until: resetsAt, resetsAt, reason: notice, role: 'worker', profile: 'builder', work: 'GY-1571' } };
+  await writeFile(environments.environmentLogPath(legacyConfig), JSON.stringify(log));
+  const legacySent: QuotaObservation[] = [];
+  assert.equal(await environments.reportPendingExhaustions(legacyConfig, { registry: { observe: async (request: { host: string; observations: { account: string; quota: QuotaObservation }[] }) => { legacySent.push(...request.observations.map(entry => entry.quota)); return retried; } } }, now), 1, 'a legacy hold is reported');
+  assert.equal(legacySent[0].identity, shared, 'with the identity the log last read for its account');
+  assert.equal((await observedExhaustions(legacyConfig, now))['claude-a'].reported, true, 'and is not sent again');
+
+  // A reset already past when the notice is read names no reset: the fallback hour holds the account alone, naming no login.
+  const late = await temporaryDirectory('shared-identity-late-reset'); directories.push(late);
+  const lateConfig = { credentialFile: join(late, 'coordinator.token'), hostId: HOST };
+  const lateSent: QuotaObservation[] = [];
+  const stale = await recordObservedExhaustion(lateConfig, 'claude-a', { at: new Date(spentAt).toISOString(), resetsAt: new Date(now - 60_000).toISOString(), reason: notice, role: 'worker', profile: 'builder', work: 'GY-1571', identity: shared }, now,
+    { registry: { observe: async (request: { host: string; observations: { account: string; quota: QuotaObservation }[] }) => { lateSent.push(...request.observations.map(entry => entry.quota)); return retried; } } });
+  assert.equal(stale.resetsAt, null, 'the stale reset is not kept');
+  assert.equal(stale.until, new Date(now + 3_600_000).toISOString(), 'the fallback hour holds the account');
+  assert.equal(await heldTwin([{ name: 'claude', kind: 'claude', home: namedHomes.claude } as never], { 'claude-a': stale }, 'claude'), null, 'its twin is not held');
+  assert.equal(lateSent[0].identity, null, 'the registry hears a hold that names no login');
 });
 
 /** Claude login homes as Claude Code writes them: the OAuth token and the account it belongs to. */

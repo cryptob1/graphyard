@@ -383,7 +383,8 @@ export async function recordObservedExhaustion(config: Pick<MasterConfig, 'crede
   // A login file unreadable just now (a runtime mid-write) falls back to the identity the log last read for it.
   const read = home ? await providerIdentity(home.kind, home.home) : undefined;
   const identity = observed.identity !== undefined ? observed.identity : read !== undefined ? read : launched?.identity;
-  const entry: ObservedExhaustion = { ...observed, reason: observed.reason.slice(0, 500), until: new Date(Number.isFinite(reset) && reset > now ? reset : now + unknownResetHoldMs).toISOString(), ...identity === undefined ? {} : { identity },
+  const future = Number.isFinite(reset) && reset > now; // a reset already past (a notice read late) names none: the fallback hour holds the account alone
+  const entry: ObservedExhaustion = { ...observed, resetsAt: future ? observed.resetsAt : null, reason: observed.reason.slice(0, 500), until: new Date(future ? reset : now + unknownResetHoldMs).toISOString(), ...identity === undefined ? {} : { identity },
     ...report && reportable(environment) ? { reported: false } : {} };
   log.exhausted = { ...Object.fromEntries(Object.entries(log.exhausted).filter(([, held]) => Date.parse(held.until) > now)), [environment]: entry };
   await atomicPrivateWrite(environmentLogPath(config), log);
@@ -391,12 +392,11 @@ export async function recordObservedExhaustion(config: Pick<MasterConfig, 'crede
   return entry;
 }
 const reportable = (environment: string) => /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$/.test(environment), observeTimeoutMs = 5_000; // a profile's or runtime's own login stays on this host
-/**
- * Send the agent registry every hold this host recorded that it has not yet heard of (GY-1573), apart from any role's
- * selection, so a report lost to a control-plane timeout cannot leave a shared-login twin launchable on another host.
- */
+/** Send the agent registry every hold this host has not yet reported (GY-1573), apart from any role's selection, so a report lost to a timeout cannot leave a shared-login twin launchable on another host. */
 export async function reportPendingExhaustions(config: Pick<MasterConfig, 'credentialFile'> & Partial<Pick<MasterConfig, 'url' | 'hostId'>>, report: { registry?: Pick<FleetClient, 'observe'>; fetch?: typeof fetch } = {}, now = Date.now()) {
-  const pending = Object.entries(await observedExhaustions(config, now)).filter(([name, held]) => held.reported === false && reportable(name));
+  const known = await readEnvironmentLog(config); // a hold saved before `reported` existed is pending too, with the login last read for it
+  const pending = Object.entries(known.exhausted ?? {}).filter(([name, held]) => Date.parse(held.until) > now && held.reported !== true && reportable(name))
+    .map(([name, held]) => [name, held.identity !== undefined || known.environments[name]?.identity === undefined ? held : { ...held, identity: known.environments[name].identity }] as const);
   if (!pending.length || !config.hostId) return 0;
   const registry = report.registry ?? (config.url ? httpFleetClient({ url: config.url, credentialFile: config.credentialFile }, report.fetch ?? fetch, observeTimeoutMs) : null);
   if (!registry?.observe) return 0;
@@ -407,10 +407,8 @@ export async function reportPendingExhaustions(config: Pick<MasterConfig, 'crede
   return pending.length;
 }
 /** The accounts still held by an observed exhaustion at `now`. */
-export async function observedExhaustions(config: Pick<MasterConfig, 'credentialFile'>, now = Date.now()): Promise<Record<string, ObservedExhaustion>> {
-  const log = await readEnvironmentLog(config);
-  return Object.fromEntries(Object.entries(log.exhausted ?? {}).filter(([, held]) => Date.parse(held.until) > now));
-}
+export const observedExhaustions = async (config: Pick<MasterConfig, 'credentialFile'>, now = Date.now()): Promise<Record<string, ObservedExhaustion>> =>
+  Object.fromEntries(Object.entries((await readEnvironmentLog(config)).exhausted ?? {}).filter(([, held]) => Date.parse(held.until) > now));
 export async function recordEnvironmentLog(config: Pick<MasterConfig, 'credentialFile'>, health: EnvironmentHealth[], skipped: AccountSkip[] = [], selection?: { key: string } & AccountSelection) {
   if (!health.length && !skipped.length && !selection) return;
   const log = await readEnvironmentLog(config);
