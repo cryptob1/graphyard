@@ -353,6 +353,9 @@ test('integration:throughput-escalation-answerable — an escalated claim-missed
     const status = await throughputStatus(directory, { release: { version: '1', revision } }, work, clock.now);
     assert.equal(status.stall?.cause, 'escalated-miss');
     assert.match(status.attention!.next, /graphyard master decide GY-1471 requirements .* graphyard master approver GY-1471 DECISION/);
+    // The command asks the escalated miss's own decision, never the population rule or fingerprints.
+    assert.match(status.attention!.next, /with a revision that settles whether the coordination that leaves GY-87's claim missing its budgets changes, or records that its claim stands unverified on this release/);
+    assert.doesNotMatch(status.attention!.next, /population rule|fingerprints/);
     assert.equal(status.attention!.approvedBy, 'approver');
     assert.equal(throughputOwnerClosure(owner, { revision, verdict: 'unverified' }, 1), null, 'unanswered, it stays open');
 

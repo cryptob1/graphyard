@@ -946,9 +946,15 @@ export function throughputClaimVisibility(measurement: { report: ThroughputRepor
   // The ledger's pursuit (GY-1437): inside its bound the loop carries the claim, so the line is in
   // motion until it is due; past the bound it escalates to the operator, naming the blocker. A
   // population shown unable to accumulate is the typed needs-decision on the owner item (GY-1438).
+  // GY-1587: the command asks the decision the stall raised. An escalated miss has an admitted
+  // population and no fingerprint problem, so its revision settles the coordination behind the
+  // budget miss or records the claim as unverified on this release, never the population rule.
+  const settles = stall?.cause === 'escalated-miss'
+    ? `settles whether the coordination that leaves ${throughputClaim.item}'s claim missing its budgets changes, or records that its claim stands unverified on this release (the budgets unchanged)`
+    : `settles the population rule ${throughputClaim.item}'s claim is judged over or the coordination that leaves these fingerprints`;
   const attention = (reason: string): AttentionItem => {
     if (stall) return { subject: 'throughput', kind: 'throughput', text: `${throughputClaim.item}'s throughput claim is unverified against the deployed release and ${stall.text}`,
-      ...agentOwner('master', `graphyard master decide ${decideOn} requirements @revision.json "REASON" with a revision that settles the population rule ${throughputClaim.item}'s claim is judged over or the coordination that leaves these fingerprints, then graphyard master approver ${decideOn} DECISION; the loop closes ${decideOn} once it is applied`, 'approver') };
+      ...agentOwner('master', `graphyard master decide ${decideOn} requirements @revision.json "REASON" with a revision that ${settles}, then graphyard master approver ${decideOn} DECISION; the loop closes ${decideOn} once it is applied`, 'approver') };
     const text = `${throughputClaim.item}'s throughput claim is unverified against the deployed release: ${reason}. ${progress}${superseded}`;
     if (!pursuit) return { subject: 'throughput', kind: 'throughput', text: `${text}; the loop re-measures the serving release at most every ${Math.round(throughputRemeasureMs / 60_000)} min while it stays unverified`, ...agentOwner('master', command) };
     if (!pursuit.escalated) return { subject: 'throughput', kind: 'throughput', text: `${text}; ${pursuit.text}`, inMotionUntil: pursuit.dueAt, ...agentOwner('master', command) };
