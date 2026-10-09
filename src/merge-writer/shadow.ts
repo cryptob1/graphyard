@@ -152,8 +152,10 @@ export const shadowPairExplained = (verdict: Pick<ShadowVerdict, 'key' | 'head' 
 export function shadowGateAttention(verdicts: readonly ShadowVerdict[], explanations: readonly ShadowExplanationRef[] = []): AttentionItem[] {
   const newest = new Map<string, ShadowVerdict>();
   for (const verdict of [...verdicts].sort((a, b) => Date.parse(a.at) - Date.parse(b.at))) {
-    // The ledger's copy of a pair carries the cause the cursor's may lack, and either way the line names it.
-    const pair = shadowDisagreementPair(verdict), cause = verdict.cause ?? newest.get(pair)?.cause;
+    // The ledger's copy of a pair carries the cause the cursor's may lack, and either way the line names it. The ledger reads
+    // its cause afresh from the log, so a contamination cause from either copy wins over a cursor's older generic one (GY-1565).
+    const pair = shadowDisagreementPair(verdict), causes = [verdict.cause, newest.get(pair)?.cause];
+    const cause = causes.find(entry => entry?.startsWith(sharedTmpContamination)) ?? causes.find(Boolean);
     newest.set(pair, cause ? { ...verdict, cause } : verdict);
   }
   return [...newest.values()].filter(verdict => shadowDisagreement(verdict.outcome) && !shadowPairExplained(verdict, explanations)).map(verdict => ({
@@ -203,14 +205,24 @@ export function trialFailureCause(logTail: string | undefined | null): string | 
 }
 
 /**
- * The dependency-share signature (GY-1565): a failing deep-equal whose expected side is a mirrored
- * node_modules sourced under the shared /tmp and whose actual side is `[]`. A stray /tmp/node_modules
- * is what the fixture's upward install lookup found first, so the mirror shared nothing.
+ * The dependency-share signature (GY-1565): one failing deep-equal assertion whose actual side is
+ * exactly `[]` and whose expected side is a mirrored node_modules sourced in a fixture directly
+ * under the shared /tmp. A stray /tmp/node_modules is what the fixture's upward install lookup found
+ * first, so the mirror shared nothing. Only a trial that ran under the host's shared tmp can print
+ * it: since GY-1565 a trial's fixtures sit in its own `gy-t*` directory, so a source there is not
+ * the signature. The fragments must share one assertion's diff, between its message and its stack.
  */
 export function sharedTmpDependencySource(logTail: string): string | null {
-  const log = logTail.replace(ansiEscape, '');
-  if (!/Expected values to be strictly deep-equal/.test(log) || !/^\s*\+ \[\]\s*$/m.test(log)) return null;
-  return /^\s*-\s+source: '(\/tmp\/[^']*\/node_modules)'/m.exec(log)?.[1] ?? null;
+  const lines = logTail.replace(ansiEscape, '').split('\n');
+  for (let index = 0; index < lines.length; index++) {
+    if (!/Expected values to be strictly deep-equal/.test(lines[index]!)) continue;
+    const rest = lines.slice(index + 1), end = rest.findIndex(line => /^\s*at /.test(line) || /^\s*✖ /.test(line) || /AssertionError/.test(line));
+    const diff = end < 0 ? rest : rest.slice(0, end), actual = diff.filter(line => /^\s*\+ /.test(line) && !/^\s*\+ actual - expected\s*$/.test(line));
+    if (actual.length !== 1 || !/^\s*\+ \[\]\s*$/.test(actual[0]!)) continue;
+    const source = diff.map(line => /^\s*-\s+source: '(\/tmp\/(?!gy-t)[^/']+\/node_modules)',?\s*$/.exec(line)?.[1]).find(Boolean);
+    if (source) return source;
+  }
+  return null;
 }
 /** How a cause read from a log with the dependency-share signature begins, so the attention line names the contamination. */
 export const sharedTmpContamination = "trial-environment contamination of the host's shared tmp";
@@ -218,7 +230,9 @@ export const sharedTmpContamination = "trial-environment contamination of the ho
 /**
  * The cause a failing verdict's record names (GY-1564, GY-1565): the trial-environment contamination
  * when its log tail carries the dependency-share signature, naming the failing test it broke; else the
- * failing cause the log names; null when it names none.
+ * failing cause the log names; null when it names none. It is told as contamination only on a
+ * shadow-only-fail's line, where GitHub's CI passed the same merge under a clean tmp: a real
+ * mirroring defect fails there too.
  */
 export function recordedFailureCause(logTail: string | undefined | null): string | null {
   const failing = trialFailureCause(logTail), source = logTail ? sharedTmpDependencySource(logTail) : null;
@@ -228,10 +242,10 @@ export function recordedFailureCause(logTail: string | undefined | null): string
   return text.length > trialCauseLength ? `${text.slice(0, trialCauseLength - 1)}…` : text;
 }
 
-/** A verdict as the loop's cursor keeps it: without its log, with the cause the log named (GY-1564). */
+/** A verdict as the loop's cursor keeps it: without its log, with the cause the log named (GY-1564), read afresh when the log is there. */
 export function cursorVerdict<T extends Pick<ShadowVerdict, 'logTail' | 'cause'>>(verdict: T): Omit<T, 'logTail'> {
   const { logTail, ...kept } = verdict;
-  const cause = kept.cause ?? recordedFailureCause(logTail);
+  const cause = recordedFailureCause(logTail) ?? kept.cause;
   return cause ? { ...kept, cause } : kept;
 }
 
@@ -245,7 +259,7 @@ const listed = (files: readonly string[]) => `${files.slice(0, 5).join(', ')}${f
 export function shadowDisagreementCause(verdict: Pick<ShadowVerdict, 'outcome' | 'build' | 'tests'> & Partial<Pick<ShadowVerdict, 'conflict' | 'cause' | 'logTail'>>) {
   if (isPlaceholderVerdict(verdict)) return `the failure is the fabricated-runner-failure placeholder ${placeholderRunnerFailure} (pre-GY-1548: the runner died naming no test while every file passed)`;
   if (verdict.outcome === 'shadow-missed') return 'the shadow trial passed it but the main guard reverted it';
-  const cause = verdict.cause ?? recordedFailureCause(verdict.logTail);
+  const cause = recordedFailureCause(verdict.logTail) ?? verdict.cause;
   const failed = verdict.conflict?.length ? `the trial merge conflicted on ${listed(verdict.conflict)}`
     : verdict.build === 'fail' ? 'the trial build failed'
     : verdict.tests.failed.length ? `${verdict.tests.failed.length} of ${verdict.tests.files} test files failed in the trial (${listed(verdict.tests.failed)})` : 'the trial failed';

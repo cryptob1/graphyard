@@ -1,13 +1,13 @@
 // Concern: the shadow gate's trial merge — the exact merge commit of a head onto main, and its build and affected tests in a credential-free checkout.
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
-import { constants } from 'node:os';
-import { dirname, join, parse } from 'node:path';
+import { mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { constants, tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
 import { defaultChildRun, type ChildRun } from '../child-runner.js';
-import { allocateSessionCheckout, removeSessionCheckout } from '../install/worktree-root.js';
+import { allocateSessionCheckout, defaultWorktreeRootMinFreeGb, removeSessionCheckout, verifyWorktreeRoot, type FilesystemProbe } from '../install/worktree-root.js';
 import { isolatedTestEnvironment, npmCiArgs, npmCiEnvironment } from '../cli/test-isolation.js';
-import { readTempOwner, tempOwnerGone, tempOwnerMarker, writeTempOwner } from '../tmp-reclaim.js';
+import { tempOwnerMarker, writeTempOwner } from '../tmp-reclaim.js';
 
 /** One git call in the coordinator's object store: the arguments after `git -C <root>`, the child's stdout. */
 export type TrialGit = (args: string[], env?: Record<string, string>) => Promise<string>;
@@ -73,12 +73,18 @@ export function trialEnvironment(environment: NodeJS.ProcessEnv = process.env): 
 
 /** What an upward lookup from a fixture resolves first: a directory holding one of these shadows the fixture's own. */
 export const trialLookupEntries = ['node_modules', '.git', 'package.json'] as const;
-/** Where a trial's temporary directory may go, in order: the platform's own, then the persistent one. */
-export const trialTemporaryRoots = ['/tmp', '/var/tmp'] as const;
-/** Whether `directory` or a folder above it (short of the filesystem root) holds an entry an upward lookup would resolve. */
-export function lookupPoisoned(directory: string): boolean {
-  for (let at = directory; at !== parse(at).root; at = dirname(at)) if (trialLookupEntries.some(entry => existsSync(join(at, entry)))) return true;
-  return false;
+/**
+ * Where a trial's temporary directory and short checkout may go, in order: the platform's own, then
+ * the coordinator's. They are the roots the loop's tmp reclaim scans (`hostTmpRoots`), so a
+ * directory a crashed trial left behind, its owner gone, is taken back by that bounded pass.
+ */
+export const trialTemporaryRoots = (own = tmpdir()): string[] => [...new Set(['/tmp', own])];
+/** Whether `directory` or a folder above it, the filesystem root included, holds an entry an upward lookup would resolve. */
+export function lookupPoisoned(directory: string, exists: (path: string) => boolean = existsSync): boolean {
+  for (let at = directory; ; at = dirname(at)) {
+    if (trialLookupEntries.some(entry => exists(join(at, entry)))) return true;
+    if (dirname(at) === at) return false;
+  }
 }
 /**
  * The folder the trial's own temporary directory is made in (GY-1565): the first root no stray
@@ -86,15 +92,29 @@ export function lookupPoisoned(directory: string): boolean {
  * host's shared /tmp is not CI's empty one: vishrog's /tmp/node_modules is what
  * tests/worktree-reclaim.test.ts's upward install lookup found first, so its dependency mirror
  * shared nothing. The directory stays short, as CI's is: a socket path or a typed launch line the
- * suite builds under it has a length bound.
+ * suite builds under it has a length bound. A root clean when chosen is checked again once the
+ * trial ends (`TrialEnvironmentError`): no point-in-time check keeps a shared folder clean.
  */
-export const trialTemporaryRoot = (sessionDirectory: string, roots: readonly string[] = trialTemporaryRoots) =>
+export const trialTemporaryRoot = (sessionDirectory: string, roots: readonly string[] = trialTemporaryRoots()) =>
   roots.find(root => existsSync(root) && !lookupPoisoned(root)) ?? sessionDirectory;
+/**
+ * The folder a trial's short checkout is made in (GY-1565): the first of `roots` that passes the
+ * managed worktree root's own guard (`verifyWorktreeRoot`: durable storage, not a tmpfs, with
+ * `minFreeBytes` free), so a checkout and its `npm ci` tree never fill a memory-backed /tmp; null
+ * when none does, and the checkout stays in the managed session directory.
+ */
+export async function trialCheckoutRoot(roots: readonly string[], minFreeBytes: number, probe?: FilesystemProbe): Promise<string | null> {
+  for (const root of roots) {
+    if (!existsSync(root)) continue;
+    try { await verifyWorktreeRoot(root, { minFreeBytes, ...(probe ? { probe } : {}) }); return root; } catch { /* the next root */ }
+  }
+  return null;
+}
 /**
  * The name prefix of a trial's temporary directory. It stays this short, as CI's /tmp is
  * (`graphyard-trial-` lengthened master-agent-envs' and master-loop-resilience's launch lines past
  * their bound), and it is one of the tmp reclaim's own names (`gy-`), so the loop's pass takes a
- * directory a crashed merge writer left wherever it scans.
+ * directory a crashed merge writer left, its owner marker naming a process that is gone.
  */
 export const trialTemporaryPrefix = 'gy-t';
 /**
@@ -106,24 +126,6 @@ export const trialTemporaryPrefix = 'gy-t';
  * still holds the trial's lists and records, and is removed and reclaimed as before.
  */
 export const trialCheckoutPrefix = 'gy-c';
-/**
- * Take back the trial directories — temporary and checkout — a crashed merge writer left in `root`
- * (GY-1565): runTrial marks each with its owner, so one whose owner is gone — and a marker whose directory is — goes before
- * the next trial makes its own, in whichever root that is, scanned by the loop's pass or not. A
- * running trial's directory, its owner alive, is kept. Returns the paths removed; never throws.
- */
-export async function reclaimTrialTemporaries(root: string): Promise<string[]> {
-  const removed: string[] = [];
-  for (const name of await readdir(root).catch(() => [] as string[])) {
-    if (![trialTemporaryPrefix, trialCheckoutPrefix].some(prefix => name.startsWith(prefix)) || !name.endsWith('.owner')) continue;
-    const directory = join(root, name.slice(0, -'.owner'.length));
-    const owner = await readTempOwner(directory);
-    if (existsSync(directory) && (!owner || !tempOwnerGone(owner))) continue;
-    try { await rm(directory, { recursive: true, force: true }); await rm(tempOwnerMarker(directory), { force: true }); removed.push(directory); }
-    catch { /* the next trial tries again */ }
-  }
-  return removed;
-}
 /** The variables that point the trial child's temporary files at `directory`. */
 export const trialTemporaryVariables = (directory: string) => ({ TMPDIR: directory, TMP: directory, TEMP: directory });
 
@@ -178,14 +180,28 @@ export class TrialRunnerError extends Error {
   }
 }
 /**
- * The trial checkout could not be removed afterwards, so it is left behind under the managed root
- * (the orphan reclaim removes it later). The verdict the trial reached, if it reached one, rides
+ * A trial directory could not be removed afterwards, so it is left behind: the session directory
+ * under the managed root (the orphan reclaim removes it later), or the temporary or short checkout
+ * directory, its owner marker dropped so the tmp reclaim takes it once it ages (GY-1565).
+ * `directory` is the one that failed. The verdict the trial reached, if it reached one, rides
  * along so the failure is recorded beside it rather than in place of it.
  */
 export class TrialCleanupError extends Error {
   constructor(readonly directory: string, readonly verdict: TrialRun | null, readonly cause: unknown, outcome: string) {
     super(`The trial checkout ${directory} was not removed (${cause instanceof Error ? cause.message : String(cause)}); ${outcome}`);
     this.name = 'TrialCleanupError';
+  }
+}
+/**
+ * The folder the trial's temporary directory was made in was clean when chosen but holds a stray
+ * node_modules, .git or package.json in or above it once the trial ends (GY-1565): an upward lookup
+ * from the trial may have resolved it, so whatever the trial answered measures the host, and it is
+ * no verdict. The next trial chooses its root afresh.
+ */
+export class TrialEnvironmentError extends Error {
+  constructor(readonly root: string) {
+    super(`The trial's temporary root ${root} gained a node_modules, .git or package.json in or above it during the trial, so the trial's answer is no verdict`);
+    this.name = 'TrialEnvironmentError';
   }
 }
 export interface RunTrialInput {
@@ -204,8 +220,11 @@ export interface RunTrialInput {
   remove?: typeof removeSessionCheckout;
   /** The most files one runner process runs; `trialTestGroupSize` unless a test narrows it. */
   groupSize?: number;
-  /** Where the trial's temporary directory may go; `trialTemporaryRoots` unless a test names others. */
+  /** Where the trial's temporary directory and short checkout may go; `trialTemporaryRoots()` unless a test names others. */
   temporaryRoots?: readonly string[];
+  /** The free space a short checkout's root must have, and how it is measured: the managed worktree root's default and probe unless given. */
+  minFreeBytes?: number;
+  probe?: FilesystemProbe;
 }
 const tailLength = 4000;
 const testFile = /tests\/[\w./-]+\.test\.ts/g;
@@ -250,18 +269,24 @@ export function runnerRecords(text: string): { file: string; passed: boolean }[]
 export async function runTrial(input: RunTrialInput): Promise<TrialRun> {
   const run = input.run ?? defaultChildRun, now = input.now ?? Date.now, startedAt = now(), deadline = startedAt + input.timeoutMs;
   const checkout = await allocateSessionCheckout(input.base, 'trial', input.key ?? 'trial', input.mergeSha, randomUUID());
-  // A fresh, empty temporary directory made for this trial alone, and a short one its checkout goes in when a clean root
-  // is found (else the session directory's checkout), each removed with the session and marked as this process's so a
-  // crash before the cleanup leaves it to the next trial's sweep and the tmp reclaim.
-  let temporary: string | null = null, place: string | null = null, worktree = checkout.worktree;
+  // A fresh, empty temporary directory made for this trial alone, and a short one its checkout goes in on a durable root
+  // with room (else the session directory's checkout), each removed with the session and marked as this process's so a
+  // crash before the cleanup leaves it to the tmp reclaim.
+  const roots = input.temporaryRoots ?? trialTemporaryRoots();
+  let temporary: string | null = null, place: string | null = null, worktree = checkout.worktree, guarded: string | null = null;
+  const clear = async (directory: string) => {
+    // A directory that would not go loses its owner marker, so the tmp reclaim takes it once it ages rather than keeping it for this live process.
+    try { await rm(directory, { recursive: true, force: true }); } finally { await rm(tempOwnerMarker(directory), { force: true }).catch(() => {}); }
+  };
   try {
-    const root = trialTemporaryRoot(checkout.directory, input.temporaryRoots);
-    await reclaimTrialTemporaries(root);
+    const root = trialTemporaryRoot(checkout.directory, roots);
+    if (root !== checkout.directory) guarded = root;
     temporary = await mkdtemp(join(root, trialTemporaryPrefix)); await writeTempOwner(temporary);
-    if (root !== checkout.directory) { place = await mkdtemp(join(root, trialCheckoutPrefix)); await writeTempOwner(place); worktree = join(place, 'checkout'); }
+    const near = await trialCheckoutRoot(roots, input.minFreeBytes ?? defaultWorktreeRootMinFreeGb * 1e9, input.probe);
+    if (near) { place = await mkdtemp(join(near, trialCheckoutPrefix)); await writeTempOwner(place); worktree = join(place, 'checkout'); }
   }
   catch (error) {
-    for (const made of [temporary, place]) if (made) await rm(made, { recursive: true, force: true }).then(() => rm(tempOwnerMarker(made), { force: true })).catch(() => {});
+    for (const made of [temporary, place]) if (made) await clear(made).catch(() => {});
     await (input.remove ?? removeSessionCheckout)(input.root, input.base, checkout.directory, input.run).catch(() => {});
     throw error;
   }
@@ -377,16 +402,17 @@ export async function runTrial(input: RunTrialInput): Promise<TrialRun> {
   // The checkout goes whatever the trial did; a removal that fails is reported, never swallowed.
   let settled: { verdict: TrialRun } | { error: unknown };
   try { settled = { verdict: await trial() }; } catch (error) { settled = { error }; }
-  // The temporary directory goes with it: a failure to remove either is the cleanup's, and neither stops the other.
+  // A root that was clean when chosen and is not now may have shadowed the trial's lookups: whatever it answered is no verdict.
+  if (guarded && lookupPoisoned(guarded)) settled = { error: new TrialEnvironmentError(guarded) };
+  // The temporary directory goes with it: a failure to remove any is the cleanup's, naming the directory, and none stops the others.
   // The short checkout's files go first, so the session's removal prunes its registration in the repository.
-  const made = [temporary, ...(place ? [place] : [])];
-  const removed = await Promise.allSettled(made.map(directory => rm(directory, { recursive: true, force: true }).then(() => rm(tempOwnerMarker(directory), { force: true }))));
-  removed.push(...await Promise.allSettled([(input.remove ?? removeSessionCheckout)(input.root, input.base, checkout.directory, input.run)]));
-  const failure = removed.find((result): result is PromiseRejectedResult => result.status === 'rejected');
+  const failures: { directory: string; cause: unknown }[] = [];
+  for (const directory of [temporary, ...(place ? [place] : [])]) await clear(directory).catch(cause => { failures.push({ directory, cause }); });
+  await (input.remove ?? removeSessionCheckout)(input.root, input.base, checkout.directory, input.run).catch(cause => { failures.push({ directory: checkout.directory, cause }); });
+  const failure = failures[0];
   if (failure) {
-    const cause = failure.reason;
     const outcome = 'verdict' in settled ? `the trial itself answered build ${settled.verdict.build}, ${settled.verdict.tests.failed.length} failing test file(s)` : `the trial itself failed: ${settled.error instanceof Error ? settled.error.message : String(settled.error)}`;
-    throw new TrialCleanupError(checkout.directory, 'verdict' in settled ? settled.verdict : null, cause, outcome);
+    throw new TrialCleanupError(failure.directory, 'verdict' in settled ? settled.verdict : null, failure.cause, outcome);
   }
   if ('error' in settled) throw settled.error;
   return settled.verdict;

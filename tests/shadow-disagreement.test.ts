@@ -180,10 +180,19 @@ test('unit:cycle-shadow-disagreement-explanation — a standing shadow-only-fail
     assert.equal(attention.length, 1, 'one line per pair');
     assert.match(attention[0]!.text, /the failure is trial-environment contamination/, 'whichever copy of the pair is newest, the cause one of them read is named');
   }
+  // A GY-1564 cursor row persisted before the upgrade carries the generic cause; the ledger's row, read afresh, names the
+  // contamination, and that wins whichever copy is newer.
+  const staleRow = { ...cursorRow, cause: trialFailureCause(contaminationTail)!, at: iso(start + 60_000) };
+  for (const rows of [[staleRow, ledgerRow], [ledgerRow, staleRow]]) assert.match(shadowGateAttention(rows)[0]!.text, /the failure is trial-environment contamination/, 'a stale generic cursor cause never hides the contamination');
+  assert.equal(cursorVerdict({ ...staleRow, logTail: contaminationTail }).cause, named, 'a cursor row written with its log reads the cause afresh');
   // A colored log carries the same signature.
   assert.equal(sharedTmpDependencySource(contaminationTail.split('\n').map(entry => entry && `\u001b[31m${entry}\u001b[39m`).join('\n')), '/tmp/graphyard-reclaim-OWwNuA/node_modules');
   // Not the signature: a mirror sourced under the trial's own tmp, or a non-empty actual side, names the failing test as before.
-  for (const other of [contaminationTail.replace("'/tmp/graphyard-reclaim", "'/home/u/trial/tmp/graphyard-reclaim"), contaminationTail.replace('  + []', "  + [ { path: 'x' } ]")]) {
+  // Nor fragments from separate assertions, nor a source under a trial's own tmpdir, which a trial since GY-1565 prints.
+  const split = [contaminationTail.split('\n').slice(0, 5).join('\n'), '      at TestContext.<anonymous> (tests/a.test.ts:1:1)',
+    '✖ another (1ms)', '  AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal:', '  + actual - expected', '', "  + [ 'x' ]", "  -     source: '/tmp/graphyard-reclaim-OWwNuA/node_modules'"].join('\n');
+  for (const other of [contaminationTail.replace("'/tmp/graphyard-reclaim", "'/home/u/trial/tmp/graphyard-reclaim"), contaminationTail.replace('  + []', "  + [ { path: 'x' } ]"),
+    contaminationTail.replace("'/tmp/graphyard-reclaim", "'/tmp/gy-tAbC123/graphyard-reclaim"), contaminationTail.replace('  + []', "  + []\n  + [ 'extra' ]"), split]) {
     assert.equal(sharedTmpDependencySource(other), null);
     assert.equal(recordedFailureCause(other), trialFailureCause(other));
   }
