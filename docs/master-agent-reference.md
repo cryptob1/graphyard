@@ -41,7 +41,7 @@ Unacted producer requests (never started, launch refused, exited at launch) rela
 
 ## Fault classes
 
-`faultClass` (`master status` `faults`): recurring classes file one item; a resource at bound files `resource:ID`; also `fleet-capacity`, `unanswered-request` (past `settledAnswerGraceMs`), `configuration`, `decision-unanswered` (not `loop-silence`), and `unclassified` unless named (`plane-unavailable`, `fix-item`, `decision-stale`, `overlong-session`). Review unlaunched 15min: `concurrency-starved`, `review-settlement`, or `launch-review`. Unanswering planes raise one `plane-unavailable`; `planeWaitMs` is not `loop-cost`. A launch that failed before its session started is its dispatch's one fault, not also a `session` fault while its lease runs out.
+`faultClass` (`master status` `faults`): recurring classes file one item; a resource at bound files `resource:ID`; also `fleet-capacity`, `unanswered-request` (past `settledAnswerGraceMs`), `configuration`, `decision-unanswered` (not `loop-silence`), and `unclassified` unless named (`plane-unavailable`, `fix-item`, `decision-stale`, `overlong-session`). Review unlaunched 15min: `concurrency-starved`, `review-settlement`, or `launch-review`. Unanswering planes raise one `plane-unavailable`; `planeWaitMs` (time in flight on the control plane, answered or not) is neither `loop-cost` nor `cycle-p90`. A launch that failed before its session started is its dispatch's one fault, not also a `session` fault while its lease runs out.
 
 ## Shadow merge gate
 

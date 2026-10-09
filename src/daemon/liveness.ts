@@ -22,7 +22,7 @@ export interface LoopLiveness { state: LoopState; lagMs: number | null; stalledA
  */
 export interface CycleCost {
   cycle: number; at: string; durationMs: number; childWaitMs: number; workMs: number; intervalMs: number; stalledAfterMs: number;
-  /** Time on requests the control plane did not answer (GY-1344): its outage, so not in `workMs`. */
+  /** Time at least one request was in flight on the control plane, answered or not (GY-1344, GY-1562): the plane's time, so not in `workMs`. */
   planeWaitMs: number;
   steps: CycleSteps | null;
   /** The step with the most of its own work, when any step worked at all. */
@@ -78,7 +78,7 @@ export function cycleCost(metrics: CycleMetrics | null | undefined, intervalMs: 
   return { cycle: metrics.cycle, at: metrics.at, durationMs: metrics.durationMs, childWaitMs, workMs, planeWaitMs, intervalMs, stalledAfterMs: 2 * intervalMs, steps, slowest, longestWait, culprit, slowestSteps: slowestTimed.map(step => ({ step: step.step, ms: step.ms })),
     withinInterval: workMs <= intervalMs, withinLivenessBound: workMs <= 2 * intervalMs,
     breakdown: ordered.length
-      ? `${seconds(workMs)} of its own work and ${seconds(childWaitMs)} waiting on child processes${planeWaitMs ? `, ${seconds(planeWaitMs)} on requests the control plane did not answer` : ''}; ${ordered.map(([step, cost]) => `${step} ${seconds(cost.ms)}${cost.childWaitMs ? ` (${seconds(cost.childWaitMs)} waiting)` : ''}`).join(', ')}`
+      ? `${seconds(workMs)} of its own work and ${seconds(childWaitMs)} waiting on child processes${planeWaitMs ? `, ${seconds(planeWaitMs)} in flight on the control plane` : ''}; ${ordered.map(([step, cost]) => `${step} ${seconds(cost.ms)}${cost.childWaitMs ? ` (${seconds(cost.childWaitMs)} waiting)` : ''}`).join(', ')}`
       : 'no step breakdown was recorded for this cycle' };
 }
 

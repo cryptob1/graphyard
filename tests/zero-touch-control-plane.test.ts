@@ -1,4 +1,4 @@
-import { after, before, test } from 'node:test';
+import { after, before, test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
@@ -13,9 +13,10 @@ import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-da
 import { mergeRecordKey, mergeWriterIdle, mergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
 import { deployKeySshCommand, type MergePorts, type MergeTrialRun, type runMergeTrial } from '../src/merge-writer/executor.js';
 import { gitRunnerFor } from '../src/merge-writer/local-observation.js';
-import { acceptanceStep, clearDrafts, draftsSettled, type AcceptanceEffects } from '../src/daemon/acceptance.js';
+import { acceptanceEffects, acceptanceStep, clearDrafts, draftsSettled, type AcceptanceEffects } from '../src/daemon/acceptance.js';
 import { clearPlans, plannerStep, plansSettled, type PlannerEffects } from '../src/daemon/planner.js';
-import { recordLanding } from '../src/server/routes/goals.js';
+import { cut, gitIn } from '../src/release-candidate.js';
+import { validateProjectCandidate } from '../src/release-project.js';
 import type { Goal } from '../src/model/goal.js';
 import { masterConfigSchema } from '../src/master.js';
 import { completionBody } from '../src/cli/complete.js';
@@ -35,7 +36,9 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
  * loop steps driven by stubbed runtimes that post through the plane's API — plan and release the
  * goal `up` submitted; a stub worker commits the first planned item and submits it; the merge
  * writer lands it on the bare origin. Nothing in the run waits on a person, opens a browser or
- * touches GitHub.
+ * touches GitHub. GY-1535: the goal's acceptance — its outcome, required case and contract binding —
+ * is one change the merge writer lands on the bare origin before the first planned item is
+ * dispatched, and the first release candidate runs that case against its (static) UAT.
  */
 const repository = 'owner/project';
 const operatorAgent: Principal = { id: 'graphyard-master-operator', role: 'admin', sessionKind: 'ai' };
@@ -152,7 +155,7 @@ function host(checkoutDir: string, events: UpEvent[]) {
   return { deps, calls, ghCalls, deployKeys };
 }
 
-test('unit:zero-touch-control-plane — up --agent --goal FILE --merger control-plane against a bare origin and a real control plane reaches a merged first planned item through the merge writer with no human step: no prompt, handoff, browser or App approval, the goal planned and released by stubbed acceptance and planner runtimes, the stub worker\'s commit merged onto the bare origin by the deploy-key push', { timeout: 180_000 }, async () => {
+test('unit:zero-touch-control-plane — up --agent --goal FILE --merger control-plane against a bare origin and a real control plane reaches a merged first planned item through the merge writer with no human step: no prompt, handoff, browser or App approval, the goal planned and released by stubbed acceptance and planner runtimes, the stub worker\'s commit merged onto the bare origin by the deploy-key push', { timeout: 180_000 }, async (t: TestContext) => {
   clearDrafts(); clearPlans();
   const { runUp, upRequestFromArgs } = await import('../src/up.js');
 
@@ -177,45 +180,34 @@ test('unit:zero-touch-control-plane — up --agent --goal FILE --merger control-
   const key = result.goal!;
 
   // 2. The loop's acceptance and planner roles, driven by stubbed runtimes that post through the real plane.
-  //    No GitHub: acceptance opens a fabricated pull request and lands it via recordLanding; the
-  //    planner's plan/approve/release posts hit /api/goals as the operator-agent and approver.
+  //    No GitHub (GY-1535): the acceptance role commits its change in the coordinator checkout and the
+  //    merge writer's reads land it on the bare origin; the planner's posts hit /api/goals as the operator-agent and approver.
   const runs: string[] = [];
-  const pulls = new Map<number, { branch: string; head: string; state: 'open' | 'closed' | 'merged' }>();
-  let nextPr = 1, clock = Date.parse('2026-10-08T00:00:00Z');
-  const config = masterConfigSchema.parse({ version: 1, url, credentialFile: '/outside/coordinator.token', cliPath: '/bin/graphyard', repository, baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', workers: [], run: { mergeWriter: { deployKeyFile: join(directory, 'install-dir', 'deploy-key'), retrials: 3 } } });
+  let clock = Date.parse('2026-10-08T00:00:00Z');
+  const config = masterConfigSchema.parse({ version: 1, url, credentialFile: '/outside/coordinator.token', cliPath: '/bin/graphyard', repository, baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', workers: [], run: { worktreeRoot: worktreeBase, mergeWriter: { deployKeyFile: join(directory, 'install-dir', 'deploy-key'), retrials: 3 } } });
   const state = emptyDaemonState(config);
   const cycle = () => ({ config, state, now: () => clock, clock, snapshot: { work: [] as Work[] }, performed: [], isolate: async (_k: string, _i: unknown, _n: string, body: () => Promise<unknown>) => body() });
+  const greetingCase = { id: 'greeting', title: 'greeting answers', tags: ['api'], target: 'uat', required: true, steps: [{ kind: 'http', name: 'read the greeting', method: 'GET', path: '/greeting.json', status: 200, expect: [{ path: 'greeting', includes: 'Hello' }] }] };
+  // The merge writer's reads over the coordinator checkout, as the loop wires them; the acceptance change and the item both land through them.
+  const pushes: { args: string[]; env?: NodeJS.ProcessEnv }[] = [];
+  const run: ChildRun = (command, args, options) => { if (command === 'git' && args.includes('push')) pushes.push({ args, env: options?.env }); return defaultChildRun(command, args, options); };
+  const trial = async (input: Parameters<typeof runMergeTrial>[0]): Promise<MergeTrialRun> => ({ build: 'pass', tests: { passed: input.proofFiles.length, failed: [], files: input.proofFiles.length }, durationMs: 5, logTail: 'ok', files: [...input.proofFiles], proofs: Object.fromEntries(input.proofs.map(proof => [proof, { executed: 1, failed: 0 }])) });
+  const deployKeyFile = join(directory, 'install-dir', 'deploy-key');
+  const record: MergePorts['record'] = async (work, event) => request(coordinator, `work/${work.id}/merge-record`, event, mergeRecordKey(work, event));
+  const recordedMerger = async () => (await request(coordinator, 'status')).mergeWriter.merger as 'github' | 'control-plane';
+  const reads = mergeWriterReads(config, checkout, run, { base: worktreeBase, record, merger: recordedMerger, trial });
   const acceptance: AcceptanceEffects = {
-    settings: diagnosticianSettings({}), cwd: directory,
+    ...acceptanceEffects(config, checkout, { run, fetcher: fetch, asCoordinator: path => request(coordinator, path), asOperatorAgent: (_method, path, body, key) => request(operatorAgent, path, body, key), merger: recordedMerger, writer: reads }),
+    settings: diagnosticianSettings({}),
     goals: async () => (await request(coordinator, 'goals?open=1')).goals,
     runner: async (role, attempt, goal) => ({ runtime: 'stub', model: attempt, runner: stubRuntime(() => role === 'judge'
       ? { goal: goal.key, verdict: 'approve', reason: 'The outcome is what a customer asked for and its case checks it' }
-      : { goal: goal.key, outcomes: [{ id: 'greeting', title: 'A customer is greeted by name', criteria: ['The greeting names the customer'],
-        case: { id: 'greeting', title: 'greeting answers', tags: ['api'], target: 'uat', required: true, steps: [{ kind: 'http', name: 'read the board', method: 'GET', path: '/api/board', status: 200 }] } }] }, runs) }),
-    open: async (goal, draft) => {
-      const branch = `graphyard/${goal.key.toLowerCase()}-acceptance-${goal.revision}`;
-      const head = sha('acceptance', goal.key, goal.revision, draft);
-      const existing = [...pulls].find(([, pull]) => pull.branch === branch && pull.state === 'open');
-      if (existing) { existing[1].head = head; return { pr: existing[0], branch, head }; }
-      const pr = nextPr++;
-      pulls.set(pr, { branch, head, state: 'open' });
-      return { pr, branch, head };
-    },
-    draft: (goal, input) => request(operatorAgent, `goals/${goal.key}/draft`, input, `acceptance:${goal.id}:${goal.revision}`),
+      : { goal: goal.key, outcomes: [{ id: 'greeting', title: 'A customer is greeted by name', criteria: ['The greeting names the customer'], case: greetingCase }] }, runs) }),
     judge: (goal, judgement) => request(approver, `goals/${goal.key}/${judgement.verdict}`, { reason: judgement.reason }, `acceptance:${goal.id}:${goal.revision}:judged`),
-    pullRequest: async pr => {
-      const pull = pulls.get(pr)!;
-      return { state: pull.state, mergeSha: pull.state === 'merged' ? sha('acceptance-merge', pr) : null, head: pull.head };
-    },
-    land: async goal => {
-      const pr = goal.acceptance!.pr, pull = pulls.get(pr)!;
-      assert.equal(pull.head, goal.approval!.head, 'an acceptance pull request is landed only at its approved head');
-      pull.state = 'merged';
-      const landing = { state: 'merged' as const, detail: `#${pr} merged`, mergeSha: sha('acceptance-merge', pr) };
-      return { goal: await recordLanding(store, goal, landing, operatorAgent), landing };
-    },
-    close: async pr => { const pull = pulls.get(pr); if (pull?.state === 'open') pull.state = 'closed'; },
-    closed: (goal, pr, reason) => request(operatorAgent, `goals/${goal.key}/closed`, { pr, reason }, `acceptance:${goal.id}:${goal.revision}:closed`),
+    open: async () => { throw new Error('the control-plane acceptance opened a pull request'); },
+    pullRequest: async () => { throw new Error('the control-plane acceptance read a pull request'); },
+    land: async () => { throw new Error('the control-plane acceptance asked GitHub to land it'); },
+    close: async () => { throw new Error('the control-plane acceptance closed a pull request'); },
   };
   const planner: PlannerEffects = {
     settings: diagnosticianSettings({}), cwd: directory,
@@ -225,7 +217,7 @@ test('unit:zero-touch-control-plane — up --agent --goal FILE --merger control-
       : { goal: goal.key, note: 'A greeting module under src/, served by the existing application.',
         items: [{ ref: 'greeting', title: 'Greet the customer', description: 'Add the greeting module', type: 'feature', priority: 2,
           outcomes: ['greeting'], cases: ['greeting'],
-          criteria: [{ id: 'AC-1', text: 'The greeting module answers', proofs: ['unit:app-works'] }], plannedFiles: ['src/greeting.ts'], dependsOn: [] }] }, runs) }),
+          criteria: [{ id: 'AC-1', text: 'The greeting module answers', proofs: ['unit:app-works'] }], plannedFiles: ['src/greeting.ts', 'public/greeting.json'], dependsOn: [] }] }, runs) }),
     plan: (goal, plan) => request(operatorAgent, `goals/${goal.key}/plan`, plan, `planner:${goal.id}:${goal.revision}`),
     invalid: (goal, reason) => request(operatorAgent, `goals/${goal.key}/plan-invalid`, { reason }, `planner:${goal.id}:${goal.revision}:invalid`),
     judge: (goal, judgement) => request(approver, `goals/${goal.key}/plan-${judgement.verdict}`, { reason: judgement.reason }, `planner:${goal.id}:${goal.revision}:judged`),
@@ -234,24 +226,23 @@ test('unit:zero-touch-control-plane — up --agent --goal FILE --merger control-
   };
 
   // 3. Stub worker + merge writer: claim/commit/submit once an item is ready; the deploy-key push lands it.
-  const pushes: { args: string[]; env?: NodeJS.ProcessEnv }[] = [];
-  const run: ChildRun = (command, args, options) => { if (command === 'git' && args.includes('push')) pushes.push({ args, env: options?.env }); return defaultChildRun(command, args, options); };
-  const trial = async (input: Parameters<typeof runMergeTrial>[0]): Promise<MergeTrialRun> => ({ build: 'pass', tests: { passed: input.proofFiles.length, failed: [], files: input.proofFiles.length }, durationMs: 5, logTail: 'ok', files: [...input.proofFiles], proofs: Object.fromEntries(input.proofs.map(proof => [proof, { executed: 1, failed: 0 }])) });
-  const deployKeyFile = join(directory, 'install-dir', 'deploy-key');
-  const record: MergePorts['record'] = async (work, event) => request(coordinator, `work/${work.id}/merge-record`, event, mergeRecordKey(work, event));
-  const recordedMerger = async () => (await request(coordinator, 'status')).mergeWriter.merger as 'github' | 'control-plane';
-  const reads = mergeWriterReads(config, checkout, run, { base: worktreeBase, record, merger: recordedMerger, trial });
+  //    When the first item is dispatched, main must already hold the goal's case and contract binding (GY-1535).
+  let atDispatch: { cases: string; contract: string; goal: Goal } | null = null;
   let submittedHead: string | null = null;
   const workItems = async () => {
     const ready = ((await request(coordinator, 'work')) as Work[]).find(item => item.stage === 'ready' && !item.lease && !item.submission);
     if (!ready) return;
     runs.push(`worker ${ready.key}`);
+    git(checkout, 'fetch', '-q', 'origin', 'main');
+    atDispatch = { cases: git(checkout, 'ls-tree', '--name-only', 'refs/remotes/origin/main', 'e2e/cases/'), contract: git(checkout, 'show', 'refs/remotes/origin/main:e2e/contract.json'),
+      goal: (await request(coordinator, `goals/${key}`)).goal as Goal };
     const pulled = await engine.pullAssignment(worker, { work: ready.id }, randomUUID());
     assert.equal(pulled.assigned?.id, ready.id, JSON.stringify(pulled.refused));
     const branch = `graphyard/${ready.key.toLowerCase()}-1`, tree = join(checkout, '.graphyard', 'worktrees', `${ready.key}-1`);
-    git(checkout, 'worktree', 'add', '-q', '-b', branch, tree, baseTip);
+    git(checkout, 'worktree', 'add', '-q', '-b', branch, tree, 'refs/remotes/origin/main');
     git(tree, 'config', 'user.email', 't@example.com'); git(tree, 'config', 'user.name', 'T');
-    const head = await commit(tree, 'src/greeting.ts', 'export const greeting = (name: string) => `Hello, ${name}`;\n', `${ready.key}: greet the customer`);
+    await commit(tree, 'src/greeting.ts', 'export const greeting = (name: string) => `Hello, ${name}`;\n', `${ready.key}: greet the customer`);
+    const head = await commit(tree, 'public/greeting.json', '{ "greeting": "Hello, customer" }\n', `${ready.key}: serve the greeting`);
     await engine.execute(worker, 'workspace', ready.id, { epoch: 1, host: 'test', path: tree, branch }, randomUUID());
     const submitted = await engine.execute(worker, 'submit', ready.id, completionBody(['1', '--head', head], () => head), randomUUID());
     assert.equal(submitted.observation?.source, 'control-plane', 'the plane observed the head itself');
@@ -298,13 +289,35 @@ test('unit:zero-touch-control-plane — up --agent --goal FILE --merger control-
   assert.equal(done.stage, 'done', JSON.stringify(done.gates));
   const mergeSha = done.delivery!.mergeSha;
   assert.equal(git(origin, 'rev-list', '--first-parent', 'main').split('\n')[0], mergeSha, 'main\'s first parent on the bare origin is the delivered merge commit');
-  assert.equal(git(origin, 'rev-parse', `${mergeSha}^1`), baseTip);
+  const acceptanceMerge = goal.merged!.mergeSha!;
+  assert.equal(git(origin, 'rev-parse', `${mergeSha}^1`), acceptanceMerge, 'the item merged onto the acceptance change');
+  assert.equal(git(origin, 'rev-parse', `${acceptanceMerge}^1`), baseTip);
   assert.equal(git(origin, 'rev-parse', `${mergeSha}^2`), submittedHead);
   assert.match(git(origin, 'show', `${mergeSha}:src/greeting.ts`), /Hello/, 'the worker\'s file is on main');
-  assert.equal(pushes.length, 1, 'one push');
-  assert.equal(pushes[0]!.env?.GIT_SSH_COMMAND, deployKeySshCommand(deployKeyFile), 'the push used the deploy key `up` placed, and no other credential');
+  assert.equal(pushes.length, 2, 'two pushes: the acceptance change, then the item');
+  for (const push of pushes) assert.equal(push.env?.GIT_SSH_COMMAND, deployKeySshCommand(deployKeyFile), 'every push used the deploy key `up` placed, and no other credential');
   const kinds = (await store.pool.query("SELECT kind FROM events WHERE work_id=$1 AND kind LIKE 'merge.%' ORDER BY seq", [first!.id])).rows.map(row => row.kind as string);
   assert.deepEqual(kinds, ['merge.intent', 'merge.trial', 'merge.pushed', 'merge.reconciled']);
   assert.ok(!(await store.pool.query("SELECT 1 FROM events WHERE work_id=$1 AND kind ILIKE '%github%'", [first!.id])).rowCount, 'nothing about the item touched GitHub');
   assert.ok(!events.some(event => event.kind === 'handoff' || event.kind === 'waiting'), 'still no human step after the loop');
+
+  await t.test('unit:zero-touch-creates-e2e-first — the goal\'s required case and contract binding are merged onto the bare origin by the merge writer before the first planned item is dispatched, and the first release candidate runs them on its UAT', async () => {
+    assert.ok(atDispatch, 'the first planned item was dispatched');
+    assert.equal(atDispatch!.cases, 'e2e/cases/greeting.json', 'main held the goal\'s case when the first item was dispatched');
+    assert.deepEqual(JSON.parse(atDispatch!.contract).outcomes.map((outcome: { id: string; cases: string[] }) => [outcome.id, outcome.cases]), [['greeting', ['greeting']]], 'and its contract binding');
+    assert.equal(atDispatch!.goal.stage, 'delivering', 'the goal was planned and released only after its acceptance merged');
+    assert.equal(atDispatch!.goal.acceptance!.pr, null, 'no pull request: the acceptance change went through the merge writer');
+    assert.equal(atDispatch!.goal.merged!.mergeSha, acceptanceMerge);
+    assert.deepEqual(atDispatch!.goal.protected.cases, ['greeting']);
+    // The first candidate: cut from main after the item merged, validated on the static UAT of its build output.
+    const ledger = gitIn(checkout);
+    const cutResult = cut(ledger, { base: 'main', trigger: 'manual', now: new Date(clock), push: true });
+    assert.ok(cutResult.cut, JSON.stringify(cutResult));
+    const candidateTree = join(fixtureRoot, 'first-candidate');
+    git(checkout, 'worktree', 'add', '-q', '--detach', candidateTree, cutResult.candidate.sha);
+    const validated = await validateProjectCandidate(ledger, cutResult.candidate.id, { checkout: candidateTree, uat: { static: { directory: 'public' } }, token: 'uat', base: 'main', push: true, timeoutMs: 30_000, stepTimeoutMs: 5_000 });
+    assert.equal(validated.record.result, 'passed', JSON.stringify(validated.record.suites));
+    assert.deepEqual(validated.record.e2e!.cases.map(entry => [entry.case, entry.verdict, entry.required]), [['greeting', 'passed', true]], 'the first candidate ran the goal\'s required case');
+    assert.equal(validated.record.e2e!.sha, cutResult.candidate.sha);
+  });
 });

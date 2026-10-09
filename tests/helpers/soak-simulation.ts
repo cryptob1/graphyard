@@ -15,6 +15,7 @@ import { DispatchReservedError, type HerdrAgent, type MasterConfig, type WorkerP
 import { withSupervision } from '../../src/master/profiles.js';
 import { readAccountStartFailures, workerLaunchStatus, worktreeFailure } from '../../src/master/dispatch.js';
 import { readControlPlaneClock } from '../../src/master/containment.js';
+import { timedCall } from '../../src/master/timings.js';
 import { containmentSettlementRefusals, containmentVerificationSchema, loopEndedAttempt } from '../../src/quarantine.js';
 import { type SupervisorProbeReport } from '../../src/containment-probe.js';
 import { coordinatorConfinementRefusal, rerunFailedChecks } from '../../src/master/profiles.js';
@@ -43,6 +44,7 @@ import { clearPlans, plansSettled } from '../../src/daemon/planner.js';
 import { plannerWorld } from './soak-planner.js';
 import type { Goal, Landing } from '../../src/model/goal.js';
 import { recordLanding } from '../../src/server/routes/goals.js';
+import { controlPlaneAcceptance } from './soak-acceptance-writer.js';
 import { terminalDecisions } from '../../src/cli/decision-report.js';
 import { Launcher } from '../../src/daemon/cycle.js';
 import { wakeOwnObservation } from '../../src/master/base-break-refresh.js';
@@ -164,7 +166,7 @@ export interface MainWatchLanding { sha: string; at: number; subject: string; au
  * effect. tests/soak-supervised.test.ts checks the real effects leave each of them absent.
  */
 export const supervisedAbsentEffects = ['decide', 'approver', 'docsSync', 'withdraw', 'resume', 'decisions', 'decisionChanges', 'replan', 'widenScope', 'withdrawReview', 'diagnostician', 'acceptance', 'planner', 'fileFaultClass', 'unblock', 'doctor'] as const;
-export async function simulateDay(options: { hours: number; backlog?: boolean; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number; working?: { from: number; retryAt: number } }; regression?: ('approvers-left-open' | 'docs-syncs-left-open')[]; headless?: boolean; handApprovers?: boolean; stranded?: boolean | 'resume'; staleRework?: boolean; staleMerge?: number; capacityWait?: { from: number; to: number }; diagnosisLimit?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; workspaceFailure?: { item: number; until: number }; credentialBlocked?: { recovers: number; never: number }; blockers?: boolean; retrying?: { worker: number; approver: number }; unbounded?: { stuck: number; progressing: number; pushedOnce: number; rework: number }; starved?: { items: number[]; dropFirst: number }; docs?: { budget: { total: number; perPage: number } }; dispatchFailing?: { constant: number; changing: number; refuseBlocks: number; unblockAfterMs: number }; mainGuard?: MainGuardDay; containment?: { failUntil: number; slowUntil: number; refuseSettle?: number }; mechanical?: { applied: number; rejected: number }; slowDecisions?: { from: number; to: number; ms: number }; slowObservation?: { from: number; to: number; attentionMs: number }; lateReading?: boolean; slowDeployment?: { from: number; to: number; observationMs: number }; selfProvision?: { redeployFails: { from: number; to: number } }; plan?: Partial<typeof basePlan>; github806?: boolean; remedies?: boolean;
+export async function simulateDay(options: { hours: number; backlog?: boolean; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number; working?: { from: number; retryAt: number } }; regression?: ('approvers-left-open' | 'docs-syncs-left-open')[]; headless?: boolean; handApprovers?: boolean; stranded?: boolean | 'resume'; staleRework?: boolean; staleMerge?: number; capacityWait?: { from: number; to: number }; diagnosisLimit?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; workspaceFailure?: { item: number; until: number }; credentialBlocked?: { recovers: number; never: number }; blockers?: boolean; retrying?: { worker: number; approver: number }; unbounded?: { stuck: number; progressing: number; pushedOnce: number; rework: number }; starved?: { items: number[]; dropFirst: number }; docs?: { budget: { total: number; perPage: number } }; dispatchFailing?: { constant: number; changing: number; refuseBlocks: number; unblockAfterMs: number }; mainGuard?: MainGuardDay; containment?: { failUntil: number; slowUntil: number; refuseSettle?: number }; mechanical?: { applied: number; rejected: number }; slowDecisions?: { from: number; to: number; ms: number }; slowAnswers?: { from: number; to: number; ms: number }; slowObservation?: { from: number; to: number; attentionMs: number }; lateReading?: boolean; slowDeployment?: { from: number; to: number; observationMs: number }; selfProvision?: { redeployFails: { from: number; to: number } }; plan?: Partial<typeof basePlan>; github806?: boolean; remedies?: boolean;
   decomposition?: { broadItems: number[]; concurrency?: number };
   /** GY-1294: the loop's own write moves a diagnosed item's revision before its approver reads the diagnosis decision, so the decision settles stale. */
   staleDiagnosis?: boolean;
@@ -210,8 +212,8 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
    * day's clock. From `crashLoop.from` to `.to` slot 1 crashes half a minute after each start.
    */
   hostSupervision?: { managerDown: { from: number; to: number }; crashLoop: { from: number; to: number } };
-  /** GY-1417: record three goals and wire the acceptance role (acceptanceWorld below). */
-  acceptance?: boolean;
+  /** GY-1417: record three goals and wire the acceptance role (acceptanceWorld below); `control-plane` lands them through the merge writer (GY-1535, soak-acceptance-writer.ts). */
+  acceptance?: boolean | 'control-plane';
   /** GY-1418: with `acceptance`, also wire the planner role over the same goals (tests/helpers/soak-planner.ts). */
   planner?: boolean;
   /**
@@ -1349,7 +1351,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   const settings = diagnosticianSettings({ diagnostician: { invariantBoundMinutes: 30 } });
   const diagnosed: DiagnosisRun[] = [];
   clearDrafts(); clearPlans();
-  const acceptance = options.acceptance ? await acceptanceWorld(dayStart) : null;
+  const acceptance = options.acceptance ? await acceptanceWorld(dayStart, options.acceptance === 'control-plane' ? 'control-plane' : 'github') : null;
   const planner = acceptance && options.planner ? await plannerWorld(dayStart, acceptance.day.goals) : null;
   // GY-1092: for `diagnosisLimit` the provider refuses every run for its spent quota, naming no reset.
   const limited = () => !!options.diagnosisLimit && clock.now() - dayStart >= options.diagnosisLimit.from && clock.now() - dayStart < options.diagnosisLimit.to;
@@ -1958,6 +1960,18 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     effects.decide = async (work, action, reason, input) => { await slow(); return decide!(work, action, reason, input); };
     effects.wakeObservation = async work => { await slow(); return wakeObservation!(work); };
     effects.withdraw = async (work, decision, reason) => { budgetDay.withdrawn.push({ key: work.key, cycle: cycles }); return withdraw!(work, decision, reason); };
+  }
+  // ---- GY-1562: the slow-answering plane. Inside the window the loop's snapshot read is answered,
+  // ---- 200, only after `ms` of the clock, timed as the server request it is (cycle 13964's 95.8 s,
+  // ---- 83.7 s of it on 2xx answers): the cycle crawls on the plane, and its own work stays small.
+  const slowPlaneDay = { cycles: [] as { cycle: number; elapsed: number; durationMs: number; workMs: number; planeWaitMs: number; slowCalls: number }[], slowReads: 0 };
+  if (options.slowAnswers) {
+    const window = options.slowAnswers, { snapshot: read } = effects;
+    effects.snapshot = () => timedCall('server', 'GET work-snapshot', async () => {
+      const at = clock.now() - dayStart;
+      if (at >= window.from && at < window.to) { slowPlaneDay.slowReads++; fenced.drift += window.ms; await moveClock(window.ms); }
+      return read();
+    }, clock.now);
   }
   // ---- GY-1345: the slow-observation day. Inside the window the attention master status adds answers
   // ---- `attentionMs` after it is asked, as cycle 12621's did in 350.8s: the cycle that asks spends the
@@ -2690,6 +2704,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
         if (acceptance) await draftsSettled();
         if (planner) await plansSettled();
         if (options.staleRelease) { staleReleaseDay.steps.push({ elapsed, ms: result.metrics.steps?.decisions?.ms ?? 0, backlogReads: staleReleaseDay.backlogReads }); staleReleaseDay.backlogReads = 0; }
+        if (options.slowAnswers) slowPlaneDay.cycles.push({ cycle: cycles - 1, elapsed, durationMs: result.metrics.durationMs, workMs: result.metrics.workMs ?? result.metrics.durationMs, planeWaitMs: result.metrics.planeWaitMs ?? 0, slowCalls: result.metrics.timings?.slowCalls ?? 0 });
         if (options.slowDecisions) budgetDay.cycles.push({ cycle: cycles - 1, elapsed, spentMs: clock.now() - cycleStart, slow: budgetDay.cycleSlow, deferred: [...state.decisionsDeferred] });
         if (options.slowDeployment) deploymentDay.cycles.push({ cycle: cycles - 1, elapsed, spentMs: clock.now() - cycleStart, cut: result.actions.some(action => action.kind === 'deployment' && /spent its \d+s budget/.test(action.detail)), pending: deploymentStep.deploymentReadsPending(state) });
         if (options.slowObservation) observationDay.cycles.push({ cycle: cycles - 1, elapsed, spentMs: clock.now() - cycleStart, cut: result.actions.some(action => action.kind === 'fault' && /spent its \d+s observation budget/.test(action.detail)), pending: faultsStep.observationReadsPending(state) });
@@ -2875,7 +2890,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     mergeQueuePosts, config, refused, decideCalls, restarted, approverPanes, failing, herdrClosed: herdr.closed, diagnosisModel: settings.model, diagnosisRuns: diagnosed, baseBreak, capacityRefused, capacityLaunched, capacityWaiters,
     decided, misreads, prompts, screens, heldAccounts, approverAccounts, retryReset, exitedLive, exitedClosed, exitedRowsSeen, reassign, workspaceFailures, workspaceCooled, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, fenced, mergeStallSightings, master, baseFailure,
     blockerEvents, blockerProbes, blockerDecisions, blockerActions, blockerKeysPeak, attempts, lanesSeen, laneApplications, approverWorks, approverDecisions, failover, webhook, remedies, observeRequests, starvation, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size }, mechanical: { ledger, botRounds, misclassified, reviewHolds }, shared, charges: { ...charged, b: charged.b.length, instancesSeen: [...charged.instancesSeen], restarts: chargeRestarts },
-    wakes, lateReading, staleMerges, restartLog, hostDay, guardDay, mainWatchDay, budgetDay, observationDay, deploymentDay, decompositionDay: decompositionHistory, diagnosisRaces, diagnosisRequestRaces, transientRefused, lateReads, staleReleaseDay, drain, acceptanceDay: acceptance?.day ?? null, plannerDay: planner?.day ?? null, loopWakeDay: loopWakeDay || null,
+    wakes, lateReading, staleMerges, restartLog, hostDay, guardDay, mainWatchDay, budgetDay, slowPlaneDay, observationDay, deploymentDay, decompositionDay: decompositionHistory, diagnosisRaces, diagnosisRequestRaces, transientRefused, lateReads, staleReleaseDay, drain, acceptanceDay: acceptance?.day ?? null, plannerDay: planner?.day ?? null, loopWakeDay: loopWakeDay || null,
     restartDay: options.checkoutRestart ? restartDay : null, failedLaunches };
 }
 
@@ -2917,7 +2932,7 @@ export const memoryDay = { memoryDip: { from: 0, until: 15 * minute } };
  * returns nothing and its first approved pull request conflicts with the base. The control plane's
  * land answers waiting until half an hour after it was first asked, then merged.
  */
-export async function acceptanceWorld(dayStart: number) {
+export async function acceptanceWorld(dayStart: number, merger: 'github' | 'control-plane' = 'github') {
   const day = {
     goals: {} as Record<string, string>, runs: [] as { goal: string; role: 'draft' | 'judge'; at: number }[], opens: [] as { goal: string; pr: number; revision: number; at: number }[],
     posts: [] as { goal: string; ok: boolean; at: number }[], reads: [] as { pr: number; at: number }[], closes: [] as number[], lands: [] as { pr: number; at: number }[],
@@ -2947,7 +2962,7 @@ export async function acceptanceWorld(dayStart: number) {
   // POST /api/goals/:key/land as the control plane answers it, its GitHub held here: the merge lands half an hour after it is
   // first asked; a person closes billing's first approved pull request instead, and audit's first conflicts with the base.
   const land = async (goal: Goal) => {
-    const pr = goal.acceptance!.pr, pull = day.pulls.get(pr)!;
+    const pr = goal.acceptance!.pr!, pull = day.pulls.get(pr)!;
     assert.equal(pull.head, goal.approval!.head, 'an acceptance pull request is landed only at its approved head');
     day.lands.push({ pr, at: clock.now() - dayStart });
     pull.autoAt ??= clock.now();
@@ -2991,5 +3006,7 @@ export async function acceptanceWorld(dayStart: number) {
     close: async pr => { const pull = day.pulls.get(pr)!; if (pull.state === 'open') pull.state = 'closed'; day.closes.push(pr); },
     closed: (goal, pr, reason) => api(principals.operatorAgent, 'POST', `goals/${goal.key}/closed`, { pr, reason }, `acceptance:${goal.id}:${goal.revision}:closed`),
   };
-  return { day, effects };
+  if (merger === 'github') return { day: { ...day, writer: null, main: null }, effects };
+  const controlPlane = controlPlaneAcceptance(effects, named, dayStart);
+  return { day: { ...day, writer: controlPlane.writer, main: controlPlane.history }, effects: controlPlane.effects };
 }
