@@ -4,11 +4,13 @@ import { once } from 'node:events';
 import { existsSync } from 'node:fs';
 import { lstat, mkdir, utimes, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
+import { userInfo } from 'node:os';
 import { join } from 'node:path';
 import { reclaimTmpDirectories, testTempMinAgeMs, tmpReclaimMinAgeMs } from '../src/tmp-reclaim.js';
 // A namespace import: on a base without GY-1597's escalation the case fails, not the file's load.
 import * as tmpReclaim from '../src/tmp-reclaim.js';
-import { readResources, readTmpInodes, type ResourceInputs } from '../src/master-resources.js';
+import * as resources from '../src/master-resources.js';
+import { readResources, readTmpInodes, reclaimResources, resourceAttention, settleTmpReclaim, type ResourceInputs } from '../src/master-resources.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-1512: test runs write content-hashed compile files into this user's tsx cache (`tsx-<uid>`)
@@ -203,4 +205,89 @@ test('unit:tmp-reclaim-tsx-cache — an escalation step\'s work bound is counted
   assert.deepEqual(report.errors, []);
   assert.equal(existsSync(stale), false, 'the base sweep removed the stale temp');
   assert.deepEqual(report.escalated?.map(step => step.removed), [0], 'the step\'s 60 ms were spent before it ran');
+});
+
+// GY-1602: the loop's pass scans its own tmpdir and /tmp, but the tmp-inodes reading measured only
+// the reading process's tmpdir. With TMPDIR and /tmp on different filesystems, a /tmp below its
+// headroom went unmeasured and its consumers unnamed whenever TMPDIR read healthy.
+test('unit:tmp-reclaim-per-root — each scanned root is measured on its own volume, and a low root raises the tmp-inodes attention naming that root and its own consumers while the other root is above the bound', async () => {
+  const root = await temporaryDirectory('per-root-plane');
+  await mkdir(join(root, '.graphyard'));
+  const healthy = await temporaryDirectory('per-root-healthy'), low = await temporaryDirectory('per-root-low');
+  const leaker = join(low, 'voice-cache'), quiet = join(healthy, 'other-cache');
+  await mkdir(leaker); await mkdir(quiet);
+  for (let index = 0; index < 30; index++) await writeFile(join(leaker, `chunk-${index}`), 'x');
+  for (let index = 0; index < 50; index++) await writeFile(join(quiet, `chunk-${index}`), 'x');
+  const volume = async (path: string) => ({ files: 4000, ffree: path === low ? 100 : 3_000 });
+  // The pass's own report: both roots measured, only the low one's census taken, and it names only its own entries.
+  const report = await reclaimTmpDirectories({ tmpRoots: [healthy, low], held: new Set(), limit: 100, workMs: 150, volume });
+  assert.deepEqual(report.errors, []);
+  assert.deepEqual(report.pressure?.map(entry => ({ root: entry.root, free: entry.freeInodes, below: entry.below })), [{ root: healthy, free: 3_000, below: false }, { root: low, free: 100, below: true }]);
+  assert.equal(report.pressure?.[0]?.consumers, undefined, 'a root above the bound takes no census');
+  assert.deepEqual(report.pressure?.[1]?.consumers?.[0], { path: leaker, entries: 31, owner: userInfo().username });
+  assert.ok(report.pressure![1]!.consumers!.every(consumer => consumer.path.startsWith(`${low}/`)), 'the low root names only its own consumers');
+
+  // The loop records the pass, and the reading measures each root on its own filesystem.
+  const options = { tmpRoots: [healthy, low], tmpPass: (pass: Parameters<typeof reclaimTmpDirectories>[0]) => reclaimTmpDirectories({ ...pass, held: new Set(), volume }) };
+  await reclaimResources(root, { reviewers: [], producers: [] }, { work: [], agents: [] }, options);
+  await settleTmpReclaim();
+  await reclaimResources(root, { reviewers: [], producers: [] }, { work: [], agents: [] }, options);
+  await settleTmpReclaim();
+  const devices: Record<string, number> = { [healthy]: 1, [low]: 2 };
+  const readTmpRoots = (resources as { readTmpRoots?: (...args: unknown[]) => Promise<unknown[]> }).readTmpRoots;
+  assert.equal(typeof readTmpRoots, 'function', 'the reading reads every scanned root');
+  const tmp = await readTmpRoots!(root, [healthy, low], volume, undefined, async (path: string) => devices[path]!) as NonNullable<Awaited<ReturnType<typeof readTmpInodes>>>[];
+  assert.deepEqual(tmp.map(entry => ({ path: entry.path, free: entry.freeInodes })), [{ path: healthy, free: 3_000 }, { path: low, free: 100 }]);
+  const input: ResourceInputs = { now: Date.now(), reviews: [], producers: [], agents: [], work: [], plane: null, loop: null, revision: null, disk: null, tmp, profiles: { workers: [], reviewers: [], producers: [] } };
+  const readings = readResources(input).filter(entry => entry.resource === 'tmp-inodes');
+  assert.deepEqual(readings.map(entry => entry.state), ['ok', 'low'], 'the healthy root reads ok and the low root low');
+  const attention = resourceAttention(readings);
+  assert.equal(attention.length, 1, 'only the low root raises attention');
+  assert.equal(attention[0]!.subject, `resource:tmp-inodes:${low}`);
+  assert.match(attention[0]!.text, new RegExp(`measured ${low}: 100 of 4000 inodes free`), 'the attention names the low root');
+  assert.match(attention[0]!.text, new RegExp(`the top /tmp consumers are ${leaker} \\(31 entries, owner ${userInfo().username}\\)`), 'and its top consumers by path, entry count and owner');
+  assert.doesNotMatch(attention[0]!.text, new RegExp(quiet), 'never the healthy root\'s entries');
+
+  // Two roots on one filesystem are read once.
+  const shared = await readTmpRoots!(root, [healthy, low], volume, undefined, async () => 7) as unknown[];
+  assert.equal(shared.length, 1, 'one filesystem, one reading');
+});
+
+test('unit:tmp-reclaim-per-root — the census charges every top-level entry to its budget: a root of more top-level entries than the budget stops there and reports itself partial', async () => {
+  const flat = await temporaryDirectory('per-root-flat');
+  for (let index = 0; index < 40; index++) await writeFile(join(flat, `leak-${index}x`), 'x');
+  const tmpCensus = (tmpReclaim as { tmpCensus?: (roots: string | readonly string[], bound?: number) => Promise<{ consumers: { entries: number; capped?: boolean }[]; partial: boolean }> }).tmpCensus;
+  assert.equal(typeof tmpCensus, 'function');
+  const census = await tmpCensus!(flat, 10);
+  assert.equal(census.partial, true, 'the census says it is partial');
+  assert.equal(census.consumers.reduce((total, consumer) => total + consumer.entries, 0), 10, 'it counted exactly its budget of top-level entries');
+  assert.ok(census.consumers.every(consumer => consumer.capped));
+  const whole = await tmpCensus!(flat, 40);
+  assert.equal(whole.partial, false, 'a census that read every entry within its budget is whole');
+  // The pass reports its census partial, and the reading says so.
+  const report = await reclaimTmpDirectories({ tmpRoot: flat, held: new Set(), limit: 100, workMs: 150, volume: async () => ({ files: 4000, ffree: 100 }), escalation: [] });
+  assert.equal(report.pressure?.[0]?.partial, undefined, 'the default budget reads 40 entries whole');
+  const tmp = { path: flat, totalInodes: 4000, freeInodes: 100, removed: null, removedAt: null, latest: { removed: 0, at: new Date().toISOString() }, consumers: [{ path: join(flat, 'leak'), entries: 10, owner: 'someone', capped: true }], censusPartial: true };
+  const input: ResourceInputs = { now: Date.now(), reviews: [], producers: [], agents: [], work: [], plane: null, loop: null, revision: null, disk: null, tmp, profiles: { workers: [], reviewers: [], producers: [] } };
+  assert.match(readResources(input).find(entry => entry.resource === 'tmp-inodes')?.detail ?? '', /\(at least 10 entries, owner someone\) \(a partial census: it stopped at its \d+-entry budget\)/, 'the reading reports the census partial');
+});
+
+test('unit:tmp-reclaim-per-root — the safety envelope is unchanged across roots: only this user\'s stale test temps and unheld tsx cache files go, from the low root and the healthy one alike', { skip: ownCache() === null ? 'no uids on this platform' : false }, async () => {
+  const healthy = await temporaryDirectory('per-root-envelope-healthy'), low = await temporaryDirectory('per-root-envelope-low');
+  const now = Date.now(), gone: string[] = [], kept: string[] = [];
+  for (const root of [healthy, low]) {
+    const stale = join(root, 'pg-password-stale'), young = join(root, 'graphyard-young'), foreign = join(root, 'voice-recording');
+    const cache = join(root, ownCache()!), oldFile = join(cache, 'compiled-old'), heldFile = join(cache, 'compiled-held');
+    await mkdir(cache); await mkdir(young);
+    for (const path of [stale, foreign, oldFile, heldFile]) await writeFile(path, 'x');
+    await backdate(stale, testTempMinAgeMs + 3_600_000, now); await backdate(foreign, 9 * 3_600_000, now);
+    await backdate(oldFile, tmpReclaimMinAgeMs + 3_600_000, now); await backdate(heldFile, tmpReclaimMinAgeMs + 3_600_000, now);
+    await backdate(young, testTempMinAgeMs - 30 * 60_000, now); await backdate(cache, 9 * 3_600_000, now);
+    gone.push(stale, oldFile); kept.push(young, foreign, heldFile, cache);
+  }
+  const held = new Set(kept.filter(path => path.endsWith('compiled-held')));
+  const report = await reclaimTmpDirectories({ tmpRoots: [healthy, low], held, limit: 100, workMs: 60_000, volume: async (path: string) => ({ files: 4000, ffree: path === low ? 100 : 3_000 }) });
+  assert.deepEqual(report.errors, []);
+  assert.deepEqual(report.removed.map(entry => entry.path).sort(), [...gone].sort());
+  for (const path of kept) assert.equal(existsSync(path), true, `${path} stays`);
 });
