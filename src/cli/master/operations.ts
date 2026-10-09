@@ -20,6 +20,7 @@ import { installIdFor } from '../../install/types.js';
 import { knownGoodState, pinKnownGood } from '../../master/known-good.js';
 import { alignLoopUnit, loopUnitOf, type LoopSupervisorHost } from '../../supervisor.js';
 import type { ChildRun } from '../../child-runner.js';
+import { readLockRefusal, supervisingUnit, unsupervisedHolderAttention } from '../../master/loop-restart.js';
 
 /** `master main-watch`: the watch's state and policy, or an admin's acknowledgement of one commit (GY-1519). */
 export const mainWatchUsage = 'Use master main-watch acknowledge SHA --reason TEXT --admin-token-stdin (the admin credential on stdin), or master main-watch status';
@@ -62,7 +63,10 @@ export async function operationsCommand(session: MasterSession, effects: Recover
       ...(entry.cause ? { cause: entry.cause } : {}),
     }));
     const shadowAttention = shadowGateAttention([...(state?.shadow ?? []), ...standingVerdicts], explanations);
-    const added = [...(harness ? [harness] : []), ...mainWatchAttention(state?.mainWatch ?? null, master.baseBranch), ...shadowAttention];
+    // GY-1603: a loop holding the lock outside this install's unit, which the unit's own run is refused on.
+    const refusal = await readLockRefusal(root);
+    const holder = refusal && state?.lock ? unsupervisedHolderAttention({ refusal, lock: state.lock, hostId: master.hostId, unit: await supervisingUnit(root, master, { host: effects.host }).catch(() => null) }) : null;
+    const added = [...(harness ? [harness] : []), ...(holder ? [holder] : []), ...mainWatchAttention(state?.mainWatch ?? null, master.baseBranch), ...shadowAttention];
     const attention = added.length ? { attentionItems: [...report.attentionItems, ...added], counts: { ...report.counts, attention: report.counts.attention + added.length } } : {};
     // `shadowGate`: outcome counts and trial times from the cursor; unexplained/explained counts from the ledger so eviction cannot hide a standing pair.
     // `mergeWriter` (GY-1524): the control-plane merge executor's queue (oldest first), the merge in flight, its last delivery and newest refusals.
