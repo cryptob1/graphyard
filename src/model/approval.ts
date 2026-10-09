@@ -7,6 +7,8 @@ import { standingEscalations } from './escalation.js';
 import { closureKinds } from './closure.js';
 import { createSchema, escalationTriggers, operatorCapability, type OperatorCapability, type Principal, type Work } from './work.js';
 import { baseRefreshConflict } from '../merge-queue.js';
+import { judgedSame, situatedDecisionActions, type DecisionSituation } from './decision-situation.js';
+export { decisionSituation, judgedSame, situatedDecisionActions, situationLabel, supersededSituation, type DecisionSituation } from './decision-situation.js';
 
 /**
  * Two-party decisions: the calls the guides used to reserve for a human operator. An agent
@@ -105,39 +107,10 @@ export interface Decision {
   situation?: DecisionSituation | null;
   superseded?: { bound: DecisionSituation; current: DecisionSituation } | null; // GY-1297: the situation it was bound to, and the item's
 }
-/**
- * What a rework or recover request judged: the item's candidate head and the base it was built
- * on when the request was made; the grounds it judges travel in the request's `binding` input
- * (GY-407). The server records both with the request, and a refusal stands only against a request
- * made for the same pair and the same grounds (GY-229, GY-407): their input is otherwise the bare
- * attestation `{ previousWorkerStopped: true }`, identical for every request on the item.
- */
-export interface DecisionSituation { sha: string | null; baseSha: string | null }
-export const situatedDecisionActions: readonly DecisionAction[] = ['rework', 'recover'];
-export const decisionSituation = (action: string, work: Pick<Work, 'candidate'>): DecisionSituation | null =>
-  situatedDecisionActions.includes(action as DecisionAction) ? { sha: work.candidate?.sha ?? null, baseSha: work.candidate?.baseSha ?? null } : null;
-const sameSituation = (recorded: DecisionSituation | null | undefined, current: DecisionSituation | null | undefined) =>
-  !recorded || ((recorded.sha ?? null) === (current?.sha ?? null) && (recorded.baseSha ?? null) === (current?.baseSha ?? null));
-/**
- * Whether a refused decision judged the same situation as a new request. Only rework and recover
- * are situated; any other action's input already names what it binds. For a situated action the
- * grounds binding is part of that input (GY-407), so a refusal on one ground never matches a
- * request whose binding differs, whatever the head. A refusal recorded before situations were
- * kept judged a candidate nobody can name any more, so it still stands against every request
- * whose input it shares — today, one that names no binding — until one cites it, as it always
- * did; the loop cites it with its new grounds.
- */
-const judgedSame = (action: DecisionAction, decision: { situation?: DecisionSituation | null }, situation: DecisionSituation | null | undefined) =>
-  !situatedDecisionActions.includes(action) || sameSituation(decision.situation, situation);
 // GY-1297. An approved decision left without an outcome refused its action forever (GY-949): one bound to a head
 // and base the item has left is `superseded`, naming both; one whose situation holds is resumed past the grace.
 export const approvalApplyGraceMs = 60_000, approvedDecisionBoundMs = 300_000;
-export function supersededSituation(decision: { action: string; state: string; situation?: DecisionSituation | null }, work: Pick<Work, 'candidate'>): { bound: DecisionSituation; current: DecisionSituation } | null {
-  const bound = decision.state === 'approved' ? decision.situation : null, current = bound ? decisionSituation(decision.action, work) : null;
-  return !bound || !current || sameSituation(bound, current) ? null : { bound: { sha: bound.sha ?? null, baseSha: bound.baseSha ?? null }, current };
-}
 export const stalledApproval = (decision: { state: string; approvedAt?: string | null }, now: number) => decision.state === 'approved' && !!decision.approvedAt && now - Date.parse(decision.approvedAt) >= approvalApplyGraceMs;
-export const situationLabel = (situation: DecisionSituation) => situation.sha ? `head ${situation.sha.slice(0, 12)} on base ${String(situation.baseSha).slice(0, 12)}` : 'no candidate';
 export interface DecisionEvent { kind: string; actor: string; at: string; payload: any }
 
 /** Rebuild every decision on an item from its append-only ledger entries, oldest first. */
@@ -149,7 +122,7 @@ export function foldDecisions(workId: string, events: DecisionEvent[]): Decision
       decisions.set(details.id, { id: details.id, workId, action: details.action, input: details.input, reason: details.reason, requestedBy: event.actor, requestedAt: event.at, state: 'requested',
         approvedBy: null, approvedAt: null, approvalReason: null, outcome: null, refusals: [], refusal: null,
         precedent: Array.isArray(details.precedent) ? [...details.precedent] : [], context: typeof details.context === 'string' ? details.context : null, noPrecedent: typeof details.noPrecedent === 'string' ? details.noPrecedent : null, concurrences: [],
-        situation: details.situation && typeof details.situation === 'object' ? { sha: details.situation.sha ?? null, baseSha: details.situation.baseSha ?? null } : null });
+        situation: details.situation && typeof details.situation === 'object' ? { sha: details.situation.sha ?? null, baseSha: details.situation.baseSha ?? null, ...(typeof details.situation.reauthorizes === 'string' ? { reauthorizes: details.situation.reauthorizes } : {}) } : null });
       continue;
     }
     const decision = decisions.get(details.id);

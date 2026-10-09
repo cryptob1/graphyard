@@ -5,7 +5,11 @@ import type { MasterConfig } from '../src/master.js';
 import { emptyDaemonState, pruneDaemonState, retainedActions, storeAction, type DaemonAction, type DaemonEffects } from '../src/master-daemon.js';
 import { cappedReview, cappedReworkBinding, cappedRevisionMark, neededDecision } from '../src/daemon/decisions.js';
 import { emptyHeldDecisions } from '../src/daemon/decision-reads.js';
-import { cappedEscalationKey, cappedFilingKey, cappedRefusalRequest, cappedRereviewKey, refusalFollowUps, refusedCappedRework, reviewCapStep } from '../src/daemon/cycle-review-cap.js';
+import { cappedEscalation, cappedEscalationKey, cappedFilingKey, cappedRefusalRequest, cappedRereviewKey, refusalFollowUps, refusedCappedRework, reviewCapStep, unmatchedCappedRefusal } from '../src/daemon/cycle-review-cap.js';
+import * as reviewCap from '../src/daemon/cycle-review-cap.js';
+import { handActions, handDecision } from '../src/cli/hand-actions.js';
+import { loopRework } from '../src/cli/hand-rework.js';
+import { autonomySubcommands } from '../src/master/autonomy.js';
 import { decisionKey } from '../src/daemon/reconcile.js';
 import { actionId, reconcileActions } from '../src/model/actions.js';
 import { standingRefusal } from '../src/model/approval.js';
@@ -260,6 +264,253 @@ test('unit:capped-refusal-rereview-context — the re-review request carries the
 });
 
 
+// GY-1579, observed on GY-1573 at 2026-10-09T08:19:16Z: the approver refused capped rework f84ee922,
+// requested at 08:18:36Z by the release running before GY-1575 merged, so its reason carried no
+// revision mark. The step matched refusals on the mark alone and returned silently: no withdrawal,
+// the owed request-rework kept executors fenced, and the head sat owed 34 minutes.
+
+/** The capped request as a release before GY-1575 wrote it: the binding, and a reason with no revision mark. */
+const markless = (state: 'requested' | 'refused') => ({ ...decision(state), id: 'f84ee922-0d1c-4c51-9a2e-3b8e7a6f5d40',
+  reason: `[Decided from the GitHub observation taken at 2026-10-09T08:18:00Z of candidate ${H}; if the item has moved since, this request no longer describes it.] GY-1573 is in review round 8, past its cap of 3. Past the review-round cap only an independent approver sends the head back: approve for one more round fixing exactly that finding, or refuse it as non-blocking: the loop then requests it no more and escalates the refusal for the master to answer.` });
+
+test('unit:capped-refusal-recognized-without-mark — a refused capped rework whose reason carries no revision mark is read from its binding; a marked one still binds its own revision', () => {
+  const judged = cappedReview(capped('BLOCKING: former hotspot files exceed their size budgets.'), config)!;
+  const item = capped('BLOCKING: former hotspot files exceed their size budgets.');
+  assert.equal(refusedCappedRework([markless('refused')], judged, item)?.id, markless('refused').id, 'the binding names the head and reviewer it judged');
+  assert.equal(refusedCappedRework([markless('requested')], judged, item), null, 'a request still awaiting its approver is no refusal');
+  assert.equal(refusedCappedRework([markless('refused')], { ...judged, sha: 'c'.repeat(40) }, item), null, 'a refusal binds its own head only');
+  assert.equal(refusedCappedRework([markless('refused')], { ...judged, reviewer: 'a-person' }, item), null, 'and its own reviewer');
+  assert.equal(refusedCappedRework([decision('refused', 1)], judged, { ...item, policyRevision: 2 }), null, 'a marked refusal binds the revision it was judged under');
+  assert.equal(unmatchedCappedRefusal([markless('refused')], judged), null, 'a refusal the step reads is not unmatched');
+});
+
+test('integration:capped-refusal-remedy-runs-markless — GY-1573 f84ee922: the review-cap step withdraws the change request, wakes the observation and records the re-review for a refusal with no revision mark', async () => {
+  const run = harness(capped('BLOCKING: former hotspot files exceed their size budgets.'));
+  run.world.history = [markless('requested')];
+  await run.cycle();
+  assert.equal(run.world.withdrawn.length, 0, 'the round is the approver\'s while the request stands');
+  run.world.history = [markless('refused')];
+  await run.cycle();
+  assert.deepEqual(run.world.withdrawn.map(entry => entry.reviewId), [4242], 'the change request is withdrawn as the reviewer App');
+  assert.match(run.world.withdrawn[0].message, /refused the rework it asked for as non-blocking \(decision f84ee922-0d1c-4c51-9a2e-3b8e7a6f5d40\)/);
+  assert.deepEqual(run.world.wakes, ['GY-1573'], 'the observation is woken to retire the owed request-rework');
+  assert.match(run.state.actions[cappedFilingKey(run.world.item, { sha: H, reviewId: 4242 })]!.detail, /its observation woken so the owed request-rework is cancelled/);
+  assert.equal(run.state.actions[cappedRereviewKey(run.world.item, H)]?.state, 'done', 'the re-review request is recorded');
+  assert.equal(run.state.actions[cappedEscalationKey(run.world.item, H)], undefined, 'nothing is escalated');
+  assert.equal(cappedRefusalRequest(run.world.item, H, config, [markless('refused')], [run.world.item, followUp, unrelated]), run.world.withdrawn[0].message, 'the launched reviewer reads the same request');
+  await run.cycle();
+  assert.equal(run.world.withdrawn.length, 1, 'withdrawn once');
+
+  // On a revised item whose record cannot date the undated, markless refusal against the revision, its binding still answers the round.
+  const revised = harness({ ...capped('BLOCKING: former hotspot files exceed their size budgets.'), policyRevision: 3, formalReviewResetRequired: true, formalReviewBaseline: undefined, reviewRequest: null } as Work);
+  revised.world.history = [markless('refused')];
+  await revised.cycle();
+  assert.deepEqual(revised.world.withdrawn.map(entry => entry.reviewId), [4242], 'withdrawn under revision 3 as under revision 1');
+  assert.deepEqual(revised.world.wakes, ['GY-1573']);
+  assert.equal(revised.state.actions[cappedRereviewKey(revised.world.item, H)]?.state, 'done');
+  assert.equal(revised.state.actions[cappedEscalationKey(revised.world.item, H)], undefined);
+});
+
+test('unit:capped-refusal-unmatched-escalates — a refused capped rework on the head that binds it under none of its readings escalates naming the decision, never returns silently', async () => {
+  // The record names the head as capped, but for another reviewer slug and with no revision mark.
+  const stray = { ...markless('refused'), id: 'b8d7b97b-2ecf-4f2f-bfc7-5160fec9cbdf', input: { binding: cappedReworkBinding(H, 'graphyard-reviewer'), previousWorkerStopped: true } };
+  const run = harness(capped('BLOCKING: former hotspot files exceed their size budgets.'));
+  const judged = cappedReview(run.world.item, config)!;
+  assert.equal(refusedCappedRework([stray], judged, run.world.item), null);
+  assert.equal(unmatchedCappedRefusal([stray], judged)?.id, stray.id);
+  run.world.history = [stray];
+  await run.cycle();
+  await run.cycle();
+  assert.equal(run.world.withdrawn.length, 0, 'nothing is withdrawn on a refusal the step cannot bind');
+  const escalation = run.state.actions[cappedEscalationKey(run.world.item, H)]!;
+  assert.equal(escalation.state, 'done');
+  assert.match(escalation.detail, /refused capped rework decision b8d7b97b-2ecf-4f2f-bfc7-5160fec9cbdf on f1ea5b764ac7, but its record binds graphyard-reviewer\[bot\]'s change request under none of its readings/);
+  assert.match(escalation.detail, /the master answers it/);
+  assert.equal(run.performed.filter(entry => entry.kind === 'escalation').length, 1, 'escalated once, not on every cycle');
+
+  // A binding-null hand rework whose situation names the head and the cap is read the same way.
+  const hand = { ...markless('refused'), id: 'ef1f554b-1111-4c51-9a2e-3b8e7a6f5d40', input: { previousWorkerStopped: true }, situation: { sha: H, baseSha: B } };
+  assert.equal(unmatchedCappedRefusal([hand], judged)?.id, hand.id);
+  // So is one whose binding is in another format: its situation names the head and its reason the cap.
+  const other = { ...markless('refused'), id: '5d0c7a1e-2222-4c51-9a2e-3b8e7a6f5d40', input: { previousWorkerStopped: true, binding: `${H}:verdict:${reviewer}` }, situation: { sha: H, baseSha: B } };
+  assert.equal(refusedCappedRework([other], judged, run.world.item), null);
+  assert.equal(unmatchedCappedRefusal([other], judged)?.id, other.id, 'a binding in another format leaves the head and cap to the other readings');
+  assert.equal(unmatchedCappedRefusal([{ ...other, situation: { sha: 'c'.repeat(40), baseSha: B }, reason: 'GY-1573 is past its cap of 3.' }], judged), null, 'and is not read for another head');
+  assert.equal(unmatchedCappedRefusal([{ ...other, reason: 'The verdict stands on the head.' }], judged), null, 'nor without naming the cap');
+  const formatted = harness(capped('BLOCKING: former hotspot files exceed their size budgets.'));
+  formatted.world.history = [other];
+  await formatted.cycle();
+  await formatted.cycle();
+  assert.equal(formatted.world.withdrawn.length, 0);
+  assert.match(formatted.state.actions[cappedEscalationKey(formatted.world.item, H)]!.detail, new RegExp(`refused capped rework decision ${other.id} on f1ea5b764ac7.*binding ${H}:verdict:`));
+  assert.equal(formatted.performed.filter(entry => entry.kind === 'escalation').length, 1, 'escalated by id, once');
+  // Neither is a refusal marked under another revision (it judged a change request that no longer stands), nor one for another head.
+  assert.equal(unmatchedCappedRefusal([decision('refused', 1)], judged), null);
+  assert.equal(unmatchedCappedRefusal([{ ...stray, input: { binding: cappedReworkBinding('c'.repeat(40), reviewer), previousWorkerStopped: true } }], judged), null);
+  assert.equal(unmatchedCappedRefusal([{ ...hand, situation: { sha: 'c'.repeat(40), baseSha: B }, reason: 'GY-1573 is past its cap of 3.' }], judged), null);
+  // A marked refusal under an earlier revision still waits for the new revision's approver, silently, as GY-1575 decided.
+  const revised = harness(capped('BLOCKING: AC-1 is not met under the revised criteria.', 4250));
+  revised.world.item.policyRevision = 2;
+  revised.world.history = [decision('refused', 1)];
+  await revised.cycle();
+  assert.equal(revised.performed.length, 0);
+});
+
+// GY-1580, observed on GY-1573 rounds 9-10, 2026-10-09: the approver refused capped rework 7df4183e as
+// non-blocking, the loop withdrew the change request and had the head re-reviewed, and the re-review
+// (review 5468008197, 09:04:31Z) requested changes again with a new BLOCKING: finding. The escalation sent
+// the master to "have the change request answered as FOLLOW-UP", which no command it may run does; its
+// answering rework ea13b053, citing 7df4183e, was refused as non-blocking and the finding routed to GY-1574.
+const firstRefusal = { ...decision('refused'), id: '7df4183e-1c2d-4e5f-8a9b-0c1d2e3f4a5b', requestedAt: '2026-10-09T06:35:00.000Z' };
+const answerReason = 'The re-review\'s finding is real but not blocking either: it belongs with GY-1574 AC-8, which already tracks the hotspot budgets.';
+const answer = (state: 'requested' | 'refused', requestedAt = '2026-10-09T09:10:00.000Z') => ({ id: 'ea13b053-6f7a-4b8c-9d0e-1f2a3b4c5d6e', action: 'rework', state, input: { previousWorkerStopped: true }, precedent: [firstRefusal.id], requestedAt,
+  situation: { sha: H, baseSha: B }, reason: `Answering the review-cap escalation after refused capped rework ${firstRefusal.id}: the re-review names a new BLOCKING: finding beyond it.`,
+  approvedBy: null, refusal: state === 'refused' ? { approver: 'graphyard-approver-graphyard', reason: answerReason, at: '2026-10-09T09:20:00.000Z' } : null });
+const firstBody = 'BLOCKING: former hotspot files exceed their size budgets.';
+const rereviewBody = 'BLOCKING: the soak test still leaks its temporary directory.';
+
+/** The second re-review's cursor key, read off the module so a tree without it fails as a test case, not at load. */
+const answeredRereviewKey = (work: Pick<Work, 'id'>, sha: string): string => (reviewCap as { answeredRereviewKey?: (work: Pick<Work, 'id'>, sha: string) => string }).answeredRereviewKey?.(work, sha) ?? `${cappedRereviewKey(work, sha)}:answered`;
+
+/** Rounds 9-10 up to the escalation the re-review raised: refusal, first withdrawal, re-review requesting changes again. */
+async function replayToEscalation() {
+  const run = harness(capped(firstBody));
+  run.world.history = [firstRefusal] as any;
+  await run.cycle();
+  assert.deepEqual(run.world.withdrawn.map(entry => entry.reviewId), [4242], 'the first refusal withdraws the change request');
+  run.world.item = capped(rereviewBody, 5468008197, '2026-10-09T09:04:31Z');
+  await run.cycle();
+  const escalation = run.state.actions[cappedEscalationKey(run.world.item, H)]!;
+  assert.match(escalation.detail, /its re-review requested changes again, so it is not withdrawn a second time/);
+  assert.equal(run.world.withdrawn.length, 1);
+  return run;
+}
+
+test('unit:master-refusal-answers-capped-escalation — GY-1573 rounds 9-10: an approver refusing the master\'s answer to a refused capped head\'s escalation has the change request withdrawn once more and the head re-reviewed with both refusals and GY-1574; a third change request escalates', async () => {
+  for (const prune of [false, true]) {
+    const run = await replayToEscalation();
+    // The master's answer stands requested: the round is its approver's, and nothing is withdrawn.
+    run.world.history = [firstRefusal, answer('requested')] as any;
+    await run.cycle();
+    assert.equal(run.world.withdrawn.length, 1);
+    // The approver refuses the answer as non-blocking: the change request is withdrawn a second time, once.
+    run.world.history = [firstRefusal, answer('refused')] as any;
+    await run.cycle();
+    await run.cycle();
+    assert.deepEqual(run.world.withdrawn.map(entry => entry.reviewId), [4242, 5468008197]);
+    const message = run.world.withdrawn[1].message;
+    for (const part of [firstRefusal.id, refusalReason, answer('refused').id, answerReason, 'GY-1574', `Re-review head ${H} and approve it, listing these findings as FOLLOW-UP threads`, 'Only a finding that breaks a criterion neither refusal judged is BLOCKING'])
+      assert.ok(message.includes(part), `${part} in ${message}`);
+    assert.doesNotMatch(message, /GY-1500/);
+    // One re-review request, recorded once, carrying both refusals and the follow-up.
+    const rereview = run.state.actions[answeredRereviewKey(run.world.item, H)]!;
+    assert.equal(rereview.state, 'done');
+    assert.ok(rereview.detail.includes(firstRefusal.id) && rereview.detail.includes(answer('refused').id) && rereview.detail.includes('GY-1574'), rereview.detail);
+    assert.equal(run.performed.filter(entry => entry.kind === 'review' && entry.detail.startsWith('Requested a fresh review')).length, 2, 'the first re-review and this one, nothing more');
+    assert.match(run.state.actions[cappedFilingKey(run.world.item, { sha: H, reviewId: 5468008197 })]!.detail, /refused the master's answer \(decision ea13b053-6f7a-4b8c-9d0e-1f2a3b4c5d6e\).*withdrawn once more/);
+    // The launched reviewer reads the same request.
+    assert.equal(cappedRefusalRequest(run.world.item, H, config, run.world.history as any, [run.world.item, followUp, unrelated]), message);
+    if (prune) {
+      // A busy fleet retires every withdrawal and re-review row before the third change request lands.
+      for (let index = 0; index <= retainedActions; index++)
+        storeAction(run.state, `dispatch:other-${index}:1`, { kind: 'dispatch', work: `GY-${index}`, principal: null, epoch: 1, state: 'done', detail: 'launched', attempts: 1, cycle: run.state.cycle, at: new Date(Date.parse('2026-10-09T09:30:00Z') + index).toISOString() });
+      pruneDaemonState(run.state);
+      assert.equal(run.state.actions[answeredRereviewKey(run.world.item, H)], undefined, 'the re-review row is pruned');
+      assert.equal(run.state.actions[cappedRereviewKey(run.world.item, H)], undefined);
+    }
+    // A third change request on the head escalates and is not withdrawn again.
+    run.world.item = capped('BLOCKING: the soak test still leaks it.', 5468009999, '2026-10-09T09:40:00Z');
+    await run.cycle();
+    await run.cycle();
+    assert.deepEqual(run.world.withdrawn.map(entry => entry.reviewId), [4242, 5468008197], `withdrawn twice only (pruned: ${prune})`);
+    const escalation = run.state.actions[cappedEscalationKey(run.world.item, H)]!;
+    assert.match(escalation.detail, /so it is not withdrawn a third time/);
+    assert.ok(escalation.detail.includes(`--precedent ${firstRefusal.id},${answer('refused').id}`), escalation.detail);
+  }
+
+  // An answer that cites no refusal, binds the loop's grounds, judged another head, or was requested before the change request answers nothing.
+  for (const other of [{ ...answer('refused'), precedent: [], reason: 'A rework.' }, { ...answer('refused'), input: { binding: 'x', previousWorkerStopped: true } },
+    { ...answer('refused'), situation: { sha: 'c'.repeat(40), baseSha: B } }, answer('refused', '2026-10-09T09:00:00.000Z')]) {
+    const run = await replayToEscalation();
+    run.world.history = [firstRefusal, other] as any;
+    await run.cycle();
+    assert.equal(run.world.withdrawn.length, 1, JSON.stringify(other));
+  }
+
+  // GY-1580 review: an answer the master requested before the first re-review posted binds no change request. The first
+  // re-review's prompt carries only the first refusal, and the master's later answer, refused, has the re-review's change request withdrawn.
+  const early = { ...answer('refused', '2026-10-09T08:50:00.000Z'), id: 'e0a1b2c3-0000-4000-8000-000000000001', refusal: { approver: 'graphyard-approver-graphyard', reason: answerReason, at: '2026-10-09T09:05:00.000Z' } };
+  const beforeRereview = capped(firstBody);
+  assert.ok(!cappedRefusalRequest(beforeRereview, H, config, [firstRefusal, early] as any, [beforeRereview, followUp, unrelated])!.includes(early.id), 'the first re-review carries no answer');
+  const run = await replayToEscalation();
+  run.world.history = [firstRefusal, early, answer('refused')] as any;
+  await run.cycle();
+  await run.cycle();
+  assert.deepEqual(run.world.withdrawn.map(entry => entry.reviewId), [4242, 5468008197], 'the later answer is the one bound to the re-review');
+  assert.ok(run.world.withdrawn[1].message.includes(answer('refused').id) && !run.world.withdrawn[1].message.includes(early.id), run.world.withdrawn[1].message);
+
+  // GY-1580 review round 2: an answer requested at 08:50 and refused at 09:00, both before the 09:04 re-review posted, bound no withdrawal.
+  // Until the master answers that re-review the step escalates (it cannot tell the early answer from one a withdrawal followed); the
+  // answer requested at 09:10 and refused at 09:20 in reply to the 09:04 change request then withdraws it, once, and a later change
+  // request, nits-only or blocking, escalates citing every refusal still uncited and is never withdrawn a third time, pruned rows or not.
+  for (const prune of [false, true]) for (const third of [rereviewBody, 'The helper could be named more clearly.']) {
+    const preSubmit = { ...early, refusal: { ...early.refusal, at: '2026-10-09T09:00:00.000Z' } };
+    const run = await replayToEscalation();
+    run.world.history = [firstRefusal, preSubmit] as any;
+    await run.cycle();
+    assert.equal(run.world.withdrawn.length, 1, 'the early answer alone withdraws nothing');
+    assert.match(run.state.actions[cappedEscalationKey(run.world.item, H)]!.detail, /not withdrawn a third time/);
+    run.world.history = [firstRefusal, preSubmit, answer('refused')] as any;
+    await run.cycle();
+    await run.cycle();
+    assert.deepEqual(run.world.withdrawn.map(entry => entry.reviewId), [4242, 5468008197], 'the answer requested after the change request withdraws it');
+    assert.ok(run.world.withdrawn[1].message.includes(answer('refused').id) && !run.world.withdrawn[1].message.includes(preSubmit.id), run.world.withdrawn[1].message);
+    if (prune) {
+      for (let index = 0; index <= retainedActions; index++)
+        storeAction(run.state, `dispatch:other-${index}:1`, { kind: 'dispatch', work: `GY-${index}`, principal: null, epoch: 1, state: 'done', detail: 'launched', attempts: 1, cycle: run.state.cycle, at: new Date(Date.parse('2026-10-09T09:30:00Z') + index).toISOString() });
+      pruneDaemonState(run.state);
+      assert.equal(run.state.actions[answeredRereviewKey(run.world.item, H)], undefined, 'the re-review row is pruned');
+    }
+    run.world.item = capped(third, 5468009999, '2026-10-09T09:40:00Z');
+    assert.equal(cappedReview(run.world.item, config)!.kind, third === rereviewBody ? 'escalate' : 'follow-up');
+    await run.cycle();
+    await run.cycle();
+    assert.deepEqual(run.world.withdrawn.map(entry => entry.reviewId), [4242, 5468008197], `withdrawn twice only (pruned: ${prune}, ${third})`);
+    const escalation = run.state.actions[cappedEscalationKey(run.world.item, H)]!.detail;
+    assert.match(escalation, /not withdrawn a (third|second) time/);
+    const precedent = /--precedent (\S+)/.exec(escalation)?.[1]?.split(',') ?? [];
+    for (const id of [preSubmit.id, answer('refused').id]) assert.ok(precedent.includes(id), `${id} cited in ${escalation}`);
+  }
+});
+
+/** Every `graphyard master …` command a text names, as words. */
+const masterCommands = (text: string) => [...text.matchAll(/graphyard master ([a-z-]+) (GY-\d+)((?: (?:--[a-z]+ \S+|[a-z]+))*)/g)].map(match => ({ sub: match[1]!, key: match[2]!, rest: match[3]!.trim().split(' ').filter(Boolean) }));
+
+test('unit:capped-escalation-names-runnable-commands — the escalation of a refused capped head names only commands master status\'s actor may run on the system-driven item', async () => {
+  const item = { ...capped(rereviewBody, 5468008197, '2026-10-09T09:04:31Z'), systemDriven: true } as Work;
+  const judged = cappedReview(item, config)!;
+  const refusals = [{ id: firstRefusal.id, approver: 'a', reason: refusalReason }, { id: answer('refused').id, approver: 'a', reason: answerReason }];
+  for (const named of [refusals.slice(0, 1), refusals]) {
+    const text = cappedEscalation(item, judged, judged.reason, named);
+    const commands = masterCommands(text);
+    assert.ok(commands.some(command => command.sub === 'decide'), text);
+    assert.doesNotMatch(text, /master (review|dispatch|merge)\b/, 'no hand action the loop owns');
+    for (const command of commands) {
+      assert.equal(command.key, 'GY-1573');
+      assert.ok((autonomySubcommands as readonly string[]).includes(command.sub), `${command.sub} is a master subcommand`);
+      assert.ok(!(handActions as readonly string[]).includes(command.sub));
+      if (command.sub !== 'decide') continue;
+      const [action, ...flags] = command.rest, precedent = flags[flags.indexOf('--precedent') + 1];
+      assert.equal(precedent, named.map(refusal => refusal.id).join(','), 'it cites every refusal');
+      const loop = { now: Date.parse('2026-10-09T09:06:00Z'), requestsDecisions: true, precedent, capEscalated: true };
+      assert.equal(loopRework(item, action!, { previousWorkerStopped: true }, config, loop), null, text);
+      assert.equal(handDecision(item, action, { previousWorkerStopped: true }), null);
+      // Without the precedent the CLI refuses it: the check is the one the CLI applies.
+      assert.match(loopRework(item, action!, { previousWorkerStopped: true }, config, { ...loop, precedent: undefined }) ?? '', /system-driven/);
+    }
+  }
+});
+
 // GY-1577, observed on GY-1573 (PR #1047, review round 8 of cap 3), 2026-10-09: the approver refused head d6a938c5's capped
 // rework (decision f84ee922) at ~08:20Z under policy revision 5, but the loop had requested it before GY-1575's revision mark
 // existed. On GY-1575's code nothing matched that unmarked refusal, the loop did not request the decision again, and the
@@ -315,11 +566,13 @@ test('unit:unmarked-capped-refusal-rereviews — GY-1573 round 8: an unmarked re
   await stale.cycle();
   assert.deepEqual(stale.world.withdrawn, [], 'the earlier judgement withdraws nothing');
   assert.equal(stale.performed.length, 0, 'the loop has yet to ask under revision 5, so the round waits for that request');
-  // Nor can a change request the baseline already holds, from before the revision, be dated after it.
-  assert.equal(refusedCappedRework([unmarked()], { ...judged, reviewId: 5466311316 }, run.world.item), null);
-  // A baseline of another revision, or none on a revised item, dates nothing: the unmarked refusal binds no change request.
-  assert.equal(refusedCappedRework([unmarked()], judged, { ...run.world.item, formalReviewBaseline: { pr: 1047, policyRevision: 4, reviewIds: [] } }), null);
-  assert.equal(refusedCappedRework([unmarked()], judged, { ...run.world.item, formalReviewBaseline: undefined, reviewRequest: null }), null);
+  // GY-1579 AC-1: where the item's record cannot date the refusal against the revision — a change request the baseline already
+  // holds, a baseline of another revision, none on a revised item, no time at all — its binding is the record's answer, and it binds.
+  assert.ok(refusedCappedRework([unmarked()], { ...judged, reviewId: 5466311316 }, run.world.item));
+  assert.ok(refusedCappedRework([unmarked()], judged, { ...run.world.item, formalReviewBaseline: { pr: 1047, policyRevision: 4, reviewIds: [] } }));
+  assert.ok(refusedCappedRework([unmarked()], judged, { ...run.world.item, formalReviewBaseline: undefined, reviewRequest: null }));
+  assert.ok(refusedCappedRework([{ ...unmarked(), requestedAt: undefined as unknown as string, refusal: { approver: 'graphyard-approver-graphyard', reason: refusalReason } as { approver: string; reason: string; at?: string } }], judged, run.world.item), 'an undated refusal binds by its binding');
+  assert.equal(refusedCappedRework([before], judged, { ...run.world.item, formalReviewBaseline: undefined, reviewRequest: null })?.id, before.id, 'with nothing to date it by, even an older refusal binds');
   // An agent review request posted under the current revision dates it as the baseline does.
   const agentRequest = { commentId: 1, sha: D, baseSha: B, policyRevision: 5, body: '', createdAt: '2026-10-09T08:10:00Z' };
   assert.ok(refusedCappedRework([unmarked()], judged, { ...run.world.item, formalReviewBaseline: undefined, reviewRequest: agentRequest }));

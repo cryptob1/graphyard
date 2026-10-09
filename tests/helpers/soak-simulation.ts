@@ -210,10 +210,13 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   /**
    * GY-1389: the review-round cap, the items whose change requests name a blocking finding past it, and those whose capped round the approver refuses.
    * GY-1575: the day runs with a reviewer App that withdraws a refused round's change request; the re-review of each of `again` requests changes once more.
+   * GY-1579: each of `unmatched` already holds, on its capped head, a refusal a prior release recorded for another reviewer slug and with no revision mark.
    * GY-1577: the loop reads the refused capped rework of each of `legacy` as one requested before GY-1575's revision mark (its reason
-   * unmarked), and of each of `undated` unmarked and with no time it was requested or refused, so nothing places it under the item's revision.
+   * unmarked), and of each of `undated` unmarked and with no time it was requested or refused, so nothing dates it before the item's revision (GY-1579: it binds).
+   * GY-1580: the master answers each review-cap escalation of `answered` with the rework it names, once per escalation and at most twice
+   * per item, and the approver refuses every answer; the re-review after that second withdrawal of each of `third` requests changes again.
    */
-  reviewCap?: { cap: number; items: number[]; refused: number[]; again?: number[]; legacy?: number[]; undated?: number[] };
+  reviewCap?: { cap: number; items: number[]; refused: number[]; again?: number[]; unmatched?: number[]; legacy?: number[]; undated?: number[]; answered?: number[]; third?: number[] };
   /**
    * GY-1428: the loop's host-supervision step runs the real repair over a simulated host declaring
    * two executor slots. Its user manager stops answering at `managerDown.from`, taking both slots
@@ -524,10 +527,29 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   }
   // GY-1389: a change request on every head through the first past the cap, each naming a blocking finding.
   const cappedDay = options.reviewCap;
+  // GY-1579: the change-requested heads of each capped item in review order, and the unmatched refusals recorded on their capped heads.
+  const changeRequested = new Map<string, string[]>(), unmatchedRefusals: { key: string; sha: string; decision: string }[] = [];
+  const unmatchedTick = async () => {
+    const current = await store.list();
+    for (const n of cappedDay?.unmatched ?? []) {
+      // The head pushed after the rounds under the cap were each sent back is the capped head: the refusal stands before its review lands.
+      const work = items[n - 1], reviewed = changeRequested.get(work.key) ?? [], head = current.find(entry => entry.id === work.id)?.candidate?.sha;
+      if (reviewed.length < cappedDay!.cap || !head || reviewed.slice(0, cappedDay!.cap).includes(head) || unmatchedRefusals.some(entry => entry.key === work.key)) continue;
+      const decision = randomUUID(), reason = `${work.key} is in review round ${cappedDay!.cap + 1}, past its cap of ${cappedDay!.cap}. Past the review-round cap only an independent approver sends the head back.`;
+      await store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4),($1,$5,$6,$7)', [work.id, principals.operatorAgent.id, 'decision.requested',
+        JSON.stringify({ id: decision, action: 'rework', input: { previousWorkerStopped: true, binding: `${head}:capped:${cappedReviewerApp.slug}` }, reason, requester: { id: principals.operatorAgent.id, role: principals.operatorAgent.role } }),
+        principals.approver.id, 'decision.declined', JSON.stringify({ id: decision, reason: `Refused: ${work.key}'s capped finding is not blocking` })]);
+      unmatchedRefusals.push({ key: work.key, sha: head, decision });
+    }
+  };
   if (cappedDay) {
-    for (const n of cappedDay.items) github.verdicts.set(items[n - 1].key, Array.from({ length: cappedDay.cap + 1 + (cappedDay.again?.includes(n) ? 1 : 0) }, () => 'CHANGES_REQUESTED' as const));
+    for (const n of cappedDay.items) github.verdicts.set(items[n - 1].key, Array.from({ length: cappedDay.cap + 1 + (cappedDay.again?.includes(n) ? 1 : 0) + (cappedDay.third?.includes(n) ? 1 : 0) }, () => 'CHANGES_REQUESTED' as const));
     github.reviewer = `${cappedReviewerApp.slug}[bot]`;
-    github.changeRequestBody = (key, review) => cappedDay.items.includes(numberOf({ key })) ? `AC-1 is judged on ${review.sha.slice(0, 12)}.\nBLOCKING: AC-1 is not met — ${key} skips the last frob.` : null;
+    github.changeRequestBody = (key, review) => {
+      if (!cappedDay.items.includes(numberOf({ key }))) return null;
+      const heads = changeRequested.get(key) ?? []; if (!heads.includes(review.sha)) changeRequested.set(key, [...heads, review.sha]);
+      return `AC-1 is judged on ${review.sha.slice(0, 12)}.\nBLOCKING: AC-1 is not met — ${key} skips the last frob.`;
+    };
   }
   if (plan.unstable) github.unstable.add(items[plan.unstable - 1].key);
   if (plan.slowRecompute) github.slowRecompute.add(items[plan.slowRecompute - 1].key);
@@ -2320,6 +2342,23 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   // cycles, the way `runDaemon` does, and a launch settles in the interval after the cycle that
   // handed it over — here, before the simulated clock moves on.
   const launcher = new Launcher();
+  // GY-1580: the master's answer to a refused capped head's escalation, the rework it names with the refusals it cites, which
+  // the approver refuses as non-blocking; one answer per escalation, two per item at most, so the day shows where it settles.
+  const capAnswers: { key: string; decision: string; precedent: string[]; at: number }[] = [];
+  const answerCapEscalations = async () => {
+    for (const n of cappedDay!.answered!) {
+      const work = (await store.list()).find(item => numberOf(item) === n);
+      if (!work?.candidate || work.stage === 'done' || capAnswers.filter(entry => entry.key === work.key).length >= 2) continue;
+      const detail = state.actions[`escalation:review-cap:${work.id}:${work.candidate.sha}`]?.detail ?? '';
+      const precedent = new RegExp(`graphyard master decide ${work.key} rework --precedent (\\S+)`).exec(detail)?.[1]?.split(',');
+      if (!precedent || capAnswers.some(entry => entry.key === work.key && entry.precedent.join() === precedent.join())) continue;
+      const requested = await api(principals.operatorAgent, 'POST', `work/${work.id}/decide`, { action: 'rework', input: { previousWorkerStopped: true }, precedent,
+        reason: `Answering review-cap escalation ${capAnswers.filter(entry => entry.key === work.key).length + 1} of ${work.key} after refusals ${precedent.join(', ')}: its latest re-review names a finding beyond them.` });
+      const decision = (requested.decision?.id ?? requested.id) as string;
+      await api(principals.approver, 'POST', `work/${work.id}/approve`, { action: 'refuse', decision, reason: `Refused: the re-review's finding on ${work.key} is real but not blocking; it is a follow-up.` });
+      capAnswers.push({ key: work.key, decision, precedent, at: clock.now() });
+    }
+  };
   const violations: string[] = [], observed = new Set<string>(), faulted = new Set<string>(), failures: string[] = [], escalations: string[] = [], spent = new Set<string>(), actionKeys = new Set<string>(), lanesSeen = new Set<string>();
   // Peers `processJob` reconciled from another item's landing check (GY-744), as `KEY merged|unmerged`.
   const reconciled: string[] = [];
@@ -2628,6 +2667,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     if (options.drained) await drainTick(now);
     docsSyncTick(now);
     await producersTick(now);
+    if (cappedDay?.unmatched?.length) await unmatchedTick();
     // GY-1078: every blocker the day's failing items carry is sighted; the operator clears the
     // constant item's `unblockAfterMs` after it is recorded, and its next launch succeeds.
     if (options.dispatchFailing) for (const item of (await store.list()).filter(entry => items.some(own => own.id === entry.id) && entry.blocker)) {
@@ -2814,6 +2854,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
         if (options.workspaceFailure) for (const [name, entry] of Object.entries(state.profiles)) if (/worktree/.test(entry.reason ?? '')) workspaceCooled.push(`+${Math.round(elapsed / minute)} min ${name}: ${entry.reason}`);
         reportedDispatches += result.actions.filter(action => action.kind === 'dispatch' && action.state === 'done').length;
         escalations.push(...result.actions.filter(action => action.kind === 'escalation').map(action => action.detail));
+        if (cappedDay?.answered) await answerCapEscalations();
         if (supervisedDay) {
           for (const agent of herdr.list()) if (agent.name) supervisedDay.agentNames.add(agent.name);
           const withheldIds = options.supervised!.withheld.map(n => items[n - 1].id);
@@ -2989,7 +3030,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   const tmp = { root: tmpRoot, backlog, deadOwned, cache, heldDirectory, liveOwned, hourly, passes: tmpPasses, peak: tmpPeak, reports: await readReclaimReports(reclaimRoot), left: readdirSync(tmpRoot) };
   if (process.env.SOAK_TRACE) console.error(`landing: ${github.landingChecks} checks over ${github.landingBases.size} bases, ${github.ancestorCompares} ancestor compares, ${github.blindCompares} blind compares; false landing refusals: ${landingRefusals.map(entry => `${entry.key}@+${Math.round(entry.elapsed / minute)}min ${entry.sha.slice(0, 12)}`).join(', ') || 'none'}`);
   engine.execute = executeAll;
-  return { readinessDay, supervisedDay, stuck, unboundedDay, provisionDay, promotion, throughput, reconciled, outside, items, final, github, sessions, docsSyncRuns, docsSyncRoot, lost, launches, violations, faulted, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, headless, herdr, hand, stranded, withdrawals, resumes, strandedLaunches, escalations, spent, attestations, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, guardReads, checkout, landingRefusals, foreignPane, previousWorktrees, closedLeased,
+  return { unmatchedRefusals, capAnswers, readinessDay, supervisedDay, stuck, unboundedDay, provisionDay, promotion, throughput, reconciled, outside, items, final, github, sessions, docsSyncRuns, docsSyncRoot, lost, launches, violations, faulted, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, headless, herdr, hand, stranded, withdrawals, resumes, strandedLaunches, escalations, spent, attestations, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, guardReads, checkout, landingRefusals, foreignPane, previousWorktrees, closedLeased,
     mergeQueuePosts, config, refused, decideCalls, restarted, approverPanes, failing, herdrClosed: herdr.closed, diagnosisModel: settings.model, diagnosisRuns: diagnosed, baseBreak, capacityRefused, capacityLaunched, capacityWaiters,
     decided, misreads, prompts, screens, heldAccounts, approverAccounts, retryReset, limitMenuDay, menuReset, menuNotice, exitedLive, exitedClosed, exitedRowsSeen, reassign, workspaceFailures, workspaceCooled, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, fenced, mergeStallSightings, master, baseFailure,
     blockerEvents, blockerProbes, githubStatusReads, credentialReads, blockerRecords, blockerDecisions, blockerActions, blockerKeysPeak, attempts, lanesSeen, laneApplications, approverWorks, approverDecisions, failover, webhook, remedies, observeRequests, starvation, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size }, mechanical: { ledger, botRounds, misclassified, reviewHolds }, shared, charges: { ...charged, b: charged.b.length, instancesSeen: [...charged.instancesSeen], restarts: chargeRestarts },
