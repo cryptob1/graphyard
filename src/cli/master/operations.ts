@@ -12,7 +12,7 @@ import { masterHarnessDrift } from './fleet.js';
 import { readSecretFromStdin } from '../context.js';
 import { acknowledgeCommand, mainWatchAttention } from '../../daemon/main-watch.js';
 import { shadowGateSummary } from '../../daemon/cycle-shadow.js';
-import { shadowGateAttention, type ShadowFailureCause } from '../../merge-writer/shadow.js';
+import { shadowGateAttention } from '../../merge-writer/shadow.js';
 import { mergeWriterSummary } from '../../daemon/cycle-merge-writer.js';
 import { defaultChildRun } from '../../child-runner.js';
 import { installDirectory } from '../../install/secrets.js';
@@ -49,7 +49,7 @@ export async function operationsCommand(session: MasterSession, effects: Recover
     // GY-1519: each commit on the base branch the main watch cannot explain is one attention line, report-only.
     // GY-1522 / GY-1560: each unexplained shadow-only-fail or shadow-missed is one attention line until explained;
     // the ledger's standing list covers pairs the cursor may have dropped, and a later head of the same item does not.
-    type Standing = { key: string; head: string; baseTip: string; outcome: 'shadow-only-fail' | 'shadow-missed'; mergeSha: string | null; build: 'pass' | 'fail'; tests: { passed: number; failed: string[]; files: number }; at: string; explained: boolean; cause?: ShadowFailureCause | null };
+    type Standing = { key: string; head: string; baseTip: string; outcome: 'shadow-only-fail' | 'shadow-missed'; mergeSha: string | null; build: 'pass' | 'fail'; tests: { passed: number; failed: string[]; files: number }; conflict?: string[]; at: string; explained: boolean; cause?: string | null };
     const shadowStatus = await masterApi('shadow-disagreements').then(
       (body: { explanations?: { key: string; head: string; baseTip: string }[]; disagreements?: Standing[] }) => body ?? {},
       () => ({} as { explanations?: { key: string; head: string; baseTip: string }[]; disagreements?: Standing[] }),
@@ -58,8 +58,7 @@ export async function operationsCommand(session: MasterSession, effects: Recover
     const standing = shadowStatus.disagreements ?? [];
     const standingVerdicts = standing.map(entry => ({
       key: entry.key, id: entry.key, head: entry.head, baseTip: entry.baseTip, mergeSha: entry.mergeSha, risk: 'normal' as const,
-      build: entry.build, tests: entry.tests, conflict: [] as string[], durationMs: 0, at: entry.at, outcome: entry.outcome,
-      // The cause the ledger's record names (GY-1565), so a pair the cursor no longer holds keeps it.
+      build: entry.build, tests: entry.tests, conflict: entry.conflict ?? [], durationMs: 0, at: entry.at, outcome: entry.outcome,
       ...(entry.cause ? { cause: entry.cause } : {}),
     }));
     const shadowAttention = shadowGateAttention([...(state?.shadow ?? []), ...standingVerdicts], explanations);

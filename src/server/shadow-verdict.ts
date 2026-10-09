@@ -3,8 +3,8 @@ import type pg from 'pg';
 import { z } from 'zod';
 import { demand, type Principal, type Work } from '../model.js';
 import {
-  compareVerdicts, githubOutcome, isPlaceholderVerdict, placeholderRunnerFailure, shadowDisagreement,
-  shadowDisagreementPair, shadowFailureCause, type ShadowFailureCause, shadowExplanationPairsMax, trialLogTailLength, type ShadowExplanationRef, type ShadowVerdict,
+  compareVerdicts, githubOutcome, isPlaceholderVerdict, recordedFailureCause, placeholderRunnerFailure, shadowDisagreement,
+  shadowDisagreementPair, shadowExplanationPairsMax, trialLogTailLength, type ShadowExplanationRef, type ShadowVerdict,
 } from '../merge-writer/shadow.js';
 import { DELIVERY_EVENT_PREDICATE } from '../store/tables/production.js';
 import { defineRoutes, parseJson, type Services } from './routes.js';
@@ -203,9 +203,9 @@ async function recoveredDeliveredMerges(db: Queryable, pairs: readonly { key: st
 /** One standing shadow disagreement as the status and merger switch read it. */
 export interface StandingShadowDisagreement {
   key: string; head: string; baseTip: string; outcome: 'shadow-only-fail' | 'shadow-missed';
-  mergeSha: string | null; build: 'pass' | 'fail'; tests: ShadowVerdict['tests']; at: string; explained: boolean;
-  /** What the recorded verdict names as the failure's cause (GY-1565); null for a shadow-missed, or a record with nothing to read. */
-  cause: ShadowFailureCause | null;
+  mergeSha: string | null; build: 'pass' | 'fail'; tests: ShadowVerdict['tests']; conflict: string[]; at: string; explained: boolean;
+  /** The failing cause the recorded log tail names, the shared-tmp contamination included (GY-1565), or null when the record names none (GY-1564); the log itself stays on the ledger. */
+  cause: string | null;
 }
 
 /** The documents of the named work items alone, by key: a bounded read safe under the coordination lock. */
@@ -246,9 +246,9 @@ export async function standingShadowDisagreements(db: Queryable, work?: readonly
     if (outcome !== 'shadow-only-fail' && outcome !== 'shadow-missed') continue;
     standing.push({
       key: verdict.key, head: verdict.head, baseTip: verdict.baseTip, outcome,
-      mergeSha: verdict.mergeSha, build: verdict.build, tests: verdict.tests, at: verdict.at,
+      mergeSha: verdict.mergeSha, build: verdict.build, tests: verdict.tests, conflict: verdict.conflict, at: verdict.at,
+      cause: recordedFailureCause(verdict.logTail),
       explained: explained.has(shadowDisagreementPair(verdict)),
-      cause: outcome === 'shadow-only-fail' ? shadowFailureCause(verdict) : null,
     });
   }
   return standing;
