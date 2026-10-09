@@ -374,9 +374,9 @@ test('unit:tmp-cleanup — a zero-removal pass that leaves /tmp between a tenth 
   const [line] = resourceAttention([reading]);
   assert.equal(line?.subject, 'resource:tmp-inodes');
   assert.match(line?.text ?? '', new RegExp(`the top /tmp consumers are ${leaker} \\(42 entries`));
-  // The same reading after a pass that took entries back stays answered, as GY-1379 set out.
+  // A pass that took entries back but still left /tmp below the headroom answers nothing either (GY-1602).
   const progressed: ResourceInputs = { ...input, tmp: { ...inodes!, latest: { ...inodes!.latest!, removed: 3 } } };
-  assert.equal(resourceAttention(readResources(progressed).filter(entry => entry.id === 'tmp-inodes')).length, 0);
+  assert.equal(resourceAttention(readResources(progressed).filter(entry => entry.id === 'tmp-inodes')).length, 1);
 });
 
 // GY-1600: on 9 October 2026 the loop's /tmp pass removed 0 entries at 19:34Z while /tmp stood at

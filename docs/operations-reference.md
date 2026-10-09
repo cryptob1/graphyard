@@ -72,7 +72,7 @@ Silent webhook hour: `master status` cites `https://github.com/settings/apps/APP
 
 ## Control-plane resources
 
-`resources` remedies: ledgers, `graphyard master run --once`; `agent-names:PROFILE`, `herdr pane close PANE`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow volume+`GRAPHYARD_DATABASE_MAX_BYTES` (10GiB); `tmp-inodes`, free `TMPDIR`/`/tmp` (<25% free: pass escalates, names consumers; 0-removal run: one ledger row, "1000 or more" past its cap); `loaded-revision` counts code moves. No fault while remedy acts: owed restart retried within bound, pane unowned <10min (unnamed pane: reclaim pass's clock, kept through failed close), `/tmp` >10% free post-pass within 30min unless 0-removal pass named consumers. Loop age uses host clock.
+`resources` remedies: ledgers, `graphyard master run --once`; `agent-names:PROFILE`, `herdr pane close PANE`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow volume+`GRAPHYARD_DATABASE_MAX_BYTES` (10GiB); `tmp-inodes[:ROOT]`, one per `TMPDIR`/`/tmp` root (<25% free: pass escalates, names its consumers, flags partial census; 0-removal run: one ledger row, "1000 or more" past its cap); `loaded-revision` counts code moves. No fault while remedy acts: owed restart within bound, pane unowned <10min (unnamed pane: reclaim pass's clock, kept through failed close), `/tmp` >10% free <30min after a pass left it ≥25%. Loop age: host clock.
 
 Session-started `npm test`, `test:browser`, typecheck, `tsc --noEmit` take one of max(2, floor(GB/8)) slots (`GRAPHYARD_VERIFICATION_SLOTS`; managed root's `.verification-slots`); CI unbounded. Under max(10% RAM, 4GB) available, launches defer (`escalation:dispatch:memory`; one `memory-pressure` fault per dip) until 1GB above.
 
