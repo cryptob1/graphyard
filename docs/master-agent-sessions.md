@@ -41,9 +41,9 @@ GY=…/.graphyard/launch/NAME; claude … --settings …/.graphyard/harness/prod
 
 #### The start bound reads the pane
 
-**Ready**: Herdr active with no prompt, or banner shown (`the claude runtime is on screen while Herdr reports it unknown`; OpenCode 1.18 `Ask anything…`/`tab agents`, [fixture](../tests/fixtures/opencode-1.18-start-screen.txt)). Ready within **60 seconds** (`run.launchStartSeconds`) starts; still starting gets **120 seconds** (`started.extended`); supervisor first prints `graphyard: establishing containment for GY-N epoch E`. Refusals quote case and pane's last non-empty line, never Herdr's own `agent_not_found` (`the claude runtime never started within 60 s (command still echoing)`, `… was still starting after 120 s`, `… is blocked before it is ready`; a dialog no classifier names is quoted, `Herdr reports it blocked on a dialog the launcher does not recognise: "…"`), retry as `Automatic producer launch for GY-N refused 1 time(s)`.
+**Ready**: Herdr active with no prompt, or banner shown (`the claude runtime is on screen while Herdr reports it unknown`; OpenCode 1.18 `Ask anything…`/`tab agents`, [fixture](../tests/fixtures/opencode-1.18-start-screen.txt)). Ready within **60 seconds** (`run.launchStartSeconds`) starts; still starting gets **120 seconds** (`started.extended`); supervisor first prints `graphyard: establishing containment for GY-N epoch E`. Refusals quote case and pane's last non-empty line (`the claude runtime never started within 60 s (command still echoing)`, `… was still starting after 120 s`, `… is blocked before it is ready`), never Herdr's own `agent_not_found`; retry as `Automatic producer launch for GY-N refused 1 time(s)`.
 
-**Approvers**: a hand-replaced pane's bound runs from the cycle that first saw it, even when ending its predecessor's registry session was refused for cycles. A failed launch's relaunch adopts the listed same-name approver, keeping its pane's launch record time, unless that record and its screen show it never started; it waits while that launch's registry session is unended.
+**Approvers**: replaced panes' bounds run from first sight; failed relaunches adopt a started same-name approver once its registry session ends.
 
 #### First-run consent prompts
 
