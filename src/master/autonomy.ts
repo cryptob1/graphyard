@@ -18,7 +18,7 @@ import { assertOutsideWorktrees, atomicPrivateText, atomicPrivateWrite, external
 import { type AccountSkip, accountLaunch, agentLaunchPlan, describeObservedExhaustion, type EnvironmentProbe, heldAwareProbe, inspectProfileAccounts, type LaunchRole, NoHealthyAccountError, observedExhaustions, ownLoginHold, type ProfileAccountHealth, recordEnvironmentLog, selectAccount, setupAgentEnvironments } from './environments.js';
 import { closeFailedLaunch, launchStartMs, readSessionScreen, type RequestDelivery, startAgentSession, withLaunchClose, withLaunchedRuntime } from './launch.js';
 import { closeHerdrPane, createdHerdrTab, type HerdrAgent, herdrJson } from './herdr.js';
-import { boundLaunch, judgeApproverStall, stallScreenLines } from './approver-stall.js';
+import { boundLaunch, judgeApproverStall, stallScreenLines, withoutPane } from './approver-stall.js';
 import { allocateManagedCheckout, failureText, settleCheckout } from './worktrees.js';
 import { herdrAttach } from './dispatch.js';
 import type { SessionHandleInput } from '../model/sessions.js';
@@ -336,14 +336,14 @@ export type SessionRegistrar = (handle: SessionHandleInput) => Promise<unknown>;
  * An `idle` one also needs a still screen across `pauseMs` that shows no trace of its decision (`judgeApproverStall`): Herdr reports a
  * long or silent command as idle. Its age comes only from the launch record bound to its pane (`boundLaunch`).
  */
-async function closeUnstartedApprover(root: string, config: MasterConfig, agent: HerdrAgent, decision: string, run?: ChildRun, pauseMs?: number) {
-  const own = boundLaunch(await readApproverLaunches(root), agent);
-  const verdict = await judgeApproverStall(agent, own?.launchedAt, launchStartMs(config), Date.now(),
-    () => readSessionScreen(agent.pane_id!, run, stallScreenLines), decision, pauseMs);
+async function closeUnstartedApprover(root: string, config: MasterConfig, agent: HerdrAgent, decision: string, probe: FleetProbe, run?: ChildRun, pauseMs?: number) {
+  const own = boundLaunch(await readApproverLaunches(root), agent), verdict = await judgeApproverStall(agent, own?.launchedAt, launchStartMs(config), Date.now(), () => readSessionScreen(agent.pane_id!, run, stallScreenLines), decision, pauseMs);
   if (!verdict.close) throw new Error(`Approver session ${agent.name} is already visible in Herdr; let it finish or close it first (${verdict.why})`);
   await closeHerdrPane(agent.pane_id!, run);
-  // The registry session its launch holds (GY-1604): ended before the replacement is chosen, so the slot it held is free for it.
-  return { replaced: `closed approver session ${agent.name} (pane ${agent.pane_id}): ${verdict.why}`, session: own?.session ?? null, pane: agent.pane_id! };
+  const replaced = `closed approver session ${agent.name} (pane ${agent.pane_id}): ${verdict.why}`, fleet = own?.session ? await readFleet(config, 'approver', probe).catch(() => null) : null;
+  // GY-1604: its registry session is ended before the replacement is chosen, freeing the slot; one not ended now the loop's reconciliation ends.
+  if (fleet?.managed) await fleet.client.end(own!.session!, `${replaced}, to launch its replacement`.slice(0, 500)).catch(() => {});
+  return { replaced, pane: agent.pane_id! };
 }
 /**
  * `herdr` is this host's Herdr inventory and whether it could be read at all (GY-205): the role's
@@ -359,18 +359,9 @@ export async function launchApprover(root: string, work: Work, decision: string,
   const attest = await carriesAttestation(config, work, decision, headless.fetcher ?? fetch);
   const retry = `graphyard master approver ${work.key} ${decision} [AGENT_KIND]`;
   const name = nameForLaunch(retry, () => approverSessionName(work, decision));
-  const visible = agents.find(agent => agent.name === name), closed = visible ? await closeUnstartedApprover(root, config, visible, decision, run, headless.screenPauseMs) : null;
-  const replaced = closed?.replaced ?? null;
-  // GY-1604: the closed session no longer runs, so the replacement is chosen against the inventory without its pane, with its registry
-  // session ended first: at the role's concurrency limit the slot it alone held would otherwise refuse the replacement it was closed for.
-  if (closed) {
-    const open = (agent: { name?: string | null; pane_id?: string | null }) => (agent.pane_id ?? null) !== closed.pane && (agent.pane_id || agent.name !== name);
-    herdr = { ...herdr, agents: agents.filter(open) };
-    if (probe.runtime) probe = { ...probe, runtime: { ...probe.runtime, agents: probe.runtime.agents.filter(open) } };
-    // A registry that cannot be told now ends it on the loop's next reconciliation, the pane being gone; the choice below then says why it refused.
-    const fleet = closed.session ? await readFleet(config, 'approver', probe).catch(() => null) : null;
-    if (fleet?.managed) await fleet.client.end(closed.session!, `${closed.replaced}, to launch its replacement`.slice(0, 500)).catch(() => {});
-  }
+  const visible = agents.find(agent => agent.name === name), closed = visible ? await closeUnstartedApprover(root, config, visible, decision, probe, run, headless.screenPauseMs) : null, replaced = closed?.replaced ?? null;
+  // GY-1604: the replacement is chosen against the inventory without the closed pane, whose registry session is already ended.
+  if (closed) { herdr = withoutPane(herdr, closed.pane, name); if (probe.runtime) probe = { ...probe, runtime: withoutPane(probe.runtime, closed.pane, name) }; }
   // GY-169: a `pi` approver runtime (no AGENT_KIND override) is a headless run under the same name; its validated graphyard_decide
   // verdict is applied as the approver identity on the `master approve`/`master refuse` route, under the server's separation rules.
   // GY-170: a registry approver role decides the runtime too (a `pi` account runs headless with its home, model and the role's

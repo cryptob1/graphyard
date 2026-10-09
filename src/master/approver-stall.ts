@@ -63,3 +63,6 @@ export async function judgeApproverStall(agent: Pick<HerdrAgent, 'agent_status' 
   if (agent.agent_status !== 'idle' || (!verdict.close && !verdict.why.startsWith('it has no launch record'))) return verdict;
   return approverStallVerdict(agent, launchedAt, bound, now, read ? await screenMotion(read, marker, pauseMs) : 'unreadable');
 }
+/** An inventory without the session in `pane` (GY-1604), or without one unlisted by pane under `name`: what a replacement is chosen against once that session is closed. */
+export const withoutPane = <T extends { agents: { name?: string | null; pane_id?: string | null }[] }>(inventory: T, pane: string, name: string): T =>
+  ({ ...inventory, agents: inventory.agents.filter(agent => agent.pane_id ? agent.pane_id !== pane : agent.name !== name) });
