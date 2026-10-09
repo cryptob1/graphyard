@@ -28,9 +28,12 @@ export const tmpReclaimMinAgeMs = 6 * 3_600_000;
  * `native-*` from GitHub fixture runs, embedded Postgres's `pg-password-*` files (written by
  * initdb's caller and left behind when that process is killed mid-init) and Playwright's
  * `playwright_chromiumdev_profile-*` browser profiles. On 1 October 2026 these filled /tmp to
- * three quarters of its inodes within hours and the per-user quota broke every worker shell.
+ * three quarters of its inodes within hours and the per-user quota broke every worker shell. A
+ * shadow trial's own `gyt-*` directory (GY-1565) is one too when a crashed merge writer leaves it.
  */
-export const testTempPatterns: readonly RegExp[] = [/^graphyard-/, /^gy-/, /^landing-merge-result/, /^native-/, /^pg-password/, /^playwright_chromiumdev_profile/];
+export const testTempPatterns: readonly RegExp[] = [/^graphyard-/, /^gy-/, /^gyt-/, /^landing-merge-result/, /^native-/, /^pg-password/, /^playwright_chromiumdev_profile/];
+/** The names whose directories carry an owner marker, so a marker left without its directory is clutter. */
+const markedTempPattern = /^(?:graphyard|gyt)-/;
 /** How old a test temp entry — file or directory — must be before the loop's pass removes it. */
 export const testTempMinAgeMs = 2 * 3_600_000;
 /** The most directories one pass removes, and the most wall-clock time it spends removing: reclaim is bounded per cycle, whatever the backlog. */
@@ -262,7 +265,7 @@ async function reclaimRoot(root: string, real: string, pass: PassState, report: 
     if (removable.length >= limit) break;
     const path = join(root, entry.name);
     // A marker whose directory is already gone is clutter: take it back, whatever the bound.
-    if (entry.name.startsWith('graphyard-') && entry.name.endsWith('.owner') && !existsSync(path.slice(0, -'.owner'.length))) {
+    if (markedTempPattern.test(entry.name) && entry.name.endsWith('.owner') && !existsSync(path.slice(0, -'.owner'.length))) {
       try { await rm(path, { force: true }); } catch { /* the next pass tries again */ }
       continue;
     }

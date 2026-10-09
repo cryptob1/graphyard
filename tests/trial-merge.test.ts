@@ -250,7 +250,7 @@ test('unit:trial-run-credential-free — the trial child sees none of GH_CONFIG_
 test('unit:trial-tmpdir-isolated — the trial child gets a fresh, empty, short temporary directory made for the trial in the first of /tmp and /var/tmp that no stray node_modules, .git or package.json sits in or above (else its session directory), never the host\'s TMPDIR, so a fixture\'s upward lookup cannot resolve one; the directory is removed with the checkout, pass or fail, and one a crashed trial left behind is the tmp reclaim\'s to take back (GY-1565)', async () => {
   assert.deepEqual([...trialTemporaryRoots], ['/tmp', '/var/tmp']);
   assert.deepEqual([...trialLookupEntries], ['node_modules', '.git', 'package.json']);
-  assert.deepEqual(trialTemporaryVariables('/var/tmp/graphyard-trial-x'), { TMPDIR: '/var/tmp/graphyard-trial-x', TMP: '/var/tmp/graphyard-trial-x', TEMP: '/var/tmp/graphyard-trial-x' });
+  assert.deepEqual(trialTemporaryVariables('/var/tmp/gyt-x'), { TMPDIR: '/var/tmp/gyt-x', TMP: '/var/tmp/gyt-x', TEMP: '/var/tmp/gyt-x' });
   assert.ok(testTempPatterns.some(pattern => pattern.test(`${trialTemporaryPrefix}x`)), 'the trial\'s directory carries a name the tmp reclaim takes');
   // The host's shared tmp, poisoned as vishrog's /tmp was: a dependency cache with no lockfile and an empty .git.
   const shared = await temporaryDirectory('trial-shared-tmp', tmpdir());
@@ -303,6 +303,10 @@ test('unit:trial-tmpdir-isolated — the trial child gets a fresh, empty, short 
   const reclaimed = await reclaimTmpDirectories({ tmpRoot: clean, held: new Set(), unfinished: new Set() });
   assert.deepEqual(reclaimed.removed.map(entry => entry.path), [crashed], 'the crashed trial\'s directory is taken back');
   assert.deepEqual(readdirSync(clean).sort(), [`${trialTemporaryPrefix}running`, `${trialTemporaryPrefix}running.owner`], 'the running trial\'s directory stays');
+  // A marker whose directory is already gone is clutter, taken whatever its age.
+  writeFileSync(tempOwnerMarker(join(clean, `${trialTemporaryPrefix}gone`)), '{}\n');
+  await reclaimTmpDirectories({ tmpRoot: clean, held: new Set(), unfinished: new Set() });
+  assert.deepEqual(readdirSync(clean).sort(), [`${trialTemporaryPrefix}running`, `${trialTemporaryPrefix}running.owner`], 'an orphaned trial marker is taken back');
 });
 
 test('integration:shadow-trial-stable-green — three consecutive trials of one head, on a host whose shared tmp holds a stray node_modules, pass every time: a test whose upward lookup from its tmpdir would resolve that node_modules (as tests/worktree-reclaim.test.ts did on vishrog) runs under the trial\'s own tmpdir and never sees it, while the shared tmp stays dirty (GY-1565)', async () => {

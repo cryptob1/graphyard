@@ -91,12 +91,13 @@ export function lookupPoisoned(directory: string): boolean {
 export const trialTemporaryRoot = (sessionDirectory: string, roots: readonly string[] = trialTemporaryRoots) =>
   roots.find(root => existsSync(root) && !lookupPoisoned(root)) ?? sessionDirectory;
 /**
- * The name prefix of a trial's temporary directory: the tmp reclaim's own `graphyard-` pattern, so a
- * directory a crashed merge writer left behind is taken back (GY-1565). runTrial marks it with its
+ * The name prefix of a trial's temporary directory, one of the tmp reclaim's `testTempPatterns`, so
+ * a directory a crashed merge writer left behind is taken back (GY-1565). runTrial marks it with its
  * owner, so the loop's pass and the test runner's sweep remove it as soon as that process is gone,
- * and keep it while the trial runs.
+ * and keep it while the trial runs. It stays this short: `graphyard-trial-` lengthened the suite's
+ * launch lines past their bound (master-agent-envs, master-loop-resilience).
  */
-export const trialTemporaryPrefix = 'graphyard-trial-';
+export const trialTemporaryPrefix = 'gyt-';
 /** The variables that point the trial child's temporary files at `directory`. */
 export const trialTemporaryVariables = (directory: string) => ({ TMPDIR: directory, TMP: directory, TEMP: directory });
 
