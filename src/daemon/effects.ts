@@ -25,7 +25,7 @@ import { defaultAwaitReviewers, readDispatchCursor } from '../auto-dispatch.js';
 import { relaunchSession } from './relaunch.js';
 import { readApproverLaunches } from '../master/autonomy.js';
 import { type MasterSessionEffects, masterSessionEffects } from '../master/master-session.js';
-import { type WorkerProfile, type HerdrAgent, type WorktreeReclaimReport, type ContainmentAssessment, type EscalationSession, type ObservedExhaustion, type ProfileAccountHealth, type MasterConfig, agentToken, approverRoleHealth, decisionInput, escalationRoleHealth, launchApprover, launchEscalationHandler, readApproverLaunch, readEscalationSessions, saveEscalationSession, verifiedContext, listHerdrAgents, sessionAccount, preservePartialWork, recordObservedExhaustion, closeHerdrPane, inspectProfileAccounts, inspectProducerCredentials, observeHerdrAgents, inspectWorkerCredentials, deliverPrompt, dispatchWork, reclaimWorktrees, removeReclaimableWorktrees, writeWorktreeInventoryCache, reclaimIdleMs, writeFailure, assessContainment, herdrJson, readCredentialFile, withRoleDefaults, type ControlPlaneStatus } from '../master.js';
+import { type WorkerProfile, type HerdrAgent, type WorktreeReclaimReport, type ContainmentAssessment, type EscalationSession, type ObservedExhaustion, type ProfileAccountHealth, type MasterConfig, agentToken, approverRoleHealth, decisionInput, escalationRoleHealth, launchApprover, launchEscalationHandler, readApproverLaunch, readEscalationSessions, saveEscalationSession, verifiedContext, listHerdrAgents, sessionAccount, preservePartialWork, recordObservedExhaustion, closeHerdrPane, inspectProfileAccounts, inspectProducerCredentials, observeHerdrAgents, inspectWorkerCredentials, deliverPrompt, dispatchWork, reclaimWorktrees, removeReclaimableWorktrees, writeWorktreeInventoryCache, reclaimIdleMs, writeFailure, assessContainment, herdrJson, readCredentialFile, withRoleDefaults, type ControlPlaneStatus, type SessionIdentity } from '../master.js';
 import { readControlPlaneClock, type ContainmentObservation, type ControlPlaneClock } from '../master/containment.js';
 import { annotatePaneShell } from '../quarantine.js';
 import { herdrCall, listHerdrPanes, type HerdrPane } from '../master/herdr.js';
@@ -73,7 +73,7 @@ import { readMechanicalFixState, type MechanicalFixState } from '../mechanical-f
 export { snapshotRetryDelayMs, retriedSnapshot } from './snapshot-retry.js';
 
 /** A reviewer or producer session a launch ledger holds as pending, as the failover step reads it. */
-export interface LaunchedSession { role: 'reviewer' | 'producer'; record: string; profile: string; agentName: string; pane: string | null; work: string; requestId: string | null }
+export interface LaunchedSession { role: 'reviewer' | 'producer'; record: string; profile: string; agentName: string; pane: string | null; work: string; requestId: string | null; /** A producer's proof group: with the item, the session its account was selected for (GY-1582). */ group?: string }
 /** A session only says its account is spent once it has stopped; while it works, its output is its own prose. */
 export const stoppedStates = ['idle', 'done', 'blocked'];
 /** The wait an escalation launch refused for spent capacity already computed: the earliest reset among every account it skipped. */
@@ -291,8 +291,8 @@ export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffec
   recordTriage?: (work: Work, body: { judgement: TriageJudgement; runtime?: string }) => Promise<unknown>;
   /** The reviewer and producer sessions the launch ledgers hold as pending. */
   launchedSessions?: () => Promise<LaunchedSession[]>;
-  /** The account the profile's current session was launched on, as its launcher recorded it: a worker attempt's own launch record when `launch` names it. */
-  selectedAccount?: (role: CapacityRole, profile: string, launch?: { work: string; epoch: number }) => Promise<{ environment: string | null; kind: string | null } | null>;
+  /** The account a session was launched on, as its launcher recorded it: a worker attempt's own launch record, a reviewer's or producer's own selection, by the `session` named (GY-1582). */
+  selectedAccount?: (role: CapacityRole, profile: string, session?: SessionIdentity) => Promise<{ environment: string | null; kind: string | null } | null>;
   /**
    * Commits (or cleanly discards) what the interrupted attempt left uncommitted in its worktree.
    * `cause` is the WIP commit's subject after the key and attempt; the provider-quota wording is
@@ -574,9 +574,9 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     recordTriage: (work, body) => mutate(`work/${work.id}/triage`, body),
     launchedSessions: async () => [
       ...(await readReviewLedger(root)).reviews.filter(entry => entry.state === 'pending' && !entry.launching).map(entry => ({ role: 'reviewer' as const, record: entry.id, profile: entry.profile, agentName: entry.agentName, pane: entry.pane, work: entry.key, requestId: entry.requestId ?? null })),
-      ...(await readProducerLedger(root)).producers.filter(entry => entry.state === 'pending').map(entry => ({ role: 'producer' as const, record: entry.id, profile: entry.profile, agentName: entry.agentName, pane: entry.pane, work: entry.key, requestId: entry.requestId })),
+      ...(await readProducerLedger(root)).producers.filter(entry => entry.state === 'pending').map(entry => ({ role: 'producer' as const, record: entry.id, profile: entry.profile, agentName: entry.agentName, pane: entry.pane, work: entry.key, requestId: entry.requestId, group: entry.group })),
     ],
-    selectedAccount: (role, profile, launch) => sessionAccount(root, current(), role, profile, launch), // a worker's from its own launch record (GY-1582)
+    selectedAccount: (role, profile, session) => sessionAccount(root, current(), role, profile, session), // by the session's own identity (GY-1582)
     preserveWork: async (work, epoch, cause = 'interrupted by provider quota exhaustion') => {
       const workspace = work.workspaces.find(entry => entry.epoch === epoch);
       if (!workspace || workspace.host !== current().hostId) return { state: 'not-applicable', detail: workspace ? `the attempt worktree is on ${workspace.host}, not this host; its commits stay on ${workspace.branch}` : 'the attempt registered no workspace' };

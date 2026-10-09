@@ -18,14 +18,17 @@ import { temporaryDirectory } from './temp-dirs.js';
  * day in tests/soak-repeated-limit.test.ts both run on it.
  */
 
-/** Claude's usage-limit menu, as the 2026-10-09 sessions drew it; `reset` is as Claude prints it ("Oct 12, 3pm"). */
-export const limitMenu = (reset: string) => `● Reading the item before editing.
-  ⎿  You've hit your weekly limit · resets ${reset} (America/Los_Angeles)
+/**
+ * Claude's usage-limit menu, as the 2026-10-09 sessions drew it; `reset` is as Claude prints it
+ * ("Oct 12, 3pm"), or null for a notice that names none, which is held for the assumed hour.
+ */
+export const limitMenu = (reset: string | null) => `● Reading the item before editing.
+  ⎿  You've hit your weekly limit${reset ? ` · resets ${reset} (America/Los_Angeles)` : ''}
 
    What do you want to do?
 
    ❯ 1. Stop and wait for limit to reset
-     2. Wait here, then continue automatically at ${reset}
+     2. ${reset ? `Wait here, then continue automatically at ${reset}` : 'Wait here, then continue automatically'}
      3. Add funds to continue with usage credits
 
    Enter to confirm · Esc to cancel
@@ -133,7 +136,16 @@ export function limitLoop(plane: LimitPlane, host: Awaited<ReturnType<typeof lim
       await plane.api(principalOf(host.config.workers.find(profile => profile.agentName === orphan.agentName)!), 'POST', `work/${orphan.id}/settle`, { epoch: orphan.epoch, settlementToken });
     },
   };
-  /** The launch's session stops on Claude's limit menu naming `reset`, for the next cycle to read. */
-  const spend = (launch: LimitLaunch, reset: string) => { world.herdr.status(launch.pane, 'blocked'); output.set(launch.pane, limitMenu(reset)); };
-  return { world, launches, refused, stopped, effects, dispatch, spend, cycle: (state: DaemonState) => runCycle(host.config, state, effects) };
+  /** The launch's session stops on Claude's limit menu naming `reset` (or none), for the next cycle to read. */
+  const spend = (launch: LimitLaunch, reset: string | null) => { world.herdr.status(launch.pane, 'blocked'); output.set(launch.pane, limitMenu(reset)); };
+  /** The launch's attempt ends with no limit notice: its supervisor settles, the worker releases the item, and the session exits. */
+  const end = async (launch: LimitLaunch) => {
+    const work = ((await plane.api('coordinator', 'GET', 'work-snapshot')).work as Work[]).find(entry => entry.key === launch.key)!;
+    const principal = principalOf(host.config.workers.find(profile => profile.name === launch.profile)!);
+    await plane.api(principal, 'POST', `work/${work.id}/settle`, { epoch: launch.epoch, settlementToken });
+    await plane.api(principal, 'POST', `work/${work.id}/release`, { epoch: launch.epoch });
+    stopped.push(`${launch.key}:${launch.epoch}`);
+    if (world.herdr.agents.has(launch.pane)) world.herdr.close(launch.pane);
+  };
+  return { world, launches, refused, stopped, effects, dispatch, spend, end, cycle: (state: DaemonState) => runCycle(host.config, state, effects) };
 }

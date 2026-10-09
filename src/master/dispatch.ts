@@ -244,7 +244,8 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
       // choice, so the attempt is routed to an eligible account rather than onto it a third time (GY-1582).
       // A hold that cannot be read or written refuses the dispatch before anything is claimed: launching
       // without it could hand the same spent account back, and the loop's retry takes it from there.
-      const holdAt = options.probe?.now?.() ?? Date.now();
+      // On the snapshot's clock, as dispatchability is judged, and the choice reads holds at the same instant.
+      const holdAt = options.probe?.now?.() ?? Date.parse(observedAt), clock = { now: () => holdAt };
       await holdRepeatedLimitAccount(config, work, holdAt, {}).catch((error: unknown) => {
         throw new Error(`${work.key}'s last worker launches each ended on ${repeatedLimitAccount(work, holdAt)?.account ?? 'one account'}'s limit notice, and the hold that keeps the next launch off it could not be placed: ${failureText(error).slice(0, 300)}; nothing was claimed`, { cause: error });
       });
@@ -254,7 +255,7 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
         if (accounts && !accounts.length)
           throw new Error(`${describeStartFailures(startFailures, null)}; no further account of profile ${profile.name} to fall back to`, { cause: startError });
         try {
-          selected = await selectAccount(config, 'worker', accounts && accounts.length < (profile.accounts?.length ?? 0) ? { ...profile, accounts } : profile, { ...options.probe, work: work.key });
+          selected = await selectAccount(config, 'worker', accounts && accounts.length < (profile.accounts?.length ?? 0) ? { ...profile, accounts } : profile, { ...clock, ...options.probe, work: work.key });
         } catch (error) {
           if (!startFailures.length || !(error instanceof NoHealthyAccountError)) throw error;
           throw new Error(`${describeStartFailures(startFailures, null)}; no further account of profile ${profile.name} could be launched: ${failureText(error).slice(0, 300)}`, { cause: error });

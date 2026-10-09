@@ -9,7 +9,7 @@ import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { Store } from '../src/store.js';
 import { emptyDaemonState, failoverKey, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
-import { atomicPrivateWrite, environmentLogPath, holdRepeatedLimitAccount, inspectProfileAccounts, masterConfigSchema, observedExhaustions, preservePartialWork, readEnvironmentLog, recordEnvironmentLog, recordObservedExhaustion, selectAccount, sessionAccount, type MasterConfig, type WorkerProfile } from '../src/master.js';
+import { atomicPrivateWrite, environmentLogPath, holdRepeatedLimitAccount, inspectProfileAccounts, repeatedLimitAccount, repeatedLimitWindowMs, masterConfigSchema, observedExhaustions, preservePartialWork, readEnvironmentLog, recordEnvironmentLog, recordObservedExhaustion, selectAccount, sessionAccount, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import { profileLaunchedFile } from '../src/master/dispatch-reservation.js';
 import type { Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -248,17 +248,104 @@ test('unit:repeated-limit-launch-holds-account — an item whose two consecutive
   assert.match(held.reason, new RegExp(`${work.key}'s last 2 worker launches \\(epochs 1, 2\\) each ended on claude-b's limit notice`));
   assert.equal(held.work, work.key);
 
-  // Held already, nothing is placed again; an item whose last launch ended elsewhere holds nothing.
+  // Held already, nothing is placed again (read as the item stood before its third launch); an item
+  // whose last launch ended elsewhere holds nothing, nor one launched again since its last notice.
   work = await reload(work.id);
-  assert.equal(await holdRepeatedLimitAccount(config, work), null);
+  assert.equal(work.epoch, 3);
+  assert.equal(repeatedLimitAccount(work), null, 'epoch 3 was launched after the last notice and has not ended on one');
+  const beforeThird = { ...work, epoch: 2 };
+  assert.equal(repeatedLimitAccount(beforeThird)?.account, 'claude-b');
+  assert.equal(await holdRepeatedLimitAccount(config, beforeThird), null);
   await lapse();
   const elsewhere = { ...work, capacity: { ...work.capacity!, exhaustions: [...work.capacity!.exhaustions, { ...work.capacity!.exhaustions.at(-1)!, epoch: 3, account: 'claude-c' }] } };
   assert.equal(await holdRepeatedLimitAccount(config, elsewhere), null);
   // Nor does a repeat older than the window.
-  assert.equal(await holdRepeatedLimitAccount(config, work, Date.now() + 3 * 3_600_000), null);
+  assert.equal(await holdRepeatedLimitAccount(config, beforeThird, Date.now() + 3 * 3_600_000), null);
   // Nor one whose last notice named a reset that has passed, though the notice is inside the window:
   // the account has recovered, and holding it again would keep work off it for another assumed hour.
-  const recovered = { ...work, capacity: { ...work.capacity!, exhaustions: work.capacity!.exhaustions.map(entry => ({ ...entry, resetsAt: new Date(Date.now() - 60_000).toISOString() })) } };
+  const recovered = { ...beforeThird, capacity: { ...work.capacity!, exhaustions: work.capacity!.exhaustions.map(entry => ({ ...entry, resetsAt: new Date(Date.now() - 60_000).toISOString() })) } };
   assert.equal(await holdRepeatedLimitAccount(config, recovered), null);
   assert.equal((await observedExhaustions(config))['claude-b'], undefined, 'no hold was recreated after the reset');
+});
+
+test('unit:repeated-limit-launch-holds-account — notices of launches that were not consecutive are no repeat: an attempt between them that ended another way breaks the run, so the real dispatch launches on the account again, and only two adjacent epochs hold it; the repeat and the choice are judged on the snapshot clock', async () => {
+  await controlPlane('launch_account_gap');
+  const plane: LimitPlane = { url, coordinatorToken: token(coordinator), api: (as, method, path, body) => ok(as === 'coordinator' ? coordinator : workerA, method, path, body) };
+  const host = await limitHost(plane, [{ name: 'claude-primary', principal: workerA.id, token: token(workerA), accounts: ['claude-b', 'claude-c'] }], { 'claude-b': 'subscription-b', 'claude-c': 'subscription-c' });
+  const { config } = host, profile = config.workers[0];
+  const { launches, refused, spend, end, cycle, dispatch } = limitLoop(plane, host);
+  let work = await newItem('limit notices with a gap');
+  const state = emptyDaemonState(config);
+  const lapse = async () => { const log = await readEnvironmentLog(config); log.exhausted = {}; await atomicPrivateWrite(environmentLogPath(config), log); };
+  const last = () => launches.at(-1) && [launches.at(-1)!.epoch, launches.at(-1)!.account];
+
+  // Epoch 1 ends on claude-b's limit notice; epoch 2, on claude-b too, ends another way (released, no notice).
+  await cycle(state);
+  assert.deepEqual(last(), [1, 'claude-b'], JSON.stringify(refused));
+  spend(launches.at(-1)!, 'Oct 12, 3pm'); await cycle(state); await lapse();
+  await cycle(state);
+  assert.deepEqual(last(), [2, 'claude-b'], JSON.stringify(refused));
+  await end(launches.at(-1)!);
+  // Epoch 3 ends on claude-b's notice again: two notices, but of epochs 1 and 3, not consecutive launches.
+  await cycle(state);
+  assert.deepEqual(last(), [3, 'claude-b'], JSON.stringify(refused));
+  spend(launches.at(-1)!, 'Oct 12, 3pm'); await cycle(state); await lapse();
+  work = await reload(work.id);
+  assert.deepEqual(work.capacity!.exhaustions.map(entry => [entry.epoch, entry.account]), [[1, 'claude-b'], [3, 'claude-b']]);
+  assert.equal(repeatedLimitAccount(work), null, 'epoch 2 between them ended another way');
+
+  await cycle(state);
+  assert.deepEqual(last(), [4, 'claude-b'], `epochs 1 and 3 are no repeat, so claude-b is chosen again: ${JSON.stringify(refused)}`);
+  assert.equal((await observedExhaustions(config))['claude-b'], undefined, 'and no hold was placed');
+
+  // Epoch 4 ends on its notice too: epochs 3 and 4 are adjacent, the repeat AC-2 names.
+  spend(launches.at(-1)!, 'Oct 12, 3pm'); await cycle(state); await lapse();
+  work = await reload(work.id);
+  const repeat = repeatedLimitAccount(work);
+  assert.deepEqual(repeat && [repeat.account, repeat.records.map(entry => entry.epoch)], ['claude-b', [3, 4]]);
+
+  // Judged on the snapshot's clock, not the host's: a snapshot taken past the repeat's window (the
+  // host clock still inside it) holds nothing, and the choice reads the holds at that same instant.
+  const snapshot = await ok(coordinator, 'GET', 'work-snapshot');
+  const late = new Date(Date.parse(repeat!.records.at(-1)!.at) + repeatedLimitWindowMs + 60_000).toISOString();
+  assert.ok(Date.now() - Date.parse(repeat!.records.at(-1)!.at) < repeatedLimitWindowMs, 'the host clock is still inside the window');
+  await dispatch(work, profile, [], { work: snapshot.work, now: late });
+  assert.deepEqual(last(), [5, 'claude-b'], `outside the window on the snapshot clock, claude-b is not held: ${JSON.stringify(refused)}`);
+  assert.equal((await observedExhaustions(config))['claude-b'], undefined, 'no hold placed on the host clock');
+});
+
+test('unit:exhaustion-charged-to-launch-account — a reviewer or producer limit notice is charged to the account that session was selected on, read by its own identity, not to the profile\'s latest selection that a later concurrent session overwrote', async () => {
+  await controlPlane('launch_account_sessions');
+  const home = await host('sessions'), root = await temporaryDirectory('exhaustion-launch-account-sessions-root');
+  const config = configFor(home, { name: 'unused', agentName: 'graphyard-unused', kind: 'claude', accounts: ['claude-c'] });
+  const reviewer = { name: 'claude-reviewer', kind: 'claude', accounts: ['claude-b', 'claude-c'] };
+  const probe = { quota: false, cacheMs: 0 } as const;
+  // The reviewer of GY-1 launches on claude-b; claude-b is then held, so the reviewer of GY-2 launches on claude-c.
+  assert.equal((await selectAccount(config, 'reviewer', reviewer, { ...probe, work: 'GY-1' })).account?.name, 'claude-b');
+  await recordObservedExhaustion(config, 'claude-b', { at: new Date().toISOString(), resetsAt: reset, reason: 'held', role: 'reviewer', profile: reviewer.name, work: 'GY-9' });
+  assert.equal((await selectAccount(config, 'reviewer', reviewer, { ...probe, work: 'GY-2' })).account?.name, 'claude-c');
+  assert.equal((await readEnvironmentLog(config)).selected['reviewer:claude-reviewer']?.environment, 'claude-c', 'the profile\'s latest selection is the later session\'s');
+  assert.deepEqual(await sessionAccount(root, config, 'reviewer', reviewer.name, { work: 'GY-1' }), { environment: 'claude-b', kind: 'claude', at: (await readEnvironmentLog(config)).selected['reviewer:claude-reviewer|GY-1']!.at, work: 'GY-1' });
+  assert.equal((await sessionAccount(root, config, 'reviewer', reviewer.name, { work: 'GY-2' }))?.environment, 'claude-c');
+  // A session no selection was kept for is charged to nothing rather than to another session's account.
+  assert.equal(await sessionAccount(root, config, 'reviewer', reviewer.name, { work: 'GY-3' }), null);
+
+  // Producers: one session per item and proof group, each read by both.
+  const log = await readEnvironmentLog(config); log.exhausted = {}; await atomicPrivateWrite(environmentLogPath(config), log);
+  const producer = { name: 'claude-producer', kind: 'claude', accounts: ['claude-b', 'claude-c'] };
+  assert.equal((await selectAccount(config, 'producer', producer, { ...probe, work: 'GY-1', group: 'unit' })).account?.name, 'claude-b');
+  await recordObservedExhaustion(config, 'claude-b', { at: new Date().toISOString(), resetsAt: reset, reason: 'held', role: 'producer', profile: producer.name, work: 'GY-9' });
+  assert.equal((await selectAccount(config, 'producer', producer, { ...probe, work: 'GY-1', group: 'e2e' })).account?.name, 'claude-c');
+  assert.equal((await sessionAccount(root, config, 'producer', producer.name, { work: 'GY-1', group: 'unit' }))?.environment, 'claude-b');
+  assert.equal((await sessionAccount(root, config, 'producer', producer.name, { work: 'GY-1', group: 'e2e' }))?.environment, 'claude-c');
+
+  // A session's own selection is kept two days, then pruned as later selections are written.
+  const aged = await readEnvironmentLog(config);
+  aged.selected['reviewer:claude-reviewer|GY-1'] = { ...aged.selected['reviewer:claude-reviewer|GY-1']!, at: new Date(Date.now() - 3 * 86_400_000).toISOString() };
+  await atomicPrivateWrite(environmentLogPath(config), aged);
+  await recordEnvironmentLog(config, [], [], { key: 'reviewer:claude-reviewer', environment: 'claude-c', kind: 'claude', at: new Date().toISOString(), work: 'GY-4' });
+  const pruned = (await readEnvironmentLog(config)).selected;
+  assert.equal(pruned['reviewer:claude-reviewer|GY-1'], undefined);
+  assert.equal(pruned['reviewer:claude-reviewer|GY-4']?.environment, 'claude-c');
+  assert.equal(pruned['producer:claude-producer|GY-1|unit']?.environment, 'claude-b');
 });

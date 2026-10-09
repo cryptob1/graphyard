@@ -358,7 +358,7 @@ export function ownLoginHold(held: Record<string, ObservedExhaustion>, profile: 
   const key = ownLoginAccounts(profile).find(name => held[name]);
   return key ? { key, held: held[key] } : null;
 }
-export const selectionKey = (role: LaunchRole, profile: string) => `${role}:${profile}`;
+export const selectionKey = (role: LaunchRole, profile: string) => `${role}:${profile}`, sessionKeyOf = (key: string, work: string, group?: string | null) => `${key}|${work}${group ? `|${group}` : ''}`; // and one session's own beside it, by item and proof group, kept two days (GY-1582)
 export function environmentLogPath(config: Pick<MasterConfig, 'credentialFile'>) {
   return resolve(dirname(config.credentialFile), `${basename(config.credentialFile).replace(/\.token$/, '')}.environments.json`);
 }
@@ -411,10 +411,10 @@ export async function reportPendingExhaustions(config: Pick<MasterConfig, 'crede
 /** The accounts still held by an observed exhaustion at `now`. */
 export const observedExhaustions = async (config: Pick<MasterConfig, 'credentialFile'>, now = Date.now()): Promise<Record<string, ObservedExhaustion>> =>
   Object.fromEntries(Object.entries((await readEnvironmentLog(config)).exhausted ?? {}).filter(([, held]) => Date.parse(held.until) > now));
-export async function recordEnvironmentLog(config: Pick<MasterConfig, 'credentialFile'>, health: EnvironmentHealth[], skipped: AccountSkip[] = [], selection?: { key: string } & AccountSelection) {
+export async function recordEnvironmentLog(config: Pick<MasterConfig, 'credentialFile'>, health: EnvironmentHealth[], skipped: AccountSkip[] = [], selection?: { key: string; group?: string } & AccountSelection) {
   if (!health.length && !skipped.length && !selection) return;
   const log = await readEnvironmentLog(config);
-  if (selection) { const { key, ...selected } = selection; log.selected = { ...log.selected, [key]: selected }; }
+  if (selection) { const { key, group, ...selected } = selection, at = Date.parse(selected.at); log.selected = { ...Object.fromEntries(Object.entries(log.selected).filter(([name, entry]) => !name.includes('|') || !(at - Date.parse(entry.at) > 2 * 86_400_000))), [key]: selected, ...selected.work ? { [sessionKeyOf(key, selected.work, group)]: selected } : {} }; }
   // A read that caught the login file mid-write keeps the identity last read (GY-1573).
   for (const entry of health) log.environments[entry.name] = entry.identity === undefined && log.environments[entry.name]?.identity !== undefined ? { ...entry, identity: log.environments[entry.name].identity } : entry;
   log.skipped = [...log.skipped, ...skipped.map(entry => ({ ...entry, reason: entry.reason.slice(0, 500) }))].slice(-50);
@@ -462,7 +462,7 @@ export async function heldAwareProbe(config: Pick<MasterConfig, 'credentialFile'
 /** The registry's choice for a role it defines, recorded in the environment log; null when the registry does not define the role. */
 export async function selectRegistryAccount(config: Pick<MasterConfig, 'credentialFile' | 'run'> & Partial<Pick<MasterConfig, 'url' | 'hostId'>>, role: LaunchRole, profile: { name: string; principal?: string }, probe: FleetProbe = {}) {
   const fleet = await selectFleetSession(config, role, profile, await heldAwareProbe(config, probe));
-  if (fleet) await recordEnvironmentLog(config, fleet.health ? [fleet.health] : [], fleet.skipped, fleet.account ? { key: selectionKey(role, profile.name), environment: fleet.account.name, kind: fleet.account.kind, at: new Date(probe.now?.() ?? Date.now()).toISOString(), work: probe.work ?? null } : undefined).catch(() => {}); // the registry's choice is the selection too (GY-1582)
+  if (fleet) await recordEnvironmentLog(config, fleet.health ? [fleet.health] : [], fleet.skipped, fleet.account ? { key: selectionKey(role, profile.name), environment: fleet.account.name, kind: fleet.account.kind, at: new Date(probe.now?.() ?? Date.now()).toISOString(), work: probe.work ?? null, group: probe.group } : undefined).catch(() => {}); // the registry's choice is the selection too (GY-1582)
   return fleet;
 }
 export async function selectAccount(config: Pick<MasterConfig, 'environments' | 'credentialFile' | 'run'> & Partial<Pick<MasterConfig, 'url' | 'hostId'>>, role: LaunchRole, profile: { name: string; accounts?: string[]; principal?: string; kind?: string; environment?: Record<string, string> }, probe: FleetProbe = {}): Promise<LaunchSelection> {
@@ -479,7 +479,7 @@ export async function selectAccount(config: Pick<MasterConfig, 'environments' | 
       await recordEnvironmentLog(config, [], [skip]).catch(() => {});
       throw new NoHealthyAccountError(`No healthy agent account for ${role} profile ${profile.name}: ${skip.reason}`, [skip]);
     }
-    await recordEnvironmentLog(config, [], [], { key: selectionKey(role, profile.name), environment: null, kind: null, at, work: probe.work ?? null }).catch(() => {});
+    await recordEnvironmentLog(config, [], [], { key: selectionKey(role, profile.name), environment: null, kind: null, at, work: probe.work ?? null, group: probe.group }).catch(() => {});
     return { account: null, health: null, skipped: [] as AccountSkip[] };
   }
   for (const name of profile.accounts) {
@@ -493,7 +493,7 @@ export async function selectAccount(config: Pick<MasterConfig, 'environments' | 
     const health = await checkAgentEnvironment(environment, { ...probe, ceilingPercent: probe.ceilingPercent ?? config.run.quotaCeilingPercent });
     checked.push(health);
     if (health.healthy) {
-      await recordEnvironmentLog(config, checked, skipped, { key: selectionKey(role, profile.name), environment: environment.name, kind: environment.kind, at, work: probe.work ?? null }).catch(() => {});
+      await recordEnvironmentLog(config, checked, skipped, { key: selectionKey(role, profile.name), environment: environment.name, kind: environment.kind, at, work: probe.work ?? null, group: probe.group }).catch(() => {});
       return { account: environment, health, skipped };
     }
     // `checkAgentEnvironment` reports exactly two faults: not logged in, or quota spent.
