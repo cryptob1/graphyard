@@ -56,13 +56,16 @@ export function followUpFilingRefusal(actor: { id?: string; role?: string; capab
   return null;
 }
 /**
- * Pure: what `actor` holds beyond the filing identity, or null when it holds only `intent:create`.
+ * Pure: what `actor` holds beyond the filing identity, or null when it holds only `intent:create`
+ * over `repository` alone.
  * The credential sits in CI, so an admin or a broader operator agent is reported, not tolerated.
  */
-export function followUpFilingExcess(actor: { id?: string; role?: string; capabilities?: string[] }) {
+export function followUpFilingExcess(actor: { id?: string; role?: string; capabilities?: string[]; scope?: { repositories?: string[] } }, repository?: string | null) {
   if (actor.role === 'admin') return `${actor.id} is an admin, which can claim, approve and administer far beyond filing`;
   const extra = (actor.capabilities ?? []).filter(capability => !(releaseFilingIdentity.capabilities as readonly string[]).includes(capability));
-  return extra.length ? `operator agent ${actor.id} also holds ${extra.join(', ')}; the filing credential holds only intent:create` : null;
+  if (extra.length) return `operator agent ${actor.id} also holds ${extra.join(', ')}; the filing credential holds only intent:create`;
+  const otherRepositories = repository ? (actor.scope?.repositories ?? []).filter(other => other !== repository) : [];
+  return otherRepositories.length ? `operator agent ${actor.id} can also create work in ${otherRepositories.join(', ')}; the filing credential is scoped to ${repository} alone` : null;
 }
 
 export type CutTrigger = 'schedule' | 'manual';

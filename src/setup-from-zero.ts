@@ -182,8 +182,9 @@ function protectionCheck(status: any, github: ProtectionRun): SetupCheck {
  * that principal holds more than the filing identity's `intent:create`.
  */
 export function releaseFilingCheck(filing: NonNullable<SetupFromZeroInput['releaseFiling']>, repository: string | null): SetupCheck {
-  const refusal = filing.status ? followUpFilingRefusal(filing.status.actor, repository ?? filing.status.repository) : `the control plane did not accept the credential: ${filing.failure ?? 'no answer'}`;
-  const excess = refusal ? null : followUpFilingExcess(filing.status.actor);
+  const filingRepository = repository ?? filing.status?.repository;
+  const refusal = filing.status ? followUpFilingRefusal(filing.status.actor, filingRepository) : `the control plane did not accept the credential: ${filing.failure ?? 'no answer'}`;
+  const excess = refusal ? null : followUpFilingExcess(filing.status.actor, filingRepository);
   return { id: 'release-filing', status: refusal || excess ? 'fail' : 'pass', step: setupSteps.releaseFiling,
     detail: refusal ? `GRAPHYARD_RELEASE_TOKEN would be refused filing a failed candidate's follow-up: ${refusal}`
       : excess ? `GRAPHYARD_RELEASE_TOKEN is broader than filing needs: ${excess}` : `GRAPHYARD_RELEASE_TOKEN files follow-ups as ${filing.status.actor.id}` };

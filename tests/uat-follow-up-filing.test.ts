@@ -138,6 +138,9 @@ test('integration:uat-follow-up-filing — a failed candidate files its follow-u
   assert.match(releaseFilingCheck({ status: { actor: { id: 'narrow', role: 'operator-agent', capabilities: ['intent:create'], scope: { repositories: [repository], workItems: ['GY-1'] } } } }, repository).detail, /wildcard work scope/);
   assert.match(releaseFilingCheck({ status: { actor: { id: 'other', role: 'operator-agent', capabilities: ['intent:create'], scope: { repositories: ['owner/other'], workItems: ['*'] } } } }, repository).detail, /does not include owner\/uat-filing/);
   assert.match(releaseFilingCheck({ status: { actor: { id: 'reader', role: 'operator-agent', capabilities: ['intent:ready'], scope: { repositories: [repository], workItems: ['*'] } } } }, repository).detail, /lacks intent:create/);
+  const multiRepository = releaseFilingCheck({ status: { actor: { id: 'wide', role: 'operator-agent', capabilities: ['intent:create'], scope: { repositories: [repository, 'owner/other'], workItems: ['*'] } } } }, repository);
+  assert.equal(multiRepository.status, 'fail');
+  assert.match(multiRepository.detail, /broader than filing needs: operator agent wide can also create work in owner\/other/);
   assert.match(releaseFilingCheck({ status: null, failure: '{"error":"Unauthorized"}' }, repository).detail, /did not accept the credential/);
   // Doctor's own lines read GRAPHYARD_RELEASE_TOKEN from the environment and ask the plane it addresses.
   const doctor = async (token?: string) => (await setupFromZeroChecks({ root: await temporaryDirectory('uat-filing-doctor'), status: null, environments: await temporaryDirectory('uat-filing-environments'), sandbox: () => null,

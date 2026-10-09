@@ -18,7 +18,7 @@ Main → candidate → uat → production; `.railway/railway.ts` deploys `releas
 
 ### Release filing credential
 
-The uat environment's `GRAPHYARD_TOKEN` (`GRAPHYARD_RELEASE_TOKEN`) files holds and follow-ups as operator agent `graphyard-release-follow-up`: role `operator-agent`, only `intent:create`, scope repository and work items `*`; it cannot claim, complete, record evidence or approve. Issue it: `graphyard operator-agent setup FILE --token-stdin` (`{"id":"graphyard-release-follow-up","displayName":"Release follow-up","capabilities":["intent:create"],"scope":{"repositories":["OWNER/REPO"],"workItems":["*"]},"reason":"..."}`). `doctor` with `GRAPHYARD_RELEASE_TOKEN` set prints `FAIL release-filing` if refused or broader. E2E recording uses admin `GRAPHYARD_E2E_RECORD_TOKEN`.
+The uat environment's `GRAPHYARD_TOKEN` (`GRAPHYARD_RELEASE_TOKEN`) files holds and follow-ups as operator agent `graphyard-release-follow-up`: role `operator-agent`, only `intent:create`, scope repository and work items `*`; it cannot claim, complete, record evidence or approve. Issue it: `graphyard operator-agent setup FILE --token-stdin` (`{"id":"graphyard-release-follow-up","displayName":"Release follow-up","capabilities":["intent:create"],"scope":{"repositories":["OWNER/REPO"],"workItems":["*"]},"reason":"..."}`). `doctor` with `GRAPHYARD_RELEASE_TOKEN` set prints `FAIL release-filing` if refused or broader in capability or repository. E2E recording uses admin `GRAPHYARD_E2E_RECORD_TOKEN`.
 
 ### Pre-merge gate and release-candidate validation
 
@@ -70,7 +70,7 @@ Observers `POST /api/delivery/observe`:
 {"registration":{"id":"production-observer","revision":1},"epoch":4,"environment":{"id":"production","revision":1},"expectedGeneration":4,"snapshotId":"railway:snapshot:01J8Q4Z0Y3","observedAt":"2026-09-18T20:15:07Z","validFrom":"2026-09-18T20:12:31Z","validTo":"2026-09-18T20:15:07Z","services":[{"service":"api","complete":true,"deployment":{"id":"dep-a1","status":"success","deployedAt":"2026-09-18T20:12:31Z"},"instances":[{"instance":"api-1","digest":"sha256:1111111111111111111111111111111111111111111111111111111111111111","measurement":"host-attestation","healthy":true}]},{"service":"web","complete":true,"deployment":{"id":"dep-w7","status":"success","deployedAt":"2026-09-18T20:12:40Z"},"instances":[{"instance":"web-1","digest":"sha256:2222222222222222222222222222222222222222222222222222222222222222","measurement":"host-attestation","healthy":true}]}]}
 ```
 
-Only complete listings verify; `POST /api/delivery/notify` hints. Sweeps (`delivery sweep` forces) verify generations once services share an interval within `freshnessSeconds`, adding `releaseDeliveries`; `graphyard delivery` shows state.
+Only complete listings verify; `POST /api/delivery/notify` hints. Sweeps (`graphyard delivery sweep` forces) verify generations once services share an interval within `freshnessSeconds`, adding `releaseDeliveries`; `graphyard delivery` shows state.
 
 `master status` `delivery`: `readyToMerged`, `mergedToProduction`, `stages` p50/p90 (`24h`/`7d`); a 7-day p90 over `deliverySpeed` (2 h; merged→production 45 min) raises attention.
 
