@@ -8,6 +8,8 @@ import { profileHealth, readyToRetry } from './sessions.js';
 import { boundDetail, detailChanged, namePaths } from './decisions.js';
 import { record } from './effects.js';
 import { workerHandle } from './cycle-resume.js';
+import { observedExhaustions, ownLoginHold } from '../master/environments.js';
+import type { WorkerProfile } from '../master.js';
 import { credentialBlockedKey, credentialFailure } from '../worker-credential.js';
 import type { BlockerProbeResult } from './blocker-probes.js';
 import type { Cycle } from './cycle.js';
@@ -123,7 +125,7 @@ export async function blockerStep(cycle: Cycle) {
 
     let result: BlockerProbeResult | null = null;
     if (environmentalBlockerClasses.includes(classification.class)) {
-      result = launchableClass(classification) ? launchableProbe(cycle) : await probe(item, classification);
+      result = launchableClass(classification) ? await launchableProbe(cycle, classification.class === 'runtime-exhaustion') : await probe(item, classification);
       if (!result) return;
       // A cause that keeps failing its probe is reported to the master once it has failed for
       // `blockerEscalateMs`; the loop keeps probing it, and clears it if the cause goes.
@@ -239,9 +241,14 @@ const launchableClass = (classification: BlockerClassification) => classificatio
  * unowned session holds is launchable, since the dispatch closes that session. While none is, the
  * blocker stands and the probe names why each profile cannot launch.
  */
-function launchableProbe(cycle: Cycle): BlockerProbeResult {
+export async function launchableProbe(cycle: Cycle, accounts = false): Promise<BlockerProbeResult> {
   const { config, credentials, agents, state, clock, snapshot } = cycle;
-  const launch = profileHealth(config.workers, credentials, agents, state, clock, snapshot.work).filter(entry => entry.profile.mode === 'launch');
+  // Review of GY-1567: a spent runtime account clears only on a profile with an account no session
+  // has seen spent, as `selectAccount` would choose it; a registry checks its own accounts at launch.
+  const held: Awaited<ReturnType<typeof observedExhaustions>> = accounts ? await observedExhaustions(config, clock).catch(() => ({})) : {};
+  const spent = (profile: WorkerProfile) => profile.accounts?.length ? profile.accounts.every(name => held[name]) : !!ownLoginHold(held, profile);
+  const launch = profileHealth(config.workers, credentials, agents, state, clock, snapshot.work).filter(entry => entry.profile.mode === 'launch')
+    .map(entry => entry.healthy && accounts && spent(entry.profile) ? { ...entry, healthy: false, reason: 'every account it launches on is held at its usage limit' } : entry);
   const ready = launch.find(entry => entry.healthy);
   return { probe: 'a worker profile can take a launch', passed: !!ready,
     detail: ready ? `profile ${ready.profile.name} is launchable` : launch.map(entry => `${entry.profile.name} (${entry.reason})`).join('; ') || 'no launch profile is configured' };

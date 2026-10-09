@@ -50,6 +50,8 @@ export function confinementName(launch: WorkerLaunch | null): string {
  * is refused there) and changes nothing.
  */
 export const credentialScript = ['/bin/sh', '-c', 'gh auth status >/dev/null 2>&1 || { gh auth status 2>&1 | tail -n 3; exit 1; }; GIT_TERMINAL_PROMPT=0 git ls-remote --exit-code origin HEAD >/dev/null && GIT_TERMINAL_PROMPT=0 git push --dry-run --no-verify --quiet origin HEAD:refs/heads/graphyard/blocker-probe'];
+/** The GitHub-outage probe: the push path, and the pull-request API a `gh pr` the worker ran answers through (review of GY-1567). */
+export const outageScript = [...credentialScript.slice(0, 2), `${credentialScript[2]} && gh api --silent 'repos/{owner}/{repo}/pulls?per_page=1'`];
 /** The write probe: the path, or the nearest directory above it that exists, can be written. */
 export const writableScript = (path: string) => ['/bin/sh', '-c', 'p="$1"; while [ ! -e "$p" ]; do p=$(dirname "$p"); done; if [ -d "$p" ]; then f="$p/.graphyard-blocker-probe-$$"; : > "$f" && rm -f "$f"; else : >> "$p"; fi', 'sh', path];
 
@@ -114,7 +116,7 @@ export async function probeBlocker(item: Work, classification: BlockerClassifica
       // leaves the verdict to the operations the next attempt runs, inside its confinement.
       const degraded = await deps.githubStatus?.().catch(() => null) ?? null;
       if (degraded?.length) return { probe: 'githubstatus.com reports the delivery components operational', passed: false, detail: `not operational: ${degraded.join(', ')}` };
-      return confined('gh auth status, git ls-remote origin and a dry-run push', credentialScript);
+      return confined('gh auth status, git ls-remote origin, a dry-run push and a pull-request API read', outageScript);
     }
     case 'runtime-denial':
     case 'worktree-mismatch': {

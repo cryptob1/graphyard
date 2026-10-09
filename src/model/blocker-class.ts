@@ -44,8 +44,8 @@ export const blockerClassMeaning: Record<BlockerClass, string> = {
   'dispatch-failure': "the master loop stopped redispatching the item after repeated launches no worker profile could take; cleared once a profile can take a launch again",
   'host-supervisor': "a host check failed only from the worker's sandbox, where the systemd user bus is masked; cleared once the loop, on the host, reaches the user manager and finds its own unit active",
   'runtime-denial': "the worker's runtime refused git push or gh pr at its permission prompt, which a fresh session does not carry; cleared once the attempt has ended, since the next launch is a fresh session",
-  'runtime-exhaustion': "the worker's runtime account reached its usage limit; cleared once a worker profile can take a launch, which resumes the kept work",
-  'github-outage': 'GitHub answered a git or gh operation with its own server error; cleared once githubstatus.com reports Git Operations, API Requests and Pull Requests operational and git ls-remote and a dry-run push pass inside the worker confinement',
+  'runtime-exhaustion': "the worker's runtime account reached its usage limit; cleared once a worker profile can take a launch on an account no session has seen spent, which resumes the kept work",
+  'github-outage': 'GitHub answered a git or gh operation with its own server error; cleared once githubstatus.com reports Git Operations, API Requests and Pull Requests operational and git ls-remote, a dry-run push and a pull-request API read pass inside the worker confinement',
   'planned-file-scope': 'the change needs named files outside plannedFiles; becomes an additive widening decision for the independent approver, cleared once plannedFiles cover them',
   'needs-decision': 'the item waits on a requested two-party decision; its approver is launched, and the blocker is cleared once the decision is judged',
   'human-only': 'one of the three decisions only a human may make',
@@ -174,7 +174,7 @@ export function classifyBlocker(text: string | null | undefined, context: { huma
   if (readOnlyFileSystem.test(blocker) || (fileRefusal.test(blocker) && path)) return { class: 'sandbox-path', ...none, path };
   if (blocker.startsWith(scopeRefusalBlocker) || scopeWords.test(blocker)) {
     const unlinked = unlinkedText(blocker);
-    const paths = blockerPaths(unlinked, namedPaths(unlinked));
+    const paths = blockerPaths(unlinked, namedPaths(unlinked), scopeWords);
     const unclaimed = (token: string) => !paths.some(path => path.includes(token));
     const commit = [...unlinked.matchAll(namedCommit)].map(match => match[1].toLowerCase()).find(unclaimed) ?? unlinked.match(commitToken)?.find(unclaimed) ?? null;
     return paths.length && commit ? { class: 'planned-file-scope', ...none, paths, commit } : { class: 'genuine', ...none };
@@ -213,7 +213,7 @@ export function itemBlockerClass(work: Pick<Work, 'blocker' | 'humanRequest'> & 
   if (!work.blocker) return null;
   const classification = classifyBlocker(work.blocker, { humanRequest: !!work.humanRequest && !work.humanRequest.answer });
   if (classification.class !== 'genuine' || work.blocker.startsWith(scopeRefusalBlocker) || !scopeWords.test(work.blocker)) return classification;
-  const unlinked = unlinkedText(work.blocker), paths = blockerPaths(unlinked, namedPaths(unlinked)), commit = paths.length ? blockedAttemptCommit(work) : null;
+  const unlinked = unlinkedText(work.blocker), paths = blockerPaths(unlinked, namedPaths(unlinked), scopeWords), commit = paths.length ? blockedAttemptCommit(work) : null;
   return commit ? { ...classification, class: 'planned-file-scope', paths, commit } : classification;
 }
 

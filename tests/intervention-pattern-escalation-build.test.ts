@@ -3,6 +3,11 @@ import assert from 'node:assert/strict';
 import { blockerView, classifyBlocker, environmentalBlockerClasses, needsSomeone } from '../src/model/blocker-class.js';
 import { githubDegraded, githubStatusMs, probeBlocker, sharedGithubStatus } from '../src/daemon/blocker-probes.js';
 import { readFileSync } from 'node:fs';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { launchableProbe } from '../src/daemon/cycle-blockers.js';
+import type { Cycle } from '../src/daemon/cycle.js';
 import { uncoveredBlockerPaths } from '../src/model/blocker-class.js';
 import { branchRewriteGuidance, workerPrompt } from '../src/master.js';
 import { loopUnitName } from '../src/supervisor.js';
@@ -212,9 +217,59 @@ test('manual:intervention-pattern-escalation-build — GY-1567 review: a host qu
     assert.notEqual(classifyBlocker(text).class, 'runtime-exhaustion', text);
   for (const text of ["Worker session's usage limit was reached", 'The runtime account ran out of credits mid-verify', "The provider's quota was exhausted before the push"])
     assert.equal(classifyBlocker(text).class, 'runtime-exhaustion', text);
-  // A bare root source file is a path when the blocker spells none with its directory; beside full paths it is shorthand.
+  // A bare root source file is a path when the blocker spells none with its directory.
   assert.deepEqual(classifyBlocker('SCOPE NEEDED: index.ts for commit 8106499e9f').paths, ['index.ts']);
   assert.equal(classifyBlocker('SCOPE NEEDED: index.ts for commit 8106499e9f').class, 'planned-file-scope');
   assert.deepEqual(classifyBlocker('SCOPE NEEDED: server.js and build.sh for commit 8106499e9f').paths, ['server.js', 'build.sh']);
-  assert.deepEqual(classifyBlocker('SCOPE NEEDED: src/github.ts (as sync.ts does, e.g. aheadBy) for commit 8106499e9f').paths, ['src/github.ts']);
+});
+
+test('manual:intervention-pattern-escalation-build — GY-1567 review: a usage limit counts only as the runtime\'s, a status page only when it reports an incident, and a requested root file is kept beside full paths', async () => {
+  // A usage limit an outside-scope test quotes is no runtime account's; one beside its session or runtime is.
+  for (const text of ['Outside scope: tests/billing.test.ts failed with "API usage limit was reached" from the stub', 'The fixture asserts that the usage limit was reached and the client retries'])
+    assert.notEqual(classifyBlocker(text).class, 'runtime-exhaustion', text);
+  for (const text of ['Claude hit its usage limit before the push', 'The usage limit was reached on the worker account', 'Codex session reached its usage limit mid-verify'])
+    assert.equal(classifyBlocker(text).class, 'runtime-exhaustion', text);
+
+  // A status page or GitHub denying or dating an incident is no outage; the Graphyard server's own 500 stays control-plane-error.
+  for (const text of ['complete failed with HTTP 500; githubstatus.com reports no active incident', 'complete failed with HTTP 500; githubstatus.com showed an incident earlier today, now resolved', 'complete failed with HTTP 500; GitHub reports no incident'])
+    assert.equal(classifyBlocker(text).class, 'control-plane-error', text);
+  for (const text of ['gh pr create failed: GitHub returned HTTP 500', 'git push hangs; githubstatus.com is investigating degraded Git Operations'])
+    assert.equal(classifyBlocker(text).class, 'github-outage', text);
+
+  // An API-originated outage is probed on the API too: a push path that answers while pulls return 500 does not clear it.
+  const classification = classifyBlocker('gh pr create failed: GitHub returned HTTP 500');
+  const ran: string[] = [];
+  const result = await probeBlocker(item('GY-1567', 'gh pr create failed: GitHub returned HTTP 500'), classification, { run: (command, args) => { ran.push(args.join(' ')); return ''; }, launch: null, cwd: '/srv', clock: Date.now(), githubStatus: async () => [] });
+  assert.equal(result?.passed, true);
+  assert.match(ran[0], /git push --dry-run[^]*&& gh api --silent 'repos\/\{owner\}\/\{repo\}\/pulls\?per_page=1'/);
+  assert.match(result!.probe, /pull-request API read/);
+
+  // Root source files a scope request names are kept beside full paths; a basename of one, or prose outside the request, is not.
+  assert.deepEqual(classifyBlocker('SCOPE NEEDED: src/a.ts and index.ts for commit 8106499e9f').paths, ['src/a.ts', 'index.ts']);
+  assert.deepEqual(classifyBlocker('SCOPE NEEDED: src/foo.ts and server.js for commit 8106499e9f').paths, ['src/foo.ts', 'server.js']);
+  assert.deepEqual(classifyBlocker('SCOPE NEEDED: src/sync.ts (sync.ts reads aheadBy) for commit 8106499e9f').paths, ['src/sync.ts']);
+  assert.deepEqual(classifyBlocker('SCOPE NEEDED: src/github.ts for commit 8106499e9f. The compares come from sync.ts and upgrade.ts too.').paths, ['src/github.ts']);
+  assert.deepEqual(uncoveredBlockerPaths({ plannedFiles: ['src/a.ts'] }, classifyBlocker('SCOPE NEEDED: src/a.ts and index.ts for commit 8106499e9f')), ['index.ts'], 'the blocker stands until the root file is widened too');
+});
+
+test('manual:intervention-pattern-escalation-build — GY-1567 review: a spent runtime account clears only on a profile with an account no session saw spent', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'gy-1567-'));
+  try {
+    const credentialFile = join(directory, 'master.token'), clock = Date.parse('2026-10-09T05:30:00.000Z');
+    const hold = { at: '2026-10-09T05:00:00.000Z', until: '2026-10-09T08:00:00.000Z', resetsAt: '2026-10-09T08:00:00.000Z', reason: 'usage limit reached', role: 'worker', profile: 'one', work: 'GY-1519' };
+    const write = (exhausted: Record<string, unknown>) => writeFile(join(directory, 'master.environments.json'), JSON.stringify({ version: 1, environments: {}, skipped: [], selected: {}, exhausted }));
+    const profile = { name: 'one', principal: 'worker-one', agentName: 'soak-worker-one', mode: 'launch', kind: 'claude', credentialFile: '/outside/one.token', agentArgs: [], approvals: 'auto', environment: {}, accounts: ['claude-a', 'claude-b'] };
+    const cycle = { config: { workers: [profile], credentialFile }, credentials: {}, agents: [], state: { profiles: {} }, clock, snapshot: { work: [] } } as unknown as Cycle;
+    await write({ 'claude-a': hold, 'claude-b': hold });
+    const spent = await launchableProbe(cycle, true);
+    assert.equal(spent.passed, false);
+    assert.match(spent.detail, /every account it launches on is held at its usage limit/);
+    assert.equal((await launchableProbe(cycle)).passed, true, 'a dispatch failure reads only the profile');
+    await write({ 'claude-a': hold });
+    assert.equal((await launchableProbe(cycle, true)).passed, true, 'one account left resumes the kept work');
+    // A profile on its own login is held under its own name.
+    const own = { ...cycle, config: { ...cycle.config, workers: [{ ...profile, accounts: undefined }] } } as unknown as Cycle;
+    await write({ 'profile:one': hold });
+    assert.equal((await launchableProbe(own, true)).passed, false);
+  } finally { await rm(directory, { recursive: true, force: true }); }
 });
