@@ -588,6 +588,7 @@
     "tests/runner-image.test.ts": 282,
     "tests/runner-report.test.ts": 4032,
     "tests/runner-setup.test.ts": 289,
+    "tests/runtime-limit-menu.test.ts": 3000,
     "tests/runtime-screens.test.ts": 2426,
     "tests/scope-approver-routine.test.ts": 5558,
     "tests/scope-directory-collapse.test.ts": 3251,
