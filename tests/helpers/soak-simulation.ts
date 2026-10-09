@@ -70,7 +70,7 @@ import { executorUnit, writeExecutorDeclaration } from '../../src/repository-set
 import { healUserSupervision } from '../../src/user-manager.js';
 import { hostSupervisionKey } from '../../src/daemon/cycle-host.js';
 import { ChildProcessError } from '../../src/child-runner.js';
-import { probeBlocker } from '../../src/daemon/blocker-probes.js';
+import { probeBlocker, sharedGithubStatus } from '../../src/daemon/blocker-probes.js';
 import { type BlockerClass } from '../../src/model/blocker-class.js';
 import { SimulatedGitHub, SimulatedHerdr, SimulatedPi, clock, hour, minute, sha } from './soak-world.js';
 import { mergeStallAttention } from '../../src/cli/master-status.js';
@@ -1042,6 +1042,10 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   // loop ran, the needs-decision item's decision, and the loop's blocker actions.
   const blockerEvents: { key: string; epoch: number; elapsed: number; lease: number | null }[] = [];
   const blockerProbes: { key: string; class: BlockerClass; elapsed: number; passed: boolean }[] = [];
+  // GY-1567: githubstatus.com reports Git Operations down until the github-outage minute; every blocked
+  // item's probe reads it through the loop's shared reader, and each real read is counted.
+  const githubStatusReads: number[] = [];
+  const githubStatus = sharedGithubStatus(async () => { githubStatusReads.push(clock.now() - dayStart); return clock.now() - dayStart < (blockerPlan.clearsAt['github-outage'] ?? 0) ? ['Git Operations (major_outage)'] : []; });
   const blockerDecisions = new Map<string, string>();
   const blockerActions: { elapsed: number; work: string | null; state: string; detail: string }[] = [];
   let blockerKeysPeak = 0;
@@ -1782,6 +1786,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
           run: () => { ran(!failing); if (failing) throw Object.assign(new Error('exit 1'), { stderr: classification.class === 'github-credential' ? 'You are not logged into any GitHub hosts.' : 'Read-only file system' }); return ''; },
           planeHealth: async () => { ran(!failing); return failing ? 'the server answered 500 Internal Server Error on /healthz' : null; },
           baseTip: async () => { ran(false); return github.tip; },
+          githubStatus: async () => { const degraded = await githubStatus(clock.now()); if (degraded?.length) ran(false); return degraded; },
           launch: { kind: workers[0].kind, args: workers[0].agentArgs ?? [], environment: workers[0].environment }, cwd: `/tmp/soak/${work.key}-${work.epoch}`, clock: clock.now(),
         });
       },
@@ -2912,7 +2917,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   return { readinessDay, supervisedDay, stuck, unboundedDay, provisionDay, promotion, throughput, reconciled, outside, items, final, github, sessions, docsSyncRuns, docsSyncRoot, lost, launches, violations, faulted, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, headless, herdr, hand, stranded, withdrawals, resumes, strandedLaunches, escalations, spent, attestations, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, guardReads, checkout, landingRefusals, foreignPane, previousWorktrees, closedLeased,
     mergeQueuePosts, config, refused, decideCalls, restarted, approverPanes, failing, herdrClosed: herdr.closed, diagnosisModel: settings.model, diagnosisRuns: diagnosed, baseBreak, capacityRefused, capacityLaunched, capacityWaiters,
     decided, misreads, prompts, screens, heldAccounts, approverAccounts, retryReset, limitMenuDay, menuReset, menuNotice, exitedLive, exitedClosed, exitedRowsSeen, reassign, workspaceFailures, workspaceCooled, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, fenced, mergeStallSightings, master, baseFailure,
-    blockerEvents, blockerProbes, blockerDecisions, blockerActions, blockerKeysPeak, attempts, lanesSeen, laneApplications, approverWorks, approverDecisions, failover, webhook, remedies, observeRequests, starvation, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size }, mechanical: { ledger, botRounds, misclassified, reviewHolds }, shared, charges: { ...charged, b: charged.b.length, instancesSeen: [...charged.instancesSeen], restarts: chargeRestarts },
+    blockerEvents, blockerProbes, githubStatusReads, blockerDecisions, blockerActions, blockerKeysPeak, attempts, lanesSeen, laneApplications, approverWorks, approverDecisions, failover, webhook, remedies, observeRequests, starvation, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size }, mechanical: { ledger, botRounds, misclassified, reviewHolds }, shared, charges: { ...charged, b: charged.b.length, instancesSeen: [...charged.instancesSeen], restarts: chargeRestarts },
     wakes, lateReading, staleMerges, restartLog, hostDay, guardDay, mainWatchDay, budgetDay, slowPlaneDay, observationDay, deploymentDay, decompositionDay: decompositionHistory, diagnosisRaces, diagnosisRequestRaces, transientRefused, lateReads, staleReleaseDay, drain, acceptanceDay: acceptance?.day ?? null, plannerDay: planner?.day ?? null, loopWakeDay: loopWakeDay || null,
     restartDay: options.checkoutRestart ? restartDay : null, failedLaunches };
 }

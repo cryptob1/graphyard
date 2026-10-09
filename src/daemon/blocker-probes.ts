@@ -256,7 +256,7 @@ export function loopBlockerProbe(config: MasterConfig, root: string, run: ChildR
     return probeBlocker(work, classification, { run: (command, args, options) => run(command, args, { ...options, timeoutMs: 30_000 }), planeHealth,
       baseTip: async () => String(await run('git', ['-C', root, 'ls-remote', 'origin', `refs/heads/${config.baseBranch}`])).split(/\s/)[0] ?? '',
       failedBase: async () => cwd === root ? null : String(await run('git', ['-C', cwd, 'merge-base', 'HEAD', `refs/remotes/origin/${config.baseBranch}`])).trim() || null,
-      githubStatus: () => githubDegraded(), launch, cwd, clock: Date.now(), loopUnit: loopUnitOf(root) });
+      githubStatus: () => loopGithubStatus(Date.now()), launch, cwd, clock: Date.now(), loopUnit: loopUnitOf(root) });
   };
 }
 
@@ -277,3 +277,19 @@ export async function githubDegraded(read: typeof fetch = fetch): Promise<string
     });
   } catch { return null; }
 }
+
+/** How long one githubstatus.com reading answers every github-outage probe: longer than a cycle, so a cycle reads it at most once. */
+export const githubStatusMs = 60_000;
+/**
+ * The GitHub status reading shared by every blocked item (review of GY-1567): GitHub's incident is
+ * one cause for all of them, so however many items stand on it the page is read at most once per
+ * `githubStatusMs`, by whichever probe asks first; the confined push probe stays per launch.
+ */
+export function sharedGithubStatus(read: () => Promise<string[] | null> = () => githubDegraded(), ttlMs = githubStatusMs) {
+  let last: { at: number; reading: Promise<string[] | null> } | null = null;
+  return (clock: number) => {
+    if (!last || clock - last.at >= ttlMs) last = { at: clock, reading: read().catch(() => null) };
+    return last.reading;
+  };
+}
+const loopGithubStatus = sharedGithubStatus();

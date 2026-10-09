@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { blockerView, classifyBlocker, environmentalBlockerClasses, needsSomeone } from '../src/model/blocker-class.js';
-import { githubDegraded, probeBlocker } from '../src/daemon/blocker-probes.js';
+import { githubDegraded, githubStatusMs, probeBlocker, sharedGithubStatus } from '../src/daemon/blocker-probes.js';
 import { readFileSync } from 'node:fs';
 import { uncoveredBlockerPaths } from '../src/model/blocker-class.js';
 import { branchRewriteGuidance, workerPrompt } from '../src/master.js';
@@ -171,6 +171,10 @@ test("manual:intervention-pattern-escalation-build — GY-1461: GitHub's own ser
   assert.equal(await githubDegraded((async () => { throw new Error('offline'); }) as unknown as typeof fetch), null);
   // The Graphyard server's own 500 stays control-plane-error.
   assert.equal(classifyBlocker('graphyard complete failed: HTTP 500 Internal Server Error from the server').class, 'control-plane-error');
+  // Naming the status page is no incident: only the page reporting one is (review of GY-1567).
+  assert.equal(classifyBlocker('complete failed with HTTP 500; githubstatus reports all operational').class, 'control-plane-error');
+  assert.equal(classifyBlocker('git push hangs; githubstatus.com shows no incident').class, 'genuine');
+  assert.equal(classifyBlocker('git push hangs; githubstatus.com reports an incident on Git Operations').class, 'github-outage');
 });
 
 test('manual:intervention-pattern-escalation-build — GY-1272: only repository paths count, so the widened plannedFiles clear the scope blocker', () => {
@@ -182,4 +186,35 @@ test('manual:intervention-pattern-escalation-build — GY-1272: only repository 
   assert.deepEqual(uncoveredBlockerPaths({ plannedFiles: widened }, classification), []);
   // Directory scopes, root files and dotfiles still count.
   assert.deepEqual(classifyBlocker('SCOPE NEEDED: docs/, tests/*, package.json and .gitignore for commit 1a2b3c4d').paths, ['docs/', 'tests/*', 'package.json', '.gitignore']);
+});
+
+test('manual:intervention-pattern-escalation-build — GY-1567 review: however many items stand on a GitHub incident, the status page is read at most once per minute', async () => {
+  let reads = 0;
+  const status = sharedGithubStatus(async () => { reads++; return ['Git Operations (major_outage)']; });
+  const at = Date.parse('2026-10-09T05:00:00.000Z');
+  const answers = await Promise.all(Array.from({ length: 40 }, () => status(at)));
+  assert.equal(reads, 1, 'forty blocked items in one cycle share one read');
+  assert.deepEqual(answers[39], ['Git Operations (major_outage)']);
+  await status(at + githubStatusMs - 1);
+  assert.equal(reads, 1, 'the next cycle inside the minute reuses it');
+  await status(at + githubStatusMs);
+  assert.equal(reads, 2, 'a minute later the page is read again');
+  // A read that throws is an unreadable page, never a pass, and is not retried within the minute.
+  const failing = sharedGithubStatus(async () => { reads++; throw new Error('offline'); });
+  assert.equal(await failing(at), null);
+  assert.equal(await failing(at + 1), null);
+  assert.equal(reads, 3);
+});
+
+test('manual:intervention-pattern-escalation-build — GY-1567 review: a host quota is no runtime exhaustion, and a bare source file still counts when no full path stands beside it', () => {
+  // tests/exhaustion-notice.test.ts already reads this prose as no provider's: neither is it the worker's runtime account.
+  for (const text of ['The suite failed: tmp disk quota is exhausted (a known local issue)', 'write failed: Disk quota exceeded', 'cp: EDQUOT while copying fixtures; quota is exhausted'])
+    assert.notEqual(classifyBlocker(text).class, 'runtime-exhaustion', text);
+  for (const text of ["Worker session's usage limit was reached", 'The runtime account ran out of credits mid-verify', "The provider's quota was exhausted before the push"])
+    assert.equal(classifyBlocker(text).class, 'runtime-exhaustion', text);
+  // A bare root source file is a path when the blocker spells none with its directory; beside full paths it is shorthand.
+  assert.deepEqual(classifyBlocker('SCOPE NEEDED: index.ts for commit 8106499e9f').paths, ['index.ts']);
+  assert.equal(classifyBlocker('SCOPE NEEDED: index.ts for commit 8106499e9f').class, 'planned-file-scope');
+  assert.deepEqual(classifyBlocker('SCOPE NEEDED: server.js and build.sh for commit 8106499e9f').paths, ['server.js', 'build.sh']);
+  assert.deepEqual(classifyBlocker('SCOPE NEEDED: src/github.ts (as sync.ts does, e.g. aheadBy) for commit 8106499e9f').paths, ['src/github.ts']);
 });

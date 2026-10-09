@@ -266,7 +266,7 @@ test('unit:soak-invariants-hold — blocked work unblocks itself: every routine 
     hours: 4, blockers: true,
     plan: { items: blockerPlan.items, releaseEveryMs: 5 * minute, leftovers: 2, slowRecompute: 0, workMs: 15 * minute, rework: new Set(), deaths: new Set(), flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set(), misread: new Set(), exits: new Set(), spentProducer: 0, lostRuns: 0, outOfQueue: { item: 9, afterMs: 99 * hour }, blind: { from: 99 * hour, to: 100 * hour }, split: { at: 99 * hour, item: 9 } },
   });
-  const { items, final, violations, failures, state, herdr, blockerEvents, blockerProbes, blockerDecisions, blockerActions, blockerKeysPeak, attempts } = day;
+  const { items, final, violations, failures, state, herdr, blockerEvents, blockerProbes, githubStatusReads, blockerDecisions, blockerActions, blockerKeysPeak, attempts } = day;
   const repeating = items[blockerPlan.repeating - 1].key, requestError = items[blockerPlan.requestError - 1].key;
   assert.deepEqual(final.filter(item => item.key !== repeating && item.key !== requestError && item.stage !== 'done').map(item => `${item.key} ${item.stage}: ${item.blocker ?? ''} ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'every item but the repeating and request-error ones is delivered');
   assert.deepEqual(violations, [], 'every system invariant holds across the blockers, their probes and their approvers');
@@ -295,6 +295,22 @@ test('unit:soak-invariants-hold — blocked work unblocks itself: every routine 
       assert.ok(clear[0].elapsed <= Math.max(clearsAt, recorded.elapsed) + 2 * minute, `${key} was cleared within two cycles of its cause going (+${clear[0].elapsed / minute} min)`);
     }
   }
+  // GY-1567: causes in the worker's session or at GitHub, not in the item. The refused delivery push
+  // and the spent runtime account cleared within two cycles of being recorded (the attempt had ended;
+  // a profile could launch). The two items on one GitHub incident failed their probes every cycle it
+  // stood, yet githubstatus.com was read at most once per cycle between them, and never afterwards
+  // more often than one read per minute however many probes asked.
+  for (const n of [9, 10]) {
+    const key = items[n - 1].key, recorded = blockerEvents.find(entry => entry.key === key)!;
+    assert.ok(cleared(key)[0].elapsed <= recorded.elapsed + 2 * minute, `${key}'s ${blockerPlan.classes[n]} blocker cleared within two cycles (+${cleared(key)[0].elapsed / minute} min, recorded +${recorded.elapsed / minute} min)`);
+  }
+  const outage = [items[10].key, items[11].key], outageProbes = blockerProbes.filter(probe => outage.includes(probe.key) && probe.class === 'github-outage');
+  const bothFailing = [...new Set(outageProbes.filter(probe => !probe.passed).map(probe => probe.elapsed))].filter(at => outage.every(key => outageProbes.some(probe => probe.key === key && probe.elapsed === at && !probe.passed)));
+  assert.ok(bothFailing.length >= 30, `both github-outage items stood on the incident together for many cycles (${bothFailing.length})`);
+  assert.equal(new Set(githubStatusReads).size, githubStatusReads.length, `no cycle read githubstatus.com twice: ${githubStatusReads.map(at => at / minute).join(', ')}`);
+  assert.ok(githubStatusReads.every((at, index) => index === 0 || at - githubStatusReads[index - 1] >= minute), 'githubstatus.com was read at most once a minute');
+  assert.ok(githubStatusReads.filter(at => bothFailing.includes(at)).length <= bothFailing.length && githubStatusReads.length < outageProbes.length / 1.5,
+    `the status page was read once for both items, not once per item (${githubStatusReads.length} reads for ${outageProbes.length} probes)`);
   // The outside-scope failure cleared on a later base tip than the one it was met on.
   const outside = items[3].key;
   assert.ok(blockerProbes.some(probe => probe.key === outside && probe.class === 'outside-scope-test-failure'), 'the outside-scope blocker read the base tip');
@@ -337,7 +353,7 @@ test('unit:soak-invariants-hold — blocked work unblocks itself: every routine 
   assert.deepEqual(Object.keys(state.actions).filter(key => key.startsWith('blocker:')), [], 'no blocker row outlives its item');
   // Per blocked item: its blocker row and its episode's rows (the failing probe's start and its
   // report to the master, the base tip, the decisions awaited, the approver launched).
-  assert.ok(blockerKeysPeak <= 3 * 8, `the blocker rows stayed bounded by the blocked items (peak ${blockerKeysPeak})`);
+  assert.ok(blockerKeysPeak <= 3 * 12, `the blocker rows stayed bounded by the blocked items (peak ${blockerKeysPeak})`);
 });
 
 test('unit:soak-invariants-hold — rows stalled on the App permission hold across hours of real loop cycles are remedied once per unchanged run: one browser flow and one record per run, a refused remedy escalated once and never retried, rows held together sharing one flow', { timeout: 300_000 }, async () => {

@@ -18,9 +18,14 @@ const branchRewrite = /--force\b|--force-with-lease\b|\bforce[- ]push|\bgit push
 /** A delivery command the worker's runtime refused at its permission prompt: the session's, not the item's, so a fresh launch does not carry it. */
 export const runtimeDenial = (text: string) => runtimeRefusal.test(text) && deliveryCommand.test(text) && !branchRewrite.test(text);
 
-/** The worker's runtime account ran out of usage, so the session stopped: another profile, or the same one once it resets, resumes the kept work. */
-export const runtimeExhaustion = (text: string) =>
-  /\busage limit (?:was |is |has been )?(?:reached|hit|exhausted)|\b(?:reached|hit) (?:its|the|my|their) usage limit|\bout of (?:usage|quota|credits)\b|\b(?:quota|credits?) (?:was |were |is |are |has been )?(?:exhausted|spent|used up)\b/i.test(text);
+// A quota the host keeps (a disk, /tmp, a filesystem) is no runtime account: its remedy is the host's.
+const hostQuota = /\b(?:disk|tmp|\/tmp|filesystem|file system|storage|inode)\s+quota\b|\bEDQUOT\b|\bDisk quota exceeded\b/i;
+/**
+ * The worker's runtime account ran out of usage, so the session stopped: another profile, or the same
+ * one once it resets, resumes the kept work. A quota counts only as the session's or its account's.
+ */
+export const runtimeExhaustion = (text: string) => !hostQuota.test(text) &&
+  /\busage limit (?:was |is |has been )?(?:reached|hit|exhausted)|\b(?:reached|hit) (?:its|the|my|their) usage limit|\b(?:session|account|runtime|provider|subscription|profile)(?:'s)? (?:usage |API )?(?:quota|credits?) (?:was |were |is |are |has been )?(?:exhausted|spent|used up|reached)\b|\b(?:session|account|runtime|provider|profile) (?:ran |is |was )?out of (?:usage|quota|credits)\b/i.test(text);
 
 /**
  * GitHub's own server error on a git or gh operation the worker ran — a push the remote rejected
@@ -28,7 +33,7 @@ export const runtimeExhaustion = (text: string) =>
  * as against the Graphyard server's (control-plane-error): the plane's health cannot show it gone.
  */
 export const githubOutage = (text: string) =>
-  /\[remote rejected\][^\n]*\((?:Internal Server Error|Service Unavailable|Bad Gateway|Gateway Time-?out)\)|\bgithubstatus\b|\b(?:GitHub|github\.com|api\.github\.com)(?:'s)? (?:returned|answered|responded|reports?|incident|outage)\b[^.\n]{0,60}\b(?:50[0234]|Internal Server Error|Service Unavailable|Bad Gateway|incident|outage|degraded)\b/i.test(text);
+  /\[remote rejected\][^\n]*\((?:Internal Server Error|Service Unavailable|Bad Gateway|Gateway Time-?out)\)|\bgithubstatus(?:\.com)?\b[^.\n]{0,80}(?<!\bno )(?<!\bnot )\b(?:incident|outage|degraded|investigating)|\b(?:GitHub|github\.com|api\.github\.com)(?:'s)? (?:returned|answered|responded|reports?|incident|outage)\b[^.\n]{0,60}\b(?:50[0234]|Internal Server Error|Service Unavailable|Bad Gateway|incident|outage|degraded)\b/i.test(text);
 
 /** The GitHub status components a worker's delivery needs: pushing its branch and opening its PR. */
 export const deliveryComponents = ['Git Operations', 'API Requests', 'Pull Requests'] as const;
@@ -36,13 +41,17 @@ export const deliveryComponents = ['Git Operations', 'API Requests', 'Pull Reque
 /**
  * The blocker's named paths that can be repository files a widening covers (GY-1567). Prose is
  * not a path list: a token that continues an API route (`/compare/:range`), a rate (`req/min`), a
- * bare abbreviation (`e.g`) or a bare basename (`sync.ts`) names nothing in the tree. A bare name
- * counts only as a root file or dotfile (`package.json`, `.gitignore`); a nested one counts with a
- * file extension or as a directory scope (`docs/`, `tests/*`).
+ * bare abbreviation (`e.g`) or a source basename written beside full paths (`sync.ts` for
+ * `src/sync.ts`) names nothing in the tree. A bare name counts as a root file or dotfile
+ * (`package.json`, `.gitignore`), and a bare source file (`index.ts`) when the blocker spells no
+ * file with its directory; a nested one counts with a file extension or as a directory scope
+ * (`docs/`, `tests/*`).
  */
 export function blockerPaths(text: string, paths: readonly string[]) {
   const rootFile = /^(?:\.[A-Za-z_][\w.-]*|[\w-]+\.(?:md|json|ya?ml|toml|lock|txt))$/;
+  const sourceFile = /^[\w-]{2,}\.[A-Za-z][A-Za-z0-9]{1,4}$/;
   const lastSegment = /^(?:|\*|[\w.-]*\.[A-Za-z0-9]{1,5})$/;
   const routed = (path: string) => new RegExp(String.raw`[/:]${path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`).test(text);
-  return paths.filter(path => path.includes('/') ? lastSegment.test(path.slice(path.lastIndexOf('/') + 1)) && !routed(path) : rootFile.test(path));
+  const nested = paths.filter(path => path.includes('/') && lastSegment.test(path.slice(path.lastIndexOf('/') + 1)) && !routed(path));
+  return paths.filter(path => nested.includes(path) || (!path.includes('/') && (rootFile.test(path) || (!nested.length && sourceFile.test(path)))));
 }
