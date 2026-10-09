@@ -30,7 +30,7 @@ async function documentedInvariants() {
   return [...line.matchAll(/`([a-z0-9-]+)` \(/g)].map(match => match[1]);
 }
 
-test('unit:soak-lock-refusal-visible — over two simulated days the real loop holds the lock outside the unit while the unit\'s master run is refused on it every cycle: every documented system invariant holds after every cycle, status names the holder on every read with a count that tracks the refusals, and once the holder is gone the unit\'s run takes the lock and status raises nothing', { timeout: 600_000 }, async () => {
+test('unit:soak-lock-refusal-visible — over two simulated days the real loop holds the lock outside the unit while the unit\'s master run is refused on it every cycle: every documented system invariant holds after every cycle, status names the holder on every read with a count that tracks the refusals, and once the holder is gone the unit\'s run takes the lock and status raises nothing', { timeout: 600_000 }, async t => {
   const root = await temporaryDirectory('soak-lock-refusal');
   execFileSync('git', ['init', '-q', root]);
   await mkdir(join(root, '.graphyard'), { recursive: true });
@@ -47,6 +47,8 @@ test('unit:soak-lock-refusal-visible — over two simulated days the real loop h
   // The unsupervised loop's process: its pid is the one on the lock, alive until master restart stops it.
   const holder = spawn('sleep', ['600'], { stdio: 'ignore' });
   const holderPid = holder.pid!;
+  // A failed assertion must not leave the holder holding the test process open for its 600 seconds.
+  t.after(() => { holder.kill('SIGKILL'); });
   /** The cursor as the loop last persisted it: what `master run` and `master status` read. */
   let cursor: DaemonState | null = null;
   const effects = (persist: DaemonEffects['persist'], snapshot: DaemonEffects['snapshot']): DaemonEffects => ({

@@ -726,8 +726,10 @@ test('unit:master-early-stop — a stop signal received during the loop\'s start
     let snapshots = 0, persisted = 0;
     const log: string[] = [];
     const effects = daemonEffects({ persist: async () => { if (persisted++ === 0) process.emit('SIGUSR2' as NodeJS.Signals); }, snapshot: async () => { snapshots++; return { work: [], now: iso(0) }; } });
-    const result = await runDaemon(master, emptyDaemonState(master), effects, { intervalMs: 60_000, identity: { pid: process.pid, host: 'machine-a' }, signals: ['SIGUSR2'], log: line => log.push(line) });
-    assert.equal(result.stopped, true); assert.equal(result.cycles.length, 0); assert.equal(snapshots, 0);
+    // A loop that missed the early stop would cycle and wait for one: the backstop stops it, so a regression fails here rather than hangs.
+    const backstop = setTimeout(() => process.emit('SIGUSR2' as NodeJS.Signals), 5_000);
+    const result = await runDaemon(master, emptyDaemonState(master), effects, { intervalMs: 60_000, identity: { pid: process.pid, host: 'machine-a' }, signals: ['SIGUSR2'], log: line => log.push(line) }).finally(() => clearTimeout(backstop));
+    assert.equal(result.stopped, true); assert.equal(result.cycles.length, 0, 'no cycle runs after a stop received during startup'); assert.equal(snapshots, 0);
     assert.ok(log.some(line => /stopping: left/.test(line)), 'an orderly stop is logged');
     assert.equal(listeners(), before, 'the stop listener is removed');
     // A startup refused on another host's live loop lock rejects and leaves no listener behind.
