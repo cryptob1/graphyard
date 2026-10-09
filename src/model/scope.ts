@@ -281,8 +281,6 @@ export function redecidableScopeRefusal(item: { plannedFiles?: readonly string[]
 
 /** The additive widening a refused request asks the approver for (GY-549): defined beside the fold it proposes, in model/scope-collapse.ts. */
 export { routableScopeRequest };
-/** The ask an ended attempt carried, still the approver's (GY-1568), and whichever of the two the approver judges: in model/scope-collapse.ts. */
-export { routableCarriedRequest, routedScopeRequest } from './scope-collapse.js';
 /** Whether the standing refusal is the terminal over-cap one `master scope` can never carry (GY-936): defined beside the fold, in model/scope-collapse.ts. */
 export { terminalScopeRefusal };
 

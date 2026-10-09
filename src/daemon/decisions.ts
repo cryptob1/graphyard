@@ -1,7 +1,7 @@
 // Concern: routine decisions — standing verdicts, decision reasons and the approver step.
 import { type Work, type AgentReview, reviewProviderOf, RefusedResponse } from '../model.js';
-import { routedScopeRequest, scopeDecisionBinding, scopeDecisionReason, scopeRefusalBlocker, unplannedPaths } from '../model/scope.js';
-import { widenedPlannedFiles } from '../model/scope-collapse.js';
+import { scopeDecisionBinding, scopeDecisionReason, scopeRefusalBlocker, unplannedPaths } from '../model/scope.js';
+import { routedScopeRequest, widenedPlannedFiles } from '../model/scope-collapse.js';
 import { itemBlockerClass, maxAutomaticClears, uncoveredBlockerPaths } from '../model/blocker-class.js';
 import { baseRefreshConflict, checkRerunHeld, ciAppIdsOf, requiredCheck, requiredCheckRun, requiredChecksOf, threadsAwaitReview, botThread, openThreads, pendingBaseRefresh, type ReviewThread, describeThread } from '../merge-queue.js';
 import { mechanicalFailure, mechanicalProof, mechanicalVerdicts, producerManualFailure, producerManualFailures } from '../model/mechanical-proofs.js';

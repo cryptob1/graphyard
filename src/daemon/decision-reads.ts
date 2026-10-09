@@ -1,7 +1,7 @@
 // Concern: the decision histories the decisions step reads, kept across cycles (GY-1142).
 import type { Work } from '../model.js';
 import { approvalApplyGraceMs, situationLabel, stalledApproval, supersededSituation, type DecisionSituation } from '../model/approval.js';
-import { routedScopeRequest } from '../model/scope.js';
+import { routedScopeRequest } from '../model/scope-collapse.js';
 import type { ApprovalWatch, DaemonAction, DaemonState } from './state.js';
 import type { FaultKind } from '../model/fault-classes.js';
 import { planeUnavailableText } from '../model/refusal.js';
