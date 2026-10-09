@@ -3,6 +3,9 @@ import { directMergeLine, docsBudgetAttention, mergeWriterLine } from './status-
 import { masterBoard } from '../model/board.js';
 import { humanOnlyStatusRow, type HumanRequestRow } from '../model/human-request.js';
 import { branchReport, mergeProtocolSkew, profileConcurrency, reclaimIdleMs, type AttentionItem, type MasterConfig } from '../master.js';
+import { launchStartMs, readSessionScreen } from '../master/launch.js';
+import { readApproverLaunches } from '../master/autonomy.js';
+import { stallScreenLines } from '../master/approver-stall.js';
 import { reviewLedgerSpec, sessionLedgerHeadroom } from '../reviewer.js';
 import { producerLedgerSpec } from '../producer.js';
 import { actionReport, sessionReport } from './loop-report.js';
@@ -145,7 +148,9 @@ export async function assembleReportedAttention(
   if (summarized.summary.error) sections.mark('interventions', interventionSummaryRoute, summarized.summary.error);
   const interventions = { ...summarized, summary: { ...summarized.summary, ...reports.freshness() } };
   const releases = executorFleetReport(await readExecutorRegistrations(master).catch(() => []), { commit: observed.commit ?? readCommit(root) }, { hostId: master.hostId });
-  const decisions = await timedStep('attention: decisions', () => sections.optional('decisions', 'GET /api/work/:id/decisions', () => terminalDecisions(masterApi, snapshot.work, { approvals: observed.approvals, runtime: observed.runtime, now: Date.now() }),
+  const decisions = await timedStep('attention: decisions', () => sections.optional('decisions', 'GET /api/work/:id/decisions', async () => terminalDecisions(masterApi, snapshot.work, { approvals: observed.approvals, runtime: observed.runtime, now: Date.now(),
+    // GY-1598: the launch records `master approver` judges a listed approver's age by, so the command status names succeeds.
+    starts: { records: await readApproverLaunches(root).catch(() => []), boundMs: launchStartMs(master), read: agent => readSessionScreen(agent.pane_id ?? agent.name!, undefined, stallScreenLines) } }),
     () => ({ listed: [], attentionItems: [] as AttentionItem[], unanswered: [], refused: 0 })));
   const throughput = await timedStep('attention: throughput', () => throughputStatus(root, coordinator, snapshot.work));
   // The readings judge the snapshot's leases and sessions at the snapshot's own instant (GY-1379): the

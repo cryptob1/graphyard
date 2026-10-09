@@ -1,10 +1,12 @@
 // Concern: approver sessions — launch, supervise, fail over, close and record how they ended, for the loop's own and hand-launched approvers.
 import type { Work } from '../model.js';
 import { approverRuntime } from '../master/autonomy.js';
+import { type ScreenMotion, screenMotion, stallScreenLines } from '../master/approver-stall.js';
+import { launchStartMs } from '../master/launch.js';
 import { type HerdrAgent, type RoleCapacity, approverProfile, ownLoginAccounts, approverSessionId, approverSessionName } from '../master.js';
 import { type ApprovalWatch, approvalWatchSchema, type DaemonActionKind, message } from './state.js';
 import { readyToRetry } from './sessions.js';
-import { approvalStep, type ApprovalStep, approverLaunchKey, approverPrefixes, boundDetail, handWatchPrefix, maxApproverCloses, maxApproverLaunches, maxDecisionRequests, maxLostApproverRuns, lostRunRefunded, recordWatchEnded } from './decisions.js';
+import { approvalStep, type ApprovalStep, approverLaunchKey, approverSettleMs, approverPrefixes, boundDetail, handWatchPrefix, maxApproverCloses, maxApproverLaunches, maxDecisionRequests, maxLostApproverRuns, lostRunRefunded, recordWatchEnded } from './decisions.js';
 import { type DaemonEffects, failoverKey, record, stoppedStates } from './effects.js';
 import { capacityRefusal, unknownRegistrySession } from '../fleet.js';
 import type { Cycle } from './cycle.js';
@@ -211,7 +213,7 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
     // A headless approver (GY-169) reports its run when it ends; the watch keeps it, and the next
     // cycle reads the verdict it applied back from the control plane like any other.
     launched?.settled?.then(async record => { if (watch.agentName === launched.agentName) { watch.run = record; await effects.persist(state); } }).catch(() => { /* the next cycle judges the decision itself */ });
-    return `launched independent approver session ${watch.agentName}${watch.account ? ` on ${watch.account}` : ''} (launch ${watch.launches} of ${maxApproverLaunches})`;
+    return `${launched?.replaced ? `${launched.replaced}; ` : ''}launched independent approver session ${watch.agentName}${watch.account ? ` on ${watch.account}` : ''} (launch ${watch.launches} of ${maxApproverLaunches})`;
   };
   /**
    * An approver that stopped on its provider's limit notice (GY-182) has judged nothing and never
@@ -262,6 +264,34 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
       performed.push(await record(state, key, { kind: 'failover', work: item.key, principal: null, state: 'failed', detail: `approver session ${watch.agentName ?? '(closed)'} for ${item.key} exhausted ${spentOn} (${signal.reason}) but could not be failed over: ${message(error)}`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
     }
     return true;
+  };
+  /**
+   * GY-1598. What `approvalStep` needs to end a stopped approver the way `master approver` would: its start bound, and for an idle
+   * one past it, whether its screen stays still across a pause and shows no trace of its decision. Herdr reports a long or silent
+   * command as idle, so the loop reads the screen before ending it; a session in a pane other than its watch's is unread, so it waits
+   * for the judge bound. A loop that reads no screens judges by status and age alone. Every watched idle approver's screen is read
+   * together on the cycle's first need, across one shared pause, so a fleet of idle approvers costs the cycle one pause, not one each.
+   */
+  let screens: { seen: unknown; reads: Map<string, Promise<ScreenMotion>> } | null = null;
+  const idleCandidate = (watch: ApprovalWatch, seen: { agents: HerdrAgent[]; available: boolean }, startMs: number) => {
+    const agent = seen.available ? seen.agents.find(candidate => candidate.name === watch.agentName) : undefined;
+    return agent?.agent_status === 'idle' && agent.pane_id && clock - Date.parse(watch.launchedAt ?? watch.requestedAt) >= Math.max(approverSettleMs, startMs) ? agent : undefined;
+  };
+  const readScreen = (agent: HerdrAgent, decision: string) => screenMotion(() => effects.sessionOutput!(agent, stallScreenLines), decision, effects.idleScreenPauseMs);
+  const stallInputs = async (watch: ApprovalWatch, judged: { state: string } | null | undefined, seen: { agents: HerdrAgent[]; available: boolean }) => {
+    const startMs = launchStartMs(config), agent = judged?.state === 'requested' ? idleCandidate(watch, seen, startMs) : undefined;
+    if (!agent || !effects.sessionOutput) return { startMs };
+    if (watch.pane && watch.pane !== agent.pane_id) return { startMs, screen: 'unreadable' as const };
+    if (screens?.seen !== seen) {
+      screens = { seen, reads: new Map() };
+      for (const other of Object.values(state.approvals)) {
+        const idle = !other.settledAt && !other.exhaustedAt ? idleCandidate(other, seen, startMs) : undefined;
+        if (idle && (!other.pane || other.pane === idle.pane_id) && !screens.reads.has(idle.pane_id!)) screens.reads.set(idle.pane_id!, readScreen(idle, other.decision));
+      }
+    }
+    const read = screens.reads.get(agent.pane_id!) ?? readScreen(agent, watch.decision);
+    screens.reads.set(agent.pane_id!, read);
+    return { startMs, screen: await read };
   };
   const escalateUnjudged = async (item: Work, watch: ApprovalWatch, detail: string) => {
     watch.exhaustedAt = stamp;
@@ -421,7 +451,7 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
           await note(`approver:${watch.decision}:rewatched:${watch.launchedAt}`, item, 'decision', 'done', `Watching approver session ${agent.name}, put to ${item.key} decision ${watch.decision} again after its earlier sessions were spent`);
         }
         if ((!judged || judged.state === 'requested') && await approverExhausted(item, watch)) continue;
-        const step = approvalStep({ ...watch, launchedAt: watch.launchedAt ?? watch.requestedAt }, judged, seen, clock);
+        const step = approvalStep({ ...watch, launchedAt: watch.launchedAt ?? watch.requestedAt }, judged, seen, clock, await stallInputs({ ...watch, launchedAt: watch.launchedAt ?? watch.requestedAt }, judged, seen));
         if (step.step === 'wait') continue;
         // GY-1300: an approved decision is judged. Its session is put down, never replaced, and the control plane is asked to apply
         // what was approved; the next cycle finds it settled and lets the watch go.
@@ -463,5 +493,5 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
     for (const entry of ended) performed.push(await record(state, `registry:end:${entry.session}`, { kind: 'close', work: entry.work, principal: null, state: 'done',
       detail: `Ended the ${entry.role} registry session ${entry.session} on ${entry.account}${entry.work ? ` for ${entry.work}` : ''}: ${entry.reason}`, attempts: 1, cycle: state.cycle }, now(), effects.persist));
   }); };
-  return { sessions, invalidate, endApproverSession, endWatchSession, closeApprover, capacityRelaunchWaits, launch, approverExhausted, escalateUnjudged, actOnStep, superviseHandApprovers, reconcileRegistrySessions };
+  return { sessions, invalidate, endApproverSession, endWatchSession, closeApprover, capacityRelaunchWaits, launch, approverExhausted, stallInputs, escalateUnjudged, actOnStep, superviseHandApprovers, reconcileRegistrySessions };
 }
