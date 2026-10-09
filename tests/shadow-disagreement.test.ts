@@ -413,6 +413,16 @@ test('unit:cycle-shadow-disagreement-explanation — the GY-1535 head 77da3de0 (
   assert.equal(trialFailureCause(groups),
     'integration:worktree-dependency-reuse (tests/worktree-reclaim.test.ts): AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal; unit:other (tests/other.test.ts): Error: second group');
   assert.doesNotMatch(trialFailureCause(groups)!, /failing tests|unit:between/);
+  // The recorded tail keeps only its last characters: one that starts after the `failing tests:`
+  // heading still names the complete entries it carries, not missing evidence.
+  const cut = gy1535.logTail.slice(gy1535.logTail.indexOf('test at '));
+  assert.equal(trialFailureCause(cut), trialFailureCause(gy1535.logTail));
+  assert.equal(trialFailureCause(gy1528LogTail.slice(gy1528LogTail.indexOf('✖ integration:'))),
+    'integration:worktree-dependency-reuse: AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal');
+  assert.match(shadowDisagreementDetail({ ...verdict('GY-9', { tests: gy1535.tests }), logTail: cut }), /the trial log names integration:worktree-dependency-reuse \(tests\/worktree-reclaim\.test\.ts\)/);
+  // A tail cut inside an entry's error lines skips them and names the next complete entry.
+  assert.equal(trialFailureCause(['  + []', '  - ]', '', 'test at tests/other.test.ts:2:3', '✖ unit:other — breaks (2ms)', '  Error: cut', '[exit status 1]'].join('\n')),
+    'unit:other (tests/other.test.ts): Error: cut');
   // The loop's cursor drops the log but keeps the cause, and its strict schema accepts it.
   const kept = cursorVerdict({ ...verdict('GY-1535', { head: gy1535.head, baseTip: gy1535.baseTip, mergeSha: gy1535.mergeSha, tests: gy1535.tests }), logTail: gy1535.logTail });
   assert.equal('logTail' in kept, false);

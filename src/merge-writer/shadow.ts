@@ -170,7 +170,8 @@ const testId = (line: string) => line.replace(/^\s*✖\s*/, '').replace(/\s*\([\
 
 /**
  * The failing cause a trial's log tail names, or null when it names none (GY-1564): the node test
- * runner's `failing tests:` summaries (each test, its file and its first error line, once), else TAP
+ * runner's `failing tests:` summaries (each test, its file and its first error line, once; a summary
+ * whose heading the tail cut off included), else TAP
  * `not ok` lines, else the first TypeScript error of a failed build. ANSI escapes are stripped first.
  */
 export function trialFailureCause(logTail: string | undefined | null): string | null {
@@ -179,7 +180,9 @@ export function trialFailureCause(logTail: string | undefined | null): string | 
   const named: string[] = [];
   // A trial concatenates its groups' output, so the log may carry one summary per failed group: each
   // `failing tests:` heading opens a summary, and an unindented line that is neither a test nor its file closes it.
-  let inSummary = false, file: string | null = null;
+  // The tail is cut to its last characters, so it may start inside a summary whose heading was cut off:
+  // complete entries before any other unindented line are read as that summary's.
+  let inSummary = true, file: string | null = null;
   for (let index = 0; index < lines.length; index++) {
     const line = lines[index]!;
     if (/^\s*✖ failing tests:\s*$/.test(line)) { inSummary = true; file = null; continue; }
