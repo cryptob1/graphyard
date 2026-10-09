@@ -53,8 +53,13 @@ export async function reconstructedHold(held: ObservedExhaustion, launched?: { i
  * Whether a hold recorded under an environment's name was spent on that environment (GY-1574): a hold
  * that names the home its session ran in holds a same-named environment on another home (a legacy
  * configured environment named like a registry account) only as a twin of the same login, never by name.
+ * A hold saved before holds named their home is judged by the home the environment log recorded for
+ * that name, the one its session launched in; only with neither known does the name decide.
  */
-export const spentHere = (held: ObservedExhaustion | undefined, environment: { home: string }) => !!held && (!held.home || resolve(held.home) === resolve(environment.home));
+export const spentHere = (held: ObservedExhaustion | undefined, environment: { home: string }, launched?: { home?: string }) => {
+  const home = held?.home ?? launched?.home;
+  return !!held && (!home || resolve(home) === resolve(environment.home));
+};
 /**
  * A held account on the same provider login as `name` (GY-1573): one a session saw spent with a known
  * reset holds every configured environment logged in to that subscription until the same reset. The
@@ -66,7 +71,7 @@ export const spentHere = (held: ObservedExhaustion | undefined, environment: { h
  */
 export async function heldTwin(environments: readonly AgentEnvironment[], held: Record<string, ObservedExhaustion>, name: string, known: Record<string, { identity?: string | null; kind?: string; home?: string }> = {}) {
   const self = environments.find(environment => environment.name === name);
-  const candidates = self ? Object.entries(held).filter(([other, entry]) => entry.resetsAt && (other !== name || !spentHere(entry, self))) : [];
+  const candidates = self ? Object.entries(held).filter(([other, entry]) => entry.resetsAt && (other !== name || !spentHere(entry, self, known[name]))) : [];
   const read = async (kind: string, home: string, recorded?: { identity?: string | null; home?: string }) => {
     const identity = await providerIdentity(kind, home);
     return identity !== undefined ? identity : recorded && (!recorded.home || resolve(recorded.home) === resolve(home)) ? recorded.identity ?? null : null;
@@ -84,10 +89,13 @@ export async function heldTwin(environments: readonly AgentEnvironment[], held: 
 /**
  * What this host tells the registry of an account it probed (GY-1574): one a session here saw spent
  * reads as that hold, and one on the login of a hold with a known reset reads spent until that reset,
- * so no role's probe launches on, or clears the mark of, an account held here or held as a twin.
+ * so no role's probe launches on, or clears the mark of, an account held here or held as a twin. A
+ * same-named hold spent on another home (a legacy configured environment named like the account) and
+ * on a login other than the one probed is not this account's: it holds the account only as a twin would.
  */
 export function heldOverlay(held: Record<string, ObservedExhaustion>, account: string, quota: QuotaObservation): QuotaObservation {
-  if (held[account]) return heldObservation(account, held[account], quota);
+  const own = held[account];
+  if (own && !(own.home && own.identity && quota.identity && own.identity !== quota.identity)) return heldObservation(account, own, quota);
   const twin = quota.identity ? Object.entries(held).find(([, entry]) => entry.resetsAt && entry.identity === quota.identity) : undefined;
   return twin ? { ...quota, state: 'exhausted', resetsAt: twin[1].until, reason: `${account} is the same provider login as ${describeObservedExhaustion(twin[0], twin[1])}`.slice(0, 500) } : quota;
 }

@@ -487,7 +487,7 @@ export async function selectAccount(config: Pick<MasterConfig, 'environments' | 
     if (!environment) { skipped.push({ at, role, profile: profile.name, environment: name, reason: `${name} is not a configured agent environment; run master environments --apply`, work: probe.work ?? null, cause: 'unconfigured' }); continue; }
     if (profile.kind && environment.kind !== profile.kind && sameRuntimeRoles.includes(role)) { skipped.push({ at, role, profile: profile.name, environment: name, reason: crossRuntimeSkip(role, profile, environment), work: probe.work ?? null, cause: 'cross-runtime' }); continue; }
     // What a session itself reported outranks the provider's usage read, which may lag or not exist.
-    if (spentHere(held[name], environment)) { skipped.push({ at, role, profile: profile.name, environment: name, reason: describeObservedExhaustion(name, held[name]), work: probe.work ?? null, cause: 'exhausted' }); continue; }
+    if (spentHere(held[name], environment, known[name])) { skipped.push({ at, role, profile: profile.name, environment: name, reason: describeObservedExhaustion(name, held[name]), work: probe.work ?? null, cause: 'exhausted' }); continue; }
     const twin = await heldTwin(config.environments ?? [], held, name, known);
     if (twin) { skipped.push({ at, role, profile: profile.name, environment: name, reason: twin.reason, work: probe.work ?? null, cause: 'exhausted' }); continue; }
     const health = await checkAgentEnvironment(environment, { ...probe, ceilingPercent: probe.ceilingPercent ?? config.run.quotaCeilingPercent });
@@ -645,7 +645,7 @@ export async function inspectProfileAccounts<T extends { available: boolean; rea
       if (!environment) { accounts.push({ environment: name, healthy: false, reason: `${name} is not a configured agent environment`, quota: 'unknown', resetsAt: null }); continue; }
       // As selectAccount passes it over (GY-1306), an account of another runtime launches nothing for this role.
       if (profile.kind && environment.kind !== profile.kind && sameRuntimeRoles.includes(role)) { accounts.push({ environment: name, healthy: false, reason: crossRuntimeSkip(role, profile, environment), quota: 'unknown', resetsAt: null }); continue; }
-      if (spentHere(held[name], environment)) { accounts.push({ environment: name, healthy: false, reason: describeObservedExhaustion(name, held[name]), quota: 'exhausted', resetsAt: held[name].resetsAt }); continue; }
+      if (spentHere(held[name], environment, known[name])) { accounts.push({ environment: name, healthy: false, reason: describeObservedExhaustion(name, held[name]), quota: 'exhausted', resetsAt: held[name].resetsAt }); continue; }
       const twin = await heldTwin(config.environments ?? [], held, name, known);
       if (twin) { accounts.push({ environment: name, healthy: false, reason: twin.reason, quota: 'exhausted', resetsAt: twin.held.resetsAt }); continue; }
       const checked = await checkAgentEnvironment(environment, { ...probe, ceilingPercent: probe.ceilingPercent ?? config.run.quotaCeilingPercent });

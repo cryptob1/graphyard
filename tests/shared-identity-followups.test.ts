@@ -11,6 +11,8 @@ import { plannerEffects } from '../src/daemon/planner.js';
 import { acceptanceEffects } from '../src/daemon/acceptance.js';
 import { doctorEffects } from '../src/daemon/doctor.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { claudeHomes as loopHomes, controlPlane, heldAccountLoop, loopConfig, registryOf as loopRegistryOf } from './helpers/held-account-loop.js';
+import { clock, minute } from './helpers/soak-world.js';
 
 /**
  * GY-1574: follow-ups from GY-1573's shared-identity holds. An operator quota mark naming identity
@@ -67,6 +69,8 @@ async function writeHolds(config: { credentialFile: string }, exhausted: Record<
   const log = await environments.readEnvironmentLog(config);
   await writeFile(environments.environmentLogPath(config), JSON.stringify({ ...log, environments: { ...log.environments, ...logged }, exhausted }));
 }
+const loopRegistry = (homes: Record<'claude-a' | 'claude' | 'claude-c', string>, at: string) =>
+  loopRegistryOf((['claude-a', 'claude', 'claude-c'] as const).map(name => ({ name, home: homes[name] })), [{ name: 'doctor', accounts: ['claude', 'claude-c'] }], at);
 const health = (name: string, home: string, identity: string | null) => ({ name, kind: 'claude', home, variable: 'CLAUDE_CONFIG_DIR', checkedAt: new Date(spentAt).toISOString(), loggedIn: true, quota: 'unknown', usage: [], healthy: true, reason: null, note: null, login: null, identity });
 
 test('unit:quota-mark-explicit-null-identity — an operator quota mark naming identity null clears the recorded provider identity; a mark omitting identity keeps the last one', () => {
@@ -123,6 +127,18 @@ test('unit:legacy-environment-twin-by-home — a legacy configured environment n
   const twins = [{ name: 'claude-a', kind: 'claude' as const, home: homes['claude-c'] }, { name: 'claude', kind: 'claude' as const, home: homes.claude }, { name: 'claude-c', kind: 'claude' as const, home: homes['claude-c'] }];
   assert.match((await heldTwin(twins, legacyHeld, 'claude', logged))!.reason, /^claude is the same provider login as claude-a/, 'the spent login\'s twin is held');
   assert.equal(await heldTwin(twins, legacyHeld, 'claude-c', logged), null, 'the configured home\'s login is not');
+  // Nor is the same-named legacy environment on that other home held by the name: the logged launch home decides.
+  assert.equal(environments.spentHere(legacyHeld['claude-a'], twins[0], logged['claude-a']), false);
+  assert.equal(environments.spentHere(legacyHeld['claude-a'], { home: homes['claude-a'] }, logged['claude-a']), true);
+  assert.equal(await heldTwin(twins, legacyHeld, 'claude-a', logged), null);
+  const legacyLaunch = await selectAccount({ ...legacy, environments: twins, run: masterConfigSchema.shape.run.parse({}) }, 'worker', { name: 'builder', accounts: ['claude-a'] }, { quota: false, cacheMs: 0, now: () => now });
+  assert.equal(legacyLaunch.account?.home, homes['claude-c'], 'the legacy environment launches on its own login');
+
+  // What this host reports to the registry: a same-named hold spent on another home and another login is not the probed account's.
+  const other = await providerIdentity('claude', homes['claude-c']), probedQuota = (identity: string | null | undefined): QuotaObservation => ({ loggedIn: true, state: 'available', usage: [], resetsAt: null, reason: null, identity });
+  assert.equal(environments.heldOverlay(held, 'claude-a', probedQuota(other)).state, 'available', 'a registry account on another login is not held by the shared name');
+  assert.equal(environments.heldOverlay(held, 'claude-a', probedQuota(held['claude-a'].identity)).state, 'exhausted', 'the spent login reads spent');
+  assert.equal(environments.heldOverlay(held, 'claude-a', probedQuota(null)).state, 'exhausted', 'an unknown login is held by the name');
 
   // An unreadable login falls back to the identity the log recorded only when it was read from the same home.
   const unreadable = await scratch('followups-unreadable');
@@ -151,49 +167,61 @@ test('unit:exhaustion-hold-observe-retried — a transient failure of the immedi
   assert.equal((await observedExhaustions(down, now))['claude-a'].reported, false);
 });
 
-test('unit:pending-exhaustion-report-retried-across-cycles — a failed report stays pending and is retried each loop cycle within its timeout, is marked reported once the registry answers, and leaves the pending set at its reset', async () => {
+test('unit:pending-exhaustion-report-retried-across-cycles — under the real loop a failed report stays pending and is resent each cycle within its timeout, is delivered once the registry answers, and leaves the pending set at its reset', { timeout: 60_000 }, async () => {
   const root = await scratch('followups-cycles');
-  const registry = twinElsewhere();
-  const config = { credentialFile: join(root, 'coordinator.token'), hostId: HOST, url: 'https://graphyard.example' };
-  await writeFile(config.credentialFile, token, { mode: 0o600 });
-  await recordObservedExhaustion(config, 'claude-a', { ...spent, identity: shared }, now, { registry: { observe: async () => { throw new Error('control plane down'); } } });
-  assert.equal((await observedExhaustions(config, now))['claude-a'].reported, false);
+  const homes = await loopHomes(root, spentAt + 7 * 86_400_000);
+  const config = await loopConfig(root);
+  const registry = { current: loopRegistry(homes, new Date(spentAt - 3_600_000).toISOString()) };
+  probed(registry.current, HOST, [{ account: 'claude', identity: shared }]);
+  const plane = controlPlane(registry), loop = heldAccountLoop(config, root, plane.fetcher);
+  const sends = () => plane.observes.filter(observe => observe.accounts.includes('claude-a'));
+  clock.install(now);
+  try {
+    // claude-a is spent while the control plane is down: the immediate report and its retry both fail.
+    plane.mode = 'down';
+    await recordObservedExhaustion({ ...config, environments: [] }, 'claude-a', { ...spent, identity: shared }, Date.now(), { fetch: plane.fetcher });
+    assert.equal(sends().length, 2, 'reported at once, and retried at once');
+    assert.equal((await observedExhaustions(config))['claude-a'].reported, false);
 
-  const timeoutMs = 200, sent: string[][] = [];
-  // Cycle 1: the control plane never answers; the observe is abandoned at its timeout, not waited on.
-  const hanging: typeof fetch = (_url, init) => new Promise((_, reject) => init!.signal!.addEventListener('abort', () => reject(init!.signal!.reason)));
-  const started = Date.now();
-  await assert.rejects(reportPendingExhaustions(config, { fetch: hanging, timeoutMs }, now), /unreachable/);
-  assert.ok(Date.now() - started < timeoutMs + 2_000, 'the cycle is bounded by the observe timeout');
-  assert.equal((await observedExhaustions(config, now))['claude-a'].reported, false);
-  // Cycle 2: it answers 503.
-  await assert.rejects(reportPendingExhaustions(config, { fetch: async () => new Response('{"error":"unavailable"}', { status: 503 }), timeoutMs }, now + 5_000), /answered 503/);
-  assert.equal((await observedExhaustions(config, now))['claude-a'].reported, false);
-  assert.equal(twinHeld(registry), null, 'the registry has not heard of the hold yet');
-  // Cycle 3: it answers.
-  const answering: typeof fetch = async (url, init) => {
-    assert.match(String(url), /\/api\/agent-registry\/observe$/);
-    assert.ok(init?.signal, 'every report is bounded by a timeout');
-    const request = JSON.parse(String(init!.body)) as ObserveRequest;
-    sent.push(request.observations.map(entry => entry.account));
-    foldObservations(registry, request, { actor: 'executor', at: new Date(now).toISOString() });
-    return new Response(JSON.stringify(registry), { status: 200 });
-  };
-  assert.equal(await reportPendingExhaustions(config, { fetch: answering, timeoutMs }, now + 10_000), 1);
-  assert.deepEqual(sent, [['claude-a']]);
-  assert.equal((await observedExhaustions(config, now))['claude-a'].reported, true);
-  assert.match(twinHeld(registry)!, /same provider login as claude-a/);
-  assert.equal(await reportPendingExhaustions(config, { fetch: answering, timeoutMs }, now + 15_000), 0, 'a delivered hold is not sent again');
+    // Cycle 1: the control plane never answers; the loop's report is abandoned at its five-second timeout, and the cycle goes on.
+    plane.mode = 'hanging';
+    const started = performance.now();
+    await loop.cycle();
+    assert.ok(performance.now() - started < 5_000 + 3_000, `the cycle is bounded by the observe timeout: ${Math.round(performance.now() - started)} ms`);
+    assert.equal(sends().length, 3, 'the cycle resent the pending hold');
+    assert.ok(sends().every(observe => observe.bounded), 'every report carries its timeout');
+    assert.equal((await observedExhaustions(config))['claude-a'].reported, false);
+    // Cycles 2 and 3: it answers 503; each cycle resends the hold, and it stays pending.
+    for (const cycle of [2, 3]) {
+      clock.advance(minute);
+      plane.mode = 'down';
+      await loop.cycle();
+      assert.equal(sends().length, cycle + 2, `cycle ${cycle} resent the hold`);
+      assert.equal((await observedExhaustions(config))['claude-a'].reported, false);
+    }
+    assert.notEqual(account(registry.current, 'claude-a').quota.state, 'exhausted', 'the registry has not heard of the hold yet');
+    // Cycle 4: it answers, and the hold is delivered.
+    clock.advance(minute);
+    plane.mode = 'up';
+    await loop.cycle();
+    assert.deepEqual(sends().map(observe => observe.delivered), [false, false, false, false, false, true]);
+    assert.equal((await observedExhaustions(config))['claude-a'].reported, true);
+    assert.equal(account(registry.current, 'claude-a').quota.state, 'exhausted');
+    assert.match(accountIneligibility(registry.current, account(registry.current, 'claude'), Date.now(), HOST)!, /same provider login as claude-a/, 'the twin is held fleet-wide');
+    // Later cycles send a delivered hold no more.
+    for (let cycle = 0; cycle < 3; cycle++) { clock.advance(minute); await loop.cycle(); }
+    assert.equal(sends().length, 6, 'a delivered hold is not sent again');
 
-  // A hold that never landed drops out of the pending set once its reset has passed.
-  const lapsed = { ...config, credentialFile: join(root, 'lapsed.token') };
-  await writeFile(lapsed.credentialFile, token, { mode: 0o600 });
-  await recordObservedExhaustion(lapsed, 'claude-a', { ...spent, identity: shared }, now, { registry: { observe: async () => { throw new Error('control plane down'); } } });
-  let asked = 0;
-  const counting: typeof fetch = async (...args) => { asked++; return answering(...args); };
-  assert.equal(await reportPendingExhaustions(lapsed, { fetch: counting, timeoutMs }, Date.parse(resetsAt) + 1), 0);
-  assert.equal(asked, 0, 'nothing past its reset is reported');
-  assert.deepEqual(await observedExhaustions(lapsed, Date.parse(resetsAt) + 1), {});
+    // A hold that never landed is resent until its reset and drops out of the pending set once it passes.
+    plane.mode = 'down';
+    await recordObservedExhaustion({ ...config, environments: [] }, 'claude-c', { ...spent, resetsAt: new Date(Date.now() + 10 * minute).toISOString() }, Date.now(), { fetch: plane.fetcher });
+    const lapsing = () => plane.observes.filter(observe => observe.accounts.includes('claude-c')).length;
+    clock.advance(minute); await loop.cycle();
+    assert.equal(lapsing(), 3, 'pending: resent by the cycle');
+    clock.advance(10 * minute); await loop.cycle();
+    assert.equal(lapsing(), 3, 'nothing past its reset is reported');
+    assert.equal((await observedExhaustions(config)).hasOwnProperty('claude-c'), false);
+  } finally { clock.uninstall(); }
 });
 
 test('unit:legacy-hold-without-reported-is-pending — a hold saved before `reported` existed is sent to the registry like a reported:false hold', async () => {
