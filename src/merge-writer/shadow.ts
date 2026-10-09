@@ -164,16 +164,18 @@ export function shadowGateAttention(verdicts: readonly ShadowVerdict[], explanat
 
 /** The longest failing cause a verdict keeps: a few test names and the first error line of each. */
 export const trialCauseLength = 400;
+// A trial keeps FORCE_COLOR, so the runner's summary may carry ANSI escapes before every line it prints.
+const ansiEscape = /\u001b\[[0-9;?]*[ -/]*[@-~]/g;
 const testId = (line: string) => line.replace(/^\s*✖\s*/, '').replace(/\s*\([\d.]+m?s\)\s*$/, '').split(' — ')[0]!.trim();
 
 /**
  * The failing cause a trial's log tail names, or null when it names none (GY-1564): the node test
  * runner's `failing tests:` summary (each test, its file and its first error line), else TAP
- * `not ok` lines, else the first TypeScript error of a failed build.
+ * `not ok` lines, else the first TypeScript error of a failed build. ANSI escapes are stripped first.
  */
 export function trialFailureCause(logTail: string | undefined | null): string | null {
   if (!logTail) return null;
-  const lines = logTail.split('\n');
+  const lines = logTail.replace(ansiEscape, '').split('\n');
   const named: string[] = [];
   const summary = lines.findIndex(line => /^\s*✖ failing tests:\s*$/.test(line));
   if (summary >= 0) {

@@ -383,6 +383,9 @@ const gy1535 = {
 test('unit:cycle-shadow-disagreement-explanation — the GY-1535 head 77da3de0 shadow-only-fail (trial merge 953e1ac6) names the failing test, file and error its trial record carries, from the cursor and from the ledger', async () => {
   assert.equal(trialFailureCause(gy1535.logTail),
     'integration:worktree-dependency-reuse (tests/worktree-reclaim.test.ts): AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal:');
+  // A trial keeps FORCE_COLOR: the same summary colored by the spec reporter names the same cause.
+  const colored = gy1535.logTail.split('\n').map(line => line && `\u001b[31m${line}\u001b[39m`).join('\n');
+  assert.equal(trialFailureCause(colored), trialFailureCause(gy1535.logTail));
   // The loop's cursor drops the log but keeps the cause, and its strict schema accepts it.
   const kept = cursorVerdict({ ...verdict('GY-1535', { head: gy1535.head, baseTip: gy1535.baseTip, mergeSha: gy1535.mergeSha, tests: gy1535.tests }), logTail: gy1535.logTail });
   assert.equal('logTail' in kept, false);
