@@ -68,14 +68,15 @@ export const spentHere = (held: ObservedExhaustion | undefined, environment: { h
  * hold; a hold recorded before identities were reads the home it was spent on now, never a same-named
  * configured one (GY-1574). An environment whose identity is unknown, or a hold with no reset, holds
  * nothing beyond its own home. A login file that cannot be read just now (a runtime mid-write) reads as
- * `known`, the identity the environment log last recorded for it, when that was read from the same home.
+ * `known`, the identity the environment log last recorded for it, when that was read from the same home
+ * on the same runtime.
  */
 export async function heldTwin(environments: readonly AgentEnvironment[], held: Record<string, ObservedExhaustion>, name: string, known: Record<string, { identity?: string | null; kind?: string; home?: string }> = {}) {
   const self = environments.find(environment => environment.name === name);
   const candidates = self ? Object.entries(held).filter(([other, entry]) => entry.resetsAt && (other !== name || !spentHere(entry, self, known[name]))) : [];
-  const read = async (kind: string, home: string, recorded?: { identity?: string | null; home?: string }) => {
+  const read = async (kind: string, home: string, recorded?: { identity?: string | null; home?: string; kind?: string }) => {
     const identity = await providerIdentity(kind, home);
-    return identity !== undefined ? identity : recorded && (!recorded.home || resolve(recorded.home) === resolve(home)) ? recorded.identity ?? null : null;
+    return identity !== undefined ? identity : recorded && (!recorded.home || resolve(recorded.home) === resolve(home)) && (!recorded.kind || recorded.kind === kind) ? recorded.identity ?? null : null;
   };
   const identity = candidates.length ? await read(self!.kind, self!.home, known[name]) : null;
   if (!identity) return null;
@@ -91,15 +92,18 @@ export async function heldTwin(environments: readonly AgentEnvironment[], held: 
  * The home and runtime kind the agent registry logs `name` in with on `host`, or undefined when the
  * registry names none (no such account here, or a key login with no home): what a same-named hold is judged by.
  */
+const registryAccount = (registry: Pick<AgentRegistry, 'accounts'> | null | undefined, host: string | undefined, name: string) =>
+  registry?.accounts.find(entry => entry.name === name && (!host || entry.credential.host === host));
 export const registryLogin = (registry: Pick<AgentRegistry, 'accounts'> & Partial<Pick<AgentRegistry, 'runtimes'>> | null | undefined, host: string | undefined, name: string) => {
-  const account = registry?.accounts.find(entry => entry.name === name && (!host || entry.credential.host === host));
+  const account = registryAccount(registry, host, name);
   return account?.credential.home ? { home: account.credential.home, kind: registry?.runtimes?.find(runtime => runtime.name === account.runtime)?.launch.kind } : undefined;
 };
 const twinReason = (account: string, other: string, held: ObservedExhaustion) => `${account} is the same provider login as ${describeObservedExhaustion(other, held)}`.slice(0, 500);
 /**
  * What this host tells the agent registry of a pending hold (GY-1574). One spent in the same-named
  * registry account's own home and runtime (or with no registry document to judge by) is that account's
- * own. One spent elsewhere, a legacy configured environment named like a registry account or one the
+ * own, and so is any hold of a same-named account here the registry logs in with no home (a key login),
+ * which has no home to judge by. One spent elsewhere, a legacy configured environment named like a registry account or one the
  * registry does not list, is never reported as that account: its spent login is delivered instead as
  * a hold on every registry account on this host the registry knows on that login, so the registry
  * holds their twins on every host until the reset. Null while no account here is known on that login
@@ -108,7 +112,7 @@ const twinReason = (account: string, other: string, held: ObservedExhaustion) =>
  */
 export function registryHoldObservations(registry: Pick<AgentRegistry, 'accounts'> & Partial<Pick<AgentRegistry, 'runtimes'>> | null | undefined, host: string, name: string, held: ObservedExhaustion, launched?: { home?: string; kind?: string }): { account: string; quota: QuotaObservation }[] | null {
   const login = registryLogin(registry, host, name);
-  if (!registry || login && spentHere(held, login, launched)) return [{ account: name, quota: heldObservation(name, held) }];
+  if (!registry || login && spentHere(held, login, launched) || !login && registryAccount(registry, host, name)) return [{ account: name, quota: heldObservation(name, held) }];
   if (!held.resetsAt || !held.identity) return [];
   const twins = registry.accounts.filter(account => account.credential.host === host && account.quota.identity === held.identity);
   return twins.length ? twins.map(({ name: account, quota: { loggedIn, usage } }) => ({ account, quota: { loggedIn, usage, state: 'exhausted' as const, resetsAt: held.until, reason: twinReason(account, name, held), identity: held.identity } })) : null;

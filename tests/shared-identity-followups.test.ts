@@ -35,10 +35,10 @@ const scratch = async (name: string) => { const directory = await temporaryDirec
 const spent = { at: new Date(spentAt).toISOString(), resetsAt, reason: notice, role: 'worker' as const, profile: 'builder', work: 'GY-1571' };
 type ObserveRequest = { host: string; observations: { account: string; quota: QuotaObservation }[] };
 
-function registryOf(accounts: { name: string; home?: string; host?: string }[], roles: { name: string; accounts: string[] }[] = [{ name: 'worker', accounts: accounts.map(account => account.name) }]): AgentRegistry {
+function registryOf(accounts: { name: string; home?: string | null; host?: string }[], roles: { name: string; accounts: string[] }[] = [{ name: 'worker', accounts: accounts.map(account => account.name) }]): AgentRegistry {
   return applyRegistryMutation(emptyRegistry(), 'apply', {
     runtimes: [proposedRuntimes.find(runtime => runtime.name === 'claude')!], models: [{ name: 'opus', id: 'claude-opus-5' }],
-    accounts: accounts.map(account => ({ name: account.name, runtime: 'claude', model: 'opus', credential: { host: account.host ?? HOST, home: account.home ?? `/home/operator/.coding_agents/${account.name}` } })),
+    accounts: accounts.map(account => ({ name: account.name, runtime: 'claude', model: 'opus', credential: { host: account.host ?? HOST, home: account.home === undefined ? `/home/operator/.coding_agents/${account.name}` : account.home } })),
     roles: roles.map(role => ({ ...role, concurrency: 4 })), reason: 'fixture',
   }, { actor: 'operator', at: new Date(spentAt - 3_600_000).toISOString() }).registry;
 }
@@ -211,12 +211,31 @@ test('unit:legacy-environment-twin-by-home — a legacy configured environment n
     assert.deepEqual(sent, [], 'a codex exhaustion is not reported as the claude account in the same directory');
   }
 
+  // A registry account here logged in with no home (a key login) has no home to judge a same-named hold by: the hold is its own, reported by name.
+  {
+    const reporting = { credentialFile: join(root, 'report-homeless.token'), hostId: HOST }, registry = registryOf([{ name: 'claude-k', home: null }]);
+    assert.equal(environments.registryLogin(registry, HOST, 'claude-k'), undefined);
+    await writeHolds(reporting, { 'claude-k': { ...spent, until: resetsAt, identity: null, home: homes['claude-c'], kind: 'claude', reported: false } });
+    const sent: ObserveRequest[] = [], client = { document: async () => registry, observe: async (request: ObserveRequest) => { sent.push(request); return foldObservations(registry, request, { actor: 'executor', at: new Date(now).toISOString() }); } };
+    assert.equal(await reportPendingExhaustions(reporting, { registry: client }, now), 1);
+    assert.deepEqual(sent.flatMap(request => request.observations.map(entry => entry.account)), ['claude-k'], 'the home-less account is reported by name');
+    assert.equal(account(registry, 'claude-k').quota.state, 'exhausted', 'and the registry holds it');
+    // An account the registry does not list here is still never reported by the name.
+    const absent = { credentialFile: join(root, 'report-absent.token'), hostId: HOST };
+    await writeHolds(absent, { 'claude-z': { ...spent, until: resetsAt, identity: null, home: homes['claude-c'], kind: 'claude', reported: false } });
+    sent.length = 0;
+    assert.equal(await reportPendingExhaustions(absent, { registry: client }, now), 0);
+    assert.deepEqual(sent, []);
+  }
+
   // An unreadable login falls back to the identity the log recorded only when it was read from the same home.
   const unreadable = await scratch('followups-unreadable');
   await writeFile(join(unreadable, '.claude.json'), '{"oauthAccount": {"accountUu');
   const recorded = { 'claude-x': { identity: shared, home: homes.claude } };
   assert.equal(await heldTwin([{ name: 'claude-x', kind: 'claude', home: unreadable }], { 'claude-a': { ...spent, until: resetsAt, identity: shared } }, 'claude-x', recorded), null, 'another home\'s recorded login is not borrowed');
   assert.ok(await heldTwin([{ name: 'claude-x', kind: 'claude', home: unreadable }], { 'claude-a': { ...spent, until: resetsAt, identity: shared } }, 'claude-x', { 'claude-x': { identity: shared, home: unreadable } }), 'its own is');
+  // Nor is one recorded from the same home on another runtime: a codex login in that directory is not the claude one.
+  assert.equal(await heldTwin([{ name: 'claude-x', kind: 'claude', home: unreadable }], { 'claude-a': { ...spent, until: resetsAt, identity: shared } }, 'claude-x', { 'claude-x': { identity: shared, home: unreadable, kind: 'codex' } }), null, 'another runtime\'s recorded login is not borrowed');
 });
 
 test('unit:exhaustion-hold-observe-retried — a transient failure of the immediate registry observe is retried at once, so the hold reaches the registry before any selection runs', async () => {
