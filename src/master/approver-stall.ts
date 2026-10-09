@@ -1,5 +1,6 @@
 // Concern: whether a same-named approver session Herdr still lists never ran its request (GY-1598), judged alike by `master approver`, the loop and master status.
 import { setTimeout as sleep } from 'node:timers/promises';
+import { unknownRegistrySession } from '../fleet.js';
 import type { HerdrAgent } from './herdr.js';
 
 /**
@@ -62,4 +63,20 @@ export async function judgeApproverStall(agent: Pick<HerdrAgent, 'agent_status' 
   const verdict = approverStallVerdict(agent, launchedAt, bound, now);
   if (agent.agent_status !== 'idle' || (!verdict.close && !verdict.why.startsWith('it has no launch record'))) return verdict;
   return approverStallVerdict(agent, launchedAt, bound, now, read ? await screenMotion(read, marker, pauseMs) : 'unreadable');
+}
+/** An inventory without the session in `pane` (GY-1604), or without one unlisted by pane under `name`: what a replacement is chosen against once that session is closed. */
+export const withoutPane = <T extends { agents: { name?: string | null; pane_id?: string | null }[] }>(inventory: T, pane: string, name: string): T =>
+  ({ ...inventory, agents: inventory.agents.filter(agent => agent.pane_id ? agent.pane_id !== pane : agent.name !== name) });
+/**
+ * GY-1604. End a stalled approver's registry `session` before its pane is closed and its replacement chosen, freeing the role's slot. One
+ * that cannot be ended still holds that slot, so the launch is refused here, naming it (`registrySession`), with the pane left open: the
+ * next attempt finds the same pane and launch record and ends the session again before anything else, rather than losing its id. A
+ * session the registry no longer knows was already ended (a retry after its pane failed to close) and holds no slot.
+ */
+export async function freeStalledSlot(session: string, stalled: string, end: (session: string, reason: string) => Promise<unknown>) {
+  try { await end(session, `closing stalled ${stalled}, to launch its replacement`.slice(0, 500)); }
+  catch (error) {
+    if (unknownRegistrySession(error)) return;
+    throw Object.assign(new Error(`Stalled ${stalled}; its approver registry session ${session} could not be ended, so it still holds its slot, its pane is left open and no replacement was chosen: ${error instanceof Error ? error.message : String(error)}`), { registrySession: session });
+  }
 }
