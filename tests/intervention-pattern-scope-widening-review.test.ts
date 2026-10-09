@@ -1,7 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtemp, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { workerPrompt } from '../src/master.js';
-import { appliedReworkBrief, reworkBriefMax, reworkBriefSection, type ReworkDecisionRow } from '../src/master/rework-brief.js';
+import { appliedReworkBrief, readReworkDecisions, ReworkDecisionsUnreadError, reworkBriefMax, reworkBriefSection, type ReworkDecisionRow } from '../src/master/rework-brief.js';
+import { planeWideFailure } from '../src/model/blocker-class.js';
 
 // GY-1569 names this file for its proof: manual:intervention-pattern-scope-widening-review. Five
 // scope-widening interventions were needed at the review stage between 2026-10-02 and 2026-10-09,
@@ -75,4 +79,29 @@ test('manual:intervention-pattern-scope-widening-review — a first attempt carr
   const section = reworkBriefSection(work, { id: 'd-1', reason: 'x'.repeat(reworkBriefMax + 500), approvedAt: '2026-10-08T09:10:00.000Z' });
   assert.ok(section.includes(`${'x'.repeat(reworkBriefMax)}… (truncated; read the whole reason on the decision d-1)`));
   assert.ok(!section.includes('x'.repeat(reworkBriefMax + 1)));
+});
+
+test('manual:intervention-pattern-scope-widening-review — a decisions read that fails refuses the rework launch, never starts it without its brief', async () => {
+  const credentialFile = join(await mkdtemp(join(tmpdir(), 'rework-brief-')), 'master.token');
+  await writeFile(credentialFile, 'master-token-'.padEnd(40, 'x'), { mode: 0o600 });
+  const config = { url: 'https://graphyard.example', credentialFile }, work = { id: 'w-1', key: 'GY-7' };
+  const answer = (response: () => Response | Promise<Response>) => (async () => response()) as unknown as typeof fetch;
+  // A refusal, a network failure, a timeout and a body without the decisions list each refuse it, naming the item and the read.
+  for (const [fetcher, cause] of [
+    [answer(() => new Response('{}', { status: 503 })), /\(HTTP 503\)/],
+    [answer(() => { throw new TypeError('fetch failed'); }), /\(fetch failed\)/],
+    [answer(() => { throw new DOMException('The operation was aborted due to timeout', 'TimeoutError'); }), /\(The operation was aborted due to timeout\)/],
+    [answer(() => new Response('{"key":"GY-7"}', { status: 200 })), /\(the response carries no decisions list\)/],
+  ] as const) {
+    const refused = await readReworkDecisions(config, work, fetcher).then(() => null, (error: unknown) => error);
+    assert.ok(refused instanceof ReworkDecisionsUnreadError);
+    assert.match(refused.message, /^the rework decisions of GY-7 could not be read from https:\/\/graphyard\.example\/api\/work\/w-1\/decisions /);
+    assert.match(refused.message, cause);
+    assert.match(refused.message, /refused before anything is claimed rather than starting a rework round without the reason it was sent back for/);
+  }
+  // An unavailable plane is read as plane-wide: retried, never counted toward a dispatch block.
+  assert.ok(planeWideFailure(new ReworkDecisionsUnreadError('GY-7', 'https://graphyard.example/api/work/w-1/decisions', 'HTTP 503').message));
+  // A read that succeeds hands the decisions back as the plane returned them.
+  const rows = [decision('d', 'reason', '2026-10-08T09:10:00.000Z')];
+  assert.deepEqual(await readReworkDecisions(config, work, answer(() => new Response(JSON.stringify({ key: 'GY-7', decisions: rows })))), rows);
 });

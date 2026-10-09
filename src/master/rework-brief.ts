@@ -7,7 +7,10 @@
 // it names added to plannedFiles. Five such widenings at the review stage in seven days (GY-1519,
 // GY-1543 twice) were that restatement. The launcher now reads the applied decision and puts its
 // reason in the request, so the round's grounds reach the worker without a requirements change.
+// A read of the decisions that fails refuses the launch before anything is claimed, so no rework
+// round ever starts without the reason it was sent back for.
 import type { Work } from '../model.js';
+import { readCredentialFile } from './config.js';
 
 /** The longest reason the request carries; the full text stays on the decision. */
 export const reworkBriefMax = 4000;
@@ -16,6 +19,30 @@ export const reworkBriefMax = 4000;
 export interface ReworkDecisionRow { id?: string; action: string; state: string; reason?: string | null; approvedAt?: string | null; input?: any }
 /** The applied rework decision whose round this attempt is. */
 export interface AppliedRework { id: string | null; reason: string; approvedAt: string }
+
+/**
+ * The decisions of a rework round's item could not be read: the launch is refused before anything is
+ * claimed, as an unread merger is (GY-1523), and the item is dispatched again once the read succeeds.
+ */
+export class ReworkDecisionsUnreadError extends Error {
+  constructor(readonly key: string, readonly url: string, readonly cause: string) {
+    super(`the rework decisions of ${key} could not be read from ${url} (${cause}), so the launch is refused before anything is claimed rather than starting a rework round without the reason it was sent back for; it is dispatched again once the read succeeds`);
+    this.name = 'ReworkDecisionsUnreadError';
+  }
+}
+
+/** The item's decisions, read with the master's credential; a read that fails, times out, is refused or is malformed throws ReworkDecisionsUnreadError. */
+export async function readReworkDecisions(config: { url: string; credentialFile: string }, work: Pick<Work, 'id' | 'key'>, fetcher: typeof fetch = fetch): Promise<ReworkDecisionRow[]> {
+  const url = `${config.url}/api/work/${encodeURIComponent(work.id)}/decisions`;
+  let decisions: unknown;
+  try {
+    const response = await fetcher(url, { headers: { Authorization: `Bearer ${await readCredentialFile(config.credentialFile)}` }, signal: AbortSignal.timeout(5_000) });
+    if (!response.ok) throw new ReworkDecisionsUnreadError(work.key, url, `HTTP ${response.status}`);
+    decisions = ((await response.json()) as { decisions?: unknown }).decisions;
+  } catch (error) { throw error instanceof ReworkDecisionsUnreadError ? error : new ReworkDecisionsUnreadError(work.key, url, error instanceof Error ? error.message : String(error)); }
+  if (!Array.isArray(decisions)) throw new ReworkDecisionsUnreadError(work.key, url, 'the response carries no decisions list');
+  return decisions as ReworkDecisionRow[];
+}
 
 type BriefWork = Partial<Pick<Work, 'submission' | 'candidate' | 'pipeline'>>;
 

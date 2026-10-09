@@ -711,6 +711,8 @@
     "tests/zero-touch-control-plane.test.ts": 4000,
     "tests/control-plane-switches.test.ts": 1500,
     "tests/mode-parity.test.ts": 3000,
-    "tests/soak-control-plane-switches.test.ts": 3000
+    "tests/soak-control-plane-switches.test.ts": 3000,
+    "tests/soak-rework-brief.test.ts": 13000,
+    "tests/intervention-pattern-scope-widening-review.test.ts": 1200
   }
 }

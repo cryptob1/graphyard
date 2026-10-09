@@ -716,7 +716,8 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     const result = await dispatchWork(failover.root, work, profile, free, world.run, snapshot.work,
       async () => {
         const claimed = await engine.execute(principal, 'claim', work.id, {}, id());
-        epoch = claimed.epoch; branch = `graphyard/${work.key.toLowerCase()}-${epoch}`;
+        // A rework round re-registers the standing submission's branch, as the simulated dispatch does (GY-1569).
+        epoch = claimed.epoch; branch = work.candidate?.branch ?? work.workspaces.find(entry => entry.epoch === work.submission?.epoch)?.branch ?? `graphyard/${work.key.toLowerCase()}-${epoch}`;
         const path = await temporaryDirectory('soak-launch');
         await engine.execute(principal, 'workspace', work.id, { epoch, host: 'soak-host', path, branch }, id());
         return { epoch, path, base: github.tip };
