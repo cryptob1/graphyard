@@ -2,7 +2,7 @@
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import type { QuotaObservation } from '../model/registry.js';
+import type { AgentRegistry, QuotaObservation } from '../model/registry.js';
 import type { AgentEnvironment } from './profiles.js';
 import type { ObservedExhaustion } from './environments.js';
 
@@ -87,15 +87,25 @@ export async function heldTwin(environments: readonly AgentEnvironment[], held: 
   return null;
 }
 /**
+ * The home the agent registry logs `name` in from on `host`, or undefined when the registry names
+ * none (no such account here, or a key login with no home): the home a same-named hold is judged by.
+ */
+export const registryHome = (registry: Pick<AgentRegistry, 'accounts'> | null | undefined, host: string | undefined, name: string) =>
+  registry?.accounts.find(entry => entry.name === name && (!host || entry.credential.host === host))?.credential.home ?? undefined;
+/**
  * What this host tells the registry of an account it probed (GY-1574): one a session here saw spent
  * reads as that hold, and one on the login of a hold with a known reset reads spent until that reset,
  * so no role's probe launches on, or clears the mark of, an account held here or held as a twin. A
- * same-named hold spent on another home (a legacy configured environment named like the account) and
- * on a login other than the one probed is not this account's: it holds the account only as a twin would.
+ * same-named hold is the account's own only when it was spent in the account's home (`home`, the
+ * registry's, judged as spentHere judges it), whatever either login reads; one spent on another home (a
+ * legacy configured environment named like the account) holds it only as a twin of the same login.
+ * With the account's home unknown, a hold naming another home and a known login other than the one
+ * probed is not the account's either.
  */
-export function heldOverlay(held: Record<string, ObservedExhaustion>, account: string, quota: QuotaObservation): QuotaObservation {
+export function heldOverlay(held: Record<string, ObservedExhaustion>, account: string, quota: QuotaObservation, home?: string, launched?: { home?: string }): QuotaObservation {
   const own = held[account];
-  if (own && !(own.home && own.identity && quota.identity && own.identity !== quota.identity)) return heldObservation(account, own, quota);
+  const ownHere = home ? spentHere(own, { home }, launched) : !!own && !(own.home && own.identity && quota.identity && own.identity !== quota.identity);
+  if (ownHere) return heldObservation(account, own, quota);
   const twin = quota.identity ? Object.entries(held).find(([, entry]) => entry.resetsAt && entry.identity === quota.identity) : undefined;
   return twin ? { ...quota, state: 'exhausted', resetsAt: twin[1].until, reason: `${account} is the same provider login as ${describeObservedExhaustion(twin[0], twin[1])}`.slice(0, 500) } : quota;
 }
