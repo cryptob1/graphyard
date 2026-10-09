@@ -5,7 +5,11 @@ import type { MasterConfig } from '../src/master.js';
 import { emptyDaemonState, pruneDaemonState, retainedActions, storeAction, type DaemonAction, type DaemonEffects } from '../src/master-daemon.js';
 import { cappedReview, cappedReworkBinding, cappedRevisionMark, neededDecision, refusedCappedRework } from '../src/daemon/decisions.js';
 import { emptyHeldDecisions } from '../src/daemon/decision-reads.js';
-import { cappedEscalationKey, cappedFilingKey, cappedRefusalRequest, cappedRereviewKey, refusalFollowUps, reviewCapStep } from '../src/daemon/cycle-review-cap.js';
+import { cappedEscalation, cappedEscalationKey, cappedFilingKey, cappedRefusalRequest, cappedRereviewKey, refusalFollowUps, reviewCapStep } from '../src/daemon/cycle-review-cap.js';
+import * as reviewCap from '../src/daemon/cycle-review-cap.js';
+import { handActions, handDecision } from '../src/cli/hand-actions.js';
+import { loopRework } from '../src/cli/hand-rework.js';
+import { autonomySubcommands } from '../src/master/autonomy.js';
 import { actionId, reconcileActions } from '../src/model/actions.js';
 import type { NextAction } from '../src/model/next-action.js';
 import type { Cycle } from '../src/daemon/cycle.js';
@@ -257,3 +261,113 @@ test('unit:capped-refusal-rereview-context — the re-review request carries the
   }
 });
 
+
+// GY-1580, observed on GY-1573 rounds 9-10, 2026-10-09: the approver refused capped rework 7df4183e as
+// non-blocking, the loop withdrew the change request and had the head re-reviewed, and the re-review
+// (review 5468008197, 09:04:31Z) requested changes again with a new BLOCKING: finding. The escalation sent
+// the master to "have the change request answered as FOLLOW-UP", which no command it may run does; its
+// answering rework ea13b053, citing 7df4183e, was refused as non-blocking and the finding routed to GY-1574.
+const firstRefusal = { ...decision('refused'), id: '7df4183e-1c2d-4e5f-8a9b-0c1d2e3f4a5b', requestedAt: '2026-10-09T06:35:00.000Z' };
+const answerReason = 'The re-review\'s finding is real but not blocking either: it belongs with GY-1574 AC-8, which already tracks the hotspot budgets.';
+const answer = (state: 'requested' | 'refused', requestedAt = '2026-10-09T09:10:00.000Z') => ({ id: 'ea13b053-6f7a-4b8c-9d0e-1f2a3b4c5d6e', action: 'rework', state, input: { previousWorkerStopped: true }, precedent: [firstRefusal.id], requestedAt,
+  situation: { sha: H, baseSha: B }, reason: `Answering the review-cap escalation after refused capped rework ${firstRefusal.id}: the re-review names a new BLOCKING: finding beyond it.`,
+  approvedBy: null, refusal: state === 'refused' ? { approver: 'graphyard-approver-graphyard', reason: answerReason, at: '2026-10-09T09:20:00.000Z' } : null });
+const firstBody = 'BLOCKING: former hotspot files exceed their size budgets.';
+const rereviewBody = 'BLOCKING: the soak test still leaks its temporary directory.';
+
+/** The second re-review's cursor key, read off the module so a tree without it fails as a test case, not at load. */
+const answeredRereviewKey = (work: Pick<Work, 'id'>, sha: string): string => (reviewCap as { answeredRereviewKey?: (work: Pick<Work, 'id'>, sha: string) => string }).answeredRereviewKey?.(work, sha) ?? `${cappedRereviewKey(work, sha)}:answered`;
+
+/** Rounds 9-10 up to the escalation the re-review raised: refusal, first withdrawal, re-review requesting changes again. */
+async function replayToEscalation() {
+  const run = harness(capped(firstBody));
+  run.world.history = [firstRefusal] as any;
+  await run.cycle();
+  assert.deepEqual(run.world.withdrawn.map(entry => entry.reviewId), [4242], 'the first refusal withdraws the change request');
+  run.world.item = capped(rereviewBody, 5468008197, '2026-10-09T09:04:31Z');
+  await run.cycle();
+  const escalation = run.state.actions[cappedEscalationKey(run.world.item, H)]!;
+  assert.match(escalation.detail, /its re-review requested changes again, so it is not withdrawn a second time/);
+  assert.equal(run.world.withdrawn.length, 1);
+  return run;
+}
+
+test('unit:master-refusal-answers-capped-escalation — GY-1573 rounds 9-10: an approver refusing the master\'s answer to a refused capped head\'s escalation has the change request withdrawn once more and the head re-reviewed with both refusals and GY-1574; a third change request escalates', async () => {
+  for (const prune of [false, true]) {
+    const run = await replayToEscalation();
+    // The master's answer stands requested: the round is its approver's, and nothing is withdrawn.
+    run.world.history = [firstRefusal, answer('requested')] as any;
+    await run.cycle();
+    assert.equal(run.world.withdrawn.length, 1);
+    // The approver refuses the answer as non-blocking: the change request is withdrawn a second time, once.
+    run.world.history = [firstRefusal, answer('refused')] as any;
+    await run.cycle();
+    await run.cycle();
+    assert.deepEqual(run.world.withdrawn.map(entry => entry.reviewId), [4242, 5468008197]);
+    const message = run.world.withdrawn[1].message;
+    for (const part of [firstRefusal.id, refusalReason, answer('refused').id, answerReason, 'GY-1574', `Re-review head ${H} and approve it, listing these findings as FOLLOW-UP threads`, 'Only a finding that breaks a criterion neither refusal judged is BLOCKING'])
+      assert.ok(message.includes(part), `${part} in ${message}`);
+    assert.doesNotMatch(message, /GY-1500/);
+    // One re-review request, recorded once, carrying both refusals and the follow-up.
+    const rereview = run.state.actions[answeredRereviewKey(run.world.item, H)]!;
+    assert.equal(rereview.state, 'done');
+    assert.ok(rereview.detail.includes(firstRefusal.id) && rereview.detail.includes(answer('refused').id) && rereview.detail.includes('GY-1574'), rereview.detail);
+    assert.equal(run.performed.filter(entry => entry.kind === 'review' && entry.detail.startsWith('Requested a fresh review')).length, 2, 'the first re-review and this one, nothing more');
+    assert.match(run.state.actions[cappedFilingKey(run.world.item, { sha: H, reviewId: 5468008197 })]!.detail, /refused the master's answer \(decision ea13b053-6f7a-4b8c-9d0e-1f2a3b4c5d6e\).*withdrawn once more/);
+    // The launched reviewer reads the same request.
+    assert.equal(cappedRefusalRequest(run.world.item, H, config, run.world.history as any, [run.world.item, followUp, unrelated]), message);
+    if (prune) {
+      // A busy fleet retires every withdrawal and re-review row before the third change request lands.
+      for (let index = 0; index <= retainedActions; index++)
+        storeAction(run.state, `dispatch:other-${index}:1`, { kind: 'dispatch', work: `GY-${index}`, principal: null, epoch: 1, state: 'done', detail: 'launched', attempts: 1, cycle: run.state.cycle, at: new Date(Date.parse('2026-10-09T09:30:00Z') + index).toISOString() });
+      pruneDaemonState(run.state);
+      assert.equal(run.state.actions[answeredRereviewKey(run.world.item, H)], undefined, 'the re-review row is pruned');
+      assert.equal(run.state.actions[cappedRereviewKey(run.world.item, H)], undefined);
+    }
+    // A third change request on the head escalates and is not withdrawn again.
+    run.world.item = capped('BLOCKING: the soak test still leaks it.', 5468009999, '2026-10-09T09:40:00Z');
+    await run.cycle();
+    await run.cycle();
+    assert.deepEqual(run.world.withdrawn.map(entry => entry.reviewId), [4242, 5468008197], `withdrawn twice only (pruned: ${prune})`);
+    const escalation = run.state.actions[cappedEscalationKey(run.world.item, H)]!;
+    assert.match(escalation.detail, /so it is not withdrawn a third time/);
+    assert.ok(escalation.detail.includes(`--precedent ${firstRefusal.id},${answer('refused').id}`), escalation.detail);
+  }
+
+  // An answer that cites no refusal, binds the loop's grounds, judged another head, or was requested before the change request answers nothing.
+  for (const other of [{ ...answer('refused'), precedent: [], reason: 'A rework.' }, { ...answer('refused'), input: { binding: 'x', previousWorkerStopped: true } },
+    { ...answer('refused'), situation: { sha: 'c'.repeat(40), baseSha: B } }, answer('refused', '2026-10-09T09:00:00.000Z')]) {
+    const run = await replayToEscalation();
+    run.world.history = [firstRefusal, other] as any;
+    await run.cycle();
+    assert.equal(run.world.withdrawn.length, 1, JSON.stringify(other));
+  }
+});
+
+/** Every `graphyard master …` command a text names, as words. */
+const masterCommands = (text: string) => [...text.matchAll(/graphyard master ([a-z-]+) (GY-\d+)((?: (?:--[a-z]+ \S+|[a-z]+))*)/g)].map(match => ({ sub: match[1]!, key: match[2]!, rest: match[3]!.trim().split(' ').filter(Boolean) }));
+
+test('unit:capped-escalation-names-runnable-commands — the escalation of a refused capped head names only commands master status\'s actor may run on the system-driven item', async () => {
+  const item = { ...capped(rereviewBody, 5468008197, '2026-10-09T09:04:31Z'), systemDriven: true } as Work;
+  const judged = cappedReview(item, config)!;
+  const refusals = [{ id: firstRefusal.id, approver: 'a', reason: refusalReason }, { id: answer('refused').id, approver: 'a', reason: answerReason }];
+  for (const named of [refusals.slice(0, 1), refusals]) {
+    const text = cappedEscalation(item, judged, judged.reason, named);
+    const commands = masterCommands(text);
+    assert.ok(commands.some(command => command.sub === 'decide'), text);
+    assert.doesNotMatch(text, /master (review|dispatch|merge)\b/, 'no hand action the loop owns');
+    for (const command of commands) {
+      assert.equal(command.key, 'GY-1573');
+      assert.ok((autonomySubcommands as readonly string[]).includes(command.sub), `${command.sub} is a master subcommand`);
+      assert.ok(!(handActions as readonly string[]).includes(command.sub));
+      if (command.sub !== 'decide') continue;
+      const [action, ...flags] = command.rest, precedent = flags[flags.indexOf('--precedent') + 1];
+      assert.equal(precedent, named.map(refusal => refusal.id).join(','), 'it cites every refusal');
+      const loop = { now: Date.parse('2026-10-09T09:06:00Z'), requestsDecisions: true, precedent, capEscalated: true };
+      assert.equal(loopRework(item, action!, { previousWorkerStopped: true }, config, loop), null, text);
+      assert.equal(handDecision(item, action, { previousWorkerStopped: true }), null);
+      // Without the precedent the CLI refuses it: the check is the one the CLI applies.
+      assert.match(loopRework(item, action!, { previousWorkerStopped: true }, config, { ...loop, precedent: undefined }) ?? '', /system-driven/);
+    }
+  }
+});
