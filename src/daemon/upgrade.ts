@@ -41,7 +41,7 @@ export function upgradeTouchesCode(paths: readonly string[]): boolean {
   return paths.some(path => loadedFiles.includes(path) || loadedPrefixes.some(prefix => path.startsWith(prefix)));
 }
 
-/** Where the launcher reads the release a held restart pins the CLI to (GY-1585): `{ commit, root }`. */
+/** Where the launcher reads the release a held restart pins the CLI to (GY-1585): `{ commit, root, loop }`. */
 export const heldCliPointer = (root: string) => join(root, '.graphyard', 'held-cli.json');
 const heldCliSnapshots = (root: string) => join(root, '.graphyard', 'held-cli');
 /**
@@ -51,7 +51,8 @@ const heldCliSnapshots = (root: string) => join(root, '.graphyard', 'held-cli');
  * speak the protocol of the release production serves: a shared clone of that release is checked
  * out under `.graphyard/held-cli/`, and the pointer naming it is written by rename, so a launcher
  * reads the old pin or the new one. Snapshots other than the new pin and the one it replaces (a
- * process started under it may still be loading modules) are removed.
+ * process started under it may still be loading modules) are removed. The executor entry reads the
+ * same pointer, so a supervised executor loads the snapshot and takes its commit for the checkout's.
  */
 export async function holdCliAt(root: string, run: ChildRun, commit: string | null): Promise<void> {
   const pointer = heldCliPointer(root);
@@ -63,8 +64,13 @@ export async function holdCliAt(root: string, run: ChildRun, commit: string | nu
   await rm(target, { recursive: true, force: true });
   await run('git', ['clone', '-q', '--shared', '--no-checkout', root, target]);
   await run('git', ['-C', target, 'checkout', '-q', '--detach', commit]);
+  // `loop`: whether a loop restarted onto the snapshot reads the hold's cursor and keeps holding — a
+  // release from before GY-1585 would refuse its `release-lagged` stall, so the launcher keeps such a
+  // restarted loop on the checkout's code instead.
+  let loop = false;
+  try { loop = readFileSync(join(target, 'src', 'daemon', 'state.ts'), 'utf8').includes("'release-lagged'"); } catch { /* no state module: not a loop that holds */ }
   await mkdir(dirname(pointer), { recursive: true });
-  await writeFile(`${pointer}.tmp`, `${JSON.stringify({ commit, root: target })}\n`);
+  await writeFile(`${pointer}.tmp`, `${JSON.stringify({ commit, root: target, loop })}\n`);
   await rename(`${pointer}.tmp`, pointer);
   for (const entry of await readdir(snapshots)) {
     const path = join(snapshots, entry);
@@ -302,6 +308,12 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
    * the checkout with what production serves now, so the loop does not stay on the held commit
    * until a later promotion.
    */
+  /** One pin per pass, whichever step places it first: the move pins before its checkout, the hold after. */
+  let pinning: { commit: string; result: Promise<string> } | null = null;
+  const pin = (commit: string) => {
+    if (pinning?.commit !== commit) pinning = { commit, result: holdCli(commit).then(() => '', error => `; the CLI it spawns could not be pinned to ${shortCommit(commit)}: ${message(error)}`) };
+    return pinning.result;
+  };
   const finish = async (pending: { from: string | null; to: string; code: boolean }, held = false): Promise<SelfUpgradeOutcome> => {
     const aligned = held && !sameCommit(release, pending.to) ? state.upgrade.alignedRelease : release ?? state.upgrade.alignedRelease;
     if (!pending.code) {
@@ -325,7 +337,7 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
     // the move: they are pinned to the served release for as long as the hold stands.
     const lag = await lagging(pending.to);
     if (lag) {
-      const pinned = await holdCli(lag).then(() => '', error => `; the CLI it spawns could not be pinned to ${shortCommit(lag)}: ${message(error)}`);
+      const pinned = await pin(lag);
       const reason = `restart held: production serves release ${shortCommit(lag)}, which does not contain ${shortCommit(pending.to)} yet; the executors and the loop restart onto ${shortCommit(pending.to)} on the first pass whose deployment observation serves it${pinned}`;
       state.upgrade.pending = { from: pending.from, to: pending.to, code: true };
       stall('release-lagged', reason);
@@ -506,6 +518,10 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
     code = owed || upgradeTouchesCode(changed);
   } catch (error) { return unaligned(`the diff from ${shortCommit(base)} to ${shortCommit(to)} could not be read: ${message(error)}`, 'checkout-failed'); }
   await note(`Checking out base tip ${shortCommit(to)} (from ${shortCommit(from)}): ${changed.length} path(s) changed${code ? ', loaded code among them' : ', none of them loaded code'}`, false);
+  //    A loaded-code move production does not serve yet is pinned before the checkout moves (GY-1585):
+  //    an executor rereads the commit it runs before every claim, and one that saw the moved checkout
+  //    unpinned would stand down and its supervisor would start it on code the plane refuses.
+  if (code) { const lag = await lagging(to); if (lag) await pin(lag); }
   try { await git('checkout', '--detach', '--quiet', to); }
   catch (error) { return unaligned(`checking out ${shortCommit(to)} failed: ${message(error)}`, 'checkout-failed'); }
   state.upgrade.pending = { from, to, code };

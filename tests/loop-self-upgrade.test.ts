@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { setTimeout as delay } from 'node:timers/promises';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import type { Work } from '../src/model.js';
 import { daemonSummary, deploymentObservationSchema, emptyDaemonState, readDaemonState, runDaemon, writeDaemonState, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
@@ -12,7 +12,7 @@ import { describeSelfUpgrade, heldCliPointer, holdCliAt, performSelfUpgrade, typ
 import { releaseLag, promotionWait, readBaseTip, releaseLagGraceMs, upgradeRefusalAttention, type PromotionWait } from '../src/master/release-lag.js';
 import { owedUpgrade, readResources, resourceAttention } from '../src/master-resources.js';
 import { masterStatusReport } from '../src/cli/master-status.js';
-import { executorRegistrar, readExecutorRegistration, readExecutorRegistrations, readRelease, readRestartFence, restartExecutors, writeExecutorRegistration, type ExecutorRegistration } from '../src/executor-fleet.js';
+import { executorRegistrar, readCommit, readExecutorRegistration, readExecutorRegistrations, readRelease, readRestartFence, restartExecutors, writeExecutorRegistration, type ExecutorRegistration } from '../src/executor-fleet.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { releaseGuardedEffects, staleReleaseReason, type ReleaseGuard } from '../src/executor.js';
 import type { ActionRow } from '../src/model/actions.js';
@@ -101,10 +101,10 @@ const verified = (sha: string): DaemonState['deployment'] =>
   deploymentObservationSchema.parse({ source: 'endpoint', sha, at: iso(0), reason: null, deployed: ['GY-1'], pending: [] });
 const restarted = (to: string) => ({ result: 'restarted' as const, reason: null, coordinator: { commit: to }, held: [], restarted: [], unsupervised: [], forgotten: [] });
 
-/** `pins`: every pin of the CLI the checkout's launcher runs (GY-1585), null for a lift, with the executor restarts seen by then. */
-interface UpgradeRecording { executors: (string | null)[]; self: number; persisted: number; pins: { commit: string | null; executors: number }[] }
+/** `pins`: every pin of the CLI the checkout's launcher runs (GY-1585), null for a lift, with the executor restarts seen by then; `pinHeads`: the checkout's HEAD at each. */
+interface UpgradeRecording { executors: (string | null)[]; self: number; persisted: number; pins: { commit: string | null; executors: number }[]; pinHeads: string[] }
 const recording = (fake: FakeGit, root: string, behaviour: 'restart' | 'refuse' = 'restart'): { deps: () => Parameters<typeof performSelfUpgrade>[2]; calls: UpgradeRecording } => {
-  const calls: UpgradeRecording = { executors: [], self: 0, persisted: 0, pins: [] };
+  const calls: UpgradeRecording = { executors: [], self: 0, persisted: 0, pins: [], pinHeads: [] };
   return {
     calls,
     deps: () => ({
@@ -116,7 +116,7 @@ const recording = (fake: FakeGit, root: string, behaviour: 'restart' | 'refuse' 
       },
       restartSelf: async () => { calls.self += 1; },
       persist: async () => { calls.persisted += 1; },
-      holdCli: async commit => { calls.pins.push({ commit, executors: calls.executors.length }); },
+      holdCli: async commit => { calls.pins.push({ commit, executors: calls.executors.length }); calls.pinHeads.push(fake.head); },
       now: () => clock,
     }),
   };
@@ -766,6 +766,7 @@ test('unit:self-upgrade-waits-for-served-release — with production serving rel
     // The checkout already holds B, so every CLI process the loop and the executors spawn through the
     // checkout's launcher is pinned to the release production serves for as long as the hold stands.
     assert.deepEqual(calls.pins, [{ commit: loaded, executors: 0 }], 'the spawned CLI is pinned to the served release A');
+    assert.deepEqual(calls.pinHeads, [loaded], 'pinned before the checkout moves: an executor rereading the commit before a claim never sees B unpinned, so none stands down onto it');
 
     // Still serving A a cycle later while main moved on to C: held again on the same target, with no
     // fetch, no restart, the stall's first instant kept and the one held row refreshed, not grown.
@@ -807,11 +808,17 @@ test('unit:self-upgrade-waits-for-served-release — while the restart is held, 
   const root = await temporaryDirectory('held-cli');
   try {
     const cli = (release: string) => `import { z } from 'zod';\nexport const release: string = '${release}';\nconsole.log(JSON.stringify({ release, argv: process.argv[1], schema: typeof z }));\n`;
-    await mkdir(join(root, 'src'));
-    await writeFile(join(root, 'src', 'cli.ts'), cli('A'));
+    await mkdir(join(root, 'src', 'daemon'), { recursive: true });
+    await writeFile(join(root, 'src', 'cli.ts'), cli('A0'));
     await writeFile(join(root, 'package.json'), '{ "type": "module" }\n');
     git(root, 'init', '-q');
     git(root, 'add', 'src', 'package.json');
+    git(root, 'commit', '-q', '-m', 'release A0, from before the hold');
+    const preceding = git(root, 'rev-parse', 'HEAD');
+    // A release whose loop reads the hold's cursor: its stall causes name release-lagged.
+    await writeFile(join(root, 'src', 'cli.ts'), cli('A'));
+    await writeFile(join(root, 'src', 'daemon', 'state.ts'), "export const upgradeStallCauses = ['checkout-failed', 'release-lagged'] as const;\n");
+    git(root, 'add', 'src');
     git(root, 'commit', '-q', '-m', 'release A');
     const served = git(root, 'rev-parse', 'HEAD');
     await writeFile(join(root, 'src', 'cli.ts'), cli('B'));
@@ -830,14 +837,63 @@ test('unit:self-upgrade-waits-for-served-release — while the restart is held, 
     assert.equal(JSON.parse(await readFile(heldCliPointer(root), 'utf8')).commit, served);
     assert.deepEqual(launch('watch', 'GY-1', '1'), { release: 'A', argv: entry, schema: 'object' }, 'pinned, a spawned command loads release A, its argv still the checkout entry its confinement is derived from');
     assert.deepEqual(launch('heartbeat', 'GY-1', '1'), { release: 'A', argv: entry, schema: 'object' });
-    assert.deepEqual(launch('master', 'run'), { release: 'A', argv: entry, schema: 'object' }, 'a loop its supervisor restarts during the hold loads A too; the deliberate restart comes after the lift');
+    assert.deepEqual(launch('master', 'run'), { release: 'A', argv: entry, schema: 'object' }, 'a loop its supervisor restarts during the hold loads A too, since A\'s loop reads the hold\'s cursor; the deliberate restart comes after the lift');
     assert.equal(git(root, 'status', '--porcelain', '--untracked-files=no'), '', 'pinning leaves the checkout clean');
     assert.equal(git(root, 'rev-parse', 'HEAD'), tip, 'and at B');
     await holdCliAt(root, run, served);
     assert.equal(launch('status').release, 'A', 'pinning the same release again keeps the pin');
 
+    // A served release from before the hold would refuse the cursor's release-lagged stall (its
+    // strict schema throws before the loop starts) and restart onto B unheld: a restarted loop runs
+    // the checkout's B, which holds, while every other command still loads the served release.
+    await holdCliAt(root, run, preceding);
+    assert.equal(JSON.parse(await readFile(heldCliPointer(root), 'utf8')).loop, false);
+    assert.deepEqual(launch('master', 'run'), { release: 'B', argv: entry, schema: 'object' }, 'a restarted loop stays on the checkout when the snapshot cannot read the hold');
+    assert.deepEqual(launch('watch', 'GY-1', '1'), { release: 'A0', argv: entry, schema: 'object' }, 'spawned commands still load the served release');
+
     await holdCliAt(root, run, null);
     assert.deepEqual(launch('watch', 'GY-1', '1'), { release: 'B', argv: entry, schema: 'object' }, 'lifted, spawned commands load the checkout\'s B again');
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('unit:self-upgrade-waits-for-served-release — a supervised executor compares its release against the pin while one stands: the hold moving the checkout to B stands no slot down onto B, a slot started during the hold loads the served snapshot, and the lift stands it down onto B', async () => {
+  const root = await temporaryDirectory('held-executor');
+  try {
+    await mkdir(join(root, 'src'));
+    await writeFile(join(root, 'src', 'cli.ts'), 'export {};\n');
+    git(root, 'init', '-q');
+    git(root, 'add', 'src');
+    git(root, 'commit', '-q', '-m', 'release A');
+    const served = git(root, 'rev-parse', 'HEAD');
+    await writeFile(join(root, 'src', 'cli.ts'), 'export const b = 1;\n');
+    git(root, 'commit', '-q', '-am', 'tip B');
+    const tip = git(root, 'rev-parse', 'HEAD');
+    git(root, 'checkout', '-q', '--detach', served);
+    const run = async (command: string, args: string[]) => execFileSync(command, args, { encoding: 'utf8' });
+    // @ts-expect-error The standalone executor is a dependency-free entry point script.
+    const { executorRelease, load } = await import('../scripts/graphyard-executor.mjs');
+    // @ts-expect-error The launcher's hooks module is a dependency-free entry point script.
+    const { heldRelease } = await import('../bin/held-release-hooks.mjs');
+    const checkout = pathToFileURL(`${root}/`);
+
+    // A slot started on the checkout before the hold loaded A; the hold pins A, then moves the checkout to B.
+    const before = executorRelease(root, heldRelease(checkout), { readRelease, readCommit });
+    assert.deepEqual(before.release, { commit: served, dirty: false });
+    await holdCliAt(root, run, served);
+    git(root, 'checkout', '-q', '--detach', tip);
+    assert.equal(before.current(), served, 'the slot\'s checkout reads as the pinned A: it keeps claiming and does not stand down onto B');
+
+    // A slot its supervisor starts during the hold loads the snapshot's modules and runs A.
+    const held = heldRelease(checkout);
+    assert.ok(held && held.commit === served && fileURLToPath(held.to).startsWith(join(root, '.graphyard', 'held-cli')));
+    const during = executorRelease(root, held, { readRelease, readCommit });
+    assert.deepEqual([during.release, during.current()], [{ commit: served, dirty: false }, served]);
+    await assert.rejects(load(held), (error: Error) => error.message.includes(fileURLToPath(new URL('src/master.ts', held!.to))), 'its modules resolve inside the held snapshot, not the checkout');
+
+    // The lift: the checkout's own commit B is what every slot compares against, so they stand down onto B.
+    await holdCliAt(root, run, null);
+    assert.equal(before.current(), tip);
+    assert.equal(during.current(), tip);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

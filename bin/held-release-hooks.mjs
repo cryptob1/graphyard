@@ -5,6 +5,9 @@
 // release instead; the entry the process was started with — and so `process.argv[1]`, from which
 // the launcher derives the checkout it confines sessions against — stays the checkout's own path.
 // Dependencies (node_modules) and Graphyard's own state (.graphyard) are the checkout's, unchanged.
+import { existsSync, readFileSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
+
 let from = '', to = '';
 const exempt = ['node_modules/', '.graphyard/'];
 
@@ -15,4 +18,18 @@ export async function resolve(specifier, context, next) {
   if (!from || !resolved.url.startsWith(from)) return resolved;
   const rest = resolved.url.slice(from.length);
   return exempt.some(prefix => rest.startsWith(prefix)) ? resolved : { ...resolved, url: `${to}${rest}` };
+}
+
+/**
+ * The pin standing on the checkout at `checkout` (a directory URL), or null: the served release's
+ * commit, the snapshot's directory URL, and whether that snapshot's loop reads the hold's cursor
+ * (`loop`). The launcher and the executor entry read it before loading any module.
+ */
+export function heldRelease(checkout) {
+  try {
+    const pin = JSON.parse(readFileSync(new URL('.graphyard/held-cli.json', checkout), 'utf8'));
+    if (typeof pin?.root !== 'string' || typeof pin.commit !== 'string') return null;
+    const snapshot = pathToFileURL(`${pin.root}/`).href;
+    return existsSync(new URL('src/cli.ts', snapshot)) ? { commit: pin.commit, to: snapshot, loop: pin.loop === true } : null;
+  } catch { return null; }
 }

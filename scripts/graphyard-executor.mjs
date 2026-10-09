@@ -37,6 +37,7 @@ import { realpathSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { heldRelease } from '../bin/held-release-hooks.mjs';
 
 export function parseArguments(argv) {
   const options = { once: false, intervalSeconds: null, kinds: null, name: null, slot: null, install: false, count: null, unit: null };
@@ -91,16 +92,34 @@ export async function installCheck(installed, executor, read, template) {
   return report;
 }
 
-/** The TypeScript modules this process is a thin entry point for; tsx is a runtime dependency already. */
-export async function load() {
+/**
+ * The TypeScript modules this process is a thin entry point for; tsx is a runtime dependency already.
+ * While the self-upgrade holds a restart for the release production serves (GY-1585), they load from
+ * the held snapshot of that release, as every command the checkout's launcher starts does: a slot its
+ * supervisor starts during the hold speaks the protocol the serving plane accepts.
+ */
+export async function load(held = heldRelease(new URL('../', import.meta.url))) {
   const { tsImport } = await import('tsx/esm/api');
-  const here = import.meta.url;
+  const here = held ? new URL('scripts/graphyard-executor.mjs', held.to).href : import.meta.url;
   const [master, daemon, dispatch, executor, reviewer, producer, actions, view, setup, fleet] = await Promise.all([
     tsImport('../src/master.ts', here), tsImport('../src/master-daemon.ts', here), tsImport('../src/auto-dispatch.ts', here),
     tsImport('../src/executor.ts', here), tsImport('../src/reviewer.ts', here), tsImport('../src/producer.ts', here),
     tsImport('../src/model/next-action.ts', here), tsImport('../src/server/work-view.ts', here), tsImport('../src/repository-setup.ts', here), tsImport('../src/executor-fleet.ts', here),
   ]);
-  return { master, daemon, dispatch, executor, reviewer, producer, actions, view, setup, fleet };
+  return { master, daemon, dispatch, executor, reviewer, producer, actions, view, setup, fleet, held };
+}
+
+/**
+ * The release this process loaded and the checkout commit it is compared against before every claim
+ * (GY-126). A slot loaded from a held snapshot (GY-1585) runs the pinned commit, and while a pin
+ * stands the checkout's commit is the pin's: the hold moving the checkout to a tip production does
+ * not serve yet stands no slot down onto that tip, and the lift (or a newer pin) does.
+ */
+export function executorRelease(root, held, fleet) {
+  return {
+    release: held ? { commit: held.commit, dirty: false } : fleet.readRelease(root),
+    current: () => heldRelease(pathToFileURL(`${root}/`))?.commit ?? fleet.readCommit(root),
+  };
 }
 
 /** An exit status the supervisor reads: a slot the declaration does not have stays down instead of flapping. */
@@ -211,7 +230,7 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
   const identity = { id: options.name ?? (options.slot !== null ? `${status.actor.id}@${config.hostId}/${options.slot}` : `${status.actor.id}@${config.hostId}:${process.pid}`), host: config.hostId };
   // The release these modules were loaded from, recorded on this host before the first claim and
   // refreshed on every claim; the commit is re-read from the checkout in front of each claim.
-  const release = f.readRelease(root);
+  const { release, current: checkoutCommit } = executorRelease(root, modules.held, f);
   const registrar = f.executorRegistrar(config, { name: identity.id, host: identity.host, pid: process.pid, principal: status.actor.id, kinds: a.executorKinds(effects.handlers),
     intervalSeconds: options.intervalSeconds, root, release, supervisor: f.detectSupervisorUnit({ named: options.unit }) });
   await registrar.started();
@@ -229,7 +248,7 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
   // itself writes the item and defeats the loop's revision check.
   const single = x.loopMergeGuardedEffects(effects, () => x.detectLoopMerger(root, { config: current() }), line => console.error(line));
   const guarded = x.releaseGuardedEffects(single, {
-    loaded: release, current: () => f.readCommit(root),
+    loaded: release, current: checkoutCommit,
     claimed: action => registrar.claimed(action), settled: () => registrar.settled(),
     // A fleet restart raises a fence beside the records; no claim starts while it stands.
     claiming: () => registrar.claiming(), abandoned: () => registrar.abandoned(),
