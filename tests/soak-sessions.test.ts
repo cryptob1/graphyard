@@ -370,7 +370,7 @@ test('unit:soak-invariants-hold — a worker blocked on Claude\'s usage-limit me
   assert.deepEqual(proseAttempts.map(session => session.state), ['submitted'], `its one attempt carried on and submitted: ${proseAttempts.map(session => `${session.epoch}:${session.state}`).join(', ')}`);
 });
 
-test('unit:soak-invariants-hold — a worker spent on Claude\'s usage-limit menu holds its twin, the account on the same provider login, across every cycle until the reset its notice names: neither takes a launch meanwhile, the item is delivered on the other subscription, both return at the reset, and every invariant holds', { timeout: 600_000 }, async () => {
+test('unit:soak-invariants-hold — a worker spent on Claude\'s usage-limit menu holds its twin, the account on the same provider login, across every cycle until the reset its notice names: neither takes a launch meanwhile, the item is delivered on the other subscription, the hold reaches the agent registry once so a twin on another host is refused until the reset too, both return at the reset, and every invariant holds', { timeout: 600_000 }, async () => {
   // GY-1573: worker profiles one and two run on two login homes of one Claude subscription, three on
   // another. The loop reads every profile's accounts on every cycle through the real account read,
   // and the menu's hold is recorded where that read finds it; the notice's reset falls inside the day.
@@ -412,6 +412,20 @@ test('unit:soak-invariants-hold — a worker spent on Claude\'s usage-limit menu
   assert.deepEqual(sessions.filter(session => [spentProfile, twin].includes(session.profile.name) && session.dispatchAt > failedAt && session.dispatchAt < reset).map(session => `${session.key}@${session.profile.name}`), [],
     'no launch landed on the spent subscription before its reset');
   assert.equal(attempts[1]?.profile.name, 'three', `redispatched on the other subscription: ${attempts.map(session => session.profile.name).join(', ')}`);
+
+  // The hold went to the agent registry once, as the session saw it, and nothing repeated it in later cycles.
+  assert.deepEqual(limitMenuDay.observed.map(entry => [entry.accounts, entry.changed]), [[[`account-${spentProfile}`], true]], JSON.stringify(limitMenuDay.observed));
+  assert.equal(limitMenuDay.observed[0].elapsed, holdStart, 'reported the moment the hold was recorded');
+  // From then until the reset, the registry refuses the twin placed on another host every cycle, naming the spent account, while that host's own reads stand; the healthy subscription's account there stays eligible.
+  const remoteBetween = limitMenuDay.remoteReads.filter(read => read.elapsed > holdStart && read.elapsed < releaseAt), remoteAfter = limitMenuDay.remoteReads.filter(read => read.elapsed >= releaseAt);
+  assert.ok(remoteBetween.length >= 60, `the remote twin was judged across many cycles: ${remoteBetween.length}`);
+  for (const read of remoteBetween) {
+    assert.ok(read.ineligible['remote-twin']?.startsWith(`remote-twin quota is exhausted until ${resetsAt}: it is the same provider login as account-${spentProfile}, whose quota is exhausted (`), `at ${read.elapsed}: ${read.ineligible['remote-twin']}`);
+    assert.ok(read.ineligible['remote-twin']!.includes(menuNotice), read.ineligible['remote-twin']!);
+    assert.equal(read.ineligible['remote-other'], null, 'the healthy subscription on the other host can carry work');
+  }
+  assert.ok(limitMenuDay.remoteReads.filter(read => read.elapsed < holdStart).every(read => read.ineligible['remote-twin'] === null), 'before the hold the remote twin was eligible');
+  assert.ok(remoteAfter.length > 0 && remoteAfter.every(read => read.ineligible['remote-twin'] === null && read.ineligible['remote-other'] === null), 'both return at the reset');
 });
 
 test('unit:soak-invariants-hold — containment quarantines of dead workers stand across many cycles while the timed clock read fails and then answers slowly, one read a cycle and none without an assessable quarantine, each escalation recorded once, and they settle once reads are fast, with every invariant holding', { timeout: 600_000 }, async () => {

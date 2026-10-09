@@ -39,16 +39,18 @@ export const heldObservation = (environment: string, held: ObservedExhaustion, r
  * reset holds every configured environment logged in to that subscription until the same reset. The
  * spent login is the one recorded with the hold, so a source home logged in afresh since moves no
  * hold; a hold recorded before identities were, reads its home now. An environment whose identity is
- * unknown, or a hold with no reset, holds nothing beyond its own name.
+ * unknown, or a hold with no reset, holds nothing beyond its own name. A login file that cannot be read
+ * just now (a runtime mid-write) reads as `known`, the identity the environment log last recorded for it.
  */
-export async function heldTwin(environments: readonly AgentEnvironment[], held: Record<string, ObservedExhaustion>, name: string) {
+export async function heldTwin(environments: readonly AgentEnvironment[], held: Record<string, ObservedExhaustion>, name: string, known: Record<string, { identity?: string | null }> = {}) {
   const candidates = Object.entries(held).filter(([other, entry]) => other !== name && entry.resetsAt);
+  const read = async (environment: AgentEnvironment) => { const identity = await providerIdentity(environment.kind, environment.home); return identity === undefined ? known[environment.name]?.identity ?? null : identity; };
   const self = candidates.length ? environments.find(environment => environment.name === name) : undefined;
-  const identity = self ? await providerIdentity(self.kind, self.home) : null;
+  const identity = self ? await read(self) : null;
   if (!identity) return null;
   for (const [other, entry] of candidates) {
     const twin = environments.find(environment => environment.name === other);
-    const spent = entry.identity !== undefined ? entry.identity : twin ? await providerIdentity(twin.kind, twin.home) : null;
+    const spent = entry.identity !== undefined ? entry.identity : twin ? await read(twin) : null;
     if (spent === identity) return { name: other, held: entry, reason: `${name} is the same provider login as ${describeObservedExhaustion(other, entry)}` };
   }
   return null;

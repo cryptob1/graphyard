@@ -376,7 +376,9 @@ export async function recordObservedExhaustion(config: Pick<MasterConfig, 'crede
   const log = await readEnvironmentLog(config);
   const reset = observed.resetsAt ? Date.parse(observed.resetsAt) : Number.NaN;
   const home = config.environments?.find(entry => entry.name === environment);
-  const identity = observed.identity !== undefined ? observed.identity : home ? await providerIdentity(home.kind, home.home) : (log.environments[environment] as EnvironmentHealth | undefined)?.identity;
+  // A login file unreadable just now (a runtime mid-write) falls back to the identity the log last read for it.
+  const read = home ? await providerIdentity(home.kind, home.home) : undefined;
+  const identity = observed.identity !== undefined ? observed.identity : read !== undefined ? read : (log.environments[environment] as EnvironmentHealth | undefined)?.identity;
   const entry: ObservedExhaustion = { ...observed, reason: observed.reason.slice(0, 500), until: new Date(Number.isFinite(reset) && reset > now ? reset : now + unknownResetHoldMs).toISOString(), ...identity === undefined ? {} : { identity } };
   log.exhausted = { ...Object.fromEntries(Object.entries(log.exhausted).filter(([, held]) => Date.parse(held.until) > now)), [environment]: entry };
   await atomicPrivateWrite(environmentLogPath(config), log);
@@ -395,7 +397,8 @@ export async function recordEnvironmentLog(config: Pick<MasterConfig, 'credentia
   if (!health.length && !skipped.length && !selection) return;
   const log = await readEnvironmentLog(config);
   if (selection) { const { key, ...selected } = selection; log.selected = { ...log.selected, [key]: selected }; }
-  for (const entry of health) log.environments[entry.name] = entry;
+  // A read that caught the login file mid-write keeps the identity last read (GY-1573).
+  for (const entry of health) log.environments[entry.name] = entry.identity === undefined && log.environments[entry.name]?.identity !== undefined ? { ...entry, identity: log.environments[entry.name].identity } : entry;
   log.skipped = [...log.skipped, ...skipped.map(entry => ({ ...entry, reason: entry.reason.slice(0, 500) }))].slice(-50);
   await atomicPrivateWrite(environmentLogPath(config), log);
 }
@@ -450,6 +453,7 @@ export async function selectAccount(config: Pick<MasterConfig, 'environments' | 
   const at = new Date(probe.now?.() ?? Date.now()).toISOString();
   const checked: EnvironmentHealth[] = [], skipped: AccountSkip[] = [];
   const held = await observedExhaustions(config, probe.now?.() ?? Date.now());
+  const known = Object.keys(held).length ? (await readEnvironmentLog(config)).environments : {};
   if (!profile.accounts?.length) {
     const own = ownLoginHold(held, profile);
     if (own) {
@@ -466,7 +470,7 @@ export async function selectAccount(config: Pick<MasterConfig, 'environments' | 
     if (profile.kind && environment.kind !== profile.kind && sameRuntimeRoles.includes(role)) { skipped.push({ at, role, profile: profile.name, environment: name, reason: crossRuntimeSkip(role, profile, environment), work: probe.work ?? null, cause: 'cross-runtime' }); continue; }
     // What a session itself reported outranks the provider's usage read, which may lag or not exist.
     if (held[name]) { skipped.push({ at, role, profile: profile.name, environment: name, reason: describeObservedExhaustion(name, held[name]), work: probe.work ?? null, cause: 'exhausted' }); continue; }
-    const twin = await heldTwin(config.environments ?? [], held, name);
+    const twin = await heldTwin(config.environments ?? [], held, name, known);
     if (twin) { skipped.push({ at, role, profile: profile.name, environment: name, reason: twin.reason, work: probe.work ?? null, cause: 'exhausted' }); continue; }
     const health = await checkAgentEnvironment(environment, { ...probe, ceilingPercent: probe.ceilingPercent ?? config.run.quotaCeilingPercent });
     checked.push(health);
@@ -598,6 +602,7 @@ export interface ProfileAccountHealth { environment: string; healthy: boolean; r
 export async function inspectProfileAccounts<T extends { available: boolean; reason: string | null }>(config: Pick<MasterConfig, 'environments' | 'credentialFile' | 'run'> & Partial<Pick<MasterConfig, 'url' | 'hostId'>>, role: LaunchRole, profiles: { name: string; accounts?: string[]; kind?: string; environment?: Record<string, string> }[], health: Record<string, T>, probe: EnvironmentProbe = {}) {
   const result: Record<string, T & { accounts?: ProfileAccountHealth[] }> = { ...health };
   const now = probe.now?.() ?? Date.now(), held = await observedExhaustions(config, now);
+  const known = Object.keys(held).length ? (await readEnvironmentLog(config)).environments : {};
   // A role the agent registry defines is judged from the registry: every profile of the role
   // launches on the same ordered accounts, so they share one answer.
   const fleet = await fleetRoleHealth(config, role, probe).catch(() => null);
@@ -623,7 +628,7 @@ export async function inspectProfileAccounts<T extends { available: boolean; rea
       // As selectAccount passes it over (GY-1306), an account of another runtime launches nothing for this role.
       if (profile.kind && environment.kind !== profile.kind && sameRuntimeRoles.includes(role)) { accounts.push({ environment: name, healthy: false, reason: crossRuntimeSkip(role, profile, environment), quota: 'unknown', resetsAt: null }); continue; }
       if (held[name]) { accounts.push({ environment: name, healthy: false, reason: describeObservedExhaustion(name, held[name]), quota: 'exhausted', resetsAt: held[name].resetsAt }); continue; }
-      const twin = await heldTwin(config.environments ?? [], held, name);
+      const twin = await heldTwin(config.environments ?? [], held, name, known);
       if (twin) { accounts.push({ environment: name, healthy: false, reason: twin.reason, quota: 'exhausted', resetsAt: twin.held.resetsAt }); continue; }
       const checked = await checkAgentEnvironment(environment, { ...probe, ceilingPercent: probe.ceilingPercent ?? config.run.quotaCeilingPercent });
       // The reset that matters is the latest among the spent windows: the account launches again only when all of them have.

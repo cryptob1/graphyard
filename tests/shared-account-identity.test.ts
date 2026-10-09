@@ -145,6 +145,21 @@ test('unit:shared-identity-exhaustion-holds-twin — an account recorded exhaust
   await writeFile(join(scratch, '.claude.json'), '{"oauthAccount": {"accountUu');
   assert.equal(await providerIdentity('claude', scratch), undefined, 'a login file caught mid-write is unreadable, not a changed login');
   assert.equal(await providerIdentity('opencode', homes.claude), null);
+
+  // A twin's login caught mid-write keeps the identity the environment log last read, at selection and when its exhaustion is recorded.
+  const midWrite = await temporaryDirectory('shared-identity-mid-write'); directories.push(midWrite);
+  const midHomes = await claudeHomes(midWrite);
+  const midConfig = { credentialFile: join(midWrite, 'coordinator.token'), environments: Object.entries(midHomes).map(([name, home]) => ({ name, kind: 'claude' as const, home })) };
+  const known = await providerIdentity('claude', midHomes.claude);
+  await environments.recordEnvironmentLog(midConfig, Object.entries(midHomes).map(([name, home]) => ({ name, kind: 'claude', home, variable: 'CLAUDE_CONFIG_DIR', checkedAt: new Date(spentAt).toISOString(), loggedIn: true, quota: 'unknown' as const, usage: [], healthy: true, reason: null, note: null, login: null, identity: known })));
+  await writeFile(join(midHomes['claude-a'], '.claude.json'), '{"oauthAccount": {"accountUu');
+  const midSpent = await recordObservedExhaustion(midConfig, 'claude-a', { at: new Date(spentAt).toISOString(), resetsAt, reason: notice, role: 'worker', profile: 'builder', work: 'GY-1571' }, now);
+  assert.equal(midSpent.identity, known, 'the hold snapshots the identity the log last read');
+  await writeFile(join(midHomes.claude, '.claude.json'), '{"oauthAccount": {"accountUu');
+  const midLog = await environments.readEnvironmentLog(midConfig);
+  assert.match((await heldTwin(midConfig.environments, await observedExhaustions(midConfig, now), 'claude', midLog.environments))!.reason, /^claude is the same provider login as claude-a/, 'an unreadable twin login is still held');
+  await environments.recordEnvironmentLog(midConfig, [{ ...midLog.environments.claude, identity: undefined }]);
+  assert.equal((await environments.readEnvironmentLog(midConfig)).environments.claude.identity, known, 'a read that caught the file mid-write keeps the identity last read');
 });
 
 /** Claude login homes as Claude Code writes them: the OAuth token and the account it belongs to. */
