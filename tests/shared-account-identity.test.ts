@@ -1,6 +1,6 @@
 import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { FleetClient, FleetSelection } from '../src/fleet.js';
@@ -207,6 +207,44 @@ test('unit:shared-identity-exhaustion-holds-twin — an account recorded exhaust
   assert.equal(await environments.reportPendingExhaustions(legacyConfig, { registry: { observe: async (request: { host: string; observations: { account: string; quota: QuotaObservation }[] }) => { legacySent.push(...request.observations.map(entry => entry.quota)); return retried; } } }, now), 1, 'a legacy hold is reported');
   assert.equal(legacySent[0].identity, shared, 'with the identity the log last read for its account');
   assert.equal((await observedExhaustions(legacyConfig, now))['claude-a'].reported, true, 'and is not sent again');
+  assert.equal((await observedExhaustions(legacyConfig, now))['claude-a'].identity, shared, 'the reconstructed login is kept on the hold it was reported for');
+
+  // A legacy hold keeps the login it was reported with after its source home logs in afresh: its twin stays held until the reset, the new login's twin is not.
+  const legacyRelogin = await temporaryDirectory('shared-identity-legacy-relogin'); directories.push(legacyRelogin);
+  const legacyReloginHomes = await claudeHomes(legacyRelogin);
+  const reloginConfig = { credentialFile: join(legacyRelogin, 'coordinator.token'), hostId: HOST, environments: (['claude-a', 'claude', 'claude-c'] as const).map(name => ({ name, kind: 'claude' as const, home: legacyReloginHomes[name] })) };
+  const spentLogin = await providerIdentity('claude', legacyReloginHomes['claude-a']);
+  await environments.recordEnvironmentLog(reloginConfig, [{ name: 'claude-a', kind: 'claude', home: legacyReloginHomes['claude-a'], variable: 'CLAUDE_CONFIG_DIR', checkedAt: new Date(spentAt).toISOString(), loggedIn: true, quota: 'unknown', usage: [], healthy: true, reason: null, note: null, login: null, identity: spentLogin }]);
+  const reloginLog = await environments.readEnvironmentLog(reloginConfig);
+  reloginLog.exhausted = { 'claude-a': { at: new Date(spentAt).toISOString(), until: resetsAt, resetsAt, reason: notice, role: 'worker', profile: 'builder', work: 'GY-1571' } };
+  await writeFile(environments.environmentLogPath(reloginConfig), JSON.stringify(reloginLog));
+  const reloginSent: QuotaObservation[] = [];
+  const collect = (into: QuotaObservation[]) => ({ observe: async (request: { host: string; observations: { account: string; quota: QuotaObservation }[] }) => { into.push(...request.observations.map(entry => entry.quota)); return retried; } });
+  assert.equal(await environments.reportPendingExhaustions(reloginConfig, { registry: collect(reloginSent) }, now), 1);
+  assert.equal(reloginSent[0].identity, spentLogin, 'the legacy hold is reported with the spent login');
+  await writeFile(join(legacyReloginHomes['claude-a'], '.claude.json'), JSON.stringify({ oauthAccount: { accountUuid: 'account-2', organizationUuid: 'org-account-2' } }));
+  const reloginHeld = await observedExhaustions(reloginConfig, now);
+  assert.equal(reloginHeld['claude-a'].identity, spentLogin, 'the hold keeps the login it was spent on');
+  assert.match((await heldTwin(reloginConfig.environments, reloginHeld, 'claude'))!.reason, /^claude is the same provider login as claude-a/, 'the spent login\'s twin stays held after the source relogs');
+  assert.equal(await heldTwin(reloginConfig.environments, reloginHeld, 'claude-c'), null, 'the source\'s new login passes no hold to its twin');
+  assert.equal(heldObservation('claude-a', reloginHeld['claude-a'], { loggedIn: true, state: 'available', usage: [], resetsAt: null, reason: null, identity: await providerIdentity('claude', legacyReloginHomes['claude-a']) }).identity, spentLogin, 'a later probe of the relogged home overlays the hold with the spent login, not its new one');
+
+  // A pre-upgrade hold whose log recorded no login is read from its home before it is marked reported; a login caught mid-write leaves it pending.
+  const preUpgrade = await temporaryDirectory('shared-identity-pre-upgrade'); directories.push(preUpgrade);
+  const preHomes = await claudeHomes(preUpgrade);
+  const preConfig = { credentialFile: join(preUpgrade, 'coordinator.token'), hostId: HOST, environments: [{ name: 'claude-a', kind: 'claude' as const, home: preHomes['claude-a'] }] };
+  const preLog = await environments.readEnvironmentLog(preConfig);
+  preLog.exhausted = { 'claude-a': { at: new Date(spentAt).toISOString(), until: resetsAt, resetsAt, reason: notice, role: 'worker', profile: 'builder', work: 'GY-1571' } };
+  await writeFile(environments.environmentLogPath(preConfig), JSON.stringify(preLog));
+  const login = await readFile(join(preHomes['claude-a'], '.claude.json'), 'utf8');
+  await writeFile(join(preHomes['claude-a'], '.claude.json'), login.slice(0, 10));
+  const preSent: QuotaObservation[] = [];
+  assert.equal(await environments.reportPendingExhaustions(preConfig, { registry: collect(preSent) }, now), 0, 'a login caught mid-write is not reported as unknown');
+  assert.equal((await observedExhaustions(preConfig, now))['claude-a'].reported, undefined, 'and the hold stays pending');
+  await writeFile(join(preHomes['claude-a'], '.claude.json'), login);
+  assert.equal(await environments.reportPendingExhaustions(preConfig, { registry: collect(preSent) }, now), 1, 'once readable the hold is reported');
+  assert.equal(preSent[0].identity, await providerIdentity('claude', preHomes['claude-a']), 'with the login its home holds');
+  assert.equal((await observedExhaustions(preConfig, now))['claude-a'].identity, preSent[0].identity, 'kept on the hold');
 
   // A reset already past when the notice is read names no reset: the fallback hour holds the account alone, naming no login.
   const late = await temporaryDirectory('shared-identity-late-reset'); directories.push(late);

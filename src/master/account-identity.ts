@@ -35,6 +35,21 @@ export const describeObservedExhaustion = (environment: string, held: ObservedEx
 export const heldObservation = (environment: string, held: ObservedExhaustion, read: QuotaObservation = { loggedIn: true, state: 'unknown', usage: [], resetsAt: null, reason: null }): QuotaObservation =>
   ({ ...read, state: 'exhausted', resetsAt: held.until, reason: describeObservedExhaustion(environment, held).slice(0, 500), identity: !held.resetsAt ? null : held.identity !== undefined ? held.identity : read.identity });
 /**
+ * A hold as the agent registry is told of it, with the login it was spent on (GY-1573). A hold saved
+ * before identities were recorded is given one, kept on the hold once reported so a source home logged
+ * in afresh later moves no hold: the identity the log last read for its account, else its home's login
+ * read now. A login unreadable just now (a runtime mid-write) returns null, so the hold stays pending
+ * until it can be read; a hold with no known home names no login, and the registry keeps the one its
+ * executor last observed for that account.
+ */
+export async function reconstructedHold(held: ObservedExhaustion, launched?: { identity?: string | null }, home?: { kind: string; home: string }): Promise<ObservedExhaustion | null> {
+  if (held.identity !== undefined) return held;
+  if (launched?.identity !== undefined) return { ...held, identity: launched.identity };
+  if (!home) return held;
+  const identity = await providerIdentity(home.kind, home.home);
+  return identity === undefined ? null : { ...held, identity };
+}
+/**
  * A held account on the same provider login as `name` (GY-1573): one a session saw spent with a known
  * reset holds every configured environment logged in to that subscription until the same reset. The
  * spent login is the one recorded with the hold, so a source home logged in afresh since moves no

@@ -14,7 +14,7 @@ import { atomicPrivateText, atomicPrivateWrite, externalCredential, loadStoredMa
 import { failureText } from './worktrees.js';
 import { shellQuote } from './dispatch.js';
 import { timedCall } from './timings.js';
-import { describeObservedExhaustion, heldObservation, heldTwin, providerIdentity } from './account-identity.js';
+import { describeObservedExhaustion, heldObservation, heldTwin, providerIdentity, reconstructedHold } from './account-identity.js';
 export { describeObservedExhaustion, heldObservation, heldTwin, providerIdentity } from './account-identity.js';
 import { getCachedPlanUsage, setCachedPlanUsage, parseZaiUsage, type ProviderUsageResult } from '../provider-usage.js';
 
@@ -393,16 +393,18 @@ export async function recordObservedExhaustion(config: Pick<MasterConfig, 'crede
 }
 const reportable = (environment: string) => /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$/.test(environment), observeTimeoutMs = 5_000; // a profile's or runtime's own login stays on this host
 /** Send the agent registry every hold this host has not yet reported (GY-1573), apart from any role's selection, so a report lost to a timeout cannot leave a shared-login twin launchable on another host. */
-export async function reportPendingExhaustions(config: Pick<MasterConfig, 'credentialFile'> & Partial<Pick<MasterConfig, 'url' | 'hostId'>>, report: { registry?: Pick<FleetClient, 'observe'>; fetch?: typeof fetch } = {}, now = Date.now()) {
-  const known = await readEnvironmentLog(config); // a hold saved before `reported` existed is pending too, with the login last read for it
-  const pending = Object.entries(known.exhausted ?? {}).filter(([name, held]) => Date.parse(held.until) > now && held.reported !== true && reportable(name))
-    .map(([name, held]) => [name, held.identity !== undefined || known.environments[name]?.identity === undefined ? held : { ...held, identity: known.environments[name].identity }] as const);
+export async function reportPendingExhaustions(config: Pick<MasterConfig, 'credentialFile'> & Partial<Pick<MasterConfig, 'url' | 'hostId' | 'environments'>>, report: { registry?: Pick<FleetClient, 'observe'>; fetch?: typeof fetch } = {}, now = Date.now()) {
+  const known = await readEnvironmentLog(config), pending: (readonly [string, ObservedExhaustion])[] = []; // a hold saved before `reported` or `identity` existed too, its login reconstructed once
+  for (const [name, held] of Object.entries(known.exhausted ?? {})) if (Date.parse(held.until) > now && held.reported !== true && reportable(name)) {
+    const launched = known.environments[name] as EnvironmentHealth | undefined, entry = await reconstructedHold(held, launched, launched?.home ? launched : config.environments?.find(entry => entry.name === name));
+    if (entry) pending.push([name, entry]);
+  }
   if (!pending.length || !config.hostId) return 0;
   const registry = report.registry ?? (config.url ? httpFleetClient({ url: config.url, credentialFile: config.credentialFile }, report.fetch ?? fetch, observeTimeoutMs) : null);
   if (!registry?.observe) return 0;
   await registry.observe({ host: config.hostId, observations: pending.map(([name, held]) => ({ account: name, quota: heldObservation(name, held) })) });
   const log = await readEnvironmentLog(config); // a hold recorded again meanwhile is a new report, still pending
-  for (const [name, held] of pending) if (log.exhausted[name]?.at === held.at && log.exhausted[name]?.until === held.until) log.exhausted[name] = { ...log.exhausted[name], reported: true };
+  for (const [name, held] of pending) if (log.exhausted[name]?.at === held.at && log.exhausted[name]?.until === held.until) log.exhausted[name] = { ...log.exhausted[name], ...held.identity === undefined ? {} : { identity: held.identity }, reported: true };
   await atomicPrivateWrite(environmentLogPath(config), log);
   return pending.length;
 }
