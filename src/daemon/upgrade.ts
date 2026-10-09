@@ -10,7 +10,9 @@
 // executors load, it restarts the fleet through `master executors restart` and then re-executes
 // itself through the supervisor unit it runs under. A checkout that is dirty or not detached is
 // never touched: the refusal is on the cursor, and `master status` names it until it clears.
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
+import { mkdir, readdir, rename, rm, writeFile } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
 import type { ChildRun } from '../child-runner.js';
 import { shortCommit, type ExecutorRestartResult } from '../executor-fleet.js';
 import type { MasterConfig } from '../master.js';
@@ -36,6 +38,37 @@ export const fleetWaitMs = 15 * 60_000;
 const sameCommit = (a: string | null | undefined, b: string | null | undefined) => !!a && !!b && (a.startsWith(b) || b.startsWith(a));
 export function upgradeTouchesCode(paths: readonly string[]): boolean {
   return paths.some(path => loadedFiles.includes(path) || loadedPrefixes.some(prefix => path.startsWith(prefix)));
+}
+
+/** Where the launcher reads the release a held restart pins the CLI to (GY-1585): `{ commit, root }`. */
+export const heldCliPointer = (root: string) => join(root, '.graphyard', 'held-cli.json');
+const heldCliSnapshots = (root: string) => join(root, '.graphyard', 'held-cli');
+/**
+ * Pins the CLI the checkout's launcher runs to `commit` while a restart is held (GY-1585), or lifts
+ * the pin (null). The checkout already holds the merged tip, but every process `bin/graphyard.mjs`
+ * starts — watch, claim, heartbeat, the credential push the loop and the executors spawn — must
+ * speak the protocol of the release production serves: a shared clone of that release is checked
+ * out under `.graphyard/held-cli/`, and the pointer naming it is written by rename, so a launcher
+ * reads the old pin or the new one. Snapshots other than the new pin and the one it replaces (a
+ * process started under it may still be loading modules) are removed.
+ */
+export async function holdCliAt(root: string, run: ChildRun, commit: string | null): Promise<void> {
+  const pointer = heldCliPointer(root);
+  if (!commit) { await rm(pointer, { force: true }); return; }
+  let current: { commit?: unknown; root?: unknown } | null = null;
+  try { current = JSON.parse(readFileSync(pointer, 'utf8')); } catch { /* no pin yet */ }
+  const snapshots = heldCliSnapshots(root), target = join(snapshots, commit.slice(0, 12));
+  if (current?.commit === commit && current.root === target && existsSync(join(target, 'src', 'cli.ts'))) return;
+  await rm(target, { recursive: true, force: true });
+  await run('git', ['clone', '-q', '--shared', '--no-checkout', root, target]);
+  await run('git', ['-C', target, 'checkout', '-q', '--detach', commit]);
+  await mkdir(dirname(pointer), { recursive: true });
+  await writeFile(`${pointer}.tmp`, `${JSON.stringify({ commit, root: target })}\n`);
+  await rename(`${pointer}.tmp`, pointer);
+  for (const entry of await readdir(snapshots)) {
+    const path = join(snapshots, entry);
+    if (path !== target && path !== current?.root) await rm(path, { recursive: true, force: true });
+  }
 }
 
 /** The supervisor unit the loop itself runs under, when systemd supervises it: read from the process's own cgroup, like an executor's. */
@@ -153,6 +186,8 @@ export interface SelfUpgradeDeps {
    * (`alignLoopUnit`), before the loop re-executes itself through it (GY-916).
    */
   alignUnit?: () => Promise<{ wrote: string; reason: string | null }>;
+  /** Pins the CLI the checkout's launcher runs to the served release while a restart is held, null lifts it (GY-1585); `holdCliAt` on `root` by default. */
+  holdCli?: (commit: string | null) => Promise<void>;
   now?: () => number;
   persist?: (state: DaemonState) => Promise<void>;
 }
@@ -186,6 +221,7 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
   const git = (...args: string[]) => deps.run('git', ['-C', deps.root, ...args]);
   const persist = async () => { if (deps.persist) await deps.persist(state); };
   const key = `upgrade:${state.deployment?.sha ?? 'none'}`, heldKey = 'upgrade:held';
+  const holdCli = deps.holdCli ?? (commit => holdCliAt(deps.root, deps.run, commit));
   const note = async (detail: string, failure: boolean, actionKey = key) => {
     storeAction(state, actionKey, { kind: 'config', work: null, principal: null, state: failure ? 'failed' : 'done', detail, attempts: (state.actions[actionKey]?.attempts ?? 0) + 1, epoch: null, cycle: state.cycle, at: at() });
     await persist();
@@ -273,9 +309,12 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
     // only when what it names changes, its time the latest held pass (the owed restart's attempt clock
     // master status reads), and settled by the pass that lifts it: a standing hold grows nothing, and
     // no waiting row outlives the hold it describes.
+    // The CLI processes the loop and the executors spawn run from the checkout, which already holds
+    // the move: they are pinned to the served release for as long as the hold stands.
     const lag = await lagging(pending.to);
     if (lag) {
-      const reason = `restart held: production serves release ${shortCommit(lag)}, which does not contain ${shortCommit(pending.to)} yet; the executors and the loop restart onto ${shortCommit(pending.to)} on the first pass whose deployment observation serves it`;
+      const pinned = await holdCli(lag).then(() => '', error => `; the CLI it spawns could not be pinned to ${shortCommit(lag)}: ${message(error)}`);
+      const reason = `restart held: production serves release ${shortCommit(lag)}, which does not contain ${shortCommit(pending.to)} yet; the executors and the loop restart onto ${shortCommit(pending.to)} on the first pass whose deployment observation serves it${pinned}`;
       state.upgrade.pending = { from: pending.from, to: pending.to, code: true };
       stall('release-lagged', reason);
       const standing = state.actions[heldKey];
@@ -290,6 +329,7 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
       storeAction(state, heldKey, { kind: 'config', work: null, principal: null, state: 'done', detail: `The restart onto ${shortCommit(pending.to)} is no longer held: ${lifted}`, attempts: state.actions[heldKey]!.attempts, epoch: null, cycle: state.cycle, at: at() });
       await persist();
     }
+    await holdCli(null).catch(() => {});
     if (!deps.restartExecutors) return failed('loaded code moved but this loop cannot restart the executors', 'executors-unavailable');
     const executors = await deps.restartExecutors(pending.to).catch(error => ({ result: 'refused' as const, reason: message(error), coordinator: { commit: pending.to }, held: [], restarted: [], unsupervised: [], forgotten: [] }));
     if (executors.result === 'refused') {

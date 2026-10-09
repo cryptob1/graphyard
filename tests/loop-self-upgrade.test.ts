@@ -1,14 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { setTimeout as delay } from 'node:timers/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import type { Work } from '../src/model.js';
 import { daemonSummary, deploymentObservationSchema, emptyDaemonState, readDaemonState, runDaemon, writeDaemonState, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
-import { describeSelfUpgrade, performSelfUpgrade, type SelfUpgradeOutcome } from '../src/daemon/upgrade.js';
+import { describeSelfUpgrade, heldCliPointer, holdCliAt, performSelfUpgrade, type SelfUpgradeOutcome } from '../src/daemon/upgrade.js';
 import { releaseLag, promotionWait, readBaseTip, releaseLagGraceMs, upgradeRefusalAttention, type PromotionWait } from '../src/master/release-lag.js';
 import { owedUpgrade, readResources, resourceAttention } from '../src/master-resources.js';
 import { masterStatusReport } from '../src/cli/master-status.js';
@@ -98,9 +98,10 @@ const verified = (sha: string): DaemonState['deployment'] =>
   deploymentObservationSchema.parse({ source: 'endpoint', sha, at: iso(0), reason: null, deployed: ['GY-1'], pending: [] });
 const restarted = (to: string) => ({ result: 'restarted' as const, reason: null, coordinator: { commit: to }, held: [], restarted: [], unsupervised: [], forgotten: [] });
 
-interface UpgradeRecording { executors: (string | null)[]; self: number; persisted: number }
+/** `pins`: every pin of the CLI the checkout's launcher runs (GY-1585), null for a lift, with the executor restarts seen by then. */
+interface UpgradeRecording { executors: (string | null)[]; self: number; persisted: number; pins: { commit: string | null; executors: number }[] }
 const recording = (fake: FakeGit, root: string, behaviour: 'restart' | 'refuse' = 'restart'): { deps: () => Parameters<typeof performSelfUpgrade>[2]; calls: UpgradeRecording } => {
-  const calls: UpgradeRecording = { executors: [], self: 0, persisted: 0 };
+  const calls: UpgradeRecording = { executors: [], self: 0, persisted: 0, pins: [] };
   return {
     calls,
     deps: () => ({
@@ -112,6 +113,7 @@ const recording = (fake: FakeGit, root: string, behaviour: 'restart' | 'refuse' 
       },
       restartSelf: async () => { calls.self += 1; },
       persist: async () => { calls.persisted += 1; },
+      holdCli: async commit => { calls.pins.push({ commit, executors: calls.executors.length }); },
       now: () => clock,
     }),
   };
@@ -758,6 +760,9 @@ test('unit:self-upgrade-waits-for-served-release — with production serving rel
     assert.equal(state.actions['upgrade:held']?.state, 'waiting');
     assert.equal(state.actions[`upgrade:${loaded}`]?.state, 'done', 'the release\'s own row records the checkout move, not a hold');
     assert.equal(state.upgrade.alignedRelease, null, 'the release is not aligned while its restart is held');
+    // The checkout already holds B, so every CLI process the loop and the executors spawn through the
+    // checkout's launcher is pinned to the release production serves for as long as the hold stands.
+    assert.deepEqual(calls.pins, [{ commit: loaded, executors: 0 }], 'the spawned CLI is pinned to the served release A');
 
     // Still serving A a cycle later while main moved on to C: held again on the same target, with no
     // fetch, no restart, the stall's first instant kept and the one held row refreshed, not grown.
@@ -781,6 +786,7 @@ test('unit:self-upgrade-waits-for-served-release — with production serving rel
     assert.deepEqual(calls.executors, [tip], 'the executors restart onto exactly B');
     assert.equal(calls.self, 1, 'and the loop re-executes itself onto it');
     assert.equal(fake.fetches, fetched, 'no newer tip was fetched first');
+    assert.deepEqual(calls.pins.at(-1), { commit: null, executors: 0 }, 'the pin is lifted before the executors restart onto B, so what they spawn loads B with them');
     assert.equal(state.upgrade.pending, null);
     assert.equal(state.upgrade.stalled, undefined, 'the stall retires with the restart');
     assert.equal(state.upgrade.alignedRelease, tip);
@@ -790,6 +796,46 @@ test('unit:self-upgrade-waits-for-served-release — with production serving rel
     assert.match(state.actions['upgrade:held']!.detail, new RegExp(`^The restart onto ${tip.slice(0, 12)} is no longer held: production serves release ${tip.slice(0, 12)}, which contains ${tip.slice(0, 12)}`));
     assert.deepEqual(Object.entries(state.actions).filter(([key, action]) => key.startsWith('upgrade:') && action.state === 'waiting'), [], 'no upgrade row is left waiting');
   } finally { await dispose(); }
+});
+
+test('unit:self-upgrade-waits-for-served-release — while the restart is held, every command the checkout\'s launcher runs but the loop itself loads the served release A, with the checkout\'s own entry kept as its argv, and lifting the hold returns them to the checkout\'s B', async () => {
+  // A real checkout holding B with A in its history, and the shipped launcher beside it: what the
+  // loop and the executors spawn through config.cliPath (watch, claim, heartbeat, push-credential).
+  const root = await temporaryDirectory('held-cli');
+  try {
+    const cli = (release: string) => `import { z } from 'zod';\nexport const release: string = '${release}';\nconsole.log(JSON.stringify({ release, argv: process.argv[1], schema: typeof z }));\n`;
+    await mkdir(join(root, 'src'));
+    await writeFile(join(root, 'src', 'cli.ts'), cli('A'));
+    await writeFile(join(root, 'package.json'), '{ "type": "module" }\n');
+    git(root, 'init', '-q');
+    git(root, 'add', 'src', 'package.json');
+    git(root, 'commit', '-q', '-m', 'release A');
+    const served = git(root, 'rev-parse', 'HEAD');
+    await writeFile(join(root, 'src', 'cli.ts'), cli('B'));
+    git(root, 'commit', '-q', '-am', 'tip B');
+    git(root, 'checkout', '-q', '--detach');
+    const tip = git(root, 'rev-parse', 'HEAD');
+    await mkdir(join(root, 'bin'));
+    for (const file of ['graphyard.mjs', 'held-release-hooks.mjs']) await writeFile(join(root, 'bin', file), await readFile(fileURLToPath(new URL(`../bin/${file}`, import.meta.url))));
+    await symlink(fileURLToPath(import.meta.resolve('tsx')).replace(/\/node_modules\/.*$/, '/node_modules'), join(root, 'node_modules'), 'dir');
+    const launch = (...args: string[]) => JSON.parse(execFileSync(process.execPath, [join(root, 'bin', 'graphyard.mjs'), ...args], { encoding: 'utf8' }));
+    const run = async (command: string, args: string[]) => execFileSync(command, args, { encoding: 'utf8' });
+    const entry = join(root, 'src', 'cli.ts');
+    assert.deepEqual(launch('status'), { release: 'B', argv: entry, schema: 'object' }, 'unpinned, the launcher runs the checkout');
+
+    await holdCliAt(root, run, served);
+    assert.equal(JSON.parse(await readFile(heldCliPointer(root), 'utf8')).commit, served);
+    assert.deepEqual(launch('watch', 'GY-1', '1'), { release: 'A', argv: entry, schema: 'object' }, 'pinned, a spawned command loads release A, its argv still the checkout entry its confinement is derived from');
+    assert.deepEqual(launch('heartbeat', 'GY-1', '1'), { release: 'A', argv: entry, schema: 'object' });
+    assert.deepEqual(launch('master', 'run'), { release: 'B', argv: entry, schema: 'object' }, 'the loop itself is never redirected: it re-executes onto the checkout when the hold lifts');
+    assert.equal(git(root, 'status', '--porcelain', '--untracked-files=no'), '', 'pinning leaves the checkout clean');
+    assert.equal(git(root, 'rev-parse', 'HEAD'), tip, 'and at B');
+    await holdCliAt(root, run, served);
+    assert.equal(launch('status').release, 'A', 'pinning the same release again keeps the pin');
+
+    await holdCliAt(root, run, null);
+    assert.deepEqual(launch('watch', 'GY-1', '1'), { release: 'B', argv: entry, schema: 'object' }, 'lifted, spawned commands load the checkout\'s B again');
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test('unit:upgrade-stall-names-release-lag — the held restart\'s stall, its action line and master status name the served release and the awaited commit, reading as a deliberate hold, not a stuck loop', async () => {

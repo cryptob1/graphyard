@@ -23,7 +23,7 @@ const deploys = [90 * minute, 3 * hour, 4 * hour + 30 * minute, 6 * hour];
 const plan = { items: 16, heldClaimRestarts: 0, leftovers: 0, slowRecompute: 0, unstable: 0, attested: 0, workMs: 15 * minute, rework: new Set<number>(), deaths: new Set<number>(), flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set<number>(), misread: new Set<number>(), exits: new Set<number>(), spentProducer: 0, lostRuns: 0,
   outOfQueue: { item: 16, afterMs: 99 * hour }, blind: { from: 99 * hour, to: 100 * hour }, split: { at: 99 * hour, item: 16 }, loopRestarts: [] as number[], dirtyCheckout: { from: 99 * hour, to: 100 * hour }, headMove: { from: 99 * hour, to: 100 * hour }, deploys };
 
-test('manual:self-upgrade-holds-restart-until-release-serves-it — over a simulated day of the real loop whose every deploy serves a release behind the base tip, each alignment checks the tip out but holds the executor and loop restarts under one waiting release-lagged row, never advancing the held target or fetching while production lags; the deploy that serves it completes the restart and settles the row, every restart lands on a commit the served release contains, the upgrade rows stay bounded by the deploys, and the day ends with the loop on the release production serves', { timeout: 600_000 }, async () => {
+test('manual:self-upgrade-holds-restart-until-release-serves-it — over a simulated day of the real loop whose every deploy serves a release behind the base tip, each alignment checks the tip out but holds the executor and loop restarts under one waiting release-lagged row, never advancing the held target or fetching while production lags; the CLI it spawns runs the served release meanwhile; the deploy that serves it unpins the CLI, completes the restart and settles the row, every restart lands on a commit the served release contains, the upgrade rows stay bounded by the deploys, and the day ends with the loop on the release production serves', { timeout: 600_000 }, async () => {
   const day = await simulateDay({ hours: 7, plan, releaseLag: { cutAgoMs: 30 * minute } });
   const r = day.releaseLagDay!, short = (sha: string) => sha.slice(0, 12);
   assert.deepEqual(day.violations, [], 'every system invariant holds after every cycle');
@@ -34,6 +34,7 @@ test('manual:self-upgrade-holds-restart-until-release-serves-it — over a simul
   // The core property: no restart ever loads code the plane does not serve.
   assert.ok(r.restarts.length > 0, 'the loop restarted onto merged code during the day');
   assert.deepEqual(r.restarts.filter(restart => !restart.contained), [], 'every executor and loop restart landed on a commit the served release contains');
+  assert.deepEqual(r.restarts.filter(restart => restart.pin !== null), [], 'and none ran with the spawned CLI still pinned to an earlier release');
 
   // The holds: runs of consecutive held passes, one per lagging deploy.
   const holds: { target: string; passes: typeof r.passes }[] = [];
@@ -56,11 +57,13 @@ test('manual:self-upgrade-holds-restart-until-release-serves-it — over a simul
     assert.ok(hold.passes.every(pass => pass.waiting === 1), `${label}: no other upgrade row waits beside it`);
     assert.ok(hold.passes.every(pass => pass.upgradeRows === first.upgradeRows), `${label}: a standing hold adds no upgrade row`);
     assert.ok(!r.restarts.some(restart => restart.elapsed >= first.elapsed && restart.elapsed < nextStart(end)), `${label}: nothing restarted while it stood`);
+    assert.ok(hold.passes.every(pass => pass.pin === pass.served), `${label}: the CLI the loop and the executors spawn runs the served release while it stood`);
     // The pass after the hold completes the restart onto exactly the held target, once the release serves it.
     const next = r.passes[r.passes.indexOf(end) + 1], after = r.passes[r.passes.indexOf(end) + 2]?.elapsed ?? Infinity;
     if (!next) continue;
     assert.equal(next.outcome, 'upgraded', `${label}: the first pass after it completed the restart`);
     assert.deepEqual(r.restarts.filter(restart => restart.elapsed >= next.elapsed && restart.elapsed < after).map(restart => [restart.kind, restart.to]), [['executors', hold.target], ['self', hold.target]], `${label}: the executors and the loop restarted onto the held target`);
+    assert.equal(next.pin, null, `${label}: the pass that lifted it unpinned the CLI`);
     assert.equal(next.held?.state, 'done', `${label}: the pass that lifted it settled the waiting row`);
     assert.equal(next.waiting, 0, `${label}: no upgrade row is left waiting`);
   }

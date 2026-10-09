@@ -671,7 +671,8 @@ test('unit:self-upgrade-unverified-still-restarts — with production unobserved
     lagged.upgrade.stalled = { cause: 'release-lagged', reason: `restart held: production serves release ${loaded.slice(0, 12)}, which does not contain ${checkout.slice(0, 12)} yet`, since: iso(faultAt - hour), at: iso(faultAt - minute) };
     lagged.actions['upgrade:held'] = { kind: 'config', work: null, principal: null, state: 'waiting', detail: lagged.upgrade.stalled.reason, attempts: 1, epoch: null, cycle: 0, at: iso(faultAt - minute) };
     lagged.deployment = deployment;
-    const resumed = await performSelfUpgrade(master, lagged, deps(same, clock, quiet));
+    const pins: (string | null)[] = [];
+    const resumed = await performSelfUpgrade(master, lagged, { ...deps(same, clock, quiet), holdCli: async commit => { pins.push(commit); } });
     assert.equal(resumed.outcome, 'upgraded', `production ${deployment?.source ?? 'null'}: the held restart completes once the plane is unobserved`);
     assert.deepEqual(quiet.executors, [checkout]);
     assert.equal(quiet.self, 1);
@@ -679,6 +680,7 @@ test('unit:self-upgrade-unverified-still-restarts — with production unobserved
     assert.equal(lagged.upgrade.stalled, undefined);
     assert.equal(lagged.actions['upgrade:held']?.state, 'done', `production ${deployment?.source ?? 'null'}: the hold's waiting row is settled by the unobserved completion`);
     assert.match(lagged.actions['upgrade:held']!.detail, /is no longer held: production is no longer observed/);
+    assert.deepEqual(pins, [null], `production ${deployment?.source ?? 'null'}: the CLI pinned to the earlier release is unpinned with the restart`);
   }
   // The contrast: the same owed restart with production observed serving the loaded release, which
   // does not contain the checkout, is held — only an observed release engages the gate.

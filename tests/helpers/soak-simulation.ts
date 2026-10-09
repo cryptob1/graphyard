@@ -2289,8 +2289,9 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   };
   // GY-1585: the base tip as each cycle found it, which a lagging promotion cuts its release from;
   // every restart the self-upgrade ran with the release production served then; every pass's sample.
-  const releaseLagDay = { tips: [] as { at: number; tip: string }[], restarts: [] as { elapsed: number; kind: 'executors' | 'self'; to: string; served: string; contained: boolean }[],
-    passes: [] as { elapsed: number; outcome: SelfUpgradeOutcome['outcome'] | null; pending: string | null; stall: string | null; held: { state: string; attempts: number } | null; waiting: number; upgradeRows: number; head: string; served: string; fetches: number }[] };
+  // `pin` is the release the checkout's launcher runs spawned CLI processes on, null while unpinned.
+  const releaseLagDay = { tips: [] as { at: number; tip: string }[], pin: null as string | null, restarts: [] as { elapsed: number; kind: 'executors' | 'self'; to: string; served: string; contained: boolean; pin: string | null }[],
+    passes: [] as { elapsed: number; outcome: SelfUpgradeOutcome['outcome'] | null; pending: string | null; stall: string | null; held: { state: string; attempts: number } | null; waiting: number; upgradeRows: number; head: string; served: string; fetches: number; pin: string | null }[] };
   const upgrades = { fetches: 0, checkouts: [] as { at: number; from: string; to: string }[], executors: [] as string[], self: 0, outcomes: [] as SelfUpgradeOutcome['outcome'][],
     /** GY-916: the restarts refused on a held claim, the owed restart sampled each cycle it stood, and the unit the supervisor runs. */
     held: [] as string[], owed: [] as { to: string; state: string; attempts: number }[], unit: { watchdogSec: plan.driftedWatchdogSec, rewrites: 0 },
@@ -2330,10 +2331,11 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   };
   const selfUpgrade = (state: DaemonState) => performSelfUpgrade(config, state, {
     root: '/soak/coordinator', run: coordinatorGit, now: clock.now, persist: async () => {},
+    holdCli: async commit => { releaseLagDay.pin = commit; },
     restartExecutors: async to => {
       // A busy fleet: a claim outlives restartExecutors' bounded wait for the first passes, and the restart is refused.
       if (upgrades.held.length < plan.heldClaimRestarts) { upgrades.held.push(to); return { result: 'refused', reason: `Restart refused while an executor on ${config.hostId} holds a claimed action`, coordinator: { commit: to }, held: [], restarted: [], unsupervised: [], forgotten: [] }; }
-      if (options.releaseLag) releaseLagDay.restarts.push({ elapsed: clock.now() - dayStart, kind: 'executors', to, served: production.sha, contained: github.contains(production.sha, to) });
+      if (options.releaseLag) releaseLagDay.restarts.push({ elapsed: clock.now() - dayStart, kind: 'executors', to, served: production.sha, contained: github.contains(production.sha, to), pin: releaseLagDay.pin });
       upgrades.executors.push(to); return { result: 'restarted', reason: null, coordinator: { commit: to }, held: [], restarted: [], unsupervised: [], forgotten: [] };
     },
     // The alignment re-applies the unit the loop runs under: a drifted watchdog window is rewritten to the configuration's.
@@ -2345,7 +2347,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     // The supervisor re-executes the loop: the next process loads the release the checkout holds, as runDaemon records it,
     // and starts under the unit as it now stands.
     restartSelf: async () => {
-      if (options.releaseLag) releaseLagDay.restarts.push({ elapsed: clock.now() - dayStart, kind: 'self', to: checkout.head, served: production.sha, contained: github.contains(production.sha, checkout.head) });
+      if (options.releaseLag) releaseLagDay.restarts.push({ elapsed: clock.now() - dayStart, kind: 'self', to: checkout.head, served: production.sha, contained: github.contains(production.sha, checkout.head), pin: releaseLagDay.pin });
       upgrades.self++; state.release = { commit: checkout.head, dirty: checkout.dirty }; restartDay.loaded = checkout.head; await processStart(state); },
   });
   /** What runDaemon does once per process start: the supervisor's watchdog window judged against the interval (GY-916). */
@@ -2992,7 +2994,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
       if (options.releaseLag) {
         const rows = Object.entries(state.actions).filter(([key]) => key.startsWith('upgrade:')), held = state.actions['upgrade:held'];
         releaseLagDay.passes.push({ elapsed, outcome: upgraded?.outcome ?? null, pending: state.upgrade.pending?.to ?? null, stall: state.upgrade.stalled?.cause ?? null, held: held ? { state: held.state, attempts: held.attempts } : null,
-          waiting: rows.filter(([, action]) => action.state === 'waiting').length, upgradeRows: rows.length, head: checkout.head, served: production.sha, fetches: upgrades.fetches });
+          waiting: rows.filter(([, action]) => action.state === 'waiting').length, upgradeRows: rows.length, head: checkout.head, served: production.sha, fetches: upgrades.fetches, pin: releaseLagDay.pin });
       }
       // GY-1531: the loaded-revision reading after this cycle, as `master status` computes it from the
       // loaded commit, the checkout's HEAD, how far it moved and when, and the restart the cursor owes.
