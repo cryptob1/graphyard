@@ -216,7 +216,7 @@ const status = (work: Work, agents: HerdrAgent[] = []) => buildMasterStatus({ wo
 const recorded = (leaseExpiresAt: string, stops = 0): Record<string, OrphanObservation> =>
   ({ 'work-83': { epoch: 2, owner: 'worker-a', pid: scope.pid, unit: scope.unit, firstSeenAt: at(-30_000), leaseExpiresAt, stops, stoppedLeaseExpiresAt: stops ? leaseExpiresAt : null } });
 const named = (work: Work, agents: HerdrAgent[] = [], available = true, observations: Record<string, OrphanObservation> | null = recorded(at(0))) =>
-  nameOrphanSupervisors(status(work, agents), [work], [worker], { agents, available }, Date.parse(observedAt), observations);
+  nameOrphanSupervisors(status(work, agents), [work], [worker], { agents, available }, Date.parse(observedAt), observations && { orphans: observations, actions: {} });
 
 test('unit:orphan-status-two-observations a single snapshot without the session names no orphan; the loop\'s two observations do', () => {
   const held = item(at(30_000));
@@ -243,6 +243,27 @@ test('unit:orphan-status-two-observations a single snapshot without the session 
   assert.ok(established.work[0].attentionOwner!.next.startsWith(supervisorReclaimCommand));
   // A supervisor the loop has already stopped stays named while its lease still advances.
   assert.equal(actionable(named(held, [], true, recorded(at(30_000), 1))), true);
+});
+
+test('unit:orphan-status-two-observations a stop the loop could not carry out keeps the established orphan named while the lease is still held', async () => {
+  const expiries = [at(30_000), at(55_000)];
+  const harness = await daemon(cycle => [item(expiries[Math.min(cycle, expiries.length - 1)])], { stopSupervisor: () => { throw new Error('no user manager'); } });
+  try {
+    await harness.run();
+    const first = item(expiries[0]);
+    assert.deepEqual(nameOrphanSupervisors(status(first), [first], [worker], { agents: [], available: true }, Date.parse(observedAt), harness.state), status(first),
+      'one observation by the loop names nothing');
+    const second = await harness.run();
+    assert.equal(second.actions.find(action => action.work === 'GY-83')?.state, 'failed', 'the loop made its second observation and the stop failed');
+    assert.equal(harness.state.orphans['work-83'].stops, 0);
+    assert.equal(harness.state.orphans['work-83'].leaseExpiresAt, expiries[1], 'the loop rolled its recorded expiry forward to the current one');
+    // Master status after that failure, the lease still held at the same expiry and the session still absent.
+    const held = item(expiries[1]);
+    const report = nameOrphanSupervisors(status(held), [held], [worker], { agents: [], available: true }, Date.parse(observedAt), harness.state);
+    assert.match(report.work[0].attention!, /an orphaned watch supervisor/);
+    assert.ok(report.work[0].attentionOwner!.next.startsWith(supervisorReclaimCommand), 'the reclaim command is still named');
+    assert.ok(report.attentionItems.some(entry => entry.subject === 'GY-83' && /orphaned watch supervisor/.test(entry.text)));
+  } finally { await harness.cleanup(); }
 });
 
 test('unit:orphan-supervisor-attention master status names an orphaned supervisor and the command that reclaims it instead of reporting a finished session', () => {
