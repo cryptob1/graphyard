@@ -344,6 +344,18 @@ test('unit:master-refusal-answers-capped-escalation — GY-1573 rounds 9-10: an 
     await run.cycle();
     assert.equal(run.world.withdrawn.length, 1, JSON.stringify(other));
   }
+
+  // GY-1580 review: an answer the master requested before the first re-review posted binds no change request. The first
+  // re-review's prompt carries only the first refusal, and the master's later answer, refused, has the re-review's change request withdrawn.
+  const early = { ...answer('refused', '2026-10-09T08:50:00.000Z'), id: 'e0a1b2c3-0000-4000-8000-000000000001', refusal: { approver: 'graphyard-approver-graphyard', reason: answerReason, at: '2026-10-09T09:05:00.000Z' } };
+  const beforeRereview = capped(firstBody);
+  assert.ok(!cappedRefusalRequest(beforeRereview, H, config, [firstRefusal, early] as any, [beforeRereview, followUp, unrelated])!.includes(early.id), 'the first re-review carries no answer');
+  const run = await replayToEscalation();
+  run.world.history = [firstRefusal, early, answer('refused')] as any;
+  await run.cycle();
+  await run.cycle();
+  assert.deepEqual(run.world.withdrawn.map(entry => entry.reviewId), [4242, 5468008197], 'the later answer is the one bound to the re-review');
+  assert.ok(run.world.withdrawn[1].message.includes(answer('refused').id) && !run.world.withdrawn[1].message.includes(early.id), run.world.withdrawn[1].message);
 });
 
 /** Every `graphyard master …` command a text names, as words. */

@@ -57,20 +57,22 @@ export function refusedCappedRework<D extends { action: string; state: string; i
     || !revisionMarked(entry.reason) && sinceRevision(work, capped, entry.refusal?.at ?? entry.requestedAt)) ?? null;
 }
 /**
- * GY-1580. The master's own answer to a refused capped head's escalation, refused in turn: the earliest hand
- * rework (no grounds binding) on `sha` that cites `refused` by id, as precedent or in its reason, requested
- * after `since` (the refusal's time). An approver who refused it judged the re-review's finding non-blocking
- * too, so the review-cap step withdraws the change request it answered (one submitted before it was requested)
- * once more; a change request submitted after it is escalated. Read from the history and the review alone,
- * that guard outlives the cursor's pruned rows.
+ * GY-1580. The master's own answers to a refused capped head's escalation, refused in turn, earliest first: the
+ * hand reworks (no grounds binding) on `sha` that cite `refused` by id, as precedent or in its reason, requested
+ * after `since`. An answer judges the change request it was requested after, so `since` is that change request's
+ * submission (GY-1580 review), never only the first refusal's time: an answer requested before the re-review posted
+ * answers nothing on it. An approver who refused it judged that finding non-blocking too, so the review-cap step
+ * withdraws the change request once more. Read from the history and the review alone, the guard outlives the
+ * cursor's pruned rows.
  */
-export function refusedCapAnswer<D extends { id: string; action: string; state: string; input?: any; reason?: string; requestedAt?: string; precedent?: string[]; situation?: { sha: string | null } | null }>(
-  history: readonly D[], refused: Pick<D, 'id'>, sha: string, since: string | undefined): D | null {
+export function refusedCapAnswers<D extends { id: string; action: string; state: string; input?: any; reason?: string; requestedAt?: string; precedent?: string[]; situation?: { sha: string | null } | null; refusal?: { at?: string } | null }>(
+  history: readonly D[], refused: Pick<D, 'id'>, sha: string, since: string | undefined): D[] {
   const after = Date.parse(since ?? '');
+  if (!Number.isFinite(after)) return [];
   const cites = (entry: D) => !!entry.precedent?.includes(refused.id) || !!entry.reason?.includes(refused.id.slice(0, 8));
   return history.filter(entry => entry.id !== refused.id && entry.action === 'rework' && entry.state === 'refused' && entry.input?.binding === undefined
     && (!entry.situation?.sha || entry.situation.sha === sha) && cites(entry) && Date.parse(entry.requestedAt ?? '') > after)
-    .sort((a, b) => Date.parse(a.requestedAt!) - Date.parse(b.requestedAt!))[0] ?? null;
+    .sort((a, b) => Date.parse(a.requestedAt!) - Date.parse(b.requestedAt!));
 }
 /** The cursor key of the re-review an approver's refusal of a capped rework asks for (GY-1575): one per head. */
 export const cappedRereviewKey = (work: Pick<Work, 'id'>, sha: string) => `review-cap:rereview:${work.id}:${sha}`;
@@ -129,8 +131,10 @@ export function cappedRefusalRequest(work: Work, sha: string, config: Partial<Pi
   const refused = refusedCappedRework(history, { sha, reviewer, reviewId: judged?.id ?? null, ...(judged?.submittedAt ? { submittedAt: judged.submittedAt } : {}) }, work);
   if (!refused) return null;
   const refusal = capRefusalOf(refused);
-  // The master's refused answer, requested after the first refusal, is the second re-review's (GY-1580).
-  const answered = refusedCapAnswer(history, refused, sha, refusal.at), answer = answered ? capRefusalOf(answered) : undefined;
+  // The master's refused answer to the re-review's change request is the second re-review's (GY-1580): one requested
+  // after that change request, so the first re-review, whose latest review on the head predates the refusal, carries none.
+  const rereview = judged?.submittedAt && Date.parse(judged.submittedAt) > Date.parse(refusal.at ?? '') ? judged.submittedAt : undefined;
+  const answered = refusedCapAnswers(history, refused, sha, rereview)[0], answer = answered ? capRefusalOf(answered) : undefined;
   return refusedCapRereview({ round: reviewRound(work), cap: reviewRoundCapOf(config), sha }, refusal, capFollowUps(work, [refusal, ...answer ? [answer] : []], all), answer);
 }
 
@@ -245,9 +249,18 @@ export async function reviewCapStep(cycle: Cycle) {
       if (rereviewed || requestedSinceRefusal(capped, refusal)) {
         // GY-1580: the master's answer to that escalation, refused as non-blocking too, has it withdrawn once more; a
         // change request submitted after the answer (or after its row's re-review) escalates, never withdrawn a third time.
-        const answered = refusedCapAnswer(history!, refused, capped.sha, refusal.at), submitted = Date.parse(capped.submittedAt ?? '');
-        if (!answered || !Number.isFinite(submitted)) return escalate(again, [refusal]);
-        if (!(Date.parse(answered.requestedAt!) > submitted) || state.actions[answeredRereviewKey(item, capped.sha)]?.state === 'done') return escalate(thrice, [refusal, capRefusalOf(answered)]);
+        // An answer requested after this change request answers it; one requested before it and refused before it was submitted
+        // answered an earlier re-review, whose withdrawal this change request follows (GY-1580 review). An answer requested and
+        // refused before the head's first re-review posted reads the same, since GitHub's observation keeps one review per
+        // reviewer: the step then escalates, the side that cannot loop.
+        const answered = refusedCapAnswers(history!, refused, capped.sha, capped.submittedAt)[0], submitted = Date.parse(capped.submittedAt ?? '');
+        const prior = refusedCapAnswers(history!, refused, capped.sha, refusal.at)
+          .find(entry => Date.parse(entry.requestedAt!) <= submitted && Date.parse(entry.refusal?.at ?? entry.requestedAt!) < submitted);
+        if (prior || state.actions[answeredRereviewKey(item, capped.sha)]?.state === 'done') {
+          const judged = prior ?? answered;
+          return escalate(thrice, [refusal, ...judged ? [capRefusalOf(judged)] : []]);
+        }
+        if (!answered) return escalate(again, [refusal]);
         answer = capRefusalOf(answered);
       }
       const own = !!config.reviewer && capped.reviewer.toLowerCase() === `${config.reviewer.slug}[bot]`.toLowerCase();
