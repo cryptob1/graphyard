@@ -170,25 +170,27 @@ const testId = (line: string) => line.replace(/^\s*✖\s*/, '').replace(/\s*\([\
 
 /**
  * The failing cause a trial's log tail names, or null when it names none (GY-1564): the node test
- * runner's `failing tests:` summary (each test, its file and its first error line), else TAP
+ * runner's `failing tests:` summaries (each test, its file and its first error line, once), else TAP
  * `not ok` lines, else the first TypeScript error of a failed build. ANSI escapes are stripped first.
  */
 export function trialFailureCause(logTail: string | undefined | null): string | null {
   if (!logTail) return null;
   const lines = logTail.replace(ansiEscape, '').split('\n');
   const named: string[] = [];
-  const summary = lines.findIndex(line => /^\s*✖ failing tests:\s*$/.test(line));
-  if (summary >= 0) {
-    let file: string | null = null;
-    for (let index = summary + 1; index < lines.length; index++) {
-      const line = lines[index]!;
-      const at = line.match(/^test at (\S+?):\d+:\d+\s*$/);
-      if (at) { file = at[1]!; continue; }
-      if (!/^\s*✖ /.test(line)) continue;
-      const error = lines.slice(index + 1).find(next => next.trim() && !/^\s*✖ /.test(next) && !/^test at /.test(next));
-      named.push(`${testId(line)}${file ? ` (${file})` : ''}${error && /^\s/.test(error) ? `: ${error.trim().replace(/:$/, '')}` : ''}`);
-      file = null;
-    }
+  // A trial concatenates its groups' output, so the log may carry one summary per failed group: each
+  // `failing tests:` heading opens a summary, and an unindented line that is neither a test nor its file closes it.
+  let inSummary = false, file: string | null = null;
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index]!;
+    if (/^\s*✖ failing tests:\s*$/.test(line)) { inSummary = true; file = null; continue; }
+    if (!inSummary || !line.trim()) continue;
+    const at = line.match(/^test at (\S+?):\d+:\d+\s*$/);
+    if (at) { file = at[1]!; continue; }
+    if (!/^\s*✖ /.test(line)) { if (!/^\s/.test(line)) inSummary = false; continue; }
+    const error = lines.slice(index + 1).find(next => next.trim() && !/^\s*✖ /.test(next) && !/^test at /.test(next));
+    const entry = `${testId(line)}${file ? ` (${file})` : ''}${error && /^\s/.test(error) ? `: ${error.trim().replace(/:$/, '')}` : ''}`;
+    if (!named.includes(entry)) named.push(entry);
+    file = null;
   }
   if (!named.length) for (const line of lines) { const failed = line.match(/^\s*not ok \d+ - (.+)$/); if (failed) named.push(failed[1]!.trim()); }
   if (!named.length) { const build = lines.find(line => /error TS\d+:/.test(line)); if (build) named.push(build.trim()); }

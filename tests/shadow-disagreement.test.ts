@@ -400,6 +400,19 @@ test('unit:cycle-shadow-disagreement-explanation — the GY-1535 head 77da3de0 (
   // A trial keeps FORCE_COLOR: the same summary colored by the spec reporter names the same cause.
   const colored = gy1535.logTail.split('\n').map(line => line && `\u001b[31m${line}\u001b[39m`).join('\n');
   assert.equal(trialFailureCause(colored), trialFailureCause(gy1535.logTail));
+  // A trial concatenates its groups' output: each group's summary names only its own failures, and a
+  // later `failing tests:` heading, or a group's passing output between them, is never named as a test.
+  const groups = [
+    gy1535.logTail,
+    '✔ unit:between — passes (1ms)', 'ℹ tests 3', 'ℹ fail 1', '', '✖ failing tests:', '',
+    'test at tests/other.test.ts:2:3', '✖ unit:other — breaks (2ms)', '  Error: second group', '',
+    '\u001b[31m✖ failing tests:\u001b[39m', '', 'test at tests/worktree-reclaim.test.ts:1:11072',
+    '✖ integration:worktree-dependency-reuse — a fresh attempt starts from a clean checkout of its exact head and shares one install instead of paying for a private copy (1ms)',
+    '  AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal:', '[exit status 1]',
+  ].join('\n');
+  assert.equal(trialFailureCause(groups),
+    'integration:worktree-dependency-reuse (tests/worktree-reclaim.test.ts): AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal; unit:other (tests/other.test.ts): Error: second group');
+  assert.doesNotMatch(trialFailureCause(groups)!, /failing tests|unit:between/);
   // The loop's cursor drops the log but keeps the cause, and its strict schema accepts it.
   const kept = cursorVerdict({ ...verdict('GY-1535', { head: gy1535.head, baseTip: gy1535.baseTip, mergeSha: gy1535.mergeSha, tests: gy1535.tests }), logTail: gy1535.logTail });
   assert.equal('logTail' in kept, false);
