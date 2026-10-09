@@ -33,7 +33,7 @@ Declared slot not `active` (systemd, else `PRINCIPAL@HOST/N` presence): `resourc
 
 ## Recovery
 
-Dead supervisor fences its item; `containment` lists survivors' pid, cmdline and cwd: `settleable: true` → `master settle-containment GY-N REASON`, else stop recorded scope unit (`containment.scope`), request `rework`. Unexplained lapses raise `lease-loss` (`blocked-awaiting-operator`, `stopped-by-attestation`: history); any admin settles explained ones: `resolve GY-N lease-loss --attestation blocked|stopped-worker "reason"` ([settling](delegation.md#who-may-settle-what)). `master escalation GY-N` spawns a handler: `master decide GY-N resolve … --context FINGERPRINT REASON`. Named-reset exhaustion holds its login's twins fleet-wide (`agent-registry/observe`, `master registry`).
+Dead supervisor fences item; `containment` lists survivors' pid, cmdline and cwd: `settleable: true` → `master settle-containment GY-N REASON`, else stop recorded scope unit (`containment.scope`), request `rework`. Unexplained lapses raise `lease-loss` (`blocked-awaiting-operator`, `stopped-by-attestation`: history); any admin settles explained ones: `resolve GY-N lease-loss --attestation blocked|stopped-worker "reason"` ([settling](delegation.md#who-may-settle-what)). `master escalation GY-N` spawns handler: `master decide GY-N resolve … --context FINGERPRINT REASON`. Named-reset exhaustion holds its login's twins fleet-wide, every role (`agent-registry/observe`, retried; `master registry`).
 
 ### Producer-runtime faults
 

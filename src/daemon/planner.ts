@@ -8,6 +8,7 @@ import { deploySmokeRequired } from '../model/delivery.js';
 import { goalPlanSchema, maxPlanRounds, planNoteMaxWords, planRefusals, servedInProduction, type GoalPlan } from '../model/goal-plan.js';
 import { agentToken } from '../master/autonomy.js';
 import { capacityRefusal, selectFleetSession } from '../fleet.js';
+import { heldAwareProbe } from '../master/environments.js';
 import { Refusal, RefusedResponse } from '../model/refusal.js';
 import type { MasterConfig } from '../master.js';
 import { diagnosticianSettings, type DiagnosticianSettings } from '../runner/payloads.js';
@@ -272,7 +273,7 @@ export function plannerEffects(config: MasterConfig, root: string, calls: Calls)
     runner: async (role, attempt, goal) => {
       if (attempt === 'primary') {
         const [name, principal] = role === 'plan' ? [plannerRole, config.operatorAgent!.id] as const : ['approver', config.approver!.id] as const;
-        const fleet = await selectFleetSession(config, name, { name, principal }, { work: goal.key });
+        const fleet = await selectFleetSession(config, name, { name, principal }, await heldAwareProbe(config, { work: goal.key })); // an account held here, or its twin, is spent (GY-1574)
         if (fleet) { const launched = registryHeadlessLaunch(fleet.account); return { runner: registryRunner(fleet.account), runtime: launched.command, model: launched.model, release: fleet.release }; }
       }
       const model = attempt === 'primary' ? settings.model : settings.fallbackModel;

@@ -13,6 +13,7 @@ import type { MergeWriterReads } from './cycle-merge-writer.js';
 import { agentToken } from '../master/autonomy.js';
 import { worktreeRoot } from '../install/worktree-root.js';
 import { capacityRefusal, selectFleetSession } from '../fleet.js';
+import { heldAwareProbe } from '../master/environments.js';
 import { Refusal, RefusedResponse } from '../model/refusal.js';
 import type { MasterConfig } from '../master.js';
 import { diagnosticianSettings, type DiagnosticianSettings } from '../runner/payloads.js';
@@ -471,7 +472,7 @@ export function acceptanceEffects(config: MasterConfig, root: string, calls: Cal
     runner: async (role, attempt, goal) => {
       if (attempt === 'primary') {
         const [name, principal] = role === 'draft' ? [acceptanceRole, config.operatorAgent!.id] as const : ['approver', config.approver!.id] as const;
-        const fleet = await selectFleetSession(config, name, { name, principal }, { work: goal.key });
+        const fleet = await selectFleetSession(config, name, { name, principal }, await heldAwareProbe(config, { work: goal.key })); // an account held here, or its twin, is spent (GY-1574)
         if (fleet) { const launched = registryHeadlessLaunch(fleet.account); return { runner: registryRunner(fleet.account), runtime: launched.command, model: launched.model, release: fleet.release }; }
       }
       const model = attempt === 'primary' ? settings.model : settings.fallbackModel;
