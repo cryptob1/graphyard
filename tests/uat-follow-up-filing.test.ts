@@ -9,7 +9,7 @@ import { server } from '../src/server.js';
 import type { Principal } from '../src/model.js';
 import { Store } from '../src/store.js';
 import { cut, followUpFilingRefusal, followUpItem, followUpRequestId, gitIn, readLedger, releaseFilingIdentity, validateAndRecord, type Suite } from '../src/release-candidate.js';
-import { releaseFilingCheck } from '../src/setup-from-zero.js';
+import { releaseFilingCheck, setupFromZeroChecks, setupLine } from '../src/setup-from-zero.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-1614: the uat job's validateAndRecord files a failed candidate's follow-up with the uat
@@ -134,4 +134,10 @@ test('integration:uat-follow-up-filing — a failed candidate files its follow-u
   assert.match(releaseFilingCheck({ status: { actor: { id: 'other', role: 'operator-agent', capabilities: ['intent:create'], scope: { repositories: ['owner/other'], workItems: ['*'] } } } }, repository).detail, /does not include owner\/uat-filing/);
   assert.match(releaseFilingCheck({ status: { actor: { id: 'reader', role: 'operator-agent', capabilities: ['intent:ready'], scope: { repositories: [repository], workItems: ['*'] } } } }, repository).detail, /lacks intent:create/);
   assert.match(releaseFilingCheck({ status: null, failure: '{"error":"Unauthorized"}' }, repository).detail, /did not accept the credential/);
+  // Doctor's own lines read GRAPHYARD_RELEASE_TOKEN from the environment and ask the plane it addresses.
+  const doctor = async (token?: string) => (await setupFromZeroChecks({ root: await temporaryDirectory('uat-filing-doctor'), status: null, environments: await temporaryDirectory('uat-filing-environments'), sandbox: () => null,
+    env: { GRAPHYARD_URL: url, ...(token ? { GRAPHYARD_RELEASE_TOKEN: token } : {}) } })).filter(check => check.id === 'release-filing').map(setupLine);
+  assert.deepEqual(await doctor(), [], 'no line when this environment carries no filing credential');
+  assert.deepEqual(await doctor(release.token), [`PASS release-filing: GRAPHYARD_RELEASE_TOKEN files follow-ups as ${release.id}`]);
+  assert.deepEqual(await doctor(coordinator.token), ["FAIL release-filing: GRAPHYARD_RELEASE_TOKEN would be refused filing a failed candidate's follow-up: graphyard-coordinator has role coordinator, which cannot create work (Operator permission required) (fix: docs/delivery.md#release-filing-credential)"]);
 });

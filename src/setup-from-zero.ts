@@ -43,7 +43,7 @@ export interface SetupFromZeroInput {
   github?: ProtectionRun;
   /** Probes that the worker confinement can write PATHS; null when it can, else the reason. */
   sandbox?: (paths: string[]) => string | null;
-  /** GY-1614: the `/api/status` answer to GRAPHYARD_RELEASE_TOKEN when it is set, or the failure it met. */
+  /** GY-1614: the `/api/status` answer to GRAPHYARD_RELEASE_TOKEN, or the failure it met; read from the plane when unset here. */
   releaseFiling?: { status: any | null; failure?: string };
 }
 
@@ -186,6 +186,14 @@ export function releaseFilingCheck(filing: NonNullable<SetupFromZeroInput['relea
     detail: refusal ? `GRAPHYARD_RELEASE_TOKEN would be refused filing a failed candidate's follow-up: ${refusal}` : `GRAPHYARD_RELEASE_TOKEN files follow-ups as ${filing.status.actor.id}` };
 }
 
+/** The plane's answer to GRAPHYARD_RELEASE_TOKEN, at the server the CLI addresses (src/cli/context.ts), or undefined when it is unset. */
+async function readReleaseFiling(root: string, env: NodeJS.ProcessEnv) {
+  const token = env.GRAPHYARD_RELEASE_TOKEN;
+  if (!token) return undefined;
+  const base = env.GRAPHYARD_URL ?? (await readJson(resolve(root, '.graphyard/connection.json')))?.url ?? 'http://127.0.0.1:4310';
+  return planeRequest(base, token)('status').then(status => ({ status }), (error: any) => ({ status: null, failure: String(error.message) }));
+}
+
 /** One printable line per check: `PASS id: detail`, or `FAIL id: detail (fix: step)`. */
 export const setupLine = (check: SetupCheck) => check.status === 'pass' ? `PASS ${check.id}: ${check.detail}` : `FAIL ${check.id}: ${check.detail} (fix: ${check.step})`;
 
@@ -213,6 +221,7 @@ export async function setupFromZeroChecks(input: SetupFromZeroInput): Promise<Se
   }
   lines.push(...await environmentChecks(input.environments));
   lines.push(await sandboxCheck(input.root, input.sandbox ?? bubblewrapProbe));
-  if (input.releaseFiling) lines.push(releaseFilingCheck(input.releaseFiling, status?.repository ?? null));
+  const releaseFiling = input.releaseFiling ?? await readReleaseFiling(input.root, env);
+  if (releaseFiling) lines.push(releaseFilingCheck(releaseFiling, status?.repository ?? null));
   return lines;
 }
