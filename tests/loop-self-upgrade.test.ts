@@ -755,19 +755,26 @@ test('unit:self-upgrade-waits-for-served-release — with production serving rel
     assert.equal(calls.self, 0, 'nor does the loop re-execute itself');
     assert.deepEqual(state.upgrade.pending, { from: loaded, to: tip, code: true }, 'the restart stays owed on the cursor');
     assert.equal(state.upgrade.stalled?.cause, 'release-lagged');
-    assert.equal(state.actions[`upgrade:${loaded}`]?.state, 'waiting');
+    assert.equal(state.actions['upgrade:held']?.state, 'waiting');
+    assert.equal(state.actions[`upgrade:${loaded}`]?.state, 'done', 'the release\'s own row records the checkout move, not a hold');
     assert.equal(state.upgrade.alignedRelease, null, 'the release is not aligned while its restart is held');
 
-    // Still serving A a cycle later: held again, no restart, the stall's first instant kept.
-    const since = state.upgrade.stalled!.since;
+    // Still serving A a cycle later while main moved on to C: held again on the same target, with no
+    // fetch, no restart, the stall's first instant kept and the one held row refreshed, not grown.
+    const since = state.upgrade.stalled!.since, attempts = state.actions['upgrade:held']!.attempts, fetchedBefore = fake.fetches;
+    fake.nextTip = newer;
     assert.equal((await performSelfUpgrade(master, state, { ...deps(), now: () => clock + 5 * minute })).outcome, 'pending');
     assert.deepEqual([calls.executors, calls.self], [[], 0]);
     assert.equal(state.upgrade.stalled?.since, since);
+    assert.equal(fake.fetches, fetchedBefore, 'a held target is not advanced to a newer tip while production lags');
+    assert.deepEqual(state.upgrade.pending, { from: loaded, to: tip, code: true });
+    assert.equal(fake.head, tip);
+    assert.equal(state.actions['upgrade:held']!.attempts, attempts, 'a standing hold grows no attempts');
+    assert.equal(state.actions['upgrade:held']!.at, new Date(clock + 5 * minute).toISOString(), 'its time is the latest held pass');
 
     // The deploy goes live serving B while main already moved on to C: the owed restart onto B
     // completes, before any newer tip is fetched, so a busy base branch cannot hold the loop forever.
     state.deployment = verified(tip);
-    fake.nextTip = newer;
     const fetched = fake.fetches;
     const done = await performSelfUpgrade(master, state, { ...deps(), now: () => clock + 8 * minute });
     assert.deepEqual({ outcome: done.outcome, to: 'to' in done && done.to, self: 'self' in done && done.self }, { outcome: 'upgraded', to: tip, self: true });
@@ -777,6 +784,11 @@ test('unit:self-upgrade-waits-for-served-release — with production serving rel
     assert.equal(state.upgrade.pending, null);
     assert.equal(state.upgrade.stalled, undefined, 'the stall retires with the restart');
     assert.equal(state.upgrade.alignedRelease, tip);
+    // The hold's row is settled by the pass that lifted it, naming the release that serves the move:
+    // no waiting row is left claiming production still serves A.
+    assert.equal(state.actions['upgrade:held']?.state, 'done');
+    assert.match(state.actions['upgrade:held']!.detail, new RegExp(`^The restart onto ${tip.slice(0, 12)} is no longer held: production serves release ${tip.slice(0, 12)}, which contains ${tip.slice(0, 12)}`));
+    assert.deepEqual(Object.entries(state.actions).filter(([key, action]) => key.startsWith('upgrade:') && action.state === 'waiting'), [], 'no upgrade row is left waiting');
   } finally { await dispose(); }
 });
 
@@ -789,7 +801,7 @@ test('unit:upgrade-stall-names-release-lag — the held restart\'s stall, its ac
     const served = loaded.slice(0, 12), awaited = tip.slice(0, 12);
     const names = new RegExp(`production serves release ${served}, which does not contain ${awaited} yet; the executors and the loop restart onto ${awaited} on the first pass whose deployment observation serves it`);
     assert.match(state.upgrade.stalled!.reason, names, 'the stall names both commits');
-    assert.match(state.actions[`upgrade:${loaded}`]!.detail, names, 'and so does its waiting action');
+    assert.match(state.actions['upgrade:held']!.detail, names, 'and so does its waiting action');
     assert.match(describeSelfUpgrade(held), new RegExp(`^pending at ${awaited}: restart held: production serves release ${served}`), 'the loop\'s log line too');
     // The loaded-revision resource master status reads: within headroom, naming the held restart.
     const reading = readResources({ now: clock, reviews: [], producers: [], agents: [], work: [], plane: null, loop: null, disk: null, profiles: { workers: [], reviewers: [], producers: [] },

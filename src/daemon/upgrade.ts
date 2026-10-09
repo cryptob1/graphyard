@@ -185,7 +185,7 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
   const now = deps.now ?? Date.now, at = () => new Date(now()).toISOString();
   const git = (...args: string[]) => deps.run('git', ['-C', deps.root, ...args]);
   const persist = async () => { if (deps.persist) await deps.persist(state); };
-  const key = `upgrade:${state.deployment?.sha ?? 'none'}`;
+  const key = `upgrade:${state.deployment?.sha ?? 'none'}`, heldKey = 'upgrade:held';
   const note = async (detail: string, failure: boolean, actionKey = key) => {
     storeAction(state, actionKey, { kind: 'config', work: null, principal: null, state: failure ? 'failed' : 'done', detail, attempts: (state.actions[actionKey]?.attempts ?? 0) + 1, epoch: null, cycle: state.cycle, at: at() });
     await persist();
@@ -248,12 +248,18 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
     try { await git('merge-base', '--is-ancestor', commit, served); return null; }
     catch (error: any) { return error?.status === 1 ? served : null; }
   };
-  /** Completes the restarts one alignment owes, with the checkout already at the tip. */
-  const finish = async (pending: { from: string | null; to: string; code: boolean }): Promise<SelfUpgradeOutcome> => {
+  /**
+   * Completes the restarts one alignment owes, with the checkout already at the tip. A held restart
+   * (GY-1585) the served release has since moved past aligns no release: the pass after it aligns
+   * the checkout with what production serves now, so the loop does not stay on the held commit
+   * until a later promotion.
+   */
+  const finish = async (pending: { from: string | null; to: string; code: boolean }, held = false): Promise<SelfUpgradeOutcome> => {
+    const aligned = held && !sameCommit(release, pending.to) ? state.upgrade.alignedRelease : release ?? state.upgrade.alignedRelease;
     if (!pending.code) {
       state.upgrade.pending = null;
       state.upgrade.last = { at: at(), from: pending.from, to: pending.to, code: false, executors: null, self: false };
-      state.upgrade.alignedRelease = release ?? state.upgrade.alignedRelease;
+      state.upgrade.alignedRelease = aligned;
       state.upgrade.refused = null;
       unstall();
       await persist();
@@ -263,14 +269,26 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
     // registry's strict schemas still refuse (400 Invalid input on every launch). While production
     // is observed serving a release that does not contain the move, the restart is held, owed on
     // the cursor under a named stall, and the first pass whose observation serves it completes it.
+    // The hold is one `upgrade:held` row whichever release it was observed under, its attempts grown
+    // only when what it names changes, its time the latest held pass (the owed restart's attempt clock
+    // master status reads), and settled by the pass that lifts it: a standing hold grows nothing, and
+    // no waiting row outlives the hold it describes.
     const lag = await lagging(pending.to);
     if (lag) {
       const reason = `restart held: production serves release ${shortCommit(lag)}, which does not contain ${shortCommit(pending.to)} yet; the executors and the loop restart onto ${shortCommit(pending.to)} on the first pass whose deployment observation serves it`;
       state.upgrade.pending = { from: pending.from, to: pending.to, code: true };
       stall('release-lagged', reason);
-      storeAction(state, key, { kind: 'config', work: null, principal: null, state: 'waiting', detail: reason, attempts: (state.actions[key]?.attempts ?? 0) + 1, epoch: null, cycle: state.cycle, at: at() });
+      const standing = state.actions[heldKey];
+      if (standing?.state !== 'waiting' || detailChanged(standing, reason))
+        storeAction(state, heldKey, { kind: 'config', work: null, principal: null, state: 'waiting', detail: reason, attempts: (standing?.attempts ?? 0) + 1, epoch: null, cycle: state.cycle, at: at() });
+      else standing.at = at();
       await persist();
       return { outcome: 'pending', reason, to: pending.to };
+    }
+    if (state.actions[heldKey]?.state === 'waiting') {
+      const lifted = observed ? `production serves release ${shortCommit(observation!.sha!)}, which contains ${shortCommit(pending.to)}` : 'production is no longer observed, and an unobserved plane never holds the loop on stale code';
+      storeAction(state, heldKey, { kind: 'config', work: null, principal: null, state: 'done', detail: `The restart onto ${shortCommit(pending.to)} is no longer held: ${lifted}`, attempts: state.actions[heldKey]!.attempts, epoch: null, cycle: state.cycle, at: at() });
+      await persist();
     }
     if (!deps.restartExecutors) return failed('loaded code moved but this loop cannot restart the executors', 'executors-unavailable');
     const executors = await deps.restartExecutors(pending.to).catch(error => ({ result: 'refused' as const, reason: message(error), coordinator: { commit: pending.to }, held: [], restarted: [], unsupervised: [], forgotten: [] }));
@@ -312,7 +330,7 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
     // a re-execution that fails restores it with its first attempt kept.
     const prior = state.upgrade.stalled;
     state.upgrade.pending = null;
-    state.upgrade.alignedRelease = release ?? state.upgrade.alignedRelease;
+    state.upgrade.alignedRelease = aligned;
     state.upgrade.refused = null;
     unstall();
     await persist();
@@ -373,11 +391,12 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
   }
 
   // A restart held for the release (GY-1585) completes on the first pass whose observation serves
-  // the commit the checkout holds, before a newer tip is fetched: moving on to a tip the promotion
+  // the commit the checkout holds — or on which production is unobserved — before a newer tip is fetched: moving on to a tip the promotion
   // has not served yet would hold it again, and a busy base branch would hold the loop forever.
+  // While the release still lags, the pass holds the same target without fetching: advancing it to
+  // every newer tip would keep it ahead of each promotion, and the loop would never restart.
   const held = state.upgrade.pending;
-  if (held?.code && state.upgrade.stalled?.cause === 'release-lagged' && observed && !(await lagging(held.to))
-    && (await checkoutState(deps.root, deps.run)).commit === held.to) return finish(held);
+  if (held?.code && state.upgrade.stalled?.cause === 'release-lagged' && (await checkoutState(deps.root, deps.run)).commit === held.to) return finish(held, true);
 
   // 2. The base tip, from a fresh fetch.
   let to: string;

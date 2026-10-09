@@ -261,7 +261,16 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
    * proved by `e2e:<scenario>`, a scenario nothing registered, beside a configuration-class item
    * with manual proofs only; the control plane takes no filing between `outage.from` and `outage.to`.
    */
-  checkoutRestart?: { moveAt: number; restartAt: number; kind: 'forward' | 'foreign'; doctor?: { scenario: string; from: number; outage: { from: number; to: number } } } }) {
+  checkoutRestart?: { moveAt: number; restartAt: number; kind: 'forward' | 'foreign'; doctor?: { scenario: string; from: number; outage: { from: number; to: number } } };
+  /**
+   * GY-1585: production promotes a release cut `cutAgoMs` before each deploy, so every deploy serves
+   * a base tip the branch has already moved past, and the coordinator checkout answers
+   * `merge-base --is-ancestor` from the simulated history. The self-upgrade's alignment after a
+   * deploy thus finds a tip with loaded code the served release does not contain, and holds its
+   * restart until a later deploy serves it. Every restart is sampled with the release production
+   * served when it ran, and every pass with its outcome, its owed target and the upgrade rows.
+   */
+  releaseLag?: { cutAgoMs: number } }) {
   const dayStart = clock.now();
   // A day may restage the shared scenario: the day-scoped view of the plan is what every fault
   // below arms from, while each test's own assertions still read the shared base plan.
@@ -2278,6 +2287,10 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     }
     return seen.size;
   };
+  // GY-1585: the base tip as each cycle found it, which a lagging promotion cuts its release from;
+  // every restart the self-upgrade ran with the release production served then; every pass's sample.
+  const releaseLagDay = { tips: [] as { at: number; tip: string }[], restarts: [] as { elapsed: number; kind: 'executors' | 'self'; to: string; served: string; contained: boolean }[],
+    passes: [] as { elapsed: number; outcome: SelfUpgradeOutcome['outcome'] | null; pending: string | null; stall: string | null; held: { state: string; attempts: number } | null; waiting: number; upgradeRows: number; head: string; served: string; fetches: number }[] };
   const upgrades = { fetches: 0, checkouts: [] as { at: number; from: string; to: string }[], executors: [] as string[], self: 0, outcomes: [] as SelfUpgradeOutcome['outcome'][],
     /** GY-916: the restarts refused on a held claim, the owed restart sampled each cycle it stood, and the unit the supervisor runs. */
     held: [] as string[], owed: [] as { to: string; state: string; attempts: number }[], unit: { watchdogSec: plan.driftedWatchdogSec, rewrites: 0 },
@@ -2308,6 +2321,10 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     if (op === 'symbolic-ref') throw Object.assign(new Error('fatal: ref HEAD is not a symbolic ref'), { status: 1 });
     if (op === 'status') return checkout.dirty ? ' M src/master.ts\n' : '';
     if (op === 'diff') { const [from, to] = operands[1].split('..'); return `${changedPaths(from, to).join('\n')}\n`; }
+    if (op === 'merge-base' && options.releaseLag && operands[0] === '--is-ancestor') {
+      if (github.contains(operands[2], operands[1])) return '';
+      throw Object.assign(new Error(`${operands[1]} is not an ancestor of ${operands[2]}`), { status: 1 });
+    }
     if (op === 'checkout') { assert.ok(!checkout.dirty, 'a dirty checkout is never touched'); upgrades.checkouts.push({ at: clock.now(), from: checkout.head, to: operands[2] }); checkout.head = operands[2]; return ''; }
     throw new Error(`the simulated coordinator checkout cannot answer git ${args.slice(2).join(' ')}`);
   };
@@ -2316,6 +2333,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     restartExecutors: async to => {
       // A busy fleet: a claim outlives restartExecutors' bounded wait for the first passes, and the restart is refused.
       if (upgrades.held.length < plan.heldClaimRestarts) { upgrades.held.push(to); return { result: 'refused', reason: `Restart refused while an executor on ${config.hostId} holds a claimed action`, coordinator: { commit: to }, held: [], restarted: [], unsupervised: [], forgotten: [] }; }
+      if (options.releaseLag) releaseLagDay.restarts.push({ elapsed: clock.now() - dayStart, kind: 'executors', to, served: production.sha, contained: github.contains(production.sha, to) });
       upgrades.executors.push(to); return { result: 'restarted', reason: null, coordinator: { commit: to }, held: [], restarted: [], unsupervised: [], forgotten: [] };
     },
     // The alignment re-applies the unit the loop runs under: a drifted watchdog window is rewritten to the configuration's.
@@ -2326,7 +2344,9 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     },
     // The supervisor re-executes the loop: the next process loads the release the checkout holds, as runDaemon records it,
     // and starts under the unit as it now stands.
-    restartSelf: async () => { upgrades.self++; state.release = { commit: checkout.head, dirty: checkout.dirty }; restartDay.loaded = checkout.head; await processStart(state); },
+    restartSelf: async () => {
+      if (options.releaseLag) releaseLagDay.restarts.push({ elapsed: clock.now() - dayStart, kind: 'self', to: checkout.head, served: production.sha, contained: github.contains(production.sha, checkout.head) });
+      upgrades.self++; state.release = { commit: checkout.head, dirty: checkout.dirty }; restartDay.loaded = checkout.head; await processStart(state); },
   });
   /** What runDaemon does once per process start: the supervisor's watchdog window judged against the interval (GY-916). */
   const processStart = async (state: DaemonState) => {
@@ -2652,7 +2672,10 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
       restarted = true;
     }
     const deploying = deploys < plan.deploys.length && elapsed >= plan.deploys[deploys];
-    if (deploying) { production.build = sha('build', ++deploys); production.sha = github.tip; production.deploys.push({ at: now, build: production.build, sha: production.sha }); }
+    if (options.releaseLag) releaseLagDay.tips.push({ at: now, tip: github.tip });
+    // GY-1585: a lagging promotion serves the tip as it stood `cutAgoMs` ago, not the tip now.
+    const cut = options.releaseLag ? releaseLagDay.tips.findLast(entry => entry.at <= now - options.releaseLag!.cutAgoMs)?.tip ?? releaseLagDay.tips[0].tip : github.tip;
+    if (deploying) { production.build = sha('build', ++deploys); production.sha = cut; production.deploys.push({ at: now, build: production.build, sha: production.sha }); }
     // The plane reports its held integration job only inside the flap windows (GY-439's recurring fault).
     heldJobs = plan.heldJob.at.some(at => elapsed >= at && elapsed < at + plan.heldJob.forMs);
     // GY-852: the idling worker's pane dies after its re-prompt, and the profile's agent name is
@@ -2966,6 +2989,11 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
         refusalSamples.push({ keys: Object.keys(state.actions).filter(key => key.startsWith('upgrade:') || key.startsWith('escalation:dirty-checkout')).length, attempts: state.actions['escalation:dirty-checkout']?.attempts ?? 0, head: moved });
       } else assert.equal(guardReads.agents, readsBefore, 'a clean checkout costs no Herdr inventory read');
       if (upgraded) upgrades.outcomes.push(upgraded.outcome);
+      if (options.releaseLag) {
+        const rows = Object.entries(state.actions).filter(([key]) => key.startsWith('upgrade:')), held = state.actions['upgrade:held'];
+        releaseLagDay.passes.push({ elapsed, outcome: upgraded?.outcome ?? null, pending: state.upgrade.pending?.to ?? null, stall: state.upgrade.stalled?.cause ?? null, held: held ? { state: held.state, attempts: held.attempts } : null,
+          waiting: rows.filter(([, action]) => action.state === 'waiting').length, upgradeRows: rows.length, head: checkout.head, served: production.sha, fetches: upgrades.fetches });
+      }
       // GY-1531: the loaded-revision reading after this cycle, as `master status` computes it from the
       // loaded commit, the checkout's HEAD, how far it moved and when, and the restart the cursor owes.
       if (restart) {
@@ -3057,7 +3085,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     decided, misreads, prompts, screens, heldAccounts, approverAccounts, retryReset, limitMenuDay, menuReset, menuNotice, exitedLive, exitedClosed, exitedRowsSeen, reassign, workspaceFailures, workspaceCooled, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, fenced, mergeStallSightings, master, baseFailure,
     blockerEvents, blockerProbes, githubStatusReads, credentialReads, blockerRecords, blockerDecisions, blockerActions, blockerKeysPeak, attempts, lanesSeen, laneApplications, approverWorks, approverDecisions, failover, webhook, remedies, observeRequests, starvation, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size }, mechanical: { ledger, botRounds, misclassified, reviewHolds }, shared, charges: { ...charged, b: charged.b.length, instancesSeen: [...charged.instancesSeen], restarts: chargeRestarts },
     wakes, lateReading, staleMerges, restartLog, hostDay, guardDay, mainWatchDay, budgetDay, slowPlaneDay, observationDay, deploymentDay, decompositionDay: decompositionHistory, diagnosisRaces, diagnosisRequestRaces, transientRefused, lateReads, staleReleaseDay, drain, acceptanceDay: acceptance?.day ?? null, plannerDay: planner?.day ?? null, loopWakeDay: loopWakeDay || null,
-    restartDay: options.checkoutRestart ? restartDay : null, failedLaunches };
+    restartDay: options.checkoutRestart ? restartDay : null, releaseLagDay: options.releaseLag ? releaseLagDay : null, failedLaunches };
 }
 
 /**
