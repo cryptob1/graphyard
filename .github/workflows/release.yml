@@ -22,24 +22,29 @@ jobs:
           echo "version=$tag" >> "$GITHUB_OUTPUT"
           echo "repository=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
       # Docker Hub refuses anonymous pulls from shared runner addresses past its rate limit (GY-1607):
-      # the daemon pulls Docker Hub images through the mirror.gcr.io registry mirror, falling back to
-      # Docker Hub for an image the mirror lacks. Verified with docker info before any docker command,
-      # and the pull of this job's Docker Hub images is logged through the mirror.
+      # the daemon is given the mirror.gcr.io registry mirror (verified with docker info before any
+      # docker command), and this job's Docker Hub images are pulled by their mirror.gcr.io name and
+      # tagged with their Docker Hub name, so no step contacts Docker Hub for them. The step fails when
+      # the mirror cannot serve an image, or when the tagged image does not resolve to the mirror.
       - name: Pull Docker Hub images through the registry mirror
         shell: bash
         env:
-          DOCKER_HUB_IMAGES: node:24-bookworm-slim
+          DOCKER_HUB_IMAGES: node:24-bookworm-slim postgres:17-alpine
         run: |
           set -euo pipefail
-          { sudo cat /etc/docker/daemon.json 2>/dev/null || echo '{}'; } | jq '. + {"registry-mirrors": ["https://mirror.gcr.io"], "debug": true}' > "$RUNNER_TEMP/daemon.json"
+          { sudo cat /etc/docker/daemon.json 2>/dev/null || echo '{}'; } | jq '. + {"registry-mirrors": ["https://mirror.gcr.io"]}' > "$RUNNER_TEMP/daemon.json"
           sudo install -m 0644 "$RUNNER_TEMP/daemon.json" /etc/docker/daemon.json
-          since="$(date '+%Y-%m-%d %H:%M:%S')"
           sudo systemctl restart docker
           mirrors="$(docker info --format '{{json .RegistryConfig.Mirrors}}')"
           echo "Docker daemon registry mirrors: $mirrors"
           [[ $mirrors == *'https://mirror.gcr.io'* ]] || { echo '::error::the Docker daemon is not using the registry mirror' >&2; exit 1; }
-          for image in $DOCKER_HUB_IMAGES; do docker pull --quiet "$image"; done
-          sudo journalctl --unit docker --since "$since" --no-pager | grep -F 'mirror.gcr.io' || echo '::warning::the daemon log names no pull through mirror.gcr.io'
+          for image in $DOCKER_HUB_IMAGES; do
+            docker pull --quiet "mirror.gcr.io/library/$image"
+            docker tag "mirror.gcr.io/library/$image" "$image"
+            digests="$(docker image inspect --format '{{json .RepoDigests}}' "$image")"
+            echo "$image resolved through the registry mirror: $digests"
+            [[ $digests == *'mirror.gcr.io/library/'* ]] || { echo "::error::$image does not resolve to the registry mirror" >&2; exit 1; }
+          done
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
