@@ -81,44 +81,6 @@ export const cappedReworkBinding = (head: string, reviewer: string) => `${head}:
  * head unchanged, so the mark is what binds the approver's judgement to that revision's change request.
  */
 export const cappedRevisionMark = (policyRevision: number) => `[Capped review under policy revision ${policyRevision}.]`;
-/** Whether a capped rework request's reason carries any policy revision mark: one requested before GY-1575 carries none. */
-const revisionMarked = (reason: string | undefined) => /\[Capped review under policy revision \d+\.\]/.test(reason ?? '');
-/** The refused capped reworks the loop requested for `capped`'s head and reviewer, under any policy revision. */
-export const refusedCappedReworks = <D extends { action: string; state: string; input?: any }>(history: readonly D[], capped: Pick<CappedReview, 'sha' | 'reviewer'>): D[] => {
-  const binding = cappedReworkBinding(capped.sha, capped.reviewer).slice(0, decisionBindingMax);
-  return history.filter(entry => entry.action === 'rework' && entry.state === 'refused' && entry.input?.binding === binding);
-};
-/**
- * GY-1577. Whether `at` falls after the item's policy revision last changed. A decision record keeps no revision and the
- * item no time of its last revision, so this reads what that revision reset: a GitHub review the requirement-review baseline
- * does not hold was submitted after it (the rule the review gate applies, src/model/review.ts), and an agent review request
- * binds the revision it was posted under. An item never revised has no earlier revision to predate. Anything else is unknown, so false.
- */
-export function sinceRevision(work: Pick<Work, 'policyRevision' | 'formalReviewResetRequired' | 'formalReviewBaseline' | 'reviewRequest' | 'candidate'>, capped: Partial<Pick<CappedReview, 'reviewId' | 'submittedAt'>>, at: string | undefined): boolean {
-  const time = Date.parse(at ?? '');
-  if (!Number.isFinite(time)) return false;
-  if (!work.formalReviewResetRequired && work.policyRevision === 1) return true;
-  const baseline = work.formalReviewBaseline, request = work.reviewRequest, id = capped.reviewId;
-  if (baseline && baseline.pr === work.candidate?.pr && baseline.policyRevision === work.policyRevision && Number.isSafeInteger(id) && id! > 0 && !baseline.reviewIds.includes(id!))
-    return time >= Date.parse(capped.submittedAt ?? '');
-  return !!request && request.policyRevision === work.policyRevision && time >= Date.parse(request.createdAt);
-}
-/**
- * GY-1575. The approver's refusal of the rework the loop requested for a capped change request on
- * `capped`'s head and reviewer under the item's policy revision, or null: the approver judged its findings
- * non-blocking, so the review-cap step withdraws the request and has the head re-reviewed with the
- * refusal's reasoning. A refusal judged under an earlier policy revision binds no later change request.
- * GY-1577: a refusal requested before the mark existed carries none; it counts as judged under the current
- * revision when it was refused after that revision last changed (`sinceRevision`), and binds nothing otherwise.
- */
-export function refusedCappedRework<D extends { action: string; state: string; input?: any; reason?: string; requestedAt?: string; refusal?: { at?: string } | null }>(history: readonly D[],
-  capped: Pick<CappedReview, 'sha' | 'reviewer'> & Partial<Pick<CappedReview, 'reviewId' | 'submittedAt'>>, work: Parameters<typeof sinceRevision>[0]): D | null {
-  const mark = cappedRevisionMark(work.policyRevision);
-  // The binding names the head and reviewer whose verdict was judged; a base the head later sits on does not change that verdict, so the
-  // refusal's recorded base is not compared, marked or unmarked (GY-1577 review): the candidate's base follows main and would strand it.
-  return refusedCappedReworks(history, capped).find(entry => entry.reason?.includes(mark)
-    || !revisionMarked(entry.reason) && sinceRevision(work, capped, entry.refusal?.at ?? entry.requestedAt)) ?? null;
-}
 export function cappedReview(work: Work, config: Partial<Pick<MasterConfig, 'reviewRoundCap' | 'reviewer'>>): CappedReview | null {
   const cap = reviewRoundCapOf(config);
   if (work.stage === 'done' || !pastReviewCap(work, cap)) return null;
