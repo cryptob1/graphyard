@@ -29,6 +29,7 @@ import { currentAgents, dispatchedFile, DispatchReservedError, launchedSinceSnap
 import { projectMemoryDigest, type ProjectMemory } from '../model/project-memory.js';
 import { readProjectMemory } from '../project-memory.js';
 import { readVerificationMaps, verificationMapDigest, type VerificationMap } from '../verification-maps.js';
+import { appliedReworkBrief, reworkBriefSection, type AppliedRework, type ReworkDecisionRow } from './rework-brief.js';
 
 /** The launcher's own runner: the CLI as a child, and git. `stdio` is honoured for the streams a child may inherit; the rest is captured. */
 type WorkerCommand = (command: string, args: string[], options?: { cwd?: string; env?: NodeJS.ProcessEnv; stdio?: ('ignore' | 'pipe' | 'inherit')[] }) => string | Buffer | Promise<string | Buffer>;
@@ -319,16 +320,19 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
  * be, and only when the item's most recently applied rework decision was that round's; the review
  * ledger's plans are read only then. The decisions are read with the master's credential; one that
  * cannot be read makes the attempt an ordinary rework, whose head the fresh read then refuses as a
- * bot commit and whose findings it hands back to the reviewer.
+ * bot commit and whose findings it hands back to the reviewer. Any other rework round carries the
+ * applied decision's reason as its brief (GY-1569); unread decisions leave the round without one.
  */
-async function mechanicalRound(root: string, config: MasterConfig, work: Work, fetcher: typeof fetch = fetch) {
-  if (!work.submission || !work.candidate) return null;
+async function reworkRound(root: string, config: MasterConfig, work: Work, fetcher: typeof fetch = fetch): Promise<{ mechanical: { requests: MechanicalFixRequest[]; reviewId: number } | null; rework: AppliedRework | null }> {
+  if (!work.submission) return { mechanical: null, rework: null };
   try {
     const response = await fetcher(`${config.url}/api/work/${encodeURIComponent(work.id)}/decisions`, { headers: { Authorization: `Bearer ${await readCredentialFile(config.credentialFile)}` }, signal: AbortSignal.timeout(5_000) });
-    if (!response.ok) return null;
-    const reviewId = appliedMechanicalRework(work, ((await response.json()) as { decisions?: Parameters<typeof appliedMechanicalRework>[1] }).decisions ?? []);
-    return reviewId === null ? null : { requests: await readMechanicalFixRequests(root), reviewId };
-  } catch { return null; }
+    if (!response.ok) return { mechanical: null, rework: null };
+    const decisions = ((await response.json()) as { decisions?: ReworkDecisionRow[] }).decisions ?? [];
+    const reviewId = work.candidate ? appliedMechanicalRework(work, decisions) : null;
+    if (reviewId !== null) return { mechanical: { requests: await readMechanicalFixRequests(root), reviewId }, rework: null };
+    return { mechanical: null, rework: appliedReworkBrief(work, decisions) };
+  } catch { return { mechanical: null, rework: null }; }
 }
 
 export const herdrAttach = (pane: string, workspace?: string | null) => `herdr pane attach ${pane}${workspace ? ` --workspace ${workspace}` : ''}`;
@@ -452,11 +456,12 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
     // branch and opening its pull request never wait on a keypress. A failure is reported, not fatal.
     const harness = await installWorkerHarness(config, { ...profile, kind: launch.kind as WorkerProfile['kind'] }, work.key, prepared, mergeWriter).catch(error => ({ applied: false, reason: error instanceof Error ? error.message : 'Worker rules could not be written' }));
     const memory = await readProjectMemory(root).catch(() => null);
-    // A mechanical-fix round (GY-971) is told exactly which findings its one commit fixes.
-    const mechanical = await mechanicalRound(root, config, work);
+    // A mechanical-fix round (GY-971) is told exactly which findings its one commit fixes; any other
+    // rework round, the reason of the decision that sent it back (GY-1569).
+    const { mechanical, rework } = await reworkRound(root, config, work);
     // The area maps the plan touches (GY-1495), read from the base before the session starts.
     const maps = await verificationMaps(root, config.baseBranch).catch(() => []);
-    const prompt = workerPrompt(config, work, profile, prepared.epoch, prepared.dependencies ?? null, memory, prepared.base, mechanical, maps);
+    const prompt = workerPrompt(config, work, profile, prepared.epoch, prepared.dependencies ?? null, memory, prepared.base, mechanical, maps, rework);
     // The worker loads its own role rules, never the master's: it may push its assigned branch.
     const sessionHarness = await prepareSessionHarness(root, config, { role: 'worker', kind: launch.kind, profile: profile.name, branch: prepared.branch ?? `graphyard/${work.key.toLowerCase()}-${prepared.epoch}`, key: work.key, epoch: prepared.epoch, mergeWriter, credentialFiles: [profile.credentialFile!] });
     let pane: string | undefined, tabId: string | undefined, sandbox: ReturnType<typeof verifyWorkerSandbox> | null = null, ran = false;
@@ -550,7 +555,7 @@ export const destructivePromptGuidance = 'Avoid any command that triggers your r
 export const branchRewriteGuidance = 'Never force-push or rewrite a branch you have pushed: your runtime refuses it, so fix a pushed commit forward with a new commit and push normally. ';
 export function workerPrompt(
   config: Pick<MasterConfig, 'cliPath'> & Partial<Pick<MasterConfig, 'repository'>>,
-  work: Pick<Work, 'key' | 'title'> & Partial<Pick<Work, 'capacity' | 'humanRequests' | 'documentation' | 'description' | 'criteria' | 'researchBrief' | 'candidate' | 'plannedFiles'>>,
+  work: Pick<Work, 'key' | 'title'> & Partial<Pick<Work, 'capacity' | 'humanRequests' | 'documentation' | 'description' | 'criteria' | 'researchBrief' | 'candidate' | 'plannedFiles' | 'submission' | 'pipeline'>>,
   profile: Pick<WorkerProfile, 'principal'>,
   epoch: number,
   dependencies?: Pick<SharedDependencies, 'shared'> | null,
@@ -558,6 +563,7 @@ export function workerPrompt(
   baseShaOrMechanical?: string | { requests: readonly MechanicalFixRequest[]; reviewId: number } | null,
   mechanicalOpt?: { requests: readonly MechanicalFixRequest[]; reviewId: number } | null,
   verificationMaps?: readonly VerificationMap[] | null,
+  rework?: AppliedRework | null,
 ) {
   let memory: ProjectMemory | null = null;
   let baseSha: string | undefined = undefined;
@@ -594,6 +600,8 @@ export function workerPrompt(
     + destructivePromptGuidance
     + branchRewriteGuidance
     + (config.repository && mechanical ? mechanicalWorkerSection(config.repository, config.cliPath, { key: work.key, candidate: work.candidate ?? null }, epoch, mechanical.requests, mechanical.reviewId) : '')
+    // The reason the applied rework decision gave, so the round answers it rather than resubmitting (GY-1569).
+    + (mechanical ? '' : reworkBriefSection(work, rework))
     + resumedAttempt(work)
     + `If the item cannot continue without a decision only a human may make — ${humanOnlyDecisions.join('; ')} — do not wait and do not write it as a blocker: record it with node ${config.cliPath} park ${work.key} ${epoch} KIND NEEDED --ask ASK --recommend TEXT --why SENTENCE -- REASON (KIND is goals-and-priorities, money-or-accounts or credentials-for-people; NEEDED is the exact thing the human must provide: every human step the item still needs, in this one request; ASK is one plain sentence naming the human's action; TEXT is the choice you recommend, or the safest way to obtain a value, such as a fine-grained token scoped to one repository with a short expiry and only the permissions needed, and SENTENCE is one plain sentence of why; a scope widening is never a park, ask for it with scope-request), which ends your lease and parks the item for the human, then stop. `
     + autonomousSession('implement the item, open the pull request and submit it with complete', `record a blocker with node ${config.cliPath} blocked ${work.key} ${epoch} REASON`);
