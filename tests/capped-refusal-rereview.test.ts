@@ -356,6 +356,39 @@ test('unit:master-refusal-answers-capped-escalation — GY-1573 rounds 9-10: an 
   await run.cycle();
   assert.deepEqual(run.world.withdrawn.map(entry => entry.reviewId), [4242, 5468008197], 'the later answer is the one bound to the re-review');
   assert.ok(run.world.withdrawn[1].message.includes(answer('refused').id) && !run.world.withdrawn[1].message.includes(early.id), run.world.withdrawn[1].message);
+
+  // GY-1580 review round 2: an answer requested at 08:50 and refused at 09:00, both before the 09:04 re-review posted, bound no withdrawal.
+  // Until the master answers that re-review the step escalates (it cannot tell the early answer from one a withdrawal followed); the
+  // answer requested at 09:10 and refused at 09:20 in reply to the 09:04 change request then withdraws it, once, and a later change
+  // request, nits-only or blocking, escalates citing every refusal still uncited and is never withdrawn a third time, pruned rows or not.
+  for (const prune of [false, true]) for (const third of [rereviewBody, 'The helper could be named more clearly.']) {
+    const preSubmit = { ...early, refusal: { ...early.refusal, at: '2026-10-09T09:00:00.000Z' } };
+    const run = await replayToEscalation();
+    run.world.history = [firstRefusal, preSubmit] as any;
+    await run.cycle();
+    assert.equal(run.world.withdrawn.length, 1, 'the early answer alone withdraws nothing');
+    assert.match(run.state.actions[cappedEscalationKey(run.world.item, H)]!.detail, /not withdrawn a third time/);
+    run.world.history = [firstRefusal, preSubmit, answer('refused')] as any;
+    await run.cycle();
+    await run.cycle();
+    assert.deepEqual(run.world.withdrawn.map(entry => entry.reviewId), [4242, 5468008197], 'the answer requested after the change request withdraws it');
+    assert.ok(run.world.withdrawn[1].message.includes(answer('refused').id) && !run.world.withdrawn[1].message.includes(preSubmit.id), run.world.withdrawn[1].message);
+    if (prune) {
+      for (let index = 0; index <= retainedActions; index++)
+        storeAction(run.state, `dispatch:other-${index}:1`, { kind: 'dispatch', work: `GY-${index}`, principal: null, epoch: 1, state: 'done', detail: 'launched', attempts: 1, cycle: run.state.cycle, at: new Date(Date.parse('2026-10-09T09:30:00Z') + index).toISOString() });
+      pruneDaemonState(run.state);
+      assert.equal(run.state.actions[answeredRereviewKey(run.world.item, H)], undefined, 'the re-review row is pruned');
+    }
+    run.world.item = capped(third, 5468009999, '2026-10-09T09:40:00Z');
+    assert.equal(cappedReview(run.world.item, config)!.kind, third === rereviewBody ? 'escalate' : 'follow-up');
+    await run.cycle();
+    await run.cycle();
+    assert.deepEqual(run.world.withdrawn.map(entry => entry.reviewId), [4242, 5468008197], `withdrawn twice only (pruned: ${prune}, ${third})`);
+    const escalation = run.state.actions[cappedEscalationKey(run.world.item, H)]!.detail;
+    assert.match(escalation, /not withdrawn a (third|second) time/);
+    const precedent = /--precedent (\S+)/.exec(escalation)?.[1]?.split(',') ?? [];
+    for (const id of [preSubmit.id, answer('refused').id]) assert.ok(precedent.includes(id), `${id} cited in ${escalation}`);
+  }
 });
 
 /** Every `graphyard master …` command a text names, as words. */
