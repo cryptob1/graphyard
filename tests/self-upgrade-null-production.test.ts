@@ -677,4 +677,13 @@ test('unit:self-upgrade-unverified-still-restarts — with production unobserved
     assert.equal(lagged.upgrade.pending, null);
     assert.equal(lagged.upgrade.stalled, undefined);
   }
+  // The contrast: the same owed restart with production observed serving the loaded release, which
+  // does not contain the checkout, is held — only an observed release engages the gate.
+  const observed = faultState(), fake = new FakeGit(checkout, checkout), fleet = { held: false, self: 0, executors: [] as string[] };
+  observed.deployment = { source: 'endpoint', sha: loaded, at: iso(faultAt), reason: null, deployed: ['GY-1580'], pending: ['GY-1581'] };
+  const held = await performSelfUpgrade(master, observed, deps(fake, { now: faultAt }, fleet));
+  assert.equal(held.outcome, 'pending');
+  assert.deepEqual([fleet.executors, fleet.self], [[], 0]);
+  assert.equal(observed.upgrade.stalled?.cause, 'release-lagged');
+  assert.ok(fake.ancestryReads > 0);
 });
