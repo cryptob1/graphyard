@@ -1,0 +1,10 @@
+# The chart job's kind cluster (GY-1613). Each node's containerd reads registry hosts from
+# /etc/containerd/certs.d, where the job points docker.io at mirror.gcr.io alone. The node image
+# ships no config_path of its own, so it is set here explicitly rather than left to containerd's
+# default; the job refuses a node whose effective containerd config does not carry it.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+containerdConfigPatches:
+  - |-
+    [plugins."io.containerd.grpc.v1.cri".registry]
+      config_path = "/etc/containerd/certs.d"

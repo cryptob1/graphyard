@@ -224,10 +224,14 @@ jobs:
           version="$(node -p "require('./package.json').version")"
           docker build --build-arg "GRAPHYARD_VERSION=$version" --build-arg "GRAPHYARD_BUILD_REVISION=$CANDIDATE_SHA" --tag "graphyard:$version" .
           docker tag "graphyard:$version" "graphyard:$version-next"
+      # kind's node image sets no registry config_path (containerd 2 then defaults to a path list), so
+      # the cluster is created from deploy/helm/kind-config.yaml, which sets it to /etc/containerd/certs.d.
       - uses: helm/kind-action@v1
-        with: { cluster_name: graphyard }
+        with: { cluster_name: graphyard, config: deploy/helm/kind-config.yaml }
       # The cluster's containerd pulls the chart's Docker Hub images (the bundled postgres:17-alpine)
       # itself, so each node resolves docker.io through mirror.gcr.io alone, with no Docker Hub fallback.
+      # The step reads each node's effective config (containerd config dump: version 2 or 3, double or
+      # single quoted) and fails when config_path is not exactly /etc/containerd/certs.d.
       - name: Pull the cluster's Docker Hub images through the registry mirror
         shell: bash
         run: |
@@ -235,7 +239,8 @@ jobs:
           for node in $(kind get nodes --name graphyard); do
             docker exec "$node" mkdir -p /etc/containerd/certs.d/docker.io
             printf '%s\n' 'server = "https://mirror.gcr.io"' '[host."https://mirror.gcr.io"]' '  capabilities = ["pull", "resolve"]' | docker exec -i "$node" tee /etc/containerd/certs.d/docker.io/hosts.toml
-            docker exec "$node" grep -q 'config_path *= *"/etc/containerd/certs.d"' /etc/containerd/config.toml || { echo "::error::kind node $node does not read /etc/containerd/certs.d" >&2; exit 1; }
+            dump="$(docker exec "$node" containerd config dump)"
+            grep -Eq "^[[:space:]]*config_path *= *(\"/etc/containerd/certs.d\"|'/etc/containerd/certs.d')[[:space:]]*\$" <<< "$dump" || { echo "::error::kind node $node does not read /etc/containerd/certs.d" >&2; exit 1; }
           done
       - name: Install, exercise, upgrade and restore on a real cluster
         run: bash deploy/helm/exercise.sh "graphyard:$(node -p "require('./package.json').version")"
