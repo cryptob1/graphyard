@@ -72,9 +72,25 @@ export function standingVerdict(work: Work): StandingVerdict | null {
  * (`cappedReworkBinding`), which puts the finding to that approver. So is any other — an agent
  * provider's verdict, or a person's review — since Graphyard cannot withdraw it as the reviewer App.
  */
-export interface CappedReview { kind: 'follow-up' | 'escalate'; round: number; cap: number; reviewer: string; reviewId: number | null; sha: string; blocking: string[]; findings: string[]; reason: string }
+export interface CappedReview { kind: 'follow-up' | 'escalate'; round: number; cap: number; reviewer: string; reviewId: number | null; sha: string; blocking: string[]; findings: string[]; reason: string; submittedAt?: string }
 /** The binding of the loop's rework request for a capped change request (GY-1389): an approver's to judge, never the risk lane's. */
 export const cappedReworkBinding = (head: string, reviewer: string) => `${head}:capped:${reviewer}`;
+/**
+ * The mark a capped rework request opens its reason with (GY-1575): the policy revision it was requested
+ * under. A decision record keeps no revision, and a requirements or review-policy revision can leave the
+ * head unchanged, so the mark is what binds the approver's judgement to that revision's change request.
+ */
+export const cappedRevisionMark = (policyRevision: number) => `[Capped review under policy revision ${policyRevision}.]`;
+/**
+ * GY-1575. The approver's refusal of the rework the loop requested for a capped change request on
+ * `capped`'s head and reviewer under `policyRevision`, or null: the approver judged its findings
+ * non-blocking, so the review-cap step withdraws the request and has the head re-reviewed with the
+ * refusal's reasoning. A refusal judged under an earlier policy revision binds no later change request.
+ */
+export function refusedCappedRework<D extends { action: string; state: string; input?: any; reason?: string }>(history: readonly D[], capped: Pick<CappedReview, 'sha' | 'reviewer'>, policyRevision: number): D | null {
+  const binding = cappedReworkBinding(capped.sha, capped.reviewer).slice(0, decisionBindingMax), mark = cappedRevisionMark(policyRevision);
+  return history.find(entry => entry.action === 'rework' && entry.state === 'refused' && entry.input?.binding === binding && !!entry.reason?.includes(mark)) ?? null;
+}
 export function cappedReview(work: Work, config: Partial<Pick<MasterConfig, 'reviewRoundCap' | 'reviewer'>>): CappedReview | null {
   const cap = reviewRoundCapOf(config);
   if (work.stage === 'done' || !pastReviewCap(work, cap)) return null;
@@ -87,7 +103,7 @@ export function cappedReview(work: Work, config: Partial<Pick<MasterConfig, 'rev
   const blocking = review?.blocking?.length ? review.blocking : blockingFindings(body), round = reviewRound(work);
   const own = !!review && !!config.reviewer && review.reviewer.toLowerCase() === `${config.reviewer.slug}[bot]`.toLowerCase();
   const findings = followUpFindingsOf(body);
-  const base = { round, cap, reviewer: verdict.reviewer, reviewId, sha: candidate.sha, blocking, findings: findings.length ? findings : [verdict.reason] };
+  const base = { round, cap, reviewer: verdict.reviewer, reviewId, sha: candidate.sha, blocking, findings: findings.length ? findings : [verdict.reason], ...(review?.submittedAt ? { submittedAt: review.submittedAt } : {}) };
   const past = `${work.key} is in review round ${round}, past its cap of ${cap}`;
   if (blocking.length) return { kind: 'escalate', ...base, reason: `${past}, and ${verdict.reviewer} names ${blocking.length === 1 ? 'a blocking finding' : `${blocking.length} blocking findings`} on ${candidate.sha.slice(0, 12)}: ${blocking.join('; ')}` };
   if (!own || reviewId === null) return { kind: 'escalate', ...base, reason: `${past}, and ${verdict.reviewer} requested changes on ${candidate.sha.slice(0, 12)} naming no BLOCKING: finding, but Graphyard cannot withdraw a verdict it did not obtain through its reviewer App` };
@@ -305,7 +321,7 @@ export function neededDecision(work: Work, config: ReviewCapConfig, baseFailed?:
   // mandatory grounds above: an approver's refusal of it must never hide a failed proof or required check.
   const escalated = capped && !work.reworkRequested ? cappedReview(work, config) : null;
   if (escalated?.kind === 'escalate') return { action: 'rework', binding: cappedReworkBinding(work.candidate!.sha, escalated.reviewer),
-    reason: `${escalated.reason.replace(/\.$/, '')}. Past the review-round cap only an independent approver sends the head back: approve for one more round fixing exactly that finding, or refuse it as non-blocking: the loop then requests it no more and escalates the refusal for the master to answer.`.slice(0, 2000) };
+    reason: `${cappedRevisionMark(work.policyRevision)} ${escalated.reason.replace(/\.$/, '')}. Past the review-round cap only an independent approver sends the head back: approve for one more round fixing exactly that finding, or refuse it as non-blocking: the loop then requests it no more, withdraws the change request and has the reviewer re-review the head, listing the findings as FOLLOW-UP.`.slice(0, 2000) };
   // The operator answered a product question the head was built on provisionally, and the answer
   // differs from that recommendation (GY-259): the head no longer builds what was asked.
   const research = researchRework(work);

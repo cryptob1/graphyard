@@ -167,6 +167,8 @@ export interface MainWatchLanding { sha: string; at: number; subject: string; au
  * operator-agent, approver or reviewer identity: every decision, approver, escalation and reviewer
  * effect. tests/soak-supervised.test.ts checks the real effects leave each of them absent.
  */
+/** The reviewer App of the capped day (GY-1575): its change requests are the loop's to withdraw. */
+const cappedReviewerApp = { appId: 77_001, installationId: 77_002, slug: 'graphyard-reviewer', credentialFile: '/outside/reviewer.pem', boundAt: '2026-09-24T00:00:00Z' };
 export const supervisedAbsentEffects = ['decide', 'approver', 'docsSync', 'withdraw', 'resume', 'decisions', 'decisionChanges', 'replan', 'widenScope', 'withdrawReview', 'diagnostician', 'acceptance', 'planner', 'fileFaultClass', 'unblock', 'doctor'] as const;
 export async function simulateDay(options: { hours: number; backlog?: boolean; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number; working?: { from: number; retryAt: number } }; regression?: ('approvers-left-open' | 'docs-syncs-left-open')[]; headless?: boolean; handApprovers?: boolean; stranded?: boolean | 'resume'; staleRework?: boolean; staleMerge?: number; capacityWait?: { from: number; to: number }; diagnosisLimit?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; workspaceFailure?: { item: number; until: number }; credentialBlocked?: { recovers: number; never: number }; blockers?: boolean; retrying?: { worker: number; approver: number }; limitMenu?: { worker: number; prose: number; twinLogin?: boolean }; unbounded?: { stuck: number; progressing: number; pushedOnce: number; rework: number }; starved?: { items: number[]; dropFirst: number }; docs?: { budget: { total: number; perPage: number } }; dispatchFailing?: { constant: number; changing: number; refuseBlocks: number; unblockAfterMs: number }; mainGuard?: MainGuardDay; containment?: { failUntil: number; slowUntil: number; refuseSettle?: number }; mechanical?: { applied: number; rejected: number }; slowDecisions?: { from: number; to: number; ms: number }; slowAnswers?: { from: number; to: number; ms: number }; slowObservation?: { from: number; to: number; attentionMs: number }; lateReading?: boolean; slowDeployment?: { from: number; to: number; observationMs: number }; selfProvision?: { redeployFails: { from: number; to: number } }; plan?: Partial<typeof basePlan>; github806?: boolean; remedies?: boolean;
   decomposition?: { broadItems: number[]; concurrency?: number };
@@ -205,8 +207,11 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   promotion?: boolean | PromotionDay;
   /** GY-1519: wire the loop's main watch over the day's main, with foreign commits an admin acknowledges (MainWatchDay). */
   mainWatch?: MainWatchDay;
-  /** GY-1389: the review-round cap, the items whose change requests name a blocking finding past it, and those whose capped round the approver refuses. */
-  reviewCap?: { cap: number; items: number[]; refused: number[] };
+  /**
+   * GY-1389: the review-round cap, the items whose change requests name a blocking finding past it, and those whose capped round the approver refuses.
+   * GY-1575: the day runs with a reviewer App that withdraws a refused round's change request; the re-review of each of `again` requests changes once more.
+   */
+  reviewCap?: { cap: number; items: number[]; refused: number[]; again?: number[] };
   /**
    * GY-1428: the loop's host-supervision step runs the real repair over a simulated host declaring
    * two executor slots. Its user manager stops answering at `managerDown.from`, taking both slots
@@ -264,7 +269,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     // GY-1354: the slow-deployment day's deliveries ask for a smoke proof the loop requests from this workflow.
     : options.slowDeployment ? masterConfigSchema.parse({ ...soakConfig, run: { ...soakConfig.run, smokeWorkflow: 'smoke.yml' } })
     : options.decomposition ? masterConfigSchema.parse({ ...soakConfig, run: { ...soakConfig.run, research: { command: 'pi', model: 'research-pi-model' }, decomposition: { concurrency: options.decomposition.concurrency ?? 2 } } })
-    : options.reviewCap ? masterConfigSchema.parse({ ...soakConfig, reviewRoundCap: options.reviewCap.cap })
+    : options.reviewCap ? masterConfigSchema.parse({ ...soakConfig, reviewRoundCap: options.reviewCap.cap, reviewer: cappedReviewerApp })
     : options.loopWake ? masterConfigSchema.parse({ ...soakConfig, run: { ...soakConfig.run, intervalSeconds: options.loopWake.intervalSeconds } })
     : options.supervised ? withSupervision(masterConfigSchema.parse({ ...soakConfig, supervision: 'supervised', operatorLogin: options.supervised.operator }))
     : soakConfig;
@@ -518,7 +523,8 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   // GY-1389: a change request on every head through the first past the cap, each naming a blocking finding.
   const cappedDay = options.reviewCap;
   if (cappedDay) {
-    for (const n of cappedDay.items) github.verdicts.set(items[n - 1].key, Array.from({ length: cappedDay.cap + 1 }, () => 'CHANGES_REQUESTED' as const));
+    for (const n of cappedDay.items) github.verdicts.set(items[n - 1].key, Array.from({ length: cappedDay.cap + 1 + (cappedDay.again?.includes(n) ? 1 : 0) }, () => 'CHANGES_REQUESTED' as const));
+    github.reviewer = `${cappedReviewerApp.slug}[bot]`;
     github.changeRequestBody = (key, review) => cappedDay.items.includes(numberOf({ key })) ? `AC-1 is judged on ${review.sha.slice(0, 12)}.\nBLOCKING: AC-1 is not met — ${key} skips the last frob.` : null;
   }
   if (plan.unstable) github.unstable.add(items[plan.unstable - 1].key);
@@ -762,7 +768,8 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     const result = await dispatchWork(failover.root, work, profile, free, world.run, snapshot.work,
       async () => {
         const claimed = await engine.execute(principal, 'claim', work.id, {}, id());
-        epoch = claimed.epoch; branch = `graphyard/${work.key.toLowerCase()}-${epoch}`;
+        // A rework round re-registers the standing submission's branch, as the simulated dispatch does (GY-1569).
+        epoch = claimed.epoch; branch = work.candidate?.branch ?? work.workspaces.find(entry => entry.epoch === work.submission?.epoch)?.branch ?? `graphyard/${work.key.toLowerCase()}-${epoch}`;
         const path = await temporaryDirectory('soak-launch');
         await engine.execute(principal, 'workspace', work.id, { epoch, host: 'soak-host', path, branch }, id());
         return { epoch, path, base: github.tip };
@@ -1799,6 +1806,8 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     hostMemory: async () => memoryReading(),
     // A rework refused on a stale observation wakes the item's observation job (GY-710) through
     // the server's own resync endpoint, as `master run` wires it.
+    // GY-1575: the capped day's reviewer App withdraws a change request in the day's GitHub.
+    ...(cappedDay ? { withdrawReview: async (work: Work, reviewId: number, message: string) => github.dismiss(work, reviewId, message) } : {}),
     wakeObservation: work => { wakes.push({ key: work.key, at: clock.now() }); return api(principals.coordinator, 'POST', `work/${work.id}/resync`, {}); },
     reclaimResources: (work, agents) => reclaimResources(reclaimRoot, { reviewers: [], producers: [] }, { work, agents }, { closePane: pane => { herdr.close(pane); }, tmpRoot, tmpPass }),
     // What the loop's reclaim path needs to end an attempt on the record (GY-852): the partial
