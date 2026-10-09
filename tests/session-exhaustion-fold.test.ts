@@ -98,7 +98,7 @@ test('unit:session-exhaustion-survives-later-probe — a session report whose re
   assert.equal(ineligible(registry, 'claude-a', spentAt + 3_660_000), null);
 });
 
-test('unit:session-exhaustion-survives-later-probe — account set on the same login lifts a session report, so the first probe after the change replaces it and a fresh login frees the account and its former twin', () => {
+test('unit:session-exhaustion-survives-later-probe — account set on the same login clears the registry\'s session report, so the first probe after the change replaces it, but the reporting host\'s own hold, re-reported on its next selection, stands until the named reset', () => {
   const registry = registryOf(['claude-a', 'claude']);
   fold(registry, [{ account: 'claude-a', quota: heldObservation('claude-a', held) }, { account: 'claude', quota: probe }], spentAt);
   const before = Date.parse(resetsAt) - 60_000;
@@ -113,4 +113,10 @@ test('unit:session-exhaustion-survives-later-probe — account set on the same l
   assert.equal(read.identity, fresh);
   assert.equal(ineligible(changed, 'claude-a', before), null);
   assert.equal(ineligible(changed, 'claude', before), null);
+  // account set reaches only the registry: the host that saw the account spent still holds it in its
+  // environment log, and heldAwareProbe reports that hold over its next selection's read until the reset.
+  assert.equal(fold(changed, [{ account: 'claude-a', quota: heldObservation('claude-a', held, { ...probe, state: 'available', identity: fresh }) }], spentAt + 180_000), true);
+  assert.equal(changed.accounts.find(entry => entry.name === 'claude-a')!.quota.session, 'named');
+  assert.match(ineligible(changed, 'claude-a', before) ?? '', /exhausted|reset/i);
+  assert.equal(ineligible(changed, 'claude-a', Date.parse(resetsAt) + 60_000), null);
 });

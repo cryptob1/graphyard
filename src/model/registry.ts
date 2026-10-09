@@ -244,7 +244,7 @@ export function applyRegistryMutation(current: AgentRegistry, kind: RegistryMuta
     // Any change to an account is tested again before it takes a session (GY-446), and clears the
     // holds its earlier runs set: the change is what an operator makes to fix it.
     // Its identity is read again by the next probe (GY-1573): the operator may have logged the home in afresh.
-    // A session's exhaustion report is one of those holds (GY-1581): the next probe replaces it.
+    // The registry's copy of a session's exhaustion report is one (GY-1581); its reporting host re-reports its own until the reset.
     const { session: _held, ...kept } = existing?.quota ?? unobservedQuota;
     upsert(next.accounts, { ...account, quota: sameLogin ? { ...kept, identity: null } : { ...unobservedQuota } });
     demandRegistry(next.accounts.length <= registryLimits.accounts, `The registry holds at most ${registryLimits.accounts} accounts`);
