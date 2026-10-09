@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { assignmentSurrender, herdrSessionProbe, supervise } from '../src/supervisor.js';
-import { emptyDaemonState, orphanedSupervisors, runCycle, stopWatchSupervisor, type DaemonEffects, type DaemonState, type OrphanSupervisor } from '../src/master-daemon.js';
+import { emptyDaemonState, orphanedSupervisors, runCycle, stopWatchSupervisor, type DaemonEffects, type DaemonState, type OrphanObservation, type OrphanSupervisor } from '../src/master-daemon.js';
 import { nameOrphanSupervisors, supervisorReclaimCommand } from '../src/cli/master-status.js';
 import { buildMasterStatus, masterConfigSchema, type HerdrAgent, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import type { Work } from '../src/model.js';
@@ -212,8 +212,38 @@ test('integration:orphan-supervisor-reclaim the stop reaches the recorded scope 
 });
 
 const status = (work: Work, agents: HerdrAgent[] = []) => buildMasterStatus({ work: [work], now: observedAt }, [worker], agents);
-const named = (work: Work, agents: HerdrAgent[] = [], available = true) =>
-  nameOrphanSupervisors(status(work, agents), [work], [worker], { agents, available }, Date.parse(observedAt));
+// The loop recorded this supervisor at an earlier expiry, so a lease advanced past it is established.
+const recorded = (leaseExpiresAt: string, stops = 0): Record<string, OrphanObservation> =>
+  ({ 'work-83': { epoch: 2, owner: 'worker-a', pid: scope.pid, unit: scope.unit, firstSeenAt: at(-30_000), leaseExpiresAt, stops, stoppedLeaseExpiresAt: stops ? leaseExpiresAt : null } });
+const named = (work: Work, agents: HerdrAgent[] = [], available = true, observations: Record<string, OrphanObservation> | null = recorded(at(0))) =>
+  nameOrphanSupervisors(status(work, agents), [work], [worker], { agents, available }, Date.parse(observedAt), observations);
+
+test('unit:orphan-status-two-observations a single snapshot without the session names no orphan; the loop\'s two observations do', () => {
+  const held = item(at(30_000));
+  const actionable = (report: ReturnType<typeof named>) => [...report.work.map(row => [row.attention ?? '', row.attentionOwner?.next ?? '']), ...report.attentionItems.map(entry => [entry.text, entry.next])]
+    .some(([text, next]) => /orphaned watch supervisor/.test(text) || next.includes(supervisorReclaimCommand) || /systemctl --user kill/.test(next));
+
+  // AC-1: a freshly launched worker Herdr does not list yet, its lease advancing, read once.
+  for (const [why, observations] of [
+    ['the loop has not observed it', {}],
+    ['the loop state could not be read', null],
+    ['the loop has seen it only once, at this expiry', recorded(at(30_000))],
+    ['the loop recorded another attempt', { 'work-83': { ...recorded(at(0))['work-83'], epoch: 1 } }],
+    ['the loop recorded another supervisor pid', { 'work-83': { ...recorded(at(0))['work-83'], pid: scope.pid + 1 } }],
+  ] as [string, Record<string, OrphanObservation> | null][]) {
+    const report = named(held, [], true, observations);
+    assert.equal(actionable(report), false, `no orphan attention or stop command when ${why}`);
+    assert.deepEqual(report, status(held), `the report is left as it was when ${why}`);
+  }
+
+  // AC-2: the loop recorded it, and the lease has since advanced past that expiry with the session absent.
+  const established = named(held, [], true, recorded(at(0)));
+  assert.equal(actionable(established), true);
+  assert.match(established.work[0].attention!, /an orphaned watch supervisor/);
+  assert.ok(established.work[0].attentionOwner!.next.startsWith(supervisorReclaimCommand));
+  // A supervisor the loop has already stopped stays named while its lease still advances.
+  assert.equal(actionable(named(held, [], true, recorded(at(30_000), 1))), true);
+});
 
 test('unit:orphan-supervisor-attention master status names an orphaned supervisor and the command that reclaims it instead of reporting a finished session', () => {
   const held = item(at(30_000));
