@@ -1,4 +1,6 @@
 import { agentOwner, approverSessionName, type AttentionItem, type HerdrAgent } from '../master.js';
+import { approverStallVerdict } from '../master/approver-stall.js';
+import { launchStartMs } from '../master/launch.js';
 import { standingCapacity, type CapacityState } from '../model/capacity.js';
 import { elapsed } from '../model/sessions.js';
 import { mapBounded, readConcurrency } from '../master/timings.js';
@@ -9,7 +11,9 @@ import type { Closure } from '../model/closure.js';
 
 type DecisionRow = { id: string; action: string; state: string; input?: any; requestedAt: string; staleAt?: string; requestedBy?: string; outcome?: string | null; race?: unknown; refusal?: { approver: string; reason: string; at: string } | null };
 type ApprovalWatch = { work: string; decision: string; agentName: string | null; settledAt?: string | null; ended?: string[]; launches?: number; launchedAt?: string | null; exhaustedAt?: string | null };
-export interface UnansweredDecision { work: string; id: string; action: string; requestedAt: string; session: string; ageMs: number; age: string; ended?: string[]; inMotionUntil?: string; /** GY-1598: its tab is still in Herdr, idle. */ visible?: boolean }
+export interface UnansweredDecision { work: string; id: string; action: string; requestedAt: string; session: string; ageMs: number; age: string; ended?: string[]; inMotionUntil?: string; /** GY-1598: its tab is still in Herdr, `done`: `closes` when `master approver` closes it, else the pane to close first. */ visible?: { closes: true } | { closes: false; pane: string; why: string } }
+/** The approver launch records `master approver` judges a listed session's age by (GY-1598), and its start bound. */
+export interface ApproverStarts { records: { agentName: string; launchedAt: string }[]; boundMs: number }
 
 /**
  * GY-1337. How long after its approver's latest launch an unanswered decision the loop still
@@ -60,12 +64,14 @@ export function unansweredInMotionUntil(watch: ApprovalWatch | undefined, reques
  * launched for it — or, for one a master launched by hand, the name `master approver` gives it —
  * is gone from Herdr or reports `done`, and no outcome was ever recorded. That is a stall, not a
  * judgement: an approver that declines records `master refuse`, and its decision ends `refused`.
- * A session still listed `done` keeps its tab (GY-1598): `master approver` and the loop close it past its start bound before launching the next.
+ * A session still listed `done` keeps its tab (GY-1598): within its start bound it is no stall yet; past it `master approver` and
+ * the loop close it before launching the next, judged by `approverStallVerdict` on the same launch record; with none, its pane is named.
  * Nothing is concluded while Herdr cannot be read. An item waiting for an approver account to
  * reset is not one: the loop launches no approver before then, and master status names that wait
  * once, as the approver capacity line, not as a stall per decision (GY-182).
  */
-export function unansweredDecisions(items: { key: string; decisions: DecisionRow[]; capacity?: CapacityState | null }[], approvals: ApprovalWatch[], runtime: { available: boolean; agents: HerdrAgent[] }, now: number): UnansweredDecision[] {
+export function unansweredDecisions(items: { key: string; decisions: DecisionRow[]; capacity?: CapacityState | null }[], approvals: ApprovalWatch[], runtime: { available: boolean; agents: HerdrAgent[] }, now: number,
+  starts: ApproverStarts = { records: [], boundMs: launchStartMs({ run: {} }) }): UnansweredDecision[] {
   if (!runtime.available) return [];
   return items.flatMap(item => standingCapacity(item, 'approver').length ? [] : item.decisions.flatMap(decision => {
     if (decision.state !== 'requested') return [];
@@ -73,12 +79,14 @@ export function unansweredDecisions(items: { key: string; decisions: DecisionRow
     const session = watch?.agentName ?? approverSessionName(item, decision.id);
     const live = runtime.agents.find(agent => agent.name === session);
     if (live && live.agent_status !== 'done') return [];
+    const verdict = live ? approverStallVerdict(live, starts.records.findLast(entry => entry.agentName === session)?.launchedAt, starts.boundMs, now) : null;
+    if (verdict && !verdict.close && verdict.why.startsWith('it is within')) return [];
     const ageMs = Math.max(0, now - Date.parse(decision.requestedAt));
     // How the loop's earlier sessions for this decision ended (GY-551): the reasons sit beside the
     // decision here, not only in the escalation detail. A decision the loop never watched has none.
     const inMotionUntil = unansweredInMotionUntil(watch, decision.requestedAt);
     return [{ work: item.key, id: decision.id, action: decision.action, requestedAt: decision.requestedAt, session, ageMs, age: elapsed(ageMs),
-      ...(watch?.ended?.length ? { ended: watch.ended } : {}), ...(inMotionUntil ? { inMotionUntil } : {}), ...(live ? { visible: true } : {}) }];
+      ...(watch?.ended?.length ? { ended: watch.ended } : {}), ...(inMotionUntil ? { inMotionUntil } : {}), ...(verdict ? { visible: verdict.close ? { closes: true as const } : { closes: false as const, pane: live!.pane_id ?? session, why: verdict.why } } : {}) }];
   }));
 }
 
@@ -95,7 +103,7 @@ export function unansweredDecisions(items: { key: string; decisions: DecisionRow
  * request, so the next step is a request that cites the refused decision with what it lacked.
  */
 export async function terminalDecisions(masterApi: (path: string) => Promise<any>, work: { id: string; key: string; stage: string; ready?: boolean; capacity?: CapacityState | null; closure?: Closure | null }[],
-  sessions: { approvals: ApprovalWatch[]; runtime: { available: boolean; agents: HerdrAgent[] }; now: number }) {
+  sessions: { approvals: ApprovalWatch[]; runtime: { available: boolean; agents: HerdrAgent[] }; now: number; starts?: ApproverStarts }) {
   const listed: { work: string; id: string; action: string; state: string; reason: string | null; race?: unknown; refusedBy?: string; refusedAt?: string }[] = [];
   const attentionItems: AttentionItem[] = [];
   const histories: { key: string; decisions: DecisionRow[]; capacity?: CapacityState | null }[] = [];
@@ -138,10 +146,13 @@ export async function terminalDecisions(masterApi: (path: string) => Promise<any
           ...agentOwner('master', `graphyard master decide ${item.key} ${decision.action} [JSON|@FILE] REASON, then graphyard master approver ${item.key} DECISION`, 'approver') });
     }
   }
-  const unanswered = unansweredDecisions(histories, sessions.approvals, sessions.runtime, sessions.now);
-  for (const entry of unanswered)
-    attentionItems.push({ subject: entry.work, text: `Decision ${entry.id} (${entry.action}) is unanswered after ${entry.age}: approver session ${entry.session} ${entry.visible ? 'sits idle in Herdr' : 'is not running'} and recorded no outcome${entry.ended?.length ? ` (${entry.ended.join('; ')})` : ''} — a stall, not a refusal`,
-      ...agentOwner('master', `graphyard master approver ${entry.work} ${entry.id} [AGENT_KIND] ${entry.visible ? `closes ${entry.session} and ` : ''}puts it to a fresh approver`, 'approver'), ...(entry.inMotionUntil ? { inMotionUntil: entry.inMotionUntil } : {}) });
+  const unanswered = unansweredDecisions(histories, sessions.approvals, sessions.runtime, sessions.now, sessions.starts);
+  for (const entry of unanswered) {
+    const shown = entry.visible, state = !shown ? 'is not running' : shown.closes ? 'sits done in Herdr past its start bound' : `sits done in Herdr, but ${shown.why}`;
+    const next = `graphyard master approver ${entry.work} ${entry.id} [AGENT_KIND] ${shown?.closes ? `closes ${entry.session} and ` : ''}puts it to a fresh approver`;
+    attentionItems.push({ subject: entry.work, text: `Decision ${entry.id} (${entry.action}) is unanswered after ${entry.age}: approver session ${entry.session} ${state} and recorded no outcome${entry.ended?.length ? ` (${entry.ended.join('; ')})` : ''} — a stall, not a refusal`,
+      ...agentOwner('master', shown && !shown.closes ? `herdr pane close ${shown.pane} (master approver refuses it while ${shown.why}), then ${next}` : next, 'approver'), ...(entry.inMotionUntil ? { inMotionUntil: entry.inMotionUntil } : {}) });
+  }
   return { listed, attentionItems, unanswered, refused };
 }
 
