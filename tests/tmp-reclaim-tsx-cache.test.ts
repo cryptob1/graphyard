@@ -4,9 +4,13 @@ import { once } from 'node:events';
 import { existsSync } from 'node:fs';
 import { lstat, mkdir, utimes, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
+import { userInfo } from 'node:os';
 import { join } from 'node:path';
-import { reclaimTmpDirectories, tmpReclaimMinAgeMs } from '../src/tmp-reclaim.js';
-import { readResources, readTmpInodes, type ResourceInputs } from '../src/master-resources.js';
+import { reclaimTmpDirectories, testTempMinAgeMs, tmpReclaimMinAgeMs } from '../src/tmp-reclaim.js';
+// A namespace import: on a base without GY-1597's escalation the case fails, not the file's load.
+import * as tmpReclaim from '../src/tmp-reclaim.js';
+import * as resources from '../src/master-resources.js';
+import { readResources, readTmpInodes, reclaimResources, resourceAttention, settleTmpReclaim, type ResourceInputs } from '../src/master-resources.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-1512: test runs write content-hashed compile files into this user's tsx cache (`tsx-<uid>`)
@@ -79,4 +83,228 @@ test('unit:tmp-reclaim-tsx-cache-reported — the tmp-inodes reading counts the 
   // Without a cache the reading names none.
   const bare = await temporaryDirectory('tsx-cache-absent');
   assert.equal((await readTmpInodes(root, bare, async () => ({ files: 1000, ffree: 100 })))?.own?.tsxCache, undefined);
+});
+
+// GY-1597: on 9 October 2026 host /tmp fell below its 262,144-inode headroom and stayed there: the
+// tsx cache grew ~450 entries per five minutes, every one younger than the six-hour bound, and the
+// pass removed 0 entries a cycle at 100 per cycle. Below the headroom the pass now escalates in the
+// same run — a higher cap, a younger cache age — within the same safety envelope.
+test('unit:tmp-reclaim-tsx-cache — below the inode headroom one pass escalates until the volume is back above it, removing only this user\'s unheld cache files and stale test temps, and the tmp-inodes attention clears', { skip: ownCache() === null ? 'no uids on this platform' : false }, async () => {
+  const tmp = await temporaryDirectory('tsx-cache-escalate');
+  const cache = join(tmp, ownCache()!), nested = join(cache, 'nested');
+  await mkdir(nested, { recursive: true });
+  // Two hours old: past the escalated hour, short of the base six. The leak the 9 October pass never took.
+  const now = Date.now(), aged: string[] = [];
+  for (let index = 0; index < 300; index++) {
+    const path = join(index % 2 ? nested : cache, `compiled-${index}`);
+    await writeFile(path, 'x'); await backdate(path, 2 * 3_600_000, now); aged.push(path);
+  }
+  const fresh = join(cache, 'compiled-fresh'), heldFile = join(cache, 'compiled-held'), socket = join(cache, '2.pipe');
+  await writeFile(fresh, 'x'); await writeFile(heldFile, 'x'); await backdate(heldFile, 2 * 3_600_000, now);
+  const server = createServer();
+  server.listen(socket);
+  await once(server, 'listening');
+  // Outside the cache: an old name the pass does not own, and a test temp younger than its own bound, which escalation never lowers.
+  const foreign = join(tmp, 'voice-recording'), young = join(tmp, 'graphyard-young');
+  await writeFile(foreign, 'x'); await backdate(foreign, 9 * 3_600_000, now);
+  await mkdir(young); await backdate(young, testTempMinAgeMs - 30 * 60_000, now);
+  try {
+    await backdate(socket, 2 * 3_600_000, now); await backdate(nested, 9 * 3_600_000, now); await backdate(cache, 9 * 3_600_000, now);
+    // The volume: 4000 inodes, so the headroom is 1000; 750 free, each removal frees one.
+    const remaining = () => aged.filter(path => existsSync(path)).length;
+    const measured: number[] = [];
+    const volume = async () => { const ffree = 750 + aged.length - remaining(); measured.push(ffree); return { files: 4000, ffree }; };
+    const report = await reclaimTmpDirectories({ tmpRoot: tmp, held: new Set([heldFile]), limit: 100, workMs: 150, volume });
+    assert.deepEqual(report.errors, []);
+    assert.equal(tmpReclaim.tmpInodeHeadroom?.(4000), 1000);
+    assert.deepEqual(report.escalated?.map(step => ({ limit: step.limit, removed: step.removed })), [{ limit: 2_000, removed: aged.length }], 'the base pass removed nothing, and the first escalated step took every aged cache file');
+    assert.equal(report.removed.length, aged.length);
+    assert.equal(report.boundStands, false, 'the volume is back above its headroom');
+    assert.equal(report.consumers, undefined, 'with the bound cleared no consumers are named');
+    assert.ok(measured.at(-1)! >= 1000, `the last measurement is above the headroom (${measured.join(', ')})`);
+    // The safety envelope is unchanged at every step.
+    for (const path of [fresh, heldFile, socket, nested, cache, foreign, young]) assert.equal(existsSync(path), true, `${path} stays`);
+
+    // The tmp-inodes reading on the next measurement: above the headroom, nothing to attend.
+    const root = await temporaryDirectory('tsx-cache-escalate-root');
+    const inodes = await readTmpInodes(root, tmp, volume);
+    const input: ResourceInputs = { now: Date.now(), reviews: [], producers: [], agents: [], work: [], plane: null, loop: null, revision: null, disk: null, tmp: inodes, profiles: { workers: [], reviewers: [], producers: [] } };
+    assert.notEqual(readResources(input).find(entry => entry.id === 'tmp-inodes')?.state, 'low', 'the resource-bound attention clears');
+
+    // Without a volume to measure — a caller's own roots — the pass keeps its base bounds.
+    const again = join(cache, 'compiled-again');
+    await writeFile(again, 'x'); await backdate(again, 2 * 3_600_000);
+    const base = await reclaimTmpDirectories({ tmpRoot: tmp, held: new Set() });
+    assert.equal(base.escalated, undefined);
+    assert.equal(existsSync(again), true, 'an unmeasured pass never lowers the cache age');
+  } finally {
+    server.close();
+  }
+});
+
+test('unit:tmp-reclaim-tsx-cache — the escalated bounds outpace the observed leak: within an hour of cycles the top step removes far more than the ~450 entries per five minutes the cache gained', () => {
+  const steps = tmpReclaim.tmpReclaimEscalation ?? [];
+  assert.ok(steps.length > 0, 'the pass has escalation steps');
+  const top = steps.at(-1)!, leakPerHour = 450 * 12;
+  assert.ok(top.limit >= leakPerHour, `one cycle at the top step (${top.limit}) removes at least an hour of the leak (${leakPerHour})`);
+  // Only what the leak wrote in the last cache-age window is out of reach: at 450 per five minutes, a few hundred entries.
+  assert.ok(top.cacheAgeMs <= 15 * 60_000, 'the top step reaches cache files a quarter of an hour old');
+  for (const [index, step] of steps.entries()) {
+    const previous = index ? steps[index - 1]! : { limit: 100, cacheAgeMs: tmpReclaimMinAgeMs, workMs: 150 };
+    assert.ok(step.limit > previous.limit && step.cacheAgeMs < previous.cacheAgeMs && step.workMs >= previous.workMs, 'each step raises the cap and lowers the cache age');
+  }
+});
+
+test('unit:tmp-reclaim-tsx-cache — an escalation step\'s cap bounds the whole pass, base sweep included: a base sweep that removed 100 leaves the 2,000 step 1,900 more', { skip: ownCache() === null ? 'no uids on this platform' : false }, async () => {
+  const tmp = await temporaryDirectory('tsx-cache-escalate-cap');
+  const cache = join(tmp, ownCache()!);
+  await mkdir(cache);
+  const now = Date.now();
+  // 100 stale test temps the base sweep takes, and 2,300 cache files only an escalated step reaches.
+  for (let index = 0; index < 100; index++) { const path = join(tmp, `pg-password-${index}`); await writeFile(path, 'x'); await backdate(path, testTempMinAgeMs + 3_600_000, now); }
+  for (let index = 0; index < 2_300; index++) { const path = join(cache, `compiled-${index}`); await writeFile(path, 'x'); await backdate(path, 2 * 3_600_000, now); }
+  await backdate(cache, 9 * 3_600_000, now);
+  const report = await reclaimTmpDirectories({ tmpRoot: tmp, held: new Set(), limit: 100, workMs: 60_000, volume: async () => ({ files: 4000, ffree: 100 }) });
+  assert.deepEqual(report.errors, []);
+  assert.deepEqual(report.escalated?.map(step => ({ limit: step.limit, removed: step.removed })), [{ limit: 2_000, removed: 1_900 }, { limit: 20_000, removed: 400 }], 'each step\'s cap counts what earlier sweeps removed');
+  assert.equal(report.removed.length, 2_400, 'the base 100 and every cache file, well under the 20,000 cap');
+});
+
+test('unit:tmp-reclaim-tsx-cache — escalation sweeps and names only the roots still below their headroom: a healthy TMPDIR on another volume keeps its younger cache files and stays out of the census', { skip: ownCache() === null ? 'no uids on this platform' : false }, async () => {
+  const healthy = await temporaryDirectory('tsx-cache-escalate-healthy'), low = await temporaryDirectory('tsx-cache-escalate-low');
+  const now = Date.now(), seeded: Record<string, string[]> = { [healthy]: [], [low]: [] };
+  for (const root of [healthy, low]) {
+    const cache = join(root, ownCache()!);
+    await mkdir(cache);
+    for (let index = 0; index < 20; index++) { const path = join(cache, `compiled-${index}`); await writeFile(path, 'x'); await backdate(path, 2 * 3_600_000, now); seeded[root]!.push(path); }
+    await backdate(cache, 9 * 3_600_000, now);
+  }
+  const volume = async (path: string) => ({ files: 4000, ffree: path === low ? 100 : 3_000 });
+  const report = await reclaimTmpDirectories({ tmpRoots: [healthy, low], held: new Set(), limit: 100, workMs: 60_000, volume });
+  assert.deepEqual(report.errors, []);
+  assert.equal(report.boundStands, true);
+  assert.ok(seeded[low]!.every(path => !existsSync(path)), 'the low root\'s cache files went at the escalated age');
+  assert.ok(seeded[healthy]!.every(path => existsSync(path)), 'the healthy root keeps the base bounds');
+  assert.ok(report.consumers?.length, 'the bound still stands, so consumers are named');
+  assert.ok(report.consumers!.every(consumer => consumer.path.startsWith(low)), `only the low root's consumers are named (${report.consumers!.map(consumer => consumer.path).join(', ')})`);
+});
+
+test('unit:tmp-reclaim-tsx-cache — an escalation step\'s work bound is counted from the pass\'s first removal, not restarted by the step: a step whose window the base sweep already spent removes nothing', { skip: ownCache() === null ? 'no uids on this platform' : false }, async () => {
+  const tmp = await temporaryDirectory('tsx-cache-escalate-work');
+  const cache = join(tmp, ownCache()!);
+  await mkdir(cache);
+  const now = Date.now();
+  const stale = join(tmp, 'pg-password-stale');
+  await writeFile(stale, 'x'); await backdate(stale, testTempMinAgeMs + 3_600_000, now);
+  for (let index = 0; index < 20; index++) { const path = join(cache, `compiled-${index}`); await writeFile(path, 'x'); await backdate(path, 2 * 3_600_000, now); }
+  await backdate(cache, 9 * 3_600_000, now);
+  // The base sweep's one removal starts the pass's clock; measuring the volume then takes longer than
+  // the step's whole window, so a step that restarted the clock would take the cache files.
+  const volume = async () => { await new Promise(done => setTimeout(done, 120)); return { files: 4000, ffree: 100 }; };
+  const report = await reclaimTmpDirectories({ tmpRoot: tmp, held: new Set(), limit: 100, workMs: 60_000, volume, escalation: [{ limit: 2_000, cacheAgeMs: 3_600_000, workMs: 60 }] });
+  assert.deepEqual(report.errors, []);
+  assert.equal(existsSync(stale), false, 'the base sweep removed the stale temp');
+  assert.deepEqual(report.escalated?.map(step => step.removed), [0], 'the step\'s 60 ms were spent before it ran');
+});
+
+// GY-1602: the loop's pass scans its own tmpdir and /tmp, but the tmp-inodes reading measured only
+// the reading process's tmpdir. With TMPDIR and /tmp on different filesystems, a /tmp below its
+// headroom went unmeasured and its consumers unnamed whenever TMPDIR read healthy.
+test('unit:tmp-reclaim-per-root — each scanned root is measured on its own volume, and a low root raises the tmp-inodes attention naming that root and its own consumers while the other root is above the bound', async () => {
+  const root = await temporaryDirectory('per-root-plane');
+  await mkdir(join(root, '.graphyard'));
+  const healthy = await temporaryDirectory('per-root-healthy'), low = await temporaryDirectory('per-root-low');
+  const leaker = join(low, 'voice-cache'), quiet = join(healthy, 'other-cache');
+  await mkdir(leaker); await mkdir(quiet);
+  for (let index = 0; index < 30; index++) await writeFile(join(leaker, `chunk-${index}`), 'x');
+  for (let index = 0; index < 50; index++) await writeFile(join(quiet, `chunk-${index}`), 'x');
+  const volume = async (path: string) => ({ files: 4000, ffree: path === low ? 100 : 3_000 });
+  // The pass's own report: both roots measured, only the low one's census taken, and it names only its own entries.
+  const report = await reclaimTmpDirectories({ tmpRoots: [healthy, low], held: new Set(), limit: 100, workMs: 150, volume });
+  assert.deepEqual(report.errors, []);
+  assert.deepEqual(report.pressure?.map(entry => ({ root: entry.root, free: entry.freeInodes, below: entry.below })), [{ root: healthy, free: 3_000, below: false }, { root: low, free: 100, below: true }]);
+  assert.equal(report.pressure?.[0]?.consumers, undefined, 'a root above the bound takes no census');
+  assert.deepEqual(report.pressure?.[1]?.consumers?.[0], { path: leaker, entries: 31, owner: userInfo().username });
+  assert.ok(report.pressure![1]!.consumers!.every(consumer => consumer.path.startsWith(`${low}/`)), 'the low root names only its own consumers');
+
+  // The loop records the pass, and the reading measures each root on its own filesystem.
+  const options = { tmpRoots: [healthy, low], tmpPass: (pass: Parameters<typeof reclaimTmpDirectories>[0]) => reclaimTmpDirectories({ ...pass, held: new Set(), volume }) };
+  await reclaimResources(root, { reviewers: [], producers: [] }, { work: [], agents: [] }, options);
+  await settleTmpReclaim();
+  await reclaimResources(root, { reviewers: [], producers: [] }, { work: [], agents: [] }, options);
+  await settleTmpReclaim();
+  const readTmpRoots = (resources as { readTmpRoots?: (...args: unknown[]) => Promise<unknown[]> }).readTmpRoots;
+  assert.equal(typeof readTmpRoots, 'function', 'the reading reads every scanned root');
+  const tmp = await readTmpRoots!(root, [healthy, low], volume) as NonNullable<Awaited<ReturnType<typeof readTmpInodes>>>[];
+  assert.deepEqual(tmp.map(entry => ({ path: entry.path, free: entry.freeInodes })), [{ path: healthy, free: 3_000 }, { path: low, free: 100 }]);
+  const input: ResourceInputs = { now: Date.now(), reviews: [], producers: [], agents: [], work: [], plane: null, loop: null, revision: null, disk: null, tmp, profiles: { workers: [], reviewers: [], producers: [] } };
+  const readings = readResources(input).filter(entry => entry.resource === 'tmp-inodes');
+  assert.deepEqual(readings.map(entry => entry.state), ['ok', 'low'], 'the healthy root reads ok and the low root low');
+  const attention = resourceAttention(readings);
+  assert.equal(attention.length, 1, 'only the low root raises attention');
+  assert.equal(attention[0]!.subject, `resource:tmp-inodes:${low}`);
+  assert.match(attention[0]!.text, new RegExp(`measured ${low}: 100 of 4000 inodes free`), 'the attention names the low root');
+  assert.match(attention[0]!.text, new RegExp(`the top /tmp consumers are ${leaker} \\(31 entries, owner ${userInfo().username}\\)`), 'and its top consumers by path, entry count and owner');
+  assert.doesNotMatch(attention[0]!.text, new RegExp(quiet), 'never the healthy root\'s entries');
+
+  // A pass that removed entries yet left the root below the bound, even above a tenth free, answers nothing there.
+  const removedStillLow: ResourceInputs = { ...input, tmp: tmp.map(entry => ({ ...entry, freeInodes: entry.path === low ? 800 : entry.freeInodes, latest: { ...entry.latest!, removed: 3 } })) };
+  const stillLow = resourceAttention(readResources(removedStillLow).filter(entry => entry.resource === 'tmp-inodes'));
+  assert.deepEqual(stillLow.map(line => line.subject), [`resource:tmp-inodes:${low}`], 'a removing pass that left the root at 20% free still raises its attention');
+  assert.match(stillLow[0]!.text, new RegExp(`the top /tmp consumers are ${leaker}`));
+
+  // Distinct roots on one filesystem are each read, each with its own census: the low reading of the
+  // shared volume names the second root and its consumers, not only the first root's.
+  const sharedVolume = async () => ({ files: 4000, ffree: 100 });
+  const sharedOptions = { tmpRoots: [healthy, low], tmpPass: (pass: Parameters<typeof reclaimTmpDirectories>[0]) => reclaimTmpDirectories({ ...pass, held: new Set(), volume: sharedVolume }) };
+  await reclaimResources(root, { reviewers: [], producers: [] }, { work: [], agents: [] }, sharedOptions);
+  await settleTmpReclaim();
+  await reclaimResources(root, { reviewers: [], producers: [] }, { work: [], agents: [] }, sharedOptions);
+  await settleTmpReclaim();
+  const shared = await readTmpRoots!(root, [healthy, low, `${low}/.`], sharedVolume) as NonNullable<Awaited<ReturnType<typeof readTmpInodes>>>[];
+  assert.deepEqual(shared.map(entry => entry.path), [healthy, low], 'one reading per distinct root; an alias of a root is read once');
+  const sharedLines = resourceAttention(readResources({ ...input, tmp: shared }).filter(entry => entry.resource === 'tmp-inodes'));
+  assert.deepEqual(sharedLines.map(line => line.subject), ['resource:tmp-inodes', `resource:tmp-inodes:${low}`]);
+  assert.match(sharedLines[1]!.text, new RegExp(`the top /tmp consumers are ${leaker} \\(31 entries`), 'the second root names its own consumers');
+  assert.match(sharedLines[0]!.text, new RegExp(`the top /tmp consumers are ${quiet}`), 'and the first root its own');
+  assert.doesNotMatch(sharedLines[0]!.text, new RegExp(leaker));
+});
+
+test('unit:tmp-reclaim-per-root — the census charges every top-level entry to its budget: a root of more top-level entries than the budget stops there and reports itself partial', async () => {
+  const flat = await temporaryDirectory('per-root-flat');
+  for (let index = 0; index < 40; index++) await writeFile(join(flat, `leak-${index}x`), 'x');
+  const tmpCensus = (tmpReclaim as { tmpCensus?: (roots: string | readonly string[], bound?: number) => Promise<{ consumers: { entries: number; capped?: boolean }[]; partial: boolean }> }).tmpCensus;
+  assert.equal(typeof tmpCensus, 'function');
+  const census = await tmpCensus!(flat, 10);
+  assert.equal(census.partial, true, 'the census says it is partial');
+  assert.equal(census.consumers.reduce((total, consumer) => total + consumer.entries, 0), 10, 'it counted exactly its budget of top-level entries');
+  assert.ok(census.consumers.every(consumer => consumer.capped));
+  const whole = await tmpCensus!(flat, 40);
+  assert.equal(whole.partial, false, 'a census that read every entry within its budget is whole');
+  // The pass reports its census partial, and the reading says so.
+  const report = await reclaimTmpDirectories({ tmpRoot: flat, held: new Set(), limit: 100, workMs: 150, volume: async () => ({ files: 4000, ffree: 100 }), escalation: [] });
+  assert.equal(report.pressure?.[0]?.partial, undefined, 'the default budget reads 40 entries whole');
+  const tmp = { path: flat, totalInodes: 4000, freeInodes: 100, removed: null, removedAt: null, latest: { removed: 0, at: new Date().toISOString() }, consumers: [{ path: join(flat, 'leak'), entries: 10, owner: 'someone', capped: true }], censusPartial: true };
+  const input: ResourceInputs = { now: Date.now(), reviews: [], producers: [], agents: [], work: [], plane: null, loop: null, revision: null, disk: null, tmp, profiles: { workers: [], reviewers: [], producers: [] } };
+  assert.match(readResources(input).find(entry => entry.resource === 'tmp-inodes')?.detail ?? '', /\(at least 10 entries, owner someone\) \(a partial census: it stopped at its \d+-entry budget\)/, 'the reading reports the census partial');
+});
+
+test('unit:tmp-reclaim-per-root — the safety envelope is unchanged across roots: only this user\'s stale test temps and unheld tsx cache files go, from the low root and the healthy one alike', { skip: ownCache() === null ? 'no uids on this platform' : false }, async () => {
+  const healthy = await temporaryDirectory('per-root-envelope-healthy'), low = await temporaryDirectory('per-root-envelope-low');
+  const now = Date.now(), gone: string[] = [], kept: string[] = [];
+  for (const root of [healthy, low]) {
+    const stale = join(root, 'pg-password-stale'), young = join(root, 'graphyard-young'), foreign = join(root, 'voice-recording');
+    const cache = join(root, ownCache()!), oldFile = join(cache, 'compiled-old'), heldFile = join(cache, 'compiled-held');
+    await mkdir(cache); await mkdir(young);
+    for (const path of [stale, foreign, oldFile, heldFile]) await writeFile(path, 'x');
+    await backdate(stale, testTempMinAgeMs + 3_600_000, now); await backdate(foreign, 9 * 3_600_000, now);
+    await backdate(oldFile, tmpReclaimMinAgeMs + 3_600_000, now); await backdate(heldFile, tmpReclaimMinAgeMs + 3_600_000, now);
+    await backdate(young, testTempMinAgeMs - 30 * 60_000, now); await backdate(cache, 9 * 3_600_000, now);
+    gone.push(stale, oldFile); kept.push(young, foreign, heldFile, cache);
+  }
+  const held = new Set(kept.filter(path => path.endsWith('compiled-held')));
+  const report = await reclaimTmpDirectories({ tmpRoots: [healthy, low], held, limit: 100, workMs: 60_000, volume: async (path: string) => ({ files: 4000, ffree: path === low ? 100 : 3_000 }) });
+  assert.deepEqual(report.errors, []);
+  assert.deepEqual(report.removed.map(entry => entry.path).sort(), [...gone].sort());
+  for (const path of kept) assert.equal(existsSync(path), true, `${path} stays`);
 });
