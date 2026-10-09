@@ -6,7 +6,7 @@ import type { Work } from '../model.js';
 import { classifyRisk } from '../model/risk-class.js';
 import { shadowGateSettings } from '../master/merge-writer-settings.js';
 import { runTrial, trialMerge, trialNeedsLog, TrialCleanupError, TrialRunnerError, TrialTimeoutError, type TrialRun } from '../merge-writer/trial.js';
-import { judgedVerdicts, shadowDisagreement, shadowDisagreementDetail, shadowOutcomes, shadowDue, shadowExplanationPairsMax, shadowPairExplained, shadowReportWithExplanations, trialLogTailLength, type ShadowExplanationRef, type ShadowVerdict } from '../merge-writer/shadow.js';
+import { judgedVerdicts, shadowDisagreement, shadowDisagreementDetail, shadowFailureCause, shadowFailureCauses, shadowOutcomes, shadowPassed, shadowDue, shadowExplanationPairsMax, shadowPairExplained, shadowReportWithExplanations, trialLogTailLength, type ShadowExplanationRef, type ShadowVerdict } from '../merge-writer/shadow.js';
 import { storeAction, type DaemonState } from './state.js';
 import type { Cycle } from './cycle.js';
 
@@ -18,6 +18,7 @@ export const shadowVerdictSchema = z.object({
   tests: z.object({ passed: z.number().int().min(0), failed: z.array(z.string().max(300)).max(100), files: z.number().int().min(0) }).strict(),
   conflict: z.array(z.string().max(500)).max(100), durationMs: z.number().int().min(0), at: z.string().max(64), outcome: z.enum(shadowOutcomes).default('pending'),
   delivered: z.object({ mergeSha: z.string().max(64) }).strict().optional(),
+  cause: z.enum(shadowFailureCauses).optional(),
 }).strict();
 export const shadowStateSchema = z.array(shadowVerdictSchema).max(shadowKeptVerdicts);
 
@@ -186,8 +187,10 @@ export async function shadowStep(cycle: Cycle) {
       await reads.record(owed.work, owed.verdict);
       unrecorded.delete(state);
       // The cursor keeps the verdict without its log: the recorded event holds the log, and the cursor stays small.
+      // A failing verdict keeps the cause its log names, so its attention line can name it (GY-1565).
       const { logTail: _recorded, ...kept } = owed.verdict;
-      state.shadow = keepVerdicts([...state.shadow, { ...kept, outcome: 'pending' as const }], snapshot.work);
+      const cause = shadowPassed(owed.verdict) ? null : shadowFailureCause(owed.verdict);
+      state.shadow = keepVerdicts([...state.shadow, { ...kept, ...(cause ? { cause } : {}), outcome: 'pending' as const }], snapshot.work);
       changed = true;
     } catch (error) {
       performed.push(storeAction(state, `shadow-record:${owed.verdict.head}:${owed.verdict.baseTip}`, { kind: 'merge', work: owed.verdict.key, principal: null, state: 'failed', detail: `The shadow verdict for ${owed.verdict.key} is not yet recorded by the coordinator and is retried next cycle: ${error instanceof Error ? error.message : String(error)}`.slice(0, 1900), attempts: 1, epoch: null, cycle: state.cycle, at: new Date(now()).toISOString() }, null));

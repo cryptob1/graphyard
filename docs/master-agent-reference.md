@@ -27,9 +27,9 @@ Flows read `GET /api/github/installation`, recording `.graphyard/master-actions/
 
 ## Typed actions and executors
 
-`nextAction` (one per item): `dispatch`, `request-review`, `request-rework`, `approve-scope`, `resync`, `reclaim`, `merge`, `verify-deployment`, `escalate`; judgements: `actions.needsHuman`. `graphyard init` starts `graphyard-executor@N`; `master executors restart` moves stale slots to the current release; verified deployments advance clean checkouts then restart executors and the loop (dirty: `upgrade`; claim refusals 15 min: loop alone). Fenced (`POST /api/actions/presence`) or claim-renewing executors live; presence upserts from `serves`. `resync` (`POST /api/work/:id/resync` `{since}`) needs a newer observation. `dispatch`/`request-review` complete when a session already answers the head; busy profiles stall after 30 min. Three failures with an unchanged reason mark a row stalled rather than retrying (a fleet that looks idle): in no count and no list, but in `actions.stalled` and on the item's own card; backoff never outlives it; eight escalate. Ticks requeue ownerless items (`liveness.violations`).
+`nextAction` (one per item): `dispatch`, `request-review`, `request-rework`, `approve-scope`, `resync`, `reclaim`, `merge`, `verify-deployment`, `escalate`; judgements: `actions.needsHuman`. `graphyard init` starts `graphyard-executor@N`; `master executors restart` moves stale slots to the current release; verified deployments advance clean checkouts then restart executors and loop (dirty: `upgrade`; claim refusals 15 min: loop alone). Fenced (`POST /api/actions/presence`) or claim-renewing executors live; presence upserts from `serves`. `resync` (`POST /api/work/:id/resync` `{since}`) needs a newer observation. `dispatch`/`request-review` complete when a session already answers the head; busy profiles stall after 30 min. Three failures with an unchanged reason mark a row stalled rather than retrying (a fleet that looks idle): in no count and no list, but in `actions.stalled` and on the item's own card; backoff never outlives it; eight escalate. Ticks requeue ownerless items (`liveness.violations`).
 
-Declared slot not `active` (systemd, else `PRINCIPAL@HOST/N` presence): `resources` fault naming `journalctl --user -u graphyard-executor@N.service` unless stopped under 2 minutes. `graphyard-executor.mjs --install` needs `Restart=always`, `RestartSec` ≤60s. Worker starts fenced <2min retry after lapse; longer fail naming it.
+Declared slot not `active` (systemd, else `PRINCIPAL@HOST/N` presence): `resources` fault naming `journalctl --user -u graphyard-executor@N.service` unless stopped <2 minutes. `graphyard-executor.mjs --install` needs `Restart=always`, `RestartSec` ≤60s. Worker starts fenced <2min retry after lapse; longer fail naming it.
 
 ## Recovery
 
@@ -37,15 +37,15 @@ Dead supervisor fences its item; `containment` lists survivors' pid, cmdline and
 
 ### Producer-runtime faults
 
-Unacted producer requests (never started, launch refused, exited at launch) relaunch on untried profile, no rework.
+Unacted producer requests (never started, launch refused, exited at launch) relaunch on untried profile without rework.
 
 ## Fault classes
 
-`faultClass` (`master status` `faults`): recurring classes file one item; a resource at bound files `resource:ID`; also `fleet-capacity`, `unanswered-request` (past `settledAnswerGraceMs`), `configuration`, `decision-unanswered` (not `loop-silence`), and `unclassified` unless named (`plane-unavailable`, `fix-item`, `decision-stale`, `overlong-session`). Review unlaunched 15min: `concurrency-starved`, `review-settlement`, or `launch-review`. Unanswering planes raise one `plane-unavailable`; `planeWaitMs` (time in flight on the control plane, answered or not) is neither `loop-cost` nor `cycle-p90`. A launch that failed before its session started is its dispatch's one fault, not also a `session` fault while its lease runs out.
+`faultClass` (`master status` `faults`): recurring classes file one item; a resource at bound files `resource:ID`; also `fleet-capacity`, `unanswered-request` (past `settledAnswerGraceMs`), `configuration`, `decision-unanswered` (not `loop-silence`), and `unclassified` unless named (`plane-unavailable`, `fix-item`, `decision-stale`, `overlong-session`). Review unlaunched 15min: `concurrency-starved`, `review-settlement`, `launch-review`. Unanswering planes raise one `plane-unavailable`; `planeWaitMs` (control-plane time in flight, answered or not) is neither `loop-cost` nor `cycle-p90`. A launch failing before its session started is its dispatch's one fault, not also a `session` fault as its lease runs out.
 
 ## Shadow merge gate
 
-`run.shadowGate` (defaults: `enabled` true, `timeoutMinutes` 20): each cycle trial-merges, builds and affected-tests the oldest untried head in a credential-free checkout, pushing nothing; `shadow.verdict` (failing: 4000-character `logTail`) joins GitHub's outcome in `master status` `shadowGate` (`shadow-only-fail`/`shadow-missed`: one line each until explained); errors and timeouts record nothing, a tip's third timeout one line. Read: `GET /api/shadow-disagreements`, `/api/shadow-explanations?pair=KEY:HEAD:BASETIP` (≤50).
+`run.shadowGate` (default `enabled`, `timeoutMinutes` 20): each cycle trial-merges, builds and affected-tests the oldest untried head in a credential-free checkout with an empty `TMPDIR`, pushing nothing; `shadow.verdict` (failing: 4000-character `logTail`) joins GitHub's outcome in `master status` `shadowGate` (`shadow-only-fail`/`shadow-missed`: one line until explained, naming its `cause` or evidence gap); errors, timeouts record nothing; a tip's third timeout: one line. Read: `GET /api/shadow-disagreements`, `/api/shadow-explanations?pair=KEY:HEAD:BASETIP` (≤50).
 
 ## Pipeline speed
 

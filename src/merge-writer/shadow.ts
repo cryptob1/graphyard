@@ -13,6 +13,8 @@ export interface ShadowVerdict {
   delivered?: { mergeSha: string };
   /** The last `trialLogTailLength` characters of the trial's output, kept only when the trial did not pass (the build, a test file, or the runner's exit). The recorded event carries it; the loop's cursor does not. */
   logTail?: string;
+  /** What the recorded log tail names as the failure's cause (`shadowFailureCause`), kept in the loop's cursor where the log is not (GY-1565). */
+  cause?: ShadowFailureCause;
 }
 /** How much of the trial's output a failing verdict records. */
 export const trialLogTailLength = 4000;
@@ -129,6 +131,30 @@ export const isPlaceholderVerdict = (verdict: Pick<ShadowVerdict, 'build' | 'tes
   && verdict.tests.failed[0] === placeholderRunnerFailure
   && verdict.tests.passed === verdict.tests.files;
 
+/**
+ * What a failing verdict's record names as its cause (GY-1565): the pre-GY-1548 runner placeholder;
+ * the host's shared tmp shadowing a fixture's dependency mirror; or `none`, a log tail that names
+ * no cause the explainer knows. A verdict with neither a log tail nor a recorded cause has none to read.
+ */
+export const shadowFailureCauses = ['runner-placeholder', 'shared-tmp-dependency', 'none'] as const;
+export type ShadowFailureCause = typeof shadowFailureCauses[number];
+/**
+ * The dependency-share signature (GY-1565): a failing deep-equal whose expected side is a mirrored
+ * node_modules sourced under the shared /tmp and whose actual side is `[]`. A stray /tmp/node_modules
+ * is what the fixture's upward install lookup found first, so the mirror shared nothing.
+ */
+export function sharedTmpDependencySource(logTail: string): string | null {
+  if (!/Expected values to be strictly deep-equal/.test(logTail) || !/^\s*\+ \[\]\s*$/m.test(logTail)) return null;
+  return /^\s*-\s+source: '(\/tmp\/[^']*\/node_modules)'/m.exec(logTail)?.[1] ?? null;
+}
+/** The cause a verdict's record names: its recorded `cause`, else the placeholder or its log tail; null when the record holds nothing to read. */
+export function shadowFailureCause(verdict: Pick<ShadowVerdict, 'build' | 'tests' | 'logTail' | 'cause'>): ShadowFailureCause | null {
+  if (verdict.cause) return verdict.cause;
+  if (isPlaceholderVerdict(verdict)) return 'runner-placeholder';
+  if (typeof verdict.logTail !== 'string') return null;
+  return sharedTmpDependencySource(verdict.logTail) ? 'shared-tmp-dependency' : 'none';
+}
+
 /** One explanation of a (key, head, baseTip) disagreement, as the ledger and the status read it. */
 export interface ShadowExplanationRef { key: string; head: string; baseTip: string }
 
@@ -150,7 +176,9 @@ export const shadowPairExplained = (verdict: Pick<ShadowVerdict, 'key' | 'head' 
 export function shadowGateAttention(verdicts: readonly ShadowVerdict[], explanations: readonly ShadowExplanationRef[] = []): AttentionItem[] {
   const newest = new Map<string, ShadowVerdict>();
   for (const verdict of [...verdicts].sort((a, b) => Date.parse(a.at) - Date.parse(b.at))) {
-    newest.set(shadowDisagreementPair(verdict), verdict);
+    // The cursor and the ledger can each hold the pair; a cause one of them read is kept (GY-1565).
+    const prior = newest.get(shadowDisagreementPair(verdict)), cause = verdict.cause ?? prior?.cause;
+    newest.set(shadowDisagreementPair(verdict), cause ? { ...verdict, cause } : verdict);
   }
   return [...newest.values()].filter(verdict => shadowDisagreement(verdict.outcome) && !shadowPairExplained(verdict, explanations)).map(verdict => ({
     subject: 'shadow-gate', text: shadowDisagreementDetail(verdict),
@@ -158,10 +186,19 @@ export function shadowGateAttention(verdicts: readonly ShadowVerdict[], explanat
   }));
 }
 
-export function shadowDisagreementDetail(verdict: Pick<ShadowVerdict, 'key' | 'head' | 'mergeSha' | 'outcome' | 'build' | 'tests'>) {
-  const cause = isPlaceholderVerdict(verdict)
+/**
+ * The attention line of one disagreement: the cause its record names (GY-1560, GY-1565), or for a
+ * failing verdict whose record names none, that the evidence to explain it is missing.
+ */
+export function shadowDisagreementDetail(verdict: Pick<ShadowVerdict, 'key' | 'head' | 'mergeSha' | 'outcome' | 'build' | 'tests' | 'logTail' | 'cause'>) {
+  const named = verdict.outcome === 'shadow-missed' ? null : shadowFailureCause(verdict);
+  const source = typeof verdict.logTail === 'string' ? sharedTmpDependencySource(verdict.logTail) : null;
+  const cause = named === 'runner-placeholder'
     ? `the failure is the fabricated-runner-failure placeholder ${placeholderRunnerFailure} (pre-GY-1548: the runner died naming no test while every file passed)`
-    : verdict.outcome === 'shadow-missed' ? 'the shadow trial passed it but the main guard reverted it' : 'the shadow trial failed it but GitHub merged it';
+    : named === 'shared-tmp-dependency'
+      ? `the failure is trial-environment contamination of the host's shared tmp (pre-GY-1565): a fixture's dependency mirror expected a node_modules sourced under /tmp${source ? ` (${source})` : ''} and got [], because a stray /tmp/node_modules shadowed it, a trial-environment-only false positive`
+      : verdict.outcome === 'shadow-missed' ? 'the shadow trial passed it but the main guard reverted it'
+        : `the shadow trial failed it but GitHub merged it, and the verdict record names no cause: ${named === 'none' ? 'its log tail matches no known trial-environment signature' : 'it carries no log tail'}, so the evidence to explain it is missing`;
   return `Shadow merge gate: ${verdict.key} head ${verdict.head} is ${verdict.outcome} (trial merge ${verdict.mergeSha ?? 'none: it conflicts'}); `
     + `${cause}. Report only: nothing is changed`;
 }

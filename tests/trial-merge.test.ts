@@ -7,7 +7,7 @@ import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { defaultChildRun } from '../src/child-runner.js';
-import { credentialTrialVariable, groupTestFiles, runnerDiagnosticTailLength, runTrial, trialAuthor, trialEnvironment, trialMerge, trialNeedsLog, trialRef, trialTestGroupSize, TrialCleanupError, TrialRunnerError, TrialTimeoutError, withheldTrialVariables, type RunTrialInput } from '../src/merge-writer/trial.js';
+import { credentialTrialVariable, groupTestFiles, runnerDiagnosticTailLength, runTrial, trialAuthor, trialEnvironment, trialMerge, trialNeedsLog, trialRef, lookupPoisoned, trialLookupEntries, trialTemporaryRoot, trialTemporaryRoots, trialTemporaryVariables, trialTestGroupSize, TrialCleanupError, TrialRunnerError, TrialTimeoutError, withheldTrialVariables, type RunTrialInput } from '../src/merge-writer/trial.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { shadowErrorKey, shadowIdle, shadowReads, shadowRunnerKey, shadowRunnerRetries } from '../src/daemon/cycle-shadow.js';
 import { masterConfigSchema } from '../src/master.js';
@@ -88,7 +88,7 @@ const fixtureFiles = {
   'package.json': JSON.stringify({ name: 'fixture', scripts: { build: 'node build.js' } }),
   'package-lock.json': '{"lockfileVersion":3}\n',
   // With a `kill-build` marker the build child dies on a signal, as a host out of memory ends it.
-  'build.js': "const { existsSync } = require('node:fs'); console.log('ENV:' + JSON.stringify({ keys: Object.keys(process.env), global: process.env.GIT_CONFIG_GLOBAL, nosystem: process.env.GIT_CONFIG_NOSYSTEM, home: process.env.HOME, tmpdir: require('node:os').tmpdir() })); if (existsSync('break-build')) { console.error('build broke'); process.exit(1); } if (existsSync('kill-build')) { console.error('build killed'); process.kill(process.pid, 'SIGKILL'); }\n",
+  'build.js': "const { existsSync } = require('node:fs'); console.log('ENV:' + JSON.stringify({ keys: Object.keys(process.env), global: process.env.GIT_CONFIG_GLOBAL, nosystem: process.env.GIT_CONFIG_NOSYSTEM, home: process.env.HOME, tmpdir: require('node:os').tmpdir(), tmpEntries: require('node:fs').readdirSync(require('node:os').tmpdir()), tmpVariables: [process.env.TMPDIR, process.env.TMP, process.env.TEMP] })); require('node:fs').writeFileSync(require('node:path').join(require('node:os').tmpdir(), 'build-scratch'), 'x'); if (existsSync('break-build')) { console.error('build broke'); process.exit(1); } if (existsSync('kill-build')) { console.error('build killed'); process.kill(process.pid, 'SIGKILL'); }\n",
   // The stand-in for scripts/ci-tests.mjs: `affected` answers the changed test files, or a full selection (every pre-merge
   // file, never a soak) when package.json changed; with a `full-silent` marker it lists nothing for a full selection, as the
   // script did before GY-1522. `select` lists the pre-merge suite, as the real one does outside Actions.
@@ -219,7 +219,7 @@ test('unit:trial-credential-free-runner-exits-zero — this repository\'s own tw
   assert.equal(existsSync(trial.base) ? readdirSync(trial.base).length : 0, 0, 'the trial checkout is removed');
 });
 
-test('unit:trial-run-credential-free — the trial child sees none of GH_CONFIG_DIR, GH_TOKEN, GITHUB_TOKEN, SSH_AUTH_SOCK, GIT_SSH_COMMAND, TMPDIR, AWS_SECRET_ACCESS_KEY, NPM_TOKEN or any GRAPHYARD_*/HERDR_* variable, and git\'s global configuration is off', async () => {
+test('unit:trial-run-credential-free — the trial child sees none of GH_CONFIG_DIR, GH_TOKEN, GITHUB_TOKEN, SSH_AUTH_SOCK, GIT_SSH_COMMAND, the host\'s TMPDIR, AWS_SECRET_ACCESS_KEY, NPM_TOKEN or any GRAPHYARD_*/HERDR_* variable, and git\'s global configuration is off', async () => {
   const planted: NodeJS.ProcessEnv = { PATH: process.env.PATH!, HOME: '/home/me', GH_CONFIG_DIR: '/home/me/.config/gh', GH_TOKEN: 'gh-secret', GITHUB_TOKEN: 'github-secret', SSH_AUTH_SOCK: '/run/agent.sock', GIT_SSH_COMMAND: 'ssh -i key',
     XDG_RUNTIME_DIR: '/run/user/1000', TMPDIR: '/var/tmp', TMP: '/var/tmp', TEMP: '/var/tmp', AWS_SECRET_ACCESS_KEY: 'aws-secret-key', NPM_TOKEN: 'npm-secret-token',
     GRAPHYARD_TOKEN: 'graphyard-secret', GRAPHYARD_URL: 'https://example.test', GRAPHYARD_TIMING_RECORD: '/tmp/record', HERDR_PANE_ID: 'p1', HERDR_SOCKET_PATH: '/run/herdr.sock', GIT_CONFIG_GLOBAL: '/home/me/.gitconfig', KEPT: 'yes' };
@@ -236,10 +236,59 @@ test('unit:trial-run-credential-free — the trial child sees none of GH_CONFIG_
   const head = repo.commitOnBase({ 'src/a.ts': 'export {};\n' }, 'head');
   const { result } = await trialOf(repo, head, ['src/a.ts'], planted);
   const seen = JSON.parse(/ENV:(.*)/.exec(result.logTail)![1]!) as { keys: string[]; global: string; nosystem: string; home: string; tmpdir: string };
-  for (const name of withheld) assert.ok(!seen.keys.includes(name), `the child saw ${name}`);
+  // TMPDIR, TMP and TEMP reach the child only as the trial's own directory (GY-1565), never the host's value.
+  for (const name of withheld.filter(name => !['TMPDIR', 'TMP', 'TEMP'].includes(name))) assert.ok(!seen.keys.includes(name), `the child saw ${name}`);
   assert.ok(seen.keys.includes('KEPT'));
   assert.deepEqual([seen.global, seen.nosystem], ['/dev/null', '1']);
-  assert.deepEqual([seen.home, seen.tmpdir], ['/home/me', '/tmp'], 'the home stays; the suite runs under the platform\'s temporary directory, as CI does (GY-1549)');
+  assert.equal(seen.home, '/home/me', 'the home stays');
+  assert.notEqual(seen.tmpdir, '/var/tmp', 'the host\'s TMPDIR is withheld (GY-1549); the trial\'s own replaces it (GY-1565)');
+});
+
+test('unit:trial-tmpdir-isolated — the trial child gets a fresh, empty, short temporary directory made for the trial in the first of /tmp and /var/tmp that no stray node_modules, .git or package.json sits in or above (else its session directory), never the host\'s TMPDIR, so a fixture\'s upward lookup cannot resolve one; the directory is removed with the checkout, pass or fail (GY-1565)', async () => {
+  assert.deepEqual([...trialTemporaryRoots], ['/tmp', '/var/tmp']);
+  assert.deepEqual([...trialLookupEntries], ['node_modules', '.git', 'package.json']);
+  assert.deepEqual(trialTemporaryVariables('/var/tmp/gyt-x'), { TMPDIR: '/var/tmp/gyt-x', TMP: '/var/tmp/gyt-x', TEMP: '/var/tmp/gyt-x' });
+  // The host's shared tmp, poisoned as vishrog's /tmp was: a dependency cache with no lockfile and an empty .git.
+  const shared = await temporaryDirectory('trial-shared-tmp', tmpdir());
+  mkdirSync(join(shared, 'node_modules', '.vite'), { recursive: true }); mkdirSync(join(shared, '.git'));
+  const clean = await temporaryDirectory('trial-clean-tmp', tmpdir());
+  for (const entry of trialLookupEntries) {
+    const poisoned = await temporaryDirectory(`trial-poisoned-${entry.replace('.', '')}`, tmpdir());
+    if (entry === 'package.json') writeFileSync(join(poisoned, entry), '{}\n'); else mkdirSync(join(poisoned, entry));
+    mkdirSync(join(poisoned, 'a', 'b'), { recursive: true });
+    assert.equal(lookupPoisoned(join(poisoned, 'a', 'b')), true, `a ${entry} above the directory poisons it`);
+  }
+  assert.equal(trialTemporaryRoot('/session', [join(clean, 'missing'), shared]), '/session', 'no clean root: the session directory');
+  // The clean candidate is clean unless the host's own tmp above it is poisoned, as vishrog's is: then the session directory.
+  const usable = !lookupPoisoned(clean);
+  assert.equal(trialTemporaryRoot('/session', [shared, clean]), usable ? clean : '/session');
+  const host: NodeJS.ProcessEnv = { PATH: process.env.PATH!, TMPDIR: shared, TMP: shared, TEMP: shared };
+  const repo = await fixture();
+  const seen = (logTail: string) => JSON.parse(/ENV:(.*)/.exec(logTail)![1]!) as { tmpdir: string; tmpEntries: string[]; tmpVariables: string[] };
+  const directories: string[] = [];
+  for (const [files, changed, outcome] of [
+    [{ 'tests/a.test.ts': 'x\n' }, ['tests/a.test.ts'], 'pass'],
+    [{ 'tests/bad.test.ts': 'x\n' }, ['tests/bad.test.ts'], 'test failure'],
+    [{ 'break-build': '', 'tests/a.test.ts': 'x\n' }, ['tests/a.test.ts'], 'failed build'],
+  ] as const) {
+    const head = repo.commitOnBase(files, outcome);
+    const merged = await trialMerge(gitFor(repo.root), { head, baseTip: repo.base });
+    assert.ok('mergeSha' in merged);
+    const base = await temporaryDirectory('trial-merge-root', tmpdir());
+    const result = await runTrial({ root: repo.root, base, mergeSha: merged.mergeSha, changedFiles: [...changed], timeoutMs: 120_000, key: 'GY-9', environment: host, temporaryRoots: [shared, clean] });
+    const child = seen(result.logTail);
+    assert.ok(!child.tmpdir.startsWith(`${shared}/`), `the ${outcome} trial never runs in the poisoned tmp`);
+    assert.ok(child.tmpdir.startsWith(usable ? `${clean}/gyt-` : `${base}/`), `its tmpdir is made for it in the clean root: ${child.tmpdir}`);
+    assert.deepEqual(child.tmpVariables, [child.tmpdir, child.tmpdir, child.tmpdir], 'TMPDIR, TMP and TEMP all name it');
+    // npm, which runs the build, keeps node's compile cache in the tmpdir it is given; nothing else is there.
+    assert.deepEqual(child.tmpEntries.filter(entry => entry !== 'node-compile-cache'), [], 'it is empty when the suite starts: no node_modules, no .git');
+    assert.equal(existsSync(child.tmpdir), false, `it is removed with the checkout after a ${outcome}`);
+    assert.equal(existsSync(base) ? readdirSync(base).length : 0, 0);
+    directories.push(child.tmpdir);
+  }
+  assert.equal(new Set(directories).size, directories.length, 'every trial gets a fresh directory');
+  assert.deepEqual(readdirSync(shared).sort(), ['.git', 'node_modules'], 'the host\'s tmp is left as it was');
+  assert.deepEqual(readdirSync(clean), [], 'and nothing of the trials is left in the clean root');
 });
 
 test('integration:trial-run-build-and-tests — a merge that changes the lockfile installs its own dependencies with npm ci, and one that leaves it alone reuses the coordinator\'s install', async () => {

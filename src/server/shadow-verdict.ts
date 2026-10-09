@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { demand, type Principal, type Work } from '../model.js';
 import {
   compareVerdicts, githubOutcome, isPlaceholderVerdict, placeholderRunnerFailure, shadowDisagreement,
-  shadowDisagreementPair, shadowExplanationPairsMax, trialLogTailLength, type ShadowExplanationRef, type ShadowVerdict,
+  shadowDisagreementPair, shadowFailureCause, type ShadowFailureCause, shadowExplanationPairsMax, trialLogTailLength, type ShadowExplanationRef, type ShadowVerdict,
 } from '../merge-writer/shadow.js';
 import { DELIVERY_EVENT_PREDICATE } from '../store/tables/production.js';
 import { defineRoutes, parseJson, type Services } from './routes.js';
@@ -204,6 +204,8 @@ async function recoveredDeliveredMerges(db: Queryable, pairs: readonly { key: st
 export interface StandingShadowDisagreement {
   key: string; head: string; baseTip: string; outcome: 'shadow-only-fail' | 'shadow-missed';
   mergeSha: string | null; build: 'pass' | 'fail'; tests: ShadowVerdict['tests']; at: string; explained: boolean;
+  /** What the recorded verdict names as the failure's cause (GY-1565); null for a shadow-missed, or a record with nothing to read. */
+  cause: ShadowFailureCause | null;
 }
 
 /** The documents of the named work items alone, by key: a bounded read safe under the coordination lock. */
@@ -246,6 +248,7 @@ export async function standingShadowDisagreements(db: Queryable, work?: readonly
       key: verdict.key, head: verdict.head, baseTip: verdict.baseTip, outcome,
       mergeSha: verdict.mergeSha, build: verdict.build, tests: verdict.tests, at: verdict.at,
       explained: explained.has(shadowDisagreementPair(verdict)),
+      cause: outcome === 'shadow-only-fail' ? shadowFailureCause(verdict) : null,
     });
   }
   return standing;

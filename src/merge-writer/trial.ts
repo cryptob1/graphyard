@@ -1,9 +1,9 @@
 // Concern: the shadow gate's trial merge — the exact merge commit of a head onto main, and its build and affected tests in a credential-free checkout.
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { readFile, symlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { constants } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, parse } from 'node:path';
 import { defaultChildRun, type ChildRun } from '../child-runner.js';
 import { allocateSessionCheckout, removeSessionCheckout } from '../install/worktree-root.js';
 import { isolatedTestEnvironment, npmCiArgs, npmCiEnvironment } from '../cli/test-isolation.js';
@@ -50,10 +50,9 @@ export async function trialMerge(git: TrialGit, input: { head: string; baseTip: 
 
 /**
  * The variables a trial child never sees by name, besides every GRAPHYARD_* and HERDR_* one and
- * every credential-bearing name (`credentialTrialVariable`): the gh/ssh helpers, and the
- * temporary-directory overrides. The suite assumes the platform's own temporary directory, as CI
- * gives it (GY-1549: the loop's systemd unit inherits TMPDIR=/var/tmp from environment.d, and
- * tests/test-isolation.test.ts's contained-install assertion failed on it).
+ * every credential-bearing name (`credentialTrialVariable`): the gh/ssh helpers, and the host's
+ * temporary-directory overrides (GY-1549: the loop's systemd unit inherits TMPDIR=/var/tmp from
+ * environment.d). runTrial sets its own in their place (`trialTemporaryRoot`).
  */
 export const withheldTrialVariables = ['GH_CONFIG_DIR', 'GH_TOKEN', 'GITHUB_TOKEN', 'SSH_AUTH_SOCK', 'GIT_SSH_COMMAND', 'TMPDIR', 'TMP', 'TEMP'] as const;
 /**
@@ -70,6 +69,28 @@ export function trialEnvironment(environment: NodeJS.ProcessEnv = process.env): 
   const kept = Object.fromEntries(Object.entries(isolatedTestEnvironment(environment)).filter(([name]) => !/^(GRAPHYARD|HERDR)_/.test(name) && !credentialTrialVariable(name)));
   return { ...kept, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' };
 }
+
+/** What an upward lookup from a fixture resolves first: a directory holding one of these shadows the fixture's own. */
+export const trialLookupEntries = ['node_modules', '.git', 'package.json'] as const;
+/** Where a trial's temporary directory may go, in order: the platform's own, then the persistent one. */
+export const trialTemporaryRoots = ['/tmp', '/var/tmp'] as const;
+/** Whether `directory` or a folder above it (short of the filesystem root) holds an entry an upward lookup would resolve. */
+export function lookupPoisoned(directory: string): boolean {
+  for (let at = directory; at !== parse(at).root; at = dirname(at)) if (trialLookupEntries.some(entry => existsSync(join(at, entry)))) return true;
+  return false;
+}
+/**
+ * The folder the trial's own temporary directory is made in (GY-1565): the first root no stray
+ * node_modules, .git or package.json sits in or above, else the trial's session directory. The
+ * host's shared /tmp is not CI's empty one: vishrog's /tmp/node_modules is what
+ * tests/worktree-reclaim.test.ts's upward install lookup found first, so its dependency mirror
+ * shared nothing. The directory stays short, as CI's is: a socket path or a typed launch line the
+ * suite builds under it has a length bound.
+ */
+export const trialTemporaryRoot = (sessionDirectory: string, roots: readonly string[] = trialTemporaryRoots) =>
+  roots.find(root => existsSync(root) && !lookupPoisoned(root)) ?? sessionDirectory;
+/** The variables that point the trial child's temporary files at `directory`. */
+export const trialTemporaryVariables = (directory: string) => ({ TMPDIR: directory, TMP: directory, TEMP: directory });
 
 /**
  * A trial's verdict. `runnerExit` is how the test runner process ended: its exit status, 128 plus the
@@ -148,6 +169,8 @@ export interface RunTrialInput {
   remove?: typeof removeSessionCheckout;
   /** The most files one runner process runs; `trialTestGroupSize` unless a test narrows it. */
   groupSize?: number;
+  /** Where the trial's temporary directory may go; `trialTemporaryRoots` unless a test names others. */
+  temporaryRoots?: readonly string[];
 }
 const tailLength = 4000;
 const testFile = /tests\/[\w./-]+\.test\.ts/g;
@@ -178,11 +201,11 @@ export function runnerRecords(text: string): { file: string; passed: boolean }[]
 /**
  * Check the merge commit out detached as a `trial` checkout, run `npm run build`, then the affected
  * pre-merge selection of scripts/ci-tests.mjs through tests/helpers/run-tests.ts, all under one
- * deadline and `trialEnvironment`. The runner always gets a selected file list, so a full
- * selection runs every pre-merge file and never the release-candidate suites, and the verdict
- * counts the files that ran. The selection runs in groups of at most `trialTestGroupSize` files,
- * each its own runner process over the same checkout, so a full selection never fills one
- * process; the verdict's failing files are the union the groups' records name, and `groups`
+ * deadline and `trialEnvironment` with the trial's own empty temporary directory. The runner
+ * always gets a selected file list, so a full selection runs every pre-merge file and never the
+ * release-candidate suites, and the verdict counts the files that ran. The selection runs in
+ * groups of at most `trialTestGroupSize` files, each its own runner process over the same
+ * checkout, so a full selection never fills one process; the verdict's failing files are the union the groups' records name, and `groups`
  * says how each process ended. The checkout is removed afterwards, pass or fail; a removal that
  * fails rejects with TrialCleanupError carrying the verdict. Past the deadline it rejects with
  * TrialTimeoutError, and a runner that ends naming no failing test with TrialRunnerError: neither
@@ -190,8 +213,12 @@ export function runnerRecords(text: string): { file: string; passed: boolean }[]
  */
 export async function runTrial(input: RunTrialInput): Promise<TrialRun> {
   const run = input.run ?? defaultChildRun, now = input.now ?? Date.now, startedAt = now(), deadline = startedAt + input.timeoutMs;
-  const env = trialEnvironment(input.environment);
   const checkout = await allocateSessionCheckout(input.base, 'trial', input.key ?? 'trial', input.mergeSha, randomUUID());
+  // A fresh, empty temporary directory made for this trial alone, removed with its checkout.
+  let temporary: string;
+  try { temporary = await mkdtemp(join(trialTemporaryRoot(checkout.directory, input.temporaryRoots), 'gyt-')); }
+  catch (error) { await (input.remove ?? removeSessionCheckout)(input.root, input.base, checkout.directory, input.run).catch(() => {}); throw error; }
+  const env = { ...trialEnvironment(input.environment), ...trialTemporaryVariables(temporary) };
   const log: string[] = [];
   const remaining = () => Math.max(1000, deadline - now());
   const tail = () => log.join('\n').slice(-tailLength);
@@ -303,8 +330,11 @@ export async function runTrial(input: RunTrialInput): Promise<TrialRun> {
   // The checkout goes whatever the trial did; a removal that fails is reported, never swallowed.
   let settled: { verdict: TrialRun } | { error: unknown };
   try { settled = { verdict: await trial() }; } catch (error) { settled = { error }; }
-  try { await (input.remove ?? removeSessionCheckout)(input.root, input.base, checkout.directory, input.run); }
-  catch (cause) {
+  // The temporary directory goes with it: a failure to remove either is the cleanup's, and neither stops the other.
+  const removed = await Promise.allSettled([rm(temporary, { recursive: true, force: true }), (input.remove ?? removeSessionCheckout)(input.root, input.base, checkout.directory, input.run)]);
+  const failure = removed.find((result): result is PromiseRejectedResult => result.status === 'rejected');
+  if (failure) {
+    const cause = failure.reason;
     const outcome = 'verdict' in settled ? `the trial itself answered build ${settled.verdict.build}, ${settled.verdict.tests.failed.length} failing test file(s)` : `the trial itself failed: ${settled.error instanceof Error ? settled.error.message : String(settled.error)}`;
     throw new TrialCleanupError(checkout.directory, 'verdict' in settled ? settled.verdict : null, cause, outcome);
   }
