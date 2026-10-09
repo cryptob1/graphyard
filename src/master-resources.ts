@@ -454,7 +454,8 @@ export const resourceRegistry: ResourceDefinition[] = [
     warnBelow: tmpInodeHeadroom, symptoms: [],
     // The quarter-free line is an early warning on a filesystem-wide count every process on the host
     // fills (GY-1379): while the loop's latest pass is current and scanned the measured directory, it
-    // has taken back all it may, so a reading above a tenth free is reported and raises nothing.
+    // has taken back all it may, so a reading above a tenth free is reported and raises nothing — unless
+    // that pass removed 0 and named the consumers it could not reach (GY-1597).
     read: input => {
       if (!input.tmp) return [{ id: '', used: null, bound: null, detail: 'the host temporary directory\'s inodes could not be read', reclaimable: 0 }];
       const answered = tmpPassAnswers(input.tmp, input.now);
@@ -469,9 +470,13 @@ export const tmpPassCurrentMs = 30 * 60_000;
 /**
  * Whether the loop's own /tmp pass answers a low tmp-inodes reading (GY-1379): it finished within
  * `tmpPassCurrentMs`, scanned the measured directory, and the volume is still above a tenth free.
+ * A pass that escalated, removed 0 entries and still left the bound standing, so named the top
+ * consumers, answers nothing (GY-1597): what fills /tmp is outside its reach, and the attention
+ * must carry the consumers it named until someone stops the leaker.
  */
 export function tmpPassAnswers(tmp: TmpInodes, now: number) {
   const at = tmp.latest ? Date.parse(tmp.latest.at) : Number.NaN;
+  if (tmp.latest && tmp.latest.removed === 0 && tmp.latest.consumers?.length) return false;
   return Number.isFinite(at) && now - at < tmpPassCurrentMs && tmp.measuredScanned === true && tmp.freeInodes >= tenthOf(tmp.totalInodes);
 }
 const entries = (count: number) => `${count} entr${count === 1 ? 'y' : 'ies'}`;

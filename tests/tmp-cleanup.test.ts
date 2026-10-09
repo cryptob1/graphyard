@@ -343,3 +343,29 @@ test('unit:tmp-cleanup — the loop records the escalated pass and the consumers
   assert.match(line?.text ?? '', new RegExp(`the top /tmp consumers are ${leaker} \\(42 entries, owner ${userInfo().username}\\)`));
   assert.match(reading.reclaim, /escalates .* names the top \/tmp consumers/, 'the registry describes the escalation');
 });
+
+test('unit:tmp-cleanup — a zero-removal pass that leaves /tmp between a tenth and a quarter free still raises the tmp-inodes attention naming the consumers', async () => {
+  const root = await temporaryDirectory('zero-pass-gap');
+  await mkdir(join(root, '.graphyard'));
+  const { tmp, leaker } = await leakingRoot('zero-pass-gap-tmp');
+  // 209,715 of 1,048,576 free: above a tenth, below the 262,144 quarter-free headroom.
+  const gapVolume = async () => ({ files: 1_048_576, ffree: 209_715 });
+  const options = { tmpRoot: tmp, tmpPass: (pass: Parameters<typeof reclaimTmpDirectories>[0]) => reclaimTmpDirectories({ ...pass, held: new Set(), volume: gapVolume }) };
+  await reclaimResources(root, { reviewers: [], producers: [] }, { work: [], agents: [] }, options);
+  await settleTmpReclaim();
+  await reclaimResources(root, { reviewers: [], producers: [] }, { work: [], agents: [] }, options);
+  await settleTmpReclaim();
+  const inodes = await readTmpInodes(root, tmp, gapVolume);
+  assert.equal(inodes?.latest?.removed, 0);
+  assert.equal(inodes?.measuredScanned, true, 'the pass is current over the measured directory');
+  const input: ResourceInputs = { now: Date.now(), reviews: [], producers: [], agents: [], work: [], plane: null, loop: null, revision: null, disk: null, tmp: inodes, profiles: { workers: [], reviewers: [], producers: [] } };
+  const reading = readResources(input).find(entry => entry.id === 'tmp-inodes')!;
+  assert.equal(reading.state, 'low');
+  assert.ok(!reading.answered, 'a pass that removed 0 and named consumers answers nothing');
+  const [line] = resourceAttention([reading]);
+  assert.equal(line?.subject, 'resource:tmp-inodes');
+  assert.match(line?.text ?? '', new RegExp(`the top /tmp consumers are ${leaker} \\(42 entries`));
+  // The same reading after a pass that took entries back stays answered, as GY-1379 set out.
+  const progressed: ResourceInputs = { ...input, tmp: { ...inodes!, latest: { ...inodes!.latest!, removed: 3 } } };
+  assert.equal(resourceAttention(readResources(progressed).filter(entry => entry.id === 'tmp-inodes')).length, 0);
+});
