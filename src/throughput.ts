@@ -424,7 +424,8 @@ export const populationRule = 'A delivery is counted when it is a merged pull re
 export function verifyThroughput(work: Work[], now: number, options: { deployed: DeployedRelease; since?: string | null; until?: string | null; claimKey?: string }): ThroughputReport {
   const claimKey = options.claimKey ?? throughputClaim.item;
   const window = claimWindow(work.find(item => item.key === claimKey), options.since, time(options.until ?? null) ?? now);
-  const inWindow = windowDeliveries(work, window.since, options.until);
+  // The window ends at --until or, without it, at the measurement time: a merge stamped later is not in it.
+  const inWindow = windowDeliveries(work, window.since, options.until ?? new Date(now).toISOString());
   const records = inWindow.map(item => deliveryRecord(item, now, window.since)).sort((a, b) => Date.parse(a.mergedAt) - Date.parse(b.mergedAt));
   // "Real" is judged before the coordinator rule, so the population line separates a fixture from
   // a delivery a master drove; both are excluded, and they are not the same fact.
@@ -792,7 +793,7 @@ export async function measureThroughput(summaries: Work[], readItem: (id: string
   const claim = summaries.find(item => item.key === claimKey);
   const window = claimWindow(claim, options.since, time(options.until ?? null) ?? now);
   // No established window means no release of the claim to measure: nothing is read.
-  const wanted = window.since === null && window.basis === 'unknown' ? [] : windowDeliveries(summaries, window.since, options.until);
+  const wanted = window.since === null && window.basis === 'unknown' ? [] : windowDeliveries(summaries, window.since, options.until ?? new Date(now).toISOString());
   const whole = new Map<string, Work>(), queue = [...wanted];
   await Promise.all(Array.from({ length: Math.min(throughputReadConcurrency, queue.length) }, async () => {
     for (let next = queue.shift(); next; next = queue.shift()) whole.set(next.id, await readItem(next.id));

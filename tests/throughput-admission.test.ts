@@ -421,7 +421,7 @@ test('unit:throughput-idle-window-clip — an action idle before the window star
 });
 
 test('unit:throughput-trailing-window — without an explicit --since the serving release is judged only over deliveries merged in the 72 hours before the measurement (or --until), never before GY-87 first served, named trailing-72h with why; --since still overrides it; the budgets are unchanged, an idle span past 5 min inside the window still fails the claim and fewer than 10 admitted deliveries leave it unverified', async () => {
-  const { claimWindow, throughputTrailingWindowMs } = await import('../src/throughput.js');
+  const { claimWindow, measureThroughput, throughputTrailingWindowMs } = await import('../src/throughput.js');
   const hour = 60 * minute;
   // GY-87 first served ten days before the measurement; the 72-hour window is much later.
   const measuredAt = base + 240 * hour;
@@ -469,6 +469,18 @@ test('unit:throughput-trailing-window — without an explicit --since the servin
   assert.equal(bounded.window.basis, 'trailing-72h');
   assert.equal(bounded.window.since, stamp(base + 28 * hour));
   assert.equal(bounded.window.until, until);
+  // Without --until the window ends at the measurement time: a merge stamped after it (clock skew,
+  // a ledger read ahead of the clock) is neither read nor judged, in either measurement path.
+  const future = [merged('GY-700', measuredAt + hour, 149), merged('GY-701', measuredAt + 2 * hour, 149)];
+  const ahead = verifyThroughput([served, ...oldMisses, ...recent, ...future], measuredAt, { deployed });
+  assert.deepEqual(ahead.deliveries.map(record => record.key), recent.map(item => item.key));
+  assert.ok(![...ahead.deliveries, ...ahead.excluded].some(record => record.key.startsWith('GY-70')), 'a delivery merged after the measurement time is not judged');
+  assert.equal(ahead.verdict, 'verified', ahead.reason);
+  const everything = [served, ...oldMisses, ...recent, ...future];
+  const measured = await measureThroughput(everything, async id => everything.find(item => item.id === id)!, measuredAt, { deployed });
+  assert.ok(!measured.read.some(id => future.some(item => item.id === id)), 'a delivery merged after the measurement time is not read');
+  assert.deepEqual(measured.report.deliveries.map(record => record.key), recent.map(item => item.key));
+  assert.equal(measured.report.verdict, 'verified', measured.report.reason);
   // Never before GY-87 first served: a release fresher than 72 hours keeps its serving floor and basis.
   const fresh = verifyThroughput([served, ...oldMisses], base + 24 * hour, { deployed });
   assert.equal(fresh.window.since, servedAt);
