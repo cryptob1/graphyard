@@ -32,18 +32,22 @@ function installClis(install: LoopInstall) {
   return clis;
 }
 /**
- * Whether the unit's effective ExecStart (drop-ins applied: `{ path=… ; argv[]=NODE CLI master run ; … }`)
- * starts this install's loop: exactly a Node interpreter running one of this install's CLIs with
- * `master run`. Any other executable or CLI — even one whose arguments end in `master run` — would
- * let a restart report a new MainPID while no coordinator loop runs.
+ * Why the unit's effective ExecStart (drop-ins applied: `{ path=… ; argv[]=NODE CLI master run ; … }`)
+ * does not start this install's loop, or null when it does: exactly a Node interpreter running one of
+ * this install's CLIs with `master run`. Any other executable or CLI — even one whose arguments end in
+ * `master run` — would let a restart report a new MainPID while no coordinator loop runs.
  */
-function runsInstallLoop(execStart: string, install: LoopInstall) {
+function execStartMismatch(execStart: string, install: LoopInstall): string | null {
   const path = /(?:^|[{;\s])path=([^;\s]+)/.exec(execStart)?.[1];
-  const argv = /argv\[\]=([^;]*)/.exec(execStart)?.[1].trim().split(/\s+/) ?? [];
-  if (argv.length !== 4 || argv[2] !== 'master' || argv[3] !== 'run') return false;
+  const argv = /argv\[\]=([^;]*)/.exec(execStart)?.[1].trim().split(/\s+/).filter(Boolean) ?? [];
+  const command = argv.join(' ') || '(none)';
+  if (argv.length !== 4 || argv[2] !== 'master' || argv[3] !== 'run') return `its effective ExecStart runs ${command}, not exactly NODE CLI master run`;
   const node = (file: string) => /^node(js)?(\d[\d.]*)?$/.test(basename(file));
-  if (!node(argv[0]) || (path && !node(path))) return false;
-  return installClis(install).includes(canonical(argv[1]));
+  const foreign = [path, argv[0]].find(file => file && !node(file));
+  if (foreign) return `its effective ExecStart executable ${foreign} is not node`;
+  const clis = installClis(install);
+  if (!clis.includes(canonical(argv[1]))) return `its effective ExecStart runs the CLI ${argv[1]}, not this install's ${clis.join(' or ')}`;
+  return null;
 }
 const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch (error: any) { return error?.code === 'EPERM'; } };
 
@@ -68,6 +72,11 @@ async function startQueued(systemctl: UserSystemctl, unit: string) {
  * unsupervised loop beside a unit that may be running is what this module exists to prevent.
  */
 export async function supervisingUnit(root: string, install: LoopInstall, options: Pick<RestartOptions, 'systemctl' | 'host' | 'platform'> = {}): Promise<SupervisingUnit | null> {
+  const found = await inspectLoopUnit(root, install, options);
+  return found && 'mainPid' in found ? found : null;
+}
+/** This install's loop unit as supervisingUnit judges it, or, for this checkout's unit whose effective ExecStart is not this install's loop (GY-1616), why it is not used. */
+async function inspectLoopUnit(root: string, install: LoopInstall, options: Pick<RestartOptions, 'systemctl' | 'host' | 'platform'>): Promise<SupervisingUnit | { unit: string; mismatch: string } | null> {
   if ((options.platform ?? process.platform) !== 'linux') return null;
   const systemctl = options.systemctl ?? userSystemctl, host = options.host ?? {};
   const unit = loopUnitOf(root, loopUnitDirectory(host), host.home);
@@ -85,7 +94,8 @@ export async function supervisingUnit(root: string, install: LoopInstall, option
   if (!directory || canonical(directory) !== canonical(root)) return null;
   // A unit whose effective command was overridden to anything but this install's `master run` is
   // not this loop's supervisor, and restarting it would report a restart while no loop runs.
-  if (!runsInstallLoop(properties.ExecStart ?? '', install)) return null;
+  const mismatch = execStartMismatch(properties.ExecStart ?? '', install);
+  if (mismatch) return { unit, mismatch };
   // A unit stopping (deactivating) or down with a start or restart queued is still this loop's
   // supervisor: a detached `master run` now would contend for the lock with the loop systemd is
   // about to start.
@@ -109,19 +119,22 @@ async function stopProcess(pid: number, timeoutMs: number) {
  * through systemd — `systemctl --user restart UNIT` — and reports the unit's new MainPID; a loop
  * holding the lock outside the unit is stopped first, or the unit's new loop would be refused on the
  * lock and crash-loop. Without one, the running loop is stopped and a fresh one started detached,
- * logging beside the config.
+ * logging beside the config; when this checkout's unit was passed over because its effective
+ * ExecStart is not this install's loop (GY-1616), `mismatch` says why.
  */
 export async function restartMasterLoop(root: string, config: MasterConfig, lock: LoopLock | null, options: RestartOptions = {}) {
   if (lock && lock.host !== config.hostId && Date.now() - Date.parse(lock.heartbeatAt) < 3 * config.run.intervalSeconds * 1000) throw new Error(`The master loop runs on ${lock.host} (pid ${lock.pid}); restart it on that host`);
   const timeoutMs = options.timeoutMs ?? 30_000, systemctl = options.systemctl ?? userSystemctl;
   const holder = lock && lock.host === config.hostId && alive(lock.pid) ? lock.pid : null;
-  const supervisor = await supervisingUnit(root, config, options);
+  const found = await inspectLoopUnit(root, config, options);
+  const supervisor = found && 'mainPid' in found ? found : null;
+  const mismatch = found && 'mismatch' in found ? `${found.unit} was not restarted: ${found.mismatch}; the loop was restarted detached instead` : null;
   if (supervisor) {
     const unsupervised = holder !== null && holder !== supervisor.mainPid ? { pid: holder, result: await stopProcess(holder, timeoutMs) } : null;
     // Blocking: systemd stops the loop (SIGTERM, SIGKILL past TimeoutStopSec) and starts the next before it returns.
     await systemctl(['restart', supervisor.unit], (loopStopTimeoutSeconds + 60) * 1000);
     const started = Number((await unitProperties(systemctl, supervisor.unit)).MainPID) || null;
-    return { supervisor: supervisor.unit, stopped: supervisor.mainPid || null, unsupervised, started, log: null };
+    return { supervisor: supervisor.unit, stopped: supervisor.mainPid || null, unsupervised, started, log: null, mismatch: null };
   }
   let stopped: number | null = null;
   if (holder !== null) {
@@ -137,7 +150,7 @@ export async function restartMasterLoop(root: string, config: MasterConfig, lock
   const output = openSync(log, 'a', 0o600);
   const child = spawn(process.execPath, [config.cliPath, 'master', 'run'], { cwd: root, detached: true, stdio: ['ignore', output, output] });
   child.unref();
-  return { supervisor: null, stopped, unsupervised: null, started: child.pid ?? null, log };
+  return { supervisor: null, stopped, unsupervised: null, started: child.pid ?? null, log, mismatch };
 }
 
 /**
