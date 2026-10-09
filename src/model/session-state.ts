@@ -152,6 +152,20 @@ export function launchHeldByLease(work: Pick<Work, 'lease'>, handle: Pick<Sessio
   return handle.kind === 'implementation' && handle.state === 'running' && !handle.observed && !handle.pane && !handle.agentName
     && !!lease && !!handle.principal && lease.owner === handle.principal && handleEpoch(handle) === lease.epoch && Date.parse(lease.expiresAt) > clock;
 }
+/**
+ * GY-1571. A worker handle registered for an attempt the item has not claimed yet. The launcher
+ * registers `PRINCIPAL:EPOCH` for the item's next epoch before its claim, so a report reading a
+ * snapshot taken between the two sees an attempt holding no lease. On 9 October 2026 that report
+ * ended GY-1528's, GY-1566's and GY-1565's fresh worker handles within seconds of registration
+ * ("attempt N ... holds no lease"); the claim then landed, and the next observation read the live
+ * lease's handle as "Assigned worker session is ended" — three session-liveness faults for three
+ * launches that went on to start and submit.
+ */
+export function unclaimedLaunch(work: Pick<Work, 'epoch' | 'lease'>, handle: Pick<SessionHandle, 'id' | 'kind' | 'epoch'>) {
+  if (handle.kind !== 'implementation' || typeof work.epoch !== 'number') return false;
+  const epoch = handleEpoch(handle);
+  return Number.isFinite(epoch) && epoch > work.epoch && !(work.lease && work.lease.epoch >= epoch);
+}
 /** A handle nothing has observed yet whose launch is still under way: inside the launch grace, or held by its attempt's lease. */
 export function launchingSession(work: Pick<Work, 'lease'>, handle: Pick<SessionHandle, 'id' | 'kind' | 'principal' | 'epoch' | 'pane' | 'agentName' | 'state' | 'observed' | 'startedAt'>, clock: number, grace = sessionLaunchGraceMs) {
   if (handle.state !== 'running' || handle.observed) return false;
@@ -243,7 +257,9 @@ export function observeSessions(all: Work[], runtime: RuntimeSession[] | null, n
     const where = handle.pane ? `pane ${handle.pane}` : handle.agentName ? `session ${handle.agentName}` : `session ${handle.id} (registered with no pane or name to match)`;
     const base = { workId: work.id, key: work.key, id: handle.id, kind: handle.kind, role: sessionRole(handle), runtime: handle.runtime, host: handle.host, subject: handle.subject };
     const entry = handle.pane || handle.agentName ? runtimeSessionOf(handle, runtime) : undefined;
-    const over = settledPurpose(work, handle, clock);
+    // A launch registers its handle before it claims (GY-1571), so inside the launch grace the item's
+    // facts still describe the attempt before it: no lease is not the attempt's end.
+    const over = young && unclaimedLaunch(work, handle) ? null : settledPurpose(work, handle, clock);
     if (entry) {
       const state = observedRuntimeState(entry, handle.runtime, states);
       // A pane whose agent has not started yet looks like one whose agent exited: registration
