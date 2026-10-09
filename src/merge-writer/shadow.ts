@@ -186,7 +186,7 @@ export function trialFailureCause(logTail: string | undefined | null): string | 
       if (at) { file = at[1]!; continue; }
       if (!/^\s*✖ /.test(line)) continue;
       const error = lines.slice(index + 1).find(next => next.trim() && !/^\s*✖ /.test(next) && !/^test at /.test(next));
-      named.push(`${testId(line)}${file ? ` (${file})` : ''}${error && /^\s/.test(error) ? `: ${error.trim()}` : ''}`);
+      named.push(`${testId(line)}${file ? ` (${file})` : ''}${error && /^\s/.test(error) ? `: ${error.trim().replace(/:$/, '')}` : ''}`);
       file = null;
     }
   }

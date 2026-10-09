@@ -380,9 +380,23 @@ const gy1535 = {
   ].join('\n'),
 };
 
-test('unit:cycle-shadow-disagreement-explanation — the GY-1535 head 77da3de0 shadow-only-fail (trial merge 953e1ac6) names the failing test, file and error its trial record carries, from the cursor and from the ledger', async () => {
+/** GY-1528 head 2186dd85's recorded log tail from the runner's summary on (ledger seq 2439697). */
+const gy1528LogTail = [
+  'ℹ tests 68', 'ℹ suites 0', 'ℹ pass 67', 'ℹ fail 1', 'ℹ cancelled 0', 'ℹ skipped 0', 'ℹ todo 0', 'ℹ duration_ms 5859.54096', '', '✖ failing tests:', '',
+  'test at tests/worktree-reclaim.test.ts:1:11072',
+  '✖ integration:worktree-dependency-reuse — a fresh attempt starts from a clean checkout of its exact head and shares one install instead of paying for a private copy (130.912959ms)',
+  '  AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal:', '  + actual - expected', '  ', '  + []', '  - [', '  -   {',
+  "  -     how: 'mirrored',", "  -     name: 'node_modules',", "  -     source: '/tmp/graphyard-reclaim-N6oAPH/node_modules'", '  -   }', '  - ]', '  ',
+  '      at TestContext.<anonymous> (/home/vish/.local/share/graphyard/worktrees/graphyard-7dc8733c9f87/graphyard-trial-gy-1528-c30d4b1-3e9bb531/checkout/tests/worktree-reclaim.test.ts:231:12)',
+  '      at async Test.run (node:internal/test_runner/test:1088:7)', '      at async Test.processPendingSubtests (node:internal/test_runner/test:763:7) {',
+  '    generatedMessage: true,', "    code: 'ERR_ASSERTION',", '    actual: [],',
+  "    expected: [ { name: 'node_modules', source: '/tmp/graphyard-reclaim-N6oAPH/node_modules', how: 'mirrored' } ],", "    operator: 'deepStrictEqual'", '  }', '',
+  '[exit status 1]',
+].join('\n');
+
+test('unit:cycle-shadow-disagreement-explanation — the GY-1535 head 77da3de0 (trial merge 953e1ac6) and GY-1528 head 2186dd85 (trial merge c30d4b16) shadow-only-fails each name the failing test, file and error its trial record carries, from the cursor and from the ledger', async () => {
   assert.equal(trialFailureCause(gy1535.logTail),
-    'integration:worktree-dependency-reuse (tests/worktree-reclaim.test.ts): AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal:');
+    'integration:worktree-dependency-reuse (tests/worktree-reclaim.test.ts): AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal');
   // A trial keeps FORCE_COLOR: the same summary colored by the spec reporter names the same cause.
   const colored = gy1535.logTail.split('\n').map(line => line && `\u001b[31m${line}\u001b[39m`).join('\n');
   assert.equal(trialFailureCause(colored), trialFailureCause(gy1535.logTail));
@@ -407,6 +421,22 @@ test('unit:cycle-shadow-disagreement-explanation — the GY-1535 head 77da3de0 s
   const [attention] = shadowGateAttention([cursorCopy, ledgerCopy]);
   assert.match(attention!.text, /the trial log names integration:worktree-dependency-reuse/);
   await request(token(admin), `work/${id}/shadow-explain`, { head: gy1535.head, baseTip: gy1535.baseTip, reason: 'GY-1564 test cleanup' });
+  // GY-1528 head 2186dd85 (trial merge c30d4b16 on 157b7134), merged by GitHub after its own
+  // shadow-only-fail: its recorded log tail, stack and assertion object included, names its cause too.
+  const gy1528 = { head: '2186dd853a8d089129e2b2f0ba87a9a9a8d5d62a', baseTip: '157b71349d7915cdf5776bbf0bb968725244643a', mergeSha: 'c30d4b1624deae333183d6112a5a1261fca3e027',
+    tests: { ...gy1535.tests, passed: 487, files: 497 }, logTail: gy1528LogTail };
+  assert.equal(trialFailureCause(gy1528.logTail),
+    'integration:worktree-dependency-reuse (tests/worktree-reclaim.test.ts): AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal');
+  const gy1528Line = shadowDisagreementDetail({ ...verdict('GY-1528', { head: gy1528.head, baseTip: gy1528.baseTip, mergeSha: gy1528.mergeSha, tests: gy1528.tests }), logTail: gy1528.logTail });
+  assert.match(gy1528Line, /GY-1528 head 2186dd853a8d089129e2b2f0ba87a9a9a8d5d62a is shadow-only-fail \(trial merge c30d4b1624deae333183d6112a5a1261fca3e027\); the shadow trial failed it but GitHub merged it: 10 of 497 test files failed/);
+  assert.match(gy1528Line, /the trial log names integration:worktree-dependency-reuse \(tests\/worktree-reclaim\.test\.ts\): AssertionError \[ERR_ASSERTION\]: Expected values to be strictly deep-equal\. Report only/);
+  const second = await deliveredDisagreement(gy1528.head, gy1528.baseTip, gy1528.tests, { logTail: gy1528.logTail, trialMergeSha: gy1528.mergeSha });
+  const standing1528 = ((await request(token(reader), 'shadow-disagreements')).body.disagreements as { key: string; cause: string | null }[]).find(entry => entry.key === second.key)!;
+  assert.equal(standing1528.cause, trialFailureCause(gy1528.logTail));
+  const [line1528] = shadowGateAttention([verdict(second.key, { head: gy1528.head, baseTip: gy1528.baseTip, mergeSha: gy1528.mergeSha, tests: gy1528.tests, cause: standing1528.cause! })]);
+  assert.match(line1528!.text, /the trial log names integration:worktree-dependency-reuse/);
+  assert.doesNotMatch(line1528!.text, /merged it\. Report only/, 'not the bare line');
+  await request(token(admin), `work/${second.id}/shadow-explain`, { head: gy1528.head, baseTip: gy1528.baseTip, reason: 'GY-1564 test cleanup' });
 });
 
 test('unit:merger-mode-refuses-unexplained-disagreement — a shadow-only-fail whose record names no cause says the evidence is missing, and the control-plane switch stays refused until it is explained', async () => {
