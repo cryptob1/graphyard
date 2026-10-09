@@ -222,145 +222,156 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
   // Progress goes to stderr so stdout stays the machine-readable result the CLI prints.
   const now = options.now ?? Date.now, log = options.log ?? (line => console.error(line));
   const interval = () => typeof options.intervalMs === 'function' ? options.intervalMs() : options.intervalMs;
-  // GY-866: research and triage sessions have no checkout of their own, so they read the code they
-  // judge from a scratch checkout of their own under the managed worktree root — a detached
-  // worktree of the release this loop runs, when one can be made, so the session still reads real
-  // code — never from the coordinator checkout: a session that works where it starts rewrites the
-  // control plane's own code. A root that cannot hold the scratch leaves the loop without research
-  // and triage rather than with sessions working in the coordinator checkout.
-  // The diagnostician reads the repository from the same scratch checkout: it too is a session the
-  // loop launches, and without the scratch it does not run at all.
-  // A loop with neither has no scratch to place, so it needs no CLI launcher to place it from.
-  const needsScratch = Boolean(raw.research) || 'diagnostician' in raw;
-  const scratchDirectory = needsScratch ? await openResearchScratch(researchScratchSource(config, options.repository), config, raw.loadedRelease?.commit ?? null, log) : null;
-  const scoped = new Proxy(raw, { get(target, property, receiver) {
-    if (property === 'research') return target.research && scratchDirectory ? { ...target.research, cwd: scratchDirectory } : undefined;
-    if (property === 'diagnostician') { const diagnostician = target.diagnostician; return diagnostician && scratchDirectory ? { ...diagnostician, cwd: scratchDirectory } : undefined; }
-    return Reflect.get(target, property, receiver);
-  } });
-  const effects = boundedPersist(namedEffects(scoped)), host = options.process ?? process;
-  acquireDaemonLock(state, options.identity, now(), interval());
-  // GY-437: the release is this process's, never the cursor's: a loop re-executed onto a moved
-  // checkout must not report the release the process before it loaded.
-  state.release = raw.loadedRelease ?? null;
-  await effects.persist(state);
-  // Under a supervisor that watches for keep-alives, a hung cycle is a restart rather than a
-  // silent pipeline; a window that would restart a healthy loop is recorded and left to the
-  // supervisor's configuration rather than worked around.
-  const watchdog = watchdogPlan(options.environment ?? process.env, interval());
-  for (const action of await noteWatchdog(state, watchdog, new Date(now()).toISOString(), effects.persist)) log(`[graphyard-master] ${action.kind} ${action.state}: ${action.detail}`);
-  if (watchdog.supervised) { try { await effects.notify?.('ready'); } catch (error) { log(`[graphyard-master] supervisor notification failed: ${message(error)}`); } }
-  await adoptHeadlessRuns(state, effects, log);
+  const host = options.process ?? process;
   let stopping = false;
-  // A supervisor's SIGTERM must land during the wait, not one whole interval later.
+  // A supervisor's SIGTERM must land during the wait, not one whole interval later — and from the
+  // first line, not after the awaited startup below (GY-1603): a stop received while the scratch
+  // checkout opens or runs are adopted ends the loop before any cycle, rather than being missed.
   const waking = new AbortController();
   const stop = () => { stopping = true; waking.abort(); };
   const signals = options.signals ?? ['SIGTERM', 'SIGINT'];
   for (const signal of signals) host.on(signal, stop);
-  // A detached promise that rejects — in the dispatcher beside this loop, an approver watch, a
-  // Herdr read nobody awaited — would otherwise end the process. It is counted and survived; the
-  // cursor write is best-effort, since the handler runs outside any cycle's own persistence.
-  const unhandled = (origin: 'unhandledRejection' | 'uncaughtException') => (error: unknown) => {
-    const entry = noteUnhandled(state, error, origin, now());
-    log(`[graphyard-master] ${origin} caught at the process level during cycle ${entry.cycle} (${state.failures.unhandled} so far); the loop keeps running: ${entry.reason}`);
-    effects.persist(state).catch(() => {});
-  };
-  const onRejection = unhandled('unhandledRejection'), onException = unhandled('uncaughtException');
-  host.on('unhandledRejection', onRejection); host.on('uncaughtException', onException);
-  const cycles: { cycle: number; actions: number; durationMs: number; childWaitMs: number }[] = [], failed: { cycle: number; call: string | null; reason: string; delayMs: number }[] = [];
-  // Session launches run beside the cycles, never inside one (GY-616): a cycle hands a launch over
-  // and moves on, and the next cycle reports what it did. The launcher outlives every cycle.
-  const launcher = new Launcher(config.run.launchConcurrency ?? defaultLaunchConcurrency);
-  // GY-857: the checkout guard. The modules this process imported were read from the coordinator
-  // checkout at startup; when it holds uncommitted work, cycling would run unreviewed code and a
-  // self-upgrade would move the checkout underneath it, so the loop refuses — at startup it never
-  // becomes live at all, and between cycles it skips the upgrade and keeps running the release it
-  // loaded. Either refusal is an escalation naming the dirty paths and which live leases' planned
-  // files they match: those matches are the checkout's writes attributed to the attempts most
-  // likely to have made them.
-  const checkoutOf = async () => options.checkout?.() ?? await readCoordinatorCheckout(coordinatorCheckoutRoot(config.cliPath));
-  const guard = coordinatorCheckoutGuard({ state: () => state, read: checkoutOf, agents: raw.agents, snapshot: raw.snapshot, persist: effects.persist, now, log, recover: effects.recoverHead });
+  const unlisten = () => { for (const signal of signals) host.off(signal, stop); };
   try {
-    const startRefusal = await guard.start(raw.loadedRelease?.commit ?? null);
-    if (startRefusal) {
-      // The refused loop keeps its process for its supervisor — a crash would only be restarted
-      // onto the same dirty checkout — and cycles nothing until it is restarted on a clean one.
-      log(`[graphyard-master] the loop cycles nothing from a dirty coordinator checkout; clean or stash the paths it names, then restart it`);
-      while (!stopping && !options.once) {
-        if (watchdog.supervised) { try { await effects.notify?.('alive'); } catch (error) { log(`[graphyard-master] supervisor notification failed: ${message(error)}`); } }
-        try { await delay(interval(), undefined, { signal: waking.signal }); } catch { /* woken to stop */ }
-      }
-    } else do {
-      let phase: 'reload' | 'cycle' = 'reload', wait: number, wakeable = false;
-      try {
-        if (options.reload) {
-          for (const action of await noteConfigReload(state, await options.reload().then(reload => { config = reload.config; return reload; }), effects.persist)) log(`[graphyard-master] ${action.kind} ${action.state}: ${action.detail}`);
+    // GY-866: research and triage sessions have no checkout of their own, so they read the code they
+    // judge from a scratch checkout of their own under the managed worktree root — a detached
+    // worktree of the release this loop runs, when one can be made, so the session still reads real
+    // code — never from the coordinator checkout: a session that works where it starts rewrites the
+    // control plane's own code. A root that cannot hold the scratch leaves the loop without research
+    // and triage rather than with sessions working in the coordinator checkout.
+    // The diagnostician reads the repository from the same scratch checkout: it too is a session the
+    // loop launches, and without the scratch it does not run at all.
+    // A loop with neither has no scratch to place, so it needs no CLI launcher to place it from.
+    const needsScratch = Boolean(raw.research) || 'diagnostician' in raw;
+    const scratchDirectory = needsScratch ? await openResearchScratch(researchScratchSource(config, options.repository), config, raw.loadedRelease?.commit ?? null, log) : null;
+    const scoped = new Proxy(raw, { get(target, property, receiver) {
+      if (property === 'research') return target.research && scratchDirectory ? { ...target.research, cwd: scratchDirectory } : undefined;
+      if (property === 'diagnostician') { const diagnostician = target.diagnostician; return diagnostician && scratchDirectory ? { ...diagnostician, cwd: scratchDirectory } : undefined; }
+      return Reflect.get(target, property, receiver);
+    } });
+    const effects = boundedPersist(namedEffects(scoped));
+    acquireDaemonLock(state, options.identity, now(), interval());
+    // GY-437: the release is this process's, never the cursor's: a loop re-executed onto a moved
+    // checkout must not report the release the process before it loaded.
+    state.release = raw.loadedRelease ?? null;
+    await effects.persist(state);
+    // Under a supervisor that watches for keep-alives, a hung cycle is a restart rather than a
+    // silent pipeline; a window that would restart a healthy loop is recorded and left to the
+    // supervisor's configuration rather than worked around.
+    const watchdog = watchdogPlan(options.environment ?? process.env, interval());
+    for (const action of await noteWatchdog(state, watchdog, new Date(now()).toISOString(), effects.persist)) log(`[graphyard-master] ${action.kind} ${action.state}: ${action.detail}`);
+    if (watchdog.supervised) { try { await effects.notify?.('ready'); } catch (error) { log(`[graphyard-master] supervisor notification failed: ${message(error)}`); } }
+    await adoptHeadlessRuns(state, effects, log);
+    // A detached promise that rejects — in the dispatcher beside this loop, an approver watch, a
+    // Herdr read nobody awaited — would otherwise end the process. It is counted and survived; the
+    // cursor write is best-effort, since the handler runs outside any cycle's own persistence.
+    const unhandled = (origin: 'unhandledRejection' | 'uncaughtException') => (error: unknown) => {
+      const entry = noteUnhandled(state, error, origin, now());
+      log(`[graphyard-master] ${origin} caught at the process level during cycle ${entry.cycle} (${state.failures.unhandled} so far); the loop keeps running: ${entry.reason}`);
+      effects.persist(state).catch(() => {});
+    };
+    const onRejection = unhandled('unhandledRejection'), onException = unhandled('uncaughtException');
+    host.on('unhandledRejection', onRejection); host.on('uncaughtException', onException);
+    const cycles: { cycle: number; actions: number; durationMs: number; childWaitMs: number }[] = [], failed: { cycle: number; call: string | null; reason: string; delayMs: number }[] = [];
+    // Session launches run beside the cycles, never inside one (GY-616): a cycle hands a launch over
+    // and moves on, and the next cycle reports what it did. The launcher outlives every cycle.
+    const launcher = new Launcher(config.run.launchConcurrency ?? defaultLaunchConcurrency);
+    // GY-857: the checkout guard. The modules this process imported were read from the coordinator
+    // checkout at startup; when it holds uncommitted work, cycling would run unreviewed code and a
+    // self-upgrade would move the checkout underneath it, so the loop refuses — at startup it never
+    // becomes live at all, and between cycles it skips the upgrade and keeps running the release it
+    // loaded. Either refusal is an escalation naming the dirty paths and which live leases' planned
+    // files they match: those matches are the checkout's writes attributed to the attempts most
+    // likely to have made them.
+    const checkoutOf = async () => options.checkout?.() ?? await readCoordinatorCheckout(coordinatorCheckoutRoot(config.cliPath));
+    const guard = coordinatorCheckoutGuard({ state: () => state, read: checkoutOf, agents: raw.agents, snapshot: raw.snapshot, persist: effects.persist, now, log, recover: effects.recoverHead });
+    try {
+      const startRefusal = await guard.start(raw.loadedRelease?.commit ?? null);
+      if (startRefusal) {
+        // The refused loop keeps its process for its supervisor — a crash would only be restarted
+        // onto the same dirty checkout — and cycles nothing until it is restarted on a clean one.
+        log(`[graphyard-master] the loop cycles nothing from a dirty coordinator checkout; clean or stash the paths it names, then restart it`);
+        while (!stopping && !options.once) {
+          if (watchdog.supervised) { try { await effects.notify?.('alive'); } catch (error) { log(`[graphyard-master] supervisor notification failed: ${message(error)}`); } }
+          try { await delay(interval(), undefined, { signal: waking.signal }); } catch { /* woken to stop */ }
         }
-        phase = 'cycle';
-        if (cycles.length + failed.length) await adoptHeadlessRuns(state, effects, log, 'cycle');
-        const result = await runCycle(config, state, effects, now, launcher);
-        // The end of a run of failures is written at once, so `master status` stops naming it.
-        const recovered = noteCycleSuccess(state);
-        if (recovered) await effects.persist(state);
-        cycles.push({ cycle: result.metrics.cycle, actions: result.actions.length, durationMs: result.metrics.durationMs, childWaitMs: result.metrics.childWaitMs ?? 0 });
-        for (const action of result.actions) log(`[graphyard-master] cycle ${result.metrics.cycle} ${action.kind} ${action.state}: ${action.detail}`);
-        // Both halves of every cycle: what it could act on, and what it did about it — and where its
-        // time went: its three slowest steps and its slowest external call (GY-377).
-        log(`[graphyard-master] cycle ${result.metrics.cycle} complete in ${result.metrics.durationMs}ms (${result.metrics.childWaitMs ?? 0}ms waiting on child processes); ${result.metrics.open} open, ${result.silence.actionable} actionable, ${result.actions.length} action(s)${result.silence.longest && result.silence.longestIdleMs > 0 ? `, longest wait ${Math.round(result.silence.longestIdleMs / 1000)}s on ${result.silence.longest.detail}` : ''}${recovered ? `; recovered after ${recovered} failed cycle(s)` : ''}${result.metrics.timings ? `; ${describeTimings(result.metrics.timings)}` : ''}`);
-        // The configured interval is the idle cadence; while anything is actionable the loop comes
-        // back inside the responsive window so ready work cannot sit out a long interval.
-        wait = cycleDelay(interval(), result.silence);
-        wakeable = true;
-      } catch (error) {
-        // The cycle failed; the loop did not. The counter advances, the cause is on the cursor, and
-        // the next cycle waits longer for each consecutive failure so a fault is not hammered.
-        const failure = await noteCycleFailure(state, error, phase, { now: now(), intervalMs: interval(), ceilingMs: cycleFailureCeiling(watchdog.windowMs), persist: effects.persist });
-        failed.push({ cycle: failure.cycle, call: failure.call, reason: failure.reason, delayMs: failure.delayMs });
-        log(`[graphyard-master] cycle ${failure.cycle} failed in ${describeFailingCall(failure)}: ${failure.reason}; ${state.failures.consecutive} consecutive failure(s), the next cycle runs in ${Math.round(failure.delayMs / 1000)}s at ${failure.nextAt}`);
-        wait = failure.delayMs;
+      // A loop stopped during startup runs no cycle (GY-1603).
+      } else while (!stopping) {
+        let phase: 'reload' | 'cycle' = 'reload', wait: number, wakeable = false;
+        try {
+          if (options.reload) {
+            for (const action of await noteConfigReload(state, await options.reload().then(reload => { config = reload.config; return reload; }), effects.persist)) log(`[graphyard-master] ${action.kind} ${action.state}: ${action.detail}`);
+          }
+          phase = 'cycle';
+          if (cycles.length + failed.length) await adoptHeadlessRuns(state, effects, log, 'cycle');
+          const result = await runCycle(config, state, effects, now, launcher);
+          // The end of a run of failures is written at once, so `master status` stops naming it.
+          const recovered = noteCycleSuccess(state);
+          if (recovered) await effects.persist(state);
+          cycles.push({ cycle: result.metrics.cycle, actions: result.actions.length, durationMs: result.metrics.durationMs, childWaitMs: result.metrics.childWaitMs ?? 0 });
+          for (const action of result.actions) log(`[graphyard-master] cycle ${result.metrics.cycle} ${action.kind} ${action.state}: ${action.detail}`);
+          // Both halves of every cycle: what it could act on, and what it did about it — and where its
+          // time went: its three slowest steps and its slowest external call (GY-377).
+          log(`[graphyard-master] cycle ${result.metrics.cycle} complete in ${result.metrics.durationMs}ms (${result.metrics.childWaitMs ?? 0}ms waiting on child processes); ${result.metrics.open} open, ${result.silence.actionable} actionable, ${result.actions.length} action(s)${result.silence.longest && result.silence.longestIdleMs > 0 ? `, longest wait ${Math.round(result.silence.longestIdleMs / 1000)}s on ${result.silence.longest.detail}` : ''}${recovered ? `; recovered after ${recovered} failed cycle(s)` : ''}${result.metrics.timings ? `; ${describeTimings(result.metrics.timings)}` : ''}`);
+          // The configured interval is the idle cadence; while anything is actionable the loop comes
+          // back inside the responsive window so ready work cannot sit out a long interval.
+          wait = cycleDelay(interval(), result.silence);
+          wakeable = true;
+        } catch (error) {
+          // The cycle failed; the loop did not. The counter advances, the cause is on the cursor, and
+          // the next cycle waits longer for each consecutive failure so a fault is not hammered.
+          const failure = await noteCycleFailure(state, error, phase, { now: now(), intervalMs: interval(), ceilingMs: cycleFailureCeiling(watchdog.windowMs), persist: effects.persist });
+          failed.push({ cycle: failure.cycle, call: failure.call, reason: failure.reason, delayMs: failure.delayMs });
+          log(`[graphyard-master] cycle ${failure.cycle} failed in ${describeFailingCall(failure)}: ${failure.reason}; ${state.failures.consecutive} consecutive failure(s), the next cycle runs in ${Math.round(failure.delayMs / 1000)}s at ${failure.nextAt}`);
+          wait = failure.delayMs;
+        }
+        // GY-437: between cycles — never mid-cycle — align this checkout with the verified deployed
+        // release. An alignment that re-executes the loop through its supervisor ends this process
+        // here: the supervisor starts the next one on the code the checkout now holds.
+        // GY-857: never while the checkout is dirty — the alignment would check out over work it
+        // holds and re-execute the loop onto code no commit names.
+        // GY-866: the guard reads the checkout every cycle, not only when an alignment is due.
+        // The executor restart can wait minutes on held claims and re-registration: the watchdog is
+        // fed on each poll so that wait is not mistaken for a hung loop (GY-916).
+        const keepAlive = watchdog.supervised ? async () => { try { await effects.notify?.('alive'); } catch (error) { log(`[graphyard-master] supervisor notification failed: ${message(error)}`); } } : undefined;
+        const selfUpgrade = effects.selfUpgrade;
+        await guard.betweenCycles(stopping || !selfUpgrade ? undefined : current => selfUpgrade(current, keepAlive), stopping ? undefined : keepAlive, { stopping });
+        // The keep-alive says the process is alive, which a failed cycle leaves true: the watchdog
+        // is for a cycle that hangs, and a thrown one has just proved it did not.
+        if (watchdog.supervised) { try { await effects.notify?.('alive'); } catch (error) { log(`[graphyard-master] supervisor notification failed: ${message(error)}`); } }
+        if (options.once || stopping) break;
+        // GY-1490: after a cycle that ran, the dispatcher wakes the sleep for work this loop acts on;
+        // a failed cycle's backoff is never cut short, so a fault is still not hammered.
+        if (wakeable && options.wake) {
+          const sleptAt = now(), reasons = await options.wake.sleep(wait, waking.signal);
+          if (reasons.length && !stopping) log(`[graphyard-master] woken ${Math.round(Math.max(0, wait - (now() - sleptAt)) / 1000)}s before the ${Math.round(wait / 1000)}s wait ended: ${reasons.join('; ')}`);
+        } else try { await delay(wait, undefined, { signal: waking.signal }); } catch { /* woken to stop */ }
       }
-      // GY-437: between cycles — never mid-cycle — align this checkout with the verified deployed
-      // release. An alignment that re-executes the loop through its supervisor ends this process
-      // here: the supervisor starts the next one on the code the checkout now holds.
-      // GY-857: never while the checkout is dirty — the alignment would check out over work it
-      // holds and re-execute the loop onto code no commit names.
-      // GY-866: the guard reads the checkout every cycle, not only when an alignment is due.
-      // The executor restart can wait minutes on held claims and re-registration: the watchdog is
-      // fed on each poll so that wait is not mistaken for a hung loop (GY-916).
-      const keepAlive = watchdog.supervised ? async () => { try { await effects.notify?.('alive'); } catch (error) { log(`[graphyard-master] supervisor notification failed: ${message(error)}`); } } : undefined;
-      const selfUpgrade = effects.selfUpgrade;
-      await guard.betweenCycles(stopping || !selfUpgrade ? undefined : current => selfUpgrade(current, keepAlive), stopping ? undefined : keepAlive, { stopping });
-      // The keep-alive says the process is alive, which a failed cycle leaves true: the watchdog
-      // is for a cycle that hangs, and a thrown one has just proved it did not.
-      if (watchdog.supervised) { try { await effects.notify?.('alive'); } catch (error) { log(`[graphyard-master] supervisor notification failed: ${message(error)}`); } }
-      if (options.once || stopping) break;
-      // GY-1490: after a cycle that ran, the dispatcher wakes the sleep for work this loop acts on;
-      // a failed cycle's backoff is never cut short, so a fault is still not hammered.
-      if (wakeable && options.wake) {
-        const sleptAt = now(), reasons = await options.wake.sleep(wait, waking.signal);
-        if (reasons.length && !stopping) log(`[graphyard-master] woken ${Math.round(Math.max(0, wait - (now() - sleptAt)) / 1000)}s before the ${Math.round(wait / 1000)}s wait ended: ${reasons.join('; ')}`);
-      } else try { await delay(wait, undefined, { signal: waking.signal }); } catch { /* woken to stop */ }
-    } while (!stopping);
-  } finally {
-    // Launches still in flight are let finish, so none is left `started` on the cursor, and what
-    // they did is logged here since no next cycle will report it.
-    if (launcher.pending) log(`[graphyard-master] waiting for ${launcher.pending} launch(es) in flight before stopping`);
-    await launcher.idle();
-    // A pipeline-doctor run in flight is cancelled and its outcome recorded before the lock is released (GY-711).
-    await stopDoctorRuns();
-    for (const action of launcher.drain()) log(`[graphyard-master] launch ${action.kind} ${action.state}: ${action.detail}`);
-    // GY-866: the scratch checkout outlives the loop: research runs detached into it keep working
-    // and the next loop adopts them from it.
-    for (const signal of signals) host.off(signal, stop);
-    host.off('unhandledRejection', onRejection); host.off('uncaughtException', onException);
-    // Headless runs are detached (GY-453): the loop stops watching them and sends none of them a
-    // signal, so a planned restart takes no run's attempt; the next loop adopts them.
-    const left = detachRuns();
-    log(`[graphyard-master] stopping: left ${left} headless run(s) running, detached, for the next loop to adopt`);
-    state.lock = null;
-    await effects.persist(state).catch(() => {});
+    } finally {
+      // Launches still in flight are let finish, so none is left `started` on the cursor, and what
+      // they did is logged here since no next cycle will report it.
+      if (launcher.pending) log(`[graphyard-master] waiting for ${launcher.pending} launch(es) in flight before stopping`);
+      await launcher.idle();
+      // A pipeline-doctor run in flight is cancelled and its outcome recorded before the lock is released (GY-711).
+      await stopDoctorRuns();
+      for (const action of launcher.drain()) log(`[graphyard-master] launch ${action.kind} ${action.state}: ${action.detail}`);
+      // GY-866: the scratch checkout outlives the loop: research runs detached into it keep working
+      // and the next loop adopts them from it.
+      unlisten();
+      host.off('unhandledRejection', onRejection); host.off('uncaughtException', onException);
+      // Headless runs are detached (GY-453): the loop stops watching them and sends none of them a
+      // signal, so a planned restart takes no run's attempt; the next loop adopts them.
+      const left = detachRuns();
+      log(`[graphyard-master] stopping: left ${left} headless run(s) running, detached, for the next loop to adopt`);
+      state.lock = null;
+      await effects.persist(state).catch(() => {});
+    }
+    return { cycles, failed, stopped: stopping };
+  } catch (error) {
+    // A startup that failed (another loop's lock, an unwritable cursor) leaves no listener behind.
+    unlisten();
+    throw error;
   }
-  return { cycles, failed, stopped: stopping };
 }
 
 const escalationKey = 'escalation:dirty-checkout';

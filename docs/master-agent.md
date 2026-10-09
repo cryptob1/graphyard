@@ -7,7 +7,7 @@ The master (`coordinator`) routes and administers GitHub unasked, never implemen
 
 Keep cycling: `master status`; `master run` dispatches (`schedule.order`); merge gate-passing candidates; rework findings; deployment verification (`master verify-deployment GY-N`, [refusals](operations-reference.md#perpetual-master-loop)); Close finished agent sessions. Stop only when every in-scope item is Done or has a genuinely external blocker recorded in Graphyard, and every merge is verified against the exact deployed release or deployment-blocked. Ordinary review findings, rework, idle workers, and proof setup are not stopping conditions. `controlPlane.production`: main ahead of production.
 
-`master run` is unit `graphyard-master.service` ([supervision](onboarding.md#the-loop-must-be-supervised)); on `daemon.liveness` `stalled`/`absent`: `systemctl --user restart graphyard-master`, never from a [dirty or non-forward checkout](master-agent-sessions.md#the-coordinator-checkout-is-confined-at-the-os-level).
+`master run` is [unit](onboarding.md#the-loop-must-be-supervised) `graphyard-master.service`; on `daemon.liveness` `stalled`/`absent`, `master restart` runs `systemctl --user restart graphyard-master.service`, never from [dirty/non-forward checkouts](master-agent-sessions.md#the-coordinator-checkout-is-confined-at-the-os-level).
 
 **Cycle cadence.** The loop sleeps `run.intervalSeconds` (≤30 s when work is actionable); the dispatcher tick wakes it early, once per new subject, ≥`run.dispatchIntervalSeconds` after the cycle.
 

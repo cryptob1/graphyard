@@ -9,7 +9,7 @@ Paths: src/master/**, src/master.ts, src/reviewer.ts
 
 ## Drive
 
-`node bin/graphyard.mjs master status` reads the loop's view; launches are exercised in tests with injected preparers, probes and Herdr runners, never real panes. Restart a running loop with systemctl, not `master restart`.
+`node bin/graphyard.mjs master status` reads the loop's view; launches are exercised in tests with injected preparers, probes and Herdr runners, never real panes. Restart a running loop with `master restart`: with this install's unit (rooted here, its effective ExecStart running `master run`) up, stopping or restart-queued it restarts through `systemctl --user restart` of that unit, never a second, unsupervised loop.
 
 ## Invariants
 
