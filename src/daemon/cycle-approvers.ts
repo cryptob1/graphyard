@@ -352,17 +352,18 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
   /**
    * GY-1612. Whether a relaunch whose last launch did not stand adopts the session already listed under the decision's approver name —
    * a `master approver` launch, or the pane of a launch that failed after it was made — rather than replacing it. Only a launch record
-   * naming that session's own pane judges it (GY-1604): one its own record shows already stalled past its start bound is replaced, as
-   * the launcher replaces it (GY-1598); one with no record of its own is adopted and dated from now, the loop's first sight of it.
+   * naming that session's own pane judges it (GY-1604): one its own record shows never started past its start bound is replaced, as
+   * the launcher replaces it (GY-1598); any session that has started is adopted, since the launcher refuses to replace it, and one with
+   * no record of its own is adopted and dated from now, the loop's first sight of it.
    */
   const adoptable = async (item: Work, watch: ApprovalWatch) => {
     const name = approverSessionName(item, watch.decision), seen = await sessions();
     const agent = seen.available ? seen.agents.find(candidate => candidate.name === name) : undefined;
     if (!agent?.pane_id) return false;
     const own = boundLaunch(await effects.approverLaunches?.().catch(() => []) ?? [], agent);
-    if (!own) return true;
-    const candidate = { ...watch, agentName: name, pane: agent.pane_id, launchedAt: own.launchedAt }, judged = { state: 'requested' };
-    return approvalStep(candidate, judged, seen, clock, await stallInputs(candidate, judged, seen)).step === 'wait';
+    // The launcher's own never-started predicate decides, not the watch's step: a session that has started (working past the judge
+    // bound, blocked) is one the launcher refuses to replace, so only adopting it lets supervision reach it.
+    return !own || !approverStallVerdict(agent, own.launchedAt, launchStartMs(config), clock).close;
   };
   const actOnStep = async (item: Work, watch: ApprovalWatch, step: ApprovalStep): Promise<'wait' | 'rerequest' | 'done'> => {
     const base = `approver:${watch.decision}`;

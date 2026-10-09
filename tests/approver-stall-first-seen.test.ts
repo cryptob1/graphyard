@@ -147,4 +147,12 @@ test('unit:approver-stall-first-seen — a loop watch whose last launch failed a
   await stalled.supervisor.actOnStep(work, replaced, relaunch);
   assert.deepEqual(launches, ['launched'], 'a session its own record shows stalled is replaced');
   assert.deepEqual([replaced.pane, replaced.account, replaced.session], ['pane-launched', null, null], 'and never adopted on its record');
+  // A session that has started — blocked at a question, or working long past its record's bounds — is one the launcher refuses to
+  // replace: it is adopted on its own record, so supervision reaches it, instead of a relaunch that fails every cycle.
+  for (const status of ['blocked', 'working']) {
+    const started = supervise([{ ...listed, agent_status: status }], { pane: 'pane-listed', ageMs: bound * 20 }), kept = failed();
+    assert.equal(await started.supervisor.actOnStep(work, kept, relaunch), 'done');
+    assert.deepEqual(launches, ['launched'], `a ${status} session is never replaced`);
+    assert.deepEqual([kept.agentName, kept.pane, kept.session], [name, 'pane-listed', 'registry-recorded'], `a ${status} session is adopted on its own record`);
+  }
 });
