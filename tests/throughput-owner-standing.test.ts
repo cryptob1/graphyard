@@ -334,7 +334,8 @@ test('integration:throughput-escalation-answerable — an escalated claim-missed
   const { throughputOwnerAnswered, throughputOwnerClosure, throughputStatus } = await import('../src/throughput.js');
   const directory = await temporaryDirectory('throughput-escalation-answerable');
   try {
-    const clock = { now: base + 3 * 24 * 60 * minute };
+    // Two days after the deliveries, so the hours of cycles below stay inside the trailing 72-hour window (GY-1596).
+    const clock = { now: base + 2 * 24 * 60 * minute };
     const owner = openOwner('GY-1471');
     const work: Work[] = [...accumulated(staleRework(10, null)), owner];
     const { master, state, effects, filed, closed } = await convergenceLoop(directory, work, clock);

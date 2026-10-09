@@ -29,11 +29,11 @@ One stateless container, Postgres: `node "$GRAPHYARD_CLI" install --provider rai
 
 ### Production deployment observation
 
-A merge unserved five minutes after new `GRAPHYARD_BUILD_SHA` is `delivery.deployment-incident`; before then, or mid-deploy, `production` shows `aheadBy`, `rollingOut: true`, no attention. Deployments: Railway's API (`RAILWAY_API_TOKEN`/`RAILWAY_TOKEN`), else GitHub deployments under [production environment name](#production-environment-name); failures name their log URL. A fresh `master verify-deployment` observation (`servingSource: endpoint`) outranks a lagging list; the build's `/healthz` commit (`servingSource: build`) outranks both. Probe: `master init --deployment-url https://YOUR-DOMAIN/healthz --deployment-sha-field commit`. While nothing pends, the loop reuses its last verified observation `run.deploymentReuseMinutes` (15; `0` every cycle).
+A merge unserved five minutes after new `GRAPHYARD_BUILD_SHA` is `delivery.deployment-incident`; before then, or mid-deploy, `production` shows `aheadBy`, `rollingOut: true`, no attention. Deployments: Railway's API (`RAILWAY_API_TOKEN`/`RAILWAY_TOKEN`), else GitHub deployments under [production environment name](#production-environment-name); failures link logs. A fresh `master verify-deployment` observation (`servingSource: endpoint`) outranks a lagging list; the build's `/healthz` commit (`servingSource: build`) outranks both. Probe: `master init --deployment-url https://YOUR-DOMAIN/healthz --deployment-sha-field commit`. While nothing pends, the loop reuses its verified observation `run.deploymentReuseMinutes` (15; `0` every cycle).
 
-Release lag and the `loaded-revision` [resource](operations-reference.md#control-plane-resources) skip deliveries awaiting [promotion](delivery.md). Self-upgrades wait until production serves their target; `release-lagged`/`upgrade:held` name both commits; `.graphyard/held-cli.json` pins `bin/graphyard.mjs`, executors and restarted loops to the served release.
+Release lag and `loaded-revision` [resource](operations-reference.md#control-plane-resources) skip deliveries awaiting [promotion](delivery.md). Self-upgrades await production serving their target; `release-lagged`/`upgrade:held` name both commits; `.graphyard/held-cli.json` pins `bin/graphyard.mjs`, executors, restarted loops to the served release.
 
-Post-deploy the loop records throughput (`.graphyard/measurements/throughput`, `scripts/measure-throughput.mjs --record`) without operator-touched deliveries or grant-refused superseded idle, charging idle-but-actionable time from the window start; ≥20 all excluded, or ≥10 missing 48h+, escalates once/release (`escalation:throughput:GY-N:REV`).
+Post-deploy the loop records throughput (`.graphyard/measurements/throughput`, `scripts/measure-throughput.mjs --record`), judging the serving release over deliveries merged in the trailing 72 hours (never pre-GY-87) minus operator-touched ones, grant-refused superseded idle, idle charged from window start; ≥20 all excluded, or ≥10 missing 48h+, escalates once/release (`escalation:throughput:GY-N:REV`).
 
 ### Deployment incident
 
@@ -41,15 +41,15 @@ Railway deploys `release/production` within a minute. `/healthz` `commit` at tip
 
 #### Production environment name
 
-Railway reports `<project> / production`. Startup takes `production.environment` (run field `productionEnvironment`), else `GRAPHYARD_PRODUCTION_ENVIRONMENT` (`.railway/railway.ts`), else `production`; applies at restart. Check: startup line `production observation via GitHub deployments to NAME` or `production.providerDescription`.
+Railway reports `<project> / production`. Startup takes `production.environment` (run `productionEnvironment`), else `GRAPHYARD_PRODUCTION_ENVIRONMENT` (`.railway/railway.ts`), else `production`; applies at restart. Check: startup line `production observation via GitHub deployments to NAME` or `production.providerDescription`.
 
 ### Webhook delivery
 
-Hosted only (compose/local poll, no webhook): no `webhooks.lastDeliveryAt` an hour with a pull request open → webhook broken. `webhooks.settingsUrl` → Advanced deliveries: none → inactive; connection error/404 → URL ≠ `https://YOUR-HOST/api/github/webhook`; 401 → secret ≠ `GITHUB_WEBHOOK_SECRET`. Fix, redeliver; re-check after host/secret redeploys.
+Hosted only (compose/local poll, no webhook): no `webhooks.lastDeliveryAt` an hour with a PR open → webhook broken. `webhooks.settingsUrl` → Advanced deliveries: none → inactive; connection error/404 → URL ≠ `https://YOUR-HOST/api/github/webhook`; 401 → secret ≠ `GITHUB_WEBHOOK_SECRET`. Fix, redeliver; re-check after redeploys.
 
 ## Backup, upgrade, rollback
 
-**Backup:** `graphyard db backup ./graphyard.json` (with `DATABASE_URL`), `graphyard db verify FILE`; `graphyard db fence` before move (`--release` undoes). **Upgrade:** back up, deploy, check `/healthz` `commit`, run any [App-permission migration](install.md#upgrading-an-existing-installation); **rollback** only to a same-schema image. **Restore:** `graphyard db migrate` empty database, `graphyard db restore FILE`.
+**Backup:** `graphyard db backup ./graphyard.json` (with `DATABASE_URL`), `graphyard db verify FILE`; `graphyard db fence` before move (`--release` undoes). **Upgrade:** back up, deploy, check `/healthz` `commit`, run [App-permission migrations](install.md#upgrading-an-existing-installation); **rollback** only to same-schema images. **Restore:** `graphyard db migrate` empty database, `graphyard db restore FILE`.
 
 ## Manual fallback
 
