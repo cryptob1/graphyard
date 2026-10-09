@@ -256,4 +256,9 @@ test('unit:repeated-limit-launch-holds-account — an item whose two consecutive
   assert.equal(await holdRepeatedLimitAccount(config, elsewhere), null);
   // Nor does a repeat older than the window.
   assert.equal(await holdRepeatedLimitAccount(config, work, Date.now() + 3 * 3_600_000), null);
+  // Nor one whose last notice named a reset that has passed, though the notice is inside the window:
+  // the account has recovered, and holding it again would keep work off it for another assumed hour.
+  const recovered = { ...work, capacity: { ...work.capacity!, exhaustions: work.capacity!.exhaustions.map(entry => ({ ...entry, resetsAt: new Date(Date.now() - 60_000).toISOString() })) } };
+  assert.equal(await holdRepeatedLimitAccount(config, recovered), null);
+  assert.equal((await observedExhaustions(config))['claude-b'], undefined, 'no hold was recreated after the reset');
 });

@@ -33,12 +33,15 @@ export const repeatedLimitLaunches = 2;
 /**
  * The account an item's latest worker launches each ended on, when the last `repeatedLimitLaunches`
  * of its quota exhaustions all name it and the latest is within `repeatedLimitWindowMs`. An attempt
- * interrupted for another cause ends the run, as does one on no named account.
+ * interrupted for another cause ends the run, as does one on no named account. A repeat whose last
+ * notice named a reset that has since passed is over: the account has recovered, and only a new
+ * notice after that reset starts another.
  */
 export function repeatedLimitAccount(work: Pick<Work, 'capacity'>, now = Date.now()): { account: string; records: ExhaustionRecord[] } | null {
   const worker = (work.capacity?.exhaustions ?? []).filter(entry => entry.role === 'worker');
   const last = worker.at(-1);
   if (!last?.account || (last.cause ?? 'quota') !== 'quota' || now - Date.parse(last.at) > repeatedLimitWindowMs) return null;
+  if (last.resetsAt && Date.parse(last.resetsAt) <= now) return null;
   const records: ExhaustionRecord[] = [];
   for (const entry of [...worker].reverse()) {
     if (entry.account !== last.account || (entry.cause ?? 'quota') !== 'quota') break;
