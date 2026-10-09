@@ -349,19 +349,22 @@ export const failureDetail = (report: E2eReport) => {
  * the cases after it are unrun. Only the release verdict's blocking cases — required cases that
  * failed or were flaky — fail the suite; optional cases run and are recorded but never fail it
  * (GY-1378). The detail names each blocking case and step, then the unrun cases apart. A managed
- * repository's candidate (GY-1535, release-candidate.ts projectCaseSuite) selects every required
- * case beside the uat ones.
+ * repository's candidate (GY-1535, release-project.ts projectCaseSuite) selects every required
+ * case beside the uat ones and runs every one of them (`runAll`): a failing required case still
+ * fails the suite, but never leaves a later required case unrun.
  */
 export const releaseRetries = 1;
 export const e2eSuite = (cases: readonly CaseFile[], token: string, options: { fetcher?: typeof fetch; launcher?: E2eLauncher; stepTimeoutMs?: number; root?: string; report?: (report: E2eReport) => void | Promise<void>;
   /** Which cases run: those targeting uat by default; a managed repository's candidate (GY-1535) runs every required case too. */
-  select?: (entry: CaseFile) => boolean } = {}) => ({
+  select?: (entry: CaseFile) => boolean;
+  /** Run every selected case even after a required one fails, so each records its own result (GY-1535). */
+  runAll?: boolean } = {}) => ({
   name: 'e2e',
   run: async (url: string, candidate: { id: string } | null) => {
     const selected = cases.filter(options.select ?? (entry => entry.definition.target === 'uat'));
     if (!selected.length) return { name: 'e2e', passed: false, detail: options.select ? 'no required or uat E2E case is in the checkout, so the suite exercised nothing' : 'no E2E case targets uat, so the suite exercised nothing' };
     const report = await runCases(selected, { url, token, environment: 'uat', runId: candidate ? `rc-${candidate.id}` : undefined, fetcher: options.fetcher, launcher: options.launcher, stepTimeoutMs: options.stepTimeoutMs,
-      root: options.root, retries: releaseRetries, stopOnRequiredFailure: true });
+      root: options.root, retries: releaseRetries, stopOnRequiredFailure: !options.runAll });
     await options.report?.(report);
     const verdict = releaseVerdict(report), detail = failureDetail(report);
     const executed = report.cases.length - verdict.unrun.length;

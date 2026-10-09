@@ -5,13 +5,14 @@ import { join } from 'node:path';
 import { contractFile, loadCases, loadContract } from './e2e/case.js';
 import { e2eSuite, type E2eLauncher, type E2eReport } from './e2e/runner.js';
 import { releaseHolds } from './release-holds.js';
-import { findCandidate, readLedger, serveStaticSite, syncLedger, validateAndRecord, type Git, type StaticUat, type Suite } from './release-candidate.js';
+import { findCandidate, readLedgerAsync, serveStaticSite, syncLedgerAsync, validateAndRecord, type AnyGit, type StaticUat, type Suite } from './release-candidate.js';
 
 /**
  * GY-1535: a managed repository's own cases as the candidate's `e2e` suite — every required case
  * and every case targeting uat in the candidate checkout `root`, run against the UAT deployment
- * through src/e2e/runner.ts's release suite (one retry, stopping at the first required failure), so
- * a failing required case fails the candidate. `report` receives the run's report, from which the
+ * through src/e2e/runner.ts's release suite (one retry each), every one of them run even after a
+ * required case fails, so a failing required case fails the candidate and every case records its own
+ * result. `report` receives the run's report, from which the
  * candidate record names each case's result.
  */
 export function projectCaseSuite(root: string, token: string, options: { fetcher?: typeof fetch; launcher?: E2eLauncher; stepTimeoutMs?: number;
@@ -20,7 +21,7 @@ export function projectCaseSuite(root: string, token: string, options: { fetcher
     name: 'e2e',
     run: async (url, candidate) => {
       const suite = e2eSuite(await loadCases(root), token, { fetcher: options.fetcher, launcher: options.launcher, stepTimeoutMs: options.stepTimeoutMs, root, report: options.report,
-        select: entry => entry.definition.required || entry.definition.target === 'uat' });
+        select: entry => entry.definition.required || entry.definition.target === 'uat', runAll: true });
       return suite.run(url, candidate);
     },
   };
@@ -37,11 +38,12 @@ export type ProjectUat = { url: string } | { static: { directory: string; build?
  * site's UAT is `serveStaticSite` over its build output, built first when `build` is named; a
  * build that fails fails the candidate as its own `build` suite.
  */
-export async function validateProjectCandidate(git: Git, id: string, options: { checkout: string; uat: ProjectUat; token: string; base: string; push: boolean; timeoutMs: number;
+export async function validateProjectCandidate(sourceGit: AnyGit, id: string, options: { checkout: string; uat: ProjectUat; token: string; base: string; push: boolean; timeoutMs: number;
   file?: (item: object, requestId: string) => Promise<string>; fetcher?: typeof fetch; launcher?: E2eLauncher; stepTimeoutMs?: number; now?: () => Date;
   shell?: (command: string, cwd: string) => Promise<{ ok: boolean; output: string }> }) {
-  syncLedger(git, options.base);
-  const candidate = findCandidate(readLedger(git), id);
+  const git = async (args: string[]) => await sourceGit(args);
+  await syncLedgerAsync(git, options.base);
+  const candidate = findCandidate(await readLedgerAsync(git), id);
   let report: E2eReport | null = null;
   const suites: Suite[] = [];
   let served: StaticUat | null = null, url: string;

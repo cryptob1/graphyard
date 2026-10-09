@@ -1,9 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { caseDirectory, caseId, caseSchema, contractFile, type ReleaseContract } from '../e2e/case.js';
-import { classifyRisk, sensitiveReason, type RiskVerdict } from './risk-class.js';
 import { applyPlanCommand, isPlanCommand, planCommandSchemas, planNext, type GoalPlan } from './goal-plan.js';
 import { demand } from './refusal.js';
+import { acceptanceName, acceptedNext } from './goal-acceptance.js';
+export { acceptanceChangeRisk, acceptanceChangeRule, acceptanceName } from './goal-acceptance.js';
 import type { Observation, Principal, ScopeFile, Work } from './work.js';
 
 /**
@@ -12,9 +13,9 @@ import type { Observation, Principal, ScopeFile, Work } from './work.js';
  * deployed. Before any code is written the `acceptance` role (src/daemon/acceptance.ts) turns it
  * into plain-language customer outcomes, one required uat E2E case per outcome (the GY-1351 case
  * format) and the release-contract bindings in e2e/contract.json, opened as one pull request linked
- * to the goal — or, under the control-plane merger (GY-1535), committed as one change the merge
- * writer lands, with no pull request (`acceptance.pr` null). An approver on another identity approves that draft — its author never can — and
- * once the pull request merges the goal's cases and bindings are protected: an implementation
+ * to the goal — or, under the control-plane merger (GY-1535), one change the merge writer lands
+ * (`acceptance.pr` null; src/model/goal-acceptance.ts). An approver on another identity approves
+ * that draft — its author never can — and once it merges the goal's cases and bindings are protected: an implementation
  * candidate that modifies or deletes one is refused at `complete`, and a change to one goes only
  * through an approved case change whose approver is neither its requester nor an implementer of
  * the item that asked. People who write the tests are not the people who write the code.
@@ -95,10 +96,7 @@ export interface CaseChange {
 export interface Goal extends GoalInput {
   id: string; key: string; stage: GoalStage; revision: number;
   recordedBy: string; recordedAt: string; updatedAt: string;
-  /**
-   * The acceptance role's draft: who wrote it, its pull request (null for a change the merge writer
-   * lands under the control-plane merger, GY-1535) at its head, and its outcomes with their cases.
-   */
+  /** The acceptance role's draft: its author, its pull request (null for a merge-writer change, GY-1535) at its head, and its outcomes with their cases. */
   acceptance: { author: string; pr: number | null; branch: string; head: string; draftedAt: string; outcomes: AcceptanceOutcome[] } | null;
   /** The approval binds the head it judged: the pull request merges only at that head. */
   approval: { by: string; at: string; reason: string; head: string } | null;
@@ -235,34 +233,12 @@ export function applyGoalCommand(goal: Goal, command: Exclude<GoalCommand, 'reco
   return next;
 }
 
-/** How a goal's acceptance is named: its pull request, or the merge-writer change at its head (GY-1535). */
-export const acceptanceName = (goal: Pick<Goal, 'acceptance'>) => goal.acceptance?.pr != null ? `acceptance pull request #${goal.acceptance.pr}` : `acceptance change ${goal.acceptance?.head.slice(0, 12) ?? '(none)'}`;
-
-/** The rule every acceptance change is sensitive by, whatever paths it touches: it is the goal's customer contract. */
-export const acceptanceChangeRule = 'customer acceptance: required cases and contract bindings';
-/**
- * The class of an acceptance change (GY-1535): always sensitive — it writes the required cases and
- * contract bindings every later item is judged by — so the approver identity's verdict on its exact
- * head is required before the merge writer lands it. Each path names the acceptance rule beside any
- * rule risk-class.ts itself matches.
- */
-export function acceptanceChangeRisk(paths: readonly string[]): RiskVerdict {
-  const verdict = classifyRisk(paths.map(path => ({ path })));
-  return { risk: 'sensitive', reasons: [...new Set([...verdict.reasons, ...paths.map(path => sensitiveReason(path, acceptanceChangeRule))])] };
-}
-
 /** Who acts next on a goal, and with which command; null once it is delivered. */
 export function goalNext(goal: Goal, now = Date.now()): { who: string; command: string } | null {
   if (goal.stage === 'acceptance-drafting' && (goal.drafts ?? 0) >= maxDraftRounds) return { who: `master: ${maxDraftRounds} acceptance drafts were refused or closed (last: ${goal.refusal?.reason ?? 'none recorded'}); the loop drafts no more`, command: `graphyard goal draft ${goal.key} DRAFT.json` };
   if (goal.stage === 'acceptance-drafting') return { who: 'acceptance role (the master loop launches it once its operator-agent and approver identities are provisioned)', command: `graphyard goal draft ${goal.key} DRAFT.json` };
   if (goal.stage === 'awaiting-approval') return { who: `an approver other than ${goal.acceptance!.author}`, command: `graphyard goal approve ${goal.key} -- REASON (or goal refuse)` };
-  if (goal.stage === 'accepted' && goal.approval && now - Date.parse(goal.approval.at) > acceptanceStuckMs)
-    return goal.acceptance!.pr === null
-      ? { who: `master: ${acceptanceName(goal)} was approved ${goal.approval.at} and the merge writer has not landed it; read the loop's acceptance action for why, then close it (the loop drafts again) or let the writer land it`, command: `graphyard goal closed ${goal.key} change -- REASON` }
-      : { who: `master: acceptance pull request #${goal.acceptance!.pr} was approved ${goal.approval.at} and has not merged; read why on the pull request, then close it (the loop drafts again) or land it`, command: `graphyard goal closed ${goal.key} ${goal.acceptance!.pr} -- REASON` };
-  if (goal.stage === 'accepted') return goal.acceptance!.pr === null
-    ? { who: `the loop: the merge writer merges ${acceptanceName(goal)} onto the base at its approved head and records it merged`, command: `graphyard goal land ${goal.key}` }
-    : { who: `the loop: Graphyard publishes its gate verdicts on acceptance pull request #${goal.acceptance!.pr} and merges it at its approved head, once its required checks pass`, command: `graphyard goal land ${goal.key}` };
+  if (goal.stage === 'accepted') return acceptedNext(goal, Boolean(goal.approval && now - Date.parse(goal.approval.at) > acceptanceStuckMs));
   const planning = planNext(goal);
   if (planning) return planning;
   if (goal.stage === 'delivering') return { who: 'master: create and deliver the implementation items, then name them once every one has merged', command: `graphyard goal deliver ${goal.key} GY-N... -- REASON` };

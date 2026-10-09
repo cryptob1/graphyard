@@ -1,6 +1,6 @@
 import { releaseVerdict, type E2eReport } from './e2e/runner.js';
 import type { ReleaseContract } from './e2e/case.js';
-import { candidateId, readRecords, writeRecord, type E2eCaseRecord, type E2eRecord, type FlakyAcceptance, type Git, type HoldOutcome, type ReleaseCandidate, type UatRecord } from './release-candidate.js';
+import { candidateId, readRecordsAsync, writeRecordAsync, type AnyGit, type E2eCaseRecord, type E2eRecord, type FlakyAcceptance, type HoldOutcome, type ReleaseCandidate, type UatRecord } from './release-candidate.js';
 
 /**
  * Release holds (GY-1378): one hold per customer risk. The release contract (`e2e/contract.json`)
@@ -132,10 +132,11 @@ export function holdItem(record: HoldRecord, candidate: ReleaseCandidate) {
  * failure is answered by the holds only when every blocking case landed in one; otherwise the
  * candidate's follow-up still names it, as it names every failure no case explains.
  */
-export const releaseHolds = (git: Git, options: { contract: ReleaseContract | null; report: () => Promise<E2eReport | null>; push: boolean; now?: () => Date;
+export const releaseHolds = (sourceGit: AnyGit, options: { contract: ReleaseContract | null; report: () => Promise<E2eReport | null>; push: boolean; now?: () => Date;
   file?: (item: ReturnType<typeof holdItem>, requestId: string) => Promise<string> }) => async (candidate: ReleaseCandidate, record: UatRecord): Promise<HoldOutcome> => {
+  const git = async (args: string[]) => await sourceGit(args);
   const e2e = e2eRecord(await options.report(), candidate);
-  const planned = options.contract ? assessHolds(options.contract, candidate, { deployedSha: record.deployedSha, e2e }, foldHolds(readRecords<HoldRecord>(git, holdTagPrefix)), (options.now ?? (() => new Date()))().toISOString()) : [];
+  const planned = options.contract ? assessHolds(options.contract, candidate, { deployedSha: record.deployedSha, e2e }, foldHolds(await readRecordsAsync<HoldRecord>(git, holdTagPrefix)), (options.now ?? (() => new Date()))().toISOString()) : [];
   let filingError: string | null = null;
   for (const entry of planned.filter(entry => entry.kind === 'open' && options.file)) {
     try { entry.item = await options.file!(holdItem(entry, candidate), holdRequestId(entry.outcome, candidate.id)); }
@@ -144,7 +145,7 @@ export const releaseHolds = (git: Git, options: { contract: ReleaseContract | nu
   const held = new Set(planned.filter(entry => entry.kind !== 'clear').flatMap(entry => (entry.cases ?? []).map(held => held.case)));
   return { e2e, holds: planned.map(entry => ({ kind: entry.kind as 'open' | 'attach' | 'clear', outcome: entry.outcome, hold: entry.hold, item: entry.item ?? null })),
     covered: e2e?.blocking.length && e2e.blocking.every(id => held.has(id)) ? ['e2e'] : [], filingError,
-    write: () => { for (const entry of planned) writeRecord(git, holdTag(entry), candidate.sha, entry, options.push); } };
+    write: async () => { for (const entry of planned) await writeRecordAsync(git, holdTag(entry), candidate.sha, entry, options.push); } };
 };
 
 /** A decision as `GET /api/work/ID/decisions` lists it. */

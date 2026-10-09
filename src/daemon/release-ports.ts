@@ -1,5 +1,4 @@
 // Concern: the local release ports of control-plane mode (GY-1526) — src/release-candidate.ts run from the coordinator checkout, pushes through the deploy key, the revert through the merge writer's steps.
-import { execFileSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import type { ChildRun } from '../child-runner.js';
@@ -13,7 +12,7 @@ import { deployKeySshCommand, firstParentHolds, pushArgs, pushEnvironment, runMe
 import { trialAuthor } from '../merge-writer/trial.js';
 import {
   awaitServing, cutAsync, deployToUatAsync, promoteAsync, readLedgerAsync, syncLedgerAsync, uatValidationWindowMs,
-  findCandidate, readLedger, syncLedger, type AsyncGit, type Git, type ReleaseCandidate, type UatRecord,
+  findCandidate, type AsyncGit, type ReleaseCandidate, type UatRecord,
 } from '../release-candidate.js';
 import { validateProjectCandidate } from '../release-project.js';
 import { revertCandidateItem, type CandidateItemDelta, type RevertContract, type RevertPorts, type RevertRecordEvent } from '../release-revert.js';
@@ -120,14 +119,13 @@ export function localReleasePorts(config: Pick<MasterConfig, 'baseBranch' | 'run
     record: options.record,
   };
   // GY-1535: a managed repository's candidate, validated in-process from a checkout of its exact SHA.
-  const ledgerGit: Git = args => execFileSync('git', args, { cwd: root, env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024 });
   const validateManaged = async (id: string): Promise<LocalValidation> => {
-    syncLedger(ledgerGit, base);
-    const candidate = findCandidate(readLedger(ledgerGit), id);
+    await syncLedgerAsync(git, base);
+    const candidate = findCandidate(await readLedgerAsync(git), id);
     const checkout = mkdtempSync(join(options.base, 'candidate-cases-'));
     try {
       await git(['worktree', 'add', '--detach', checkout, candidate.sha]);
-      const result = await validateProjectCandidate(ledgerGit, id, { checkout, base, push: true, timeoutMs: localServeWaitSeconds * 1000, file: options.file,
+      const result = await validateProjectCandidate(git, id, { checkout, base, push: true, timeoutMs: localServeWaitSeconds * 1000, file: options.file,
         token: environment[localReleaseVariables.uatToken] ?? '',
         uat: uatUrl ? { url: uatUrl } : { static: { directory: uatStatic!, build: environment[localReleaseVariables.uatBuild] ?? null } } });
       return { record: result.record, followUp: result.followUp ?? null };

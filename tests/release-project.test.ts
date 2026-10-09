@@ -96,15 +96,15 @@ test('unit:candidate-runs-project-cases — every required case of a managed rep
     return { candidate, run };
   };
 
-  // 1. Level two is missing: its required case fails, so the candidate fails and the cases after it are unrun.
+  // 1. Level two is missing: its required case fails, so the candidate fails; every required case after it still runs and records its own result.
   const first = await validateTip('one');
   assert.equal(first.run.record.result, 'failed', JSON.stringify(first.run.record.suites));
   assert.equal(first.run.record.deployedSha, first.candidate.sha, 'the verdict is bound to the candidate the loopback UAT served');
   const e2e = first.run.record.e2e!;
   assert.ok(e2e, 'the record keeps the case verdicts');
   assert.equal(e2e.sha, first.candidate.sha);
-  assert.deepEqual(Object.fromEntries(e2e.cases.map(entry => [entry.case, entry.verdict])), { credits: 'passed', home: 'passed', 'level-two': 'failed', scores: 'unrun' },
-    'every required and uat case is named with its result; an optional non-uat case does not run');
+  assert.deepEqual(Object.fromEntries(e2e.cases.map(entry => [entry.case, entry.verdict])), { credits: 'passed', home: 'passed', 'level-two': 'failed', scores: 'passed' },
+    'every required and uat case runs and is named with its result, none left unrun by an earlier failure; an optional non-uat case does not run');
   assert.deepEqual(e2e.blocking, ['level-two']);
   assert.equal(e2e.cases.find(entry => entry.case === 'level-two')!.failingStep!.name, 'read /level-2.json');
   assert.deepEqual(failingRequiredCases(first.run.record).map(entry => entry.case), ['level-two'], 'the failing required case is what the related-item revert reads');

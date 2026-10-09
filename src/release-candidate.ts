@@ -246,6 +246,9 @@ export const servedRevision = (health: any): string | null => {
 export type Git = (args: string[]) => string;
 /** Async git the loop's local release ports use (GY-1526): every child goes through child-runner, never execFileSync. */
 export type AsyncGit = (args: string[]) => Promise<string>;
+/** Either flavour: `validateAndRecord` and the release holds run under the CLI's sync git and the loop's async one alike (GY-1535). */
+export type AnyGit = Git | AsyncGit;
+const awaited = (git: AnyGit): AsyncGit => async args => await git(args);
 export const gitIn = (cwd: string): Git => args => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024 });
 
 /** Every record under one tag prefix, newest first, read from annotated tag messages. */
@@ -256,7 +259,7 @@ export function readRecords<T>(git: Git, prefix: string): T[] {
     try { return [JSON.parse(body.trim()) as T]; } catch { return []; }
   });
 }
-async function readRecordsAsync<T>(git: AsyncGit, prefix: string): Promise<T[]> {
+export async function readRecordsAsync<T>(git: AsyncGit, prefix: string): Promise<T[]> {
   const out = await git(['for-each-ref', '--sort=-refname', '--format=%(refname:strip=2)%00%(contents)%00%00', `refs/tags/${prefix}`]);
   return out.split('\0\0').map(entry => entry.replace(/^\n/, '')).filter(Boolean).flatMap(entry => {
     const [, body] = entry.split('\0');
@@ -638,7 +641,7 @@ export async function deployToUatAsync(git: AsyncGit, id: string, base: string, 
  * to keep on the record, `covered` the suites whose failure the holds answer (no follow-up names
  * them), and `write` records the hold entries once the UAT record is written.
  */
-export interface HoldOutcome { e2e: E2eRecord | null; holds: NonNullable<UatRecord['holds']>; covered: string[]; filingError: string | null; write: () => void }
+export interface HoldOutcome { e2e: E2eRecord | null; holds: NonNullable<UatRecord['holds']>; covered: string[]; filingError: string | null; write: () => void | Promise<void> }
 
 /**
  * Validate a candidate on UAT and record the verdict once. A failure the release holds attribute to
@@ -646,11 +649,12 @@ export interface HoldOutcome { e2e: E2eRecord | null; holds: NonNullable<UatReco
  * follow-up, keyed by the candidate so a retry never files twice. Both are filed before the record
  * is written; a filing that fails still records the verdict, and `release follow-up` files it later.
  */
-export async function validateAndRecord(git: Git, id: string, url: string, suites: readonly Suite[], options: { base: string; push: boolean; timeoutMs: number;
+export async function validateAndRecord(sourceGit: AnyGit, id: string, url: string, suites: readonly Suite[], options: { base: string; push: boolean; timeoutMs: number;
   file?: (item: ReturnType<typeof followUpItem>, requestId: string) => Promise<string>; now?: () => Date; fetcher?: typeof fetch; sleep?: (ms: number) => Promise<void>;
   holds?: (candidate: ReleaseCandidate, record: UatRecord) => Promise<HoldOutcome> }) {
-  syncLedger(git, options.base);
-  const ledger = readLedger(git);
+  const git = awaited(sourceGit);
+  await syncLedgerAsync(git, options.base);
+  const ledger = await readLedgerAsync(git);
   const candidate = findCandidate(ledger, id);
   const existing = ledger.uat.find(record => record.id === candidate.id);
   if (existing) throw new Error(`Candidate ${candidate.id} was already validated on UAT (${existing.result} at ${existing.at}); cut a new candidate to validate again`);
@@ -662,8 +666,8 @@ export async function validateAndRecord(git: Git, id: string, url: string, suite
     try { record.followUp = await options.file(followUpItem(candidate, record, holds?.covered), followUpRequestId(candidate.id)); }
     catch (error) { filingError = error instanceof Error ? error.message : String(error); }
   }
-  writeRecord(git, `${uatTagPrefix}${candidate.id}`, candidate.sha, record, options.push);
-  holds?.write();
+  await writeRecordAsync(git, `${uatTagPrefix}${candidate.id}`, candidate.sha, record, options.push);
+  await holds?.write();
   return { record, followUp: record.result === 'failed' ? record.followUp ?? null : null, filingError };
 }
 

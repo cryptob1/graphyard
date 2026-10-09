@@ -43,6 +43,7 @@ import { clearPlans, plansSettled } from '../../src/daemon/planner.js';
 import { plannerWorld } from './soak-planner.js';
 import type { Goal, Landing } from '../../src/model/goal.js';
 import { recordLanding } from '../../src/server/routes/goals.js';
+import { controlPlaneAcceptance } from './soak-acceptance-writer.js';
 import { terminalDecisions } from '../../src/cli/decision-report.js';
 import { Launcher } from '../../src/daemon/cycle.js';
 import { wakeOwnObservation } from '../../src/master/base-break-refresh.js';
@@ -210,8 +211,8 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
    * day's clock. From `crashLoop.from` to `.to` slot 1 crashes half a minute after each start.
    */
   hostSupervision?: { managerDown: { from: number; to: number }; crashLoop: { from: number; to: number } };
-  /** GY-1417: record three goals and wire the acceptance role (acceptanceWorld below). */
-  acceptance?: boolean;
+  /** GY-1417: record three goals and wire the acceptance role (acceptanceWorld below); `control-plane` lands them through the merge writer (GY-1535, soak-acceptance-writer.ts). */
+  acceptance?: boolean | 'control-plane';
   /** GY-1418: with `acceptance`, also wire the planner role over the same goals (tests/helpers/soak-planner.ts). */
   planner?: boolean;
   /**
@@ -1349,7 +1350,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   const settings = diagnosticianSettings({ diagnostician: { invariantBoundMinutes: 30 } });
   const diagnosed: DiagnosisRun[] = [];
   clearDrafts(); clearPlans();
-  const acceptance = options.acceptance ? await acceptanceWorld(dayStart) : null;
+  const acceptance = options.acceptance ? await acceptanceWorld(dayStart, options.acceptance === 'control-plane' ? 'control-plane' : 'github') : null;
   const planner = acceptance && options.planner ? await plannerWorld(dayStart, acceptance.day.goals) : null;
   // GY-1092: for `diagnosisLimit` the provider refuses every run for its spent quota, naming no reset.
   const limited = () => !!options.diagnosisLimit && clock.now() - dayStart >= options.diagnosisLimit.from && clock.now() - dayStart < options.diagnosisLimit.to;
@@ -2917,7 +2918,7 @@ export const memoryDay = { memoryDip: { from: 0, until: 15 * minute } };
  * returns nothing and its first approved pull request conflicts with the base. The control plane's
  * land answers waiting until half an hour after it was first asked, then merged.
  */
-export async function acceptanceWorld(dayStart: number) {
+export async function acceptanceWorld(dayStart: number, merger: 'github' | 'control-plane' = 'github') {
   const day = {
     goals: {} as Record<string, string>, runs: [] as { goal: string; role: 'draft' | 'judge'; at: number }[], opens: [] as { goal: string; pr: number; revision: number; at: number }[],
     posts: [] as { goal: string; ok: boolean; at: number }[], reads: [] as { pr: number; at: number }[], closes: [] as number[], lands: [] as { pr: number; at: number }[],
@@ -2991,5 +2992,7 @@ export async function acceptanceWorld(dayStart: number) {
     close: async pr => { const pull = day.pulls.get(pr)!; if (pull.state === 'open') pull.state = 'closed'; day.closes.push(pr); },
     closed: (goal, pr, reason) => api(principals.operatorAgent, 'POST', `goals/${goal.key}/closed`, { pr, reason }, `acceptance:${goal.id}:${goal.revision}:closed`),
   };
-  return { day, effects };
+  if (merger === 'github') return { day: { ...day, writer: null, main: null }, effects };
+  const controlPlane = controlPlaneAcceptance(effects, named, dayStart);
+  return { day: { ...day, writer: controlPlane.writer, main: controlPlane.history }, effects: controlPlane.effects };
 }
