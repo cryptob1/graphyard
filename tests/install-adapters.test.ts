@@ -288,8 +288,25 @@ test('the SSH transport ends the key write with chown and refuses a remote user 
   );
 });
 
-test('a uid-1000 container reads the key a real transport wrote, through a real bind mount', { skip: skipWithoutDocker }, async () => {
+// The transport's chown fallback and the compose service both run alpine:3. A registry the
+// runner cannot reach (Docker Hub's token endpoint timing out on CI) is not the product's
+// fault, so the case skips only then; a pulled image runs the real bind-mount read unchanged.
+const registryUnreachable = /Client\.Timeout|i\/o timeout|TLS handshake timeout|connection (refused|reset)|no such host|network is unreachable|toomanyrequests|Service Unavailable|Gateway Time-?out/i;
+async function pullAlpine(docker: Transport): Promise<string | null> {
+  let stderr = '';
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const pulled = await docker.exec('docker', ['pull', '--quiet', 'alpine:3'], { allowFailure: true, timeout: 120_000 });
+    if (pulled.code === 0) return null;
+    stderr = pulled.stderr.trim();
+    if (!registryUnreachable.test(stderr)) throw new Error(`docker pull alpine:3 failed: ${stderr.slice(-400)}`);
+  }
+  return `the Docker registry is unreachable: ${stderr.slice(-200)}`;
+}
+
+test('a uid-1000 container reads the key a real transport wrote, through a real bind mount', { skip: skipWithoutDocker }, async t => {
   const docker = localTransport();
+  const unreachable = await pullAlpine(docker);
+  if (unreachable) { t.skip(unreachable); return; }
   const workdir = await temporaryDirectory('key-mount');
   try {
     const context: AdapterContext = {
