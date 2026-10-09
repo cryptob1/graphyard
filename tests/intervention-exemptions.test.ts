@@ -149,7 +149,7 @@ test('unit:intervention-exemptions-module — the fold consults one ordered list
   assert.deepEqual(interventionExemptions.map(entry => entry.name), [
     'approved-autoscope', 'successor-replan', 'audited-scope-widening', 'routed-scope-widening', 'unstarted-replan',
     'routine-rework-ground', 'lane-rework-ground', 'failed-check-round', 'loop-rework-round',
-    'direct-merge-window', 'loop-autosettle-in-bound', 'answered-off-ledger', 'undecided-scope-request', 'lease-loss-resolve', 'approved-decision-weakening',
+    'direct-merge-window', 'loop-autosettle-in-bound', 'answered-off-ledger', 'undecided-scope-request', 'lease-loss-resolve',
   ]);
   assert.ok(interventionExemptions.every(entry => typeof entry.exempts === 'function'), 'one predicate per rule');
   const fold = source('src/interventions.ts');
@@ -189,9 +189,6 @@ test('unit:intervention-exemptions-module — the fold consults one ordered list
     [{ at: 'open-ask', ask: { seq: 1, at: at(0), stage: 'build', kind: 'scope-request', blocked: 'x', paths: ['a'], trigger: 'refused-by-loop', sources: [] }, item }, null],
     [{ at: 'open-escalation', item, escalation: lost, now: at(60) }, 'lease-loss-resolve'],
     [{ at: 'open-escalation', item, escalation: { ...lost, at: at(30) }, now: at(60) }, null],
-    [{ at: 'escalation-resolved', details: { trigger: 'requirement-weakening', decision: 'd', escalation: { trigger: 'requirement-weakening', at: at(0), decision: 'd' } } }, 'approved-decision-weakening'],
-    [{ at: 'escalation-resolved', details: { trigger: 'requirement-weakening', decision: 'e', escalation: { trigger: 'requirement-weakening', at: at(0), decision: 'd' } } }, null],
-    [{ at: 'escalation-resolved', details: { trigger: 'requirement-weakening', decision: 'd', escalation: { trigger: 'requirement-weakening', at: at(0) } } }, null],
   ];
   for (const [moment, expected] of cases) assert.equal(exemption(moment), expected, JSON.stringify(moment));
   const routed = scopeDecisionReason('GY-1', { requestedBy: worker, reason: 'needs it', decision: { state: 'refused', reason: 'outside the rule', at: at(1), decidedBy: 'graphyard', waitedMs: 0, paths: ['src/b.ts'], requestedBy: worker, requestedAt: at(0) } }, [{ id: 'AC-1', text: 'It works' }], ['src/b.ts'], null);

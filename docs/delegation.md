@@ -27,4 +27,4 @@ Unresolved triggers refuse merging; replacements may claim. Explained lapses: `l
 - Explained `lease-loss`: reconciliation, or `admin` `resolve GY-N lease-loss --attestation blocked|stopped-worker "reason"`.
 - Superseded-epoch `lease-loss`: reconciliation; all attempts ended unfenced: after 5 min.
 - `security-concern`, `requirement-weakening`, `evidence-policy-conflict`, lead-raised `lease-loss`: master-requested two-party decision or declared human session (`sessionKind: "human"`).
-- `requirement-weakening` from an approved `requirements` decision: settled by that approval, citing its approver; no `scope` fault, no escalation [intervention](dashboard.md).
+- `requirement-weakening` from an approved `requirements` decision: settled by that approval, citing its approver; no `scope` fault.

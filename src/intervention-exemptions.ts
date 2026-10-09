@@ -34,9 +34,7 @@ export type ExemptionMoment =
   /** An ask still open past the last row, on the item as the current record holds it. */
   | { at: 'open-ask'; ask: Ask; item: Work }
   /** An escalation still standing on the item past the last row. */
-  | { at: 'open-escalation'; item: Work; escalation: Escalation; now: string }
-  /** An `escalation.resolved` row: the trigger, the escalation it resolved and the decision that resolved it. */
-  | { at: 'escalation-resolved'; details: Record<string, any> };
+  | { at: 'open-escalation'; item: Work; escalation: Escalation; now: string };
 
 /**
  * Whether an `autosettle` row is the loop's own settlement inside the settle bound: the loop marked
@@ -237,21 +235,11 @@ export const undecidedScopeRequest = rule('undecided-scope-request', moment => m
 export const leaseLossResolve = rule('lease-loss-resolve', moment => moment.at === 'open-escalation' && !!endedLeaseLoss(moment.item, moment.escalation)
   && Date.parse(moment.now) - Date.parse(moment.escalation.at) < leaseLossSettleMs);
 
-/**
- * GY-1570: a requirement-weakening an approved requirements decision raised (the engine stamps it
- * with that decision, GY-1347) and the approval of that same decision resolved (GY-1348) waited on
- * nobody: the two-party decision was the independent judgement, and the escalation is its audit
- * line, settled in the approval's own flow. One resolved by any other decision, or raised by a
- * writer no approved decision names, was somebody stepping in and stays a signal.
- */
-export const approvedDecisionWeakening = rule('approved-decision-weakening', moment => moment.at === 'escalation-resolved' && moment.details.trigger === 'requirement-weakening'
-  && typeof moment.details.decision === 'string' && !!moment.details.decision && isObject(moment.details.escalation) && moment.details.escalation.decision === moment.details.decision);
-
 /** Every exemption rule, in the order the fold consults them: the first that holds names the exemption. */
 export const interventionExemptions: readonly InterventionExemption[] = [
   approvedAutoscope, successorReplan, auditedScopeWidening, routedScopeWidening, unstartedReplan,
   routineReworkGround, laneReworkGround, failedCheckRound, loopReworkRound,
-  directMergeWindow, loopAutosettleInBound, answeredOffLedger, undecidedScopeRequest, leaseLossResolve, approvedDecisionWeakening,
+  directMergeWindow, loopAutosettleInBound, answeredOffLedger, undecidedScopeRequest, leaseLossResolve,
 ];
 
 /** The name of the first rule that exempts the moment, or null when it is a signal. */
