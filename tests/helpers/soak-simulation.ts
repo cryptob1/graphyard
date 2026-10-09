@@ -837,7 +837,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
       exitsAt: !idling && plan.exits.has(n) && attempt === 1 ? clock.now() + plan.exitAfterMs : null, dispatchAt: clock.now(), state: idling ? 'idling' : 'working', syncs: 0,
       scopeAt: !idling && plan.scoped.has(n) && attempt === 1 ? clock.now() + plan.scopeAfterMs : null, misreadAt: !idling && plan.misread.has(n) && attempt === 1 ? clock.now() + plan.misreadAfterMs : null, misread: false,
       // GY-1008: the blocked day's first attempts record their blocker; the repeating item's every attempt does.
-      blockAt: options.blockers && blockerPlan.classes[n] && (attempt === 1 || n === blockerPlan.repeating) ? clock.now() + blockerPlan.blockAfterMs : null,
+      blockAt: options.blockers && blockerPlan.classes[n] && (attempt === 1 || n === blockerPlan.repeating) ? clock.now() + (blockerPlan.blockAfter[n] ?? blockerPlan.blockAfterMs) : null,
       credentialAt: credentialBlocks ? clock.now() + 5 * minute : null, retryingAt: options.retrying?.worker === n && attempt === 1 ? clock.now() + 5 * minute : null,
       limitMenuAt: options.limitMenu?.worker === n && attempt === 1 ? clock.now() + 5 * minute : null, proseAt: options.limitMenu?.prose === n && attempt === 1 ? clock.now() + 5 * minute : null, settlementToken, files: sessionFiles, ...(bot ? { bot } : {}) });
     // A scope scenario asks the moment it holds the lease, as a worker does, and keeps working
@@ -941,6 +941,8 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
           decision = (await api(principals.operatorAgent, 'POST', `work/${current.id}/decide`, { action: 'requirements', input: decisionInput('requirements', current, { plannedFiles: [...current.plannedFiles, extraFile(n)] }), reason: `Soak: ${current.key} needs ${extraFile(n)}, requested by the master and put to no approver` })).id;
           blockerDecisions.set(session.key, decision!);
         }
+        // GY-1567 review: the session that hit its usage limit spent every worker account until the reset minute.
+        if (blockerPlan.classes[n] === 'runtime-exhaustion') for (const worker of workers) heldAccounts.set(`account-${worker.name}`, { resetsAt: new Date(dayStart + blockerPlan.accountResetAt).toISOString() });
         const blocked = await engine.execute(principal, 'blocked', session.work, { epoch: session.epoch, reason: blockerPlan.text(n, session.branch, decision)! }, id());
         blockerEvents.push({ key: session.key, epoch: session.epoch, elapsed: now - dayStart, lease: blocked.lease?.epoch ?? null });
         herdr.kill(session.pane);
@@ -1045,6 +1047,8 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   // GY-1567: githubstatus.com reports Git Operations down until the github-outage minute; every blocked
   // item's probe reads it through the loop's shared reader, and each real read is counted.
   const githubStatusReads: number[] = [];
+  // GY-1567 review: the account health each cycle reads once for dispatch, and every blocker probe the loop writes.
+  const credentialReads: number[] = [], blockerRecords: { key: string; class: string; elapsed: number; result: string; detail: string }[] = [];
   const githubStatus = sharedGithubStatus(async () => { githubStatusReads.push(clock.now() - dayStart); return clock.now() - dayStart < (blockerPlan.clearsAt['github-outage'] ?? 0) ? ['Git Operations (major_outage)'] : []; });
   const blockerDecisions = new Map<string, string>();
   const blockerActions: { elapsed: number; work: string | null; state: string; detail: string }[] = [];
@@ -1665,7 +1669,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
       apply: applyVerdict(String(owner.context.workId), String(owner.context.run)) }) }, { runner: headless.pi }) } : {}),
     panes: async () => ({ panes: herdr.paneList(), available: true }),
     recordSession,
-    credentials: async profiles => Object.fromEntries(profiles.map(profile => [profile.name, accountHeld(`account-${profile.name}`) ? { available: false, reason: `account-${profile.name} is held until ${heldAccounts.get(`account-${profile.name}`)!.resetsAt}` } : { available: true, reason: null }])),
+    credentials: async profiles => { credentialReads.push(clock.now() - dayStart); return Object.fromEntries(profiles.map(profile => [profile.name, accountHeld(`account-${profile.name}`) ? { available: false, reason: `account-${profile.name} is held until ${heldAccounts.get(`account-${profile.name}`)!.resetsAt}` } : { available: true, reason: null }])); },
     snapshot, dispatch, requestProof, approver, docsSync, docsSyncSettled: synced => releaseDocsSyncHarness(docsSyncRoot, synced), doctor, containment, settleContainment, unblock,
     closeSession: async pane => {
       const name = herdr.agents.get(pane)?.name ?? '';
@@ -1790,7 +1794,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
           launch: { kind: workers[0].kind, args: workers[0].agentArgs ?? [], environment: workers[0].environment }, cwd: `/tmp/soak/${work.key}-${work.epoch}`, clock: clock.now(),
         });
       },
-      recordBlockerProbe: (work: Work, body: unknown) => api(principals.coordinator, 'POST', `work/${work.id}/blocker-probe`, body),
+      recordBlockerProbe: (work: Work, body: unknown) => { const { class: blockerClass, result, detail } = body as { class: string; result: string; detail: string }; blockerRecords.push({ key: work.key, class: blockerClass, elapsed, result, detail }); return api(principals.coordinator, 'POST', `work/${work.id}/blocker-probe`, body); },
     } : {}),
     // GY-1322: the drained day's loop probes and clears its dispatch-failure blocker through the
     // real route, and any dispatch block it asks for is recorded and refused.
@@ -2917,7 +2921,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   return { readinessDay, supervisedDay, stuck, unboundedDay, provisionDay, promotion, throughput, reconciled, outside, items, final, github, sessions, docsSyncRuns, docsSyncRoot, lost, launches, violations, faulted, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, headless, herdr, hand, stranded, withdrawals, resumes, strandedLaunches, escalations, spent, attestations, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, guardReads, checkout, landingRefusals, foreignPane, previousWorktrees, closedLeased,
     mergeQueuePosts, config, refused, decideCalls, restarted, approverPanes, failing, herdrClosed: herdr.closed, diagnosisModel: settings.model, diagnosisRuns: diagnosed, baseBreak, capacityRefused, capacityLaunched, capacityWaiters,
     decided, misreads, prompts, screens, heldAccounts, approverAccounts, retryReset, limitMenuDay, menuReset, menuNotice, exitedLive, exitedClosed, exitedRowsSeen, reassign, workspaceFailures, workspaceCooled, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, fenced, mergeStallSightings, master, baseFailure,
-    blockerEvents, blockerProbes, githubStatusReads, blockerDecisions, blockerActions, blockerKeysPeak, attempts, lanesSeen, laneApplications, approverWorks, approverDecisions, failover, webhook, remedies, observeRequests, starvation, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size }, mechanical: { ledger, botRounds, misclassified, reviewHolds }, shared, charges: { ...charged, b: charged.b.length, instancesSeen: [...charged.instancesSeen], restarts: chargeRestarts },
+    blockerEvents, blockerProbes, githubStatusReads, credentialReads, blockerRecords, blockerDecisions, blockerActions, blockerKeysPeak, attempts, lanesSeen, laneApplications, approverWorks, approverDecisions, failover, webhook, remedies, observeRequests, starvation, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size }, mechanical: { ledger, botRounds, misclassified, reviewHolds }, shared, charges: { ...charged, b: charged.b.length, instancesSeen: [...charged.instancesSeen], restarts: chargeRestarts },
     wakes, lateReading, staleMerges, restartLog, hostDay, guardDay, mainWatchDay, budgetDay, slowPlaneDay, observationDay, deploymentDay, decompositionDay: decompositionHistory, diagnosisRaces, diagnosisRequestRaces, transientRefused, lateReads, staleReleaseDay, drain, acceptanceDay: acceptance?.day ?? null, plannerDay: planner?.day ?? null, loopWakeDay: loopWakeDay || null,
     restartDay: options.checkoutRestart ? restartDay : null, failedLaunches };
 }

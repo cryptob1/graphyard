@@ -62,7 +62,8 @@ export const deliveryComponents = ['Git Operations', 'API Requests', 'Pull Reque
  */
 export function blockerPaths(text: string, paths: readonly string[], scopeWords: RegExp) {
   const rootFile = /^(?:\.[A-Za-z_][\w.-]*|[\w-]+\.(?:md|json|ya?ml|toml|lock|txt))$/;
-  const sourceFile = /^[\w-]{2,}\.[A-Za-z][A-Za-z0-9]{1,4}$/;
+  // `main.c` and `a.ts` are files; `e.g` and `i.e`, one letter either side, are prose.
+  const sourceFile = /^(?:[\w-]{2,}\.[A-Za-z][A-Za-z0-9]{0,4}|[\w-]\.[A-Za-z][A-Za-z0-9]{1,4})$/;
   const lastSegment = /^(?:|\*|[\w.-]*\.[A-Za-z0-9]{1,5})$/;
   const escaped = (path: string) => path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const routed = (path: string) => new RegExp(String.raw`[/:]${escaped(path)}`).test(text);

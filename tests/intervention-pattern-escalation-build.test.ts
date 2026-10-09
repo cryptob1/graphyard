@@ -3,13 +3,13 @@ import assert from 'node:assert/strict';
 import { blockerView, classifyBlocker, environmentalBlockerClasses, needsSomeone } from '../src/model/blocker-class.js';
 import { githubDegraded, githubStatusMs, probeBlocker, sharedGithubStatus } from '../src/daemon/blocker-probes.js';
 import { readFileSync } from 'node:fs';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, writeFile } from 'node:fs/promises';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { join } from 'node:path';
 import { launchableProbe } from '../src/daemon/cycle-blockers.js';
 import type { Cycle } from '../src/daemon/cycle.js';
 import { uncoveredBlockerPaths } from '../src/model/blocker-class.js';
-import { branchRewriteGuidance, workerPrompt } from '../src/master.js';
+import { branchRewriteGuidance, inspectProfileAccounts, selectAccount, workerPrompt, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import { loopUnitName } from '../src/supervisor.js';
 import { docsHeadroom, docsTrimItem, docsTrimLatitude, docsWordBudgetOf } from '../src/model/documentation.js';
 import { workerPushPermissions } from '../src/worker-credential.js';
@@ -247,29 +247,54 @@ test('manual:intervention-pattern-escalation-build — GY-1567 review: a usage l
   // Root source files a scope request names are kept beside full paths; a basename of one, or prose outside the request, is not.
   assert.deepEqual(classifyBlocker('SCOPE NEEDED: src/a.ts and index.ts for commit 8106499e9f').paths, ['src/a.ts', 'index.ts']);
   assert.deepEqual(classifyBlocker('SCOPE NEEDED: src/foo.ts and server.js for commit 8106499e9f').paths, ['src/foo.ts', 'server.js']);
+  // A short root file is one too; one letter either side of a dot (`e.g`) is prose.
+  assert.deepEqual(classifyBlocker('SCOPE NEEDED: main.c for commit 8106499e9f').paths, ['main.c']);
+  assert.deepEqual(classifyBlocker('SCOPE NEEDED: a.ts for commit 8106499e9f').paths, ['a.ts']);
+  assert.equal(classifyBlocker('SCOPE NEEDED: e.g a wider scope for commit 8106499e9f').class, 'genuine');
   assert.deepEqual(classifyBlocker('SCOPE NEEDED: src/sync.ts (sync.ts reads aheadBy) for commit 8106499e9f').paths, ['src/sync.ts']);
   assert.deepEqual(classifyBlocker('SCOPE NEEDED: src/github.ts for commit 8106499e9f. The compares come from sync.ts and upgrade.ts too.').paths, ['src/github.ts']);
   assert.deepEqual(uncoveredBlockerPaths({ plannedFiles: ['src/a.ts'] }, classifyBlocker('SCOPE NEEDED: src/a.ts and index.ts for commit 8106499e9f')), ['index.ts'], 'the blocker stands until the root file is widened too');
 });
 
-test('manual:intervention-pattern-escalation-build — GY-1567 review: a spent runtime account clears only on a profile with an account no session saw spent', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'gy-1567-'));
-  try {
-    const credentialFile = join(directory, 'master.token'), clock = Date.parse('2026-10-09T05:30:00.000Z');
-    const hold = { at: '2026-10-09T05:00:00.000Z', until: '2026-10-09T08:00:00.000Z', resetsAt: '2026-10-09T08:00:00.000Z', reason: 'usage limit reached', role: 'worker', profile: 'one', work: 'GY-1519' };
-    const write = (exhausted: Record<string, unknown>) => writeFile(join(directory, 'master.environments.json'), JSON.stringify({ version: 1, environments: {}, skipped: [], selected: {}, exhausted }));
-    const profile = { name: 'one', principal: 'worker-one', agentName: 'soak-worker-one', mode: 'launch', kind: 'claude', credentialFile: '/outside/one.token', agentArgs: [], approvals: 'auto', environment: {}, accounts: ['claude-a', 'claude-b'] };
-    const cycle = { config: { workers: [profile], credentialFile }, credentials: {}, agents: [], state: { profiles: {} }, clock, snapshot: { work: [] } } as unknown as Cycle;
-    await write({ 'claude-a': hold, 'claude-b': hold });
-    const spent = await launchableProbe(cycle, true);
-    assert.equal(spent.passed, false);
-    assert.match(spent.detail, /every account it launches on is held at its usage limit/);
-    assert.equal((await launchableProbe(cycle)).passed, true, 'a dispatch failure reads only the profile');
-    await write({ 'claude-a': hold });
-    assert.equal((await launchableProbe(cycle, true)).passed, true, 'one account left resumes the kept work');
-    // A profile on its own login is held under its own name.
-    const own = { ...cycle, config: { ...cycle.config, workers: [{ ...profile, accounts: undefined }] } } as unknown as Cycle;
-    await write({ 'profile:one': hold });
-    assert.equal((await launchableProbe(own, true)).passed, false);
-  } finally { await rm(directory, { recursive: true, force: true }); }
+test('manual:intervention-pattern-escalation-build — GY-1567 review: a spent runtime account clears only once dispatch would choose an account for a profile', async () => {
+  // The probe reads the cycle's `credentials`, which the loop takes from inspectProfileAccounts, the
+  // account health dispatch launches by. Each case below is checked against selectAccount itself.
+  const directory = await temporaryDirectory('gy-1567-accounts');
+  const credentialFile = join(directory, 'master.token'), now = Date.now(), hour = 3_600_000;
+  const home = async (name: string, login: boolean, percent?: number) => {
+    const path = join(directory, name); await mkdir(path, { recursive: true });
+    if (login) await writeFile(join(path, 'auth.json'), JSON.stringify({ OPENAI_API_KEY: null, tokens: { access_token: `${name}-token`, refresh_token: 'r', id_token: 'i', account_id: 'a' } }), { mode: 0o600 });
+    if (percent !== undefined) {
+      const day = join(path, 'sessions/2026/10/09'); await mkdir(day, { recursive: true });
+      const event = { timestamp: new Date(now).toISOString(), type: 'event_msg', payload: { type: 'token_count', info: null, rate_limits: { limit_id: 'codex', primary: { used_percent: percent, window_minutes: 10080, resets_at: Math.floor((now + hour) / 1000) }, secondary: null, rate_limit_reached_type: null } } };
+      await writeFile(join(day, 'rollout-2026-10-09T05-00-00-session.jsonl'), `${JSON.stringify({ type: 'session_meta', payload: {} })}\n${JSON.stringify(event)}\n`);
+    }
+    return { name, kind: 'codex' as const, home: path };
+  };
+  const environments = [await home('codex-spent', true, 100), await home('codex-out', false), await home('codex-held', true, 10), await home('codex-ok', true, 10)];
+  const hold = { at: new Date(now - hour).toISOString(), until: new Date(now + 2 * hour).toISOString(), resetsAt: null, reason: 'usage limit reached', role: 'worker', profile: 'one', work: 'GY-1519' };
+  await writeFile(join(directory, 'master.environments.json'), JSON.stringify({ version: 1, environments: {}, skipped: [], selected: {}, exhausted: { 'codex-held': hold } }));
+  const config = { environments, credentialFile, run: {} } as unknown as MasterConfig, probe = { now: () => now, cacheMs: 0 };
+  const profile = (accounts: string[]) => ({ name: 'one', principal: 'worker-one', agentName: 'soak-worker-one', mode: 'launch', kind: 'codex', credentialFile: '/outside/one.token', agentArgs: [], approvals: 'auto', environment: {}, accounts }) as unknown as WorkerProfile;
+  const judge = async (accounts: string[]) => {
+    const worker = profile(accounts);
+    const credentials = await inspectProfileAccounts(config, 'worker', [worker], { one: { available: true, reason: null as string | null } }, probe);
+    const cycle = { config: { workers: [worker] }, credentials, agents: [], state: { profiles: {} }, clock: now, snapshot: { work: [] } } as unknown as Cycle;
+    const dispatched = await selectAccount(config, 'worker', worker, probe).then(selected => selected.account?.name ?? 'own login', () => null);
+    return { probe: launchableProbe(cycle, true), dispatched };
+  };
+  // An unconfigured account, a provider quota at its ceiling, a logged-out home and an observed hold each keep it standing.
+  for (const [accounts, reason] of [[['codex-missing'], /codex-missing is not a configured agent environment/], [['codex-spent'], /codex-spent/], [['codex-out'], /codex-out/], [['codex-held'], /codex-held exhausted its quota mid-session/],
+    [['codex-missing', 'codex-spent', 'codex-out', 'codex-held'], /No healthy agent account/]] as const) {
+    const { probe: result, dispatched } = await judge([...accounts]);
+    assert.equal(dispatched, null, `dispatch chooses no account among ${accounts.join(', ')}`);
+    assert.equal(result.passed, false, `the blocker stands on ${accounts.join(', ')}`);
+    assert.match(result.detail, reason);
+  }
+  // One account dispatch would choose clears it, naming that account.
+  const { probe: cleared, dispatched } = await judge(['codex-spent', 'codex-held', 'codex-ok']);
+  assert.equal(dispatched, 'codex-ok');
+  assert.equal(cleared.passed, true);
+  assert.equal(cleared.detail, 'profile one is launchable on codex-ok');
+  assert.equal(cleared.probe, 'a worker profile can take a launch on an eligible account');
 });
