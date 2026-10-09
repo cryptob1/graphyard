@@ -13,6 +13,10 @@ import * as consent from '../src/consent-prompt.js';
 const { detectConsentPrompt } = consent;
 const screenDialog = (screen: string) => consent.screenDialog?.(screen);
 import { trackFaults, type FaultRecord } from '../src/model/fault-classes.js';
+// A namespace import, so the base run of this file, which has no unclaimedLaunch, fails only the GY-1571 case.
+import * as sessionState from '../src/model/session-state.js';
+const { observeSessions, reportedHandle, sessionLaunchGraceMs } = sessionState;
+const unclaimedLaunch = (...args: Parameters<typeof sessionState.unclaimedLaunch>) => sessionState.unclaimedLaunch?.(...args) ?? false;
 // @ts-expect-error Dependency-free fixture and screenshot script.
 import { fixtureWork } from '../scripts/dashboard-fixture.mjs';
 import { live } from '../browser-tests/ui-board.js';
@@ -296,4 +300,61 @@ test('unit:fault-class-session-liveness GY-1525 session — a launch that failed
   const started = status(session({ pane: 'w1V:pMHS', observed: 'ended', observedAt: at(-28_000), outcome: 'the agent process exited (code 0) while its lease was live' }));
   assert.equal(started.work[0].attention, 'Assigned worker session is ended');
   assert.ok(started.attentionItems.some(entry => entry.kind === 'session' && entry.faultClass === 'session-liveness'));
+});
+
+// GY-1571 names this file for its proof too: 3 session-liveness faults in 24 hours on 9 October 2026,
+// all "Assigned worker session is ended", on GY-1528 (01:29:00Z), GY-1566 (03:24:22Z) and GY-1565
+// (05:17:47Z). Each item's ledger shows one shape: the worker launcher registered its handle
+// PRINCIPAL:EPOCH for the next epoch, then claimed; between the two the loop's session report read a
+// snapshot whose item held no lease and ended the fresh handle at once ("attempt N of GY-… ended
+// (released, blocked, parked or lapsed) and GY-… holds no lease"), launch grace or not. The claim then
+// landed and the next fault observation read the live lease's handle as ended. Every one of those
+// launches went on to start its runtime and submit. The candidate leaves a handle registered for an
+// epoch the item has not claimed alone through the launch grace, as it does any unobserved launch.
+
+/** Each instance as its item's ledger records it: handle registered, report (on the pre-claim snapshot), claim, fault observation. */
+const unclaimedInstances = [
+  { key: 'GY-1528', principal: 'graphyard-claude-1', epoch: 13, registered: '2026-10-09T01:28:24.129Z', report: '2026-10-09T01:28:29.526Z', claimed: '2026-10-09T01:28:29.908Z', fault: '2026-10-09T01:29:00.532Z' },
+  { key: 'GY-1566', principal: 'graphyard-claude-2', epoch: 1, registered: '2026-10-09T03:24:07.422Z', report: '2026-10-09T03:24:11.270Z', claimed: '2026-10-09T03:24:10.621Z', fault: '2026-10-09T03:24:22.392Z' },
+  { key: 'GY-1565', principal: 'graphyard-claude-2', epoch: 5, registered: '2026-10-09T05:17:38.148Z', report: '2026-10-09T05:17:43.039Z', claimed: '2026-10-09T05:17:41.479Z', fault: '2026-10-09T05:17:47.698Z' },
+];
+
+// One case per instance, so the base run reports each instance's own failure rather than stopping at the first.
+for (const instance of unclaimedInstances) {
+  test(`unit:fault-class-session-liveness ${instance.key} session — a worker handle registered before its claim is not ended by a report on the pre-claim snapshot, so the claimed lease never reads it as ended`, () => {
+    const base = (fixtureWork() as unknown as Work[]).map(live)[0];
+    const worker = { name: instance.principal, principal: instance.principal, agentName: instance.principal, mode: 'launch', kind: 'claude', credentialFile: '/outside/c.token', agentArgs: [], environment: {} } as unknown as WorkerProfile;
+    const handle = { id: `${instance.principal}:${instance.epoch}`, kind: 'implementation', principal: instance.principal, epoch: null, runtime: 'claude', host: 'vishrog', workspace: 'w1V', tab: null,
+      pane: null, agentName: null, role: null, head: null, attach: null, transcript: null, subject: instance.key, startedAt: instance.registered, updatedAt: instance.registered, endedAt: null, state: 'running', outcome: null } as unknown as SessionHandle;
+    const item = (epoch: number, lease: Work['lease'], sessions: SessionHandle[]) => ({ ...base, id: `work-${instance.key}`, key: instance.key, stage: 'build', epoch, lease, sessions, pipeline: { attempts: [] } } as unknown as Work);
+    // The snapshot the report read: the attempt before the claim, holding no lease.
+    const before = item(instance.epoch - 1, null, [handle]);
+    const report = observeSessions([before], [], new Date(instance.report), { hostId: 'vishrog' });
+    assert.ok(!report.entries.some(entry => entry.closed), `${instance.key}: the base ended ${handle.id} here as "attempt ${instance.epoch} … holds no lease"`);
+    assert.equal(unclaimedLaunch(before, handle), true);
+
+    // The claim lands, and the fault step reads the attempt's live lease.
+    const entry = report.entries.find(row => row.id === handle.id);
+    const written = entry ? { ...handle, ...reportedHandle(entry), endedAt: entry.closed ? instance.report : null } as SessionHandle : handle;
+    const claimed = item(instance.epoch, { owner: instance.principal, epoch: instance.epoch, expiresAt: new Date(Date.parse(instance.claimed) + 120_000).toISOString() }, [written]);
+    const status = buildMasterStatus({ work: [claimed], now: instance.fault }, [worker], []);
+    assert.doesNotMatch(status.work[0].attention ?? '', /Assigned worker session/, `${instance.key}: the base raised "Assigned worker session is ended" at ${instance.fault}`);
+    const record: FaultRecord = { instances: [], open: {}, failing: {} };
+    trackFaults(record, status.attentionItems.map(item => ({ kind: item.kind!, faultClass: item.faultClass!, subject: item.subject, text: item.text })), instance.fault);
+    assert.equal(record.instances.filter(fault => fault.faultClass === 'session-liveness').length, 0, `${instance.key}: no session-liveness instance`);
+
+    // Once claimed the lease holds the handle; a registration whose claim never comes is still ended past the launch grace.
+    assert.deepEqual(observeSessions([claimed], [], new Date(instance.fault), { hostId: 'vishrog' }).entries, []);
+    const abandoned = observeSessions([before], [], new Date(Date.parse(instance.registered) + sessionLaunchGraceMs), { hostId: 'vishrog' }).entries[0];
+    assert.equal(abandoned?.closed, 'ended', `${instance.key}: an unclaimed registration past the grace is over`);
+  });
+}
+
+test('unit:fault-class-session-liveness GY-1571 — only a worker handle for an epoch later than the item\'s claim is an unclaimed launch', () => {
+  // Only a later epoch than the item's is unclaimed: the attempt the item is on, or one before it, is not.
+  const handle = { id: 'graphyard-claude-1:4', kind: 'implementation', epoch: null } as unknown as SessionHandle;
+  assert.equal(unclaimedLaunch({ epoch: 3, lease: null }, handle), true);
+  assert.equal(unclaimedLaunch({ epoch: 4, lease: null }, handle), false);
+  assert.equal(unclaimedLaunch({ epoch: 3, lease: { owner: 'x', epoch: 4, expiresAt: '2026-10-09T00:00:00Z' } }, handle), false);
+  assert.equal(unclaimedLaunch({ epoch: 3, lease: null }, { ...handle, kind: 'review' } as SessionHandle), false);
 });
