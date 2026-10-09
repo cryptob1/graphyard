@@ -2,12 +2,13 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { readFile, writeFile } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { localDirectory } from '../onboarding.js';
 import { loopStopTimeoutSeconds, loopUnitDirectory, loopUnitOf, type LoopSupervisorHost } from '../supervisor.js';
 import type { MasterConfig } from './profiles.js';
 import { agentOwner } from './attention.js';
+import { atomicPrivateText } from './config.js';
 
 /** `systemctl --user ARGS`, returning stdout and throwing on a failed command. */
 export type UserSystemctl = (args: string[], timeoutMs?: number) => string;
@@ -113,14 +114,19 @@ export function exitWhenStopped(proc: Pick<NodeJS.Process, 'once' | 'exit'> & { 
   return { stopped: () => arm(options.graceMs ?? 2_000) };
 }
 
-/** What a `master run` refused on the lock records, beside the config, for `master status` (GY-1603). */
+/**
+ * What a `master run` refused on the lock records, beside the config, for `master status` (GY-1603).
+ * Published by rename, never rewritten in place: a status read during a refusal sees the previous
+ * record or the new one, never an empty or partial file that would drop the holder's attention item,
+ * and a refusal interrupted mid-write leaves the previous record readable.
+ */
 export interface LockRefusal { holder: { pid: number; host: string; startedAt: string | null }; refusedAt: string; count: number }
 const refusalFile = async (root: string) => resolve(await localDirectory(root), 'master-lock-refusal.json');
 export async function recordLockRefusal(root: string, holder: LoopLock, at = new Date()) {
   const previous = await readLockRefusal(root);
   const same = previous && previous.holder.pid === holder.pid && previous.holder.host === holder.host;
   const record: LockRefusal = { holder: { pid: holder.pid, host: holder.host, startedAt: holder.startedAt ?? null }, refusedAt: at.toISOString(), count: same ? previous.count + 1 : 1 };
-  await writeFile(await refusalFile(root), `${JSON.stringify(record)}\n`, { mode: 0o600 });
+  await atomicPrivateText(await refusalFile(root), `${JSON.stringify(record)}\n`);
   return record;
 }
 export async function readLockRefusal(root: string): Promise<LockRefusal | null> {
