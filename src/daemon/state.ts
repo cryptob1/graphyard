@@ -278,8 +278,7 @@ export const approvalWatchSchema = z.object({
   scope: z.object({ epoch: z.number().int().min(1), at: z.string(), requestedBy: z.string().max(200), paths: z.array(z.string().max(500)).max(50) }).strict().nullable().default(null),
   /** The failed decision whose request was given back because only its scope request closed (GY-1484): once per decision, never per cycle. */
   givenBack: z.string().max(100).nullable().default(null),
-  /** The agent-registry session the current approver runs on (GY-190), ended once the decision is judged,
-   * or as soon as its quota is spent so the replacement has the slot (GY-182). */
+  /** The agent-registry session the current approver runs on (GY-190), ended once the decision is judged or its quota is spent (GY-182). */
   session: z.string().max(200).nullable().default(null),
   /** Why the last launch waits for a slot: the registry refused it only because the role was full (GY-190). */
   capacity: z.string().max(500).nullable().default(null),
@@ -289,17 +288,13 @@ export const approvalWatchSchema = z.object({
   reportedExhaustion: z.string().max(200).nullable().default(null),
   /** The decision and launch whose spent-account hold alone is written (GY-489): a capacity report that failed after it is retried without writing the hold again. */
   heldExhaustion: z.string().max(200).nullable().default(null),
-  /** GY-1394. An attest decision's refusal and the head it bound: the loop returns that head to a worker on it, with no approver. */
-  /** GY-1612. The replacement pane a watch first saw under its name, and when, kept while its predecessor's registry session could not be
-   * ended: the rebind that follows dates an unrecorded pane from this first sight, not from the cycle the end succeeded. */
+  /** GY-1612. A replacement pane first seen while its predecessor's registry end was refused, and when: its rebind dates from that sight. */
   movedPane: z.object({ pane: z.string().max(200), at: z.string() }).strict().nullable().default(null),
+  /** GY-1394. An attest decision's refusal and the head it bound: the loop returns that head to a worker on it, with no approver. */
   refusal: z.object({ approver: z.string().max(200), reason: z.string().max(1200), at: z.string(), proof: z.string().max(200), sha: z.string().max(64), baseSha: z.string().max(64), policyRevision: z.number().int().min(0) }).strict().nullable().default(null),
 }).strict();
 export type ApprovalWatch = z.infer<typeof approvalWatchSchema>;
-/**
- * What a re-keyed watch takes over from the one it retires: the session goes on, and so does what
- * it runs on, so a retained session's exhaustion holds the account it spent (GY-182).
- */
+/** What a re-keyed watch takes over from the one it retires: the session and what it runs on, so its exhaustion holds the account it spent (GY-182). */
 export const carriedSession = (prior: ApprovalWatch) => ({ launches: prior.launches, lostRuns: prior.lostRuns, agentName: prior.agentName, pane: prior.pane, launchedAt: prior.launchedAt,
   exhaustedAt: prior.exhaustedAt, account: prior.account, runtime: prior.runtime, session: prior.session, movedPane: prior.movedPane });
 
