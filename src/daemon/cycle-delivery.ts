@@ -283,6 +283,12 @@ export function answeredVerdict(answer: DaemonAction | undefined): 'verified' | 
 /** How many closed owners of one release a single filing follows to reach (or file) the open one. */
 export const throughputOwnerSuccessions = 8;
 export const throughputOwnerKey = (revision: string) => `throughput:owner:${revision}`;
+/**
+ * GY-1609: how often an open owner with no needs-decision raised reads the one standing on the
+ * newest recorded measurement: well inside the minutes a decision and its approver take.
+ */
+export const throughputStandingReadMs = 60_000;
+const standingReads = new WeakMap<DaemonState, number>();
 export const throughputEscalationKey = (owner: string, policyRevision: number) => `escalation:throughput:${owner}:${policyRevision}`;
 /**
  * The owner's requirements revision at which the loop raised its needs-decision (the earliest, should a key repeat), or null when it raised none.
@@ -387,7 +393,16 @@ async function throughputOwnerStep(cycle: Pick<Cycle, 'state' | 'effects' | 'now
       if (filed) { owner = filed; performed.push(await note(filed.key, 'done', `Filed ${filed.key} to own GY-87's throughput verification on ${revision.slice(0, 12)}${predecessor ? `, succeeding ${predecessor}` : ''}${stall ? ' and the needs-decision standing on it' : ''}; it closes once the claim verifies or its needs-decision is answered`)); }
     } catch (error) { performed.push(await note(predecessor, 'failed', `Could not file the item that owns GY-87's throughput verification on ${revision.slice(0, 12)}${predecessor ? `, succeeding ${predecessor}` : ''}: ${message(error)}`)); }
   }
-  if (!stall || !owner || throughputEscalatedAt(state.actions, owner) !== null) return;
+  if (!owner || throughputEscalatedAt(state.actions, owner) !== null) return;
+  // GY-1609: master status asks the decision from the newest recorded measurement, whenever it reads,
+  // so an open owner with none raised reads it too rather than waiting for a cycle that measures:
+  // raised after its answer was applied, at the answering revision, it could never be seen answered.
+  // The read parses the whole ledger, so it is taken at most once per throughputStandingReadMs.
+  if (!stall && effects.standingThroughputStall && now() - (standingReads.get(state) ?? -Infinity) >= throughputStandingReadMs) {
+    standingReads.set(state, now());
+    stall = await effects.standingThroughputStall(revision).catch(() => null);
+  }
+  if (!stall) return;
   // GY-1587: an escalated miss over an accumulating population is asked once per release. Once an
   // owner of this release closed on the answer to that escalated miss, its successor carries the
   // verification without a second ask; the next release asks afresh. An answered stall is a

@@ -15,7 +15,9 @@ import { slowReportReader } from '../master/report-cache.js';
 import { interventionSummary, interventionSummaryRoute } from './intervention-status.js';
 import { executorFleetReport, readCommit, readExecutorRegistrations } from '../executor-fleet.js';
 import { terminalDecisions } from './decision-report.js';
-import { throughputStatus } from '../throughput.js';
+import { openThroughputOwner, throughputStatus } from '../throughput.js';
+import { throughputEscalatedAt } from '../daemon/cycle-delivery.js';
+import { readDaemonState } from '../daemon/state.js';
 import { attributeAttention, derivedAttention, ledgerRefusalAttention, resourceStatus } from '../master-status.js';
 import { workerLaunchStatus } from '../master/dispatch.js';
 import type { ReportSections } from '../master/sections.js';
@@ -147,7 +149,10 @@ export async function assembleReportedAttention(
   const releases = executorFleetReport(await readExecutorRegistrations(master).catch(() => []), { commit: observed.commit ?? readCommit(root) }, { hostId: master.hostId });
   const decisions = await timedStep('attention: decisions', () => sections.optional('decisions', 'GET /api/work/:id/decisions', () => terminalDecisions(masterApi, snapshot.work, { approvals: observed.approvals, runtime: observed.runtime, now: Date.now() }),
     () => ({ listed: [], attentionItems: [] as AttentionItem[], unanswered: [], refused: 0 })));
-  const throughput = await timedStep('attention: throughput', () => throughputStatus(root, coordinator, snapshot.work));
+  // GY-1609: the revision the loop raised the open owner's needs-decision at, from its cursor, so an
+  // applied answer reads as answered rather than as the decision asked again. Read only while one is open.
+  const escalations = openThroughputOwner(snapshot.work) ? (await readDaemonState(root, master).catch(() => null))?.actions ?? {} : {};
+  const throughput = await timedStep('attention: throughput', () => throughputStatus(root, coordinator, snapshot.work, Date.now(), owner => throughputEscalatedAt(escalations, owner)));
   // The readings judge the snapshot's leases and sessions at the snapshot's own instant (GY-1379): the
   // loop reads this at the end of a cycle that can run ten minutes, and a two-minute lease taken at its
   // start read against the wall clock then is a live worker misread as gone.
