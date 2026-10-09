@@ -188,7 +188,7 @@ test('unit:approver-idle-stall-relaunch — an approver idle past its start boun
     await withDataHome(dataHome, async () => {
       const work = item(), name = approverSessionName(work, decision);
       const bound = launchStartMs(config);
-      const recordLaunch = (ageMs: number) => autonomy.saveApproverLaunch(root, { agentName: name, account: null, runtime: 'claude', session: null, launchedAt: new Date(Date.now() - ageMs).toISOString(), work: work.key, decision });
+      const recordLaunch = (ageMs: number, pane = 'pane-old') => autonomy.saveApproverLaunch(root, { agentName: name, account: null, runtime: 'claude', session: null, launchedAt: new Date(Date.now() - ageMs).toISOString(), work: work.key, decision, pane });
       const statusFor = (status: string): HerdrAgent => ({ name, pane_id: 'pane-old', agent: 'claude', agent_status: status });
 
       // AC-1: the loop. Its watch of the decision holds no live session (its last launch did not
@@ -244,8 +244,8 @@ test('unit:approver-idle-stall-relaunch — an approver idle past its start boun
       await assert.rejects(command([statusFor('done')]), /let it finish or close it first \(it is within its \d+s start bound until /);
       // With no launch record its age is unknown: the command refuses, and status names the pane to close first, not the command alone.
       const unknown = (await report(null)).attentionItems.find(entry => entry.text.includes(decision));
-      assert.match(unknown?.text ?? '', /sits done in Herdr, but it has no launch record, so its age is unknown/);
-      assert.match(JSON.stringify(unknown), /herdr pane close pane-old \(master approver refuses it while it has no launch record, so its age is unknown\), then graphyard master approver/);
+      assert.match(unknown?.text ?? '', /sits done in Herdr, but it has no launch record bound to its pane, so its age is unknown/);
+      assert.match(JSON.stringify(unknown), /herdr pane close pane-old \(master approver refuses it while it has no launch record bound to its pane, so its age is unknown\), then graphyard master approver/);
       assert.deepEqual(closed, [], 'nothing was closed under a session within its bound');
 
       // An idle session is judged by status on the same verdict and screen reading as the command: idle at a still screen past
@@ -261,6 +261,8 @@ test('unit:approver-idle-stall-relaunch — an approver idle past its start boun
       const idleRelaunch = await autonomy.launchApprover(root, work, decision, 'claude', { agents: [statusFor('idle')], available: true }, stubHerdr(panes, closed, ['╭─\n│ > \n╰─', '╭─\n│ > \n╰─']), {}, async () => ({}), { screenPauseMs: 0 });
       assert.deepEqual(closed, ['pane-old'], 'the command status names closes the idle session it described');
       assert.equal(idleRelaunch.pane, 'pane-new');
+      // The launcher records the pane it launched into, so the next judgement of that session is bound to it.
+      assert.equal((await autonomy.readApproverLaunches(root)).findLast(entry => entry.agentName === name)?.pane, 'pane-new');
       for (const screens of [['⏺ Bash(npm test)\n  ⎿ running 1s', '⏺ Bash(npm test)\n  ⎿ running 2s'], [null, null]]) {
         reset(); await recordLaunch(bound + 60_000);
         assert.equal((await reportIdle([...screens])).attentionItems.some(entry => entry.text.includes(decision)), false, `an idle session whose screen is ${screens[0] === null ? 'unread' : 'moving'} is no stall`);
@@ -281,7 +283,27 @@ test('unit:approver-idle-stall-relaunch — an approver idle past its start boun
         await assert.rejects(autonomy.launchApprover(root, work, decision, 'claude', { agents: [statusFor(status)], available: true }, run, {}, async () => ({}), { screenPauseMs: 0 }), why);
         assert.deepEqual(closed, [], `a ${status} session is never closed under it`);
       }
-      // An idle session whose screen holds still across the pause never ran its request: closed and replaced.
+      // A silent invocation (a tool waiting on the network, output buffered) leaves an idle screen still after the request ran: a
+      // screen that names the decision, or one fuller than a runtime's start, is at work. Status raises nothing and the command refuses.
+      const silent = `❯ You are the independent Graphyard approver. Judge decision ${decision} on ${work.key}\n⏺ Bash(graphyard master decisions ${work.key})\n  ⎿ Running…`;
+      const scrolled = Array.from({ length: 60 }, (_, line) => `⏺ read line ${line} of the pull request`).join('\n');
+      for (const screen of [silent, scrolled]) {
+        reset(); await recordLaunch(bound + 60_000);
+        assert.equal((await reportIdle([screen, screen])).attentionItems.some(entry => entry.text.includes(decision)), false, 'an idle session whose still screen shows its request ran is no stall');
+        await assert.rejects(autonomy.launchApprover(root, work, decision, 'claude', { agents: [statusFor('idle')], available: true }, stubHerdr(panes, closed, [screen, screen]), {}, async () => ({}), { screenPauseMs: 0 }),
+          /\(it is idle with a screen that shows its request ran, as while a silent command waits\)/);
+        assert.deepEqual(closed, [], 'a silently working session is never closed under it');
+      }
+      // A launch whose record could not be written leaves the previous same-named record, of another pane and well past the bound:
+      // it dates nothing about the pane Herdr lists now, so the command refuses and status names the pane, never the close.
+      reset(); await recordLaunch(bound + 60_000, 'pane-earlier');
+      const stale = (await reportIdle(['╭─\n│ > \n╰─', '╭─\n│ > \n╰─'])).attentionItems.find(entry => entry.text.includes(decision));
+      assert.match(JSON.stringify(stale), /herdr pane close pane-old \(master approver refuses it while it has no launch record bound to its pane, so its age is unknown\)/);
+      await assert.rejects(autonomy.launchApprover(root, work, decision, 'claude', { agents: [statusFor('idle')], available: true }, stubHerdr(panes, closed, ['╭─\n│ > \n╰─', '╭─\n│ > \n╰─']), {}, async () => ({}), { screenPauseMs: 0 }),
+        /\(it has no launch record bound to its pane, so its age is unknown\)/);
+      assert.deepEqual(closed, [], 'a session dated only by an earlier pane\'s record is never closed');
+
+      // An idle session whose screen holds still across the pause and shows no trace of its request never ran it: closed and replaced.
       reset(); await recordLaunch(bound + 60_000);
       const still = await autonomy.launchApprover(root, work, decision, 'claude', { agents: [statusFor('idle')], available: true }, stubHerdr(panes, closed, ['╭─\n│ > \n╰─', '╭─\n│ > \n╰─']), {}, async () => ({}), { screenPauseMs: 0 });
       assert.deepEqual(closed, ['pane-old']);

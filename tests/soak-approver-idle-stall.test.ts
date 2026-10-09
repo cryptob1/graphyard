@@ -20,7 +20,8 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 // the real loop and the real approver launcher over a simulated day against a Herdr world: an
 // approver that never starts is closed and relaunched only within maxApproverLaunches and then
 // escalated, never launched or closed again; an approver at work is never closed under it, nor one
-// Herdr reports idle while its screen moves (a long command), nor any within a start bound set above
+// Herdr reports idle while its screen moves (a long command) or holds still on a request it already ran
+// (a silent command waiting on the network), nor any within a start bound set above
 // the loop's 60-second settle; and every system invariant holds after every cycle.
 // Proof: unit:approver-idle-stall-relaunch.
 
@@ -40,10 +41,11 @@ function item(n: number): Work {
 
 /**
  * How every approver session launched for a decision behaves: never starts, or works for `workMs` and applies it; `stallFirst` makes
- * its first fresh session never start; `idleBusy` makes it work while Herdr reports it idle with a moving screen, as a long command does.
+ * its first fresh session never start; `idleBusy` makes it work while Herdr reports it idle with a moving screen, as a long command does,
+ * and `idleSilent` with a screen that holds still on the request it ran, as a command silently waiting on the network does.
  */
-type Behaviour = { decision: string; work: Work; stall: 'done' | 'idle' | null; workMs: number; stallFirst?: boolean; idleBusy?: boolean };
-type Pane = { pane: string; name: string; status: string; since: number; decision: string; fresh: number; moving?: boolean };
+type Behaviour = { decision: string; work: Work; stall: 'done' | 'idle' | null; workMs: number; stallFirst?: boolean; idleBusy?: boolean; idleSilent?: boolean };
+type Pane = { pane: string; name: string; status: string; since: number; decision: string; fresh: number; moving?: boolean; silent?: boolean };
 
 test('unit:approver-idle-stall-relaunch — over a simulated day the loop closes and relaunches never-started approvers only within the launch bound, never closes one at work, and every system invariant holds', { timeout: 300_000 }, async () => {
   const root = await temporaryDirectory('soak-idle-approver'), credentials = await temporaryDirectory('soak-idle-approver-credentials'), dataHome = await temporaryDirectory('soak-idle-approver-data');
@@ -73,6 +75,7 @@ test('unit:approver-idle-stall-relaunch — over a simulated day the loop closes
       { decision: 'bbbbbbbb-0000-4000-8000-000000000002', work: item(1602), stall: null, workMs: approverJudgeBoundMs - 2 * minute },
       { decision: 'cccccccc-0000-4000-8000-000000000003', work: item(1603), stall: null, workMs: 5 * minute, stallFirst: true },
       { decision: 'dddddddd-0000-4000-8000-000000000004', work: item(1604), stall: null, workMs: approverJudgeBoundMs - 2 * minute, idleBusy: true },
+      { decision: 'eeeeeeee-0000-4000-8000-000000000005', work: item(1605), stall: null, workMs: approverJudgeBoundMs - 2 * minute, idleSilent: true },
     ];
     const decisions = new Map(behaviours.map(entry => [entry.decision, 'requested']));
     const panes = new Map<string, Pane>(), closedWhileWorking: string[] = [], closedWithinBound: string[] = [], launches = new Map<string, number>(), closes = new Map<string, number>();
@@ -80,20 +83,24 @@ test('unit:approver-idle-stall-relaunch — over a simulated day the loop closes
     const nameOf = (entry: Behaviour) => approverSessionName(entry.work, entry.decision);
     for (const entry of behaviours) {
       panes.set(`pane-old-${entry.decision}`, { pane: `pane-old-${entry.decision}`, name: nameOf(entry), status: 'done', since: start - bound - minute, decision: entry.decision, fresh: 0 });
-      await autonomy.saveApproverLaunch(root, { agentName: nameOf(entry), account: null, runtime: 'claude', session: null, launchedAt: new Date(start - bound - minute).toISOString(), work: entry.work.key, decision: entry.decision });
+      await autonomy.saveApproverLaunch(root, { agentName: nameOf(entry), account: null, runtime: 'claude', session: null, launchedAt: new Date(start - bound - minute).toISOString(), work: entry.work.key, decision: entry.decision, pane: `pane-old-${entry.decision}` });
     }
     const close = (pane: string) => {
       const session = panes.get(pane); if (!session) return;
-      if (session.status === 'working' || session.moving) closedWhileWorking.push(`${session.name} ${pane}`);
+      if (session.status === 'working' || session.moving || session.silent) closedWhileWorking.push(`${session.name} ${pane}`);
       if (session.fresh && Date.now() - session.since < bound) closedWithinBound.push(`${session.name} ${pane} after ${(Date.now() - session.since) / 1000}s`);
       closes.set(session.decision, (closes.get(session.decision) ?? 0) + 1); panes.delete(pane);
     };
     let creating: string | null = null, ticks = 0;
+    // What an idle approver's screen shows: a long command's output moves between reads, a silent one holds still on the request it
+    // ran (naming its decision), and one that never ran its request shows only an empty prompt.
+    const screenOf = (session: Pane | undefined) => session?.moving ? `⏺ Bash(npm test)\n  ⎿ running ${++ticks}`
+      : session?.silent ? `❯ Judge decision ${session.decision}\n⏺ Bash(graphyard master decisions)\n  ⎿ Running…` : '╭─\n│ > \n╰─';
     const herdr = (_command: string, args: string[]): string => {
       if (args[0] === 'tab' && args[1] === 'create') { creating = `pane-${++next}`; return JSON.stringify({ result: { root_pane: { pane_id: creating, tab_id: `tab-${next}` } } }); }
       if (args[0] === 'pane' && args[1] === 'close') { close(args[2]!); return JSON.stringify({ result: {} }); }
       if (args[0] === 'pane' && args[1] === 'list') return JSON.stringify({ result: { panes: [...panes.keys(), ...(creating ? [creating] : [])].map(pane_id => ({ pane_id })) } });
-      if (args[0] === 'agent' && args[1] === 'read') return '╭─\n│ > \n╰─';
+      if (args[0] === 'agent' && args[1] === 'read') return screenOf(panes.get(args[2]!));
       return startedAtOnce(args) ?? JSON.stringify({ result: {} });
     };
     const listed = (): HerdrAgent[] => [...panes.values()].map(session => ({ name: session.name, pane_id: session.pane, agent: 'claude', agent_status: session.status }));
@@ -106,7 +113,7 @@ test('unit:approver-idle-stall-relaunch — over a simulated day the loop closes
       decisions: async work => ({ decisions: behaviours.filter(entry => entry.work.id === work.id).map(entry => ({ id: entry.decision, action: 'requirements', state: decisions.get(entry.decision)!, input: {}, approvedBy: null, requestedAt: new Date(start - 10 * minute).toISOString() })) }),
       approverLaunches: () => autonomy.readApproverLaunches(root),
       // The loop reads an idle approver's screen before ending it: a long command's output moves between reads, an empty prompt does not.
-      sessionOutput: agent => { const session = [...panes.values()].find(entry => entry.name === agent.name); return session?.moving ? `⏺ Bash(npm test)\n  ⎿ running ${++ticks}` : '╭─\n│ > \n╰─'; },
+      sessionOutput: agent => screenOf([...panes.values()].find(entry => entry.name === agent.name)),
       idleScreenPauseMs: 0,
       // The real launcher against what Herdr lists now; the pane it creates takes the decision's behaviour.
       approver: async (subject, id) => {
@@ -114,7 +121,7 @@ test('unit:approver-idle-stall-relaunch — over a simulated day the loop closes
         const launched = await autonomy.launchApprover(root, subject, id, 'claude', { agents: listed(), available: true }, herdr, {}, async () => ({}), { screenPauseMs: 0 });
         const fresh = (launches.get(id) ?? 0) + 1; launches.set(id, fresh);
         const stall = entry.stall ?? (entry.stallFirst && fresh === 1 ? 'idle' : null);
-        panes.set(launched.pane!, { pane: launched.pane!, name: launched.agentName, status: stall ?? (entry.idleBusy ? 'idle' : 'working'), since: Date.now(), decision: id, fresh, moving: !stall && entry.idleBusy }); creating = null;
+        panes.set(launched.pane!, { pane: launched.pane!, name: launched.agentName, status: stall ?? (entry.idleBusy || entry.idleSilent ? 'idle' : 'working'), since: Date.now(), decision: id, fresh, moving: !stall && entry.idleBusy, silent: !stall && entry.idleSilent }); creating = null;
         return { agentName: launched.agentName, pane: launched.pane, runtime: launched.runtime, session: launched.session, ...(launched.replaced ? { replaced: launched.replaced } : {}) };
       },
     };
@@ -126,7 +133,7 @@ test('unit:approver-idle-stall-relaunch — over a simulated day the loop closes
       // A working approver applies its decision once its work is done, then its session ends `done`.
       for (const session of panes.values()) {
         const entry = behaviours.find(candidate => candidate.decision === session.decision)!;
-        if ((session.status === 'working' || session.moving) && now - session.since >= entry.workMs) { Object.assign(session, { status: 'done', moving: false }); decisions.set(session.decision, 'applied'); }
+        if ((session.status === 'working' || session.moving || session.silent) && now - session.since >= entry.workMs) { Object.assign(session, { status: 'done', moving: false, silent: false }); decisions.set(session.decision, 'applied'); }
       }
       const result = await runCycle(config, state, loop, () => Date.now());
       failures.push(...result.actions.filter(action => action.state === 'failed').map(action => `${new Date(now).toISOString()} ${action.detail}`));
@@ -135,9 +142,9 @@ test('unit:approver-idle-stall-relaunch — over a simulated day the loop closes
 
     assert.ok(cycles >= 700, 'the loop ran a whole simulated day');
     assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
-    assert.deepEqual(closedWhileWorking, [], 'no approver at work is ever closed under it, idle with a moving screen included');
+    assert.deepEqual(closedWhileWorking, [], 'no approver at work is ever closed under it, idle with a moving or silent screen included');
     assert.deepEqual(closedWithinBound, [], 'no approver is closed within its start bound');
-    const [stalled, working, recovered, busy] = behaviours.map(entry => entry.decision) as [string, string, string, string];
+    const [stalled, working, recovered, busy, silent] = behaviours.map(entry => entry.decision) as [string, string, string, string, string];
     // The approver that never starts: the earlier launch plus at most two fresh ones, each closed, then escalated and left alone.
     assert.equal(launches.get(stalled), maxApproverLaunches - 1, 'the never-starting approver is relaunched only within the launch bound');
     assert.ok((closes.get(stalled) ?? 0) <= maxApproverLaunches, `its sessions are closed at most once each: ${closes.get(stalled)}`);
@@ -153,6 +160,9 @@ test('unit:approver-idle-stall-relaunch — over a simulated day the loop closes
     // The one Herdr reports idle through a long command: launched once over the stale tab, never closed while its screen moved, applied.
     assert.equal(launches.get(busy), 1, 'an idle approver whose screen moves is left at its work');
     assert.equal(decisions.get(busy), 'applied');
+    // The one Herdr reports idle on a still screen through a silent command it started: never closed under it, applied.
+    assert.equal(launches.get(silent), 1, 'an idle approver whose still screen shows its request ran is left at its work');
+    assert.equal(decisions.get(silent), 'applied');
     assert.deepEqual(listed().filter(agent => agent.name !== approverSessionName(behaviours[0]!.work, stalled)).map(agent => agent.name), [], 'no approver of a settled decision is left open');
     const escalated = failures.filter(detail => detail.includes(stalled) && /so the loop has stopped spending sessions on it/.test(detail));
     assert.equal(escalated.length, 1, 'the never-starting approver\'s decision is escalated once, naming the command that answers it');

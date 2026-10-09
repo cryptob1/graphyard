@@ -755,8 +755,9 @@ export function approvalStep(watch: ApprovalWatch, decision: { id?: string; acti
   if (!sessions.available) return { step: 'wait', detail: `Herdr could not be read, so the approver session of ${label} is unknown this cycle` };
   const session = watch.agentName ? sessions.agents.find(agent => agent.name === watch.agentName) : undefined;
   const launchedAt = watch.launchedAt ? Date.parse(watch.launchedAt) : Number.NaN, age = Number.isFinite(launchedAt) ? now - launchedAt : 0;
-  // GY-1598: a stopped session is ended only past its start bound too, and an idle one only on a still screen (`judgeApproverStall`):
-  // Herdr reports a long command as idle while its output moves, so a moving or unread screen waits for the judge bound instead.
+  // GY-1598: a stopped session is ended only past its start bound too, and an idle one only on a still screen with no trace of its
+  // decision (`judgeApproverStall`): Herdr reports a long or silent command as idle, so a moving, started or unread screen waits for
+  // the judge bound instead.
   const stopped = ['idle', 'done', 'blocked'].includes(session?.agent_status ?? '') && age >= Math.max(approverSettleMs, stall.startMs ?? 0)
     && !(session?.agent_status === 'idle' && stall.screen && stall.screen !== 'still');
   const ended = !session ? `approver session ${watch.agentName ?? '(never launched)'} is gone without judging it`

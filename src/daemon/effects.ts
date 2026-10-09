@@ -264,7 +264,7 @@ export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffec
    * records what the loop observed on the item. A loop wired without the two never fails a
    * session over and never escalates capacity: it cycles exactly as it did before.
    */
-  sessionOutput?: (agent: HerdrAgent) => string | null | Promise<string | null>; /** GY-1598: how long the loop watches an idle approver's screen before ending it. */ idleScreenPauseMs?: number;
+  sessionOutput?: (agent: HerdrAgent, lines?: number) => string | null | Promise<string | null>; /** GY-1598: how long the loop watches an idle approver's screen before ending it. */ idleScreenPauseMs?: number;
   /**
    * A blocked session's runtime prompt (GY-197). `answerSession` sends the keys that choose the prompt's
    * non-destructive answer into the session's pane; `promptSession` then gives it the one instruction to carry on
@@ -560,7 +560,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     },
     childWaits: () => ledger.drain(),
     // The tail of the session's own terminal, unwrapped so a notice the pane folded reads as one line.
-    sessionOutput: async agent => { const target = agent.name ?? agent.pane_id; return target ? herdrCall(run, ['agent', 'read', target, '--source', 'recent-unwrapped', '--lines', '60', '--format', 'text']) : null; },
+    sessionOutput: async (agent, lines = 60) => { const target = agent.name ?? agent.pane_id; return target ? herdrCall(run, ['agent', 'read', target, '--source', 'recent-unwrapped', '--lines', String(lines), '--format', 'text']) : null; },
     // The decline is typed into the pane and given a moment to close the dialog, so the instruction
     // that follows lands in the runtime's input rather than in the closing menu.
     answerSession: async (agent, keys) => { await herdrCall(run, ['pane', 'send-keys', agent.pane_id!, ...keys]); await delay(2_000); },

@@ -18,7 +18,7 @@ import { assertOutsideWorktrees, atomicPrivateText, atomicPrivateWrite, external
 import { type AccountSkip, accountLaunch, agentLaunchPlan, describeObservedExhaustion, type EnvironmentProbe, heldAwareProbe, inspectProfileAccounts, type LaunchRole, NoHealthyAccountError, observedExhaustions, ownLoginHold, type ProfileAccountHealth, recordEnvironmentLog, selectAccount, setupAgentEnvironments } from './environments.js';
 import { closeFailedLaunch, launchStartMs, readSessionScreen, type RequestDelivery, startAgentSession, withLaunchClose, withLaunchedRuntime } from './launch.js';
 import { closeHerdrPane, createdHerdrTab, type HerdrAgent, herdrJson } from './herdr.js';
-import { judgeApproverStall } from './approver-stall.js';
+import { boundLaunch, judgeApproverStall, stallScreenLines } from './approver-stall.js';
 import { allocateManagedCheckout, failureText, settleCheckout } from './worktrees.js';
 import { herdrAttach } from './dispatch.js';
 import type { SessionHandleInput } from '../model/sessions.js';
@@ -332,9 +332,13 @@ async function startHeadlessApprover(root: string, config: MasterConfig, work: W
   return { ...started, settled: started.settled.finally(() => settleCheckout(root, checkout.directory)) };
 }
 export type SessionRegistrar = (handle: SessionHandleInput) => Promise<unknown>;
-/** An `idle` one also needs a still screen across `pauseMs` (`judgeApproverStall`): Herdr reports a long command as idle while its output moves. */
-async function closeUnstartedApprover(root: string, config: MasterConfig, agent: HerdrAgent, run?: ChildRun, pauseMs?: number) {
-  const verdict = await judgeApproverStall(agent, (await readApproverLaunch(root, agent.name!))?.launchedAt, launchStartMs(config), Date.now(), () => readSessionScreen(agent.pane_id!, run), pauseMs);
+/**
+ * An `idle` one also needs a still screen across `pauseMs` that shows no trace of its decision (`judgeApproverStall`): Herdr reports a
+ * long or silent command as idle. Its age comes only from the launch record bound to its pane (`boundLaunch`).
+ */
+async function closeUnstartedApprover(root: string, config: MasterConfig, agent: HerdrAgent, decision: string, run?: ChildRun, pauseMs?: number) {
+  const verdict = await judgeApproverStall(agent, boundLaunch(await readApproverLaunches(root), agent)?.launchedAt, launchStartMs(config), Date.now(),
+    () => readSessionScreen(agent.pane_id!, run, stallScreenLines), decision, pauseMs);
   if (!verdict.close) throw new Error(`Approver session ${agent.name} is already visible in Herdr; let it finish or close it first (${verdict.why})`);
   await closeHerdrPane(agent.pane_id!, run);
   return `closed approver session ${agent.name} (pane ${agent.pane_id}): ${verdict.why}`;
@@ -353,7 +357,7 @@ export async function launchApprover(root: string, work: Work, decision: string,
   const attest = await carriesAttestation(config, work, decision, headless.fetcher ?? fetch);
   const retry = `graphyard master approver ${work.key} ${decision} [AGENT_KIND]`;
   const name = nameForLaunch(retry, () => approverSessionName(work, decision));
-  const visible = agents.find(agent => agent.name === name), replaced = visible ? await closeUnstartedApprover(root, config, visible, run, headless.screenPauseMs) : null;
+  const visible = agents.find(agent => agent.name === name), replaced = visible ? await closeUnstartedApprover(root, config, visible, decision, run, headless.screenPauseMs) : null;
   // GY-169: a `pi` approver runtime (no AGENT_KIND override) is a headless run under the same name; its validated graphyard_decide
   // verdict is applied as the approver identity on the `master approve`/`master refuse` route, under the server's separation rules.
   // GY-170: a registry approver role decides the runtime too (a `pi` account runs headless with its home, model and the role's
@@ -415,7 +419,7 @@ export async function launchApprover(root: string, work: Work, decision: string,
   // The record names the spent account, registry slot, item and decision (GY-403), so the loop adopts and closes the session.
   // Kept off the checkout (GY-1339): an unwritable location leaves it unrecorded and the started runtime judging; other failures close it.
   let record: ApproverLaunchRecord;
-  try { record = await saveApproverLaunch(root, { agentName: name, account: spentOn, runtime: kind, session, launchedAt: new Date().toISOString(), work: work.key, decision, checkout: checkout.directory }); }
+  try { record = await saveApproverLaunch(root, { agentName: name, account: spentOn, runtime: kind, session, launchedAt: new Date().toISOString(), work: work.key, decision, pane: pane ?? null, checkout: checkout.directory }); }
   catch (error) { const failure = await abandonLaunch(error, pane, tabId, selected, `approver launch record for ${work.key} could not be written: ${failureText(error).slice(0, 300)}`, run); await settleCheckout(root, checkout.directory); throw failure; }
   return { agentName: name, work: work.key, decision, identity: config.approver!.id, pane: pane! as string | null, delivery, focusChanged: false, runtime: kind as string, session,
     ...(record.unrecorded ? { unrecorded: record.unrecorded } : {}), ...(replaced ? { replaced } : {}),
@@ -433,7 +437,9 @@ export const approverLaunchSchema = z.object({ agentName: z.string().max(200), a
   /** The agent registry session the launch holds, when the registry chose its account. */
   session: z.string().max(200).nullable().default(null), launchedAt: z.string(),
   /** The item and decision it judges (GY-403): the loop registers the session in its approval watch from these. */
-  work: z.string().max(40).nullable().default(null), decision: z.string().max(100).nullable().default(null), /** Its own managed directory, kept from reclaim while this record is (GY-866). */ checkout: z.string().max(4096).optional() }).strict();
+  work: z.string().max(40).nullable().default(null), decision: z.string().max(100).nullable().default(null),
+  /** The Herdr pane it was launched in (GY-1598): only a record naming the pane a listed session sits in dates that session. */ pane: z.string().max(200).nullable().optional(),
+  /** Its own managed directory, kept from reclaim while this record is (GY-866). */ checkout: z.string().max(4096).optional() }).strict();
 export type ApproverLaunch = z.infer<typeof approverLaunchSchema>;
 /** Where approver launches are recorded (GY-1339): the managed data root keyed by checkout, since the doctor's checkout is read-only (EROFS). */
 export const approverLaunchesFile = (root: string, environment: Record<string, string | undefined> = process.env) =>

@@ -1,5 +1,5 @@
 import { agentOwner, approverSessionName, type AttentionItem, type HerdrAgent } from '../master.js';
-import { approverStallVerdict, idleScreenPauseMs, screenMotion, type ScreenMotion } from '../master/approver-stall.js';
+import { approverStallVerdict, boundLaunch, idleScreenPauseMs, screenMotion, type ScreenMotion } from '../master/approver-stall.js';
 import { launchStartMs } from '../master/launch.js';
 import { standingCapacity, type CapacityState } from '../model/capacity.js';
 import { elapsed } from '../model/sessions.js';
@@ -13,10 +13,10 @@ type DecisionRow = { id: string; action: string; state: string; input?: any; req
 type ApprovalWatch = { work: string; decision: string; agentName: string | null; settledAt?: string | null; ended?: string[]; launches?: number; launchedAt?: string | null; exhaustedAt?: string | null };
 export interface UnansweredDecision { work: string; id: string; action: string; requestedAt: string; session: string; ageMs: number; age: string; ended?: string[]; inMotionUntil?: string; /** GY-1598: its tab is still in Herdr, `done` or `idle` at a still screen: `closes` when `master approver` closes it, else the pane to close first. */ visible?: { status: string } & ({ closes: true } | { closes: false; pane: string; why: string }) }
 /**
- * The approver launch records `master approver` judges a listed session's age by (GY-1598), and its start bound. `screens` holds how
- * each idle session's screen behaved across a pause, read by `terminalDecisions` through `read`; an idle one with none is unread.
+ * The approver launch records `master approver` judges a listed session's age by (GY-1598), each only for the pane it names, and its
+ * start bound. `screens` holds how each idle session's screen behaved across a pause, still only when it showed no trace of its decision, read by `terminalDecisions` through `read`; an idle one with none is unread.
  */
-export interface ApproverStarts { records: { agentName: string; launchedAt: string }[]; boundMs: number; screens?: Record<string, ScreenMotion>; read?: (agent: HerdrAgent) => Promise<string | null>; pauseMs?: number }
+export interface ApproverStarts { records: { agentName: string; launchedAt: string; pane?: string | null }[]; boundMs: number; screens?: Record<string, ScreenMotion>; read?: (agent: HerdrAgent) => Promise<string | null>; pauseMs?: number }
 const approverOf = (item: { key: string }, decision: { id: string }, approvals: ApprovalWatch[]) => {
   const watch = approvals.find(entry => entry.decision === decision.id);
   return { watch, session: watch?.agentName ?? approverSessionName(item, decision.id) };
@@ -73,8 +73,8 @@ export function unansweredInMotionUntil(watch: ApprovalWatch | undefined, reques
  * judgement: an approver that declines records `master refuse`, and its decision ends `refused`.
  * A session still listed `done`, or `idle` at a still screen, keeps its tab (GY-1598): within its start bound it is no stall yet; past
  * it `master approver` and the loop close it before launching the next, judged by `approverStallVerdict` on the same launch record and
- * screen reading; with no record, its pane is named. An idle one whose screen moves is at work, and one whose screen was not read is
- * concluded nothing about.
+ * screen reading; with no launch record bound to its pane, its pane is named. An idle one whose screen moves, or shows its request
+ * ran (a silent command), is at work, and one whose screen was not read is concluded nothing about.
  * Nothing is concluded while Herdr cannot be read. An item waiting for an approver account to
  * reset is not one: the loop launches no approver before then, and master status names that wait
  * once, as the approver capacity line, not as a stall per decision (GY-182).
@@ -89,7 +89,7 @@ export function unansweredDecisions(items: { key: string; decisions: DecisionRow
     if (live && status !== 'done' && status !== 'idle') return [];
     const screen = status === 'idle' ? starts.screens?.[session] ?? 'unreadable' : undefined;
     if (screen && screen !== 'still') return [];
-    const verdict = live ? approverStallVerdict(live, starts.records.findLast(entry => entry.agentName === session)?.launchedAt, starts.boundMs, now, screen) : null;
+    const verdict = live ? approverStallVerdict(live, boundLaunch(starts.records, live)?.launchedAt, starts.boundMs, now, screen) : null;
     if (verdict && !verdict.close && verdict.why.startsWith('it is within')) return [];
     const ageMs = Math.max(0, now - Date.parse(decision.requestedAt));
     // How the loop's earlier sessions for this decision ended (GY-551): the reasons sit beside the
@@ -159,8 +159,8 @@ export async function terminalDecisions(masterApi: (path: string) => Promise<any
   // GY-1598: an idle session named for a requested decision is judged on its screen across a pause, as `master approver` judges it.
   const starts = sessions.starts, idle = !starts?.read || !sessions.runtime.available ? [] : histories.flatMap(item => item.decisions.filter(decision => decision.state === 'requested')
     .flatMap(decision => sessions.runtime.agents.filter(agent => agent.name === approverOf(item, decision, sessions.approvals).session && agent.agent_status === 'idle'
-      && !approverStallVerdict(agent, starts.records.findLast(entry => entry.agentName === agent.name)?.launchedAt, starts.boundMs, sessions.now).why.startsWith('it is within'))));
-  const screens = Object.fromEntries(await Promise.all(idle.map(async agent => [agent.name!, await screenMotion(() => starts!.read!(agent), starts!.pauseMs ?? idleScreenPauseMs)] as const)));
+      && !approverStallVerdict(agent, boundLaunch(starts.records, agent)?.launchedAt, starts.boundMs, sessions.now).why.startsWith('it is within')).map(agent => ({ agent, decision: decision.id }))));
+  const screens = Object.fromEntries(await Promise.all(idle.map(async ({ agent, decision }) => [agent.name!, await screenMotion(() => starts!.read!(agent), decision, starts!.pauseMs ?? idleScreenPauseMs)] as const)));
   const unanswered = unansweredDecisions(histories, sessions.approvals, sessions.runtime, sessions.now, starts && { ...starts, screens: { ...starts.screens, ...screens } });
   for (const entry of unanswered) {
     const shown = entry.visible, sits = shown && `sits ${shown.status}${shown.status === 'idle' ? ' at a still screen' : ''} in Herdr`;
