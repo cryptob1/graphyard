@@ -168,6 +168,8 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
     // listed in is its launch's; an earlier same-name launch's record (the replacement's could not be written) gives it nothing of its own.
     const recorded = listed ? await effects.approverLaunch?.(name).catch(() => null) ?? null : null;
     const adopted = recorded?.pane && recorded.pane === listed?.pane_id ? recorded : null;
+    // GY-1612: an adopted session keeps its own pane-bound record's launch time, so supervision judges its real age, not a fresh interval.
+    const adoptedAt = adopted && listed ? boundLaunch(await effects.approverLaunches?.().catch(() => []) ?? [], listed)?.launchedAt : undefined;
     // A session the watch still holds past its close attempts is ended before the watch forgets it.
     // While the registry cannot be told, its id stays on the watch and no replacement is launched:
     // at a role concurrency of 1 the live slot would refuse it, and the id is the only way to end it.
@@ -194,7 +196,7 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
       watch.ended = [...watch.ended, `approver run ${watch.agentName ?? name} was lost${refunded ? '' : `, past the ${maxLostApproverRuns} lost runs given back`}: ${watch.run.result.detail}`.slice(0, 300)].slice(-10);
       Object.assign(watch, refunded ? { launches: Math.max(0, watch.launches - 1), lostRuns: watch.lostRuns + 1, run: null } : { run: null });
     }
-    Object.assign(watch, { launches: watch.launches + 1, agentName: name, pane: listed?.pane_id ?? null, launchedAt: adopted?.launchedAt ?? stamp, account: adopted?.account ?? null, runtime: adopted?.runtime ?? null, session: adopted?.session ?? null });
+    Object.assign(watch, { launches: watch.launches + 1, agentName: name, pane: listed?.pane_id ?? null, launchedAt: adoptedAt ?? stamp, account: adopted?.account ?? null, runtime: adopted?.runtime ?? null, session: adopted?.session ?? null });
     // GY-920: adopting a session that is already judging the decision ends any capacity wait the
     // watch still carried. The wait described a launch that never happened; kept, it would have
     // `master status` report "waiting for approver capacity" beside a live approver.
