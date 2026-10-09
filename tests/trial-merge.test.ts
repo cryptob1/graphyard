@@ -7,7 +7,7 @@ import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { defaultChildRun } from '../src/child-runner.js';
-import { credentialTrialVariable, groupTestFiles, runnerDiagnosticTailLength, runTrial, trialAuthor, trialEnvironment, trialMerge, trialNeedsLog, trialRef, lookupPoisoned, trialLookupEntries, reclaimTrialTemporaries, trialTemporaryPrefix, trialTemporaryRoot, trialTemporaryRoots, trialTemporaryVariables, trialTestGroupSize, TrialCleanupError, TrialRunnerError, TrialTimeoutError, withheldTrialVariables, type RunTrialInput } from '../src/merge-writer/trial.js';
+import { credentialTrialVariable, groupTestFiles, runnerDiagnosticTailLength, runTrial, trialAuthor, trialEnvironment, trialMerge, trialNeedsLog, trialRef, lookupPoisoned, trialLookupEntries, reclaimTrialTemporaries, trialCheckoutPrefix, trialTemporaryPrefix, trialTemporaryRoot, trialTemporaryRoots, trialTemporaryVariables, trialTestGroupSize, TrialCleanupError, TrialRunnerError, TrialTimeoutError, withheldTrialVariables, type RunTrialInput } from '../src/merge-writer/trial.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { shadowErrorKey, shadowIdle, shadowReads, shadowRunnerKey, shadowRunnerRetries } from '../src/daemon/cycle-shadow.js';
 import { masterConfigSchema } from '../src/master.js';
@@ -89,7 +89,7 @@ const fixtureFiles = {
   'package.json': JSON.stringify({ name: 'fixture', scripts: { build: 'node build.js' } }),
   'package-lock.json': '{"lockfileVersion":3}\n',
   // With a `kill-build` marker the build child dies on a signal, as a host out of memory ends it.
-  'build.js': "const { existsSync } = require('node:fs'); console.log('ENV:' + JSON.stringify({ keys: Object.keys(process.env), global: process.env.GIT_CONFIG_GLOBAL, nosystem: process.env.GIT_CONFIG_NOSYSTEM, home: process.env.HOME, tmpdir: require('node:os').tmpdir(), tmpEntries: require('node:fs').readdirSync(require('node:os').tmpdir()), tmpVariables: [process.env.TMPDIR, process.env.TMP, process.env.TEMP] })); require('node:fs').writeFileSync(require('node:path').join(require('node:os').tmpdir(), 'build-scratch'), 'x'); if (existsSync('break-build')) { console.error('build broke'); process.exit(1); } if (existsSync('kill-build')) { console.error('build killed'); process.kill(process.pid, 'SIGKILL'); }\n",
+  'build.js': "const { existsSync } = require('node:fs'); console.log('ENV:' + JSON.stringify({ keys: Object.keys(process.env), global: process.env.GIT_CONFIG_GLOBAL, nosystem: process.env.GIT_CONFIG_NOSYSTEM, home: process.env.HOME, tmpdir: require('node:os').tmpdir(), tmpEntries: require('node:fs').readdirSync(require('node:os').tmpdir()), tmpVariables: [process.env.TMPDIR, process.env.TMP, process.env.TEMP], cwd: process.cwd() })); require('node:fs').writeFileSync(require('node:path').join(require('node:os').tmpdir(), 'build-scratch'), 'x'); if (existsSync('break-build')) { console.error('build broke'); process.exit(1); } if (existsSync('kill-build')) { console.error('build killed'); process.kill(process.pid, 'SIGKILL'); }\n",
   // The stand-in for scripts/ci-tests.mjs: `affected` answers the changed test files, or a full selection (every pre-merge
   // file, never a soak) when package.json changed; with a `full-silent` marker it lists nothing for a full selection, as the
   // script did before GY-1522. `select` lists the pre-merge suite, as the real one does outside Actions.
@@ -268,7 +268,7 @@ test('unit:trial-tmpdir-isolated — the trial child gets a fresh, empty, short 
   assert.equal(trialTemporaryRoot('/session', [shared, clean]), usable ? clean : '/session');
   const host: NodeJS.ProcessEnv = { PATH: process.env.PATH!, TMPDIR: shared, TMP: shared, TEMP: shared };
   const repo = await fixture();
-  const seen = (logTail: string) => JSON.parse(/ENV:(.*)/.exec(logTail)![1]!) as { tmpdir: string; tmpEntries: string[]; tmpVariables: string[] };
+  const seen = (logTail: string) => JSON.parse(/ENV:(.*)/.exec(logTail)![1]!) as { tmpdir: string; tmpEntries: string[]; tmpVariables: string[]; cwd: string };
   const directories: string[] = [];
   for (const [files, changed, outcome] of [
     [{ 'tests/a.test.ts': 'x\n' }, ['tests/a.test.ts'], 'pass'],
@@ -284,10 +284,13 @@ test('unit:trial-tmpdir-isolated — the trial child gets a fresh, empty, short 
     assert.ok(!child.tmpdir.startsWith(`${shared}/`), `the ${outcome} trial never runs in the poisoned tmp`);
     assert.ok(child.tmpdir.startsWith(usable ? `${clean}/${trialTemporaryPrefix}` : `${base}/`), `its tmpdir is made for it in the clean root: ${child.tmpdir}`);
     assert.deepEqual(child.tmpVariables, [child.tmpdir, child.tmpdir, child.tmpdir], 'TMPDIR, TMP and TEMP all name it');
+    // Its checkout is short beside it, as CI's is, so no launch line the suite types outgrows its bound; else the session's own.
+    assert.ok(child.cwd.startsWith(usable ? `${clean}/${trialCheckoutPrefix}` : `${base}/`) && child.cwd.endsWith('/checkout'), `its checkout is made in the clean root: ${child.cwd}`);
     // npm, which runs the build, keeps node's compile cache in the tmpdir it is given; nothing else is there.
     assert.deepEqual(child.tmpEntries.filter(entry => entry !== 'node-compile-cache'), [], 'it is empty when the suite starts: no node_modules, no .git');
     assert.equal(existsSync(child.tmpdir), false, `it is removed with the checkout after a ${outcome}`);
     assert.equal(existsSync(tempOwnerMarker(child.tmpdir)), false, `its owner marker goes with it after a ${outcome}`);
+    assert.equal(existsSync(child.cwd), false, `the checkout goes with it after a ${outcome}`);
     assert.equal(existsSync(base) ? readdirSync(base).length : 0, 0);
     directories.push(child.tmpdir);
   }
@@ -298,6 +301,9 @@ test('unit:trial-tmpdir-isolated — the trial child gets a fresh, empty, short 
   // marker left without its directory, go before the next trial in that root makes its own; a running trial's, marked by
   // this live process, is kept. The name is the loop's tmp pass's too, so a root that pass scans is swept by it as well.
   const crashed = join(clean, `${trialTemporaryPrefix}crashed`), running = join(clean, `${trialTemporaryPrefix}running`), orphan = join(clean, `${trialTemporaryPrefix}gone`);
+  const crashedCheckout = join(clean, `${trialCheckoutPrefix}crashed`);
+  mkdirSync(join(crashedCheckout, 'checkout', 'tests'), { recursive: true });
+  writeFileSync(tempOwnerMarker(crashedCheckout), `${JSON.stringify({ pid: process.pid, startedAt: -1, at: new Date().toISOString() })}\n`);
   for (const directory of [crashed, running]) { mkdirSync(join(directory, 'graphyard-pg-data'), { recursive: true }); writeFileSync(join(directory, 'graphyard-pg-data', 'PG_VERSION'), '16\n'); }
   writeFileSync(tempOwnerMarker(crashed), `${JSON.stringify({ pid: process.pid, startedAt: -1, at: new Date().toISOString() })}\n`);
   writeFileSync(tempOwnerMarker(orphan), `${JSON.stringify({ pid: process.pid, startedAt: -1, at: new Date().toISOString() })}\n`);
@@ -308,8 +314,8 @@ test('unit:trial-tmpdir-isolated — the trial child gets a fresh, empty, short 
   const result = await runTrial({ root: repo.root, base: await temporaryDirectory('trial-merge-root', tmpdir()), mergeSha: merged.mergeSha, changedFiles: ['tests/a.test.ts'], timeoutMs: 120_000, key: 'GY-9', environment: host, temporaryRoots: [clean] });
   assert.equal(result.build, 'pass', result.logTail);
   // Under a poisoned host tmp the trial made its directory in its session directory instead, and swept that: sweep this root as it would.
-  if (!usable) assert.deepEqual((await reclaimTrialTemporaries(clean)).sort(), [crashed, orphan]);
-  assert.deepEqual(readdirSync(clean).sort(), [`${trialTemporaryPrefix}running`, `${trialTemporaryPrefix}running.owner`], 'the crashed trial\'s directory and the orphaned marker are taken back; the running trial\'s stays');
+  if (!usable) assert.deepEqual((await reclaimTrialTemporaries(clean)).sort(), [crashedCheckout, crashed, orphan].sort());
+  assert.deepEqual(readdirSync(clean).sort(), [`${trialTemporaryPrefix}running`, `${trialTemporaryPrefix}running.owner`], 'the crashed trial\'s directories and the orphaned marker are taken back; the running trial\'s stays');
   assert.deepEqual(await reclaimTrialTemporaries(clean), [], 'and a sweep while it runs keeps it');
 });
 

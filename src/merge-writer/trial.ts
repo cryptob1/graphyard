@@ -98,15 +98,24 @@ export const trialTemporaryRoot = (sessionDirectory: string, roots: readonly str
  */
 export const trialTemporaryPrefix = 'gy-t';
 /**
- * Take back the trial directories a crashed merge writer left in `root` (GY-1565): runTrial marks
- * each with its owner, so one whose owner is gone — and a marker whose directory is — goes before
+ * The name prefix of the short directory a trial's checkout is made in, beside its temporary one
+ * (GY-1565). The managed session directory's path (~/.local/share/graphyard/worktrees/<repo>/
+ * graphyard-trial-<key>-<sha>-<id>/checkout, 116 bytes on vishrog) put the launch lines
+ * master-agent-envs and master-loop-resilience type past `launchCommandLimit`, which CI's
+ * 37-byte checkout never reaches: two of GY-1535's ten shadow-only-fails. The session directory
+ * still holds the trial's lists and records, and is removed and reclaimed as before.
+ */
+export const trialCheckoutPrefix = 'gy-c';
+/**
+ * Take back the trial directories — temporary and checkout — a crashed merge writer left in `root`
+ * (GY-1565): runTrial marks each with its owner, so one whose owner is gone — and a marker whose directory is — goes before
  * the next trial makes its own, in whichever root that is, scanned by the loop's pass or not. A
  * running trial's directory, its owner alive, is kept. Returns the paths removed; never throws.
  */
 export async function reclaimTrialTemporaries(root: string): Promise<string[]> {
   const removed: string[] = [];
   for (const name of await readdir(root).catch(() => [] as string[])) {
-    if (!name.startsWith(trialTemporaryPrefix) || !name.endsWith('.owner')) continue;
+    if (![trialTemporaryPrefix, trialCheckoutPrefix].some(prefix => name.startsWith(prefix)) || !name.endsWith('.owner')) continue;
     const directory = join(root, name.slice(0, -'.owner'.length));
     const owner = await readTempOwner(directory);
     if (existsSync(directory) && (!owner || !tempOwnerGone(owner))) continue;
@@ -225,7 +234,8 @@ export function runnerRecords(text: string): { file: string; passed: boolean }[]
 }
 
 /**
- * Check the merge commit out detached as a `trial` checkout, run `npm run build`, then the affected
+ * Check the merge commit out detached as a `trial` checkout (in a short directory beside the trial's
+ * temporary one when a clean root is found), run `npm run build`, then the affected
  * pre-merge selection of scripts/ci-tests.mjs through tests/helpers/run-tests.ts, all under one
  * deadline and `trialEnvironment` with the trial's own empty temporary directory. The runner
  * always gets a selected file list, so a full selection runs every pre-merge file and never the
@@ -240,16 +250,18 @@ export function runnerRecords(text: string): { file: string; passed: boolean }[]
 export async function runTrial(input: RunTrialInput): Promise<TrialRun> {
   const run = input.run ?? defaultChildRun, now = input.now ?? Date.now, startedAt = now(), deadline = startedAt + input.timeoutMs;
   const checkout = await allocateSessionCheckout(input.base, 'trial', input.key ?? 'trial', input.mergeSha, randomUUID());
-  // A fresh, empty temporary directory made for this trial alone, removed with its checkout, and
-  // marked as this process's so a crash before the cleanup leaves it to the next trial's sweep and the tmp reclaim.
-  let temporary: string | null = null;
+  // A fresh, empty temporary directory made for this trial alone, and a short one its checkout goes in when a clean root
+  // is found (else the session directory's checkout), each removed with the session and marked as this process's so a
+  // crash before the cleanup leaves it to the next trial's sweep and the tmp reclaim.
+  let temporary: string | null = null, place: string | null = null, worktree = checkout.worktree;
   try {
     const root = trialTemporaryRoot(checkout.directory, input.temporaryRoots);
     await reclaimTrialTemporaries(root);
     temporary = await mkdtemp(join(root, trialTemporaryPrefix)); await writeTempOwner(temporary);
+    if (root !== checkout.directory) { place = await mkdtemp(join(root, trialCheckoutPrefix)); await writeTempOwner(place); worktree = join(place, 'checkout'); }
   }
   catch (error) {
-    if (temporary) await rm(temporary, { recursive: true, force: true }).catch(() => {});
+    for (const made of [temporary, place]) if (made) await rm(made, { recursive: true, force: true }).then(() => rm(tempOwnerMarker(made), { force: true })).catch(() => {});
     await (input.remove ?? removeSessionCheckout)(input.root, input.base, checkout.directory, input.run).catch(() => {});
     throw error;
   }
@@ -290,7 +302,7 @@ export async function runTrial(input: RunTrialInput): Promise<TrialRun> {
   };
   const child = async (phase: TrialTimeoutError['phase'], command: string, args: string[], options: { env?: NodeJS.ProcessEnv } = {}): Promise<Ended> => {
     let out: string;
-    try { out = String(await run(command, args, { cwd: checkout.worktree, env: (options.env ?? env) as Record<string, string>, timeoutMs: remaining() })); }
+    try { out = String(await run(command, args, { cwd: worktree, env: (options.env ?? env) as Record<string, string>, timeoutMs: remaining() })); }
     catch (error) {
       const out = output(error);
       const ended = endedOf(error, out);
@@ -310,11 +322,11 @@ export async function runTrial(input: RunTrialInput): Promise<TrialRun> {
   const listed = (out: string) => out.split('\n').map(line => line.trim()).filter(line => testFileLine.test(line));
   const trial = async (): Promise<TrialRun> => {
     try {
-      await run('git', ['-C', input.root, 'worktree', 'add', '--detach', checkout.worktree, input.mergeSha], { timeoutMs: remaining() });
+      await run('git', ['-C', input.root, 'worktree', 'add', '--detach', worktree, input.mergeSha], { timeoutMs: remaining() });
       // The merge builds against its own dependencies: the coordinator's install when its lockfile is byte-identical to the merge's, else an `npm ci` of the merge's lockfile.
       const lockfile = (dir: string) => readFile(join(dir, 'package-lock.json'), 'utf8').catch(() => null);
-      const [own, merged] = await Promise.all([lockfile(input.root), lockfile(checkout.worktree)]);
-      if (existsSync(join(input.root, 'node_modules')) && own !== null && own === merged) await symlink(join(input.root, 'node_modules'), join(checkout.worktree, 'node_modules'));
+      const [own, merged] = await Promise.all([lockfile(input.root), lockfile(worktree)]);
+      if (existsSync(join(input.root, 'node_modules')) && own !== null && own === merged) await symlink(join(input.root, 'node_modules'), join(worktree, 'node_modules'));
       else {
         const installed = await child('install', 'npm', npmCiArgs, { env: npmCiEnvironment(env) });
         if (hostEnded(installed)) throw runnerFailure('install', installed);
@@ -366,7 +378,10 @@ export async function runTrial(input: RunTrialInput): Promise<TrialRun> {
   let settled: { verdict: TrialRun } | { error: unknown };
   try { settled = { verdict: await trial() }; } catch (error) { settled = { error }; }
   // The temporary directory goes with it: a failure to remove either is the cleanup's, and neither stops the other.
-  const removed = await Promise.allSettled([rm(temporary, { recursive: true, force: true }).then(() => rm(tempOwnerMarker(temporary), { force: true })), (input.remove ?? removeSessionCheckout)(input.root, input.base, checkout.directory, input.run)]);
+  // The short checkout's files go first, so the session's removal prunes its registration in the repository.
+  const made = [temporary, ...(place ? [place] : [])];
+  const removed = await Promise.allSettled(made.map(directory => rm(directory, { recursive: true, force: true }).then(() => rm(tempOwnerMarker(directory), { force: true }))));
+  removed.push(...await Promise.allSettled([(input.remove ?? removeSessionCheckout)(input.root, input.base, checkout.directory, input.run)]));
   const failure = removed.find((result): result is PromiseRejectedResult => result.status === 'rejected');
   if (failure) {
     const cause = failure.reason;
