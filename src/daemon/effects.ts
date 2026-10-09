@@ -95,6 +95,12 @@ export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffec
   closeSession: (pane: string) => void | Promise<void>;
   dispatch: (work: Work, profile: WorkerProfile, agents: HerdrAgent[], snapshot: { work: Work[]; now: string }) => Promise<unknown>;
   requestProof: (work: Work) => void | Promise<void>;
+  /**
+   * The throughput owner as the control plane holds it now (GY-1609): read before the loop keys a
+   * needs-decision by the owner's requirements revision, so a revision applied since the cycle's
+   * snapshot is never mistaken for one applied after the escalation. Absent, the snapshot's is used.
+   */
+  readThroughputOwner?: (owner: Work) => Promise<Work>;
   /** Asks the control plane to decide the item's open scope request and returns the decided document. */
   decideScope?: (work: Work) => Promise<Work>;
   wakeObservation?: (work: Work) => Promise<unknown>; // GY-710: a prioritized `resync` now (GY-1266) that waits on no tick (GY-1286), for a step refused on a stale observation
@@ -712,6 +718,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       publishedMergeQueue = published;
     },
     ...throughputEffects(root, current, run, asCoordinator, asOperatorAgent), ...flakeLedgerEffects(root),
+    readThroughputOwner: async owner => await asCoordinator(`work/${encodeURIComponent(owner.id)}`) as Work,
     recordDeployment: (work, observation) => mutate(`work/${work.id}/deployment`, { sha: observation.sha, mergeSha: work.delivery!.mergeSha, source: observation.source, observedAt: observation.observedAt }),
     exhaustedProofs: async () => Object.entries((await readDispatchCursor(root, current(), () => {})).abandoned).filter(([, entry]) => entry.kind === 'producer')
       .map(([requestId, entry]) => ({ requestId, work: entry.work, sha: entry.sha, group: entry.group ?? null, proofs: entry.proofs ?? [], attempts: entry.attempts, reason: entry.reason })),

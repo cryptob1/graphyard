@@ -595,6 +595,8 @@ export function throughputOwnerItem(revision: string, admitted: number | null) {
 
 /** How an owner's closure reason names an answered escalated miss (`throughputOwnerClosure`, GY-1587). */
 const escalatedMissAnswer = ' on an escalated budget miss';
+/** How that reason names the release the answered miss was asked on (GY-1609). */
+const escalatedMissRelease = ' of ';
 
 /**
  * Why the loop closes the owner now, or null while it must stay open: the newest answer for the
@@ -602,10 +604,11 @@ const escalatedMissAnswer = ' on an escalated budget miss';
  * so a release that is still unverified always has an open owner.
  */
 export function throughputOwnerClosure(owner: Pick<Work, 'key' | 'policyRevision'>, serving: { revision: string; verdict: ThroughputReport['verdict'] | null }, raisedAt: number | null,
-  cause: ThroughputStall['cause'] = 'stall'): string | null {
+  cause: ThroughputStall['cause'] = 'stall', asked: string | null = null): string | null {
   if (serving.verdict === 'verified') return `${throughputClaim.item}'s throughput claim verified on the serving release ${serving.revision}; the loop closes ${owner.key}, which owned that verification`;
   // GY-1587: the reason names an escalated miss it answered, so `throughputAnsweredAt` tells that answer from a stall's.
-  if (throughputOwnerAnswered(owner, raisedAt)) return `${owner.key}'s needs-decision (raised at its requirements revision ${raisedAt}${cause === 'escalated-miss' ? escalatedMissAnswer : ''}) was answered by its requirements revision ${owner.policyRevision}; the loop closes it, and files a second owner for ${serving.revision.slice(0, 12)} only while a measurement of it under the applied rule still shows a needs-decision standing, in this same cycle: the next release it measures unverified files a new one`;
+  // GY-1609: and the release that miss was asked on (`asked`), which the release serving now need not be.
+  if (throughputOwnerAnswered(owner, raisedAt)) return `${owner.key}'s needs-decision (raised at its requirements revision ${raisedAt}${cause === 'escalated-miss' ? `${escalatedMissAnswer}${asked ? `${escalatedMissRelease}${asked.slice(0, 12)}` : ''}` : ''}) was answered by its requirements revision ${owner.policyRevision}; the loop closes it, and files a second owner for ${serving.revision.slice(0, 12)} only while a measurement of it under the applied rule still shows a needs-decision standing, in this same cycle: the next release it measures unverified files a new one`;
   return null;
 }
 
@@ -615,7 +618,7 @@ export function throughputOwnerClosure(owner: Pick<Work, 'key' | 'policyRevision
  * successor's idempotency key names it, so one is filed per (release, answered revision) (GY-1467).
  */
 export function throughputOwnerAnsweredBy(owner: Pick<Work, 'closure'> | undefined): number | null {
-  const answered = /needs-decision \(raised at its requirements revision \d+(?: on an escalated budget miss)?\) was answered by its requirements revision (\d+)/.exec(owner?.closure?.reason ?? '');
+  const answered = /needs-decision \(raised at its requirements revision \d+(?: on an escalated budget miss(?: of [0-9a-f]{12})?)?\) was answered by its requirements revision (\d+)/.exec(owner?.closure?.reason ?? '');
   return answered ? Number(answered[1]) : null;
 }
 
@@ -725,15 +728,23 @@ export const throughputDecision = (report: ThroughputReport, pursuit: Pick<Throu
  * its escalated miss asked.
  *
  * GY-1609: an owner stays open across releases, so the release its decision was answered on is the
- * one its closure names as serving (`files a second owner for REVISION`), whatever its title says:
- * GY-1471 (filed for 3de6fef53f00) and GY-1601 (filed for 77db400620f4) answered the escalated miss
- * on 9a75e367d6ec and 07094753fccc. The loop judges it the same way, so master status never asks a
- * successor the decision the loop does not raise on it, which no applied revision could then answer.
+ * one the escalation asked it on, which its closure names (`on an escalated budget miss of REVISION`),
+ * whatever its title says or which release served when the answer landed: an owner asked on A whose
+ * answer is applied once B serves answers A's miss, never B's, which is asked afresh. A closure written
+ * before the release was named reads the release it served then (`files a second owner for REVISION`)
+ * or its title: GY-1471 (filed for 3de6fef53f00) and GY-1601 (filed for 77db400620f4) answered the
+ * escalated miss on 9a75e367d6ec and 07094753fccc. The loop judges it the same way, so master status
+ * never asks a successor the decision the loop does not raise on it, which no applied revision could then answer.
  */
 export function throughputAnsweredAt(work: readonly Pick<Work, 'title' | 'closure'>[], revision: string): number | null {
   const title = throughputOwnerItem(revision, null).title, serving = `files a second owner for ${revision.slice(0, 12)} `;
-  const answered = work.filter(item => (item.title === title || (item.closure?.reason ?? '').includes(serving)) && throughputOwnerAnsweredBy(item) !== null && (item.closure?.reason ?? '').includes(escalatedMissAnswer))
-    .map(item => time(item.closure?.at)).filter((at): at is number => at !== null);
+  const named = `${escalatedMissAnswer}${escalatedMissRelease}`, asked = `${named}${revision.slice(0, 12)})`;
+  const answeredOn = (item: Pick<Work, 'title' | 'closure'>) => {
+    const reason = item.closure?.reason ?? '';
+    if (!reason.includes(escalatedMissAnswer) || throughputOwnerAnsweredBy(item) === null) return false;
+    return reason.includes(named) ? reason.includes(asked) : item.title === title || reason.includes(serving);
+  };
+  const answered = work.filter(answeredOn).map(item => time(item.closure?.at)).filter((at): at is number => at !== null);
   return answered.length ? Math.max(...answered) : null;
 }
 
@@ -759,6 +770,8 @@ export const settledExclusions = (exclusions: readonly string[]) => exclusions.f
 const escalatedMissDecide = 'Decide whether the coordination that leaves the claim missing its budgets changes';
 /** What raised the needs-decision an escalation action records, read from its text (`throughputStallText`). */
 export const throughputDecisionCause = (detail: string | null | undefined): NonNullable<ThroughputStall['cause']> => detail?.includes(escalatedMissDecide) ? 'escalated-miss' : 'stall';
+/** The release a recorded needs-decision was asked on, read back from its text (`throughputStallText`), or null when it names none (GY-1609). */
+export const throughputDecisionRelease = (detail: string | null | undefined) => /(?:budgets missed|cannot accumulate) on ([0-9a-f]{12}) /.exec(detail ?? '')?.[1] ?? null;
 
 /** The needs-decision as the escalation and the attention word it, asked on the owner item it names. */
 export function throughputStallText(stall: Omit<ThroughputStall, 'text'>) {

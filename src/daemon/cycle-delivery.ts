@@ -12,7 +12,7 @@ import type { Cycle } from './cycle.js';
 import { defaultDeploymentReuseMinutes, defaultPromoteEveryMinutes, deploymentDetail, deploymentStepBudgetMs, promotionCycle, promotionWorkflow, reusableDeployment, stillVerifying, withinDeploymentBudget } from './deployment.js';
 import { mainGuardAttention } from '../main-guard.js';
 import { promotionFreeze } from './main-watch.js';
-import { openThroughputOwner, throughputAnsweredAt, throughputDecisionCause, throughputOwnerAnsweredBy, throughputOwnerClosure, throughputOwnerItem, throughputRemeasureAt, throughputStallText, type ThroughputStall } from '../throughput.js';
+import { openThroughputOwner, throughputAnsweredAt, throughputDecisionCause, throughputDecisionRelease, throughputOwnerAnsweredBy, throughputOwnerClosure, throughputOwnerItem, throughputRemeasureAt, throughputStallText, type ThroughputStall } from '../throughput.js';
 
 /**
  * GY-710. Wake the item's observation job for a step refused on a stale observation — a rework —
@@ -338,20 +338,22 @@ async function throughputOwnerStep(cycle: Pick<Cycle, 'state' | 'effects' | 'now
   const verdict = answeredVerdict(answer);
   const ownerKey = throughputOwnerKey(revision);
   const note = (work: string | null, outcome: DaemonAction['state'], detail: string) => record(state, ownerKey, { kind: 'deployment', work, principal: null, state: outcome, detail, attempts: (state.actions[ownerKey]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist);
-  let owner = openThroughputOwner(work), answered: { key: string; by: number; cause: ReturnType<typeof throughputDecisionCause> } | null = null;
+  let owner = openThroughputOwner(work), answered: { key: string; by: number; cause: ReturnType<typeof throughputDecisionCause>; asked: string | null } | null = null;
   settleThroughputEscalations(state, owner?.key ?? null);
   if (owner) {
     // Without a reason it stays open: the claim is not verified and its needs-decision is not answered.
     // GY-1587: the closure names which decision it answered, read from the escalation that asked it.
-    const raisedAt = throughputEscalatedAt(state.actions, owner), cause = throughputDecisionCause(raisedAt === null ? null : state.actions[throughputEscalationKey(owner.key, raisedAt)]?.detail);
-    const reason = throughputOwnerClosure(owner, { revision, verdict }, raisedAt, cause), ownerAction = state.actions[ownerKey];
+    // GY-1609: and the release it was asked on, which an owner open across a release change need not be serving now.
+    const raisedAt = throughputEscalatedAt(state.actions, owner), escalation = raisedAt === null ? null : state.actions[throughputEscalationKey(owner.key, raisedAt)]?.detail;
+    const cause = throughputDecisionCause(escalation), asked = throughputDecisionRelease(escalation);
+    const reason = throughputOwnerClosure(owner, { revision, verdict }, raisedAt, cause, asked), ownerAction = state.actions[ownerKey];
     if (reason) {
       if (effects.closeThroughputOwner && (ownerAction?.state !== 'failed' || readyToRetry(ownerAction, state.cycle))) try {
         if (await effects.closeThroughputOwner(owner, reason, `throughput-owner:close:${owner.id}:${owner.revision}`)) {
           settleThroughputEscalations(state, null);
           performed.push(await note(owner.key, 'done', `Closed ${owner.key}: ${reason}`));
           // Closed on its answer, not a verified claim: its successor is judged in this same cycle.
-          if (verdict !== 'verified') answered = { key: owner.key, by: owner.policyRevision, cause };
+          if (verdict !== 'verified') answered = { key: owner.key, by: owner.policyRevision, cause, asked };
         }
       } catch (error) { performed.push(await note(owner.key, 'failed', `Could not close ${owner.key}: ${message(error)}`)); }
       if (!answered) return;
@@ -410,7 +412,19 @@ async function throughputOwnerStep(cycle: Pick<Cycle, 'state' | 'effects' | 'now
   // owner of this release closed on the answer to that escalated miss, its successor carries the
   // verification without a second ask; the next release asks afresh. An answered stall is a
   // different decision and never suppresses it.
-  if (stall.cause === 'escalated-miss' && (answered?.cause === 'escalated-miss' || throughputAnsweredAt(work, revision) !== null)) return;
+  // GY-1609: an answer counts for the release it was asked on, so an owner asked on A and answered once
+  // B serves leaves B's miss to be asked on its successor.
+  const answeredHere = answered?.cause === 'escalated-miss' && (answered.asked ?? revision.slice(0, 12)) === revision.slice(0, 12);
+  if (stall.cause === 'escalated-miss' && (answeredHere || throughputAnsweredAt(work, revision) !== null)) return;
+  // GY-1609: the owner's requirements revision is read again before the escalation is keyed by it.
+  // The work list is the cycle's opening snapshot, and a revision approved since — before this
+  // escalation was raised, so answering nothing — would otherwise read as applied after it and close
+  // the owner on the next cycle. Unreadable, nothing is raised: the next standing read raises it.
+  if (effects.readThroughputOwner) {
+    const fresh = await effects.readThroughputOwner(owner).catch(() => null);
+    if (!fresh || !openThroughputOwner([fresh]) || throughputEscalatedAt(state.actions, fresh) !== null) return;
+    owner = fresh;
+  }
   performed.push(await record(state, throughputEscalationKey(owner.key, owner.policyRevision), { kind: 'escalation', work: owner.key, principal: null, state: 'waiting', detail: throughputStallText({ ...stall, owner: owner.key }), attempts: 1, cycle: state.cycle }, now(), effects.persist));
 }
 

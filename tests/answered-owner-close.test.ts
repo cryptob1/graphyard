@@ -170,3 +170,64 @@ test('unit:next-action-no-decide-on-applied-decision — while the answering rev
   assert.equal(throughputAnsweredAt([closed], release), base);
   assert.equal(decideOn(throughputClaimVisibility({ report, file: 't.json' }, { revision: release, version: '1' }, 10, pursuit, owner, throughputAnsweredAt([closed], release), null)), null);
 });
+
+test('integration:answered-owner-bound-to-asked-release — an owner asked on one release whose answer is applied once the next serves answers that release\'s miss only: the closure names the release it was asked on, and the serving release\'s miss is asked on the successor in the same cycle', async () => {
+  const directory = await temporaryDirectory('answered-owner-bound');
+  try {
+    const first = sha('a'), serving = { release: first };
+    const work: Work[] = [];
+    const loop = await fleet(directory, work, serving);
+    await loop.cycle();
+    const owner = loop.filed[0]!;
+    assert.equal(throughputEscalatedAt(loop.state.actions, owner), 1, 'the miss on the first release is raised on its owner');
+    // The next release serves, and its miss stands, before the first release's decision is approved.
+    serving.release = sha('b');
+    await loop.cycle();
+    assert.equal(loop.closed.length, 0, 'unanswered, the owner stays open across the release change');
+    owner.policyRevision = 2;
+    await loop.cycle();
+    assert.deepEqual(loop.closed, [owner.key]);
+    assert.match(owner.closure!.reason, new RegExp(`on an escalated budget miss of ${first.slice(0, 12)}\\) was answered by its requirements revision 2`));
+    assert.equal(throughputAnsweredAt(work, first), Date.parse(owner.closure!.at), 'the answer counts for the release it was asked on');
+    assert.equal(throughputAnsweredAt(work, serving.release), null, 'and never for the release serving when it landed');
+    const successor = openThroughputOwner(work)!;
+    assert.notEqual(successor.key, owner.key);
+    assert.equal(throughputEscalatedAt(loop.state.actions, successor), 1, 'the serving release\'s own escalated miss is asked on the successor in the closing cycle');
+    assert.equal(decideOn(loop.status()), successor.key, 'and master status asks it there');
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('integration:answered-owner-refreshed-before-raise — a requirements revision applied to the open owner after the cycle\'s snapshot but before the loop raises its decision answers nothing: the loop reads the owner again, raises at that revision, and the owner stays open until a later answer', async () => {
+  const directory = await temporaryDirectory('answered-owner-refreshed');
+  try {
+    const serving = { release: sha('c') };
+    const owner = ownerOf('GY-1700', sha('7'));
+    const work: Work[] = [owner];
+    const loop = await fleet(directory, work, serving);
+    // The snapshot the cycle works from carries revision 1; revision 2 is applied as the loop reads the decision standing.
+    loop.effects.snapshot = async () => ({ work: work.map(item => ({ ...item })), now: new Date().toISOString() });
+    const read = loop.effects.standingThroughputStall!, measure = loop.effects.measureThroughput!;
+    loop.effects.standingThroughputStall = async release => { const stall = await read(release); if (stall) owner.policyRevision = 2; return stall; };
+    loop.effects.measureThroughput = async (items, observed) => { const outcome = await measure(items, observed); if (outcome.stall) owner.policyRevision = 2; return outcome; };
+    loop.effects.readThroughputOwner = async item => ({ ...work.find(held => held.id === item.id)! });
+    await loop.cycle();
+    assert.equal(throughputEscalatedAt(loop.state.actions, owner), 2, 'raised at the revision the owner holds now, not the snapshot\'s');
+    for (let cycle = 0; cycle < 3; cycle++) await loop.cycle();
+    assert.deepEqual(loop.closed, [], 'the revision applied before the raise answers nothing');
+    assert.equal(decideOn(loop.status()), owner.key, 'master status still asks the decision');
+    owner.policyRevision = 3;
+    await loop.cycle();
+    assert.deepEqual(loop.closed, [owner.key], 'the later answer closes it within one cycle');
+    // Unreadable, the owner's decision is not raised from the stale snapshot: a later read raises it.
+    const other = ownerOf('GY-1701', sha('7'));
+    Object.assign(owner, { stage: 'done' });
+    work.splice(0, work.length, other);
+    serving.release = sha('d');
+    loop.effects.readThroughputOwner = async () => { throw new Error('control plane unreachable'); };
+    await loop.cycle();
+    assert.equal(throughputEscalatedAt(loop.state.actions, other), null, 'nothing raised on an unread owner');
+    loop.effects.readThroughputOwner = async item => ({ ...work.find(held => held.id === item.id)! });
+    await loop.cycle();
+    assert.notEqual(throughputEscalatedAt(loop.state.actions, other), null, 'raised once the owner reads');
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
