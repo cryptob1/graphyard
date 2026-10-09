@@ -120,3 +120,21 @@ test('unit:session-exhaustion-survives-later-probe — account set on the same l
   assert.match(ineligible(changed, 'claude-a', before) ?? '', /exhausted|reset/i);
   assert.equal(ineligible(changed, 'claude-a', Date.parse(resetsAt) + 60_000), null);
 });
+
+test('unit:session-exhaustion-survives-later-probe — a guessed session hold its host resends on every selection never becomes the plan\'s deciding probe: a healthy sibling on another host, probed before each resend, stays eligible across the whole guessed hour', () => {
+  const registry = registryOf(['claude-a', 'claude-b'], 'team-max');
+  const elsewhere = 'other-host', other = 'claude:' + 'b'.repeat(32);
+  registry.accounts.find(account => account.name === 'claude-b')!.credential.host = elsewhere;
+  const guessedUntil = new Date(spentAt + 3_600_000).toISOString(), guessedHold = { ...held, until: guessedUntil, resetsAt: null };
+  for (let at = spentAt; at < spentAt + 3_600_000; at += 60_000) {
+    // The sibling's host probes it available, then the spent account's host selects, resending its hold over its own read: the newest observation on the plan.
+    foldObservations(registry, { host: elsewhere, observations: [{ account: 'claude-b', quota: { ...probe, state: 'available', identity: other } }] }, { actor: 'other-executor', at: new Date(at).toISOString() });
+    fold(registry, [{ account: 'claude-a', quota: heldObservation('claude-a', guessedHold, probe) }], at + 1_000);
+    const spent = registry.accounts.find(account => account.name === 'claude-a')!.quota;
+    assert.equal(spent.session, 'guessed');
+    assert.equal(spent.observedAt, new Date(at + 1_000).toISOString(), 'the resent hold is the plan\'s newest observation');
+    assert.equal(accountIneligibility(registry, registry.accounts.find(account => account.name === 'claude-b')!, at + 2_000, elsewhere), null, `the sibling stays eligible at ${at - spentAt}`);
+    assert.match(ineligible(registry, 'claude-a', at + 2_000) ?? '', new RegExp(`^claude-a quota is exhausted until ${guessedUntil}`));
+  }
+  assert.equal(ineligible(registry, 'claude-a', spentAt + 3_660_000), null);
+});
