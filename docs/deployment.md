@@ -45,7 +45,7 @@ Railway reports `<project> / production`. Startup takes `production.environment`
 
 ### Webhook delivery
 
-No `webhooks.lastDeliveryAt` for an hour with a pull request open: the webhook broke; polling carries events. App settings (`webhooks.settingsUrl`) → Advanced deliveries: none → webhook inactive; connection error/404 → URL isn't `https://YOUR-HOST/api/github/webhook`; 401 → App secret ≠ `GITHUB_WEBHOOK_SECRET`. Fix, redeliver. Re-check after redeploys changing host or secret.
+Hosted only (compose/local poll, no webhook): no `webhooks.lastDeliveryAt` an hour with a pull request open → webhook broken. `webhooks.settingsUrl` → Advanced deliveries: none → inactive; connection error/404 → URL ≠ `https://YOUR-HOST/api/github/webhook`; 401 → secret ≠ `GITHUB_WEBHOOK_SECRET`. Fix, redeliver; re-check after host/secret redeploys.
 
 ## Backup, upgrade, rollback
 
@@ -55,8 +55,8 @@ No `webhooks.lastDeliveryAt` for an hour with a pull request open: the webhook b
 
 Set the variables table by hand; `node "$GRAPHYARD_CLI" github-setup https://YOUR-DOMAIN` and `doctor`.
 
-- Compose: `cp .env.example .env`, replace secrets, `docker compose --profile full up -d`; TLS on 4310.
+- Compose: `cp .env.example .env`, replace secrets, `docker compose --profile full up -d`; TLS on 4310, Postgres private.
 - Kubernetes: `helm install graphyard deploy/helm/graphyard --set secrets.existingSecret=graphyard-credentials …`.
 - Railway: `railway init`, `railway add --database postgres`, variables, `railway up`. Production redeploy: no `init`; from clean tip, `railway link --project graphyard --environment production --service graphyard`, `railway up`.
 - Existing installs: `graphyard master setup` plans variables saved credentials derive; `--apply` sets them (Railway: `variable set --stdin`), audited in `.graphyard/setup-audit.jsonl`. No install record: `--provider railway --service graphyard --link-dir DIR`. `park` refuses host-doable asks (repository gh login administers, derived variable, held credential).
-- Railway revert approver: `node scripts/provision-railway.mjs` sets `GRAPHYARD_REVERT_APPROVER_*` from `.graphyard/revert-approver.json` or `--revert-approver-stdin` (`--revert-approver-only`: only those). Redeploy; `--verify` exits 0 once the live guard names it.
+- Railway revert approver: `node scripts/provision-railway.mjs` sets `GRAPHYARD_REVERT_APPROVER_*` from `.graphyard/revert-approver.json` (0600) or `--revert-approver-stdin` (`--revert-approver-only`: only those). Redeploy; `--verify` exits 0 once the live guard names it.
