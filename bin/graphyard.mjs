@@ -4,12 +4,11 @@ import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 const args = process.argv.slice(2);
 // GY-1585: while the self-upgrade holds a restart for the release production serves, it names a
-// snapshot of that release in .graphyard/held-cli.json, and every command but the loop itself runs
-// the snapshot's code through bin/held-release-hooks.mjs, so the CLI processes the loop and the
-// executors spawn speak the protocol the serving plane accepts. The loop re-executes onto the
-// checkout itself once the hold lifts, which removes the pointer.
+// snapshot of that release in .graphyard/held-cli.json, and every command runs the snapshot's code
+// through bin/held-release-hooks.mjs, so the CLI processes the loop and the executors spawn speak
+// the protocol the serving plane accepts. So does a loop its supervisor restarts during the hold:
+// the deliberate restart once the hold lifts comes after the pointer is removed.
 const held = () => {
-  if (args[0] === 'master' && args[1] === 'run') return [];
   try {
     const pin = JSON.parse(readFileSync(new URL('../.graphyard/held-cli.json', import.meta.url), 'utf8'));
     if (typeof pin?.root !== 'string') return [];

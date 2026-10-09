@@ -72,10 +72,13 @@ class FakeGit {
   /** While set, `merge-base --is-ancestor COMMIT RELEASE` answers from it, exiting 1 for "not contained" (GY-1585). */
   contains: ((commit: string, release: string) => boolean) | null = null;
   ancestryReads = 0;
+  /** The commit each held snapshot directory is checked out at (GY-1585). */
+  snapshots: Record<string, string> = {};
   constructor(head: string, originTip: string) { this.head = head; this.originTip = originTip; }
   run = async (command: string, args: string[]): Promise<string> => {
     assert.equal(command, 'git', `the upgrade runs git alone, asked for ${command}`);
     const rest = args.slice(2), op = rest[0], operands = rest.slice(1);
+    if (op === 'rev-parse' && this.snapshots[args[1]]) return `${this.snapshots[args[1]]}\n`;
     if (op === 'rev-parse') return `${operands[0] === 'HEAD' ? this.head : this.originTip}\n`;
     if (op === 'symbolic-ref') {
       if (!this.branch) throw Object.assign(new Error('fatal: not a symbolic ref (use git branch --reason)'), { status: 1 });
@@ -798,7 +801,7 @@ test('unit:self-upgrade-waits-for-served-release — with production serving rel
   } finally { await dispose(); }
 });
 
-test('unit:self-upgrade-waits-for-served-release — while the restart is held, every command the checkout\'s launcher runs but the loop itself loads the served release A, with the checkout\'s own entry kept as its argv, and lifting the hold returns them to the checkout\'s B', async () => {
+test('unit:self-upgrade-waits-for-served-release — while the restart is held, every command the checkout\'s launcher runs loads the served release A, with the checkout\'s own entry kept as its argv, and lifting the hold returns them to the checkout\'s B', async () => {
   // A real checkout holding B with A in its history, and the shipped launcher beside it: what the
   // loop and the executors spawn through config.cliPath (watch, claim, heartbeat, push-credential).
   const root = await temporaryDirectory('held-cli');
@@ -827,7 +830,7 @@ test('unit:self-upgrade-waits-for-served-release — while the restart is held, 
     assert.equal(JSON.parse(await readFile(heldCliPointer(root), 'utf8')).commit, served);
     assert.deepEqual(launch('watch', 'GY-1', '1'), { release: 'A', argv: entry, schema: 'object' }, 'pinned, a spawned command loads release A, its argv still the checkout entry its confinement is derived from');
     assert.deepEqual(launch('heartbeat', 'GY-1', '1'), { release: 'A', argv: entry, schema: 'object' });
-    assert.deepEqual(launch('master', 'run'), { release: 'B', argv: entry, schema: 'object' }, 'the loop itself is never redirected: it re-executes onto the checkout when the hold lifts');
+    assert.deepEqual(launch('master', 'run'), { release: 'A', argv: entry, schema: 'object' }, 'a loop its supervisor restarts during the hold loads A too; the deliberate restart comes after the lift');
     assert.equal(git(root, 'status', '--porcelain', '--untracked-files=no'), '', 'pinning leaves the checkout clean');
     assert.equal(git(root, 'rev-parse', 'HEAD'), tip, 'and at B');
     await holdCliAt(root, run, served);
@@ -836,6 +839,36 @@ test('unit:self-upgrade-waits-for-served-release — while the restart is held, 
     await holdCliAt(root, run, null);
     assert.deepEqual(launch('watch', 'GY-1', '1'), { release: 'B', argv: entry, schema: 'object' }, 'lifted, spawned commands load the checkout\'s B again');
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('unit:self-upgrade-waits-for-served-release — a loop its supervisor restarts during the hold runs the held snapshot of A, is recorded as running A though the checkout holds B, and still re-executes onto B once production serves it', async () => {
+  const { master, dispose } = await fixture();
+  try {
+    const { loaded, tip, fake, state } = releaseLagged(hex('a'));
+    const { deps, calls } = recording(fake, '/srv/graphyard');
+    assert.equal((await performSelfUpgrade(master, state, deps())).outcome, 'pending');
+    // The restarted process read its release from the checkout, at B, but loaded the snapshot's modules.
+    const snapshot = join('/srv/graphyard', '.graphyard', 'held-cli', loaded.slice(0, 12));
+    fake.snapshots[snapshot] = loaded;
+    state.release = { commit: tip, dirty: false };
+    const restarted = { ...deps(), loadedFrom: join(snapshot, 'src', 'daemon', 'upgrade.ts') };
+    assert.equal((await performSelfUpgrade(master, state, restarted)).outcome, 'pending');
+    assert.deepEqual(state.release, { commit: loaded, dirty: false }, 'the loop is recorded as running the served release it loaded');
+    assert.deepEqual([calls.executors, calls.self], [[], 0], 'and the restart stays held');
+
+    state.deployment = verified(tip);
+    const done = await performSelfUpgrade(master, state, restarted);
+    assert.deepEqual({ outcome: done.outcome, self: 'self' in done && done.self }, { outcome: 'upgraded', self: true }, 'the lifted hold re-executes it onto B rather than taking it for a loop already running B');
+    assert.deepEqual(calls.executors, [tip]);
+    assert.equal(calls.self, 1);
+
+    // A loop loaded from the checkout itself keeps the release it read.
+    const own = releaseLagged(hex('a'));
+    own.fake.snapshots[snapshot] = loaded;
+    own.state.release = { commit: tip, dirty: false };
+    await performSelfUpgrade(master, own.state, { ...recording(own.fake, '/srv/graphyard').deps(), loadedFrom: '/srv/graphyard/src/daemon/upgrade.ts' });
+    assert.deepEqual(own.state.release, { commit: tip, dirty: false });
+  } finally { await dispose(); }
 });
 
 test('unit:upgrade-stall-names-release-lag — the held restart\'s stall, its action line and master status name the served release and the awaited commit, reading as a deliberate hold, not a stuck loop', async () => {

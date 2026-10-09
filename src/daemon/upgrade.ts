@@ -12,7 +12,8 @@
 // never touched: the refusal is on the cursor, and `master status` names it until it clears.
 import { existsSync, readFileSync } from 'node:fs';
 import { mkdir, readdir, rename, rm, writeFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { dirname, isAbsolute, join, relative, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { ChildRun } from '../child-runner.js';
 import { shortCommit, type ExecutorRestartResult } from '../executor-fleet.js';
 import type { MasterConfig } from '../master.js';
@@ -188,6 +189,8 @@ export interface SelfUpgradeDeps {
   alignUnit?: () => Promise<{ wrote: string; reason: string | null }>;
   /** Pins the CLI the checkout's launcher runs to the served release while a restart is held, null lifts it (GY-1585); `holdCliAt` on `root` by default. */
   holdCli?: (commit: string | null) => Promise<void>;
+  /** The file this module was loaded from: under a held snapshot when the launcher pinned `master run` (GY-1585). */
+  loadedFrom?: string;
   now?: () => number;
   persist?: (state: DaemonState) => Promise<void>;
 }
@@ -222,6 +225,15 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
   const persist = async () => { if (deps.persist) await deps.persist(state); };
   const key = `upgrade:${state.deployment?.sha ?? 'none'}`, heldKey = 'upgrade:held';
   const holdCli = deps.holdCli ?? (commit => holdCliAt(deps.root, deps.run, commit));
+  // GY-1585: a loop its supervisor restarts while a restart is held runs the held snapshot of the
+  // served release, as every command the launcher starts does, but it read its release from the
+  // checkout, which holds the move. It is recorded as running the snapshot's commit, so the pass
+  // that lifts the hold still re-executes it onto the checkout.
+  const snapshot = relative(heldCliSnapshots(deps.root), deps.loadedFrom ?? fileURLToPath(import.meta.url)).split(sep)[0];
+  if (snapshot && snapshot !== '..' && !isAbsolute(snapshot)) {
+    const commit = await Promise.resolve(deps.run('git', ['-C', join(heldCliSnapshots(deps.root), snapshot), 'rev-parse', 'HEAD'])).then(out => out.trim(), () => '');
+    if (commit && state.release?.commit !== commit) state.release = { commit, dirty: false };
+  }
   const note = async (detail: string, failure: boolean, actionKey = key) => {
     storeAction(state, actionKey, { kind: 'config', work: null, principal: null, state: failure ? 'failed' : 'done', detail, attempts: (state.actions[actionKey]?.attempts ?? 0) + 1, epoch: null, cycle: state.cycle, at: at() });
     await persist();
