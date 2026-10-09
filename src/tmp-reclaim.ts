@@ -210,15 +210,7 @@ export interface TmpReclaimReport {
   boundStands?: boolean;
   /** The largest consumers of the scanned roots, named when the bound still stood at the pass's end: what to stop, since the pass took all it may. */
   consumers?: TmpConsumer[];
-  /**
-   * Each scanned root's own volume as the pass left it (GY-1602): its inodes, whether it is below
-   * its headroom and, when it is, its own top consumers and whether that census stopped at its
-   * budget. Absent when no volume was measured.
-   */
-  pressure?: TmpRootPressure[];
 }
-/** One scanned root's inodes at the pass's end, measured on that root's own filesystem, with the consumers named while it is below its headroom. */
-export interface TmpRootPressure { root: string; totalInodes: number; freeInodes: number; below: boolean; consumers?: TmpConsumer[]; partial?: boolean }
 /** One consumer of a temporary directory: a top-level entry, or a family of same-stem siblings, with the entries under it and their owner. */
 export interface TmpConsumer { path: string; entries: number; owner: string; capped?: boolean }
 export interface TmpReclaimOptions {
@@ -293,12 +285,7 @@ export async function reclaimTmpDirectories(options: TmpReclaimOptions = {}): Pr
   if (!volume) return report;
   // Which roots are low, not merely whether one is: a healthy TMPDIR on another volume must not
   // spend the escalated cap the low /tmp needs, nor crowd its consumers out of the census.
-  // Every root is measured on its own volume, so a low /tmp is seen whatever TMPDIR's volume says (GY-1602).
-  let measured: { root: (typeof roots)[number]; inodes: { total: number; free: number } | null }[] = [];
-  const low = async () => {
-    measured = await Promise.all(roots.map(async root => ({ root, inodes: await inodesOf(root.path, volume) })));
-    return measured.filter(entry => entry.inodes && entry.inodes.free < tmpInodeHeadroom(entry.inodes.total)).map(entry => entry.root);
-  };
+  const low = async () => (await Promise.all(roots.map(async root => await belowHeadroom(root.path, volume) ? root : null))).filter(root => root !== null);
   let lowRoots = await low();
   report.boundStands = lowRoots.length > 0;
   for (const step of options.escalation ?? tmpReclaimEscalation) {
@@ -313,23 +300,16 @@ export async function reclaimTmpDirectories(options: TmpReclaimOptions = {}): Pr
     lowRoots = await low();
     report.boundStands = lowRoots.length > 0;
   }
-  // Each low root gets its own census, so one root's consumers never crowd out another's.
-  report.pressure = [];
-  for (const { root, inodes } of measured) {
-    if (!inodes) continue;
-    const below = lowRoots.includes(root), census = below ? await tmpCensus(root.path) : null;
-    report.pressure.push({ root: root.path, totalInodes: inodes.total, freeInodes: inodes.free, below, ...(census ? { consumers: census.consumers, ...(census.partial ? { partial: true } : {}) } : {}) });
-  }
-  if (report.boundStands) report.consumers = report.pressure.flatMap(entry => entry.consumers ?? []);
+  if (report.boundStands) report.consumers = await tmpConsumers(lowRoots.map(root => root.path));
   return report;
 }
 
-/** `path`'s volume's inodes, or null for a volume without fixed inodes or one that cannot be read: such a volume is never below its headroom. */
-async function inodesOf(path: string, volume: NonNullable<TmpReclaimOptions['volume']>) {
+/** Whether `path`'s volume has fewer free inodes than its headroom; a volume without fixed inodes, or one that cannot be read, never does. */
+async function belowHeadroom(path: string, volume: NonNullable<TmpReclaimOptions['volume']>) {
   try {
     const info = await volume(path), total = Number(info.files), free = Number(info.ffree);
-    return Number.isFinite(total) && total > 0 && Number.isFinite(free) ? { total, free } : null;
-  } catch { return null; }
+    return Number.isFinite(total) && total > 0 && free < tmpInodeHeadroom(total);
+  } catch { return false; }
 }
 
 /** The name a uid has in /etc/passwd, or `uid N` when it has none there. */
@@ -348,15 +328,6 @@ const consumerStem = (name: string) => name.replace(/([-_.][^-_.]*\d[^-_.]*)+$/,
  * a directory it may not read, or one on another device than its root, counts as itself.
  */
 export async function tmpConsumers(roots: readonly string[], bound = tmpConsumersScanBound): Promise<TmpConsumer[]> {
-  return (await tmpCensus(roots, bound)).consumers;
-}
-/**
- * `tmpConsumers` with whether the census is partial (GY-1602): every top-level entry it reads, and
- * every entry under one, is charged to `bound`, so a root holding more top-level entries than the
- * bound stops at the bound, never stats the rest, and reports itself partial.
- */
-export async function tmpCensus(roots: string | readonly string[], bound = tmpConsumersScanBound): Promise<{ consumers: TmpConsumer[]; partial: boolean }> {
-  roots = typeof roots === 'string' ? [roots] : roots;
   const owner = ownerNames(), families = new Map<string, { root: string; stem: string; first: string; members: number; entries: number; uid: number; capped: boolean }>();
   let budget = bound;
   // The census stays on the measured volume: a mount under /tmp is another filesystem's inodes, so
@@ -397,9 +368,8 @@ export async function tmpCensus(roots: string | readonly string[], bound = tmpCo
     }
   }
   if (truncated) for (const family of families.values()) family.capped = true;
-  const partial = truncated || [...families.values()].some(family => family.capped);
-  return { partial, consumers: [...families.values()].sort((first, second) => second.entries - first.entries).slice(0, tmpConsumersNamed)
-    .map(family => ({ path: family.members === 1 ? family.first : `${join(family.root, family.stem)}* (${family.members} top-level)`, entries: family.entries, owner: owner(family.uid), ...(family.capped ? { capped: true } : {}) })) };
+  return [...families.values()].sort((first, second) => second.entries - first.entries).slice(0, tmpConsumersNamed)
+    .map(family => ({ path: family.members === 1 ? family.first : `${join(family.root, family.stem)}* (${family.members} top-level)`, entries: family.entries, owner: owner(family.uid), ...(family.capped ? { capped: true } : {}) }));
 }
 
 interface PassState { now: number; minAge: (name: string) => number | null; cacheAge: number | null; limit: number; uid: number | undefined; held: Set<string> | null; workMs: number; started: number | null; unfinished: Set<string>; retryMs: number }
