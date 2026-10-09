@@ -1,6 +1,6 @@
 import { releaseVerdict, type E2eReport } from './e2e/runner.js';
 import type { ReleaseContract } from './e2e/case.js';
-import { candidateId, readRecords, writeRecord, type E2eCaseRecord, type E2eRecord, type FlakyAcceptance, type Git, type HoldOutcome, type ReleaseCandidate, type UatRecord } from './release-candidate.js';
+import { candidateId, filingReason, readRecords, writeRecord, type E2eCaseRecord, type E2eRecord, type FlakyAcceptance, type Git, type HoldOutcome, type ReleaseCandidate, type UatRecord } from './release-candidate.js';
 
 /**
  * Release holds (GY-1378): one hold per customer risk. The release contract (`e2e/contract.json`)
@@ -120,7 +120,7 @@ export function holdItem(record: HoldRecord, candidate: ReleaseCandidate) {
       + 'This hold collects every later failure of this outcome; it clears only when every attached case passes on a newer candidate UAT serves at its exact SHA. '
       + (flaky.length ? `A flaky case blocks promotion until an evidence decision on this item accepts it for its run and exact SHA (${flaky.map(entry => `{"case":"${entry.case}","runId":"${entry.runId}","sha":"${entry.sha}"}`).join(', ')}). ` : '')
       + 'Folding another outcome\'s hold into this one is a fold decision with an independent approver.',
-    type: 'bug', priority: 1,
+    type: 'bug', priority: 1, reason: filingReason,
     criteria: [{ id: 'AC-1', text: `Every E2E case attached to the release hold of outcome ${record.outcome} passes on a newer UAT candidate served at its exact SHA`, proofs: ['manual:release-hold-cleared'] }],
     policy: { checks: ['test', 'typecheck'], review: true },
   };
