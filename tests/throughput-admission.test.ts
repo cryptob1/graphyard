@@ -489,6 +489,22 @@ test('unit:throughput-trailing-window — without an explicit --since the servin
   const floored = verifyThroughput([served, early, ...oldMisses], base + 24 * hour, { deployed });
   assert.ok(![...floored.deliveries, ...floored.excluded].some(record => record.key === 'GY-399'), 'a delivery merged before GY-87 first served is never judged');
   assert.deepEqual(claimWindow(served, null, base + 24 * hour), claimWindow(served, null, base + 1));
+  // A window starting at the serving floor also ends at the measurement time: future-stamped merges
+  // neither complete the population of ten nor hide a budget miss, in either measurement path.
+  const freshAt = base + 24 * hour;
+  const nine = Array.from({ length: 9 }, (_, index) => merged(`GY-${800 + index}`, base + (index + 1) * hour));
+  const later = [merged('GY-810', freshAt + hour), merged('GY-811', freshAt + 2 * hour, 149)];
+  const freshAll = [served, ...nine, ...later];
+  const freshReport = verifyThroughput(freshAll, freshAt, { deployed });
+  assert.equal(freshReport.window.basis, 'deployment-observation');
+  assert.ok(![...freshReport.deliveries, ...freshReport.excluded].some(record => record.key === 'GY-810' || record.key === 'GY-811'), 'a merge after the measurement time is not judged under the floor');
+  assert.equal(freshReport.population.admitted, 9);
+  assert.equal(freshReport.verdict, 'unverified');
+  assert.deepEqual(freshReport.shortfall!.missed.map(entry => entry.metric), ['population']);
+  const freshMeasured = await measureThroughput(freshAll, async id => freshAll.find(item => item.id === id)!, freshAt, { deployed });
+  assert.ok(!freshMeasured.read.some(id => later.some(item => item.id === id)), 'a merge after the measurement time is not read under the floor');
+  assert.equal(freshMeasured.report.population.admitted, 9);
+  assert.equal(freshMeasured.report.verdict, 'unverified');
   assert.equal(claimWindow(undefined, null, measuredAt).basis, 'unknown', 'an undelivered claim still establishes no window');
 
   // AC-2: the budgets are unchanged.

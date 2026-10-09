@@ -161,7 +161,9 @@ test('integration:live-throughput-population — the population rule reads the r
   reworked = await reload(reworked);
 
   const work = await store.list();
-  const now = Date.now();
+  // Measured after the last of these merges (each is stamped up to 55 minutes past its submission):
+  // a window without --since ends at the measurement time, so a later merge would not be judged.
+  const now = Date.now() + 120 * minute;
   const report = verifyThroughput(work, now, { deployed: release(), claimKey });
 
   // AC-2: the window, the population rule, every delivery counted, and the executor that claimed
@@ -541,7 +543,8 @@ test('unit:throughput-recorded-by-loop — after a verified deployment the loop 
     const byId = new Map(work.map(item => [item.id, item]));
     let revision = deployedRevision, statusReads = 0;
     const read: string[] = [];
-    const input = (observedSha: string) => ({ work: summaries, observedSha, now: () => Date.now(), origin: 'https://graphyard.example',
+    // Measured after those merges: a window without --since ends at the measurement time.
+    const input = (observedSha: string) => ({ work: summaries, observedSha, now: () => Date.parse(at(60)), origin: 'https://graphyard.example',
       status: async () => { statusReads++; return { now: new Date().toISOString(), release: { version: '0.9.1', revision } }; },
       readItem: async (id: string) => { read.push(id); return byId.get(id)!; },
       contains: async () => true as boolean | null });
@@ -598,7 +601,7 @@ test('unit:throughput-recorded-by-loop — after a verified deployment the loop 
     // The record stays bounded: past the retention the oldest files are retired and the newest still reads back.
     const before = (await records()).sort();
     assert.equal(before.length, 4);
-    const newest = { ...named.report!, measuredAt: new Date(Date.now() + 60_000).toISOString() };
+    const newest = { ...named.report!, measuredAt: at(61) };
     const kept = await recordThroughputMeasurement(root, newest, undefined, 2);
     const after = (await records()).sort();
     assert.deepEqual(after, [before[3], kept.split('/').pop()], 'the two newest files remain');

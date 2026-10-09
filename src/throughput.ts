@@ -200,13 +200,14 @@ export function claimWindow(claim: Work | undefined, given?: string | null, end?
 }
 
 /**
- * Where a window's selection ends: `--until` when given. A trailing window without it ends at the
- * measurement time, because its start was counted back from there, so a merge stamped later (clock
- * skew, a ledger read ahead of the clock) is neither read nor judged. A window starting at the
- * claim's floor or a given start keeps no upper bound without `--until`, as it always has.
+ * Where a window's selection ends: `--until` when given. A window without an explicit start ends at
+ * the measurement time, whether its start is the trailing bound or the claim's floor, so a merge
+ * stamped later (clock skew, a replayed or read-ahead ledger) is neither read nor judged and the
+ * deliveries counted are exactly those merged before the measurement. Only an explicit `--since`
+ * without `--until` keeps no upper bound, as it always has.
  */
 function windowEnd(window: { basis: WindowBasis }, until: string | null | undefined, now: number): string | null | undefined {
-  return until ?? (window.basis === 'trailing-72h' ? new Date(now).toISOString() : until);
+  return until ?? (window.basis === 'given' ? until : new Date(now).toISOString());
 }
 
 /**
