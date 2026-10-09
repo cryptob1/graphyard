@@ -25,7 +25,7 @@ import { containmentHold, stopLaunchSupervisor } from './containment.js';
 import { dependencyDirectories, failureText, type SharedDependencies, shareDependencies } from './worktrees.js';
 import { humanOnlyDecisions, installWorkerHarness, prepareSessionHarness, sessionSlotsGrant, submissionPolicyRule } from './harness.js';
 import { withVerificationPath } from './verification-slots.js';
-import { holdRepeatedLimitAccount } from './launch-account.js';
+import { holdRepeatedLimitAccount, repeatedLimitAccount } from './launch-account.js';
 import { currentAgents, dispatchedFile, DispatchReservedError, launchedSinceSnapshot, profileLaunchedFile, reclaimableAgent, reserveDispatch, watchSupervisorRunning } from './dispatch-reservation.js';
 import { projectMemoryDigest, type ProjectMemory } from '../model/project-memory.js';
 import { readProjectMemory } from '../project-memory.js';
@@ -242,7 +242,12 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
       // fallback lands on the next account rather than the same one again (GY-417).
       // An account this item's last launches each ended on with its limit notice is held before the
       // choice, so the attempt is routed to an eligible account rather than onto it a third time (GY-1582).
-      await holdRepeatedLimitAccount(config, work, options.probe?.now?.() ?? Date.now(), {}).catch(() => null);
+      // A hold that cannot be read or written refuses the dispatch before anything is claimed: launching
+      // without it could hand the same spent account back, and the loop's retry takes it from there.
+      const holdAt = options.probe?.now?.() ?? Date.now();
+      await holdRepeatedLimitAccount(config, work, holdAt, {}).catch((error: unknown) => {
+        throw new Error(`${work.key}'s last worker launches each ended on ${repeatedLimitAccount(work, holdAt)?.account ?? 'one account'}'s limit notice, and the hold that keeps the next launch off it could not be placed: ${failureText(error).slice(0, 300)}; nothing was claimed`, { cause: error });
+      });
       let startError: unknown = null;
       for (;;) {
         const accounts = profile.accounts?.length ? profile.accounts.filter(name => !startFailures.some(failure => failure.account === name)) : undefined;

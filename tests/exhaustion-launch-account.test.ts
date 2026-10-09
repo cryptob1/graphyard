@@ -1,7 +1,7 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, rm, rmdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import EmbeddedPostgres from 'embedded-postgres';
@@ -13,6 +13,7 @@ import { atomicPrivateWrite, environmentLogPath, holdRepeatedLimitAccount, inspe
 import { profileLaunchedFile } from '../src/master/dispatch-reservation.js';
 import type { Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { limitHost, limitLoop, type LimitPlane } from './helpers/limit-loop.js';
 
 // GY-1582, 2026-10-09 09:57-10:00Z: worker profile opencode-secondary fell back to Claude account
 // claude-b because its OpenCode accounts were spent. Its launch record named claude-b, but the
@@ -84,8 +85,8 @@ interface Herdr { agents: { name: string; pane_id: string; agent_status: string 
  * The loop as `master run` wires it: the account a failover charges comes from the production
  * `sessionAccount`, and each launch writes the profile's launch record as dispatchWork does. A
  * launch's account is the registry's choice when `choose` gives one, which (as on 2026-10-09)
- * leaves the environment log's selection as it was; otherwise the dispatch holds an account the
- * item's launches kept ending on, then selects, as dispatchWork does.
+ * leaves the environment log's selection as it was; otherwise it is the production selection. The
+ * repeated-limit replay runs on the production dispatchWork instead (tests/helpers/limit-loop.ts).
  */
 function loop(root: string, config: MasterConfig, herdr: Herdr, choose: (work: Work, profile: WorkerProfile) => string | null = () => null) {
   const calls = { dispatch: [] as { work: string; epoch: number; account: string | null }[], stopped: [] as string[] };
@@ -97,10 +98,7 @@ function loop(root: string, config: MasterConfig, herdr: Herdr, choose: (work: W
     closeSession: pane => { herdr.agents = herdr.agents.filter(agent => agent.pane_id !== pane); },
     dispatch: async (work, profile) => {
       let account = choose(work, profile);
-      if (!account) {
-        await holdRepeatedLimitAccount(config, work);
-        account = (await selectAccount(config, 'worker', profile, { quota: false, cacheMs: 0, work: work.key })).account?.name ?? null;
-      }
+      account ??= (await selectAccount(config, 'worker', profile, { quota: false, cacheMs: 0, work: work.key })).account?.name ?? null;
       const claimed = await ok(workerA, 'POST', `work/${work.id}/claim`, {}) as Work;
       await ok(workerA, 'POST', `work/${work.id}/workspace`, { epoch: claimed.epoch, host: 'loop-host', path: await worktree(`${work.key}-${claimed.epoch}`), branch: `graphyard/${claimed.key.toLowerCase()}-${claimed.epoch}` });
       await ok(workerA, 'POST', `work/${work.id}/quarantine`, { epoch: claimed.epoch, settlementHash: createHash('sha256').update(settlementToken).digest('hex'), scope: { unit: `graphyard-watch-4242-${randomUUID()}.scope`, pid: 4242 } });
@@ -200,41 +198,58 @@ test('unit:exhaustion-charged-to-launch-account — the 09:59Z limit menu is cha
   assert.deepEqual(await sessionAccount(root, config, 'worker', 'opencode-secondary', { work: work.key, epoch: 2 }), { environment: 'claude-c', kind: 'claude' });
 });
 
-test('unit:repeated-limit-launch-holds-account — an item whose two consecutive launches on one account each end on its limit notice is not launched onto it a third time: the account is held and the attempt routed to an eligible one', async () => {
+test('unit:repeated-limit-launch-holds-account — an item whose two consecutive launches on one account each end on its limit notice is not launched onto it a third time by the real dispatch: the account is held and the attempt routed to an eligible one, and a hold that cannot be placed refuses the dispatch before anything is claimed', async () => {
   await controlPlane('launch_account_repeat');
-  const home = await host('repeat'), root = await temporaryDirectory('exhaustion-launch-account-repeat-root');
-  const config = configFor(home, { name: 'claude-primary', agentName: 'graphyard-claude-1', kind: 'claude', accounts: ['claude-b', 'claude-c'] });
-  const herdr: Herdr = { agents: [], output: {} };
-  const { calls, cycle } = loop(root, config, herdr);
+  const plane: LimitPlane = { url, coordinatorToken: token(coordinator), api: (as, method, path, body) => ok(as === 'coordinator' ? coordinator : workerA, method, path, body) };
+  const host = await limitHost(plane, [{ name: 'claude-primary', principal: workerA.id, token: token(workerA), accounts: ['claude-b', 'claude-c'] }], { 'claude-b': 'subscription-b', 'claude-c': 'subscription-c' });
+  const { config } = host, profile = config.workers[0];
+  const { launches, refused, spend, cycle, dispatch, world } = limitLoop(plane, host);
   let work = await newItem('repeated limit');
   const state = emptyDaemonState(config);
   /** The hold each notice placed lapses or is lost (as a hold charged elsewhere was at 09:59Z). */
   const lapse = async () => { const log = await readEnvironmentLog(config); log.exhausted = {}; await atomicPrivateWrite(environmentLogPath(config), log); };
 
   await cycle(state);
-  assert.deepEqual(calls.dispatch.at(-1), { work: work.key, epoch: 1, account: 'claude-b' });
-  await spend(herdr, 'graphyard-claude-1', () => cycle(state));
-  assert.equal(state.actions[failoverKey('worker', work, 1)]?.state, 'done');
+  assert.deepEqual(launches.map(entry => [entry.epoch, entry.account]), [[1, 'claude-b']], `the real dispatch launched it on claude-b: ${JSON.stringify(refused)}`);
+  spend(launches.at(-1)!, 'Oct 12, 3pm');
+  await cycle(state);
+  assert.equal(state.actions[failoverKey('worker', work, 1)]?.state, 'done', state.actions[failoverKey('worker', work, 1)]?.detail);
   await lapse();
 
   // One limit notice is not yet a repeat: with no hold standing, claude-b is chosen again.
   await cycle(state);
-  assert.deepEqual(calls.dispatch.at(-1), { work: work.key, epoch: 2, account: 'claude-b' });
-  await spend(herdr, 'graphyard-claude-1', () => cycle(state));
+  assert.deepEqual(launches.at(-1) && [launches.at(-1)!.epoch, launches.at(-1)!.account], [2, 'claude-b'], JSON.stringify(refused));
+  spend(launches.at(-1)!, 'Oct 12, 3pm');
+  await cycle(state);
   assert.equal(state.actions[failoverKey('worker', work, 2)]?.state, 'done');
   await lapse();
   work = await reload(work.id);
   assert.deepEqual(work.capacity!.exhaustions.map(entry => [entry.epoch, entry.account]), [[1, 'claude-b'], [2, 'claude-b']]);
 
-  // The third launch: claude-b is held again before the choice, and the attempt goes to claude-c.
+  // A hold that cannot be placed (the environment log unwritable, so no hold can stand) refuses
+  // the dispatch before any claim, rather than letting selection hand claude-b back a third time.
+  const log = environmentLogPath(config);
+  await rm(log, { force: true }); await mkdir(log);
+  const snapshot = await ok(coordinator, 'GET', 'work-snapshot');
+  await assert.rejects(dispatch(work, profile, [], { work: snapshot.work, now: snapshot.now }), (error: Error) => {
+    assert.match(error.message, new RegExp(`${work.key}'s last worker launches each ended on claude-b's limit notice, and the hold that keeps the next launch off it could not be placed: .*; nothing was claimed`));
+    return true;
+  });
+  assert.equal((await reload(work.id)).epoch, 2, 'nothing was claimed');
+  assert.equal(launches.length, 2, 'and nothing launched');
+  assert.equal(world.kinds.length, 2, 'no runtime was started for the refused dispatch');
+  await rmdir(log);
+
+  // The third launch, through the loop: claude-b is held again before the choice, and the attempt goes to claude-c.
   await cycle(state);
-  assert.deepEqual(calls.dispatch.at(-1), { work: work.key, epoch: 3, account: 'claude-c' }, 'not relaunched onto claude-b a third time');
+  assert.deepEqual(launches.at(-1) && [launches.at(-1)!.key, launches.at(-1)!.epoch, launches.at(-1)!.account], [work.key, 3, 'claude-c'], `not relaunched onto claude-b a third time: ${JSON.stringify(refused)}`);
   const held = (await observedExhaustions(config))['claude-b'];
   assert.equal(held?.until, reset, 'held until the reset its last notice named');
   assert.match(held.reason, new RegExp(`${work.key}'s last 2 worker launches \\(epochs 1, 2\\) each ended on claude-b's limit notice`));
   assert.equal(held.work, work.key);
 
   // Held already, nothing is placed again; an item whose last launch ended elsewhere holds nothing.
+  work = await reload(work.id);
   assert.equal(await holdRepeatedLimitAccount(config, work), null);
   await lapse();
   const elsewhere = { ...work, capacity: { ...work.capacity!, exhaustions: [...work.capacity!.exhaustions, { ...work.capacity!.exhaustions.at(-1)!, epoch: 3, account: 'claude-c' }] } };
