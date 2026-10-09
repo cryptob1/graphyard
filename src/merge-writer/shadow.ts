@@ -13,6 +13,8 @@ export interface ShadowVerdict {
   delivered?: { mergeSha: string };
   /** The last `trialLogTailLength` characters of the trial's output, kept only when the trial did not pass (the build, a test file, or the runner's exit). The recorded event carries it; the loop's cursor does not. */
   logTail?: string;
+  /** The failing cause read from `logTail` when the verdict joined the loop's cursor (GY-1564): the cursor drops the log but keeps what it names. */
+  cause?: string;
 }
 /** How much of the trial's output a failing verdict records. */
 export const trialLogTailLength = 4000;
@@ -150,7 +152,9 @@ export const shadowPairExplained = (verdict: Pick<ShadowVerdict, 'key' | 'head' 
 export function shadowGateAttention(verdicts: readonly ShadowVerdict[], explanations: readonly ShadowExplanationRef[] = []): AttentionItem[] {
   const newest = new Map<string, ShadowVerdict>();
   for (const verdict of [...verdicts].sort((a, b) => Date.parse(a.at) - Date.parse(b.at))) {
-    newest.set(shadowDisagreementPair(verdict), verdict);
+    // The ledger's copy of a pair carries the cause the cursor's may lack, and either way the line names it.
+    const pair = shadowDisagreementPair(verdict), cause = verdict.cause ?? newest.get(pair)?.cause;
+    newest.set(pair, cause ? { ...verdict, cause } : verdict);
   }
   return [...newest.values()].filter(verdict => shadowDisagreement(verdict.outcome) && !shadowPairExplained(verdict, explanations)).map(verdict => ({
     subject: 'shadow-gate', text: shadowDisagreementDetail(verdict),
@@ -158,12 +162,74 @@ export function shadowGateAttention(verdicts: readonly ShadowVerdict[], explanat
   }));
 }
 
-export function shadowDisagreementDetail(verdict: Pick<ShadowVerdict, 'key' | 'head' | 'mergeSha' | 'outcome' | 'build' | 'tests'>) {
-  const cause = isPlaceholderVerdict(verdict)
-    ? `the failure is the fabricated-runner-failure placeholder ${placeholderRunnerFailure} (pre-GY-1548: the runner died naming no test while every file passed)`
-    : verdict.outcome === 'shadow-missed' ? 'the shadow trial passed it but the main guard reverted it' : 'the shadow trial failed it but GitHub merged it';
+/** The longest failing cause a verdict keeps: a few test names and the first error line of each. */
+export const trialCauseLength = 400;
+// A trial keeps FORCE_COLOR, so the runner's summary may carry ANSI escapes before every line it prints.
+const ansiEscape = /\u001b\[[0-9;?]*[ -/]*[@-~]/g;
+const testId = (line: string) => line.replace(/^\s*✖\s*/, '').replace(/\s*\([\d.]+m?s\)\s*$/, '').split(' — ')[0]!.trim();
+
+/**
+ * The failing cause a trial's log tail names, or null when it names none (GY-1564): the node test
+ * runner's `failing tests:` summaries (each test, its file and its first error line, once; a summary
+ * whose heading the tail cut off included), else TAP
+ * `not ok` lines, else the first TypeScript error of a failed build. ANSI escapes are stripped first.
+ */
+export function trialFailureCause(logTail: string | undefined | null): string | null {
+  if (!logTail) return null;
+  const lines = logTail.replace(ansiEscape, '').split('\n');
+  const named: string[] = [];
+  // A trial concatenates its groups' output, so the log may carry one summary per failed group: each
+  // `failing tests:` heading opens a summary, and an unindented line that is neither a test nor its file closes it.
+  // The tail is cut to its last characters, so it may start inside a summary whose heading was cut off:
+  // complete entries before any other unindented line are read as that summary's.
+  let inSummary = true, file: string | null = null;
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index]!;
+    if (/^\s*✖ failing tests:\s*$/.test(line)) { inSummary = true; file = null; continue; }
+    if (!inSummary || !line.trim()) continue;
+    const at = line.match(/^test at (\S+?):\d+:\d+\s*$/);
+    if (at) { file = at[1]!; continue; }
+    if (!/^\s*✖ /.test(line)) { if (!/^\s/.test(line)) inSummary = false; continue; }
+    const error = lines.slice(index + 1).find(next => next.trim() && !/^\s*✖ /.test(next) && !/^test at /.test(next));
+    const entry = `${testId(line)}${file ? ` (${file})` : ''}${error && /^\s/.test(error) ? `: ${error.trim().replace(/:$/, '')}` : ''}`;
+    if (!named.includes(entry)) named.push(entry);
+    file = null;
+  }
+  if (!named.length) for (const line of lines) { const failed = line.match(/^\s*not ok \d+ - (.+)$/); if (failed) named.push(failed[1]!.trim()); }
+  if (!named.length) { const build = lines.find(line => /error TS\d+:/.test(line)); if (build) named.push(build.trim()); }
+  if (!named.length) return null;
+  const text = named.join('; ');
+  return text.length > trialCauseLength ? `${text.slice(0, trialCauseLength - 1)}…` : text;
+}
+
+/** A verdict as the loop's cursor keeps it: without its log, with the cause the log named (GY-1564). */
+export function cursorVerdict<T extends Pick<ShadowVerdict, 'logTail' | 'cause'>>(verdict: T): Omit<T, 'logTail'> {
+  const { logTail, ...kept } = verdict;
+  const cause = kept.cause ?? trialFailureCause(logTail);
+  return cause ? { ...kept, cause } : kept;
+}
+
+const listed = (files: readonly string[]) => `${files.slice(0, 5).join(', ')}${files.length > 5 ? ` and ${files.length - 5} more` : ''}`;
+
+/**
+ * Why a disagreement stands, from its record alone: the pre-GY-1548 placeholder, the conflict, the
+ * build, or the failing files and the cause the log tail named (GY-1564). A shadow-only-fail whose
+ * record names no cause says so: that gap is missing evidence, not an explanation.
+ */
+export function shadowDisagreementCause(verdict: Pick<ShadowVerdict, 'outcome' | 'build' | 'tests'> & Partial<Pick<ShadowVerdict, 'conflict' | 'cause' | 'logTail'>>) {
+  if (isPlaceholderVerdict(verdict)) return `the failure is the fabricated-runner-failure placeholder ${placeholderRunnerFailure} (pre-GY-1548: the runner died naming no test while every file passed)`;
+  if (verdict.outcome === 'shadow-missed') return 'the shadow trial passed it but the main guard reverted it';
+  const cause = verdict.cause ?? trialFailureCause(verdict.logTail);
+  const failed = verdict.conflict?.length ? `the trial merge conflicted on ${listed(verdict.conflict)}`
+    : verdict.build === 'fail' ? 'the trial build failed'
+    : verdict.tests.failed.length ? `${verdict.tests.failed.length} of ${verdict.tests.files} test files failed in the trial (${listed(verdict.tests.failed)})` : 'the trial failed';
+  return `the shadow trial failed it but GitHub merged it: ${failed}; `
+    + (cause ? `the trial log names ${cause}` : 'the record names no failing cause (no log tail recorded, or none it could read), so the cause is missing evidence until the trial log is read');
+}
+
+export function shadowDisagreementDetail(verdict: Pick<ShadowVerdict, 'key' | 'head' | 'mergeSha' | 'outcome' | 'build' | 'tests'> & Partial<Pick<ShadowVerdict, 'conflict' | 'cause' | 'logTail'>>) {
   return `Shadow merge gate: ${verdict.key} head ${verdict.head} is ${verdict.outcome} (trial merge ${verdict.mergeSha ?? 'none: it conflicts'}); `
-    + `${cause}. Report only: nothing is changed`;
+    + `${shadowDisagreementCause(verdict)}. Report only: nothing is changed`;
 }
 
 /** Counts per outcome plus unexplained vs explained disagreement totals the switch criterion reads (GY-1560). */

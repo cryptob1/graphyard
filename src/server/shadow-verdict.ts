@@ -3,7 +3,7 @@ import type pg from 'pg';
 import { z } from 'zod';
 import { demand, type Principal, type Work } from '../model.js';
 import {
-  compareVerdicts, githubOutcome, isPlaceholderVerdict, placeholderRunnerFailure, shadowDisagreement,
+  compareVerdicts, githubOutcome, isPlaceholderVerdict, trialFailureCause, placeholderRunnerFailure, shadowDisagreement,
   shadowDisagreementPair, shadowExplanationPairsMax, trialLogTailLength, type ShadowExplanationRef, type ShadowVerdict,
 } from '../merge-writer/shadow.js';
 import { DELIVERY_EVENT_PREDICATE } from '../store/tables/production.js';
@@ -203,7 +203,9 @@ async function recoveredDeliveredMerges(db: Queryable, pairs: readonly { key: st
 /** One standing shadow disagreement as the status and merger switch read it. */
 export interface StandingShadowDisagreement {
   key: string; head: string; baseTip: string; outcome: 'shadow-only-fail' | 'shadow-missed';
-  mergeSha: string | null; build: 'pass' | 'fail'; tests: ShadowVerdict['tests']; at: string; explained: boolean;
+  mergeSha: string | null; build: 'pass' | 'fail'; tests: ShadowVerdict['tests']; conflict: string[]; at: string; explained: boolean;
+  /** The failing cause the recorded log tail names, or null when the record names none (GY-1564); the log itself stays on the ledger. */
+  cause: string | null;
 }
 
 /** The documents of the named work items alone, by key: a bounded read safe under the coordination lock. */
@@ -244,7 +246,8 @@ export async function standingShadowDisagreements(db: Queryable, work?: readonly
     if (outcome !== 'shadow-only-fail' && outcome !== 'shadow-missed') continue;
     standing.push({
       key: verdict.key, head: verdict.head, baseTip: verdict.baseTip, outcome,
-      mergeSha: verdict.mergeSha, build: verdict.build, tests: verdict.tests, at: verdict.at,
+      mergeSha: verdict.mergeSha, build: verdict.build, tests: verdict.tests, conflict: verdict.conflict, at: verdict.at,
+      cause: trialFailureCause(verdict.logTail),
       explained: explained.has(shadowDisagreementPair(verdict)),
     });
   }
