@@ -120,6 +120,25 @@ jobs:
           echo "::error title=Infrastructure failure, not a test failure::bubblewrap could not be installed from any mirror; this shard waits for the job timeout so it concludes timed out (cancelled), which the main guard reruns and never reverts"
           sleep 600
           exit 1
+      # Docker Hub refuses anonymous pulls from shared runner addresses past its rate limit (GY-1607):
+      # the daemon pulls Docker Hub images through the mirror.gcr.io registry mirror, falling back to
+      # Docker Hub for an image the mirror lacks. Verified with docker info before any docker command,
+      # and the pull of this job's Docker Hub images is logged through the mirror.
+      - name: Pull Docker Hub images through the registry mirror
+        shell: bash
+        env:
+          DOCKER_HUB_IMAGES: alpine:3
+        run: |
+          set -euo pipefail
+          { sudo cat /etc/docker/daemon.json 2>/dev/null || echo '{}'; } | jq '. + {"registry-mirrors": ["https://mirror.gcr.io"], "debug": true}' > "$RUNNER_TEMP/daemon.json"
+          sudo install -m 0644 "$RUNNER_TEMP/daemon.json" /etc/docker/daemon.json
+          since="$(date '+%Y-%m-%d %H:%M:%S')"
+          sudo systemctl restart docker
+          mirrors="$(docker info --format '{{json .RegistryConfig.Mirrors}}')"
+          echo "Docker daemon registry mirrors: $mirrors"
+          [[ $mirrors == *'https://mirror.gcr.io'* ]] || { echo '::error::the Docker daemon is not using the registry mirror' >&2; exit 1; }
+          for image in $DOCKER_HUB_IMAGES; do docker pull --quiet "$image"; done
+          sudo journalctl --unit docker --since "$since" --no-pager | grep -F 'mirror.gcr.io' || echo '::warning::the daemon log names no pull through mirror.gcr.io'
       - name: Select the test files this run executes
         run: node scripts/ci-tests.mjs select --out "$RUNNER_TEMP/selected-tests.txt"
       - name: Run this shard, keeping the record of its timing-dependent assertions

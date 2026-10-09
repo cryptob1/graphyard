@@ -97,6 +97,25 @@ jobs:
         with: { ref: '${{ env.CANDIDATE_SHA }}', persist-credentials: false }
       - uses: actions/setup-node@v4
         with: { node-version: '24' }
+      # Docker Hub refuses anonymous pulls from shared runner addresses past its rate limit (GY-1607):
+      # the daemon pulls Docker Hub images through the mirror.gcr.io registry mirror, falling back to
+      # Docker Hub for an image the mirror lacks. Verified with docker info before any docker command,
+      # and the pull of this job's Docker Hub images is logged through the mirror.
+      - name: Pull Docker Hub images through the registry mirror
+        shell: bash
+        env:
+          DOCKER_HUB_IMAGES: node:24-bookworm-slim postgres:17-alpine
+        run: |
+          set -euo pipefail
+          { sudo cat /etc/docker/daemon.json 2>/dev/null || echo '{}'; } | jq '. + {"registry-mirrors": ["https://mirror.gcr.io"], "debug": true}' > "$RUNNER_TEMP/daemon.json"
+          sudo install -m 0644 "$RUNNER_TEMP/daemon.json" /etc/docker/daemon.json
+          since="$(date '+%Y-%m-%d %H:%M:%S')"
+          sudo systemctl restart docker
+          mirrors="$(docker info --format '{{json .RegistryConfig.Mirrors}}')"
+          echo "Docker daemon registry mirrors: $mirrors"
+          [[ $mirrors == *'https://mirror.gcr.io'* ]] || { echo '::error::the Docker daemon is not using the registry mirror' >&2; exit 1; }
+          for image in $DOCKER_HUB_IMAGES; do docker pull --quiet "$image"; done
+          sudo journalctl --unit docker --since "$since" --no-pager | grep -F 'mirror.gcr.io' || echo '::warning::the daemon log names no pull through mirror.gcr.io'
       - name: Build candidate image as the release process would
         run: |
           version="$(node -p "require('./package.json').version")"
@@ -121,6 +140,25 @@ jobs:
         with: { ref: '${{ env.CANDIDATE_SHA }}', persist-credentials: false }
       - uses: actions/setup-node@v4
         with: { node-version: '24' }
+      # Docker Hub refuses anonymous pulls from shared runner addresses past its rate limit (GY-1607):
+      # the daemon pulls Docker Hub images through the mirror.gcr.io registry mirror, falling back to
+      # Docker Hub for an image the mirror lacks. Verified with docker info before any docker command,
+      # and the pull of this job's Docker Hub images is logged through the mirror.
+      - name: Pull Docker Hub images through the registry mirror
+        shell: bash
+        env:
+          DOCKER_HUB_IMAGES: node:24-bookworm-slim postgres:17-alpine
+        run: |
+          set -euo pipefail
+          { sudo cat /etc/docker/daemon.json 2>/dev/null || echo '{}'; } | jq '. + {"registry-mirrors": ["https://mirror.gcr.io"], "debug": true}' > "$RUNNER_TEMP/daemon.json"
+          sudo install -m 0644 "$RUNNER_TEMP/daemon.json" /etc/docker/daemon.json
+          since="$(date '+%Y-%m-%d %H:%M:%S')"
+          sudo systemctl restart docker
+          mirrors="$(docker info --format '{{json .RegistryConfig.Mirrors}}')"
+          echo "Docker daemon registry mirrors: $mirrors"
+          [[ $mirrors == *'https://mirror.gcr.io'* ]] || { echo '::error::the Docker daemon is not using the registry mirror' >&2; exit 1; }
+          for image in $DOCKER_HUB_IMAGES; do docker pull --quiet "$image"; done
+          sudo journalctl --unit docker --since "$since" --no-pager | grep -F 'mirror.gcr.io' || echo '::warning::the daemon log names no pull through mirror.gcr.io'
       - name: Build candidate image
         run: docker build --tag graphyard-ci .
       - name: Recover an expired lease on a second machine identity
@@ -147,6 +185,25 @@ jobs:
           helm template graphyard deploy/helm/graphyard --set secrets.existingSecret=graphyard-credentials > /dev/null
           # An installation with nowhere to hold credentials must not render.
           if helm template graphyard deploy/helm/graphyard > /dev/null 2>&1; then echo 'chart rendered without credentials' >&2; exit 1; fi
+      # Docker Hub refuses anonymous pulls from shared runner addresses past its rate limit (GY-1607):
+      # the daemon pulls Docker Hub images through the mirror.gcr.io registry mirror, falling back to
+      # Docker Hub for an image the mirror lacks. Verified with docker info before any docker command,
+      # and the pull of this job's Docker Hub images is logged through the mirror.
+      - name: Pull Docker Hub images through the registry mirror
+        shell: bash
+        env:
+          DOCKER_HUB_IMAGES: node:24-bookworm-slim
+        run: |
+          set -euo pipefail
+          { sudo cat /etc/docker/daemon.json 2>/dev/null || echo '{}'; } | jq '. + {"registry-mirrors": ["https://mirror.gcr.io"], "debug": true}' > "$RUNNER_TEMP/daemon.json"
+          sudo install -m 0644 "$RUNNER_TEMP/daemon.json" /etc/docker/daemon.json
+          since="$(date '+%Y-%m-%d %H:%M:%S')"
+          sudo systemctl restart docker
+          mirrors="$(docker info --format '{{json .RegistryConfig.Mirrors}}')"
+          echo "Docker daemon registry mirrors: $mirrors"
+          [[ $mirrors == *'https://mirror.gcr.io'* ]] || { echo '::error::the Docker daemon is not using the registry mirror' >&2; exit 1; }
+          for image in $DOCKER_HUB_IMAGES; do docker pull --quiet "$image"; done
+          sudo journalctl --unit docker --since "$since" --no-pager | grep -F 'mirror.gcr.io' || echo '::warning::the daemon log names no pull through mirror.gcr.io'
       - name: Build the candidate image
         run: |
           version="$(node -p "require('./package.json').version")"
@@ -154,6 +211,17 @@ jobs:
           docker tag "graphyard:$version" "graphyard:$version-next"
       - uses: helm/kind-action@v1
         with: { cluster_name: graphyard }
+      # The cluster's containerd pulls the chart's Docker Hub images (the bundled postgres:17-alpine)
+      # itself, so each node is given the same mirror, falling back to Docker Hub.
+      - name: Pull the cluster's Docker Hub images through the registry mirror
+        shell: bash
+        run: |
+          set -euo pipefail
+          for node in $(kind get nodes --name graphyard); do
+            docker exec "$node" mkdir -p /etc/containerd/certs.d/docker.io
+            printf '%s\n' 'server = "https://registry-1.docker.io"' '[host."https://mirror.gcr.io"]' '  capabilities = ["pull", "resolve"]' | docker exec -i "$node" tee /etc/containerd/certs.d/docker.io/hosts.toml
+            docker exec "$node" grep -q 'config_path *= *"/etc/containerd/certs.d"' /etc/containerd/config.toml || { echo "::error::kind node $node does not read /etc/containerd/certs.d" >&2; exit 1; }
+          done
       - name: Install, exercise, upgrade and restore on a real cluster
         run: bash deploy/helm/exercise.sh "graphyard:$(node -p "require('./package.json').version")"
   uat:
