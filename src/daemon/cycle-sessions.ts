@@ -2,7 +2,7 @@
 import type { Work } from '../model.js';
 import { detectRetryingExhaustion, type CapacityRole, type ExhaustionSignal } from '../model/capacity.js';
 import { detectRuntimeExhaustion } from '../master/environments.js';
-import { classifyRuntimePrompt, continueAfterDecline, type EscalationSession, escalationProfile, type HerdrAgent, isProfileSession, ownLoginAccounts, profileAccount, type RuntimePrompt } from '../master.js';
+import { classifyRuntimePrompt, continueAfterDecline, type EscalationSession, escalationProfile, type HerdrAgent, isProfileSession, ownLoginAccounts, profileAccount, type RuntimePrompt, type SessionIdentity } from '../master.js';
 import { standingEscalations } from '../model/escalation.js';
 import { capacityRecheckMs } from '../auto-dispatch.js';
 import { message, orphanObservationSchema } from './state.js';
@@ -136,8 +136,9 @@ export async function closeStep(cycle: Cycle) {
     /** The runtime a launched role's profile names, for the notice the loop reads off its pane. */
     const profileRuntime = (role: string, profile: string) =>
       (role === 'reviewer' ? config.reviewers : role === 'producer' ? config.producers : []).find(entry => entry.name === profile)?.kind;
-    const held = async (role: CapacityRole, profile: string, item: Work, signal: { reason: string; resetsAt: string | null }) => {
-      const selected = await effects.selectedAccount?.(role, profile) ?? null;
+    // A session is charged to the account it launched on, read by its own identity, not the profile's latest (GY-1582).
+    const held = async (role: CapacityRole, profile: string, item: Work, signal: { reason: string; resetsAt: string | null }, session: SessionIdentity) => {
+      const selected = await effects.selectedAccount?.(role, profile, session) ?? null;
       const account = selected?.environment ?? null;
       // A session on no named account spent its runtime's own login, which other roles launch on too.
       const own = (role === 'worker' ? config.workers : role === 'reviewer' ? config.reviewers : role === 'producer' ? config.producers : []).find(entry => entry.name === profile) ?? { name: profile };
@@ -158,7 +159,7 @@ export async function closeStep(cycle: Cycle) {
       await record(state, key, { kind: 'failover', work: item.key, principal: profile.principal, epoch, state: 'started', detail: `${profile.agentName} on ${item.key} (epoch ${epoch}) ${onNotice(agent)} its provider's limit notice: ${signal.reason}`, attempts, cycle: state.cycle }, now(), effects.persist);
       try {
         const partialWork = await effects.preserveWork?.(item, epoch) ?? { state: 'not-applicable' as const, detail: 'this loop has no access to the attempt worktree' };
-        const { account, runtime } = await held('worker', profile.name, item, signal);
+        const { account, runtime } = await held('worker', profile.name, item, signal, { work: item.key, epoch });
         await effects.reportCapacity!(item, { event: 'exhausted', role: 'worker', epoch, profile: profile.name, account, runtime: runtime ?? profile.kind ?? null, reason: signal.reason, resetsAt: signal.resetsAt, partialWork });
         // The lease is over on the record; the supervisor is stopped through the containment scope
         // it recorded, and the fence it leaves is settled in this action once the host verifies it
@@ -188,7 +189,7 @@ export async function closeStep(cycle: Cycle) {
       const attempts = (previous?.attempts ?? 0) + 1, resets = signal.resetsAt ? `resets ${signal.resetsAt}` : 'reset time unknown';
       await record(state, key, { kind: 'failover', work: item.key, principal: null, state: 'started', detail: `${session.role} session ${session.agentName} for ${item.key} ${onNotice(agent)} its provider's limit notice: ${signal.reason}`, attempts, cycle: state.cycle }, now(), effects.persist);
       try {
-        const { account, runtime } = await held(session.role, session.profile, item, signal);
+        const { account, runtime } = await held(session.role, session.profile, item, signal, { work: item.key, group: session.group });
         await effects.reportCapacity!(item, { event: 'exhausted', role: session.role, ...(session.requestId ? { requestId: session.requestId } : {}), profile: session.profile, account, runtime, reason: signal.reason, resetsAt: signal.resetsAt,
           partialWork: { state: 'not-applicable', detail: `a ${session.role} session edits nothing: it reads the exact head and leaves no work to keep` } });
         await effects.endSession?.(session, `provider quota exhausted on ${account ?? `${session.profile}'s own account`} mid-session (${signal.reason}; ${resets}); launched again on another account`);
