@@ -1,6 +1,6 @@
 import type { Work } from './work.js';
 import { fleetRoles, rolePolicy } from './registry.js';
-import { foldObservation } from './registry.js';
+import { exhaustedTwin, foldObservation } from './account-quota.js';
 import type { AccountSmoke, AgentRegistry, FleetAccount, FleetModel, FleetRefusal, FleetRoleName, FleetRuntime, FleetSession, ObservedQuota, RolePolicy, RunOutcome, SelectionRequest, SessionSkip } from './registry.js';
 import { accountProvider, busyDifferentProvider, sameProviderFallback, sharedProviderSkip, type ReviewDiversity } from './review-diversity.js';
 import { deriveAccountPlan, groupAccountsByPlan, type FleetPlanView } from '../provider-usage.js';
@@ -96,18 +96,6 @@ export const smokeRetestMs = 3_600_000;
 export const smokeFailureDue = (account: FleetAccount, now: number) =>
   account.smoke?.result === 'fail' && now - Date.parse(account.smoke.at) >= smokeRetestMs;
 const until = (iso: string | null) => iso ? ` until ${iso}` : '';
-/**
- * Another registry account on the same provider login as `account` that is recorded exhausted with
- * a reset still ahead (GY-1573): two accounts on one subscription share one limit, so the twin is
- * spent until that reset whatever its own probe last read. An account whose identity is unknown has
- * no twin, and an exhaustion with no reset time holds only the account it was recorded on.
- */
-export function exhaustedTwin(registry: Pick<AgentRegistry, 'accounts'>, account: FleetAccount, now: number): FleetAccount | null {
-  const identity = account.quota.identity ?? null;
-  if (!identity) return null;
-  return registry.accounts.find(other => other.name !== account.name && (other.quota.identity ?? null) === identity && other.quota.state === 'exhausted'
-    && !!other.quota.resetsAt && Date.parse(other.quota.resetsAt) > now) ?? null;
-}
 /**
  * Why an account cannot take a session right now, whatever role asks — null when it can. `host`
  * is the executor asking: an account is placed where its login lives, so every other host is

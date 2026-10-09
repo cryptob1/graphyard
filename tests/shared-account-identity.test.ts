@@ -22,8 +22,8 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 const HOST = 'vishrog';
 const spentAt = Date.parse('2026-10-09T05:30:28Z');
-// "resets Oct 10, 10pm (America/Los_Angeles)"
-const resetsAt = '2026-10-11T05:00:00.000Z';
+// "resets Oct 10, 10pm (America/Los_Angeles)"; every case passes a clock fixed at spentAt, never Date.now().
+const resetsAt = new Date(Date.UTC(2026, 9, 11, 5)).toISOString();
 const notice = `You've hit your weekly limit · resets Oct 10, 10pm (America/Los_Angeles)`;
 const shared = 'claude:' + 'a'.repeat(32), other = 'claude:' + 'b'.repeat(32);
 const directories: string[] = [];

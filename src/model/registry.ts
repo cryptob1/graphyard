@@ -302,33 +302,9 @@ export function applyRegistryMutation(current: AgentRegistry, kind: RegistryMuta
   return { registry: next, removed };
 }
 
-/**
- * Fold an executor's probe into what the registry knows. An operator's exhausted mark stands until
- * its reset passes or an operator clears it, whatever a probe reads meanwhile: the mark exists for
- * what a probe cannot see — a plan the provider cut off, a runtime whose quota Graphyard cannot
- * read — so only the login state and its identity are taken from the probe while it holds. Returns whether anything
- * an eligibility decision reads has changed, so a steady state appends nothing to the ledger.
- */
-export function foldObservation(account: FleetAccount, observed: QuotaObservation, context: { actor: string; at: string }) {
-  const held = account.quota, now = Date.parse(context.at);
-  const operatorHold = held.source === 'operator' && held.state === 'exhausted' && (!held.resetsAt || Date.parse(held.resetsAt) > now);
-  if (operatorHold) {
-    const identity = observed.identity === undefined ? held.identity ?? null : observed.identity;
-    if ((observed.loggedIn === null || observed.loggedIn === held.loggedIn) && identity === (held.identity ?? null)) return false;
-    account.quota = { ...held, loggedIn: observed.loggedIn ?? held.loggedIn, identity }; return true;
-  }
-  // A provider restates the same reset to the millisecond or not at all; only a reset that really moved is a change.
-  const moved = (held.resetsAt === null) !== (observed.resetsAt === null) || !!held.resetsAt && !!observed.resetsAt && Math.abs(Date.parse(held.resetsAt) - Date.parse(observed.resetsAt)) > 60_000;
-  // A probe that could not read the login file leaves the identity last read; one that read a login naming no account (an
-  // API key, a logout) clears it, so a home logged in afresh is never held under its former login.
-  const identity = observed.identity === undefined ? held.identity ?? null : observed.identity;
-  const changed = held.loggedIn !== observed.loggedIn || held.state !== observed.state || moved || held.source !== 'probe' || identity !== (held.identity ?? null);
-  account.quota = { ...observed, identity, observedAt: context.at, observedBy: context.actor, source: 'probe' };
-  return changed;
-}
-
 // Session liveness, eligibility, selection and the status view; and what setup proposes.
 export * from './registry-keys.js';
 export * from './registry-sessions.js';
+export * from './account-quota.js';
 export * from './registry-proposal.js';
 export * from '../provider-usage.js';
