@@ -3,7 +3,7 @@
 
 ## Items, scope and human waits
 
-Unplanned file: `scope-request GY-N EPOCH PATH… [--wait] -- REASON`; auto-granted if grounded: docs; files criteria, follow-ups or findings name; `web/`/`browser-tests/` for `docs/` planners; tests pinning planned text; symbol definitions; successors; companions (budget gate, timing baseline, importing tests, module imports). Else `approve-scope` executor replays standing decisions or asks approver; `master scope GY-N [--allow-broad-scope] REASON` applies refused requests save approver's (`master decisions`). Ending attempts close requests `attempt ended` (one awaiting the approver carries over); `master unblock GY-N` closes stale or carried ones. Human decisions: `park GY-N EPOCH KIND NEEDED --ask ASK [--step STEP]… --recommend TEXT --why WHY [--choice LABEL]… -- REASON` ([Needs you](dashboard.md#needs-you)); `graphyard answer GY-N …`; [host-doable](deployment.md) asks refused.
+Unplanned file: `scope-request GY-N EPOCH PATH… [--wait] -- REASON`; auto-granted if grounded: docs; files criteria, follow-ups or findings name; `web/`/`browser-tests/` for `docs/` planners; tests pinning planned text; symbol definitions; successors; companions (budget gate, timing baseline, importing tests, module imports). Else `approve-scope` executor replays standing decisions or asks approver; `master scope GY-N [--allow-broad-scope] REASON` applies refused requests save approver's (`master decisions`). Ending attempts close requests `attempt ended` (one awaiting the approver carries over); `master unblock GY-N` closes stale/carried ones. Human decisions: `park GY-N EPOCH KIND NEEDED --ask ASK [--step STEP]… --recommend TEXT --why WHY [--choice LABEL]… -- REASON` ([Needs you](dashboard.md#needs-you)); `graphyard answer GY-N …`; [host-doable](deployment.md) asks refused.
 
 ## Promotion to autonomy
 
@@ -33,7 +33,7 @@ Declared slot not `active` (systemd, else `PRINCIPAL@HOST/N` presence): `resourc
 
 ## Recovery
 
-Dead supervisor fences its item; `containment` lists survivors' pid, cmdline and cwd: `settleable: true` → `master settle-containment GY-N REASON`, else stop recorded scope unit (`containment.scope`), request `rework`. Unexplained lapses raise `lease-loss` (`blocked-awaiting-operator`, `stopped-by-attestation`: history); any admin settles explained ones: `resolve GY-N lease-loss --attestation blocked|stopped-worker "reason"` ([settling](delegation.md#who-may-settle-what)). `master escalation GY-N` spawns handler answering `master decide GY-N resolve … --context FINGERPRINT REASON`. Exhaustion with a reset holds same-login accounts (probe-read identity; unknown: none) until it; `master registry` names the twin.
+Dead supervisor fences its item; `containment` lists survivors' pid, cmdline and cwd: `settleable: true` → `master settle-containment GY-N REASON`, else stop recorded scope unit (`containment.scope`), request `rework`. Unexplained lapses raise `lease-loss` (`blocked-awaiting-operator`, `stopped-by-attestation`: history); any admin settles explained ones: `resolve GY-N lease-loss --attestation blocked|stopped-worker "reason"` ([settling](delegation.md#who-may-settle-what)). `master escalation GY-N` spawns handler answering `master decide GY-N resolve … --context FINGERPRINT REASON`. Exhaustion with a reset holds same-login accounts (probe-read identity, cleared by relogin; unknown: none) until it; `master registry` names the twin.
 
 ### Producer-runtime faults
 
@@ -41,7 +41,7 @@ Unacted producer requests (never started, launch refused, exited at launch) rela
 
 ## Fault classes
 
-`faultClass` (`master status` `faults`): recurring classes file one item; a resource at bound files `resource:ID`; also `fleet-capacity`, `unanswered-request` (past `settledAnswerGraceMs`), `configuration`, `decision-unanswered` (not `loop-silence`), and `unclassified` unless named (`plane-unavailable`, `fix-item`, `decision-stale`, `overlong-session`). Review unlaunched 15min: `concurrency-starved`, `review-settlement`, `launch-review`. Unanswering planes raise one `plane-unavailable`; `planeWaitMs` (control-plane time in flight, answered or not) is neither `loop-cost` nor `cycle-p90`. A launch failing before its session starts is one dispatch fault, not also a `session` fault.
+`faultClass` (`master status` `faults`): recurring classes file one item; a resource at bound files `resource:ID`; also `fleet-capacity`, `unanswered-request` (past `settledAnswerGraceMs`), `configuration`, `decision-unanswered` (not `loop-silence`), and `unclassified` unless named (`plane-unavailable`, `fix-item`, `decision-stale`, `overlong-session`). Review unlaunched 15min: `concurrency-starved`, `review-settlement`, `launch-review`. Unanswering planes raise one `plane-unavailable`; `planeWaitMs` (control-plane time in flight, answered or not) is neither `loop-cost` nor `cycle-p90`. A launch failing before its session starts is one dispatch fault, not a `session` fault.
 
 ## Shadow merge gate
 

@@ -40,7 +40,7 @@ function registryOf(accounts: { name: string; home?: string | null }[]): AgentRe
   }, { actor: 'operator', at: new Date(spentAt - 3_600_000).toISOString() }).registry;
 }
 const observe = (registry: AgentRegistry, observations: { account: string; state: 'available' | 'exhausted' | 'unknown'; resetsAt?: string | null; reason?: string | null; identity?: string | null }[], at: number) =>
-  foldObservations(registry, { host: HOST, observations: observations.map(({ account, state, resetsAt = null, reason = null, identity = null }) => ({ account, quota: { loggedIn: true, state, usage: [], resetsAt, reason, identity } })) },
+  foldObservations(registry, { host: HOST, observations: observations.map(({ account, state, resetsAt = null, reason = null, identity }) => ({ account, quota: { loggedIn: true, state, usage: [], resetsAt, reason, ...identity === undefined ? {} : { identity } } })) },
     { actor: 'executor', at: new Date(at).toISOString() });
 
 test('unit:shared-identity-exhaustion-holds-twin — an account recorded exhausted with a reset holds every registry account of the same provider identity until that reset, and master registry names the twin and the exhaustion; a different or unknown identity is unaffected', async () => {
@@ -68,12 +68,26 @@ test('unit:shared-identity-exhaustion-holds-twin — an account recorded exhaust
   assert.equal(chosen.account?.name, 'claude-c');
   assert.deepEqual(chosen.skipped.map(skip => skip.account), ['claude-a', 'claude']);
 
-  // A later probe that cannot read the login leaves the identity it last read: the login has not changed.
-  observe(registry, [{ account: 'claude', state: 'unknown', identity: null }], now);
+  // A later probe that cannot read the login file leaves the identity it last read: the login has not been seen to change.
+  observe(registry, [{ account: 'claude', state: 'unknown' }], now);
   assert.match(accountIneligibility(registry, registry.accounts.find(account => account.name === 'claude')!, now, HOST)!, /same provider login as claude-a/);
 
   // The hold ends with the reset.
   assert.equal(accountIneligibility(registry, registry.accounts.find(account => account.name === 'claude')!, Date.parse(resetsAt) + 1, HOST), null);
+
+  // A home logged in afresh with an API key reads a login naming no account: the former identity goes, and with it the hold.
+  const relogged = registryOf([{ name: 'claude-a' }, { name: 'claude' }]);
+  observe(relogged, [{ account: 'claude-a', state: 'exhausted', resetsAt, reason: notice, identity: shared }, { account: 'claude', state: 'unknown', identity: shared }], spentAt);
+  assert.match(accountIneligibility(relogged, relogged.accounts.find(account => account.name === 'claude')!, now, HOST)!, /same provider login as claude-a/);
+  observe(relogged, [{ account: 'claude', state: 'unknown', identity: null }], now);
+  assert.equal(relogged.accounts.find(account => account.name === 'claude')!.quota.identity, null);
+  assert.equal(accountIneligibility(relogged, relogged.accounts.find(account => account.name === 'claude')!, now, HOST), null, 'a changed login is not held under its former identity');
+  // So does an operator's account.set for the same home: the next probe reads the identity again.
+  observe(relogged, [{ account: 'claude', state: 'unknown', identity: shared }], now);
+  const account = relogged.accounts.find(entry => entry.name === 'claude')!;
+  const reset = applyRegistryMutation(relogged, 'account.set', { account: { name: account.name, runtime: account.runtime, model: account.model, credential: account.credential }, reason: 'logged in again' }, { actor: 'operator', at: new Date(now).toISOString() }).registry;
+  assert.equal(reset.accounts.find(entry => entry.name === 'claude')!.quota.identity, null);
+  assert.equal(accountIneligibility(reset, reset.accounts.find(entry => entry.name === 'claude')!, now, HOST), null);
 
   // An operator's exhausted mark holds the twin too, keeping the identity the probe read.
   const marked = registryOf([{ name: 'claude-a' }, { name: 'claude' }]);
@@ -96,6 +110,10 @@ test('unit:shared-identity-exhaustion-holds-twin — an account recorded exhaust
   assert.notEqual(a, c);
   assert.ok(!a!.includes('account-1'), 'the identity is a digest; the provider ids stay on the host');
   assert.equal(await providerIdentity('claude', scratch), null, 'a home with no OAuth account has an unknown identity');
+  await writeFile(join(scratch, '.claude.json'), JSON.stringify({ hasCompletedOnboarding: true }));
+  assert.equal(await providerIdentity('claude', scratch), null, 'an API-key login names no account');
+  await writeFile(join(scratch, '.claude.json'), '{"oauthAccount": {"accountUu');
+  assert.equal(await providerIdentity('claude', scratch), undefined, 'a login file caught mid-write is unreadable, not a changed login');
   assert.equal(await providerIdentity('opencode', homes.claude), null);
 });
 

@@ -370,6 +370,50 @@ test('unit:soak-invariants-hold — a worker blocked on Claude\'s usage-limit me
   assert.deepEqual(proseAttempts.map(session => session.state), ['submitted'], `its one attempt carried on and submitted: ${proseAttempts.map(session => `${session.epoch}:${session.state}`).join(', ')}`);
 });
 
+test('unit:soak-invariants-hold — a worker spent on Claude\'s usage-limit menu holds its twin, the account on the same provider login, across every cycle until the reset its notice names: neither takes a launch meanwhile, the item is delivered on the other subscription, both return at the reset, and every invariant holds', { timeout: 600_000 }, async () => {
+  // GY-1573: worker profiles one and two run on two login homes of one Claude subscription, three on
+  // another. The loop reads every profile's accounts on every cycle through the real account read,
+  // and the menu's hold is recorded where that read finds it; the notice's reset falls inside the day.
+  const worker = 2;
+  const { items, final, violations, failures, lost, sessions, state, limitMenuDay, menuReset, menuNotice, dayStart } = await simulateDay({
+    hours: 6, limitMenu: { worker, prose: 99, twinLogin: true },
+    plan: { items: 6, leftovers: 2, slowRecompute: 0, workMs: 15 * minute, rework: new Set(), deaths: new Set(), flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set(), misread: new Set(), exits: new Set(), spentProducer: 0, lostRuns: 0, outOfQueue: { item: 6, afterMs: 99 * hour }, blind: { from: 99 * hour, to: 100 * hour }, split: { at: 99 * hour, item: 6 } },
+  });
+  assert.deepEqual(violations, [], 'every system invariant holds while the twin is held and after it is released');
+  assert.deepEqual(failures, [], 'no cycle failed');
+  assert.deepEqual(lost, [], 'no lease was lost');
+  assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}`), [], 'every item is delivered');
+  const resetsAt = menuReset.toISOString(), reset = menuReset.getTime();
+
+  const spent = items[worker - 1], attempts = sessions.filter(session => session.key === spent.key);
+  const failovers = Object.entries(state.actions).filter(([, action]) => action.kind === 'failover');
+  assert.deepEqual(failovers.map(([, action]) => [action.work, action.state, action.attempts]), [[spent.key, 'done', 1]], JSON.stringify(failovers));
+  const failedAt = Date.parse(failovers[0][1].at);
+  assert.deepEqual(limitMenuDay.answered, [], 'the menu is never answered');
+  const spentProfile = attempts[0].profile.name;
+  assert.ok(['one', 'two'].includes(spentProfile), `the menu's session ran on one of the twin logins: ${spentProfile}`);
+  const twin = spentProfile === 'one' ? 'two' : 'one';
+  assert.deepEqual(limitMenuDay.holds.map(entry => [entry.account, entry.resetsAt]), [[`account-${spentProfile}`, resetsAt]], 'only the spent account is held by name; its twin is held by its login');
+
+  // Every cycle between the hold and the reset read both logins unavailable, the twin naming the spent one; the other subscription never.
+  const holdStart = limitMenuDay.holds[0].elapsed, releaseAt = reset - dayStart;
+  const between = limitMenuDay.twinReads.filter(read => read.elapsed > holdStart && read.elapsed < releaseAt), after = limitMenuDay.twinReads.filter(read => read.elapsed >= releaseAt);
+  assert.ok(between.length >= 60, `the hold stood across many cycles: ${between.length} reads`);
+  for (const read of between) {
+    assert.ok(read.unavailable[spentProfile] && read.unavailable[twin], `both logins of the spent subscription are unavailable at ${read.elapsed}: ${JSON.stringify(read.unavailable)}`);
+    assert.match(read.unavailable[twin], new RegExp(`account-${twin} is the same provider login as account-${spentProfile} exhausted its quota mid-session`));
+    assert.ok(read.unavailable[twin].includes(menuNotice) && read.unavailable[twin].includes(`it resets ${resetsAt}`), read.unavailable[twin]);
+    assert.equal(read.unavailable.three, undefined, 'the other subscription is unaffected');
+  }
+  assert.ok(after.length > 0, 'the day reads accounts past the reset');
+  for (const read of after) assert.deepEqual(read.unavailable, {}, `both logins return at the reset: ${read.elapsed} ${JSON.stringify(read.unavailable)}`);
+
+  // Neither login took a launch between the failover and the reset; the item went to the other subscription.
+  assert.deepEqual(sessions.filter(session => [spentProfile, twin].includes(session.profile.name) && session.dispatchAt > failedAt && session.dispatchAt < reset).map(session => `${session.key}@${session.profile.name}`), [],
+    'no launch landed on the spent subscription before its reset');
+  assert.equal(attempts[1]?.profile.name, 'three', `redispatched on the other subscription: ${attempts.map(session => session.profile.name).join(', ')}`);
+});
+
 test('unit:soak-invariants-hold — containment quarantines of dead workers stand across many cycles while the timed clock read fails and then answers slowly, one read a cycle and none without an assessable quarantine, each escalation recorded once, and they settle once reads are fast, with every invariant holding', { timeout: 600_000 }, async () => {
   // GY-811: every supervised launch raises a containment quarantine; two workers die, so their
   // fences outlive them and only the loop can lower them. The work snapshot takes 6 s to read, so

@@ -15,6 +15,7 @@ import { DispatchReservedError, type HerdrAgent, type MasterConfig, type WorkerP
 import { withSupervision } from '../../src/master/profiles.js';
 import { readAccountStartFailures, workerLaunchStatus, worktreeFailure } from '../../src/master/dispatch.js';
 import { readControlPlaneClock } from '../../src/master/containment.js';
+import { inspectProfileAccounts, recordObservedExhaustion } from '../../src/master/environments.js';
 import { timedCall } from '../../src/master/timings.js';
 import { containmentSettlementRefusals, containmentVerificationSchema, loopEndedAttempt } from '../../src/quarantine.js';
 import { type SupervisorProbeReport } from '../../src/containment-probe.js';
@@ -166,7 +167,7 @@ export interface MainWatchLanding { sha: string; at: number; subject: string; au
  * effect. tests/soak-supervised.test.ts checks the real effects leave each of them absent.
  */
 export const supervisedAbsentEffects = ['decide', 'approver', 'docsSync', 'withdraw', 'resume', 'decisions', 'decisionChanges', 'replan', 'widenScope', 'withdrawReview', 'diagnostician', 'acceptance', 'planner', 'fileFaultClass', 'unblock', 'doctor'] as const;
-export async function simulateDay(options: { hours: number; backlog?: boolean; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number; working?: { from: number; retryAt: number } }; regression?: ('approvers-left-open' | 'docs-syncs-left-open')[]; headless?: boolean; handApprovers?: boolean; stranded?: boolean | 'resume'; staleRework?: boolean; staleMerge?: number; capacityWait?: { from: number; to: number }; diagnosisLimit?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; workspaceFailure?: { item: number; until: number }; credentialBlocked?: { recovers: number; never: number }; blockers?: boolean; retrying?: { worker: number; approver: number }; limitMenu?: { worker: number; prose: number }; unbounded?: { stuck: number; progressing: number; pushedOnce: number; rework: number }; starved?: { items: number[]; dropFirst: number }; docs?: { budget: { total: number; perPage: number } }; dispatchFailing?: { constant: number; changing: number; refuseBlocks: number; unblockAfterMs: number }; mainGuard?: MainGuardDay; containment?: { failUntil: number; slowUntil: number; refuseSettle?: number }; mechanical?: { applied: number; rejected: number }; slowDecisions?: { from: number; to: number; ms: number }; slowAnswers?: { from: number; to: number; ms: number }; slowObservation?: { from: number; to: number; attentionMs: number }; lateReading?: boolean; slowDeployment?: { from: number; to: number; observationMs: number }; selfProvision?: { redeployFails: { from: number; to: number } }; plan?: Partial<typeof basePlan>; github806?: boolean; remedies?: boolean;
+export async function simulateDay(options: { hours: number; backlog?: boolean; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number; working?: { from: number; retryAt: number } }; regression?: ('approvers-left-open' | 'docs-syncs-left-open')[]; headless?: boolean; handApprovers?: boolean; stranded?: boolean | 'resume'; staleRework?: boolean; staleMerge?: number; capacityWait?: { from: number; to: number }; diagnosisLimit?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; workspaceFailure?: { item: number; until: number }; credentialBlocked?: { recovers: number; never: number }; blockers?: boolean; retrying?: { worker: number; approver: number }; limitMenu?: { worker: number; prose: number; twinLogin?: boolean }; unbounded?: { stuck: number; progressing: number; pushedOnce: number; rework: number }; starved?: { items: number[]; dropFirst: number }; docs?: { budget: { total: number; perPage: number } }; dispatchFailing?: { constant: number; changing: number; refuseBlocks: number; unblockAfterMs: number }; mainGuard?: MainGuardDay; containment?: { failUntil: number; slowUntil: number; refuseSettle?: number }; mechanical?: { applied: number; rejected: number }; slowDecisions?: { from: number; to: number; ms: number }; slowAnswers?: { from: number; to: number; ms: number }; slowObservation?: { from: number; to: number; attentionMs: number }; lateReading?: boolean; slowDeployment?: { from: number; to: number; observationMs: number }; selfProvision?: { redeployFails: { from: number; to: number } }; plan?: Partial<typeof basePlan>; github806?: boolean; remedies?: boolean;
   decomposition?: { broadItems: number[]; concurrency?: number };
   /** GY-1294: the loop's own write moves a diagnosed item's revision before its approver reads the diagnosis decision, so the decision settles stale. */
   staleDiagnosis?: boolean;
@@ -620,7 +621,9 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     unbounded?: 'stuck' | 'progressing' | 'pushed-once'; pushedAt?: number }
   const sessions: Session[] = [], lost: string[] = [], launches: number[] = [];
   // GY-1566: what the usage-limit-menu day saw: each account the loop held, each spent session stopped, any keys sent, and the prose session's block.
-  const limitMenuDay = { holds: [] as { account: string; resetsAt: string | null; elapsed: number }[], stoppedAt: [] as { key: string; epoch: number; elapsed: number }[], answered: [] as { pane: string; keys: string[] }[], proseBlocked: [] as string[] };
+  const limitMenuDay = { holds: [] as { account: string; resetsAt: string | null; elapsed: number }[], stoppedAt: [] as { key: string; epoch: number; elapsed: number }[], answered: [] as { pane: string; keys: string[] }[], proseBlocked: [] as string[],
+    /** GY-1573: every account read the loop made on the twin-login day, with each account it found unavailable and why. */
+    twinReads: [] as { elapsed: number; unavailable: Record<string, string> }[] };
   // GY-973: what each pane's screen tail shows, where it is not a session at work, and the
   // accounts the loop held. OpenCode 1.18 on a spent account prints its limit banner with a retry
   // marker and retries for ever, so Herdr keeps the session `working` and only the screen tells.
@@ -633,12 +636,27 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   // zone it names, and then its usage-limit menu, and blocks on the menu holding its lease. The
   // reset is a whole hour, as Claude names it. The notice stands behind the runtime's error label,
   // more label words than the line scan of a stopped session admits, so only the menu reads it.
-  const menuReset = new Date(Math.ceil((dayStart + 2 * 24 * hour) / hour) * hour);
+  // GY-1573: the twin-login day's reset falls inside the day, so the release at the reset is seen too.
+  const menuReset = new Date(Math.ceil((dayStart + (options.limitMenu?.twinLogin ? 3 * hour : 2 * 24 * hour)) / hour) * hour);
   const losAngeles = (instant: Date) => { const parts = Object.fromEntries(new Intl.DateTimeFormat('en-US', { timeZone: 'America/Los_Angeles', month: 'short', day: 'numeric', hour: 'numeric', hour12: true }).formatToParts(instant).map(part => [part.type, part.value])); return `${parts.month} ${parts.day}, ${parts.hour}${parts.dayPeriod.toLowerCase()}`; };
   const menuNotice = `You've hit your weekly limit · resets ${losAngeles(menuReset)} (America/Los_Angeles)`;
   const limitMenuScreen = `● Reading src/model/capacity.ts before editing.\n  ⎿  API Error: Claude Code · ${menuNotice}\n\n What do you want to do?\n\n ❯ 1. Stop and wait for limit to reset\n   2. Wait here, then continue automatically at ${losAngeles(menuReset)}\n   3. Switch to usage credits\n\n Enter to confirm · Esc to cancel\n`;
   // An agent blocked over its own words about a quota, the notice and the menu quoted among them: not its provider's (GY-402).
   const proseScreen = `● Claude prints "${menuNotice}" and then asks:\n What do you want to do?\n 1. Stop and wait for limit to reset\n 2. Wait here, then continue automatically\n 3. Switch to usage credits\n● tmp disk quota is exhausted (a known local issue). Clearing the tsx cache, then rerunning.\n`;
+  // GY-1573: on the twin-login day each worker profile's account is a real Claude login home: one and
+  // two are the same subscription, three another. The loop's account read and its hold run through
+  // the real inspectProfileAccounts and recordObservedExhaustion, so a spent login holds its twin.
+  const twinLogin = options.limitMenu?.twinLogin ? await (async () => {
+    const root = await temporaryDirectory('soak-twin-login');
+    const environments = await Promise.all(workers.map(async (profile, index) => {
+      const home = join(root, profile.name), account = index < 2 ? 'subscription-1' : 'subscription-2';
+      await mkdir(home, { recursive: true });
+      await writeFile(join(home, '.credentials.json'), JSON.stringify({ claudeAiOauth: { accessToken: `access-${profile.name}`, refreshToken: `refresh-${profile.name}`, expiresAt: dayStart + 7 * 24 * hour } }));
+      await writeFile(join(home, '.claude.json'), JSON.stringify({ oauthAccount: { accountUuid: account, organizationUuid: `org-${account}` } }));
+      return { name: `account-${profile.name}`, kind: 'claude' as const, home };
+    }));
+    return { config: { environments, credentialFile: join(root, 'master.token'), run: soakConfig.run } as unknown as Pick<MasterConfig, 'environments' | 'credentialFile' | 'run'> };
+  })() : null;
   const accountHeld = (account: string) => { const hold = heldAccounts.get(account); return !!hold && (!hold.resetsAt || Date.parse(hold.resetsAt) > clock.now()); };
   // GY-888: every session launch the day makes carries the coordinator confinement through the
   // launcher's own logic, and the same launch where the mount namespace cannot be built is
@@ -1669,7 +1687,12 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
       apply: applyVerdict(String(owner.context.workId), String(owner.context.run)) }) }, { runner: headless.pi }) } : {}),
     panes: async () => ({ panes: herdr.paneList(), available: true }),
     recordSession,
-    credentials: async profiles => { credentialReads.push(clock.now() - dayStart); return Object.fromEntries(profiles.map(profile => [profile.name, accountHeld(`account-${profile.name}`) ? { available: false, reason: `account-${profile.name} is held until ${heldAccounts.get(`account-${profile.name}`)!.resetsAt}` } : { available: true, reason: null }])); },
+    credentials: async profiles => { credentialReads.push(clock.now() - dayStart); if (twinLogin) {
+      const health = await inspectProfileAccounts(twinLogin.config, 'worker', profiles.map(profile => ({ ...profile, accounts: [`account-${profile.name}`] })),
+        Object.fromEntries(profiles.map(profile => [profile.name, { available: true, reason: null as string | null }])), { quota: false, cacheMs: 0, now: () => clock.now() });
+      limitMenuDay.twinReads.push({ elapsed: clock.now() - dayStart, unavailable: Object.fromEntries(Object.entries(health).filter(([, entry]) => !entry.available).map(([name, entry]) => [name, entry.reason ?? ''])) });
+      return Object.fromEntries(Object.entries(health).map(([name, entry]) => [name, { available: entry.available, reason: entry.reason }]));
+    } return Object.fromEntries(profiles.map(profile => [profile.name, accountHeld(`account-${profile.name}`) ? { available: false, reason: `account-${profile.name} is held until ${heldAccounts.get(`account-${profile.name}`)!.resetsAt}` } : { available: true, reason: null }])); },
     snapshot, dispatch, requestProof, approver, docsSync, docsSyncSettled: synced => releaseDocsSyncHarness(docsSyncRoot, synced), doctor, containment, settleContainment, unblock,
     closeSession: async pane => {
       const name = herdr.agents.get(pane)?.name ?? '';
@@ -1758,7 +1781,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     ...(options.retrying || options.limitMenu ? {
       sessionOutput: (agent: HerdrAgent) => screens.get(agent.pane_id ?? '') ?? `● Working as ${agent.name}…\n`,
       selectedAccount: async (role: string, profile: string) => role === 'worker' ? { environment: `account-${profile}`, kind: null } : null,
-      holdAccount: async (account: string, observed: { resetsAt: string | null }) => { heldAccounts.set(account, { resetsAt: observed.resetsAt }); if (options.limitMenu) limitMenuDay.holds.push({ account, resetsAt: observed.resetsAt, elapsed: clock.now() - dayStart }); },
+      holdAccount: async (account: string, observed: Parameters<NonNullable<DaemonEffects['holdAccount']>>[1]) => { if (twinLogin) await recordObservedExhaustion(twinLogin.config, account, observed, clock.now()); heldAccounts.set(account, { resetsAt: observed.resetsAt }); if (options.limitMenu) limitMenuDay.holds.push({ account, resetsAt: observed.resetsAt, elapsed: clock.now() - dayStart }); },
       // GY-1566: the loop never chooses on the usage-limit menu; any keys it sends are recorded.
       ...(options.limitMenu ? { answerSession: async (agent: HerdrAgent, keys: string[]) => { limitMenuDay.answered.push({ pane: agent.pane_id ?? '', keys }); } } : {}),
     } : {}),

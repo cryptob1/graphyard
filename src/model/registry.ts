@@ -79,7 +79,8 @@ export const quotaObservationSchema = z.object({
   /**
    * The provider login behind the account (GY-1573): its runtime kind and a digest of the provider's own
    * account and organization ids, read from the login home. Two accounts with one identity are one
-   * subscription, spent together; null when the login names none Graphyard can read.
+   * subscription, spent together; null when the login names none Graphyard can read, absent when a
+   * probe could not read the login file just now and the identity last read stands.
    */
   identity: z.string().regex(/^[a-z][a-z0-9-]{0,39}:[0-9a-f]{16,64}$/, 'A provider identity is a runtime kind and a hex digest').nullable().optional(),
 }).strict();
@@ -237,7 +238,8 @@ export function applyRegistryMutation(current: AgentRegistry, kind: RegistryMuta
     const sameLogin = existing && existing.runtime === account.runtime && existing.credential.host === account.credential.host && existing.credential.home === account.credential.home;
     // Any change to an account is tested again before it takes a session (GY-446), and clears the
     // holds its earlier runs set: the change is what an operator makes to fix it.
-    upsert(next.accounts, { ...account, quota: sameLogin ? existing.quota : { ...unobservedQuota } });
+    // Its identity is read again by the next probe (GY-1573): the operator may have logged the home in afresh.
+    upsert(next.accounts, { ...account, quota: sameLogin ? { ...existing.quota, identity: null } : { ...unobservedQuota } });
     demandRegistry(next.accounts.length <= registryLimits.accounts, `The registry holds at most ${registryLimits.accounts} accounts`);
   };
   const setRole = (role: FleetRole) => {
@@ -309,14 +311,15 @@ export function foldObservation(account: FleetAccount, observed: QuotaObservatio
   const held = account.quota, now = Date.parse(context.at);
   const operatorHold = held.source === 'operator' && held.state === 'exhausted' && (!held.resetsAt || Date.parse(held.resetsAt) > now);
   if (operatorHold) {
-    const identity = observed.identity ?? held.identity ?? null;
+    const identity = observed.identity === undefined ? held.identity ?? null : observed.identity;
     if ((observed.loggedIn === null || observed.loggedIn === held.loggedIn) && identity === (held.identity ?? null)) return false;
     account.quota = { ...held, loggedIn: observed.loggedIn ?? held.loggedIn, identity }; return true;
   }
   // A provider restates the same reset to the millisecond or not at all; only a reset that really moved is a change.
   const moved = (held.resetsAt === null) !== (observed.resetsAt === null) || !!held.resetsAt && !!observed.resetsAt && Math.abs(Date.parse(held.resetsAt) - Date.parse(observed.resetsAt)) > 60_000;
-  // A probe that could not read the login's identity leaves the one last read: the login is the same until the account changes.
-  const identity = observed.identity ?? held.identity ?? null;
+  // A probe that could not read the login file leaves the identity last read; one that read a login naming no account (an
+  // API key, a logout) clears it, so a home logged in afresh is never held under its former login.
+  const identity = observed.identity === undefined ? held.identity ?? null : observed.identity;
   const changed = held.loggedIn !== observed.loggedIn || held.state !== observed.state || moved || held.source !== 'probe' || identity !== (held.identity ?? null);
   account.quota = { ...observed, identity, observedAt: context.at, observedBy: context.actor, source: 'probe' };
   return changed;

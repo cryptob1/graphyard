@@ -197,7 +197,7 @@ export async function observeAccount(account: FleetAccount, runtime: FleetRuntim
     // so the smoke test it gets before first selection decides, with Pi's own error (GY-515, GY-1158).
     if (runtime.launch.kind === 'pi' && !health.loggedIn) return { health, quota: { loggedIn: null, state: 'unknown', usage: [], resetsAt: null, reason: null } };
     return { health, quota: { loggedIn: health.loggedIn, state: health.loggedIn ? health.quota : 'unknown', usage: health.usage.map(entry => ({ window: entry.window, percent: entry.percent, resetsAt: entry.resetsAt })),
-      resetsAt: health.quota === 'exhausted' ? resets.at(-1) ?? null : null, reason: health.reason ? health.reason.slice(0, 500) : null, identity: health.identity ?? null } };
+      resetsAt: health.quota === 'exhausted' ? resets.at(-1) ?? null : null, reason: health.reason ? health.reason.slice(0, 500) : null, identity: health.identity } };
   }
   if (!runtime.launch.loginFile) return { quota: { loggedIn: null, state: 'unknown', usage: [], resetsAt: null, reason: null }, health: null };
   const loggedIn = await access(resolve(home, runtime.launch.loginFile)).then(() => true, () => false);
