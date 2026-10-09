@@ -133,10 +133,35 @@ export function routableScopeRequest(item: { plannedFiles?: readonly string[]; c
   if (!request || request.decision?.state !== 'refused' || request.remove?.length || request.criteria?.length) return null;
   // A request whose attempt no longer holds the lease is moot: a fresh attempt asks afresh.
   if (!item.lease || item.lease.epoch !== request.epoch || Date.parse(item.lease.expiresAt) <= now) return null;
+  return routableWidening(item, request);
+}
+const routableWidening = (item: { plannedFiles?: readonly string[]; criteria?: readonly ScopeCriterion[] }, request: ScopeRequestState) => {
   const paths = unplannedPaths(item.plannedFiles, request.paths);
   const folded = paths.length ? collapsePlannedFiles(item.plannedFiles ?? [], paths, collapseArea(item)) : null;
   return folded && folded.plannedFiles.length <= plannedFilesMax ? { request, paths, ...folded } : null;
+};
+
+/**
+ * The ask an ended attempt carried to the item while the approver judged it (GY-1484), still routed
+ * to that approver (GY-1568), or null. A worker that asks and then submits (or releases) ends its
+ * attempt seconds later; the ask is carried, so no live request remains for `routableScopeRequest`
+ * to read, and the loop used to withdraw the routed decision as one the item had moved past — the
+ * operator then widened by hand. The carried ask keeps its epoch and instant, so the decision it is
+ * routed as is the very one requested while the attempt lived, and its approval applies as the late
+ * answer the engine accepts. Only while no attempt holds an ask of its own: a claim inherits it.
+ */
+export function routableCarriedRequest(item: { plannedFiles?: readonly string[]; criteria?: readonly ScopeCriterion[]; scopeRequest?: ScopeRequestState | null; carriedScopeRequest?: ScopeRequestState | null }) {
+  const request = item.carriedScopeRequest;
+  if (!request || item.scopeRequest || request.decision?.state !== 'refused' || request.decision.decidedBy !== 'graphyard' || request.remove?.length || request.criteria?.length) return null;
+  return routableWidening(item, request);
 }
+
+/** The epoch and instant that identify an ask: a claim that inherits it keeps the epoch that asked (GY-1568), so its routed decision still answers it. */
+export const askIdentity = (request: Pick<ScopeRequestState, 'epoch' | 'at' | 'askedEpoch'>) => ({ epoch: request.askedEpoch ?? request.epoch, at: request.at });
+
+/** The ask the independent approver judges for the item: its live attempt's routed request, or the one an ended attempt carried. */
+export const routedScopeRequest = (item: Parameters<typeof routableScopeRequest>[0] & Parameters<typeof routableCarriedRequest>[0], now: number) =>
+  routableScopeRequest(item, now) ?? routableCarriedRequest(item);
 
 /**
  * True when the item's standing refusal is the terminal over-cap one (GY-906): a purely additive
