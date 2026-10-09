@@ -110,6 +110,12 @@ async function recordRequest(services: Services, caller: Principal, id: string, 
     // A refused decision is answered, never retried unchanged (GY-141). A rework or recover
     // refusal judged the candidate and base it was requested against, and stands only for those (GY-229).
     const situation = decisionSituation(data.action, work!);
+    // GY-1579: a rework the item's live state already holds is refused here, naming the applied decision, rather than put to an approver.
+    const held = data.action === 'rework' ? heldRework(work!, history) : null;
+    if (held && heldSameGrounds(held, situation))
+      throw new Refusal(heldReworkRefusal(work!, held), 409, { heldRework: { decision: held.id } });
+    // The rework this request would re-authorize travels beside its situation, so refusals and duplicates key on the record.
+    const recorded = situation && held ? { ...situation, reauthorizes: held.id } : situation;
     // The refused decision travels as a field beside the message (GY-265), so the loop answers it by id.
     const repeated = standingRefusal(history, data.action, input, data.reason, (a, b) => JSON.stringify(canonical(a)) === JSON.stringify(canonical(b)), data.precedent ?? [], situation);
     if (repeated) throw new Refusal(repeated.message, 409, { standingRefusal: { decision: repeated.decision, action: repeated.action, legacy: repeated.legacy } });
@@ -141,12 +147,29 @@ async function recordRequest(services: Services, caller: Principal, id: string, 
       : `Decision ${pending?.id} (${data.action}) is already ${pending?.state} on ${work!.key}; wait for it before requesting another`, 409);
     const decisionId = randomUUID();
     await record(db, work!, actor.id, 'decision.requested', { id: decisionId, action: data.action, input, reason: data.reason, requester: { id: actor.id, role: actor.role }, capabilities: requiredDecisionCapabilities(data.action, input, work!),
-      ...(cited ? { precedent: cited } : {}), ...(noPrecedent ? { noPrecedent } : {}), ...(data.context ? { context: data.context } : {}), ...(data.action === 'resolve' ? { pin: resolvePin(work!) } : {}), ...(situation ? { situation } : {}) });
+      ...(cited ? { precedent: cited } : {}), ...(noPrecedent ? { noPrecedent } : {}), ...(data.context ? { context: data.context } : {}), ...(data.action === 'resolve' ? { pin: resolvePin(work!) } : {}), ...(recorded ? { situation: recorded } : {}) });
     const result = (await readDecisions(db, work!)).find(decision => decision.id === decisionId)!;
     await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]);
     return result;
   });
 }
+
+/**
+ * GY-1579. The applied rework decision the item's live state still holds, or null: `reworkRequested`
+ * stands (no worker has submitted since) and the item's newest applied rework is the one that set it.
+ * On GY-1522 a hand rework was put to an approver while 8da1e201 already held the item, and the
+ * approver's session was spent saying so; the held state answers such a request on the record.
+ */
+export function heldRework<D extends Pick<Decision, 'id' | 'action'> & { state: string; situation?: Decision['situation'] }>(work: Pick<Work, 'reworkRequested'>, history: readonly D[]): D | null {
+  if (!work.reworkRequested) return null;
+  return [...history].reverse().find(decision => decision.action === 'rework' && decision.state === 'applied') ?? null;
+}
+/** Whether a request judges the grounds the held rework already answers: the same candidate head and base (a rework recorded before situations were kept judged an unnamed one, so it holds every request). */
+export const heldSameGrounds = (held: { situation?: Decision['situation'] }, situation: Decision['situation']) =>
+  !held.situation || ((held.situation.sha ?? null) === (situation?.sha ?? null) && (held.situation.baseSha ?? null) === (situation?.baseSha ?? null));
+export const heldReworkRefusal = (work: Pick<Work, 'key'>, held: Pick<Decision, 'id'> & { situation?: Decision['situation'] }) =>
+  `${work.key} already holds rework: decision ${held.id} was applied${held.situation?.sha ? ` for head ${held.situation.sha.slice(0, 12)}` : ''} and no worker has submitted since, so the item waits for a worker on it and a second rework authorizes nothing. `
+  + `If no worker takes it, what holds its dispatch (an unfinished dependency, a blocker, a fenced launch) is the lever, not another rework`;
 
 // A refused approval is part of the item's history even though its transaction rolled back.
 async function recordRefusal(services: Services, actor: Principal, workId: string, decision: string, conflict: string) {

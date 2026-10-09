@@ -81,15 +81,41 @@ export const cappedReworkBinding = (head: string, reviewer: string) => `${head}:
  * head unchanged, so the mark is what binds the approver's judgement to that revision's change request.
  */
 export const cappedRevisionMark = (policyRevision: number) => `[Capped review under policy revision ${policyRevision}.]`;
+/** The policy revision a capped rework request's reason names in its mark, or null for a request recorded before the mark existed (GY-1579). */
+export const cappedRevisionOf = (reason: string | undefined) => {
+  const marked = /\[Capped review under policy revision (\d+)\.\]/.exec(reason ?? '');
+  return marked ? Number(marked[1]) : null;
+};
+type CappedRecord = { action: string; state: string; input?: any; reason?: string; situation?: { sha: string | null } | null };
+const refusedRework = (entry: CappedRecord) => entry.action === 'rework' && entry.state === 'refused';
 /**
- * GY-1575. The approver's refusal of the rework the loop requested for a capped change request on
- * `capped`'s head and reviewer under `policyRevision`, or null: the approver judged its findings
+ * GY-1575, GY-1579. The approver's refusal of the rework the loop requested for a capped change request
+ * on `capped`'s head and reviewer under `policyRevision`, or null: the approver judged its findings
  * non-blocking, so the review-cap step withdraws the request and has the head re-reviewed with the
- * refusal's reasoning. A refusal judged under an earlier policy revision binds no later change request.
+ * refusal's reasoning. The record's binding names the head and reviewer it judged. A refusal whose
+ * reason marks an earlier policy revision binds no later change request; one recorded before the mark
+ * existed (a release older than GY-1575 requested it) is judged by its binding alone, since its head is
+ * unchanged and nothing on the record names another revision.
  */
-export function refusedCappedRework<D extends { action: string; state: string; input?: any; reason?: string }>(history: readonly D[], capped: Pick<CappedReview, 'sha' | 'reviewer'>, policyRevision: number): D | null {
-  const binding = cappedReworkBinding(capped.sha, capped.reviewer).slice(0, decisionBindingMax), mark = cappedRevisionMark(policyRevision);
-  return history.find(entry => entry.action === 'rework' && entry.state === 'refused' && entry.input?.binding === binding && !!entry.reason?.includes(mark)) ?? null;
+export function refusedCappedRework<D extends CappedRecord>(history: readonly D[], capped: Pick<CappedReview, 'sha' | 'reviewer'>, policyRevision: number): D | null {
+  const binding = cappedReworkBinding(capped.sha, capped.reviewer).slice(0, decisionBindingMax);
+  return history.find(entry => refusedRework(entry) && entry.input?.binding === binding && (cappedRevisionOf(entry.reason) ?? policyRevision) === policyRevision) ?? null;
+}
+/**
+ * GY-1579. A refused capped rework on `capped`'s head that `refusedCappedRework` cannot read, or null:
+ * its binding names the head as capped (or, binding none, its situation or reason names the head and
+ * the cap) but not this reviewer, and its reason carries no revision mark either. Such a refusal answers
+ * the round all the same, so the review-cap step escalates it by id rather than waiting on it silently.
+ * A refusal marked under another policy revision is not one: it judged a change request that no longer stands.
+ */
+export function unmatchedCappedRefusal<D extends CappedRecord>(history: readonly D[], capped: Pick<CappedReview, 'sha' | 'reviewer'>): D | null {
+  const binding = cappedReworkBinding(capped.sha, capped.reviewer).slice(0, decisionBindingMax);
+  return history.find(entry => {
+    if (!refusedRework(entry) || entry.input?.binding === binding || cappedRevisionOf(entry.reason) !== null) return false;
+    const bound = typeof entry.input?.binding === 'string' ? entry.input.binding as string : null;
+    if (bound) return bound.startsWith(`${capped.sha}:capped:`);
+    return (entry.situation?.sha === capped.sha || !!entry.reason?.includes(capped.sha)) && /\bpast (?:its|the) (?:review-round )?cap\b|\bcapped\b/i.test(entry.reason ?? '');
+  }) ?? null;
 }
 export function cappedReview(work: Work, config: Partial<Pick<MasterConfig, 'reviewRoundCap' | 'reviewer'>>): CappedReview | null {
   const cap = reviewRoundCapOf(config);

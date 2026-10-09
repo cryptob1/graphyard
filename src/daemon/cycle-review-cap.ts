@@ -1,5 +1,5 @@
 // Concern: the review-round cap step (GY-1118) — a change request past the cap is withdrawn, or escalated; nothing is filed (GY-1249).
-import { cappedReview, detailChanged, refusedCappedRework, type CappedReview } from './decisions.js';
+import { cappedReview, detailChanged, refusedCappedRework, unmatchedCappedRefusal, type CappedReview } from './decisions.js';
 import { reviewRound, reviewRoundCapOf } from '../review-cap.js';
 import { record } from './effects.js';
 import { readyToRetry } from './sessions.js';
@@ -127,7 +127,12 @@ export async function reviewCapStep(cycle: Cycle) {
       // Until the approver refuses the rework the loop requested, the round is the approver's to judge.
       const history = await decisionHistory();
       const refused = history ? refusedCappedRework(history, capped, item.policyRevision) : null;
-      if (!refused) return;
+      if (!refused) {
+        // GY-1579: a refusal of this head's capped round its record does not bind to this reviewer and revision is still an answer; it is escalated by id, never left unacted.
+        const unmatched = history ? unmatchedCappedRefusal(history, capped) : null;
+        if (unmatched) return escalate(`${capped.reason}; independent approver ${capRefusalOf(unmatched).approver} refused capped rework decision ${unmatched.id} on ${capped.sha.slice(0, 12)}, but its record binds ${capped.reviewer}'s change request under none of its readings (binding ${String(unmatched.input?.binding ?? 'none')}, no policy revision mark), so the loop cannot withdraw the request on it`, true);
+        return;
+      }
       refusal = capRefusalOf(refused);
       // The cursor's row may be pruned; a change request submitted after the refusal is the re-review's all the same.
       if (requestedSinceRefusal(capped, refusal)) return escalate(again, true);
