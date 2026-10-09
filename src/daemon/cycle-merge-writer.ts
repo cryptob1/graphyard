@@ -121,8 +121,13 @@ export function advisoryChore(test: string, mergeSha: string, key: string) {
 }
 /** The action key the chore of one advisory test failing on one merge commit is recorded under. */
 export const advisoryActionKey = (mergeSha: string, test: string) => `merge-writer-advisory:${mergeSha}:${test}`;
-/** How many times filing one advisory chore is tried before the failure is left recorded. */
+/**
+ * After how many failed attempts filing one advisory chore is escalated: its row says so and it
+ * stays owed, retried with backoff (`advisoryFilingBackoffMs`) until it files. Nothing drops it.
+ */
 export const advisoryFilingAttempts = 5;
+/** The wait before the next attempt to file a chore that failed `attempts` times: one minute, doubling, at most an hour. */
+export const advisoryFilingBackoffMs = (attempts: number) => Math.min(60_000 * 2 ** Math.max(0, attempts - 1), 3_600_000);
 /** How many merge commits the advisory ledger remembers having run, how many it holds owed, and how many chores it holds unfiled. */
 export const advisoryKeptRuns = 50, advisoryKeptDue = 50, advisoryKeptUnfiled = 100;
 const advisoryMerge = z.object({ key: z.string().max(100), mergeSha: shaField, deliveredAt: instant }).strict();
@@ -136,11 +141,17 @@ const advisoryMerge = z.object({ key: z.string().max(100), mergeSha: shaField, d
 export const advisoryStateSchema = z.object({
   since: instant.nullable().default(null),
   due: z.array(advisoryMerge).max(advisoryKeptDue).default([]),
-  unfiled: z.array(z.object({ key: z.string().max(100), mergeSha: shaField, test: z.string().max(500), attempts: z.number().int().min(0).max(100) }).strict()).max(advisoryKeptUnfiled).default([]),
+  unfiled: z.array(z.object({ key: z.string().max(100), mergeSha: shaField, test: z.string().max(500), attempts: z.number().int().min(0).max(100_000), retryAt: instant.nullable().default(null) }).strict()).max(advisoryKeptUnfiled).default([]),
   ran: z.array(advisoryMerge).max(advisoryKeptRuns).default([]),
 }).strict();
 export type AdvisoryState = z.infer<typeof advisoryStateSchema>;
-interface AdvisoryRun { mergeSha: string; settled: { build: 'pass' | 'fail'; failed: string[] } | { error: unknown } | null }
+/**
+ * The run in flight, or settled with failures still to take: `held` are the failing tests that did
+ * not yet fit in `unfiled`. The merge stays owed (and no other run starts) until every one is taken,
+ * so a full `unfiled` holds the next merge back instead of dropping a chore; a restart reruns the
+ * merge and a chore already recorded filed is not taken again.
+ */
+interface AdvisoryRun { mergeSha: string; settled: { build: 'pass' | 'fail'; failed: string[] } | { error: unknown } | null; held?: string[] }
 /** The one advisory run in flight per loop state; process memory only, since its merge stays owed in the persisted state until it settles. */
 const advisoryRuns = new WeakMap<DaemonState, AdvisoryRun>();
 /** Resolves once the advisory run in flight for `state` has settled; for the step's tests. */
@@ -186,9 +197,11 @@ export async function advisoryStep(cycle: Pick<Cycle, 'state' | 'effects' | 'now
   for (const entry of owed) if (!known(entry.mergeSha) && advisory.due.length < advisoryKeptDue) { advisory.due.push(entry); changed = true; }
   const running = advisoryRuns.get(state);
   if (running?.settled) {
-    advisoryRuns.delete(state);
     const index = advisory.due.findIndex(entry => entry.mergeSha === running.mergeSha);
-    const merge = index >= 0 ? advisory.due.splice(index, 1)[0]! : null;
+    const pending = index >= 0 && !('error' in running.settled) ? takeFailures(advisory, advisory.due[index]!, running, state) : [];
+    if (pending.length) running.held = pending;
+    else advisoryRuns.delete(state);
+    const merge = index >= 0 && !pending.length ? advisory.due.splice(index, 1)[0]! : null;
     if (merge) {
       const ran = [...advisory.ran, merge];
       // A run the bounded list forgets moves `since` past it, so the ledger never owes it again.
@@ -197,11 +210,8 @@ export async function advisoryStep(cycle: Pick<Cycle, 'state' | 'effects' | 'now
       if ('error' in running.settled) {
         performed.push(storeAction(state, `merge-writer-advisory:${merge.mergeSha}`, { kind: 'merge', work: merge.key, principal: null, state: 'failed', attempts: 1, epoch: null, cycle: state.cycle, at: at(),
           detail: `The advisory budget tests could not run on ${merge.mergeSha} (${message(running.settled.error)}); they are advisory, so nothing is refused or reverted`.slice(0, 1900) }, null));
-      } else {
-        const failed = running.settled.failed.filter(test => /^tests\/[\w./-]+\.test\.ts$/.test(test));
-        for (const test of failed) advisory.unfiled.push({ key: merge.key, mergeSha: merge.mergeSha, test, attempts: 0 });
-        advisory.unfiled = advisory.unfiled.slice(-advisoryKeptUnfiled);
-        if (!failed.length) performed.push(storeAction(state, `merge-writer-advisory:${merge.mergeSha}`, { kind: 'merge', work: merge.key, principal: null, state: 'done', attempts: 1, epoch: null, cycle: state.cycle, at: at(),
+      } else if (!advisoryFailures(running.settled.failed).length) {
+        performed.push(storeAction(state, `merge-writer-advisory:${merge.mergeSha}`, { kind: 'merge', work: merge.key, principal: null, state: 'done', attempts: 1, epoch: null, cycle: state.cycle, at: at(),
           detail: `The advisory budget tests passed on ${merge.mergeSha}, merged for ${merge.key}` }));
       }
     }
@@ -209,17 +219,19 @@ export async function advisoryStep(cycle: Pick<Cycle, 'state' | 'effects' | 'now
   }
   const kept: AdvisoryState['unfiled'] = [];
   for (const entry of advisory.unfiled) {
-    if (!effects.fileFaultClass) { kept.push(entry); continue; }
-    const key = advisoryActionKey(entry.mergeSha, entry.test), attempts = entry.attempts + 1;
+    if (!effects.fileFaultClass || (entry.retryAt && Date.parse(entry.retryAt) > now())) { kept.push(entry); continue; }
+    const key = advisoryActionKey(entry.mergeSha, entry.test), attempts = Math.min(entry.attempts + 1, 100_000);
     try {
       // A chore, not a bug: the loop's filing effect takes any item type the work route accepts.
       const filed = await effects.fileFaultClass(advisoryChore(entry.test, entry.mergeSha, entry.key) as unknown as LoopFiledItem, `advisory-test:${entry.mergeSha}:${entry.test}`);
       performed.push(storeAction(state, key, { kind: 'fault', work: filed.key, principal: null, state: 'done', attempts, epoch: null, cycle: state.cycle, at: at(),
         detail: `Filed ${filed.key}: the advisory test ${entry.test} failed on ${entry.mergeSha}, merged for ${entry.key}; nothing is reverted` }));
     } catch (error) {
+      // The obligation is never dropped: past `advisoryFilingAttempts` the row escalates as a fault the operator sees, and the filing keeps being retried.
+      const retryAt = new Date(now() + advisoryFilingBackoffMs(attempts)).toISOString(), escalated = attempts >= advisoryFilingAttempts;
       performed.push(storeAction(state, key, { kind: 'fault', work: null, principal: null, state: 'failed', attempts, epoch: null, cycle: state.cycle, at: at(),
-        detail: `Could not file the chore for the advisory test ${entry.test} failing on ${entry.mergeSha}: ${message(error)}`.slice(0, 1900) }, null));
-      if (attempts < advisoryFilingAttempts) kept.push({ ...entry, attempts });
+        detail: `${escalated ? `Escalated after ${attempts} failed attempts: ` : ''}could not file the chore for the advisory test ${entry.test} failing on ${entry.mergeSha}; it stays owed and is tried again at ${retryAt}: ${message(error)}`.slice(0, 1900) }, escalated ? undefined : null));
+      kept.push({ ...entry, attempts, retryAt });
     }
     changed = true;
   }
@@ -231,6 +243,20 @@ export async function advisoryStep(cycle: Pick<Cycle, 'state' | 'effects' | 'now
     void reads.advisory(entry.mergeSha).then(result => { entry.settled = result; }, error => { entry.settled = { error }; });
   }
   return changed;
+}
+
+const advisoryFailures = (failed: readonly string[]) => [...new Set(failed.filter(test => /^tests\/[\w./-]+\.test\.ts$/.test(test)))];
+/**
+ * Moves a settled run's failing tests into `unfiled` as far as it has room, skipping one already
+ * owed or already recorded filed; answers those that did not fit, which the run holds until a
+ * later cycle has room.
+ */
+function takeFailures(advisory: AdvisoryState, merge: { key: string; mergeSha: string }, run: AdvisoryRun, state: DaemonState): string[] {
+  const failed = run.held ?? advisoryFailures((run.settled as { failed: string[] }).failed);
+  const owed = failed.filter(test => state.actions[advisoryActionKey(merge.mergeSha, test)]?.state !== 'done' && !advisory.unfiled.some(entry => entry.mergeSha === merge.mergeSha && entry.test === test));
+  const room = Math.max(0, advisoryKeptUnfiled - advisory.unfiled.length);
+  for (const test of owed.slice(0, room)) advisory.unfiled.push({ key: merge.key, mergeSha: merge.mergeSha, test, attempts: 0, retryAt: null });
+  return owed.slice(room);
 }
 
 interface Flight { key: string; id: string; head: string; startedAt: string; settled: { outcome: MergeOutcome; work: Work } | { error: unknown } | null }
