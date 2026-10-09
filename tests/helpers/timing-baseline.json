@@ -638,6 +638,7 @@
     "tests/soak-budgets.test.ts": 57277,
     "tests/soak-carried-scope-ask.test.ts": 1823,
     "tests/soak-checkout-restart.test.ts": 20000,
+    "tests/soak-ci-rework-after-refusal.test.ts": 1500,
     "tests/soak-control-plane-dispatch.test.ts": 8200,
     "tests/soak-control-plane-switches.test.ts": 3000,
     "tests/soak-day.test.ts": 112848,

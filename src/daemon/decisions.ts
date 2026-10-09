@@ -76,6 +76,8 @@ export function standingVerdict(work: Work): StandingVerdict | null {
 export interface CappedReview { kind: 'follow-up' | 'escalate'; round: number; cap: number; reviewer: string; reviewId: number | null; sha: string; blocking: string[]; findings: string[]; reason: string; submittedAt?: string }
 /** The binding of the loop's rework request for a capped change request (GY-1389): an approver's to judge, never the risk lane's. */
 export const cappedReworkBinding = (head: string, reviewer: string) => `${head}:capped:${reviewer}`;
+/** Whether a rework decision's binding is the loop's capped review-grounds request (`cappedReworkBinding`): the review-cap step answers its refusal. */
+export const cappedReworkBound = (binding: unknown) => typeof binding === 'string' && /^[0-9a-f]{40}:capped:/.test(binding);
 /**
  * The mark a capped rework request opens its reason with (GY-1575): the policy revision it was requested
  * under. A decision record keeps no revision, and a requirements or review-policy revision can leave the
