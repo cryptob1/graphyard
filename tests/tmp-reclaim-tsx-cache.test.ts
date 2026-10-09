@@ -152,3 +152,37 @@ test('unit:tmp-reclaim-tsx-cache — the escalated bounds outpace the observed l
     assert.ok(step.limit > previous.limit && step.cacheAgeMs < previous.cacheAgeMs && step.workMs >= previous.workMs, 'each step raises the cap and lowers the cache age');
   }
 });
+
+test('unit:tmp-reclaim-tsx-cache — an escalation step\'s cap bounds the whole pass, base sweep included: a base sweep that removed 100 leaves the 2,000 step 1,900 more', { skip: ownCache() === null ? 'no uids on this platform' : false }, async () => {
+  const tmp = await temporaryDirectory('tsx-cache-escalate-cap');
+  const cache = join(tmp, ownCache()!);
+  await mkdir(cache);
+  const now = Date.now();
+  // 100 stale test temps the base sweep takes, and 2,300 cache files only an escalated step reaches.
+  for (let index = 0; index < 100; index++) { const path = join(tmp, `pg-password-${index}`); await writeFile(path, 'x'); await backdate(path, testTempMinAgeMs + 3_600_000, now); }
+  for (let index = 0; index < 2_300; index++) { const path = join(cache, `compiled-${index}`); await writeFile(path, 'x'); await backdate(path, 2 * 3_600_000, now); }
+  await backdate(cache, 9 * 3_600_000, now);
+  const report = await reclaimTmpDirectories({ tmpRoot: tmp, held: new Set(), limit: 100, workMs: 60_000, volume: async () => ({ files: 4000, ffree: 100 }) });
+  assert.deepEqual(report.errors, []);
+  assert.deepEqual(report.escalated?.map(step => ({ limit: step.limit, removed: step.removed })), [{ limit: 2_000, removed: 1_900 }, { limit: 20_000, removed: 400 }], 'each step\'s cap counts what earlier sweeps removed');
+  assert.equal(report.removed.length, 2_400, 'the base 100 and every cache file, well under the 20,000 cap');
+});
+
+test('unit:tmp-reclaim-tsx-cache — escalation sweeps and names only the roots still below their headroom: a healthy TMPDIR on another volume keeps its younger cache files and stays out of the census', { skip: ownCache() === null ? 'no uids on this platform' : false }, async () => {
+  const healthy = await temporaryDirectory('tsx-cache-escalate-healthy'), low = await temporaryDirectory('tsx-cache-escalate-low');
+  const now = Date.now(), seeded: Record<string, string[]> = { [healthy]: [], [low]: [] };
+  for (const root of [healthy, low]) {
+    const cache = join(root, ownCache()!);
+    await mkdir(cache);
+    for (let index = 0; index < 20; index++) { const path = join(cache, `compiled-${index}`); await writeFile(path, 'x'); await backdate(path, 2 * 3_600_000, now); seeded[root]!.push(path); }
+    await backdate(cache, 9 * 3_600_000, now);
+  }
+  const volume = async (path: string) => ({ files: 4000, ffree: path === low ? 100 : 3_000 });
+  const report = await reclaimTmpDirectories({ tmpRoots: [healthy, low], held: new Set(), limit: 100, workMs: 60_000, volume });
+  assert.deepEqual(report.errors, []);
+  assert.equal(report.boundStands, true);
+  assert.ok(seeded[low]!.every(path => !existsSync(path)), 'the low root\'s cache files went at the escalated age');
+  assert.ok(seeded[healthy]!.every(path => existsSync(path)), 'the healthy root keeps the base bounds');
+  assert.ok(report.consumers?.length, 'the bound still stands, so consumers are named');
+  assert.ok(report.consumers!.every(consumer => consumer.path.startsWith(low)), `only the low root's consumers are named (${report.consumers!.map(consumer => consumer.path).join(', ')})`);
+});

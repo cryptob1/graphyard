@@ -16,7 +16,7 @@
 // gone" checkable rather than guessed from a modification time.
 
 import { existsSync, readFileSync, type Dirent } from 'node:fs';
-import { lstat, readdir, readFile, readlink, realpath, rm, stat, statfs, writeFile } from 'node:fs/promises';
+import { lstat, opendir, readdir, readFile, readlink, realpath, rm, stat, statfs, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -269,8 +269,8 @@ export async function reclaimTmpDirectories(options: TmpReclaimOptions = {}): Pr
   const pass: PassState = { now, minAge, cacheAge, limit: options.limit ?? tmpReclaimLimitPerCycle, uid: process.getuid?.(), held: options.held ?? null,
     workMs: options.workMs ?? Number.POSITIVE_INFINITY, deadline: null, unfinished: options.unfinished ?? unfinishedRemovals, retryMs: options.retryMs ?? tmpReclaimRetryMs };
   for (const path of pass.unfinished) if (!existsSync(path)) pass.unfinished.delete(path);
-  const sweep = async () => {
-    for (const { path, real } of roots) {
+  const sweep = async (scanned = roots) => {
+    for (const { path, real } of scanned) {
       await reclaimRoot(path, real, pass, report);
       await reclaimTsxCaches(path, real, pass, report);
     }
@@ -281,18 +281,23 @@ export async function reclaimTmpDirectories(options: TmpReclaimOptions = {}): Pr
   // age — and, if the bound still stands once every step has run, names what fills the roots.
   const volume = options.prefixes ? undefined : options.volume;
   if (!volume) return report;
-  const stands = async () => (await Promise.all(roots.map(root => belowHeadroom(root.path, volume)))).some(Boolean);
-  report.boundStands = await stands();
+  // Which roots are low, not merely whether one is: a healthy TMPDIR on another volume must not
+  // spend the escalated cap the low /tmp needs, nor crowd its consumers out of the census.
+  const low = async () => (await Promise.all(roots.map(async root => await belowHeadroom(root.path, volume) ? root : null))).filter(root => root !== null);
+  let lowRoots = await low();
+  report.boundStands = lowRoots.length > 0;
   for (const step of tmpReclaimEscalation) {
     if (!report.boundStands) break;
     const before = report.removed.length;
-    Object.assign(pass, { limit: before + step.limit, cacheAge: Math.min(cacheAge ?? step.cacheAgeMs, step.cacheAgeMs), workMs: step.workMs, deadline: null });
+    // A step's cap is the whole pass's, base sweep included: 20,000 per cycle means 20,000, not 20,000 more.
+    Object.assign(pass, { limit: Math.max(before, step.limit), cacheAge: Math.min(cacheAge ?? step.cacheAgeMs, step.cacheAgeMs), workMs: step.workMs, deadline: null });
     report.scanned = 0; report.kept = 0;
-    await sweep();
+    await sweep(lowRoots);
     (report.escalated ??= []).push({ limit: step.limit, cacheAgeMs: pass.cacheAge!, removed: report.removed.length - before });
-    report.boundStands = await stands();
+    lowRoots = await low();
+    report.boundStands = lowRoots.length > 0;
   }
-  if (report.boundStands) report.consumers = await tmpConsumers(roots.map(root => root.path));
+  if (report.boundStands) report.consumers = await tmpConsumers(lowRoots.map(root => root.path));
   return report;
 }
 
@@ -315,7 +320,7 @@ const consumerStem = (name: string) => name.replace(/([-_.][^-_.]*\d[^-_.]*)+$/,
 /**
  * The largest consumers of `roots`, every user's entries included (GY-1597): each top-level entry
  * counts itself and every entry under it, siblings of one stem and owner are summed as one family,
- * and the `tmpConsumersNamed` largest are named with their owner. The walk stops at
+ * and the `tmpConsumersNamed` largest are named with their owner. The census — top-level entries and the walk under them — stops at
  * `tmpConsumersScanBound` entries and marks what it could not finish as capped; it reads only, and
  * a directory it may not read counts as itself.
  */
@@ -335,10 +340,17 @@ export async function tmpConsumers(roots: readonly string[], bound = tmpConsumer
     }
     return { entries, capped: false };
   };
-  for (const root of new Set(roots)) {
-    const names = await readdir(root).catch(() => [] as string[]);
-    for (const name of names) {
-      const path = join(root, name);
+  // Top-level entries count against the same budget, read as a stream: a /tmp of a million flat
+  // files is neither materialised nor stat'ed past the bound, and what the census never reached
+  // marks every family it names as capped.
+  let truncated = false;
+  census: for (const root of new Set(roots)) {
+    let directory;
+    try { directory = await opendir(root); } catch { continue; }
+    for await (const entry of directory) {
+      if (budget <= 0) { truncated = true; break census; }
+      budget--;
+      const name = entry.name, path = join(root, name);
       let info;
       try { info = await lstat(path); } catch { continue; }
       const inside = info.isDirectory() && budget > 0 ? await walk(path) : { entries: 0, capped: info.isDirectory() };
@@ -348,6 +360,7 @@ export async function tmpConsumers(roots: readonly string[], bound = tmpConsumer
       families.set(key, family);
     }
   }
+  if (truncated) for (const family of families.values()) family.capped = true;
   return [...families.values()].sort((first, second) => second.entries - first.entries).slice(0, tmpConsumersNamed)
     .map(family => ({ path: family.members === 1 ? family.first : `${join(family.root, family.stem)}* (${family.members} top-level)`, entries: family.entries, owner: owner(family.uid), ...(family.capped ? { capped: true } : {}) }));
 }

@@ -321,6 +321,12 @@ test('unit:tmp-leaks — a pass below the inode headroom that removes 0 entries 
   // A census is bounded: past its entry budget it names what it reached as capped.
   const capped = await tmpReclaim.tmpConsumers([tmp], 10);
   assert.ok(capped.some(consumer => consumer.capped), 'a census past its bound says so');
+  // Top-level entries count against the same budget: a root of flat files stops at the bound, and every family it names is capped.
+  const flat = await temporaryDirectory('zero-pass-flat');
+  for (let index = 0; index < 12; index++) await writeFile(join(flat, `leak-${index}x`), 'x');
+  const stopped = await tmpReclaim.tmpConsumers([flat], 5);
+  assert.equal(stopped.reduce((total, consumer) => total + consumer.entries, 0), 5, 'the census counted no more top-level entries than its bound');
+  assert.ok(stopped.length > 0 && stopped.every(consumer => consumer.capped), 'a census stopped among top-level entries marks what it names as capped');
 });
 
 test('unit:tmp-cleanup — the loop records the escalated pass and the consumers it named, and the tmp-inodes attention carries them', async () => {
