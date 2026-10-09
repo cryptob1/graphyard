@@ -78,6 +78,9 @@ export function cappedRefusalRequest(work: Work, sha: string, config: Partial<Pi
 export const requestedSinceRefusal = (capped: Pick<CappedReview, 'submittedAt'>, refusal: Pick<CapRefusal, 'at'>) =>
   Date.parse(capped.submittedAt ?? '') > Date.parse(refusal.at ?? '');
 
+/** The decision states in which a capped rework still has an actor: its approver, or the loop applying the approval. */
+const pendingReworkStates = new Set(['requested', 'approved']);
+
 /**
  * GY-1577. Why the step cannot act on a refused capped rework of `capped`'s head, or null when it can wait: the
  * history holds a refusal for the head's binding that binds no change request under the item's policy revision
@@ -89,7 +92,8 @@ export function strandedCappedRefusal(work: Pick<Work, 'key' | 'policyRevision'>
   const refused = refusedCappedReworks(history, capped);
   if (!refused.length || !requested) return null;
   const binding = refused[0].input.binding, mark = cappedRevisionMark(work.policyRevision);
-  if (history.some(entry => entry.action === 'rework' && entry.state !== 'refused' && entry.input?.binding === binding && !!entry.reason?.includes(mark))) return null;
+  // Only a request still before its approver, or approved and awaiting its apply, has an actor; a superseded, failed, stale or withdrawn one has none (GY-1577 review).
+  if (history.some(entry => entry.action === 'rework' && pendingReworkStates.has(entry.state) && entry.input?.binding === binding && !!entry.reason?.includes(mark))) return null;
   const latest = capRefusalOf(refused[0]);
   return `${capped.reason}; independent approver ${latest.approver} refused its capped rework (decision ${latest.id}), but that refusal does not bind this change request under policy revision ${work.policyRevision} `
     + `(it predates the revision, or its time cannot be placed after it), and no capped rework under revision ${work.policyRevision} stands for an approver, so the review-cap step can neither withdraw it nor wait on a judgement; a new request cites ${latest.id} (--precedent ${latest.id})`;

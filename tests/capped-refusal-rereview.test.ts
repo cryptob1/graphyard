@@ -356,4 +356,34 @@ test('unit:capped-refusal-never-silent — a refused capped rework the review-ca
   asked(pending);
   await pending.cycle();
   assert.equal(pending.performed.length, 0, 'the approver judging the request is the actor');
+
+  // A capped rework under revision 5 that no approver can act on any more — superseded, failed — names no actor: the step escalates.
+  for (const settled of ['superseded', 'failed']) {
+    const gone = harness(round8());
+    gone.world.history = [{ ...unmarked('2026-10-09T07:40:00Z', '2026-10-09T07:30:00Z') }, { ...unmarked(), id: 'a1b2c3d4-0000-4000-8000-000000000002', state: settled as 'requested', refusal: null, reason: `${cappedRevisionMark(5)} ${unmarked().reason}` }];
+    asked(gone);
+    await gone.cycle();
+    await gone.cycle();
+    assert.deepEqual(gone.world.withdrawn, [], `a ${settled} request withdraws nothing`);
+    const raised = gone.state.actions[cappedEscalationKey(gone.world.item, D)];
+    assert.equal(raised?.state, 'done', `a ${settled} capped rework under revision 5 leaves no actor, so the step escalates`);
+    assert.match(raised!.detail, /decision f84ee922-9b67-4a8e-aa96-a2ca189a9ccb.*graphyard master decide GY-1573 rework REASON/);
+    assert.equal(gone.performed.filter(entry => entry.kind === 'escalation').length, 1, `escalated once across cycles beside a ${settled} request`);
+  }
+
+  // Bounded across revisions: the same stranded head under a later revision, once the loop asked under it, is escalated once more, naming that revision.
+  const moved = harness(round8());
+  moved.world.history = [unmarked('2026-10-09T07:40:00Z', '2026-10-09T07:30:00Z')];
+  asked(moved);
+  await moved.cycle();
+  moved.world.item.policyRevision = 6;
+  moved.world.item.formalReviewBaseline = { ...moved.world.item.formalReviewBaseline!, policyRevision: 6 };
+  await moved.cycle();
+  assert.equal(moved.performed.filter(entry => entry.kind === 'escalation').length, 1, 'under revision 6 the loop has yet to ask, so the round waits for that request');
+  asked(moved);
+  await moved.cycle();
+  await moved.cycle();
+  const escalated = moved.performed.filter(entry => entry.kind === 'escalation');
+  assert.equal(escalated.length, 2, 'one escalation per revision, not one per cycle');
+  assert.match(escalated[1].detail, /does not bind this change request under policy revision 6/);
 });
