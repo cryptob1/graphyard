@@ -1,0 +1,163 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import type { Observation, Work } from '../src/model.js';
+import type { MasterConfig } from '../src/master.js';
+import { emptyDaemonState, type DaemonAction, type DaemonEffects } from '../src/master-daemon.js';
+import { cappedReview, cappedReworkBinding, neededDecision, refusedCappedRework } from '../src/daemon/decisions.js';
+import { emptyHeldDecisions } from '../src/daemon/decision-reads.js';
+import { cappedEscalationKey, cappedFilingKey, cappedRereviewKey, refusalFollowUps, reviewCapStep } from '../src/daemon/cycle-review-cap.js';
+import { actionId, reconcileActions } from '../src/model/actions.js';
+import type { NextAction } from '../src/model/next-action.js';
+import type { Cycle } from '../src/daemon/cycle.js';
+
+// GY-1575, observed on GY-1573 (PR #1047, review round 5 of cap 3), 2026-10-09: the reviewer App
+// requested changes naming a BLOCKING: finding, the loop requested the capped rework decision, and
+// the independent approver refused it as non-blocking, naming a follow-up the master filed. Nothing
+// then withdrew the change request or re-reviewed the head, and the owed request-rework stood with
+// no actor. These replay that round through the real review-cap step.
+
+const H = 'f1ea5b764ac7'.padEnd(40, '0'), B = 'b1'.padEnd(40, 'f');
+const reviewer = 'graphyard-reviewer[bot]';
+const config = { url: 'https://graphyard.example', repository: 'owner/project',
+  reviewer: { appId: 5678, installationId: 91011, slug: 'graphyard-reviewer', credentialFile: '/outside/reviewer.pem', boundAt: '2026-09-24T00:00:00Z' } } as unknown as MasterConfig;
+const refusedAt = '2026-10-09T06:40:00.000Z';
+const refusalReason = 'The finding is real but not blocking: the hotspot budget is a follow-up, not a defect of this head. File it as its own item and let the reviewer list it as a FOLLOW-UP.';
+
+function capped(body: string, reviewId = 4242): Work {
+  const candidate = { sha: H, baseSha: B, pr: 1047, branch: 'graphyard/gy-1573-5', author: 'implementer' };
+  const observation = { candidate, checks: [], reviews: [{ reviewer, sha: H, state: 'CHANGES_REQUESTED', id: reviewId, submittedAt: '2026-10-09T06:30:00Z', body }], merged: false, mergeSha: null,
+    mergeable: true, protected: true, files: ['src/a.ts'], scopeFiles: [], at: '2026-10-09T06:31:00Z', prState: 'open', draft: false, baseTip: B, baseTree: B, baseTipContained: true } as unknown as Observation;
+  return { id: 'work-1573', key: 'GY-1573', title: 'Hotspot budgets', description: '', type: 'bug', priority: 1, dependencies: [], plannedFiles: ['src/'],
+    criteria: [{ id: 'AC-1', text: 'The widget counts every frob.', proofs: ['unit:frob-count'] }], policy: { checks: ['test'], review: true, reviewProvider: 'github' },
+    stage: 'review', revision: 40, policyRevision: 1, createdAt: '2026-10-08T00:00:00Z', updatedAt: '2026-10-09T06:31:00Z', stageEnteredAt: '2026-10-09T06:31:00Z', ready: true, epoch: 5,
+    lease: null, workspaces: [], candidate, submission: { epoch: 5, pr: 1047 }, reworkRequested: false, scenarioRequirements: [], evidence: [], observation, blocker: null, gates: [], violations: [],
+    pipeline: { attempts: [], submittedAt: null, resubmittedAt: null, reworkRounds: 4, interventions: { blocked: 0, requirements: 0 } } } as unknown as Work;
+}
+/** The master's follow-up, filed after the refusal and naming the item. */
+const followUp = { id: 'work-1574', key: 'GY-1574', title: 'Former hotspot files exceed their size budgets after GY-1573', description: 'Named by the refusal of GY-1573\'s capped rework.', stage: 'backlog', createdAt: '2026-10-09T06:42:00Z' } as unknown as Work;
+const unrelated = { id: 'work-1500', key: 'GY-1500', title: 'Something else', description: 'Mentions GY-15730 only', stage: 'backlog', createdAt: '2026-10-09T06:43:00Z' } as unknown as Work;
+
+/** The capped rework the loop requested for the head, then the approver's refusal of it. */
+const decision = (state: 'requested' | 'refused') => ({ id: '334c52c6-467e-4fe4-b81f-2c761e07a066', action: 'rework', state, input: { binding: cappedReworkBinding(H, reviewer), previousWorkerStopped: true },
+  approvedBy: null, refusal: state === 'refused' ? { approver: 'graphyard-approver-graphyard', reason: refusalReason, at: refusedAt } : null });
+
+function harness(item: Work, others: Work[] = [followUp, unrelated]) {
+  const state = emptyDaemonState(config), performed: DaemonAction[] = [];
+  const world = { item, history: [decision('requested')] as ReturnType<typeof decision>[], withdrawn: [] as { reviewId: number; message: string }[], wakes: [] as string[] };
+  let tick = Date.parse('2026-10-09T06:45:00Z');
+  const effects = {
+    persist: async () => {}, decide: async () => ({ id: 'unused' }), approver: async () => ({ agentName: 'unused', pane: null }),
+    decisions: async () => ({ decisions: world.history }),
+    withdrawReview: async (_work: Work, reviewId: number, message: string) => { world.withdrawn.push({ reviewId, message }); },
+    wakeObservation: async (work: Work) => { world.wakes.push(work.key); },
+  } as unknown as DaemonEffects;
+  const cycle = async () => {
+    state.cycle++;
+    tick += 60_000;
+    await reviewCapStep({ config, state, effects, performed, now: () => tick, open: [world.item], snapshot: { work: [world.item, ...others], now: new Date(tick).toISOString() },
+      heldDecisions: emptyHeldDecisions(), isolate: async (_kind: string, _item: unknown, _name: string, body: () => Promise<unknown>) => body() } as unknown as Cycle);
+  };
+  return { state, performed, world, cycle };
+}
+
+test('unit:capped-refusal-withdraws-and-rereviews — GY-1573 round 5: an approver refusing the capped rework withdraws the change request as the reviewer App, cancels the owed request-rework and re-reviews the head once; a re-review requesting changes again escalates, never withdrawn twice', async () => {
+  const run = harness(capped('BLOCKING: former hotspot files exceed their size budgets.\n\nThe helper could be named more clearly.'));
+  // The change request: past the cap, it names a BLOCKING: finding, so its rework is the approver's to judge.
+  const judged = cappedReview(run.world.item, config)!;
+  assert.equal(judged.kind, 'escalate');
+  const owed = neededDecision(run.world.item, config)!;
+  assert.deepEqual([owed.action, owed.binding], ['rework', cappedReworkBinding(H, reviewer)], 'the loop requests the capped rework decision for the approver');
+
+  // The rework decision stands requested: the round is the approver's, and the step takes nothing.
+  await run.cycle();
+  assert.equal(run.world.withdrawn.length, 0);
+  assert.equal(run.performed.length, 0);
+
+  // The approver refuses it as non-blocking.
+  run.world.history = [decision('refused')];
+  assert.equal(refusedCappedRework(run.world.history, judged)?.id, decision('refused').id);
+  assert.equal(refusedCappedRework(run.world.history, { ...judged, sha: 'c'.repeat(40) }), null, 'a refusal binds its own head only');
+  await run.cycle();
+  // The withdrawal, as the reviewer App, of exactly that change request.
+  assert.deepEqual(run.world.withdrawn.map(entry => entry.reviewId), [4242]);
+  const filing = run.state.actions[cappedFilingKey(run.world.item, { sha: H, reviewId: 4242 })]!;
+  assert.equal(filing.state, 'done');
+  assert.match(filing.detail, /independent approver graphyard-approver-graphyard refused the capped rework \(decision 334c52c6-467e-4fe4-b81f-2c761e07a066\) as non-blocking, so graphyard-reviewer\[bot\]'s change request 4242 on f1ea5b764ac7 is withdrawn/);
+  // The cancelled rework: the observation is woken at once, and the fresh reading retires the owed request-rework row.
+  assert.deepEqual(run.world.wakes, ['GY-1573']);
+  assert.match(filing.detail, /its observation woken so the owed request-rework is cancelled/);
+  const dismissed = structuredClone(run.world.item);
+  dismissed.observation!.reviews = dismissed.observation!.reviews.map(review => ({ ...review, state: 'DISMISSED' }));
+  assert.equal(neededDecision(dismissed, config), null, 'with the change request withdrawn the item owes no rework');
+  const rework: NextAction = { kind: 'request-rework', binding: `${H}:review`, reason: 'Outstanding change requests must be resolved through a new review', gate: 'review', refusal: 'Outstanding change requests must be resolved through a new review', inputs: { kind: 'request-rework', pr: 1047, sha: H, detail: 'changes requested' } } as unknown as NextAction;
+  const review: NextAction = { kind: 'request-review', binding: `${H}:review-request`, reason: 'Independent approval of the current commit is required', gate: 'review', refusal: 'Independent approval of the current commit is required', inputs: { kind: 'request-review', provider: 'agent', requestId: null, pr: 1047, sha: H, baseSha: B, policyRevision: 1 } } as unknown as NextAction;
+  reconcileActions(dismissed, [dismissed], new Date('2026-10-09T06:47:00Z'), { next: rework });
+  const transitions = reconcileActions(dismissed, [dismissed], new Date('2026-10-09T06:48:00Z'), { next: review });
+  assert.deepEqual(transitions.filter(entry => entry.event === 'cancelled').map(entry => entry.action.id), [actionId('request-rework', dismissed.id, rework.binding)], 'the fresh reading cancels the owed request-rework');
+  // The single re-review, recorded once for the head.
+  const rereview = run.state.actions[cappedRereviewKey(run.world.item, H)]!;
+  assert.equal(rereview.state, 'done');
+  assert.match(rereview.detail, /^Requested a fresh review of GY-1573 on f1ea5b764ac7: /);
+
+  // Further cycles on the same reading withdraw nothing again.
+  await run.cycle();
+  await run.cycle();
+  assert.equal(run.world.withdrawn.length, 1);
+  assert.equal(run.world.wakes.length, 1);
+  assert.equal(run.performed.filter(entry => entry.kind === 'review').length, 2, 'one withdrawal and one re-review request');
+
+  // The re-review requests changes again on the same head, BLOCKING: or not: escalated, never withdrawn a second time.
+  for (const body of ['BLOCKING: former hotspot files still exceed their size budgets.', 'The helper could still be named more clearly.']) {
+    const again = harness(capped('BLOCKING: former hotspot files exceed their size budgets.'));
+    again.world.history = [decision('refused')];
+    await again.cycle();
+    assert.deepEqual(again.world.withdrawn.map(entry => entry.reviewId), [4242]);
+    again.world.item = capped(body, 4243);
+    await again.cycle();
+    await again.cycle();
+    assert.deepEqual(again.world.withdrawn.map(entry => entry.reviewId), [4242], `withdrawn once only: ${body}`);
+    const escalation = again.state.actions[cappedEscalationKey(again.world.item, H)]!;
+    assert.equal(escalation.state, 'done');
+    assert.match(escalation.detail, /requested changes again, so it is not withdrawn a second time/);
+    assert.equal(again.performed.filter(entry => entry.kind === 'escalation').length, 1, 'escalated once, not on every cycle');
+  }
+
+  // A refused rework of a verdict Graphyard did not obtain through its reviewer App cannot be withdrawn: it escalates.
+  const foreign = harness(capped('BLOCKING: AC-1 is not met.'));
+  foreign.world.item.observation!.reviews[0].reviewer = 'a-person';
+  foreign.world.history = [{ ...decision('refused'), input: { binding: cappedReworkBinding(H, 'a-person'), previousWorkerStopped: true } }];
+  await foreign.cycle();
+  assert.equal(foreign.world.withdrawn.length, 0);
+  assert.match(foreign.state.actions[cappedEscalationKey(foreign.world.item, H)]!.detail, /refused its capped rework as non-blocking \(decision 334c52c6-467e-4fe4-b81f-2c761e07a066\), but Graphyard cannot withdraw a verdict/);
+});
+
+test('unit:capped-refusal-rereview-context — the re-review request carries the refusal\'s reasoning and the follow-up item the master filed, so the reviewer lists the findings as FOLLOW-UP threads', async () => {
+  const run = harness(capped('BLOCKING: former hotspot files exceed their size budgets.'));
+  run.world.history = [decision('refused')];
+  await run.cycle();
+  const [withdrawal] = run.world.withdrawn;
+  // The request the reviewer reads on the pull request: the approver, the decision, its whole reasoning, the follow-up, and the FOLLOW-UP instruction.
+  assert.ok(withdrawal.message.includes(`independent approver graphyard-approver-graphyard refused the rework it asked for as non-blocking (decision 334c52c6-467e-4fe4-b81f-2c761e07a066): ${refusalReason}`), withdrawal.message);
+  assert.ok(withdrawal.message.includes(`Re-review head ${H} and list these findings as FOLLOW-UP threads, not as a change request; the follow-up item filed for them: GY-1574.`), withdrawal.message);
+  assert.match(withdrawal.message, /A change request on this head again is escalated, not withdrawn a second time\.$/);
+  assert.doesNotMatch(withdrawal.message, /GY-1500/, 'an item that does not name GY-1573 is no follow-up of it');
+  // The loop's record of the re-review request carries the same context.
+  const rereview = run.state.actions[cappedRereviewKey(run.world.item, H)]!.detail;
+  assert.ok(rereview.includes(refusalReason) && rereview.includes('GY-1574') && rereview.includes('FOLLOW-UP threads'), rereview);
+
+  // The follow-ups: named in the reasoning, filed from the item's review, or filed since the refusal naming the item; never one delivered or filed before it.
+  const item = { key: 'GY-1573' };
+  const named = { ...unrelated, key: 'GY-1600', createdAt: '2026-10-01T00:00:00Z' } as Work;
+  const origin = { ...unrelated, key: 'GY-1601', createdAt: '2026-10-01T00:00:00Z', origin: { reviewFollowUps: { parent: 'GY-1573', findings: [] } } } as unknown as Work;
+  const earlier = { ...followUp, key: 'GY-1602', createdAt: '2026-10-09T06:00:00Z' } as Work;
+  const delivered = { ...followUp, key: 'GY-1603', stage: 'done' } as Work;
+  assert.deepEqual(refusalFollowUps(item, { reason: `${refusalReason} See GY-1600.`, at: refusedAt }, [named, origin, earlier, delivered, followUp, unrelated]), ['GY-1600', 'GY-1601', 'GY-1574']);
+  assert.deepEqual(refusalFollowUps(item, { reason: refusalReason }, [followUp]), [], 'with no refusal time, only a named or review-filed item is a follow-up');
+
+  // A refusal with no follow-up filed still carries its reasoning, and names none.
+  const bare = harness(capped('BLOCKING: former hotspot files exceed their size budgets.'), []);
+  bare.world.history = [decision('refused')];
+  await bare.cycle();
+  assert.ok(bare.world.withdrawn[0].message.includes(refusalReason));
+  assert.ok(bare.world.withdrawn[0].message.includes('list these findings as FOLLOW-UP threads, not as a change request. '), bare.world.withdrawn[0].message);
+});

@@ -75,6 +75,15 @@ export function standingVerdict(work: Work): StandingVerdict | null {
 export interface CappedReview { kind: 'follow-up' | 'escalate'; round: number; cap: number; reviewer: string; reviewId: number | null; sha: string; blocking: string[]; findings: string[]; reason: string }
 /** The binding of the loop's rework request for a capped change request (GY-1389): an approver's to judge, never the risk lane's. */
 export const cappedReworkBinding = (head: string, reviewer: string) => `${head}:capped:${reviewer}`;
+/**
+ * GY-1575. The approver's refusal of the rework the loop requested for a capped change request on
+ * `capped`'s head and reviewer, or null: the approver judged its findings non-blocking, so the
+ * review-cap step withdraws the request and has the head re-reviewed with the refusal's reasoning.
+ */
+export function refusedCappedRework<D extends { action: string; state: string; input?: any }>(history: readonly D[], capped: Pick<CappedReview, 'sha' | 'reviewer'>): D | null {
+  const binding = cappedReworkBinding(capped.sha, capped.reviewer).slice(0, decisionBindingMax);
+  return history.find(entry => entry.action === 'rework' && entry.state === 'refused' && entry.input?.binding === binding) ?? null;
+}
 export function cappedReview(work: Work, config: Partial<Pick<MasterConfig, 'reviewRoundCap' | 'reviewer'>>): CappedReview | null {
   const cap = reviewRoundCapOf(config);
   if (work.stage === 'done' || !pastReviewCap(work, cap)) return null;
@@ -304,7 +313,7 @@ export function neededDecision(work: Work, config: ReviewCapConfig, baseFailed?:
   // mandatory grounds above: an approver's refusal of it must never hide a failed proof or required check.
   const escalated = capped && !work.reworkRequested ? cappedReview(work, config) : null;
   if (escalated?.kind === 'escalate') return { action: 'rework', binding: cappedReworkBinding(work.candidate!.sha, escalated.reviewer),
-    reason: `${escalated.reason.replace(/\.$/, '')}. Past the review-round cap only an independent approver sends the head back: approve for one more round fixing exactly that finding, or refuse it as non-blocking: the loop then requests it no more and escalates the refusal for the master to answer.`.slice(0, 2000) };
+    reason: `${escalated.reason.replace(/\.$/, '')}. Past the review-round cap only an independent approver sends the head back: approve for one more round fixing exactly that finding, or refuse it as non-blocking: the loop then requests it no more, withdraws the change request and has the reviewer re-review the head, listing the findings as FOLLOW-UP.`.slice(0, 2000) };
   // The operator answered a product question the head was built on provisionally, and the answer
   // differs from that recommendation (GY-259): the head no longer builds what was asked.
   const research = researchRework(work);
