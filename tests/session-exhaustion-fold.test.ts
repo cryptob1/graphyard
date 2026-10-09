@@ -82,3 +82,35 @@ test('unit:session-exhaustion-survives-later-probe — on an explicitly shared p
   assert.equal(ineligible(registry, 'claude-a', after), null, 'the mark lapses at its reset even before a probe replaces it');
   assert.equal(ineligible(registry, 'claude-b', after), null);
 });
+
+test('unit:session-exhaustion-survives-later-probe — a session report whose reset was guessed holds only its own account: on an explicitly shared plan a later available probe of another account frees that account, while the spent one stays held until the guessed hour ends', () => {
+  const registry = registryOf(['claude-a', 'claude-b'], 'team-max');
+  const other = 'claude:' + 'b'.repeat(32);
+  const guessedUntil = new Date(spentAt + 3_600_000).toISOString();
+  fold(registry, [{ account: 'claude-a', quota: heldObservation('claude-a', { ...held, until: guessedUntil, resetsAt: null }) }], spentAt);
+  const spent = registry.accounts.find(account => account.name === 'claude-a')!.quota;
+  assert.equal(spent.session, 'guessed');
+  assert.equal(spent.identity, null, 'a guessed hour names no login');
+  fold(registry, [{ account: 'claude-b', quota: { ...probe, state: 'available', identity: other } }], spentAt + 60_000);
+  fold(registry, [{ account: 'claude-a', quota: probe }], spentAt + 120_000);
+  assert.equal(ineligible(registry, 'claude-b', spentAt + 180_000), null, 'the guessed hour holds no other account on the plan');
+  assert.match(ineligible(registry, 'claude-a', spentAt + 180_000) ?? '', new RegExp(`^claude-a quota is exhausted until ${guessedUntil}`));
+  assert.equal(ineligible(registry, 'claude-a', spentAt + 3_660_000), null);
+});
+
+test('unit:session-exhaustion-survives-later-probe — account set on the same login lifts a session report, so the first probe after the change replaces it and a fresh login frees the account and its former twin', () => {
+  const registry = registryOf(['claude-a', 'claude']);
+  fold(registry, [{ account: 'claude-a', quota: heldObservation('claude-a', held) }, { account: 'claude', quota: probe }], spentAt);
+  const before = Date.parse(resetsAt) - 60_000;
+  const account = registry.accounts.find(entry => entry.name === 'claude-a')!;
+  const { quota: _quota, smoke: _smoke, unjudged: _unjudged, ...input } = account as typeof account & { smoke?: unknown; unjudged?: unknown };
+  const changed = applyRegistryMutation(registry, 'account.set', { account: input, reason: 'logged the home in to another subscription' }, { actor: 'operator', at: new Date(spentAt + 60_000).toISOString() }).registry;
+  assert.equal(changed.accounts.find(entry => entry.name === 'claude-a')!.quota.session, undefined, 'account set clears the session provenance');
+  const fresh = 'claude:' + 'd'.repeat(32);
+  assert.equal(fold(changed, [{ account: 'claude-a', quota: { ...probe, state: 'available', identity: fresh } }], spentAt + 120_000), true);
+  const read = changed.accounts.find(entry => entry.name === 'claude-a')!.quota;
+  assert.equal(read.state, 'available');
+  assert.equal(read.identity, fresh);
+  assert.equal(ineligible(changed, 'claude-a', before), null);
+  assert.equal(ineligible(changed, 'claude', before), null);
+});

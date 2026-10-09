@@ -21,8 +21,8 @@ export function foldObservation(account: FleetAccount, observed: QuotaObservatio
   // A session's report of an exhaustion (GY-1581) is what a probe cannot see either, so it stands until the reset it
   // named: a later ordinary probe takes only the login state, and the spent login it was reported on stays, so its
   // shared-login twin stays held too. Another session's report replaces it.
-  const sessionHold = held.session === true && held.state === 'exhausted' && !!held.resetsAt && Date.parse(held.resetsAt) > now;
-  if (sessionHold && observed.session !== true) {
+  const sessionHold = !!held.session && held.state === 'exhausted' && !!held.resetsAt && Date.parse(held.resetsAt) > now;
+  if (sessionHold && !observed.session) {
     if (observed.loggedIn === null || observed.loggedIn === held.loggedIn) return false;
     account.quota = { ...held, loggedIn: observed.loggedIn }; return true;
   }

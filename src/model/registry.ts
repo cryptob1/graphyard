@@ -86,8 +86,10 @@ export const quotaObservationSchema = z.object({
   /**
    * The exhaustion was reported from a session that ran out mid-work (GY-1581), not read by a probe:
    * the registry keeps it until its reset whatever a later probe reads, since a probe cannot see it.
+   * `named` when the provider named that reset, which holds the whole plan; `guessed` when the host
+   * assumed one, which holds only the account it was spent on.
    */
-  session: z.literal(true).optional(),
+  session: z.enum(['named', 'guessed']).optional(),
 }).strict();
 export type QuotaObservation = z.infer<typeof quotaObservationSchema>;
 export interface ObservedQuota extends QuotaObservation { observedAt: string | null; observedBy: string | null; source: 'probe' | 'operator' | null }
@@ -246,7 +248,9 @@ export function applyRegistryMutation(current: AgentRegistry, kind: RegistryMuta
     // Any change to an account is tested again before it takes a session (GY-446), and clears the
     // holds its earlier runs set: the change is what an operator makes to fix it.
     // Its identity is read again by the next probe (GY-1573): the operator may have logged the home in afresh.
-    upsert(next.accounts, { ...account, quota: sameLogin ? { ...existing.quota, identity: null } : { ...unobservedQuota } });
+    // A session's exhaustion report is one of those holds (GY-1581): the next probe replaces it.
+    const { session: _held, ...kept } = existing?.quota ?? unobservedQuota;
+    upsert(next.accounts, { ...account, quota: sameLogin ? { ...kept, identity: null } : { ...unobservedQuota } });
     demandRegistry(next.accounts.length <= registryLimits.accounts, `The registry holds at most ${registryLimits.accounts} accounts`);
   };
   const setRole = (role: FleetRole) => {
