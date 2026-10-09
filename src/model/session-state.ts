@@ -1,6 +1,7 @@
 import type { Work } from './work.js';
 import type { PipelineTimeline } from '../pipeline-speed.js';
 import { attachCommand, endedRuntimeStates, runtimeSessionOf, sessionRole, type LivenessOptions, type ObservedSessionState, type RuntimeSession, type RuntimeStates, type SessionHandle, type SessionHandleInput, type SessionKind } from './sessions.js';
+import { handleEpoch, launchHeldByLease, sessionLaunchGraceMs, unclaimedLaunch } from './session-launch-window.js';
 
 /**
  * One session state for every reader (GY-172). `sessions.ts` holds the record; this module holds
@@ -108,7 +109,7 @@ export function unseenSessions(all: Work[], now: Date) {
  * inside `sessionObservationFreshMs` while a steady session costs one write per refresh interval
  * rather than one per tick.
  */
-export const lostAfterReports = 2, sessionLaunchGraceMs = 3 * 60_000, sessionObservationRefreshMs = 5 * 60_000;
+export const lostAfterReports = 2, sessionObservationRefreshMs = 5 * 60_000;
 /** The most misses a record counts: the handle schema's ceiling on `missedReports`. */
 export const missedReportsCeiling = 1000;
 /** What one listed runtime entry says about the session in it. */
@@ -138,40 +139,6 @@ export type ObserveOptions = LivenessOptions & { hostId?: string | null; launchG
   /** When each handle the previous report missed was first missed; a handle in it is missing for a second consecutive report. */
   firstMissed?: Record<string, string> };
 const handleKey = (workId: string, id: string) => `${workId}\u0000${id}`;
-/** The epoch a worker handle was registered for: its own, or the `PRINCIPAL:EPOCH` its id names. */
-const handleEpoch = (handle: Pick<SessionHandle, 'id' | 'epoch'>) => handle.epoch ?? Number(/:(\d+)$/.exec(handle.id)?.[1]);
-/**
- * GY-1287: a worker handle its launcher has not yet given a pane or name, whose attempt's lease
- * stands under the handle's principal, is a launch still preparing — the launch renews that lease
- * until its supervisor's first heartbeat, and the supervisor after — never a vanished session.
- * On 5 October 2026 GY-1235's launch took longer than the launch grace, and the report closed its
- * handle as lost while the worker it was starting went on to hold and renew the lease.
- */
-export function launchHeldByLease(work: Pick<Work, 'lease'>, handle: Pick<SessionHandle, 'id' | 'kind' | 'principal' | 'epoch' | 'pane' | 'agentName' | 'state' | 'observed'>, clock: number) {
-  const lease = work.lease;
-  return handle.kind === 'implementation' && handle.state === 'running' && !handle.observed && !handle.pane && !handle.agentName
-    && !!lease && !!handle.principal && lease.owner === handle.principal && handleEpoch(handle) === lease.epoch && Date.parse(lease.expiresAt) > clock;
-}
-/**
- * GY-1571. A worker handle registered for an attempt the item has not claimed yet. The launcher
- * registers `PRINCIPAL:EPOCH` for the item's next epoch before its claim, so a report reading a
- * snapshot taken between the two sees an attempt holding no lease. On 9 October 2026 that report
- * ended GY-1528's, GY-1566's and GY-1565's fresh worker handles within seconds of registration
- * ("attempt N ... holds no lease"); the claim then landed, and the next observation read the live
- * lease's handle as "Assigned worker session is ended" — three session-liveness faults for three
- * launches that went on to start and submit.
- */
-export function unclaimedLaunch(work: Pick<Work, 'epoch' | 'lease'>, handle: Pick<SessionHandle, 'id' | 'kind' | 'epoch'>) {
-  if (handle.kind !== 'implementation' || typeof work.epoch !== 'number') return false;
-  const epoch = handleEpoch(handle);
-  return Number.isFinite(epoch) && epoch > work.epoch && !(work.lease && work.lease.epoch >= epoch);
-}
-/** A handle nothing has observed yet whose launch is still under way: inside the launch grace, or held by its attempt's lease. */
-export function launchingSession(work: Pick<Work, 'lease'>, handle: Pick<SessionHandle, 'id' | 'kind' | 'principal' | 'epoch' | 'pane' | 'agentName' | 'state' | 'observed' | 'startedAt'>, clock: number, grace = sessionLaunchGraceMs) {
-  if (handle.state !== 'running' || handle.observed) return false;
-  const started = Date.parse(handle.startedAt);
-  return (Number.isFinite(started) && clock - started < grace) || launchHeldByLease(work, handle, clock);
-}
 /**
  * GY-1532. Why the item's own facts say a session's purpose is over, or null while it stands: an
  * implementation session whose attempt has ended — submitted, released (by its worker, by its
@@ -321,4 +288,5 @@ export function reportedHandle(entry: SessionReportEntry): SessionHandleInput {
     ...(entry.observed ? { observed: entry.observed } : {}), ...(entry.observedAt ? { observedAt: entry.observedAt } : {}), missedReports: entry.missedReports };
 }
 
+export { launchHeldByLease, launchingSession, sessionLaunchGraceMs, unclaimedLaunch } from './session-launch-window.js';
 export { coordinateAttempts, coordinateRetryMs, registeredLaunch, type LaunchedCoordinates } from './session-launch.js';
