@@ -7,6 +7,8 @@ import type { Engine } from '../../engine.js';
 import { landableCarried } from '../../landable-check.js';
 import type { GitHub } from '../../github.js';
 import type { Store } from '../../store.js';
+import { recordedMergerMode } from '../../merger-mode.js';
+import { gitRunnerFor, type GitRunner } from '../../merge-writer/local-observation.js';
 import { defineRoutes, parseJson, type RouteContext } from '../routes.js';
 
 /**
@@ -90,13 +92,27 @@ export async function landAcceptance(github: LandingGitHub, goal: Goal): Promise
   return merged?.merged && merged.head?.sha === head ? { state: 'merged', mergeSha: merged.merge_commit_sha ?? null, detail: `#${pr} merged` } : { state: 'waiting', mergeSha: null, detail: `GitHub accepted the merge of #${pr} but has not reported it merged yet` };
 }
 
+/**
+ * GY-1535: why the base does not hold a merge-writer landing of `head` as `mergeSha`, or null when it
+ * does: the commit is on the first-parent history of `refs/remotes/origin/BASE` in the checkout the
+ * control plane shares with the merge writer, and its second parent is exactly the approved head.
+ */
+export async function acceptanceMergeRefusal(git: GitRunner, base: string, head: string, mergeSha: string): Promise<string | null> {
+  const ref = `refs/remotes/origin/${base}`;
+  const second = await git(['rev-parse', '--verify', '--quiet', `${mergeSha}^2`]);
+  if (second.status !== 0 || second.stdout.trim().toLowerCase() !== head) return `${mergeSha.slice(0, 12)} is not a merge of the approved head ${head.slice(0, 12)}`;
+  const listed = await git(['rev-list', '--first-parent', ref]);
+  if (listed.status !== 0) return `the control plane's checkout holds no ${ref}: ${listed.stderr.trim()}`;
+  return listed.stdout.split('\n').some(line => line.trim().toLowerCase() === mergeSha) ? null : `${base}'s first-parent history does not hold ${mergeSha.slice(0, 12)}`;
+}
+
 /** What landing found, recorded under the lock unless the goal moved on meanwhile: merged at its approved head, else closed and drafted again. */
 export async function recordLanding(store: Pick<Store, 'transaction'>, goal: Goal, landing: Landing, actor: Principal): Promise<Goal> {
-  const pr = goal.acceptance!.pr;
+  const { pr, head } = goal.acceptance!;
   return store.transaction(async (db, now) => {
     const current = find(await readGoals(db), goal.id);
     demand(current, 'Goal not found', 404);
-    if (current.stage !== 'accepted' || current.acceptance?.pr !== pr) return current;
+    if (current.stage !== 'accepted' || current.acceptance?.pr !== pr || current.acceptance.head !== head) return current;
     const [command, input] = landing.state === 'merged' ? ['merged', { pr, mergeSha: landing.mergeSha }] as const : ['closed', { pr, reason: landing.detail }] as const;
     const changed = applyGoalCommand(current, command, input, { actor, at: now.toISOString() });
     await appendGoal(db, actor.id, command, changed, input);
@@ -177,15 +193,28 @@ export const goalRoutes = defineRoutes('goals', [
   },
   {
     // The loop lands an approved acceptance pull request: merged at its approved head, it is recorded merged; closed, moved, conflicting or merged unapproved, it is closed (when open) and recorded closed, so the goal is drafted again.
+    // GY-1535: a merge-writer change (no pull request) is landed by the loop's merge writer, which names the merge commit it pushed; it is recorded merged only once the base holds that merge of the approved head.
     method: 'POST', path: /^\/api\/goals\/([^/]+)\/land$/,
     async handle(context, [ref]) {
       intent(context);
-      goalCommandSchemas.land.parse(await parseJson(context, 1024, '{}'));
+      const body = goalCommandSchemas.land.parse(await parseJson(context, 1024, '{}'));
       const { engine, github } = context.services;
       const goal = find(await readGoals(engine.store.pool), decodeURIComponent(ref));
       demand(goal, 'Goal not found', 404);
-      if (goal.merged && goal.stage !== 'accepted') return { goal, landing: { state: 'merged', mergeSha: goal.merged.mergeSha, detail: `#${goal.merged.pr} merged` } };
+      if (goal.merged && goal.stage !== 'accepted') return { goal, landing: { state: 'merged', mergeSha: goal.merged.mergeSha, detail: goal.merged.pr === null ? `merged as ${goal.merged.mergeSha}` : `#${goal.merged.pr} merged` } };
       demand(goal.stage === 'accepted' && goal.acceptance && goal.approval, `${goal.key} is ${goal.stage}; only an approved acceptance draft is landed`);
+      if (goal.acceptance.pr === null) {
+        demand((await recordedMergerMode(engine.store.pool)).merger === 'control-plane', `${goal.key}'s acceptance change is landed only by the control-plane merge writer, and the recorded merger is github`, 409);
+        demand(body.mergeSha, `${goal.key}'s acceptance change has no pull request: the merge writer lands it and names the merge commit it pushed`, 422);
+        demand(goal.approval.by !== goal.acceptance.author && goal.approval.head === goal.acceptance.head, `${goal.key}'s acceptance change is sensitive and lands only on an approver's verdict on its exact head by another identity`, 403);
+        if (engine.gitRunner === undefined) engine.gitRunner = gitRunnerFor(process.env.GRAPHYARD_REPOSITORY_ROOT ?? process.cwd());
+        demand(engine.gitRunner, 'The control plane has no checkout to read the merge writer\'s landing from', 503);
+        const refusal = await acceptanceMergeRefusal(engine.gitRunner, engine.baseBranch, goal.approval.head, body.mergeSha);
+        demand(!refusal, `${goal.key}'s acceptance change is not landed: ${refusal}`, 422);
+        const landing: Landing = { state: 'merged', mergeSha: body.mergeSha, detail: `the merge writer merged ${goal.key}'s acceptance change as ${body.mergeSha}` };
+        return { goal: await recordLanding(engine.store, goal, landing, context.actor), landing };
+      }
+      demand(!body.mergeSha, `${goal.key}'s acceptance is pull request #${goal.acceptance.pr}: GitHub reports its merge, so no merge commit is named`, 422);
       demand(github, 'No GitHub App is configured on this control plane, so no acceptance pull request can be landed', 503);
       const landing = await landAcceptance(github, goal);
       if (landing.state === 'waiting') return { goal, landing };

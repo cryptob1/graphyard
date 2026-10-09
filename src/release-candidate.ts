@@ -1,7 +1,9 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { createServer } from 'node:http';
+import { readFile, realpath, stat } from 'node:fs/promises';
+import { extname, join, resolve, sep } from 'node:path';
 
 /**
  * Release candidates: one moving main, a frozen candidate, UAT, then that exact SHA in production.
@@ -244,18 +246,23 @@ export const servedRevision = (health: any): string | null => {
 export type Git = (args: string[]) => string;
 /** Async git the loop's local release ports use (GY-1526): every child goes through child-runner, never execFileSync. */
 export type AsyncGit = (args: string[]) => Promise<string>;
+/** Either flavour: `validateAndRecord` and the release holds run under the CLI's sync git and the loop's async one alike (GY-1535). */
+export type AnyGit = Git | AsyncGit;
+const awaited = (git: AnyGit): AsyncGit => async args => await git(args);
 export const gitIn = (cwd: string): Git => args => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024 });
 
+/** The read of every record under one tag prefix (GY-1535: a caller can answer it ahead of a sync reader). */
+export const recordsArguments = (prefix: string) => ['for-each-ref', '--sort=-refname', '--format=%(refname:strip=2)%00%(contents)%00%00', `refs/tags/${prefix}`];
 /** Every record under one tag prefix, newest first, read from annotated tag messages. */
 export function readRecords<T>(git: Git, prefix: string): T[] {
-  const out = git(['for-each-ref', '--sort=-refname', '--format=%(refname:strip=2)%00%(contents)%00%00', `refs/tags/${prefix}`]);
+  const out = git(recordsArguments(prefix));
   return out.split('\0\0').map(entry => entry.replace(/^\n/, '')).filter(Boolean).flatMap(entry => {
     const [, body] = entry.split('\0');
     try { return [JSON.parse(body.trim()) as T]; } catch { return []; }
   });
 }
 async function readRecordsAsync<T>(git: AsyncGit, prefix: string): Promise<T[]> {
-  const out = await git(['for-each-ref', '--sort=-refname', '--format=%(refname:strip=2)%00%(contents)%00%00', `refs/tags/${prefix}`]);
+  const out = await git(recordsArguments(prefix));
   return out.split('\0\0').map(entry => entry.replace(/^\n/, '')).filter(Boolean).flatMap(entry => {
     const [, body] = entry.split('\0');
     try { return [JSON.parse(body.trim()) as T]; } catch { return []; }
@@ -636,7 +643,7 @@ export async function deployToUatAsync(git: AsyncGit, id: string, base: string, 
  * to keep on the record, `covered` the suites whose failure the holds answer (no follow-up names
  * them), and `write` records the hold entries once the UAT record is written.
  */
-export interface HoldOutcome { e2e: E2eRecord | null; holds: NonNullable<UatRecord['holds']>; covered: string[]; filingError: string | null; write: () => void }
+export interface HoldOutcome { e2e: E2eRecord | null; holds: NonNullable<UatRecord['holds']>; covered: string[]; filingError: string | null; write: () => void | Promise<void> }
 
 /**
  * Validate a candidate on UAT and record the verdict once. A failure the release holds attribute to
@@ -644,11 +651,12 @@ export interface HoldOutcome { e2e: E2eRecord | null; holds: NonNullable<UatReco
  * follow-up, keyed by the candidate so a retry never files twice. Both are filed before the record
  * is written; a filing that fails still records the verdict, and `release follow-up` files it later.
  */
-export async function validateAndRecord(git: Git, id: string, url: string, suites: readonly Suite[], options: { base: string; push: boolean; timeoutMs: number;
+export async function validateAndRecord(sourceGit: AnyGit, id: string, url: string, suites: readonly Suite[], options: { base: string; push: boolean; timeoutMs: number;
   file?: (item: ReturnType<typeof followUpItem>, requestId: string) => Promise<string>; now?: () => Date; fetcher?: typeof fetch; sleep?: (ms: number) => Promise<void>;
   holds?: (candidate: ReleaseCandidate, record: UatRecord) => Promise<HoldOutcome> }) {
-  syncLedger(git, options.base);
-  const ledger = readLedger(git);
+  const git = awaited(sourceGit);
+  await syncLedgerAsync(git, options.base);
+  const ledger = await readLedgerAsync(git);
   const candidate = findCandidate(ledger, id);
   const existing = ledger.uat.find(record => record.id === candidate.id);
   if (existing) throw new Error(`Candidate ${candidate.id} was already validated on UAT (${existing.result} at ${existing.at}); cut a new candidate to validate again`);
@@ -660,8 +668,8 @@ export async function validateAndRecord(git: Git, id: string, url: string, suite
     try { record.followUp = await options.file(followUpItem(candidate, record, holds?.covered), followUpRequestId(candidate.id)); }
     catch (error) { filingError = error instanceof Error ? error.message : String(error); }
   }
-  writeRecord(git, `${uatTagPrefix}${candidate.id}`, candidate.sha, record, options.push);
-  holds?.write();
+  await writeRecordAsync(git, `${uatTagPrefix}${candidate.id}`, candidate.sha, record, options.push);
+  await holds?.write();
   return { record, followUp: record.result === 'failed' ? record.followUp ?? null : null, filingError };
 }
 
@@ -716,3 +724,46 @@ export const ledgerStatus = (ledger: Ledger) => ledger.candidates.map(candidate 
     soak: soak ? { result: soak.result, at: soak.at, run: soak.run, report: soak.report } : null,
     production: ledger.production.find(record => record.id === candidate.id)?.at ?? null };
 });
+
+// ——— GY-1535: a managed repository's own E2E cases on every candidate. ———
+
+/** What the loopback static UAT serves each extension as; anything else is application/octet-stream. */
+const staticTypes: Record<string, string> = {
+  '.html': 'text/html; charset=utf-8', '.htm': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8', '.json': 'application/json', '.map': 'application/json', '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.ico': 'image/x-icon', '.txt': 'text/plain; charset=utf-8', '.wasm': 'application/wasm',
+  '.woff': 'font/woff', '.woff2': 'font/woff2', '.mp3': 'audio/mpeg', '.ogg': 'audio/ogg', '.wav': 'audio/wav',
+};
+export interface StaticUat { url: string; close(): Promise<void> }
+
+/**
+ * GY-1535: the UAT deployment of a static site (a GitHub Pages game, say) — the candidate's build
+ * output `directory` served on loopback, so its cases drive it in a browser like any deployment.
+ * `/healthz` answers the candidate's SHA as `commit`, so `validate` binds every verdict to it; a
+ * directory serves its `index.html`; nothing outside `directory` is ever read, and a missing build
+ * output answers 404 rather than failing the server. Only GET and HEAD are answered.
+ */
+export async function serveStaticSite(directory: string, sha: string): Promise<StaticUat> {
+  assertSha(sha, 'static UAT');
+  const root = resolve(directory);
+  const inside = (path: string) => path === root || path.startsWith(`${root}${sep}`);
+  const server = createServer(async (request, response) => {
+    const send = (status: number, type: string, body: string | Buffer) => { response.writeHead(status, { 'Content-Type': type, 'Cache-Control': 'no-store' }); response.end(request.method === 'HEAD' ? undefined : body); };
+    if (request.method !== 'GET' && request.method !== 'HEAD') return send(405, 'text/plain; charset=utf-8', 'Method not allowed\n');
+    let pathname: string;
+    try { pathname = decodeURIComponent(new URL(request.url ?? '/', 'http://uat.invalid').pathname); } catch { return send(400, 'text/plain; charset=utf-8', 'Bad path\n'); }
+    if (pathname === '/healthz') return send(200, 'application/json', JSON.stringify({ ok: true, commit: sha }));
+    let path = resolve(root, `.${pathname}`);
+    if (!inside(path)) return send(404, 'text/plain; charset=utf-8', 'Not found\n');
+    try {
+      if ((await stat(path)).isDirectory()) path = resolve(path, 'index.html');
+      // A symbolic link out of the build output is not served.
+      const real = await realpath(path), realRoot = await realpath(root);
+      if (real !== realRoot && !real.startsWith(`${realRoot}${sep}`)) return send(404, 'text/plain; charset=utf-8', 'Not found\n');
+      return send(200, staticTypes[extname(path).toLowerCase()] ?? 'application/octet-stream', await readFile(path));
+    } catch { return send(404, 'text/plain; charset=utf-8', 'Not found\n'); }
+  });
+  await new Promise<void>((accept, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', () => accept()); });
+  const { port } = server.address() as { port: number };
+  return { url: `http://127.0.0.1:${port}`, close: () => new Promise<void>(accept => { server.closeAllConnections?.(); server.close(() => accept()); }) };
+}
