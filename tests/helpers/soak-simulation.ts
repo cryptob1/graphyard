@@ -209,8 +209,10 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
    * GY-1389: the review-round cap, the items whose change requests name a blocking finding past it, and those whose capped round the approver refuses.
    * GY-1575: the day runs with a reviewer App that withdraws a refused round's change request; the re-review of each of `again` requests changes once more.
    * GY-1579: each of `unmatched` already holds, on its capped head, a refusal a prior release recorded for another reviewer slug and with no revision mark.
+   * GY-1577: the loop reads the refused capped rework of each of `legacy` as one requested before GY-1575's revision mark (its reason
+   * unmarked), and of each of `undated` unmarked and with no time it was requested or refused, so nothing places it under the item's revision.
    */
-  reviewCap?: { cap: number; items: number[]; refused: number[]; again?: number[]; unmatched?: number[] };
+  reviewCap?: { cap: number; items: number[]; refused: number[]; again?: number[]; unmatched?: number[]; legacy?: number[]; undated?: number[] };
   /**
    * GY-1428: the loop's host-supervision step runs the real repair over a simulated host declaring
    * two executor slots. Its user manager stops answering at `managerDown.from`, taking both slots
@@ -1684,6 +1686,14 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     if (elapsed < hostDay!.managerDown.to) throw Object.assign(new Error('Command failed: loginctl enable-linger'), { stderr: 'Could not enable linger: Access denied\n' });
     hostDay!.revived = true; return '';
   };
+  // GY-1577: the refused capped rework of a legacy item, as the loop reads it, is one the loop requested before the revision mark existed.
+  const legacyRefusals = <R extends { decisions: { action: string; state: string; input?: { binding?: string }; reason?: string; requestedAt?: string; refusal?: { at?: string } | null }[] }>(work: Work, read: R): R => {
+    const n = numberOf(work), undated = !!cappedDay?.undated?.includes(n);
+    if (!undated && !cappedDay?.legacy?.includes(n)) return read;
+    return { ...read, decisions: read.decisions.map(entry => entry.action !== 'rework' || entry.state !== 'refused' || !/:capped:/.test(entry.input?.binding ?? '') ? entry : {
+      ...entry, reason: entry.reason?.replace(/\[Capped review under policy revision \d+\.\]\s*/, ''),
+      ...(undated ? { requestedAt: undefined, refusal: entry.refusal ? { ...entry.refusal, at: undefined } : entry.refusal } : {}) }) };
+  };
   const effects: DaemonEffects = {
     ...(promotionEffect ? { promotion: promotionEffect } : {}),
     ...(mainWatchEffect ? { mainWatch: mainWatchEffect } : {}),
@@ -1714,7 +1724,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
       decideCalls.push({ key: work.key, action, reason, input: bound });
       return api(principals.operatorAgent, 'POST', `work/${work.id}/decide`, { action, input: bound, reason });
     },
-    decisions: work => api(principals.operatorAgent, 'GET', `work/${encodeURIComponent(work.id)}/decisions`),
+    decisions: work => api(principals.operatorAgent, 'GET', `work/${encodeURIComponent(work.id)}/decisions`).then(read => legacyRefusals(work, read)),
     withdraw: (work, decision, reason) => { withdrawals.set(decision, (withdrawals.get(decision) ?? 0) + 1); return api(principals.operatorAgent, 'POST', `work/${work.id}/decide`, { action: 'withdraw', decision, reason }); },
     ...(options.stranded === 'resume' ? { resume: async (work: Work, decision: string) => {
       const settled = await api(principals.operatorAgent, 'POST', `work/${work.id}/decide`, { action: 'resume', decision });
@@ -1756,7 +1766,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
           lateReads.push({ n: numberOf(work), elapsed });
           await new Promise(resolve => setTimeout(resolve, decisionReadDeadlineMs + 500));
         }
-        return api(principals.operatorAgent, 'GET', `work/${encodeURIComponent(work.id)}/decisions`);
+        return api(principals.operatorAgent, 'GET', `work/${encodeURIComponent(work.id)}/decisions`).then(read => legacyRefusals(work, read));
       },
     } : {}),
     controlPlane: async () => ({ build: { commit: production.build }, ...(heldJobs ? { heldJobs: 1 } : {}) }),
