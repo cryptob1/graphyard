@@ -3,7 +3,7 @@ import { standingCapacity, type CapacityState } from '../model/capacity.js';
 import { elapsed } from '../model/sessions.js';
 import { mapBounded, readConcurrency } from '../master/timings.js';
 import { staleReleaseAttention } from './owed-report.js';
-import { approverJudgeBoundMs, masterTurnWaitBoundMs, maxApproverLaunches } from '../daemon/decisions.js';
+import { approverJudgeBoundMs, cappedReworkBound, masterTurnWaitBoundMs, maxApproverLaunches } from '../daemon/decisions.js';
 import { convergibleClose, staleAttentionAttempts, staleRun } from '../model/stale-close.js';
 import type { Closure } from '../model/closure.js';
 
@@ -113,7 +113,9 @@ export async function terminalDecisions(masterApi: (path: string) => Promise<any
       if (decision.state === 'refused') {
         const by = decision.refusal?.approver ?? 'the approver', reason = decision.refusal?.reason ?? decision.outcome ?? null;
         listed.push({ work: item.key, id: decision.id, action: decision.action, state: 'refused', reason, refusedBy: by, ...(decision.refusal ? { refusedAt: decision.refusal.at } : {}) });
-        if (latest.get(decision.action) !== decision.id || answeredRefusal(decision, decisions)) continue;
+        // GY-1606: a refused capped review rework is the review-cap step's to answer (it withdraws the change request and has the
+        // head re-reviewed), never the master's by hand; a failed check on that head is the loop's own rework.
+        if (latest.get(decision.action) !== decision.id || answeredRefusal(decision, decisions) || (decision.action === 'rework' && cappedReworkBound(decision.input?.binding))) continue;
         refused += 1;
         const at = decision.refusal ? Date.parse(decision.refusal.at) : Number.NaN;
         attentionItems.push({ ...(Number.isFinite(at) ? { inMotionUntil: new Date(at + refusalAnswerWaitBoundMs).toISOString() } : {}), subject: item.key, text: `Decision ${decision.id} (${decision.action}) was refused by ${by}: ${reason ?? 'no reason recorded'}. Answer the refusal: an identical request is refused, so a new one must cite ${decision.id} with what the refused request lacked, or the item needs something else`,

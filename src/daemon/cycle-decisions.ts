@@ -8,7 +8,7 @@ import { recordSettledDecision } from '../model/project-memory.js';
 import { type ApprovalWatch, approvalWatchSchema, carriedSession, type DaemonActionKind, latencySampleSchema, message, scopeMeasurementSchema } from './state.js';
 import { decisionKey, scopeAnsweredAt, scopeKey, scopeOutcomeAnswered } from './reconcile.js';
 import { readyToRetry } from './sessions.js';
-import { approvalStep, recordWatchEnded, approverLaunchKey, attestDecisions, boundDetail, exhaustedProofKey, decisionReasonMax, detailChanged, fitDecisionReason, githubPause, handWatchPrefix, maxApproverCloses, maxRefusalAnswers, maxDecisionRequests, namePaths, neededDecision, observedFrom, overtakenDecision, resolveCovers, reworkDecisionReason, refusalNamedIn, standingNamedIn, adoptedOnRefusal, conflictReworkOverdue, reworkObservationWait, routineDecision, type RoutineDecision, sameAnswers, scopeRoutineDecision, blockerScopeDecision, standingVerdict, uncountedScopeFailure, withheldDecision } from './decisions.js';
+import { approvalStep, recordWatchEnded, approverLaunchKey, attestDecisions, boundDetail, cappedReworkBound, refusedOnOtherGrounds, exhaustedProofKey, decisionReasonMax, detailChanged, fitDecisionReason, githubPause, handWatchPrefix, maxApproverCloses, maxRefusalAnswers, maxDecisionRequests, namePaths, neededDecision, observedFrom, overtakenDecision, resolveCovers, reworkDecisionReason, refusalNamedIn, standingNamedIn, adoptedOnRefusal, conflictReworkOverdue, reworkObservationWait, routineDecision, type RoutineDecision, sameAnswers, scopeRoutineDecision, blockerScopeDecision, standingVerdict, uncountedScopeFailure, withheldDecision } from './decisions.js';
 import { candidateMovedMeanwhile, decisionFailureKind, decisionReads, deliveredMeanwhile, lateDecisionRead, resumedApplication, selfHealingDecisionFailure } from './decision-reads.js';
 import { refusedAttestationWatch, type RefusedAttestation } from '../model/rework-ground.js';
 import { record } from './effects.js';
@@ -344,6 +344,21 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       // routine step returns that head to a worker on it, applied with no second approver.
       const attested = watch.action === 'attest' ? refusedAttestationWatch(judged) : null;
       if (attested) { watch.refusal = attested; await note(`${base}:refused`, item, 'decision', 'done', `${step.detail}; ${item.key} returns to a worker on that refusal`); return; }
+      // GY-1606: a rework this binding adopted while it stood requested on other grounds (a capped review rework
+      // its approver refused as non-blocking) never judged these: the watch is dropped, and this binding's own
+      // request is made at once, on the fresh observation this step was reached on. The refusal is no one's to answer by hand.
+      const refusedBinding = judged?.input?.binding;
+      if (watch.action === 'rework' && refusedOnOtherGrounds(refusedBinding, decision.binding)) {
+        delete state.approvals[key];
+        await note(`${base}:refused`, item, 'decision', 'done', `${step.detail}; it judged ${String(refusedBinding).slice(41)}, not ${decision.binding.slice(41)}, which ${item.key} still needs, so the loop requests that rework on its own grounds`);
+        await request(item, decision, key, null);
+        return;
+      }
+      // A refused capped review rework is answered by the review-cap step: it withdraws the change request and has the head re-reviewed.
+      if (watch.action === 'rework' && cappedReworkBound(refusedBinding)) {
+        await note(`${base}:refused`, item, 'decision', 'done', `${step.detail}; the review-cap step withdraws the change request and has the head re-reviewed with its findings as FOLLOW-UP, so the loop does not request it again`);
+        return;
+      }
       await note(`escalation:decision-refused:${watch.decision}`, item, 'escalation', 'done', `${step.detail}. The loop does not request it again or launch another approver; answer the refusal: read it with graphyard master decisions ${item.key}, then request what the item needs with a reason that cites ${watch.decision} and gives what the refused request lacked, or act on the refusal instead`);
       return;
     }

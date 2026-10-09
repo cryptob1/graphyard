@@ -75,6 +75,19 @@ export function standingVerdict(work: Work): StandingVerdict | null {
 export interface CappedReview { kind: 'follow-up' | 'escalate'; round: number; cap: number; reviewer: string; reviewId: number | null; sha: string; blocking: string[]; findings: string[]; reason: string; submittedAt?: string }
 /** The binding of the loop's rework request for a capped change request (GY-1389): an approver's to judge, never the risk lane's. */
 export const cappedReworkBinding = (head: string, reviewer: string) => `${head}:capped:${reviewer}`;
+/** Whether a rework decision's binding is the loop's capped review-grounds request (`cappedReworkBinding`): the review-cap step answers its refusal. */
+export const cappedReworkBound = (binding: unknown) => typeof binding === 'string' && /^[0-9a-f]{40}:capped:/.test(binding);
+/** The head and grounds kind a routine rework binding names (`${sha}:${kind}:…`), or null for any other binding. */
+const reworkGrounds = (binding: unknown) => typeof binding === 'string' ? /^([0-9a-f]{40}:[^:]+)/.exec(binding)?.[1] ?? null : null;
+/**
+ * GY-1606. Whether a refused rework judged other grounds than `binding`'s: both name a head and a grounds kind, and they differ.
+ * GY-1598's failed-check rework adopted capped review rework a5116d00 while it stood requested; its refusal settled the CI
+ * binding's watch, and no failed-check rework was requested for 24 minutes. A binding whose thread set moved is the same grounds.
+ */
+export const refusedOnOtherGrounds = (refused: unknown, binding: string) => {
+  const judged = reworkGrounds(refused), needed = reworkGrounds(binding);
+  return !!judged && !!needed && judged !== needed;
+};
 /**
  * The mark a capped rework request opens its reason with (GY-1575): the policy revision it was requested
  * under. A decision record keeps no revision, and a requirements or review-policy revision can leave the

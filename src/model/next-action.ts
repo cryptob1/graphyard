@@ -182,7 +182,13 @@ function computeAccount(work: Work, all: Work[], now: Date): Computed {
       { kind: 'approve-scope', epoch: scope.epoch, paths: [...scope.paths], requestedBy: scope.requestedBy, detail: scope.reason }, `scope:${scope.epoch}:${scope.at}`);
   }
 
-  const failing = work.gates.find(gate => !gate.passed);
+  const first = work.gates.find(gate => !gate.passed);
+  // GY-1606: a failed required check owes a new head that no review judgement can withdraw or refuse, so it is the rework named
+  // over a review change request owing one too: on GY-1598 the review gate named a capped review rework its approver had refused,
+  // and the master was asked to answer that refusal by hand while the failed-check rework the loop owed went unnamed.
+  const failedCheck = first?.name === 'review' && refusalAction(work, first.name, first.reasons[0] ?? '', all, now) === 'request-rework'
+    ? work.gates.find(gate => gate.name === 'test' && !gate.passed && gate.reasons.some(reason => refusalAction(work, 'test', reason, all, now) === 'request-rework')) : undefined;
+  const failing = failedCheck ? { ...failedCheck, reasons: failedCheck.reasons.filter(reason => refusalAction(work, 'test', reason, all, now) === 'request-rework') } : first;
   if (failing) {
     // Which of the gate's refusals this item acts on. A refusal that belongs to another item — an
     // unfinished dependency — answers this item

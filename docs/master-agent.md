@@ -9,11 +9,11 @@ Keep cycling: `master status`; `master run` dispatches (`schedule.order`); merge
 
 `master run` is unit `graphyard-master.service` ([supervision](onboarding.md#the-loop-must-be-supervised)); on `daemon.liveness` `stalled`/`absent`: `systemctl --user restart graphyard-master`, never from a [dirty or non-forward checkout](master-agent-sessions.md#the-coordinator-checkout-is-confined-at-the-os-level).
 
-**Cycle cadence.** The loop sleeps `run.intervalSeconds`, at most 30 s while anything is actionable. The dispatcher tick wakes it early, once per new subject, no sooner than `run.dispatchIntervalSeconds` after the cycle (`woken Ns before the … wait ended: REASONS`).
+**Cycle cadence.** The loop sleeps `run.intervalSeconds`, ≤30 s while anything is actionable. The dispatcher tick wakes it early, once per new subject, no sooner than `run.dispatchIntervalSeconds` after the cycle (`woken Ns before the … wait ended: REASONS`).
 
 ### System-driven items
 
-Unless created `"systemDriven": false`, items refuse hand `dispatch`, `merge`, `review`, `decide attest|merge`, loop-owned `decide rework` (`--precedent` answers refusals), except stopped-loop recovery, unproduced `manual:` attestations, `decide merge` unauthorized or without an operator agent. The loop attests unproduced `manual:` proofs via an independent approver once per head, base, policy revision (`loopDecisions.attestations`).
+Unless created `"systemDriven": false`, items refuse hand `dispatch`, `merge`, `review`, `decide attest|merge`, loop-owned `decide rework` (`--precedent` answers refusals), except stopped-loop recovery, unproduced `manual:` attestations, `decide merge` unauthorized or without an operator agent. The loop attests unproduced `manual:` proofs via an independent approver once per head, base, policy revision (`loopDecisions.attestations`). A refused review rework never holds back the same head's failed-check rework.
 
 ### Session liveness is reconciled, not trusted
 
@@ -47,10 +47,10 @@ The master never launches reviews or producers by hand, except `master review GY
 
 ### Proofs must exercise their criterion
 
-A passing producer records `"exercise"`: rerun without the criterion's behaviour, proof must fail with a case executed, else the pass is recorded as not exercising its criterion rather than as passing (`unexercised`, `evidence.exercise.refused`); next: `request-rework` naming proof, criterion and surviving mutation. Unexercised `manual:` proofs re-attest instead.
+A passing producer records `"exercise"`: rerun without the criterion's behaviour, the proof must fail a case, else it is recorded as not exercising its criterion rather than as passing (`unexercised`, `evidence.exercise.refused`), reworked naming the surviving mutation; unexercised `manual:` proofs re-attest.
 
 ## GitHub merges
 
 GitHub merges heads whose gates pass under the `github` merger ([delivery](delivery.md#one-delivery-path)), the [merge writer](delivery-redesign.md#merge-writer) under `control-plane`; failing heads need two-party `master decide GY-N merge`; skew: `… deploy main first`; a check the base head fails too is a [base failure](development.md#base-failures). Unresolved review threads are the reviewer's inputs, not merge blockers (`reviewThreads`); approvals list each under `Resolved threads:`, `Follow-up threads:` or `Overridden threads:` ([rules](coordination.md#review-gate-verdicts-not-threads)).
 
-**Shadow gate.** Named failures fail the verdict; exit naming none is host failure (diagnostic, retries, attention), never `shadow-only-fail`. Groups of 40.
+**Shadow gate.** Named failures fail the verdict; exit naming none is host failure (diagnostic, retries, attention), never `shadow-only-fail`.
