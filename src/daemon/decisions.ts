@@ -15,6 +15,7 @@ import { triageClosure } from '../model/machine-backlog.js'; import { refusedAtt
 import { actionDetailMax, type ApprovalWatch, message } from './state.js';
 import { blockingFindings, followUpFindingsOf, pastReviewCap, reviewRound, reviewRoundCapOf, reworkRoundsOf } from '../review-cap.js';
 import { sessionName } from '../session-name.js';
+import type { ScreenMotion } from '../master/approver-stall.js';
 
 /** What the routine decisions read of the master configuration: automatic merging, and the review-round cap (GY-1118). */
 export type ReviewCapConfig = Pick<MasterConfig, 'autoMerge'> & Partial<Pick<MasterConfig, 'reviewRoundCap' | 'reviewer'>>;
@@ -75,6 +76,8 @@ export function standingVerdict(work: Work): StandingVerdict | null {
 export interface CappedReview { kind: 'follow-up' | 'escalate'; round: number; cap: number; reviewer: string; reviewId: number | null; sha: string; blocking: string[]; findings: string[]; reason: string; submittedAt?: string }
 /** The binding of the loop's rework request for a capped change request (GY-1389): an approver's to judge, never the risk lane's. */
 export const cappedReworkBinding = (head: string, reviewer: string) => `${head}:capped:${reviewer}`;
+/** Whether a rework decision's binding is the loop's capped review-grounds request (`cappedReworkBinding`): the review-cap step answers its refusal. */
+export const cappedReworkBound = (binding: unknown) => typeof binding === 'string' && /^[0-9a-f]{40}:capped:/.test(binding);
 /**
  * The mark a capped rework request opens its reason with (GY-1575): the policy revision it was requested
  * under. A decision record keeps no revision, and a requirements or review-policy revision can leave the
@@ -732,7 +735,7 @@ export type ApprovalStep =
   | { step: 'exhausted'; detail: string }
   | { step: 'apply'; detail: string };
 export function approvalStep(watch: ApprovalWatch, decision: { id?: string; action?: string; state: string; outcome?: string | null; refusal?: { approver: string; reason: string } | null; approvedBy?: string | null; approvedAt?: string | null; situation?: DecisionSituation | null } | null | undefined,
-  sessions: { agents: HerdrAgent[]; available: boolean }, now: number): ApprovalStep {
+  sessions: { agents: HerdrAgent[]; available: boolean }, now: number, stall: { startMs?: number; screen?: ScreenMotion } = {}): ApprovalStep {
   const label = `${watch.action} decision ${watch.decision} on ${watch.work}`;
   // `undefined`: the history could not be read this cycle. Nothing is concluded from that.
   if (decision === undefined) return { step: 'wait', detail: `The decision history of ${watch.work} could not be read; ${label} is looked at again next cycle` };
@@ -754,8 +757,13 @@ export function approvalStep(watch: ApprovalWatch, decision: { id?: string; acti
   if (!sessions.available) return { step: 'wait', detail: `Herdr could not be read, so the approver session of ${label} is unknown this cycle` };
   const session = watch.agentName ? sessions.agents.find(agent => agent.name === watch.agentName) : undefined;
   const launchedAt = watch.launchedAt ? Date.parse(watch.launchedAt) : Number.NaN, age = Number.isFinite(launchedAt) ? now - launchedAt : 0;
+  // GY-1598: a stopped session is ended only past its start bound too, and an idle one only on a still screen with no trace of its
+  // decision (`judgeApproverStall`): Herdr reports a long or silent command as idle, so a moving, started or unread screen waits for
+  // the judge bound instead.
+  const stopped = ['idle', 'done', 'blocked'].includes(session?.agent_status ?? '') && age >= Math.max(approverSettleMs, stall.startMs ?? 0)
+    && !(session?.agent_status === 'idle' && stall.screen && stall.screen !== 'still');
   const ended = !session ? `approver session ${watch.agentName ?? '(never launched)'} is gone without judging it`
-    : ['idle', 'done', 'blocked'].includes(session.agent_status ?? '') && age >= approverSettleMs ? `approver session ${watch.agentName} ended ${session.agent_status} without approving it — declined, or its prompt was dropped`
+    : stopped ? `approver session ${watch.agentName} ended ${session.agent_status} without approving it — declined, or its prompt was dropped`
       : age > approverJudgeBoundMs ? `approver session ${watch.agentName} has not judged it for ${Math.round(age / 60_000)} minutes, past the ${Math.round(approverJudgeBoundMs / 60_000)}-minute bound`
         : null;
   if (!ended) return { step: 'wait', detail: `${label} is with approver session ${watch.agentName} (launch ${watch.launches} of ${maxApproverLaunches})` };

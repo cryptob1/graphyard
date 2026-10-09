@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { existsSync, writeFileSync } from 'node:fs';
 import { chmod, mkdir, readdir, readFile, stat, utimes, writeFile } from 'node:fs/promises';
@@ -10,8 +10,11 @@ import { fileURLToPath } from 'node:url';
 import { describeTmpReclaim, readTempOwner, reclaimTmpDirectories, tempOwnerMarker, writeTempOwner } from '../src/tmp-reclaim.js';
 // A namespace import: on a base without GY-1597's census the case fails, not the file's load.
 import * as tmpReclaim from '../src/tmp-reclaim.js';
-import { describeReclaim, readReclaimReports, readResources, readTmpInodes, reclaimResources, resourceAttention, settleTmpReclaim, takeTmpReclaim, type ResourceInputs } from '../src/master-resources.js';
+import { describeReclaim, describeStandingTmpPass, readReclaimReports, readResources, readTmpInodes, reclaimResources, resourceAttention, settleTmpReclaim, takeTmpReclaim, type ResourceInputs } from '../src/master-resources.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { loadMasterConfig, setupMaster } from '../src/master.js';
+import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
+import { standingTmpKey } from '../src/daemon/cycle-reclaim.js';
 
 // GY-421: test runs used to leak their temporary directories — by 25 September 2026 the host held
 // 11,511 /tmp/graphyard-* embedded-Postgres data dirs a run had left behind on failing or being
@@ -371,7 +374,96 @@ test('unit:tmp-cleanup — a zero-removal pass that leaves /tmp between a tenth 
   const [line] = resourceAttention([reading]);
   assert.equal(line?.subject, 'resource:tmp-inodes');
   assert.match(line?.text ?? '', new RegExp(`the top /tmp consumers are ${leaker} \\(42 entries`));
-  // The same reading after a pass that took entries back stays answered, as GY-1379 set out.
+  // A pass that took entries back but still left /tmp below the headroom answers nothing either (GY-1602).
   const progressed: ResourceInputs = { ...input, tmp: { ...inodes!, latest: { ...inodes!.latest!, removed: 3 } } };
-  assert.equal(resourceAttention(readResources(progressed).filter(entry => entry.id === 'tmp-inodes')).length, 0);
+  assert.equal(resourceAttention(readResources(progressed).filter(entry => entry.id === 'tmp-inodes')).length, 1);
+});
+
+// GY-1600: on 9 October 2026 the loop's /tmp pass removed 0 entries at 19:34Z while /tmp stood at
+// 98,830 of 1,048,576 inodes free, and the cycle recorded nothing: describeReclaim has nothing to
+// say about a pass that took nothing, so the ledger fell silent exactly while the bound stood.
+test('unit:tmp-reclaim-zero-escalates — a /tmp pass that removes 0 entries while the inode bound stands is recorded in the cycle\'s action ledger with what it scanned and why nothing was eligible; one with the bound clear records nothing', async () => {
+  const root = await temporaryDirectory('zero-pass-ledger');
+  const credentials = await temporaryDirectory('zero-pass-ledger-credentials');
+  execFileSync('git', ['init', '-q', root]);
+  execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
+  await setupMaster(root, { url: 'https://graphyard.example', token: 'coordinator-token-'.padEnd(40, 'x'), cliPath: fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url)), credentialDirectory: credentials },
+    (async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }))) as typeof fetch);
+  const config = await loadMasterConfig(root);
+  const { tmp, leaker } = await leakingRoot('zero-pass-ledger-tmp');
+  // A test temp this pass scans and keeps: younger than its age bound.
+  await mkdir(join(tmp, 'graphyard-young'));
+  const pass = (volume: typeof lowVolume) => async () => {
+    const options = { tmpRoot: tmp, tmpPass: (each: Parameters<typeof reclaimTmpDirectories>[0]) => reclaimTmpDirectories({ ...each, held: new Set(), volume }) };
+    await reclaimResources(root, { reviewers: [], producers: [] }, { work: [], agents: [] }, options);
+    await settleTmpReclaim();
+    return reclaimResources(root, { reviewers: [], producers: [] }, { work: [], agents: [] }, options);
+  };
+  const cycle = async (reclaim: () => ReturnType<typeof reclaimResources>) => {
+    const state = emptyDaemonState(config), clock = Date.now();
+    const effects = {
+      agents: () => [], credentials: async () => ({}), snapshot: async () => ({ work: [], now: new Date(clock).toISOString() }), closeSession: () => {},
+      dispatch: async () => {}, requestProof: () => {}, recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+      observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date(clock).toISOString(), reason: 'not configured', deployed: [], pending: [] }),
+      reclaimResources: reclaim,
+    } as unknown as DaemonEffects;
+    await runCycle(config, state, effects, () => clock);
+    return Object.entries(state.actions).filter(([key]) => key.startsWith('reclaim:tmp:')).map(([, action]) => action);
+  };
+
+  // Below the headroom: the pass escalates, removes 0 and names the consumers, and the cycle records it.
+  const recorded = await cycle(pass(lowVolume));
+  await settleTmpReclaim();
+  assert.equal(recorded.length, 1, 'the zero-removal pass under the standing bound is in the ledger');
+  const [action] = recorded;
+  assert.equal(action.kind, 'reclaim');
+  assert.equal(action.state, 'done');
+  assert.match(action.detail, /^\/tmp reclaim removed 0 entries while the inode bound stands/);
+  assert.match(action.detail, new RegExp(`scanned ${tmp}; its last step, over the roots still below headroom, examined 1 entry with this user's test temp names, 1 kept`), 'it names what it scanned and kept, and which sweep the counts are');
+  assert.match(action.detail, /no tsx cache file of this user's it could remove \(each younger than 10 minutes or held open by a live process\)/, 'it says why nothing was eligible without claiming one unmeasured cause');
+  assert.doesNotMatch(action.detail, /old enough/);
+  assert.match(action.detail, /escalated to 20000 per cycle and tsx cache files older than 10 minutes \(0 \+ 0 removed\)/);
+  assert.match(action.detail, new RegExp(`top consumers: ${leaker} \\(42 entries, owner ${userInfo().username}\\)`));
+  assert.equal(existsSync(join(tmp, 'graphyard-young')), true, 'recording the pass removes nothing');
+
+  // The bound clear: a pass that removed 0 has nothing to report, as before.
+  const clear = await pass(async () => ({ files: 1_048_576, ffree: 900_000 }))();
+  await settleTmpReclaim();
+  assert.equal(clear.tmpPass?.boundStands, false);
+  assert.equal(describeStandingTmpPass(clear), null);
+  // A pass that took entries back is reported by describeReclaim, never as a standing zero.
+  assert.equal(describeStandingTmpPass({ ...clear, tmp: { removed: 3, bytes: 3 }, tmpPass: { ...clear.tmpPass!, boundStands: true } }), null);
+  assert.deepEqual(await cycle(async () => clear), [], 'a pass with the bound clear adds no record');
+});
+
+test('unit:tmp-reclaim-zero-escalates — a standing zero-removal pass with errors fails its row and adds no fault of its own', async () => {
+  const root = await temporaryDirectory('zero-pass-errors');
+  const credentials = await temporaryDirectory('zero-pass-errors-credentials');
+  execFileSync('git', ['init', '-q', root]);
+  execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
+  await setupMaster(root, { url: 'https://graphyard.example', token: 'coordinator-token-'.padEnd(40, 'x'), cliPath: fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url)), credentialDirectory: credentials },
+    (async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }))) as typeof fetch);
+  const config = await loadMasterConfig(root), clock = Date.now();
+  const effects = {
+    agents: () => [], credentials: async () => ({}), snapshot: async () => ({ work: [], now: new Date(clock).toISOString() }), closeSession: () => {},
+    dispatch: async () => {}, requestProof: () => {}, recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date(clock).toISOString(), reason: 'not configured', deployed: [], pending: [] }),
+    reclaimResources: async () => ({ at: new Date(clock).toISOString(), reaped: { review: 0, producer: 0 }, closed: [], released: [], tmp: { removed: 0, bytes: 0 }, errors: ['Tmp reclaim: /tmp/graphyard-held: EBUSY'],
+      tmpPass: { roots: ['/tmp'], scanned: 1, kept: 1, boundStands: true } }),
+  } as unknown as DaemonEffects;
+  const state = emptyDaemonState(config);
+  await runCycle(config, state, effects, () => clock);
+  const row = state.actions[standingTmpKey];
+  assert.equal(row?.state, 'failed', 'a pass that met errors is not recorded as done');
+  assert.match(row.detail, /1 could not be reclaimed: Tmp reclaim: \/tmp\/graphyard-held: EBUSY/);
+  assert.equal(row.faultClass, undefined, 'the row carries no fault of its own');
+  assert.equal(state.faults.failing[standingTmpKey], undefined);
+  assert.deepEqual(Object.entries(state.actions).filter(([, action]) => action.kind === 'reclaim' && action.state === 'failed').map(([key]) => key.split(':').slice(0, 2).join(':')).sort(), ['reclaim:resources', 'reclaim:tmp'], 'the resources row and the /tmp row');
+  // Another resource's failure in the same report (a pane close) is not the /tmp pass's: its row stays done and names no error.
+  const other = emptyDaemonState(config);
+  await runCycle(config, other, { ...effects, reclaimResources: async () => ({ at: new Date(clock).toISOString(), reaped: { review: 0, producer: 0 }, closed: [], released: [], tmp: { removed: 0, bytes: 0 },
+    errors: ['Pane close: w1:p1: herdr refused'], tmpPass: { roots: ['/tmp'], scanned: 1, kept: 1, boundStands: true } }) } as DaemonEffects, () => clock);
+  assert.equal(other.actions[standingTmpKey]?.state, 'done', 'an unrelated failure does not fail the /tmp row');
+  assert.doesNotMatch(other.actions[standingTmpKey].detail, /could not be reclaimed|Pane close/);
+  assert.equal(other.actions[Object.keys(other.actions).find(key => key.startsWith('reclaim:resources:'))!]?.state, 'failed', 'the resources row carries it');
 });

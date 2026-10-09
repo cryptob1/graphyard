@@ -97,6 +97,30 @@ jobs:
         with: { ref: '${{ env.CANDIDATE_SHA }}', persist-credentials: false }
       - uses: actions/setup-node@v4
         with: { node-version: '24' }
+      # Docker Hub refuses anonymous pulls from shared runner addresses past its rate limit (GY-1607):
+      # the daemon is given the mirror.gcr.io registry mirror (verified with docker info before any
+      # docker command), and this job's Docker Hub images are pulled by their mirror.gcr.io name and
+      # tagged with their Docker Hub name, so no step contacts Docker Hub for them. The step fails when
+      # the mirror cannot serve an image, or when the tagged image does not resolve to the mirror.
+      - name: Pull Docker Hub images through the registry mirror
+        shell: bash
+        env:
+          DOCKER_HUB_IMAGES: node:24-bookworm-slim postgres:17-alpine
+        run: |
+          set -euo pipefail
+          { sudo cat /etc/docker/daemon.json 2>/dev/null || echo '{}'; } | jq '. + {"registry-mirrors": ["https://mirror.gcr.io"]}' > "$RUNNER_TEMP/daemon.json"
+          sudo install -m 0644 "$RUNNER_TEMP/daemon.json" /etc/docker/daemon.json
+          sudo systemctl restart docker
+          mirrors="$(docker info --format '{{json .RegistryConfig.Mirrors}}')"
+          echo "Docker daemon registry mirrors: $mirrors"
+          [[ $mirrors == *'https://mirror.gcr.io'* ]] || { echo '::error::the Docker daemon is not using the registry mirror' >&2; exit 1; }
+          for image in $DOCKER_HUB_IMAGES; do
+            docker pull --quiet "mirror.gcr.io/library/$image"
+            docker tag "mirror.gcr.io/library/$image" "$image"
+            digests="$(docker image inspect --format '{{json .RepoDigests}}' "$image")"
+            echo "$image resolved through the registry mirror: $digests"
+            [[ $digests == *'mirror.gcr.io/library/'* ]] || { echo "::error::$image does not resolve to the registry mirror" >&2; exit 1; }
+          done
       - name: Build candidate image as the release process would
         run: |
           version="$(node -p "require('./package.json').version")"
@@ -121,6 +145,30 @@ jobs:
         with: { ref: '${{ env.CANDIDATE_SHA }}', persist-credentials: false }
       - uses: actions/setup-node@v4
         with: { node-version: '24' }
+      # Docker Hub refuses anonymous pulls from shared runner addresses past its rate limit (GY-1607):
+      # the daemon is given the mirror.gcr.io registry mirror (verified with docker info before any
+      # docker command), and this job's Docker Hub images are pulled by their mirror.gcr.io name and
+      # tagged with their Docker Hub name, so no step contacts Docker Hub for them. The step fails when
+      # the mirror cannot serve an image, or when the tagged image does not resolve to the mirror.
+      - name: Pull Docker Hub images through the registry mirror
+        shell: bash
+        env:
+          DOCKER_HUB_IMAGES: node:24-bookworm-slim postgres:17-alpine
+        run: |
+          set -euo pipefail
+          { sudo cat /etc/docker/daemon.json 2>/dev/null || echo '{}'; } | jq '. + {"registry-mirrors": ["https://mirror.gcr.io"]}' > "$RUNNER_TEMP/daemon.json"
+          sudo install -m 0644 "$RUNNER_TEMP/daemon.json" /etc/docker/daemon.json
+          sudo systemctl restart docker
+          mirrors="$(docker info --format '{{json .RegistryConfig.Mirrors}}')"
+          echo "Docker daemon registry mirrors: $mirrors"
+          [[ $mirrors == *'https://mirror.gcr.io'* ]] || { echo '::error::the Docker daemon is not using the registry mirror' >&2; exit 1; }
+          for image in $DOCKER_HUB_IMAGES; do
+            docker pull --quiet "mirror.gcr.io/library/$image"
+            docker tag "mirror.gcr.io/library/$image" "$image"
+            digests="$(docker image inspect --format '{{json .RepoDigests}}' "$image")"
+            echo "$image resolved through the registry mirror: $digests"
+            [[ $digests == *'mirror.gcr.io/library/'* ]] || { echo "::error::$image does not resolve to the registry mirror" >&2; exit 1; }
+          done
       - name: Build candidate image
         run: docker build --tag graphyard-ci .
       - name: Recover an expired lease on a second machine identity
@@ -147,13 +195,53 @@ jobs:
           helm template graphyard deploy/helm/graphyard --set secrets.existingSecret=graphyard-credentials > /dev/null
           # An installation with nowhere to hold credentials must not render.
           if helm template graphyard deploy/helm/graphyard > /dev/null 2>&1; then echo 'chart rendered without credentials' >&2; exit 1; fi
+      # Docker Hub refuses anonymous pulls from shared runner addresses past its rate limit (GY-1607):
+      # the daemon is given the mirror.gcr.io registry mirror (verified with docker info before any
+      # docker command), and this job's Docker Hub images are pulled by their mirror.gcr.io name and
+      # tagged with their Docker Hub name, so no step contacts Docker Hub for them. The step fails when
+      # the mirror cannot serve an image, or when the tagged image does not resolve to the mirror.
+      - name: Pull Docker Hub images through the registry mirror
+        shell: bash
+        env:
+          DOCKER_HUB_IMAGES: node:24-bookworm-slim
+        run: |
+          set -euo pipefail
+          { sudo cat /etc/docker/daemon.json 2>/dev/null || echo '{}'; } | jq '. + {"registry-mirrors": ["https://mirror.gcr.io"]}' > "$RUNNER_TEMP/daemon.json"
+          sudo install -m 0644 "$RUNNER_TEMP/daemon.json" /etc/docker/daemon.json
+          sudo systemctl restart docker
+          mirrors="$(docker info --format '{{json .RegistryConfig.Mirrors}}')"
+          echo "Docker daemon registry mirrors: $mirrors"
+          [[ $mirrors == *'https://mirror.gcr.io'* ]] || { echo '::error::the Docker daemon is not using the registry mirror' >&2; exit 1; }
+          for image in $DOCKER_HUB_IMAGES; do
+            docker pull --quiet "mirror.gcr.io/library/$image"
+            docker tag "mirror.gcr.io/library/$image" "$image"
+            digests="$(docker image inspect --format '{{json .RepoDigests}}' "$image")"
+            echo "$image resolved through the registry mirror: $digests"
+            [[ $digests == *'mirror.gcr.io/library/'* ]] || { echo "::error::$image does not resolve to the registry mirror" >&2; exit 1; }
+          done
       - name: Build the candidate image
         run: |
           version="$(node -p "require('./package.json').version")"
           docker build --build-arg "GRAPHYARD_VERSION=$version" --build-arg "GRAPHYARD_BUILD_REVISION=$CANDIDATE_SHA" --tag "graphyard:$version" .
           docker tag "graphyard:$version" "graphyard:$version-next"
+      # kind's node image sets no registry config_path (containerd 2 then defaults to a path list), so
+      # the cluster is created from deploy/helm/kind-config.yaml, which sets it to /etc/containerd/certs.d.
       - uses: helm/kind-action@v1
-        with: { cluster_name: graphyard }
+        with: { cluster_name: graphyard, config: deploy/helm/kind-config.yaml }
+      # The cluster's containerd pulls the chart's Docker Hub images (the bundled postgres:17-alpine)
+      # itself, so each node resolves docker.io through mirror.gcr.io alone, with no Docker Hub fallback.
+      # The step reads each node's effective config (containerd config dump: version 2 or 3, double or
+      # single quoted) and fails when config_path is not exactly /etc/containerd/certs.d.
+      - name: Pull the cluster's Docker Hub images through the registry mirror
+        shell: bash
+        run: |
+          set -euo pipefail
+          for node in $(kind get nodes --name graphyard); do
+            docker exec "$node" mkdir -p /etc/containerd/certs.d/docker.io
+            printf '%s\n' 'server = "https://mirror.gcr.io"' '[host."https://mirror.gcr.io"]' '  capabilities = ["pull", "resolve"]' | docker exec -i "$node" tee /etc/containerd/certs.d/docker.io/hosts.toml
+            dump="$(docker exec "$node" containerd config dump)"
+            grep -Eq "^[[:space:]]*config_path *= *(\"/etc/containerd/certs.d\"|'/etc/containerd/certs.d')[[:space:]]*\$" <<< "$dump" || { echo "::error::kind node $node does not read /etc/containerd/certs.d" >&2; exit 1; }
+          done
       - name: Install, exercise, upgrade and restore on a real cluster
         run: bash deploy/helm/exercise.sh "graphyard:$(node -p "require('./package.json').version")"
   uat:
@@ -222,15 +310,20 @@ jobs:
           GRAPHYARD_TOKEN: ${{ secrets.GRAPHYARD_RELEASE_TOKEN }}
       - name: Record the E2E case runs on the control plane's Tests page
         # Best effort and after the verdict: recording never decides promotion. The suite command
-        # never holds the release credential, so this step records the report it wrote.
+        # never holds a control-plane credential, so this step records the report it wrote. It uses
+        # its own GRAPHYARD_E2E_RECORD_TOKEN (GY-1614): the release filing credential above is an
+        # operator agent holding only intent:create, which the scenario routes refuse. This step runs
+        # the candidate's own checkout, so that token is an operator agent holding only e2e:record,
+        # never an admin credential: it reaches repository E2E cases on the scenario routes alone.
         if: ${{ !cancelled() }}
         continue-on-error: true
         shell: bash
         run: |
-          if [[ -f "$RUNNER_TEMP/e2e-report.json" ]]; then node bin/graphyard.mjs e2e record "$RUNNER_TEMP/e2e-report.json"; else echo 'The e2e suite wrote no report; nothing to record'; fi
+          if [[ -z "$GRAPHYARD_TOKEN" ]]; then echo 'GRAPHYARD_E2E_RECORD_TOKEN is not set; the E2E case runs are not recorded'
+          elif [[ -f "$RUNNER_TEMP/e2e-report.json" ]]; then node bin/graphyard.mjs e2e record "$RUNNER_TEMP/e2e-report.json"; else echo 'The e2e suite wrote no report; nothing to record'; fi
         env:
           GRAPHYARD_URL: ${{ vars.GRAPHYARD_URL }}
-          GRAPHYARD_TOKEN: ${{ secrets.GRAPHYARD_RELEASE_TOKEN }}
+          GRAPHYARD_TOKEN: ${{ secrets.GRAPHYARD_E2E_RECORD_TOKEN }}
   promote:
     needs: [candidate, uat]
     if: needs.uat.result == 'success' && (github.event_name == 'schedule' || inputs.promote)
