@@ -191,6 +191,22 @@ test('unit:stall-remedy-recorded-once — the remedy is applied and recorded onc
   for (let n = 0; n < actionStallThreshold; n++) a.row.history.push({ at: shift(at, (21 + n) * 60_000), event: 'failed', requester: 'graphyard', executor: 'x', result: 'failed', reason: a.row.stall!.reason });
   assert.equal(standingRemedy(a.work, a.row.id, a.row.stall!.reason), null);
   assert.deepEqual(owedRemedies(work).map(entry => entry.work.key), ['GY-864']);
+
+  // GY-1586: the remedy cleared the hold and the held job completed the row before the record landed.
+  // The record still lands on the run the completion ended, once; a row that completed out of
+  // another reason's run, or after any later event, is refused.
+  const c = stalledItem('GY-1586', 'dispatch', holdReason('GY-1586'), at), reason = c.row.stall!.reason;
+  c.row.history.push({ at: shift(at, 30_000), event: 'claimed', requester: 'graphyard', executor: 'x', result: null, reason: 'resumed' }, { at: shift(at, 60_000), event: 'completed', requester: 'graphyard', executor: 'x', result: 'done', reason: 'the held job resumed' });
+  Object.assign(c.row, { state: 'done', result: 'done' });
+  assert.equal(actionStall(c.row), null);
+  const late = { remedy: 'installation-accept' as const, reason, outcome: 'applied' as const, detail: 'granted', flows: ['installation-accept' as const] };
+  assert.equal(recordStallRemedy(c.work, c.row.id, late, 'graphyard-master', new Date(shift(at, 90_000))).remedy?.outcome, 'applied', 'a record landing after the row completed out of its run is kept');
+  assert.throws(() => recordStallRemedy(c.work, c.row.id, late, 'graphyard-master', new Date(shift(at, 120_000))), /already recorded for this unchanged run/);
+  assert.throws(() => recordStallRemedy(c.work, c.row.id, { ...late, reason: 'some other reason' }, 'graphyard-master', new Date(at)), /no longer stalled on the reason/);
+  assert.deepEqual(owedRemedies([c.work]), [], 'a completed row is owed nothing');
+  const d = stalledItem('GY-1587', 'dispatch', holdReason('GY-1587'), at);
+  d.row.history.push({ at: shift(at, 60_000), event: 'completed', requester: 'graphyard', executor: 'x', result: 'done', reason: 'done' }, { at: shift(at, 70_000), event: 'requested', requester: 'graphyard', executor: null, result: null, reason: 'again' });
+  assert.throws(() => recordStallRemedy(d.work, d.row.id, { ...late, reason: d.row.stall!.reason }, 'graphyard-master', new Date(shift(at, 90_000))), /no longer stalled on the reason/, 'only a completion that is the row\'s last event ended the run the record names');
 });
 
 // ---- AC-3 -----------------------------------------------------------------------------------------

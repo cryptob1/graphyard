@@ -125,18 +125,30 @@ export function standingRemedy(work: Pick<Work, 'actionQueue'>, id: string, reas
 }
 
 /**
+ * The stall a completed row's last event ended, or null. A remedy that clears the condition lets the
+ * held job resume, and its executor can complete the row before the loop's record of the remedy
+ * lands; the record still belongs to the run it ended (GY-1586).
+ */
+function endedStall(row: ActionRow) {
+  return row.state === 'done' && row.history.at(-1)?.event === 'completed' ? actionStall({ ...row, history: row.history.slice(0, -1) }) : null;
+}
+
+/**
  * Record one attempt of a loop-applied remedy on the open row it was applied for. Refused unless
- * the row is still stalled on the reason the remedy was applied for and no attempt is recorded for
- * that run yet: one record per unchanged run, whoever asks.
+ * the row is still stalled on the reason the remedy was applied for, or completed straight out of
+ * that run (`endedStall`), and no attempt is recorded for that run yet: one record per unchanged
+ * run, whoever asks.
  */
 export function recordStallRemedy(work: Work, id: string, input: Omit<RemedyRecord, 'at' | 'by'>, by: string, now: Date): ActionRow {
   const row = work.actionQueue?.actions.find(entry => entry.id === id);
   demand(row, 'Action is not open on this work item', 404);
-  const stall = actionStall(row!);
+  const live = actionStall(row!), stall = live ?? endedStall(row!);
   demand(stall && stall.reason === input.reason, 'The row is no longer stalled on the reason the remedy was applied for', 409);
   const bound = stallRemedy(input.reason);
   demand(bound?.applies === 'loop' && bound.kind === input.remedy, `The reason does not bind to the ${input.remedy} remedy`, 409);
-  demand(!standingRemedy(work, id, input.reason), 'A remedy is already recorded for this unchanged run', 409);
+  // The completion that ended the run would read as a fresh run to `standingRemedy`: the ended run's record is one made since it began.
+  const recorded = live ? standingRemedy(work, id, input.reason) : row!.remedy?.reason === input.reason && Date.parse(row!.remedy.at) >= Date.parse(stall!.since);
+  demand(!recorded, 'A remedy is already recorded for this unchanged run', 409);
   row!.remedy = { ...input, at: now.toISOString(), by };
   return row!;
 }
