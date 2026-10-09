@@ -286,6 +286,14 @@ export class SimulatedGitHub {
    */
   /** An approval's mechanical-nit count as the real adapter observes it (src/github.ts), when the day writes review bodies. */
   /** A change request's body and BLOCKING: findings as the real adapter observes them (GY-1118), when the day writes one. */
+  /** Every review a reviewer App dismissed (GY-1575): GitHub reports it DISMISSED from then on, and the reviewer judges its head again. */
+  dismissals: { key: string; reviewId: number; sha: string; message: string; at: number }[] = [];
+  dismiss(work: Pick<Work, 'submission' | 'candidate'>, reviewId: number, message: string) {
+    const pr = this.pr(work), review = pr.reviews.find(entry => entry.id === reviewId);
+    if (!review || review.state === 'DISMISSED') throw new Error(`GitHub refused to dismiss review ${reviewId} (422)`);
+    review.state = 'DISMISSED';
+    this.dismissals.push({ key: pr.key, reviewId, sha: review.sha, message, at: clock.now() });
+  }
   changeRequest(key: string, review: { id: number; sha: string; state: string; reviewer: string }): { body?: string; blocking?: string[] } {
     const body = review.state === 'CHANGES_REQUESTED' ? this.changeRequestBody?.(key, review) : null;
     return body ? { body, blocking: blockingFindings(body) } : {};
@@ -554,7 +562,7 @@ export class SimulatedGitHub {
       // The reviewer judges a head once CI reported on it; an item in `carriedOnly` is not asked
       // again for a Graphyard-authored base refresh, whose approval carries.
       const graphyardHead = this.carriedOnly.has(pr.key) && /^Graphyard /.test(this.commits.get(pr.head)?.message ?? '');
-      const reviewDue = ciDone && !graphyardHead && !this.withheld.has(pr.key) && now - pushedAt >= this.options.ciMs + this.options.reviewMs && !pr.reviews.some(review => review.sha === pr.head);
+      const reviewDue = ciDone && !graphyardHead && !this.withheld.has(pr.key) && now - pushedAt >= this.options.ciMs + this.options.reviewMs && !pr.reviews.some(review => review.sha === pr.head && review.state !== 'DISMISSED');
       if (reviewDue && now < (this.staleUntil.get(pr.key) ?? 0)) {
         if (!pr.reviews.some(review => review.sha === staleSha(pr.head))) pr.reviews.push({ reviewer: this.reviewer, sha: staleSha(pr.head), state: 'APPROVED', id: ++this.serial, submittedAt: new Date(now).toISOString() });
       } else if (reviewDue) {
@@ -712,7 +720,7 @@ export class SimulatedGitHub {
           candidate: { sha: pr.head, baseSha: pr.base, pr: pr.number, branch: pr.branch, author: pr.author, createdAt: new Date(pr.createdAt).toISOString() },
           checks,
           // GitHub's latest verdict per reviewer, and the id of every review, as the real adapter reports them.
-          reviews: [...new Map(pr.reviews.map(review => [review.reviewer, { ...review, ...world.mechanicalNits(pr.key, review), ...world.changeRequest(pr.key, review) }])).values()], reviewIds: pr.reviews.map(review => review.id),
+          reviews: [...new Map(pr.reviews.map(review => [review.reviewer, { ...review, ...world.mechanicalNits(pr.key, review), ...world.changeRequest(pr.key, review) }])).values()], reviewIds: pr.reviews.map(review => review.id), dismissedReviewIds: pr.reviews.filter(review => review.state === 'DISMISSED').map(review => review.id),
           // A reviewer App's verdict is read for the request the item is bound to, never for another.
           ...(pr.agentReview && work.reviewRequest?.commentId === pr.agentReview.requestId ? { agentReview: { ...pr.agentReview } } : {}),
           merged: !!pr.merged, mergeSha: pr.merged?.sha ?? null, mergedAt: pr.merged ? new Date(pr.merged.at).toISOString() : null,

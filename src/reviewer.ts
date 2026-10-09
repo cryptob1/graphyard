@@ -568,6 +568,45 @@ export function reviewRoundSection(sha: string, history?: ReviewHistory, rounds?
 }
 
 /**
+ * GY-1575 AC-2. The section of a re-review an approver's refusal of the head's capped rework asked
+ * for: the request the withdrawal posted (the refusal's reasoning, the follow-up items), so the
+ * reviewer lists those findings as FOLLOW-UP threads. A failed read of the decision history says so
+ * and points at the withdrawal message on the pull request, never reads as "no refusal".
+ */
+export type CappedRefusalContext = { request: string } | { failure: string };
+export function cappedRefusalSection(context: CappedRefusalContext | null | undefined) {
+  if (!context) return '';
+  if ('failure' in context) return `Graphyard could not read whether an independent approver refused this head's capped rework (${context.failure}). If this pull request shows a change request on this head that Graphyard withdrew after such a refusal, its withdrawal message is your request: list the findings it names as FOLLOW-UP threads, not as a change request. `;
+  return `An independent approver refused the capped rework this head's last change request asked for, and Graphyard withdrew that request and asks you to review the head again. Its request, verbatim: <<<${context.request}>>> `
+    + 'Judge the head afresh against its criteria. List each finding that refusal judged non-blocking as a FOLLOW-UP thread, naming the follow-up item filed for it when there is one, and do not request changes for it again; only a BLOCKING: finding the refusal did not judge holds this head. ';
+}
+
+/**
+ * The default read of that context for a launch (GY-1575): the item's decision history and its open
+ * items, read with the coordinator credential, once the item is past its review-round cap. The pure
+ * builder lives with the review-cap step that posts the same text (src/daemon/cycle-review-cap.ts),
+ * loaded on demand so this module takes on none of the loop's imports.
+ */
+export function readCappedRefusal(config: Pick<MasterConfig, 'url' | 'credentialFile' | 'reviewRoundCap' | 'reviewer'>, fetcher: typeof fetch = fetch) {
+  return async (work: Work, sha: string): Promise<CappedRefusalContext | null> => {
+    try {
+      const token = await readCredentialFile(config.credentialFile);
+      const read = async (path: string) => {
+        const response = await fetcher(`${config.url}/api/${path}`, { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(10_000) });
+        if (!response.ok) throw new Error(`GET /api/${path} answered ${response.status}`);
+        return response.json() as Promise<any>;
+      };
+      const { cappedRefusalRequest } = await import('./daemon/cycle-review-cap.js');
+      const history = ((await read(`work/${encodeURIComponent(work.id)}/decisions`)).decisions ?? []) as Parameters<typeof cappedRefusalRequest>[3];
+      // The open items, for the follow-ups the master filed, are read only once a refusal binds the head.
+      if (!cappedRefusalRequest(work, sha, config, history, [])) return null;
+      const request = cappedRefusalRequest(work, sha, config, history, await read('work') as Work[]);
+      return request ? { request } : null;
+    } catch (error) { return { failure: (error instanceof Error ? error.message : String(error)).split('\n')[0]!.slice(0, 300) }; }
+  };
+}
+
+/**
  * The paths whose changes run on every loop cycle, head and item (GY-404): the loop, the master,
  * the merge queue, the GitHub adapter and review-thread filing. A fault there passes the change's own
  * gates and appears only when the behaviour repeats, so the review asks what repetition does.
@@ -669,7 +708,7 @@ export async function coordinationCheckout(root: string, config: MasterConfig, k
  * its first parent, and says what becomes of its findings.
  */
 export interface ControlPlanePrompt { head: string; baseTip: string; postMerge?: { mergeSha: string } }
-export function reviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<Pick<MasterConfig, 'cliPath'>>, binding: Pick<ReviewBinding, 'key' | 'pr' | 'sha' | 'baseSha' | 'policyRevision'>, checkout?: SessionCheckout, threads?: { unresolved: LaunchThread[]; failure?: string; total?: number }, criteria?: { id: string; text: string }[], history?: ReviewHistory, documentation?: { obligation: DocumentationObligation; files?: readonly string[] | null }, research?: Pick<Work, 'key' | 'title' | 'description' | 'criteria' | 'researchBrief'> | null, roundsOrMemory?: ReviewRoundStatus | ProjectMemory | null, memory?: ProjectMemory | null, fresh?: FreshReadRecord | null, verification?: { maps: readonly VerificationMap[]; plannedFiles: readonly string[] } | null, plane?: ControlPlanePrompt | null) {
+export function reviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<Pick<MasterConfig, 'cliPath'>>, binding: Pick<ReviewBinding, 'key' | 'pr' | 'sha' | 'baseSha' | 'policyRevision'>, checkout?: SessionCheckout, threads?: { unresolved: LaunchThread[]; failure?: string; total?: number }, criteria?: { id: string; text: string }[], history?: ReviewHistory, documentation?: { obligation: DocumentationObligation; files?: readonly string[] | null }, research?: Pick<Work, 'key' | 'title' | 'description' | 'criteria' | 'researchBrief'> | null, roundsOrMemory?: ReviewRoundStatus | ProjectMemory | null, memory?: ProjectMemory | null, fresh?: FreshReadRecord | null, verification?: { maps: readonly VerificationMap[]; plannedFiles: readonly string[] } | null, plane?: ControlPlanePrompt | null, cappedRefusal?: CappedRefusalContext | null) {
   if (plane) return controlPlaneReviewPrompt(config, binding, plane, checkout, criteria, history, documentation, research, roundsOrMemory, memory, verification);
   let rounds: ReviewRoundStatus | undefined;
   if (roundsOrMemory && 'round' in roundsOrMemory && typeof roundsOrMemory.round === 'number') {
@@ -684,6 +723,7 @@ export function reviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<
     + (memorySection || '')
     + verificationMapDigest(verification?.maps, verification?.plannedFiles, 'reviewer')
     + reviewRoundSection(binding.sha, history, rounds)
+    + cappedRefusalSection(cappedRefusal)
     + criteriaRuleSection(binding.key, binding.sha, criteria)
     + findingClassificationSection()
     + (fresh ? freshReadSection(fresh, binding.sha) : '')
@@ -847,6 +887,8 @@ export async function launchReview(root: string, work: Work, profileName: string
   verificationMaps?: (root: string, baseBranch: string) => Promise<VerificationMap[]>;
   /** A post-merge review (GY-1525 AC-4): the delivered merge commit, judged against its first parent (read from the coordinator checkout when not given). */
   postMerge?: { mergeSha: string; baseTip?: string };
+  /** How an approver's refusal of the head's capped rework is read for the prompt (GY-1575); readCappedRefusal by default, none for a test launch that substitutes `mint` and not this. */
+  cappedRefusal?: (work: Work, sha: string) => Promise<CappedRefusalContext | null>;
   /** How a control-plane launch is registered with the control plane (POST /api/work/:id/review-launch); the coordinator credential by default. */
   registerLaunch?: (work: Work, launch: ControlPlaneLaunchInput) => Promise<{ launch: string }>;
 } = {}) {
@@ -1002,9 +1044,12 @@ export async function launchReview(root: string, work: Work, profileName: string
         pane = created.pane; tabId = created.tab;
         const memory = await readProjectMemory(root).catch(() => null);
         const maps = await (dependencies.verificationMaps ?? readVerificationMaps)(root, config.baseBranch).catch(() => []);
+        // Past the cap, a head whose capped rework an approver refused is re-reviewed with that refusal (GY-1575 AC-2).
+        const refusal = plane || !reviewerApp || !pastReviewCap(work, reviewRoundCapOf(config)) ? null
+          : await (dependencies.cappedRefusal ?? (dependencies.mint ? async () => null : readCappedRefusal(config)))(work, binding.sha);
         // The request is the session's own first message, on the runtime's command line (GY-93), read
         // from the request file in the session's checkout so the typed line stays short (GY-121).
-        ({ delivery, consent } = await startAgentSession(agentName, launch.kind!, created.pane, [...launch.args, ...harness.args], reviewPrompt(config, binding, checkout, { unresolved: listed, total: unresolved.length, failure: threadReadFailure }, work.criteria, reservation.record.reviewRound, work.documentation ? { obligation: work.documentation, files: work.observation?.candidate.sha === binding.sha ? work.observation.files : null } : undefined, work, reviewRoundStatus(work, reviewRoundCapOf(config)), memory, reservation.record.freshRead, { maps, plannedFiles: work.plannedFiles ?? [] }, plane ? { head: binding.sha, baseTip: binding.baseSha, ...(postMerge ? { postMerge: { mergeSha: postMerge.mergeSha } } : {}) } : null), dependencies.run, { ...dependencies.prompt, ...dependencies.start, timeoutMs: dependencies.start?.timeoutMs ?? launchStartMs(config), directory: checkout.directory, cwd: checkout.directory, environment, ownGitHubCredential: true, role: harness.role, contract: launch.contract }));
+        ({ delivery, consent } = await startAgentSession(agentName, launch.kind!, created.pane, [...launch.args, ...harness.args], reviewPrompt(config, binding, checkout, { unresolved: listed, total: unresolved.length, failure: threadReadFailure }, work.criteria, reservation.record.reviewRound, work.documentation ? { obligation: work.documentation, files: work.observation?.candidate.sha === binding.sha ? work.observation.files : null } : undefined, work, reviewRoundStatus(work, reviewRoundCapOf(config)), memory, reservation.record.freshRead, { maps, plannedFiles: work.plannedFiles ?? [] }, plane ? { head: binding.sha, baseTip: binding.baseSha, ...(postMerge ? { postMerge: { mergeSha: postMerge.mergeSha } } : {}) } : null, refusal), dependencies.run, { ...dependencies.prompt, ...dependencies.start, timeoutMs: dependencies.start?.timeoutMs ?? launchStartMs(config), directory: checkout.directory, cwd: checkout.directory, environment, ownGitHubCredential: true, role: harness.role, contract: launch.contract }));
       } catch (error) {
         // A launch that never became a session leaves no checkout behind.
         await discard();
