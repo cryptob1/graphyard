@@ -5,7 +5,12 @@ import { existsSync } from 'node:fs';
 import { chmod, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { approverSessionName, atomicPrivateWrite, loadMasterConfig, runAutonomyCommand, setupMaster, type MasterConfig } from '../src/master.js';
+import { approverSessionName, atomicPrivateWrite, loadMasterConfig, runAutonomyCommand, setupMaster, type HerdrAgent, type MasterConfig } from '../src/master.js';
+import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
+import { approvalWatchSchema } from '../src/daemon/state.js';
+import { handWatchPrefix } from '../src/daemon/decisions.js';
+import { terminalDecisions } from '../src/cli/decision-report.js';
+import { launchStartMs } from '../src/master/launch.js';
 // A namespace import, so the base exercise (where approverLaunchesFile does not exist) loads the file and fails the cases.
 import * as autonomy from '../src/master/autonomy.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
@@ -153,4 +158,156 @@ test('unit:approver-launch-record-writable — the launch record is written unde
   // Checkout records past a day are aged out on read, since that file is rewritten only on failover.
   await writeFile(checkoutFile, JSON.stringify([{ ...launch('gy-approver-old'), launchedAt: new Date(Date.now() - 2 * 86_400_000).toISOString() }]));
   assert.equal((await autonomy.readApproverLaunches(root, environment)).some(entry => entry.agentName === 'gy-approver-old'), false);
+});
+
+// GY-1598, 2026-10-09 19:34Z: the loop launched gy-approver-gy-1594-68c808bd, whose pane sat at an
+// empty Claude prompt with its request never run. master status called it a stall and named
+// `master approver GY-1594 DECISION`, which refused because the tab was still visible in Herdr; the
+// decision waited 11 minutes for the master to close the tab by hand. A same-named approver `done`,
+// or `idle` with a still screen, past its start bound by its launch record is now closed, with why,
+// and the launch goes on — from the loop and from the command master status names alike. Working,
+// blocked, idle with a moving screen, within the bound or of unknown age, it is kept and the
+// launch refuses, and status names that command only when it succeeds. One proof:
+// unit:approver-idle-stall-relaunch.
+
+/** A Herdr stub holding `panes`: a close removes the pane from every later list, the launch creates pane-new, and `screens` answers each screen read in turn. */
+function stubHerdr(panes: Set<string>, closed: string[], screens: (string | null)[] = []) {
+  return (_command: string, args: string[]): string => {
+    if (args[0] === 'tab' && args[1] === 'create') { panes.add('pane-new'); return JSON.stringify({ result: { root_pane: { pane_id: 'pane-new', tab_id: 'tab-new' } } }); }
+    if (args[0] === 'pane' && args[1] === 'close') { closed.push(args[2]!); panes.delete(args[2]!); return JSON.stringify({ result: {} }); }
+    if (args[0] === 'pane' && args[1] === 'list') return JSON.stringify({ result: { panes: [...panes].map(pane_id => ({ pane_id })) } });
+    if (args[0] === 'agent' && args[1] === 'read') { const screen = screens.length ? screens.shift()! : '❯ '; if (screen === null) throw new Error('pane_not_found'); return screen; }
+    return startedAtOnce(args) ?? JSON.stringify({ result: {} });
+  };
+}
+
+test('unit:approver-idle-stall-relaunch — an approver idle past its start bound with its request never run is closed and relaunched by the loop and by master approver, and a working one still refuses', async () => {
+  const { root, config, cleanup } = await boundCheckout('idle-approver');
+  const dataHome = await temporaryDirectory('idle-approver-data');
+  try {
+    await withDataHome(dataHome, async () => {
+      const work = item(), name = approverSessionName(work, decision);
+      const bound = launchStartMs(config);
+      const recordLaunch = (ageMs: number, pane = 'pane-old') => autonomy.saveApproverLaunch(root, { agentName: name, account: null, runtime: 'claude', session: null, launchedAt: new Date(Date.now() - ageMs).toISOString(), work: work.key, decision, pane });
+      const statusFor = (status: string): HerdrAgent => ({ name, pane_id: 'pane-old', agent: 'claude', agent_status: status });
+
+      // AC-1: the loop. Its watch of the decision holds no live session (its last launch did not
+      // stand), while the earlier session's tab sits done in Herdr past its start bound.
+      await recordLaunch(bound + 60_000);
+      const panes = new Set(['pane-old']), closed: string[] = [];
+      const herdr = stubHerdr(panes, closed);
+      const listed = (): HerdrAgent[] => [...panes].map(pane => pane === 'pane-old' ? statusFor('done') : { name, pane_id: pane, agent: 'claude', agent_status: 'working' });
+      const state = emptyDaemonState(config);
+      state.approvals[`${handWatchPrefix}${decision}`] = approvalWatchSchema.parse({ work: work.key, action: 'requirements', decision, requestedAt: new Date(Date.now() - 600_000).toISOString(), launches: 1 });
+      const loop: DaemonEffects = {
+        agents: listed, credentials: async () => ({}), snapshot: async () => ({ work: [work], now: new Date().toISOString() }),
+        closeSession: pane => { closed.push(pane); panes.delete(pane); }, dispatch: async () => {}, requestProof: () => {}, requestSmoke: () => {}, persist: async () => {},
+        observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date().toISOString(), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {},
+        decisions: async () => ({ decisions: [{ id: decision, action: 'requirements', state: 'requested', input: {}, approvedBy: null, requestedAt: new Date(Date.now() - 600_000).toISOString() }] }),
+        approverLaunches: () => autonomy.readApproverLaunches(root),
+        // The loop's approver effect: the real launcher against what Herdr lists now.
+        approver: async (subject, id) => { const launched = await autonomy.launchApprover(root, subject, id, 'claude', { agents: listed(), available: true }, herdr, {}, async () => ({})); return { agentName: launched.agentName, pane: launched.pane, runtime: launched.runtime, session: launched.session, ...(launched.replaced ? { replaced: launched.replaced } : {}) }; },
+      };
+      const result = await runCycle(config, state, loop, () => Date.now());
+      assert.deepEqual(closed, ['pane-old'], 'the idle session that never ran its request is closed within one cycle');
+      assert.ok(panes.has('pane-new'), `and a fresh approver is launched for the same decision: ${JSON.stringify(result.actions.map(action => action.detail))}`);
+      const launch = result.actions.find(action => action.kind === 'decision' && action.state === 'done' && action.detail.includes('launched independent approver session'));
+      assert.ok(launch, `the relaunch is recorded: ${JSON.stringify(result.actions.map(action => action.detail))}`);
+      assert.match(launch.detail, new RegExp(`closed approver session ${name} \\(pane pane-old\\): done in Herdr \\d+s after its launch, past the ${bound / 1000}s start bound without running its request; launched independent approver session ${name}`), 'with why the old session was closed');
+      assert.equal(state.approvals[`${handWatchPrefix}${decision}`]?.agentName, name);
+
+      // AC-2: master status names the stall and the command that answers it, and that command
+      // succeeds in the state it describes: it closes the done session of the same name first.
+      const report = async (ageMs: number | null) => {
+        const records = await autonomy.readApproverLaunches(root);
+        return terminalDecisions(async () => ({ decisions: [{ id: decision, action: 'requirements', state: 'requested', requestedAt: new Date(Date.now() - 660_000).toISOString() }] }),
+          [{ id: work.id, key: work.key, stage: 'build' }], { approvals: [], runtime: { available: true, agents: [statusFor('done')] }, now: Date.now(),
+            starts: { records: ageMs === null ? [] : records, boundMs: bound } });
+      };
+      const command = (agents: HerdrAgent[]) => runAutonomyCommand(root, config, 'approver', [work.key, decision, 'claude'], {
+        coordinator: async () => ({ work: [work], now: new Date().toISOString() }), readSecret: async () => '', agents: () => agents, daemonLock: async () => null, runtime: herdr, mutate: async () => ({}),
+      }) as Promise<{ agentName: string; pane: string | null; replaced?: string }>;
+      const reset = () => { panes.clear(); panes.add('pane-old'); closed.length = 0; };
+      reset(); await recordLaunch(bound + 60_000);
+      const stall = (await report(bound + 60_000)).attentionItems.find(entry => entry.text.includes(decision));
+      assert.match(stall?.text ?? '', new RegExp(`approver session ${name} sits done in Herdr past its start bound and recorded no outcome — a stall`));
+      assert.match(JSON.stringify(stall), new RegExp(`"graphyard master approver ${work.key} ${decision} \\[AGENT_KIND\\] closes ${name} and puts it to a fresh approver"`));
+      const relaunched = await command([statusFor('done')]);
+      assert.deepEqual(closed, ['pane-old'], 'master approver closes the done, never-started session');
+      assert.equal(relaunched.pane, 'pane-new');
+      assert.match(relaunched.replaced ?? '', /closed approver session .* without running its request/);
+
+      // A session launched seconds ago for a decision requested eleven minutes ago is within its
+      // start bound: status raises no stall for it, and the command refuses it alike.
+      reset(); await recordLaunch(5_000);
+      assert.equal((await report(5_000)).attentionItems.some(entry => entry.text.includes(decision)), false, 'a done session within its start bound is no stall yet');
+      await assert.rejects(command([statusFor('done')]), /let it finish or close it first \(it is within its \d+s start bound until /);
+      // With no launch record its age is unknown: the command refuses, and status names the pane to close first, not the command alone.
+      const unknown = (await report(null)).attentionItems.find(entry => entry.text.includes(decision));
+      assert.match(unknown?.text ?? '', /sits done in Herdr, but it has no launch record bound to its pane, so its age is unknown/);
+      assert.match(JSON.stringify(unknown), /herdr pane close pane-old \(master approver refuses it while it has no launch record bound to its pane, so its age is unknown\), then graphyard master approver/);
+      assert.deepEqual(closed, [], 'nothing was closed under a session within its bound');
+
+      // An idle session is judged by status on the same verdict and screen reading as the command: idle at a still screen past
+      // its bound is a stall whose named command closes it and launches; idle with a moving or unread screen is at work or
+      // unknown, so status raises nothing and the command refuses it alike.
+      const reportIdle = async (screens: (string | null)[]) => terminalDecisions(async () => ({ decisions: [{ id: decision, action: 'requirements', state: 'requested', requestedAt: new Date(Date.now() - 660_000).toISOString() }] }),
+        [{ id: work.id, key: work.key, stage: 'build' }], { approvals: [], runtime: { available: true, agents: [statusFor('idle')] }, now: Date.now(),
+          starts: { records: await autonomy.readApproverLaunches(root), boundMs: bound, pauseMs: 0, read: async () => { const screen = screens.shift(); return screen === undefined ? null : screen; } } });
+      reset(); await recordLaunch(bound + 60_000);
+      const idleStall = (await reportIdle(['╭─\n│ > \n╰─', '╭─\n│ > \n╰─'])).attentionItems.find(entry => entry.text.includes(decision));
+      assert.match(idleStall?.text ?? '', new RegExp(`approver session ${name} sits idle at a still screen in Herdr past its start bound and recorded no outcome — a stall`));
+      assert.match(JSON.stringify(idleStall), new RegExp(`"graphyard master approver ${work.key} ${decision} \\[AGENT_KIND\\] closes ${name} and puts it to a fresh approver"`));
+      const idleRelaunch = await autonomy.launchApprover(root, work, decision, 'claude', { agents: [statusFor('idle')], available: true }, stubHerdr(panes, closed, ['╭─\n│ > \n╰─', '╭─\n│ > \n╰─']), {}, async () => ({}), { screenPauseMs: 0 });
+      assert.deepEqual(closed, ['pane-old'], 'the command status names closes the idle session it described');
+      assert.equal(idleRelaunch.pane, 'pane-new');
+      // The launcher records the pane it launched into, so the next judgement of that session is bound to it.
+      assert.equal((await autonomy.readApproverLaunches(root)).findLast(entry => entry.agentName === name)?.pane, 'pane-new');
+      for (const screens of [['⏺ Bash(npm test)\n  ⎿ running 1s', '⏺ Bash(npm test)\n  ⎿ running 2s'], [null, null]]) {
+        reset(); await recordLaunch(bound + 60_000);
+        assert.equal((await reportIdle([...screens])).attentionItems.some(entry => entry.text.includes(decision)), false, `an idle session whose screen is ${screens[0] === null ? 'unread' : 'moving'} is no stall`);
+      }
+
+      // It still refuses while that session is working, blocked at a tool call, idle with a moving
+      // screen (a long command), idle with a screen Herdr cannot read, within its bound, or of unknown age.
+      const refusals: [string, number | null, (string | null)[], RegExp][] = [
+        ['working', bound + 60_000, [], /\(it is working\)/],
+        ['blocked', bound + 60_000, [], /\(it is blocked at a tool call or question, so it ran its request\)/],
+        ['idle', bound + 60_000, ['⏺ Bash(npm test)\n  ⎿ running 1s', '⏺ Bash(npm test)\n  ⎿ running 2s'], /\(it is idle with a screen that is still changing, as while a long command runs\)/],
+        ['idle', bound + 60_000, [null, null], /\(it is idle with a screen that Herdr could not read\)/],
+        ['idle', 5_000, [], /\(it is within its \d+s start bound until /],
+      ];
+      for (const [status, ageMs, screens, why] of refusals) {
+        reset(); if (ageMs !== null) await recordLaunch(ageMs);
+        const run = stubHerdr(panes, closed, [...screens]);
+        await assert.rejects(autonomy.launchApprover(root, work, decision, 'claude', { agents: [statusFor(status)], available: true }, run, {}, async () => ({}), { screenPauseMs: 0 }), why);
+        assert.deepEqual(closed, [], `a ${status} session is never closed under it`);
+      }
+      // A silent invocation (a tool waiting on the network, output buffered) leaves an idle screen still after the request ran: a
+      // screen that names the decision, or one fuller than a runtime's start, is at work. Status raises nothing and the command refuses.
+      const silent = `❯ You are the independent Graphyard approver. Judge decision ${decision} on ${work.key}\n⏺ Bash(graphyard master decisions ${work.key})\n  ⎿ Running…`;
+      const scrolled = Array.from({ length: 60 }, (_, line) => `⏺ read line ${line} of the pull request`).join('\n');
+      for (const screen of [silent, scrolled]) {
+        reset(); await recordLaunch(bound + 60_000);
+        assert.equal((await reportIdle([screen, screen])).attentionItems.some(entry => entry.text.includes(decision)), false, 'an idle session whose still screen shows its request ran is no stall');
+        await assert.rejects(autonomy.launchApprover(root, work, decision, 'claude', { agents: [statusFor('idle')], available: true }, stubHerdr(panes, closed, [screen, screen]), {}, async () => ({}), { screenPauseMs: 0 }),
+          /\(it is idle with a screen that shows its request ran, as while a silent command waits\)/);
+        assert.deepEqual(closed, [], 'a silently working session is never closed under it');
+      }
+      // A launch whose record could not be written leaves the previous same-named record, of another pane and well past the bound:
+      // it dates nothing about the pane Herdr lists now, so the command refuses and status names the pane, never the close.
+      reset(); await recordLaunch(bound + 60_000, 'pane-earlier');
+      const stale = (await reportIdle(['╭─\n│ > \n╰─', '╭─\n│ > \n╰─'])).attentionItems.find(entry => entry.text.includes(decision));
+      assert.match(JSON.stringify(stale), /herdr pane close pane-old \(master approver refuses it while it has no launch record bound to its pane, so its age is unknown\)/);
+      await assert.rejects(autonomy.launchApprover(root, work, decision, 'claude', { agents: [statusFor('idle')], available: true }, stubHerdr(panes, closed, ['╭─\n│ > \n╰─', '╭─\n│ > \n╰─']), {}, async () => ({}), { screenPauseMs: 0 }),
+        /\(it has no launch record bound to its pane, so its age is unknown\)/);
+      assert.deepEqual(closed, [], 'a session dated only by an earlier pane\'s record is never closed');
+
+      // An idle session whose screen holds still across the pause and shows no trace of its request never ran it: closed and replaced.
+      reset(); await recordLaunch(bound + 60_000);
+      const still = await autonomy.launchApprover(root, work, decision, 'claude', { agents: [statusFor('idle')], available: true }, stubHerdr(panes, closed, ['╭─\n│ > \n╰─', '╭─\n│ > \n╰─']), {}, async () => ({}), { screenPauseMs: 0 });
+      assert.deepEqual(closed, ['pane-old']);
+      assert.match(still.replaced ?? '', /idle in Herdr \d+s after its launch, past the \d+s start bound without running its request, its screen still/);
+    });
+  } finally { await cleanup(); await rm(dataHome, { recursive: true, force: true }); }
 });

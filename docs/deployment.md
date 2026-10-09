@@ -3,7 +3,7 @@
 
 ## The one command
 
-One stateless container, Postgres: `node "$GRAPHYARD_CLI" install --provider railway --repo OWNER/REPO --apply` ([install](install.md)). Tag `vX.Y.Z` publishes `ghcr.io/cryptob1/graphyard:X.Y.Z`; alert on `/healthz?strict` (503 unhealthy).
+One stateless container, Postgres: `node "$GRAPHYARD_CLI" install --provider railway --repo OWNER/REPO --apply` ([install](install.md)). Tag `vX.Y.Z` publishes `ghcr.io/cryptob1/graphyard:X.Y.Z`; alert on `/healthz?strict` (503 unhealthy). CI and release-candidate runners pull Docker Hub images through the `mirror.gcr.io` mirror.
 
 ## Variables
 
@@ -45,7 +45,7 @@ Railway reports `<project> / production`. Startup takes `production.environment`
 
 ### Webhook delivery
 
-Hosted only (compose/local poll, no webhook): no `webhooks.lastDeliveryAt` an hour with a PR open → webhook broken. `webhooks.settingsUrl` → Advanced deliveries: none → inactive; connection error/404 → URL ≠ `https://YOUR-HOST/api/github/webhook`; 401 → secret ≠ `GITHUB_WEBHOOK_SECRET`. Fix, redeliver; re-check after redeploys.
+Hosted only: no `webhooks.lastDeliveryAt` an hour with a PR open → webhook broken. `webhooks.settingsUrl` → Advanced deliveries: none → inactive; connection error/404 → URL ≠ `https://YOUR-HOST/api/github/webhook`; 401 → secret ≠ `GITHUB_WEBHOOK_SECRET`. Fix, redeliver.
 
 ## Backup, upgrade, rollback
 
@@ -53,10 +53,10 @@ Hosted only (compose/local poll, no webhook): no `webhooks.lastDeliveryAt` an ho
 
 ## Manual fallback
 
-Set the variables table by hand; `node "$GRAPHYARD_CLI" github-setup https://YOUR-DOMAIN` and `doctor`.
+Set the variables table; `node "$GRAPHYARD_CLI" github-setup https://YOUR-DOMAIN` and `doctor`.
 
 - Compose: `cp .env.example .env`, replace secrets, `docker compose --profile full up -d`; TLS on 4310, Postgres private.
 - Kubernetes: `helm install graphyard deploy/helm/graphyard --set secrets.existingSecret=graphyard-credentials …`.
-- Railway: `railway init`, `railway add --database postgres`, variables, `railway up`. Production redeploy: no `init`; from clean tip, `railway link --project graphyard --environment production --service graphyard`, `railway up`.
+- Railway: `railway init`, `railway add --database postgres`, variables, `railway up`. Production redeploy (no `init`), clean tip: `railway link --project graphyard --environment production --service graphyard`, `railway up`.
 - Existing installs: `graphyard master setup` plans variables saved credentials derive; `--apply` sets them (Railway: `variable set --stdin`), audited in `.graphyard/setup-audit.jsonl`. No install record: `--provider railway --service graphyard --link-dir DIR`. `park` refuses host-doable asks (repository gh login administers, derived variable, held credential).
 - Railway revert approver: `node scripts/provision-railway.mjs` sets `GRAPHYARD_REVERT_APPROVER_*` from `.graphyard/revert-approver.json` (0600) or `--revert-approver-stdin` (`--revert-approver-only`: only those). Redeploy; `--verify` exits 0 once the live guard names it.
