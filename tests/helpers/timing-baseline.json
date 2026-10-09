@@ -647,7 +647,7 @@
     "tests/soak-main-watch.test.ts": 102000,
     "tests/soak-merge-writer.test.ts": 4000,
     "tests/soak-reclaim-refusal.test.ts": 2659,
-    "tests/soak-review.test.ts": 47617,
+    "tests/soak-review.test.ts": 68000,
     "tests/soak-sessions.test.ts": 162500,
     "tests/soak-shadow-gate.test.ts": 5943,
     "tests/soak-supervised.test.ts": 17000,
