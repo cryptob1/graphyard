@@ -100,12 +100,14 @@ export const trialTemporaryRoot = (sessionDirectory: string, roots: readonly str
 /**
  * The folder a trial's short checkout is made in (GY-1565): the first of `roots` that passes the
  * managed worktree root's own guard (`verifyWorktreeRoot`: durable storage, not a tmpfs, with
- * `minFreeBytes` free), so a checkout and its `npm ci` tree never fill a memory-backed /tmp; null
+ * `minFreeBytes` free), so a checkout and its `npm ci` tree never fill a memory-backed /tmp, and
+ * that no stray node_modules, .git or package.json sits in or above (`lookupPoisoned`), so a module
+ * the checkout's own install lacks never resolves upward into a durable host /tmp's stray tree; null
  * when none does, and the checkout stays in the managed session directory.
  */
 export async function trialCheckoutRoot(roots: readonly string[], minFreeBytes: number, probe?: FilesystemProbe): Promise<string | null> {
   for (const root of roots) {
-    if (!existsSync(root)) continue;
+    if (!existsSync(root) || lookupPoisoned(root)) continue;
     try { await verifyWorktreeRoot(root, { minFreeBytes, ...(probe ? { probe } : {}) }); return root; } catch { /* the next root */ }
   }
   return null;

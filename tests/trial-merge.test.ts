@@ -271,15 +271,19 @@ test('unit:trial-tmpdir-isolated — the trial child gets a fresh, empty, short 
   // The clean candidate is clean unless the host's own tmp above it is poisoned, as vishrog's is: then the session directory.
   const usable = !lookupPoisoned(clean);
   assert.equal(trialTemporaryRoot('/session', [shared, clean]), usable ? clean : '/session');
-  // The checkout goes only where the managed worktree root\'s guard would let it: never a tmpfs, never a volume short of room.
+  // The checkout goes only where the managed worktree root\'s guard would let it: never a tmpfs, never a volume short of room,
+  // and never a root a stray node_modules, .git or package.json sits in or above, durable or not.
+  const near = await temporaryDirectory('trial-near-tmp', tmpdir());
   const durable: FilesystemProbe = async path => ({ probed: path, volatile: null, freeBytes: null });
   const memory: FilesystemProbe = async path => ({ probed: path, volatile: path === clean ? 'tmpfs' : null, freeBytes: null });
   const full: FilesystemProbe = async path => ({ probed: path, volatile: null, freeBytes: path === clean ? 1e6 : 1e12 });
   const tmpfs: FilesystemProbe = async path => ({ probed: path, volatile: 'tmpfs', freeBytes: null });
-  assert.equal(await trialCheckoutRoot([clean, shared], 2e9, durable), clean);
-  assert.equal(await trialCheckoutRoot([clean, shared], 2e9, memory), shared, 'a tmpfs is passed over');
-  assert.equal(await trialCheckoutRoot([clean, shared], 2e9, full), shared, 'so is a volume below the minimum free');
-  assert.equal(await trialCheckoutRoot([clean], 2e9, memory), null, 'none: the checkout stays in the managed session directory');
+  assert.equal(await trialCheckoutRoot([clean, shared], 2e9, durable), usable ? clean : null);
+  assert.equal(await trialCheckoutRoot([shared, clean], 2e9, durable), usable ? clean : null, 'a poisoned root is passed over though it is durable with room');
+  assert.equal(await trialCheckoutRoot([shared], 2e9, durable), null, 'a durable host /tmp holding a stray node_modules: the checkout stays in the managed session directory');
+  assert.equal(await trialCheckoutRoot([clean, near, shared], 2e9, memory), usable ? near : null, 'a tmpfs is passed over');
+  assert.equal(await trialCheckoutRoot([clean, near, shared], 2e9, full), usable ? near : null, 'so is a volume below the minimum free');
+  assert.equal(await trialCheckoutRoot([clean, shared], 2e9, memory), null, 'none: the checkout stays in the managed session directory');
   const host: NodeJS.ProcessEnv = { PATH: process.env.PATH!, TMPDIR: shared, TMP: shared, TEMP: shared };
   const repo = await fixture();
   const seen = (logTail: string) => JSON.parse(/ENV:(.*)/.exec(logTail)![1]!) as { tmpdir: string; tmpEntries: string[]; tmpVariables: string[]; cwd: string };
@@ -303,8 +307,10 @@ test('unit:trial-tmpdir-isolated — the trial child gets a fresh, empty, short 
     assert.ok(!child.tmpdir.startsWith(`${shared}/`), `the ${outcome} trial never runs in the poisoned tmp`);
     assert.ok(child.tmpdir.startsWith(usable ? `${clean}/${trialTemporaryPrefix}` : `${base}/`), `its tmpdir is made for it in the clean root: ${child.tmpdir}`);
     assert.deepEqual(child.tmpVariables, [child.tmpdir, child.tmpdir, child.tmpdir], 'TMPDIR, TMP and TEMP all name it');
-    // Its checkout is short beside it on durable storage, as CI's is, so no launch line the suite types outgrows its bound; else the session's own.
-    const near = probe === durable ? `${shared}/${trialCheckoutPrefix}` : `${base}/`;
+    // Its checkout is short beside it on durable storage, as CI's is, so no launch line the suite types outgrows its bound, never in the
+    // poisoned root though it is durable; else the session's own.
+    assert.ok(!child.cwd.startsWith(`${shared}/`), `the ${outcome} trial's checkout is never made in the poisoned tmp`);
+    const near = probe === durable && usable ? `${clean}/${trialCheckoutPrefix}` : `${base}/`;
     assert.ok(child.cwd.startsWith(near) && child.cwd.endsWith('/checkout'), `its checkout is made in ${near}: ${child.cwd}`);
     // npm, which runs the build, keeps node's compile cache in the tmpdir it is given; nothing else is there.
     assert.deepEqual(child.tmpEntries.filter(entry => entry !== 'node-compile-cache'), [], 'it is empty when the suite starts: no node_modules, no .git');
