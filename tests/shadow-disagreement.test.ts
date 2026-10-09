@@ -5,10 +5,10 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import EmbeddedPostgres from 'embedded-postgres';
-import { keepVerdicts, shadowGateSummary, shadowKeptVerdicts } from '../src/daemon/cycle-shadow.js';
+import { keepVerdicts, shadowGateSummary, shadowKeptVerdicts, shadowVerdictSchema } from '../src/daemon/cycle-shadow.js';
 import {
-  isPlaceholderVerdict, placeholderRunnerFailure, shadowDisagreementDetail, shadowGateAttention,
-  shadowExplanationPairsMax, shadowReportWithExplanations, type ShadowVerdict,
+  cursorVerdict, isPlaceholderVerdict, placeholderRunnerFailure, shadowDisagreementDetail, shadowGateAttention,
+  shadowExplanationPairsMax, trialCauseLength, trialFailureCause, shadowReportWithExplanations, type ShadowVerdict,
 } from '../src/merge-writer/shadow.js';
 import type { Work } from '../src/model.js';
 import { MergerSettings } from '../src/merger-mode.js';
@@ -356,4 +356,86 @@ test('integration:merger-applies-when-explained — POST /api/merger control-pla
   const back = await request(token(admin), 'merger', { merger: 'github', reason: 'Roll back; github never refused' });
   assert.equal(back.status, 200, JSON.stringify(back.body));
   assert.equal(back.body.merger, 'github');
+});
+
+/**
+ * GY-1564: GY-1535 head 77da3de0's shadow.verdict as the ledger records it (trial merge 953e1ac6 on
+ * c8c8c70e): build pass, ten failing files, and the log tail ending in the runner's summary.
+ */
+const gy1535 = {
+  head: '77da3de0b3866447cf5fac627474dfd5195ae531', baseTip: 'c8c8c70e6ff94282ebab98fd659264e9cf4e19db', mergeSha: '953e1ac6a610979bdeca5b008726e81df4d4cdeb',
+  tests: { passed: 490, files: 500, failed: [
+    'tests/approver-launch-record.test.ts', 'tests/graphyard-up.test.ts', 'tests/master-agent-envs.test.ts', 'tests/master-loop-resilience.test.ts',
+    'tests/registry-drives-launch.test.ts', 'tests/resource-fault-recurrence.test.ts', 'tests/resource-reading-moment.test.ts', 'tests/revert-recheck.test.ts',
+    'tests/unattended-cycle.test.ts', 'tests/worktree-reclaim.test.ts',
+  ] },
+  logTail: [
+    '✔ unit:zero-touch-onboarding — `graphyard up --agent --goal FILE` on a fresh repository reaches a merged first planned item (901.456929ms)',
+    'ℹ tests 115', 'ℹ pass 114', 'ℹ fail 1', '', '✖ failing tests:', '',
+    'test at tests/worktree-reclaim.test.ts:1:11072',
+    '✖ integration:worktree-dependency-reuse — a fresh attempt starts from a clean checkout of its exact head and shares one install instead of paying for a private copy (138.148351ms)',
+    '  AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal:',
+    '  + actual - expected', '  ', '  + []', '  - [', "  -   { how: 'mirrored', name: 'node_modules' }", '  - ]', '',
+    '[exit status 1]',
+  ].join('\n'),
+};
+
+test('unit:cycle-shadow-disagreement-explanation — the GY-1535 head 77da3de0 shadow-only-fail (trial merge 953e1ac6) names the failing test, file and error its trial record carries, from the cursor and from the ledger', async () => {
+  assert.equal(trialFailureCause(gy1535.logTail),
+    'integration:worktree-dependency-reuse (tests/worktree-reclaim.test.ts): AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal:');
+  // The loop's cursor drops the log but keeps the cause, and its strict schema accepts it.
+  const kept = cursorVerdict({ ...verdict('GY-1535', { head: gy1535.head, baseTip: gy1535.baseTip, mergeSha: gy1535.mergeSha, tests: gy1535.tests }), logTail: gy1535.logTail });
+  assert.equal('logTail' in kept, false);
+  assert.match(kept.cause!, /integration:worktree-dependency-reuse/);
+  assert.equal(shadowVerdictSchema.safeParse(kept).success, true);
+  const line = shadowDisagreementDetail(kept);
+  assert.match(line, /GY-1535 head 77da3de0b3866447cf5fac627474dfd5195ae531 is shadow-only-fail \(trial merge 953e1ac6a610979bdeca5b008726e81df4d4cdeb\)/);
+  assert.match(line, /10 of 500 test files failed in the trial \(tests\/approver-launch-record\.test\.ts, .* and 5 more\)/);
+  assert.match(line, /the trial log names integration:worktree-dependency-reuse \(tests\/worktree-reclaim\.test\.ts\): AssertionError/);
+  assert.doesNotMatch(line, /merged it\. Report only/, 'not the bare line');
+  // The ledger's standing list carries the cause read from the recorded log, and master status's
+  // attention names it even when the cursor's older copy of the pair has none.
+  const { id, key } = await deliveredDisagreement(gy1535.head, gy1535.baseTip, gy1535.tests, { logTail: gy1535.logTail, trialMergeSha: gy1535.mergeSha });
+  const listing = await request(token(reader), 'shadow-disagreements');
+  const standing = (listing.body.disagreements as { key: string; cause: string | null }[]).find(entry => entry.key === key)!;
+  assert.match(standing.cause!, /^integration:worktree-dependency-reuse \(tests\/worktree-reclaim\.test\.ts\)/);
+  const cursorCopy = verdict(key, { head: gy1535.head, baseTip: gy1535.baseTip, mergeSha: gy1535.mergeSha, tests: gy1535.tests, at: iso(start + 1) });
+  const ledgerCopy = verdict(key, { head: gy1535.head, baseTip: gy1535.baseTip, mergeSha: gy1535.mergeSha, tests: gy1535.tests, at: iso(0), cause: standing.cause! });
+  const [attention] = shadowGateAttention([cursorCopy, ledgerCopy]);
+  assert.match(attention!.text, /the trial log names integration:worktree-dependency-reuse/);
+  await request(token(admin), `work/${id}/shadow-explain`, { head: gy1535.head, baseTip: gy1535.baseTip, reason: 'GY-1564 test cleanup' });
+});
+
+test('unit:merger-mode-refuses-unexplained-disagreement — a shadow-only-fail whose record names no cause says the evidence is missing, and the control-plane switch stays refused until it is explained', async () => {
+  for (const logTail of [undefined, 'some output\n[exit status 1]']) {
+    const line = shadowDisagreementDetail({ ...verdict('GY-9', { tests: { passed: 3, failed: ['tests/x.test.ts'], files: 4 } }), ...(logTail ? { logTail } : {}) });
+    assert.match(line, /1 of 4 test files failed in the trial \(tests\/x\.test\.ts\); the record names no failing cause .* missing evidence/);
+  }
+  assert.match(shadowDisagreementDetail(verdict('GY-9', { conflict: ['src/a.ts'] })), /the trial merge conflicted on src\/a\.ts; the record names no failing cause/);
+  assert.match(shadowDisagreementDetail({ ...verdict('GY-9', { build: 'fail', tests: { passed: 0, failed: [], files: 0 } }), logTail: "src/a.ts(1,1): error TS2304: Cannot find name 'x'." }),
+    /the trial build failed; the trial log names src\/a\.ts\(1,1\): error TS2304/);
+  assert.ok(trialFailureCause(`✖ failing tests:\n${Array.from({ length: 20 }, (_, n) => `✖ unit:case-${n} — ${'x'.repeat(40)}`).join('\n')}`)!.length <= trialCauseLength);
+  const head = sha('no-cause-head'), baseTip = sha('no-cause-tip');
+  const { id, key } = await deliveredDisagreement(head, baseTip, { passed: 1, failed: ['tests/q.test.ts'], files: 2 });
+  const listing = await request(token(reader), 'shadow-disagreements');
+  assert.equal((listing.body.disagreements as { key: string; cause: string | null }[]).find(entry => entry.key === key)!.cause, null);
+  const refused = await request(token(admin), 'merger', { merger: 'control-plane', reason: 'No cause recorded' });
+  assert.equal(refused.status, 409, JSON.stringify(refused.body));
+  assert.match(JSON.stringify(refused.body), new RegExp(`unexplained shadow disagreements stand:.*${key}`));
+  await request(token(admin), `work/${id}/shadow-explain`, { head, baseTip, reason: 'GY-1564 test cleanup' });
+});
+
+test('unit:cycle-shadow-record-regression — GY-1523 (9b30324f/b02f268d) and GY-1549 (d205ce97/37df2a95) still name the placeholder-runner cause, and agree-fail verdicts raise no attention', () => {
+  for (const entry of [
+    { key: 'GY-1523', head: '9b30324fc4f3b10d1b74c63efcb35df6d5f05071', files: 486, mergeSha: 'b02f268d48a8f859434ecb65d62831133d8bb3d1' },
+    { key: 'GY-1549', head: 'd205ce97ea6e5ee3d6e5e083d14eefccd7b0ff0b', files: 462, mergeSha: '37df2a951778f41b27b5ed30f797b2580f6a4d2d' },
+  ]) {
+    const recorded = verdict(entry.key, { head: entry.head, mergeSha: entry.mergeSha, tests: { passed: entry.files, failed: [placeholderRunnerFailure], files: entry.files } });
+    for (const line of [shadowDisagreementDetail(recorded), shadowDisagreementDetail(cursorVerdict({ ...recorded, logTail: gy1535.logTail }))]) {
+      assert.match(line, new RegExp(`${entry.key} head ${entry.head} is shadow-only-fail \\(trial merge ${entry.mergeSha}\\); the failure is the fabricated-runner-failure placeholder tests/helpers/run-tests\\.ts \\(pre-GY-1548`));
+    }
+  }
+  const agreeFail = verdict('GY-7', { outcome: 'agree-fail', logTail: gy1535.logTail });
+  assert.deepEqual(shadowGateAttention([agreeFail]), []);
+  assert.equal(cursorVerdict(agreeFail).outcome, 'agree-fail');
 });

@@ -6,7 +6,7 @@ import type { Work } from '../model.js';
 import { classifyRisk } from '../model/risk-class.js';
 import { shadowGateSettings } from '../master/merge-writer-settings.js';
 import { runTrial, trialMerge, trialNeedsLog, TrialCleanupError, TrialRunnerError, TrialTimeoutError, type TrialRun } from '../merge-writer/trial.js';
-import { judgedVerdicts, shadowDisagreement, shadowDisagreementDetail, shadowOutcomes, shadowDue, shadowExplanationPairsMax, shadowPairExplained, shadowReportWithExplanations, trialLogTailLength, type ShadowExplanationRef, type ShadowVerdict } from '../merge-writer/shadow.js';
+import { cursorVerdict, judgedVerdicts, shadowDisagreement, shadowDisagreementDetail, shadowOutcomes, shadowDue, shadowExplanationPairsMax, shadowPairExplained, shadowReportWithExplanations, trialCauseLength, trialLogTailLength, type ShadowExplanationRef, type ShadowVerdict } from '../merge-writer/shadow.js';
 import { storeAction, type DaemonState } from './state.js';
 import type { Cycle } from './cycle.js';
 
@@ -18,6 +18,7 @@ export const shadowVerdictSchema = z.object({
   tests: z.object({ passed: z.number().int().min(0), failed: z.array(z.string().max(300)).max(100), files: z.number().int().min(0) }).strict(),
   conflict: z.array(z.string().max(500)).max(100), durationMs: z.number().int().min(0), at: z.string().max(64), outcome: z.enum(shadowOutcomes).default('pending'),
   delivered: z.object({ mergeSha: z.string().max(64) }).strict().optional(),
+  cause: z.string().max(trialCauseLength).optional(),
 }).strict();
 export const shadowStateSchema = z.array(shadowVerdictSchema).max(shadowKeptVerdicts);
 
@@ -185,8 +186,8 @@ export async function shadowStep(cycle: Cycle) {
     try {
       await reads.record(owed.work, owed.verdict);
       unrecorded.delete(state);
-      // The cursor keeps the verdict without its log: the recorded event holds the log, and the cursor stays small.
-      const { logTail: _recorded, ...kept } = owed.verdict;
+      // The cursor keeps the verdict without its log but with the cause it named (GY-1564): the recorded event holds the log, and the cursor stays small.
+      const kept = cursorVerdict(owed.verdict);
       state.shadow = keepVerdicts([...state.shadow, { ...kept, outcome: 'pending' as const }], snapshot.work);
       changed = true;
     } catch (error) {
