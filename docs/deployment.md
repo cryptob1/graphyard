@@ -33,7 +33,7 @@ A merge unserved five minutes after new `GRAPHYARD_BUILD_SHA` is `delivery.deplo
 
 Deliveries awaiting not-yet-due or validating [promotion](delivery.md) are skipped by release lag and the `loaded-revision` [resource](operations-reference.md#control-plane-resources).
 
-Post-deploy the loop records throughput in `.graphyard/measurements/throughput` (or `scripts/measure-throughput.mjs --record`), excluding master/operator-touched deliveries; idle skips unclaimed permission-refused superseded rows. ≥20 all excluded, or a 48h-escalated miss over ≥10 admitted (once/release), raises `escalation:throughput:GY-N:REV` on a filed owner.
+Post-deploy the loop records throughput in `.graphyard/measurements/throughput` (`scripts/measure-throughput.mjs --record` too), excluding master/operator-touched deliveries; idle omits unclaimed superseded rows refused 403-missing-permission. ≥20 all excluded, or ≥10 admitted missing 48h+, escalates once/release (stall answers aside) on its owner.
 
 ### Deployment incident
 

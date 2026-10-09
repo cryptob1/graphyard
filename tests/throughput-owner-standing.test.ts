@@ -376,6 +376,58 @@ test('integration:throughput-escalation-answerable — an escalated claim-missed
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
+test('integration:throughput-escalation-answerable — an answered population stall on the release never stands in for the escalated miss: once deliveries accumulate and the budgets miss past the escalation bound, the open successor is asked that distinct decision, both when the stall was answered in an earlier cycle and in the cycle that closes its owner', async () => {
+  const { throughputEscalatedAt, throughputEscalationKey } = await import('../src/daemon/cycle-delivery.js');
+  const { throughputAnsweredAt, throughputOwnerClosure, throughputStatus } = await import('../src/throughput.js');
+  const stallText = 'needs decision on GY-1470: session-free deliveries cannot accumulate — 0 admitted of 20 deliveries in the window. Decide whether the population rule or the coordination that leaves these fingerprints changes; the budgets stay as GY-87 stated them';
+  // The stall was answered in an earlier cycle: its owner is closed with a stall's answer on this release.
+  {
+    const directory = await temporaryDirectory('throughput-stall-then-miss');
+    try {
+      const clock = { now: base + 3 * 24 * 60 * minute };
+      const answeredStall = { ...openOwner('GY-1470', 2), stage: 'done' } as Work;
+      answeredStall.closure = { kind: 'obsolete', reason: throughputOwnerClosure(answeredStall, { revision, verdict: 'unverified' }, 1)!, ref: null, by: 'operator-agent', at: new Date(clock.now - 60 * minute).toISOString(), from: 'backlog' } as Work['closure'];
+      assert.equal(throughputAnsweredAt([answeredStall], revision), null, 'an answered stall is not an answered escalated miss');
+      const owner = openOwner('GY-1471');
+      const work: Work[] = [...accumulated(staleRework(10, null)), answeredStall, owner];
+      const { master, state, effects, filed } = await convergenceLoop(directory, work, clock);
+      await runCycle(master, state, effects, () => clock.now);
+      assert.equal(filed.length, 0);
+      assert.equal(state.actions[throughputEscalationKey('GY-1471', 1)]?.state, 'done', 'the escalated miss is asked on the open successor');
+      assert.match(state.actions[throughputEscalationKey('GY-1471', 1)]!.detail, /over an accumulating population — 10 admitted/);
+      const status = await throughputStatus(directory, { release: { version: '1', revision } }, work, clock.now);
+      assert.equal(status.stall?.cause, 'escalated-miss');
+      assert.match(status.attention!.next, /graphyard master decide GY-1471 requirements/);
+      // Its answer closes the owner naming the escalated miss, which then suppresses a second ask on this release.
+      owner.policyRevision = 2;
+      clock.now += minute;
+      await runCycle(master, state, effects, () => clock.now);
+      assert.match(owner.closure!.reason, /raised at its requirements revision 1 on an escalated budget miss\) was answered by its requirements revision 2/);
+      assert.equal(throughputAnsweredAt(work, revision), Date.parse(owner.closure!.at));
+      assert.equal(filed.length, 1);
+      assert.equal(throughputEscalatedAt(state.actions, filed[0]!), null, 'the answered escalated miss is not asked again');
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  }
+  // The stall is answered in this very cycle: the owner closes on the stall's answer and its successor is asked the escalated miss.
+  {
+    const directory = await temporaryDirectory('throughput-stall-then-miss-same-cycle');
+    try {
+      const clock = { now: base + 3 * 24 * 60 * minute };
+      const owner = openOwner('GY-1471', 2);
+      const work: Work[] = [...accumulated(staleRework(10, null)), owner];
+      const { master, state, effects, filed, closed } = await convergenceLoop(directory, work, clock);
+      state.actions[throughputEscalationKey('GY-1471', 1)] = { kind: 'escalation', work: 'GY-1471', principal: null, state: 'done', detail: stallText, attempts: 1, epoch: null, cycle: 0, at: new Date(clock.now - 2 * 60 * minute).toISOString() };
+      await runCycle(master, state, effects, () => clock.now);
+      assert.deepEqual(closed, ['GY-1471'], 'the stall\'s answer closes its owner');
+      assert.match(owner.closure!.reason, /raised at its requirements revision 1\) was answered by its requirements revision 2/, 'named as a stall\'s answer');
+      assert.equal(filed.length, 1, 'the release stays owned');
+      const successor = filed[0]!;
+      assert.equal(state.actions[throughputEscalationKey(successor.key, successor.policyRevision)]?.state, 'done', 'the distinct escalated miss is asked on the successor in the same cycle');
+      assert.match(state.actions[throughputEscalationKey(successor.key, successor.policyRevision)]!.detail, new RegExp(`needs decision on ${successor.key}: .*over an accumulating population`));
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  }
+});
+
 test('integration:throughput-owner-converges — after the fix the open owner reaches a closure path within one re-measure: a window whose only miss was GY-468\'s unrunnable superseded span verifies and the loop closes the owner, leaving no unowned unverified claim and no repeating escalation', async () => {
   const { recordThroughputMeasurement, throughputRemeasureMs, throughputStatus, readThroughputMeasurement } = await import('../src/throughput.js');
   const directory = await temporaryDirectory('throughput-owner-converges');

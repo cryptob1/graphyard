@@ -216,8 +216,14 @@ export function actionIdleSpans(row: Pick<ActionRow, 'requestedAt' | 'history' |
   return spans;
 }
 
-/** A refusal by the provider for a permission the installation lacks: no executor holding that installation can run the request. */
-const permissionRefusal = /\brefused: [^;]*\((?:401|403)\)|\blacks a permission\b/i;
+/**
+ * A provider refusal that itself establishes a permission the installation lacks: a 403 whose
+ * recorded reason names the missing grant (the preflight's `App … lacks …`, an installed App that
+ * `lacks a permission`, or GitHub's `Resource not accessible by integration`). No executor holding
+ * that installation can run the request. Any other 401/403 — a secondary rate limit, a rerun of a
+ * run still in progress, rejected credentials — is a refusal a later attempt can clear (GY-1587).
+ */
+const permissionRefusal = /\brefused: [^;]*\(403\).*?(?:\bApp \S+ lacks \S|\blacks a permission\b|\bResource not accessible by integration\b)/i;
 
 /**
  * Why no executor could have run this row, read from the row alone, or null when one could have
@@ -521,14 +527,19 @@ export function throughputOwnerItem(revision: string, admitted: number | null) {
   };
 }
 
+/** How an owner's closure reason names an answered escalated miss (`throughputOwnerClosure`, GY-1587). */
+const escalatedMissAnswer = ' on an escalated budget miss';
+
 /**
  * Why the loop closes the owner now, or null while it must stay open: the newest answer for the
  * serving release verified the claim, or its needs-decision was answered. Nothing else closes it,
  * so a release that is still unverified always has an open owner.
  */
-export function throughputOwnerClosure(owner: Pick<Work, 'key' | 'policyRevision'>, serving: { revision: string; verdict: ThroughputReport['verdict'] | null }, raisedAt: number | null): string | null {
+export function throughputOwnerClosure(owner: Pick<Work, 'key' | 'policyRevision'>, serving: { revision: string; verdict: ThroughputReport['verdict'] | null }, raisedAt: number | null,
+  cause: ThroughputStall['cause'] = 'stall'): string | null {
   if (serving.verdict === 'verified') return `${throughputClaim.item}'s throughput claim verified on the serving release ${serving.revision}; the loop closes ${owner.key}, which owned that verification`;
-  if (throughputOwnerAnswered(owner, raisedAt)) return `${owner.key}'s needs-decision (raised at its requirements revision ${raisedAt}) was answered by its requirements revision ${owner.policyRevision}; the loop closes it, and files a second owner for ${serving.revision.slice(0, 12)} only while a measurement of it under the applied rule still shows a needs-decision standing, in this same cycle: the next release it measures unverified files a new one`;
+  // GY-1587: the reason names an escalated miss it answered, so `throughputAnsweredAt` tells that answer from a stall's.
+  if (throughputOwnerAnswered(owner, raisedAt)) return `${owner.key}'s needs-decision (raised at its requirements revision ${raisedAt}${cause === 'escalated-miss' ? escalatedMissAnswer : ''}) was answered by its requirements revision ${owner.policyRevision}; the loop closes it, and files a second owner for ${serving.revision.slice(0, 12)} only while a measurement of it under the applied rule still shows a needs-decision standing, in this same cycle: the next release it measures unverified files a new one`;
   return null;
 }
 
@@ -538,7 +549,7 @@ export function throughputOwnerClosure(owner: Pick<Work, 'key' | 'policyRevision
  * successor's idempotency key names it, so one is filed per (release, answered revision) (GY-1467).
  */
 export function throughputOwnerAnsweredBy(owner: Pick<Work, 'closure'> | undefined): number | null {
-  const answered = /needs-decision \(raised at its requirements revision \d+\) was answered by its requirements revision (\d+)/.exec(owner?.closure?.reason ?? '');
+  const answered = /needs-decision \(raised at its requirements revision \d+(?: on an escalated budget miss)?\) was answered by its requirements revision (\d+)/.exec(owner?.closure?.reason ?? '');
   return answered ? Number(answered[1]) : null;
 }
 
@@ -636,14 +647,17 @@ export const throughputDecision = (report: ThroughputReport, pursuit: Pick<Throu
   throughputStall(report, owner) ?? throughputEscalatedMiss(report, pursuit, owner);
 
 /**
- * When a needs-decision on `revision` was last answered: the latest closure of an owner filed for
- * that release that the loop closed on its answer (`throughputOwnerAnsweredBy`), or null. An
- * escalated miss is asked once per release (GY-1587): after its answer the release stays owned by
- * the successor, which closes when a measurement verifies, and the next release asks afresh.
+ * When an escalated miss on `revision` was last answered: the latest closure of an owner filed for
+ * that release that the loop closed on the answer to an escalated-miss needs-decision
+ * (`throughputOwnerClosure` with that cause), or null. An escalated miss is asked once per release
+ * (GY-1587): after its answer the release stays owned by the successor, which closes when a
+ * measurement verifies, and the next release asks afresh. An answered stall is a different decision
+ * and never stands in for it: a population that accumulates after its stall was answered still has
+ * its escalated miss asked.
  */
 export function throughputAnsweredAt(work: readonly Pick<Work, 'title' | 'closure'>[], revision: string): number | null {
   const title = throughputOwnerItem(revision, null).title;
-  const answered = work.filter(item => item.title === title && throughputOwnerAnsweredBy(item) !== null).map(item => time(item.closure?.at)).filter((at): at is number => at !== null);
+  const answered = work.filter(item => item.title === title && throughputOwnerAnsweredBy(item) !== null && (item.closure?.reason ?? '').includes(escalatedMissAnswer)).map(item => time(item.closure?.at)).filter((at): at is number => at !== null);
   return answered.length ? Math.max(...answered) : null;
 }
 
@@ -666,10 +680,14 @@ export const supersededActionExclusion = /^its \S+ action was superseded before 
 /** A delivery's exclusions as the settled rule judges them: the superseded control-plane family dropped (GY-1465). */
 export const settledExclusions = (exclusions: readonly string[]) => exclusions.filter(exclusion => !supersededActionExclusion.test(exclusion));
 
+const escalatedMissDecide = 'Decide whether the coordination that leaves the claim missing its budgets changes';
+/** What raised the needs-decision an escalation action records, read from its text (`throughputStallText`). */
+export const throughputDecisionCause = (detail: string | null | undefined): NonNullable<ThroughputStall['cause']> => detail?.includes(escalatedMissDecide) ? 'escalated-miss' : 'stall';
+
 /** The needs-decision as the escalation and the attention word it, asked on the owner item it names. */
 export function throughputStallText(stall: Omit<ThroughputStall, 'text'>) {
   const decide = stall.cause === 'escalated-miss'
-    ? `Decide whether the coordination that leaves the claim missing its budgets changes or ${throughputClaim.item}'s claim stands unverified on this release`
+    ? `${escalatedMissDecide} or ${throughputClaim.item}'s claim stands unverified on this release`
     : 'Decide whether the population rule or the coordination that leaves these fingerprints changes';
   return `needs decision on ${stall.owner ?? 'the item that owns the verification (the loop files it)'}: ${stall.finding}. `
     + `${decide}; the budgets stay as ${throughputClaim.item} stated them (measured ${stall.measuredAt})`;

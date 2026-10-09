@@ -322,6 +322,26 @@ test('unit:throughput-superseded-row-span — GY-468\'s superseded request-rewor
   assert.equal(unrunnableCause(supersededAfter('request-rework', at(12), 6 * minute, 'rerun: refused: GitHub POST … failed (502): bad gateway')), null);
   const timedOut = verifyThroughput(idleWindow(supersededAfter('request-rework', at(12), 6 * minute, 'the rerun timed out')), now, { deployed });
   assert.equal(timedOut.verdict, 'unverified');
+  // A 401/403 that does not itself establish a missing permission is one a later attempt clears:
+  // a secondary rate limit, a rerun of a run still in progress, rejected credentials, or a 403 whose
+  // preflight found nothing missing. Its row was runnable, and its wait fails the 5 min budget.
+  for (const runnable403 of [
+    'rerun: refused: GitHub POST /repos/cryptob1/graphyard/actions/runs/1/rerun-failed-jobs failed (403): secondary rate limit; retry later',
+    'rerun: refused: GitHub POST /repos/cryptob1/graphyard/actions/runs/1/rerun-failed-jobs failed (403) "This workflow is already running": the App permission preflight at 2026-09-28T06:00:00.000Z found no missing permission',
+    'rerun: refused: GitHub POST /repos/cryptob1/graphyard/actions/runs/1/rerun-failed-jobs failed (401): the App credentials were rejected; check GITHUB_APP_ID, GITHUB_INSTALLATION_ID and the private key',
+  ]) {
+    const rateLimited = supersededAfter('request-rework', at(12), 6 * minute, runnable403);
+    assert.equal(unrunnableCause(rateLimited), null, runnable403);
+    const missed = verifyThroughput(idleWindow(rateLimited), now, { deployed });
+    assert.equal(missed.verdict, 'unverified', runnable403);
+    assert.deepEqual(missed.shortfall!.missed.map(entry => entry.metric), ['idle-actionable'], runnable403);
+    assert.equal(missed.idle.maxMs, 6 * minute);
+  }
+  // The refusals that do establish the missing grant: the preflight's named shortfall and GitHub's own answer.
+  for (const missing of [
+    'rerun: refused: GitHub POST /repos/cryptob1/graphyard/actions/runs/1/rerun-failed-jobs failed (403) "Resource not accessible by integration": the App permission preflight at 2026-09-28T06:00:00.000Z found no missing permission',
+    'rerun: refused: GitHub POST /repos/cryptob1/graphyard/actions/runs/1/rerun-failed-jobs failed (403): App graphyard lacks Actions: write (installed with read), which CI reruns needs to rerun failed jobs; accept the pending permission request at https://github.com/settings/installations/1',
+  ]) assert.equal(unrunnableCause(supersededAfter('request-rework', at(12), 6 * minute, missing)), missing);
 
   // The loop's next re-measure of the serving release — within one throughputRemeasureMs of the
   // pre-fix record — records the verdict under the fixed rule.
