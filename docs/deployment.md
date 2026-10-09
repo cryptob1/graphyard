@@ -29,11 +29,11 @@ One stateless container, Postgres: `node "$GRAPHYARD_CLI" install --provider rai
 
 ### Production deployment observation
 
-A merge unserved five minutes after new `GRAPHYARD_BUILD_SHA` is `delivery.deployment-incident`; before then, or with a provider attempt in flight, `production` shows `aheadBy`, `rollingOut: true` and no "main is N commits ahead of production" attention. Deployments: Railway's API (`RAILWAY_API_TOKEN`/`RAILWAY_TOKEN`), else App-read GitHub deployments under [production environment name](#production-environment-name); in-flight holds the incident; a failed one names its log URL. A fresh `master verify-deployment` endpoint observation (`servingSource: endpoint`) outranks a lagging list; the running build's `/healthz` commit outranks both (`servingSource: build`). Probe: `master init --deployment-url https://YOUR-DOMAIN/healthz --deployment-sha-field commit`. Loop reuses last verified observation for `run.deploymentReuseMinutes` (15; `master config deploymentReuseMinutes=N`, `0` reads every cycle) while nothing is pending.
+A merge unserved five minutes after new `GRAPHYARD_BUILD_SHA` is `delivery.deployment-incident`; before then, or with a provider attempt in flight, `production` shows `aheadBy`, `rollingOut: true` and no "main is N commits ahead of production" attention. Deployments: Railway's API (`RAILWAY_API_TOKEN`/`RAILWAY_TOKEN`), else App-read GitHub deployments under [production environment name](#production-environment-name); in-flight holds the incident; failures name their log URL. A fresh `master verify-deployment` endpoint observation (`servingSource: endpoint`) outranks a lagging list; the running build's `/healthz` commit outranks both (`servingSource: build`). Probe: `master init --deployment-url https://YOUR-DOMAIN/healthz --deployment-sha-field commit`. Loop reuses last verified observation `run.deploymentReuseMinutes` (15; `master config deploymentReuseMinutes=N`, `0` reads every cycle) while nothing pends.
 
-Deliveries awaiting not-yet-due or validating [promotion](delivery.md) are skipped by release lag and the `loaded-revision` [resource](operations-reference.md#control-plane-resources).
+Deliveries awaiting not-yet-due or validating [promotion](delivery.md) are skipped by release lag and the `loaded-revision` [resource](operations-reference.md#control-plane-resources). Self-upgrade holds loaded-code restarts until production serves them (stall `release-lagged` names both commits), unless production is unobserved.
 
-After a verified deployment the loop measures served-release throughput into `.graphyard/measurements/throughput` (`scripts/measure-throughput.mjs --record` too), excluding deliveries a master, operator or human hand touched; all ≥20 window deliveries excluded raises `escalation:throughput:GY-N:REV` once and files an owner item.
+After verified deployment the loop records served-release throughput in `.graphyard/measurements/throughput` (`scripts/measure-throughput.mjs --record`), excluding hand-touched deliveries; all ≥20 window deliveries excluded raises `escalation:throughput:GY-N:REV` once, filing an owner item.
 
 ### Deployment incident
 
@@ -41,7 +41,7 @@ Railway deploys `release/production` within a minute of promotion. `/healthz` `c
 
 #### Production environment name
 
-Railway reports to GitHub as `<project> / production`. Startup takes ledger's master-published `production.environment` (run field `productionEnvironment`), else `GRAPHYARD_PRODUCTION_ENVIRONMENT` (`.railway/railway.ts`), else `production`; changes apply at restart. Check: startup line `production observation via GitHub deployments to NAME`, `/api/status` `production.providerDescription`.
+Railway reports `<project> / production`. Startup takes ledger's master-published `production.environment` (run field `productionEnvironment`), else `GRAPHYARD_PRODUCTION_ENVIRONMENT` (`.railway/railway.ts`), else `production`; applies at restart. Check: startup line `production observation via GitHub deployments to NAME`, `/api/status` `production.providerDescription`.
 
 ## Backup, upgrade, rollback
 

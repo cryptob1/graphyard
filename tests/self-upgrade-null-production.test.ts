@@ -40,6 +40,7 @@ class FakeGit {
   fetches = 0;
   /** While set, every fetch fails with it: origin unreachable. */
   fetchFails: string | null = null;
+  ancestryReads = 0;
   constructor(public head: string, public originTip: string, public diffPaths = ['src/daemon/run.ts']) {}
   run = async (command: string, args: string[]): Promise<string> => {
     assert.equal(command, 'git');
@@ -50,6 +51,8 @@ class FakeGit {
     if (op === 'fetch') { this.fetches += 1; if (this.fetchFails) throw new Error(this.fetchFails); return ''; }
     if (op === 'diff') return `${this.diffPaths.join('\n')}\n`;
     if (op === 'checkout') { this.head = operands[2]; this.checkouts.push(operands[2]); return ''; }
+    // GY-1585: every ancestry read answers "not contained", so only an observed plane could hold a restart.
+    if (op === 'merge-base') { this.ancestryReads += 1; throw Object.assign(new Error('not an ancestor'), { status: 1 }); }
     throw new Error(`fake git cannot answer: git ${args.slice(2).join(' ')}`);
   };
 }
@@ -648,4 +651,30 @@ test('unit:loaded-revision-fault-clears — once the self-upgrade\'s restart lan
   assert.equal(read.reading.used, 3);
   assert.deepEqual(read.attention.map(item => item.subject), ['resource:loaded-revision']);
   assert.match(read.reading.detail!, /the checkout is at 63530ca74a00/);
+});
+
+test('unit:self-upgrade-unverified-still-restarts — with production unobserved (null or unavailable), the owed restart completes onto the checkout\'s own head, even one a release-lagged hold left owed: the served-release gate never pins the loop on stale code', async () => {
+  for (const deployment of [null, { source: 'unavailable' as const, sha: null, at: iso(faultAt), reason: 'the endpoint did not answer', deployed: [], pending: ['GY-1581'] }]) {
+    // An owed restart onto the checkout, no hold yet: the pass completes it.
+    const state = faultState(), fake = new FakeGit(checkout, checkout), clock = { now: faultAt }, fleet = { held: false, self: 0, executors: [] as string[] };
+    state.deployment = deployment;
+    const upgraded = await performSelfUpgrade(master, state, deps(fake, clock, fleet));
+    assert.equal(upgraded.outcome, 'upgraded', `production ${deployment?.source ?? 'null'}: the owed restart completes`);
+    assert.deepEqual(fleet.executors, [checkout]);
+    assert.equal(fleet.self, 1);
+    assert.equal(fake.ancestryReads, 0, 'an unobserved plane is never asked to serve the move');
+    assert.equal(state.upgrade.stalled, undefined);
+
+    // A restart held while production was observed on an earlier release, then the plane went
+    // unobserved: the owed restart onto the checkout's own head completes on the next pass.
+    const lagged = faultState(), same = new FakeGit(checkout, checkout), quiet = { held: false, self: 0, executors: [] as string[] };
+    lagged.upgrade.stalled = { cause: 'release-lagged', reason: `restart held: production serves release ${loaded.slice(0, 12)}, which does not contain ${checkout.slice(0, 12)} yet`, since: iso(faultAt - hour), at: iso(faultAt - minute) };
+    lagged.deployment = deployment;
+    const resumed = await performSelfUpgrade(master, lagged, deps(same, clock, quiet));
+    assert.equal(resumed.outcome, 'upgraded', `production ${deployment?.source ?? 'null'}: the held restart completes once the plane is unobserved`);
+    assert.deepEqual(quiet.executors, [checkout]);
+    assert.equal(quiet.self, 1);
+    assert.equal(lagged.upgrade.pending, null);
+    assert.equal(lagged.upgrade.stalled, undefined);
+  }
 });

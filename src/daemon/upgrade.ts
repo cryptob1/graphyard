@@ -176,7 +176,10 @@ export interface SelfUpgradeDeps {
  * the next cycle to finish; the loop's own re-execution is last, and everything the next process
  * needs to know is on the cursor before it goes. A refusal that has stood `fleetWaitMs` no longer
  * holds the loop (GY-1473): it re-executes onto the checkout alone, and the executor restart stays
- * owed for the process that starts. Nothing here throws: every failure is a recorded action.
+ * owed for the process that starts. A loaded-code move production is observed not serving yet is
+ * held (GY-1585): the checkout moves, but the executors and the loop restart onto it only once the
+ * served release contains it, under the `release-lagged` stall. Nothing here throws: every failure
+ * is a recorded action.
  */
 export async function performSelfUpgrade(config: MasterConfig, state: DaemonState, deps: SelfUpgradeDeps): Promise<SelfUpgradeOutcome> {
   const now = deps.now ?? Date.now, at = () => new Date(now()).toISOString();
@@ -232,6 +235,19 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
       }
     }
   };
+  /**
+   * The release production is observed serving, when it does not contain `commit` yet (GY-1585):
+   * null while production is unobserved (GY-1445/GY-1464: an unobservable plane never pins the loop
+   * on stale code), when the served release is the commit or descends from it, and when git cannot
+   * place the two — only a definite "not an ancestor" (exit status 1) holds a restart.
+   */
+  const lagging = async (commit: string): Promise<string | null> => {
+    if (!observed) return null;
+    const served = observation!.sha!;
+    if (sameCommit(served, commit)) return null;
+    try { await git('merge-base', '--is-ancestor', commit, served); return null; }
+    catch (error: any) { return error?.status === 1 ? served : null; }
+  };
   /** Completes the restarts one alignment owes, with the checkout already at the tip. */
   const finish = async (pending: { from: string | null; to: string; code: boolean }): Promise<SelfUpgradeOutcome> => {
     if (!pending.code) {
@@ -242,6 +258,19 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
       unstall();
       await persist();
       return { outcome: 'upgraded', from: pending.from, to: pending.to, code: false, executors: null, self: false };
+    }
+    // GY-1585: loaded code restarted before the plane serves it speaks a protocol the serving
+    // registry's strict schemas still refuse (400 Invalid input on every launch). While production
+    // is observed serving a release that does not contain the move, the restart is held, owed on
+    // the cursor under a named stall, and the first pass whose observation serves it completes it.
+    const lag = await lagging(pending.to);
+    if (lag) {
+      const reason = `restart held: production serves release ${shortCommit(lag)}, which does not contain ${shortCommit(pending.to)} yet; the executors and the loop restart onto ${shortCommit(pending.to)} on the first pass whose deployment observation serves it`;
+      state.upgrade.pending = { from: pending.from, to: pending.to, code: true };
+      stall('release-lagged', reason);
+      storeAction(state, key, { kind: 'config', work: null, principal: null, state: 'waiting', detail: reason, attempts: (state.actions[key]?.attempts ?? 0) + 1, epoch: null, cycle: state.cycle, at: at() });
+      await persist();
+      return { outcome: 'pending', reason, to: pending.to };
     }
     if (!deps.restartExecutors) return failed('loaded code moved but this loop cannot restart the executors', 'executors-unavailable');
     const executors = await deps.restartExecutors(pending.to).catch(error => ({ result: 'refused' as const, reason: message(error), coordinator: { commit: pending.to }, held: [], restarted: [], unsupervised: [], forgotten: [] }));
@@ -342,6 +371,13 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
       return finish(state.upgrade.pending);
     }
   }
+
+  // A restart held for the release (GY-1585) completes on the first pass whose observation serves
+  // the commit the checkout holds, before a newer tip is fetched: moving on to a tip the promotion
+  // has not served yet would hold it again, and a busy base branch would hold the loop forever.
+  const held = state.upgrade.pending;
+  if (held?.code && state.upgrade.stalled?.cause === 'release-lagged' && observed && !(await lagging(held.to))
+    && (await checkoutState(deps.root, deps.run)).commit === held.to) return finish(held);
 
   // 2. The base tip, from a fresh fetch.
   let to: string;
