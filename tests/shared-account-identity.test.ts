@@ -5,7 +5,8 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { FleetClient, FleetSelection } from '../src/fleet.js';
 import { masterConfigSchema, selectAccount, type MasterConfig } from '../src/master.js';
-import { heldTwin, observedExhaustions, providerIdentity, recordObservedExhaustion } from '../src/master/environments.js';
+import * as environments from '../src/master/environments.js';
+import { observedExhaustions, recordObservedExhaustion } from '../src/master/environments.js';
 import { accountIneligibility, applyRegistryMutation, chooseSession, emptyRegistry, fleetView, foldObservations, proposedRuntimes, type AgentRegistry, type FleetSession } from '../src/model/registry.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -26,6 +27,9 @@ const resetsAt = '2026-10-11T05:00:00.000Z';
 const notice = `You've hit your weekly limit · resets Oct 10, 10pm (America/Los_Angeles)`;
 const shared = 'claude:' + 'a'.repeat(32), other = 'claude:' + 'b'.repeat(32);
 const directories: string[] = [];
+// Read off the module, so a checkout without them fails these cases rather than the file's import.
+const providerIdentity = (kind: string, home: string) => environments.providerIdentity(kind, home);
+const heldTwin: typeof environments.heldTwin = (...args) => environments.heldTwin(...args);
 after(async () => { for (const directory of directories) await rm(directory, { recursive: true, force: true }); });
 
 function registryOf(accounts: { name: string; home?: string | null }[]): AgentRegistry {
@@ -143,8 +147,8 @@ test('unit:shared-identity-dispatch-replay — replaying 2026-10-09 05:30Z (clau
   assert.equal(registry.sessions.at(-1)!.work, 'GY-1571');
 
   // A role the registry does not define launches from the profile's own environments: the same hold applies there.
-  const environments = Object.entries(homes).map(([name, home]) => ({ name, kind: 'claude' as const, home }));
+  const local = Object.entries(homes).map(([name, home]) => ({ name, kind: 'claude' as const, home }));
   const held = await observedExhaustions(config, now);
-  assert.match((await heldTwin(environments, held, 'claude'))!.reason, /^claude is the same provider login as claude-a exhausted its quota mid-session/);
-  assert.equal(await heldTwin(environments, held, 'claude-c'), null);
+  assert.match((await heldTwin(local, held, 'claude'))!.reason, /^claude is the same provider login as claude-a exhausted its quota mid-session/);
+  assert.equal(await heldTwin(local, held, 'claude-c'), null);
 });
