@@ -11,6 +11,8 @@ import { Store } from '../src/store.js';
 import { cut, followUpFilingRefusal, followUpItem, followUpRequestId, gitIn, readLedger, releaseFilingIdentity, validateAndRecord, type Suite } from '../src/release-candidate.js';
 import { releaseFilingCheck, setupFromZeroChecks, setupLine } from '../src/setup-from-zero.js';
 import { loadCases, syncCases } from '../src/e2e/case.js';
+import { OperatorAgents } from '../src/operator-agent.js';
+import { defineScenario, recordCaseRun } from '../src/scenarios.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-1614: the uat job's validateAndRecord files a failed candidate's follow-up with the uat
@@ -25,7 +27,7 @@ const release = { id: releaseFilingIdentity.id, token: `release-follow-up-${'r'.
 const master = { id: 'master-operator', token: `master-operator-${'m'.repeat(32)}`, capabilities: ['intent:create', 'intent:ready'] };
 // The uat job's E2E recording identity (docs/validation.md): the candidate's own checkout runs `e2e record` with it.
 const recorder = { id: 'graphyard-e2e-recorder', token: `e2e-recorder-${'e'.repeat(32)}`, capabilities: ['e2e:record'] };
-let database: EmbeddedPostgres, store: Store, http: ReturnType<typeof server>, url: string;
+let database: EmbeddedPostgres, store: Store, engine: Engine, http: ReturnType<typeof server>, url: string;
 
 const call = async (credential: string, method: 'GET' | 'POST', path: string, body?: unknown, key: string = randomUUID()) => {
   const response = await fetch(`${url}/api/${path}`, { method, headers: { Authorization: `Bearer ${credential}`, 'Content-Type': 'application/json', 'Idempotency-Key': key }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
@@ -37,7 +39,7 @@ before(async () => {
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('uat-follow-up-filing'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('uat_filing_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/uat_filing_test`); await store.init();
-  const engine = new Engine(store, [15368], 120, repository); engine.submissionObserver = null;
+  engine = new Engine(store, [15368], 120, repository); engine.submissionObserver = null;
   http = server(engine, credentials);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
@@ -192,4 +194,22 @@ test('integration:uat-e2e-recording — the uat job records E2E case runs as an 
   const filingRecord = await call(release.token, 'POST', `scenarios/${synced.id}/runs`, { ...run, runId: 'uat-run-2' });
   assert.equal(filingRecord.status, 403);
   assert.equal(filingRecord.body.error, 'Route is not available to operator agents');
+});
+
+test('integration:uat-e2e-recording — a recorder revoked after it authenticated writes nothing: each recording transaction reads the credential again', async () => {
+  const late = { id: 'graphyard-e2e-recorder-revoked', token: `e2e-recorder-revoked-${'v'.repeat(32)}` };
+  const provisioned = await call(credentials[0].token, 'POST', 'operator-agents', { id: late.id, displayName: late.id, capabilities: ['e2e:record'], scope: { repositories: [repository], workItems: ['*'] }, token: late.token, reason: 'Provision a recorder to revoke' });
+  assert.equal(provisioned.status, 200, JSON.stringify(provisioned.body));
+  // The principal as the request authenticated it, held while its body is still arriving.
+  const actor = (await new OperatorAgents(store, repository).authenticate(late.token))!;
+  assert.equal(actor.id, late.id);
+  assert.equal((await call(credentials[0].token, 'POST', `operator-agents/${late.id}/revoke`, { reason: 'Revoke the recorder mid-request' })).status, 200);
+  const id = 'hand-defined', run = { revision: 1, runId: 'uat-run-revoked', baseUrl: 'https://uat.example.test', sha: 'c'.repeat(40), environment: 'uat', durationMs: 10, outcome: 'pass', executed: 1, failingStep: null };
+  await assert.rejects(recordCaseRun(store, actor, id, run, engine.operatorAuthorizer), /Operator-agent credential is revoked or expired/);
+  const definition = { id: 'revoked-recorder-case', title: 'Late case', purpose: 'Recorded after revocation', steps: ['do it'], expected: ['done'], environment: 'uat', runner: 'graphyard-e2e', testPath: 'tests/x.test.ts' };
+  await assert.rejects(defineScenario(store, actor, definition, randomUUID(), engine.operatorAuthorizer), /Operator-agent credential is revoked or expired/);
+  // And with no authorizer to read it again, the recorder is refused rather than trusted.
+  await assert.rejects(recordCaseRun(store, actor, id, run), /Operator-agent authorization is unavailable/);
+  assert.equal((await store.pool.query(`SELECT 1 FROM scenario_runs WHERE document->>'runId'='uat-run-revoked'`)).rowCount, 0, 'no run was recorded');
+  assert.equal((await call(credentials[0].token, 'GET', 'scenarios')).body.some((entry: any) => entry.id === definition.id), false, 'no case was defined');
 });
