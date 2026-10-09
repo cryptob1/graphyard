@@ -15,7 +15,7 @@
 // to read rather than `master scope` (`scopeAskCommand`).
 import type { Work } from './work.js';
 import { pathScopeContains, scopeBlockedBudgetMs, unplannedPaths } from './scope.js';
-import { routableScopeRequest, terminalScopeRefusal } from './scope-collapse.js';
+import { routedScopeRequest, terminalScopeRefusal } from './scope-collapse.js';
 
 /** The opening of the reason the loop writes when it widens on its own audited grounds (cycle-scope.ts widenOnFindings). */
 export const groundedWideningReason = (key: string) => `Additive scope ${key}'s own change calls for — `;
@@ -62,9 +62,10 @@ export function wideningSettlement(details: unknown, routed: readonly string[] =
  * revision covers any path it asks for. Null for anything else — an undecided ask, one the
  * approver already refused, a non-additive or over-cap one — which stays the master's.
  */
-export function routedScopeAsk(work: Pick<Work, 'scopeRequest' | 'lease' | 'plannedFiles' | 'criteria'>, plannedFiles: readonly string[], now: number) {
-  const request = work.scopeRequest;
-  if (request?.decision?.decidedBy !== 'graphyard' || !routableScopeRequest(work, now)) return null;
+export function routedScopeAsk(work: Pick<Work, 'scopeRequest' | 'carriedScopeRequest' | 'lease' | 'plannedFiles' | 'criteria'>, plannedFiles: readonly string[], now: number) {
+  // GY-1568: an ask its attempt carried past its end is still the approver's, so it is held the same way.
+  const request = routedScopeRequest(work, now)?.request;
+  if (request?.decision?.decidedBy !== 'graphyard') return null;
   return unplannedPaths(work.plannedFiles, request.paths).some(path => plannedFiles.some(planned => pathScopeContains(planned, path))) ? request : null;
 }
 
@@ -97,7 +98,7 @@ export function handScopeWideningRefusal(key: string, request: { at: string; dec
  * known reads as none requested), otherwise `master requirements` past the cap or `master scope`.
  */
 export function scopeAskCommand(work: Work, now: number, decisions: readonly RoutedScopeDecision[] = []) {
-  const request = work.scopeRequest;
-  if (request?.decision?.decidedBy === 'graphyard' && routableScopeRequest(work, now) && approverScopeHold(request, decisions, now) !== null) return `graphyard master decisions ${work.key}`;
+  const request = routedScopeRequest(work, now)?.request;
+  if (request?.decision?.decidedBy === 'graphyard' && approverScopeHold(request, decisions, now) !== null) return `graphyard master decisions ${work.key}`;
   return terminalScopeRefusal(work) ? `graphyard master requirements ${work.key} FILE REASON` : `graphyard master scope ${work.key}`;
 }

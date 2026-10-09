@@ -376,7 +376,8 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
   // cannot read findings or widen on them has no rule to wait for.
   const findingsJudged = (item: Work) => {
     const request = item.scopeRequest;
-    if (!request) return false;
+    // A carried ask (GY-1568) outlived its attempt: the finding rule widens only for a live one, so it is the approver's.
+    if (!request) return !!item.carriedScopeRequest;
     if (!effects.reviewFindings || !effects.widenScope) return true;
     const judged = state.actions[`${scopeKey(item, request)}:finding:${item.policyRevision}`];
     return judged?.state === 'done' && !/^Widened /.test(judged.detail);
