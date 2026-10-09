@@ -1,5 +1,5 @@
 // Concern: cycle step 3 — reclaim disk, bounded resources and dead sessions' quarantines.
-import { describeReclaim, describeStandingTmpPass, graphyardWorktree, paneReclaimStatus, agentlessPaneAttentionBound, finishedSessionGraceMs } from '../master-resources.js';
+import { describeReclaim, describeStandingTmpPass, tmpPassErrors, graphyardWorktree, paneReclaimStatus, agentlessPaneAttentionBound, finishedSessionGraceMs } from '../master-resources.js';
 import { diskThresholdBytes, containmentPhase } from '../master.js';
 import { worktreeRootMinFreeBytes } from '../install/worktree-root.js';
 import { actionDetailMax, gigabytes, message, reclaimIntervalMs, reclaimSummarySchema } from './state.js';
@@ -145,6 +145,8 @@ export async function settleQuarantine(cycle: Cycle, item: Work, assessment: Con
 export const endedFenceWaitMs = 10_000;
 /** The one row for the current run of /tmp passes that removed 0 under the standing inode bound (GY-1600). */
 export const standingTmpKey = 'reclaim:tmp:standing';
+/** The most attempts an action row holds (storeAction clamps to the schema's bound): past it a run's count reads as a floor. */
+const actionAttemptsMax = 1000;
 /** The deadline each cycle's ended-attempt waits share, so a cycle ending several fenced attempts stalls one bound, not one per attempt. */
 const endedFenceDeadlines = new WeakMap<Cycle, number>();
 /** How the loop ended an attempt: the preserve it recorded (the reason its exhaustion reads), or its close of a submitted attempt's session (the outcome). */
@@ -435,13 +437,16 @@ export async function reclaimStep(cycle: Cycle) {
       // A /tmp pass that removed 0 while the inode bound stands is recorded too (GY-1600), never dropped
       // as a pass with nothing to say. One row stands for the whole run of such passes, its attempts
       // the passes in it, so a bound that stands for days holds one row, not one per cycle crowding
-      // the ledger's bound; the run's row is filed under its last pass once a pass ends it. Its
-      // errors fail it, but the resources row above already carries their fault.
+      // the ledger's bound; the run's row is filed under its last pass once a pass ends it. A row's
+      // attempts stop at their bound, so from that pass on the count is stated as a floor, never
+      // as a number it no longer holds. The /tmp pass's own errors fail it, another resource's do
+      // not, and the resources row above already carries their fault.
       const standing = describeStandingTmpPass(report), run = state.actions[standingTmpKey];
       if (standing) {
-        const passes = (run?.attempts ?? 0) + 1;
-        performed.push(await record(state, standingTmpKey, { kind: 'reclaim', work: null, principal: null, state: report.errors.length ? 'failed' : 'done',
-          detail: boundDetail(passes > 1 ? `Pass ${passes} in a row: ${standing}` : standing), attempts: passes, cycle: state.cycle }, now(), effects.persist, null));
+        const passes = Math.min((run?.attempts ?? 0) + 1, actionAttemptsMax);
+        const count = passes >= actionAttemptsMax ? `${actionAttemptsMax} or more passes in a row` : `Pass ${passes} in a row`;
+        performed.push(await record(state, standingTmpKey, { kind: 'reclaim', work: null, principal: null, state: tmpPassErrors(report).length ? 'failed' : 'done',
+          detail: boundDetail(passes > 1 ? `${count}: ${standing}` : standing), attempts: passes, cycle: state.cycle }, now(), effects.persist, null));
       } else if (run && report.tmpPass) {
         state.actions[`reclaim:tmp:${run.at}`] = run;
         delete state.actions[standingTmpKey];
