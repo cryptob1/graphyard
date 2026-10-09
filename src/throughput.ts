@@ -136,7 +136,7 @@ export interface ThroughputReport {
   shortfall: ThroughputShortfall | null;
 }
 
-export type WindowBasis = 'deployment-observation' | 'merge-instant' | 'given' | 'unknown';
+export type WindowBasis = 'trailing-72h' | 'deployment-observation' | 'merge-instant' | 'given' | 'unknown';
 
 /**
  * The commit the deployed control plane runs, from its own status document. The release stamp
@@ -160,14 +160,16 @@ const minutes = (ms: number) => `${Math.round(ms / 6000) / 10} min`;
 const measuredMinutes = (ms: number | null | undefined, count: number) => count > 0 && ms !== null && ms !== undefined ? minutes(ms) : 'n/a (no deliveries measured)';
 const sha40 = /^[0-9a-f]{40}$/;
 
+/** How far back a measurement without an explicit start judges deliveries (GY-1596): a miss stays charged this long. */
+export const throughputTrailingWindowMs = 72 * 3_600_000;
+
 /**
- * When a release carrying the claim began serving, which is where a measurement *of that release*
- * can start. The coordinator's own deployment observation on the claim's delivery is the fact
- * that says so; without one the claim's merge instant is used and named as the weaker basis it
+ * When a release carrying the claim began serving, which is the earliest a measurement *of that
+ * release* can start. The coordinator's own deployment observation on the claim's delivery is the
+ * fact that says so; without one the claim's merge instant is used and named as the weaker basis it
  * is, because a merge is not a deployment. Neither is ever moved later to improve a figure.
  */
-export function claimWindow(claim: Work | undefined, given?: string | null): { since: string | null; basis: WindowBasis; reason: string } {
-  if (given) return { since: given, basis: 'given', reason: `The window start was given as ${given}; deliveries merged before it are not counted` };
+export function claimFloor(claim: Work | undefined): { since: string | null; basis: WindowBasis; reason: string } {
   const deployment = claim?.delivery?.deployment;
   if (deployment) return { since: deployment.observedAt, basis: 'deployment-observation',
     reason: `${claim!.key} was observed serving from ${deployment.sha.slice(0, 12)} at ${deployment.observedAt}; every delivery counted was merged after the release carrying it was serving` };
@@ -175,6 +177,26 @@ export function claimWindow(claim: Work | undefined, given?: string | null): { s
   if (merged) return { since: merged, basis: 'merge-instant',
     reason: `${claim!.key} carries no deployment observation, so the window starts at its merge (${merged}); a merge is not a deployment, so a delivery merged shortly after it may have been driven by the previous release` };
   return { since: null, basis: 'unknown', reason: `${claim?.key ?? throughputClaim.item} is not delivered, so no window of the release running its executors can be established` };
+}
+
+/**
+ * The window a measurement judges (GY-1596). An explicit start is taken as given. Otherwise the
+ * serving release is judged over the deliveries merged in the `throughputTrailingWindowMs` before
+ * the window's end (`until`, else the measurement time), never before the claim's floor: a window
+ * fixed at the floor forever would keep charging every later release with misses its coordination
+ * did not make, so no re-measure could change its verdict. When the floor is the later bound it is
+ * the window start, with its own basis; when the trailing bound is, the basis is `trailing-72h`.
+ */
+export function claimWindow(claim: Work | undefined, given?: string | null, end?: number | null): { since: string | null; basis: WindowBasis; reason: string } {
+  if (given) return { since: given, basis: 'given', reason: `The window start was given as ${given}; deliveries merged before it are not counted` };
+  const floor = claimFloor(claim);
+  const floorAt = time(floor.since);
+  if (floorAt === null || end === null || end === undefined || !Number.isFinite(end)) return floor;
+  const trailingAt = end - throughputTrailingWindowMs;
+  if (trailingAt <= floorAt) return floor;
+  const since = new Date(trailingAt).toISOString();
+  return { since, basis: 'trailing-72h',
+    reason: `The serving release is judged over deliveries merged in the ${Math.round(throughputTrailingWindowMs / 3_600_000)} hours before ${new Date(end).toISOString()}, so a miss stays charged for that long and the verdict follows the coordination that recently ran; deliveries merged before ${since} are not counted, and none merged before ${claim!.key} first served (${floor.since}, ${floor.basis}) ever are` };
 }
 
 /**
@@ -401,7 +423,7 @@ export const populationRule = 'A delivery is counted when it is a merged pull re
  */
 export function verifyThroughput(work: Work[], now: number, options: { deployed: DeployedRelease; since?: string | null; until?: string | null; claimKey?: string }): ThroughputReport {
   const claimKey = options.claimKey ?? throughputClaim.item;
-  const window = claimWindow(work.find(item => item.key === claimKey), options.since);
+  const window = claimWindow(work.find(item => item.key === claimKey), options.since, time(options.until ?? null) ?? now);
   const inWindow = windowDeliveries(work, window.since, options.until);
   const records = inWindow.map(item => deliveryRecord(item, now, window.since)).sort((a, b) => Date.parse(a.mergedAt) - Date.parse(b.mergedAt));
   // "Real" is judged before the coordinator rule, so the population line separates a fixture from
@@ -768,7 +790,7 @@ export async function measureThroughput(summaries: Work[], readItem: (id: string
   options: { deployed: DeployedRelease; since?: string | null; until?: string | null; claimKey?: string }): Promise<{ report: ThroughputReport; read: string[] }> {
   const claimKey = options.claimKey ?? throughputClaim.item;
   const claim = summaries.find(item => item.key === claimKey);
-  const window = claimWindow(claim, options.since);
+  const window = claimWindow(claim, options.since, time(options.until ?? null) ?? now);
   // No established window means no release of the claim to measure: nothing is read.
   const wanted = window.since === null && window.basis === 'unknown' ? [] : windowDeliveries(summaries, window.since, options.until);
   const whole = new Map<string, Work>(), queue = [...wanted];

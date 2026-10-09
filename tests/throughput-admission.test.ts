@@ -284,7 +284,11 @@ function supersededAfter(kind: string, from: string, waited: number, refusal: st
 const gy468Span = Date.parse('2026-10-02T03:17:10.987Z') - Date.parse('2026-09-28T06:11:33.492Z');
 const gy468Row = (refusal: string | null = appRefusal) => supersededAfter('request-rework', '2026-09-28T06:11:33.492Z', gy468Span, refusal);
 /** A release that began serving before GY-468's row went idle, so its whole span lies inside the window (GY-1595 clips the rest). */
-const servingSinceSeptember = { ...claim, delivery: { ...claim.delivery, deployment: { sha: revision, observedAt: '2026-09-28T00:00:00.000Z' } } } as unknown as Work;
+const servedSeptember = '2026-09-28T00:00:00.000Z';
+const servingSinceSeptember = { ...claim, delivery: { ...claim.delivery, deployment: { sha: revision, observedAt: servedSeptember } } } as unknown as Work;
+// GY-468's 5585.6 min span is longer than the trailing 72-hour window (GY-1596), so the measurements
+// judging it whole are given the release's serving start, as `--since` gives it; the loop's own
+// re-measure below keeps the default window.
 /** Ten plain admitted deliveries and GY-468 carrying `extra` beside its executed review, in the window `release` opens. */
 const idleWindow = (extra: ActionRow, release: Work = servingSinceSeptember) => [release, ...Array.from({ length: throughputClaim.minimumDeliveries - 1 }, (_, index) => delivery(`GY-${600 + index}`)),
   delivery('GY-468', { history: [executed('request-review', 11), extra] })];
@@ -297,7 +301,7 @@ test('unit:throughput-superseded-row-span — GY-468\'s superseded request-rewor
   // GY-468's row: unclaimed, superseded, and its own refusal names the App permission it lacked.
   const refused = gy468Row();
   assert.equal(unrunnableCause(refused), appRefusal);
-  const forgiven = verifyThroughput(idleWindow(refused), now, { deployed });
+  const forgiven = verifyThroughput(idleWindow(refused), now, { deployed, since: servedSeptember });
   const gy468 = forgiven.deliveries.find(record => record.key === 'GY-468')!;
   assert.ok(gy468, 'GY-468 stays admitted: the superseded row is the loop machinery of record');
   assert.ok((gy468.idle?.ms ?? 0) <= throughputClaim.idleActionableMs, 'its span is not the delivery\'s idle figure');
@@ -310,19 +314,19 @@ test('unit:throughput-superseded-row-span — GY-468\'s superseded request-rewor
   // The same row with nothing on it saying why it could not run: anybody could have, nobody did.
   const runnable = gy468Row(null);
   assert.equal(unrunnableCause(runnable), null);
-  const counted = verifyThroughput(idleWindow(runnable), now, { deployed });
+  const counted = verifyThroughput(idleWindow(runnable), now, { deployed, since: servedSeptember });
   assert.equal(counted.verdict, 'unverified');
   assert.equal(counted.idle.maxMs, gy468Span);
   assert.match(counted.reason, /GY-468 left its request-rework actionable and unclaimed for 5585\.6 min, 5580\.6 min past the 5 min bound/);
   // A short runnable superseded row just past the bound fails the claim too.
-  const justPast = verifyThroughput(idleWindow(supersededAfter('request-review', at(12), 6 * minute)), now, { deployed });
+  const justPast = verifyThroughput(idleWindow(supersededAfter('request-review', at(12), 6 * minute)), now, { deployed, since: servedSeptember });
   assert.equal(justPast.verdict, 'unverified');
   assert.deepEqual(justPast.shortfall!.missed.map(entry => entry.metric), ['idle-actionable']);
   // A refusal on a row an executor claimed proves it was runnable: its wait is not forgiven, and
   // a refusal for anything but a permission (a timeout) is not a cause no executor could clear.
   assert.equal(unrunnableCause(supersededAfter('request-rework', at(12), 6 * minute, appRefusal, true)), null);
   assert.equal(unrunnableCause(supersededAfter('request-rework', at(12), 6 * minute, 'rerun: refused: GitHub POST … failed (502): bad gateway')), null);
-  const timedOut = verifyThroughput(idleWindow(supersededAfter('request-rework', at(12), 6 * minute, 'the rerun timed out')), now, { deployed });
+  const timedOut = verifyThroughput(idleWindow(supersededAfter('request-rework', at(12), 6 * minute, 'the rerun timed out')), now, { deployed, since: servedSeptember });
   assert.equal(timedOut.verdict, 'unverified');
   // A 401/403 that does not itself establish a missing permission is one a later attempt clears:
   // a secondary rate limit, a rerun of a run still in progress, rejected credentials, or a 403 whose
@@ -337,7 +341,7 @@ test('unit:throughput-superseded-row-span — GY-468\'s superseded request-rewor
   ]) {
     const rateLimited = supersededAfter('request-rework', at(12), 6 * minute, runnable403);
     assert.equal(unrunnableCause(rateLimited), null, runnable403);
-    const missed = verifyThroughput(idleWindow(rateLimited), now, { deployed });
+    const missed = verifyThroughput(idleWindow(rateLimited), now, { deployed, since: servedSeptember });
     assert.equal(missed.verdict, 'unverified', runnable403);
     assert.deepEqual(missed.shortfall!.missed.map(entry => entry.metric), ['idle-actionable'], runnable403);
     assert.equal(missed.idle.maxMs, 6 * minute);
@@ -354,7 +358,7 @@ test('unit:throughput-superseded-row-span — GY-468\'s superseded request-rewor
   const root = await temporaryDirectory('throughput-superseded-row-span');
   try {
     const takenAt = now - 30 * minute, items = idleWindow(refused);
-    await recordThroughputMeasurement(root, verifyThroughput(idleWindow(runnable), takenAt, { deployed }));
+    await recordThroughputMeasurement(root, verifyThroughput(idleWindow(runnable), takenAt, { deployed, since: servedSeptember }));
     const input = (clock: number) => ({ work: items, observedSha: revision, now: () => clock, origin: 'https://example.invalid',
       status: async () => ({ now: new Date(clock).toISOString(), release: { version: '1', revision } }), readItem: async (id: string) => items.find(item => item.id === id)!, contains: async () => true });
     assert.equal((await loopThroughputMeasurement(root, input(takenAt + throughputRemeasureMs - minute))).outcome, 'current');
@@ -414,4 +418,81 @@ test('unit:throughput-idle-window-clip — an action idle before the window star
   assert.equal(longInside.idle.maxMs, 6 * minute);
   assert.equal(longInside.verdict, 'unverified');
   assert.deepEqual(longInside.shortfall!.missed.map(entry => entry.metric), ['idle-actionable']);
+});
+
+test('unit:throughput-trailing-window — without an explicit --since the serving release is judged only over deliveries merged in the 72 hours before the measurement (or --until), never before GY-87 first served, named trailing-72h with why; --since still overrides it; the budgets are unchanged, an idle span past 5 min inside the window still fails the claim and fewer than 10 admitted deliveries leave it unverified', async () => {
+  const { claimWindow, throughputTrailingWindowMs } = await import('../src/throughput.js');
+  const hour = 60 * minute;
+  // GY-87 first served ten days before the measurement; the 72-hour window is much later.
+  const measuredAt = base + 240 * hour;
+  const servedAt = new Date(base).toISOString();
+  const served = { ...claim, delivery: { mergeSha: sha('c'), mergedAt: new Date(base - hour).toISOString(), deployment: { sha: revision, observedAt: servedAt } } } as unknown as Work;
+  const stamp = (ms: number) => new Date(ms).toISOString();
+  /** One routine delivery merged `mergedAt`, submitted 20 min before, whose one executed action waited `idle` minutes. */
+  const merged = (key: string, mergedAt: number, idle = 1) => {
+    const from = mergedAt - 25 * minute;
+    const work = delivery(key, { history: [row('request-review', [
+      { at: stamp(from), event: 'requested', requester: 'graphyard', executor: null, result: null, reason: '' },
+      { at: stamp(from + idle * minute), event: 'claimed', requester: 'graphyard', executor: 'executor-a', result: null, reason: 'attempt 1 claimed by executor-a on host-a' },
+      { at: stamp(from + idle * minute + minute), event: 'completed', requester: 'graphyard', executor: 'executor-a', result: 'done', reason: '' },
+    ])] }) as any;
+    work.delivery = { mergeSha: sha('a'), mergedAt: stamp(mergedAt) };
+    work.pipeline = { ...work.pipeline, attempts: [{ epoch: 1, owner: 'worker-1', claimedAt: stamp(from - 30 * minute), endedAt: stamp(mergedAt - 20 * minute), end: 'submitted' }], submittedAt: stamp(mergedAt - 20 * minute) };
+    work.updatedAt = stamp(mergedAt);
+    return work as Work;
+  };
+  const trailingStart = measuredAt - throughputTrailingWindowMs;
+  assert.equal(throughputTrailingWindowMs, 72 * hour);
+  // Twelve clean deliveries inside the trailing 72 hours, and old misses the fixed window kept charging forever.
+  const recent = Array.from({ length: 12 }, (_, index) => merged(`GY-${500 + index}`, trailingStart + (index + 1) * 5 * hour));
+  const oldMisses = Array.from({ length: 5 }, (_, index) => merged(`GY-${400 + index}`, base + (index + 2) * hour, 149));
+  const report = verifyThroughput([served, ...oldMisses, ...recent], measuredAt, { deployed });
+
+  // AC-1: only the trailing 72 hours are judged, and the window says so and why.
+  assert.equal(report.window.since, stamp(trailingStart));
+  assert.equal(report.window.basis, 'trailing-72h');
+  assert.match(report.window.reason, /72 hours before/);
+  assert.match(report.window.reason, new RegExp(`${throughputClaim.item} first served \\(${servedAt}`));
+  assert.deepEqual(report.deliveries.map(record => record.key), recent.map(item => item.key));
+  assert.ok(!report.excluded.some(record => record.key.startsWith('GY-40')), 'deliveries merged before the trailing window are not listed at all');
+  assert.equal(report.verdict, 'verified', report.reason);
+  // The pre-GY-1596 window from GY-87's first serving fails on the old misses; --since still overrides the trailing window.
+  const given = verifyThroughput([served, ...oldMisses, ...recent], measuredAt, { deployed, since: servedAt });
+  assert.equal(given.window.basis, 'given');
+  assert.equal(given.window.since, servedAt);
+  assert.equal(given.population.delivered, 17);
+  assert.equal(given.verdict, 'unverified');
+  assert.deepEqual(given.shortfall!.missed.map(entry => entry.metric), ['idle-actionable']);
+  // --until moves the trailing window's end with it.
+  const until = stamp(base + 100 * hour);
+  const bounded = verifyThroughput([served, ...oldMisses, ...recent], measuredAt, { deployed, until });
+  assert.equal(bounded.window.basis, 'trailing-72h');
+  assert.equal(bounded.window.since, stamp(base + 28 * hour));
+  assert.equal(bounded.window.until, until);
+  // Never before GY-87 first served: a release fresher than 72 hours keeps its serving floor and basis.
+  const fresh = verifyThroughput([served, ...oldMisses], base + 24 * hour, { deployed });
+  assert.equal(fresh.window.since, servedAt);
+  assert.equal(fresh.window.basis, 'deployment-observation');
+  const early = merged('GY-399', base - 30 * minute);
+  const floored = verifyThroughput([served, early, ...oldMisses], base + 24 * hour, { deployed });
+  assert.ok(![...floored.deliveries, ...floored.excluded].some(record => record.key === 'GY-399'), 'a delivery merged before GY-87 first served is never judged');
+  assert.deepEqual(claimWindow(served, null, base + 24 * hour), claimWindow(served, null, base + 1));
+  assert.equal(claimWindow(undefined, null, measuredAt).basis, 'unknown', 'an undelivered claim still establishes no window');
+
+  // AC-2: the budgets are unchanged.
+  assert.equal(throughputClaim.submitToMergeP50Ms, 30 * minute);
+  assert.equal(throughputClaim.idleActionableMs, 5 * minute);
+  assert.equal(throughputClaim.minimumDeliveries, 10);
+  // A delivery inside the trailing window idle past 5 min still fails the claim.
+  const slow = verifyThroughput([served, ...recent.slice(1), merged('GY-600', trailingStart + hour, 6)], measuredAt, { deployed });
+  assert.equal(slow.window.basis, 'trailing-72h');
+  assert.equal(slow.verdict, 'unverified');
+  assert.equal(slow.idle.key, 'GY-600');
+  assert.deepEqual(slow.shortfall!.missed.map(entry => entry.metric), ['idle-actionable']);
+  // Fewer than 10 admitted deliveries in the window leaves the claim unverified, never verified.
+  const few = verifyThroughput([served, ...oldMisses, ...recent.slice(0, 9)], measuredAt, { deployed });
+  assert.equal(few.population.admitted, 9);
+  assert.equal(few.met, null);
+  assert.equal(few.verdict, 'unverified');
+  assert.deepEqual(few.shortfall!.missed.map(entry => entry.metric), ['population']);
 });
