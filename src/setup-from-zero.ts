@@ -7,6 +7,7 @@ import { checkAgentEnvironment, discoverAgentEnvironments } from './master/envir
 import type { AgentEnvironment } from './master/profiles.js';
 import { sharedGitPaths, workerPaths } from './worker-sandbox.js';
 import { mergerNotRequired, statusControlPlaneMerger } from './model/setup-checklist.js';
+import { followUpFilingExcess, followUpFilingRefusal } from './release-candidate.js';
 
 /**
  * The prerequisites docs/setup-from-zero.md depends on that `graphyard doctor` can check from this
@@ -20,6 +21,7 @@ export const setupSteps = {
   protection: 'docs/setup-from-zero.md step 4 (branch protection)',
   environments: 'docs/setup-from-zero.md step 8 (agent environments)',
   sandbox: 'docs/setup-from-zero.md step 9 (worker sandbox)',
+  releaseFiling: 'docs/delivery.md#release-filing-credential',
 } as const;
 
 export interface SetupCheck { id: string; status: 'pass' | 'fail'; detail: string; step: string }
@@ -41,6 +43,8 @@ export interface SetupFromZeroInput {
   github?: ProtectionRun;
   /** Probes that the worker confinement can write PATHS; null when it can, else the reason. */
   sandbox?: (paths: string[]) => string | null;
+  /** GY-1614: the `/api/status` answer to GRAPHYARD_RELEASE_TOKEN, or the failure it met; read from the plane when unset here. */
+  releaseFiling?: { status: any | null; failure?: string };
 }
 
 const writable = async (path: string) => { try { await access(path, constants.W_OK); return true; } catch { return false; } };
@@ -172,6 +176,28 @@ function protectionCheck(status: any, github: ProtectionRun): SetupCheck {
   return check(!gaps.length, gaps.length ? gaps.join('; ') : `${baseBranch} requires Graphyard / merge and graphyard/landable from App ${githubAppId}`);
 }
 
+/**
+ * GY-1614: whether the control plane would admit the follow-up a failed release candidate files
+ * with GRAPHYARD_RELEASE_TOKEN, judged from the principal that token authenticates as, and whether
+ * that principal holds more than the filing identity's `intent:create`.
+ */
+export function releaseFilingCheck(filing: NonNullable<SetupFromZeroInput['releaseFiling']>, repository: string | null): SetupCheck {
+  const filingRepository = repository ?? filing.status?.repository;
+  const refusal = filing.status ? followUpFilingRefusal(filing.status.actor, filingRepository) : `the control plane did not accept the credential: ${filing.failure ?? 'no answer'}`;
+  const excess = refusal ? null : followUpFilingExcess(filing.status.actor, filingRepository);
+  return { id: 'release-filing', status: refusal || excess ? 'fail' : 'pass', step: setupSteps.releaseFiling,
+    detail: refusal ? `GRAPHYARD_RELEASE_TOKEN would be refused filing a failed candidate's follow-up: ${refusal}`
+      : excess ? `GRAPHYARD_RELEASE_TOKEN is broader than filing needs: ${excess}` : `GRAPHYARD_RELEASE_TOKEN files follow-ups as ${filing.status.actor.id}` };
+}
+
+/** The plane's answer to GRAPHYARD_RELEASE_TOKEN, at the server the CLI addresses (src/cli/context.ts), or undefined when it is unset. */
+async function readReleaseFiling(root: string, env: NodeJS.ProcessEnv) {
+  const token = env.GRAPHYARD_RELEASE_TOKEN;
+  if (!token) return undefined;
+  const base = env.GRAPHYARD_URL ?? (await readJson(resolve(root, '.graphyard/connection.json')))?.url ?? 'http://127.0.0.1:4310';
+  return planeRequest(base, token)('status').then(status => ({ status }), (error: any) => ({ status: null, failure: String(error.message) }));
+}
+
 /** One printable line per check: `PASS id: detail`, or `FAIL id: detail (fix: step)`. */
 export const setupLine = (check: SetupCheck) => check.status === 'pass' ? `PASS ${check.id}: ${check.detail}` : `FAIL ${check.id}: ${check.detail} (fix: ${check.step})`;
 
@@ -199,5 +225,7 @@ export async function setupFromZeroChecks(input: SetupFromZeroInput): Promise<Se
   }
   lines.push(...await environmentChecks(input.environments));
   lines.push(await sandboxCheck(input.root, input.sandbox ?? bubblewrapProbe));
+  const releaseFiling = input.releaseFiling ?? await readReleaseFiling(input.root, env);
+  if (releaseFiling) lines.push(releaseFilingCheck(releaseFiling, status?.repository ?? null));
   return lines;
 }

@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import type pg from 'pg';
 import { z } from 'zod';
 import { admin, demand, type Principal } from './model.js';
 import { flakiness, type RunIdentity, type ScenarioRun } from './model/test-cases.js';
@@ -26,15 +27,35 @@ export type Scenario = Omit<z.infer<typeof scenarioSchema>, 'expectedRevision'> 
 export async function scenarios(store: Store): Promise<Scenario[]> {
   return (await store.pool.query('SELECT document FROM scenarios ORDER BY id,revision DESC')).rows.map(r => r.document);
 }
-export async function defineScenario(store: Store, actor: Principal, input: unknown, key: string) {
-  admin(actor);
+/**
+ * An operator, or an operator agent holding `e2e:record` (GY-1614): the uat job records a candidate's
+ * case runs with that narrow identity, since the candidate's own checkout runs the recording command
+ * and must never hold an admin credential. It reaches repository E2E cases only, never a case
+ * defined by hand; the route guard (src/server/auth.ts) and authentication already confine it to
+ * these routes and its repository.
+ */
+const caseRecorder = (actor: Principal) => actor.role === 'operator-agent' && !!actor.capabilities?.includes('e2e:record');
+type OperatorAuthorizer = (db: pg.PoolClient, now: Date, actor: Principal) => Promise<Principal>;
+/** The recorder is read again under the transaction's lock, so one revoked, expired or stripped of e2e:record since it authenticated writes nothing. */
+async function revalidateRecorder(db: pg.PoolClient, now: Date, actor: Principal, authorize: OperatorAuthorizer | undefined) {
+  demand(authorize, 'Operator-agent authorization is unavailable', 503);
+  demand(caseRecorder(await authorize!(db, now, actor)), 'Operator agent no longer holds e2e:record', 403);
+}
+const repositoryCase = (runner: string | undefined) => demand(runner === caseRunner, `An e2e:record operator agent records repository E2E cases (runner ${caseRunner}) only`, 403);
+export async function defineScenario(store: Store, actor: Principal, input: unknown, key: string, authorize?: OperatorAuthorizer) {
+  const recorder = caseRecorder(actor);
+  if (!recorder) admin(actor);
   demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
   const data = scenarioSchema.parse(input);
+  if (recorder) repositoryCase(data.runner);
   const fingerprint = createHash('sha256').update(JSON.stringify({ command: 'scenario.define', data })).digest('hex');
   return store.transaction(async (db, now) => {
+    if (recorder) await revalidateRecorder(db, now, actor, authorize);
     const receipt = (await db.query('SELECT * FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];
     if (receipt) { demand(receipt.fingerprint === fingerprint, 'Idempotency key reused with different input'); return receipt.result as Scenario; }
-    const latest = (await db.query('SELECT revision FROM scenarios WHERE id=$1 ORDER BY revision DESC LIMIT 1', [data.id])).rows[0];
+    const latest = (await db.query('SELECT revision, document FROM scenarios WHERE id=$1 ORDER BY revision DESC LIMIT 1', [data.id])).rows[0];
+    // Nor may it turn a case defined by hand into a repository case by revising it.
+    if (recorder && latest) repositoryCase(latest.document.runner);
     demand((latest?.revision ?? 0) === data.expectedRevision, 'Scenario changed; read the latest revision before publishing a new version');
     const { expectedRevision, ...definition } = data;
     const scenario: Scenario = { ...definition, revision: expectedRevision + 1, hash: createHash('sha256').update(JSON.stringify(definition)).digest('hex'), createdAt: now.toISOString(), createdBy: actor.id };
@@ -96,11 +117,14 @@ export async function trackedCases(db: Store['pool']): Promise<{ window: number;
  * the case. The run is bound to the revision it measured, the base URL and the commit that URL
  * served; a retried report of the same run is the same row.
  */
-export async function recordCaseRun(store: Store, actor: Principal, id: string, input: unknown): Promise<CaseRun> {
-  admin(actor);
+export async function recordCaseRun(store: Store, actor: Principal, id: string, input: unknown, authorize?: OperatorAuthorizer): Promise<CaseRun> {
+  const recorder = caseRecorder(actor);
+  if (!recorder) admin(actor);
   const data = caseRunSchema.parse(input);
   return store.transaction(async (db, now) => {
+    if (recorder) await revalidateRecorder(db, now, actor, authorize);
     const scenario: Scenario | undefined = (await db.query('SELECT document FROM scenarios WHERE id=$1 AND revision=$2', [id, data.revision])).rows[0]?.document;
+    if (recorder && scenario) repositoryCase(scenario.runner);
     demand(scenario, `Scenario ${id} has no revision ${data.revision}; run graphyard e2e sync first`, 404);
     const run: Omit<CaseRun, 'seq'> = { scenarioId: id, proof: `e2e:${id}`, result: data.outcome, scenarioRevision: data.revision, environment: data.environment,
       executed: data.executed, skipped: 0, sha: data.sha ?? 'unknown', baseSha: '', policyRevision: 0, workId: '', workKey: '', pr: null,

@@ -282,7 +282,16 @@ test('unit:release-candidate-e2e-suite — UAT runs every case targeted at uat a
   assert.match(validateStep, /--suite 'e2e=node --import tsx --eval "import\(\\"\.\/src\/e2e\/runner\.ts\\"\)\.then\(m => m\.runE2eSuite\(\)\)"'/, 'the uat job runs the e2e suite inside release validate');
   assert.match(validateStep, /GRAPHYARD_UAT_TOKEN: \$\{\{ secrets\.GRAPHYARD_UAT_TOKEN \}\}/, 'the runner reads UAT\'s token from the uat environment secret');
   assert.match(validateStep, /UAT_URL: \$\{\{ vars\.UAT_URL \}\}/);
-  assert.match(workflow, /e2e record "\$RUNNER_TEMP\/e2e-report\.json"/, 'a later step records the report with the release credential');
+  const recordStep = workflow.slice(workflow.indexOf('- name: Record the E2E case runs'), workflow.indexOf('\n  promote:\n'));
+  assert.match(recordStep, /e2e record "\$RUNNER_TEMP\/e2e-report\.json"/, 'a later step records the report');
+  // GY-1614: the release filing credential holds only intent:create, which /api/scenarios refuses, so recording holds its own.
+  assert.match(recordStep, /GRAPHYARD_TOKEN: \$\{\{ secrets\.GRAPHYARD_E2E_RECORD_TOKEN \}\}/, 'recording uses its own credential');
+  assert.doesNotMatch(recordStep, /GRAPHYARD_RELEASE_TOKEN \}\}/, 'recording never uses the intent:create filing credential');
+  assert.match(validateStep, /GRAPHYARD_TOKEN: \$\{\{ secrets\.GRAPHYARD_RELEASE_TOKEN \}\}/, 'filing keeps the release credential');
+  // The candidate's checkout runs the recording command, so its credential is documented as the narrow e2e:record identity, never admin.
+  const delivery = await readFile(new URL('../docs/delivery.md', import.meta.url), 'utf8');
+  assert.match(delivery, /`e2e record` uses `GRAPHYARD_E2E_RECORD_TOKEN`, likewise `graphyard-e2e-recorder` with only `e2e:record`, never admin/);
+  assert.doesNotMatch(delivery + workflow, /admin `?GRAPHYARD_E2E_RECORD_TOKEN/, 'no admin credential reaches the candidate checkout');
   assert.match(workflow, /- name: Record the E2E case runs[^]*?continue-on-error: true/, 'recording never decides promotion');
   const shipped = await loadCases(new URL('..', import.meta.url).pathname);
   assert.ok(shipped.filter(entry => entry.definition.target === 'uat').length >= 5, 'the shipped cases run on UAT');

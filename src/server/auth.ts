@@ -39,7 +39,9 @@ export const operatorAgentRouteGuard: Route = {
       // The loop's pipeline-doctor run summaries (GY-711): a record of what the doctor found and did, posted as the master's identity.
       || url.pathname === '/api/doctor'
       // Retro artefacts are judged by an independent agent identity holding decision:approve (GY-970).
-      || /^\/api\/retro(?:\/standing|\/[0-9a-f-]{36}\/(?:approve|refuse))?$/.test(url.pathname),
+      || /^\/api\/retro(?:\/standing|\/[0-9a-f-]{36}\/(?:approve|refuse))?$/.test(url.pathname)
+      // E2E case recording (GY-1614): the registry and its run route, only for a holder of e2e:record.
+      || (/^\/api\/scenarios(?:\/[^/]+\/runs)?$/.test(url.pathname) && !!actor.capabilities?.includes('e2e:record')),
       'Route is not available to operator agents', 403);
     return Next;
   },
