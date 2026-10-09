@@ -65,6 +65,15 @@ export function cappedRefusalRequest(work: Work, sha: string, config: Partial<Pi
   return refusedCapRereview({ round: reviewRound(work), cap: reviewRoundCapOf(config), sha }, refusal, refusalFollowUps(work, refusal, all));
 }
 
+/**
+ * Whether `capped` was submitted after the approver refused its head's capped rework (GY-1575): the change
+ * request that refusal judged predates it, so a later one is the re-review's. Read from the decision history
+ * and the review itself, this is the once-per-head guard the cursor's rows cannot keep: those are resolved
+ * actions, and pruneDaemonState retires them oldest first on a busy fleet.
+ */
+export const requestedSinceRefusal = (capped: Pick<CappedReview, 'submittedAt'>, refusal: Pick<CapRefusal, 'at'>) =>
+  Date.parse(capped.submittedAt ?? '') > Date.parse(refusal.at ?? '');
+
 /** The escalation's detail: the round, the cap, the findings, and the decision the independent approver is asked for. */
 export function cappedEscalation(work: Pick<Work, 'key'>, capped: CappedReview, why = capped.reason, refused = false) {
   // GY-1575: after a refusal and its re-review the approver has judged the round; nothing is to be requested again by hand.
@@ -108,17 +117,20 @@ export async function reviewCapStep(cycle: Cycle) {
     const head = cappedHeadKey(item, capped.sha);
     const earlier = Object.keys(state.actions).find(other => other !== key && other.startsWith(head) && state.actions[other]?.state === 'done');
     let refusal: CapRefusal | null = null;
+    const again = `${capped.reason}, after the independent approver refused its capped rework as non-blocking and Graphyard withdrew the change request on the same head; its re-review requested changes again, so it is not withdrawn a second time`;
+    const decisionHistory = () => effects.decisions ? effects.decisions(item).then(result => result.decisions, () => null) : Promise.resolve(null);
     if (capped.kind === 'escalate') {
       // A loop that requests decisions asks its approver for this round itself (neededDecision, GY-1389).
       if (!effects.decide || !effects.approver) return escalate();
       // GY-1575: the head an approver's refusal already had withdrawn and re-reviewed requested changes again; that escalates, never loops.
-      if (state.actions[cappedRereviewKey(item, capped.sha)]?.state === 'done')
-        return escalate(`${capped.reason}, after the independent approver refused its capped rework as non-blocking and Graphyard withdrew the change request on the same head; its re-review requested changes again, so it is not withdrawn a second time`, true);
+      if (state.actions[cappedRereviewKey(item, capped.sha)]?.state === 'done') return escalate(again, true);
       // Until the approver refuses the rework the loop requested, the round is the approver's to judge.
-      const history = effects.decisions ? await effects.decisions(item).then(result => result.decisions, () => null) : null;
+      const history = await decisionHistory();
       const refused = history ? refusedCappedRework(history, capped, item.policyRevision) : null;
       if (!refused) return;
       refusal = capRefusalOf(refused);
+      // The cursor's row may be pruned; a change request submitted after the refusal is the re-review's all the same.
+      if (requestedSinceRefusal(capped, refusal)) return escalate(again, true);
       const own = !!config.reviewer && capped.reviewer.toLowerCase() === `${config.reviewer.slug}[bot]`.toLowerCase();
       if (!own || capped.reviewId === null)
         return escalate(`${capped.reason}; the independent approver refused its capped rework as non-blocking (decision ${refusal.id}), but Graphyard cannot withdraw a verdict it did not obtain through its reviewer App`);
@@ -130,6 +142,11 @@ export async function reviewCapStep(cycle: Cycle) {
     if (previous && previous.attempts >= maxCappedFilingAttempts) return escalate(`${capped.reason}; withdrawing it failed ${previous.attempts} times (${previous.detail.slice(0, 300)})`);
     if (!readyToRetry(previous, state.cycle)) return;
     if (closing.has(item.key) || await closeStanding(reads, item, cycle.snapshot.work, closing)) return;
+    // GY-1575: a re-review's nits-only change request, after a refusal the pruned rows no longer record, is escalated too.
+    if (!refusal) {
+      const history = await decisionHistory(), refused = history ? refusedCappedRework(history, capped, item.policyRevision) : null;
+      if (refused && requestedSinceRefusal(capped, capRefusalOf(refused))) return escalate(again, true);
+    }
     const followUps = refusal ? refusalFollowUps(item, refusal, cycle.snapshot.work) : [];
     const reason = refusal
       ? `Review round ${capped.round} of ${item.key} is past its cap of ${capped.cap}: independent approver ${refusal.approver} refused the capped rework (decision ${refusal.id}) as non-blocking, so ${capped.reviewer}'s change request ${capped.reviewId} on ${capped.sha.slice(0, 12)} is withdrawn and the head re-reviewed with its findings as FOLLOW-UP`

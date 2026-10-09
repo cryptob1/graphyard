@@ -72,7 +72,7 @@ export function standingVerdict(work: Work): StandingVerdict | null {
  * (`cappedReworkBinding`), which puts the finding to that approver. So is any other — an agent
  * provider's verdict, or a person's review — since Graphyard cannot withdraw it as the reviewer App.
  */
-export interface CappedReview { kind: 'follow-up' | 'escalate'; round: number; cap: number; reviewer: string; reviewId: number | null; sha: string; blocking: string[]; findings: string[]; reason: string }
+export interface CappedReview { kind: 'follow-up' | 'escalate'; round: number; cap: number; reviewer: string; reviewId: number | null; sha: string; blocking: string[]; findings: string[]; reason: string; submittedAt?: string }
 /** The binding of the loop's rework request for a capped change request (GY-1389): an approver's to judge, never the risk lane's. */
 export const cappedReworkBinding = (head: string, reviewer: string) => `${head}:capped:${reviewer}`;
 /**
@@ -103,7 +103,7 @@ export function cappedReview(work: Work, config: Partial<Pick<MasterConfig, 'rev
   const blocking = review?.blocking?.length ? review.blocking : blockingFindings(body), round = reviewRound(work);
   const own = !!review && !!config.reviewer && review.reviewer.toLowerCase() === `${config.reviewer.slug}[bot]`.toLowerCase();
   const findings = followUpFindingsOf(body);
-  const base = { round, cap, reviewer: verdict.reviewer, reviewId, sha: candidate.sha, blocking, findings: findings.length ? findings : [verdict.reason] };
+  const base = { round, cap, reviewer: verdict.reviewer, reviewId, sha: candidate.sha, blocking, findings: findings.length ? findings : [verdict.reason], ...(review?.submittedAt ? { submittedAt: review.submittedAt } : {}) };
   const past = `${work.key} is in review round ${round}, past its cap of ${cap}`;
   if (blocking.length) return { kind: 'escalate', ...base, reason: `${past}, and ${verdict.reviewer} names ${blocking.length === 1 ? 'a blocking finding' : `${blocking.length} blocking findings`} on ${candidate.sha.slice(0, 12)}: ${blocking.join('; ')}` };
   if (!own || reviewId === null) return { kind: 'escalate', ...base, reason: `${past}, and ${verdict.reviewer} requested changes on ${candidate.sha.slice(0, 12)} naming no BLOCKING: finding, but Graphyard cannot withdraw a verdict it did not obtain through its reviewer App` };

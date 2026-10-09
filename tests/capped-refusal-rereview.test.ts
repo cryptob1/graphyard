@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Observation, Work } from '../src/model.js';
 import type { MasterConfig } from '../src/master.js';
-import { emptyDaemonState, type DaemonAction, type DaemonEffects } from '../src/master-daemon.js';
+import { emptyDaemonState, pruneDaemonState, retainedActions, storeAction, type DaemonAction, type DaemonEffects } from '../src/master-daemon.js';
 import { cappedReview, cappedReworkBinding, cappedRevisionMark, neededDecision, refusedCappedRework } from '../src/daemon/decisions.js';
 import { emptyHeldDecisions } from '../src/daemon/decision-reads.js';
 import { cappedEscalationKey, cappedFilingKey, cappedRefusalRequest, cappedRereviewKey, refusalFollowUps, reviewCapStep } from '../src/daemon/cycle-review-cap.js';
@@ -27,9 +27,9 @@ const config = { url: 'https://graphyard.example', repository: 'owner/project',
 const refusedAt = '2026-10-09T06:40:00.000Z';
 const refusalReason = 'The finding is real but not blocking: the hotspot budget is a follow-up, not a defect of this head. File it as its own item and let the reviewer list it as a FOLLOW-UP.';
 
-function capped(body: string, reviewId = 4242): Work {
+function capped(body: string, reviewId = 4242, submittedAt = '2026-10-09T06:30:00Z'): Work {
   const candidate = { sha: H, baseSha: B, pr: 1047, branch: 'graphyard/gy-1573-5', author: 'implementer' };
-  const observation = { candidate, checks: [], reviews: [{ reviewer, sha: H, state: 'CHANGES_REQUESTED', id: reviewId, submittedAt: '2026-10-09T06:30:00Z', body }], merged: false, mergeSha: null,
+  const observation = { candidate, checks: [], reviews: [{ reviewer, sha: H, state: 'CHANGES_REQUESTED', id: reviewId, submittedAt, body }], merged: false, mergeSha: null,
     mergeable: true, protected: true, files: ['src/a.ts'], scopeFiles: [], at: '2026-10-09T06:31:00Z', prState: 'open', draft: false, baseTip: B, baseTree: B, baseTipContained: true } as unknown as Observation;
   return { id: 'work-1573', key: 'GY-1573', title: 'Hotspot budgets', description: '', type: 'bug', priority: 1, dependencies: [], plannedFiles: ['src/'],
     criteria: [{ id: 'AC-1', text: 'The widget counts every frob.', proofs: ['unit:frob-count'] }], policy: { checks: ['test'], review: true, reviewProvider: 'github' },
@@ -126,6 +126,29 @@ test('unit:capped-refusal-withdraws-and-rereviews — GY-1573 round 5: an approv
     assert.equal(escalation.state, 'done');
     assert.match(escalation.detail, /requested changes again, so it is not withdrawn a second time/);
     assert.equal(again.performed.filter(entry => entry.kind === 'escalation').length, 1, 'escalated once, not on every cycle');
+  }
+
+  // The once-per-head guard outlives the cursor: with the withdrawal and re-review rows pruned, a re-review requesting changes again is still escalated.
+  for (const body of ['BLOCKING: former hotspot files still exceed their size budgets.', 'The helper could still be named more clearly.']) {
+    const pruned = harness(capped('BLOCKING: former hotspot files exceed their size budgets.'));
+    pruned.world.history = [decision('refused')];
+    await pruned.cycle();
+    assert.deepEqual(pruned.world.withdrawn.map(entry => entry.reviewId), [4242]);
+    // A busy fleet: more newer resolved actions than the cursor keeps retire the withdrawal and re-review rows.
+    for (let index = 0; index <= retainedActions; index++)
+      storeAction(pruned.state, `dispatch:other-${index}:1`, { kind: 'dispatch', work: `GY-${index}`, principal: null, epoch: 1, state: 'done', detail: 'launched', attempts: 1, cycle: pruned.state.cycle, at: new Date(Date.parse('2026-10-09T07:00:00Z') + index).toISOString() });
+    pruneDaemonState(pruned.state);
+    assert.equal(pruned.state.actions[cappedRereviewKey(pruned.world.item, H)], undefined, 'the re-review row is pruned');
+    assert.equal(pruned.state.actions[cappedFilingKey(pruned.world.item, { sha: H, reviewId: 4242 })], undefined, 'the withdrawal row is pruned');
+    // The re-review, submitted after the refusal, requests changes again on the same head.
+    pruned.world.item = capped(body, 4243, '2026-10-09T07:10:00Z');
+    await pruned.cycle();
+    await pruned.cycle();
+    assert.deepEqual(pruned.world.withdrawn.map(entry => entry.reviewId), [4242], `withdrawn once only: ${body}`);
+    const escalation = pruned.state.actions[cappedEscalationKey(pruned.world.item, H)]!;
+    assert.equal(escalation.state, 'done');
+    assert.match(escalation.detail, /its re-review requested changes again, so it is not withdrawn a second time/);
+    assert.match(escalation.detail, /the master answers it/, 'the refusal is escalated for the master to answer');
   }
 
   // A refused rework of a verdict Graphyard did not obtain through its reviewer App cannot be withdrawn: it escalates.
@@ -233,3 +256,4 @@ test('unit:capped-refusal-rereview-context — the re-review request carries the
     assert.doesNotMatch(reviewPrompt(config, binding, undefined, undefined, run.world.item.criteria, undefined, undefined, null, { round: 5, cap: 3, capped: true }), /independent approver refused/, 'an ordinary review carries no refusal');
   }
 });
+
