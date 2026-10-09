@@ -90,6 +90,8 @@ const REQUIRED_STATEMENTS: [string, RegExp][] = [
   // GY-1523 AC-8: the head form of submit, its CLI and the change number it allocates.
   ['docs/protocol/work-commands.md', /`\{"epoch":1,"head":SHA\}` \(`complete GY-N EPOCH --head \[SHA\]`.*allocates one change number per head into `candidate\.pr`\/`submission\.pr`/],
   // GY-1529 AC-5: the Coordinator recovery section names its symptoms, the recover command and how promotion resumes.
+  // GY-1607 AC-4: the deployment page says CI and release-candidate runners pull Docker Hub images through the mirror.
+  ['docs/deployment.md', /CI and release-candidate runners pull Docker Hub images through the `mirror\.gcr\.io` mirror/],
   ['docs/recovery.md', /## Coordinator recovery\n\nSelf-merge stalled the loop, or main-watch froze: `graphyard master recover \[--to SHA\] --admin-token-stdin` repins, restarts; verified promotions repin\./],
 ];
 

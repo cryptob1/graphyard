@@ -1004,7 +1004,7 @@ test('an approver session a master launched is adopted on the account its launch
   // `master approver` already launched the decision's session on env-a, and recorded where.
   const name = approverSessionName(work, 'decision-adopt-1');
   herdr.agents.push({ name, pane_id: 'pane-master-approver', agent_status: 'working' });
-  await saveApproverLaunch(root, { agentName: name, account: 'env-a', runtime: 'claude', session: null, launchedAt: new Date().toISOString() });
+  await saveApproverLaunch(root, { agentName: name, account: 'env-a', runtime: 'claude', session: null, launchedAt: new Date().toISOString(), pane: 'pane-master-approver' });
 
   const state = emptyDaemonState(config);
   const adopted = await cycle(state);
@@ -1025,6 +1025,22 @@ test('an approver session a master launched is adopted on the account its launch
   assert.equal(held[profileAccount('approver')], undefined, 'not the runtime\'s own login');
   assert.equal((await reload(work.id)).capacity!.exhaustions.at(-1)!.account, 'env-a');
   assert.deepEqual(launches, ['env-b'], 'the failover launch goes around the spent account');
+});
+
+// GY-1604 (PRRT_kwDOUZby-s6q9Amf): a replacement whose launch record could not be written leaves an earlier launch's record as the
+// latest of its name. Adopting the replacement by that record would charge its quota to the earlier account and track the wrong slot.
+test('unit:approver-stall-followup — an adopted approver takes the account, runtime and registry session only of the launch record naming its pane', async () => {
+  const root = await localRoot('adopt-unbound-root');
+  const { herdr, attempts, work, cycle, config } = await approverLoop('adopt-unbound', ['env-a', 'env-b'], () => ({ approverLaunch: agentName => readApproverLaunch(root, agentName) }));
+  const name = approverSessionName(work, 'decision-adopt-unbound-1');
+  herdr.agents.push({ name, pane_id: 'pane-replacement', agent_status: 'working' });
+  await saveApproverLaunch(root, { agentName: name, account: 'env-a', runtime: 'claude', session: 'registry-earlier', launchedAt: new Date().toISOString(), pane: 'pane-earlier' });
+  const state = emptyDaemonState(config);
+  const adopted = await cycle(state);
+  assert.deepEqual(attempts, [], 'the listed session is adopted, not launched again');
+  const watch = Object.values(state.approvals)[0];
+  assert.deepEqual([watch.agentName, watch.pane, watch.account, watch.runtime, watch.session], [name, 'pane-replacement', null, null, null], 'the earlier pane\'s record gives it nothing');
+  assert.ok(adopted.actions.some(action => action.kind === 'decision' && action.detail.includes(`adopted approver session ${name}, already judging it`)), JSON.stringify(adopted.actions));
 });
 
 test('a waiting escalation handler is kept until its reset, even a weekly one more than a day away', async () => {
