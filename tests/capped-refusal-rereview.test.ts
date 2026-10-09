@@ -5,10 +5,14 @@ import type { MasterConfig } from '../src/master.js';
 import { emptyDaemonState, type DaemonAction, type DaemonEffects } from '../src/master-daemon.js';
 import { cappedReview, cappedReworkBinding, neededDecision, refusedCappedRework } from '../src/daemon/decisions.js';
 import { emptyHeldDecisions } from '../src/daemon/decision-reads.js';
-import { cappedEscalationKey, cappedFilingKey, cappedRereviewKey, refusalFollowUps, reviewCapStep } from '../src/daemon/cycle-review-cap.js';
+import { cappedEscalationKey, cappedFilingKey, cappedRefusalRequest, cappedRereviewKey, refusalFollowUps, reviewCapStep } from '../src/daemon/cycle-review-cap.js';
 import { actionId, reconcileActions } from '../src/model/actions.js';
 import type { NextAction } from '../src/model/next-action.js';
 import type { Cycle } from '../src/daemon/cycle.js';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { readCappedRefusal, reviewPrompt } from '../src/reviewer.js';
 
 // GY-1575, observed on GY-1573 (PR #1047, review round 5 of cap 3), 2026-10-09: the reviewer App
 // requested changes naming a BLOCKING: finding, the loop requested the capped rework decision, and
@@ -160,4 +164,44 @@ test('unit:capped-refusal-rereview-context — the re-review request carries the
   await bare.cycle();
   assert.ok(bare.world.withdrawn[0].message.includes(refusalReason));
   assert.ok(bare.world.withdrawn[0].message.includes('list these findings as FOLLOW-UP threads, not as a change request. '), bare.world.withdrawn[0].message);
+
+  // The handoff: the reviewer the re-review launches is told the same request in its prompt, read from the decision history.
+  const long = `${'The finding is real but not blocking. '.repeat(52)}Decided.`.slice(0, 2000);
+  const longRun = harness(capped('BLOCKING: former hotspot files exceed their size budgets.'));
+  longRun.world.history = [{ ...decision('refused'), refusal: { approver: 'graphyard-approver-graphyard', reason: long, at: refusedAt } }];
+  await longRun.cycle();
+  assert.ok(longRun.world.withdrawn[0].message.includes(long), 'a refusal at the approval\'s 2,000-character bound is posted whole');
+  const request = cappedRefusalRequest(run.world.item, H, config, [decision('refused')], [run.world.item, followUp, unrelated])!;
+  assert.equal(request, withdrawal.message, 'the launch builds exactly the request the withdrawal posted');
+  assert.equal(cappedRefusalRequest(run.world.item, H, config, [decision('requested')], [followUp]), null, 'no refusal, no re-review context');
+  assert.equal(cappedRefusalRequest(run.world.item, 'c'.repeat(40), config, [decision('refused')], [followUp]), null, 'a refusal binds its own head only');
+
+  const directory = await mkdtemp(join(tmpdir(), 'gy-1575-'));
+  try {
+    const credentialFile = join(directory, 'master.token');
+    await writeFile(credentialFile, 'c'.repeat(40), { mode: 0o600 });
+    const reads: string[] = [];
+    const fetcher = (async (url: string) => {
+      reads.push(new URL(url).pathname);
+      const body = url.endsWith('/decisions') ? { decisions: [decision('refused')] } : [run.world.item, followUp, unrelated];
+      return new Response(JSON.stringify(body), { status: 200 });
+    }) as unknown as typeof fetch;
+    const context = await readCappedRefusal({ ...config, credentialFile }, fetcher)(run.world.item, H);
+    assert.deepEqual(context, { request: withdrawal.message });
+    assert.deepEqual(reads, ['/api/work/work-1573/decisions', '/api/work']);
+    // A head with no refusal reads the history alone, and gives no context.
+    reads.length = 0;
+    assert.equal(await readCappedRefusal({ ...config, credentialFile }, fetcher)(run.world.item, 'c'.repeat(40)), null);
+    assert.deepEqual(reads, ['/api/work/work-1573/decisions']);
+    // A failed read is told to the reviewer, never read as "no refusal".
+    const failed = await readCappedRefusal({ ...config, credentialFile }, (async () => new Response('{}', { status: 503 })) as unknown as typeof fetch)(run.world.item, H);
+    assert.ok(failed && 'failure' in failed && /answered 503/.test(failed.failure), JSON.stringify(failed));
+    const binding = { key: 'GY-1573', pr: 1047, sha: H, baseSha: B, policyRevision: 1 };
+    const prompt = reviewPrompt(config, binding, undefined, undefined, run.world.item.criteria, undefined, undefined, null, { round: 5, cap: 3, capped: true }, null, null, null, null, context);
+    assert.ok(prompt.includes(withdrawal.message), 'the launched reviewer reads the whole request');
+    assert.match(prompt, /List each finding that refusal judged non-blocking as a FOLLOW-UP thread, naming the follow-up item filed for it/);
+    assert.ok(prompt.includes('GY-1574') && prompt.includes(refusalReason));
+    assert.match(reviewPrompt(config, binding, undefined, undefined, run.world.item.criteria, undefined, undefined, null, { round: 5, cap: 3, capped: true }, null, null, null, null, failed), /could not read whether an independent approver refused this head's capped rework \(GET \/api\/work\/work-1573\/decisions answered 503\)/);
+    assert.doesNotMatch(reviewPrompt(config, binding, undefined, undefined, run.world.item.criteria, undefined, undefined, null, { round: 5, cap: 3, capped: true }), /independent approver refused/, 'an ordinary review carries no refusal');
+  } finally { await rm(directory, { recursive: true, force: true }); }
 });

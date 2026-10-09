@@ -223,39 +223,62 @@ test('unit:soak-invariants-hold — review findings classified mechanical under 
   assert.equal(report.byKind?.find((entry: { kind: string }) => entry.kind === 'misclassified-finding')?.count, 1, `the control plane holds the one misclassification: ${JSON.stringify(report.byKind)}`);
 });
 
-test('unit:soak-invariants-hold — change requests naming a blocking finding past the review-round cap under the real loop: each capped head gets one rework request and one approver, never the risk lane, never repeated across cycles; an approved round is reworked once and delivered, a refused one is never requested again and is escalated once for the master, with every invariant holding', { timeout: 300_000 }, async () => {
+test('unit:soak-invariants-hold — change requests naming a blocking finding past the review-round cap under the real loop: each capped head gets one rework request and one approver, never the risk lane, never repeated across cycles; an approved round is reworked once and delivered, a refused one has its change request withdrawn once by the reviewer App, its owed rework cancelled and its head re-reviewed with the refusal, and is delivered, while a re-review requesting changes again escalates once and is never withdrawn twice, with every invariant holding', { timeout: 300_000 }, async () => {
   // GY-1389: past the cap the loop itself requests the capped round (neededDecision) for the
-  // approver it launches, and the review-cap step stays quiet. Both repeat per cycle, head and item:
-  // two items run past a cap of 1 with a BLOCKING: change request on each head, and the approver
-  // refuses the second one's capped round.
-  const reviewCap = { cap: 1, items: [1, 3], refused: [3] };
-  const { items, final, violations, failures, lost, escalations, actionKeys, approverDecisions } = await simulateDay({
+  // approver it launches, and the review-cap step stays quiet. GY-1575: once the approver refuses
+  // the round as non-blocking, the step withdraws the change request as the reviewer App and the
+  // head is reviewed again. All of it repeats per cycle, head and item: three items run past a cap
+  // of 1 with a BLOCKING: change request on each head; the approver refuses the second and third
+  // ones' capped rounds, and the third one's re-review requests changes again.
+  const reviewCap = { cap: 1, items: [1, 3, 4], refused: [3, 4], again: [4] };
+  const { items, final, violations, failures, lost, escalations, actionKeys, approverDecisions, github, state } = await simulateDay({
     hours: 6, reviewCap,
     plan: { items: 4, leftovers: 0, slowRecompute: 0, workMs: 15 * minute, rework: new Set(), deaths: new Set(), flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set(), misread: new Set(), exits: new Set(), spentProducer: 0, lostRuns: 0, exhaustedReviewer: 0, outOfQueue: { item: 4, afterMs: 99 * hour }, blind: { from: 99 * hour, to: 100 * hour }, split: { at: 99 * hour, item: 4 } },
   });
-  const [approved, refused] = [items[0], items[2]];
-  assert.deepEqual(final.filter(item => item.key !== refused.key && item.stage !== 'done').map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'every item but the refused one is delivered');
+  const [approved, refused, again] = [items[0], items[2], items[3]];
+  assert.deepEqual(final.filter(item => item.key !== again.key && item.stage !== 'done').map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'every item but the one re-reviewed into a change request again is delivered');
   assert.deepEqual(violations, [], 'every system invariant holds across the capped rounds');
   assert.deepEqual(failures, [], 'no cycle failed');
   assert.deepEqual(lost, [], 'no lease was lost');
-  for (const work of [approved, refused]) {
-    const decisions = (await api(principals.operatorAgent, 'GET', `work/${encodeURIComponent(work.id)}/decisions`)).decisions as { id: string; action: string; state: string; input?: { binding?: string }; approvedBy?: string | null }[];
+  for (const work of [approved, refused, again]) {
+    const decisions = (await api(principals.operatorAgent, 'GET', `work/${encodeURIComponent(work.id)}/decisions`)).decisions as { id: string; action: string; state: string; input?: { binding?: string }; approvedBy?: string | null; refusal?: { reason?: string } | null }[];
     const capped = decisions.filter(entry => entry.action === 'rework' && /:capped:/.test(entry.input?.binding ?? ''));
     assert.equal(capped.length, 1, `${work.key}: one capped rework request for its capped head: ${JSON.stringify(decisions.map(entry => [entry.action, entry.state, entry.input?.binding]))}`);
     assert.equal([...actionKeys].filter(key => key.startsWith(`decision:rework:${work.id}:`) && key.includes(':capped:')).length, 1, `${work.key}: the loop requested it once, across every cycle it stood`);
     assert.equal(approverDecisions.filter(decision => decision === capped[0].id).length, 1, `${work.key}: one approver session judged it, and none was launched again`);
     assert.equal(escalations.filter(detail => detail.includes(work.key) && /graphyard master decide \S+ rework REASON/.test(detail)).length, 0, `${work.key}: no escalation asks a master to request the round by hand`);
-    const item = final.find(entry => entry.key === work.key)!;
+    const item = final.find(entry => entry.key === work.key)!, head = capped[0].input!.binding!.split(':')[0]!;
+    const dismissed = github.dismissals.filter(entry => entry.key === work.key);
     if (work === approved) {
       assert.deepEqual([capped[0].state, capped[0].approvedBy], ['applied', 'graphyard-approver'], `${work.key}: the approver, not the risk lane, applied the capped round`);
       assert.equal(item.pipeline?.reworkRounds, reviewCap.cap + 1, `${work.key}: the round under the cap and the one capped round, nothing more`);
       assert.ok(item.delivery, `${work.key}: the head that answered the capped round was delivered`);
+      assert.deepEqual(dismissed, [], `${work.key}: an approved round withdraws nothing`);
+      continue;
+    }
+    assert.equal(capped[0].state, 'refused', `${work.key}: the approver refused the capped round`);
+    assert.equal(item.pipeline?.reworkRounds, reviewCap.cap, `${work.key}: the refused round was not reworked`);
+    // The withdrawal: once, as the reviewer App, of the head's change request, carrying the refusal and the FOLLOW-UP request.
+    assert.equal(dismissed.length, 1, `${work.key}: its change request was withdrawn exactly once across every cycle: ${JSON.stringify(dismissed)}`);
+    assert.equal(dismissed[0].sha, head, `${work.key}: the refused head's change request was the one withdrawn`);
+    assert.ok(dismissed[0].message.includes(capped[0].refusal!.reason!) && /list these findings as FOLLOW-UP threads/.test(dismissed[0].message), `${work.key}: the withdrawal carries the refusal and the FOLLOW-UP request: ${dismissed[0].message}`);
+    // One re-review request recorded for the head, and the owed request-rework never acted on: no worker reworked the refused round.
+    assert.equal(state.actions[`review-cap:rereview:${work.id}:${head}`]?.state, 'done', `${work.key}: one re-review request recorded for its head`);
+    const reworks = (item.actionQueue?.history ?? []).concat(item.actionQueue?.actions ?? []).filter(action => action.kind === 'request-rework' && (action.inputs as { sha?: string }).sha === head);
+    const events = reworks.map(action => action.history.map(entry => entry.event));
+    assert.ok(reworks.length && events.every(list => !list.includes('claimed')), `${work.key}: no request-rework owed for the refused head was ever acted on: ${JSON.stringify(events)}`);
+    // The withdrawal cancels it and the approving re-review leaves nothing owed; a change request again on the same
+    // binding (maybe before any observation saw the withdrawal) owes it still, and the escalation hands it to the master.
+    assert.deepEqual(events.map(list => list.at(-1)), work === refused ? ['cancelled'] : ['requested'], `${work.key}: ${JSON.stringify(events)}`);
+    if (work === refused) {
+      assert.ok(item.delivery, `${work.key}: its re-review approved the head, which was delivered`);
+      assert.equal(escalations.filter(detail => detail.includes(work.key) && /not withdrawn a second time/.test(detail)).length, 0, `${work.key}: nothing escalated a second withdrawal`);
     } else {
-      assert.equal(capped[0].state, 'refused', `${work.key}: the approver refused the capped round`);
-      assert.equal(item.pipeline?.reworkRounds, reviewCap.cap, `${work.key}: the refused round was not reworked`);
-      assert.equal(item.stage, 'review', `${work.key}: it waits in review on its standing change request`);
-      const raised = escalations.filter(detail => detail.includes(capped[0].id) && /does not request it again/.test(detail));
-      assert.equal(raised.length, 1, `${work.key}: the refusal was escalated once for the master to answer: ${escalations.filter(detail => detail.includes(work.key)).join('\n')}`);
+      assert.equal(item.stage, 'review', `${work.key}: its re-review requested changes again, so it waits in review`);
+      const raised = state.actions[`escalation:review-cap:${work.id}:${head}`];
+      assert.equal(raised?.state, 'done', `${work.key}: the repeated change request was escalated`);
+      assert.match(raised!.detail, /requested changes again, so it is not withdrawn a second time/);
+      assert.equal(raised!.attempts, 1, `${work.key}: escalated once, not on every cycle`);
     }
   }
 });
