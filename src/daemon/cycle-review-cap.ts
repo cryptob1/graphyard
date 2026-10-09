@@ -18,19 +18,17 @@ export const cappedEscalationKey = (work: Pick<Work, 'id'>, sha: string) => `esc
 
 /** The cursor key of the re-review an approver's refusal of a capped rework asks for (GY-1575): one per head. */
 export const cappedRereviewKey = (work: Pick<Work, 'id'>, sha: string) => `review-cap:rereview:${work.id}:${sha}`;
-/** How many follow-up items a re-review request names. */
-const refusalFollowUpsMax = 5;
-
 /**
  * The follow-up items the master filed for a refused capped rework (GY-1575): open items the refusal's
  * reasoning names, items filed from the item's review, and items filed since the refusal that name the item.
+ * Every one is named: a follow-up the request left out is one the reviewer cannot list.
  */
 export function refusalFollowUps(work: Pick<Work, 'key'>, refusal: { reason: string; at?: string }, all: readonly Pick<Work, 'key' | 'title' | 'description' | 'createdAt' | 'origin' | 'stage'>[]): string[] {
   const named = new Set(refusal.reason.match(/\b[A-Z][A-Z0-9]*-\d+\b/g) ?? []), since = Date.parse(refusal.at ?? '');
   const mentions = new RegExp(`\\b${work.key}\\b`);
   return all.filter(other => other.key !== work.key && other.stage !== 'done' && (named.has(other.key) || other.origin?.reviewFollowUps?.parent === work.key
     || Number.isFinite(since) && Date.parse(other.createdAt) >= since && mentions.test(`${other.title}\n${other.description ?? ''}`)))
-    .map(other => other.key).slice(0, refusalFollowUpsMax);
+    .map(other => other.key);
 }
 
 /**
@@ -58,10 +56,10 @@ export function capRefusalOf(refused: { id: string; outcome?: string | null; ref
  * reviewer App. The reviewer launch puts it in the session's prompt, so the reviewer it starts lists
  * the refused findings as FOLLOW-UP threads: the same text the withdrawal posted on the pull request.
  */
-export function cappedRefusalRequest(work: Work, sha: string, config: Partial<Pick<MasterConfig, 'reviewRoundCap' | 'reviewer'>>, history: readonly { id: string; action: string; state: string; input?: any; outcome?: string | null; refusal?: { approver?: string; reason?: string; at?: string } | null }[],
+export function cappedRefusalRequest(work: Work, sha: string, config: Partial<Pick<MasterConfig, 'reviewRoundCap' | 'reviewer'>>, history: readonly { id: string; action: string; state: string; input?: any; reason?: string; outcome?: string | null; refusal?: { approver?: string; reason?: string; at?: string } | null }[],
   all: Parameters<typeof refusalFollowUps>[2]): string | null {
   if (!config.reviewer) return null;
-  const refused = refusedCappedRework(history, { sha, reviewer: `${config.reviewer.slug}[bot]` });
+  const refused = refusedCappedRework(history, { sha, reviewer: `${config.reviewer.slug}[bot]` }, work.policyRevision);
   if (!refused) return null;
   const refusal = capRefusalOf(refused);
   return refusedCapRereview({ round: reviewRound(work), cap: reviewRoundCapOf(config), sha }, refusal, refusalFollowUps(work, refusal, all));
@@ -118,7 +116,7 @@ export async function reviewCapStep(cycle: Cycle) {
         return escalate(`${capped.reason}, after the independent approver refused its capped rework as non-blocking and Graphyard withdrew the change request on the same head; its re-review requested changes again, so it is not withdrawn a second time`, true);
       // Until the approver refuses the rework the loop requested, the round is the approver's to judge.
       const history = effects.decisions ? await effects.decisions(item).then(result => result.decisions, () => null) : null;
-      const refused = history ? refusedCappedRework(history, capped) : null;
+      const refused = history ? refusedCappedRework(history, capped, item.policyRevision) : null;
       if (!refused) return;
       refusal = capRefusalOf(refused);
       const own = !!config.reviewer && capped.reviewer.toLowerCase() === `${config.reviewer.slug}[bot]`.toLowerCase();

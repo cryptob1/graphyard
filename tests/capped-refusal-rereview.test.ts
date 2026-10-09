@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import type { Observation, Work } from '../src/model.js';
 import type { MasterConfig } from '../src/master.js';
 import { emptyDaemonState, type DaemonAction, type DaemonEffects } from '../src/master-daemon.js';
-import { cappedReview, cappedReworkBinding, neededDecision, refusedCappedRework } from '../src/daemon/decisions.js';
+import { cappedReview, cappedReworkBinding, cappedRevisionMark, neededDecision, refusedCappedRework } from '../src/daemon/decisions.js';
 import { emptyHeldDecisions } from '../src/daemon/decision-reads.js';
 import { cappedEscalationKey, cappedFilingKey, cappedRefusalRequest, cappedRereviewKey, refusalFollowUps, reviewCapStep } from '../src/daemon/cycle-review-cap.js';
 import { actionId, reconcileActions } from '../src/model/actions.js';
@@ -41,8 +41,9 @@ function capped(body: string, reviewId = 4242): Work {
 const followUp = { id: 'work-1574', key: 'GY-1574', title: 'Former hotspot files exceed their size budgets after GY-1573', description: 'Named by the refusal of GY-1573\'s capped rework.', stage: 'backlog', createdAt: '2026-10-09T06:42:00Z' } as unknown as Work;
 const unrelated = { id: 'work-1500', key: 'GY-1500', title: 'Something else', description: 'Mentions GY-15730 only', stage: 'backlog', createdAt: '2026-10-09T06:43:00Z' } as unknown as Work;
 
-/** The capped rework the loop requested for the head, then the approver's refusal of it. */
-const decision = (state: 'requested' | 'refused') => ({ id: '334c52c6-467e-4fe4-b81f-2c761e07a066', action: 'rework', state, input: { binding: cappedReworkBinding(H, reviewer), previousWorkerStopped: true },
+/** The capped rework the loop requested for the head under policy revision `revision`, then the approver's refusal of it. */
+const decision = (state: 'requested' | 'refused', revision = 1) => ({ id: '334c52c6-467e-4fe4-b81f-2c761e07a066', action: 'rework', state, input: { binding: cappedReworkBinding(H, reviewer), previousWorkerStopped: true },
+  reason: `[Decided from the GitHub observation taken at 2026-10-09T06:31:00Z of candidate ${H}; if the item has moved since, this request no longer describes it.] ${cappedRevisionMark(revision)} GY-1573 is in review round 5, past its cap of 3.`,
   approvedBy: null, refusal: state === 'refused' ? { approver: 'graphyard-approver-graphyard', reason: refusalReason, at: refusedAt } : null });
 
 function harness(item: Work, others: Work[] = [followUp, unrelated]) {
@@ -79,8 +80,9 @@ test('unit:capped-refusal-withdraws-and-rereviews — GY-1573 round 5: an approv
 
   // The approver refuses it as non-blocking.
   run.world.history = [decision('refused')];
-  assert.equal(refusedCappedRework(run.world.history, judged)?.id, decision('refused').id);
-  assert.equal(refusedCappedRework(run.world.history, { ...judged, sha: 'c'.repeat(40) }), null, 'a refusal binds its own head only');
+  assert.equal(refusedCappedRework(run.world.history, judged, 1)?.id, decision('refused').id);
+  assert.equal(refusedCappedRework(run.world.history, { ...judged, sha: 'c'.repeat(40) }, 1), null, 'a refusal binds its own head only');
+  assert.ok(owed.reason.startsWith(cappedRevisionMark(1)), 'the request names the policy revision its refusal binds');
   await run.cycle();
   // The withdrawal, as the reviewer App, of exactly that change request.
   assert.deepEqual(run.world.withdrawn.map(entry => entry.reviewId), [4242]);
@@ -133,6 +135,25 @@ test('unit:capped-refusal-withdraws-and-rereviews — GY-1573 round 5: an approv
   await foreign.cycle();
   assert.equal(foreign.world.withdrawn.length, 0);
   assert.match(foreign.state.actions[cappedEscalationKey(foreign.world.item, H)]!.detail, /refused its capped rework as non-blocking \(decision 334c52c6-467e-4fe4-b81f-2c761e07a066\), but Graphyard cannot withdraw a verdict/);
+
+  // A requirements or review-policy revision leaves the head unchanged but makes the earlier refusal inapplicable:
+  // the new revision's change request is its own approver's to judge, never withdrawn on the old judgement.
+  const revised = harness(capped('BLOCKING: AC-1 is not met under the revised criteria.', 4250));
+  revised.world.item.policyRevision = 2;
+  revised.world.history = [decision('refused', 1)];
+  assert.equal(refusedCappedRework(revised.world.history, judged, 2), null, 'a refusal binds the policy revision it was judged under');
+  assert.equal(cappedRefusalRequest(revised.world.item, H, config, revised.world.history, [followUp]), null, 'nor does it reach the revised head\'s reviewer');
+  await revised.cycle();
+  await revised.cycle();
+  assert.equal(revised.world.withdrawn.length, 0);
+  assert.equal(revised.performed.length, 0, 'the round waits for the new revision\'s approver');
+  const renewed = neededDecision(revised.world.item, config)!;
+  assert.ok(renewed.reason.startsWith(cappedRevisionMark(2)), renewed.reason);
+  // Its own refusal, under revision 2, is the one that withdraws it.
+  revised.world.history = [decision('refused', 1), { ...decision('refused', 2), id: '6d0c2a47-55a9-4e0e-9c2f-0f1d1a2b3c4d' }];
+  await revised.cycle();
+  assert.deepEqual(revised.world.withdrawn.map(entry => entry.reviewId), [4250]);
+  assert.match(revised.world.withdrawn[0].message, /decision 6d0c2a47-55a9-4e0e-9c2f-0f1d1a2b3c4d/);
 });
 
 test('unit:capped-refusal-rereview-context — the re-review request carries the refusal\'s reasoning and the follow-up item the master filed, so the reviewer lists the findings as FOLLOW-UP threads', async () => {
@@ -157,6 +178,13 @@ test('unit:capped-refusal-rereview-context — the re-review request carries the
   const delivered = { ...followUp, key: 'GY-1603', stage: 'done' } as Work;
   assert.deepEqual(refusalFollowUps(item, { reason: `${refusalReason} See GY-1600.`, at: refusedAt }, [named, origin, earlier, delivered, followUp, unrelated]), ['GY-1600', 'GY-1601', 'GY-1574']);
   assert.deepEqual(refusalFollowUps(item, { reason: refusalReason }, [followUp]), [], 'with no refusal time, only a named or review-filed item is a follow-up');
+  // Every follow-up is named, however many the master filed: the reviewer cannot list one the request left out.
+  const many = Array.from({ length: 7 }, (_, index) => ({ ...followUp, id: `work-17${index}`, key: `GY-17${index}0` }) as Work);
+  assert.deepEqual(refusalFollowUps(item, { reason: refusalReason, at: refusedAt }, many), many.map(other => other.key));
+  const crowded = harness(capped('BLOCKING: former hotspot files exceed their size budgets.'), many);
+  crowded.world.history = [decision('refused')];
+  await crowded.cycle();
+  assert.ok(crowded.world.withdrawn[0].message.includes(`the follow-up items filed for them: ${many.map(other => other.key).join(', ')}.`), crowded.world.withdrawn[0].message);
 
   // A refusal with no follow-up filed still carries its reasoning, and names none.
   const bare = harness(capped('BLOCKING: former hotspot files exceed their size budgets.'), []);
