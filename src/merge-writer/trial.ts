@@ -237,10 +237,11 @@ export interface RunTrialInput {
 }
 const tailLength = 4000;
 /**
- * The log tail of a trial whose test groups named failing files (GY-1639): each failing group's own
- * output, its command line and the end of what it printed (the runner's `failing tests:` summary
- * and the exit), sharing `tailLength` evenly. The whole log's last characters are the last group's,
- * and in a full selection that group passed, so they named no failing cause.
+ * The log tail of a trial whose test groups named failing files and whose whole log outgrew the
+ * tail (GY-1639): each failing group's own output, its command line and the end of what it printed
+ * (the runner's `failing tests:` summary and the exit), sharing `tailLength` evenly. The whole
+ * log's last characters are the last group's, and in a full selection that group passed, so they
+ * named no failing cause.
  */
 export function failureTail(outputs: readonly string[], length = tailLength): string {
   const share = Math.floor((length - (outputs.length - 1)) / Math.max(1, outputs.length));
@@ -416,7 +417,7 @@ export async function runTrial(input: RunTrialInput): Promise<TrialRun> {
       if (!failed.length && unattributed) throw unattributed;
       const worst = groups.find(group => group.status !== 0);
       return finish('pass', { passed: Math.max(0, files.length - failed.length), failed, files: files.length }, worst ? exitCode({ status: worst.status, signal: worst.signal, cause: undefined }) : 0, groups,
-        failingOutput.length ? failureTail(failingOutput) : tail());
+        failingOutput.length && log.join('\n').length > tailLength ? failureTail(failingOutput) : tail());
     } catch (error) {
       if (error instanceof TrialTimeoutError || error instanceof TrialRunnerError) throw error;
       log.push(`trial checkout failed: ${error instanceof Error ? error.message : String(error)}`);

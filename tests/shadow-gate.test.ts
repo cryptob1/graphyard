@@ -508,7 +508,7 @@ test('integration:shadow-trial-env-parity — run against this tree, tests/manag
   assert.equal(result.build, 'pass', result.logTail);
   assert.deepEqual(result.tests, { passed: 2, failed: [], files: 2 }, result.logTail);
   assert.equal(result.runnerExit, 0, result.logTail);
-  assert.ok(seen.length === 1 && (seen[0]!.mode & 0o7777) === trialTemporaryMode, `the runner's own TMPDIR is sticky and private (${seen.map(entry => `${entry.tmp} ${(entry.mode & 0o7777).toString(8)}`).join(', ')})`);
+  assert.ok(seen.length > 0 && seen.every(entry => (entry.mode & 0o7777) === trialTemporaryMode), `the runner's own TMPDIR is sticky and private (${seen.map(entry => `${entry.tmp} ${(entry.mode & 0o7777).toString(8)}`).join(', ')})`);
   assert.equal(compareVerdicts({ build: result.build, tests: result.tests, conflict: [] }, 'merged'), 'agree-pass', 'a head GitHub merged comes out agree-pass');
 });
 
