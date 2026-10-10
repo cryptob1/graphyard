@@ -18,7 +18,7 @@
 import { existsSync, readFileSync, type Dirent } from 'node:fs';
 import { lstat, opendir, readdir, readFile, readlink, realpath, rm, stat, statfs, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 
 /** How old an ownerless directory must be before the pass removes it: the tsx cache's bound, and the default for a caller's own prefixes. */
 export const tmpReclaimMinAgeMs = 6 * 3_600_000;
@@ -146,9 +146,16 @@ export async function heldOpenPaths(procRoot = '/proc'): Promise<Set<string>> {
   }));
   return held;
 }
-/** The absolute paths a process's NUL-separated command line names: whole arguments, and paths after an `=` or inside a longer argument. */
-export const namedPaths = (commandLine: string): string[] => commandLine.split('\0').flatMap(argument => argument.match(/(?<![\w.~:/-])\/[^\s'"`=:,;)]+/g) ?? [])
-  .map(path => path.replace(/\/+$/, '')).filter(path => path.length > 1);
+/**
+ * The absolute paths a process's NUL-separated command line names. An argument that is a path, or
+ * the value of `--opt=/path` or a short `-D/path`, is taken whole, spaces included, since the kernel
+ * already split the arguments; a path inside a longer argument such as a shell command is taken up
+ * to its first space, which can only name a shorter path and so keeps more, never less.
+ */
+export const namedPaths = (commandLine: string): string[] => commandLine.split('\0').flatMap(argument => {
+  const whole = argument.match(/^(?:--[\w-]+=|-[A-Za-z])?(\/.*)$/s)?.[1];
+  return [...whole ? [whole] : [], ...argument.match(/(?<![\w.~:/-])\/[^\s'"`=:,;)]+/g) ?? []];
+}).map(path => path.replace(/\/+$/, '')).filter((path, index, all) => path.length > 1 && all.indexOf(path) === index);
 /**
  * The entries directly under `root` that some held path lies in or names: reduced once per pass, so
  * each candidate's check is one lookup rather than a scan of every open path on the host.
@@ -199,6 +206,18 @@ async function treeLastWritten(path: string, own: number): Promise<number> {
   const gitdir = (await readFile(join(path, '.git'), 'utf8').catch(() => '')).match(/^gitdir: (.+)$/m)?.[1]?.trim();
   if (gitdir) newest = Math.max(newest, await lastWritten(gitdir, (await lstat(gitdir).catch(() => null))?.mtimeMs ?? 0));
   return newest;
+}
+/**
+ * The repository's registration of a linked git worktree at `path` — `.git/worktrees/<name>`, whose
+ * `gitdir` file names this checkout back — or null. Removing the checkout alone leaves it registered,
+ * and `git worktree add` at the same path then fails as already registered; git's own prune deletes
+ * exactly this directory for a missing checkout, so the pass deletes it with the checkout.
+ */
+async function worktreeRegistration(path: string): Promise<string | null> {
+  const gitdir = (await readFile(join(path, '.git'), 'utf8').catch(() => '')).match(/^gitdir: (.+)$/m)?.[1]?.trim();
+  if (!gitdir || !isAbsolute(gitdir)) return null;
+  const back = (await readFile(join(gitdir, 'gitdir'), 'utf8').catch(() => '')).trim();
+  return back === join(path, '.git') ? gitdir : null;
 }
 
 /** Recursively sum the sizes of the regular files under `path`, following no symlink. */
@@ -525,7 +544,9 @@ async function reclaimRoot(root: string, real: string, pass: PassState, report: 
     if (at > pass.started + pass.workMs) break;
     try {
       const bytes = await sizeOf(path);
+      const registration = await worktreeRegistration(path);
       await removeTree(path, pass.retryMs);
+      if (registration) await rm(registration, { recursive: true, force: true });
       await rm(tempOwnerMarker(path), { force: true });
       pass.unfinished.delete(path);
       report.removed.push({ path, bytes });

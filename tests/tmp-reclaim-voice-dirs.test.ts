@@ -34,6 +34,8 @@ async function checkout(tmp: string, name: string, gitdirs: string) {
   await mkdir(join(gitdir, 'logs'), { recursive: true });
   await writeFile(join(gitdir, 'HEAD'), 'abc\n'); await writeFile(join(gitdir, 'index'), 'x');
   await writeFile(join(path, '.git'), `gitdir: ${gitdir}\n`);
+  // The repository's registration names the checkout back, as `git worktree add` writes it.
+  await writeFile(join(gitdir, 'gitdir'), `${join(path, '.git')}\n`);
   return { path, gitdir };
 }
 
@@ -68,6 +70,8 @@ test('integration:tmp-reclaim-voice-dirs — the pass removes this user\'s voice
   assert.deepEqual(report.errors, []);
   assert.deepEqual(report.removed.map(entry => entry.path).sort(), [leaked.path, leakedLog].sort(), 'only the day-stale, unheld agent scratch goes');
   for (const path of [deepEdit.path, committed.path, younger.path, held.path, foreign, other]) assert.equal(existsSync(path), true, `${path} stays`);
+  assert.equal(existsSync(leaked.gitdir), false, 'a reclaimed worktree is unregistered with it, as git worktree prune would');
+  for (const gitdir of [deepEdit.gitdir, committed.gitdir, younger.gitdir, held.gitdir]) assert.equal(existsSync(gitdir), true, `${gitdir} stays registered`);
   assert.ok(12 * hour > testTempMinAgeMs, 'the younger checkout is past the test temp bound, so the agent scratch bound alone keeps it');
 
   // The tmp-inodes reading counts this user's agent scratch entries among its own.
@@ -81,6 +85,9 @@ test('integration:tmp-reclaim-voice-dirs — the pass removes this user\'s voice
 test('unit:tmp-reclaim-live-process-guard — a running process that names a voice<n>-* directory in its command line keeps it, with its working directory elsewhere and no file open there; once it exits the pass removes the directory', async () => {
   assert.deepEqual(tmpReclaim.namedPaths?.(['postgres', '-D', '/tmp/voice638-189-db/', '--dir=/tmp/a/b', 'cd /tmp/voice1-x && ls', 'https://example.com/path', './relative'].join('\0')),
     ['/tmp/voice638-189-db', '/tmp/a/b', '/tmp/voice1-x'], 'whole arguments, paths after = and paths inside a longer argument; never a URL or a relative path');
+  assert.deepEqual(tmpReclaim.namedPaths?.(['node', '/tmp/voice615-work space/run.js', '-D/tmp/voice616-db', '--dir=/tmp/voice617 a/b'].join('\0')),
+    ['/tmp/voice615-work space/run.js', '/tmp/voice615-work', '/tmp/voice616-db', '/tmp/voice617 a/b', '/tmp/voice617'],
+    'a path argument is kept whole, spaces included, as is a short -D/path or --opt=/path value; the shorter prefix a space cuts only adds protection');
   const tmp = await temporaryDirectory('voice-live-guard');
   const named = join(tmp, 'voice638-189-db'), unnamed = join(tmp, 'voice639-189-db');
   for (const path of [named, unnamed]) { await mkdir(path); await writeFile(join(path, 'PG_VERSION'), '17'); await backdateTree(path, 2 * day); }
@@ -101,6 +108,29 @@ test('unit:tmp-reclaim-live-process-guard — a running process that names a voi
   }
   const after = await reclaimTmpDirectories({ tmpRoot: tmp });
   assert.deepEqual(after.removed.map(entry => entry.path), [named], 'once the process has exited the stale directory goes');
+});
+
+test('unit:tmp-reclaim-live-process-guard-whole-arguments — a running process naming /tmp/voice615-work space as one argument, or /tmp/voice616-db as -D/path, keeps both directories; once it exits the pass removes them', async () => {
+  const tmp = await temporaryDirectory('voice-live-guard-whole');
+  const spaced = join(tmp, 'voice615-work space'), prefix = join(tmp, 'voice615-work'), short = join(tmp, 'voice616-db');
+  for (const path of [spaced, short]) { await mkdir(path); await writeFile(join(path, 'PG_VERSION'), '17'); await backdateTree(path, 2 * day); }
+  const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)', '--', spaced, `-D${short}`], { cwd: '/', stdio: 'ignore' });
+  await once(child, 'spawn');
+  try {
+    if (!existsSync('/proc')) return;
+    const held = await tmpReclaim.heldOpenPaths();
+    assert.ok(held.has(spaced), 'the whole argument, space included, is held');
+    assert.ok(held.has(short), 'the -D/path value is held');
+    const report = await reclaimTmpDirectories({ tmpRoot: tmp });
+    assert.deepEqual(report.errors, []);
+    assert.deepEqual(report.removed, [], 'neither directory the running process names is removed');
+    for (const path of [spaced, short]) assert.equal(existsSync(path), true, `${path} stays while its process runs`);
+    assert.equal(existsSync(prefix), false, 'no directory at the space-cut prefix stood in for the real one');
+  } finally {
+    child.kill(); if (child.exitCode === null && child.signalCode === null) await once(child, 'exit');
+  }
+  const after = await reclaimTmpDirectories({ tmpRoot: tmp });
+  assert.deepEqual(after.removed.map(entry => entry.path).sort(), [spaced, short].sort(), 'once the process has exited the stale directories go');
 });
 
 test('integration:tmp-inodes-attention-retires — with /tmp below its headroom, the loop\'s pass removes the stale voice<n>-* trees, the tmp-inodes reading names that scope, its attention retires at or above 262,144 free, and the escalated steps stand down', async () => {
