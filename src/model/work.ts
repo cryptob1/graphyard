@@ -21,6 +21,7 @@ import { proofSchema } from './proof.js';
 import { closedQuestionsSchema } from './closed-question.js';
 import { workOriginSchema, type WorkOrigin } from './interventions.js';
 import { demand } from './refusal.js';
+import { askGrounds } from './scope-collapse.js';
 
 export const CHECK_NAME = 'Graphyard / merge', LANDABLE_CHECK = 'graphyard/landable'; // GY-887: both are Graphyard's own, never CI inputs to the verdict
 export const stages = ['backlog', 'ready', 'build', 'review', 'test', 'acceptance', 'merge', 'done'] as const;
@@ -274,16 +275,15 @@ export interface PlannedFilesDerivation {
 /**
  * plannedFiles as `master create` and `master requirements` record it: every planned path is
  * resolved against the tree of the base branch the item will be worked on, and every file a
- * criterion names that the tree holds is carried in. Only criteria are read — a path the
- * description mentions in prose is not a requirement and adds nothing — and only exact files
+ * criterion names that the tree holds is carried in. Only criteria are read — a path the description mentions in prose is not a requirement and adds nothing — and only exact files
  * are carried: a criterion naming a directory widens nothing on its own. So are a change's inevitable companions (GY-955, model/scope-companions.ts).
  */
 export function derivePlannedFiles(
   item: { plannedFiles?: readonly string[]; criteria: readonly CriterionText[]; documentation?: ItemDocumentation | null; origin?: WorkOrigin | null; description?: string | null },
-  tree: ReadonlySet<string>, asked: readonly string[] = [], // an open scope ask's paths (askedScopePaths, GY-1676): planned though the tree lacks them
+  tree: ReadonlySet<string>, asked: readonly string[] = [], // an open scope ask's paths (askedScopePaths, GY-1676): planned though the tree lacks them, when askGrounds
 ): PlannedFilesDerivation {
   const planned = [...new Set(item.plannedFiles ?? [])], added: PlannedFilesDerivation['added'] = [];
-  const missing = planned.filter(path => !scopeExists(path, tree) && !describedAsNew(path, item.criteria) && !asked.some(entry => pathScopeContains(path, entry)));
+  const missing = planned.filter(path => !scopeExists(path, tree) && !describedAsNew(path, item.criteria) && !askGrounds(path, asked));
   for (const criterion of item.criteria) for (const path of namedPaths(criterion.text)) {
     if (tree.has(path) && !planned.some(entry => pathScopeContains(entry, path)) && !added.some(entry => entry.path === path)) added.push({ path, criterion: criterion.id });
   }

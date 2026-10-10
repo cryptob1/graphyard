@@ -136,6 +136,11 @@ test('unit:scope-request-new-file — one new file beside 21 planned src paths i
   assert.deepEqual(derivePlannedFiles({ plannedFiles: [...planned, newFile], criteria }, tree, askedScopePaths(item)).missing, []);
   assert.deepEqual(derivePlannedFiles({ plannedFiles: [...planned, newFile], criteria }, tree).missing, [newFile], 'without the ask the new path is refused as before');
   assert.deepEqual(derivePlannedFiles({ plannedFiles: [...planned, newFile, 'src/typo.ts'], criteria }, tree, askedScopePaths(item)).missing, ['src/typo.ts']);
+  // A directory the base lacks is grounded only by an ask wide enough to fold into it, never by one asked file inside it.
+  assert.deepEqual(derivePlannedFiles({ plannedFiles: ['newdir/', 'newdir/**'], criteria }, tree, ['newdir/a.ts']).missing, ['newdir/', 'newdir/**']);
+  const wideNew = Array.from({ length: 21 }, (_, index) => `newdir/file-${String(index).padStart(2, '0')}.ts`);
+  assert.deepEqual(derivePlannedFiles({ plannedFiles: ['newdir/'], criteria }, tree, wideNew).missing, [], 'the fold of a 21-file ask is planned');
+  assert.deepEqual(derivePlannedFiles({ plannedFiles: ['newdir/a.ts'], criteria }, tree, ['newdir/']).missing, [], 'a file inside an asked directory is planned');
 });
 
 test('integration:scope-request-new-file — an approved exact-path widening for a file the base lacks applies under the live lease and containment quarantine, and the worker keeps its lease', async () => {

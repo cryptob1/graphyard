@@ -242,3 +242,11 @@ export function scopeRequestOutcome(item: { key: string; plannedFiles?: readonly
  */
 export const askedScopePaths = (item: { scopeRequest?: ScopeRequestState | null; carriedScopeRequest?: ScopeRequestState | null }) =>
   (item.scopeRequest ?? item.carriedScopeRequest)?.paths ?? [];
+/**
+ * Whether an open ask grounds a planned path the base lacks: the path lies within a scope the ask
+ * names, or it is a directory the ask itself folds into for its width (more than
+ * `collapseDirectoryFiles` asked paths beneath it). A directory that merely contains one asked file
+ * is never grounded, so asking for `newdir/a.ts` never plans the rest of `newdir/`.
+ */
+export const askGrounds = (path: string, asked: readonly string[]) => asked.some(entry => pathScopeContains(entry, path))
+  || (pathScope(path).prefix && asked.filter(entry => pathScopeContains(path, entry)).length > collapseDirectoryFiles);
