@@ -6,13 +6,13 @@ import { mergedWithoutAuthorization, unauthorizedMergeViolation } from '../merge
 import { boundDeployment, type DaemonAction, type DaemonState, deploymentObservationSchema, maxProofAttempts, message, retainedActions, storeAction } from './state.js';
 import { candidateKey } from './reconcile.js';
 import { readyToRetry } from './sessions.js';
-import { detailChanged, exhaustedProofEscalation, exhaustedProofKey, githubPause, observationWakeDue, standingVerdict } from './decisions.js';
+import { detailChanged, exhaustedProofEscalation, exhaustedProofKey, githubPause, observationWakeDue, standingVerdict, type RoutineDecision } from './decisions.js';
 import { record } from './effects.js';
 import type { Cycle } from './cycle.js';
 import { defaultDeploymentReuseMinutes, defaultPromoteEveryMinutes, deploymentDetail, deploymentStepBudgetMs, promotionCycle, promotionWorkflow, reusableDeployment, stillVerifying, withinDeploymentBudget } from './deployment.js';
 import { mainGuardAttention } from '../main-guard.js';
 import { promotionFreeze } from './main-watch.js';
-import { openThroughputOwner, throughputAnsweredAt, throughputDecisionCause, throughputDecisionRelease, throughputOwnerAnsweredBy, throughputOwnerClosure, throughputOwnerItem, throughputRemeasureAt, throughputStallText, type ThroughputStall } from '../throughput.js';
+import { openThroughputOwner, throughputAnsweredAt, throughputClaim, throughputDecisionCause, throughputDecisionRelease, throughputHandAsked, throughputOwnerAnsweredBy, throughputOwnerClosure, throughputOwnerItem, throughputRemeasureAt, throughputSelfAsked, throughputStallText, type ThroughputStall } from '../throughput.js';
 
 /**
  * GY-710. Wake the item's observation job for a step refused on a stale observation — a rework —
@@ -425,7 +425,37 @@ async function throughputOwnerStep(cycle: Pick<Cycle, 'state' | 'effects' | 'now
     if (!fresh || !openThroughputOwner([fresh]) || throughputEscalatedAt(state.actions, fresh) !== null) return;
     owner = fresh;
   }
-  performed.push(await record(state, throughputEscalationKey(owner.key, owner.policyRevision), { kind: 'escalation', work: owner.key, principal: null, state: 'waiting', detail: throughputStallText({ ...stall, owner: owner.key }), attempts: 1, cycle: state.cycle }, now(), effects.persist));
+  // GY-1630: the record names who asks the decision: the loop's own decision step where it has the decide and approver
+  // effects (`throughputRoutineDecision`), the hand path only for a loop without them.
+  const asks = effects.decide && effects.approver ? throughputSelfAsked(owner.key) : throughputHandAsked(owner.key);
+  performed.push(await record(state, throughputEscalationKey(owner.key, owner.policyRevision), { kind: 'escalation', work: owner.key, principal: null, state: 'waiting', detail: `${throughputStallText({ ...stall, owner: owner.key })}. ${asks}`, attempts: 1, cycle: state.cycle }, now(), effects.persist));
+}
+
+/** The binding of the requirements decision the loop requests on a throughput owner's standing needs-decision: one per raise. */
+export const throughputDecisionBound = (binding: unknown) => typeof binding === 'string' && binding.startsWith('throughput:');
+
+/**
+ * GY-1630: the requirements decision the loop requests itself on the open throughput owner while the
+ * needs-decision it raised there stands unanswered (`escalation:throughput:GY-N:REVISION` waiting, the
+ * owner still at that revision), or null. It asks the option of record, which changes no requirement:
+ * the coordination unchanged and GY-87's claim recorded unverified on the release it was asked on, the
+ * budgets unchanged and never relaxed. `expectedPolicyRevision` is the revision at the raise, so the
+ * revision answers exactly that needs-decision (`throughputOwnerAnswered`) and the unchanged closure
+ * path closes the owner once it is applied. The binding names the raise and the measurement it stands
+ * on, so a lost reply adopts the request already standing rather than asking a second.
+ */
+export function throughputRoutineDecision(work: Work, actions: Record<string, DaemonAction>): RoutineDecision | null {
+  if (!openThroughputOwner([work])) return null;
+  const raisedAt = throughputEscalatedAt(actions, work), escalation = raisedAt === null ? null : actions[throughputEscalationKey(work.key, raisedAt)];
+  if (raisedAt === null || escalation?.state !== 'waiting' || work.policyRevision !== raisedAt) return null;
+  const measuredAt = /\(measured ([^)]+)\)/.exec(escalation.detail)?.[1] ?? 'unrecorded', release = throughputDecisionRelease(escalation.detail);
+  const on = release ? `the release ${release} it was asked on` : 'the release it was asked on';
+  const text = `${throughputClaim.item}'s throughput claim stands recorded unverified on ${on}, and the needs-decision the loop raised on ${work.key} at its requirements revision ${raisedAt} (measured ${measuredAt}) is answered by this revision: `
+    + `the coordination is left unchanged, and ${throughputClaim.item}'s budgets stay exactly as stated (${throughputClaim.statement} Judged over at least ${throughputClaim.minimumDeliveries} session-free deliveries), recorded unverified and never relaxed; a later release verifies the claim through a fresh measurement or the successor the loop files.`;
+  const reason = `The loop raised the throughput needs-decision on ${work.key} at its requirements revision ${raisedAt} and requests it itself (GY-1630): ${escalation.detail.slice(0, 1000)}. `
+    + `It asks the option of record, which changes no requirement: the coordination unchanged and the claim recorded unverified on this release, the budgets unchanged and never relaxed. expectedPolicyRevision ${raisedAt} binds the revision to that raise, so it answers exactly this needs-decision and the loop closes ${work.key} once it is applied.`;
+  return { action: 'requirements', binding: `throughput:${raisedAt}:${measuredAt}`, reason: reason.slice(0, 2000),
+    input: { criteria: [{ id: 'AC-1', text: text.slice(0, 2000), proofs: ['manual:throughput-claim-verified'] }], plannedFiles: work.plannedFiles ?? [], expectedPolicyRevision: raisedAt } };
 }
 
 /** Record a budget-cut step, so the journal and `master status` say verification is in flight rather than blind; a full step supersedes the last cut once. */
