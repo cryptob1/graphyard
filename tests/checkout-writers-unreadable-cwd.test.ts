@@ -23,6 +23,14 @@ function processEntry(proc: string, pid: number, options: { ppid?: number; state
   if (options.cwd) symlinkSync(options.cwd, join(directory, 'cwd'));
   else writeFileSync(join(directory, 'cwd'), '');
 }
+/** A thread of a fake /proc entry, under /proc/PID/task/TID. */
+function threadEntry(proc: string, pid: number, tid: number, options: { state?: string; cwd?: string | null }) {
+  const directory = join(proc, String(pid), 'task', String(tid));
+  mkdirSync(directory, { recursive: true });
+  writeFileSync(join(directory, 'stat'), `${tid} (proc ${pid}) ${options.state ?? 'S'} 1 ${pid} ${pid} 0 -1 4194560\n`);
+  if (options.cwd) symlinkSync(options.cwd, join(directory, 'cwd'));
+  else writeFileSync(join(directory, 'cwd'), '');
+}
 
 test('unit:checkout-writers-unreadable-cwd — a process of this user whose cwd cannot be read is unverifiable and checkout-restore refuses before any snapshot or reset', async () => {
   const base = await temporaryDirectory('checkout-writers-unreadable-cwd');
@@ -40,6 +48,10 @@ test('unit:checkout-writers-unreadable-cwd — a process of this user whose cwd 
   processEntry(proc, 200, { cwd: null });                                     // unreadable, this user's: unverifiable
   processEntry(proc, 300, { cwd: null, cgroup: '/user.slice/user-1000.slice/user@1000.service/app.slice/graphyard-watch-42-abc.scope' }); // a managed session: spared
   processEntry(proc, 400, { cwd: null, state: 'Z' });                         // a zombie writes nothing
+  // A zombie leader whose main thread called pthread_exit: a live sibling thread still writes.
+  processEntry(proc, 410, { cwd: null, state: 'Z' }); threadEntry(proc, 410, 410, { state: 'Z', cwd: null }); threadEntry(proc, 410, 411, { cwd: checkout });
+  processEntry(proc, 420, { cwd: null, state: 'Z' }); threadEntry(proc, 420, 421, { cwd: null });           // its live thread's cwd is unreadable too: unverifiable
+  processEntry(proc, 430, { cwd: null, state: 'Z' }); threadEntry(proc, 430, 430, { state: 'Z', cwd: null }); threadEntry(proc, 430, 431, { state: 'Z', cwd: null }); // no live thread: gone
   processEntry(proc, 500, { cwd: checkout });                                 // a standing writer
   processEntry(proc, 600, { cwd: join(checkout, '.graphyard') });              // the managed area: no writer
   processEntry(proc, 700, { cwd: null, state: 'I', ppid: 2, flags: 0x04208040 }); // a kernel thread (PF_KTHREAD), as root sees it: no writer
@@ -54,11 +66,12 @@ test('unit:checkout-writers-unreadable-cwd — a process of this user whose cwd 
   syncBuiltinESMExports();
 
   const scan = writers.checkoutProcessScan(root, 100, proc, uid);
-  assert.deepEqual(scan.writers, [500]);
-  assert.deepEqual(scan.unverifiable.map(entry => entry.pid), [200], 'only the unreadable live process of this user, outside the loop, its managed sessions and the kernel, is unverifiable');
+  assert.deepEqual(scan.writers, [410, 500], 'a zombie leader with a live thread in the checkout is a writer');
+  assert.deepEqual(scan.unverifiable.map(entry => entry.pid), [200, 420], 'only the unreadable live processes of this user, outside the loop, its managed sessions and the kernel, are unverifiable');
   assert.match(scan.unverifiable[0].error, /EINVAL/);
+  assert.match(scan.unverifiable[1].error, /live thread 421's cwd cannot be read either/);
   fs.readlinkSync = readlink; syncBuiltinESMExports();
-  rmSync(join(proc, '800'), { recursive: true, force: true });
+  for (const pid of ['800', '410', '420', '430']) rmSync(join(proc, pid), { recursive: true, force: true });
   assert.throws(() => checkoutWriterProcesses(root, 100, proc, uid), /pid 200 \(EINVAL[^)]*\) cannot be read.*nothing was restored/);
   // Another user's process is not this user's to judge.
   assert.deepEqual(writers.checkoutProcessScan(root, 100, proc, uid + 1).unverifiable, []);

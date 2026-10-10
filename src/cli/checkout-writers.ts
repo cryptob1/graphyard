@@ -17,7 +17,8 @@ import { setTimeout as delay } from 'node:timers/promises';
  * is stopped or touched — unless it is provably outside the checkout: this process or an ancestor, or
  * one of the loop's managed sessions (a `graphyard-watch-…` scope, which sees the checkout read-only).
  * A kernel thread (PF_KTHREAD in its stat flags, seen when the scan runs as root) has no cwd and is
- * never a writer; a process whose state, read again after the failed cwd read, is a zombie is gone.
+ * never a writer; a process whose state, read again after the failed cwd read, is a zombie is gone
+ * unless a sibling thread still runs, whose own cwd then decides it (zombieLeader).
  */
 export function checkoutWriterProcesses(root: string, self = process.pid, proc = '/proc', uid = process.getuid?.() ?? null): number[] {
   const { writers, unverifiable } = checkoutProcessScan(root, self, proc, uid);
@@ -60,7 +61,10 @@ export function checkoutProcessScan(root: string, self = process.pid, proc = '/p
         const fields = now?.slice(now.lastIndexOf(')') + 2).split(' ') ?? [];
         const state = fields[0] ?? null, flags = Number(fields[6]);
         const kernelThread = Number.isFinite(flags) && (flags & PF_KTHREAD) !== 0;
-        if (owner !== null && now !== null && (uid === null || owner === uid) && state !== 'Z' && state !== 'X' && !kernelThread) error = failure instanceof Error ? failure.message : String(failure);
+        const ours = owner !== null && now !== null && (uid === null || owner === uid) && !kernelThread;
+        const reason = failure instanceof Error ? failure.message : String(failure);
+        if (ours && state !== 'Z' && state !== 'X') error = reason;
+        else if (ours) ({ cwd, error } = zombieLeader(proc, name, reason));
       }
       table.set(Number(name), { ppid, cwd, error });
     } catch { /* exited while read */ }
@@ -77,6 +81,29 @@ export function checkoutProcessScan(root: string, self = process.pid, proc = '/p
   const outside = (pid: number) => { try { return managedScope.test(readFileSync(join(proc, String(pid), 'cgroup'), 'utf8')); } catch { return false; } };
   const unverifiable = [...table].filter(([pid, entry]) => entry.error !== null && !spared.has(pid) && !outside(pid)).map(([pid, entry]) => ({ pid, error: entry.error! })).sort((a, b) => a.pid - b.pid);
   return { writers: [...writers].sort((a, b) => a - b), unverifiable };
+}
+/**
+ * A zombie thread-group leader whose sibling threads still run (the main thread called pthread_exit)
+ * is not gone: its cwd reads as unreadable at /proc/PID, yet a live thread can still write. Its live
+ * threads' cwd is read from /proc/PID/task/TID instead; a live thread whose cwd cannot be read, or a
+ * task list that cannot be read, is unverifiable. A leader with no live thread is gone.
+ */
+function zombieLeader(proc: string, name: string, reason: string): { cwd: string | null; error: string | null } {
+  let tasks: string[];
+  try { tasks = readdirSync(join(proc, name, 'task')).filter(tid => /^\d+$/.test(tid) && tid !== name); }
+  catch (failure) {
+    if ((failure as NodeJS.ErrnoException).code === 'ENOENT') return { cwd: null, error: null };
+    return { cwd: null, error: `${reason}; its threads cannot be listed (${failure instanceof Error ? failure.message : String(failure)})` };
+  }
+  let error: string | null = null;
+  for (const tid of tasks) {
+    let stat: string; try { stat = readFileSync(join(proc, name, 'task', tid, 'stat'), 'utf8'); } catch { continue; /* exited */ }
+    const state = stat.slice(stat.lastIndexOf(')') + 2).split(' ')[0];
+    if (state === 'Z' || state === 'X') continue;
+    try { return { cwd: readlinkSync(join(proc, name, 'task', tid, 'cwd')), error: null }; }
+    catch (failure) { error ??= `${reason}; its live thread ${tid}'s cwd cannot be read either (${failure instanceof Error ? failure.message : String(failure)})`; }
+  }
+  return { cwd: null, error };
 }
 /** A process's state letter from /proc (R, S, D, T, t, Z, …), or null when it is gone. */
 export function processStateOf(pid: number, proc = '/proc'): string | null {
