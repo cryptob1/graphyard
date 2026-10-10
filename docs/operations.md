@@ -26,14 +26,14 @@ graphyard master settle-containment GY-N "reason"                       # settle
 graphyard recover-containment GY-N --previous-worker-stopped "reason"   # delivered, stop confirmed
 graphyard unblock GY-N "reason"                                         # unowned blocker
 systemctl --user restart graphyard-master-OWNER-NAME                    # loop down, supervised (units.json)
-graphyard master checkout-restore "reason"                              # dirty: refs/graphyard/checkout-restore/
+graphyard master checkout-restore "reason"                              # dirty: refs/graphyard/checkout-restore/; refuses on unreadable cwd
 ```
 
-`checkout-restore` refuses (naming pid, error) while your non-loop process hides its cwd (kernel threads and zombies are not writers). Never attest a stop you have not confirmed; merged work changes only via follow-ups. Outside the lock's PID namespace `master status` judges the loop by stall bound; stalled or absent: stop hand-started loops, install `examples/master/graphyard-master.service`, `systemctl --user daemon-reload && systemctl --user enable --now graphyard-master`.
+Never attest a stop you have not confirmed; merged work changes only via follow-ups. Outside the lock's PID namespace `master status` judges the loop by stall bound; stalled or absent: stop hand-started loops, install `examples/master/graphyard-master.service`, `systemctl --user daemon-reload && systemctl --user enable --now graphyard-master`.
 
 ## Worker host keyring proxy
 
-Confined masters, approvers, producers read GitHub login (`gh auth git-credential`) via a keyring-only D-Bus proxy; workers and reviewers use their own. Per host: copy `deploy/systemd/graphyard-secrets-bus.socket`, `graphyard-secrets-bus.service` and `graphyard-secrets-bus-filter.service`, then `systemctl --user enable --now graphyard-secrets-bus.socket`. Listens at `$XDG_RUNTIME_DIR/graphyard-secrets-bus` (or `GRAPHYARD_SECRETS_BUS`); absent, sessions push with `GH_TOKEN`.
+Confined masters, approvers, producers read GitHub login (`gh auth git-credential`) via a keyring-only D-Bus proxy; workers, reviewers use their own. Per host: copy `deploy/systemd/graphyard-secrets-bus.socket`, `graphyard-secrets-bus.service`, `graphyard-secrets-bus-filter.service`, then `systemctl --user enable --now graphyard-secrets-bus.socket`. Listens at `$XDG_RUNTIME_DIR/graphyard-secrets-bus` (or `GRAPHYARD_SECRETS_BUS`); absent, sessions push with `GH_TOKEN`.
 
 ## Safety facts that never change
 

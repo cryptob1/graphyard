@@ -231,10 +231,10 @@ test('integration:checkout-restore-clears-guard — the restore saves every dirt
   assert.equal(state.actions['escalation:dirty-checkout']?.state, 'done');
   // The request carries its outcome, and is served once.
   assert.equal((await readCheckoutRestoreRequest(file))?.outcome?.ref, outcome!.ref);
-  assert.equal(await serveCheckoutRestore(file, root, { restart: restart(43), pid: 43 }), null);
+  assert.equal(await serveCheckoutRestore(file, root, { restart: restart(43), pid: 43, quiesce: hostQuiesce }), null);
   // A request on a clean checkout restores nothing and restarts nothing.
   await fileCheckoutRestoreRequest(file, 'check again', 'graphyard-operator-agent');
-  assert.equal((await serveCheckoutRestore(file, root, { restart: restart(43), pid: 43 }))?.state, 'clean');
+  assert.equal((await serveCheckoutRestore(file, root, { restart: restart(43), pid: 43, quiesce: hostQuiesce }))?.state, 'clean');
   assert.equal(restarts.length, 2);
   // The confined master's `master restart`: a request the loop serves by restarting through its unit.
   const restartFile = loopRestartRequestPath(config(base));
