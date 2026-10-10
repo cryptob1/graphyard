@@ -23,7 +23,7 @@ Dispatch is optimistic (overlap holds nothing), smallest planned scope first ([r
 | `installation-accept` | Accept pending requests
 | `protection` | Reconcile branch protection
 
-Flows read `GET /api/github/installation`, recording `.graphyard/master-actions/` `record.json`, `ledger.json` and redacted Confirm-access markup (`master browser fixtures`). Approving *Confirm access* on device: human-only; master never stores cookies, bypasses merges, pushes code, reads worker credentials. `master harness claude --apply` (or `codex`) writes `.claude/settings.local.json` rules denying `gh pr merge`/`review`, merging, reviewing, token-minting or mutating `gh api`; missing or retired rules are `harness` drift the loop reapplies each cycle to its CLI's checkout, not research scratch (no units, its unit unreadable or elsewhere: waits naming `master init` or the unit); `master status` too, unless read-only (reports).
+Flows read `GET /api/github/installation`, recording `.graphyard/master-actions/` `record.json`, `ledger.json` and redacted Confirm-access markup (`master browser fixtures`). Approving *Confirm access* GitHub Mobile code on device: human-only; master never stores cookies, uses merge bypass, pushes code, reads worker credentials. On classifier refusals `master harness claude --apply` (or `codex`) writes `.claude/settings.local.json` rules denying `gh pr merge`/`review`, merging, reviewing, token-minting or mutating `gh api`; missing or retired rules are `harness` drift the loop reapplies each cycle to its CLI's checkout, not research scratch (no units, its unit unreadable or elsewhere: waits naming `master init` or the unit); `master status` too, unless read-only (reports).
 
 ## Typed actions and executors
 
