@@ -12,7 +12,7 @@ import EmbeddedPostgres from 'embedded-postgres';
 import { daemonStateSchema, daemonSummary, emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { keepVerdicts, shadowErrorKey, shadowKeptVerdicts, shadowLeftoverKey, shadowReads, shadowRunnerDetail, shadowRunnerKey, shadowRunnerRetries, shadowIdle, shadowStateSchema, shadowTimeoutKey, shadowTimeoutRetries, shadowVerdictBody, shadowVerdictKey } from '../src/daemon/cycle-shadow.js';
 import { compareVerdicts, githubOutcome, judgedVerdicts, recordedFailureCause, shadowDisagreementCause, shadowDue, shadowGateAttention, shadowReport, submittedAtOf, trialLogTailLength, type ShadowVerdict } from '../src/merge-writer/shadow.js';
-import { runTrial, trialNeedsLog, trialTemporaryMode, TrialCleanupError, TrialRunnerError, TrialTimeoutError, type TrialRun } from '../src/merge-writer/trial.js';
+import { runTrial, trialNeedsLog, TrialCleanupError, TrialRunnerError, TrialTimeoutError, type TrialRun } from '../src/merge-writer/trial.js';
 import { defaultChildRun, type ChildRun } from '../src/child-runner.js';
 import type { FilesystemProbe } from '../src/install/worktree-root.js';
 import { daemonEffects } from '../src/daemon/effects.js';
@@ -508,7 +508,7 @@ test('integration:shadow-trial-env-parity — run against this tree, tests/manag
   assert.equal(result.build, 'pass', result.logTail);
   assert.deepEqual(result.tests, { passed: 2, failed: [], files: 2 }, result.logTail);
   assert.equal(result.runnerExit, 0, result.logTail);
-  assert.ok(seen.length > 0 && seen.every(entry => (entry.mode & 0o7777) === trialTemporaryMode), `the runner's own TMPDIR is sticky and private (${seen.map(entry => `${entry.tmp} ${(entry.mode & 0o7777).toString(8)}`).join(', ')})`);
+  assert.ok(seen.length > 0 && seen.every(entry => (entry.mode & 0o7777) === 0o1700), `the runner's own TMPDIR is sticky and private (${seen.map(entry => `${entry.tmp} ${(entry.mode & 0o7777).toString(8)}`).join(', ')})`);
   assert.equal(compareVerdicts({ build: result.build, tests: result.tests, conflict: [] }, 'merged'), 'agree-pass', 'a head GitHub merged comes out agree-pass');
 });
 
