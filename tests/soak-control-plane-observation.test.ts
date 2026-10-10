@@ -141,4 +141,38 @@ test('soak:control-plane-observation — the App-less observation job, run acros
   git(checkout, 'update-ref', 'refs/remotes/origin/main', lostTip);
   await cycle();
   for (const id of ids) assert.equal((await jobs()).find(row => row.work_id === id)!.error, null);
+
+  // The ledger says github: a server with no App claims nothing, so a checkout that is not the merger never writes an observation (review of 10cb17d2).
+  await new MergerSettings(store).change(operator, { merger: 'github', reason: 'GitHub merges again' }, randomUUID());
+  const gatedFrom = await Promise.all(ids.map(history));
+  for (let round = 0; round < 3; round++) {
+    await due();
+    for (let claims = 0; claims < 5; claims++) assert.equal(await processControlPlaneJob(engine), false, 'nothing is claimed while GitHub is the recorded merger');
+  }
+  assert.deepEqual(await Promise.all(ids.map(history)), gatedFrom, 'no observation is written');
+  assert.ok((await jobs()).every(row => !row.later), 'the due jobs stay due for the merger that owns them, neither taken nor deferred');
+  assert.equal((await store.pool.query('SELECT count(*)::int AS n FROM jobs WHERE token IS NOT NULL')).rows[0].n, 0, 'no job is held');
+  await new MergerSettings(store).change(operator, { merger: 'control-plane', reason: 'the soak runs an App-less install' }, randomUUID());
+  assert.equal(await cycle(), 4, 'the control plane claims again once it is the merger');
+
+  // The claim race: a submission between the pre-claim fleet read and the claim creates the candidate and wakes the job claimed.
+  // The claimed item is judged as it stands after the claim, so that job is observed, never dropped on the stale snapshot.
+  const racedHead = git(join(checkout, '.graphyard', 'worktrees', 'GY-4-1'), 'rev-parse', 'HEAD');
+  await store.pool.query('UPDATE jobs SET available_at=now() - interval \'1 hour\' WHERE work_id=$1', [pending.w.id]);
+  await store.pool.query(`UPDATE jobs SET available_at=now() + interval '1 hour' WHERE work_id<>$1`, [pending.w.id]);
+  const fleet = store.fleet.bind(store);
+  store.fleet = async (options?: Parameters<Store['fleet']>[0]) => {
+    const all = await fleet(options);
+    store.fleet = fleet;
+    await engine.execute(worker, 'submit', pending.w.id, { epoch: 1, head: racedHead }, randomUUID());
+    return all;
+  };
+  try { assert.equal(await processControlPlaneJob(engine), true, 'the job woken by the submission is claimed and observed'); }
+  finally { store.fleet = fleet; }
+  const raced = (await store.workDocument(pending.w.id))!;
+  assert.equal(raced.observation?.source, 'control-plane'); assert.equal(raced.observation?.candidate.sha, racedHead, 'the submission landed in the race is observed in the same claim');
+  const racedJob = (await jobs()).find(row => row.work_id === pending.w.id);
+  assert.ok(racedJob, 'the job row survives the race');
+  assert.equal(racedJob.error, null); assert.equal(racedJob.deferred_reason, null, 'it is finished, not deferred as unsubmitted');
+  await store.pool.query('UPDATE jobs SET available_at=now()');
 });

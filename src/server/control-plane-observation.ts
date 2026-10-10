@@ -1,25 +1,34 @@
 // Concern: the observation job of a control-plane install with no GitHub App (GY-1675), kept out of src/server/main.ts's budget.
 import { observationClaim } from '../observation-priority.js';
+import { recordedMergerMode } from '../merger-mode.js';
 import type { Engine } from '../engine.js';
 
 /**
  * The observation job of a control-plane install with no GitHub App (GY-1675): take one due job and
  * observe its candidate from the local checkout, as `processJob` does from GitHub; false when no job
- * was due or the observation failed. A job for an item with nothing submitted yet is deferred a
- * minute; one for a finished item, or with no candidate, is dropped.
+ * was due or the observation failed.
+ *
+ * The path is gated on the recorded merger: while the ledger says `github`, a server with no App
+ * claims nothing, so a checkout that is not the configured merger never writes a control-plane
+ * observation over a GitHub one. The claimed item is read again after the claim, never judged from
+ * the pre-claim snapshot: a submission between `fleet()` and `takeJob` creates the candidate and
+ * wakes the very job claimed, and a stale snapshot would discard it. A job for an item with nothing
+ * submitted yet is deferred a minute (`deferJob` keeps a wake that lands meanwhile); one for a
+ * finished or missing item is dropped.
  */
 export async function processControlPlaneJob(engine: Engine): Promise<boolean> {
+  if ((await recordedMergerMode(engine.store.pool)).merger !== 'control-plane') return false;
   const all = await engine.store.fleet();
   const plan = observationClaim(all, Date.now(), false);
   const job = await engine.store.takeJob(plan.order, plan.headCount);
   if (!job) return false;
-  let work = all.find(w => w.id === job.work_id);
-  if (!work?.submission || work.stage === 'done' || !work.candidate) {
-    if (work && !work.submission && work.stage !== 'done') {
-      await engine.store.deferJob(job.work_id, job.token, new Date(Date.now() + 60_000).toISOString(), 'no submission to observe', null);
-    } else {
-      await engine.store.pool.query('DELETE FROM jobs WHERE work_id=$1 AND token=$2', [job.work_id, job.token]);
-    }
+  let work = await engine.store.workItem(job.work_id);
+  if (!work || work.stage === 'done') {
+    await engine.store.pool.query('DELETE FROM jobs WHERE work_id=$1 AND token=$2', [job.work_id, job.token]);
+    return true;
+  }
+  if (!work.submission || !work.candidate) {
+    await engine.store.deferJob(job.work_id, job.token, new Date(Date.now() + 60_000).toISOString(), 'no submission to observe', null);
     return true;
   }
   let observed = false;

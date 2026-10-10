@@ -143,7 +143,8 @@ export async function main(options: MainOptions = {}) {
       failed: error => console.error('production watch failed', error instanceof Error ? error.message : 'unknown'),
     });
     // The observation workers run beside the tick, never in it: a queue of due jobs is drained at
-    // the concurrency the installation sets, whatever the rest of the tick is doing (GY-492).
+    // the concurrency the installation sets, whatever the rest of the tick is doing (GY-492). With
+    // no App the same workers observe from the checkout, each claim gated on the recorded merger (GY-1675).
     observing = startObservationWorkers(engine, github, capacity.concurrency);
     console.log(`Observation workers: ${observing?.concurrency ?? 0} (database pool ${capacity.poolMax})`);
     // A recurring intervention becomes work on its own (GY-98), once a minute and beside the tick,

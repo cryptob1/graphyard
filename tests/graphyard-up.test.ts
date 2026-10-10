@@ -1776,6 +1776,25 @@ test('unit:land-coordinator-commits — the operator commits landed from the coo
   await assert.rejects(fileOnboardingWork(filing, refusing(false), () => 0), /refused for another reason/, 'any other refusal is not answered by head');
   assert.equal(submitted.length, 1);
 
+  // The install's base-branch detection reads `git branch -r` as whole names: origin/main-old is not origin/main (review of 10cb17d2).
+  const { detectedBaseBranch, composeCheckoutMounts } = await import('../src/install/index.js');
+  assert.equal(detectedBaseBranch('  origin/HEAD -> origin/main\n  origin/main\n  origin/master\n'), null, 'main present: the default stands');
+  assert.equal(detectedBaseBranch('  origin/master\n  origin/main-old\n'), 'master', 'only master, beside a main-old branch');
+  assert.equal(detectedBaseBranch('  origin/master-old\n  origin/feature\n'), null, 'master-old is not master');
+  assert.equal(detectedBaseBranch('  origin/HEAD -> origin/master\n  origin/master\n'), 'master');
+  assert.equal(detectedBaseBranch(''), null);
+  // A compose install mounts a plain checkout alone; a linked worktree's common Git directory goes with it, at its own host path.
+  const plain = await temporaryDirectory('land-coordinator-commits-checkout');
+  execFileSync('git', ['init', '-q', plain]);
+  execFileSync('git', ['-C', plain, 'commit', '-q', '--allow-empty', '-m', 'base'], { env: { ...process.env, GIT_AUTHOR_NAME: 'T', GIT_AUTHOR_EMAIL: 't@example.com', GIT_COMMITTER_NAME: 'T', GIT_COMMITTER_EMAIL: 't@example.com' } });
+  assert.deepEqual(composeCheckoutMounts(plain), { repoCheckout: plain, repoGitDir: null });
+  const linked = join(plain, '.graphyard', 'worktrees', 'GY-1-1');
+  execFileSync('git', ['-C', plain, 'worktree', 'add', '-q', linked]);
+  const mounts = composeCheckoutMounts(linked);
+  assert.equal(mounts.repoCheckout, linked);
+  assert.equal(mounts.repoGitDir, execFileSync('git', ['-C', plain, 'rev-parse', '--path-format=absolute', '--git-common-dir'], { encoding: 'utf8' }).trim(), 'the worktree points into the main checkout\'s .git, which is what the container needs');
+  assert.deepEqual(composeCheckoutMounts(bare), { repoCheckout: null, repoGitDir: null }, 'no .git, nothing to mount');
+
   // AC-2: the coverage of graphyard up and of the install's own Herdr instance that these commits touched is kept, not dropped.
   const upTests = await readFile(resolve(import.meta.dirname, 'graphyard-up.test.ts'), 'utf8');
   for (const name of ['unit:up-child-url-propagation', 'integration:up-control-plane-nondefault-port', 'unit:onboarding-pr-self-merges', 'unit:onboarding-pr-visible', 'unit:onboarding-generates-workflow'])

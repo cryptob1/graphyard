@@ -18,6 +18,8 @@ export interface AdapterContext {
   workdir: string;
   sourceRoot: string;
   repoCheckout?: string | null;
+  /** The common Git directory a linked-worktree checkout points at, mounted at its own host path so `/repo/.git` resolves inside the container (GY-1675). */
+  repoGitDir?: string | null;
   sshHost: string | null;
   sshUser: string;
   /** Hetzner Cloud SSH key the created server is registered with; without one it is unreachable for key-only SSH. */
@@ -167,6 +169,7 @@ export function composeBundle(ctx: AdapterContext, values: EnvValue[], publish: 
   const serverVolumes = [
     ...keys.map(key => `"./${key.bundle}:${key.container}:ro"`),
     ...(ctx.repoCheckout ? [`"${ctx.repoCheckout}:/repo"`] : []),
+    ...(ctx.repoGitDir ? [`"${ctx.repoGitDir}:${ctx.repoGitDir}"`] : []),
   ];
   const files: BundleFile[] = [
     { path: `${ctx.workdir}/db.env`, mode: 0o600, content: `POSTGRES_USER=graphyard\nPOSTGRES_DB=graphyard\nPOSTGRES_PASSWORD=${ctx.databasePassword}\n` },
