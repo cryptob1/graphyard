@@ -1,12 +1,13 @@
 // Concern: session and worker harness permissions, and starting the master session.
 import { lstat, mkdir } from 'node:fs/promises';
-import { mkdirSync, readdirSync } from 'node:fs';
+import { mkdirSync, readdirSync, readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { dirname, resolve, basename } from 'node:path';
 import { type ChildRun, defaultChildRun } from '../child-runner.js';
 import { nameForLaunch } from '../session-name.js';
 import { executorUnitDirectory, launchAuthorization } from '../repository-setup.js';
 import { type HarnessHook, type HarnessPlan, type HarnessRule, writeHarnessPermissions, mergeHarnessHooks, masterHarnessPlan, harnessDecision, claudeRuleProblem, bashRuleMatches } from '../harness.js';
-import { executorInstance, legacyLoopUnit, readInstallUnits } from '../install/units.js';
+import { executorInstance, foreignUnitText, initialiseUnitsCommand, installUnitsFile, type InstallUnits, LegacyUnitRefusal, legacyLoopUnit, readInstallUnits } from '../install/units.js';
 import type { Work } from '../model.js';
 import type { MasterConfig, WorkerProfile } from './profiles.js';
 import { coordinatorCheckoutRoot, promotionCommand, workerConfinementRefusal } from './profiles.js';
@@ -363,6 +364,37 @@ const autonomyDeny = (credentialHome: string): HarnessRule[] => [
   { rule: 'Bash(*GRAPHYARD_APPROVER=*)', why: 'Only a launched approver session carries the approver marker; the master never claims it.' },
   { rule: `Edit(//${credentialHome}/**)`, why: 'Agent credentials are issued by onboarding and rotated through the API, never edited in place.' },
 ];
+/** Thrown when the checkout a harness apply resolved is not one it may apply against (GY-1662); `unit` is the unit file to update, when one names the right checkout elsewhere. */
+export class HarnessCheckoutRefusal extends Error {
+  override readonly name = 'HarnessCheckoutRefusal';
+  constructor(readonly root: string, readonly unit: string | null, detail: string) { super(detail); }
+}
+/**
+ * GY-1662: the checkout the loop applies the Claude harness contract against, checked before any
+ * write. A loop's research effect names its scratch worktree, which records no units, so an apply
+ * resolved from it met the legacy unit refusal every cycle; the loop's own checkout is what it
+ * applies against. ROOT is refused, naming it and the `master init` remedy, when it records no units
+ * and a legacy unit runs another checkout; and when the unit serving this loop (SERVINGUNIT, in
+ * UNITDIRECTORY) runs a checkout other than ROOT, naming that unit to update rather than applying
+ * against the wrong checkout.
+ */
+export function harnessApplyCheckout(root: string, options: { servingUnit?: string | null; unitDirectory?: string; home?: string } = {}) {
+  const unitDirectory = options.unitDirectory ?? executorUnitDirectory(), home = options.home ?? homedir();
+  let units: InstallUnits;
+  try { units = readInstallUnits(root, unitDirectory, home); }
+  catch (error) {
+    if (!(error instanceof LegacyUnitRefusal)) throw error;
+    throw new HarnessCheckoutRefusal(root, error.unitPath, `The harness contract was not applied: ${root} records no units (${installUnitsFile} is absent) and the legacy unit ${error.unitPath} runs another checkout (${error.checkout}). Run ${initialiseUnitsCommand} in ${root} to record its own units, or update ${error.unitPath} if ${root} is the checkout it should run`);
+  }
+  if (options.servingUnit) {
+    const path = resolve(unitDirectory, options.servingUnit);
+    let text: string | null = null;
+    try { text = readFileSync(path, 'utf8'); } catch { /* a unit file that cannot be read names no other checkout */ }
+    const other = text === null ? null : foreignUnitText(text, root, home);
+    if (other) throw new HarnessCheckoutRefusal(root, path, `The harness contract was not applied: the unit serving this loop, ${path}, runs ${other}, not ${root}, the checkout this apply targets. Update ${path} (its WorkingDirectory and ExecStart) to run ${root}, then systemctl --user daemon-reload and restart it, rather than apply against the wrong checkout`);
+  }
+  return { root, units };
+}
 export function masterHarness(root: string, config: MasterConfig, harness: string, options: { unitDirectory?: string } = {}) {
   const credentialHome = dirname(dirname(config.credentialFile));
   const plan = withMasterOwnedRules(masterHarnessPlan({ harness, root, cliPath: config.cliPath, repository: config.repository, baseBranch: config.baseBranch, credentialHome }), config, root, options.unitDirectory ?? executorUnitDirectory());

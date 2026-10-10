@@ -254,6 +254,7 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
     const scratchDirectory = needsScratch ? await openResearchScratch(researchScratchSource(config, options.repository), config, raw.loadedRelease?.commit ?? null, log) : null;
     const scoped = new Proxy(raw, { get(target, property, receiver) {
       if (property === 'research') return target.research && scratchDirectory ? { ...target.research, cwd: scratchDirectory } : undefined;
+      if (property === 'harness') return target.harness ?? (target.research ? { root: target.research.cwd } : undefined); // GY-1662: the loop's own checkout, never the scratch
       if (property === 'diagnostician') { const diagnostician = target.diagnostician; return diagnostician && scratchDirectory ? { ...diagnostician, cwd: scratchDirectory } : undefined; }
       return Reflect.get(target, property, receiver);
     } });

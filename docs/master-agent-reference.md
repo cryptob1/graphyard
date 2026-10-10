@@ -7,7 +7,7 @@ Unplanned file: `scope-request GY-N EPOCH PATH… [--wait] -- REASON`; auto-gran
 
 ## Promotion to autonomy
 
-`graphyard master promote --admin-token-stdin` makes a supervised install autonomous; `master autonomy --apply` refuses on it, editing `master.json` skips checks. It refuses (naming missing steps) until a reviewer App and profile exist and the App's bot is neither your `gh` login, `operatorLogin`, the worker App nor a worker principal; then logs who, reviewer, time to `.graphyard/master-actions/promotions.jsonl`, provisions operator-agent and approver, writes `supervision: autonomous`; reruns change nothing; no demotion.
+`graphyard master promote --admin-token-stdin` makes a supervised install autonomous; `master autonomy --apply` refuses on it, editing `master.json` skips checks. It refuses (naming missing steps) until a reviewer App and profile exist, its bot being none of your `gh` login, `operatorLogin`, worker App or principals; then logs who, reviewer, time to `.graphyard/master-actions/promotions.jsonl`, provisions operator-agent and approver, writes `supervision: autonomous`; reruns change nothing; no demotion.
 
 ## Conflict avoidance
 
@@ -23,7 +23,7 @@ Dispatch is optimistic (overlap holds nothing), smallest planned scope first ([r
 | `installation-accept` | Accept pending requests
 | `protection` | Reconcile branch protection
 
-Flows read `GET /api/github/installation`, recording `.graphyard/master-actions/` `record.json`, `ledger.json` and redacted Confirm-access markup, listed by `master browser fixtures`. Approving *Confirm access* GitHub Mobile code on device: human-only; master never stores profile cookies, uses merge bypass, pushes code or reads worker credentials. On classifier refusals `master harness claude --apply` (or `codex`) writes `.claude/settings.local.json` rules denying `gh pr merge`/`review` and merging, reviewing, token-minting or mutating `gh api` calls; missing or retired rules are `harness` drift that the loop reapplies each cycle; `master status` too, unless read-only (confined doctor): it reports.
+Flows read `GET /api/github/installation`, recording `.graphyard/master-actions/` `record.json`, `ledger.json` and redacted Confirm-access markup (`master browser fixtures`). Approving *Confirm access* on device: human-only; master never stores cookies, bypasses merges, pushes code or reads worker credentials. `master harness claude --apply` (or `codex`) writes `.claude/settings.local.json` rules denying `gh pr merge`/`review`, merging, reviewing, token-minting or mutating `gh api`; missing or retired rules are `harness` drift the loop reapplies each cycle to its own checkout (unrecorded units or a unit running elsewhere wait once, naming `master init` or the unit); `master status` too, unless read-only: it reports.
 
 ## Typed actions and executors
 
