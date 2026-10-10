@@ -21,6 +21,9 @@ const hour = 60 * minute, day = 24 * hour;
  *     pane is never closed under it and its fence stands until it exits; then the loop settles it.
  *   - GY-1627 (day 3): delivered, its supervisor gone. The reclaim step settles it.
  *   - GY-1628 (day 0): delivered, its supervisor never stops. It is refused, escalated once, never settled.
+ *   - GY-1550 (day 2): submitted, its supervisor running, but its fenced workspace is registered to
+ *     another host; GY-1551 (day 2) likewise with no workspace registered at all. This host cannot
+ *     inspect either fence, so neither is stopped, its pane never closed, its fence never settled.
  *   - GY-1540 (day 1): a live lease renewed every cycle beside a running supervisor until it submits an
  *     hour later. Never stopped, its pane never closed.
  *
@@ -42,13 +45,15 @@ test('unit:containment-settlement-soak — over a simulated week each lingering 
   const arrivals: { at: number; key: string; make: () => Work; supervisor: boolean; ignoresStop?: boolean }[] = [
     { at: day, key: 'GY-1530', make: () => submitted('GY-1530', 'w1:pM70', 1005), supervisor: true, ignoresStop: true },
     { at: day, key: 'GY-1540', make: leased, supervisor: true },
+    { at: 2 * day, key: 'GY-1550', make: () => ({ ...submitted('GY-1550', 'w1:pM72', 1007), workspaces: [{ host: 'other-host', path: '/srv/worktrees/GY-1550-4', epoch: 4, owner: 'worker-a', branch: 'graphyard/gy-1550-1' }] }), supervisor: true },
+    { at: 2 * day, key: 'GY-1551', make: () => ({ ...submitted('GY-1551', 'w1:pM73', 1008), workspaces: [] }), supervisor: true },
     { at: 3 * day, key: 'GY-1627', make: () => delivered('GY-1627', 3 * minute), supervisor: false },
   ];
   // GY-1530's supervisor exits on its own well past its settle bound; GY-1540 submits an hour in, and
   // its supervisor settles its own fence and exits, as a clean `complete` does.
   const stubbornExit = day + minute + containmentGraceMs + containmentSettleWaitBoundMs + 30 * minute, liveEnds = day + hour;
   // Every minute for the half hour after each arrival or exit, hourly otherwise, for seven days.
-  const busy = [0, day, stubbornExit, liveEnds, 3 * day];
+  const busy = [0, day, 2 * day, stubbornExit, liveEnds, 3 * day];
   const steps = [...new Set([...Array.from({ length: 7 * 24 + 1 }, (_, n) => n * hour), ...busy.flatMap(mark => Array.from({ length: 30 }, (_, n) => mark + n * minute))])].sort((a, b) => a - b);
   // Herdr lists each open session's pane: its agent at work while its supervisor runs, a bare shell once it exited.
   const agents = () => [...fleet.plane.items.values()].flatMap(item => (item.sessions ?? []).filter(handle => handle.state === 'running' && handle.pane && !fleet.panesClosed.includes(handle.pane))
@@ -94,6 +99,10 @@ test('unit:containment-settlement-soak — over a simulated week each lingering 
         assert.equal(fleet.byKey('GY-1530').sessions?.[0]?.state, 'running', `${when}: GY-1530's supervisor still runs, so its session stays open`);
         assert.ok(fleet.running.has('GY-1530'), `${when}: and its supervisor is untouched by any pane close`);
       }
+      for (const key of ['GY-1550', 'GY-1551']) if (fleet.byKey(key)) {
+        assert.equal(fleet.byKey(key).sessions?.[0]?.state, 'running', `${when}: ${key}'s fence cannot be inspected here, so its session stays open`);
+        assert.ok(fleet.running.has(key) && !fleet.stopped.includes(key), `${when}: and its supervisor is neither stopped nor closed under`);
+      }
     }
     assert.ok(cycles > 250, `the week ran ${cycles} cycles`);
     assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
@@ -105,6 +114,11 @@ test('unit:containment-settlement-soak — over a simulated week each lingering 
     assert.equal(fleet.stopped.filter(key => key === 'GY-1520').length, 1, 'GY-1520 is stopped once');
     assert.ok(fleet.stopped.includes('GY-1530'), 'GY-1530 is asked to stop');
     assert.ok(!fleet.stopped.includes('GY-1540') && !fleet.stopped.includes('GY-1628'), 'a leased or delivered supervisor is never stopped by this path');
+    for (const key of ['GY-1550', 'GY-1551']) {
+      assert.ok(!fleet.panesClosed.some(pane => fleet.byKey(key).sessions?.some(handle => handle.pane === pane)), `${key}'s pane is never closed`);
+      assert.notEqual(fleet.byKey(key).containmentQuarantine, null, `${key}'s uninspectable fence is never settled`);
+      assert.ok(!Object.keys(harness.state.actions).some(action => action.startsWith(`close:implementation:work-${key}:`)), `${key} is never attempted by the close step, so no failing close is retried each cycle`);
+    }
     assert.equal(fleet.byKey('GY-1540').sessions?.[0]?.outcome, 'submitted', 'the live attempt ended on its own submission, not by the loop');
     assert.notEqual(fleet.byKey('GY-1628').containmentQuarantine, null, 'a delivered supervisor still running holds its fence');
     assert.match(harness.state.actions['escalation:containment:work-GY-1628:4']?.detail ?? '', /cannot be settled automatically/, 'the held fence is escalated, once its refusal is known');

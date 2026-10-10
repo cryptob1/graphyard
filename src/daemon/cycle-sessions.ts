@@ -2,7 +2,7 @@
 import type { Work } from '../model.js';
 import { detectRetryingExhaustion, type CapacityRole, type ExhaustionSignal } from '../model/capacity.js';
 import { detectRuntimeExhaustion } from '../master/environments.js';
-import { classifyRuntimePrompt, continueAfterDecline, type EscalationSession, escalationProfile, type HerdrAgent, isProfileSession, ownLoginAccounts, profileAccount, type RuntimePrompt, type SessionIdentity, type WorkerProfile } from '../master.js';
+import { classifyRuntimePrompt, containmentQuarantines, continueAfterDecline, type EscalationSession, escalationProfile, type HerdrAgent, isProfileSession, ownLoginAccounts, profileAccount, type RuntimePrompt, type SessionIdentity, type WorkerProfile } from '../master.js';
 import { containmentPhase } from '../model/containment.js';
 import { standingEscalations } from '../model/escalation.js';
 import { capacityRecheckMs } from '../auto-dispatch.js';
@@ -578,10 +578,11 @@ async function closeExitedWorkerSessions(cycle: Cycle, runtime: { agents: HerdrA
     // holds nothing the record still authorizes; its session is over. A lapsed lease proves no
     // process gone, so the supervisor is stopped through its recorded scope and verified gone on the
     // host before its pane is closed (stopLingeringSupervisor), and the close settles the fence below.
-    // A loop that cannot stop or inspect it leaves the pane to the steps that read Herdr.
+    // A loop that cannot stop or inspect it — no fenced workspace registered on this host to probe —
+    // leaves the pane to the steps that read Herdr.
     const fence = item.containmentQuarantine, owner = fence && config.workers.find(profile => profile.principal === fence.owner);
     const lingering = !leased && !!fence?.scope && !!owner && !!effects.stopSupervisor && !!effects.containment && handle.id === `${fence.owner}:${fence.epoch}`
-      && item.submission?.epoch === fence.epoch && containmentPhase(item, clock)?.state === 'lapsed';
+      && item.submission?.epoch === fence.epoch && containmentPhase(item, clock)?.state === 'lapsed' && inspectable(item, config.hostId);
     if (item.stage !== 'build' && !leased) reason = `${item.key} has left build, the stage this implementation session was launched for, and is now in ${item.stage}`;
     else if (lingering) reason = `${item.key} epoch ${fence!.epoch} submitted pull request #${item.submission!.pr} and holds no lease, yet its containment fence still stands past the grace window`;
     else if (runtime?.available && handle.pane && !(clock - Date.parse(handle.startedAt) < launchAppearanceMs)) {
@@ -648,6 +649,9 @@ async function closeExitedWorkerSessions(cycle: Cycle, runtime: { agents: HerdrA
  */
 async function stopLingeringSupervisor(cycle: Cycle, item: Work, profile: WorkerProfile) {
   const fence = item.containmentQuarantine!, scope = fence.scope!;
+  // supervisorStillRunning answers null without probing a fence it cannot inspect, so only an
+  // inspectable fence lets that null stand as the host's word that the supervisor is gone.
+  if (!inspectable(item, cycle.config.hostId)) throw new Error(`its fenced workspace for epoch ${fence.epoch} is not registered on ${cycle.config.hostId}, so its supervisor cannot be verified gone and its pane is left standing`);
   let stop: string;
   try {
     await cycle.effects.stopSupervisor!({ id: item.id, key: item.key, epoch: fence.epoch, owner: fence.owner, profile: profile.name, agentName: profile.agentName, scope, leaseExpiresAt: fence.leaseExpiresAt ?? new Date(cycle.clock).toISOString() }, 'SIGTERM');
@@ -657,3 +661,6 @@ async function stopLingeringSupervisor(cycle: Cycle, item: Work, profile: Worker
   if (running) throw new Error(`${stop}, but it is not yet verified gone, so its pane is left standing: ${running}`);
   return `${stop} and verified gone`;
 }
+
+/** Whether this host can probe `item`'s fence: its fenced epoch's workspace is registered here (GY-1633). */
+const inspectable = (item: Work, hostId: string) => containmentQuarantines([item], hostId).length > 0;
