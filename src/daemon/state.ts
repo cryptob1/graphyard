@@ -514,9 +514,8 @@ export const daemonStateSchema = z.object({
   /**
    * Every fault instance the loop recorded, each with its class (GY-173), and per standing fault
    * (`kind|subject`) the instance it is, and per action key in a run of failures the instance that run
-   * is. A class that recurs files one item; later instances link to it, and `linked` keeps per item key the newest
-   * first-seen time of an instance linked to it while the item is open, past the instance's own retention (GY-1632). `observedAt` is when (loop time) the loop last
-   * read the sources standing faults are observed from, which it reads on a slower cadence than it cycles.
+   * is. A class that recurs files one item; later instances link to it, and `linked` keeps per item key the newest first-seen time of an instance linked
+   * to it while open, past the instance's own retention (GY-1632). `observedAt` is when (loop time) the loop last read the sources standing faults are observed from, which it reads on a slower cadence than it cycles.
    * The default is a factory: zod 4 hands a literal default out by reference, which would share one record between states.
    */
   faults: z.object({ instances: z.array(faultInstanceSchema).default([]), open: z.record(z.string(), z.string()).default({}), failing: z.record(z.string(), z.string()).default({}), linked: z.record(z.string(), z.string()).optional(), observedAt: z.string().optional() }).strict()

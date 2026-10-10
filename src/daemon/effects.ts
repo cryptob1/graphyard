@@ -131,8 +131,7 @@ export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffec
    * shown to contain (see `observeDeployment`).
    */
   observeDeployment: (delivered: Work[], retained?: ContainmentRetention | null) => Promise<DeploymentObservation>;
-  /** Records the coordinator's own deployment observation on the delivered item. */
-  recordDeployment: (work: Work, observation: { sha: string; source: 'endpoint' | 'github-deployment'; observedAt: string }) => Promise<unknown>;
+  recordDeployment: (work: Work, observation: { sha: string; source: 'endpoint' | 'github-deployment'; observedAt: string }) => Promise<unknown>; // the coordinator's own deployment observation on the delivered item
   /**
    * Publishes the production environment this loop verifies deployments under
    * (`config.run.productionEnvironment`, else GRAPHYARD_PRODUCTION_ENVIRONMENT, else `production`)
@@ -286,10 +285,8 @@ export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffec
   research?: { cwd: string; runner?: Runner };
   recordDecomposition?: (work: Work, event: DecompositionEvent) => Promise<unknown>; // GY-1126: a split run's start, decision or failure, as the coordinator; runs in `research`'s checkout and runner
   adoptRuns?: () => Promise<AdoptedRun[]>; // the headless runs a restart left running (GY-453, run-adoption.ts); unwired adopts nothing
-  /** Records a triage judgement on a machine-filed item as the coordinator (GY-402, POST work/ID/triage). */
-  recordTriage?: (work: Work, body: { judgement: TriageJudgement; runtime?: string }) => Promise<unknown>;
-  /** Withdraws the closure the loop proposed at `triageAt` (GY-1632): POST work/ID/triage with `withdraw`. */
-  withdrawTriage?: (work: Work, body: { triageAt: string; reason: string }) => Promise<unknown>;
+  recordTriage?: (work: Work, body: { judgement: TriageJudgement; runtime?: string }) => Promise<unknown>; // records a triage judgement on a machine-filed item as the coordinator (GY-402, POST work/ID/triage)
+  withdrawTriage?: (work: Work, body: { triageAt: string; reason: string }) => Promise<unknown>; // withdraws the closure proposed at `triageAt` (GY-1632, POST work/ID/triage `withdraw`)
   /** The reviewer and producer sessions the launch ledgers hold as pending. */
   launchedSessions?: () => Promise<LaunchedSession[]>;
   /** The account a session was launched on, as its launcher recorded it: a worker attempt's own launch record, a reviewer's or producer's own selection, by the `session` named (GY-1582). */
