@@ -35,16 +35,15 @@ export function orphanSupervisorAttention(orphan: OrphanSupervisor, host: string
  * a supervisor, or the command that stops it, before the loop would act on it.
  *
  * The loop rolls its recorded expiry forward when it acts, so a stop that failed leaves an
- * observation at the current expiry with no stop counted. The incident the loop recorded for that
- * very supervisor — written only once its two observations held, whatever the stop then did — keeps
- * the orphan established, so a failed stop never hides it from status.
+ * observation at the current expiry with no stop counted. The loop marks the observation itself
+ * established when its two observations hold, whatever the stop then did, so a failed stop never
+ * hides the orphan from status. That mark lives and dies with the observation: a session Herdr
+ * reports again drops it, and a later absence starts a fresh, unestablished one.
  */
-export function orphanEstablished(orphan: OrphanSupervisor, loop: Pick<DaemonState, 'orphans' | 'actions'> | null | undefined): boolean {
+export function orphanEstablished(orphan: OrphanSupervisor, loop: Pick<DaemonState, 'orphans'> | null | undefined): boolean {
   const tracked: OrphanObservation | undefined = loop?.orphans?.[orphan.id];
   if (!tracked || tracked.epoch !== orphan.epoch || tracked.owner !== orphan.owner || tracked.pid !== orphan.scope.pid) return false;
-  // The key step 1c of the cycle (src/daemon/cycle-sessions.ts) records its orphan-supervisor incident under.
-  if (loop?.actions?.[`incident:orphan-supervisor:${orphan.id}:${orphan.epoch}:${orphan.scope.pid}`]) return true;
-  return tracked.stops > 0 || Date.parse(orphan.leaseExpiresAt) > Date.parse(tracked.leaseExpiresAt);
+  return !!tracked.establishedAt || tracked.stops > 0 || Date.parse(orphan.leaseExpiresAt) > Date.parse(tracked.leaseExpiresAt);
 }
 
 /**
@@ -54,7 +53,7 @@ export function orphanEstablished(orphan: OrphanSupervisor, loop: Pick<DaemonSta
  * runtime changes nothing. Only an orphan the loop's persisted observations establish is named
  * (GY-1617); an unreadable loop state establishes none.
  */
-export function nameOrphanSupervisors(status: MasterStatus, work: Work[], profiles: WorkerProfile[], runtime: { agents: HerdrAgent[]; available: boolean }, now: number, loop: Pick<DaemonState, 'orphans' | 'actions'> | null | undefined): MasterStatus {
+export function nameOrphanSupervisors(status: MasterStatus, work: Work[], profiles: WorkerProfile[], runtime: { agents: HerdrAgent[]; available: boolean }, now: number, loop: Pick<DaemonState, 'orphans'> | null | undefined): MasterStatus {
   if (!runtime.available) return status;
   const orphans = orphanedSupervisors(work, profiles, runtime.agents, now).filter(orphan => orphanEstablished(orphan, loop));
   if (!orphans.length) return status;
