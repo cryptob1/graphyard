@@ -1,13 +1,15 @@
-// Concern: `graphyard master checkout-restore` and the confined master's `master restart` (GY-1658) — host acts a confined master identity requests and the loop, the one unconfined process, carries out.
-import { copyFileSync, existsSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, rmSync } from 'node:fs';
+// Concern: `graphyard master checkout-restore` and the confined master's `master restart` and `master executors` (GY-1658) — host acts a confined master identity requests and the loop, the one unconfined process, carries out.
+import { copyFileSync, existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { basename, dirname, join, resolve, sep } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { z } from 'zod';
 import { type ChildRun, defaultChildRun } from '../child-runner.js';
 import { atomicPrivateWrite } from '../master/config.js';
-import { dirtyCheckoutPaths, parseCoordinatorCheckout, readCoordinatorCheckout } from '../master/profiles.js';
+import { freezeCheckoutWriters } from './checkout-writers.js';
+
+export { checkoutWriterProcesses, freezeCheckoutWriters, processStateOf, type WriterFreezeDeps } from './checkout-writers.js';
 import type { MasterConfig } from '../master/profiles.js';
 
 // The GY-857 guard refuses every loop start, self-upgrade and restart from a coordinator checkout
@@ -16,9 +18,10 @@ import type { MasterConfig } from '../master/profiles.js';
 // with the checkout read-only and the host's process-launch channels hidden (GY-888, GY-1658). This
 // act is the installation's own remedy. Any master identity — the doctor's included — records a
 // request beside the loop's cursor, outside the checkout; the loop then freezes the standing
-// processes working in the checkout (the suspected writers), commits the index and every dirty path
-// onto HEAD under a named ref (refs/graphyard/checkout-restore/STAMP), returns those paths to HEAD,
-// thaws the writers, settles the dirty-checkout escalation and restarts itself through its
+// processes working in the checkout (the suspected writers) — refusing to touch anything when one
+// cannot be verified stopped — commits the index and every non-ignored dirty path, untracked scratch
+// included, onto HEAD under a named ref (refs/graphyard/checkout-restore/STAMP-COMMIT), returns those paths
+// to HEAD, continues the writers it stopped, settles the dirty-checkout escalation and restarts itself through its
 // supervising unit (graphyard-master.service). Nothing is discarded: the ref's first parent is HEAD,
 // its second the index as it stood, and its tree the working files, so `git diff HEAD REF` and
 // `git diff HEAD REF^2` show every byte. No stash entry is used: the stash stack is shared with every
@@ -28,21 +31,30 @@ import type { MasterConfig } from '../master/profiles.js';
 // the process-launch channels its confinement hides, so it files a restart request the loop serves.
 // A restart the loop owes is recorded before it is asked for, against the loop's pid, and retried on
 // every pass until a process other than the one that asked reads the request — the restarted loop.
+// Its `master executors [restart]` is a third: the restart goes through the host's systemd, and the
+// liveness of the executors' host pids cannot be judged from its own PID namespace, so the loop runs
+// the command and records what it printed.
 
 /** Where restored checkout contents are kept, one ref per restore. */
 export const checkoutRestoreRefPrefix = 'refs/graphyard/checkout-restore/';
 export const checkoutRestoreUsage = 'Use master checkout-restore REASON';
 /** How long the command waits for the loop to carry its request out before it reports the request as filed. */
 export const checkoutRestoreWaitMs = 120_000;
+/** An executor restart waits on held claims and re-registration for up to its timeout twice over (executor-fleet.ts). */
+export const loopExecutorsWaitMs = 1_200_000;
 
 const restartSchema = z.object({ state: z.enum(['requested', 'failed', 'done']), pid: z.number().int(), at: z.string(), detail: z.string().max(4000) }).strict();
 const outcomeSchema = z.object({
-  at: z.string(), state: z.enum(['restored', 'clean', 'failed', 'restart']), detail: z.string().max(4000),
+  at: z.string(), state: z.enum(['restored', 'clean', 'failed', 'restart', 'executors']), detail: z.string().max(4000),
   ref: z.string().nullable(), commit: z.string().nullable(), paths: z.array(z.string()).max(10_000),
   restart: restartSchema.nullable().default(null),
+  /** What `master executors` printed when the loop ran it for a confined master. */
+  result: z.unknown().optional(),
 }).strict();
 const requestSchema = z.object({
-  id: z.string().max(100), act: z.enum(['checkout-restore', 'restart']).default('checkout-restore'), reason: z.string().min(1).max(2000), requestedAt: z.string(), requestedBy: z.string().max(200),
+  id: z.string().max(100), act: z.enum(['checkout-restore', 'restart', 'executors']).default('checkout-restore'), reason: z.string().min(1).max(2000), requestedAt: z.string(), requestedBy: z.string().max(200),
+  /** The `master executors` arguments the loop runs. */
+  args: z.array(z.string().max(200)).max(20).default([]),
   outcome: outcomeSchema.nullable(),
 }).strict();
 export type LoopRequestAct = z.infer<typeof requestSchema>['act'];
@@ -54,82 +66,55 @@ const besideCursor = (config: Pick<MasterConfig, 'credentialFile'>, suffix: stri
 /** The request files: beside the loop's cursor (daemonStatePath), so a session that sees the checkout read-only can still file them. */
 export const checkoutRestoreRequestPath = (config: Pick<MasterConfig, 'credentialFile'>) => besideCursor(config, 'checkout-restore');
 export const loopRestartRequestPath = (config: Pick<MasterConfig, 'credentialFile'>) => besideCursor(config, 'loop-restart');
-export const loopRequestPath = (config: Pick<MasterConfig, 'credentialFile'>, act: LoopRequestAct) => act === 'restart' ? loopRestartRequestPath(config) : checkoutRestoreRequestPath(config);
+export const loopExecutorsRequestPath = (config: Pick<MasterConfig, 'credentialFile'>) => besideCursor(config, 'loop-executors');
+export const loopRequestPath = (config: Pick<MasterConfig, 'credentialFile'>, act: LoopRequestAct) =>
+  act === 'restart' ? loopRestartRequestPath(config) : act === 'executors' ? loopExecutorsRequestPath(config) : checkoutRestoreRequestPath(config);
 export async function readCheckoutRestoreRequest(file: string): Promise<CheckoutRestoreRequest | null> {
   try { return requestSchema.parse(JSON.parse(await readFile(file, 'utf8'))); } catch { return null; }
 }
-export async function fileCheckoutRestoreRequest(file: string, reason: string, requestedBy: string, now = new Date(), act: LoopRequestAct = 'checkout-restore'): Promise<CheckoutRestoreRequest> {
-  const request = requestSchema.parse({ id: `${now.getTime().toString(36)}-${Math.random().toString(36).slice(2, 8)}`, act, reason, requestedAt: now.toISOString(), requestedBy, outcome: null });
+export async function fileCheckoutRestoreRequest(file: string, reason: string, requestedBy: string, now = new Date(), act: LoopRequestAct = 'checkout-restore', args: readonly string[] = []): Promise<CheckoutRestoreRequest> {
+  const request = requestSchema.parse({ id: `${now.getTime().toString(36)}-${Math.random().toString(36).slice(2, 8)}`, act, reason, requestedAt: now.toISOString(), requestedBy, args, outcome: null });
   await atomicPrivateWrite(file, request);
   return request;
 }
 
-/** The status entries' paths, rename and copy origins included: every path a restore returns to HEAD. */
-function statusPaths(status: string, dirty: readonly string[]) {
-  const origins: string[] = [], entries = status.split('\0');
+/**
+ * Every path `git status --porcelain -z` names, rename and copy origins included: every non-ignored
+ * dirty path — tracked changes and untracked files alike, wherever they lie — which a restore saves
+ * and returns to HEAD.
+ */
+export function statusPaths(status: string): string[] {
+  const paths: string[] = [], entries = status.split('\0');
   for (let index = 0; index < entries.length; index++) {
-    const xy = entries[index].slice(0, 2);
-    if (entries[index].length >= 4 && (xy.includes('R') || xy.includes('C')) && xy !== '??') { if (entries[index + 1]) origins.push(entries[index + 1]); index++; }
+    const entry = entries[index], xy = entry.slice(0, 2);
+    if (entry.length < 4) continue;
+    paths.push(entry.slice(3));
+    if ((xy.includes('R') || xy.includes('C')) && xy !== '??') { if (entries[index + 1]) paths.push(entries[index + 1]); index++; }
   }
-  return [...new Set([...dirty, ...origins])];
+  return [...new Set(paths)];
 }
 const refStamp = (at: Date) => at.toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z');
 
 /**
- * The standing processes working in the checkout at `root` — a process whose working directory is
- * the checkout or inside it, outside the managed `.graphyard` area whose sessions see the checkout
- * read-only — and their descendants outside that area: the suspected writers the dirty-checkout
- * escalation names. This process and its ancestors are never among them. Linux /proc; elsewhere none.
- */
-export function checkoutWriterProcesses(root: string, self = process.pid, proc = '/proc'): number[] {
-  const base = resolve(root), managed = `${base}${sep}.graphyard`;
-  const table = new Map<number, { ppid: number; cwd: string | null }>();
-  let entries: string[];
-  try { entries = readdirSync(proc).filter(name => /^\d+$/.test(name)); } catch { return []; }
-  for (const name of entries) {
-    try {
-      const stat = readFileSync(join(proc, name, 'stat'), 'utf8');
-      const ppid = Number(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[1]);
-      let cwd: string | null = null; try { cwd = readlinkSync(join(proc, name, 'cwd')); } catch { /* another user's, or gone */ }
-      table.set(Number(name), { ppid, cwd });
-    } catch { /* exited while read */ }
-  }
-  const spared = new Set<number>();
-  for (let pid = self; pid > 1 && !spared.has(pid); pid = table.get(pid)?.ppid ?? 0) spared.add(pid);
-  const working = (cwd: string | null) => !!cwd && (cwd === base || cwd.startsWith(`${base}${sep}`)) && cwd !== managed && !cwd.startsWith(`${managed}${sep}`);
-  const unmanaged = (cwd: string | null) => !cwd || (cwd !== managed && !cwd.startsWith(`${managed}${sep}`));
-  const writers = new Set([...table].filter(([pid, entry]) => !spared.has(pid) && working(entry.cwd)).map(([pid]) => pid));
-  for (let grown = true; grown;) {
-    grown = false;
-    for (const [pid, entry] of table) if (!writers.has(pid) && !spared.has(pid) && writers.has(entry.ppid) && unmanaged(entry.cwd)) { writers.add(pid); grown = true; }
-  }
-  return [...writers].sort((a, b) => a - b);
-}
-/** Stop the checkout's standing writers (SIGSTOP) and return what continues them (SIGCONT): they keep every byte of their state, and none of them can write between the snapshot and the reset. */
-export function freezeCheckoutWriters(root: string, signal: (pid: number, name: NodeJS.Signals) => void = (pid, name) => process.kill(pid, name)): { pids: number[]; thaw: () => void } {
-  const pids = checkoutWriterProcesses(root).filter(pid => { try { signal(pid, 'SIGSTOP'); return true; } catch { return false; } });
-  return { pids, thaw: () => { for (const pid of pids) { try { signal(pid, 'SIGCONT'); } catch { /* gone */ } } } };
-}
-
-/**
- * With the checkout's writers frozen (`quiesce`), commit the index as it stands and every path the
- * guard counts dirty (dirtyCheckoutPaths, plus any rename's origin) onto HEAD — the index as the
- * second parent, the working files as the tree — record the commit under a named ref, then return
- * those paths to HEAD: tracked ones checked out from it, ones HEAD lacks removed. Null when nothing is
+ * With the checkout's writers frozen (`quiesce`, which throws before anything is touched when it
+ * cannot establish that), commit the index as it stands and every non-ignored dirty path (statusPaths:
+ * tracked changes, untracked files anywhere, rename origins) onto HEAD — the index as the second
+ * parent, the working files as the tree — record the commit under a named ref, then return those
+ * paths to HEAD: tracked ones checked out from it, ones HEAD lacks removed. Null when nothing is
  * dirty. Throws, with the ref named when it was already written, when the checkout is still dirty
- * after; the writers are thawed whatever happens.
+ * after; the writers this attempt stopped are continued whatever happens.
  */
-export async function restoreCoordinatorCheckout(root: string, reason: string, run: ChildRun = defaultChildRun, at = new Date(), quiesce: (root: string) => { thaw: () => void } = freezeCheckoutWriters): Promise<{ ref: string; commit: string; paths: string[] } | null> {
-  const frozen = quiesce(root);
+export type CheckoutQuiesce = (root: string) => { thaw: () => void } | Promise<{ thaw: () => void }>;
+export async function restoreCoordinatorCheckout(root: string, reason: string, run: ChildRun = defaultChildRun, at = new Date(), quiesce: CheckoutQuiesce = freezeCheckoutWriters): Promise<{ ref: string; commit: string; paths: string[] } | null> {
+  const frozen = await quiesce(root);
   try { return await restoreQuiesced(root, reason, run, at); } finally { frozen.thaw(); }
 }
 async function restoreQuiesced(root: string, reason: string, run: ChildRun, at: Date) {
   const git = async (args: string[], env?: NodeJS.ProcessEnv) => String(await run('git', ['-C', root, '--literal-pathspecs', ...args], env ? { env } : undefined));
   const head = (await git(['rev-parse', 'HEAD'])).trim();
-  const status = await git(['status', '--porcelain', '-z', '--untracked-files=normal']);
-  const dirty = dirtyCheckoutPaths(parseCoordinatorCheckout(root, head, status));
-  if (!dirty.length) return null;
-  const paths = statusPaths(status, dirty);
+  const status = () => git(['status', '--porcelain', '-z', '--untracked-files=normal']);
+  const paths = statusPaths(await status());
+  if (!paths.length) return null;
   const scratch = mkdtempSync(join(tmpdir(), 'graphyard-checkout-restore-'));
   let commit: string;
   try {
@@ -144,7 +129,8 @@ async function restoreQuiesced(root: string, reason: string, run: ChildRun, at: 
     await git(['add', '-A', '--', ...paths], env);
     commit = (await git([...identity, 'commit-tree', (await git(['write-tree'], env)).trim(), '-p', head, '-p', index, '-m', message], env)).trim();
   } finally { rmSync(scratch, { recursive: true, force: true }); }
-  const ref = `${checkoutRestoreRefPrefix}${refStamp(at)}`;
+  // The stamp and the commit: two restores within one second never collide.
+  const ref = `${checkoutRestoreRefPrefix}${refStamp(at)}-${commit.slice(0, 12)}`;
   await git(['update-ref', '-m', `graphyard checkout-restore: ${reason.slice(0, 200)}`, ref, commit, '']);
   // Only once the ref holds them are the paths returned to HEAD.
   const tracked: string[] = [], added: string[] = [];
@@ -156,13 +142,15 @@ async function restoreQuiesced(root: string, reason: string, run: ChildRun, at: 
   if (added.length) await git(['rm', '-r', '-q', '-f', '--cached', '--ignore-unmatch', '--', ...added]);
   if (tracked.length) await git(['checkout', head, '--', ...tracked]);
   for (const path of added) await rm(join(root, path), { recursive: true, force: true });
-  const after = dirtyCheckoutPaths(await readCoordinatorCheckout(root, (command, args) => run(command, args)));
+  const after = statusPaths(await status());
   if (after.length) throw new Error(`the coordinator checkout at ${root} is still dirty after its paths were saved under ${ref} (${commit.slice(0, 12)}): ${after.slice(0, 8).join(', ')}`);
   return { ref, commit, paths };
 }
 
 /** What the loop's serving of a request needs: `restart` re-executes the loop through its unit; `settle` lets the guard record a restored checkout clean first. */
-export interface LoopRequestDeps { restart: () => Promise<unknown>; settle?: () => Promise<unknown>; report?: (outcome: CheckoutRestoreOutcome) => void; run?: ChildRun; now?: () => Date; pid?: number; quiesce?: (root: string) => { thaw: () => void } }
+export interface LoopRequestDeps { restart: () => Promise<unknown>; settle?: () => Promise<unknown>; report?: (outcome: CheckoutRestoreOutcome) => void; run?: ChildRun; now?: () => Date; pid?: number; quiesce?: CheckoutQuiesce;
+  /** Runs `master executors ARGS` on the host — the loop's own view of its processes and systemd — and returns what it prints. */
+  executors?: (args: string[]) => Promise<unknown> }
 
 /**
  * The loop's side (GY-1658): carry out a standing request, once, and the restart it owes until it
@@ -184,6 +172,18 @@ export async function serveCheckoutRestore(file: string, root: string, deps: Loo
     return restartOwed(file, request, request.outcome, deps, pid, now);
   }
   let outcome: CheckoutRestoreOutcome;
+  if (request.act === 'executors') {
+    try {
+      if (!deps.executors) throw new Error('this loop cannot run master executors for a confined master');
+      const result = await deps.executors(request.args);
+      const verdict = (result as { result?: unknown } | null)?.result;
+      outcome = { at: now().toISOString(), state: 'executors', ref: null, commit: null, paths: [], detail: `the loop ran master executors ${request.args.join(' ')}`.trim() + (typeof verdict === 'string' ? `: ${verdict}` : ''), restart: null, result };
+    } catch (error) {
+      outcome = { at: now().toISOString(), state: 'failed', ref: null, commit: null, paths: [], detail: (error instanceof Error ? error.message : String(error)).slice(0, 4000), restart: null };
+    }
+    deps.report?.(outcome);
+    return write(file, request, outcome, deps);
+  }
   if (request.act === 'restart') {
     outcome = { at: now().toISOString(), state: 'restart', ref: null, commit: null, paths: [], detail: `the loop restarts through its supervising unit, as ${request.requestedBy} asked: ${request.reason}`, restart: null };
   } else try {
@@ -215,21 +215,23 @@ async function restartOwed(file: string, request: CheckoutRestoreRequest, outcom
   }
 }
 
-/** `master checkout-restore REASON` (and the confined master's `master restart`): file the request, then wait for the loop's outcome. */
+/** `master checkout-restore REASON` (and the confined master's `master restart` and `master executors [restart]`): file the request, then wait for the loop's outcome. */
 export async function checkoutRestoreCommand(config: Pick<MasterConfig, 'credentialFile'>, args: readonly string[], requestedBy: string, options: { waitMs?: number; pollMs?: number; act?: LoopRequestAct } = {}) {
   const act = options.act ?? 'checkout-restore';
-  const reason = args.join(' ').trim() || (act === 'restart' ? 'master restart from the confined master session' : '');
+  const reason = act === 'executors' ? `master executors ${args.join(' ')} from the confined master session`.replace(/ {2,}/g, ' ')
+    : args.join(' ').trim() || (act === 'restart' ? 'master restart from the confined master session' : '');
   if (!reason) throw new Error(checkoutRestoreUsage);
   if (reason.length > 2000) throw new Error(`The ${act} reason is limited to 2000 characters`);
   const file = loopRequestPath(config, act);
-  const request = await fileCheckoutRestoreRequest(file, reason, requestedBy, new Date(), act);
-  const deadline = Date.now() + (options.waitMs ?? checkoutRestoreWaitMs);
+  const request = await fileCheckoutRestoreRequest(file, reason, requestedBy, new Date(), act, act === 'executors' ? args : []);
+  const deadline = Date.now() + (options.waitMs ?? (act === 'executors' ? loopExecutorsWaitMs : checkoutRestoreWaitMs));
   while (Date.now() < deadline) {
     await delay(options.pollMs ?? 2_000);
     const current = await readCheckoutRestoreRequest(file);
     if (current?.id !== request.id) return { request: request.id, act, state: 'superseded', detail: `a later ${act} request replaced this one` };
     if (current.outcome) {
-      if (current.outcome.state === 'failed') process.exitCode = 1;
+      const executors = (current.outcome.result as { result?: unknown } | undefined)?.result;
+      if (current.outcome.state === 'failed' || typeof executors === 'string' && executors !== 'restarted') process.exitCode = 1;
       return { request: request.id, act, ...current.outcome };
     }
   }

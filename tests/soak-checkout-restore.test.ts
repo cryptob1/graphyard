@@ -9,14 +9,16 @@ import type { Work } from '../src/model.js';
 import { emptyDaemonState, runDaemon, type DaemonEffects } from '../src/master-daemon.js';
 import { masterConfigSchema } from '../src/master.js';
 import { dirtyCheckoutPaths, readCoordinatorCheckout } from '../src/master/profiles.js';
-import { checkoutRestoreRefPrefix, checkoutRestoreRequestPath, loopRestartRequestPath, readCheckoutRestoreRequest } from '../src/cli/master-checkout-restore.js';
+import { checkoutRestoreRefPrefix, checkoutRestoreRequestPath, loopExecutorsRequestPath, loopRestartRequestPath, readCheckoutRestoreRequest } from '../src/cli/master-checkout-restore.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
  * GY-1658 under the real loop for two simulated days. The loop serves the host acts a confined
- * master identity requests — `master checkout-restore`, and the confined master's `master restart` —
- * on every pass, the refused startup's and every cycle's alike. Each request must be carried out
- * once, its escalation settled, its restart asked until one lands (the first ask here fails), and
+ * master identity requests — `master checkout-restore`, and the confined master's `master restart`
+ * and `master executors [restart]` — on every pass, the refused startup's and every cycle's alike. Each request must be carried out
+ * once, its escalation settled, every dirty path preserved (untracked scratch too), its restart asked
+ * until one lands (the first ask here fails), an executors request run on the host without a loop
+ * restart, and
  * the restarted loops must stay settled: no request re-served, no restart asked again, no further
  * failed dirty-checkout attempt, for the rest of the days.
  */
@@ -68,13 +70,16 @@ test('unit:soak-checkout-restore-served-once — over two simulated days of the 
   const reads: { at: number; pid: number; escalation: string | null; attempts: number | null }[] = [];
   // The day's plan, keyed by simulated time: hotfixes written into the checkout and the requests the
   // doctor and the master file (as `master checkout-restore` and the confined `master restart` write them).
-  const request = (file: string, act: string, reason: string, requestedBy: string) => () => writeFileSync(file, JSON.stringify({ id: `r-${clock}`, act, reason, requestedAt: new Date(clock).toISOString(), requestedBy, outcome: null }));
+  const request = (file: string, act: string, reason: string, requestedBy: string, args: string[] = []) => () => writeFileSync(file, JSON.stringify({ id: `r-${clock}`, act, reason, requestedAt: new Date(clock).toISOString(), requestedBy, args, outcome: null }));
+  const executorRuns: { at: number; pid: number; args: string[] }[] = [];
   const plan = [
     { at: 0, act: () => writeFileSync(join(main, 'src', 'loop.ts'), 'export const loop = 2; // hotfix\n') },
     { at: 2 * hour, act: request(checkoutRestoreRequestPath(config), 'checkout-restore', 'the loop refuses its dirty checkout', 'graphyard-operator-agent') },
-    { at: 20 * hour, act: () => { writeFileSync(join(main, 'src', 'fresh.ts'), 'export const fresh = 1;\n'); git(main, 'add', 'src/fresh.ts'); writeFileSync(join(main, 'src', 'fresh.ts'), 'export const fresh = 2;\n'); } },
+    { at: 20 * hour, act: () => { writeFileSync(join(main, 'src', 'fresh.ts'), 'export const fresh = 1;\n'); git(main, 'add', 'src/fresh.ts'); writeFileSync(join(main, 'src', 'fresh.ts'), 'export const fresh = 2;\n'); writeFileSync(join(main, 'scratchpad.mjs'), '// scratch\n'); } },
     { at: 22 * hour, act: request(checkoutRestoreRequestPath(config), 'checkout-restore', 'a standing pane wrote the checkout again', 'graphyard-operator-agent') },
+    { at: 26 * hour, act: request(loopExecutorsRequestPath(config), 'executors', 'master executors from the confined master session', 'graphyard-master') },
     { at: 30 * hour, act: request(loopRestartRequestPath(config), 'restart', 'master restart from the confined master session', 'graphyard-master') },
+    { at: 28 * hour, act: request(loopExecutorsRequestPath(config), 'executors', 'master executors restart from the confined master session', 'graphyard-master', ['restart']) },
   ];
   plan[0].act(); plan.shift();
   let failNextRestart = true, pid = 1000;
@@ -100,18 +105,27 @@ test('unit:soak-checkout-restore-served-once — over two simulated days of the 
       if (!landed) { failNextRestart = false; throw new Error('systemctl --user restart graphyard-master.service: Failed to connect to bus'); }
       host.emit('SIGTERM');
     };
-    await runDaemon(config, state, effects(now), { intervalMs, identity: { pid: own, host: 'machine-a' }, signals: ['SIGTERM'], process: host as never, now, checkout, restartLoop,
+    const executors = async (args: string[]) => { executorRuns.push({ at: clock, pid: own, args }); return args[0] === 'restart' ? { host: 'machine-a', result: 'restarted' } : { host: 'machine-a', executors: [] }; };
+    await runDaemon(config, state, effects(now), { intervalMs, identity: { pid: own, host: 'machine-a' }, signals: ['SIGTERM'], process: host as never, now, checkout, restartLoop, executors,
       log: line => journal.push({ at: clock, pid: own, line }) });
   }
 
   // Each request was carried out once: two restores, each to its own named ref, and one restart request answered.
-  const served = journal.filter(entry => /\] checkout-restore (restored|clean|failed)|\] loop-restart request/.test(entry.line) && !/restart (done|failed):/.test(entry.line));
-  assert.equal(served.length, 3, `three requests served once each: ${served.map(entry => entry.line).join(' | ')}`);
-  const refs = git(main, 'for-each-ref', '--format=%(refname)', checkoutRestoreRefPrefix).split('\n').filter(Boolean);
+  const served = journal.filter(entry => /\] checkout-restore (restored|clean|failed)|\] loop-restart request|\] master executors request/.test(entry.line) && !/restart (done|failed):/.test(entry.line));
+  assert.equal(served.length, 5, `five requests served once each: ${served.map(entry => entry.line).join(' | ')}`);
+  // The executors requests: each run once on the host, by the loop serving when it was filed, owing no loop restart.
+  assert.deepEqual(executorRuns.map(entry => entry.args), [[], ['restart']], `executors runs: ${JSON.stringify(executorRuns)}`);
+  assert.ok(executorRuns.every(entry => entry.at - start - (entry.args.length ? 28 : 26) * hour <= 10 * minute), 'each on the next pass after it was filed');
+  assert.equal((await readCheckoutRestoreRequest(loopExecutorsRequestPath(config)))?.outcome?.state, 'executors');
+  // Two restores may share a stamp's second; the ref names their commits too, so they are ordered by what they hold.
+  const holds = (ref: string, path: string) => { try { git(main, 'cat-file', '-e', `${ref}:${path}`); return 1; } catch { return 0; } };
+  const refs = git(main, 'for-each-ref', '--format=%(refname)', checkoutRestoreRefPrefix).split('\n').filter(Boolean).sort((a, b) => holds(a, 'src/fresh.ts') - holds(b, 'src/fresh.ts'));
   assert.equal(refs.length, 2, `one named ref per restore: ${refs.join(', ')}`);
   assert.equal(git(main, 'show', `${refs[0]}:src/loop.ts`), 'export const loop = 2; // hotfix', 'the first hotfix is saved');
   assert.equal(git(main, 'show', `${refs[1]}:src/fresh.ts`), 'export const fresh = 2;', 'the second restore saved the working file');
   assert.equal(git(main, 'show', `${refs[1]}^2:src/fresh.ts`), 'export const fresh = 1;', 'and the staged version beside it');
+  assert.equal(git(main, 'show', `${refs[1]}:scratchpad.mjs`), '// scratch', 'and the untracked scratch outside the source paths');
+  assert.equal(git(main, 'status', '--porcelain'), '', 'no non-ignored dirty path is left');
   assert.deepEqual(dirtyCheckoutPaths(await readCoordinatorCheckout(main)), [], 'the checkout ends the days clean');
   // The restarts: the first ask failed and was asked again on the next pass by the same loop; every
   // other request owed exactly one, and each landed loop is a new process.
@@ -129,7 +143,7 @@ test('unit:soak-checkout-restore-served-once — over two simulated days of the 
   assert.ok(after.every(entry => entry.escalation === 'done'), 'the escalation stays settled');
   assert.equal(new Set(after.map(entry => entry.attempts)).size, 1, 'no further failed attempt is recorded');
   assert.equal(Object.keys(state.actions).filter(key => key.startsWith('escalation:dirty-checkout')).length, 1, 'one escalation row all days');
-  assert.ok(!journal.some(entry => entry.at > restarts.at(-1)!.at && /checkout-restore|loop-restart|escalation failed/.test(entry.line) && !/restart done/.test(entry.line)),
+  assert.ok(!journal.some(entry => entry.at > restarts.at(-1)!.at && /checkout-restore|loop-restart|executors request|escalation failed/.test(entry.line) && !/restart done/.test(entry.line)),
     `the last restarted loop serves nothing again: ${journal.filter(entry => entry.at > restarts.at(-1)!.at && /checkout-restore|loop-restart/.test(entry.line)).map(entry => entry.line).join(' | ')}`);
   assert.ok(new Set(reads.map(entry => entry.pid)).size >= 4, 'the days ran four loop processes');
 });

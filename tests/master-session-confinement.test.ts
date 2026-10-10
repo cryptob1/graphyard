@@ -6,9 +6,9 @@ import { join } from 'node:path';
 import { masterConfinementVariable, masterSessionConfinement, startAgentSession } from '../src/master/launch.js';
 import { dirtyCheckoutPaths, hostProcessLaunchTargets, readCoordinatorCheckout, sessionMountNamespaceWorks } from '../src/master/profiles.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
-import { checkoutRestoreRemedy, coordinatorCheckoutGuard } from '../src/daemon/run.js';
+import { checkoutRestoreRemedy, coordinatorCheckoutGuard, serveLoopRequests } from '../src/daemon/run.js';
 import { emptyDaemonState } from '../src/master-daemon.js';
-import { checkoutRestoreCommand, checkoutRestoreRefPrefix, checkoutRestoreRequestPath, checkoutWriterProcesses, fileCheckoutRestoreRequest, freezeCheckoutWriters, loopRestartRequestPath, readCheckoutRestoreRequest, serveCheckoutRestore } from '../src/cli/master-checkout-restore.js';
+import { checkoutRestoreCommand, checkoutRestoreRefPrefix, checkoutRestoreRequestPath, checkoutWriterProcesses, fileCheckoutRestoreRequest, freezeCheckoutWriters, loopExecutorsRequestPath, loopRestartRequestPath, readCheckoutRestoreRequest, restoreCoordinatorCheckout, serveCheckoutRestore, statusPaths } from '../src/cli/master-checkout-restore.js';
 import { doctorCommandVerdict, doctorSanctionedCommands as piSanctioned } from '../integrations/pi/index.js';
 import { doctorPrompt, doctorSanctionedCommands } from '../src/daemon/doctor.js';
 import { confinedMaster } from '../src/cli/master/operations.js';
@@ -79,10 +79,16 @@ test('integration:master-session-checkout-readonly — the master session cannot
   assert.equal(git('rev-parse', '--abbrev-ref', 'HEAD'), 'main', 'the coordinator checkout did not move');
   assert.notEqual(inside(`kill -0 ${process.pid}`).status, 0, 'no host process is visible to signal');
   assert.equal(inside(`printenv ${masterConfinementVariable}`).stdout.trim(), 'master', 'the session knows it is confined');
-  assert.ok(confinedMaster({ [masterConfinementVariable]: 'master' }) && !confinedMaster({}), 'and routes its master restart to the loop request');
-  // Its `master restart` files a request beside the cursor, which the loop serves through its own unit.
-  const restart = inside(`echo '{}' > ${loopRestartRequestPath({ credentialFile: join(outside, 'coordinator.token') })}`);
-  assert.equal(restart.status, 0, restart.stderr);
+  assert.ok(confinedMaster({ [masterConfinementVariable]: 'master' }) && !confinedMaster({}), 'and routes its master restart and master executors to loop requests');
+  // Its admin commands that act on the host — the executors' restart through systemd, their host-pid
+  // liveness — are routed to the loop, never run against the masked manager or its own PID namespace.
+  const cliSource = readFileSync(join(import.meta.dirname, '..', 'src', 'cli', 'master.ts'), 'utf8');
+  assert.match(cliSource, /\(id === 'restart' \|\| id === 'executors'\) && confinedMaster\(\) \? \[operationsCommand\]/, 'a confined master restart or executors goes only to the loop request');
+  // Its `master restart` and `master executors` file requests beside the cursor, which the loop serves on the host.
+  for (const path of [loopRestartRequestPath({ credentialFile: join(outside, 'coordinator.token') }), loopExecutorsRequestPath({ credentialFile: join(outside, 'coordinator.token') })]) {
+    const filed = inside(`echo '{}' > ${path}`);
+    assert.equal(filed.status, 0, filed.stderr);
+  }
 });
 
 test('unit:master-session-confinement-refusal — a master launch that cannot carry the confinement is refused, never started unconfined', async () => {
@@ -144,7 +150,9 @@ test('integration:checkout-restore-clears-guard — the restore saves every dirt
   execFileSync('rm', [join(root, 'src', 'gone.ts')]);
   mkdirSync(join(root, 'src', 'fresh'));
   writeFileSync(join(root, 'src', 'fresh', 'patch.ts'), 'export const fresh = 1;\n');
+  // Untracked scratch outside the source paths the guard reads: preserved and restored like the rest.
   writeFileSync(join(root, 'scratchpad.mjs'), '// scratch\n');
+  mkdirSync(join(root, 'scratchpad')); writeFileSync(join(root, 'scratchpad', 'notes.md'), 'notes\n');
   const state = emptyDaemonState(config(base));
   const guard = guardFor(root, state);
   assert.ok(await guard.start(null), 'the dirty checkout is refused');
@@ -156,24 +164,29 @@ test('integration:checkout-restore-clears-guard — the restore saves every dirt
   // The suspected writer: a standing process working in the checkout. It is stopped for the restore
   // and continued after, so it can write nothing between the snapshot and the reset.
   const writer = spawn('sleep', ['60'], { cwd: root, stdio: 'ignore' });
+  // A process already stopped by job control stays stopped: the restore never continues work it did not stop.
+  const suspended = spawn('sleep', ['60'], { cwd: root, stdio: 'ignore' });
   const processState = (pid: number) => readFileSync(`/proc/${pid}/stat`, 'utf8').split(') ')[1][0];
-  let frozenDuring: { pids: number[]; states: string[]; dirtyAtThaw: number } | null = null;
-  const quiesce = (directory: string) => {
-    const frozen = freezeCheckoutWriters(directory);
+  process.kill(suspended.pid!, 'SIGSTOP');
+  for (let tries = 0; processState(suspended.pid!) !== 'T' && tries < 200; tries++) await new Promise(done => setTimeout(done, 5));
+  let frozenDuring: { pids: number[]; stopped: number[]; states: string[]; dirtyAtThaw: number } | null = null;
+  const quiesce = async (directory: string) => {
+    const frozen = await freezeCheckoutWriters(directory);
     const states = frozen.pids.map(processState);
-    return { thaw: () => { frozenDuring = { pids: frozen.pids, states, dirtyAtThaw: Number(spawnSync('git', ['-C', root, 'status', '--porcelain', '--', 'src', 'Dockerfile'], { encoding: 'utf8' }).stdout.trim().length) }; frozen.thaw(); } };
+    return { thaw: () => { frozenDuring = { pids: frozen.pids, stopped: frozen.stopped, states, dirtyAtThaw: Number(spawnSync('git', ['-C', root, 'status', '--porcelain'], { encoding: 'utf8' }).stdout.trim().length) }; frozen.thaw(); } };
   };
   const restarts: { pid: number }[] = [];
   let failRestart = true;
   const restart = (pid: number) => async () => { restarts.push({ pid }); if (failRestart) { failRestart = false; throw new Error('Failed to connect to bus'); } };
   let outcome;
   try {
-    assert.deepEqual(checkoutWriterProcesses(root), [writer.pid], 'the standing process in the checkout is the suspected writer; this process is spared');
+    assert.deepEqual(checkoutWriterProcesses(root), [writer.pid!, suspended.pid!].sort((a, b) => a - b), 'the standing processes in the checkout are the suspected writers; this process is spared');
     outcome = await serveCheckoutRestore(file, root, { settle: () => guard.settle(), restart: restart(41), pid: 41, quiesce });
     assert.notEqual(processState(writer.pid!), 'T', 'the writer is continued after the restore');
-  } finally { writer.kill(); }
+    assert.equal(processState(suspended.pid!), 'T', 'the process stopped before the restore is left stopped');
+  } finally { writer.kill('SIGKILL'); suspended.kill('SIGKILL'); }
   assert.equal(outcome?.state, 'restored', outcome?.detail);
-  assert.deepEqual(frozenDuring, { pids: [writer.pid], states: ['T'], dirtyAtThaw: 0 }, 'the writer stood stopped through the whole restore');
+  assert.deepEqual(frozenDuring, { pids: [writer.pid!, suspended.pid!].sort((a, b) => a - b), stopped: [writer.pid], states: ['T', 'T'], dirtyAtThaw: 0 }, 'both writers stood stopped through the whole restore, and only the one it stopped is continued');
   // The restart failed: recorded so, never as done, and asked again on the next pass until it lands.
   assert.equal(outcome!.restart?.state, 'failed');
   assert.equal((await readCheckoutRestoreRequest(file))?.outcome?.restart?.state, 'failed');
@@ -182,7 +195,7 @@ test('integration:checkout-restore-clears-guard — the restore saves every dirt
   assert.equal((await serveCheckoutRestore(file, root, { restart: restart(42), pid: 42 }))?.restart?.state, 'done', 'the restarted loop records the restart done');
   assert.deepEqual(restarts, [{ pid: 41 }, { pid: 41 }], 'the loop restarts through its unit until it lands, and no restarted loop asks again');
   assert.ok(outcome!.ref!.startsWith(checkoutRestoreRefPrefix));
-  assert.deepEqual(outcome!.paths.sort(), ['Dockerfile', 'src/fresh/', 'src/gone.ts', 'src/loop.ts']);
+  assert.deepEqual(outcome!.paths.sort(), ['Dockerfile', 'scratchpad.mjs', 'scratchpad/', 'src/fresh/', 'src/gone.ts', 'src/loop.ts']);
   // Clean, and nothing lost: the ref holds every byte, on top of the HEAD it was taken at.
   const checkout = await readCoordinatorCheckout(root);
   assert.deepEqual(dirtyCheckoutPaths(checkout), [], 'readCoordinatorCheckout reports an empty dirty set');
@@ -195,7 +208,10 @@ test('integration:checkout-restore-clears-guard — the restore saves every dirt
   assert.equal(git('rev-parse', `${outcome!.ref}^2^`), head);
   assert.notEqual(spawnSync('git', ['-C', root, 'cat-file', '-e', `${outcome!.ref}:src/gone.ts`]).status, 0, 'the deletion is recorded too');
   assert.equal(readFileSync(join(root, 'src', 'gone.ts'), 'utf8'), 'export const gone = 1;\n', 'the deleted file is back at HEAD');
-  assert.ok(existsSync(join(root, 'scratchpad.mjs')), 'scratch outside the source paths is left alone');
+  assert.equal(git('show', `${outcome!.ref}:scratchpad.mjs`), '// scratch', 'untracked scratch outside the source paths is preserved');
+  assert.equal(git('show', `${outcome!.ref}:scratchpad/notes.md`), 'notes');
+  assert.ok(!existsSync(join(root, 'scratchpad.mjs')) && !existsSync(join(root, 'scratchpad')), 'and returned to HEAD with the rest');
+  assert.equal(git('status', '--porcelain'), '', 'no non-ignored dirty path is left');
   assert.equal(git('stash', 'list'), '', 'the shared stash stack is untouched');
   // The escalation settled before the restart, and records no further failed attempt.
   assert.equal(state.actions['escalation:dirty-checkout']?.state, 'done');
@@ -237,4 +253,70 @@ test('integration:coordinator-serves-current-release — after a restore, a rest
   const pending = await checkoutRestoreCommand(config(base), ['restore', 'again'], 'graphyard-master', { waitMs: 20, pollMs: 5 });
   assert.equal(pending.state, 'requested');
   await assert.rejects(checkoutRestoreCommand(config(base), [], 'graphyard-master'), /Use master checkout-restore REASON/);
+});
+
+test('unit:checkout-restore-freeze-fails-closed — a writer that cannot be stopped, or does not show stopped, refuses the restore before anything is touched, and only what it stopped is continued', async () => {
+  const states = new Map<number, string>([[11, 'S'], [12, 'S'], [13, 'T'], [14, 'S']]);
+  const sent: string[] = [];
+  const signal = (refuse: number[]) => (pid: number, name: NodeJS.Signals) => {
+    sent.push(`${name}:${pid}`);
+    if (refuse.includes(pid)) throw Object.assign(new Error(`kill EPERM ${pid}`), { code: 'EPERM' });
+    states.set(pid, name === 'SIGSTOP' ? 'T' : 'S');
+  };
+  const state = (pid: number) => states.get(pid) ?? null;
+  // Another user's process: SIGSTOP is refused, so the freeze throws and continues the one it had stopped.
+  await assert.rejects(freezeCheckoutWriters('/checkout', { scan: () => [11, 12, 13], signal: signal([12]), state }), /writer pid 12 could not be stopped.*nothing was restored/);
+  assert.deepEqual(sent, ['SIGSTOP:11', 'SIGSTOP:12', 'SIGCONT:11'], 'the stopped one is continued; the one stopped before is never signalled');
+  assert.equal(states.get(13), 'T');
+  // A process that takes the signal but never shows stopped (a ptrace stop elsewhere, an uninterruptible wait) refuses too.
+  sent.length = 0; states.set(11, 'S');
+  const stuck = (pid: number, name: NodeJS.Signals) => { sent.push(`${name}:${pid}`); };
+  await assert.rejects(freezeCheckoutWriters('/checkout', { scan: () => [11], signal: stuck, state, settleMs: 30, pollMs: 5 }), /did not stop within 30ms/);
+  assert.deepEqual(sent, ['SIGSTOP:11', 'SIGCONT:11']);
+  // A writer that exits between the scan and the signal writes nothing more: it is no refusal.
+  sent.length = 0;
+  const exiting = (pid: number, name: NodeJS.Signals) => { sent.push(`${name}:${pid}`); if (pid === 14) { states.delete(14); throw Object.assign(new Error('kill ESRCH'), { code: 'ESRCH' }); } states.set(pid, name === 'SIGSTOP' ? 'T' : 'S'); };
+  states.set(11, 'S');
+  // One forked during the freeze is found on the next read and stopped too.
+  let reads = 0;
+  const frozen = await freezeCheckoutWriters('/checkout', { scan: () => ++reads === 1 ? [11, 14] : [11, 14, 15], signal: exiting, state: pid => pid === 15 ? (states.get(15) ?? 'R') : state(pid) });
+  assert.deepEqual(frozen.stopped, [11, 15]);
+  frozen.thaw();
+  assert.deepEqual(sent, ['SIGSTOP:11', 'SIGSTOP:14', 'SIGSTOP:15', 'SIGCONT:11', 'SIGCONT:15']);
+  // Through the restore: a freeze that fails leaves every dirty path where it was, and writes no ref.
+  const base = await temporaryDirectory('freeze-fails-closed');
+  const { root, git } = coordinator(base);
+  writeFileSync(join(root, 'src', 'loop.ts'), 'export const loop = 2; // hotfix\n');
+  writeFileSync(join(root, 'scratchpad.mjs'), '// scratch\n');
+  await assert.rejects(restoreCoordinatorCheckout(root, 'restore', undefined, new Date(), () => { throw new Error('the checkout\'s writer pid 12 could not be stopped'); }), /could not be stopped/);
+  assert.equal(readFileSync(join(root, 'src', 'loop.ts'), 'utf8'), 'export const loop = 2; // hotfix\n');
+  assert.ok(existsSync(join(root, 'scratchpad.mjs')));
+  assert.equal(git('for-each-ref', checkoutRestoreRefPrefix), '', 'no ref was written');
+  assert.deepEqual(statusPaths(`R  new.ts\0old.ts\0?? scratch/\0 M src/a.ts\0`).sort(), ['new.ts', 'old.ts', 'scratch/', 'src/a.ts'], 'every status entry and rename origin is a restored path');
+});
+
+test('unit:confined-master-executors-through-loop — a confined master\'s master executors is a request the loop runs on the host, once, recording what it printed', async () => {
+  const base = await temporaryDirectory('confined-executors');
+  const { root } = coordinator(base);
+  const settings = config(base);
+  const ran: string[][] = [];
+  const executors = async (args: string[]) => { ran.push(args); return args[0] === 'restart' ? { host: 'machine-a', result: 'refused', reason: 'an executor holds a claim' } : { host: 'machine-a', executors: [], lines: [] }; };
+  const pending = checkoutRestoreCommand(settings, ['restart', '--timeout', '60'], 'graphyard-master', { act: 'executors', waitMs: 2_000, pollMs: 5 });
+  const file = loopExecutorsRequestPath(settings);
+  for (let tries = 0; !(await readCheckoutRestoreRequest(file)) && tries < 200; tries++) await new Promise(done => setTimeout(done, 5));
+  assert.deepEqual((await readCheckoutRestoreRequest(file))?.args, ['restart', '--timeout', '60']);
+  const restarts: number[] = [];
+  const served = await serveLoopRequests(settings, root, { restart: async () => { restarts.push(1); }, pid: 41, executors });
+  assert.equal(served.length, 1);
+  assert.equal(served[0].state, 'executors');
+  const answer = await pending;
+  assert.deepEqual((answer as { result?: unknown }).result, { host: 'machine-a', result: 'refused', reason: 'an executor holds a claim' }, 'the command prints what the loop ran');
+  assert.equal(process.exitCode, 1, 'a refused executor restart exits non-zero for the confined master too');
+  process.exitCode = 0;
+  assert.deepEqual(await serveLoopRequests(settings, root, { restart: async () => { restarts.push(1); }, pid: 42, executors }), [], 'served once, by no later loop either');
+  assert.deepEqual(ran, [['restart', '--timeout', '60']]);
+  assert.deepEqual(restarts, [], 'an executors request owes the loop no restart of its own');
+  // A loop without the host command answers it failed rather than leaving it standing.
+  await fileCheckoutRestoreRequest(file, 'master executors from the confined master session', 'graphyard-master', new Date(), 'executors', []);
+  assert.equal((await serveLoopRequests(settings, root, { restart: async () => {}, pid: 43 }))[0]?.state, 'failed');
 });

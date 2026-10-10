@@ -9,13 +9,14 @@ import { herdrServerSeen, herdrTarget } from '../../master/herdr.js';
 import { LoopWake, loopWakeSubjects } from '../../daemon/loop-wake.js';
 import { unhandled, type MasterSession } from './session.js';
 import { exitWhenStopped, recordingLockRefusal } from '../../master/loop-restart.js';
+import { executorsAct } from '../master-executors.js';
 
 /** The durable coordination loop and the dispatcher beside it, until stopped. */
 /** The Herdr server the loop names on each read (GY-1511): the instance its herdr calls target, its host, and whether it last answered. */
 export const loopHerdrReport = (host: string | null) => encodeLoopPanes({ configHome: herdrTarget()?.configHome ?? null, session: herdrTarget()?.session ?? null, host, running: herdrServerSeen() });
 
 export async function loopCommand(session: MasterSession): Promise<unknown> {
-  const { id, args, print, root, master, masterToken, masterApi, masterMutation, coordinator, assertProtocol } = session;
+  const { id, args, print, root, master, masterToken, masterApi, masterMutation, coordinator, cli, assertProtocol } = session;
   if (id === 'run') {
     const { values } = parseArgs({ args, options: { once: { type: 'boolean' }, interval: { type: 'string' } }, allowPositionals: false });
     const intervalSeconds = values.interval ? Number(values.interval) : master.run.intervalSeconds;
@@ -45,7 +46,9 @@ export async function loopCommand(session: MasterSession): Promise<unknown> {
     const exit = exitWhenStopped();
     const held = state.lock && state.lock.pid !== process.pid ? state.lock : null;
     // A run refused on another loop's lock is recorded for master status, which names a holder outside the unit.
-    const daemonRun = recordingLockRefusal(root, held, runDaemon(master, state, effects, { once: values.once, intervalMs: values.interval ? intervalSeconds * 1000 : () => current().run.intervalSeconds * 1000, identity: { pid: process.pid, host: master.hostId }, reload, repository: root, wake }))
+    const daemonRun = recordingLockRefusal(root, held, runDaemon(master, state, effects, { once: values.once, intervalMs: values.interval ? intervalSeconds * 1000 : () => current().run.intervalSeconds * 1000, identity: { pid: process.pid, host: master.hostId }, reload, repository: root, wake,
+      // GY-1658: a confined master's `master executors [restart]`, run here with the host's systemd and pids in view.
+      executors: (executorArgs, keepAlive) => executorsAct(current(), executorArgs, { actions: () => masterApi('actions'), coordinatorCommit: cli.commit, onWait: keepAlive }) }))
       .finally(() => stopping.abort());
     const dispatching = { ...dispatchEffects(root, current, { snapshot: (timeoutMs = dispatchReadTimeoutMs) => coordinationSnapshot(timeoutMs) }),
       observeLoopSubjects: (work: Parameters<typeof loopWakeSubjects>[0], agents: Parameters<typeof loopWakeSubjects>[3], clock: number) => { wake.observe(loopWakeSubjects(work, current(), clock, agents)); } };

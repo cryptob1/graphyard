@@ -1,4 +1,4 @@
-// Concern: `graphyard master` operations subcommands — status, settle-containment, checkout-restore, dispatch, merge, verify-deployment, main-watch.
+// Concern: `graphyard master` operations subcommands — status, settle-containment, checkout-restore and the confined master's loop requests, dispatch, merge, verify-deployment, main-watch.
 import { parseArgs } from 'node:util';
 import { resourceConflicts } from '../../coordination.js';
 import { handSettlementRefusal } from '../../model/containment.js';
@@ -87,6 +87,8 @@ export async function operationsCommand(session: MasterSession, effects: Recover
   if (id === 'checkout-restore') return print(await checkoutRestoreCommand(master, args, String(coordinator?.actor?.id ?? coordinator?.actor?.name ?? 'master')));
   // The confined master session sees no host systemd (GY-1658), so its restart is a request the loop serves through its own unit.
   if (id === 'restart' && confinedMaster()) return print(await checkoutRestoreCommand(master, args, String(coordinator?.actor?.id ?? coordinator?.actor?.name ?? 'master'), { act: 'restart' }));
+  // Likewise its `master executors [restart]`: the restart goes through the host's systemd and the executors' liveness is their host pids, which its PID namespace cannot see.
+  if (id === 'executors' && confinedMaster()) return print(await checkoutRestoreCommand(master, args, String(coordinator?.actor?.id ?? coordinator?.actor?.name ?? 'master'), { act: 'executors' }));
   if (id === 'settle-containment') {
     if (!args[0] || !args.slice(1).join(' ').trim()) throw new Error('Use master settle-containment GY-N REASON');
     const { snapshot, clockOffset } = await snapshotWithClock(() => masterApi('work-snapshot'));

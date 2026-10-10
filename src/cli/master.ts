@@ -106,8 +106,8 @@ export const masterCommands = defineCommands([
       if (id === 'setup') return masterSetupCommand(context, root, await loadStoredMasterConfig(root));
       const session = await openMasterSession(context, root);
       // Each concern under ./master/ answers its own subcommands; the first that knows the id handles it.
-      // A confined master's `restart` is operations' loop request (GY-1658), not the autonomy restart through the host's systemd.
-      const concerns = id === 'restart' && confinedMaster() ? [operationsCommand] : [intentCommand, fleetCommand, operationsCommand, loopCommand, mergerCommand];
+      // A confined master's `restart` and `executors` are operations' loop requests (GY-1658), not acts on the host's systemd and pids it cannot reach.
+      const concerns = (id === 'restart' || id === 'executors') && confinedMaster() ? [operationsCommand] : [intentCommand, fleetCommand, operationsCommand, loopCommand, mergerCommand];
       for (const command of concerns) if (await command(session) !== unhandled) return;
       throw new Error(`There is no master ${id}; use master guide for the subcommands`);
     },

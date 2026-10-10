@@ -29,7 +29,7 @@ systemctl --user restart graphyard-master-OWNER-NAME                    # loop d
 graphyard master checkout-restore "reason"                              # dirty: refs/graphyard/checkout-restore/
 ```
 
-Never attest a stop you have not confirmed; merged work changes only via follow-ups. Outside the lock's PID namespace `master status` judges the loop by stall bound alone; if stalled or absent on the coordinator host: stop hand-started loops, install `examples/master/graphyard-master.service`, `systemctl --user daemon-reload && systemctl --user enable --now graphyard-master`.
+Never attest a stop you have not confirmed; merged work changes only via follow-ups. Outside the lock's PID namespace `master status` judges the loop by stall bound alone; if stalled or absent: stop hand-started loops, install `examples/master/graphyard-master.service`, `systemctl --user daemon-reload && systemctl --user enable --now graphyard-master`.
 
 ## Worker host keyring proxy
 
@@ -41,6 +41,10 @@ Confined masters, approvers, producers read GitHub login (`gh auth git-credentia
 - Proof authority: live [grant](operations-reference.md#proof-authority-grants); `admin` attests only `manual:` proofs; operator agents only add requirements.
 - GitHub merges on passing gates: no bypass, no lifecycle-state endpoint.
 - History is append-only; only routine rows past retention are [compacted](operations-reference.md#storage-retention).
+
+## Deeper references
+
+[Operations reference](operations-reference.md), [delegation](delegation.md).
 
 ## Resources and disk
 

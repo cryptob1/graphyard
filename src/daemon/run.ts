@@ -20,7 +20,7 @@ import { Launcher, defaultLaunchConcurrency, runCycle } from './cycle.js';
 import { holdBoundWait } from './cycle-decisions.js';
 import { detailChanged } from './decisions.js';
 import { awaitSupervisorRestart, describeSelfUpgrade, detectLoopSupervisorUnit, restartEndedBySupervisorStop, type SelfUpgradeOutcome } from './upgrade.js';
-import { checkoutRestoreRequestPath, loopRestartRequestPath, serveCheckoutRestore, type CheckoutRestoreOutcome } from '../cli/master-checkout-restore.js';
+import { checkoutRestoreRequestPath, loopExecutorsRequestPath, loopRestartRequestPath, serveCheckoutRestore, type CheckoutRestoreOutcome } from '../cli/master-checkout-restore.js';
 import { describeTimings } from '../master/timings.js';
 import { stopDoctorRuns, doctorReport } from './doctor.js';
 import { mainWatchSummary } from './main-watch.js';
@@ -218,7 +218,9 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
   /** Reads how the coordinator checkout stands; defaults to reading it from the configured CLI launcher's root. */
   checkout?: () => CoordinatorCheckout | Promise<CoordinatorCheckout>;
   /** Carries out the standing `master checkout-restore` and confined `master restart` requests (GY-1658), `settle` recording the checkout clean before the loop restarts; defaults to the requests beside the cursor, served by serveLoopRequests. */
-  checkoutRestore?: (settle: () => Promise<unknown>) => Promise<unknown>;
+  checkoutRestore?: (settle: () => Promise<unknown>, keepAlive?: () => Promise<void>) => Promise<unknown>;
+  /** Runs `master executors ARGS` on the host for a confined master's request (GY-1658), feeding `keepAlive` while a restart waits; without it such a request is answered failed. */
+  executors?: (args: string[], keepAlive?: () => Promise<void>) => Promise<unknown>;
   /** Re-executes this loop through its supervising unit when a served request owes a restart (GY-1658); defaults to `systemctl --user --no-block restart` of the unit this process runs under. */
   restartLoop?: () => Promise<unknown>;
   /** The managed repository's checkout the loop runs for; its research scratch is a worktree of it (GY-1480). Defaults to the CLI launcher's checkout. */
@@ -295,11 +297,12 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
     // (any master identity, the doctor's included, files it beside the cursor) is carried out here, by
     // the one unconfined process: every dirty path saved under a named ref and returned to HEAD, the
     // escalation settled, and the loop restarted through its supervising unit onto the clean checkout.
-    const restoreCheckout = options.checkoutRestore ?? ((settle: () => Promise<unknown>) => serveLoopRequests(config, coordinatorCheckoutRoot(config.cliPath), {
-      settle, report: outcome => log(`[graphyard-master] ${outcome.state === 'restart' ? 'loop-restart request' : `checkout-restore ${outcome.state}`}: ${outcome.detail}${outcome.restart ? `; restart ${outcome.restart.state}: ${outcome.restart.detail}` : ''}`),
-      restart: options.restartLoop ?? restartThroughUnit, pid: options.identity.pid }));
-    const serveRestore = async () => {
-      try { await restoreCheckout(() => guard.settle()); }
+    const executorsAct = options.executors;
+    const restoreCheckout = options.checkoutRestore ?? ((settle: () => Promise<unknown>, keepAlive?: () => Promise<void>) => serveLoopRequests(config, coordinatorCheckoutRoot(config.cliPath), {
+      settle, report: outcome => log(`[graphyard-master] ${outcome.state === 'restart' ? 'loop-restart request' : outcome.state === 'executors' ? 'master executors request' : `checkout-restore ${outcome.state}`}: ${outcome.detail}${outcome.restart ? `; restart ${outcome.restart.state}: ${outcome.restart.detail}` : ''}`),
+      restart: options.restartLoop ?? restartThroughUnit, pid: options.identity.pid, ...(executorsAct ? { executors: (args: string[]) => executorsAct(args, keepAlive) } : {}) }));
+    const serveRestore = async (keepAlive?: () => Promise<void>) => {
+      try { await restoreCheckout(() => guard.settle(), keepAlive); }
       catch (error) { log(`[graphyard-master] checkout-restore could not be served: ${message(error)}`); }
     };
     try {
@@ -309,7 +312,7 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
         // onto the same dirty checkout — and cycles nothing until it is restarted on a clean one.
         log(`[graphyard-master] the loop cycles nothing from a dirty coordinator checkout; clean or stash the paths it names, then restart it`);
         while (!stopping && !options.once) {
-          await serveRestore();
+          await serveRestore(watchdog.supervised ? async () => { try { await effects.notify?.('alive'); } catch { /* the next keep-alive logs */ } } : undefined);
           if (watchdog.supervised) { try { await effects.notify?.('alive'); } catch (error) { log(`[graphyard-master] supervisor notification failed: ${message(error)}`); } }
           try { await delay(interval(), undefined, { signal: waking.signal }); } catch { /* woken to stop */ }
         }
@@ -356,7 +359,7 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
         // fed on each poll so that wait is not mistaken for a hung loop (GY-916).
         const keepAlive = watchdog.supervised ? async () => { try { await effects.notify?.('alive'); } catch (error) { log(`[graphyard-master] supervisor notification failed: ${message(error)}`); } } : undefined;
         const selfUpgrade = effects.selfUpgrade;
-        if (!stopping) await serveRestore();
+        if (!stopping) await serveRestore(keepAlive);
         await guard.betweenCycles(stopping || !selfUpgrade ? undefined : current => selfUpgrade(current, keepAlive), stopping ? undefined : keepAlive, { stopping });
         // The keep-alive says the process is alive, which a failed cycle leaves true: the watchdog
         // is for a cycle that hangs, and a thrown one has just proved it did not.
@@ -407,13 +410,14 @@ async function restartThroughUnit() {
 }
 /**
  * One pass over the host acts a confined master identity requested (GY-1658): the checkout-restore
- * request first, then the loop-restart request — skipped when the first has just asked for the restart.
+ * request first, then the loop-restart request — skipped when the first has just asked for the
+ * restart — then a `master executors` request, run with the loop's own view of the host.
  * A checkout the guard does not apply to (a test runner's own) is never touched.
  */
 export async function serveLoopRequests(config: Pick<MasterConfig, 'credentialFile'>, root: string, deps: Parameters<typeof serveCheckoutRestore>[2]): Promise<CheckoutRestoreOutcome[]> {
   if (!checkoutGuardApplies(root)) return [];
   const served: CheckoutRestoreOutcome[] = [];
-  for (const file of [checkoutRestoreRequestPath(config), loopRestartRequestPath(config)]) {
+  for (const file of [checkoutRestoreRequestPath(config), loopRestartRequestPath(config), loopExecutorsRequestPath(config)]) {
     const asked = served.some(outcome => outcome.restart?.state === 'requested');
     const outcome = await serveCheckoutRestore(file, root, asked ? { ...deps, restart: async () => {} } : deps);
     if (outcome) served.push(outcome);
