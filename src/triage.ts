@@ -1,5 +1,6 @@
 import type { Work } from './model.js';
 import { isDelivered } from './model/closure.js';
+import { closesFaultClass, deliveredFaultClassCover, predateLanding } from './model/fault-classes.js';
 import { awaitsParent, followUpEntries, followUpParent, machineKind, overdueTriage, triageAttention, triageClosure, triageJudgementSchema, untriaged, type TriageJudgement } from './model/machine-backlog.js';
 import { agentOwner, type AttentionItem } from './master/attention.js';
 import type { ResearchSettings } from './research.js';
@@ -21,6 +22,9 @@ import type { Run, RunResult, Runner } from './runner/types.js';
 // closure proposed again while the item is unchanged is dropped unrecorded, so it never launches
 // another approver session (GY-1448). A run that fails is retried on a later cycle; an item still
 // untriaged a day after it was filed is raised as attention (model/machine-backlog.ts triageAttention).
+// A recurring-fault item whose origin instances were all first seen before a delivered item naming
+// the same class landed needs no session (GY-1632): the loop proposes closing it as covered by that
+// item, which the approver judges like any closure, and no worker is dispatched to re-implement it.
 // ---------------------------------------------------------------------------
 
 /** The Graphyard Pi tool whose call is the triage session's judgement (integrations/pi). */
@@ -53,6 +57,20 @@ export function repeatsRefusedClosure(work: Pick<Work, 'triage' | 'updatedAt'>, 
   return !!refused && !!closure && closure.kind === refused.kind && closure.ref === refused.ref;
 }
 const closureName = (closure: { kind: string; ref: string | null }) => `${closure.kind}${closure.ref ? ` of ${closure.ref}` : ''}`;
+
+/**
+ * The judgement a recurring-fault item needs no session for (GY-1632): close it as covered by the
+ * newest delivered item naming its class, when every instance its origin lists predates that item's
+ * landing. Null when it lists none, one postdates the landing, or no delivered item names the class.
+ */
+export function coveredByDelivery(work: Work, all: readonly Work[]): Extract<TriageJudgement, { outcome: 'close' }> | null {
+  const faultClass = closesFaultClass(work), instances = work.origin?.faultClass?.instances ?? [];
+  if (!faultClass || !instances.length) return null;
+  const cover = deliveredFaultClassCover(all.filter(item => item.id !== work.id), faultClass);
+  if (!cover || !predateLanding(instances, cover.landedAt)) return null;
+  const landed = new Date(cover.landedAt).toISOString();
+  return { outcome: 'close', ref: cover.item.key, reason: `Covered by ${cover.item.key}, delivered for the ${faultClass} fault class at ${landed}: every instance this item lists (${instances.length}, the latest first seen ${instances.map(entry => entry.at).sort().at(-1)}) predates that landing, so the delivered fix already answers them` };
+}
 
 /** The triage session's request: the item, the open and recently delivered items it may name, and the three outcomes. */
 export function triagePrompt(config: { repository: string }, work: Work, all: readonly Work[]) {
@@ -90,10 +108,12 @@ const live = new Map<string, LiveTriage>();
 const failedAt = new Map<string, number>();
 /** Items whose triage run proposed again the closure refused at the recorded time (GY-1448), by item id: not judged again while that refusal stands unchanged. */
 const repeatedAt = new Map<string, string>();
+/** Covered-by-delivery closures being recorded, by item id (GY-1632): no session runs for them. */
+const recording = new Map<string, Promise<void>>();
 /** Test seam: stop and forget every triage run. */
-export function clearTriageRuns() { for (const entry of live.values()) entry.run.cancel('the triage runs were cleared'); live.clear(); failedAt.clear(); repeatedAt.clear(); }
+export function clearTriageRuns() { for (const entry of live.values()) entry.run.cancel('the triage runs were cleared'); live.clear(); failedAt.clear(); repeatedAt.clear(); recording.clear(); }
 /** Every run this process has in flight, settled. */
-export async function triageSettled() { await Promise.all([...live.values()].map(entry => entry.settled)); }
+export async function triageSettled() { await Promise.all([...[...live.values()].map(entry => entry.settled), ...recording.values()]); }
 
 export interface TriageStepInput {
   work: readonly Work[];
@@ -117,11 +137,19 @@ export function triageStep(input: TriageStepInput): TriageStepAction[] {
   if (!input.settings.enabled) return actions;
   // A follow-up whose parent has not shipped is never judged (GY-845): its findings may still change,
   // and the migration folds it back onto the parent.
-  const waiting = input.work.filter(item => untriaged(item) && !awaitsParent(item, input.work) && !live.has(item.id)).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  const waiting = input.work.filter(item => untriaged(item) && !awaitsParent(item, input.work) && !live.has(item.id) && !recording.has(item.id)).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   for (const work of waiting) {
-    if (live.size >= (input.settings.triageConcurrency ?? triageConcurrency)) break;
     const failed = failedAt.get(work.id);
     if (failed !== undefined && input.clock - failed < triageRetryMs) continue;
+    // GY-1632: every instance predates a delivered same-class item's landing — closing it as covered needs no session, and never releases it to a worker.
+    const covered = coveredByDelivery(work, input.work);
+    if (covered && !repeatsRefusedClosure(work, covered)) {
+      const settled = input.record(work, { judgement: covered }).then(() => {}, () => { failedAt.set(work.id, Date.now()); }).finally(() => recording.delete(work.id));
+      recording.set(work.id, settled);
+      actions.push({ work: work.key, state: 'done', detail: `Proposing to close machine-filed ${work.key} as covered by delivered ${covered.ref}: every instance it lists predates that item's landing, so no worker is dispatched` });
+      continue;
+    }
+    if (live.size >= (input.settings.triageConcurrency ?? triageConcurrency)) break;
     // A run already proposed again the closure the approver refused, and the item has not changed
     // since (GY-1448): another session would only propose it once more, so the item waits for its
     // evidence to change, or for the master once it is overdue (untriagedAttention).

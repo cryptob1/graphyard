@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { isClosed } from './closure.js';
+import { isClosed, isDelivered } from './closure.js';
 import { standingCapacity } from './capacity.js';
 import { routableScopeRequest, scopeBlockedBudgetMs, scopeRefusalBlocker } from './scope.js';
 import { containmentPhase } from './containment.js';
@@ -22,6 +22,11 @@ import type { EscalationTrigger, Work } from './work.js';
 // escalation and pipeline fault the loop records carries a class from one shipped catalogue;
 // master status and the dashboard group open problems by class with a count; and a class that
 // recurs past the threshold becomes one structural backlog item, which later instances link to.
+// Instances count against a class item from its landing, not its opening (GY-1632): once the
+// newest delivered item naming the class has merged, an instance first seen before that merge is
+// one the delivered fix already answers, so it links to that item and files nothing; only an
+// instance first seen after the landing counts toward filing the class afresh. GY-1628 was filed
+// from instances that all predated GY-1618's merge, and triage released it to re-implement it.
 // This module is browser-safe: the dashboard classifies with it too.
 // ---------------------------------------------------------------------------
 
@@ -254,11 +259,36 @@ export function openFaultClassItem(work: readonly Work[], faultClass: FaultClass
   return work.find(item => item.stage !== 'done' && !isClosed(item) && closesFaultClass(item) === faultClass) ?? null;
 }
 
+/** When a delivered item landed: GitHub's merge time, null when none was recorded. */
+export function landedAt(work: Pick<Work, 'delivery' | 'observation'>): number | null {
+  const at = Date.parse(work.delivery?.mergedAt ?? work.observation?.mergedAt ?? '');
+  return Number.isFinite(at) ? at : null;
+}
+/**
+ * The newest delivered item naming `faultClass`, with its landing (GY-1632): a delivered item filed
+ * for the class, or the delivered item a recurring item of the class was closed as a duplicate of
+ * (the diagnosis's answer). Null when no such item has a recorded merge.
+ */
+export function deliveredFaultClassCover(work: readonly Work[], faultClass: FaultClass): { item: Work; landedAt: number } | null {
+  const answers = new Set(work.filter(item => closesFaultClass(item) === faultClass && item.closure?.kind === 'duplicate' && item.closure.ref).map(item => item.closure!.ref!));
+  let cover: { item: Work; landedAt: number } | null = null;
+  for (const item of work) {
+    if (!isDelivered(item) || !(closesFaultClass(item) === faultClass || answers.has(item.key))) continue;
+    const at = landedAt(item);
+    if (at !== null && (!cover || at > cover.landedAt)) cover = { item, landedAt: at };
+  }
+  return cover;
+}
+/** Whether every instance listed was first seen before `landing`: none of them postdates the delivered fix. */
+export const predateLanding = (instances: readonly { at: string }[], landing: number) => instances.every(entry => Date.parse(entry.at) < landing);
+
 export interface ClassRecurrence { faultClass: FaultClass; count: number; recent: FaultInstance[]; unlinked: FaultInstance[]; item: Work | null; file: boolean }
 /**
  * Every class with an instance inside the window. A class files an item when the instances in the
  * window no item accounts for reach the threshold and no item stands for the class (`standing`,
- * GY-439); with one, every unlinked instance links to it.
+ * GY-439); with one, every unlinked instance links to it. A delivered item naming the class stands
+ * too while every unlinked instance in the window was first seen before it landed (GY-1632): an
+ * instance after the landing files afresh.
  * Instances linked to an item that has since closed stay counted by it, never by a second one.
  */
 export function recurringClasses(instances: readonly FaultInstance[], work: readonly Work[], policy: FaultClassPolicy, now: number, standing = openFaultClassItem): ClassRecurrence[] {
@@ -266,7 +296,9 @@ export function recurringClasses(instances: readonly FaultInstance[], work: read
   return faultClasses.flatMap(faultClass => {
     const all = instances.filter(entry => entry.faultClass === faultClass);
     const recent = all.filter(entry => Date.parse(entry.at) >= from && Date.parse(entry.at) <= now && !entry.linkedTo);
-    const item = standing(work, faultClass);
+    // GY-1632: with no item standing, a delivered item naming the class stands while every instance in the window predates its landing.
+    const open = standing(work, faultClass), cover = open || !recent.length ? null : deliveredFaultClassCover(work, faultClass);
+    const item = open ?? (cover && predateLanding(recent, cover.landedAt) ? cover.item : null);
     const unlinked = item ? all.filter(entry => !entry.linkedTo) : recent;
     if (!unlinked.length) return [];
     return [{ faultClass, count: recent.length, recent, unlinked, item, file: !item && recent.length >= policy.threshold }];

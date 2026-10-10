@@ -182,3 +182,36 @@ test('unit:triage-sees-closure-refusal — triage judging an item whose closure 
   assert.doesNotMatch(fresh.starts[0]!.prompt, /approver refused/);
   await triageSettled();
 });
+
+// GY-1632: triage released machine-filed GY-1628 at P1 and a worker was dispatched to re-implement
+// GY-1618, although every instance GY-1628 listed predated GY-1618's landing.
+test('unit:triage-pre-landing-instances-close — a recurring-fault item whose instances all predate a delivered same-class item\'s landing is proposed closed as covered by it, with no session run', async t => {
+  t.after(clearTriageRuns);
+  const origin = (instances: string[]) => ({ faultClass: { class: 'resources', threshold: 3, windowHours: 24, count: instances.length, detectedAt: hours(1), instances: instances.map((at, index) => ({ id: `resource-bound|tmp-inodes|${index}`, kind: 'resource-bound', subject: 'resource:tmp-inodes', at })) } });
+  const filed = item('GY-1628', 'Recurring resources faults: 3 in 24 hours', hours(1), { type: 'bug', origin: origin([hours(9), hours(7), hours(4)]) } as Partial<Work>);
+  const fix = item('GY-1618', 'Stop the /tmp inode leak', hours(20), { stage: 'done', delivery: { mergedAt: hours(3), mergeSha: 'a'.repeat(40), authorizationRevision: 1 } } as Partial<Work>);
+  const answered = item('GY-1610', 'Recurring resources faults: 4 in 24 hours', hours(20), { stage: 'done', origin: origin([hours(19)]), closure: { kind: 'duplicate', ref: 'GY-1618', reason: 'answered', by: 'master', at: hours(18), from: 'backlog' } } as Partial<Work>);
+  const recorded: { key: string; judgement: TriageJudgement }[] = [];
+  const { runner, starts } = fakeRunner(() => ({ outcome: 'release', priority: 1, reason: 'real work' }));
+  const step = (work: Work[]) => triageStep({ work, clock: NOW, settings: researchSettings({ research: {} }), config: { repository: 'owner/project' }, cwd: process.cwd(), runner, record: async (entry, body) => { recorded.push({ key: entry.key, judgement: body.judgement }); } });
+  const actions = step([filed, fix, answered]);
+  await triageSettled();
+  assert.equal(starts.length, 0, 'no triage session runs, so nothing can release it to a worker');
+  assert.equal(actions[0]!.state, 'done');
+  assert.match(actions[0]!.detail, /close machine-filed GY-1628 as covered by delivered GY-1618.*no worker is dispatched/);
+  assert.equal(recorded.length, 1);
+  const judgement = recorded[0]!.judgement;
+  assert.deepEqual([recorded[0]!.key, judgement.outcome, judgement.outcome === 'close' ? judgement.ref : null], ['GY-1628', 'close', 'GY-1618'], 'the closure proposal names the delivered item');
+  assert.match(judgement.reason, /Covered by GY-1618.*predates that landing/);
+  // The proposal becomes the close decision the approver judges, never a release.
+  const proposed = { ...filed, triage: { judgement, state: 'proposed', by: 'master', at: hours(0) } } as Work;
+  assert.deepEqual(routineDecision(proposed, { autoMerge: true }, NOW)?.input, { kind: 'superseded', ref: 'GY-1618', reason: `Already fixed by GY-1618: ${judgement.reason}`, triageAt: hours(0) });
+
+  // One instance after the landing: the item is judged by a session as before.
+  clearTriageRuns(); recorded.length = 0;
+  const recurred = { ...filed, origin: origin([hours(9), hours(2)]) } as Work;
+  step([recurred, fix, answered]);
+  await triageSettled();
+  assert.equal(starts.length, 1);
+  assert.deepEqual(recorded.map(entry => entry.judgement.outcome), ['release']);
+});
