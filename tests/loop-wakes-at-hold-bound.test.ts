@@ -56,9 +56,9 @@ function gy1619(observedAt: number, systemDriven = true, { key = 'GY-1619', id =
  * reads it ten seconds old, the step's woken observation one second after the cycle. `decideMs` is how long each
  * rework request takes, `guardMs` how long the checkout guard spends between cycles, `workMs` how long each cycle's
  * work takes after its snapshot was read, and `skewMs` how far the control plane's clock runs ahead of this host's
- * (the board's times are control-plane times). Returns the cycle times, the waits and the decisions, on this host's clock.
+ * (the board's times are control-plane times), and `unobserved` makes the step's woken observation return no reading. Returns the cycle times, the waits and the decisions, on this host's clock.
  */
-async function replay(work: (observedAt: number) => Work[], start: number, cycles: number, { decideMs = 0, guardMs = 0, workMs = 0, skewMs = 0 } = {}) {
+async function replay(work: (observedAt: number) => Work[], start: number, cycles: number, { decideMs = 0, guardMs = 0, workMs = 0, skewMs = 0, unobserved = false } = {}) {
   let now = start, worked = 0;
   const decided: { key: string; action: string; at: number }[] = [], agents: string[] = [], waits: number[] = [], ran: number[] = [], lines: string[] = [];
   const effects: DaemonEffects = {
@@ -74,7 +74,7 @@ async function replay(work: (observedAt: number) => Work[], start: number, cycle
     docsSync: async (_item: Work, plan: DocsSyncPlan) => { const name = docsSyncSessionName(plan); agents.push(name); return { agentName: name, pane: 'pane-s', account: 'reviewer-a', runtime: 'claude' as const, session: null }; },
     conflictPaths: async () => paths,
     // The step's woken reading, taken now: the docs-sync never moved the head.
-    observe: async (subject: Work) => work(now + skewMs + 1_000).find(entry => entry.id === subject.id) ?? null,
+    observe: async (subject: Work) => unobserved ? null : work(now + skewMs + 1_000).find(entry => entry.id === subject.id) ?? null,
     persist: async () => {},
   } as DaemonEffects;
   const listeners = new Map<string, () => void>();
@@ -153,6 +153,17 @@ test('unit:loop-wakes-at-hold-bound — a bound the cycle\'s own work carries th
   assert.deepEqual(loop.ran.map(iso), ['2026-10-10T00:53:15.000Z', '2026-10-10T00:53:20.000Z'], loop.lines.join('\n'));
   assert.equal(loop.waits[0], 0, 'the elapsed standing bound is a zero wait');
   assert.deepEqual(loop.decided.map(entry => [entry.action, iso(entry.at)]), [['rework', '2026-10-10T00:53:25.000Z']], loop.lines.join('\n'));
+});
+
+test('unit:loop-wakes-at-hold-bound — a cycle at exactly the rework bound, with no reading since the cutoff, keeps that bound as a zero wait', async () => {
+  // The board's observation stays from before the 00:53:17.921 cutoff and the woken observation returns none, so the
+  // stopped docs-sync holds the rework until its 00:55:17.921 bound. A cycle at exactly that bound still finds it held
+  // (the rework is not yet overdue): the bound stands as a zero wait, and the next cycle, after 1s of work, requests it.
+  const own = { key: 'GY-1619', id: '7c1e2a6b-3f4d-4e8a-9b0c-1d2e3f4f2619', conflictSince: since }, due = holdBound + 120_000;
+  const loop = await replay(observedAt => [gy1619(Math.min(observedAt, holdBound - 1_000), true, own)], at('00:46:00'), 8, { workMs: 1_000, unobserved: true });
+  assert.deepEqual(loop.ran.slice(-2).map(iso), [iso(due), iso(due + 1_000)], loop.lines.join('\n'));
+  assert.equal(loop.waits[loop.ran.length - 2], 0, 'the bound reached at the cycle is a zero wait, not the loop\'s cadence');
+  assert.deepEqual(loop.decided.map(entry => [entry.action, iso(entry.at)]), [['rework', iso(due + 2_000)]], loop.lines.join('\n'));
 });
 
 test('unit:loop-wakes-at-hold-bound — the control plane\'s bound is translated to this host\'s clock, whichever way the clocks differ', async () => {
