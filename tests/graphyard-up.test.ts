@@ -1567,6 +1567,27 @@ test('unit:up-child-url-propagation — up --merger control-plane on a server re
   const crashed = await runUp(controlPlaneRequest(), { ...thrownBase, cli: async (args, options) => args[0] === 'master' && args[1] === 'harness' ? Promise.reject(new Error('spawn node EMFILE')) : thrownBase.cli(args, options) });
   assert.equal(crashed.exitCode, 1);
   assert.deepEqual(thrownEvents.at(-1), { kind: 'step-failed', step: 'harness', exitCode: 1, argv: null, stderr: null, detail: 'harness: spawn node EMFILE' });
+
+  // A child that succeeds but whose step cannot be recorded (.graphyard/up.json unwritable) fails its step too: no bare step-start, exit 1.
+  const { upStateFile } = await up();
+  const unwritable = world({ app: true, reviewer: true, accounts: true });
+  const unwritableEvents: UpEvent[] = [];
+  const unwritableRoot = await temporaryDirectory('graphyard-up-child-url-unwritable');
+  await writeFile(join(unwritableRoot, 'goal.txt'), 'A sign-up page');
+  const unwritableBase = dependencies(unwritable, unwritableRoot, unwritableEvents, { serverUrl: async () => unwritable.installed ? chosen : null, ensureDeployKey: async () => '/install/acme-shop/deploy-key', gh: async () => ({ code: 0, stdout: '{}' }) });
+  const unrecorded = await runUp(controlPlaneRequest(), { ...unwritableBase, cli: async (args, options) => {
+    const answer = await unwritableBase.cli(args, options);
+    // The state file's temporary path becomes a directory, so the write that records harness done fails.
+    if (args[0] === 'master' && args[1] === 'harness') await mkdir(`${upStateFile(unwritableRoot)}.${process.pid}.tmp`, { recursive: true });
+    return answer;
+  } });
+  assert.equal(unrecorded.exitCode, 1, unrecorded.next);
+  const unrecordedFailed = unwritableEvents.at(-1) as any;
+  assert.equal(unrecordedFailed.kind, 'step-failed');
+  assert.equal(unrecordedFailed.step, 'harness');
+  assert.equal(unrecordedFailed.exitCode, 1);
+  assert.match(unrecordedFailed.detail, /^harness: .*EISDIR/);
+  assert.ok(!unwritableEvents.some(event => event.kind === 'step' && event.step === 'harness' && event.state === 'done'), 'an unrecorded step is not reported done');
 });
 
 test('integration:up-control-plane-nondefault-port — real child processes: up --merger control-plane against a control plane serving on an ephemeral port (not 4310) completes host-supervisor through goal with every child reaching that server, and a failing child ends in a step-failed event and exit 1', async () => {
@@ -1665,6 +1686,13 @@ process.exit(answer.code);
     assert.equal(red.result.exitCode, 1);
     assert.deepEqual(red.events.filter(event => event.kind === 'step-failed'), [{ kind: 'step-failed', step: 'harness', exitCode: 1, argv: ['master', 'harness', 'claude', '--apply'], stderr: 'claude is not logged in on this host', detail: 'harness: graphyard master harness exited 1; its last output:' }]);
     assert.equal(red.events.at(-1)?.kind, 'step-failed', 'no step-start is left without its outcome');
+
+    // A verbose child: more stderr than up keeps as its tail (64,000 characters) after its first line; step-failed still names that first line.
+    const noise = Array.from({ length: 2_000 }, (_, at) => `progress line ${at} ${'.'.repeat(60)}`).join('\n');
+    const verbose = await runOn('graphyard-up-nondefault-port-verbose', argv => argv[0] === 'master' && argv[1] === 'harness' ? { code: 1, stderr: `claude is not logged in on this host\n${noise}\n` } : null);
+    assert.ok(noise.length > 64_000);
+    assert.equal(verbose.result.exitCode, 1);
+    assert.deepEqual(verbose.events.filter(event => event.kind === 'step-failed').map(event => (event as any).stderr), ['claude is not logged in on this host']);
   } finally {
     for (const [name, value] of Object.entries(saved)) if (value === undefined) delete process.env[name]; else process.env[name] = value;
   }

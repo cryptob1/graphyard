@@ -136,8 +136,11 @@ export type Handoff = (sentence: string, link: { url?: string | null; code?: str
 
 export interface UpDependencies {
   root: string;
-  /** Runs one graphyard command; stderr lines go to onLine as they arrive, and its tail comes back as stderr (GY-1509). */
-  cli(args: string[], options?: { stdin?: string; env?: Record<string, string>; onLine?: (line: string) => void; signal?: AbortSignal }): Promise<{ code: number; stdout: string; stderr?: string }>;
+  /**
+   * Runs one graphyard command; stderr lines go to onLine as they arrive, and its tail comes back as stderr (GY-1509),
+   * its first non-empty stderr line as firstStderr, kept even when the tail has scrolled past it (GY-1641).
+   */
+  cli(args: string[], options?: { stdin?: string; env?: Record<string, string>; onLine?: (line: string) => void; signal?: AbortSignal }): Promise<{ code: number; stdout: string; stderr?: string; firstStderr?: string }>;
   /** The control plane's /api/status as the recorded master identity, or null while none answers. */
   status(): Promise<any | null>;
   /** The control plane's address once the install recorded it. */
@@ -392,12 +395,13 @@ const childFailure = (step: string, args: string[], result: { code: number; stdo
 };
 const redactLine = (line: string) => redactString(line).replace(/#(sign-in|claim)=[^\s"']+/g, '#$1=[redacted]');
 /** GY-1641: the first non-empty line a failed child wrote to stderr, redacted as childTail redacts; null when it wrote none. */
-export const childFirstStderr = (result: { stderr?: string }) => {
-  const line = (result.stderr ?? '').split('\n').map(text => text.trim()).find(Boolean);
+export const childFirstStderr = (result: { stderr?: string; firstStderr?: string }) => {
+  // The child's own first line, kept apart from the bounded tail, which a verbose child scrolls past.
+  const line = (result.firstStderr ?? result.stderr ?? '').split('\n').map(text => text.trim()).find(Boolean);
   return line ? redactLine(line).slice(0, 500) : null;
 };
 /** GY-1641: the stop a failed child ends its step with: childFailure's message, its argv and first stderr line. */
-const childStop = (step: string, args: string[], result: { code: number; stdout: string; stderr?: string }, more = '', exitCode: number = upExitCodes.failed) =>
+const childStop = (step: string, args: string[], result: { code: number; stdout: string; stderr?: string; firstStderr?: string }, more = '', exitCode: number = upExitCodes.failed) =>
   new ChildStop(childFailure(step, args, result, more), exitCode, args.map(redactLine), childFirstStderr(result));
 
 export const signInAt = (link: string, base: string) => { const at = link.indexOf('#'); return at < 0 ? link : `${base.replace(/\/+$/, '')}/${link.slice(at)}`; };
@@ -538,8 +542,8 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
   const step = async (name: UpStep, body: () => Promise<string | void>) => {
     if (state.completed.includes(name)) { deps.emit({ kind: 'step', step: name, state: 'skipped', detail: 'done by an earlier run' }); return; }
     deps.emit({ kind: 'step', step: name, state: 'start' });
-    let detail: string | void;
-    try { detail = await body(); }
+    // GY-1641: recording the step done is part of its outcome, so a failed write fails the step.
+    try { await complete(name, (await body()) || undefined); }
     catch (error) {
       // GY-1641: a started step always ends with an outcome event: a person's wait is a step event,
       // anything else a step-failed naming the child that failed; an unexpected error fails the step (exit 1).
@@ -548,7 +552,6 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
       else deps.emit({ kind: 'step-failed', step: name, exitCode: stop.exitCode, argv: stop instanceof ChildStop ? stop.argv : null, stderr: stop instanceof ChildStop ? stop.stderr : null, detail: stop.message.split('\n')[0] });
       throw stop;
     }
-    await complete(name, detail || undefined);
   };
 
   try {
@@ -1467,17 +1470,21 @@ export function upDependencies(root: string, cliPath: string, request: UpRequest
       const child = spawn(process.execPath, [cliPath, ...args], { cwd: root, stdio: ['pipe', 'pipe', 'pipe'], ...(options.signal ? { signal: options.signal } : {}), env: { ...process.env, ...options.env, PATH: withLocalBin(process.env.PATH) } });
       children.add(child);
       child.on('exit', () => children.delete(child));
-      let stdout = '', pending = '', stderr = '';
+      let stdout = '', pending = '', stderr = '', firstStderr: string | undefined;
       child.stdout.on('data', chunk => { stdout += chunk; });
       child.stderr.on('data', chunk => {
         pending += chunk;
         // Bounded: only the tail is ever shown (childTail).
         stderr = (stderr + chunk).slice(-64_000);
         const lines = pending.split('\n'); pending = lines.pop() ?? '';
-        for (const line of lines) { if (!request.agent) process.stderr.write(`${line}\n`); options.onLine?.(line); }
+        for (const line of lines) { if (firstStderr === undefined && line.trim()) firstStderr = line.slice(0, 4_000); if (!request.agent) process.stderr.write(`${line}\n`); options.onLine?.(line); }
       });
       child.on('error', reject);
-      child.on('close', code => { if (pending) options.onLine?.(pending); accept({ code: code ?? 1, stdout, stderr }); });
+      child.on('close', code => {
+        if (pending) options.onLine?.(pending);
+        if (firstStderr === undefined && pending.trim()) firstStderr = pending.slice(0, 4_000);
+        accept({ code: code ?? 1, stdout, stderr, ...(firstStderr === undefined ? {} : { firstStderr }) });
+      });
       child.stdin.end(options.stdin ?? '');
     }),
     status: async () => {
