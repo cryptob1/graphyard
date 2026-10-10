@@ -22,7 +22,7 @@ Node 24, `OWNER/REPO` checkout, `export GRAPHYARD_CLI=/abs/path/graphyard/bin/gr
 - `railway`: `npm i -g @railway/cli`, `railway login`.
 - `hetzner`: `brew install hcloud`, `hcloud context create graphyard`; `--ssh-key NAME`, `--domain`. `manual:host-install-live` or `manual:…install…-live` coordinators need `HCLOUD_TOKEN`, `HETZNER_SPEND_CAP_USD_MONTHLY` in repo-root `.env` (`0600`, uncommitted); optional `HETZNER_SSH_KEY` names registered key (else throwaway).
 - `docker-host`: `ssh USER@HOST 'curl -fsSL https://get.docker.com | sh'`; `--ssh-host`, `--domain`.
-- `compose` (local): `curl -fsSL https://get.docker.com | sh`. It polls GitHub: its Apps have no webhook and subscribe to no events, so webhook steps are skipped. It publishes `127.0.0.1:4310`, or (port held) the first free one up to 4329, kept on reruns; a taken `--port N` fails preflight. Under `graphyard up`, a failed step's `next` carries its last 20 output lines, credentials redacted.
+- `compose` (local): `curl -fsSL https://get.docker.com | sh`. It polls GitHub (Apps without webhook or events), skipping webhook steps. It publishes `127.0.0.1:4310`, or (port held) the first free one up to 4329, kept on reruns; a taken `--port N` fails preflight. `up`, `master init` use it. Under `graphyard up`, a failed step's `next` carries its last 20 output lines, redacted.
 - `local` (`graphyard up --local`, refused beside another `--provider`): no Docker. Same server on embedded Postgres (`npm install` without `--omit=optional`), cluster in `INSTALL/postgres`; user unit `graphyard-local-INSTALL.service` starts it, migrates (`db migrate`) and serves (without systemd the plan prints the foreground command). Polls GitHub like compose.
 
 ## Step 1: plan and approve

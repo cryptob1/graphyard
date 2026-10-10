@@ -1506,3 +1506,218 @@ test('unit:up-app-page-rejection-fails — GitHub rejecting the App manifest, or
   assert.deepEqual(result.handoffs, [], 'a rejection is handed to no person');
   assert.ok(!result.completed.includes('control-plane'));
 });
+
+/** GY-1641: the control-plane merger's world: no Apps, the plane becomes the merge writer once `master merger control-plane` runs. */
+const controlPlaneRequest = (extra: Partial<UpRequest> = {}) => request({ agent: true, merger: 'control-plane', goalFile: 'goal.txt', ...extra });
+const controlPlaneSteps = ['host-supervisor', 'deploy-key', 'merger-setting', 'master-autonomy', 'onboarding', 'accounts', 'harness', 'master-loop', 'goal'];
+
+test('unit:up-child-url-propagation — up --merger control-plane on a server recorded at a non-default port points every child after the install at that URL (master init by --url too), and a failing child ends its step with a step-failed event naming the step, argv and first stderr line, exit 1', async () => {
+  const { runUp, upRequestFromArgs, upCommandFlags } = await up();
+  const chosen = 'http://127.0.0.1:4317';
+  const root = await temporaryDirectory('graphyard-up-child-url');
+  await writeFile(join(root, 'goal.txt'), 'A sign-up page');
+  const w = world({ app: true, reviewer: true, accounts: true });
+  const seen: { args: string[]; env: Record<string, string> }[] = [];
+  const events: UpEvent[] = [];
+  const base = dependencies(w, root, events, { serverUrl: async () => w.installed ? chosen : null, ensureDeployKey: async () => '/install/acme-shop/deploy-key', gh: async () => ({ code: 0, stdout: '{}' }) });
+  const result = await runUp(controlPlaneRequest(), { ...base, cli: async (args, options = {}) => { seen.push({ args, env: options.env ?? {} }); return base.cli(args, options); } });
+  assert.equal(result.exitCode, 0, result.next);
+  for (const step of controlPlaneSteps) assert.ok(result.completed.includes(step as any), `${step} completed: ${result.completed.join(', ')}`);
+  const children = seen.filter(call => call.args[0] !== 'install');
+  assert.ok(children.length >= 8, `every later step ran a child: ${children.map(call => call.args.join(' ')).join('; ')}`);
+  for (const call of children) assert.equal(call.env.GRAPHYARD_URL, chosen, `graphyard ${call.args.join(' ')} reaches the recorded server`);
+  for (const call of seen.filter(call => call.args[0] === 'install')) assert.equal(call.env.GRAPHYARD_URL, undefined, 'the install chooses its own port');
+  const init = children.find(call => call.args[0] === 'master' && call.args[1] === 'init')!;
+  assert.deepEqual(init.args.slice(init.args.indexOf('--url'), init.args.indexOf('--url') + 2), ['--url', chosen], 'master init is given the recorded server');
+  assert.ok(seen.some(call => call.args.join(' ').startsWith('master merger control-plane') && call.env.GRAPHYARD_TOKEN === ADMIN), 'the merger setting keeps its admin credential beside the URL');
+  assert.ok(!JSON.stringify(seen).includes('127.0.0.1:4310'), 'no child is pointed at the default port');
+  // Every step-start has its outcome.
+  const started = events.filter(event => event.kind === 'step' && event.state === 'start').map(event => (event as any).step);
+  for (const step of started) assert.ok(events.some(event => (event.kind === 'step' && event.step === step && event.state === 'done') || (event.kind === 'step-failed' && event.step === step)), `${step} has an outcome`);
+
+  // --url names the server outright, and a printed rerun keeps it.
+  const parsed = upRequestFromArgs(['--repo', 'acme/shop', '--merger', 'control-plane', '--agent', '--url', `${chosen}/`]);
+  assert.equal(parsed.url, chosen);
+  assert.match(upCommandFlags(parsed), new RegExp(` --url ${chosen.replace(/[.:/]/g, '\\$&')}$`));
+  assert.throws(() => upRequestFromArgs(['--repo', 'acme/shop', '--url', 'ftp://example']), /--url/);
+  // The origin rule master init applies: HTTP only on loopback, so no non-loopback HTTP origin passes entry to fail at host-supervisor.
+  assert.throws(() => upRequestFromArgs(['--repo', 'acme/shop', '--url', 'http://10.0.0.5:4310']), /HTTPS, or HTTP on loopback/);
+  assert.throws(() => upRequestFromArgs(['--repo', 'acme/shop', '--url', 'https://plane.example/api']), /no credentials, query or path/);
+  assert.equal(upRequestFromArgs(['--repo', 'acme/shop', '--url', 'https://plane.example']).url, 'https://plane.example');
+
+  // A child failing mid-run: one step-failed event with the step, the child argv and its first stderr line; exit 1.
+  const failing = world({ app: true, reviewer: true, accounts: true });
+  const failedEvents: UpEvent[] = [];
+  const failRoot = await temporaryDirectory('graphyard-up-child-url-fail');
+  await writeFile(join(failRoot, 'goal.txt'), 'A sign-up page');
+  const failBase = dependencies(failing, failRoot, failedEvents, { serverUrl: async () => failing.installed ? chosen : null, ensureDeployKey: async () => '/install/acme-shop/deploy-key', gh: async () => ({ code: 0, stdout: '{}' }) });
+  const failed = await runUp(controlPlaneRequest(), { ...failBase, cli: async (args, options) => args[0] === 'master' && args[1] === 'init'
+    ? { code: 1, stdout: '', stderr: `\nCannot reach Graphyard; master setup made no changes\nat token=${'s'.repeat(40)}` } : failBase.cli(args, options) });
+  assert.equal(failed.exitCode, 1);
+  const stepFailed = failedEvents.filter(event => event.kind === 'step-failed');
+  assert.equal(stepFailed.length, 1);
+  assert.deepEqual(stepFailed[0], { kind: 'step-failed', step: 'host-supervisor', exitCode: 1, argv: ['master', 'init', '--token-stdin', '--url', chosen], stderr: 'Cannot reach Graphyard; master setup made no changes', detail: 'host-supervisor: graphyard master init exited 1; its last output:' });
+  assert.ok(!JSON.stringify(failedEvents).includes('s'.repeat(40)), 'nothing secret is in the events');
+  const lastStart = failedEvents.filter(event => event.kind === 'step' && event.state === 'start').at(-1) as any;
+  assert.equal(lastStart.step, 'host-supervisor');
+  assert.equal(failedEvents.at(-1), stepFailed[0], 'the run ends on the failed step\'s outcome, not a bare step-start');
+
+  // An unexpected error inside a step (a child that cannot be spawned) is a step-failed too, and exit 1.
+  const thrown = world({ app: true, reviewer: true, accounts: true });
+  const thrownEvents: UpEvent[] = [];
+  const thrownRoot = await temporaryDirectory('graphyard-up-child-url-throw');
+  await writeFile(join(thrownRoot, 'goal.txt'), 'A sign-up page');
+  const thrownBase = dependencies(thrown, thrownRoot, thrownEvents, { serverUrl: async () => thrown.installed ? chosen : null, ensureDeployKey: async () => '/install/acme-shop/deploy-key', gh: async () => ({ code: 0, stdout: '{}' }) });
+  const crashed = await runUp(controlPlaneRequest(), { ...thrownBase, cli: async (args, options) => args[0] === 'master' && args[1] === 'harness' ? Promise.reject(new Error('spawn node EMFILE')) : thrownBase.cli(args, options) });
+  assert.equal(crashed.exitCode, 1);
+  assert.deepEqual(thrownEvents.at(-1), { kind: 'step-failed', step: 'harness', exitCode: 1, argv: null, stderr: null, detail: 'harness: spawn node EMFILE' });
+
+  // A child that succeeds but whose step cannot be recorded (.graphyard/up.json unwritable) fails its step too: no bare step-start, exit 1.
+  const { upStateFile } = await up();
+  const unwritable = world({ app: true, reviewer: true, accounts: true });
+  const unwritableEvents: UpEvent[] = [];
+  const unwritableRoot = await temporaryDirectory('graphyard-up-child-url-unwritable');
+  await writeFile(join(unwritableRoot, 'goal.txt'), 'A sign-up page');
+  const unwritableBase = dependencies(unwritable, unwritableRoot, unwritableEvents, { serverUrl: async () => unwritable.installed ? chosen : null, ensureDeployKey: async () => '/install/acme-shop/deploy-key', gh: async () => ({ code: 0, stdout: '{}' }) });
+  const unrecorded = await runUp(controlPlaneRequest(), { ...unwritableBase, cli: async (args, options) => {
+    const answer = await unwritableBase.cli(args, options);
+    // The state file's temporary path becomes a directory, so the write that records harness done fails.
+    if (args[0] === 'master' && args[1] === 'harness') await mkdir(`${upStateFile(unwritableRoot)}.${process.pid}.tmp`, { recursive: true });
+    return answer;
+  } });
+  assert.equal(unrecorded.exitCode, 1, unrecorded.next);
+  const unrecordedFailed = unwritableEvents.at(-1) as any;
+  assert.equal(unrecordedFailed.kind, 'step-failed');
+  assert.equal(unrecordedFailed.step, 'harness');
+  assert.equal(unrecordedFailed.exitCode, 1);
+  assert.match(unrecordedFailed.detail, /^harness: .*EISDIR/);
+  assert.ok(!unwritableEvents.some(event => event.kind === 'step' && event.step === 'harness' && event.state === 'done'), 'an unrecorded step is not reported done');
+});
+
+test('integration:up-control-plane-nondefault-port — real child processes: up --merger control-plane against a control plane serving on an ephemeral port (not 4310) completes host-supervisor through goal with every child reaching that server, and a failing child ends in a step-failed event and exit 1', async () => {
+  const { createServer } = await import('node:http');
+  const { upDependencies, runUp, upStateFile } = await up();
+  const plane = randomUUID();
+  const masterToken = 'm'.repeat(40);
+  // The control plane: /api/status for up itself, /api/cli for the stub CLI, answering as the real commands change it.
+  const make = (fail: (argv: string[]) => { code: number; stderr: string } | null) => {
+    const calls: { argv: string[]; env: string | null }[] = [];
+    const state = { merger: 'github', accounts: false, loop: false };
+    const server = createServer((req, res) => {
+      let body = '';
+      req.on('data', chunk => { body += chunk; });
+      req.on('end', () => {
+        res.setHeader('x-plane', plane); res.setHeader('content-type', 'application/json');
+        if (req.url === '/api/status') {
+          if (req.headers.authorization !== `Bearer ${masterToken}`) { res.statusCode = 401; return res.end('{}'); }
+          return res.end(JSON.stringify({ actor: { role: 'coordinator' }, repository: 'acme/shop', mergeWriter: { merger: state.merger },
+            fleet: state.accounts ? { roles: [{ role: 'worker', accounts: ['claude-a'] }, { role: 'reviewer', accounts: ['claude-a'] }], accounts: [{ name: 'claude-a', enabled: true, loggedIn: true, smoke: { result: 'pass' } }] } : { roles: [], accounts: [] },
+            setup: { loop: state.loop } }));
+        }
+        const { argv, env } = JSON.parse(body);
+        calls.push({ argv, env });
+        const failure = fail(argv);
+        if (failure) return res.end(JSON.stringify({ code: failure.code, stdout: '', stderr: failure.stderr }));
+        const joined = argv.join(' ');
+        if (joined.startsWith('master merger control-plane')) state.merger = 'control-plane';
+        if (joined === 'master registry propose --apply') state.accounts = true;
+        if (joined === 'master restart') state.loop = true;
+        res.end(JSON.stringify({ code: 0, stdout: argv[0] === 'goal' ? JSON.stringify({ key: 'GOAL-1' }) : '{}' }));
+      });
+    });
+    return { server, calls, state };
+  };
+  const scratch = await temporaryDirectory('graphyard-up-nondefault-port-cli');
+  // The stub CLI resolves its server as graphyard's own CLI does (--url, else GRAPHYARD_URL, else the default port) and fails as master init does when that server is not this plane.
+  const cliPath = join(scratch, 'graphyard-stub.mjs');
+  await writeFile(cliPath, `const argv = process.argv.slice(2);
+const at = argv.indexOf('--url');
+const target = at >= 0 ? argv[at + 1] : process.env.GRAPHYARD_URL ?? 'http://127.0.0.1:4310';
+let stdin = ''; for await (const chunk of process.stdin) stdin += chunk;
+let answer;
+try {
+  const response = await fetch(target + '/api/cli', { method: 'POST', body: JSON.stringify({ argv, env: process.env.GRAPHYARD_URL ?? null }), signal: AbortSignal.timeout(5000) });
+  if (response.headers.get('x-plane') !== ${JSON.stringify(plane)}) throw new Error('another server');
+  answer = await response.json();
+} catch { process.stderr.write('Cannot reach Graphyard at ' + target + '; master setup made no changes\\n'); process.exit(1); }
+if (answer.stderr) process.stderr.write(answer.stderr);
+process.stdout.write(answer.stdout ?? '');
+process.exit(answer.code);
+`);
+  const saved = Object.fromEntries(['GRAPHYARD_URL', 'GRAPHYARD_TOKEN', 'GRAPHYARD_TOKEN_FILE'].map(name => [name, process.env[name]]));
+  for (const name of Object.keys(saved)) delete process.env[name];
+  const runOn = async (label: string, fail: (argv: string[]) => { code: number; stderr: string } | null) => {
+    const { server, calls, state } = make(fail);
+    await new Promise<void>(accept => server.listen(0, '127.0.0.1', () => accept()));
+    const port = (server.address() as { port: number }).port;
+    assert.notEqual(port, 4310);
+    const url = `http://127.0.0.1:${port}`;
+    try {
+      const root = await temporaryDirectory(label), secrets = await temporaryDirectory(`${label}-secrets`);
+      const credentialFile = join(secrets, 'master.token'), operatorTokenFile = join(secrets, 'operator.token');
+      await writeFile(credentialFile, masterToken, { mode: 0o600 });
+      await writeFile(operatorTokenFile, ADMIN, { mode: 0o600 });
+      // What install --apply leaves behind on this port: master.json at its URL, and the install and preflight steps done.
+      await mkdir(join(root, '.graphyard'), { recursive: true });
+      await writeFile(join(root, '.graphyard/master.json'), JSON.stringify({ url, credentialFile }), { mode: 0o600 });
+      await writeFile(upStateFile(root), JSON.stringify({ version: 1, repository: 'acme/shop', provider: 'compose', merger: 'control-plane', completed: ['preflight', 'control-plane'], noHerdr: true, goal: null, operatorTokenFile }), { mode: 0o600 });
+      await writeFile(join(root, 'goal.txt'), 'A sign-up page');
+      const events: UpEvent[] = [];
+      const req = controlPlaneRequest();
+      const real = upDependencies(root, cliPath, req, event => events.push(event));
+      const result = await runUp(req, { ...real, herdr: undefined, pollMs: 1, machineWaitMs: 5_000, humanWaitMs: 5_000,
+        cliCheckout: async () => ({ root, dirty: [] }), loopRefusal: async () => null, tailnet: async () => null, signIn: async () => null,
+        ensureDeployKey: async () => join(secrets, 'deploy-key'), installDirectory: () => secrets,
+        publishOnboarding: async () => null, onboardingMerged: async () => true });
+      return { result, events, calls, state, url };
+    } finally { await new Promise(accept => server.close(accept)); }
+  };
+  try {
+    const green = await runOn('graphyard-up-nondefault-port', () => null);
+    assert.equal(green.result.exitCode, 0, green.result.next);
+    for (const step of controlPlaneSteps) assert.ok(green.result.completed.includes(step as any), `${step} completed without hand intervention: ${green.result.completed.join(', ')}`);
+    assert.equal(green.state.merger, 'control-plane');
+    assert.equal(green.result.goal, 'GOAL-1');
+    const commands = green.calls.map(call => call.argv.slice(0, 2).join(' '));
+    for (const expected of ['master init', 'master merger', 'master autonomy', 'init --scan', 'master registry', 'master harness', 'master restart']) assert.ok(commands.includes(expected), `${expected} reached the plane: ${commands.join('; ')}`);
+    assert.ok(green.calls.some(call => call.argv[0] === 'goal'), 'the goal child reached the plane');
+    for (const call of green.calls) assert.equal(call.env, green.url, `graphyard ${call.argv.join(' ')} was given the recorded server`);
+    const init = green.calls.find(call => call.argv[0] === 'master' && call.argv[1] === 'init')!;
+    assert.equal(init.argv[init.argv.indexOf('--url') + 1], green.url);
+    assert.ok(!green.events.some(event => event.kind === 'step-failed'));
+
+    const red = await runOn('graphyard-up-nondefault-port-fail', argv => argv[0] === 'master' && argv[1] === 'harness' ? { code: 1, stderr: 'claude is not logged in on this host\nrun claude login first\n' } : null);
+    assert.equal(red.result.exitCode, 1);
+    assert.deepEqual(red.events.filter(event => event.kind === 'step-failed'), [{ kind: 'step-failed', step: 'harness', exitCode: 1, argv: ['master', 'harness', 'claude', '--apply'], stderr: 'claude is not logged in on this host', detail: 'harness: graphyard master harness exited 1; its last output:' }]);
+    assert.equal(red.events.at(-1)?.kind, 'step-failed', 'no step-start is left without its outcome');
+
+    // A moved control plane: real master init (setupMaster) accepts the address up hands it, and refuses
+    // one master.json does not record, so up refuses such a --url before any step runs.
+    const { setupMaster } = await import('../src/master.js');
+    const { upCommand, upUrlRefusal } = await up();
+    const repo = await temporaryDirectory('graphyard-up-nondefault-port-master');
+    const credentials = await temporaryDirectory('graphyard-up-nondefault-port-master-credentials');
+    execFileSync('git', ['init', '-q', repo]);
+    execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/acme/shop.git'], { cwd: repo });
+    const statusOf = (async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'acme/shop', baseBranch: 'main', githubAppId: null, mergeWriter: { merger: 'control-plane' } }))) as typeof fetch;
+    const masterInit = (url: string) => setupMaster(repo, { url, token: masterToken, cliPath: resolve(import.meta.dirname, '../bin/graphyard.mjs'), credentialDirectory: credentials }, statusOf);
+    const initUrl = init.argv[init.argv.indexOf('--url') + 1];
+    await masterInit(initUrl);
+    await masterInit(initUrl);
+    await assert.rejects(masterInit('http://127.0.0.1:4310'), /belongs to another server/);
+    assert.equal(await upUrlRefusal(repo, initUrl), null, 'the recorded server is accepted');
+    assert.equal(await upUrlRefusal(join(scratch, 'unconfigured'), 'http://127.0.0.1:4310'), null, 'before master init records a server, any --url is accepted');
+    await assert.rejects(upCommand(repo, async () => { throw new Error('no child may run'); }, ['--repo', 'acme/shop', '--merger', 'control-plane', '--agent', '--url', 'http://127.0.0.1:4310']),
+      (error: Error) => error.message.includes(`(${initUrl} in .graphyard/master.json), and master init accepts no other`));
+    await assert.rejects(readFile(upStateFile(repo), 'utf8'), /ENOENT/, 'no step ran');
+
+    // A verbose child: more stderr than up keeps as its tail (64,000 characters) after its first line; step-failed still names that first line.
+    const noise = Array.from({ length: 2_000 }, (_, at) => `progress line ${at} ${'.'.repeat(60)}`).join('\n');
+    const verbose = await runOn('graphyard-up-nondefault-port-verbose', argv => argv[0] === 'master' && argv[1] === 'harness' ? { code: 1, stderr: `claude is not logged in on this host\n${noise}\n` } : null);
+    assert.ok(noise.length > 64_000);
+    assert.equal(verbose.result.exitCode, 1);
+    assert.deepEqual(verbose.events.filter(event => event.kind === 'step-failed').map(event => (event as any).stderr), ['claude is not logged in on this host']);
+  } finally {
+    for (const [name, value] of Object.entries(saved)) if (value === undefined) delete process.env[name]; else process.env[name] = value;
+  }
+});

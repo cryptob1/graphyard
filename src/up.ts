@@ -16,12 +16,12 @@ import { redactString } from './evidence-replay.js';
 import { recordSupervision } from './master/config.js';
 import { unitCheckout, userUnitDirectory } from './install/units.js';
 import { installIdFor } from './install/types.js';
-import { installDirectory } from './install/secrets.js';
+import { installDirectory, readInstallRecord } from './install/secrets.js';
 import { ensureDeployKey } from './install/deploy-key.js';
 import type { GitHubCli } from './install/github.js';
 import { herdrAttachCommand, installHerdrInstance, type HerdrInstance } from './master/herdr.js';
 import { ensureHerdrBinary, ensureHerdrServer, ensureHerdrWorkspace, HerdrSetupFailure, herdrSync, hostHerdrDeps, prepareHerdrInstance, withLocalBin, type HerdrHostDeps } from './herdr-host.js';
-import { herdrBoundElsewhere, herdrPluginBinding, herdrPluginEnabled } from './repository-setup.js';
+import { herdrBoundElsewhere, herdrPluginBinding, herdrPluginEnabled, serverOrigin } from './repository-setup.js';
 import { recordHerdrInstance } from './master/config.js';
 import { mergerModes, type MergerMode } from './merger-mode.js';
 
@@ -102,6 +102,12 @@ export interface UpRequest {
   noWait?: boolean;
   /** GY-1477: serve a local dashboard on this host's tailnet (`--share-tailnet`); otherwise the command is only printed. */
   shareTailnet?: boolean;
+  /**
+   * GY-1641: the control plane's address (`--url`), an origin master init accepts, and only where
+   * master.json records none or the same one (upUrlRefusal). Every child command after the install is
+   * pointed at the recorded address (this, else master.json, else the install record), never a default port.
+   */
+  url?: string | null;
 }
 /** Agent mode's default wait on a person: 20 minutes, the time the Confirm-access handoff asks for (GY-1457). */
 export const upAgentWaitMs = 1_200_000;
@@ -109,7 +115,13 @@ export const upAgentWaitMs = 1_200_000;
 export const upWaitMs = (request: Pick<UpRequest, 'agent' | 'waitMs'>) => request.waitMs ?? (request.agent ? upAgentWaitMs : Infinity);
 
 export type UpEvent =
-  | { kind: 'step'; step: UpStep; state: 'start' | 'done' | 'skipped'; detail?: string }
+  | { kind: 'step'; step: UpStep; state: 'start' | 'done' | 'skipped' | 'waiting'; detail?: string }
+  /**
+   * GY-1641: a started step that did not finish: the outcome of every step-start that has no done.
+   * ARGV is the failed child's graphyard arguments and STDERR its first stderr line (both redacted),
+   * null when the step failed without a child; EXITCODE is up's own (upExitCodes).
+   */
+  | { kind: 'step-failed'; step: UpStep; exitCode: number; argv: string[] | null; stderr: string | null; detail: string }
   | { kind: 'waiting'; setupUrl: string; waitingFor: SetupItemId[]; sentence: string }
   | { kind: 'handoff'; step: UpStep; sentence: string; url: string | null; code: string | null }
   /** GY-1478: the onboarding pull request is the current setup step: its URL, what it waits for and how long it has waited. */
@@ -124,8 +136,11 @@ export type Handoff = (sentence: string, link: { url?: string | null; code?: str
 
 export interface UpDependencies {
   root: string;
-  /** Runs one graphyard command; stderr lines go to onLine as they arrive, and its tail comes back as stderr (GY-1509). */
-  cli(args: string[], options?: { stdin?: string; env?: Record<string, string>; onLine?: (line: string) => void; signal?: AbortSignal }): Promise<{ code: number; stdout: string; stderr?: string }>;
+  /**
+   * Runs one graphyard command; stderr lines go to onLine as they arrive, and its tail comes back as stderr (GY-1509),
+   * its first non-empty stderr line as firstStderr, kept even when the tail has scrolled past it (GY-1641).
+   */
+  cli(args: string[], options?: { stdin?: string; env?: Record<string, string>; onLine?: (line: string) => void; signal?: AbortSignal }): Promise<{ code: number; stdout: string; stderr?: string; firstStderr?: string }>;
   /** The control plane's /api/status as the recorded master identity, or null while none answers. */
   status(): Promise<any | null>;
   /** The control plane's address once the install recorded it. */
@@ -258,6 +273,8 @@ export interface UpResult {
 export const upExitCodes = { green: 0, failed: 1, prerequisite: 2, waiting: 3 } as const;
 
 class UpStop extends Error { constructor(message: string, readonly exitCode: number) { super(message); } }
+/** GY-1641: a step stopped by a failed child command, carrying what its step-failed event names. */
+class ChildStop extends UpStop { constructor(message: string, exitCode: number, readonly argv: string[], readonly stderr: string | null) { super(message, exitCode); } }
 /** The drive met Confirm access under --no-wait: it stops there, naming the next step (GY-1457). */
 class SudoNoWait extends Error {}
 
@@ -369,13 +386,23 @@ export const childTailLines = 20;
  */
 export function childTail(result: { stdout: string; stderr?: string }, lines = childTailLines) {
   const text = [result.stdout, result.stderr ?? ''].map(part => part.trim()).filter(Boolean).join('\n');
-  return text ? text.split('\n').slice(-lines).map(line => redactString(line).replace(/#(sign-in|claim)=[^\s"']+/g, '#$1=[redacted]')).join('\n') : '';
+  return text ? text.split('\n').slice(-lines).map(line => redactLine(line)).join('\n') : '';
 }
 /** A failed step's message: the command that exited, then its own last output lines. */
 const childFailure = (step: string, args: string[], result: { code: number; stdout: string; stderr?: string }, more = '') => {
   const tail = childTail(result);
   return `${step}: graphyard ${args[0]}${args[1] && !args[1].startsWith('-') ? ` ${args[1]}` : ''} exited ${result.code}${more}${tail ? `; its last output:\n${tail}` : ''}`;
 };
+const redactLine = (line: string) => redactString(line).replace(/#(sign-in|claim)=[^\s"']+/g, '#$1=[redacted]');
+/** GY-1641: the first non-empty line a failed child wrote to stderr, redacted as childTail redacts; null when it wrote none. */
+export const childFirstStderr = (result: { stderr?: string; firstStderr?: string }) => {
+  // The child's own first line, kept apart from the bounded tail, which a verbose child scrolls past.
+  const line = (result.firstStderr ?? result.stderr ?? '').split('\n').map(text => text.trim()).find(Boolean);
+  return line ? redactLine(line).slice(0, 500) : null;
+};
+/** GY-1641: the stop a failed child ends its step with: childFailure's message, its argv and first stderr line. */
+const childStop = (step: string, args: string[], result: { code: number; stdout: string; stderr?: string; firstStderr?: string }, more = '', exitCode: number = upExitCodes.failed) =>
+  new ChildStop(childFailure(step, args, result, more), exitCode, args.map(redactLine), childFirstStderr(result));
 
 export const signInAt = (link: string, base: string) => { const at = link.indexOf('#'); return at < 0 ? link : `${base.replace(/\/+$/, '')}/${link.slice(at)}`; };
 /** Both of the master's agent identities are recorded in master.json and their credential files are readable. */
@@ -483,9 +510,17 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
       await deps.sleep(pollMs);
     }
   };
+  /**
+   * GY-1641: one child command. Every child but the install is pointed at the recorded server
+   * (GRAPHYARD_URL), so none falls back to the default port when the install bound another one.
+   */
+  const child = async (args: string[], options: { stdin?: string; env?: Record<string, string>; onLine?: (line: string) => void; signal?: AbortSignal } = {}) => {
+    const server = args[0] === 'install' ? null : await deps.serverUrl();
+    return deps.cli(args, server ? { ...options, env: { GRAPHYARD_URL: server, ...options.env } } : options);
+  };
   const run = async (step: UpStep, args: string[], options: { stdin?: string; env?: Record<string, string>; onLine?: (line: string) => void } = {}) => {
-    const result = await deps.cli(args, options);
-    if (result.code !== 0) throw new UpStop(childFailure(step, args, result), upExitCodes.failed);
+    const result = await child(args, options);
+    if (result.code !== 0) throw childStop(step, args, result);
     return result.stdout;
   };
   const passed = request.install ?? {};
@@ -507,8 +542,16 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
   const step = async (name: UpStep, body: () => Promise<string | void>) => {
     if (state.completed.includes(name)) { deps.emit({ kind: 'step', step: name, state: 'skipped', detail: 'done by an earlier run' }); return; }
     deps.emit({ kind: 'step', step: name, state: 'start' });
-    const detail = await body();
-    await complete(name, detail || undefined);
+    // GY-1641: recording the step done is part of its outcome, so a failed write fails the step.
+    try { await complete(name, (await body()) || undefined); }
+    catch (error) {
+      // GY-1641: a started step always ends with an outcome event: a person's wait is a step event,
+      // anything else a step-failed naming the child that failed; an unexpected error fails the step (exit 1).
+      const stop = error instanceof UpStop ? error : new UpStop(`${name}: ${String((error as any)?.message ?? error).split('\n')[0].slice(0, 500)}`, upExitCodes.failed);
+      if (stop.exitCode === upExitCodes.waiting) deps.emit({ kind: 'step', step: name, state: 'waiting', detail: stop.message.split('\n')[0] });
+      else deps.emit({ kind: 'step-failed', step: name, exitCode: stop.exitCode, argv: stop instanceof ChildStop ? stop.argv : null, stderr: stop instanceof ChildStop ? stop.stderr : null, detail: stop.message.split('\n')[0] });
+      throw stop;
+    }
   };
 
   try {
@@ -602,7 +645,7 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
       if (controlPlaneMerger) {
         const result = await deps.cli(installArgs('--apply'));
         claim = await rememberSignIn(deps.root, state, result.stdout) ?? claim;
-        if (result.code !== 0) throw new UpStop(childFailure('control-plane', ['install'], result), upExitCodes.failed);
+        if (result.code !== 0) throw childStop('control-plane', installArgs('--apply'), result);
         return 'control plane installed without a GitHub App (--no-github-app)';
       }
       // The install waits on the App pages itself, as long as this run waits on a person (900 s
@@ -651,7 +694,7 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
         if (result.code === 0) return 'control plane installed with its GitHub Apps';
         const paused = parseJson(result.stdout);
         const drove = gaveUp.length ? `; the browser could not finish the App page (${gaveUp.join('; ')}), its record is under .graphyard/master-actions` : '';
-        if (!paused?.resume || deps.now() >= deadline) throw new UpStop(paused?.resume ? `control-plane: graphyard install exited ${result.code}${drove}; the App page is still unconfirmed, rerun graphyard up to resume` : childFailure('control-plane', ['install'], result, drove), paused?.resume ? upExitCodes.waiting : upExitCodes.failed);
+        if (!paused?.resume || deps.now() >= deadline) throw paused?.resume ? new UpStop(`control-plane: graphyard install exited ${result.code}${drove}; the App page is still unconfirmed, rerun graphyard up to resume`, upExitCodes.waiting) : childStop('control-plane', installArgs('--apply'), result, drove);
         deps.emit({ kind: 'note', text: 'The App page is still waiting for a person; serving it again' });
       }
     });
@@ -711,7 +754,9 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
     await step('host-supervisor', async () => {
       const token = await deps.masterToken();
       if (!token) throw new UpStop('host-supervisor: no master credential is recorded for the installed control plane', upExitCodes.failed);
-      await run('host-supervisor', ['master', 'init', '--token-stdin', ...(request.browserProfile ? ['--browser-profile', request.browserProfile] : [])], { stdin: token });
+      // GY-1641: master init accepts the control plane on the recorded address, never its default port.
+      const server = await deps.serverUrl();
+      await run('host-supervisor', ['master', 'init', '--token-stdin', ...(server ? ['--url', server] : []), ...(request.browserProfile ? ['--browser-profile', request.browserProfile] : [])], { stdin: token });
     });
     // Recorded on every run (idempotent), so a resumed run that skipped master init still installs supervised.
     if (supervised && deps.supervise) {
@@ -744,8 +789,9 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
         if (!state.mergerRequest) { state.mergerRequest = randomUUID(); await writeState(deps.root, state); }
         if (deps.setMerger) await deps.setMerger(admin, state.mergerRequest);
         else {
-          const result = await deps.cli(['master', 'merger', 'control-plane', '--reason', 'graphyard up --merger control-plane'], { env: { GRAPHYARD_TOKEN: admin, GRAPHYARD_REQUEST_ID: state.mergerRequest } });
-          if (result.code !== 0) throw new UpStop(childFailure('merger-setting', ['master', 'merger'], result), upExitCodes.failed);
+          const args = ['master', 'merger', 'control-plane', '--reason', 'graphyard up --merger control-plane'];
+          const result = await child(args, { env: { GRAPHYARD_TOKEN: admin, GRAPHYARD_REQUEST_ID: state.mergerRequest } });
+          if (result.code !== 0) throw childStop('merger-setting', args, result);
         }
         return 'POST /api/merger set the control-plane writer';
       });
@@ -874,11 +920,28 @@ export async function upCommand(root: string, cliPath: () => Promise<string>, ar
   const handed = await upSudoCode(root, args);
   if (handed) return handed;
   const request = upRequestFromArgs(args, recordedUp(root));
+  const refusal = await upUrlRefusal(root, request.url);
+  if (refusal) throw new Error(refusal);
   const emit = (event: UpEvent) => console.error(request.agent ? JSON.stringify(event) : describeUpEvent(event));
   const dependencies = upDependencies(root, await cliPath(), request, emit);
   // Ctrl-C or SIGTERM stops the install child too, so nothing keeps serving its App page on 4311.
   const release = forwardSignals(dependencies.children);
   return runUp(request, dependencies).finally(release);
+}
+
+/**
+ * GY-1641: why --url cannot drive this checkout, or null when it can. master init accepts only the
+ * server .graphyard/master.json records (setupMaster), so a --url naming another one is refused here,
+ * before any step runs, rather than at host-supervisor after the earlier steps have changed things.
+ */
+export async function upUrlRefusal(root: string, url: string | null | undefined) {
+  if (!url) return null;
+  let recorded = '';
+  try { recorded = String(JSON.parse(await readFile(resolve(root, '.graphyard/master.json'), 'utf8')).url ?? ''); } catch { return null; }
+  let origin = recorded;
+  try { origin = new URL(recorded).origin; } catch { /* compared as written */ }
+  return !recorded || origin === url ? null
+    : `--url ${url} is not the control plane this checkout's master is set up with (${recorded} in .graphyard/master.json), and master init accepts no other; omit --url to use ${recorded}`;
 }
 
 /** `graphyard up --help` (GY-1510): up's usage, one line for each option. */
@@ -909,6 +972,7 @@ export const upUsage = [
   '  --wait MINUTES             how long each wait on a person lasts (agent default 20)',
   '  --no-wait                  at Confirm access, exit 3 with the App-import route instead of waiting',
   "  --share-tailnet            serve the dashboard on this host's tailnet (never publicly)",
+  '  --url URL                  the control plane\'s address before master init records one (HTTPS, or HTTP on loopback); every later step uses it',
   '  --json                     print the result as JSON',
   '  -h, --help                 print this help and exit',
   '',
@@ -949,6 +1013,7 @@ export function upCommandFlags(request: UpRequest) {
   if (request.sudo === 'mobile') flags.push('--github-mobile');
   if (request.waitMs) option('--wait', String(request.waitMs / 60_000));
   if (request.shareTailnet) flags.push('--share-tailnet');
+  option('--url', request.url);
   return flags.map(shellWord).map(word => ` ${word}`).join('');
 }
 
@@ -968,7 +1033,7 @@ export function recordedUp(root: string): { repository: string; provider: string
 /** The options `graphyard up` parses; upUsage gives each one line (GY-1510), and --sudo-code is read before them. */
 export const upOptions = { repo: { type: 'string' }, provider: { type: 'string' }, agent: { type: 'boolean' }, json: { type: 'boolean' }, merger: { type: 'string' }, reviewer: { type: 'string' }, master: { type: 'string' }, goal: { type: 'string' }, 'browser-profile': { type: 'string' },
   'confirm-price': { type: 'string' }, 'max-monthly': { type: 'string' }, 'ssh-key': { type: 'string' }, 'ssh-host': { type: 'string' }, 'ssh-user': { type: 'string' },
-  'reuse-app': { type: 'string', multiple: true }, 'github-mobile': { type: 'boolean' }, wait: { type: 'string' }, 'no-wait': { type: 'boolean' }, 'share-tailnet': { type: 'boolean' }, local: { type: 'boolean' } } as const;
+  'reuse-app': { type: 'string', multiple: true }, 'github-mobile': { type: 'boolean' }, wait: { type: 'string' }, 'no-wait': { type: 'boolean' }, 'share-tailnet': { type: 'boolean' }, local: { type: 'boolean' }, url: { type: 'string' } } as const;
 
 /**
  * `graphyard up`'s flags. With a run RECORDED in this checkout, an omitted --repo or --provider is
@@ -990,11 +1055,14 @@ export function upRequestFromArgs(args: string[], recorded: { repository: string
   if (!repository || !/^[\w.-]+\/[\w.-]+$/.test(repository)) throw new Error('Use graphyard up --repo OWNER/NAME [--provider compose|railway|hetzner|local | --local] [--merger github|control-plane] [--agent]');
   const minutes = values.wait === undefined ? null : Number(values.wait);
   if (minutes !== null && (!Number.isSafeInteger(minutes) || minutes < 1 || minutes > 1_440)) throw new Error('Use --wait with whole minutes from 1 to 1440');
+  let url: string | null = null;
+  // The origin rule master init applies (serverOrigin): HTTPS, or HTTP only on loopback.
+  if (values.url !== undefined) { try { url = serverOrigin(values.url); } catch { throw new Error('Use --url with the control plane\'s origin: HTTPS, or HTTP on loopback (such as http://127.0.0.1:4311); no credentials, query or path'); } }
   return { repository, provider: provider ?? recorded?.provider ?? 'compose', agent: !!values.agent, reviewer: values.reviewer ?? 'claude', master: values.master ?? 'claude',
     goalFile: values.goal ?? null, browserProfile: values['browser-profile'] ?? null, ...(merger ? { merger } : {}),
     install: { confirmPrice: values['confirm-price'] ?? null, maxMonthly: values['max-monthly'] ?? null, sshKey: values['ssh-key'] ?? null, sshHost: values['ssh-host'] ?? null, sshUser: values['ssh-user'] ?? null },
     ...(values['reuse-app']?.length ? { reuseApps: values['reuse-app'] } : {}), ...(values['github-mobile'] ? { sudo: 'mobile' as const } : {}),
-    ...(minutes !== null ? { waitMs: minutes * 60_000 } : {}), ...(values['no-wait'] ? { noWait: true } : {}), ...(values['share-tailnet'] ? { shareTailnet: true } : {}) };
+    ...(minutes !== null ? { waitMs: minutes * 60_000 } : {}), ...(values['no-wait'] ? { noWait: true } : {}), ...(values['share-tailnet'] ? { shareTailnet: true } : {}), ...(url ? { url } : {}) };
 }
 
 /** How many fresh GitHub Mobile prompts a drive requests after one expires unapproved (GY-1510). */
@@ -1362,7 +1430,15 @@ export function upDependencies(root: string, cliPath: string, request: UpRequest
   discoverLogin: (browser: { profile: string; executable?: string }) => string | null = hostProfileLogin): UpDependencies & { children: Set<ChildProcess> } {
   // The children still running, for forwardSignals.
   const children = new Set<ChildProcess>();
-  const serverUrl = async () => { try { return String(JSON.parse(await readFile(resolve(root, '.graphyard/master.json'), 'utf8')).url ?? '') || null; } catch { return null; } };
+  // GY-1641: --url, else the address master.json records, else the one this machine's install record (install.json) holds.
+  const serverUrl = async () => {
+    if (request.url) return request.url;
+    try { const url = String(JSON.parse(await readFile(resolve(root, '.graphyard/master.json'), 'utf8')).url ?? ''); if (url) return url; } catch { /* not recorded yet */ }
+    // A self-contained host's record names its server before that install completes, so only master.json counts there.
+    if (remoteLoopProviders.includes(request.provider)) return null;
+    return (await readInstallRecord(installDirectory(installIdFor(request.repository))).catch(() => null))?.url ?? null;
+  };
+  // upUrlRefusal keeps --url to the server master.json records, so its credential is the one for serverUrl.
   const masterToken = async () => { const url = await serverUrl(); return url ? (await masterCredential(root, url))?.token ?? null : null; };
   const browser = request.agent ? upBrowserProfile(root, request, hostInstallRoots(), githubLogin, discoverLogin) : null;
   if (browser?.from) emit({ kind: 'note', text: `No --browser-profile given: the App pages are driven in Chrome profile ${browser.profile}, which the Graphyard install at ${browser.from} uses, signed in to GitHub as ${browser.login}, the login gh uses here; pass --browser-profile to use another.` });
@@ -1413,17 +1489,21 @@ export function upDependencies(root: string, cliPath: string, request: UpRequest
       const child = spawn(process.execPath, [cliPath, ...args], { cwd: root, stdio: ['pipe', 'pipe', 'pipe'], ...(options.signal ? { signal: options.signal } : {}), env: { ...process.env, ...options.env, PATH: withLocalBin(process.env.PATH) } });
       children.add(child);
       child.on('exit', () => children.delete(child));
-      let stdout = '', pending = '', stderr = '';
+      let stdout = '', pending = '', stderr = '', firstStderr: string | undefined;
       child.stdout.on('data', chunk => { stdout += chunk; });
       child.stderr.on('data', chunk => {
         pending += chunk;
         // Bounded: only the tail is ever shown (childTail).
         stderr = (stderr + chunk).slice(-64_000);
         const lines = pending.split('\n'); pending = lines.pop() ?? '';
-        for (const line of lines) { if (!request.agent) process.stderr.write(`${line}\n`); options.onLine?.(line); }
+        for (const line of lines) { if (firstStderr === undefined && line.trim()) firstStderr = line.slice(0, 4_000); if (!request.agent) process.stderr.write(`${line}\n`); options.onLine?.(line); }
       });
       child.on('error', reject);
-      child.on('close', code => { if (pending) options.onLine?.(pending); accept({ code: code ?? 1, stdout, stderr }); });
+      child.on('close', code => {
+        if (pending) options.onLine?.(pending);
+        if (firstStderr === undefined && pending.trim()) firstStderr = pending.slice(0, 4_000);
+        accept({ code: code ?? 1, stdout, stderr, ...(firstStderr === undefined ? {} : { firstStderr }) });
+      });
       child.stdin.end(options.stdin ?? '');
     }),
     status: async () => {
@@ -1480,6 +1560,7 @@ export function upHerdr(root: string, repository: string, deps: HerdrHostDeps = 
 /** One line a person reads for an event, as the interactive run prints it. */
 export function describeUpEvent(event: UpEvent) {
   if (event.kind === 'step') return event.state === 'start' ? `→ ${event.step}` : `${event.state === 'done' ? '✓' : '·'} ${event.step}${event.detail ? `: ${event.detail}` : ''}`;
+  if (event.kind === 'step-failed') return `✗ ${event.step}: ${event.detail}`;
   if (event.kind === 'waiting') return `\n${event.sentence}\n`;
   if (event.kind === 'onboarding') return !event.wait.waitingFor.length ? `· onboarding: ${event.wait.key}: ${event.wait.line}` : `· onboarding: ${event.wait.key} (${event.wait.url ?? 'its pull request'}) waits for ${event.wait.waitingFor.join(' and ')}, ${waitedFor(event.wait.waitedMs)} so far; the loop reviews and merges it`;
   if (event.kind === 'handoff') return `NEEDS YOU: ${event.sentence}${event.code ? ` (code ${event.code})` : ''}${event.url ? ` — ${event.url}` : ''}`;

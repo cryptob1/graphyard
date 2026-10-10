@@ -29,11 +29,11 @@ A step needing a person prints one link (`SERVER/#sign-in=CODE&setup`) and waits
 | Branch protection, coordinator running | none (automatic; control-plane: Done, not required)
 | Onboarding change: its wait | **Open the change**
 
-Once green (onboarding merged), **Describe what you want built** records a goal (`graphyard goal`).
+Once green, **Describe what you want built** records a goal (`graphyard goal`).
 
 ## Agent setup: up --agent
 
-`up --agent` takes `[--goal FILE] [--browser-profile PROFILE]`: JSON events on stderr; exit `0` green, `1` failed (quoting GitHub's rejection), `2` prerequisite, `3` waiting. `--merger control-plane`: no Apps, browser profile, Mobile approval or `--reviewer`; a deploy key; a missing repository made with `gh` from this checkout (`--source . --push`); no `--local`. Otherwise it creates the Apps in a GitHub-signed-in Chrome profile (passed, else the master's, else a same-login install's; none, without `--reuse-app` or saved Apps: exit `2`), recorded under `.graphyard/master-actions/`. Only a device step becomes a `handoff`: a subscription login's approval, or *Confirm access*: a GitHub Mobile number. Without Mobile: confirm in your Chrome; give a code via `up --sudo-code CODE|email` (never recorded); or create both Apps at github.com/settings/apps/new, `graphyard app import` each, then `up --reuse-app SLUG --reuse-app REVIEWER_SLUG` (`--no-wait` exits `3`). Waits last `--wait MINUTES` (default 20). Preflight refuses `/tmp`, `/var/tmp` checkouts.
+`up --agent` takes `[--goal FILE] [--browser-profile PROFILE] [--url URL]` (child steps' server: HTTPS or loopback HTTP, only `master.json`'s once recorded; default: that, else install record): JSON events on stderr (`step-failed`: child argv, first stderr line); exit `0` green, `1` failed, `2` prerequisite, `3` waiting. `--merger control-plane`: no Apps, browser profile, Mobile approval or `--reviewer`; missing repository: `gh repo create --source . --push`; no `--local`. Otherwise creates the Apps in a GitHub-signed-in Chrome profile (passed, else the master's, else a same-login install's; none, without `--reuse-app` or saved Apps: exit `2`), recorded under `.graphyard/master-actions/`. Only device steps become `handoff`s: a subscription login's approval, *Confirm access*'s GitHub Mobile number. Without Mobile: confirm in Chrome; `up --sudo-code CODE|email` (never recorded); or create both Apps at github.com/settings/apps/new, `graphyard app import` each, then `up --reuse-app SLUG --reuse-app REVIEWER_SLUG` (`--no-wait` exits `3`). Waits: `--wait MINUTES` (default 20). Preflight refuses `/tmp`, `/var/tmp` checkouts.
 
 ## Troubleshooting: manual steps
 
@@ -69,7 +69,7 @@ GitHub merger only. `--apply` serves `http://127.0.0.1:4311` and prints it; it o
 
 ## 6. Onboard the checkout
 
-`gy init --scan`, then `gy init --scan --apply --url http://127.0.0.1:4310`; merge `AGENTS.md .gitignore graphyard.json .github/workflows` to the base (never `.graphyard/`). Control-plane: worker block says `complete GY-N EPOCH --head SHA`. `--no-github-app` installs onboard App-less; a rerun adding an App refuses, naming `install.json`. **Verify:** readiness `setup-proposal` is `ready` ([onboarding](onboarding.md#documentation-policy)).
+`gy init --scan`, then `gy init --scan --apply --url SERVER`; merge `AGENTS.md .gitignore graphyard.json .github/workflows` to the base (never `.graphyard/`). Control-plane: worker block says `complete GY-N EPOCH --head SHA`. `--no-github-app` installs onboard App-less; a rerun adding an App refuses, naming `install.json`. **Verify:** readiness `setup-proposal` is `ready` ([onboarding](onboarding.md#documentation-policy)).
 
 ## 8. Agent environments
 
