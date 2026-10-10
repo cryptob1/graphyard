@@ -2,8 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { chmod, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
 import { masterConfigSchema, masterHarness, type MasterConfig } from '../src/master.js';
 import { emptyDaemonState, type DaemonEffects } from '../src/master-daemon.js';
 import { emptyHeldDecisions } from '../src/daemon/decision-reads.js';
@@ -21,9 +20,9 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 // applies the contract itself each cycle, and a read-only reader names its vantage instead of
 // reporting the doomed in-place apply.
 
-const launcher = resolve(fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url)));
 const observedAt = '2026-10-10T14:00:00.000Z';
-const config = (credentialFile: string): MasterConfig => masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile, cliPath: launcher,
+// The loop applies against its CLI's checkout (coordinatorCheckoutRoot(cliPath), GY-1662): each checkout's config names its own CLI, beside its credentials.
+const config = (credentialFile: string): MasterConfig => masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile, cliPath: join(dirname(dirname(dirname(credentialFile))), 'bin/graphyard.mjs'),
   repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [] });
 const settingsFile = (root: string) => join(root, '.claude/settings.local.json');
 const asRoot = process.getuid?.() === 0; // root ignores directory modes, so a chmod cannot make the checkout read-only
@@ -97,9 +96,9 @@ test('integration:harness-remedy-loop-cycle — the loop\'s routine remedies app
     assert.ok(JSON.parse(await readFile(settingsFile(root), 'utf8')).permissions.deny.includes(absent), 'a loop without a doctor heals the drift');
     assert.equal(undoctored.performed.length, 1);
     assert.equal(undoctored.state.actions['remedy:harness:claude']?.state, 'done');
-    // Only effects that name no checkout at all (a bare test cycle) leave nothing to repair.
+    // Only a loop that names no checkout at all (no CLI path recorded, a bare test cycle) leaves nothing to repair.
     await writeFile(settingsFile(root), JSON.stringify(installed));
-    const bare = cycle(root, master, {});
+    const bare = cycle(root, { ...master, cliPath: '' }, {});
     await routineRemedies(bare);
     assert.equal(bare.performed.length, 0);
 

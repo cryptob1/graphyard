@@ -182,3 +182,42 @@ test('integration:harness-remedy-ignores-research-scratch — the remedy resolve
   assert.equal(neither.state.actions[key], undefined, 'research alone names no checkout to apply against');
   assert.equal(await readFile(settingsFile(scratch.root), 'utf8'), scratchBefore);
 });
+
+test('unit:harness-apply-checkout-unreadable-and-recovery — a serving unit that exists but cannot be read, or is not the master unit the checkout records, is refused naming it; a waiting row closes on the first cycle the contract holds, even with nothing to apply', async () => {
+  const own = await checkout('harness-unreadable', true), units = await temporaryDirectory('harness-unreadable-units');
+  const recorded = perInstallUnits('owner/project').master;
+  // A path that exists but is no readable file (a directory: EISDIR) is refused, naming the path and its read error; an absent one is not.
+  await mkdir(join(units, recorded));
+  assert.throws(() => harness.harnessApplyCheckout(own.root, { servingUnit: recorded, unitDirectory: units }), (error: unknown) => {
+    assert.ok(error instanceof harness.HarnessCheckoutRefusal);
+    assert.equal(error.unit, join(units, recorded));
+    assert.match(error.message, new RegExp(`the unit serving this loop, ${join(units, recorded).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}, could not be read \\(EISDIR\\)`));
+    return true;
+  });
+  const absentUnits = await temporaryDirectory('harness-absent-units');
+  assert.equal(harness.harnessApplyCheckout(own.root, { servingUnit: recorded, unitDirectory: absentUnits }).units.master, recorded);
+  // A serving unit running this checkout but not the one it records is refused, naming both.
+  await writeFile(join(absentUnits, 'graphyard-master-other.service'), unitText(own.root));
+  assert.throws(() => harness.harnessApplyCheckout(own.root, { servingUnit: 'graphyard-master-other.service', unitDirectory: absentUnits }),
+    (error: unknown) => error instanceof harness.HarnessCheckoutRefusal && error.message.includes(`graphyard-master-other.service, is not the master unit ${own.root} records (${recorded} in ${installUnitsFile})`));
+
+  // Recovery: the refusal waits; once the unit is readable and the contract already holds, the row closes with nothing written.
+  const master = config(own.root);
+  const looped = cycle(master, { harness: { servingUnit: recorded, unitDirectory: units } });
+  await routineRemedies(looped);
+  assert.equal(looped.state.actions[key]?.state, 'waiting');
+  await writeFile(settingsFile(own.root), JSON.stringify({ permissions: { allow: masterHarness(own.root, master, 'claude').allow.map(entry => entry.rule), deny: masterHarness(own.root, master, 'claude').deny.map(entry => entry.rule) } }));
+  const before = await readFile(settingsFile(own.root), 'utf8');
+  const fixed = await temporaryDirectory('harness-fixed-units');
+  await writeFile(join(fixed, recorded), unitText(own.root));
+  looped.effects = { ...looped.effects, harness: { servingUnit: recorded, unitDirectory: fixed } };
+  await routineRemedies(looped);
+  const row = looped.state.actions[key]!;
+  assert.equal(row.state, 'done', row.detail);
+  assert.match(row.detail, /already holds .* the earlier waiting row is resolved with nothing to apply/);
+  assert.equal(await readFile(settingsFile(own.root), 'utf8'), before, 'nothing is written when the contract already holds');
+  // A further cycle with the contract still holding journals nothing.
+  const count = looped.performed.length;
+  await routineRemedies(looped);
+  assert.equal(looped.performed.length, count);
+});

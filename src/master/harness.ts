@@ -375,8 +375,8 @@ export class HarnessCheckoutRefusal extends Error {
  * resolved from it met the legacy unit refusal every cycle; the loop's own checkout is what it
  * applies against. ROOT is refused, naming it and the `master init` remedy, when it records no units
  * and a legacy unit runs another checkout; and when the unit serving this loop (SERVINGUNIT, in
- * UNITDIRECTORY) runs a checkout other than ROOT, naming that unit to update rather than applying
- * against the wrong checkout.
+ * UNITDIRECTORY) runs a checkout other than ROOT, cannot be read, or is not the master unit ROOT
+ * records, naming that unit to update rather than applying against the wrong checkout.
  */
 export function harnessApplyCheckout(root: string, options: { servingUnit?: string | null; unitDirectory?: string; home?: string } = {}) {
   const unitDirectory = options.unitDirectory ?? executorUnitDirectory(), home = options.home ?? homedir();
@@ -388,10 +388,16 @@ export function harnessApplyCheckout(root: string, options: { servingUnit?: stri
   }
   if (options.servingUnit) {
     const path = resolve(unitDirectory, options.servingUnit);
+    // Only an absent unit file names no checkout; one that exists but cannot be read cannot show it runs ROOT, so it is refused.
     let text: string | null = null;
-    try { text = readFileSync(path, 'utf8'); } catch { /* a unit file that cannot be read names no other checkout */ }
+    try { text = readFileSync(path, 'utf8'); }
+    catch (error) {
+      const code = (error as NodeJS.ErrnoException | null)?.code;
+      if (code !== 'ENOENT') throw new HarnessCheckoutRefusal(root, path, `The harness contract was not applied: the unit serving this loop, ${path}, could not be read (${code ?? (error instanceof Error ? error.message : String(error))}), so it is not established that it runs ${root}, the checkout this apply targets. Make ${path} a readable unit file that runs ${root}, then systemctl --user daemon-reload and restart it`);
+    }
     const other = text === null ? null : foreignUnitText(text, root, home);
     if (other) throw new HarnessCheckoutRefusal(root, path, `The harness contract was not applied: the unit serving this loop, ${path}, runs ${other}, not ${root}, the checkout this apply targets. Update ${path} (its WorkingDirectory and ExecStart) to run ${root}, then systemctl --user daemon-reload and restart it, rather than apply against the wrong checkout`);
+    if (options.servingUnit !== units.master) throw new HarnessCheckoutRefusal(root, path, `The harness contract was not applied: the unit serving this loop, ${options.servingUnit}, is not the master unit ${root} records (${units.master} in ${installUnitsFile}), so the contract built from the recorded units would misclassify the unit actually serving it. Serve the loop from ${units.master}, or record ${options.servingUnit} as the master unit in ${root}/${installUnitsFile} if it is this checkout's own`);
   }
   return { root, units };
 }

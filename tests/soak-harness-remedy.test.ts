@@ -2,8 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { chmod, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 import { masterConfigSchema, masterHarness, type MasterConfig } from '../src/master.js';
 import { emptyDaemonState, runCycle, type DaemonAction, type DaemonEffects } from '../src/master-daemon.js';
 import { clearDoctorRuns, doctorRunsSettled, type DoctorEffects } from '../src/daemon/doctor.js';
@@ -25,12 +24,12 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
  */
 const minute = 60_000, hour = 60 * minute, start = Date.parse('2026-10-10T06:00:00Z');
 const iso = (at: number) => new Date(at).toISOString();
-const launcher = resolve(fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url)));
+// The loop applies against its CLI's checkout (coordinatorCheckoutRoot(cliPath), GY-1662), so the config names the temporary checkout's CLI.
 const asRoot = process.getuid?.() === 0; // root ignores directory modes, so a chmod cannot make the checkout unwritable
 /** The minutes the host widens the plan, and the window the checkout cannot be written in (drift appears inside it). */
 const widenings = [0, 60, 125, 300], unwritable = { from: 120, to: 150 };
 
-const config = (root: string): MasterConfig => masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: join(root, '.graphyard-credentials/master/token'), cliPath: launcher,
+const config = (root: string): MasterConfig => masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: join(root, '.graphyard-credentials/master/token'), cliPath: join(root, 'bin/graphyard.mjs'),
   repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', workers: [], run: { intervalSeconds: 60 } });
 
 test('unit:soak-harness-remedy-invariants — over a simulated day the loop heals every harness drift on the next writable cycle with one journal line, writes nothing otherwise, journals an unwritable checkout once, keeps operator entries, and every system invariant holds', { timeout: 300_000 }, async () => {

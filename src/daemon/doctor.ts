@@ -737,7 +737,11 @@ export async function applyHarnessContract(cycle: Cycle) {
     try {
       harnessApplyCheckout(root, { servingUnit: effects.harness?.servingUnit, unitDirectory: effects.harness?.unitDirectory });
       const plan = masterHarness(root, config, 'claude');
-      if (!await harnessDrift(root, plan)) return;
+      if (!await harnessDrift(root, plan)) {
+        // A refusal the operator's remedy has cleared, or a failure the checkout recovered from, closes once the contract already holds (GY-1662).
+        if (previous && previous.state !== 'done') performed.push(await record(state, key, { kind: 'config', work: null, principal: null, state: 'done', detail: `The Claude harness contract already holds for ${root}: the earlier ${previous.state} row is resolved with nothing to apply`, attempts, cycle: state.cycle }, now(), effects.persist));
+        return;
+      }
       const written = await writeHarnessPermissions(root, plan, true);
       const changed = [...written.removed.map(entry => `removed stale ${entry.list} ${entry.rule}`), ...written.added.map(entry => `added ${entry.list} ${entry.rule}`)].join(', ');
       performed.push(await record(state, key, { kind: 'config', work: null, principal: null, state: 'done', detail: `Applied the Claude harness contract to ${written.file} from the loop's own process, as graphyard master harness claude --apply does, keeping operator-added entries: ${changed}`.slice(0, 2000), attempts, cycle: state.cycle }, now(), effects.persist));
