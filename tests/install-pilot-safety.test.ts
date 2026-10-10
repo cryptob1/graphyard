@@ -159,6 +159,35 @@ test('unit:init-reuses-install-identities — init --scan --apply never mints a 
   } finally { await new Promise<void>(accept => holder.close(() => accept())); await rm(root, { recursive: true, force: true }); }
 });
 
+test('unit:init-reuses-install-identities — a rerun that binds an App to a former --no-github-app install is refused by init while it waits at its App step', async () => {
+  // The server serves without an App until the upgrade binds one.
+  const options: Parameters<typeof harness>[0] = { provider: 'compose', statusBody: { actor: { id: 'owner-project-operator', role: 'admin' }, repository: REPOSITORY, github: false, githubAppId: null, githubInstallationId: null } };
+  const fixture = await harness(options);
+  try {
+    const noApp = await prepareInstall(fixture.root, { repository: REPOSITORY, provider: 'compose', noGithubApp: true }, { ...fixture.deps,
+      githubApp: async () => { throw new Error('the App manifest flow must never run with --no-github-app'); } }, 'apply');
+    await applyInstall(noApp, await buildPlan(noApp));
+    const before = await readInstallRecord(noApp.directory);
+    assert.equal(before!.noGithubApp, true); assert.equal(before!.github, null);
+    assert.equal((await installedOnboarding(fixture.root, REPOSITORY, null, fixture.configHome))!.githubApp, null, 'the no-App install onboards');
+
+    // The upgrade: rerun without --no-github-app, paused at its App step.
+    delete options.statusBody;
+    let refusal = null as Error | null, waiting = null as Awaited<ReturnType<typeof readInstallRecord>>;
+    const upgrade = await prepareInstall(fixture.root, { repository: REPOSITORY, provider: 'compose' }, { ...fixture.deps,
+      githubApp: async request => {
+        waiting = await readInstallRecord(noApp.directory);
+        refusal = await installedOnboarding(fixture.root, REPOSITORY, null, fixture.configHome).then(() => null, error => error);
+        throw new AppStepPending(request.file, false, 900_000);
+      } }, 'apply');
+    await assert.rejects(applyInstall(upgrade, await buildPlan(upgrade)), InstallPaused);
+    assert.equal(waiting!.noGithubApp, false, "the record names this run's App choice before the App step");
+    assert.ok(refusal, 'init refuses while the upgrade waits at its App step');
+    assert.match(refusal!.message, /has not finished its GitHub App step/);
+    await assert.rejects(installedOnboarding(fixture.root, REPOSITORY, null, fixture.configHome), /has not finished its GitHub App step/, 'the paused upgrade stays refused');
+  } finally { await fixture.cleanup(); }
+});
+
 test('unit:install-herdr-plugin-guard — the plan shows a Herdr relink and a plugin bound to another server is never repointed without --herdr-rebind', async () => {
   const fixture = await harness({ provider: 'compose' });
   const pluginDirectory = join(fixture.configHome, 'herdr-plugin');
