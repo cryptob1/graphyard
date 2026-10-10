@@ -736,17 +736,20 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     }, { actor: 'operator', at }).registry;
     const probed = (identity: string | null | undefined): QuotaObservation => ({ loggedIn: true, state: 'unknown', usage: [], resetsAt: null, reason: null, identity });
     foldObservations(registry, { host: soakConfig.hostId, observations: await Promise.all(environments.map(async environment => ({ account: environment.name, quota: probed(await providerIdentity('claude', environment.home)) }))) }, { actor: 'executor', at });
+    // GY-1637: the simulated clock runs real time forward, so every read of it inside one simulated step is one instant: a hold's
+    // report is stamped with the instant the hold was recorded at, never a millisecond its file writes took after it.
+    const reporting = { at: null as number | null };
     const client = { observe: async (request: { host: string; observations: { account: string; quota: QuotaObservation }[] }) => {
-      const changed = foldObservations(registry, request, { actor: 'executor', at: new Date(clock.now()).toISOString() });
-      limitMenuDay.observed.push({ elapsed: clock.now() - dayStart, accounts: request.observations.map(entry => entry.account), changed });
+      const now = reporting.at ?? clock.now();
+      const changed = foldObservations(registry, request, { actor: 'executor', at: new Date(now).toISOString() });
+      limitMenuDay.observed.push({ elapsed: now - dayStart, accounts: request.observations.map(entry => entry.account), changed });
       return { changed };
     } };
     // GY-1581: this host's executor probes its own accounts every cycle too, an ordinary probe reading quota unknown on a
     // spent Claude login; folded after the session's report, it must not lift that report before its reset.
     const localIdentities = await Promise.all(environments.map(async environment => ({ account: environment.name, identity: await providerIdentity('claude', environment.home) })));
     // What the other host sees of its own accounts, folded as its selection would fold it, and what the registry then judges of them for that host.
-    const readRemote = () => {
-      const now = clock.now();
+    const readRemote = (now: number) => {
       foldObservations(registry, { host: soakConfig.hostId, observations: localIdentities.map(entry => ({ account: entry.account, quota: probed(entry.identity) })) }, { actor: 'executor', at: new Date(now).toISOString() });
       limitMenuDay.localReads.push({ elapsed: now - dayStart, ineligible: Object.fromEntries(environments.map(environment => [environment.name, accountIneligibility(registry, registry.accounts.find(entry => entry.name === environment.name)!, now, soakConfig.hostId)])) });
       foldObservations(registry, { host: remoteHost, observations: remote.map(account => ({ account: account.name, quota: probed(account.identity) })) }, { actor: 'remote-executor', at: new Date(now).toISOString() });
@@ -759,7 +762,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
       limitMenuDay.guessedReads.push({ elapsed: now - dayStart, until: guessedHold.until, ineligible: { 'guessed-spent': accountIneligibility(registry, registry.accounts.find(entry => entry.name === 'guessed-spent')!, now, remoteHost),
         'guessed-sibling': accountIneligibility(registry, registry.accounts.find(entry => entry.name === 'guessed-sibling')!, now, thirdHost) } });
     };
-    return { config: { environments, credentialFile: join(root, 'master.token'), run: soakConfig.run, hostId: soakConfig.hostId } as unknown as Pick<MasterConfig, 'environments' | 'credentialFile' | 'run' | 'hostId'>, client, readRemote };
+    return { config: { environments, credentialFile: join(root, 'master.token'), run: soakConfig.run, hostId: soakConfig.hostId } as unknown as Pick<MasterConfig, 'environments' | 'credentialFile' | 'run' | 'hostId'>, client, reporting, readRemote };
   })() : null;
   const accountHeld = (account: string) => { const hold = heldAccounts.get(account); return !!hold && (!hold.resetsAt || Date.parse(hold.resetsAt) > clock.now()); };
   // GY-888: every session launch the day makes carries the coordinator confinement through the
@@ -1801,10 +1804,11 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     panes: async () => ({ panes: herdr.paneList(), available: true }),
     recordSession,
     credentials: async profiles => { credentialReads.push(clock.now() - dayStart); if (twinLogin) {
-      twinLogin.readRemote();
+      const now = clock.now(); // one instant for the whole read, as the reset is judged against it (GY-1637)
+      twinLogin.readRemote(now);
       const health = await inspectProfileAccounts(twinLogin.config, 'worker', profiles.map(profile => ({ ...profile, accounts: [`account-${profile.name}`] })),
-        Object.fromEntries(profiles.map(profile => [profile.name, { available: true, reason: null as string | null }])), { quota: false, cacheMs: 0, now: () => clock.now() });
-      limitMenuDay.twinReads.push({ elapsed: clock.now() - dayStart, unavailable: Object.fromEntries(Object.entries(health).filter(([, entry]) => !entry.available).map(([name, entry]) => [name, entry.reason ?? ''])) });
+        Object.fromEntries(profiles.map(profile => [profile.name, { available: true, reason: null as string | null }])), { quota: false, cacheMs: 0, now: () => now });
+      limitMenuDay.twinReads.push({ elapsed: now - dayStart, unavailable: Object.fromEntries(Object.entries(health).filter(([, entry]) => !entry.available).map(([name, entry]) => [name, entry.reason ?? ''])) });
       return Object.fromEntries(Object.entries(health).map(([name, entry]) => [name, { available: entry.available, reason: entry.reason }]));
     } return Object.fromEntries(profiles.map(profile => [profile.name, accountHeld(`account-${profile.name}`) ? { available: false, reason: `account-${profile.name} is held until ${heldAccounts.get(`account-${profile.name}`)!.resetsAt}` } : { available: true, reason: null }])); },
     snapshot, dispatch, requestProof, approver, docsSync, docsSyncSettled: synced => releaseDocsSyncHarness(docsSyncRoot, synced), doctor, containment, settleContainment, unblock,
@@ -1897,7 +1901,10 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     ...(options.retrying || options.limitMenu ? {
       sessionOutput: (agent: HerdrAgent) => screens.get(agent.pane_id ?? '') ?? `● Working as ${agent.name}…\n`,
       selectedAccount: async (role: string, profile: string) => role === 'worker' ? { environment: `account-${profile}`, kind: null } : null,
-      holdAccount: async (account: string, observed: Parameters<NonNullable<DaemonEffects['holdAccount']>>[1]) => { if (twinLogin) await recordObservedExhaustion(twinLogin.config, account, observed, clock.now(), { registry: twinLogin.client }); heldAccounts.set(account, { resetsAt: observed.resetsAt }); if (options.limitMenu) limitMenuDay.holds.push({ account, resetsAt: observed.resetsAt, elapsed: clock.now() - dayStart }); },
+      holdAccount: async (account: string, observed: Parameters<NonNullable<DaemonEffects['holdAccount']>>[1]) => {
+        const now = clock.now(); // the hold and its registry report are one instant (GY-1637)
+        if (twinLogin) { twinLogin.reporting.at = now; try { await recordObservedExhaustion(twinLogin.config, account, observed, now, { registry: twinLogin.client }); } finally { twinLogin.reporting.at = null; } }
+        heldAccounts.set(account, { resetsAt: observed.resetsAt }); if (options.limitMenu) limitMenuDay.holds.push({ account, resetsAt: observed.resetsAt, elapsed: now - dayStart }); },
       // GY-1566: the loop never chooses on the usage-limit menu; any keys it sends are recorded.
       ...(options.limitMenu ? { answerSession: async (agent: HerdrAgent, keys: string[]) => { limitMenuDay.answered.push({ pane: agent.pane_id ?? '', keys }); } } : {}),
     } : {}),
@@ -3272,4 +3279,86 @@ export async function acceptanceWorld(dayStart: number, merger: 'github' | 'cont
   if (merger === 'github') return { day: { ...day, writer: null, main: null }, effects };
   const controlPlane = controlPlaneAcceptance(effects, named, dayStart);
   return { day: { ...day, writer: controlPlane.writer, main: controlPlane.history }, effects: controlPlane.effects };
+}
+
+/**
+ * GY-1573's twin-login day and every assertion the soak makes on it, shared by tests/soak-sessions.test.ts
+ * and the repetition test (GY-1637). Every instant the assertions compare is read from the simulated
+ * clock once per simulated step, so the outcome depends on that clock and the scenario's inputs only.
+ */
+export async function twinHoldDay() {
+  // GY-1573: worker profiles one and two run on two login homes of one Claude subscription, three on
+  // another. The loop reads every profile's accounts on every cycle through the real account read,
+  // and the menu's hold is recorded where that read finds it; the notice's reset falls inside the day.
+  const worker = 2;
+  const { items, final, violations, failures, lost, sessions, state, limitMenuDay, menuReset, menuNotice, dayStart } = await simulateDay({
+    hours: 6, limitMenu: { worker, prose: 99, twinLogin: true },
+    plan: { items: 6, leftovers: 2, slowRecompute: 0, workMs: 15 * minute, rework: new Set(), deaths: new Set(), flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set(), misread: new Set(), exits: new Set(), spentProducer: 0, lostRuns: 0, outOfQueue: { item: 6, afterMs: 99 * hour }, blind: { from: 99 * hour, to: 100 * hour }, split: { at: 99 * hour, item: 6 } },
+  });
+  assert.deepEqual(violations, [], 'every system invariant holds while the twin is held and after it is released');
+  assert.deepEqual(failures, [], 'no cycle failed');
+  assert.deepEqual(lost, [], 'no lease was lost');
+  assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}`), [], 'every item is delivered');
+  const resetsAt = menuReset.toISOString(), reset = menuReset.getTime();
+
+  const spent = items[worker - 1], attempts = sessions.filter(session => session.key === spent.key);
+  const failovers = Object.entries(state.actions).filter(([, action]) => action.kind === 'failover');
+  assert.deepEqual(failovers.map(([, action]) => [action.work, action.state, action.attempts]), [[spent.key, 'done', 1]], JSON.stringify(failovers));
+  const failedAt = Date.parse(failovers[0][1].at);
+  assert.deepEqual(limitMenuDay.answered, [], 'the menu is never answered');
+  const spentProfile = attempts[0].profile.name;
+  assert.ok(['one', 'two'].includes(spentProfile), `the menu's session ran on one of the twin logins: ${spentProfile}`);
+  const twin = spentProfile === 'one' ? 'two' : 'one';
+  assert.deepEqual(limitMenuDay.holds.map(entry => [entry.account, entry.resetsAt]), [[`account-${spentProfile}`, resetsAt]], 'only the spent account is held by name; its twin is held by its login');
+
+  // Every cycle between the hold and the reset read both logins unavailable, the twin naming the spent one; the other subscription never.
+  const holdStart = limitMenuDay.holds[0].elapsed, releaseAt = reset - dayStart;
+  const between = limitMenuDay.twinReads.filter(read => read.elapsed > holdStart && read.elapsed < releaseAt), after = limitMenuDay.twinReads.filter(read => read.elapsed >= releaseAt);
+  assert.ok(between.length >= 60, `the hold stood across many cycles: ${between.length} reads`);
+  for (const read of between) {
+    assert.ok(read.unavailable[spentProfile] && read.unavailable[twin], `both logins of the spent subscription are unavailable at ${read.elapsed}: ${JSON.stringify(read.unavailable)}`);
+    assert.match(read.unavailable[twin], new RegExp(`account-${twin} is the same provider login as account-${spentProfile} exhausted its quota mid-session`));
+    assert.ok(read.unavailable[twin].includes(menuNotice) && read.unavailable[twin].includes(`it resets ${resetsAt}`), read.unavailable[twin]);
+    assert.equal(read.unavailable.three, undefined, 'the other subscription is unaffected');
+  }
+  assert.ok(after.length > 0, 'the day reads accounts past the reset');
+  for (const read of after) assert.deepEqual(read.unavailable, {}, `both logins return at the reset: ${read.elapsed} ${JSON.stringify(read.unavailable)}`);
+
+  // Neither login took a launch between the failover and the reset; the item went to the other subscription.
+  assert.deepEqual(sessions.filter(session => [spentProfile, twin].includes(session.profile.name) && session.dispatchAt > failedAt && session.dispatchAt < reset).map(session => `${session.key}@${session.profile.name}`), [],
+    'no launch landed on the spent subscription before its reset');
+  assert.equal(attempts[1]?.profile.name, 'three', `redispatched on the other subscription: ${attempts.map(session => session.profile.name).join(', ')}`);
+
+  // The hold went to the agent registry once, as the session saw it, and nothing repeated it in later cycles.
+  assert.deepEqual(limitMenuDay.observed.map(entry => [entry.accounts, entry.changed]), [[[`account-${spentProfile}`], true]], JSON.stringify(limitMenuDay.observed));
+  assert.equal(limitMenuDay.observed[0].elapsed, holdStart, 'reported the moment the hold was recorded');
+  // From then until the reset, the registry refuses the twin placed on another host every cycle, naming the spent account, while that host's own reads stand; the healthy subscription's account there stays eligible.
+  const remoteBetween = limitMenuDay.remoteReads.filter(read => read.elapsed > holdStart && read.elapsed < releaseAt), remoteAfter = limitMenuDay.remoteReads.filter(read => read.elapsed >= releaseAt);
+  assert.ok(remoteBetween.length >= 60, `the remote twin was judged across many cycles: ${remoteBetween.length}`);
+  for (const read of remoteBetween) {
+    assert.ok(read.ineligible['remote-twin']?.startsWith(`remote-twin quota is exhausted until ${resetsAt}: it is the same provider login as account-${spentProfile}, whose quota is exhausted (`), `at ${read.elapsed}: ${read.ineligible['remote-twin']}`);
+    assert.ok(read.ineligible['remote-twin']!.includes(menuNotice), read.ineligible['remote-twin']!);
+    assert.equal(read.ineligible['remote-other'], null, 'the healthy subscription on the other host can carry work');
+  }
+  assert.ok(limitMenuDay.remoteReads.filter(read => read.elapsed < holdStart).every(read => read.ineligible['remote-twin'] === null), 'before the hold the remote twin was eligible');
+  assert.ok(remoteAfter.length > 0 && remoteAfter.every(read => read.ineligible['remote-twin'] === null && read.ineligible['remote-other'] === null), 'both return at the reset');
+  // GY-1581: this host's ordinary probe of its own accounts is folded into the registry every cycle after the report, and
+  // never lifts it: the spent account and its shared-login twin stay held until the named reset, then both return.
+  const localBetween = limitMenuDay.localReads.filter(read => read.elapsed > holdStart && read.elapsed < releaseAt), localAfter = limitMenuDay.localReads.filter(read => read.elapsed >= releaseAt);
+  assert.ok(localBetween.length >= 60, `the local accounts were probed and judged across many cycles: ${localBetween.length}`);
+  for (const read of localBetween) {
+    assert.ok(read.ineligible[`account-${spentProfile}`]?.startsWith(`account-${spentProfile} quota is exhausted until ${resetsAt}`), `at ${read.elapsed}: ${read.ineligible[`account-${spentProfile}`]}`);
+    assert.ok(read.ineligible[`account-${twin}`]?.startsWith(`account-${twin} quota is exhausted until ${resetsAt}: it is the same provider login as account-${spentProfile}`), `at ${read.elapsed}: ${read.ineligible[`account-${twin}`]}`);
+    assert.equal(read.ineligible['account-three'], null, 'the other subscription stays eligible');
+  }
+  assert.ok(localAfter.length > 0 && localAfter.every(read => Object.values(read.ineligible).every(reason => reason === null)), `the spent account and its twin return at the reset: ${JSON.stringify(localAfter[0])}`);
+  // GY-1581: a guessed session hold, resent by its host on every selection after the sibling's probe and so always the plan's newest
+  // observation, holds only its own account: the healthy sibling on a third host stays eligible every cycle of the guessed hour.
+  const guessedBetween = limitMenuDay.guessedReads.filter(read => read.elapsed >= hour && read.elapsed < 2 * hour);
+  assert.ok(guessedBetween.length >= 30, `the guessed hold was resent across many cycles: ${guessedBetween.length}`);
+  for (const read of guessedBetween) {
+    assert.ok(read.ineligible['guessed-spent']?.startsWith(`guessed-spent quota is exhausted until ${read.until}`), `at ${read.elapsed}: ${read.ineligible['guessed-spent']}`);
+    assert.equal(read.ineligible['guessed-sibling'], null, `the sibling on the plan stays eligible at ${read.elapsed}`);
+  }
+  assert.ok(limitMenuDay.guessedReads.filter(read => read.elapsed >= 2 * hour).every(read => read.ineligible['guessed-spent'] === null && read.ineligible['guessed-sibling'] === null), 'both are free once the guessed hour ends');
 }
