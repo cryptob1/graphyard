@@ -1,9 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { mkdir, rm } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { ChildProcessError } from '../src/child-runner.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
@@ -15,6 +13,7 @@ import type { RunOptions, RunResult, Runner } from '../src/runner/types.js';
 import type { AcceptanceEffects } from '../src/daemon/acceptance.js';
 import type { PlannerEffects } from '../src/daemon/planner.js';
 import type { Principal } from '../src/model.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
  * GY-1661: the goal pipeline's outright refusals over two simulated days of the real loop's cycles,
@@ -58,7 +57,7 @@ test('unit:soak-invariants-hold — over two days goal steps GitHub or the contr
     },
   };
   let pendingDraft: unknown = null;
-  const scratch = await mkdtemp(join(tmpdir(), 'soak-gy-1661-'));
+  const scratch = await temporaryDirectory('soak-gy-1661');
   const child = async (command: string, args: string[]) => {
     if (command === 'git' && args.includes('worktree') && args.includes('add')) { await mkdir(args[args.length - 2]!, { recursive: true }); return ''; }
     if (command === 'git' && args.includes('rev-parse')) return `${'c'.repeat(40)}\n`;

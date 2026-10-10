@@ -2,10 +2,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { recordGoal, type Goal } from '../src/model/goal.js';
+import { mkdir, rm } from 'node:fs/promises';
+import { applyGoalCommand, recordGoal, type Goal } from '../src/model/goal.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { ReconciliationRetry, Refusal, RefusedResponse } from '../src/model/refusal.js';
 import type { AcceptanceEffects } from '../src/daemon/acceptance.js';
 import type { PlannerEffects } from '../src/daemon/planner.js';
@@ -86,7 +85,7 @@ test('unit:goal-pipeline-outright-refusals — an acceptance draft whose gh pull
     const goal = recordGoal({ statement: 'Customers can read the board', users: ['Customers'], constraints: [], deployTarget: 'uat then production' }, `GOAL-GH-${status}-${command}`, { actor: master, at: new Date().toISOString() });
     let runs = 0, opens = 0;
     // The real open path, whose git and gh calls answer as GitHub refusing the push (git) or the pull request (gh).
-    const scratch = await mkdtemp(join(tmpdir(), 'gy-1661-open-'));
+    const scratch = await temporaryDirectory('gy-1661-open');
     const child = async (cmd: string, args: string[]) => {
       if (cmd === 'git' && args.includes('worktree') && args.includes('add')) { await mkdir(args[args.length - 2]!, { recursive: true }); return ''; }
       if (cmd === 'git' && args.includes('rev-parse')) return `${'c'.repeat(40)}\n`;
@@ -209,6 +208,58 @@ test('unit:goal-pipeline-outright-refusals — a plan release refused with 401, 
     assert.equal(releases.length, 1, `a release refused with ${status} is not asked again every ten minutes`);
     await step(planRetryMs - 50 * 60_000);
     assert.equal(releases.length, 2, 'it is asked again once planRetryMs has passed');
+  }
+  clearPlans();
+});
+
+test('unit:goal-pipeline-outright-refusals — a plan whose post is refused with 401, 403 or 409 is kept and posted again after planRetryMs, never recorded as invalid; a 422 is a refused plan round', async () => {
+  const { clearPlans, plannerStep, planRetryMs, plansSettled, planStepRetryMs, planTool } = await loop();
+  const planAuthor: Principal = { id: 'refusal-planner', role: 'operator-agent', sessionKind: 'ai' } as Principal;
+  const approver: Principal = { id: 'refusal-approver', role: 'admin', sessionKind: 'ai' } as Principal;
+  const item = (ref: string, outcomes: string[], plannedFiles: string[]) => ({ ref, title: `Build ${ref}`, description: `The ${ref} part`, type: 'feature' as const, priority: 2, outcomes,
+    cases: outcomes.map(id => `${id}-case`), criteria: [{ id: 'AC-1', text: `${ref} works`, proofs: ['unit:planned-behaviour'] }], plannedFiles, dependsOn: [] as string[] });
+  for (const status of [401, 403, 409, 422]) {
+    clearPlans();
+    const at = new Date().toISOString();
+    let goal = recordGoal({ statement: 'Customers can sign up', users: ['Customers'], constraints: [], deployTarget: 'uat then production' }, `GOAL-P${status}`, { actor: master, at });
+    goal = applyGoalCommand(goal, 'draft', { outcomes: [{ id: 'signup', title: 'A customer can sign up', criteria: ['The signup page answers'], case: caseOf('signup-case') }], pr: 1, branch: `graphyard/goal-p${status}`, head: 'a'.repeat(40) }, { actor: planAuthor, at });
+    goal = applyGoalCommand(goal, 'approve', { reason: 'Right' }, { actor: approver, at });
+    goal = applyGoalCommand(goal, 'merged', { pr: 1, mergeSha: 'b'.repeat(40) }, { actor: master, at });
+    const plan = { goal: goal.key, note: 'Node server, one module per outcome under src/, deployed by the release pipeline.', items: [item('signup', ['signup'], ['src/signup.ts'])] };
+    let launches = 0;
+    const posts: number[] = [], invalids: string[] = [];
+    const fx: PlannerEffects = {
+      settings: diagnosticianSettings({}), cwd: root,
+      goals: async () => [goal],
+      runner: async (_role, attempt) => { launches++; return { runner: stubRunner(() => plan), runtime: 'stub', model: attempt }; },
+      plan: async () => { posts.push(clock); throw refused(status); },
+      invalid: async (target, reason) => { invalids.push(reason); return target; },
+      judge: async target => target, release: async target => target, deliver: async target => target,
+    };
+    const state = emptyDaemonState(config);
+    let clock = Date.parse('2026-10-10T00:00:00Z');
+    const step = async (advance: number) => {
+      clock += advance;
+      await plannerStep({ config, state, effects: { planner: fx, persist: async () => {} }, now: () => clock, clock, snapshot: { work: [] }, performed: [], isolate: async (_k: string, _i: unknown, _n: string, body: () => Promise<unknown>) => body() } as unknown as Cycle);
+      await plansSettled();
+    };
+    await step(60_000); await step(60_000);
+    assert.equal(launches, 1, `${planTool} ran once`);
+    assert.equal(posts.length, 1);
+    const detail = state.actions[`planner:${goal.id}`].detail;
+    if (status === 422) {
+      assert.equal(invalids.length, 1, 'a plan the control plane rejects as input is a refused plan round');
+      assert.match(detail, /refused before approval: Graphyard refused goals \(422\)/);
+      continue;
+    }
+    assert.deepEqual(invalids, [], `a ${status} is not recorded as an invalid plan with the same refused credential`);
+    assert.match(detail, new RegExp(`The plan for ${goal.key} could not be recorded: Graphyard refused goals \\(${status}\\).*refused it outright, so it is posted again in an hour`));
+    for (let minutes = 0; minutes < 50; minutes += 10) await step(planStepRetryMs);
+    assert.equal(posts.length, 1, `a post refused with ${status} is not retried every ten minutes`);
+    assert.equal(launches, 1, 'the plan is kept, not planned again');
+    await step(planRetryMs - 50 * 60_000);
+    assert.equal(posts.length, 2, 'the kept plan is posted again once planRetryMs has passed');
+    assert.equal(launches, 1);
   }
   clearPlans();
 });
