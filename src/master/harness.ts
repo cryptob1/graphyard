@@ -1,12 +1,13 @@
 // Concern: session and worker harness permissions, and starting the master session.
 import { lstat, mkdir } from 'node:fs/promises';
-import { mkdirSync, readdirSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { dirname, resolve, basename } from 'node:path';
 import { type ChildRun, defaultChildRun } from '../child-runner.js';
 import { nameForLaunch } from '../session-name.js';
 import { executorUnitDirectory, launchAuthorization } from '../repository-setup.js';
 import { type HarnessHook, type HarnessPlan, type HarnessRule, writeHarnessPermissions, mergeHarnessHooks, masterHarnessPlan, harnessDecision, claudeRuleProblem, bashRuleMatches } from '../harness.js';
-import { executorInstance, legacyLoopUnit, readInstallUnits } from '../install/units.js';
+import { executorInstance, foreignUnitText, initialiseUnitsCommand, installUnitsFile, type InstallUnits, LegacyUnitRefusal, legacyLoopUnit, readInstallUnits, unitCheckout } from '../install/units.js';
 import type { Work } from '../model.js';
 import type { MasterConfig, WorkerProfile } from './profiles.js';
 import { coordinatorCheckoutRoot, promotionCommand, workerConfinementRefusal } from './profiles.js';
@@ -363,6 +364,61 @@ const autonomyDeny = (credentialHome: string): HarnessRule[] => [
   { rule: 'Bash(*GRAPHYARD_APPROVER=*)', why: 'Only a launched approver session carries the approver marker; the master never claims it.' },
   { rule: `Edit(//${credentialHome}/**)`, why: 'Agent credentials are issued by onboarding and rotated through the API, never edited in place.' },
 ];
+/** Thrown when the checkout a harness apply resolved is not one it may apply against (GY-1662); `unit` is the unit file to update, when one names the right checkout elsewhere. */
+export class HarnessCheckoutRefusal extends Error {
+  override readonly name = 'HarnessCheckoutRefusal';
+  constructor(readonly root: string, readonly unit: string | null, detail: string) { super(detail); }
+}
+/**
+ * GY-1662: the checkout the loop applies the Claude harness contract against, checked before any
+ * write. A loop's research effect names its scratch worktree, which records no units, so an apply
+ * resolved from it met the legacy unit refusal every cycle; the loop's own checkout is what it
+ * applies against. ROOT is refused, naming it and the `master init` remedy, when it records no units
+ * (naming too the legacy unit that runs another checkout, when one does); and when the unit serving this loop (SERVINGUNIT, in
+ * UNITDIRECTORY) runs a checkout other than ROOT, cannot be read, or is not the master unit ROOT
+ * records, naming that unit to update rather than applying against the wrong checkout.
+ */
+/**
+ * The checkout a master unit with no WorkingDirectory launches, when it is not ROOT (GY-1662):
+ * foreignUnitText reads a master unit's checkout only from its WorkingDirectory, so one that omits
+ * it and runs another checkout's bin/graphyard.mjs passed. Without a WorkingDirectory the CLI its
+ * ExecStart runs is the only evidence of the checkout, so one naming no CLI under ROOT is refused;
+ * a unit whose WorkingDirectory is ROOT may run an external launcher (a private CLI path).
+ */
+function launchedCheckout(text: string, root: string, home: string): string | null {
+  const { workingDirectory, execStart } = unitCheckout(text, home);
+  if (workingDirectory) return null;
+  const real = (path: string) => { const absolute = resolve(path); try { return realpathSync(absolute); } catch { return absolute; } };
+  const cli = execStart?.split(/\s+/).map(part => part.replace(/^"|"$/g, '')).find(part => /\/bin\/graphyard\.mjs$/.test(part));
+  if (!cli) return `a command with no WorkingDirectory and no ${root}/bin/graphyard.mjs in its ExecStart (${execStart ?? 'none'})`;
+  const checkout = dirname(dirname(cli));
+  return real(checkout) === real(root) ? null : checkout;
+}
+export function harnessApplyCheckout(root: string, options: { servingUnit?: string | null; unitDirectory?: string; home?: string } = {}) {
+  const unitDirectory = options.unitDirectory ?? executorUnitDirectory(), home = options.home ?? homedir();
+  let units: InstallUnits;
+  try { units = readInstallUnits(root, unitDirectory, home); }
+  catch (error) {
+    if (!(error instanceof LegacyUnitRefusal)) throw error;
+    throw new HarnessCheckoutRefusal(root, error.unitPath, `The harness contract was not applied: ${root} records no units (${installUnitsFile} is absent) and the legacy unit ${error.unitPath} runs another checkout (${error.checkout}). Run ${initialiseUnitsCommand} in ${root} to record its own units, or update ${error.unitPath} if ${root} is the checkout it should run`);
+  }
+  // The legacy alias readInstallUnits falls back to is no proof ROOT is this install's checkout: with no serving unit detected, a separate launcher checkout would pass and receive the managed repository's plan.
+  if (!existsSync(resolve(root, installUnitsFile))) throw new HarnessCheckoutRefusal(root, null, `The harness contract was not applied: ${root} records no units (${installUnitsFile} is absent), so it is not established that it is this install's checkout. Run ${initialiseUnitsCommand} in ${root} to record its own units`);
+  if (options.servingUnit) {
+    const path = resolve(unitDirectory, options.servingUnit);
+    // Only an absent unit file names no checkout; one that exists but cannot be read cannot show it runs ROOT, so it is refused.
+    let text: string | null = null;
+    try { text = readFileSync(path, 'utf8'); }
+    catch (error) {
+      const code = (error as NodeJS.ErrnoException | null)?.code;
+      if (code !== 'ENOENT') throw new HarnessCheckoutRefusal(root, path, `The harness contract was not applied: the unit serving this loop, ${path}, could not be read (${code ?? (error instanceof Error ? error.message : String(error))}), so it is not established that it runs ${root}, the checkout this apply targets. Make ${path} a readable unit file that runs ${root}, then systemctl --user daemon-reload and restart it`);
+    }
+    const other = text === null ? null : foreignUnitText(text, root, home) ?? launchedCheckout(text, root, home);
+    if (other) throw new HarnessCheckoutRefusal(root, path, `The harness contract was not applied: the unit serving this loop, ${path}, runs ${other}, not ${root}, the checkout this apply targets. Update ${path} (its WorkingDirectory and ExecStart) to run ${root}, then systemctl --user daemon-reload and restart it, rather than apply against the wrong checkout`);
+    if (options.servingUnit !== units.master) throw new HarnessCheckoutRefusal(root, path, `The harness contract was not applied: the unit serving this loop, ${options.servingUnit}, is not the master unit ${root} records (${units.master} in ${installUnitsFile}), so the contract built from the recorded units would misclassify the unit actually serving it. Serve the loop from ${units.master}, or record ${options.servingUnit} as the master unit in ${root}/${installUnitsFile} if it is this checkout's own`);
+  }
+  return { root, units };
+}
 export function masterHarness(root: string, config: MasterConfig, harness: string, options: { unitDirectory?: string } = {}) {
   const credentialHome = dirname(dirname(config.credentialFile));
   const plan = withMasterOwnedRules(masterHarnessPlan({ harness, root, cliPath: config.cliPath, repository: config.repository, baseBranch: config.baseBranch, credentialHome }), config, root, options.unitDirectory ?? executorUnitDirectory());

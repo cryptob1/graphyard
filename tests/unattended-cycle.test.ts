@@ -14,6 +14,7 @@ import { containmentSettleWaitBoundMs } from '../src/model/containment.js';
 import type { Work } from '../src/model.js';
 import { decideScopeRequest } from '../src/model/scope.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { installUnitsFile, perInstallUnits } from '../src/install/units.js';
 import { cappedEscalationKey, cappedFilingKey } from '../src/daemon/cycle-review-cap.js';
 import { observedReviewBody } from '../src/review-cap.js';
 
@@ -561,7 +562,11 @@ test('integration:no-actionable-silence — every cycle records what it could ac
   const simulation = plane([{ key: 'GY-400', rounds: ['pass'] }]);
   // A two-minute cycle, so cycling every two simulated minutes is a healthy loop rather than a
   // stalled one: this proof is about silence in the work, not about the loop's own liveness.
-  const master = config({ workers: [profile('claude-a')], run: { intervalSeconds: 120 } });
+  // The loop runs from a fixture checkout that records its units, so the harness remedy validates it and, with no Claude settings installed, has nothing to journal (GY-1662).
+  const recorded = await temporaryDirectory('silence-checkout');
+  await mkdir(join(recorded, '.graphyard'), { recursive: true });
+  await writeFile(join(recorded, installUnitsFile), JSON.stringify(perInstallUnits('owner/project')));
+  const master = config({ cliPath: join(recorded, 'bin/graphyard.mjs'), workers: [profile('claude-a')], run: { intervalSeconds: 120 } });
   const state = emptyDaemonState(master);
   // The one worker profile has no usable credential, so nothing can claim the ready item: the
   // pipeline has something actionable and no way to act on it, which is exactly the silence GY-84

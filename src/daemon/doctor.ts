@@ -1,6 +1,8 @@
 // Concern: the pipeline doctor (GY-711) — the loop's ten-minute remedy worker, and the
 // deterministic remedies the loop applies itself without an agent.
 import { createHash } from 'node:crypto';
+import { existsSync } from 'node:fs';
+import { resolve } from 'node:path';
 import type { Work } from '../model.js';
 import { createSchema } from '../model.js';
 import { isClosed } from '../model/closure.js';
@@ -11,6 +13,8 @@ import { workerSubmissionBoundMs } from '../model/attempt-bound.js';
 import { scopeRefusalBlocker, unplannedPaths } from '../model/scope.js';
 import { approverSessionName, guardBroadScope } from '../master/autonomy.js';
 import { containmentPhase, masterHarness, type MasterConfig } from '../master.js';
+import { HarnessCheckoutRefusal, harnessApplyCheckout } from '../master/harness.js';
+import { coordinatorCheckoutRoot } from '../master/profiles.js';
 import { harnessDrift, writeHarnessPermissions } from '../harness.js';
 import { selectFleetSession } from '../fleet.js';
 import { heldAwareProbe } from '../master/environments.js';
@@ -716,26 +720,46 @@ export const decisionCheckMs = 2 * 60_000;
  * (GY-888), so its repair always met EROFS and the row recurred every pass. The loop owns the file:
  * whenever the installed settings differ from the plan it makes the same idempotent write
  * `master harness claude --apply` makes — operator-added entries kept, only retired generated rules
- * removed — and journals one line. It runs on the checkout the doctor reads, which is the loop's
- * own. The checkout is named by the loop's research effect, which every loop carries, not by the
- * doctor's: a loop with no operator-agent identity or with the doctor off still owns its checkout,
- * and its own cycle is then the only recurring reader that would heal host-derived drift.
+ * removed — and journals one line. It runs on the loop's own checkout, the one its CLI runs from
+ * (coordinatorCheckoutRoot, the doctor's checkout as fallback; GY-1662), never research's, which
+ * runDaemon rewrites to the research scratch worktree: that worktree records no units, so on a host
+ * whose legacy unit runs another checkout every cycle met the legacy unit refusal. A loop with no operator-agent identity or with the doctor off still owns
+ * its checkout, and its own cycle is then the only recurring reader that would heal host-derived drift.
+ * A checkout it may not apply against (harnessApplyCheckout) waits on the remedy it names, journaled once.
  * A failure is journaled once per distinct cause and retried every cycle; a repeat of the same cause
  * moves the standing row's time, so the failure stays open for as long as it lasts.
  */
+/** The settings file the Claude harness contract is written to, relative to the checkout (masterHarnessPlan's file). */
+const claudeSettingsFile = '.claude/settings.local.json';
+
 export async function applyHarnessContract(cycle: Cycle) {
   const { state, effects, now, performed, config, isolate } = cycle;
-  const root = effects.research?.cwd ?? effects.doctor?.cwd;
-  if (!root) return;
+  // GY-1662: the loop's managed checkout (its CLI's), never the research scratch worktree runDaemon rewrites research's cwd to.
+  const root = (config.cliPath ? coordinatorCheckoutRoot(config.cliPath) : null) ?? effects.doctor?.cwd;
+  // A root that does not exist is no checkout at all (a configuration whose CLI path names no files): nothing to validate or write.
+  if (!root || !existsSync(root)) return;
   await isolate('config', null, 'harness contract', async () => {
     const key = remedyKey('harness', 'claude'), previous = state.actions[key], attempts = (previous?.attempts ?? 0) + 1;
     try {
-      const plan = masterHarness(root, config, 'claude');
-      if (!await harnessDrift(root, plan)) return;
+      // Every resolved checkout is validated first, settings installed or not: one that records no units waits on master init (GY-1662).
+      harnessApplyCheckout(root, { servingUnit: effects.harness?.servingUnit, unitDirectory: effects.harness?.unitDirectory });
+      // A validated checkout with no Claude settings installed has nothing to apply (harnessDrift is null without the file).
+      const plan = existsSync(resolve(root, claudeSettingsFile)) ? masterHarness(root, config, 'claude') : null;
+      if (!plan || !await harnessDrift(root, plan)) {
+        // A refusal the operator's remedy has cleared, or a failure the checkout recovered from, closes once the contract already holds (GY-1662).
+        if (previous && previous.state !== 'done') performed.push(await record(state, key, { kind: 'config', work: null, principal: null, state: 'done', detail: plan ? `The Claude harness contract already holds for ${root}: the earlier ${previous.state} row is resolved with nothing to apply` : `No Claude harness settings are installed under ${root} (${claudeSettingsFile}): the earlier ${previous.state} row is resolved with nothing to apply`, attempts, cycle: state.cycle }, now(), effects.persist));
+        return;
+      }
       const written = await writeHarnessPermissions(root, plan, true);
       const changed = [...written.removed.map(entry => `removed stale ${entry.list} ${entry.rule}`), ...written.added.map(entry => `added ${entry.list} ${entry.rule}`)].join(', ');
       performed.push(await record(state, key, { kind: 'config', work: null, principal: null, state: 'done', detail: `Applied the Claude harness contract to ${written.file} from the loop's own process, as graphyard master harness claude --apply does, keeping operator-added entries: ${changed}`.slice(0, 2000), attempts, cycle: state.cycle }, now(), effects.persist));
     } catch (error) {
+      // A checkout refusal waits on the operator's remedy, which it names: journaled once, never refreshed or retried as a fault, until its cause changes.
+      if (error instanceof HarnessCheckoutRefusal) {
+        const detail = error.message.slice(0, 2000);
+        if (previous?.state !== 'waiting' || previous.detail !== detail) performed.push(await record(state, key, { kind: 'config', work: null, principal: null, state: 'waiting', detail, attempts, cycle: state.cycle }, now(), effects.persist));
+        return;
+      }
       // A filesystem refusal names its random temporary file; its code and the settings directory are the cause, stable across cycles.
       const code = (error as NodeJS.ErrnoException | null)?.code;
       const detail = `Could not apply the Claude harness contract from the loop's own process: ${code ? `${code} writing the harness settings under ${root}/.claude` : message(error)}`.slice(0, 2000);
