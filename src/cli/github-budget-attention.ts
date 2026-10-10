@@ -1,4 +1,5 @@
 import { agentOwner, type AttentionItem } from '../master.js';
+import type { WebhookDeliveryReport } from '../github.js';
 
 /**
  * Attention the GitHub request budget raises in `master status` (GY-117), read from the control
@@ -19,7 +20,10 @@ import { agentOwner, type AttentionItem } from '../master.js';
  *   outside it spend; this is raised while there is still time to act on the rest.
  * - **A silent webhook** is a broken webhook, not a slower control plane: no delivery for an hour
  *   while pull requests are open, named with the App settings page that fixes it, instead of
- *   being compensated by polling without a word.
+ *   being compensated by polling without a word. GitHub's own delivery log (`webhooks.github`,
+ *   GY-1648) decides whether the silence is the webhook's: deliveries GitHub logged since the last
+ *   receipt that the endpoint refused name the fault and GitHub's status code; a log with nothing
+ *   refused since then is a quiet repository, and raises nothing.
  */
 export interface BudgetStatus {
   githubBudget?: {
@@ -32,9 +36,17 @@ export interface BudgetStatus {
     pace?: { tier: string; perMinute: number | null } | null;
     tokens?: { token: string; current: boolean; remaining: number; resetAt: string | null; perMinute: number; otherPerMinute: number; projectedAtReset: number | null; belowReserveAtReset: boolean }[];
   } | null;
-  webhooks?: { lastDeliveryAt: string | null; lastHour: number; configured?: boolean; settingsUrl: string | null; openPullRequests: number } | null;
+  webhooks?: { lastDeliveryAt: string | null; lastHour: number; configured?: boolean; settingsUrl: string | null; openPullRequests: number; github?: WebhookDeliveryReport | null } | null;
   jobs?: { work_id: string; error: string | null }[];
 }
+
+/** What GitHub's status code for a refused delivery means, in the setting that fixes it. */
+const refusalCause = (code: number) => code === 401 ? 'the secret does not match GITHUB_WEBHOOK_SECRET'
+  : code === 503 ? 'GITHUB_WEBHOOK_SECRET is not set on the control plane'
+  : code === 403 ? 'the delivery names a repository this control plane does not manage'
+  : code === 0 ? 'GitHub could not connect: the URL is not https://YOUR-HOST/api/github/webhook or the host is down'
+  : code === 404 ? 'the URL is not https://YOUR-HOST/api/github/webhook'
+  : 'the endpoint did not accept it';
 
 /** How long a wait is, in the unit the reader thinks in. */
 const elapsed = (ms: number) => ms >= 3_600_000 ? `${Math.floor(ms / 3_600_000)}h${Math.floor(ms % 3_600_000 / 60_000)}m` : `${Math.max(0, Math.floor(ms / 60_000))}m`;
@@ -69,16 +81,28 @@ export function tokenProjectionAttention(status: BudgetStatus): AttentionItem[] 
     ...agentOwner('master', `graphyard status (githubBudget.tokens, githubBudget.lastHour) names the token and the spend by kind; the observation pace already yields to the other callers, so what is left to cut is their spend — review and producer launches, merges, the loop's own reads — until ${token.resetAt ?? 'the reset'}`) }));
 }
 
-/** No webhook delivery for an hour while pull requests are open: a broken webhook, named as one. */
+/**
+ * No webhook delivery for an hour while pull requests are open: a broken webhook, named as one.
+ * When GitHub's delivery log was read, it decides: deliveries refused since the last receipt are
+ * the fault, named with GitHub's status code; none refused (and at least one ever logged) means
+ * GitHub had nothing to send, which is no fault. An unread or empty log keeps the receipts' reading.
+ */
 export function webhookAttention(status: BudgetStatus, now: number): AttentionItem[] {
   const webhooks = status.webhooks;
   if (!webhooks || webhooks.openPullRequests === 0) return [];
   const since = webhooks.lastDeliveryAt ? now - Date.parse(webhooks.lastDeliveryAt) : null;
   if (since !== null && since < 3_600_000) return [];
+  const log = webhooks.github ?? null;
+  const read = log && !log.error ? log : null;
+  if (webhooks.configured !== false && read && read.refusedSinceReceipt === 0 && read.latestAt !== null) return [];
   const settings = webhooks.settingsUrl ?? 'https://github.com/settings/apps';
   const open = `${webhooks.openPullRequests} pull request${webhooks.openPullRequests === 1 ? ' is' : 's are'} open`;
+  const refusal = read?.lastRefusal;
+  const evidence = refusal ? `; GitHub's delivery log lists ${read!.refusedSinceReceipt} deliver${read!.refusedSinceReceipt === 1 ? 'y' : 'ies'} since then the endpoint did not accept, the latest a ${refusal.event} at ${refusal.at} answered ${refusal.statusCode || 'no response'}${refusal.status ? ` (${refusal.status})` : ''}: ${refusalCause(refusal.statusCode)}`
+    : read ? "; GitHub's delivery log lists no delivery at all, so the webhook may be inactive"
+    : log?.error ? `; GitHub's delivery log could not be read (${log.error})` : '';
   return [{ subject: 'github',
-    text: `No GitHub webhook delivery has arrived ${since === null ? 'since the control plane started' : `for ${elapsed(since)} (last at ${webhooks.lastDeliveryAt})`} while ${open}${webhooks.configured === false ? '; GITHUB_WEBHOOK_SECRET is not set, so every delivery is refused' : ''}: polling is compensating at its safety-net cadence, so the webhook is broken rather than the control plane slow`,
+    text: `No GitHub webhook delivery has arrived ${since === null ? 'since the control plane started' : `for ${elapsed(since)} (last at ${webhooks.lastDeliveryAt})`} while ${open}${webhooks.configured === false ? '; GITHUB_WEBHOOK_SECRET is not set, so every delivery is refused' : ''}${evidence}: polling is compensating at its safety-net cadence, so the webhook is broken rather than the control plane slow`,
     ...agentOwner('master', `Check the App webhook settings at ${settings} (URL https://YOUR-HOST/api/github/webhook, the secret matching GITHUB_WEBHOOK_SECRET, deliveries listed under ${settings}/advanced); a delivery that arrives clears this`) }];
 }
 

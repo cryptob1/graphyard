@@ -606,6 +606,26 @@ export function installationFingerprint(report: AppPermissionReport | null): str
   return JSON.stringify({ appId: report.appId, installationId: report.installationId, suspended: report.suspended, granted });
 }
 /** App-level endpoints authenticate with a short JWT signed by the App private key. */
+/** How long GitHub's webhook delivery log is reused before it is read again (GY-1648). */
+export const webhookDeliveryLogMs = 5 * 60_000;
+/**
+ * GitHub's delivery log read against our receipts (GY-1648): when it was read and why it could not
+ * be, its newest delivery, how many it logged after the last receipt, how many of those the
+ * endpoint did not answer 2xx, and the latest such refusal with GitHub's status code (0: no response).
+ */
+export interface WebhookDeliveryReport {
+  observedAt: string; error: string | null; latestAt: string | null;
+  sinceReceipt: number; refusedSinceReceipt: number;
+  lastRefusal: { at: string; event: string; statusCode: number; status: string } | null;
+}
+/** The report over a log of deliveries: only what GitHub logged after `lastDeliveryAt` can be a refusal of ours. */
+export function webhookDeliveryReport(log: { observedAt: string; error: string | null; deliveries: readonly { at: string; event: string; statusCode: number; status: string }[] }, lastDeliveryAt: string | null): WebhookDeliveryReport {
+  const since = lastDeliveryAt ? Date.parse(lastDeliveryAt) : -Infinity;
+  const after = log.deliveries.filter(delivery => Date.parse(delivery.at) > since);
+  const refused = after.filter(delivery => delivery.statusCode < 200 || delivery.statusCode >= 300).sort((a, b) => Date.parse(b.at) - Date.parse(a.at));
+  const latestAt = log.deliveries.reduce<string | null>((newest, delivery) => newest === null || Date.parse(delivery.at) > Date.parse(newest) ? delivery.at : newest, null);
+  return { observedAt: log.observedAt, error: log.error, latestAt, sinceReceipt: after.length, refusedSinceReceipt: refused.length, lastRefusal: refused[0] ? { ...refused[0] } : null };
+}
 export function appJwt(appId: number, privateKey: string, now = Date.now()) {
   const issued = Math.floor(now / 1000);
   const encode = (x: unknown) => Buffer.from(JSON.stringify(x)).toString('base64url');
@@ -840,6 +860,34 @@ export class GitHub {
   webhookSettingsUrl() {
     const slug = this.preflightState?.verifiedAt && this.preflightState.app !== String(this.config.appId) ? this.preflightState.app : this.appSlug;
     return slug ? `https://github.com/settings/apps/${encodeURIComponent(slug)}` : 'https://github.com/settings/apps';
+  }
+  private deliveryLog: { at: number; log: { observedAt: string; error: string | null; deliveries: { at: string; event: string; statusCode: number; status: string }[] } } | null = null;
+  /**
+   * GitHub's own log of the App webhook's recent deliveries, judged against the last receipt
+   * (GY-1648). It is the authority on whether GitHub sent anything and what the endpoint answered:
+   * our receipts alone cannot tell a quiet repository from a broken webhook, since an hour without
+   * one is both. Read with the App JWT (its own allowance, never the installation budget), at most
+   * once per five minutes, and never throws: an unreadable log says why in `error`.
+   */
+  async webhookDeliveries(lastDeliveryAt: string | null, now = Date.now()): Promise<WebhookDeliveryReport> {
+    if (!this.deliveryLog || now - this.deliveryLog.at >= webhookDeliveryLogMs) {
+      let log: NonNullable<GitHub['deliveryLog']>['log'];
+      try {
+        demand(now >= this.blockedUntil, `GitHub requests paused until ${new Date(this.blockedUntil).toISOString()} after a rate limit`, 502);
+        const response = await this.fetch('https://api.github.com/app/hook/deliveries?per_page=50', { headers: this.appHeaders(), signal: AbortSignal.timeout(5_000) });
+        this.record('/app/hook/deliveries', response, false);
+        const refused = await this.refusal(response, 'GET /app/hook/deliveries');
+        if (refused) throw refused;
+        const rows: unknown = await response.json();
+        demand(Array.isArray(rows), 'GitHub returned no delivery list', 502);
+        log = { observedAt: new Date(now).toISOString(), error: null, deliveries: rows.filter((row: any) => typeof row?.delivered_at === 'string' && Number.isFinite(Date.parse(row.delivered_at)))
+          .map((row: any) => ({ at: new Date(row.delivered_at).toISOString(), event: String(row.event ?? ''), statusCode: Number.isInteger(row.status_code) ? row.status_code : 0, status: String(row.status ?? '') })) };
+      } catch (error) {
+        log = { observedAt: new Date(now).toISOString(), error: error instanceof Error ? error.message : String(error), deliveries: [] };
+      }
+      this.deliveryLog = { at: now, log };
+    }
+    return webhookDeliveryReport(this.deliveryLog.log, lastDeliveryAt);
   }
   /** The live budget: what is left, how fast it is going, and what the control plane is doing about it. */
   budget(now = Date.now()): GitHubBudget {
