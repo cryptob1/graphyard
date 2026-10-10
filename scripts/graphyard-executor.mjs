@@ -174,6 +174,7 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
     // Only a coordinator host can run an executor at all: without master.json every unit this
     // enables would fail on start and be restarted every ten seconds.
     await m.loadMasterConfig(root);
+    const installed = await s.installExecutorSupervision(root, { ...(options.count !== null ? { count: options.count } : {}), ...(options.kinds ? { kinds: options.kinds } : {}), ...(options.intervalSeconds !== null ? { intervalSeconds: options.intervalSeconds } : {}) });
     const templatePath = existsSync(resolve(root, 'examples/master', s.executorUnitTemplate))
       ? resolve(root, 'examples/master', s.executorUnitTemplate)
       : resolve(new URL('../examples/master', import.meta.url).pathname, s.executorUnitTemplate);
