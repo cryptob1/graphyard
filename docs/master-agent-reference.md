@@ -37,18 +37,18 @@ Dead supervisor fences item; `containment` lists survivors' pid, cmdline and cwd
 
 ### Producer-runtime faults
 
-Unacted producer requests (unstarted, refused, exited at launch) relaunch on untried profile, no rework.
+Unacted producer requests (unstarted, refused, launch-exited) relaunch on untried profile, unreworked.
 
 ## Fault classes
 
-`faultClass` (`master status` `faults`): recurring classes file one item each; instances predating a delivered class item's landing (not opening) link there; triage proposes closing items holding only those, withdrawn on post-landing links; a resource at bound files `resource:ID`; also `fleet-capacity`, `unanswered-request` (past `settledAnswerGraceMs`), `configuration`, `decision-unanswered` (not `loop-silence`), and `unclassified` unless named (`plane-unavailable`, `fix-item`, `decision-stale`, `overlong-session`). Review unlaunched 15min: `concurrency-starved`, `review-settlement`, `launch-review`. Unanswering planes: `plane-unavailable`; `planeWaitMs` (control-plane time) is neither `loop-cost` nor `cycle-p90`. Pre-start launch failures: one dispatch fault, not `session`.
+`faultClass` (`master status` `faults`): recurring classes file one item each; instances predating a delivered class item's landing (not opening) link there; triage proposes closing items holding only those, withdrawn on post-landing links; a resource at bound files `resource:ID`; also `fleet-capacity`, `unanswered-request` (past `settledAnswerGraceMs`), `configuration`, `decision-unanswered` (not `loop-silence`), and `unclassified` unless named (`plane-unavailable`, `fix-item`, `decision-stale`, `overlong-session`). Review unlaunched 15min: `concurrency-starved`, `review-settlement`, `launch-review`. Unanswering planes: `plane-unavailable`; `planeWaitMs` (control-plane time) is neither `loop-cost` nor `cycle-p90`. Pre-start launch failures: one dispatch fault, not `session`. `/tmp` pass: stale any-name-checkouts+`/tmp/opencode/*`, per-class-counted.
 
 ## Shadow merge gate
 
-`run.shadowGate` (defaults: `enabled` true, `timeoutMinutes` 20): each cycle trial-merges, builds, affected-tests the oldest untried head credential-free in an empty, sticky, tmp-reclaimed `TMPDIR` (`gy-t*`), pushing nothing; `shadow.verdict` (failing: runner-ran files; 4000-character summary-keeping `logTail`) joins GitHub's outcome in `master status` `shadowGate` (`shadow-only-fail`/`shadow-missed`: one line each naming its failing test, shared-tmp contamination or missing evidence); errors, timeouts, mid-trial poisoning record nothing; third timeout, one line. `GET /api/shadow-disagreements`, `/api/shadow-explanations?pair=KEY:HEAD:BASETIP` (≤50).
+`run.shadowGate` (defaults: `enabled` true, `timeoutMinutes` 20): each cycle trial-merges, builds, affected-tests the oldest untried head credential-free in an empty, sticky, tmp-reclaimed `TMPDIR` (`gy-t*`), pushing nothing; `shadow.verdict` (failing: runner-ran files; 4000-character summary-keeping `logTail`) joins GitHub's outcome in `master status` `shadowGate` (`shadow-only-fail`/`shadow-missed`: one line each naming its failing test, shared-tmp contamination or missing evidence); errors, timeouts, mid-trial poisoning record nothing; third timeout: one line. `GET /api/shadow-disagreements`, `/api/shadow-explanations?pair=KEY:HEAD:BASETIP` (≤50).
 
 ## Pipeline speed
 
-Target (10+ deliveries): submit→merge p50 ≤30 minutes, p90 ≤60 minutes. Row `speed`: `executionMs`, `waitMs`, `reworkRounds`, `interventions`; verdict `speed.submitToMerge`; `node scripts/measure-pipeline-speed.mjs` records what `manual:speed-target-met` reads.
+Target (10+ deliveries): submit→merge p50 ≤30min, p90 ≤60min. Row `speed`: `executionMs`, `waitMs`, `reworkRounds`, `interventions`; verdict `speed.submitToMerge`; `node scripts/measure-pipeline-speed.mjs` records what `manual:speed-target-met` reads.
 
 Loop's decisions step stays within 10 s a cycle: one `decision.*` ledger read names moved items; a history whose ledger has not moved is kept, not read. Widenings refused by 5xx or stale revision and timed-out decision history reads retry next cycle (twice: fault) unless moot (delivered, answered, lease ended, head moved).
