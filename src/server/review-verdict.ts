@@ -166,7 +166,7 @@ export async function recordReviewVerdict(services: Services, actor: Principal, 
         work!.formalReviewBaseline = {
           pr: work!.candidate.pr,
           policyRevision: work!.policyRevision,
-          reviewIds: (observation.reviews ?? []).map(r => r.id).filter((id): id is number => Number.isSafeInteger(id) && id > 0)
+          reviewIds: (observation.reviews ?? []).map(r => r.id).filter((id): id is number => typeof id === 'number' && Number.isSafeInteger(id) && id > 0)
         };
       }
       observation.reviews = [...(observation.reviews ?? []), { reviewer: launch!.reviewer, sha: data.sha, state, id: reviewId, submittedAt, body: data.body, ...(state === 'CHANGES_REQUESTED' ? { blocking: blockingFindings(data.body) } : {}), source: 'control-plane' } as (typeof observation.reviews)[number]];

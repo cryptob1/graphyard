@@ -852,7 +852,7 @@ export class Engine {
     });
     if (work.observation?.reviews) {
       observation.reviews = [...work.observation.reviews];
-      observation.reviewIds = observation.reviews.map(r => r.id).filter((id): id is number => Number.isSafeInteger(id) && id > 0);
+      observation.reviewIds = observation.reviews.map(r => r.id).filter((id): id is number => typeof id === 'number' && Number.isSafeInteger(id) && id > 0);
     } else {
       observation.reviews = [];
       observation.reviewIds = [];
