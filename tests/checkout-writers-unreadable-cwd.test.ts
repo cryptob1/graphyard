@@ -5,7 +5,7 @@ import fs, { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkS
 import { join } from 'node:path';
 import { syncBuiltinESMExports } from 'node:module';
 import * as writers from '../src/cli/checkout-writers.js';
-import { checkoutWriterProcesses, freezeCheckoutWriters } from '../src/cli/checkout-writers.js';
+import { checkoutWriterProcesses, freezeCheckoutWriters, processStateOf } from '../src/cli/checkout-writers.js';
 import { checkoutRestoreRefPrefix, restoreCoordinatorCheckout } from '../src/cli/master-checkout-restore.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -71,6 +71,25 @@ test('unit:checkout-writers-unreadable-cwd — a process of this user whose cwd 
   assert.match(scan.unverifiable[0].error, /EINVAL/);
   assert.match(scan.unverifiable[1].error, /live thread 421's cwd cannot be read either/);
   fs.readlinkSync = readlink; syncBuiltinESMExports();
+
+  // The freeze stops that zombie leader's live sibling rather than reading the leader as gone: SIGSTOP
+  // to the leader's pid stops the whole group, and the group shows stopped only once that thread does.
+  assert.equal(processStateOf(410, proc), 'S', 'a zombie leader with a live thread is judged by that thread');
+  assert.equal(processStateOf(430, proc), 'Z', 'a zombie leader with no live thread is gone');
+  const groupSent: string[] = [];
+  const stopGroup = (pid: number, name: NodeJS.Signals) => {
+    groupSent.push(`${name}:${pid}`);
+    if (pid === 410) writeFileSync(join(proc, '410', 'task', '411', 'stat'), `411 (proc 410) ${name === 'SIGSTOP' ? 'T' : 'S'} 1 410 410 0 -1 4194560\n`);
+  };
+  const frozen = await freezeCheckoutWriters(root, { scan: () => [410], signal: stopGroup, state: pid => processStateOf(pid, proc), pollMs: 1 });
+  assert.deepEqual(frozen.pids, [410]); assert.equal(processStateOf(410, proc), 'T', 'the live sibling is stopped for the restore');
+  frozen.thaw();
+  assert.deepEqual(groupSent, ['SIGSTOP:410', 'SIGCONT:410']);
+  // A sibling that never shows stopped refuses the freeze, with what it stopped continued again.
+  groupSent.length = 0;
+  await assert.rejects(freezeCheckoutWriters(root, { scan: () => [410], signal: (pid, name) => { groupSent.push(`${name}:${pid}`); }, state: pid => processStateOf(pid, proc), settleMs: 20, pollMs: 1 }), /writer\(s\) 410 did not stop.*nothing was restored/);
+  assert.deepEqual(groupSent, ['SIGSTOP:410', 'SIGCONT:410']);
+
   for (const pid of ['800', '410', '420', '430']) rmSync(join(proc, pid), { recursive: true, force: true });
   assert.throws(() => checkoutWriterProcesses(root, 100, proc, uid), /pid 200 \(EINVAL[^)]*\) cannot be read.*nothing was restored/);
   // Another user's process is not this user's to judge.

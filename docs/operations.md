@@ -33,7 +33,7 @@ Never attest a stop you have not confirmed; merged work changes only via follow-
 
 ## Worker host keyring proxy
 
-Confined masters, approvers, producers read GitHub login (`gh auth git-credential`) via a keyring-only D-Bus proxy; workers, reviewers use their own. Per host: copy `deploy/systemd/graphyard-secrets-bus.socket`, `graphyard-secrets-bus.service`, `graphyard-secrets-bus-filter.service`, then `systemctl --user enable --now graphyard-secrets-bus.socket`. Listens at `$XDG_RUNTIME_DIR/graphyard-secrets-bus` (or `GRAPHYARD_SECRETS_BUS`); absent, sessions push with `GH_TOKEN`.
+Confined masters, approvers, producers read GitHub login (`gh auth git-credential`) via a keyring-only D-Bus proxy; workers and reviewers use their own. Per host: copy `deploy/systemd/graphyard-secrets-bus.socket`, `graphyard-secrets-bus.service`, `graphyard-secrets-bus-filter.service`, then `systemctl --user enable --now graphyard-secrets-bus.socket`. Listens at `$XDG_RUNTIME_DIR/graphyard-secrets-bus` (or `GRAPHYARD_SECRETS_BUS`); absent, sessions push with `GH_TOKEN`.
 
 ## Safety facts that never change
 

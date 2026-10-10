@@ -105,12 +105,30 @@ function zombieLeader(proc: string, name: string, reason: string): { cwd: string
   }
   return { cwd: null, error };
 }
-/** A process's state letter from /proc (R, S, D, T, t, Z, …), or null when it is gone. */
-export function processStateOf(pid: number, proc = '/proc'): string | null {
-  try { const stat = readFileSync(join(proc, String(pid), 'stat'), 'utf8'); return stat.slice(stat.lastIndexOf(')') + 2, stat.lastIndexOf(')') + 3) || null; } catch { return null; }
-}
 const gone = (state: string | null) => state === null || state === 'Z' || state === 'X';
 const stoppedState = (state: string | null) => state === 'T' || state === 't';
+const stateLetter = (stat: string) => stat.slice(stat.lastIndexOf(')') + 2, stat.lastIndexOf(')') + 3) || null;
+/**
+ * A process's state letter from /proc (R, S, D, T, t, Z, …), or null when it is gone. A zombie
+ * thread-group leader whose sibling threads still run (zombieLeader) is judged by those threads, never
+ * as gone (GY-1663 review): a live thread not yet stopped gives its own state, and when every live
+ * thread shows stopped the group is stopped (T). SIGSTOP sent to the leader's pid stops the whole group.
+ */
+export function processStateOf(pid: number, proc = '/proc'): string | null {
+  let state: string | null;
+  try { state = stateLetter(readFileSync(join(proc, String(pid), 'stat'), 'utf8')); } catch { return null; }
+  if (state !== 'Z') return state;
+  let tasks: string[];
+  try { tasks = readdirSync(join(proc, String(pid), 'task')).filter(tid => /^\d+$/.test(tid) && tid !== String(pid)); } catch { return state; }
+  let stopped = false;
+  for (const tid of tasks) {
+    let thread: string | null; try { thread = stateLetter(readFileSync(join(proc, String(pid), 'task', tid, 'stat'), 'utf8')); } catch { continue; /* exited */ }
+    if (thread === null || thread === 'Z' || thread === 'X') continue;
+    if (!stoppedState(thread)) return thread;
+    stopped = true;
+  }
+  return stopped ? 'T' : state;
+}
 export interface WriterFreezeDeps {
   signal?: (pid: number, name: NodeJS.Signals) => void;
   /** The process's state letter, null when it is gone (processStateOf). */
