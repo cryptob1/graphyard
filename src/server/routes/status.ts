@@ -5,7 +5,7 @@ import { parseEventHistoryQuery, readEventHistory } from '../../events-history.j
 import { catchUpPipelineTimelines, pipelineBackfillState, readPipelineTimelines } from '../../pipeline-backfill.js';
 import { delegationSnapshot } from '../../delegation.js';
 import { describeUnserved, durablePresence, executorRegistry, executorReport, loopPresenceHeader, loopPresenceInterval, loopPanes, loopPanesHeader, loopPanesRegistry, loopRegistry, loopSupervision, loopSupervisionHeader, presenceQuery, reportedLoopMerger } from '../../model/executor-presence.js';
-import { installationSettingsUrl, mainGuardStatus } from '../../github.js';
+import { installationSettingsUrl, mainGuardStatus, webhookCorroboration, webhookState } from '../../github.js';
 import { controlPlanePermissions, requiredPermissions } from '../../github-permissions.js';
 import { releaseInfo, schemaVersion } from '../../release.js';
 import { openHumanOnly } from '../../model/human-request.js';
@@ -67,8 +67,13 @@ export const statusRoutes = defineRoutes('status', [
       // left, how fast it goes, the pause in force, what each observation cost; and whether the
       // webhook is delivering at all, against the pull requests that are open to be woken.
       const githubBudget = github?.budget?.(observedAt.getTime()) ?? null;
-      const webhooks = { ...await engine.store.webhookLiveness(), configured: !!process.env.GITHUB_WEBHOOK_SECRET, settingsUrl: github?.webhookSettingsUrl?.() ?? null,
-        openPullRequests: work.filter(item => item.stage !== 'done' && !!item.submission && !!item.observation && !item.observation.merged && item.observation.prState !== 'closed').length };
+      // GitHub's own delivery log corroborates a receipts gap (GY-1649): the last attempt it logged and
+      // the attempts after the last receipt that failed, from one cached app-level read, never per call.
+      const liveness = await engine.store.webhookLiveness();
+      const corroboration = github?.webhookDeliveries ? webhookCorroboration(await github.webhookDeliveries(observedAt.getTime()), liveness.lastDeliveryAt, observedAt.getTime(), { installationId: github.config.installationId, repositoryId: githubRepository?.id ?? null }) : null;
+      const webhooks = { ...liveness, configured: !!process.env.GITHUB_WEBHOOK_SECRET, settingsUrl: github?.webhookSettingsUrl?.() ?? null, ...corroboration,
+        openPullRequests: work.filter(item => item.stage !== 'done' && !!item.submission && !!item.observation && !item.observation.merged && item.observation.prState !== 'closed').length,
+        state: webhookState({ ...liveness, ...corroboration }, observedAt.getTime()) };
       // The fleet as the dashboard needs it (GY-105): how many executors are alive, and each kind
       // of pending action none of them serves, with its wait and what to start.
       // A pending merge row waits on a loop that merges, never on an executor (GY-916).
