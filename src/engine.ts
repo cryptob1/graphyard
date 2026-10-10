@@ -850,7 +850,13 @@ export class Engine {
       branch: work.candidate.branch,
       author: work.candidate.author,
     });
-    if (work.observation?.reviews) observation.reviews = [...work.observation.reviews];
+    if (work.observation?.reviews) {
+      observation.reviews = [...work.observation.reviews];
+      observation.reviewIds = observation.reviews.map(r => r.id).filter((id): id is number => Number.isSafeInteger(id) && id > 0);
+    } else {
+      observation.reviews = [];
+      observation.reviewIds = [];
+    }
     if (work.candidate.pr) observation.candidate.pr = work.candidate.pr;
     return observation;
   }

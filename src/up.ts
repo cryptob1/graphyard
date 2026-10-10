@@ -636,6 +636,7 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
       try {
         const server = await herdrHost.server(herdrBinary, ownHerdr, installIdFor(request.repository));
         herdrWorkspace = server.workspace;
+        if (ownHerdr && herdrWorkspace) await herdrHost.record(ownHerdr, herdrWorkspace).catch(() => {});
         if (server.started) deps.emit({ kind: 'note', text: `The Herdr server${ownHerdr ? ` for session ${ownHerdr.session}` : ''} was not running; it now runs as the user unit ${server.unit}, which restarts it after a failure or a reboot.` });
       } catch (error) { await leaveHerdrOut(error); }
     }
