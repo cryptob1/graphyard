@@ -15,7 +15,7 @@ Dispatch is optimistic (overlap holds nothing), smallest planned scope first ([r
 
 ## GitHub administration through the browser
 
-`master protection --apply` reconciles protection; flows (`master browser app-permissions`, `master browser installation-accept`, `master browser protection`) drive the `master init --browser-profile` profile:
+`master protection --apply` reconciles protection; `master browser FLOW` drives the `master init --browser-profile` profile:
 
 | Flow | Effect
 | --- | ---
@@ -23,11 +23,11 @@ Dispatch is optimistic (overlap holds nothing), smallest planned scope first ([r
 | `installation-accept` | Accept pending requests
 | `protection` | Reconcile branch protection
 
-Flows read `GET /api/github/installation`, recording `.graphyard/master-actions/` `record.json`, `ledger.json` and redacted Confirm-access markup, listed by `master browser fixtures`. Approving *Confirm access* GitHub Mobile code on device: human-only; master never stores profile cookies, uses merge bypass, pushes code or reads worker credentials. On classifier refusals `master harness claude --apply` (or `codex`) writes `.claude/settings.local.json` rules denying `gh pr merge`/`review` and merging, reviewing, token-minting or mutating `gh api` calls; missing or retired rules are `harness` drift that the loop reapplies each cycle; `master status` too, unless read-only (confined doctor): it reports.
+Flows read `GET /api/github/installation`, recording `.graphyard/master-actions/` `record.json`, `ledger.json` and redacted Confirm-access markup, listed by `master browser fixtures`. Approving *Confirm access* GitHub Mobile code on device: human-only; master never stores profile cookies, uses merge bypass, pushes code or reads worker credentials. On classifier refusals `master harness claude --apply` (or `codex`) writes `.claude/settings.local.json` rules denying `gh pr merge`/`review` and merging, reviewing, token-minting or mutating `gh api` calls; missing or retired rules are `harness` drift that the loop reapplies each cycle to the checkout its managed state names, never the research scratch; one without `.graphyard/units.json` fails naming `graphyard master init --token-stdin` there; `master status` too, unless read-only (confined doctor): it reports.
 
 ## Typed actions and executors
 
-`nextAction` (one per item): `dispatch`, `request-review`, `request-rework`, `approve-scope`, `resync`, `reclaim`, `merge`, `verify-deployment`, `escalate`; judgements: `actions.needsHuman`. `graphyard init` starts `graphyard-executor@N`; `master executors restart` moves stale slots to the current release; verified deployments advance clean checkouts, restart executors and loop (dirty: `upgrade`; claim refusals 15 min: loop alone). Fenced (`POST /api/actions/presence`) or claim-renewing executors live; presence upserts from `serves`. `resync` (`POST /api/work/:id/resync` `{since}`) needs a newer observation. `dispatch`/`request-review` complete when a session already answers the head; busy profiles stall after 30min. Three failures with an unchanged reason mark a row stalled rather than retrying (a fleet that looks idle): in no count and no list, but in `actions.stalled` and on the item's own card; backoff never outlives it; eight escalate. Ticks requeue ownerless items (`liveness.violations`).
+`nextAction` (one per item): `dispatch`, `request-review`, `request-rework`, `approve-scope`, `resync`, `reclaim`, `merge`, `verify-deployment`, `escalate`; judgements: `actions.needsHuman`. `graphyard init` starts `graphyard-executor@N`; `master executors restart` moves stale slots to the current release; verified deployments advance clean checkouts, restart executors and loop (dirty: `upgrade`; claim refusals 15 min: loop alone). Fenced (`POST /api/actions/presence`) or claim-renewing executors live; presence upserts from `serves`. `resync` (`POST /api/work/:id/resync` `{since}`) needs a newer observation. `dispatch`/`request-review` complete when a session already answers the head; busy profiles stall after 30min. Three unchanged-reason failures stall a row, not retried (fleet looks idle): shown only in `actions.stalled` and its item's card; backoff never outlives it; eight escalate. Ticks requeue ownerless items (`liveness.violations`).
 
 Declared slot not `active` (systemd, else `PRINCIPAL@HOST/N` presence): `resources` fault naming `journalctl --user -u graphyard-executor@N.service` unless stopped <2min. `--install` needs `Restart=always`, `RestartSec` ≤60s. Worker starts fenced <2min retry after lapse; longer fail, named.
 

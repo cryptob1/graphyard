@@ -2,14 +2,14 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { chmod, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 import { masterConfigSchema, masterHarness, type MasterConfig } from '../src/master.js';
 import { emptyDaemonState, runCycle, type DaemonAction, type DaemonEffects } from '../src/master-daemon.js';
 import { clearDoctorRuns, doctorRunsSettled, type DoctorEffects } from '../src/daemon/doctor.js';
 import { doctorSettingsSchema } from '../src/master/doctor-settings.js';
 import { harnessDrift } from '../src/harness.js';
 import type { Runner } from '../src/runner/types.js';
+import { installUnitsFile, perInstallUnits } from '../src/install/units.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
@@ -25,20 +25,25 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
  */
 const minute = 60_000, hour = 60 * minute, start = Date.parse('2026-10-10T06:00:00Z');
 const iso = (at: number) => new Date(at).toISOString();
-const launcher = resolve(fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url)));
 const asRoot = process.getuid?.() === 0; // root ignores directory modes, so a chmod cannot make the checkout unwritable
 /** The minutes the host widens the plan, and the window the checkout cannot be written in (drift appears inside it). */
 const widenings = [0, 60, 125, 300], unwritable = { from: 120, to: 150 };
 
-const config = (root: string): MasterConfig => masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: join(root, '.graphyard-credentials/master/token'), cliPath: launcher,
+// The loop's managed state names its checkout (GY-1664): the launcher lives in it and its .graphyard/master.json records the loop.
+const config = (root: string): MasterConfig => masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: join(root, '.graphyard-credentials/master/token'), cliPath: join(root, 'bin/graphyard.mjs'),
   repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', workers: [], run: { intervalSeconds: 60 } });
 
 test('unit:soak-harness-remedy-invariants — over a simulated day the loop heals every harness drift on the next writable cycle with one journal line, writes nothing otherwise, journals an unwritable checkout once, keeps operator entries, and every system invariant holds', { timeout: 300_000 }, async () => {
   clearDoctorRuns();
-  const root = await temporaryDirectory('soak-harness-remedy');
+  const root = await temporaryDirectory('soak-harness-remedy'), scratch = await temporaryDirectory('soak-harness-remedy-scratch');
   try {
     execFileSync('git', ['init', '-q', root]);
-    const master = config(root), plan = masterHarness(root, master, 'claude');
+    execFileSync('git', ['init', '-q', scratch]);
+    const master = config(root);
+    await mkdir(join(root, '.graphyard'), { recursive: true });
+    await writeFile(join(root, '.graphyard/master.json'), JSON.stringify(master));
+    await writeFile(join(root, installUnitsFile), JSON.stringify(perInstallUnits(master.repository)));
+    const plan = masterHarness(root, master, 'claude');
     const file = join(root, '.claude/settings.local.json'), directory = join(root, '.claude');
     const absent = plan.deny.at(-1)!.rule;
     const widened = JSON.stringify({ permissions: { allow: [...plan.allow.map(entry => entry.rule), 'Bash(npm test)'], deny: [...plan.deny.map(entry => entry.rule).filter(rule => rule !== absent), 'Bash(rm -rf /)'] }, model: 'opus' });
@@ -60,7 +65,7 @@ test('unit:soak-harness-remedy-invariants — over a simulated day the loop heal
       snapshot: async () => ({ work: [], now: iso(now) }),
       closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, persist: async () => {},
       observeDeployment: async () => ({ source: 'endpoint', sha: 'd'.repeat(40), at: iso(now), reason: null, deployed: [], pending: [] }), recordDeployment: async () => {}, requestSmoke: () => {},
-      research: { cwd: root }, doctor, // as the real loop wires them: research names its checkout on every loop, the doctor reads the same one
+      research: { cwd: scratch }, doctor, // as the real loop wires them: research names its units-less scratch, never the checkout; the doctor reads the checkout
     } as unknown as DaemonEffects;
 
     const state = emptyDaemonState(master);
@@ -123,5 +128,6 @@ test('unit:soak-harness-remedy-invariants — over a simulated day the loop heal
   } finally {
     await chmod(join(root, '.claude'), 0o700).catch(() => {});
     await rm(root, { recursive: true, force: true });
+    await rm(scratch, { recursive: true, force: true });
   }
 });
