@@ -7,9 +7,9 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { z } from 'zod';
 import { type ChildRun, defaultChildRun } from '../child-runner.js';
 import { atomicPrivateWrite } from '../master/config.js';
-import { freezeCheckoutWriters } from './checkout-writers.js';
+import { freezeCheckoutWriters, type UnverifiableProcess } from './checkout-writers.js';
 
-export { checkoutWriterProcesses, freezeCheckoutWriters, processStateOf, type WriterFreezeDeps } from './checkout-writers.js';
+export { checkoutWriterProcesses, checkoutWriterScan, freezeCheckoutWriters, processStateOf, type WriterFreezeDeps } from './checkout-writers.js';
 import type { MasterConfig } from '../master/profiles.js';
 
 // The GY-857 guard refuses every loop start, self-upgrade and restart from a coordinator checkout
@@ -19,7 +19,8 @@ import type { MasterConfig } from '../master/profiles.js';
 // act is the installation's own remedy. Any master identity — the doctor's included — records a
 // request beside the loop's cursor, outside the checkout; the loop then freezes the standing
 // processes working in the checkout (the suspected writers) — refusing to touch anything when one
-// cannot be verified stopped — commits the index and every non-ignored dirty path, untracked scratch
+// cannot be verified stopped, and recording as skipped the processes whose cwd read is refused EACCES
+// (GY-1672) — commits the index and every non-ignored dirty path, untracked scratch
 // included, onto HEAD under a named ref (refs/graphyard/checkout-restore/STAMP-COMMIT), returns those paths
 // to HEAD, continues the writers it stopped, settles the dirty-checkout escalation and restarts itself through its
 // supervising unit (graphyard-master.service). Nothing is discarded: the ref's first parent is HEAD,
@@ -102,12 +103,17 @@ const refStamp = (at: Date) => at.toISOString().replace(/[-:]/g, '').replace(/\.
  * parent, the working files as the tree — record the commit under a named ref, then return those
  * paths to HEAD: tracked ones checked out from it, ones HEAD lacks removed. Null when nothing is
  * dirty. Throws, with the ref named when it was already written, when the checkout is still dirty
- * after; the writers this attempt stopped are continued whatever happens.
+ * after; the writers this attempt stopped are continued whatever happens. `skipped` names the
+ * processes the freeze skipped because their cwd could not be read (EACCES).
  */
-export type CheckoutQuiesce = (root: string) => { thaw: () => void } | Promise<{ thaw: () => void }>;
-export async function restoreCoordinatorCheckout(root: string, reason: string, run: ChildRun = defaultChildRun, at = new Date(), quiesce: CheckoutQuiesce = freezeCheckoutWriters): Promise<{ ref: string; commit: string; paths: string[] } | null> {
+type Quiesced = { thaw: () => void; skipped?: UnverifiableProcess[] };
+export type CheckoutQuiesce = (root: string) => Quiesced | Promise<Quiesced>;
+export async function restoreCoordinatorCheckout(root: string, reason: string, run: ChildRun = defaultChildRun, at = new Date(), quiesce: CheckoutQuiesce = freezeCheckoutWriters): Promise<{ ref: string; commit: string; paths: string[]; skipped: UnverifiableProcess[] } | null> {
   const frozen = await quiesce(root);
-  try { return await restoreQuiesced(root, reason, run, at); } finally { frozen.thaw(); }
+  try {
+    const restored = await restoreQuiesced(root, reason, run, at);
+    return restored && { ...restored, skipped: frozen.skipped ?? [] };
+  } finally { frozen.thaw(); }
 }
 async function restoreQuiesced(root: string, reason: string, run: ChildRun, at: Date) {
   const git = async (args: string[], env?: NodeJS.ProcessEnv) => String(await run('git', ['-C', root, '--literal-pathspecs', ...args], env ? { env } : undefined));
@@ -211,7 +217,7 @@ export async function serveCheckoutRestore(file: string, root: string, deps: Loo
   } else try {
     const restored = await restoreCoordinatorCheckout(root, `${request.reason} (requested by ${request.requestedBy})`, deps.run, now(), deps.quiesce);
     outcome = restored
-      ? { at: now().toISOString(), state: 'restored', ref: restored.ref, commit: restored.commit, paths: restored.paths, detail: `${restored.paths.length} dirty path(s) saved under ${restored.ref} (${restored.commit.slice(0, 12)}; its second parent holds the index) and returned to HEAD; the loop restarts through its supervising unit`, restart: null }
+      ? { at: now().toISOString(), state: 'restored', ref: restored.ref, commit: restored.commit, paths: restored.paths, detail: `${restored.paths.length} dirty path(s) saved under ${restored.ref} (${restored.commit.slice(0, 12)}; its second parent holds the index) and returned to HEAD; the loop restarts through its supervising unit${skippedDetail(restored.skipped)}`.slice(0, 4000), restart: null }
       : { at: now().toISOString(), state: 'clean', ref: null, commit: null, paths: [], detail: `the coordinator checkout at ${root} held no dirty path; nothing was restored and the loop was not restarted`, restart: null };
   } catch (error) {
     outcome = { at: now().toISOString(), state: 'failed', ref: null, commit: null, paths: [], detail: (error instanceof Error ? error.message : String(error)).slice(0, 4000), restart: null };
@@ -223,6 +229,9 @@ export async function serveCheckoutRestore(file: string, root: string, deps: Loo
   if (outcome.state !== 'restored' && outcome.state !== 'restart') return write(file, request, outcome, deps);
   return restartOwed(file, request, outcome, deps, pid, now);
 }
+const skippedDetail = (skipped: UnverifiableProcess[]) => skipped.length
+  ? `; skipped, their cwd unreadable: ${skipped.slice(0, 8).map(entry => `pid ${entry.pid} (${entry.error})`).join(', ')}${skipped.length > 8 ? ` and ${skipped.length - 8} more` : ''}`
+  : '';
 async function write(file: string, request: CheckoutRestoreRequest, outcome: CheckoutRestoreOutcome, deps: Pick<LoopRequestDeps, 'report'>) {
   await atomicPrivateWrite(file, { ...request, outcome });
   if (outcome.restart && outcome.restart.state !== 'requested') deps.report?.(outcome);

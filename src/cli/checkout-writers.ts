@@ -16,14 +16,22 @@ import { setTimeout as delay } from 'node:timers/promises';
  * unverifiable, never absent (GY-1663): it throws, naming the pid and the read error, before anything
  * is stopped or touched — unless it is provably outside the checkout: this process or an ancestor, or
  * one of the loop's managed sessions (a `graphyard-watch-…` scope, which sees the checkout read-only).
+ * One whose read is refused EACCES — a non-dumpable process (sd-pam, a password manager, a daemon
+ * that dropped privileges) denying this user its /proc links — is recorded as skipped instead (GY-1672):
+ * such processes stand permanently on a desktop host, so refusing on them left the restore no way to
+ * complete. checkoutWriterScan returns them beside the writers, and the restore names them.
  * A kernel thread (PF_KTHREAD in its stat flags, seen when the scan runs as root) has no cwd and is
  * never a writer; a process whose state, read again after the failed cwd read, is a zombie is gone
  * unless a sibling thread still runs, whose own cwd then decides it (zombieLeader).
  */
 export function checkoutWriterProcesses(root: string, self = process.pid, proc = '/proc', uid = process.getuid?.() ?? null): number[] {
-  const { writers, unverifiable } = checkoutProcessScan(root, self, proc, uid);
+  return checkoutWriterScan(root, self, proc, uid).writers;
+}
+/** checkoutWriterProcesses with the processes it skipped because their cwd read was refused EACCES. */
+export function checkoutWriterScan(root: string, self = process.pid, proc = '/proc', uid = process.getuid?.() ?? null): { writers: number[]; skipped: UnverifiableProcess[] } {
+  const { writers, unverifiable, skipped } = checkoutProcessScan(root, self, proc, uid);
   if (unverifiable.length) throw new Error(`the working directory of ${unverifiable.slice(0, 8).map(entry => `pid ${entry.pid} (${entry.error})`).join(', ')} cannot be read, so whether it writes in the checkout cannot be verified and nothing was restored`);
-  return writers;
+  return { writers, skipped };
 }
 /** A process of this user whose working directory could not be read, with the read error. */
 export interface UnverifiableProcess { pid: number; error: string }
@@ -34,14 +42,15 @@ const managedScope = /\/graphyard-watch-[A-Za-z0-9:@._-]+\.scope(?:\/|$)/m;
 /**
  * checkoutWriterProcesses's scan: the writers it finds, and the processes of this user (`uid`; null
  * when the platform has none, so every owner counts) whose working directory could not be read and
- * which are not provably outside the checkout.
+ * which are not provably outside the checkout — `skipped` when the read was refused EACCES,
+ * `unverifiable` for any other failure.
  */
-export function checkoutProcessScan(root: string, self = process.pid, proc = '/proc', uid = process.getuid?.() ?? null): { writers: number[]; unverifiable: UnverifiableProcess[] } {
+export function checkoutProcessScan(root: string, self = process.pid, proc = '/proc', uid = process.getuid?.() ?? null): { writers: number[]; unverifiable: UnverifiableProcess[]; skipped: UnverifiableProcess[] } {
   let base: string;
   try { base = realpathSync(resolve(root)); }
   catch (error) { throw new Error(`the checkout's canonical path cannot be read (${error instanceof Error ? error.message : String(error)}), so its writers cannot be found and nothing was restored`); }
   const managed = `${base}${sep}.graphyard`;
-  const table = new Map<number, { ppid: number; cwd: string | null; error: string | null }>();
+  const table = new Map<number, { ppid: number; cwd: string | null; error: string | null; denied: boolean }>();
   let entries: string[];
   try { entries = readdirSync(proc).filter(name => /^\d+$/.test(name)); }
   catch (error) { throw new Error(`the processes working in the checkout cannot be enumerated from ${proc} (${error instanceof Error ? error.message : String(error)}), so nothing was restored`); }
@@ -50,7 +59,7 @@ export function checkoutProcessScan(root: string, self = process.pid, proc = '/p
     try {
       const stat = readFileSync(join(proc, name, 'stat'), 'utf8');
       const ppid = Number(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[1]);
-      let cwd: string | null = null, error: string | null = null;
+      let cwd: string | null = null, error: string | null = null, denied = false;
       try { cwd = readlinkSync(join(proc, name, 'cwd')); }
       catch (failure) {
         // Another user's is not ours to judge; one gone, a zombie or a kernel thread writes nothing. Its
@@ -63,10 +72,10 @@ export function checkoutProcessScan(root: string, self = process.pid, proc = '/p
         const kernelThread = Number.isFinite(flags) && (flags & PF_KTHREAD) !== 0;
         const ours = owner !== null && now !== null && (uid === null || owner === uid) && !kernelThread;
         const reason = failure instanceof Error ? failure.message : String(failure);
-        if (ours && state !== 'Z' && state !== 'X') error = reason;
+        if (ours && state !== 'Z' && state !== 'X') { error = reason; denied = (failure as NodeJS.ErrnoException).code === 'EACCES'; }
         else if (ours) ({ cwd, error } = zombieLeader(proc, name, reason));
       }
-      table.set(Number(name), { ppid, cwd, error });
+      table.set(Number(name), { ppid, cwd, error, denied });
     } catch { /* exited while read */ }
   }
   const spared = new Set<number>();
@@ -79,8 +88,9 @@ export function checkoutProcessScan(root: string, self = process.pid, proc = '/p
     for (const [pid, entry] of table) if (!writers.has(pid) && !spared.has(pid) && writers.has(entry.ppid) && unmanaged(entry.cwd)) { writers.add(pid); grown = true; }
   }
   const outside = (pid: number) => { try { return managedScope.test(readFileSync(join(proc, String(pid), 'cgroup'), 'utf8')); } catch { return false; } };
-  const unverifiable = [...table].filter(([pid, entry]) => entry.error !== null && !spared.has(pid) && !outside(pid)).map(([pid, entry]) => ({ pid, error: entry.error! })).sort((a, b) => a.pid - b.pid);
-  return { writers: [...writers].sort((a, b) => a - b), unverifiable };
+  const unreadable = [...table].filter(([pid, entry]) => entry.error !== null && !spared.has(pid) && !outside(pid)).sort(([a], [b]) => a - b);
+  const listed = (denied: boolean) => unreadable.filter(([, entry]) => entry.denied === denied).map(([pid, entry]) => ({ pid, error: entry.error! }));
+  return { writers: [...writers].sort((a, b) => a - b), unverifiable: listed(false), skipped: listed(true) };
 }
 /**
  * A zombie thread-group leader whose sibling threads still run (the main thread called pthread_exit)
@@ -133,8 +143,8 @@ export interface WriterFreezeDeps {
   signal?: (pid: number, name: NodeJS.Signals) => void;
   /** The process's state letter, null when it is gone (processStateOf). */
   state?: (pid: number) => string | null;
-  /** The checkout's standing writers (checkoutWriterProcesses). */
-  scan?: (root: string) => number[];
+  /** The checkout's standing writers (checkoutWriterScan), or just their pids. */
+  scan?: (root: string) => number[] | { writers: number[]; skipped: UnverifiableProcess[] };
   /** How long a stopped writer may take to show stopped, and how often it is read. */
   settleMs?: number; pollMs?: number;
 }
@@ -145,10 +155,18 @@ export interface WriterFreezeDeps {
  * signalled, or does not show stopped within `settleMs`, throws before anything is touched, with
  * every process this attempt stopped continued again. The writers are read again after each round, so
  * one forked during the freeze is stopped too. A writer already stopped (by job control or a
- * debugger) is quiescent as it stands: it is neither signalled nor continued after.
+ * debugger) is quiescent as it stands: it is neither signalled nor continued after. The processes the
+ * scans skipped (their cwd read refused EACCES, GY-1672) are returned in `skipped`, neither stopped nor continued.
  */
-export async function freezeCheckoutWriters(root: string, deps: WriterFreezeDeps = {}): Promise<{ pids: number[]; stopped: number[]; thaw: () => void }> {
-  const signal = deps.signal ?? ((pid, name) => process.kill(pid, name)), state = deps.state ?? (pid => processStateOf(pid)), scan = deps.scan ?? (directory => checkoutWriterProcesses(directory));
+export async function freezeCheckoutWriters(root: string, deps: WriterFreezeDeps = {}): Promise<{ pids: number[]; stopped: number[]; skipped: UnverifiableProcess[]; thaw: () => void }> {
+  const signal = deps.signal ?? ((pid, name) => process.kill(pid, name)), state = deps.state ?? (pid => processStateOf(pid)), scanned = deps.scan ?? (directory => checkoutWriterScan(directory));
+  const skipped = new Map<number, UnverifiableProcess>();
+  const scan = (directory: string) => {
+    const result = scanned(directory);
+    if (Array.isArray(result)) return result;
+    for (const entry of result.skipped) if (!skipped.has(entry.pid)) skipped.set(entry.pid, entry);
+    return result.writers;
+  };
   const settleMs = deps.settleMs ?? 5_000, pollMs = deps.pollMs ?? 20;
   const stopped: number[] = [], quiet = new Set<number>(), seen = new Set<number>();
   const thaw = () => { for (const pid of stopped) { try { signal(pid, 'SIGCONT'); } catch { /* gone */ } } };
@@ -179,5 +197,5 @@ export async function freezeCheckoutWriters(root: string, deps: WriterFreezeDeps
       for (const pid of signalled) quiet.add(pid);
     }
   } catch (error) { thaw(); throw error; }
-  return { pids: [...quiet].sort((a, b) => a - b), stopped, thaw };
+  return { pids: [...quiet].sort((a, b) => a - b), stopped, skipped: [...skipped.values()].sort((a, b) => a.pid - b.pid), thaw };
 }

@@ -5,14 +5,17 @@ import fs, { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkS
 import { join } from 'node:path';
 import { syncBuiltinESMExports } from 'node:module';
 import * as writers from '../src/cli/checkout-writers.js';
-import { checkoutWriterProcesses, freezeCheckoutWriters, processStateOf } from '../src/cli/checkout-writers.js';
-import { checkoutRestoreRefPrefix, restoreCoordinatorCheckout } from '../src/cli/master-checkout-restore.js';
+import { checkoutWriterProcesses, checkoutWriterScan, freezeCheckoutWriters, processStateOf } from '../src/cli/checkout-writers.js';
+import { checkoutRestoreRefPrefix, fileCheckoutRestoreRequest, readCheckoutRestoreRequest, restoreCoordinatorCheckout, serveCheckoutRestore } from '../src/cli/master-checkout-restore.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-1663: writer discovery read an unreadable /proc/PID/cwd as "not in the checkout", so a live
 // process of this user it could not verify (a non-dumpable one) was skipped and checkout-restore
 // snapshotted and reset paths while it might still write. Such a process is now unverifiable, and
 // the restore refuses before any snapshot or reset, naming the pid and the read error.
+// GY-1672: a read refused EACCES (a non-dumpable process denying this user its /proc links — sd-pam,
+// a password manager) is recorded as skipped instead, since such processes stand permanently and
+// refusing on them left checkout-restore no way to complete.
 
 /** A fake /proc entry: its stat line, its cwd (a symlink to the directory, or a plain file readlink refuses), its cgroup. */
 function processEntry(proc: string, pid: number, options: { ppid?: number; state?: string; flags?: number; cwd?: string | null; cgroup?: string }) {
@@ -111,4 +114,106 @@ test('unit:checkout-writers-unreadable-cwd — a process of this user whose cwd 
   const restored = await restoreCoordinatorCheckout(root, 'restore', undefined, new Date(), freeze);
   assert.deepEqual(restored?.paths.sort(), ['scratchpad.mjs', 'src/loop.ts']);
   assert.deepEqual(sent, ['SIGSTOP:500', 'SIGCONT:500']);
+});
+
+/** A git checkout in a temporary directory with one committed file. */
+async function coordinator(name: string) {
+  const base = await temporaryDirectory(name);
+  const root = join(base, 'coordinator');
+  const git = (...args: string[]) => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+  mkdirSync(join(root, 'src'), { recursive: true });
+  writeFileSync(join(root, 'src', 'loop.ts'), 'export const loop = 1;\n');
+  execFileSync('git', ['init', '-q', '-b', 'main', root]);
+  git('add', '-A'); git('-c', 'user.name=x', '-c', 'user.email=x@x', 'commit', '-q', '-m', 'base');
+  return { base, root, git, checkout: realpathSync(root), elsewhere: realpathSync(base) };
+}
+/** Make readlinkSync refuse the cwd of `pids` under `proc` with EACCES, as the kernel does for a non-dumpable process; returns the restore. */
+function denyCwd(proc: string, pids: number[]) {
+  const readlink = fs.readlinkSync, denied = new Set(pids.map(pid => join(proc, String(pid), 'cwd')));
+  fs.readlinkSync = ((path: string, ...rest: unknown[]) => {
+    if (denied.has(String(path))) throw Object.assign(new Error(`EACCES: permission denied, readlink '${String(path)}'`), { code: 'EACCES', errno: -13, syscall: 'readlink', path: String(path) });
+    return (readlink as (...args: unknown[]) => unknown)(path, ...rest);
+  }) as typeof fs.readlinkSync;
+  syncBuiltinESMExports();
+  return () => { fs.readlinkSync = readlink; syncBuiltinESMExports(); };
+}
+
+test('unit:checkout-writers-eacces-writer-skipped — a process of this user whose cwd read is refused EACCES is recorded as skipped and the scan returns the remaining writers without error', async () => {
+  const { root, checkout, elsewhere } = await coordinator('checkout-writers-eacces');
+  const proc = join(root, '..', 'proc'), uid = process.getuid!();
+  processEntry(proc, 1, { cwd: '/' });
+  processEntry(proc, 100, { cwd: elsewhere });                 // the loop itself
+  processEntry(proc, 500, { cwd: checkout });                  // a standing writer
+  processEntry(proc, 510, { ppid: 500, cwd: join(checkout, 'src') }); // its child, also a writer
+  processEntry(proc, 1372, { cwd: checkout });                 // sd-pam: non-dumpable, cwd read refused EACCES
+  processEntry(proc, 4093087, { cwd: checkout });              // another non-dumpable daemon of this user
+  const restore = denyCwd(proc, [1372, 4093087]);
+  try {
+    const scan = writers.checkoutProcessScan(root, 100, proc, uid);
+    assert.deepEqual(scan.writers, [500, 510]);
+    assert.deepEqual(scan.unverifiable, [], 'an EACCES read is no abort cause');
+    assert.deepEqual(scan.skipped.map(entry => entry.pid), [1372, 4093087], 'the EACCES processes are recorded');
+    assert.match(scan.skipped[0].error, /EACCES/);
+    assert.deepEqual(checkoutWriterProcesses(root, 100, proc, uid), [500, 510], 'the scan returns the remaining writers without error');
+    assert.deepEqual(checkoutWriterScan(root, 100, proc, uid).skipped.map(entry => entry.pid), [1372, 4093087]);
+    // The freeze stops the writers only, and reports what it skipped.
+    const sent: string[] = [];
+    const frozen = await freezeCheckoutWriters(root, { scan: at => checkoutWriterScan(at, 100, proc, uid), signal: (pid, name) => { sent.push(`${name}:${pid}`); }, state: pid => sent.includes(`SIGSTOP:${pid}`) ? 'T' : 'S' });
+    assert.deepEqual(frozen.pids, [500, 510]);
+    assert.deepEqual(frozen.skipped.map(entry => entry.pid), [1372, 4093087]);
+    frozen.thaw();
+    assert.deepEqual(sent, ['SIGSTOP:500', 'SIGSTOP:510', 'SIGCONT:500', 'SIGCONT:510']);
+    // Any other read failure still aborts: an EINVAL beside the EACCES ones is unverifiable.
+    processEntry(proc, 200, { cwd: null });
+    assert.throws(() => checkoutWriterProcesses(root, 100, proc, uid), /pid 200 \(EINVAL[^)]*\) cannot be read.*nothing was restored/);
+  } finally { restore(); }
+});
+
+test('integration:checkout-restore-completes-unreadable-writer — checkout-restore completes while a scanned process\'s cwd is unreadable: every dirty path saved, the checkout clean at HEAD, the restart requested', async () => {
+  const { base, root, git, checkout, elsewhere } = await coordinator('checkout-restore-eacces');
+  const proc = join(base, 'proc'), uid = process.getuid!();
+  processEntry(proc, 1, { cwd: '/' });
+  processEntry(proc, 100, { cwd: elsewhere });
+  processEntry(proc, 500, { cwd: checkout });
+  processEntry(proc, 1372, { cwd: checkout });
+  const head = git('rev-parse', 'HEAD');
+  writeFileSync(join(root, 'src', 'loop.ts'), 'export const loop = 2; // hotfix\n');
+  writeFileSync(join(root, 'scratchpad.mjs'), '// scratch\n');
+  mkdirSync(join(root, 'notes', 'deep'), { recursive: true });
+  writeFileSync(join(root, 'notes', 'deep', 'plan.md'), '# plan\n');
+  const file = join(base, 'state', 'graphyard-master.checkout-restore.json');
+  mkdirSync(join(base, 'state'), { recursive: true });
+  await fileCheckoutRestoreRequest(file, 'escalation:dirty-checkout', 'graphyard-doctor');
+  const sent: string[] = [];
+  let restarts = 0, settled = 0;
+  const restore = denyCwd(proc, [1372]);
+  let outcome;
+  try {
+    outcome = await serveCheckoutRestore(file, root, {
+      pid: 100, restart: async () => { restarts++; }, settle: async () => { settled++; },
+      quiesce: directory => freezeCheckoutWriters(directory, { scan: at => checkoutWriterScan(at, 100, proc, uid), signal: (pid, name) => { sent.push(`${name}:${pid}`); }, state: pid => sent.includes(`SIGSTOP:${pid}`) && !sent.includes(`SIGCONT:${pid}`) ? 'T' : 'S' }),
+    });
+  } finally { restore(); }
+  assert.equal(outcome?.state, 'restored', outcome?.detail);
+  assert.deepEqual([...outcome!.paths].sort(), ['notes/deep/plan.md', 'scratchpad.mjs', 'src/loop.ts']);
+  assert.match(outcome!.detail, /skipped, their cwd unreadable: pid 1372 \(EACCES/);
+  assert.ok(outcome!.ref?.startsWith(checkoutRestoreRefPrefix));
+  assert.equal(git('for-each-ref', '--format=%(refname)', checkoutRestoreRefPrefix), outcome!.ref);
+  // Nothing is discarded: the ref's tree holds every dirty byte on top of HEAD.
+  assert.equal(git('rev-parse', `${outcome!.ref}^1`), head);
+  assert.equal(git('show', `${outcome!.ref}:src/loop.ts`), 'export const loop = 2; // hotfix');
+  assert.equal(git('show', `${outcome!.ref}:scratchpad.mjs`), '// scratch');
+  assert.equal(git('show', `${outcome!.ref}:notes/deep/plan.md`), '# plan');
+  // The checkout is clean at HEAD.
+  assert.equal(git('status', '--porcelain', '--untracked-files=all'), '');
+  assert.equal(git('rev-parse', 'HEAD'), head);
+  assert.equal(readFileSync(join(root, 'src', 'loop.ts'), 'utf8'), 'export const loop = 1;\n');
+  // The writer was stopped and continued; the skipped process was never signalled.
+  assert.deepEqual(sent, ['SIGSTOP:500', 'SIGCONT:500']);
+  // The restart the loop serves is written and asked for.
+  assert.equal(settled, 1); assert.equal(restarts, 1);
+  const stored = await readCheckoutRestoreRequest(file);
+  assert.equal(stored?.outcome?.state, 'restored');
+  assert.equal(stored?.outcome?.restart?.state, 'requested');
+  assert.equal(stored?.outcome?.restart?.pid, 100);
 });
