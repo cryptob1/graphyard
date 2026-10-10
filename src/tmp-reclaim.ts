@@ -264,6 +264,14 @@ export interface TmpReclaimReport {
   bytes: number;
   /** Directories kept: a live owner, an open holder, or past the per-pass bound. */
   kept: number;
+  /**
+   * Why each kept test temp name was kept (GY-1628), summing to `kept` less what the tsx cache's
+   * bound left: younger than its age bound, held open or named by a live process, a live owner's,
+   * or past the pass's entry or work bounds. With steps run, the last step's, as `kept` is.
+   */
+  keptFor?: TmpKeptFor;
+  /** This user's tsx cache files the last sweep left, by why: younger than the cache age it applied, or held open by a live process. */
+  cacheKept?: { young: number; held: number };
   errors: string[];
   /**
    * The escalation steps the pass ran past its base bounds because a root's volume stayed below its
@@ -282,6 +290,8 @@ export interface TmpReclaimReport {
    */
   pressure?: TmpRootPressure[];
 }
+/** The reasons a pass kept test temp names, counted per entry (GY-1628). */
+export interface TmpKeptFor { young: number; held: number; owner: number; bound: number }
 /** One scanned root's inodes at the pass's end, measured on that root's own filesystem, with the consumers named while it is below its headroom. */
 export interface TmpRootPressure { root: string; totalInodes: number; freeInodes: number; below: boolean; consumers?: TmpConsumer[]; partial?: boolean }
 /** One consumer of a temporary directory: a top-level entry, or a family of same-stem siblings, with the entries under it and their owner. */
@@ -331,7 +341,7 @@ const tsxCachePattern = /^tsx-\d+$/;
 export async function reclaimTmpDirectories(options: TmpReclaimOptions = {}): Promise<TmpReclaimReport> {
   const now = options.now ?? Date.now();
   const roots = await distinctRoots(options.tmpRoots ?? [options.tmpRoot ?? tmpdir()]);
-  const report: TmpReclaimReport = { at: new Date(now).toISOString(), roots: roots.map(root => root.path), scanned: 0, removed: [], bytes: 0, kept: 0, errors: [] };
+  const report: TmpReclaimReport = { at: new Date(now).toISOString(), roots: roots.map(root => root.path), scanned: 0, removed: [], bytes: 0, kept: 0, ...keptCounters(), errors: [] };
   const minAge = options.prefixes
     ? (name: string) => options.prefixes!.some(prefix => name.startsWith(prefix)) ? options.maxAgeMs ?? tmpReclaimMinAgeMs : null
     : (name: string) => { const age = defaultMinAge(name); return age === null ? null : options.maxAgeMs ?? age; };
@@ -372,7 +382,7 @@ export async function reclaimTmpDirectories(options: TmpReclaimOptions = {}): Pr
     // A step's bounds are the whole pass's, base sweep included: 20,000 per cycle means 20,000, not
     // 20,000 more, and 30 s of removing is counted from the pass's first removal, not the step's.
     Object.assign(pass, { limit: Math.max(before, step.limit), cacheAge: Math.min(cacheAge ?? step.cacheAgeMs, step.cacheAgeMs), workMs: step.workMs });
-    report.scanned = 0; report.kept = 0;
+    Object.assign(report, { scanned: 0, kept: 0, ...keptCounters() });
     await sweep(lowRoots);
     (report.escalated ??= []).push({ limit: step.limit, cacheAgeMs: pass.cacheAge!, removed: report.removed.length - before });
     lowRoots = await low();
@@ -388,6 +398,11 @@ export async function reclaimTmpDirectories(options: TmpReclaimOptions = {}): Pr
   if (report.boundStands) report.consumers = report.pressure.flatMap(entry => entry.consumers ?? []);
   return report;
 }
+
+/** Fresh kept-by-reason counters, for a pass and for each step's sweep. */
+const keptCounters = () => ({ keptFor: { young: 0, held: 0, owner: 0, bound: 0 }, cacheKept: { young: 0, held: 0 } });
+/** Count one kept test temp name under `reason`, and in `kept`. */
+const keep = (report: TmpReclaimReport, reason: keyof TmpKeptFor, count = 1) => { report.kept += count; if (report.keptFor) report.keptFor[reason] += count; };
 
 /** `path`'s volume's inodes, or null for a volume without fixed inodes or one that cannot be read: such a volume is never below its headroom. */
 async function inodesOf(path: string, volume: NonNullable<TmpReclaimOptions['volume']>) {
@@ -507,25 +522,25 @@ async function reclaimRoot(root: string, real: string, pass: PassState, report: 
     // A live owner keeps its directory only when its start could be recorded: without it a recycled
     // pid would pass for the dead run's owner for as long as it lives, so such a directory is judged
     // as an ownerless one is — by its age and its live holders.
-    if (owner && !gone && owner.startedAt !== null) { report.kept++; continue; }
+    if (owner && !gone && owner.startedAt !== null) { keep(report, 'owner'); continue; }
     if (owner && gone) { removable.push({ path, mtime: 0 }); }
     else {
       const maxAgeMs = minAge(entry.name)!;
       // A directory's entries are read only once the directory itself is old: a young one is kept on one stat.
       // An entry an earlier pass began removing is due at once: its half-finished removal is what made it look young (GY-1401).
       let written = pass.unfinished.has(path) ? 0 : now - info.mtimeMs < maxAgeMs || !entry.isDirectory() ? info.mtimeMs : await lastWritten(path, info.mtimeMs);
-      if (now - written < maxAgeMs) { report.kept++; continue; }
+      if (now - written < maxAgeMs) { keep(report, 'young'); continue; }
       // Only holders under the scanned root can hold a candidate, and on a host with a backlog the
       // raw scan holds thousands of paths elsewhere: reduce it once to the root's entries, then
       // every check is a single lookup.
       // /proc names a holder by its resolved path, so a root reached through a symlink is matched by its realpath.
       // A command line names the path as it was typed, so a root's own spelling is matched as well.
       if (!held) { const all = pass.held ??= await heldOpenPaths(); held = new Set([...heldEntries(real, all), ...(root === real ? [] : heldEntries(root, all))]); }
-      if (held.has(join(real, entry.name)) || held.has(join(root, entry.name))) { report.kept++; continue; }
+      if (held.has(join(real, entry.name)) || held.has(join(root, entry.name))) { keep(report, 'held'); continue; }
       // An agent's scratch checkout is judged by its whole tree, read last: only an old, unheld one is walked.
       if (written && entry.isDirectory() && agentScratchPatterns.some(pattern => pattern.test(entry.name))) {
         written = await treeLastWritten(path, written);
-        if (now - written < maxAgeMs) { report.kept++; continue; }
+        if (now - written < maxAgeMs) { keep(report, 'young'); continue; }
       }
       removable.push({ path, mtime: written });
     }
@@ -535,7 +550,7 @@ async function reclaimRoot(root: string, real: string, pass: PassState, report: 
   }
   // The candidates the bound left unexamined are the next pass's: they are counted as kept, from
   // the dirent list already in hand, so the report still accounts for every candidate exactly once.
-  report.kept += Math.max(0, dirents.reduce((total, entry) => total + (candidate(entry) ? 1 : 0), 0) - (report.scanned - scannedBefore));
+  keep(report, 'bound', Math.max(0, dirents.reduce((total, entry) => total + (candidate(entry) ? 1 : 0), 0) - (report.scanned - scannedBefore)));
   removable.sort((first, second) => first.mtime - second.mtime);
   const removedBefore = report.removed.length;
   for (const { path } of removable.slice(0, limit)) {
@@ -553,7 +568,7 @@ async function reclaimRoot(root: string, real: string, pass: PassState, report: 
       report.bytes += bytes;
     } catch (error) { pass.unfinished.add(path); report.errors.push(`${path}: ${error instanceof Error ? error.message : String(error)}`); }
   }
-  report.kept += Math.max(0, removable.length - (report.removed.length - removedBefore));
+  keep(report, 'bound', Math.max(0, removable.length - (report.removed.length - removedBefore)));
 }
 
 /** The name of this user's tsx compile cache directory in a temporary directory, or null where there are no uids. */
@@ -590,7 +605,8 @@ async function reclaimTsxCaches(root: string, real: string, pass: PassState, rep
     for (const path of await cacheFiles(join(root, name))) {
       let info;
       try { info = await lstat(path); } catch { continue; }
-      if (!info.isFile() || (pass.uid !== undefined && info.uid !== pass.uid) || pass.now - info.mtimeMs < maxAgeMs) continue;
+      if (!info.isFile() || (pass.uid !== undefined && info.uid !== pass.uid)) continue;
+      if (pass.now - info.mtimeMs < maxAgeMs) { if (report.cacheKept) report.cacheKept.young++; continue; }
       old.push({ path, mtime: info.mtimeMs, bytes: info.size });
     }
   }
@@ -598,6 +614,7 @@ async function reclaimTsxCaches(root: string, real: string, pass: PassState, rep
   const held = pass.held ??= await heldOpenPaths();
   // /proc names a holder by its resolved path, so a root reached through a symlink is matched by its realpath.
   const removable = old.filter(file => !held.has(join(real, file.path.slice(root.length + 1)))).sort((first, second) => first.mtime - second.mtime);
+  if (report.cacheKept) report.cacheKept.held += old.length - removable.length;
   report.kept += Math.max(0, removable.length - limit);
   for (const { path, bytes } of removable.slice(0, limit)) {
     const at = Date.now();

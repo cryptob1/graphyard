@@ -808,7 +808,7 @@ export interface ResourceReclaimReport {
    * candidates it examined and kept, whether the inode bound still stood, its escalation steps and
    * the consumers it named. Absent when no pass finished this cycle.
    */
-  tmpPass?: Pick<TmpReclaimReport, 'roots' | 'scanned' | 'kept' | 'boundStands' | 'escalated' | 'consumers'>;
+  tmpPass?: Pick<TmpReclaimReport, 'roots' | 'scanned' | 'kept' | 'keptFor' | 'cacheKept' | 'boundStands' | 'escalated' | 'consumers'>;
   errors: string[];
 }
 /** How a /tmp pass's own errors are marked among a reclaim report's errors (GY-1600). */
@@ -1099,7 +1099,7 @@ export async function reclaimResources(root: string, config: Pick<ProfileSet, 'r
   const tmp = namesOnly ? null : takeTmpReclaim(() => (options.tmpPass ?? reclaimTmpDirectories)(loopTmpReclaimOptions(options.tmpRoots ?? (options.tmpRoot === undefined ? undefined : [options.tmpRoot]))));
   if (tmp) {
     report.tmp = { removed: tmp.removed.length, bytes: tmp.bytes };
-    report.tmpPass = { roots: tmp.roots, scanned: tmp.scanned, kept: tmp.kept, boundStands: tmp.boundStands, escalated: tmp.escalated, consumers: tmp.consumers };
+    report.tmpPass = { roots: tmp.roots, scanned: tmp.scanned, kept: tmp.kept, keptFor: tmp.keptFor, cacheKept: tmp.cacheKept, boundStands: tmp.boundStands, escalated: tmp.escalated, consumers: tmp.consumers };
     report.errors.push(...tmp.errors.map(error => `${tmpErrorPrefix}${error}`));
   }
   const took = !!(report.reaped.review || report.reaped.producer || report.closed.length || report.released.length || report.tmp.removed || report.errors.length);
@@ -1136,8 +1136,8 @@ export function describeReclaim(report: ResourceReclaimReport) {
  * was eligible, how far it escalated and the consumers it named. Null for any other pass, so a
  * pass that took entries back, or one with the bound clear, records only what `describeReclaim` says.
  * Only what the pass measured is claimed: its counts are the last sweep's (an escalation step's
- * sweep covers only the roots still below headroom), and a tsx cache file it could not remove is
- * either younger than the final cache age or held open, which the pass does not tell apart. Only the
+ * sweep covers only the roots still below headroom), and each kept entry is named by the reason the
+ * pass counted for it (GY-1628) — a report from before those counts names the reasons together. Only the
  * /tmp pass's own errors are named: another resource's failure in the same report is not this pass's.
  */
 export function describeStandingTmpPass(report: ResourceReclaimReport) {
@@ -1146,8 +1146,14 @@ export function describeStandingTmpPass(report: ResourceReclaimReport) {
   const roots = pass.roots?.length ? pass.roots.join(' and ') : 'its temporary directories';
   const top = pass.escalated?.at(-1), errors = tmpPassErrors(report);
   const sweep = top ? `; its last step, over the roots still below headroom, examined` : ':';
+  const testAge = `${testTempMinAgeMs / 3_600_000} hours`, cacheAge = minutes(top?.cacheAgeMs ?? tmpReclaimMinAgeMs);
+  // A pass that counted its reasons states each (GY-1628): a zero that kept only young or held entries
+  // is the pass taking all it may, not a remedy that matches nothing, and reads so.
+  const why = pass.keptFor ? `${pass.keptFor.young} younger than ${testAge}, ${pass.keptFor.held} held open or named by a live process, ${pass.keptFor.owner} with a live owner, ${pass.keptFor.bound} past the pass's bounds` : `younger than ${testAge}, a live owner or holder, or past the pass's bounds`;
+  const cache = pass.cacheKept ? `${pass.cacheKept.young} younger than ${cacheAge}, ${pass.cacheKept.held} held open by a live process` : `each younger than ${cacheAge} or held open by a live process`;
+  const stale = pass.keptFor && pass.cacheKept && !pass.keptFor.bound ? `; nothing of this user's was both past its age bound and free to remove` : '';
   return [
-    `/tmp reclaim removed 0 entries while the inode bound stands: scanned ${roots}${sweep} ${entries(pass.scanned)} with this user's test temp names, ${pass.kept} kept (younger than ${testTempMinAgeMs / 3_600_000} hours, a live owner or holder, or past the pass's bounds), and no tsx cache file of this user's it could remove (each younger than ${minutes(top?.cacheAgeMs ?? tmpReclaimMinAgeMs)} or held open by a live process)`,
+    `/tmp reclaim removed 0 entries while the inode bound stands: scanned ${roots}${sweep} ${entries(pass.scanned)} with this user's test temp names, ${pass.kept} kept (${why}), and no tsx cache file of this user's it could remove (${cache})${stale}`,
     top ? `escalated to ${top.limit} per cycle and tsx cache files older than ${minutes(top.cacheAgeMs)} (${pass.escalated!.map(step => step.removed).join(' + ')} removed)` : '',
     pass.consumers?.length ? `what fills it is outside the pass's reach; top consumers: ${pass.consumers.map(consumer => `${consumer.path} (${consumer.capped ? 'at least ' : ''}${entries(consumer.entries)}, owner ${consumer.owner})`).join(', ')}` : '',
     errors.length ? `${errors.length} could not be reclaimed: ${errors[0]}` : '',

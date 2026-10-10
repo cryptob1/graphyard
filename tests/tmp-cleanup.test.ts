@@ -420,7 +420,9 @@ test('unit:tmp-reclaim-zero-escalates — a /tmp pass that removes 0 entries whi
   assert.equal(action.state, 'done');
   assert.match(action.detail, /^\/tmp reclaim removed 0 entries while the inode bound stands/);
   assert.match(action.detail, new RegExp(`scanned ${tmp}; its last step, over the roots still below headroom, examined 1 entry with this user's test temp names, 1 kept`), 'it names what it scanned and kept, and which sweep the counts are');
-  assert.match(action.detail, /no tsx cache file of this user's it could remove \(each younger than 10 minutes or held open by a live process\)/, 'it says why nothing was eligible without claiming one unmeasured cause');
+  // GY-1628: each kept entry is named by the reason the pass counted for it, and a zero that kept nothing stale says so.
+  assert.match(action.detail, /1 kept \(1 younger than 2 hours, 0 held open or named by a live process, 0 with a live owner, 0 past the pass's bounds\)/, 'it counts why each test temp was kept');
+  assert.match(action.detail, /no tsx cache file of this user's it could remove \(5 younger than 10 minutes, 0 held open by a live process\); nothing of this user's was both past its age bound and free to remove/, 'it counts why no cache file was eligible, each cause measured');
   assert.doesNotMatch(action.detail, /old enough/);
   assert.match(action.detail, /escalated to 20000 per cycle and tsx cache files older than 10 minutes \(0 \+ 0 removed\)/);
   assert.match(action.detail, new RegExp(`top consumers: ${leaker} \\(42 entries, owner ${userInfo().username}\\)`));
