@@ -1,12 +1,17 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
-import { readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { execFile as execFileCallback, execFileSync } from 'node:child_process';
+import { chmod, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { repositoryFromRemote, saveDiscovery } from '../src/onboarding.js';
+import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
+import { installedOnboarding, repositoryFromRemote, saveDiscovery } from '../src/onboarding.js';
+import { applyProposal, scanProposal } from '../src/repository-setup.js';
+import { installIdFor } from '../src/install/types.js';
 import { appManifest, reviewerAppManifest, startGithubSetup } from '../src/github-setup.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
+const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 async function repository() { const root = await temporaryDirectory('setup'); execFileSync('git', ['init', '-q', root]); return root; }
 test('discovery identifies GitHub without exposing embedded credentials and preserves repository instructions', async () => {
   assert.equal(repositoryFromRemote('https://test-only-password@github.com/owner/repo.git'), 'owner/repo');
@@ -182,4 +187,97 @@ test('a reviewer App is inspected against its own declaration and an excess Cont
     // The control-plane credential file is never inspected under a reviewer role, or vice versa.
     await assert.rejects(inspectAppPermissions(root, { fetcher }), /No saved Graphyard App/);
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+// GY-1642: an install applied with --no-github-app (a control-plane merger install) records
+// noGithubApp true and github null; init --scan --apply reuses it and writes the onboarding files.
+async function installRecord(configHome: string, repository: string, fields: Record<string, unknown>) {
+  const directory = join(configHome, installIdFor(repository));
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  const now = new Date().toISOString();
+  await writeFile(join(directory, 'install.json'), JSON.stringify({ version: 1, installId: installIdFor(repository), repository, provider: 'local', baseBranch: 'main', url: 'http://127.0.0.1:4310', createdAt: now, updatedAt: now, ...fields }), { mode: 0o600 });
+  return directory;
+}
+async function onboardable() {
+  const root = await repository();
+  execFileSync('git', ['remote', 'add', 'origin', 'git@github.com:owner/repo.git'], { cwd: root });
+  await writeFile(join(root, 'package.json'), JSON.stringify({ scripts: { test: 'node --test', typecheck: 'tsc --noEmit' } }));
+  return root;
+}
+const onboardingFiles = ['AGENTS.md', 'graphyard.json', '.gitignore'];
+
+test('unit:onboarding-nogithubapp-applies — a --no-github-app install supplies no App and apply writes the onboarding without one; a github-mode install at its App step still refuses', async () => {
+  const configHome = await temporaryDirectory('config'), root = await onboardable();
+  const directory = await installRecord(configHome, 'owner/repo', { noGithubApp: true, github: null });
+  const installed = await installedOnboarding(root, 'owner/repo', 'http://127.0.0.1:4310', configHome);
+  assert.deepEqual(installed, { directory, url: 'http://127.0.0.1:4310', githubApp: null });
+  assert.deepEqual(await installedOnboarding(root, 'owner/repo', null, configHome), installed, "no selected server means the install's own");
+  await assert.rejects(installedOnboarding(root, 'owner/repo', 'https://other.example', configHome), /not https:\/\/other\.example/);
+
+  const proposal = await scanProposal(root, { url: 'http://127.0.0.1:4310', runtimes: [] });
+  // A stale saved App, for another repository, is irrelevant to an install that chose none and must not abort the apply.
+  await mkdir(join(root, '.graphyard'), { recursive: true });
+  await writeFile(join(root, '.graphyard/github-app.json'), JSON.stringify({ repository: 'other/repo', appId: 9, slug: 'stale' }));
+  let appPage = false;
+  const result = await applyProposal(root, proposal, { url: 'http://127.0.0.1:4310', installed: installed!, merger: 'control-plane',
+    githubSetup: async () => { appPage = true; return { appId: 1, slug: 'unwanted' }; } });
+  assert.equal(appPage, false, 'no App page is opened for an install that chose none');
+  assert.equal(result.githubApp, null);
+  assert.equal(result.githubPending, false, 'an install that chose no App has no pending App step');
+  assert.equal(result.principalsFile, null);
+  assert.ok(result.applied.includes('AGENTS.md coordination section'), JSON.stringify(result.applied));
+  assert.match(await readFile(join(root, 'AGENTS.md'), 'utf8'), /complete GY-N EPOCH --head SHA/, 'the control-plane worker block is written');
+  const record = JSON.parse(await readFile(join(root, '.graphyard/repository-setup.json'), 'utf8'));
+  assert.equal(record.artifacts.githubApp, null);
+  assert.equal(record.artifacts.principals, join(directory, 'install.json'));
+  await assert.rejects(stat(join(root, '.graphyard/principals.json')), { code: 'ENOENT' });
+
+  // A github-mode install with no App yet is still refused, naming its install directory and the
+  // generic remediation rather than a hard-coded server address.
+  const waiting = await temporaryDirectory('config');
+  const waitingDirectory = await installRecord(waiting, 'owner/repo', { github: null });
+  await assert.rejects(installedOnboarding(root, 'owner/repo', null, waiting), (error: Error) => {
+    assert.match(error.message, /has not finished its GitHub App step/);
+    assert.ok(error.message.includes(join(waitingDirectory, 'install.json')), error.message);
+    assert.match(error.message, /Finish the App step on the page graphyard install --apply serves, or rerun graphyard install --apply/);
+    assert.doesNotMatch(error.message, /https?:\/\//);
+    return true;
+  });
+});
+
+test('integration:onboarding-apply-without-app — init --scan --apply --url onboards a --no-github-app install end to end', async () => {
+  const configHome = await temporaryDirectory('config'), root = await onboardable(), bin = await temporaryDirectory('bin');
+  const directory = await installRecord(configHome, 'owner/repo', { noGithubApp: true, github: null });
+  // No GitHub call may decide the outcome: gh answers nothing, as on a host without GitHub access.
+  await writeFile(join(bin, 'gh'), '#!/bin/sh\necho "gh: not available in this test" >&2\nexit 1\n'); await chmod(join(bin, 'gh'), 0o755);
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  for (const key of Object.keys(env)) if (key.startsWith('GRAPHYARD_')) delete env[key];
+  Object.assign(env, { GRAPHYARD_CONFIG_HOME: configHome, PATH: `${bin}:${process.env.PATH}` });
+  const run = (args: string[]) => promisify(execFileCallback)(process.execPath, [launcher, 'init', ...args], { cwd: root, env });
+  await run(['--scan', '--url', 'http://127.0.0.1:4310']);
+  await writeFile(join(root, '.graphyard/github-app.json'), '{ not json');
+  const applied = JSON.parse((await run(['--scan', '--apply', '--url', 'http://127.0.0.1:4310'])).stdout);
+  assert.equal(applied.installed, directory);
+  assert.equal(applied.githubApp, null);
+  assert.equal(applied.githubPending, false, 'the CLI reports no pending App step for an install that chose none');
+  assert.equal(applied.principalsFile, null);
+  for (const file of onboardingFiles) assert.ok((await stat(join(root, file))).isFile(), `${file} is written for publishing`);
+  assert.ok(applied.delivery?.workflows.length, 'a delivery workflow is written for the onboarding change');
+  for (const workflow of applied.delivery.workflows) assert.ok((await stat(join(root, workflow))).isFile(), workflow);
+  assert.ok((await stat(join(root, '.graphyard/repository-setup.json'))).isFile());
+  await assert.rejects(stat(join(root, '.graphyard/principals.json')), { code: 'ENOENT' });
+  // The onboarding files publish: git sees them as additions and ignores .graphyard/.
+  const status = execFileSync('git', ['status', '--porcelain', '--untracked-files=all'], { cwd: root, encoding: 'utf8' });
+  for (const file of onboardingFiles) assert.match(status, new RegExp(`^\\?\\? ${file.replace('.', '\\.')}$`, 'm'));
+  assert.doesNotMatch(status, /\.graphyard\//);
+
+  // A github-mode install waiting at its App step refuses the same apply, and writes nothing.
+  const waitingHome = await temporaryDirectory('config'), fresh = await onboardable();
+  await installRecord(waitingHome, 'owner/repo', { github: null });
+  const refused = await promisify(execFileCallback)(process.execPath, [launcher, 'init', '--scan', '--url', 'http://127.0.0.1:4310'], { cwd: fresh, env: { ...env, GRAPHYARD_CONFIG_HOME: waitingHome } })
+    .then(() => promisify(execFileCallback)(process.execPath, [launcher, 'init', '--scan', '--apply', '--url', 'http://127.0.0.1:4310'], { cwd: fresh, env: { ...env, GRAPHYARD_CONFIG_HOME: waitingHome } }))
+    .then(() => null, error => error);
+  assert.ok(refused, 'the github-mode refusal is unchanged');
+  assert.match(String(refused.stderr), /has not finished its GitHub App step/);
+  await assert.rejects(stat(join(fresh, 'AGENTS.md')), { code: 'ENOENT' });
 });
