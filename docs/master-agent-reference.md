@@ -15,15 +15,15 @@ Dispatch is optimistic (overlap holds nothing), smallest planned scope first ([r
 
 ## GitHub administration through the browser
 
-`master protection --apply` reconciles protection; flows (`master browser app-permissions`, `master browser installation-accept`, `master browser protection`) drive the `master init --browser-profile` profile:
+`master protection --apply` reconciles protection; `master browser FLOW` drives the `master init --browser-profile` profile:
 
 | Flow | Effect
 | --- | ---
-| `app-permissions` | Raise App permissions to declaration
+| `app-permissions` | Raise App permissions
 | `installation-accept` | Accept pending requests
 | `protection` | Reconcile branch protection
 
-Flows read `GET /api/github/installation`, recording `.graphyard/master-actions/` `record.json`, `ledger.json` and redacted Confirm-access markup, listed by `master browser fixtures`. Approving *Confirm access* GitHub Mobile code on device: human-only; master never stores profile cookies, uses merge bypass, pushes code or reads worker credentials. On classifier refusals `master harness claude --apply` (or `codex`) writes `.claude/settings.local.json` rules denying `gh pr merge`/`review` and merging, reviewing, token-minting or mutating `gh api` calls; missing or retired rules are `harness` drift that the loop reapplies each cycle; `master status` too, unless read-only (confined doctor): it reports.
+Flows read `GET /api/github/installation`, recording `.graphyard/master-actions/` `record.json`, `ledger.json` and redacted Confirm-access markup, listed by `master browser fixtures`. Approving *Confirm access* GitHub Mobile codes: human-only; master never stores profile cookies, uses merge bypass, pushes code or reads worker credentials. On classifier refusals `master harness claude|codex --apply` writes `.claude/settings.local.json` rules denying `gh pr merge`/`review` and merging, reviewing, token-minting or mutating `gh api` calls; missing or retired rules are `harness` drift the loop reapplies each cycle to its managed-state checkout (from `.graphyard/master.json`), never the research scratch (no `.graphyard/units.json`: `graphyard master init --token-stdin` there); `master status` too, unless read-only (confined doctor), reporting.
 
 ## Typed actions and executors
 
@@ -49,6 +49,6 @@ Unacted producer requests (unstarted, refused, exited at launch) relaunch on unt
 
 ## Pipeline speed
 
-Target (10+ deliveries): submit→merge p50 ≤30 minutes, p90 ≤60 minutes. Row `speed`: `executionMs`, `waitMs`, `reworkRounds`, `interventions`; verdict `speed.submitToMerge`; `node scripts/measure-pipeline-speed.mjs` records what `manual:speed-target-met` reads.
+Target (10+ deliveries): submit→merge p50 ≤30, p90 ≤60 minutes. Row `speed`: `executionMs`, `waitMs`, `reworkRounds`, `interventions`; verdict `speed.submitToMerge`; `node scripts/measure-pipeline-speed.mjs` records what `manual:speed-target-met` reads.
 
 Loop's decisions step stays within 10 s a cycle: one `decision.*` ledger read names moved items; a history whose ledger has not moved is kept, not read. Widenings refused by 5xx or stale revision and timed-out decision history reads retry next cycle (twice: fault) unless moot (delivered, answered, lease ended, head moved).

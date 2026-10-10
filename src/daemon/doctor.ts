@@ -1,6 +1,10 @@
 // Concern: the pipeline doctor (GY-711) — the loop's ten-minute remedy worker, and the
 // deterministic remedies the loop applies itself without an agent.
 import { createHash } from 'node:crypto';
+import { existsSync, realpathSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
+import { join, resolve } from 'node:path';
 import type { Work } from '../model.js';
 import { createSchema } from '../model.js';
 import { isClosed } from '../model/closure.js';
@@ -12,6 +16,8 @@ import { scopeRefusalBlocker, unplannedPaths } from '../model/scope.js';
 import { approverSessionName, guardBroadScope } from '../master/autonomy.js';
 import { containmentPhase, masterHarness, type MasterConfig } from '../master.js';
 import { harnessDrift, writeHarnessPermissions } from '../harness.js';
+import { coordinatorCheckoutRoot } from '../master/profiles.js';
+import { foreignUnitText, initialiseUnitsCommand, installUnitsFile, legacyUnitFiles, unitCheckout, userUnitDirectory } from '../install/units.js';
 import { selectFleetSession } from '../fleet.js';
 import { heldAwareProbe } from '../master/environments.js';
 import { registryHeadlessLaunch, registryRunner, runConfinement } from '../runner/roles.js';
@@ -716,20 +722,21 @@ export const decisionCheckMs = 2 * 60_000;
  * (GY-888), so its repair always met EROFS and the row recurred every pass. The loop owns the file:
  * whenever the installed settings differ from the plan it makes the same idempotent write
  * `master harness claude --apply` makes — operator-added entries kept, only retired generated rules
- * removed — and journals one line. It runs on the checkout the doctor reads, which is the loop's
- * own. The checkout is named by the loop's research effect, which every loop carries, not by the
- * doctor's: a loop with no operator-agent identity or with the doctor off still owns its checkout,
- * and its own cycle is then the only recurring reader that would heal host-derived drift.
- * A failure is journaled once per distinct cause and retried every cycle; a repeat of the same cause
+ * removed — and journals one line. It runs on the loop's own checkout, the one its managed state
+ * names (`harnessCheckout`, GY-1664), never the research effect's: that is the units-less research
+ * scratch (GY-866/GY-1480), where a refusal names a remedy no operator can satisfy. A checkout that
+ * records no units is refused with its exact remedy (`unrecordedUnitsFault`). A failure is journaled once per distinct cause and retried every cycle; a repeat of the same cause
  * moves the standing row's time, so the failure stays open for as long as it lasts.
  */
 export async function applyHarnessContract(cycle: Cycle) {
   const { state, effects, now, performed, config, isolate } = cycle;
-  const root = effects.research?.cwd ?? effects.doctor?.cwd;
+  const root = await harnessCheckout(config, effects.doctor?.cwd);
   if (!root) return;
   await isolate('config', null, 'harness contract', async () => {
     const key = remedyKey('harness', 'claude'), previous = state.actions[key], attempts = (previous?.attempts ?? 0) + 1;
     try {
+      const unrecorded = unrecordedUnitsFault(root);
+      if (unrecorded) throw new Error(unrecorded);
       const plan = masterHarness(root, config, 'claude');
       if (!await harnessDrift(root, plan)) return;
       const written = await writeHarnessPermissions(root, plan, true);
@@ -744,6 +751,31 @@ export async function applyHarnessContract(cycle: Cycle) {
       performed.push(await record(state, key, { kind: 'config', work: null, principal: null, state: 'failed', detail, attempts, cycle: state.cycle }, now(), effects.persist));
     }
   });
+}
+
+/** The checkout the loop's managed state names: the launcher's when its `.graphyard/master.json` records this loop, else FALLBACK (the doctor's), never the research scratch. */
+export async function harnessCheckout(config: Pick<MasterConfig, 'cliPath' | 'repository'>, fallback?: string | null): Promise<string | null> {
+  const root = coordinatorCheckoutRoot(config.cliPath);
+  try {
+    const recorded = JSON.parse(await readFile(join(root, '.graphyard/master.json'), 'utf8')) as { cliPath?: unknown; repository?: unknown };
+    if (typeof recorded.cliPath === 'string' && resolve(recorded.cliPath) === resolve(config.cliPath) && recorded.repository === config.repository) return root;
+  } catch { /* no managed state here: the launcher runs from a checkout this loop does not manage */ }
+  return fallback ?? null;
+}
+
+const sameDirectory = (left: string, right: string) => { const real = (path: string) => { try { return realpathSync(path); } catch { return resolve(path); } }; return real(left) === real(right); };
+
+/** Why ROOT cannot name its units for the harness plan, with the exact `master init --token-stdin` remedy; null when it records them or a legacy unit runs ROOT itself (the pre-GY-1441 alias). */
+export function unrecordedUnitsFault(root: string, unitDirectory = userUnitDirectory(), home = homedir()): string | null {
+  if (existsSync(join(root, installUnitsFile))) return null;
+  const remedy = `run ${initialiseUnitsCommand} --token-stdin in ${root}`;
+  const legacy = legacyUnitFiles(unitDirectory).filter((unit): unit is { path: string; text: string } => unit.text !== null);
+  for (const unit of legacy) {
+    const foreign = foreignUnitText(unit.text, root, home);
+    if (foreign) return `${root}, the checkout the loop's managed state names, records no units (${installUnitsFile} is absent), and the legacy unit ${unit.path} runs another checkout (${foreign}); ${remedy} to record this install's own units`;
+  }
+  if (legacy.some(unit => { const working = unitCheckout(unit.text, home).workingDirectory; return !!working && sameDirectory(working, root); })) return null;
+  return `${root}, the checkout the loop's managed state names, records no units (${installUnitsFile} is absent) and no legacy-named unit runs it; ${remedy} to record this install's units`;
 }
 
 /** The deterministic remedies, every cycle, before the doctor itself is scheduled. */
