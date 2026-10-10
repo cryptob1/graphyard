@@ -17,7 +17,7 @@ import { latencyBudget, silenceReport } from './metrics.js';
 import { boundedPersist, cycleCost, cycleTimes, cycleDelay, cycleFailureCeiling, describeFailingCall, loopLiveness, namedEffects, noteCycleFailure, noteCycleSuccess, noteUnhandled, watchdogPlan } from './liveness.js';
 import type { DaemonEffects } from './effects.js';
 import { Launcher, defaultLaunchConcurrency, runCycle } from './cycle.js';
-import { takeHoldBound } from './cycle-decisions.js';
+import { holdBoundWait } from './cycle-decisions.js';
 import { detailChanged } from './decisions.js';
 import { describeSelfUpgrade, type SelfUpgradeOutcome } from './upgrade.js';
 import { describeTimings } from '../master/timings.js';
@@ -318,8 +318,8 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
           // back inside the responsive window so ready work cannot sit out a long interval.
           wait = cycleDelay(interval(), result.silence);
           // GY-1622: a docs-sync hold left standing ends the idle wait at its bound, so the step that releases it runs then.
-          const bound = takeHoldBound(state);
-          if (bound !== null && bound - now() < wait) { wait = Math.max(0, bound - now()); log(`[graphyard-master] the next cycle runs in ${Math.round(wait / 1000)}s, at the docs-sync hold bound ${new Date(bound).toISOString()}`); }
+          const held = holdBoundWait(state, wait, now()), bound = held.bound;
+          if (bound !== null) { wait = held.wait; log(`[graphyard-master] the next cycle runs in ${Math.round(wait / 1000)}s, at the docs-sync hold bound ${new Date(bound).toISOString()}`); }
           wakeable = true;
         } catch (error) {
           // The cycle failed; the loop did not. The counter advances, the cause is on the cursor, and

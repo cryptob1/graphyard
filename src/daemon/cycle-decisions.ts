@@ -25,10 +25,8 @@ import { closeStanding, closingItems, recordingWrites, staleCloseStep } from './
 
 /** The approval-watch key prefix of a hand-launched approver, re-exported for the blocker step (GY-403). */
 export { handWatchPrefix };
-/** GY-1622: per loop cursor, the earliest future bound of a docs-sync hold the last decision step left standing. */
-const holdBounds = new WeakMap<DaemonState, number>();
-/** The bound the loop's idle wait ends at, read once: the step that releases the hold then runs within one cycle of it. */
-export const takeHoldBound = (state: DaemonState) => { const bound = holdBounds.get(state) ?? null; holdBounds.delete(state); return bound; };
+const holdBounds = new WeakMap<DaemonState, number>(); // GY-1622: per loop cursor, the earliest future docs-sync hold bound the last step left; holdBoundWait ends the loop's wait there when sooner, read once (`bound` set only then)
+export const holdBoundWait = (state: DaemonState, wait: number, at: number) => { const bound = holdBounds.get(state) ?? null; holdBounds.delete(state); return bound !== null && bound - at < wait ? { wait: Math.max(0, bound - at), bound } : { wait, bound: null }; };
 /** Step 4c: request and supervise the routine decisions. */
 export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, assessments: Record<string, ContainmentAssessment>, { capacities, approversSpent }: { capacities: RoleCapacity[]; approversSpent: boolean }) {
   const { config, state, now, snapshot, clock, performed, isolate, agents, open } = cycle;
@@ -47,8 +45,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
   //     refused one is left to the master to answer, a decision the server settled some other way
   //     is requested again, and one no session will judge is escalated and left standing on the
   //     silence measure.
-  const stamp = new Date(clock).toISOString();
-  holdBounds.delete(state);
+  const stamp = new Date(clock).toISOString(); holdBounds.delete(state);
   const note = async (key: string, item: Work, kind: DaemonActionKind, outcome: 'done' | 'failed', detail: string, at = now(), faultKind?: FaultKind | null) =>
     performed.push(await record(state, key, { kind, work: item.key, principal: null, state: outcome, detail, attempts: (state.actions[key]?.attempts ?? 0) + 1, epoch: item.epoch, cycle: state.cycle }, at, effects.persist, faultKind));
   const approvers = createApproverSupervisor(cycle, effects, stamp, note, capacities, approversSpent);
@@ -439,12 +436,8 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
   };
   const wake = effects.observe && observationWaker(effects.observe);
   const noteWait = async (item: Work, detail: string) => { const waitKey = `wait:rework:${item.id}`; if (detailChanged(state.actions[waitKey], detail)) await note(waitKey, item, 'decision', 'done', detail); };
-  // GY-1436: one stable wait per held item, naming the docs-sync session, head, base and the end of its bound.
-  // GY-1622: its bound, when still ahead, ends the loop's idle wait (takeHoldBound).
-  const noteHold = async (item: Work, { wait: detail, deadline }: { wait: string; deadline: string }) => {
-    const bound = Date.parse(deadline); if (bound > clock) holdBounds.set(state, Math.min(holdBounds.get(state) ?? Infinity, bound));
-    const waitKey = `wait:docs-sync:${item.id}`; if (detailChanged(state.actions[waitKey], detail)) await note(waitKey, item, 'decision', 'done', detail);
-  };
+  // GY-1436: one stable wait per held item, naming the docs-sync session, head, base and the end of its bound; that bound, still ahead, ends the loop's idle wait (GY-1622).
+  const noteHold = async (item: Work, { wait: detail, deadline }: { wait: string; deadline: string }) => { const bound = Date.parse(deadline), waitKey = `wait:docs-sync:${item.id}`; if (bound > clock) holdBounds.set(state, Math.min(holdBounds.get(state) ?? Infinity, bound)); if (detailChanged(state.actions[waitKey], detail)) await note(waitKey, item, 'decision', 'done', detail); };
   const mechanical = effects.mechanicalFixes ? await effects.mechanicalFixes().then(read => read.requests, () => []) : []; // GY-971 planned bot rounds
   const routinePass = budget.pass(), attestPass = budget.pass();
   // GY-1439: while a close stands requested and unapplied on an item, nothing advances it (closingItems): no
