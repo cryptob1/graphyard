@@ -22,6 +22,11 @@ import type { EscalationTrigger, Work } from './work.js';
 // escalation and pipeline fault the loop records carries a class from one shipped catalogue;
 // master status and the dashboard group open problems by class with a count; and a class that
 // recurs past the threshold becomes one structural backlog item, which later instances link to.
+// Instances count against a class item from its landing, not its opening (GY-1632): once the
+// newest delivered item naming the class has merged, an instance first seen before that merge is
+// one the delivered fix already answers, so it links to that item and files nothing; only an
+// instance first seen after the landing counts toward filing the class afresh. GY-1628 was filed
+// from instances that all predated GY-1618's merge, and triage released it to re-implement it.
 // This module is browser-safe: the dashboard classifies with it too.
 // ---------------------------------------------------------------------------
 
@@ -254,24 +259,7 @@ export function openFaultClassItem(work: readonly Work[], faultClass: FaultClass
   return work.find(item => item.stage !== 'done' && !isClosed(item) && closesFaultClass(item) === faultClass) ?? null;
 }
 
-export interface ClassRecurrence { faultClass: FaultClass; count: number; recent: FaultInstance[]; unlinked: FaultInstance[]; item: Work | null; file: boolean }
-/**
- * Every class with an instance inside the window. A class files an item when the instances in the
- * window no item accounts for reach the threshold and no item stands for the class (`standing`,
- * GY-439); with one, every unlinked instance links to it.
- * Instances linked to an item that has since closed stay counted by it, never by a second one.
- */
-export function recurringClasses(instances: readonly FaultInstance[], work: readonly Work[], policy: FaultClassPolicy, now: number, standing = openFaultClassItem): ClassRecurrence[] {
-  const from = now - policy.windowHours * 3_600_000;
-  return faultClasses.flatMap(faultClass => {
-    const all = instances.filter(entry => entry.faultClass === faultClass);
-    const recent = all.filter(entry => Date.parse(entry.at) >= from && Date.parse(entry.at) <= now && !entry.linkedTo);
-    const item = standing(work, faultClass);
-    const unlinked = item ? all.filter(entry => !entry.linkedTo) : recent;
-    if (!unlinked.length) return [];
-    return [{ faultClass, count: recent.length, recent, unlinked, item, file: !item && recent.length >= policy.threshold }];
-  });
-}
+export { deliveredFaultClassCover, faultClassItem, landedAt, predateLanding, recurringClasses, releaseOvertakenLinks, type ClassRecurrence } from './fault-class-recurrence.js';
 
 /** Problems the control plane's status reports beside any item (App permissions, integration jobs, production lag and
  *  incidents, a GitHub pause, unserved executors): the dashboard groups them with the items' faults, as master status does. */
@@ -290,26 +278,3 @@ export function statusFaults(status: any): FaultObservation[] {
 }
 
 export { noteActionOutcome, noteFault, retainedFaultInstances, trackFaults, type FaultRecord } from './fault-record.js';
-
-/** The backlog item one recurring class files: the class, its frequency and every instance as evidence. */
-export function faultClassItem(recurrence: Pick<ClassRecurrence, 'faultClass' | 'recent'>, policy: FaultClassPolicy, now: number) {
-  const { faultClass, recent } = recurrence, at = new Date(now).toISOString();
-  const subjects = [...new Set(recent.map(entry => entry.subject))];
-  const origin: FaultClassOrigin = { class: faultClass, threshold: policy.threshold, windowHours: policy.windowHours, count: recent.length, detectedAt: at,
-    instances: recent.slice(0, 100).map(({ id, kind, subject, at: seen }) => ({ id, kind, subject, at: seen })) };
-  // Goals, spending and credentials stay a human's however often asked: this class removes only the avoidable waits.
-  const human = faultClass === 'human-decision';
-  const description = [
-    `The master loop filed this item itself: ${recent.length} ${faultClass} faults in ${policy.windowHours} hours (threshold ${policy.threshold}). The class means ${faultClassMeaning[faultClass]}.`,
-    human ? `These waits are on decisions only a human may make (goals and priorities, money or accounts, credentials for people), and this item does not move any of them to an agent or weaken that boundary. What it replaces is handling each wait by hand: find the waits that were avoidable — asked again for something already decided, asked for a decision the item did not need, or left unanswered because nobody was told — and remove those, so each human decision is asked for once, when it is needed, with what the human needs to make it. Later instances of the class are linked to this item rather than filed again.` : `Fixing these one instance at a time is what this item replaces: find the cause the instances share and remove it, so the product handles the case itself. Later instances of the class are linked to this item rather than filed again. Whether the class stays quiet after this ships is not evidence this item can carry: the loop keeps counting it, and a recurrence past the threshold after delivery files a new item.`,
-    `Subjects affected: ${subjects.join(', ')}.`,
-    'Instances (the evidence):',
-    ...recent.slice(0, 100).map(entry => `- ${entry.at} ${entry.kind} on ${entry.subject}: ${entry.text}`),
-  ].join('\n\n');
-  return {
-    title: `Recurring ${faultClass} faults: ${recent.length} in ${policy.windowHours} hours`.slice(0, 200), description: description.slice(0, 20000), type: 'bug' as const, priority: human ? 2 : 1,
-    criteria: [{ id: 'AC-1', text: human ? 'Each instance listed on this item is judged necessary (a goals, money or credentials decision the item needed) or avoidable, with the reason; every avoidable wait is reproduced against the base and shown not to recur against the candidate, by a test the change adds; and a test shows every necessary decision is still refused to every agent and answered only in the human\'s own session' : `The shared cause of the recurring ${faultClass} faults is found and removed at the candidate: each instance listed on this item is reproduced against the base and shown not to recur against the candidate, by a test the change adds`, proofs: [`manual:fault-class-${faultClass}`] }],
-    origin: { faultClass: origin },
-    reason: `The ${faultClass} fault class recurred past its threshold (${recent.length} ≥ ${policy.threshold} in ${policy.windowHours} hours) and no open item names it`,
-  };
-}

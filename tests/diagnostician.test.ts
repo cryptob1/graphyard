@@ -10,7 +10,7 @@ import { server } from '../src/server.js';
 import { Store } from '../src/store.js';
 import type { Principal, Work } from '../src/model.js';
 import { decisionCapabilities, decisionInputs, decisionPrecondition } from '../src/model/approval.js';
-import { faultClassItem, recurringClasses as classes, type FaultInstance, type FaultClassPolicy } from '../src/model/fault-classes.js';
+import { faultClassItem, recurringClasses as classes, releaseOvertakenLinks, type FaultInstance, type FaultClassPolicy } from '../src/model/fault-classes.js';
 import { registryRoles, roleSchema, fleetRoles } from '../src/model/registry.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { decisionInput } from '../src/master/autonomy.js';
@@ -18,6 +18,7 @@ import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-da
 import { standingFaultClassItem, clearDiagnoses, diagnosesSettled, diagnosisStep, diagnosisSubjects, type DiagnosticianEffects, type DiagnosisContext, type DiagnosisSubject } from '../src/daemon/diagnosis.js';
 import { clearDoctorRuns, doctorStep, type DoctorEffects } from '../src/daemon/doctor.js';
 import { doctorSettingsSchema } from '../src/master/doctor-settings.js';
+import { overtakenClosure } from '../src/triage.js';
 import { RefusedResponse } from '../src/model/refusal.js';
 import type { Cycle } from '../src/daemon/cycle.js';
 import { diagnosisPayloadSchema, diagnosticianSettings, type DiagnosisPayload } from '../src/runner/payloads.js';
@@ -132,6 +133,56 @@ function recurring(state: ReturnType<typeof emptyDaemonState>) {
   return item('GY-101', { title: input.title, description: input.description, origin: input.origin, type: 'bug', priority: 1 } as Partial<Work>);
 }
 afterEach(() => clearDiagnoses());
+
+// GY-1632: GY-1628 was filed from tmp-inodes instances that all predated GY-1618's merge, though
+// GY-1618 answered the same resources class: instances count against a delivered item from its landing.
+function gy1628Shape() {
+  const state = emptyDaemonState(config());
+  const t = (n: number) => iso(n * hour);
+  const instances = [1, 2, 3].map((n): FaultInstance => ({ id: `resource-bound|tmp-inodes|${t(n)}`, kind: 'resource-bound', faultClass: 'resources', subject: 'resource:tmp-inodes', text: '/tmp inodes at their bound', at: t(n), lastSeenAt: t(n), linkedTo: null }));
+  const answered = { ...recurring(state), key: 'GY-1610', id: 'work-GY-1610', origin: { faultClass: { class: 'resources', threshold: 3, windowHours: 24, count: 3, instances: [], detectedAt: t(0) } },
+    stage: 'done', closure: { kind: 'duplicate', ref: 'GY-1618', reason: 'answered', by: 'master', at: t(0), from: 'backlog' } } as unknown as Work;
+  const fix = item('GY-1618', { stage: 'done', delivery: { mergedAt: t(4), mergeSha: 'a'.repeat(40), authorizationRevision: 1 } } as Partial<Work>);
+  return { instances, answered, fix, t };
+}
+
+test('unit:fault-class-delivered-coverage — instances all predating a delivered same-class item\'s landing file nothing and link to it', () => {
+  const { instances, answered, fix } = gy1628Shape();
+  const entry = recurringClasses(instances, [answered, fix], policy, clock + 5 * hour).find(recurrence => recurrence.faultClass === 'resources')!;
+  assert.equal(entry.file, false, 'T1<T2<T3 all predate the landing at T4: nothing is filed');
+  assert.equal(entry.item?.key, 'GY-1618', 'the delivered item stands, so the instances link to it');
+  assert.deepEqual(entry.unlinked.map(instance => instance.id), instances.map(instance => instance.id));
+  // A delivered item filed for the class itself covers it the same way, under the default standing rule too.
+  const filedForClass = { ...fix, origin: { faultClass: { class: 'resources', threshold: 3, windowHours: 24, count: 3, instances: [], detectedAt: iso(0) } } } as unknown as Work;
+  const direct = classes(instances, [filedForClass], policy, clock + 5 * hour).find(recurrence => recurrence.faultClass === 'resources')!;
+  assert.deepEqual([direct.file, direct.item?.key], [false, 'GY-1618']);
+  // A delivered item with no recorded merge has no landing to compare against: the class files afresh, as before.
+  const unmerged = { ...fix, delivery: undefined } as unknown as Work;
+  assert.equal(recurringClasses(instances, [answered, unmerged], policy, clock + 5 * hour).find(recurrence => recurrence.faultClass === 'resources')!.file, true);
+});
+
+test('unit:fault-class-post-landing-files — an instance observed after the delivered item\'s landing files a new item afresh', () => {
+  const { instances, answered, fix, t } = gy1628Shape();
+  const after: FaultInstance = { ...instances[2]!, id: `resource-bound|tmp-inodes|${t(5)}`, at: t(5), lastSeenAt: t(5) };
+  const entry = recurringClasses([instances[0]!, instances[1]!, after], [answered, fix], policy, clock + 6 * hour).find(recurrence => recurrence.faultClass === 'resources')!;
+  assert.equal(entry.item, null, 'no item stands: the class recurred after the fix landed');
+  assert.equal(entry.file, true);
+  // An item already filed from the pre-landing instances, proposed closed as covered by the fix: the post-landing
+  // instance linked to it while the closure awaits its approver withdraws that closure, so the recurrence is never closed over.
+  const filed = { ...item('GY-1628', { stage: 'backlog' } as Partial<Work>), origin: { faultClass: { class: 'resources', threshold: 3, windowHours: 24, count: 2, detectedAt: t(3), instances: instances.slice(0, 2).map(({ id, kind, subject, at }) => ({ id, kind, subject, at })) } },
+    triage: { judgement: { outcome: 'close', ref: 'GY-1618', reason: 'covered' }, state: 'proposed', by: 'master', at: t(4.5) } } as unknown as Work;
+  assert.equal(overtakenClosure(filed, [filed, answered, fix], { instances: [{ ...after, linkedTo: 'GY-1628' }] })?.triageAt, t(4.5));
+  assert.equal(overtakenClosure(filed, [filed, answered, fix], { instances: [{ ...instances[2]!, linkedTo: 'GY-1628' }] }), null, 'a pre-landing link leaves the closure standing');
+  // The closure applied before the link was made (approved in the same cycle's decision step): the post-landing link
+  // is released once the item shows closed, so it files afresh; a pre-landing link to it stays.
+  const closed = { ...filed, stage: 'done', closure: { kind: 'superseded', ref: 'GY-1618', reason: 'covered', by: 'approver', at: t(5), from: 'backlog' } } as unknown as Work;
+  const linked = [{ ...after, linkedTo: 'GY-1628' }, { ...instances[2]!, linkedTo: 'GY-1628' }];
+  releaseOvertakenLinks(linked, [closed, answered, fix]);
+  assert.deepEqual(linked.map(instance => instance.linkedTo), [null, 'GY-1628']);
+  const open = [{ ...after, linkedTo: 'GY-1628' }];
+  releaseOvertakenLinks(open, [filed, answered, fix]);
+  assert.equal(open[0]!.linkedTo, 'GY-1628', 'a link to the item while it is open stays');
+});
 
 test('unit:diagnostician-launched — a recurring-fault item is diagnosed within the cycle that files it, with its instances, excerpts and pull requests', async () => {
   const h = harness(prompt => diagnosis(/subject "([^"]+)"/.exec(prompt)![1], { covering: 'GY-50' }));
@@ -447,7 +498,7 @@ test('unit:diagnosis-files-fix — a recurrence before the fix is delivered link
   const before = recurringClasses(later, [answered, fixOpen], policy, clock + 2 * hour).find(entry => entry.faultClass === 'stalled-gate')!;
   assert.equal(before.file, false, 'the fix is not delivered: nothing is filed');
   assert.equal(before.item?.key, 'GY-101', 'the recurrence links to the recurring item');
-  const delivered = { ...fixOpen, stage: 'done' } as Work;
+  const delivered = { ...fixOpen, stage: 'done', delivery: { mergedAt: iso(0), mergeSha: 'b'.repeat(40), authorizationRevision: 1 } } as Work; // landed before every later instance (GY-1632)
   const afterDelivery = recurringClasses(later, [answered, delivered], policy, clock + 2 * hour).find(entry => entry.faultClass === 'stalled-gate')!;
   assert.equal(afterDelivery.item, null);
   assert.equal(afterDelivery.file, true, 'the fix is delivered and the class recurred: a new item is filed');
