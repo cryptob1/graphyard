@@ -249,7 +249,7 @@ test('unit:soak-throughput-escalated-miss — over simulated days of one release
     owner.policyRevision = 2;
     await missing.cycles(start + day + 12 * hour);
     assert.deepEqual(closed, [owner.key]);
-    assert.match(work.find(item => item.key === owner.key)!.closure!.reason, /on an escalated budget miss\) was answered by its requirements revision 2/);
+    assert.match(work.find(item => item.key === owner.key)!.closure!.reason, new RegExp(`on an escalated budget miss of ${serving.slice(0, 12)}\\) was answered by its requirements revision 2`));
     assert.notEqual(state.actions[raisedKey]?.state, 'waiting', 'its answer consumed, the escalation is settled, and the bound may retire it');
     const successor = openThroughputOwner(work)!;
     assert.ok(successor && successor.key !== owner.key);
