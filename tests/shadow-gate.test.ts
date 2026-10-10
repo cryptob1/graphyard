@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 import EmbeddedPostgres from 'embedded-postgres';
 import { daemonStateSchema, daemonSummary, emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { keepVerdicts, shadowErrorKey, shadowKeptVerdicts, shadowLeftoverKey, shadowReads, shadowRunnerDetail, shadowRunnerKey, shadowRunnerRetries, shadowIdle, shadowStateSchema, shadowTimeoutKey, shadowTimeoutRetries, shadowVerdictBody, shadowVerdictKey } from '../src/daemon/cycle-shadow.js';
-import { compareVerdicts, githubOutcome, judgedVerdicts, recordedFailureCause, shadowDisagreementCause, shadowDue, shadowGateAttention, shadowReport, submittedAtOf, trialLogTailLength, type ShadowVerdict } from '../src/merge-writer/shadow.js';
+import { compareVerdicts, failingSummary, githubOutcome, judgedVerdicts, recordedFailureCause, shadowDisagreementCause, shadowDue, shadowGateAttention, shadowReport, submittedAtOf, trialLogTailLength, type ShadowVerdict } from '../src/merge-writer/shadow.js';
 import { failingFilesInLog, failureTail, runTrial, trialNeedsLog, trialTemporaryPrefix, TrialCleanupError, TrialRunnerError, TrialTimeoutError, type TrialRun } from '../src/merge-writer/trial.js';
 import { defaultChildRun, type ChildRun } from '../src/child-runner.js';
 import type { FilesystemProbe } from '../src/install/worktree-root.js';
@@ -640,6 +640,10 @@ test('unit:shadow-failing-files-from-runner — a trial verdict\'s failing files
   const printed = ['✖ failing tests:', '', 'test at tests/shadow-gate.test.ts:7:5588', '✖ integration:shadow-failure-log-tail (31.8ms)',
     '  AssertionError [ERR_ASSERTION]: the command, the cut, then whole lines', '  + $ node tests/helpers/run-tests.ts', '  + test at tests/c.test.ts:41:1', '  + ✖ gadget case 41 tests/c.test.ts', ''].join('\n');
   assert.deepEqual(failingFilesInLog(printed, ['tests/shadow-gate.test.ts', 'tests/b.test.ts']), ['tests/shadow-gate.test.ts']);
+  // The runner's own summary, not a child run's one quoted, indented, inside its failing test's error.
+  const quoted = `\u001b[31m✖ failing tests:\u001b[39m\n\ntest at tests/shadow-gate.test.ts:7:759\n✖ parity\n  AssertionError: the child run failed\n  ✖ failing tests:\n  \n  test at tests/c.test.ts:1:1\n  ✖ gadget case 1\n`;
+  assert.match(failingSummary(quoted) ?? '', /^\u001b\[31m✖ failing tests:[\s\S]*test at tests\/shadow-gate\.test\.ts:7:759[\s\S]*✖ gadget case 1$/);
+  assert.equal(failingSummary('▶ case\n  ✖ failing tests:\n  test at tests/c.test.ts:1:1\n'), null, 'an indented heading alone is no runner summary');
   assert.deepEqual(failingFilesInLog(printed).sort(), ['tests/c.test.ts', 'tests/shadow-gate.test.ts'], 'without the runner\'s files every printed name would count');
   const scratch = await temporaryDirectory('shadow-runner-files', tmpdir());
   for (const records of ['', JSON.stringify({ file: 'tests/c.test.ts', durationMs: 5, passed: false })]) {

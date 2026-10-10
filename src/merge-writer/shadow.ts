@@ -176,11 +176,12 @@ export const trialCutLine = "… (this group's earlier output was cut)";
 /**
  * The runner's last `failing tests:` summary in one group's output (GY-1645): its heading through
  * the last line of its entries (each `test at` line, its `✖` test and the indented error), or null
- * when the output carries none. ANSI escapes are ignored when reading where it ends.
+ * when the output carries none. ANSI escapes are ignored when reading where it starts and ends.
  */
 export function failingSummary(output: string): string | null {
   const lines = output.split('\n'), plain = lines.map(line => line.replace(ansiEscape, ''));
-  const start = plain.findLastIndex(line => /^\s*✖ failing tests:\s*$/.test(line));
+  // Only the runner's own heading, at column zero: a child run's summary a failing test printed is indented under it.
+  const start = plain.findLastIndex(line => /^✖ failing tests:\s*$/.test(line));
   if (start < 0) return null;
   let end = start + 1;
   while (end < lines.length && (!plain[end]!.trim() || /^\s/.test(plain[end]!) || /^(test at |✖ )/.test(plain[end]!))) end++;
