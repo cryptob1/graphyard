@@ -16,6 +16,8 @@ import { setTimeout as delay } from 'node:timers/promises';
  * unverifiable, never absent (GY-1663): it throws, naming the pid and the read error, before anything
  * is stopped or touched — unless it is provably outside the checkout: this process or an ancestor, or
  * one of the loop's managed sessions (a `graphyard-watch-…` scope, which sees the checkout read-only).
+ * A kernel thread (PF_KTHREAD in its stat flags, seen when the scan runs as root) has no cwd and is
+ * never a writer; a process whose state, read again after the failed cwd read, is a zombie is gone.
  */
 export function checkoutWriterProcesses(root: string, self = process.pid, proc = '/proc', uid = process.getuid?.() ?? null): number[] {
   const { writers, unverifiable } = checkoutProcessScan(root, self, proc, uid);
@@ -24,6 +26,8 @@ export function checkoutWriterProcesses(root: string, self = process.pid, proc =
 }
 /** A process of this user whose working directory could not be read, with the read error. */
 export interface UnverifiableProcess { pid: number; error: string }
+/** The kernel's per-task flag for a kernel thread (include/linux/sched.h), field 9 of /proc/PID/stat: it has no user cwd and writes no checkout. */
+const PF_KTHREAD = 0x00200000;
 /** The loop's managed sessions run in `graphyard-watch-…` scopes (src/supervisor.ts). */
 const managedScope = /\/graphyard-watch-[A-Za-z0-9:@._-]+\.scope(?:\/|$)/m;
 /**
@@ -48,10 +52,15 @@ export function checkoutProcessScan(root: string, self = process.pid, proc = '/p
       let cwd: string | null = null, error: string | null = null;
       try { cwd = readlinkSync(join(proc, name, 'cwd')); }
       catch (failure) {
-        // Another user's is not ours to judge; one gone or a zombie writes nothing.
-        const state = stat.slice(stat.lastIndexOf(')') + 2, stat.lastIndexOf(')') + 3);
+        // Another user's is not ours to judge; one gone, a zombie or a kernel thread writes nothing. Its
+        // state is read again after the failed read, never taken from before it: one that exited in
+        // between can keep /proc/PID as a zombie, and the earlier live state would misjudge it.
         let owner: number | null = null; try { owner = statSync(join(proc, name)).uid; } catch { /* gone */ }
-        if (owner !== null && (uid === null || owner === uid) && state !== 'Z' && state !== 'X') error = failure instanceof Error ? failure.message : String(failure);
+        let now: string | null = null; try { now = readFileSync(join(proc, name, 'stat'), 'utf8'); } catch { /* gone */ }
+        const fields = now?.slice(now.lastIndexOf(')') + 2).split(' ') ?? [];
+        const state = fields[0] ?? null, flags = Number(fields[6]);
+        const kernelThread = Number.isFinite(flags) && (flags & PF_KTHREAD) !== 0;
+        if (owner !== null && now !== null && (uid === null || owner === uid) && state !== 'Z' && state !== 'X' && !kernelThread) error = failure instanceof Error ? failure.message : String(failure);
       }
       table.set(Number(name), { ppid, cwd, error });
     } catch { /* exited while read */ }

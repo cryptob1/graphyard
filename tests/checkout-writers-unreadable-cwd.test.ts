@@ -1,8 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import fs, { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { syncBuiltinESMExports } from 'node:module';
 import * as writers from '../src/cli/checkout-writers.js';
 import { checkoutWriterProcesses, freezeCheckoutWriters } from '../src/cli/checkout-writers.js';
 import { checkoutRestoreRefPrefix, restoreCoordinatorCheckout } from '../src/cli/master-checkout-restore.js';
@@ -14,10 +15,10 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 // the restore refuses before any snapshot or reset, naming the pid and the read error.
 
 /** A fake /proc entry: its stat line, its cwd (a symlink to the directory, or a plain file readlink refuses), its cgroup. */
-function processEntry(proc: string, pid: number, options: { ppid?: number; state?: string; cwd?: string | null; cgroup?: string }) {
+function processEntry(proc: string, pid: number, options: { ppid?: number; state?: string; flags?: number; cwd?: string | null; cgroup?: string }) {
   const directory = join(proc, String(pid));
   mkdirSync(directory, { recursive: true });
-  writeFileSync(join(directory, 'stat'), `${pid} (proc ${pid}) ${options.state ?? 'S'} ${options.ppid ?? 1} ${pid} ${pid} 0 -1\n`);
+  writeFileSync(join(directory, 'stat'), `${pid} (proc ${pid}) ${options.state ?? 'S'} ${options.ppid ?? 1} ${pid} ${pid} 0 -1 ${options.flags ?? 0x400100}\n`);
   writeFileSync(join(directory, 'cgroup'), `0::${options.cgroup ?? '/user.slice/user-1000.slice/session-1.scope'}\n`);
   if (options.cwd) symlinkSync(options.cwd, join(directory, 'cwd'));
   else writeFileSync(join(directory, 'cwd'), '');
@@ -41,11 +42,23 @@ test('unit:checkout-writers-unreadable-cwd — a process of this user whose cwd 
   processEntry(proc, 400, { cwd: null, state: 'Z' });                         // a zombie writes nothing
   processEntry(proc, 500, { cwd: checkout });                                 // a standing writer
   processEntry(proc, 600, { cwd: join(checkout, '.graphyard') });              // the managed area: no writer
+  processEntry(proc, 700, { cwd: null, state: 'I', ppid: 2, flags: 0x04208040 }); // a kernel thread (PF_KTHREAD), as root sees it: no writer
+  processEntry(proc, 800, { cwd: null });                                     // exits between its stat and its cwd read: a zombie by the recheck
+
+  // pid 800 is live when its stat is first read and has become a zombie when its cwd read fails.
+  const readlink = fs.readlinkSync;
+  fs.readlinkSync = ((path: string, ...rest: unknown[]) => {
+    if (String(path) === join(proc, '800', 'cwd')) writeFileSync(join(proc, '800', 'stat'), '800 (proc 800) Z 1 800 800 0 -1 4194316\n');
+    return (readlink as (...args: unknown[]) => unknown)(path, ...rest);
+  }) as typeof fs.readlinkSync;
+  syncBuiltinESMExports();
 
   const scan = writers.checkoutProcessScan(root, 100, proc, uid);
   assert.deepEqual(scan.writers, [500]);
-  assert.deepEqual(scan.unverifiable.map(entry => entry.pid), [200], 'only the unreadable process of this user, outside the loop and its managed sessions, is unverifiable');
+  assert.deepEqual(scan.unverifiable.map(entry => entry.pid), [200], 'only the unreadable live process of this user, outside the loop, its managed sessions and the kernel, is unverifiable');
   assert.match(scan.unverifiable[0].error, /EINVAL/);
+  fs.readlinkSync = readlink; syncBuiltinESMExports();
+  rmSync(join(proc, '800'), { recursive: true, force: true });
   assert.throws(() => checkoutWriterProcesses(root, 100, proc, uid), /pid 200 \(EINVAL[^)]*\) cannot be read.*nothing was restored/);
   // Another user's process is not this user's to judge.
   assert.deepEqual(writers.checkoutProcessScan(root, 100, proc, uid + 1).unverifiable, []);

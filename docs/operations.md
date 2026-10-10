@@ -29,7 +29,7 @@ systemctl --user restart graphyard-master-OWNER-NAME                    # loop d
 graphyard master checkout-restore "reason"                              # dirty: refs/graphyard/checkout-restore/
 ```
 
-`checkout-restore` refuses (naming pid, error) while your non-loop process hides its cwd. Never attest a stop you have not confirmed; merged work changes only via follow-ups. Outside the lock's PID namespace `master status` judges the loop by stall bound; stalled or absent: stop hand-started loops, install `examples/master/graphyard-master.service`, `systemctl --user daemon-reload && systemctl --user enable --now graphyard-master`.
+`checkout-restore` refuses (naming pid, error) while your non-loop process hides its cwd (kernel threads and zombies are not writers). Never attest a stop you have not confirmed; merged work changes only via follow-ups. Outside the lock's PID namespace `master status` judges the loop by stall bound; stalled or absent: stop hand-started loops, install `examples/master/graphyard-master.service`, `systemctl --user daemon-reload && systemctl --user enable --now graphyard-master`.
 
 ## Worker host keyring proxy
 
