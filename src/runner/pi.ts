@@ -48,6 +48,14 @@ export function runEnvironment(base: NodeJS.ProcessEnv, extra: Record<string, st
 const text = (content: unknown): string => typeof content === 'string' ? content
   : Array.isArray(content) ? content.map(part => part?.type === 'text' ? String(part.text ?? '') : '').filter(Boolean).join('\n') : '';
 const bounded = (value: string, limit = 2000) => value.length > limit ? `${value.slice(0, limit - 1)}…` : value;
+/** At most this many characters of a rejected tool payload are named beside its validation error (GY-1661). */
+export const rejectedPayloadChars = 1000;
+/** Why a tool payload was rejected: the validation error and at most the first rejectedPayloadChars characters of the payload as JSON. */
+export function payloadValidationFailure(tool: string, error: unknown, payload: unknown) {
+  let shown: string;
+  try { shown = JSON.stringify(payload) ?? String(payload); } catch { shown = String(payload); }
+  return `the ${tool} payload failed validation: ${error instanceof Error ? error.message : String(error)}; payload: ${shown.slice(0, rejectedPayloadChars)}`;
+}
 
 /** One Pi JSONL record as a runner event; null for the streaming noise a record does not keep. */
 export function piEvent(record: any, at: string): RunEvent | null {
@@ -351,7 +359,7 @@ function watchRun<T>(directory: string, meta: RunMeta, options: Pick<RunOptions<
     if (record.type === 'tool_execution_end' && record.toolName === options.tool) {
       if (record.isError === true) { invalid = `the ${options.tool} call was rejected: ${text(record.result?.content) || 'no reason given'}`; return; }
       try { accepted.push(options.validate(record.result?.details)); }
-      catch (error) { invalid = `the ${options.tool} payload failed validation: ${error instanceof Error ? error.message : String(error)}`; }
+      catch (error) { invalid = payloadValidationFailure(options.tool, error, record.result?.details); }
     }
     if (record.type === 'agent_settled' && settledAt === null) settledAt = Date.now();
   };

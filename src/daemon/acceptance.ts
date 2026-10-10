@@ -14,7 +14,7 @@ import { agentToken } from '../master/autonomy.js';
 import { worktreeRoot } from '../install/worktree-root.js';
 import { capacityRefusal, selectFleetSession } from '../fleet.js';
 import { heldAwareProbe } from '../master/environments.js';
-import { Refusal, RefusedResponse } from '../model/refusal.js';
+import { ReconciliationRetry, Refusal, RefusedResponse } from '../model/refusal.js';
 import type { MasterConfig } from '../master.js';
 import { diagnosticianSettings, type DiagnosticianSettings } from '../runner/payloads.js';
 import { piRunner } from '../runner/pi.js';
@@ -88,9 +88,16 @@ export interface AcceptanceEffects {
 
 /** A finished run, kept until it is posted: the draft (and the pull request it was opened as) or the verdict; `deferred` names the full role no run started on. */
 interface Pending { revision: number; draft?: AcceptanceDraft | null; opened?: { pr: number | null; branch: string; head: string }; judgement?: Judgement | null; runs: string[]; deferred?: string }
-/** A draft the current base can never take (an outcome, case or file it names already exists): it is dropped and drafted again, never reopened. */
+/**
+ * A draft the current base can never take (an outcome, case or file it names already exists), or one
+ * refused outright (401, 403, 409 or 422): it is dropped and drafted again, never reopened.
+ */
 export class UnopenableDraft extends Error {}
-const unopenable = (error: unknown) => error instanceof UnopenableDraft || ((error instanceof Refusal || error instanceof RefusedResponse) && error.status === 422);
+/** The statuses a goal step's control-plane or GitHub request is refused outright with (GY-1661): an unchanged retry is answered the same. */
+export const outrightRefusalStatuses: readonly number[] = [401, 403, 409, 422];
+/** Refused for authority (401, 403), the current state (409) or the input (422); a reconciliation retry, which may pass once the state is re-read, is not. */
+export const refusedOutright = (error: unknown) => (error instanceof Refusal || error instanceof RefusedResponse) && !(error instanceof ReconciliationRetry) && outrightRefusalStatuses.includes(error.status);
+const unopenable = (error: unknown) => error instanceof UnopenableDraft || refusedOutright(error);
 const live = new Map<string, Promise<void>>();
 const pending = new Map<string, Pending>();
 /** When each goal's next try of a step may run: `${goal.id}:${step}`. */

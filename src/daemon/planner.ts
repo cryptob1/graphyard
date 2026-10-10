@@ -9,7 +9,8 @@ import { goalPlanSchema, maxPlanRounds, planNoteMaxWords, planRefusals, servedIn
 import { agentToken } from '../master/autonomy.js';
 import { capacityRefusal, selectFleetSession } from '../fleet.js';
 import { heldAwareProbe } from '../master/environments.js';
-import { Refusal, RefusedResponse } from '../model/refusal.js';
+import { RefusedResponse } from '../model/refusal.js';
+import { refusedOutright } from './acceptance.js';
 import type { MasterConfig } from '../master.js';
 import { diagnosticianSettings, type DiagnosticianSettings } from '../runner/payloads.js';
 import { piRunner } from '../runner/pi.js';
@@ -124,7 +125,6 @@ function launch(cycle: Cycle, planner: PlannerEffects, goal: Goal, role: 'plan' 
 }
 const due = (cycle: Cycle, goal: Goal, step: string) => cycle.clock >= (retryAt.get(`${goal.id}:${step}`) ?? -Infinity);
 const later = (cycle: Cycle, goal: Goal, step: string, ms: number) => { retryAt.set(`${goal.id}:${step}`, cycle.clock + ms); };
-const refusedOutright = (error: unknown) => (error instanceof Refusal || error instanceof RefusedResponse) && error.status === 422;
 
 /**
  * One loop step over every goal past its acceptance (GY-1418). Each goal moves at most one
@@ -219,7 +219,11 @@ async function releasing(cycle: Cycle, planner: PlannerEffects, goal: Goal, note
   if (!due(cycle, goal, 'release')) return;
   let released: Goal;
   try { released = await planner.release(goal); }
-  catch (error) { later(cycle, goal, 'release', planStepRetryMs); return note(goal, 'failed', `Could not release ${goal.key}'s approved plan: ${message(error)}; it is asked again in ten minutes, reusing the items already created`); }
+  catch (error) {
+    // Refused outright (401, 403, 409 or 422), asking again in ten minutes is answered the same: it waits the hour a paid run does.
+    if (refusedOutright(error)) { later(cycle, goal, 'release', planRetryMs); return note(goal, 'failed', `Could not release ${goal.key}'s approved plan: ${message(error)}; the control plane refused it outright, so it is asked again in an hour, reusing the items already created`); }
+    later(cycle, goal, 'release', planStepRetryMs); return note(goal, 'failed', `Could not release ${goal.key}'s approved plan: ${message(error)}; it is asked again in ten minutes, reusing the items already created`);
+  }
   return note(goal, 'done', `Released ${goal.key}'s approved plan: ${(released.items ?? []).map(item => item.key).join(', ')}; the dispatcher launches each only after the items it depends on are delivered`);
 }
 
