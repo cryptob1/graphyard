@@ -45,6 +45,17 @@ export function upgradeTouchesCode(paths: readonly string[]): boolean {
 export const heldCliPointer = (root: string) => join(root, '.graphyard', 'held-cli.json');
 const heldCliSnapshots = (root: string) => join(root, '.graphyard', 'held-cli');
 /**
+ * The commit a held restart pins the CLI to now, or null when no pin stands, it is unreadable, or
+ * the launcher would not load it (its snapshot has no `src/cli.ts`, as bin/held-release-hooks.mjs
+ * reads it). GY-1619: the fleet report reads it, and corroborates it with the cursor's held restart.
+ */
+export function readHeldCli(root: string): string | null {
+  try {
+    const pin = JSON.parse(readFileSync(heldCliPointer(root), 'utf8'));
+    return typeof pin?.commit === 'string' && pin.commit && typeof pin.root === 'string' && existsSync(join(pin.root, 'src', 'cli.ts')) ? pin.commit : null;
+  } catch { return null; }
+}
+/**
  * Pins the CLI the checkout's launcher runs to `commit` while a restart is held (GY-1585), or lifts
  * the pin (null). The checkout already holds the merged tip, but every process `bin/graphyard.mjs`
  * starts — watch, claim, heartbeat, the credential push the loop and the executors spawn — must
