@@ -1,8 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Work } from '../src/model.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
@@ -11,6 +10,7 @@ import { clearDoctorRuns, doctorBounds, doctorRunsSettled, type DoctorEffects } 
 import { doctorSettingsSchema } from '../src/master/doctor-settings.js';
 import type { Runner } from '../src/runner/types.js';
 import * as pi from '../integrations/pi/index.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
  * GY-1653. The doctor's unblocks through its command allowlist over two simulated days of the real
@@ -58,7 +58,7 @@ function item(key: string, at: number): Work {
 
 test('unit:soak-doctor-unblock-prose — over two simulated days every stuck-gate unblock the doctor writes with a prose reason passes its allowlist and reaches the CLI once with the reason whole, and every system invariant holds', { timeout: 300_000 }, async () => {
   clearDoctorRuns();
-  const directory = mkdtempSync(join(tmpdir(), 'gy-1653-soak-'));
+  const directory = await temporaryDirectory('gy-1653-soak');
   const cli = join(directory, 'graphyard.mjs'), log = join(directory, 'calls.jsonl');
   // The stand-in CLI: it logs the arguments the shell gave it, one line per invocation.
   writeFileSync(cli, `import { appendFileSync } from 'node:fs';\nappendFileSync(${JSON.stringify(log)}, JSON.stringify(process.argv.slice(2)) + '\\n');\n`);
@@ -164,6 +164,5 @@ test('unit:soak-doctor-unblock-prose — over two simulated days every stuck-gat
     assert.ok(state.doctor.runs.flatMap(run => run.actions).every(action => action.outcome === 'applied'), 'no retained run recorded a refused command');
   } finally {
     clearDoctorRuns();
-    rmSync(directory, { recursive: true, force: true });
   }
 });

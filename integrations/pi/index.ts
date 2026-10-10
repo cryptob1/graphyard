@@ -359,36 +359,58 @@ function doctorLineAllowed(line: string, context: DoctorGuardContext): GuardVerd
   return { allow: true };
 }
 /**
+ * The positional words each sanctioned master command takes before its free-text reason, as the
+ * CLI reads them: `master decide GY-N ACTION [JSON|@FILE] REASON` takes one more when the word
+ * after ACTION opens with `{` or `@`, and `--precedent` and `--context` take a value.
+ */
+const doctorReasonAfter: Record<(typeof doctorSanctionedCommands)[number], number> = { scope: 1, requirements: 2, unblock: 1, decide: 2, approver: 2, 'settle-containment': 1, close: 1, create: 1, release: 1 };
+const doctorValueFlags = new Set(['--precedent', '--context']);
+/**
  * The line a sanctioned master command runs as when its reason broke the shell's reading of it:
- * the command's grammar — program, CLI script, `master`, subcommand, item key, files and flags, all
- * bare words — then one argument enclosed in matching quotes that ends the line. The reason is the
- * text inside those quotes, as the doctor wrote it (a double-quoted one with its backslash escapes
- * undone), bounded by doctorRules['reason-bounds'] and passed single-quoted. Anything else is null:
- * the line is judged as written.
+ * the command's grammar — program, CLI script, `master`, subcommand, then the positional words,
+ * flags and quoted values (`master decide`'s JSON) the subcommand takes before its reason — then
+ * one argument enclosed in matching quotes that ends the line. The reason's opening quote is the
+ * first one, after the grammar's own words, that the command's grammar reads as its reason, so an
+ * earlier quoted argument is never absorbed into it. The reason is the text inside those quotes, as
+ * the doctor wrote it (a double-quoted one with its backslash escapes undone), and every quoted
+ * reason is bounded by doctorRules['reason-bounds'], whether or not the line needs rewriting. A
+ * line that needs it runs with the reason passed single-quoted. Anything else is null: the line is
+ * judged as written.
  */
 function doctorProseReason(line: string, context: DoctorGuardContext, apostrophesOnly: boolean): (GuardVerdict & { command?: string }) | null {
-  const text = line.trim();
-  let index = 0;
-  while (index < text.length && !'\'"'.includes(text[index])) {
-    if (/[`$\\;|&()<>\n]/.test(text[index])) return null;
-    index++;
+  const text = line.trim(), closer = text.at(-1);
+  if (closer !== '\'' && closer !== '"') return null;
+  for (let index = 1; index < text.length - 1; index++) {
+    if (text[index] !== closer || !/[ \t]/.test(text[index - 1])) continue;
+    const grammar = text.slice(0, index).trimEnd(), scan = doctorScan(grammar);
+    // A quote opened before this one and still open: this one sits inside an earlier quoted argument.
+    if (scan.open >= 0) continue;
+    // The grammar is whole words outside the reason: nothing in it the shell would run.
+    if (scan.redirect >= 0 || /[`$;|&()\n]/.test(grammar.replace(/'[^']*'|"(?:[^"\\]|\\.)*"/g, ''))) return null;
+    const segments = shellWords(grammar);
+    if (segments.length !== 1) return null;
+    const words = segments[0], program = words[0]?.value, cli = program === 'node' ? words.slice(2) : words.slice(1);
+    if (!doctorCliPrograms.has(program) && program !== 'node') return null;
+    const name = cli[1]?.value as (typeof doctorSanctionedCommands)[number];
+    if (cli[0]?.value !== 'master' || !doctorSanctionedCommands.includes(name)) return null;
+    const raw = text.slice(index + 1, -1);
+    let positionals = 0;
+    for (let at = 2; at < cli.length; at++) {
+      if (doctorValueFlags.has(cli[at].value)) at++;
+      else if (!cli[at].value.startsWith('-')) positionals++;
+    }
+    // Too few words yet, or the quoted argument here is one the grammar reads before the reason: read on.
+    if (positionals < doctorReasonAfter[name] || name === 'decide' && positionals === 2 && /^[{@]/.test(raw)) continue;
+    if (!doctorSegmentAllowed(words, context).allow) return null;
+    const reason = closer === '"' ? raw.replace(/\\([\\"$`\n])/g, (_match, char: string) => char === '\n' ? '' : char) : raw;
+    if (!reason.trim()) return null;
+    if (reason.length > doctorReasonLimit || /[\u0000-\u0008\u000b-\u001f\u007f]/.test(reason))
+      return { allow: false, reason: doctorRefusal(`a reason of ${reason.length} characters${reason.length > doctorReasonLimit ? '' : ' carrying a control character'}`, 'reason-bounds', `the reason argument after "${name}", column ${line.indexOf(text) + index + 1}`) };
+    if (apostrophesOnly && !(closer === '\'' && /\w'\w/.test(raw))) return null;
+    const command = `${grammar} '${reason.replace(/'/g, `'\\''`)}'`;
+    return doctorLineAllowed(command, context).allow ? { allow: true, command } : null;
   }
-  const opener = text[index], grammar = text.slice(0, index).trimEnd();
-  if (!opener || index === 0 || !/[ \t]/.test(text[index - 1]) || text.length - 1 <= index || text.at(-1) !== opener) return null;
-  const segments = shellWords(grammar);
-  if (segments.length !== 1) return null;
-  const words = segments[0], program = words[0]?.value, cli = program === 'node' ? words.slice(2) : words.slice(1);
-  if (!doctorCliPrograms.has(program) && program !== 'node') return null;
-  if (cli[0]?.value !== 'master' || !doctorSanctionedCommands.includes(cli[1]?.value as never)) return null;
-  if (!doctorSegmentAllowed(words, context).allow) return null;
-  const raw = text.slice(index + 1, -1);
-  if (apostrophesOnly && !(opener === '\'' && /\w'\w/.test(raw))) return null;
-  const reason = opener === '"' ? raw.replace(/\\([\\"$`\n])/g, (_match, char: string) => char === '\n' ? '' : char) : raw;
-  if (!reason.trim()) return null;
-  if (reason.length > doctorReasonLimit || /[\u0000-\u0008\u000b-\u001f\u007f]/.test(reason))
-    return { allow: false, reason: doctorRefusal(`a reason of ${reason.length} characters${reason.length > doctorReasonLimit ? '' : ' carrying a control character'}`, 'reason-bounds', `the reason argument after "${cli[1].value}", column ${line.indexOf(opener, line.indexOf(grammar) + grammar.length) + 1}`) };
-  const command = `${grammar} '${reason.replace(/'/g, `'\\''`)}'`;
-  return doctorLineAllowed(command, context).allow ? { allow: true, command } : null;
+  return null;
 }
 
 /**
