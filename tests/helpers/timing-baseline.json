@@ -708,6 +708,7 @@
     "tests/soak-sessions.test.ts": 162500,
     "tests/soak-shadow-gate.test.ts": 5943,
     "tests/soak-supervised.test.ts": 17000,
+    "tests/soak-twin-hold-deterministic.test.ts": 314200,
     "tests/speed-metric.test.ts": 4808,
     "tests/stable-json.test.ts": 217,
     "tests/stale-dismissal.test.ts": 987,
