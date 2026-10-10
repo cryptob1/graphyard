@@ -238,3 +238,31 @@ test('unit:triage-pre-landing-instances-close — a recurring-fault item whose i
   assert.equal(starts.length, 3, 'a pruned post-landing link still keeps the item from closing as covered');
   assert.deepEqual(recorded.map(entry => entry.judgement.outcome), ['release']);
 });
+
+test('unit:triage-overtaken-closure-withdrawn — a covered-by-delivery closure awaiting its approver is withdrawn once a post-landing instance is linked to the item, including after the record prunes it', async t => {
+  t.after(clearTriageRuns);
+  const origin = { faultClass: { class: 'resources', threshold: 3, windowHours: 24, count: 1, detectedAt: hours(1), instances: [{ id: 'resource-bound|tmp-inodes|0', kind: 'resource-bound', subject: 'resource:tmp-inodes', at: hours(9) }] } };
+  const judgement: TriageJudgement = { outcome: 'close', ref: 'GY-1618', reason: 'Covered by GY-1618' };
+  const filed = item('GY-1628', 'Recurring resources faults: 3 in 24 hours', hours(1), { type: 'bug', origin, triage: { judgement, state: 'proposed', by: 'master', at: hours(1) } } as Partial<Work>);
+  const fix = item('GY-1618', 'Stop the /tmp inode leak', hours(20), { stage: 'done', delivery: { mergedAt: hours(3), mergeSha: 'a'.repeat(40), authorizationRevision: 1 } } as Partial<Work>);
+  const withdrawn: { key: string; triageAt: string; reason: string }[] = [];
+  const { runner, starts } = fakeRunner(() => ({ outcome: 'release', priority: 1, reason: 'real work' }));
+  const step = (instances: FaultInstance[], linked: Record<string, string> = {}) => triageStep({ work: [filed, fix], clock: NOW, settings: researchSettings({ research: {} }), config: { repository: 'owner/project' }, cwd: process.cwd(), runner,
+    record: async () => { throw new Error('nothing is recorded'); }, faults: { instances, linked }, withdraw: async (entry, body) => { withdrawn.push({ key: entry.key, ...body }); } });
+  const instance = (at: string): FaultInstance => ({ id: `resource-bound|tmp-inodes|${at}`, kind: 'resource-bound', faultClass: 'resources', subject: 'resource:tmp-inodes', text: 'tmp inodes at bound', at, lastSeenAt: at, linkedTo: 'GY-1628' });
+  // Only pre-landing instances linked: the proposal stands.
+  assert.deepEqual(step([instance(hours(5))], { 'GY-1628': hours(5) }), []);
+  await triageSettled();
+  assert.equal(withdrawn.length, 0);
+  // A post-landing instance linked while the proposal awaits its approver withdraws it.
+  const actions = step([instance(hours(2))], { 'GY-1628': hours(2) });
+  await triageSettled();
+  assert.deepEqual(actions.map(action => action.state), ['withdrawn']);
+  assert.deepEqual(withdrawn.map(entry => [entry.key, entry.triageAt]), [['GY-1628', hours(1)]]);
+  assert.match(withdrawn[0]!.reason, /first seen at .*after GY-1618 landed.*returns to triage/);
+  // The instance pruned past retention: the record's newest linked time still withdraws it.
+  step([], { 'GY-1628': hours(2) });
+  await triageSettled();
+  assert.equal(withdrawn.length, 2);
+  assert.equal(starts.length, 0, 'a proposed item is not judged by a session while it awaits its approver');
+});

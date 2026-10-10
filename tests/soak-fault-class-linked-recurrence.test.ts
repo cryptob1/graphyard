@@ -6,6 +6,7 @@ import type { Work } from '../src/model.js';
 import { noteFault, retainedFaultInstances } from '../src/model/fault-classes.js';
 import { checkInvariants, emptyInvariantRecord } from '../src/model/invariants.js';
 import { clearTriageRuns, triageSettled, triageTool } from '../src/triage.js';
+import { decisionPrecondition } from '../src/model/approval.js';
 import type { TriageJudgement } from '../src/model/machine-backlog.js';
 import type { Run, RunOptions, RunResult, Runner } from '../src/runner/types.js';
 
@@ -96,4 +97,97 @@ test('unit:soak-fault-class-linked-recurrence — over a day of loop cycles a po
   assert.deepEqual(fileds.filter(title => /resources/.test(title)), [], 'no second resources item is filed: every recurrence stays linked to the open item');
   const linked = state.faults.instances.filter(entry => entry.faultClass === 'resources');
   assert.ok(linked.length > 0 && linked.every(entry => entry.linkedTo === 'GY-1628'), 'every retained recurrence is linked to GY-1628, none lost');
+});
+
+// The same day with the proposal already made: GY-1628 is proposed closed as covered by GY-1618 and its
+// close decision waits ten hours for the approver. A recurrence after the landing is linked to the item
+// meanwhile, and the control plane does not answer the loop's withdrawal until the record has pruned that
+// recurrence. The approver then judges the decision against the item as it stands, as the control plane's
+// decisionPrecondition does: the withdrawn proposal applies nothing, the item is judged again and released.
+test('unit:soak-fault-class-linked-recurrence — a covered-by-delivery closure awaiting its approver is withdrawn when a post-landing recurrence is linked, even after the record prunes it, so the approval closes nothing and every invariant holds', { timeout: 300_000 }, async t => {
+  t.after(clearTriageRuns);
+  const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: '/bin/graphyard',
+    repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', workers: [], run: { research: { command: 'pi' } } });
+  const state = emptyDaemonState(config);
+  const fix = item({ id: 'fix', key: 'GY-1618', title: 'Stop the /tmp inode leak', stage: 'done', origin: origin([start - 30 * hour]), delivery: { mergedAt: iso(landing), mergeSha: 'a'.repeat(40), authorizationRevision: 1 } });
+  const covered: TriageJudgement = { outcome: 'close', ref: 'GY-1618', reason: 'Covered by GY-1618: every instance predates that landing' };
+  const filed = item({ id: 'filed', key: 'GY-1628', title: 'Recurring resources faults: 3 in 24 hours', stage: 'backlog', origin: origin([start - 9 * hour, start - 7 * hour, start - 4 * hour]),
+    triage: { judgement: covered, state: 'proposed', by: 'master', at: iso(start - hour) } });
+  const work: Work[] = [fix, filed], recorded: { key: string; judgement: TriageJudgement }[] = [], fileds: string[] = [];
+  const decisions: { id: string; action: string; state: string; input: any; requestedAt: number; approvedBy: string | null; refusal: null }[] = [];
+  const withdrawals: { at: number; answered: boolean }[] = [], launched: string[] = [];
+  let now = start, recurrence = '';
+  const runner: Runner = { name: 'pi', start<T>(_prompt: string, options: RunOptions<T>): Run<T> {
+    const result: RunResult<T> = { ok: true, tool: triageTool, payload: options.validate({ outcome: 'release', priority: 1, reason: 'the recurrence after the landing is real work' }), payloads: [] };
+    return { id: `triage-${now}`, events: [], onEvent: () => () => {}, cancel: () => {}, result: () => Promise.resolve(result) };
+  } };
+  const effects = {
+    agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
+    snapshot: async () => ({ work, now: iso(now) }),
+    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }),
+    recordDeployment: async () => {}, requestSmoke: () => {},
+    decide: async (entry: Work, action: string, _reason: string, input?: Record<string, unknown>) => {
+      assert.equal(action, 'close', `only the triage closure is decided, not ${action}`);
+      const id = `close-${decisions.length + 1}`;
+      decisions.push({ id, action, state: 'requested', input: { ...input }, requestedAt: now, approvedBy: null, refusal: null });
+      return { id };
+    },
+    decisions: async (entry: Work) => ({ decisions: entry.key === 'GY-1628' ? decisions : [] }),
+    // The approver session the loop launches judges after ten hours, below.
+    approver: async (_entry: Work, decision: string) => { launched.push(decision); return { agentName: `gy-approver-${decision}`, pane: null }; },
+    persist: async () => {},
+    research: { cwd: process.cwd(), runner },
+    recordTriage: async (entry: Work, body: { judgement: TriageJudgement }) => {
+      recorded.push({ key: entry.key, judgement: body.judgement });
+      Object.assign(work.find(other => other.key === entry.key)!, { triage: { judgement: body.judgement, state: body.judgement.outcome === 'release' ? 'applied' : 'proposed', by: 'master', at: iso(now) },
+        ...(body.judgement.outcome === 'release' ? { stage: 'ready', ready: true } : {}) });
+    },
+    // The control plane does not answer until the record has pruned the recurrence, so only the record's linked time can still name it.
+    withdrawTriage: async (entry: Work, body: { triageAt: string; reason: string }) => {
+      const answered = !state.faults.instances.some(instance => instance.id === recurrence);
+      withdrawals.push({ at: now, answered });
+      if (!answered) throw new Error('502 Bad Gateway');
+      const target = work.find(other => other.key === entry.key)!;
+      if (target.triage?.state === 'proposed' && target.triage.at === body.triageAt) Object.assign(target, { triage: { ...target.triage, state: 'refused', refusal: body.reason, at: iso(now) }, updatedAt: iso(now) });
+    },
+    fileFaultClass: async (input: { title: string; origin: unknown }) => {
+      fileds.push(input.title);
+      const next = item({ id: `filed-${fileds.length}`, key: `GY-${2000 + fileds.length}`, title: input.title, stage: 'backlog', origin: input.origin });
+      work.push(next);
+      return next;
+    },
+  } as unknown as DaemonEffects;
+
+  const approvals: (string | null)[] = [];
+  for (let n = 0; n < cycles; n++) {
+    now = start + n * interval;
+    if (n === 3) recurrence = noteFault(state.faults, { kind: 'resource-bound', faultClass: 'resources', subject: 'resource:tmp-inodes', text: 'tmp inodes at the bound' }, iso(now)).id;
+    for (let k = 0; k < 12; k++) noteFault(state.faults, { kind: 'loop-failures', faultClass: 'loop', subject: `loop:${k}`, text: 'a cycle failed' }, iso(now));
+    await runCycle(config, state, effects, () => now);
+    await triageSettled();
+    // Ten hours after a close decision was requested its approver judges it against the item as it stands.
+    for (const decision of decisions.filter(entry => entry.state === 'requested' && now - entry.requestedAt >= 10 * hour)) {
+      const target = work.find(other => other.key === 'GY-1628')!, refusal = decisionPrecondition('close', decision.input, target);
+      approvals.push(refusal);
+      if (refusal) { decision.state = 'stale'; continue; }
+      Object.assign(decision, { state: 'applied', approvedBy: 'approver' });
+      Object.assign(target, { stage: 'done', closure: { kind: 'superseded', ref: decision.input.ref, reason: decision.input.reason, by: 'approver', at: iso(now), from: 'backlog' }, triage: { ...target.triage, state: 'applied' } });
+    }
+    const violated = checkInvariants(emptyInvariantRecord(), { work, now }).filter(check => !check.holds);
+    assert.deepEqual(violated.map(check => `${check.invariant}: ${check.reading}`), [], `cycle ${n}: every system invariant holds`);
+    assert.ok(state.faults.instances.length <= retainedFaultInstances, `cycle ${n}: the record stays within its bound`);
+  }
+
+  const answered = withdrawals.filter(entry => entry.answered);
+  assert.ok(withdrawals.length > answered.length, 'the withdrawal was retried while the control plane did not answer');
+  assert.equal(answered.length, 1, 'once withdrawn, it is withdrawn no more');
+  assert.ok(answered[0]!.at < start + 10 * hour, 'the withdrawal landed before the approver judged the decision');
+  assert.ok(decisions.length >= 1 && decisions.every(entry => entry.state !== 'applied'), `no close decision applied: ${decisions.map(entry => entry.state).join(', ')}`);
+  assert.ok(approvals.length >= 1 && approvals.every(refusal => /no proposed triage closure/.test(refusal ?? '')), `the approver's judgement applied nothing: ${approvals.join(' | ')}`);
+  const gy1628 = work.find(other => other.key === 'GY-1628')!;
+  assert.notEqual(gy1628.stage, 'done', 'GY-1628 is never closed as covered by GY-1618');
+  assert.deepEqual(recorded.filter(entry => entry.key === 'GY-1628').map(entry => entry.judgement.outcome), ['release'], 'GY-1628 was judged again and released, never re-proposed closed');
+  assert.deepEqual(fileds.filter(title => /resources/.test(title)), [], 'no second resources item is filed: the recurrence stays linked to the open item');
+  assert.equal(state.faults.linked?.['GY-1628'], iso(start + 3 * interval), 'the record keeps the recurrence linked to GY-1628 past its retention');
 });

@@ -1,6 +1,6 @@
 import type { Work } from './model.js';
 import { isDelivered } from './model/closure.js';
-import { closesFaultClass, deliveredFaultClassCover, predateLanding, type FaultRecord } from './model/fault-classes.js';
+import { closesFaultClass, deliveredFaultClassCover, landedAt, predateLanding, type FaultRecord } from './model/fault-classes.js';
 import { awaitsParent, followUpEntries, followUpParent, machineKind, overdueTriage, triageAttention, triageClosure, triageJudgementSchema, untriaged, type TriageJudgement } from './model/machine-backlog.js';
 import { agentOwner, type AttentionItem } from './master/attention.js';
 import type { ResearchSettings } from './research.js';
@@ -25,6 +25,8 @@ import type { Run, RunResult, Runner } from './runner/types.js';
 // A recurring-fault item whose origin instances were all first seen before a delivered item naming
 // the same class landed needs no session (GY-1632): the loop proposes closing it as covered by that
 // item, which the approver judges like any closure, and no worker is dispatched to re-implement it.
+// A recurrence after that landing linked to the item while the closure awaits its approver withdraws
+// it (POST work/ID/triage with `withdraw`): the item returns to triage, and the approval applies nothing.
 // ---------------------------------------------------------------------------
 
 /** The Graphyard Pi tool whose call is the triage session's judgement (integrations/pi). */
@@ -70,10 +72,31 @@ export function coveredByDelivery(work: Work, all: readonly Work[], faults: Part
   const faultClass = closesFaultClass(work), instances = work.origin?.faultClass?.instances ?? [];
   if (!faultClass || !instances.length) return null;
   const cover = deliveredFaultClassCover(all.filter(item => item.id !== work.id), faultClass);
-  const latest = faults.linked?.[work.key], linked = [...(faults.instances ?? []).filter(entry => entry.linkedTo === work.key), ...(latest ? [{ at: latest }] : [])];
-  if (!cover || !predateLanding([...instances, ...linked], cover.landedAt)) return null;
+  if (!cover || !predateLanding([...instances, ...linkedTo(work.key, faults)], cover.landedAt)) return null;
   const landed = new Date(cover.landedAt).toISOString();
   return { outcome: 'close', ref: cover.item.key, reason: `Covered by ${cover.item.key}, delivered for the ${faultClass} fault class at ${landed}: every instance this item lists (${instances.length}, the latest first seen ${instances.map(entry => entry.at).sort().at(-1)}) predates that landing, so the delivered fix already answers them` };
+}
+
+/** Every instance the loop linked to `key`: the retained ones, and the record's newest linked time, which outlasts their retention. */
+const linkedTo = (key: string, faults: Partial<Pick<FaultRecord, 'instances' | 'linked'>>) => {
+  const latest = faults.linked?.[key];
+  return [...(faults.instances ?? []).filter(entry => entry.linkedTo === key), ...(latest ? [{ at: latest }] : [])];
+};
+
+/**
+ * The closure proposed for a recurring-fault item that a later link has overtaken (GY-1632): it names a delivered
+ * item as having fixed the class, and an instance the loop linked to the item while the proposal awaited its
+ * approver was first seen after that item landed. Applying it would close the item over that recurrence, which no
+ * later filing counts again, so the loop withdraws it. Null for any other item or proposal.
+ */
+export function overtakenClosure(work: Work, all: readonly Work[], faults: Partial<Pick<FaultRecord, 'instances' | 'linked'>> = {}): { triageAt: string; reason: string } | null {
+  const triage = work.triage, closure = triage?.state === 'proposed' ? triageClosure(triage.judgement) : null;
+  if (!closure?.ref || !closesFaultClass(work)) return null;
+  const fixer = all.find(item => item.key === closure.ref), landing = fixer && isDelivered(fixer) ? landedAt(fixer) : null;
+  const later = landing === null ? [] : linkedTo(work.key, faults).filter(entry => Date.parse(entry.at) >= landing);
+  if (!later.length) return null;
+  const newest = later.map(entry => entry.at).sort().at(-1)!;
+  return { triageAt: triage!.at, reason: `A ${closesFaultClass(work)} instance first seen at ${newest}, after ${closure.ref} landed at ${new Date(landing!).toISOString()}, was linked to ${work.key} while its closure as covered by ${closure.ref} awaited the approver: ${closure.ref} did not end the class, so the item returns to triage` };
 }
 
 /** The triage session's request: the item, the open and recently delivered items it may name, and the three outcomes. */
@@ -106,7 +129,7 @@ function refusalNote(work: Work) {
     + 'Follow the refusal instead: release it with a priority, rescoped to the work it still names, or close or merge it on a different ref the refusal did not weigh, stating that new evidence. ';
 }
 
-export interface TriageStepAction { work: string; state: 'started' | 'done' | 'failed' | 'held'; detail: string }
+export interface TriageStepAction { work: string; state: 'started' | 'done' | 'failed' | 'held' | 'withdrawn'; detail: string }
 interface LiveTriage { run: Run<TriageJudgement>; settled: Promise<void> }
 const live = new Map<string, LiveTriage>();
 const failedAt = new Map<string, number>();
@@ -114,10 +137,12 @@ const failedAt = new Map<string, number>();
 const repeatedAt = new Map<string, string>();
 /** Covered-by-delivery closures being recorded, by item id (GY-1632): no session runs for them. */
 const recording = new Map<string, Promise<void>>();
+/** Overtaken closures being withdrawn, by item id (GY-1632). */
+const withdrawing = new Map<string, Promise<void>>();
 /** Test seam: stop and forget every triage run. */
-export function clearTriageRuns() { for (const entry of live.values()) entry.run.cancel('the triage runs were cleared'); live.clear(); failedAt.clear(); repeatedAt.clear(); recording.clear(); }
+export function clearTriageRuns() { for (const entry of live.values()) entry.run.cancel('the triage runs were cleared'); live.clear(); failedAt.clear(); repeatedAt.clear(); recording.clear(); withdrawing.clear(); }
 /** Every run this process has in flight, settled. */
-export async function triageSettled() { await Promise.all([...[...live.values()].map(entry => entry.settled), ...recording.values()]); }
+export async function triageSettled() { await Promise.all([...[...live.values()].map(entry => entry.settled), ...recording.values(), ...withdrawing.values()]); }
 
 export interface TriageStepInput {
   work: readonly Work[];
@@ -131,6 +156,8 @@ export interface TriageStepInput {
   record: (work: Work, body: { judgement: TriageJudgement; runtime?: string }) => Promise<unknown>;
   /** The loop's fault record: an instance linked to an item after a delivered fix landed keeps it from closing as covered (GY-1632). */
   faults?: Partial<Pick<FaultRecord, 'instances' | 'linked'>>;
+  /** Withdraws a proposed closure a later link overtook (POST work/ID/triage with `withdraw`, GY-1632). */
+  withdraw?: (work: Work, body: { triageAt: string; reason: string }) => Promise<unknown>;
 }
 
 /**
@@ -140,6 +167,13 @@ export interface TriageStepInput {
  */
 export function triageStep(input: TriageStepInput): TriageStepAction[] {
   const actions: TriageStepAction[] = [];
+  // GY-1632: a closure awaiting its approver that a post-landing link overtook is withdrawn, every cycle until the item shows it withdrawn.
+  for (const work of input.withdraw ? input.work : []) {
+    const overtaken = withdrawing.has(work.id) ? null : overtakenClosure(work, input.work, input.faults);
+    if (!overtaken) continue;
+    withdrawing.set(work.id, input.withdraw!(work, overtaken).then(() => {}, () => {}).finally(() => withdrawing.delete(work.id)));
+    actions.push({ work: work.key, state: 'withdrawn', detail: `Withdrawing the closure proposed for machine-filed ${work.key} at ${overtaken.triageAt}: ${overtaken.reason}` });
+  }
   if (!input.settings.enabled) return actions;
   // A follow-up whose parent has not shipped is never judged (GY-845): its findings may still change,
   // and the migration folds it back onto the parent.

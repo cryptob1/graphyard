@@ -1,7 +1,7 @@
 import type pg from 'pg';
 import { demand, type Principal, type Work } from '../model.js';
 import { isDelivered } from '../model/closure.js';
-import { appendedDescription, followUpEntries, followUpParent, mergeFollowUpEntries, triageRecordSchema, untriaged } from '../model/machine-backlog.js';
+import { appendedDescription, followUpEntries, followUpParent, mergeFollowUpEntries, triageRecordSchema, triageWithdrawalSchema, untriaged } from '../model/machine-backlog.js';
 import { save } from '../store.js';
 import { lockedWork } from '../store/locked-read.js';
 import { closeWork } from './close.js';
@@ -26,6 +26,7 @@ const recordDispatch = (services: Services, db: Db, work: Work, now: Date) =>
  * decision for it and it is applied only once an independent approver approves it.
  */
 export async function recordTriage(services: Services, caller: Principal, id: string, body: unknown, key: string) {
+  if (body && typeof body === 'object' && 'withdraw' in body) return withdrawTriage(services, caller, id, body, key);
   const data = triageRecordSchema.parse(body);
   const fingerprint = digest({ id, triage: data });
   return services.engine.store.transaction(async (db, now) => {
@@ -50,6 +51,30 @@ export async function recordTriage(services: Services, caller: Principal, id: st
     services.engine.evaluate(work!, all, now);
     await recordDispatch(services, db, work!, now);
     await save(db, work!, actor.id, judgement.outcome === 'release' ? 'triage.released' : 'triage.proposed', now, { judgement, runtime: data.runtime ?? null });
+    await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(work)]);
+    return work!;
+  });
+}
+
+/**
+ * `POST /api/work/ID/triage` with `withdraw`: the loop withdraws a closure it proposed whose grounds no longer hold
+ * (GY-1632: a recurrence after the delivered fix landed was linked to the item while the proposal awaited its
+ * approver). The proposal is marked refused with the reason, so the item returns to triage and the close decision
+ * bound to it no longer matches (decisionPrecondition): an approval of it applies nothing. A proposal already
+ * judged, or replaced by a later one, is left as it stands.
+ */
+async function withdrawTriage(services: Services, caller: Principal, id: string, body: unknown, key: string) {
+  const { withdraw } = triageWithdrawalSchema.parse(body);
+  const fingerprint = digest({ id, triage: { withdraw } });
+  return services.engine.store.transaction(async (db, now) => {
+    const actor = await authenticated(services, db, now, caller);
+    const replay = await receipt(db, actor, key, fingerprint); if (replay) return replay as unknown as Work;
+    demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
+    const work = (await readAll(db, [id])).find(item => item.id === id || item.key === id); demand(work, 'Work item not found', 404);
+    if (work!.triage?.state === 'proposed' && work!.triage.at === withdraw.triageAt) {
+      work!.triage = { ...work!.triage, state: 'refused', refusal: `Withdrawn by ${actor.id}: ${withdraw.reason}`.slice(0, 2000), at: now.toISOString() };
+      await save(db, work!, actor.id, 'triage.withdrawn', now, { triageAt: withdraw.triageAt, reason: withdraw.reason });
+    }
     await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(work)]);
     return work!;
   });

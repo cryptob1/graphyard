@@ -288,6 +288,8 @@ export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffec
   adoptRuns?: () => Promise<AdoptedRun[]>; // the headless runs a restart left running (GY-453, run-adoption.ts); unwired adopts nothing
   /** Records a triage judgement on a machine-filed item as the coordinator (GY-402, POST work/ID/triage). */
   recordTriage?: (work: Work, body: { judgement: TriageJudgement; runtime?: string }) => Promise<unknown>;
+  /** Withdraws the closure the loop proposed at `triageAt` (GY-1632): POST work/ID/triage with `withdraw`. */
+  withdrawTriage?: (work: Work, body: { triageAt: string; reason: string }) => Promise<unknown>;
   /** The reviewer and producer sessions the launch ledgers hold as pending. */
   launchedSessions?: () => Promise<LaunchedSession[]>;
   /** The account a session was launched on, as its launcher recorded it: a worker attempt's own launch record, a reviewer's or producer's own selection, by the `session` named (GY-1582). */
@@ -571,6 +573,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     research: { cwd: root },
     adoptRuns: loopRunAdoption(root, current, deps.fetcher),
     recordTriage: (work, body) => mutate(`work/${work.id}/triage`, body),
+    withdrawTriage: (work, body) => mutate(`work/${work.id}/triage`, { withdraw: body }),
     launchedSessions: async () => [
       ...(await readReviewLedger(root)).reviews.filter(entry => entry.state === 'pending' && !entry.launching).map(entry => ({ role: 'reviewer' as const, record: entry.id, profile: entry.profile, agentName: entry.agentName, pane: entry.pane, work: entry.key, requestId: entry.requestId ?? null })),
       ...(await readProducerLedger(root)).producers.filter(entry => entry.state === 'pending').map(entry => ({ role: 'producer' as const, record: entry.id, profile: entry.profile, agentName: entry.agentName, pane: entry.pane, work: entry.key, requestId: entry.requestId, group: entry.group })),

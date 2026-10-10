@@ -41,7 +41,7 @@ Unacted producer requests (unstarted, refused, exited at launch) relaunch on unt
 
 ## Fault classes
 
-`faultClass` (`master status` `faults`): recurring classes file one item; instances predating a delivered class item's landing (not opening) link to it; triage proposes closing items holding only those, bar remembered post-landing links; a resource at bound files `resource:ID`; also `fleet-capacity`, `unanswered-request` (past `settledAnswerGraceMs`), `configuration`, `decision-unanswered` (not `loop-silence`), and `unclassified` unless named (`plane-unavailable`, `fix-item`, `decision-stale`, `overlong-session`). Review unlaunched 15min: `concurrency-starved`, `review-settlement`, `launch-review`. Unanswering planes: `plane-unavailable`; `planeWaitMs` (control-plane time) is neither `loop-cost` nor `cycle-p90`. Pre-start launch failures: one dispatch fault, not `session`.
+`faultClass` (`master status` `faults`): recurring classes file one item each; instances predating a delivered class item's landing (not opening) link there; triage proposes closing items holding only those, withdrawn on post-landing links; a resource at bound files `resource:ID`; also `fleet-capacity`, `unanswered-request` (past `settledAnswerGraceMs`), `configuration`, `decision-unanswered` (not `loop-silence`), and `unclassified` unless named (`plane-unavailable`, `fix-item`, `decision-stale`, `overlong-session`). Review unlaunched 15min: `concurrency-starved`, `review-settlement`, `launch-review`. Unanswering planes: `plane-unavailable`; `planeWaitMs` (control-plane time) is neither `loop-cost` nor `cycle-p90`. Pre-start launch failures: one dispatch fault, not `session`.
 
 ## Shadow merge gate
 

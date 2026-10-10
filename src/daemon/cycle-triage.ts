@@ -24,7 +24,7 @@ export async function triageBacklogStep(cycle: Cycle) {
   if (!effects.recordTriage || !effects.research || !config.run?.research) return;
   await isolate('decision', null, 'triage', async () => {
     const settings = researchSettings(config.run);
-    const actions = triageStep({ work: snapshot.work, clock, settings, config, cwd: effects.research!.cwd, runner: effects.research!.runner ?? researchRunner(settings), record: effects.recordTriage!, faults: state.faults });
+    const actions = triageStep({ work: snapshot.work, clock, settings, config, cwd: effects.research!.cwd, runner: effects.research!.runner ?? researchRunner(settings), record: effects.recordTriage!, faults: state.faults, withdraw: effects.withdrawTriage });
     for (const action of actions) {
       const item = snapshot.work.find(entry => entry.key === action.work)!;
       await note(`triage:${item.id}:${action.state}`, item.key, 'done', action.detail);

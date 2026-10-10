@@ -18,6 +18,7 @@ import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-da
 import { standingFaultClassItem, clearDiagnoses, diagnosesSettled, diagnosisStep, diagnosisSubjects, type DiagnosticianEffects, type DiagnosisContext, type DiagnosisSubject } from '../src/daemon/diagnosis.js';
 import { clearDoctorRuns, doctorStep, type DoctorEffects } from '../src/daemon/doctor.js';
 import { doctorSettingsSchema } from '../src/master/doctor-settings.js';
+import { overtakenClosure } from '../src/triage.js';
 import { RefusedResponse } from '../src/model/refusal.js';
 import type { Cycle } from '../src/daemon/cycle.js';
 import { diagnosisPayloadSchema, diagnosticianSettings, type DiagnosisPayload } from '../src/runner/payloads.js';
@@ -166,6 +167,12 @@ test('unit:fault-class-post-landing-files — an instance observed after the del
   const entry = recurringClasses([instances[0]!, instances[1]!, after], [answered, fix], policy, clock + 6 * hour).find(recurrence => recurrence.faultClass === 'resources')!;
   assert.equal(entry.item, null, 'no item stands: the class recurred after the fix landed');
   assert.equal(entry.file, true);
+  // An item already filed from the pre-landing instances, proposed closed as covered by the fix: the post-landing
+  // instance linked to it while the closure awaits its approver withdraws that closure, so the recurrence is never closed over.
+  const filed = { ...item('GY-1628', { stage: 'backlog' } as Partial<Work>), origin: { faultClass: { class: 'resources', threshold: 3, windowHours: 24, count: 2, detectedAt: t(3), instances: instances.slice(0, 2).map(({ id, kind, subject, at }) => ({ id, kind, subject, at })) } },
+    triage: { judgement: { outcome: 'close', ref: 'GY-1618', reason: 'covered' }, state: 'proposed', by: 'master', at: t(4.5) } } as unknown as Work;
+  assert.equal(overtakenClosure(filed, [filed, answered, fix], { instances: [{ ...after, linkedTo: 'GY-1628' }] })?.triageAt, t(4.5));
+  assert.equal(overtakenClosure(filed, [filed, answered, fix], { instances: [{ ...instances[2]!, linkedTo: 'GY-1628' }] }), null, 'a pre-landing link leaves the closure standing');
 });
 
 test('unit:diagnostician-launched — a recurring-fault item is diagnosed within the cycle that files it, with its instances, excerpts and pull requests', async () => {
