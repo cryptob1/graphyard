@@ -53,8 +53,8 @@ export const rejectedPayloadChars = 1000;
 /**
  * Why a tool payload was rejected: the validation error and at most the first rejectedPayloadChars
  * characters of the payload as JSON. The detail is persisted in run failures and action notes, so
- * before it is cut every value in `secrets` (the run's injected environment, such as an account's
- * provider key) and every credential-shaped token is replaced by `[redacted]`.
+ * before it is cut every value in `secrets` (every environment value the run could read, inherited or
+ * injected, such as an account's provider key) and every credential-shaped token is replaced by `[redacted]`.
  */
 export function payloadValidationFailure(tool: string, error: unknown, payload: unknown, secrets: Iterable<string> = []) {
   let shown: string;
@@ -248,19 +248,26 @@ export function piRunner(configured: PiRunnerOptions = {}): Runner {
       } catch (error) {
         failure = `${command} could not be started: ${error instanceof Error ? error.message : String(error)}`;
       }
-      return watchRun<T>(directory, meta, options, { pollMs: configured.pollMs, scratch, failure: () => failure, child, secrets: Object.values({ ...configured.environment, ...options.env }) });
+      return watchRun<T>(directory, meta, options, { pollMs: configured.pollMs, scratch, failure: () => failure, child, secrets: visibleValues({ ...configured.environment, ...options.env }) });
     },
     adopt<T>(directory: string, options: Omit<RunOptions<T>, 'cwd' | 'env' | 'runs'>): Run<T> {
       const meta = readRunMeta(directory);
       if (!meta) {
         const now = new Date().toISOString();
         return watchRun<T>(directory, { version: 1, id: basename(directory), command, pid: null, identity: null, containment: 'setsid', unit: null, startedAt: now, timeoutMs: options.timeoutMs, exitGraceMs: grace },
-          options, { pollMs: configured.pollMs, scratch: false, failure: () => null, child: null, secrets: Object.values(configured.environment ?? {}) });
+          options, { pollMs: configured.pollMs, scratch: false, failure: () => null, child: null, secrets: visibleValues(configured.environment ?? {}) });
       }
-      return watchRun<T>(directory, meta, options, { pollMs: configured.pollMs, scratch: false, failure: () => null, child: null, secrets: Object.values(configured.environment ?? {}) });
+      return watchRun<T>(directory, meta, options, { pollMs: configured.pollMs, scratch: false, failure: () => null, child: null, secrets: visibleValues(configured.environment ?? {}) });
     },
   };
 }
+
+/**
+ * Every environment value a run can read: the inherited environment `runEnvironment` passes on and
+ * the runner's own. An adopted run is judged against this process's inheritance and the runner's
+ * configured environment; per-run `env` carries only role names and file paths, never a credential.
+ */
+const visibleValues = (extra: Record<string, string>) => Object.values(runEnvironment(process.env, extra));
 
 /** How far past its watcher's bound a scratch run's own bound lies, so a live watcher always stops it first. */
 export const scratchBoundMarginSeconds = 30;

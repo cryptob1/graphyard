@@ -70,3 +70,29 @@ test('unit:pi-payload-validation-detail — a registry runner\'s environment key
     assert.ok(!detail.includes(key) && detail.includes('env says [redacted]'), detail);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
+
+test('unit:pi-payload-validation-detail — an inherited credential the run can read never appears in its failure, started or adopted', async () => {
+  const directory = await temporaryDirectory('pi-payload-inherited');
+  const name = 'GY1661_CI_ACCESS', value = `opaque${'q'.repeat(12)}`, previous = process.env[name];
+  process.env[name] = value;
+  try {
+    const script = join(directory, 'fake-pi.mjs'), scenario = join(directory, 'scenario.json'), runs = join(directory, 'runs');
+    await writeFile(script, fakePi);
+    await writeFile(scenario, JSON.stringify([{ type: 'agent_start' }, decide({ decision: 'decision-1', approve: 'yes', reason: `the env holds ${value}` }), ...settled]));
+    const options = { tool: graphyardTools.decide, validate: (payload: unknown) => decidePayloadSchema.parse(payload), timeoutMs: 5_000 };
+    const runner = () => piRunner({ command: process.execPath, commandArgs: [script, scenario], model: 'zai/glm-5.3-flash', extension: '/extensions/graphyard.ts', exitGraceMs: 2_000 });
+    const started = runner().start('Judge decision-1', { ...options, cwd: directory, runs });
+    const result = await started.result();
+    const detail = !result.ok ? result.failure.detail : '';
+    assert.equal(!result.ok && result.failure.reason, 'invalid-payload');
+    assert.ok(!detail.includes(value) && detail.includes('the env holds [redacted]'), detail);
+    // A restarted loop adopting the same run judges it against the same environment.
+    const adopted = await runner().adopt(join(runs, started.id), options).result();
+    const again = !adopted.ok ? adopted.failure.detail : '';
+    assert.equal(!adopted.ok && adopted.failure.reason, 'invalid-payload');
+    assert.ok(!again.includes(value) && again.includes('the env holds [redacted]'), again);
+  } finally {
+    if (previous === undefined) delete process.env[name]; else process.env[name] = previous;
+    await rm(directory, { recursive: true, force: true });
+  }
+});

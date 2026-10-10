@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { ChildProcessError } from '../src/child-runner.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { masterConfigSchema } from '../src/master.js';
-import { recordGoal, type Goal } from '../src/model/goal.js';
+import { applyGoalCommand, recordGoal, type Goal } from '../src/model/goal.js';
 import { RefusedResponse } from '../src/model/refusal.js';
 import { diagnosticianSettings } from '../src/runner/payloads.js';
 import type { RunOptions, RunResult, Runner } from '../src/runner/types.js';
@@ -17,11 +17,13 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
  * GY-1661: the goal pipeline's outright refusals over two simulated days of the real loop's cycles,
- * five minutes apart. Five goals: an acceptance draft whose `gh pr create` GitHub refuses 403 (the
- * real open path), one whose draft post the control plane refuses 409, a plan release refused 403
- * throughout, one refused 401 until the operator restores the credential on the second morning, and
- * one meeting a 502 for its first hour. After every cycle the system invariants hold; a draft refused
- * outright costs one paid run an hour, never an open every ten minutes; an outright-refused release
+ * five minutes apart. Six goals: an acceptance draft whose `gh pr create` GitHub refuses 403 (the
+ * real open path), one whose draft post the control plane refuses 409, a plan whose post is refused
+ * 403 until the second morning, a plan release refused 403 throughout, one refused 401 until the
+ * operator restores the credential on the second morning, and one meeting a 502 for its first hour.
+ * After every cycle the system invariants hold; a draft refused outright costs one paid run an hour,
+ * never an open every ten minutes; a plan whose post is refused outright is kept, posted once an
+ * hour, never recorded as invalid, and recorded once its refusal lifts; an outright-refused release
  * is asked once an hour and released once its refusal lifts, while the 502 is asked every ten minutes.
  */
 const minute = 60_000, hour = 60 * minute, days = 2, cycleMs = 5 * minute;
@@ -33,7 +35,7 @@ const refused = (status: number) => new RefusedResponse(`Graphyard refused goals
 const caseOf = (id: string) => ({ id, title: `The ${id} outcome is reachable`, description: 'A customer reads the board.', tags: ['api'], target: 'uat', required: true,
   steps: [{ kind: 'http', name: 'read the board', method: 'GET', path: '/api/board', status: 200, expect: [{ path: 'groups.backlog', type: 'array' }] }] });
 
-test('unit:soak-invariants-hold — over two days goal steps GitHub or the control plane refuses with 401, 403 or 409 are retried hourly, never every ten minutes, a lifted refusal releases once, a 502 still retries in ten minutes, and every invariant holds', { timeout: 300_000 }, async () => {
+test('unit:soak-invariants-hold — over two days goal steps GitHub or the control plane refuses with 401, 403 or 409 are retried hourly, never every ten minutes, a refused plan post keeps its plan, a lifted refusal releases once, a 502 still retries in ten minutes, and every invariant holds', { timeout: 300_000 }, async () => {
   const { acceptanceRetryMs, clearDrafts, draftsSettled, openAcceptancePullRequest } = await import('../src/daemon/acceptance.js');
   const { clearPlans, planRetryMs, planStepRetryMs, plansSettled } = await import('../src/daemon/planner.js');
   clearDrafts(); clearPlans();
@@ -45,6 +47,26 @@ test('unit:soak-invariants-hold — over two days goal steps GitHub or the contr
   };
   const goals = new Map<string, Goal>(Object.entries({ ghOpen: goal('ghopen', 'acceptance-drafting'), post409: goal('post', 'acceptance-drafting'),
     release403: goal('forbidden', 'planned'), release401: goal('lapsed', 'planned'), release502: goal('gateway', 'planned') }));
+  // A goal whose acceptance merged, planned by the planner role: its plan's post is refused 403 until the second morning.
+  const planAuthor: Principal = { id: 'soak-refusal-planner', role: 'operator-agent', sessionKind: 'ai' } as Principal;
+  const approver: Principal = { id: 'soak-refusal-approver', role: 'admin', sessionKind: 'ai' } as Principal;
+  const at = new Date(start).toISOString();
+  let planning = recordGoal({ statement: 'Customers can sign up', users: ['Customers'], constraints: [], deployTarget: 'uat then production' }, 'GOAL-PLAN', { actor: master, at });
+  planning = applyGoalCommand(planning, 'draft', { outcomes: [{ id: 'signup', title: 'A customer can sign up', criteria: ['The signup page answers'], case: caseOf('signup-case') }], pr: 1, branch: 'graphyard/goal-plan', head: 'a'.repeat(40) }, { actor: planAuthor, at });
+  planning = applyGoalCommand(planning, 'approve', { reason: 'Right' }, { actor: approver, at });
+  planning = applyGoalCommand(planning, 'merged', { pr: 1, mergeSha: 'b'.repeat(40) }, { actor: master, at });
+  assert.equal(planning.stage, 'planning');
+  goals.set('plan403', planning);
+  const plan = { goal: planning.key, note: 'Node server, one module per outcome under src/, deployed by the release pipeline.', items: [{ ref: 'signup', title: 'Build signup', description: 'The signup part', type: 'feature' as const, priority: 2,
+    outcomes: ['signup'], cases: ['signup-case'], criteria: [{ id: 'AC-1', text: 'signup works', proofs: ['unit:planned-behaviour'] }], plannedFiles: ['src/signup.ts'], dependsOn: [] as string[] }] };
+  const planRunner: Runner = {
+    name: 'soak-plan',
+    start<T>(_prompt: string, options: RunOptions<T>) {
+      const payload = options.validate(plan);
+      return { id: randomUUID(), events: [], onEvent: () => () => {}, cancel() {}, result: async () => ({ ok: true as const, tool: options.tool, payload, payloads: [payload] }) };
+    },
+  };
+  const planRuns: number[] = [], planPosts: { at: number; ok: boolean }[] = [], invalids: string[] = [];
   const nameOf = (target: Goal) => [...goals].find(([, entry]) => entry.id === target.id)![0];
 
   // The acceptance role drafts at once; the gh path runs the real open, whose pull request create GitHub refuses.
@@ -91,9 +113,21 @@ test('unit:soak-invariants-hold — over two days goal steps GitHub or the contr
   const answers: Record<string, (at: number) => number | null> = { release403: () => 403, release401: at => at < start + 30 * hour ? 401 : null, release502: at => at < start + hour ? 502 : null };
   const planner: PlannerEffects = {
     settings: diagnosticianSettings({}), cwd: root,
-    goals: async () => [...goals.values()].filter(entry => entry.stage === 'planned' || entry.stage === 'delivering'),
-    runner: async () => { throw new Error('no plan is run for a planned goal'); },
-    plan: async target => target, invalid: async target => target, judge: async target => target,
+    goals: async () => [...goals.values()].filter(entry => entry.stage === 'planning' || entry.stage === 'planned' || entry.stage === 'delivering'),
+    runner: async (role, attempt, target) => {
+      assert.equal(role === 'plan' && nameOf(target), 'plan403', 'only the planning goal is planned');
+      planRuns.push(now);
+      return { runner: planRunner, runtime: 'soak', model: attempt };
+    },
+    plan: async target => {
+      const ok = now >= start + 26 * hour;
+      planPosts.push({ at: now, ok });
+      if (!ok) throw refused(403);
+      const recorded = { ...target, stage: 'plan-review', revision: target.revision + 1 } as unknown as Goal;
+      goals.set('plan403', recorded);
+      return recorded;
+    },
+    invalid: async (target, reason) => { invalids.push(reason); return target; }, judge: async target => target,
     release: async target => {
       const name = nameOf(target), status = answers[name]!(now);
       releases.push({ goal: name, at: now, ok: status === null });
@@ -143,5 +177,15 @@ test('unit:soak-invariants-hold — over two days goal steps GitHub or the contr
   const gateway = asked('release502');
   assert.ok(gateway.length >= 6 && gateway.length <= 8 && gateway.at(-1)!.ok, `the 502 was asked every ten minutes until it answered: ${gateway.length}`);
   spaced(gateway, planStepRetryMs, 'the 502 release was asked');
-  assert.equal(Object.keys(state.actions).filter(key => key.startsWith('acceptance:') || key.startsWith('planner:')).length, 5, 'one action per goal');
+
+  // A plan whose post is refused outright is kept: one paid run, posted once an hour, never recorded invalid, recorded once the refusal lifts.
+  assert.equal(planRuns.length, 1, 'the refused plan is kept, never planned again');
+  assert.deepEqual(invalids, [], 'a 403 post is never recorded as an invalid plan with the same refused credential');
+  spaced(planPosts, planRetryMs, 'the refused plan was posted');
+  assert.ok(planPosts.length >= 20 && planPosts.length <= 27, `the plan was posted about once an hour until the refusal lifted: ${planPosts.length}`);
+  assert.equal(planPosts.filter(entry => entry.ok).length, 1, 'the lifted refusal records the plan once');
+  assert.ok(planPosts.at(-1)!.ok && planPosts.at(-1)!.at - (start + 26 * hour) <= planRetryMs + cycleMs, 'within an hour of the refusal lifting');
+  assert.equal(goals.get('plan403')!.stage, 'plan-review');
+  assert.match(state.actions[`planner:${goals.get('plan403')!.id}`]!.detail, /Recorded GOAL-PLAN's plan/);
+  assert.equal(Object.keys(state.actions).filter(key => key.startsWith('acceptance:') || key.startsWith('planner:')).length, 6, 'one action per goal');
 });
