@@ -54,15 +54,17 @@ function gy1619(observedAt: number, systemDriven = true, { key = 'GY-1619', id =
  * Runs the loop on a simulated clock with a 300s idle wait: each sleep advances the clock by the wait it was
  * given, and the loop is stopped after `cycles` cycles. `work` is the board as observed at a time: the snapshot
  * reads it ten seconds old, the step's woken observation one second after the cycle. `decideMs` is how long each
- * rework request takes, and `guardMs` how long the checkout guard spends between cycles. Returns the cycle times, the waits and the decisions.
+ * rework request takes, `guardMs` how long the checkout guard spends between cycles, `workMs` how long each cycle's
+ * work takes after its snapshot was read, and `skewMs` how far the control plane's clock runs ahead of this host's
+ * (the board's times are control-plane times). Returns the cycle times, the waits and the decisions, on this host's clock.
  */
-async function replay(work: (observedAt: number) => Work[], start: number, cycles: number, { decideMs = 0, guardMs = 0 } = {}) {
-  let now = start;
+async function replay(work: (observedAt: number) => Work[], start: number, cycles: number, { decideMs = 0, guardMs = 0, workMs = 0, skewMs = 0 } = {}) {
+  let now = start, worked = 0;
   const decided: { key: string; action: string; at: number }[] = [], agents: string[] = [], waits: number[] = [], ran: number[] = [], lines: string[] = [];
   const effects: DaemonEffects = {
-    agents: () => [], herdr: () => ({ agents: agents.map((name, index) => ({ name, pane_id: `pane-${index}`, agent_status: 'working' })), available: true }),
+    agents: () => { if (worked < ran.length) { worked = ran.length; now += workMs; } return []; }, herdr: () => ({ agents: agents.map((name, index) => ({ name, pane_id: `pane-${index}`, agent_status: 'working' })), available: true }),
     credentials: async () => ({}),
-    snapshot: async () => { ran.push(now); return { work: work(now - 10_000), now: iso(now), jobs: [] }; },
+    snapshot: async () => { ran.push(now); return { work: work(now + skewMs - 10_000), now: iso(now + skewMs), jobs: [] }; },
     closeSession: () => { agents.length = 0; }, dispatch: async () => {}, requestProof: () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async () => {}, requestSmoke: () => {},
@@ -72,7 +74,7 @@ async function replay(work: (observedAt: number) => Work[], start: number, cycle
     docsSync: async (_item: Work, plan: DocsSyncPlan) => { const name = docsSyncSessionName(plan); agents.push(name); return { agentName: name, pane: 'pane-s', account: 'reviewer-a', runtime: 'claude' as const, session: null }; },
     conflictPaths: async () => paths,
     // The step's woken reading, taken now: the docs-sync never moved the head.
-    observe: async (subject: Work) => work(now + 1_000).find(entry => entry.id === subject.id) ?? null,
+    observe: async (subject: Work) => work(now + skewMs + 1_000).find(entry => entry.id === subject.id) ?? null,
     persist: async () => {},
   } as DaemonEffects;
   const listeners = new Map<string, () => void>();
@@ -124,4 +126,26 @@ test('unit:loop-wakes-at-hold-bound — time the checkout guard spends between c
     'the idle wait is the full 300s after the guard; the wait to the bound is shortened by the 20s the guard took');
   assert.deepEqual(loop.waits.slice(0, 2), [interval, holdBound - at('00:51:40')]);
   assert.deepEqual(loop.decided.map(entry => [entry.action, iso(entry.at)]), [['rework', iso(holdBound)]], loop.lines.join('\n'));
+});
+
+test('unit:loop-wakes-at-hold-bound — a bound the cycle\'s own work carries the local clock past, while the hold still stood when the step read it, ends the wait at once', async () => {
+  // The cycle starts at 00:53:15, before the 00:53:17.921 bound, so the step still finds the hold standing; its
+  // work takes 5s, past the bound. The next cycle runs straight away and requests the rework, not 300s later.
+  const own = { key: 'GY-1619', id: '7c1e2a6b-3f4d-4e8a-9b0c-1d2e3f4d1619', conflictSince: since };
+  const loop = await replay(observedAt => [gy1619(observedAt, true, own)], at('00:53:15'), 2, { workMs: 5_000 });
+  assert.deepEqual(loop.ran.map(iso), ['2026-10-10T00:53:15.000Z', '2026-10-10T00:53:20.000Z'], loop.lines.join('\n'));
+  assert.equal(loop.waits[0], 0, 'the elapsed standing bound is a zero wait');
+  assert.deepEqual(loop.decided.map(entry => [entry.action, iso(entry.at)]), [['rework', '2026-10-10T00:53:25.000Z']], loop.lines.join('\n'));
+});
+
+test('unit:loop-wakes-at-hold-bound — the control plane\'s bound is translated to this host\'s clock, whichever way the clocks differ', async () => {
+  for (const skewMs of [60_000, -60_000]) {
+    // The control plane's clock reads skewMs ahead of this host's, so its 00:53:17.921 bound falls at this host's 00:53:17.921 − skewMs.
+    const own = { key: 'GY-1619', id: `7c1e2a6b-3f4d-4e8a-9b0c-1d2e3f4e${skewMs > 0 ? 'a' : 'b'}619`, conflictSince: since };
+    const start = at('00:46:00') - skewMs, local = holdBound - skewMs;
+    const loop = await replay(observedAt => [gy1619(observedAt, true, own)], start, 3, { skewMs });
+    assert.deepEqual(loop.ran.map(iso), [iso(start), iso(start + interval), iso(local)], `skew ${skewMs / 1000}s: the cycle runs when the control plane reaches the bound\n${loop.lines.join('\n')}`);
+    assert.deepEqual(loop.waits.slice(0, 2), [interval, local - start - interval]);
+    assert.deepEqual(loop.decided.map(entry => [entry.action, iso(entry.at)]), [['rework', iso(local)]], `skew ${skewMs / 1000}s`);
+  }
 });

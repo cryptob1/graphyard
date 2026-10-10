@@ -25,11 +25,11 @@ import { closeStanding, closingItems, recordingWrites, staleCloseStep } from './
 
 /** The approval-watch key prefix of a hand-launched approver, re-exported for the blocker step (GY-403). */
 export { handWatchPrefix };
-const holdBounds = new WeakMap<DaemonState, Map<string, number>>(); // GY-1622: per loop cursor, each held item's docs-sync hold bound; an item the step did not reach this cycle (put off by its budget) keeps the one it last left
-export const holdBoundWait = (state: DaemonState, wait: number, at: number) => { const bounds = holdBounds.get(state) ?? new Map<string, number>(); for (const [id, end] of bounds) if (end <= at) bounds.delete(id); const bound = bounds.size ? Math.min(...bounds.values()) : null; return bound !== null && bound - at < wait ? { wait: bound - at, bound } : { wait, bound: null }; };
+const holdBounds = new WeakMap<DaemonState, Map<string, number>>(); // GY-1622: per loop cursor, each held item's docs-sync hold bound on the local clock; an item the step did not reach this cycle (put off by its budget) keeps the one it last left; one already passed locally while its hold stood is a zero wait, so the next cycle re-reads it
+export const holdBoundWait = (state: DaemonState, wait: number, at: number) => { const bounds = holdBounds.get(state); const bound = bounds?.size ? Math.min(...bounds.values()) : null; return bound !== null && bound - at < wait ? { wait: Math.max(0, bound - at), bound } : { wait, bound: null }; };
 /** Step 4c: request and supervise the routine decisions. */
 export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, assessments: Record<string, ContainmentAssessment>, { capacities, approversSpent }: { capacities: RoleCapacity[]; approversSpent: boolean }) {
-  const { config, state, now, snapshot, clock, performed, isolate, agents, open } = cycle;
+  const { config, state, now, snapshot, clock, clockOffset, performed, isolate, agents, open } = cycle;
   // The items this step writes, which the stale-close step leaves to the next cycle's read (GY-1439).
   const written = new Set<string>();
   const effects = recordingWrites(await decisionReads(cycle.effects, cycle.heldDecisions, snapshot.work, Object.values(state.approvals), clock, cycle.effects.decisionReadDeadlineMs), written);
@@ -436,8 +436,8 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
   };
   const wake = effects.observe && observationWaker(effects.observe);
   const noteWait = async (item: Work, detail: string) => { const waitKey = `wait:rework:${item.id}`; if (detailChanged(state.actions[waitKey], detail)) await note(waitKey, item, 'decision', 'done', detail); };
-  // GY-1436: one stable wait per held item, naming the docs-sync session, head, base and the end of its bound; that bound, still ahead, ends the loop's idle wait (GY-1622).
-  const noteHold = async (item: Work, { wait: detail, deadline }: { wait: string; deadline: string }) => { const bound = Date.parse(deadline), waitKey = `wait:docs-sync:${item.id}`; if (bound > clock) bounds.set(item.id, bound); if (detailChanged(state.actions[waitKey], detail)) await note(waitKey, item, 'decision', 'done', detail); };
+  // GY-1436: one stable wait per held item, naming the docs-sync session, head, base and the end of its bound; that bound, still ahead, ends the loop's idle wait (GY-1622), kept at the latest local time the control plane can reach it (the read's upper clock offset): the cycle it wakes finds the hold ended, at most one round trip late.
+  const noteHold = async (item: Work, { wait: detail, deadline }: { wait: string; deadline: string }) => { const bound = Date.parse(deadline), waitKey = `wait:docs-sync:${item.id}`; if (bound > clock) bounds.set(item.id, bound + clockOffset.max); if (detailChanged(state.actions[waitKey], detail)) await note(waitKey, item, 'decision', 'done', detail); };
   const mechanical = effects.mechanicalFixes ? await effects.mechanicalFixes().then(read => read.requests, () => []) : []; // GY-971 planned bot rounds
   const routinePass = budget.pass(), attestPass = budget.pass();
   // GY-1439: while a close stands requested and unapplied on an item, nothing advances it (closingItems): no
