@@ -660,6 +660,7 @@
     "tests/scope-guard.test.ts": 8000,
     "tests/scope-request-carry.test.ts": 1364,
     "tests/scope-request-flags.test.ts": 3225,
+    "tests/scope-request-new-file.test.ts": 2993,
     "tests/scope-rule-implied.test.ts": 1044,
     "tests/scope-widening-provenance.test.ts": 470,
     "tests/secrets-scan-scope.test.ts": 284,
