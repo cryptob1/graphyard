@@ -87,7 +87,7 @@ test('unit:pi-payload-validation-detail — an inherited credential the run can 
     assert.equal(!result.ok && result.failure.reason, 'invalid-payload');
     assert.ok(!detail.includes(value) && detail.includes('the env holds [redacted]'), detail);
     // A restarted loop adopting the same run judges it against the same environment.
-    const adopted = await runner().adopt(join(runs, started.id), options).result();
+    const adopted = await runner().adopt!(join(runs, started.id), options).result();
     const again = !adopted.ok ? adopted.failure.detail : '';
     assert.equal(!adopted.ok && adopted.failure.reason, 'invalid-payload');
     assert.ok(!again.includes(value) && again.includes('the env holds [redacted]'), again);
