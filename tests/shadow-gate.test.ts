@@ -2,13 +2,19 @@ import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { copyFileSync, readFileSync, symlinkSync } from 'node:fs';
+import { readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { createRequire } from 'node:module';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import EmbeddedPostgres from 'embedded-postgres';
 import { daemonStateSchema, daemonSummary, emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { keepVerdicts, shadowErrorKey, shadowKeptVerdicts, shadowLeftoverKey, shadowReads, shadowRunnerDetail, shadowRunnerKey, shadowRunnerRetries, shadowIdle, shadowStateSchema, shadowTimeoutKey, shadowTimeoutRetries, shadowVerdictBody, shadowVerdictKey } from '../src/daemon/cycle-shadow.js';
-import { compareVerdicts, githubOutcome, judgedVerdicts, shadowDue, shadowGateAttention, shadowReport, submittedAtOf, trialLogTailLength, type ShadowVerdict } from '../src/merge-writer/shadow.js';
-import { trialNeedsLog, TrialCleanupError, TrialRunnerError, TrialTimeoutError, type TrialRun } from '../src/merge-writer/trial.js';
+import { compareVerdicts, githubOutcome, judgedVerdicts, recordedFailureCause, shadowDisagreementCause, shadowDue, shadowGateAttention, shadowReport, submittedAtOf, trialLogTailLength, type ShadowVerdict } from '../src/merge-writer/shadow.js';
+import { runTrial, trialNeedsLog, trialTemporaryMode, TrialCleanupError, TrialRunnerError, TrialTimeoutError, type TrialRun } from '../src/merge-writer/trial.js';
+import { defaultChildRun, type ChildRun } from '../src/child-runner.js';
+import type { FilesystemProbe } from '../src/install/worktree-root.js';
 import { daemonEffects } from '../src/daemon/effects.js';
 import { maxShadowTimeoutMinutes, shadowGateSettings, shadowGateSettingsSchema } from '../src/master/merge-writer-settings.js';
 import { masterConfigSchema } from '../src/master.js';
@@ -469,4 +475,72 @@ test('integration:shadow-verdict-route-coordinator-only — POST /api/work/:id/s
   assert.equal(kept.payload.logTail, failing.logTail);
   assert.ok([400, 422].includes((await request(token(coordinator), `work/${id}/shadow-verdict`, { ...failing, logTail: 'x'.repeat(4001) })).status), 'a log tail over 4000 characters is refused');
   assert.equal(await count(), 2);
+});
+
+// ——— GY-1639: the trial runs the files as CI does, and a failing verdict names its cause. ———
+const parityIdentity = { GIT_AUTHOR_NAME: 'Someone', GIT_AUTHOR_EMAIL: 'someone@example.com', GIT_COMMITTER_NAME: 'Someone', GIT_COMMITTER_EMAIL: 'someone@example.com', GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
+const parityDurable: FilesystemProbe = async path => ({ probed: path, volatile: null, freeBytes: 200e9 });
+const removeCheckout = async (_root: string, _base: string, directory: string) => { await rm(directory, { recursive: true, force: true }); };
+
+test('integration:shadow-trial-env-parity — run against this tree, tests/managed-worktree-root.test.ts and tests/runner-executor.test.ts pass inside the shadow trial\'s environment: its own temporary directory is sticky as CI\'s /tmp is, and a checkout under a temporary root never reads as a prompt naming /tmp, so a head CI passes records agree-pass', async () => {
+  const keep = ['tests/managed-worktree-root.test.ts', 'tests/runner-executor.test.ts'];
+  const own = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+  // This repository's HEAD with tests/ reduced to the two files, committed in a shared scratch clone that borrows this checkout's install.
+  const scratch = await temporaryDirectory('shadow-parity', tmpdir()), root = join(scratch, 'repo'), index = join(scratch, 'index');
+  const git = (args: string[], input?: string) => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', input, env: { ...process.env, ...parityIdentity, GIT_INDEX_FILE: index } }).trim();
+  execFileSync('git', ['clone', '-q', '--shared', '--no-checkout', own, root], { stdio: 'ignore' });
+  const head = git(['rev-parse', 'HEAD']);
+  git(['read-tree', head]);
+  const dropped = git(['ls-tree', '--name-only', head, 'tests/']).split('\n').filter(path => path.endsWith('.test.ts') && !keep.includes(path));
+  git(['update-index', '--force-remove', '--stdin'], `${dropped.join('\n')}\n`);
+  const mergeSha = git(['commit-tree', git(['write-tree']), '-p', head, '-m', 'Trial of the two files']);
+  copyFileSync(join(own, 'package-lock.json'), join(root, 'package-lock.json'));
+  symlinkSync(resolve(dirname(createRequire(import.meta.url).resolve('tsx/package.json')), '..'), join(root, 'node_modules'));
+  // The runner's tsx runs the sources, so the build is answered at once; the test runner is the real one, and what it is handed is read.
+  const seen: { tmp: string; mode: number }[] = [];
+  const run: ChildRun = async (command, args, options) => {
+    if (command === 'npm' && args.join(' ') === 'run build') return '';
+    if (command === 'node' && args.includes('tests/helpers/run-tests.ts')) seen.push({ tmp: options!.env!.TMPDIR!, mode: (await stat(options!.env!.TMPDIR!)).mode });
+    return defaultChildRun(command, args, options);
+  };
+  const result = await runTrial({ root, base: join(scratch, 'base'), mergeSha, changedFiles: ['tests/helpers/run-tests.ts'], timeoutMs: 10 * 60_000, key: 'GY-1639', run,
+    temporaryRoots: [await temporaryDirectory('roots', scratch)], probe: parityDurable, remove: removeCheckout });
+  assert.equal(result.build, 'pass', result.logTail);
+  assert.deepEqual(result.tests, { passed: 2, failed: [], files: 2 }, result.logTail);
+  assert.equal(result.runnerExit, 0, result.logTail);
+  assert.ok(seen.length === 1 && (seen[0]!.mode & 0o7777) === trialTemporaryMode, `the runner's own TMPDIR is sticky and private (${seen.map(entry => `${entry.tmp} ${(entry.mode & 0o7777).toString(8)}`).join(', ')})`);
+  assert.equal(compareVerdicts({ build: result.build, tests: result.tests, conflict: [] }, 'merged'), 'agree-pass', 'a head GitHub merged comes out agree-pass');
+});
+
+test('integration:shadow-failure-log-tail — a shadow-only-fail verdict whose test file fails records that file\'s failing test name and its log tail, even when a later group printed more than the tail holds; the cause is never \'no log tail recorded\'', async () => {
+  const scratch = await temporaryDirectory('shadow-log-tail', tmpdir());
+  const failingOutput = ['▶ integration:widget', '  ✖ widget keeps its shape (3.1ms)', 'ℹ tests 1', 'ℹ fail 1', '', '✖ failing tests:', '',
+    'test at tests/a.test.ts:12:1', '✖ widget keeps its shape (3.1ms)', '  AssertionError [ERR_ASSERTION]: the widget kept its shape', '', '  true !== false', ''].join('\n');
+  const run: ChildRun = async (command, args) => {
+    if (command === 'node' && args[0] === 'scripts/ci-tests.mjs') return 'tests/a.test.ts\ntests/b.test.ts\n';
+    if (command !== 'node' || !args.includes('tests/helpers/run-tests.ts')) return '';
+    const files = (await readFile(args[args.indexOf('--files-from') + 1]!, 'utf8')).trim().split('\n'), records = args[args.indexOf('--durations') + 1]!;
+    const failing = files.includes('tests/a.test.ts');
+    await writeFile(records, files.map(file => JSON.stringify({ file, durationMs: 5, passed: !failing })).join('\n'));
+    // The passing group after it prints far more than the tail holds, as a full selection's last group does.
+    if (!failing) return `${'✔ a passing case\n'.repeat(400)}ℹ pass 400\n`;
+    throw Object.assign(new Error('Command failed'), { status: 1, stdout: failingOutput, stderr: '' });
+  };
+  const result = await runTrial({ root: scratch, base: join(scratch, 'base'), mergeSha: sha('merge-1639'), changedFiles: ['tests/a.test.ts'], timeoutMs: 60_000, key: 'GY-1639', run, groupSize: 1,
+    temporaryRoots: [await temporaryDirectory('roots', scratch)], probe: parityDurable, remove: removeCheckout });
+  assert.deepEqual(result.tests, { passed: 1, failed: ['tests/a.test.ts'], files: 2 });
+  assert.ok(trialNeedsLog(result) && result.logTail.length <= trialLogTailLength);
+  assert.match(result.logTail, /test at tests\/a\.test\.ts:12:1\n✖ widget keeps its shape/, 'the tail is the failing group\'s own output');
+  assert.doesNotMatch(result.logTail, /✔ a passing case/, 'not the later passing group\'s');
+  // Recorded through the route as the loop posts it, the event keeps that tail, and the record names the test, its file and its error.
+  const id = randomUUID();
+  await store.pool.query('INSERT INTO work_items(id, document) VALUES ($1,$2)', [id, JSON.stringify({ id, key: 'GY-1639', stage: 'build' })]);
+  const body = shadowVerdictBody({ key: 'GY-1639', id, head: sha('head-1639'), baseTip: tip, mergeSha: sha('merge-1639'), risk: 'normal', build: result.build, tests: result.tests, conflict: [], durationMs: result.durationMs, at: iso(start), logTail: result.logTail.slice(-trialLogTailLength) });
+  assert.equal((await request(token(coordinator), `work/${id}/shadow-verdict`, body)).status, 200);
+  const kept = (await store.pool.query("SELECT payload FROM events WHERE kind='shadow.verdict' AND work_id=$1", [id])).rows[0].payload as { logTail?: string };
+  assert.equal(kept.logTail, result.logTail);
+  assert.equal(recordedFailureCause(kept.logTail), 'widget keeps its shape (tests/a.test.ts): AssertionError [ERR_ASSERTION]: the widget kept its shape');
+  const line = shadowDisagreementCause({ outcome: 'shadow-only-fail', build: result.build, tests: result.tests, conflict: [], logTail: kept.logTail });
+  assert.match(line, /the trial log names widget keeps its shape \(tests\/a\.test\.ts\)/);
+  assert.doesNotMatch(line, /no log tail recorded/);
 });

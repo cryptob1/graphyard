@@ -169,11 +169,16 @@ test('integration:managed-worktree-root — producer and reviewer checkouts are 
     assert.equal(worktreeRoot(root, { repository: 'owner/project', run: {} }, { GRAPHYARD_DATA_HOME: '/srv/graphyard' }), fallback);
 
     // No generated prompt and no code path hardcodes /tmp: a prompt for a root elsewhere never
-    // mentions it, and the sources that place checkouts hold no such literal.
+    // mentions it, and the sources that place checkouts hold no such literal. This checkout's own
+    // path is an input, not something generated: the launcher and the runner's default data root
+    // (GRAPHYARD_DATA_HOME, tests/helpers/run-tests.ts) sit under it, and a shadow trial checks the
+    // merge out under /var/tmp/gy-c* (GY-1639), so it is read out of the prompt before the check.
+    const checkoutRoot = dirname(dirname(launcher));
+    const generated = (text: string) => text.split(checkoutRoot).join('<checkout>');
     const binding: ProducerBinding = { key: 'GY-88', id: 'id', pr: 88, sha: H, baseSha: B, policyRevision: 2, group: 'integration', proofs: ['integration:managed-worktree-root'], requestId: 'request-1', branch: 'graphyard/gy-88-1' };
     const elsewhere = sessionCheckout('/srv/graphyard/worktrees/project-0123456789ab', 'proof', 'GY-88', H, randomUUID());
     for (const text of [producerPrompt(config, binding, { principal: 'proof-runner' }, elsewhere), producerPrompt({ repository: 'owner/project', cliPath: launcher }, binding, { principal: 'proof-runner' }),
-      reviewPrompt(config, binding, elsewhere), reviewPrompt(config, binding)]) assert.equal(text.includes('/tmp'), false, 'a generated prompt never names /tmp');
+      reviewPrompt(config, binding, elsewhere), reviewPrompt(config, binding)]) assert.equal(generated(text).includes('/tmp'), false, 'a generated prompt never names /tmp');
     assert.ok(producerPrompt({ repository: 'owner/project', cliPath: launcher }, binding, { principal: 'proof-runner' }).includes(join(dataDirectory(process.env), 'worktrees')), 'a previewed prompt names the default root the environment configures');
     const sources = fileURLToPath(new URL('../src/', import.meta.url));
     // master.ts and master-daemon.ts re-export their modules under master/ and daemon/ (GY-177).

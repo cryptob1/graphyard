@@ -1,7 +1,7 @@
 // Concern: the shadow gate's trial merge — the exact merge commit of a head onto main, and its build and affected tests in a credential-free checkout.
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { constants, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { defaultChildRun, type ChildRun } from '../child-runner.js';
@@ -128,6 +128,13 @@ export const trialTemporaryPrefix = 'gy-t';
  * still holds the trial's lists and records, and is removed and reclaimed as before.
  */
 export const trialCheckoutPrefix = 'gy-c';
+/**
+ * The mode of a trial's own temporary directory (GY-1639): sticky, as CI's /tmp is, so a suite that
+ * holds `tmpdir()` to the sticky-shared-parent rule (tests/runner-executor.test.ts's attested cases)
+ * sees the parent CI gives it, yet private to this account, so nothing else can plant a lookup entry
+ * in it. mkdtemp's own 0700 is not sticky: every merged head failed runner-executor on it.
+ */
+export const trialTemporaryMode = 0o1700;
 /** The variables that point the trial child's temporary files at `directory`. */
 export const trialTemporaryVariables = (directory: string) => ({ TMPDIR: directory, TMP: directory, TEMP: directory });
 
@@ -229,6 +236,20 @@ export interface RunTrialInput {
   probe?: FilesystemProbe;
 }
 const tailLength = 4000;
+/**
+ * The log tail of a trial whose test groups named failing files (GY-1639): each failing group's own
+ * output, its command line and the end of what it printed (the runner's `failing tests:` summary
+ * and the exit), sharing `tailLength` evenly. The whole log's last characters are the last group's,
+ * and in a full selection that group passed, so they named no failing cause.
+ */
+export function failureTail(outputs: readonly string[], length = tailLength): string {
+  const share = Math.floor((length - (outputs.length - 1)) / Math.max(1, outputs.length));
+  return outputs.map(output => {
+    if (output.length <= share) return output;
+    const command = output.slice(0, output.indexOf('\n') + 1);
+    return command.length < share / 2 ? `${command}${output.slice(-(share - command.length))}` : output.slice(-share);
+  }).join('\n').slice(-length);
+}
 const testFile = /tests\/[\w./-]+\.test\.ts/g;
 const testFileLine = /^tests\/[\w./-]+\.test\.ts$/;
 /**
@@ -283,7 +304,7 @@ export async function runTrial(input: RunTrialInput): Promise<TrialRun> {
   try {
     const root = trialTemporaryRoot(checkout.directory, roots);
     if (root !== checkout.directory) guarded = root;
-    temporary = await mkdtemp(join(root, trialTemporaryPrefix)); await writeTempOwner(temporary);
+    temporary = await mkdtemp(join(root, trialTemporaryPrefix)); await chmod(temporary, trialTemporaryMode); await writeTempOwner(temporary);
     const near = await trialCheckoutRoot(roots, input.minFreeBytes ?? defaultWorktreeRootMinFreeGb * 1e9, input.probe);
     if (near) { place = await mkdtemp(join(near, trialCheckoutPrefix)); await writeTempOwner(place); worktree = join(place, 'checkout'); }
   }
@@ -345,7 +366,7 @@ export async function runTrial(input: RunTrialInput): Promise<TrialRun> {
   const hostEnded = (ended: Ended) => !ended.ok && (ended.signal !== null || ended.cause !== undefined);
   const runnerFailure = (phase: TrialRunnerError['phase'], ended: Ended, files: string[] = [], finished = 0) =>
     new TrialRunnerError(phase, ended.status, ended.signal, files, finished, `${ended.out}\n${ending({ status: ended.status, signal: ended.signal, cause: ended.cause })}`.slice(-runnerDiagnosticTailLength), input.mergeSha, Math.max(0, now() - startedAt));
-  const finish = (build: TrialRun['build'], tests: TrialRun['tests'], runnerExit: number | null = null, groups?: TrialGroup[]): TrialRun => ({ build, tests, durationMs: Math.max(0, now() - startedAt), logTail: tail(), runnerExit, ...(groups ? { groups } : {}) });
+  const finish = (build: TrialRun['build'], tests: TrialRun['tests'], runnerExit: number | null = null, groups?: TrialGroup[], logTail = tail()): TrialRun => ({ build, tests, durationMs: Math.max(0, now() - startedAt), logTail, runnerExit, ...(groups ? { groups } : {}) });
   const listed = (out: string) => out.split('\n').map(line => line.trim()).filter(line => testFileLine.test(line));
   const trial = async (): Promise<TrialRun> => {
     try {
@@ -378,7 +399,7 @@ export async function runTrial(input: RunTrialInput): Promise<TrialRun> {
       // partial-record run that finished some files and printed a named failure for another (GY-1548).
       // A group that ends non-zero naming no failing file is a runner failure, unless another group
       // named one: a named failing test is the merge's, and stays a failing verdict.
-      const groups: TrialGroup[] = [];
+      const groups: TrialGroup[] = [], failingOutput: string[] = [];
       let unattributed: TrialRunnerError | null = null;
       for (const [index, group] of groupTestFiles(files, input.groupSize).entries()) {
         const list = join(checkout.directory, `tests-${index + 1}.txt`), records = join(checkout.directory, `tests-${index + 1}.jsonl`);
@@ -388,12 +409,14 @@ export async function runTrial(input: RunTrialInput): Promise<TrialRun> {
         const namedByRecords = recorded.filter(record => !record.passed).map(record => record.file);
         const failing = [...new Set(namedByRecords.length ? namedByRecords : tests.ok ? [] : failingFilesInLog(tests.out))];
         groups.push({ files: group, status: tests.status, signal: tests.signal, failed: failing });
+        if (failing.length) failingOutput.push(log.at(-1)!);
         if (!tests.ok && !failing.length) unattributed ??= runnerFailure('tests', tests, group, recorded.filter(record => group.includes(record.file)).length);
       }
       const failed = [...new Set(groups.flatMap(group => group.failed))];
       if (!failed.length && unattributed) throw unattributed;
       const worst = groups.find(group => group.status !== 0);
-      return finish('pass', { passed: Math.max(0, files.length - failed.length), failed, files: files.length }, worst ? exitCode({ status: worst.status, signal: worst.signal, cause: undefined }) : 0, groups);
+      return finish('pass', { passed: Math.max(0, files.length - failed.length), failed, files: files.length }, worst ? exitCode({ status: worst.status, signal: worst.signal, cause: undefined }) : 0, groups,
+        failingOutput.length ? failureTail(failingOutput) : tail());
     } catch (error) {
       if (error instanceof TrialTimeoutError || error instanceof TrialRunnerError) throw error;
       log.push(`trial checkout failed: ${error instanceof Error ? error.message : String(error)}`);
