@@ -1751,6 +1751,10 @@ test('unit:land-coordinator-commits — the operator commits landed from the coo
   assert.match(fallback, new RegExp(`^WorkingDirectory=${bare.replace(/[.]/g, '\\.')}$`, 'm'));
   assert.match(fallback, new RegExp(`^ExecStart=/usr/bin/node ${resolve(import.meta.dirname, '../scripts/graphyard-executor.mjs').replace(/[.]/g, '\\.')} --slot %i$`, 'm'), 'a target repository without the script runs the package\'s');
   assert.match(renderExecutorUnit(template, { root: bare, node: '/usr/bin/node', script: '/opt/run.mjs' }), /^ExecStart=\/usr\/bin\/node \/opt\/run\.mjs --slot %i$/m);
+  // That unit is the repository's own, so its next install rewrites it rather than refusing it as another install's; another checkout's stays refused.
+  const { foreignUnitText } = await import('../src/install/units.js');
+  assert.equal(foreignUnitText(fallback, bare), null);
+  assert.equal(foreignUnitText(withScript, bare), resolve(import.meta.dirname, '..'));
 
   // Onboarding: a control plane that refuses a pull-request submission (no GitHub App) is answered with the published head.
   const submitted: any[] = [];
