@@ -9,7 +9,7 @@ import { emptyDaemonState, type DaemonEffects } from '../src/master-daemon.js';
 import { emptyHeldDecisions } from '../src/daemon/decision-reads.js';
 import { Launcher, type Cycle } from '../src/daemon/cycle.js';
 import { Timings } from '../src/master/timings.js';
-import { routineRemedies, type DoctorEffects } from '../src/daemon/doctor.js';
+import { applyHarnessContract, routineRemedies, type DoctorEffects } from '../src/daemon/doctor.js';
 import { harnessDrift, writeHarnessPermissions } from '../src/harness.js';
 import { masterHarnessDrift } from '../src/cli/master/fleet.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -109,17 +109,17 @@ test('integration:harness-remedy-loop-cycle — the loop\'s routine remedies app
   } finally { await cleanup(); }
 });
 
-test('unit:harness-apply-keeps-operator-entries — writeHarnessPermissions with apply=true adds the missing plan rule and keeps every operator-added allow, deny and setting', async () => {
-  const { root, plan, absent, installed, cleanup } = await checkout();
+test('unit:harness-apply-keeps-operator-entries — the loop\'s harness remedy writes as writeHarnessPermissions with apply=true does: the missing plan rule is added and every operator-added allow, deny and setting is kept', async () => {
+  const { root, master, plan, absent, installed, cleanup } = await checkout();
   try {
-    const written = await writeHarnessPermissions(root, plan, true);
-    assert.equal(written.applied, true);
-    assert.deepEqual(written.added.map(entry => entry.rule), [absent]);
-    assert.deepEqual(written.removed, []);
+    assert.deepEqual((await writeHarnessPermissions(root, plan, false)).added.map(entry => entry.rule), [absent], 'the dry run names the one missing rule');
+    const looped = cycle(root, master);
+    await applyHarnessContract(looped);
     const settings = JSON.parse(await readFile(settingsFile(root), 'utf8'));
     assert.deepEqual(settings.permissions.allow, installed.permissions.allow, 'every allow is kept, the operator\'s included');
     assert.deepEqual(settings.permissions.deny, [...installed.permissions.deny, absent], 'every deny is kept and the missing one appended');
     assert.equal(settings.model, 'opus');
+    assert.deepEqual((await writeHarnessPermissions(root, plan, false)).added, [], 'nothing is left for --apply to add');
   } finally { await cleanup(); }
 });
 
