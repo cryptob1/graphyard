@@ -689,3 +689,48 @@ test('integration:throughput-owner-approver-bound — an approver that leaves th
     assert.deepEqual(closed, ['GY-1626'], 'its approval closes the owner');
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
+
+test('integration:throughput-owner-self-request — a requirements revision standing on the owner that is not the option of record (a master\'s own criteria edit at the same revision) is left to its requester: the loop adopts only a standing request whose whole input is its own, launches no approver for another, and asks its own once that settles', async () => {
+  const { throughputRoutineDecision, throughputEscalationKey } = await import('../src/daemon/cycle-delivery.js');
+  const { decisionInput } = await import('../src/master.js');
+  const directory = await temporaryDirectory('throughput-owner-self-request-foreign');
+  try {
+    const clock = { now: base + 2 * 24 * 60 * minute };
+    const owner = openOwner('GY-1626');
+    const work: Work[] = [...accumulated(staleRework(10, null)), owner];
+    const { master, state, effects, closed } = await convergenceLoop(directory, work, clock);
+    const plane = decisionPlane(effects, clock);
+    await runCycle(master, state, effects, () => clock.now);
+    assert.equal(state.actions[throughputEscalationKey('GY-1626', 1)]?.state, 'waiting');
+    // A master's own revision at the raise revision, same planned files, other criteria: not the throughput decision.
+    const foreign = { id: '00000000-0000-4000-8000-00000000f00d', action: 'requirements', state: 'requested', reason: 'A master edits the criteria', outcome: null, approvedBy: null, refusal: null,
+      input: decisionInput('requirements', owner, { criteria: [{ id: 'AC-1', text: 'Something else entirely', proofs: ['unit:other'] }] }) };
+    plane.ledger.set('GY-1626', [foreign]);
+    for (let cycle = 0; cycle < 3; cycle++) { clock.now += 2 * minute; await runCycle(master, state, effects, () => clock.now); }
+    assert.equal(plane.requests.length, 0, 'the loop asks nothing while another requirements decision stands');
+    assert.equal(plane.launches.length, 0, 'and launches no approver for a request it did not make');
+    assert.deepEqual(plane.withdrawn, [], 'nor withdraws its requester\'s');
+    assert.deepEqual(closed, []);
+    // Once it settles (its requester withdrew it), the loop asks its own and routes it to the approver.
+    foreign.state = 'withdrawn';
+    clock.now += 2 * minute;
+    await runCycle(master, state, effects, () => clock.now);
+    assert.equal(plane.requests.length, 1);
+    assert.deepEqual(plane.launches.map(launch => launch.decision), [plane.ledger.get('GY-1626')!.at(-1)!.id]);
+
+    // A lost reply: the standing request whose whole input is the option of record is adopted, never asked twice.
+    const directory2 = await temporaryDirectory('throughput-owner-self-request-adopt');
+    try {
+      const second = openOwner('GY-1627'), clock2 = { now: clock.now };
+      const loop = await convergenceLoop(directory2, [...accumulated(staleRework(10, null)), second], clock2);
+      const plane2 = decisionPlane(loop.effects, clock2);
+      await runCycle(loop.master, loop.state, loop.effects, () => clock2.now);
+      const own = throughputRoutineDecision(second, loop.state.actions)!;
+      plane2.ledger.set('GY-1627', [{ id: '00000000-0000-4000-8000-00000000beef', action: 'requirements', state: 'requested', reason: own.reason, outcome: null, approvedBy: null, refusal: null, input: decisionInput('requirements', second, own.input!) }]);
+      clock2.now += 2 * minute;
+      await runCycle(loop.master, loop.state, loop.effects, () => clock2.now);
+      assert.deepEqual(plane2.requests, [], 'the standing request is the loop\'s own: adopted');
+      assert.deepEqual(plane2.launches.map(launch => launch.decision), ['00000000-0000-4000-8000-00000000beef'], 'and routed to the approver');
+    } finally { await rm(directory2, { recursive: true, force: true }); }
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});

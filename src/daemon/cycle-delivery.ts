@@ -5,6 +5,8 @@ import { type Work } from '../model.js';
 import { mergedWithoutAuthorization, unauthorizedMergeViolation } from '../merge-queue.js';
 import { boundDeployment, type DaemonAction, type DaemonState, deploymentObservationSchema, maxProofAttempts, message, retainedActions, storeAction } from './state.js';
 import { candidateKey } from './reconcile.js';
+import { canonicalJson } from '../onboarding.js';
+import { decisionInput } from '../master.js';
 import { readyToRetry } from './sessions.js';
 import { detailChanged, exhaustedProofEscalation, exhaustedProofKey, githubPause, observationWakeDue, standingVerdict, type RoutineDecision } from './decisions.js';
 import { record } from './effects.js';
@@ -433,6 +435,14 @@ async function throughputOwnerStep(cycle: Pick<Cycle, 'state' | 'effects' | 'now
 
 /** The binding of the requirements decision the loop requests on a throughput owner's standing needs-decision: one per raise. */
 export const throughputDecisionBound = (binding: unknown) => typeof binding === 'string' && binding.startsWith('throughput:');
+
+/**
+ * Whether a requirements decision standing on the owner is the loop's own throughput request, to adopt rather than leave
+ * to its requester: only one whose complete input is the option of record this decision asks. A master's own revision at
+ * the same policy revision (other criteria, dependencies, resources or proofs) is not it, and is left to its requester.
+ */
+export const throughputDecisionAdopts = (standing: unknown, decision: RoutineDecision, work: Work) => throughputDecisionBound(decision.binding)
+  && canonicalJson(standing) === canonicalJson(decisionInput('requirements', work, decision.input ?? {}));
 
 /**
  * GY-1630: the requirements decision the loop requests itself on the open throughput owner while the
