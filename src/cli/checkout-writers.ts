@@ -1,5 +1,5 @@
 // Concern: the coordinator checkout's standing writers (GY-1658) — finding the processes working in it and freezing them, fail-closed, for `master checkout-restore`.
-import { readdirSync, readFileSync, readlinkSync, realpathSync } from 'node:fs';
+import { readdirSync, readFileSync, readlinkSync, realpathSync, statSync } from 'node:fs';
 import { join, resolve, sep } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 
@@ -12,13 +12,31 @@ import { setTimeout as delay } from 'node:timers/promises';
  * unverifiable scan as no writers (GY-1658 review). The kernel reports each working directory by its
  * physical path, so the checkout is compared by its canonical path too: a checkout reached through a
  * symlinked ancestor is the same checkout, and one whose canonical path cannot be read throws.
+ * A live process of this user whose working directory cannot be read (a non-dumpable one, say) is
+ * unverifiable, never absent (GY-1663): it throws, naming the pid and the read error, before anything
+ * is stopped or touched — unless it is provably outside the checkout: this process or an ancestor, or
+ * one of the loop's managed sessions (a `graphyard-watch-…` scope, which sees the checkout read-only).
  */
-export function checkoutWriterProcesses(root: string, self = process.pid, proc = '/proc'): number[] {
+export function checkoutWriterProcesses(root: string, self = process.pid, proc = '/proc', uid = process.getuid?.() ?? null): number[] {
+  const { writers, unverifiable } = checkoutProcessScan(root, self, proc, uid);
+  if (unverifiable.length) throw new Error(`the working directory of ${unverifiable.slice(0, 8).map(entry => `pid ${entry.pid} (${entry.error})`).join(', ')} cannot be read, so whether it writes in the checkout cannot be verified and nothing was restored`);
+  return writers;
+}
+/** A process of this user whose working directory could not be read, with the read error. */
+export interface UnverifiableProcess { pid: number; error: string }
+/** The loop's managed sessions run in `graphyard-watch-…` scopes (src/supervisor.ts). */
+const managedScope = /\/graphyard-watch-[A-Za-z0-9:@._-]+\.scope(?:\/|$)/m;
+/**
+ * checkoutWriterProcesses's scan: the writers it finds, and the processes of this user (`uid`; null
+ * when the platform has none, so every owner counts) whose working directory could not be read and
+ * which are not provably outside the checkout.
+ */
+export function checkoutProcessScan(root: string, self = process.pid, proc = '/proc', uid = process.getuid?.() ?? null): { writers: number[]; unverifiable: UnverifiableProcess[] } {
   let base: string;
   try { base = realpathSync(resolve(root)); }
   catch (error) { throw new Error(`the checkout's canonical path cannot be read (${error instanceof Error ? error.message : String(error)}), so its writers cannot be found and nothing was restored`); }
   const managed = `${base}${sep}.graphyard`;
-  const table = new Map<number, { ppid: number; cwd: string | null }>();
+  const table = new Map<number, { ppid: number; cwd: string | null; error: string | null }>();
   let entries: string[];
   try { entries = readdirSync(proc).filter(name => /^\d+$/.test(name)); }
   catch (error) { throw new Error(`the processes working in the checkout cannot be enumerated from ${proc} (${error instanceof Error ? error.message : String(error)}), so nothing was restored`); }
@@ -27,8 +45,15 @@ export function checkoutWriterProcesses(root: string, self = process.pid, proc =
     try {
       const stat = readFileSync(join(proc, name, 'stat'), 'utf8');
       const ppid = Number(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[1]);
-      let cwd: string | null = null; try { cwd = readlinkSync(join(proc, name, 'cwd')); } catch { /* another user's, or gone */ }
-      table.set(Number(name), { ppid, cwd });
+      let cwd: string | null = null, error: string | null = null;
+      try { cwd = readlinkSync(join(proc, name, 'cwd')); }
+      catch (failure) {
+        // Another user's is not ours to judge; one gone or a zombie writes nothing.
+        const state = stat.slice(stat.lastIndexOf(')') + 2, stat.lastIndexOf(')') + 3);
+        let owner: number | null = null; try { owner = statSync(join(proc, name)).uid; } catch { /* gone */ }
+        if (owner !== null && (uid === null || owner === uid) && state !== 'Z' && state !== 'X') error = failure instanceof Error ? failure.message : String(failure);
+      }
+      table.set(Number(name), { ppid, cwd, error });
     } catch { /* exited while read */ }
   }
   const spared = new Set<number>();
@@ -40,7 +65,9 @@ export function checkoutWriterProcesses(root: string, self = process.pid, proc =
     grown = false;
     for (const [pid, entry] of table) if (!writers.has(pid) && !spared.has(pid) && writers.has(entry.ppid) && unmanaged(entry.cwd)) { writers.add(pid); grown = true; }
   }
-  return [...writers].sort((a, b) => a - b);
+  const outside = (pid: number) => { try { return managedScope.test(readFileSync(join(proc, String(pid), 'cgroup'), 'utf8')); } catch { return false; } };
+  const unverifiable = [...table].filter(([pid, entry]) => entry.error !== null && !spared.has(pid) && !outside(pid)).map(([pid, entry]) => ({ pid, error: entry.error! })).sort((a, b) => a.pid - b.pid);
+  return { writers: [...writers].sort((a, b) => a - b), unverifiable };
 }
 /** A process's state letter from /proc (R, S, D, T, t, Z, …), or null when it is gone. */
 export function processStateOf(pid: number, proc = '/proc'): string | null {

@@ -779,6 +779,7 @@
     "tests/zero-touch-control-plane.test.ts": 4000,
     "tests/zero-touch-onboarding.test.ts": 5900,
     "tests/capped-refusal-rereview.test.ts": 600,
-    "tests/uat-follow-up-filing.test.ts": 3000
+    "tests/uat-follow-up-filing.test.ts": 3000,
+    "tests/checkout-writers-unreadable-cwd.test.ts": 800
   }
 }
