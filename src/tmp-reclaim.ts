@@ -33,6 +33,21 @@ export const tmpReclaimMinAgeMs = 6 * 3_600_000;
 export const testTempPatterns: readonly RegExp[] = [/^graphyard-/, /^gy-/, /^landing-merge-result/, /^native-/, /^pg-password/, /^playwright_chromiumdev_profile/];
 /** How old a test temp entry — file or directory — must be before the loop's pass removes it. */
 export const testTempMinAgeMs = 2 * 3_600_000;
+/**
+ * The names agent sessions give their own scratch checkouts and logs in /tmp (GY-1618): a worker
+ * on another repository's VOICE-615 item made `/tmp/voice615-base-189-release` and five siblings,
+ * each a linked git worktree with its dependencies installed (~70,600 inodes apiece), and left them
+ * when it finished. By 9 October 2026 they held ~423,000 of /tmp's 1,048,576 inodes, and the pass,
+ * which matched only test temp names, removed none of them while the volume fell to 2% free.
+ */
+export const agentScratchPatterns: readonly RegExp[] = [/^voice\d+-/];
+/**
+ * How long an agent scratch entry must have gone unwritten before the pass removes it: a session
+ * can leave its checkout idle for hours between commands, where a test run's temp lives minutes.
+ * A directory's age is its newest write anywhere in its tree, and for a linked git worktree its
+ * gitdir's too, so a checkout an agent still edits or commits in is never stale.
+ */
+export const agentScratchMinAgeMs = 24 * 3_600_000;
 /** The most directories one pass removes, and the most wall-clock time it spends removing: reclaim is bounded per cycle, whatever the backlog. */
 export const tmpReclaimLimitPerCycle = 100, tmpReclaimWorkMsPerCycle = 150;
 /**
@@ -107,9 +122,11 @@ export function tempOwnerGone(owner: TempOwner, procRoot = '/proc'): boolean {
 
 /**
  * The absolute paths every live process on the host holds open — its working directory, its root
- * and each of its file descriptors — read from /proc. A directory one of these paths lies inside
- * is in use whatever its marker says: an ownerless Postgres data dir with a surviving postmaster
- * is not waste. On a host without /proc the set is empty and age alone decides.
+ * and each of its file descriptors — or names in its command line, read from /proc. A directory one
+ * of these paths lies inside is in use whatever its marker says: an ownerless Postgres data dir with
+ * a surviving postmaster is not waste, nor a scratch checkout a running server was started with
+ * (`-D /tmp/voice638-189-db`, `--dir=/tmp/...`) while it has no file open there (GY-1618). On a host
+ * without /proc the set is empty and age alone decides.
  */
 export async function heldOpenPaths(procRoot = '/proc'): Promise<Set<string>> {
   const held = new Set<string>();
@@ -124,9 +141,14 @@ export async function heldOpenPaths(procRoot = '/proc'): Promise<Set<string>> {
         if (target.startsWith('/')) held.add(target);
       } catch { /* the process exited between listing and reading */ }
     }
+    const commandLine = await readFile(join(base, 'cmdline'), 'utf8').catch(() => '');
+    for (const path of namedPaths(commandLine)) held.add(path);
   }));
   return held;
 }
+/** The absolute paths a process's NUL-separated command line names: whole arguments, and paths after an `=` or inside a longer argument. */
+export const namedPaths = (commandLine: string): string[] => commandLine.split('\0').flatMap(argument => argument.match(/(?<![\w.~:/-])\/[^\s'"`=:,;)]+/g) ?? [])
+  .map(path => path.replace(/\/+$/, '')).filter(path => path.length > 1);
 /**
  * The entries directly under `root` that some held path lies in or names: reduced once per pass, so
  * each candidate's check is one lookup rather than a scan of every open path on the host.
@@ -152,6 +174,30 @@ async function lastWritten(path: string, own: number): Promise<number> {
   for (const name of entries) {
     try { newest = Math.max(newest, (await lstat(join(path, name))).mtimeMs); } catch { /* removed while reading */ }
   }
+  return newest;
+}
+/**
+ * When an agent's scratch directory was last written (GY-1618): the newest mtime anywhere in its
+ * tree, following no symlink and staying on its device, and, for a linked git worktree, its gitdir's
+ * own entries (HEAD, index, logs), which a commit or checkout there rewrites. An edit deep inside a
+ * checkout leaves every top-level mtime alone, so the top level alone could call a checkout in use stale.
+ */
+async function treeLastWritten(path: string, own: number): Promise<number> {
+  let newest = own;
+  const device = (await lstat(path).catch(() => null))?.dev;
+  const stack = [path];
+  while (stack.length) {
+    const directory = stack.pop()!;
+    for (const entry of await readdir(directory, { withFileTypes: true }).catch(() => [] as Dirent[])) {
+      const child = join(directory, entry.name);
+      const info = await lstat(child).catch(() => null);
+      if (!info) continue;
+      newest = Math.max(newest, info.mtimeMs);
+      if (info.isDirectory() && info.dev === device) stack.push(child);
+    }
+  }
+  const gitdir = (await readFile(join(path, '.git'), 'utf8').catch(() => '')).match(/^gitdir: (.+)$/m)?.[1]?.trim();
+  if (gitdir) newest = Math.max(newest, await lastWritten(gitdir, (await lstat(gitdir).catch(() => null))?.mtimeMs ?? 0));
   return newest;
 }
 
@@ -250,7 +296,7 @@ export interface TmpReclaimOptions {
   volume?: (path: string) => Promise<{ files: number | bigint; ffree: number | bigint }>;
 }
 /** The age an entry of this name must reach before the default pass removes it whole, or null when the name is not the pass's. */
-const defaultMinAge = (name: string) => testTempPatterns.some(pattern => pattern.test(name)) ? testTempMinAgeMs : null;
+const defaultMinAge = (name: string) => testTempPatterns.some(pattern => pattern.test(name)) ? testTempMinAgeMs : agentScratchPatterns.some(pattern => pattern.test(name)) ? agentScratchMinAgeMs : null;
 /** A tsx compile cache directory's name: never removed whole, only aged file by file (GY-1512). */
 const tsxCachePattern = /^tsx-\d+$/;
 
@@ -448,14 +494,20 @@ async function reclaimRoot(root: string, real: string, pass: PassState, report: 
       const maxAgeMs = minAge(entry.name)!;
       // A directory's entries are read only once the directory itself is old: a young one is kept on one stat.
       // An entry an earlier pass began removing is due at once: its half-finished removal is what made it look young (GY-1401).
-      const written = pass.unfinished.has(path) ? 0 : now - info.mtimeMs < maxAgeMs || !entry.isDirectory() ? info.mtimeMs : await lastWritten(path, info.mtimeMs);
+      let written = pass.unfinished.has(path) ? 0 : now - info.mtimeMs < maxAgeMs || !entry.isDirectory() ? info.mtimeMs : await lastWritten(path, info.mtimeMs);
       if (now - written < maxAgeMs) { report.kept++; continue; }
       // Only holders under the scanned root can hold a candidate, and on a host with a backlog the
       // raw scan holds thousands of paths elsewhere: reduce it once to the root's entries, then
       // every check is a single lookup.
       // /proc names a holder by its resolved path, so a root reached through a symlink is matched by its realpath.
-      if (!held) held = heldEntries(real, pass.held ??= await heldOpenPaths());
-      if (held.has(join(real, entry.name))) { report.kept++; continue; }
+      // A command line names the path as it was typed, so a root's own spelling is matched as well.
+      if (!held) { const all = pass.held ??= await heldOpenPaths(); held = new Set([...heldEntries(real, all), ...(root === real ? [] : heldEntries(root, all))]); }
+      if (held.has(join(real, entry.name)) || held.has(join(root, entry.name))) { report.kept++; continue; }
+      // An agent's scratch checkout is judged by its whole tree, read last: only an old, unheld one is walked.
+      if (written && entry.isDirectory() && agentScratchPatterns.some(pattern => pattern.test(entry.name))) {
+        written = await treeLastWritten(path, written);
+        if (now - written < maxAgeMs) { report.kept++; continue; }
+      }
       removable.push({ path, mtime: written });
     }
     // The scan is bounded with the removals: once this pass cannot remove more, another 10,000

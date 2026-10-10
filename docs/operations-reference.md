@@ -7,7 +7,7 @@
 
 ### Perpetual master loop
 
-`master verify-deployment GY-N` emits instructions from served-commit checkout, refusing *unobserved*, *stale* (rerun), merge-missing or already-recorded releases; without `--deployment-url`, newest successful [`productionEnvironment`](deployment.md#production-environment-name) deployment counts.
+`master verify-deployment GY-N` emits instructions from served-commit checkout, refusing *unobserved*, *stale* (rerun), merge-missing or recorded releases; without `--deployment-url`, newest successful [`productionEnvironment`](deployment.md#production-environment-name) deployment counts.
 
 ## Lost worker before submission
 
@@ -27,11 +27,11 @@ Minutely scan (`GET /api/interventions` → `scan`; `GRAPHYARD_INTERVENTION_PATT
 
 ## Flaky CI check
 
-[Reruns once](github.md#failed-checks) (`mergeQueue.rerunFailedChecks`, 0 disables); pass clears it. On main, no later merge is judged until reruns conclude. Cancelled or timed-out jobs rerun up to 3 times; then one `escalation:main-guard:SHA` infrastructure fault names run and step, reverting nothing. A real failure reruns once: a pass joins `mainGuardFlakes` (last 20); a second failure, refusal or hour without conclusion reverts.
+[Reruns once](github.md#failed-checks) (`mergeQueue.rerunFailedChecks`, 0 disables); pass clears it. On main, no later merge is judged until reruns conclude. Cancelled/timed-out jobs rerun ≤3 times; then one `escalation:main-guard:SHA` infrastructure fault names run and step, reverting nothing. A real failure reruns once: a pass joins `mainGuardFlakes` (last 20); a second failure, refusal or hour without conclusion reverts.
 
 ## Accepted evidence turns out to be wrong
 
-`graphyard revoke GY-N revoke.json` ([body](protocol/evidence.md#revocation)) closes gate; that head's required checks no longer pass.
+`graphyard revoke GY-N revoke.json` ([body](protocol/evidence.md#revocation)) closes gate; that head's required checks stop passing.
 
 ## GitHub request budget
 
@@ -72,7 +72,7 @@ Silent webhook hour: `master status` cites `https://github.com/settings/apps/APP
 
 ## Control-plane resources
 
-`resources` remedies: ledgers, `graphyard master run --once`; `agent-names:PROFILE`, `herdr pane close PANE`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow volume+`GRAPHYARD_DATABASE_MAX_BYTES` (10GiB); `tmp-inodes[:ROOT]`, per `TMPDIR`/`/tmp` root (<25% free: pass escalates, names consumers, flags partial census; 0-removal pass ledgered); `loaded-revision` counts code moves. No fault while remedying: owed restart within bound, pane unowned <10min (unnamed: reclaim pass's clock, kept through failed close), `/tmp` >10% free <30min after a pass left it ≥25%. Loop age: host clock.
+`resources` remedies: ledgers, `graphyard master run --once`; `agent-names:PROFILE`, `herdr pane close PANE`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow volume+`GRAPHYARD_DATABASE_MAX_BYTES` (10GiB); `tmp-inodes[:ROOT]`, per `TMPDIR`/`/tmp` root (also `voice<n>-*` scratch 24h unwritten, unheld; <25% free: pass escalates, names consumers, flags partial census; 0-removal pass ledgered); `loaded-revision`: code moves. No fault while remedying: owed restart within bound, pane unowned <10min (unnamed: reclaim pass's clock, kept through failed close), `/tmp` >10% free <30min after a pass left it ≥25%. Loop age: host clock.
 
 Session-started `npm test`, `test:browser`, typecheck, `tsc --noEmit` take one of max(2, floor(GB/8)) slots (`GRAPHYARD_VERIFICATION_SLOTS`; managed root's `.verification-slots`); CI unbounded. Under max(10% RAM, 4GB) available, launches defer (`escalation:dispatch:memory`; one `memory-pressure` fault per dip) until 1GB above.
 

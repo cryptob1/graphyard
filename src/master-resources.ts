@@ -7,7 +7,7 @@ import { agentOwner, atomicPrivateWrite, closeHerdrPane, diskThresholdBytes, isP
 import type { HerdrPane } from './master/herdr.js';
 import { pinnedSessionRecords, readReviewLedger, sessionLedgerBound, SessionLedgerFullError, sessionLedgerRefusal, terminalSessionStates, updateReviewLedger, type ReviewRecord } from './reviewer.js';
 import { readProducerLedger, saveProducerLedger, type ProducerRecord } from './producer.js';
-import { describeTmpReclaim, hostTmpRoots, reclaimTmpDirectories, testTempMinAgeMs, testTempPatterns, tmpInodeHeadroom, tmpReclaimEscalation, tmpReclaimLimitPerCycle, tmpReclaimMinAgeMs, tmpConsumersScanBound, tmpReclaimWorkMsPerCycle, tsxCacheName, type TmpConsumer, type TmpRootPressure, type TmpReclaimOptions, type TmpReclaimReport } from './tmp-reclaim.js';
+import { agentScratchMinAgeMs, agentScratchPatterns, describeTmpReclaim, hostTmpRoots, reclaimTmpDirectories, testTempMinAgeMs, testTempPatterns, tmpInodeHeadroom, tmpReclaimEscalation, tmpReclaimLimitPerCycle, tmpReclaimMinAgeMs, tmpConsumersScanBound, tmpReclaimWorkMsPerCycle, tsxCacheName, type TmpConsumer, type TmpRootPressure, type TmpReclaimOptions, type TmpReclaimReport } from './tmp-reclaim.js';
 import { alignKey, upgradeTouchesCode } from './daemon/upgrade.js';
 import type { UpgradeStall } from './daemon/state.js';
 import { workerReclaimBoundMs, workerSubmissionBoundMs } from './model/attempt-bound.js';
@@ -118,9 +118,10 @@ export interface TmpInodes {
    * (GY-1081): the per-user quota is not readable without quotactl, so this is what the reading can
    * show of this user's share. `capped` when the count stopped at `ownEntriesScanBound`. `tsxCache`
    * names this user's tsx compile cache and the entries under it, which `entries` includes (GY-1512):
-   * one top-level directory that held 89,896 of them on 8 October 2026.
+   * one top-level directory that held 89,896 of them on 8 October 2026. `agentScratch` counts the
+   * top-level entries carrying an agent scratch name the pass also reclaims (GY-1618), when any do.
    */
-  own?: { entries: number; testTemp: number; capped: boolean; tsxCache?: { name: string; entries: number } } | null;
+  own?: { entries: number; testTemp: number; capped: boolean; tsxCache?: { name: string; entries: number }; agentScratch?: number } | null;
   /**
    * The consumers the latest pass named in this directory's own census, and whether that census
    * stopped at its budget (GY-1602): another root's consumers never stand in for this one's.
@@ -459,7 +460,7 @@ export const resourceRegistry: ResourceDefinition[] = [
     // not readable without quotactl, so the reading warns early rather than claiming to track it.
     bound: 'the inode count of the filesystem holding the host temporary directory (filesystem-wide, not the per-user quota, which can break shells first), so it warns at a quarter free',
     usage: 'statfs of the host temporary directory (os.tmpdir() of the reading process)', owner: 'test runs and sessions on the coordinator host, and the loop\'s /tmp reclaim pass (src/tmp-reclaim.ts)',
-    reclaim: `the loop's reclaim pass scans its own tmpdir and /tmp, each once, and removes this user's test temp entries (${testTempPatterns.map(pattern => `${pattern.source.slice(1)}*`).join(', ')}) older than ${testTempMinAgeMs / 3_600_000} hours, and the regular files in this user's tsx compile cache (tsx-<uid>) older than ${tmpReclaimMinAgeMs / 3_600_000} hours, that no live process holds, at most ${tmpReclaimLimitPerCycle} per cycle; while /tmp stays below a quarter of its inodes free the same pass escalates (${tmpReclaimEscalation.map(step => `${step.limit} per cycle and cache files older than ${minutes(step.cacheAgeMs)}`).join(', then ')}) and, if the bound still stands, names the top /tmp consumers by path, entry count and owner`,
+    reclaim: `the loop's reclaim pass scans its own tmpdir and /tmp, each once, and removes this user's test temp entries (${testTempPatterns.map(pattern => `${pattern.source.slice(1)}*`).join(', ')}) older than ${testTempMinAgeMs / 3_600_000} hours, this user's agent scratch entries (${agentScratchPatterns.map(pattern => `${pattern.source.slice(1).replace('\\d+', '<n>')}*`).join(', ')}) whose whole tree, and a linked worktree's gitdir, went unwritten for ${agentScratchMinAgeMs / 3_600_000} hours, and the regular files in this user's tsx compile cache (tsx-<uid>) older than ${tmpReclaimMinAgeMs / 3_600_000} hours, that no live process holds open or names in its command line, at most ${tmpReclaimLimitPerCycle} per cycle; while /tmp stays below a quarter of its inodes free the same pass escalates (${tmpReclaimEscalation.map(step => `${step.limit} per cycle and cache files older than ${minutes(step.cacheAgeMs)}`).join(', then ')}) and, if the bound still stands, names the top /tmp consumers by path, entry count and owner`,
     remedy: 'graphyard master run --once reclaims now; find what else fills /tmp (ls /tmp | sort | uniq -c) and stop the process leaking it',
     warnBelow: tmpInodeHeadroom, symptoms: [],
     // The quarter-free line is an early warning on a filesystem-wide count every process on the host
@@ -500,7 +501,7 @@ const consumersOf = (tmp: TmpInodes) => tmp.consumers ?? tmp.latest?.consumers?.
 /** The tmp-inodes detail: free inodes, this user's share, the latest pass's count and the last count that was not 0. */
 function describeTmpInodes(tmp: TmpInodes) {
   const parts = [`measured ${tmp.path}: ${tmp.freeInodes} of ${tmp.totalInodes} inodes free`];
-  if (tmp.own) parts.push(`${tmp.own.capped ? 'at least ' : ''}${entries(tmp.own.entries)} are this user's (${tmp.own.testTemp} top-level with test temp names${tmp.own.tsxCache ? `, ${entries(tmp.own.tsxCache.entries)} under its tsx compile cache ${tmp.own.tsxCache.name}` : ''}); the per-user quota itself is not readable`);
+  if (tmp.own) parts.push(`${tmp.own.capped ? 'at least ' : ''}${entries(tmp.own.entries)} are this user's (${tmp.own.testTemp} top-level with test temp names${tmp.own.agentScratch ? `, ${tmp.own.agentScratch} with agent scratch names` : ''}${tmp.own.tsxCache ? `, ${entries(tmp.own.tsxCache.entries)} under its tsx compile cache ${tmp.own.tsxCache.name}` : ''}); the per-user quota itself is not readable`);
   if (tmp.latest) parts.push(`the loop's latest /tmp pass removed ${entries(tmp.latest.removed)} at ${tmp.latest.at}${tmp.latest.roots ? `, scanning ${tmp.latest.roots.join(' and ')}` : ''}`);
   // Below the headroom the pass escalated in the same run (GY-1597): say how far, and what it could not reach.
   const top = tmp.latest?.escalated?.at(-1);
@@ -726,13 +727,14 @@ export const ownEntriesScanBound = 20_000;
 export async function countOwnEntries(path: string, uid = process.getuid?.()): Promise<TmpInodes['own']> {
   if (uid === undefined) return null;
   const names = await readdir(path), cacheName = tsxCacheName(uid);
-  let entries = 0, testTemp = 0, tsxCache: { name: string; entries: number } | undefined;
+  let entries = 0, testTemp = 0, agentScratch = 0, tsxCache: { name: string; entries: number } | undefined;
   for (const name of names.slice(0, ownEntriesScanBound)) {
     let info;
     try { info = await lstat(resolve(path, name)); } catch { continue; }
     if (info.uid !== uid) continue;
     entries++;
     if (testTempPatterns.some(pattern => pattern.test(name))) testTemp++;
+    else if (agentScratchPatterns.some(pattern => pattern.test(name))) agentScratch++;
     // The tsx cache is one top-level name over tens of thousands of inodes: its entries are counted
     // by name alone, so the reading names it when it is what fills the volume.
     if (name === cacheName && info.isDirectory()) {
@@ -741,7 +743,7 @@ export async function countOwnEntries(path: string, uid = process.getuid?.()): P
       entries += inside;
     }
   }
-  return { entries, testTemp, capped: names.length > ownEntriesScanBound, ...(tsxCache ? { tsxCache } : {}) };
+  return { entries, testTemp, capped: names.length > ownEntriesScanBound, ...(tsxCache ? { tsxCache } : {}), ...(agentScratch ? { agentScratch } : {}) };
 }
 
 type TmpVolume = (path: string) => Promise<{ files: number | bigint; ffree: number | bigint }>;
