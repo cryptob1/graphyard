@@ -573,4 +573,30 @@ test('integration:shadow-failure-log-tail — a shadow-only-fail verdict whose t
   const line = shadowDisagreementCause({ outcome: 'shadow-only-fail', build: result.build, tests: result.tests, conflict: [], logTail: kept.logTail });
   assert.match(line, /the trial log names widget keeps its shape \(tests\/a\.test\.ts\)/);
   assert.doesNotMatch(line, /no log tail recorded/);
+
+  // A failing group with so many failures that its `failing tests:` heading falls outside its share of the tail: the
+  // entries kept after the cut still name the last failing test, its file and its error.
+  const entry = (n: number) => [`test at tests/c.test.ts:${n}:1`, `✖ gadget case ${n} (1.2ms)`, `  AssertionError [ERR_ASSERTION]: gadget case ${n} broke`, '', '  true !== false', ''];
+  const crowded = ['▶ integration:gadget', 'ℹ fail 60', '', '✖ failing tests:', '', ...Array.from({ length: 60 }, (_, n) => entry(n + 1)).flat()].join('\n');
+  const crowdedRun: ChildRun = async (command, args) => {
+    if (command === 'node' && args[0] === 'scripts/ci-tests.mjs') return 'tests/b.test.ts\ntests/c.test.ts\n';
+    if (command !== 'node' || !args.includes('tests/helpers/run-tests.ts')) return '';
+    const files = (await readFile(args[args.indexOf('--files-from') + 1]!, 'utf8')).trim().split('\n'), records = args[args.indexOf('--durations') + 1]!;
+    const failing = files.includes('tests/c.test.ts');
+    await writeFile(records, files.map(file => JSON.stringify({ file, durationMs: 5, passed: !failing })).join('\n'));
+    if (!failing) return `${'✔ a passing case\n'.repeat(400)}ℹ pass 400\n`;
+    throw Object.assign(new Error('Command failed'), { status: 1, stdout: crowded, stderr: '' });
+  };
+  const cut = await runTrial({ root: scratch, base: join(scratch, 'base-crowded'), mergeSha: sha('merge-1639'), changedFiles: ['tests/c.test.ts'], timeoutMs: 60_000, key: 'GY-1639', run: crowdedRun, groupSize: 1,
+    temporaryRoots: [await temporaryDirectory('roots', scratch)], probe: parityDurable, remove: removeCheckout });
+  assert.deepEqual(cut.tests, { passed: 1, failed: ['tests/c.test.ts'], files: 2 });
+  assert.doesNotMatch(cut.logTail, /✖ failing tests:/, 'the summary heading is outside the failing group\'s share');
+  // The first test whose entry the cut kept whole, its file and its error lead the recorded cause.
+  const first = Number(/\ntest at tests\/c\.test\.ts:(\d+):1\n/.exec(cut.logTail)?.[1]);
+  assert.ok(first > 1 && first < 60, 'the cut kept only the summary\'s later entries');
+  assert.ok(recordedFailureCause(cut.logTail)?.startsWith(`gadget case ${first} (tests/c.test.ts): AssertionError [ERR_ASSERTION]: gadget case ${first} broke`));
+  assert.match(cut.logTail, /^\$ node .*\n… \(this group's earlier output was cut\)\n(?:  |test at )/m, 'the command, the cut, then whole lines');
+  const cutLine = shadowDisagreementCause({ outcome: 'shadow-only-fail', build: cut.build, tests: cut.tests, conflict: [], logTail: cut.logTail });
+  assert.match(cutLine, new RegExp(`the trial log names gadget case ${first} \\(tests/c\\.test\\.ts\\)`));
+  assert.doesNotMatch(cutLine, /no log tail recorded/);
 });

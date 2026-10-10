@@ -8,6 +8,7 @@ import { defaultChildRun, type ChildRun } from '../child-runner.js';
 import { allocateSessionCheckout, defaultWorktreeRootMinFreeGb, removeSessionCheckout, verifyWorktreeRoot, type FilesystemProbe } from '../install/worktree-root.js';
 import { isolatedTestEnvironment, npmCiArgs, npmCiEnvironment } from '../cli/test-isolation.js';
 import { tempOwnerMarker, writeTempOwner } from '../tmp-reclaim.js';
+import { trialCutLine } from './shadow.js';
 
 /** One git call in the coordinator's object store: the arguments after `git -C <root>`, the child's stdout. */
 export type TrialGit = (args: string[], env?: Record<string, string>) => Promise<string>;
@@ -239,16 +240,18 @@ const tailLength = 4000;
 /**
  * The log tail of a trial whose test groups named failing files and whose whole log outgrew the
  * tail (GY-1639): each failing group's own output, its command line and the end of what it printed
- * (the runner's `failing tests:` summary and the exit), sharing `tailLength` evenly. The whole
+ * (the runner's `failing tests:` summary and the exit) after `trialCutLine`, sharing `tailLength` evenly. The whole
  * log's last characters are the last group's, and in a full selection that group passed, so they
  * named no failing cause.
  */
 export function failureTail(outputs: readonly string[], length = tailLength): string {
-  const share = Math.floor((length - (outputs.length - 1)) / Math.max(1, outputs.length));
+  const share = Math.floor((length - (outputs.length - 1)) / Math.max(1, outputs.length)), cut = `${trialCutLine}\n`;
   return outputs.map(output => {
     if (output.length <= share) return output;
-    const command = output.slice(0, output.indexOf('\n') + 1);
-    return command.length < share / 2 ? `${command}${output.slice(-(share - command.length))}` : output.slice(-share);
+    // The cut output starts at a whole line after `trialCutLine`, so a summary whose heading was cut still names its tests.
+    const line = output.slice(0, output.indexOf('\n') + 1), command = line.length < share / 2 ? line : '';
+    const kept = output.slice(-Math.max(0, share - command.length - cut.length));
+    return `${command}${cut}${kept.slice(kept.indexOf('\n') + 1)}`;
   }).join('\n').slice(-length);
 }
 const testFile = /tests\/[\w./-]+\.test\.ts/g;
