@@ -8,6 +8,7 @@ import { dirtyCheckoutPaths, hostProcessLaunchTargets, readCoordinatorCheckout, 
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { checkoutRestoreRemedy, coordinatorCheckoutGuard, serveLoopRequests } from '../src/daemon/run.js';
 import { emptyDaemonState } from '../src/master-daemon.js';
+import { checkoutProcessScan } from '../src/cli/checkout-writers.js';
 import { checkoutRestoreCommand, checkoutRestoreRefPrefix, checkoutRestoreRequestPath, checkoutWriterProcesses, fileCheckoutRestoreRequest, freezeCheckoutWriters, loopExecutorsRequestPath, loopRestartRequestPath, readCheckoutRestoreRequest, restoreCoordinatorCheckout, serveCheckoutRestore, statusPaths } from '../src/cli/master-checkout-restore.js';
 import { doctorCommandVerdict, doctorSanctionedCommands as piSanctioned } from '../integrations/pi/index.js';
 import { doctorPrompt, doctorSanctionedCommands } from '../src/daemon/doctor.js';
@@ -35,6 +36,11 @@ function coordinator(base: string) {
   git('add', '.'); git('commit', '-q', '-m', 'coordinator');
   return { root, git };
 }
+// The writers this test's own processes make. A host process whose cwd cannot be read (a CI runner's
+// non-dumpable helpers) refuses a real restore (GY-1663, tests/checkout-writers-unreadable-cwd.test.ts);
+// these cases scan the real /proc for the writers they spawn and leave the host's processes out.
+const hostWriters = (directory: string) => checkoutProcessScan(directory).writers;
+const hostQuiesce = (directory: string) => freezeCheckoutWriters(directory, { scan: hostWriters });
 const config = (directory: string): MasterConfig => masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: join(directory, 'coordinator.token'), cliPath: 'graphyard',
   repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [], run: {} });
 const guardFor = (root: string, state: ReturnType<typeof emptyDaemonState>, agents: () => Promise<unknown[]> = async () => []) => coordinatorCheckoutGuard({
@@ -174,7 +180,7 @@ test('integration:checkout-restore-clears-guard — the restore saves every dirt
   for (let tries = 0; processState(suspended.pid!) !== 'T' && tries < 200; tries++) await new Promise(done => setTimeout(done, 5));
   let frozenDuring: { pids: number[]; stopped: number[]; states: string[]; dirtyAtThaw: number } | null = null;
   const quiesce = async (directory: string) => {
-    const frozen = await freezeCheckoutWriters(directory);
+    const frozen = await hostQuiesce(directory);
     const states = frozen.pids.map(processState);
     return { thaw: () => { frozenDuring = { pids: frozen.pids, stopped: frozen.stopped, states, dirtyAtThaw: Number(spawnSync('git', ['-C', root, 'status', '--porcelain'], { encoding: 'utf8' }).stdout.trim().length) }; frozen.thaw(); } };
   };
@@ -183,7 +189,7 @@ test('integration:checkout-restore-clears-guard — the restore saves every dirt
   const restart = (pid: number) => async () => { restarts.push({ pid }); if (failRestart) { failRestart = false; throw new Error('Failed to connect to bus'); } };
   let outcome;
   try {
-    assert.deepEqual(checkoutWriterProcesses(root), [writer.pid!, suspended.pid!].sort((a, b) => a - b), 'the standing processes in the checkout are the suspected writers; this process is spared');
+    assert.deepEqual(hostWriters(root), [writer.pid!, suspended.pid!].sort((a, b) => a - b), 'the standing processes in the checkout are the suspected writers; this process is spared');
     outcome = await serveCheckoutRestore(file, root, { settle: () => guard.settle(), restart: restart(41), pid: 41, quiesce });
     assert.notEqual(processState(writer.pid!), 'T', 'the writer is continued after the restore');
     assert.equal(processState(suspended.pid!), 'T', 'the process stopped before the restore is left stopped');
@@ -245,7 +251,7 @@ test('integration:coordinator-serves-current-release — after a restore, a rest
   assert.ok(await guardFor(root, state).start(null));
   const file = checkoutRestoreRequestPath(config(base));
   await fileCheckoutRestoreRequest(file, 'restore', 'graphyard-master');
-  assert.equal((await serveCheckoutRestore(file, root, { restart: async () => {} }))?.state, 'restored');
+  assert.equal((await serveCheckoutRestore(file, root, { restart: async () => {}, quiesce: hostQuiesce }))?.state, 'restored');
   // The merged release lands on the clean checkout (the self-upgrade the dirty tree refused), and
   // the loop the unit restarts loads it: its HEAD is the commit it serves, with nothing to refuse.
   writeFileSync(join(root, 'src', 'loop.ts'), 'export const loop = 3; // merged\n');
@@ -313,7 +319,7 @@ test('unit:checkout-restore-freeze-fails-closed — a writer that cannot be stop
   // A checkout reached through a symlinked ancestor is the same checkout: /proc reports the physical cwd.
   symlinkSync(root, join(base, 'linked'));
   const linkedWriter = spawn('sleep', ['60'], { cwd: root, stdio: 'ignore' });
-  try { assert.ok(checkoutWriterProcesses(join(base, 'linked')).includes(linkedWriter.pid!), 'a writer is found through the symlinked path'); }
+  try { assert.ok(hostWriters(join(base, 'linked')).includes(linkedWriter.pid!), 'a writer is found through the symlinked path'); }
   finally { linkedWriter.kill('SIGKILL'); }
   assert.throws(() => checkoutWriterProcesses(join(base, 'missing')), /canonical path cannot be read.*nothing was restored/);
   // A directory standing where HEAD has a file, holding an ignored file: checking the file out would delete it, so nothing is touched.
