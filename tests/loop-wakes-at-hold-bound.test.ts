@@ -136,6 +136,15 @@ test('unit:loop-wakes-at-hold-bound — a bound exactly one idle wait away still
   assert.deepEqual(loop.decided.map(entry => [entry.action, iso(entry.at)]), [['rework', iso(holdBound)]], loop.lines.join('\n'));
 });
 
+test('unit:loop-wakes-at-hold-bound — a bound just beyond the idle wait still ends the sleep at it when the checkout guard takes the difference', async () => {
+  // A 300s idle wait, the bound 360s after the cycle, and 120s of guard work: the sleep left is 240s, so the cycle runs at the bound, not at 420s.
+  const own = { key: 'GY-1619', id: '7c1e2a6b-3f4d-4e8a-9b0c-1d2e3f4f1619', conflictSince: since };
+  const loop = await replay(observedAt => [gy1619(observedAt, true, own)], holdBound - 360_000, 2, { guardMs: 120_000 });
+  assert.deepEqual(loop.ran.map(iso), [iso(holdBound - 360_000), iso(holdBound)], `the cycle runs at the bound, not 60s past it\n${loop.lines.join('\n')}`);
+  assert.equal(loop.waits[0], 240_000, 'the sleep after the guard is capped at the bound');
+  assert.deepEqual(loop.decided.map(entry => [entry.action, iso(entry.at)]), [['rework', iso(holdBound)]], loop.lines.join('\n'));
+});
+
 test('unit:loop-wakes-at-hold-bound — a bound the cycle\'s own work carries the local clock past, while the hold still stood when the step read it, ends the wait at once', async () => {
   // The cycle starts at 00:53:15, before the 00:53:17.921 bound, so the step still finds the hold standing; its
   // work takes 5s, past the bound. The next cycle runs straight away and requests the rework, not 300s later.
