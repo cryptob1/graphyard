@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { assignmentSurrender, herdrSessionProbe, supervise } from '../src/supervisor.js';
-import { emptyDaemonState, orphanedSupervisors, runCycle, stopWatchSupervisor, type DaemonEffects, type DaemonState, type OrphanSupervisor } from '../src/master-daemon.js';
+import { emptyDaemonState, orphanedSupervisors, pruneDaemonState, retainedActions, runCycle, stopWatchSupervisor, type DaemonEffects, type DaemonState, type OrphanObservation, type OrphanSupervisor } from '../src/master-daemon.js';
 import { nameOrphanSupervisors, supervisorReclaimCommand } from '../src/cli/master-status.js';
 import { buildMasterStatus, masterConfigSchema, type HerdrAgent, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import type { Work } from '../src/model.js';
@@ -150,7 +150,7 @@ test('integration:orphan-supervisor-reclaim the loop records a lease renewed by 
     const first = await harness.run();
     assert.equal(harness.stopped.length, 0, 'one observation cannot tell a renewed lease from one that has not lapsed yet');
     assert.deepEqual(first.actions.filter(action => action.work === 'GY-83'), []);
-    assert.deepEqual(harness.state.orphans['work-83'], { epoch: 2, owner: 'worker-a', pid: scope.pid, unit: scope.unit, firstSeenAt: observedAt, leaseExpiresAt: expiries[0], stops: 0, stoppedLeaseExpiresAt: null });
+    assert.deepEqual(harness.state.orphans['work-83'], { epoch: 2, owner: 'worker-a', pid: scope.pid, unit: scope.unit, firstSeenAt: observedAt, leaseExpiresAt: expiries[0], stops: 0, stoppedLeaseExpiresAt: null, establishedAt: null });
 
     const second = await harness.run();
     assert.equal(harness.stopped.length, 1, 'the loop stops the supervisor itself rather than leaving it to a human');
@@ -212,8 +212,93 @@ test('integration:orphan-supervisor-reclaim the stop reaches the recorded scope 
 });
 
 const status = (work: Work, agents: HerdrAgent[] = []) => buildMasterStatus({ work: [work], now: observedAt }, [worker], agents);
-const named = (work: Work, agents: HerdrAgent[] = [], available = true) =>
-  nameOrphanSupervisors(status(work, agents), [work], [worker], { agents, available }, Date.parse(observedAt));
+// The loop recorded this supervisor at an earlier expiry, so a lease advanced past it is established.
+const recorded = (leaseExpiresAt: string, stops = 0): Record<string, OrphanObservation> =>
+  ({ 'work-83': { epoch: 2, owner: 'worker-a', pid: scope.pid, unit: scope.unit, firstSeenAt: at(-30_000), leaseExpiresAt, stops, stoppedLeaseExpiresAt: stops ? leaseExpiresAt : null, establishedAt: null } });
+const named = (work: Work, agents: HerdrAgent[] = [], available = true, observations: Record<string, OrphanObservation> | null = recorded(at(0))) =>
+  nameOrphanSupervisors(status(work, agents), [work], [worker], { agents, available }, Date.parse(observedAt), observations && { orphans: observations });
+
+test('unit:orphan-status-two-observations a single snapshot without the session names no orphan; the loop\'s two observations do', () => {
+  const held = item(at(30_000));
+  const actionable = (report: ReturnType<typeof named>) => [...report.work.map(row => [row.attention ?? '', row.attentionOwner?.next ?? '']), ...report.attentionItems.map(entry => [entry.text, entry.next])]
+    .some(([text, next]) => /orphaned watch supervisor/.test(text) || next.includes(supervisorReclaimCommand) || /systemctl --user kill/.test(next));
+
+  // AC-1: a freshly launched worker Herdr does not list yet, its lease advancing, read once.
+  for (const [why, observations] of [
+    ['the loop has not observed it', {}],
+    ['the loop state could not be read', null],
+    ['the loop has seen it only once, at this expiry', recorded(at(30_000))],
+    ['the loop recorded another attempt', { 'work-83': { ...recorded(at(0))['work-83'], epoch: 1 } }],
+    ['the loop recorded another supervisor pid', { 'work-83': { ...recorded(at(0))['work-83'], pid: scope.pid + 1 } }],
+  ] as [string, Record<string, OrphanObservation> | null][]) {
+    const report = named(held, [], true, observations);
+    assert.equal(actionable(report), false, `no orphan attention or stop command when ${why}`);
+    assert.deepEqual(report, status(held), `the report is left as it was when ${why}`);
+  }
+
+  // AC-2: the loop recorded it, and the lease has since advanced past that expiry with the session absent.
+  const established = named(held, [], true, recorded(at(0)));
+  assert.equal(actionable(established), true);
+  assert.match(established.work[0].attention!, /an orphaned watch supervisor/);
+  assert.ok(established.work[0].attentionOwner!.next.startsWith(supervisorReclaimCommand));
+  // A supervisor the loop has already stopped stays named while its lease still advances.
+  assert.equal(actionable(named(held, [], true, recorded(at(30_000), 1))), true);
+});
+
+test('unit:orphan-status-two-observations a stop the loop could not carry out keeps the established orphan named while the lease is still held', async () => {
+  const expiries = [at(30_000), at(55_000)];
+  const harness = await daemon(cycle => [item(expiries[Math.min(cycle, expiries.length - 1)])], { stopSupervisor: () => { throw new Error('no user manager'); } });
+  try {
+    await harness.run();
+    const first = item(expiries[0]);
+    assert.deepEqual(nameOrphanSupervisors(status(first), [first], [worker], { agents: [], available: true }, Date.parse(observedAt), harness.state), status(first),
+      'one observation by the loop names nothing');
+    const second = await harness.run();
+    assert.equal(second.actions.find(action => action.work === 'GY-83')?.state, 'failed', 'the loop made its second observation and the stop failed');
+    assert.equal(harness.state.orphans['work-83'].stops, 0);
+    assert.equal(harness.state.orphans['work-83'].leaseExpiresAt, expiries[1], 'the loop rolled its recorded expiry forward to the current one');
+    // Master status after that failure, the lease still held at the same expiry and the session still absent.
+    const held = item(expiries[1]);
+    const report = nameOrphanSupervisors(status(held), [held], [worker], { agents: [], available: true }, Date.parse(observedAt), harness.state);
+    assert.match(report.work[0].attention!, /an orphaned watch supervisor/);
+    assert.ok(report.work[0].attentionOwner!.next.startsWith(supervisorReclaimCommand), 'the reclaim command is still named');
+    assert.ok(report.attentionItems.some(entry => entry.subject === 'GY-83' && /orphaned watch supervisor/.test(entry.text)));
+    // The establishment is kept in the observation itself, so pruning every resolved action — the
+    // failed incident among them — leaves the orphan named.
+    assert.ok(harness.state.orphans['work-83'].establishedAt, 'the loop marked its observation established');
+    for (let index = 0; index <= retainedActions; index++) harness.state.actions[`filler:${index}`] = { kind: 'session', work: 'GY-1', principal: null, state: 'done', detail: 'filler', epoch: null, attempts: 1, cycle: 0, at: at(60_000 + index) };
+    // Its failing run has ended (endFailingRuns retires it), so nothing holds the failed row back from the bound.
+    for (const key of Object.keys(harness.state.faults.failing)) delete harness.state.faults.failing[key];
+    pruneDaemonState(harness.state);
+    assert.ok(!Object.keys(harness.state.actions).some(key => key.startsWith('incident:orphan-supervisor:')), 'the incident was pruned');
+    const pruned = nameOrphanSupervisors(status(held), [held], [worker], { agents: [], available: true }, Date.parse(observedAt), harness.state);
+    assert.match(pruned.work[0].attention!, /an orphaned watch supervisor/, 'still named after the incident is pruned');
+    assert.ok(pruned.work[0].attentionOwner!.next.startsWith(supervisorReclaimCommand));
+  } finally { await harness.cleanup(); }
+});
+
+test('unit:orphan-status-two-observations a session Herdr reports again ends the observation, and a later absence is one new snapshot that names nothing', async () => {
+  // Cycles: absent, absent (established; the stop fails), present again, absent again — the lease held at one expiry throughout the last two.
+  const expiries = [at(30_000), at(55_000), at(55_000), at(55_000)];
+  const live: HerdrAgent[] = [{ name: worker.agentName, agent_status: 'working', pane_id: 'w1:p7' }];
+  let present = false;
+  const harness = await daemon(cycle => [item(expiries[Math.min(cycle, expiries.length - 1)])], {
+    herdr: () => ({ agents: present ? live : [], available: true }),
+    stopSupervisor: () => { throw new Error('no user manager'); } });
+  try {
+    await harness.run(); await harness.run();
+    assert.ok(harness.state.orphans['work-83'].establishedAt, 'established by the second observation');
+    present = true; await harness.run();
+    const observed = (): DaemonState['orphans'][string] | undefined => harness.state.orphans['work-83'];
+    assert.equal(observed(), undefined, 'the session reported again ends the observation');
+    present = false; await harness.run();
+    assert.equal(observed()?.establishedAt, null, 'the later absence starts a fresh observation');
+    assert.ok(Object.keys(harness.state.actions).some(key => key.startsWith('incident:orphan-supervisor:')), 'the earlier failed incident is still on record');
+    const held = item(expiries[3]);
+    assert.deepEqual(nameOrphanSupervisors(status(held), [held], [worker], { agents: [], available: true }, Date.parse(observedAt), harness.state), status(held),
+      'one new snapshot names no orphan, whatever the earlier incident said');
+  } finally { await harness.cleanup(); }
+});
 
 test('unit:orphan-supervisor-attention master status names an orphaned supervisor and the command that reclaims it instead of reporting a finished session', () => {
   const held = item(at(30_000));

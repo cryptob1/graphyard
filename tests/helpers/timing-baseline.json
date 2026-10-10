@@ -654,6 +654,7 @@
     "tests/soak-main-watch.test.ts": 102000,
     "tests/soak-master-lock-refusal.test.ts": 30150,
     "tests/soak-merge-writer.test.ts": 4000,
+    "tests/soak-orphan-supervisor.test.ts": 1500,
     "tests/soak-reclaim-refusal.test.ts": 2659,
     "tests/soak-release-lag.test.ts": 11000,
     "tests/soak-repeated-limit.test.ts": 11000,

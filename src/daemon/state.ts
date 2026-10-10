@@ -242,6 +242,8 @@ export const orphanObservationSchema = z.object({
   /** How many times this supervisor has been stopped, and the expiry it was last stopped at. */
   stops: z.number().int().min(0).default(0),
   stoppedLeaseExpiresAt: z.string().nullable().default(null),
+  /** When both observations first held, whatever the stop then did; status names only established orphans (GY-1617). */
+  establishedAt: z.string().nullable().default(null),
 }).strict();
 export type OrphanObservation = z.infer<typeof orphanObservationSchema>;
 

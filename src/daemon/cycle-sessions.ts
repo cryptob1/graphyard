@@ -497,6 +497,8 @@ export async function closeStep(cycle: Cycle) {
       const baseline = Date.parse(tracked.stoppedLeaseExpiresAt ?? tracked.leaseExpiresAt);
       state.orphans[orphan.id] = { ...tracked, leaseExpiresAt: orphan.leaseExpiresAt };
       if (!(Date.parse(orphan.leaseExpiresAt) > baseline)) { await effects.persist(state); return; }
+      // Established from here on, in the observation itself, so a stop that fails keeps it so (GY-1617).
+      state.orphans[orphan.id].establishedAt ??= new Date(clock).toISOString();
       const stops = tracked.stops + 1, signal: NodeJS.Signals = stops === 1 ? 'SIGTERM' : 'SIGKILL';
       const key = `incident:orphan-supervisor:${orphan.id}:${orphan.epoch}:${orphan.scope.pid}`;
       const incident = `${orphan.key} epoch ${orphan.epoch} renewed its lease to ${orphan.leaseExpiresAt} while Herdr no longer reports session ${orphan.agentName}: its watch supervisor (pid ${orphan.scope.pid}, containment scope ${orphan.scope.unit}) has outlived the agent`;
