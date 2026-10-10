@@ -22,7 +22,7 @@ import { startDirectMerge } from '../direct-merge.js';
 import { GitHubCacheStore } from '../github-cache.js';
 import { pruneReceipts, receiptPruneIntervalMs } from '../store/receipts.js';
 import { compactLedger, configuredLedgerRetentionMs, ledgerCompactionIntervalMs } from '../store/compaction.js';
-import { processControlPlaneJob } from './control-plane-observation.js';
+import { processControlPlaneJob } from '../merge-writer/local-observation.js';
 
 /** Overrides for tests that start the process entry in-process; the deployment reads PORT and HOST. */
 export interface MainOptions { port?: number; host?: string }
