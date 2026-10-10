@@ -32,7 +32,8 @@ import type { Cycle } from './cycle.js';
 // sanctioned actions. Here the loop does it. Every `run.doctor.intervalMinutes` (10 by default)
 // it launches one doctor: a headless session on the registry's doctor role, else Pi, with the
 // master's read access and the operator-agent identity's sanctioned commands only — scope,
-// requirements, unblock, decide + approver, settle-containment, close, create, release — never
+// requirements, unblock, decide + approver, settle-containment, close, create, release and
+// checkout-restore (GY-1658: the loop saves a dirty coordinator checkout to a named ref) — never
 // merge, dispatch, evidence or lease commands (the shipped allowlist guard in integrations/pi
 // blocks the rest and the doctor records the refusal). Its prompt is the shipped template below,
 // naming every check bound. The remedies that need no judgement at all the loop applies itself,
@@ -113,7 +114,7 @@ export const doctorBounds = {
 } as const;
 
 /** The sanctioned master commands the doctor may run, in the order the template names them. */
-export const doctorSanctionedCommands = ['scope', 'requirements', 'unblock', 'decide', 'approver', 'settle-containment', 'close', 'create', 'release'] as const;
+export const doctorSanctionedCommands = ['scope', 'requirements', 'unblock', 'decide', 'approver', 'settle-containment', 'close', 'create', 'release', 'checkout-restore'] as const;
 
 export interface DoctorEffects {
   settings: DoctorSettings;
@@ -166,6 +167,7 @@ export function doctorPrompt(config: { repository: string; cliPath: string }, in
     `- containment: a lapsed containment quarantine holding an item claimable`,
     `- refusal: stale refusal text standing on an item whose state has moved past it`,
     `- overdue: items overdue in any step, by the stage clocks the evidence shows`,
+    `- checkout: escalation:dirty-checkout standing — the loop refuses its own dirty coordinator checkout; run ${cli} master checkout-restore with a quoted reason, which saves every dirty path under a named ref and restarts the loop, discarding nothing`,
   ].join('\n');
   return `You are the Graphyard pipeline doctor for ${config.repository}. Find stuck and overdue work and fix it through your sanctioned commands, doing what the master would have done by hand. Read the evidence below and the control plane (${cli} status GY-N, ${cli} master status, ${cli} master decisions GY-N, gh pr view). `
     + `Act only where a check below has passed its fault bound; leave what is merely moving. Your sanctioned commands are ${doctorSanctionedCommands.map(name => `${cli} master ${name}`).join(', ')}, as the master's operator-agent identity; every other mutation is refused by your command allowlist — never merge, dispatch, submit evidence or touch a lease — and a refused command is recorded in your report, never retried. Run each command by its bare program name with literal arguments: no variables, command substitution, redirection, wrappers or node options, and read only paths inside this checkout. Put a free-text reason last, enclosed in one pair of quotes: the allowlist judges only the command's grammar, and the reason runs as one prose argument, never read as a command, whatever words, apostrophes or punctuation it holds. A refusal names the rule that denied the command and the word it denied. Never weaken a requirement; never approve a decision you requested yourself (request it, then ${cli} master approver GY-N DECISION for an independent approver). `
