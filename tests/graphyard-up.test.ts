@@ -1642,7 +1642,7 @@ process.exit(answer.code);
 `);
   const saved = Object.fromEntries(['GRAPHYARD_URL', 'GRAPHYARD_TOKEN', 'GRAPHYARD_TOKEN_FILE'].map(name => [name, process.env[name]]));
   for (const name of Object.keys(saved)) delete process.env[name];
-  const runOn = async (label: string, fail: (argv: string[]) => { code: number; stderr: string } | null) => {
+  const runOn = async (label: string, fail: (argv: string[]) => { code: number; stderr: string } | null, moved = false) => {
     const { server, calls, state } = make(fail);
     await new Promise<void>(accept => server.listen(0, '127.0.0.1', () => accept()));
     const port = (server.address() as { port: number }).port;
@@ -1655,11 +1655,12 @@ process.exit(answer.code);
       await writeFile(operatorTokenFile, ADMIN, { mode: 0o600 });
       // What install --apply leaves behind on this port: master.json at its URL, and the install and preflight steps done.
       await mkdir(join(root, '.graphyard'), { recursive: true });
-      await writeFile(join(root, '.graphyard/master.json'), JSON.stringify({ url, credentialFile }), { mode: 0o600 });
+      // moved: master.json still names an earlier address, and --url names where the plane now serves.
+      await writeFile(join(root, '.graphyard/master.json'), JSON.stringify({ url: moved ? 'http://127.0.0.1:4310' : url, credentialFile }), { mode: 0o600 });
       await writeFile(upStateFile(root), JSON.stringify({ version: 1, repository: 'acme/shop', provider: 'compose', merger: 'control-plane', completed: ['preflight', 'control-plane'], noHerdr: true, goal: null, operatorTokenFile }), { mode: 0o600 });
       await writeFile(join(root, 'goal.txt'), 'A sign-up page');
       const events: UpEvent[] = [];
-      const req = controlPlaneRequest();
+      const req = controlPlaneRequest(moved ? { url } : {});
       const real = upDependencies(root, cliPath, req, event => events.push(event));
       const result = await runUp(req, { ...real, herdr: undefined, pollMs: 1, machineWaitMs: 5_000, humanWaitMs: 5_000,
         cliCheckout: async () => ({ root, dirty: [] }), loopRefusal: async () => null, tailnet: async () => null, signIn: async () => null,
@@ -1686,6 +1687,15 @@ process.exit(answer.code);
     assert.equal(red.result.exitCode, 1);
     assert.deepEqual(red.events.filter(event => event.kind === 'step-failed'), [{ kind: 'step-failed', step: 'harness', exitCode: 1, argv: ['master', 'harness', 'claude', '--apply'], stderr: 'claude is not logged in on this host', detail: 'harness: graphyard master harness exited 1; its last output:' }]);
     assert.equal(red.events.at(-1)?.kind, 'step-failed', 'no step-start is left without its outcome');
+
+    // --url naming a control plane other than the one master.json records: the recorded coordinator credential is still found, and every child, master init too, is pointed at --url.
+    const moved = await runOn('graphyard-up-nondefault-port-moved', () => null, true);
+    assert.equal(moved.result.exitCode, 0, moved.result.next);
+    for (const step of controlPlaneSteps) assert.ok(moved.result.completed.includes(step as any), `${step} completed with --url: ${moved.result.completed.join(', ')}`);
+    for (const call of moved.calls) assert.equal(call.env, moved.url, `graphyard ${call.argv.join(' ')} was given --url`);
+    const movedInit = moved.calls.find(call => call.argv[0] === 'master' && call.argv[1] === 'init')!;
+    assert.equal(movedInit.argv[movedInit.argv.indexOf('--url') + 1], moved.url);
+    assert.ok(!moved.events.some(event => event.kind === 'step-failed'));
 
     // A verbose child: more stderr than up keeps as its tail (64,000 characters) after its first line; step-failed still names that first line.
     const noise = Array.from({ length: 2_000 }, (_, at) => `progress line ${at} ${'.'.repeat(60)}`).join('\n');

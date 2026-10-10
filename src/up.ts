@@ -1420,7 +1420,14 @@ export function upDependencies(root: string, cliPath: string, request: UpRequest
     if (remoteLoopProviders.includes(request.provider)) return null;
     return (await readInstallRecord(installDirectory(installIdFor(request.repository))).catch(() => null))?.url ?? null;
   };
-  const masterToken = async () => { const url = await serverUrl(); return url ? (await masterCredential(root, url))?.token ?? null : null; };
+  // The coordinator credential is the one master.json records for its own server, so an explicit --url
+  // naming a moved control plane still finds it; master init then records that new address.
+  const masterToken = async () => {
+    let recorded = '';
+    try { recorded = String(JSON.parse(await readFile(resolve(root, '.graphyard/master.json'), 'utf8')).url ?? ''); } catch { /* not recorded yet */ }
+    const url = recorded || await serverUrl();
+    return url ? (await masterCredential(root, url))?.token ?? null : null;
+  };
   const browser = request.agent ? upBrowserProfile(root, request, hostInstallRoots(), githubLogin, discoverLogin) : null;
   if (browser?.from) emit({ kind: 'note', text: `No --browser-profile given: the App pages are driven in Chrome profile ${browser.profile}, which the Graphyard install at ${browser.from} uses, signed in to GitHub as ${browser.login}, the login gh uses here; pass --browser-profile to use another.` });
   // The loop runs from the checkout of the CLI master init recorded, which is this CLI until it has.
