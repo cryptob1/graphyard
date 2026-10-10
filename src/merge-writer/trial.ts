@@ -8,7 +8,7 @@ import { defaultChildRun, type ChildRun } from '../child-runner.js';
 import { allocateSessionCheckout, defaultWorktreeRootMinFreeGb, removeSessionCheckout, verifyWorktreeRoot, type FilesystemProbe } from '../install/worktree-root.js';
 import { isolatedTestEnvironment, npmCiArgs, npmCiEnvironment } from '../cli/test-isolation.js';
 import { tempOwnerMarker, writeTempOwner } from '../tmp-reclaim.js';
-import { trialCutLine } from './shadow.js';
+import { failingSummary, trialCutLine } from './shadow.js';
 
 /** One git call in the coordinator's object store: the arguments after `git -C <root>`, the child's stdout. */
 export type TrialGit = (args: string[], env?: Record<string, string>) => Promise<string>;
@@ -242,16 +242,21 @@ const tailLength = 4000;
  * tail (GY-1639): each failing group's own output, its command line and the end of what it printed
  * (the runner's `failing tests:` summary and the exit) after `trialCutLine`, sharing `tailLength` evenly. The whole
  * log's last characters are the last group's, and in a full selection that group passed, so they
- * named no failing cause.
+ * named no failing cause. A group whose output carries a summary keeps that summary and its exit
+ * line, not whatever it printed after (GY-1645), and a summary cut to its share starts at a whole
+ * entry, its `test at` line, so the first test it names keeps its file whatever the command's length.
  */
 export function failureTail(outputs: readonly string[], length = tailLength): string {
   const share = Math.floor((length - (outputs.length - 1)) / Math.max(1, outputs.length)), cut = `${trialCutLine}\n`;
   return outputs.map(output => {
     if (output.length <= share) return output;
-    // The cut output starts at a whole line after `trialCutLine`, so a summary whose heading was cut still names its tests.
     const line = output.slice(0, output.indexOf('\n') + 1), command = line.length < share / 2 ? line : '';
-    const kept = output.slice(-Math.max(0, share - command.length - cut.length));
-    return `${command}${cut}${kept.slice(kept.indexOf('\n') + 1)}`;
+    const summary = failingSummary(output), exit = summary ? /\n(\[exit [^\n]*\])\s*$/.exec(output)?.[1] : undefined;
+    const end = exit ? `\n${exit}` : '', room = Math.max(0, share - command.length - cut.length - end.length);
+    if (summary && summary.length <= room) return `${command}${cut}${summary}${end}`;
+    // The cut output starts at a whole line after `trialCutLine`, so a summary whose heading was cut still names its tests.
+    const kept = (summary ?? output).slice(-room), whole = kept.slice(kept.indexOf('\n') + 1), entry = summary ? whole.search(/^test at /m) : -1;
+    return `${command}${cut}${entry > 0 ? whole.slice(entry) : whole}${end}`;
   }).join('\n').slice(-length);
 }
 const testFile = /tests\/[\w./-]+\.test\.ts/g;
@@ -260,16 +265,18 @@ const testFileLine = /^tests\/[\w./-]+\.test\.ts$/;
  * The failing files a runner log names, for a runner whose records are missing. A file-level
  * failure is a `not ok`/`✖` line carrying the path; a failing case inside a file is reported as
  * `✖ <case title>` and its file only on the `test at tests/x.test.ts:line:col` line that follows,
- * so both are read (GY-1549: reading only the first kind counted every such file as passed).
+ * so both are read (GY-1549: reading only the first kind counted every such file as passed). Given
+ * the files the runner ran, only those count (GY-1645): a name printed inside a test's own output,
+ * such as a fixture's `test at tests/c.test.ts:1:1` in an assertion message, is no failing file.
  */
-export function failingFilesInLog(out: string): string[] {
+export function failingFilesInLog(out: string, ran?: readonly string[]): string[] {
   const files = new Set<string>();
   for (const line of out.split('\n')) {
     if (/not ok|✖|FAIL/.test(line)) for (const file of line.match(testFile) ?? []) files.add(file);
     const located = /^\s*test at (tests\/[\w./-]+\.test\.ts):\d+:\d+/.exec(line);
     if (located) files.add(located[1]!);
   }
-  return [...files];
+  return [...files].filter(file => !ran || ran.includes(file));
 }
 /** The runner's per-file records (`--durations FILE`, tests/helpers/file-durations.mjs): one JSON line per file that ran, with whether it passed. */
 export function runnerRecords(text: string): { file: string; passed: boolean }[] {
@@ -410,8 +417,9 @@ export async function runTrial(input: RunTrialInput): Promise<TrialRun> {
         await writeFile(list, `${group.join('\n')}\n`);
         const tests = await child('tests', 'node', ['--import', 'tsx', 'tests/helpers/run-tests.ts', '--files-from', list, '--durations', records]);
         const recorded = runnerRecords(await readFile(records, 'utf8').catch(() => ''));
-        const namedByRecords = recorded.filter(record => !record.passed).map(record => record.file);
-        const failing = [...new Set(namedByRecords.length ? namedByRecords : tests.ok ? [] : failingFilesInLog(tests.out))];
+        // Only the group's own files count: the records and the log may name a file a test ran or printed itself (GY-1645).
+        const namedByRecords = recorded.filter(record => !record.passed && group.includes(record.file)).map(record => record.file);
+        const failing = [...new Set(namedByRecords.length ? namedByRecords : tests.ok ? [] : failingFilesInLog(tests.out, group))];
         groups.push({ files: group, status: tests.status, signal: tests.signal, failed: failing });
         if (failing.length) failingOutput.push(log.at(-1)!);
         if (!tests.ok && !failing.length) unattributed ??= runnerFailure('tests', tests, group, recorded.filter(record => group.includes(record.file)).length);

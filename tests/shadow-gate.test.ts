@@ -6,13 +6,13 @@ import { copyFileSync, readFileSync, symlinkSync } from 'node:fs';
 import { readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import EmbeddedPostgres from 'embedded-postgres';
 import { daemonStateSchema, daemonSummary, emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { keepVerdicts, shadowErrorKey, shadowKeptVerdicts, shadowLeftoverKey, shadowReads, shadowRunnerDetail, shadowRunnerKey, shadowRunnerRetries, shadowIdle, shadowStateSchema, shadowTimeoutKey, shadowTimeoutRetries, shadowVerdictBody, shadowVerdictKey } from '../src/daemon/cycle-shadow.js';
 import { compareVerdicts, githubOutcome, judgedVerdicts, recordedFailureCause, shadowDisagreementCause, shadowDue, shadowGateAttention, shadowReport, submittedAtOf, trialLogTailLength, type ShadowVerdict } from '../src/merge-writer/shadow.js';
-import { runTrial, trialNeedsLog, TrialCleanupError, TrialRunnerError, TrialTimeoutError, type TrialRun } from '../src/merge-writer/trial.js';
+import { failingFilesInLog, failureTail, runTrial, trialNeedsLog, trialTemporaryPrefix, TrialCleanupError, TrialRunnerError, TrialTimeoutError, type TrialRun } from '../src/merge-writer/trial.js';
 import { defaultChildRun, type ChildRun } from '../src/child-runner.js';
 import type { FilesystemProbe } from '../src/install/worktree-root.js';
 import { daemonEffects } from '../src/daemon/effects.js';
@@ -481,8 +481,11 @@ test('integration:shadow-verdict-route-coordinator-only — POST /api/work/:id/s
 const parityDurable: FilesystemProbe = async path => ({ probed: path, volatile: null, freeBytes: 200e9 });
 const removeCheckout = async (_root: string, _base: string, directory: string) => { await rm(directory, { recursive: true, force: true }); };
 
-test('integration:shadow-trial-env-parity — the loop\'s shadow trial of this repository\'s head on the current main tip (the real merge, the real build, the real affected selection, the real test runner) runs tests/managed-worktree-root.test.ts and tests/runner-executor.test.ts and both pass inside its environment, whose own temporary directory is sticky as CI\'s /tmp is; the verdict is recorded through the coordinator route and GitHub merging the head makes it agree-pass', async () => {
-  const named = ['tests/managed-worktree-root.test.ts', 'tests/runner-executor.test.ts'];
+test('integration:shadow-trial-env-parity — the loop\'s shadow trial of this repository\'s head on the current main tip (the real merge, the real build, the real affected selection, the real test runner) runs tests/managed-worktree-root.test.ts, tests/runner-executor.test.ts and tests/shadow-gate.test.ts and all pass inside its environment, whose own temporary directory is sticky as CI\'s /tmp is; the verdict is recorded through the coordinator route and GitHub merging the head makes it agree-pass', async () => {
+  // This file runs itself inside the trial (GY-1645: it failed only there), and that run of it, inside a trial's own
+  // temporary directory, tries the two other files alone, so the trial nests once and never again.
+  const nested = basename(tmpdir()).startsWith(trialTemporaryPrefix);
+  const named = ['tests/managed-worktree-root.test.ts', 'tests/runner-executor.test.ts', ...(nested ? [] : ['tests/shadow-gate.test.ts'])];
   const own = resolve(dirname(fileURLToPath(import.meta.url)), '..');
   const ownGit = (...args: string[]) => execFileSync('git', ['-C', own, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
   // The head and the main tip it is tried on. CI's checkout of a pull request is GitHub's merge of
@@ -527,11 +530,11 @@ test('integration:shadow-trial-env-parity — the loop\'s shadow trial of this r
   for (let cycle = 0; cycle < 3; cycle++) { await runCycle(config, state, effects, () => start); await shadowIdle(state); }
   const failures = Object.entries(state.actions).filter(([key]) => key.startsWith('shadow-')).map(([key, action]) => `${key}: ${action.detail}`);
   assert.deepEqual(failures, [], 'the trial reached a verdict');
-  assert.ok(selected.length === 1 && named.every(file => selected[0]!.includes(file)), `the head's own affected selection names both files (${selected[0]?.length ?? 0} selected)`);
+  assert.ok(selected.length === 1 && named.every(file => selected[0]!.includes(file)), `the head's own affected selection names every named file (${selected[0]?.length ?? 0} selected)`);
   assert.deepEqual(posted, [200], 'the verdict is recorded once through the coordinator route');
   const event = (await store.pool.query("SELECT payload FROM events WHERE kind='shadow.verdict' AND work_id=$1", [id])).rows.map(row => row.payload);
   assert.equal(event.length, 1);
-  assert.deepEqual([event[0].head, event[0].baseTip, event[0].build, event[0].tests, event[0].conflict], [head, mainTip, 'pass', { passed: 2, failed: [], files: 2 }, []], event[0].logTail ?? '');
+  assert.deepEqual([event[0].head, event[0].baseTip, event[0].build, event[0].tests, event[0].conflict], [head, mainTip, 'pass', { passed: named.length, failed: [], files: named.length }, []], event[0].logTail ?? '');
   assert.ok(seen.length > 0 && seen.every(entry => (entry.mode & 0o7777) === 0o1700), `the runner's own TMPDIR is sticky and private (${seen.map(entry => `${entry.tmp} ${(entry.mode & 0o7777).toString(8)}`).join(', ')})`);
   assert.deepEqual(state.shadow.map(verdict => [verdict.head, verdict.baseTip, verdict.outcome]), [[head, mainTip, 'pending']]);
   // GitHub merges the head: the recorded verdict is judged against it.
@@ -599,4 +602,53 @@ test('integration:shadow-failure-log-tail — a shadow-only-fail verdict whose t
   const cutLine = shadowDisagreementCause({ outcome: 'shadow-only-fail', build: cut.build, tests: cut.tests, conflict: [], logTail: cut.logTail });
   assert.match(cutLine, new RegExp(`the trial log names gadget case ${first} \\(tests/c\\.test\\.ts\\)`));
   assert.doesNotMatch(cutLine, /no log tail recorded/);
+
+  // Whatever the length of the group's command line (it carries the trial's own paths, longer on the loop's host than in
+  // CI: GY-1645), the cut starts at a whole entry, so the first test the cause names keeps its file.
+  for (let length = 40; length < 600; length += 7) {
+    const tail = failureTail([`$ node ${'x'.repeat(length)}\n${crowded}\n[exit status 1]`]);
+    const kept = Number(/\ntest at tests\/c\.test\.ts:(\d+):1\n/.exec(tail)?.[1]);
+    assert.ok(recordedFailureCause(tail)?.startsWith(`gadget case ${kept} (tests/c.test.ts): AssertionError`), `a ${length}-character command keeps the first entry's file: ${recordedFailureCause(tail)}`);
+  }
+
+  // A failing group that printed more after its summary than its share holds (the runner's own stderr, a nested run's
+  // output) still records its summary and exit, so the verdict names the failing test rather than 'no log tail recorded'.
+  const noisyRun: ChildRun = async (command, args) => {
+    if (command === 'node' && args[0] === 'scripts/ci-tests.mjs') return 'tests/a.test.ts\ntests/b.test.ts\n';
+    if (command !== 'node' || !args.includes('tests/helpers/run-tests.ts')) return '';
+    const files = (await readFile(args[args.indexOf('--files-from') + 1]!, 'utf8')).trim().split('\n'), records = args[args.indexOf('--durations') + 1]!;
+    const failing = files.includes('tests/a.test.ts');
+    await writeFile(records, files.map(file => JSON.stringify({ file, durationMs: 5, passed: !failing })).join('\n'));
+    if (!failing) return `${'✔ a passing case\n'.repeat(400)}ℹ pass 400\n`;
+    throw Object.assign(new Error('Command failed'), { status: 1, stdout: failingOutput, stderr: '[run-tests] after the suite: a leftover directory was swept\n'.repeat(120) });
+  };
+  const noisy = await runTrial({ root: scratch, base: join(scratch, 'base-noisy'), mergeSha: sha('merge-1645'), changedFiles: ['tests/a.test.ts'], timeoutMs: 60_000, key: 'GY-1645', run: noisyRun, groupSize: 1,
+    temporaryRoots: [await temporaryDirectory('roots', scratch)], probe: parityDurable, remove: removeCheckout });
+  assert.deepEqual(noisy.tests, { passed: 1, failed: ['tests/a.test.ts'], files: 2 });
+  assert.match(noisy.logTail, /✖ failing tests:[\s\S]*test at tests\/a\.test\.ts:12:1[\s\S]*\[exit status 1\]$/, 'the summary and the exit, not the noise after it');
+  const noisyLine = shadowDisagreementCause({ outcome: 'shadow-only-fail', build: noisy.build, tests: noisy.tests, conflict: [], logTail: noisy.logTail });
+  assert.match(noisyLine, /the trial log names widget keeps its shape \(tests\/a\.test\.ts\): AssertionError/);
+  assert.doesNotMatch(noisyLine, /no log tail recorded/);
+});
+
+test('unit:shadow-failing-files-from-runner — a trial verdict\'s failing files are only test files its runner ran: a name printed inside a test\'s own output (the tests/c.test.ts fixture of this file\'s log-tail cases) or a record of a file outside the group is never a failing file', async () => {
+  // What this very file printed when it failed inside GY-1641's trial: its own failing test, and an assertion message carrying a fixture's log tail.
+  const printed = ['✖ failing tests:', '', 'test at tests/shadow-gate.test.ts:7:5588', '✖ integration:shadow-failure-log-tail (31.8ms)',
+    '  AssertionError [ERR_ASSERTION]: the command, the cut, then whole lines', '  + $ node tests/helpers/run-tests.ts', '  + test at tests/c.test.ts:41:1', '  + ✖ gadget case 41 tests/c.test.ts', ''].join('\n');
+  assert.deepEqual(failingFilesInLog(printed, ['tests/shadow-gate.test.ts', 'tests/b.test.ts']), ['tests/shadow-gate.test.ts']);
+  assert.deepEqual(failingFilesInLog(printed).sort(), ['tests/c.test.ts', 'tests/shadow-gate.test.ts'], 'without the runner\'s files every printed name would count');
+  const scratch = await temporaryDirectory('shadow-runner-files', tmpdir());
+  for (const records of ['', JSON.stringify({ file: 'tests/c.test.ts', durationMs: 5, passed: false })]) {
+    const run: ChildRun = async (command, args) => {
+      if (command === 'node' && args[0] === 'scripts/ci-tests.mjs') return 'tests/shadow-gate.test.ts\ntests/b.test.ts\n';
+      if (command !== 'node' || !args.includes('tests/helpers/run-tests.ts')) return '';
+      // The runner's records name nothing of its own group (none at all, or a file it did not run), so the log decides.
+      await writeFile(args[args.indexOf('--durations') + 1]!, records);
+      throw Object.assign(new Error('Command failed'), { status: 1, stdout: printed, stderr: '' });
+    };
+    const result = await runTrial({ root: scratch, base: join(scratch, `base-${records.length}`), mergeSha: sha('merge-1641'), changedFiles: ['tests/shadow-gate.test.ts'], timeoutMs: 60_000, key: 'GY-1641', run,
+      temporaryRoots: [await temporaryDirectory('roots', scratch)], probe: parityDurable, remove: removeCheckout });
+    assert.deepEqual(result.tests, { passed: 1, failed: ['tests/shadow-gate.test.ts'], files: 2 }, `records ${JSON.stringify(records)}`);
+    assert.deepEqual(result.groups?.map(group => group.failed), [['tests/shadow-gate.test.ts']]);
+  }
 });
