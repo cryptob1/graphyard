@@ -19,7 +19,8 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
  * deny), and once the checkout turns unwritable for half an hour while drift stands. The remedy
  * repeats every cycle, so after every cycle and at the end: drift never survives a writable cycle,
  * the settings file is written only on a cycle that found drift, each heal is one journal line, the
- * unwritable window is journaled once rather than once a cycle, the operator's own entries are never
+ * unwritable window is journaled once rather than once a cycle while every cycle in it refreshes the
+ * standing failure up to the window's last minute, the operator's own entries are never
  * lost, nothing reaches an isolation record, and every system invariant the loop checks holds.
  */
 const minute = 60_000, hour = 60 * minute, start = Date.parse('2026-10-10T06:00:00Z');
@@ -59,12 +60,13 @@ test('unit:soak-harness-remedy-invariants — over a simulated day the loop heal
       snapshot: async () => ({ work: [], now: iso(now) }),
       closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, persist: async () => {},
       observeDeployment: async () => ({ source: 'endpoint', sha: 'd'.repeat(40), at: iso(now), reason: null, deployed: [], pending: [] }), recordDeployment: async () => {}, requestSmoke: () => {},
-      doctor,
+      research: { cwd: root }, doctor, // as the real loop wires them: research names its checkout on every loop, the doctor reads the same one
     } as unknown as DaemonEffects;
 
     const state = emptyDaemonState(master);
     const violations: string[] = [], harnessActions: (DaemonAction & { minute: number })[] = [];
-    let writes = 0, drifts = 0;
+    let writes = 0, drifts = 0, lastLocked: string | undefined;
+    const standing = new Set<number>();
     for (let cycle = 0; now < start + 8 * hour; cycle++, now += minute) {
       const at = (now - start) / minute;
       if (widenings.includes(at)) await writeFile(file, widened);
@@ -84,6 +86,20 @@ test('unit:soak-harness-remedy-invariants — over a simulated day the loop heal
       assert.deepEqual(Object.keys(state.actions).filter(key => key.startsWith('isolated:')), [], `cycle ${cycle}: a failure reached an isolation record`);
       if (!locked) assert.equal(await harnessDrift(root, plan), null, `cycle ${cycle} (+${at} min): drift survived a writable cycle`);
       if (!drifted || locked) assert.equal(after, before, `cycle ${cycle} (+${at} min): the settings were written without drift to heal`);
+      // Inside the unwritable window the one standing failure is refreshed by every cycle that meets it again:
+      // its time is this cycle's, its attempt count stays that of the one journaled failure, so the fault
+      // window never sees the run end while it lasts. The first writable cycle after it heals the row.
+      const row = state.actions['remedy:harness:claude'];
+      if (locked && drifted) {
+        assert.equal(row?.state, 'failed', `cycle ${cycle} (+${at} min): the unwritable checkout stands as a failure`);
+        assert.equal(row?.at, iso(now), `cycle ${cycle} (+${at} min): the standing failure was not refreshed this cycle`);
+        standing.add(row!.attempts);
+        if (at === unwritable.to - 1) lastLocked = row!.at;
+      }
+      if (!asRoot && at === unwritable.to) {
+        assert.equal(lastLocked, iso(start + (unwritable.to - 1) * minute), 'the last unwritable cycle refreshed the standing failure, up to the window boundary');
+        assert.equal(row?.state, 'done', 'the first writable cycle after the window heals the standing failure');
+      }
       const settings = JSON.parse(after);
       assert.ok(settings.permissions.allow.includes('Bash(npm test)') && settings.permissions.deny.includes('Bash(rm -rf /)') && settings.model === 'opus', `cycle ${cycle}: the operator's entries were lost`);
     }
@@ -101,6 +117,7 @@ test('unit:soak-harness-remedy-invariants — over a simulated day the loop heal
     if (!asRoot) {
       assert.equal(failed[0]!.minute, widenings.find(at => at >= unwritable.from && at < unwritable.to));
       assert.ok(drifts > widenings.length, 'drift stood through the window, so the remedy met it on every cycle there');
+      assert.equal(standing.size, 1, 'every refresh kept the one journaled failure\'s attempt count: no cycle re-recorded it');
     }
     assert.equal(state.actions['remedy:harness:claude']?.state, 'done', 'the day ends healed');
   } finally {

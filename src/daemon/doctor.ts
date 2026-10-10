@@ -715,13 +715,15 @@ export const decisionCheckMs = 2 * 60_000;
  * whenever the installed settings differ from the plan it makes the same idempotent write
  * `master harness claude --apply` makes — operator-added entries kept, only retired generated rules
  * removed — and journals one line. It runs on the checkout the doctor reads, which is the loop's
- * own; a loop with no doctor has no confined reader, and any status reader heals drift itself.
+ * own. The checkout is named by the loop's research effect, which every loop carries, not by the
+ * doctor's: a loop with no operator-agent identity or with the doctor off still owns its checkout,
+ * and its own cycle is then the only recurring reader that would heal host-derived drift.
  * A failure is journaled once per distinct cause and retried every cycle; a repeat of the same cause
  * moves the standing row's time, so the failure stays open for as long as it lasts.
  */
 export async function applyHarnessContract(cycle: Cycle) {
   const { state, effects, now, performed, config, isolate } = cycle;
-  const root = effects.doctor?.cwd;
+  const root = effects.research?.cwd ?? effects.doctor?.cwd;
   if (!root) return;
   await isolate('config', null, 'harness contract', async () => {
     const key = remedyKey('harness', 'claude'), previous = state.actions[key], attempts = (previous?.attempts ?? 0) + 1;

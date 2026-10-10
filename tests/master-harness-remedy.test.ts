@@ -42,15 +42,16 @@ async function checkout() {
   return { root, master, plan, absent, installed, cleanup: async () => { await chmod(join(root, '.claude'), 0o700).catch(() => {}); await rm(root, { recursive: true, force: true }); } };
 }
 
-/** One loop cycle over no work whose doctor reads `root`, the loop's own checkout. */
-function cycle(root: string, master: MasterConfig): Cycle {
+/** One loop cycle over no work whose checkout is `root`; `wired` picks the effects that name it (every loop carries research; the doctor only with an operator-agent identity). */
+function cycle(root: string, master: MasterConfig, wired: { research?: boolean; doctor?: boolean } = { research: true, doctor: true }): Cycle {
   const clock = Date.parse(observedAt);
   const effects = {
     agents: () => [], credentials: async () => ({}), snapshot: async () => ({ work: [], now: observedAt }),
     closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: observedAt, reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
-    doctor: { cwd: root } as DoctorEffects,
+    ...(wired.research ? { research: { cwd: root } } : {}),
+    ...(wired.doctor ? { doctor: { cwd: root } as DoctorEffects } : {}),
   } as unknown as DaemonEffects;
   return {
     config: master, state: emptyDaemonState(master), effects, now: () => clock, snapshot: { work: [], now: observedAt }, clock, clockOffset: { min: 0, max: 0 },
@@ -89,9 +90,16 @@ test('integration:harness-remedy-loop-cycle — the loop\'s routine remedies app
     assert.equal(looped.performed.length, 2);
     assert.equal(looped.state.actions['remedy:harness:claude']?.attempts, 2);
 
-    // A loop with no doctor has no confined reader to stand in for: the remedy is not wired.
+    // A loop with no doctor (no operator-agent identity, or the doctor off) still owns its checkout, so its remedy still heals it.
     await writeFile(settingsFile(root), JSON.stringify(installed));
-    const bare = cycle(root, master); delete (bare.effects as Partial<DaemonEffects>).doctor;
+    const undoctored = cycle(root, master, { research: true });
+    await routineRemedies(undoctored);
+    assert.ok(JSON.parse(await readFile(settingsFile(root), 'utf8')).permissions.deny.includes(absent), 'a loop without a doctor heals the drift');
+    assert.equal(undoctored.performed.length, 1);
+    assert.equal(undoctored.state.actions['remedy:harness:claude']?.state, 'done');
+    // Only effects that name no checkout at all (a bare test cycle) leave nothing to repair.
+    await writeFile(settingsFile(root), JSON.stringify(installed));
+    const bare = cycle(root, master, {});
     await routineRemedies(bare);
     assert.equal(bare.performed.length, 0);
 
