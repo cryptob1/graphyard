@@ -713,13 +713,17 @@ export async function writeExecutorDeclaration(root: string, declaration: Execut
  * script it starts. Nothing else in the unit is host-specific, so an operator who edited the
  * template by hand gets the same result as the installer.
  */
-export function renderExecutorUnit(template: string, binding: { root: string; node: string }) {
+export function renderExecutorUnit(template: string, binding: { root: string; node: string; script?: string }) {
   const escape = (value: string) => value.replaceAll('%', '%%');
   const lines = template.split('\n');
   const working = lines.findIndex(line => line.startsWith('WorkingDirectory=')), start = lines.findIndex(line => line.startsWith('ExecStart='));
   if (working < 0 || start < 0) throw new Error('The executor unit template has no WorkingDirectory= or ExecStart= line');
   lines[working] = `WorkingDirectory=${escape(binding.root)}`;
-  lines[start] = `ExecStart=${escape(binding.node)} ${escape(resolve(binding.root, 'scripts/graphyard-executor.mjs'))} --slot %i`;
+  const defaultScript = existsSync(resolve(binding.root, 'scripts/graphyard-executor.mjs'))
+    ? resolve(binding.root, 'scripts/graphyard-executor.mjs')
+    : fileURLToPath(new URL('../scripts/graphyard-executor.mjs', import.meta.url));
+  const script = binding.script ?? defaultScript;
+  lines[start] = `ExecStart=${escape(binding.node)} ${escape(script)} --slot %i`;
   return lines.join('\n');
 }
 
