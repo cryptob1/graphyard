@@ -30,21 +30,21 @@ function config(): MasterConfig {
 }
 
 /** GY-1619 as the board held it: submitted, unclaimed, its build gate failing on a docs-page conflict with the base tip. */
-function gy1619(observedAt: number, systemDriven = true): Work {
-  const candidate = { sha: head, baseSha: bound, pr: 1080, branch: 'graphyard/gy-1619-1', author: 'worker' };
+function gy1619(observedAt: number, systemDriven = true, { key = 'GY-1619', id = '7c1e2a6b-3f4d-4e8a-9b0c-1d2e3f4a1619', conflictSince = since } = {}): Work {
+  const candidate = { sha: head, baseSha: bound, pr: 1080, branch: `graphyard/${key.toLowerCase()}-1`, author: 'worker' };
   const conflict = `Candidate ${head.slice(0, 12)} cannot be brought onto base branch tip ${tip.slice(0, 12)} without resolving a conflict, which is content nobody reviewed or proved`;
   const observation = {
     clockOffset: { min: 0, max: 0 }, candidate, baseTip: tip, baseTipContained: false, conflicting: true,
     checks: [{ name: 'test', result: 'success', appId: 15368 }], reviews: [], protected: true, mergeable: false, merged: false, mergeSha: null,
     files: ['src/up.ts', ...paths], scopeFiles: [], at: iso(observedAt), prState: 'open', draft: false,
   } as unknown as Observation;
-  const baseRefresh: BaseRefresh = { from: { sha: head, baseSha: bound }, base: tip, baseTree: 'e'.repeat(40), policyRevision: 3, at: since, head: null,
-    conflict, merge: null, carry: null, trigger: 'conflict confirmed', conflictPaths: paths, conflictSince: since };
+  const baseRefresh: BaseRefresh = { from: { sha: head, baseSha: bound }, base: tip, baseTree: 'e'.repeat(40), policyRevision: 3, at: conflictSince, head: null,
+    conflict, merge: null, carry: null, trigger: 'conflict confirmed', conflictPaths: paths, conflictSince };
   return {
-    id: '7c1e2a6b-3f4d-4e8a-9b0c-1d2e3f4a1619', key: 'GY-1619', title: 'A docs-page conflict', description: '', type: 'feature', priority: 1,
+    id, key, title: 'A docs-page conflict', description: '', type: 'feature', priority: 1,
     dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:up'] }], policy: { checks: ['test'], review: true },
     plannedFiles: ['src/up.ts', ...paths], stage: 'build', revision: 20, policyRevision: 3, createdAt: iso(at('00:00:00')), updatedAt: iso(observedAt),
-    stageEnteredAt: since, ready: true, epoch: 3, lease: null, workspaces: [], submission: { epoch: 3, pr: 1080 }, systemDriven,
+    stageEnteredAt: conflictSince, ready: true, epoch: 3, lease: null, workspaces: [], submission: { epoch: 3, pr: 1080 }, systemDriven,
     candidate, reworkRequested: false, scenarioRequirements: [], evidence: [], observation, baseRefresh, blocker: null, violations: [],
     gates: [{ name: 'build', passed: false, reasons: [conflict] }, { name: 'merge', passed: false, reasons: ['Pull request is not mergeable against the current base'] }],
   } as Work;
@@ -53,11 +53,12 @@ function gy1619(observedAt: number, systemDriven = true): Work {
 /**
  * Runs the loop on a simulated clock with a 300s idle wait: each sleep advances the clock by the wait it was
  * given, and the loop is stopped after `cycles` cycles. `work` is the board as observed at a time: the snapshot
- * reads it ten seconds old, the step's woken observation one second after the cycle. Returns the cycle times, the waits and the decisions.
+ * reads it ten seconds old, the step's woken observation one second after the cycle. `decideMs` is how long each
+ * rework request takes, and `guardMs` how long the checkout guard spends between cycles. Returns the cycle times, the waits and the decisions.
  */
-async function replay(work: (observedAt: number) => Work[], start: number, cycles: number) {
+async function replay(work: (observedAt: number) => Work[], start: number, cycles: number, { decideMs = 0, guardMs = 0 } = {}) {
   let now = start;
-  const decided: { action: string; at: number }[] = [], agents: string[] = [], waits: number[] = [], ran: number[] = [], lines: string[] = [];
+  const decided: { key: string; action: string; at: number }[] = [], agents: string[] = [], waits: number[] = [], ran: number[] = [], lines: string[] = [];
   const effects: DaemonEffects = {
     agents: () => [], herdr: () => ({ agents: agents.map((name, index) => ({ name, pane_id: `pane-${index}`, agent_status: 'working' })), available: true }),
     credentials: async () => ({}),
@@ -65,20 +66,20 @@ async function replay(work: (observedAt: number) => Work[], start: number, cycle
     closeSession: () => { agents.length = 0; }, dispatch: async () => {}, requestProof: () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async () => {}, requestSmoke: () => {},
-    decide: async (_work, action) => { decided.push({ action, at: now }); return { id: '5d8a8b9e-0000-4000-8000-000000001619' }; },
+    decide: async (subject, action) => { decided.push({ key: subject.key, action, at: now }); now += decideMs; return { id: '5d8a8b9e-0000-4000-8000-000000001619' }; },
     decisions: async () => ({ decisions: [] }),
     approver: async () => ({ agentName: 'gy-approver-gy-1619', pane: 'pane-a' }),
     docsSync: async (_item: Work, plan: DocsSyncPlan) => { const name = docsSyncSessionName(plan); agents.push(name); return { agentName: name, pane: 'pane-s', account: 'reviewer-a', runtime: 'claude' as const, session: null }; },
     conflictPaths: async () => paths,
     // The step's woken reading, taken now: the docs-sync never moved the head.
-    observe: async () => work(now + 1_000)[0],
+    observe: async (subject: Work) => work(now + 1_000).find(entry => entry.id === subject.id) ?? null,
     persist: async () => {},
   } as DaemonEffects;
   const listeners = new Map<string, () => void>();
   const host = { on: (signal: string, listener: () => void) => { listeners.set(signal, listener); return host; }, off: (signal: string) => { listeners.delete(signal); return host; } };
   const wake = { sleep: async (wait: number) => { waits.push(wait); now += wait; if (ran.length >= cycles) listeners.get('SIGUSR2')?.(); return []; } };
   await runDaemon(config(), emptyDaemonState(config()), effects, { intervalMs: interval, identity: { pid: process.pid, host: 'machine-a' }, signals: ['SIGUSR2'], now: () => now,
-    log: line => lines.push(line), process: host as never, wake, checkout: () => ({ root: '/coordinator', commit: null, modified: [], untracked: [] }) });
+    log: line => lines.push(line), process: host as never, wake, checkout: () => { if (ran.length) now += guardMs; return { root: '/coordinator', commit: null, modified: [], untracked: [] }; } });
   return { ran, waits, decided, lines };
 }
 
@@ -100,4 +101,27 @@ test('unit:loop-wakes-at-hold-bound — with no hold pending, or one whose bound
   assert.deepEqual(far.waits, [interval, interval]);
   assert.ok(!far.lines.some(line => /hold bound/.test(line)));
   assert.deepEqual(far.decided, [], 'the hold still stands');
+});
+
+test('unit:loop-wakes-at-hold-bound — a held item the decisions step put off on its budget keeps its bound, so the idle wait still ends there', async () => {
+  // GY-1619 is held until 00:48:00 and GY-1620 until 00:49:15. At 00:48:00 GY-1619's rework request takes 60s,
+  // past the step's 30s budget, so GY-1620 is put off unreached: its standing bound still ends the wait after that cycle.
+  // Item ids of their own: the step's observation waker throttles wakes per item id across the process.
+  const first = { key: 'GY-1619', id: '7c1e2a6b-3f4d-4e8a-9b0c-1d2e3f4b1619', conflictSince: '2026-10-10T00:40:00.000Z' };
+  const second = { key: 'GY-1620', id: '7c1e2a6b-3f4d-4e8a-9b0c-1d2e3f4b1620', conflictSince: '2026-10-10T00:41:15.000Z' };
+  const board = (observedAt: number) => [gy1619(observedAt, true, first), gy1619(observedAt, true, second)];
+  const loop = await replay(board, at('00:46:00'), 3, { decideMs: 60_000 });
+  assert.deepEqual(loop.ran.map(iso), ['2026-10-10T00:46:00.000Z', '2026-10-10T00:48:00.000Z', '2026-10-10T00:49:15.000Z'], loop.lines.join('\n'));
+  assert.deepEqual(loop.decided.map(entry => [entry.key, entry.action, iso(entry.at)]), [['GY-1619', 'rework', '2026-10-10T00:48:00.000Z'], ['GY-1620', 'rework', '2026-10-10T00:49:15.000Z']]);
+  assert.equal(loop.waits[1], at('00:49:15') - at('00:49:00'), 'the wait after the budget-bound cycle ends at the put-off item\'s bound, sooner than the 30s actionable cadence');
+  assert.ok(loop.lines.some(line => line.includes('at the docs-sync hold bound 2026-10-10T00:49:15.000Z')), loop.lines.join('\n'));
+});
+
+test('unit:loop-wakes-at-hold-bound — time the checkout guard spends between cycles comes off a wait that ends at a hold bound', async () => {
+  const own = { key: 'GY-1619', id: '7c1e2a6b-3f4d-4e8a-9b0c-1d2e3f4c1619', conflictSince: since };
+  const loop = await replay(observedAt => [gy1619(observedAt, true, own)], at('00:46:00'), 3, { guardMs: 20_000 });
+  assert.deepEqual(loop.ran.map(iso), ['2026-10-10T00:46:00.000Z', '2026-10-10T00:51:20.000Z', iso(holdBound)],
+    'the idle wait is the full 300s after the guard; the wait to the bound is shortened by the 20s the guard took');
+  assert.deepEqual(loop.waits.slice(0, 2), [interval, holdBound - at('00:51:40')]);
+  assert.deepEqual(loop.decided.map(entry => [entry.action, iso(entry.at)]), [['rework', iso(holdBound)]], loop.lines.join('\n'));
 });

@@ -25,8 +25,8 @@ import { closeStanding, closingItems, recordingWrites, staleCloseStep } from './
 
 /** The approval-watch key prefix of a hand-launched approver, re-exported for the blocker step (GY-403). */
 export { handWatchPrefix };
-const holdBounds = new WeakMap<DaemonState, number>(); // GY-1622: per loop cursor, the earliest future docs-sync hold bound the last step left; holdBoundWait ends the loop's wait there when sooner, read once (`bound` set only then)
-export const holdBoundWait = (state: DaemonState, wait: number, at: number) => { const bound = holdBounds.get(state) ?? null; holdBounds.delete(state); return bound !== null && bound - at < wait ? { wait: Math.max(0, bound - at), bound } : { wait, bound: null }; };
+const holdBounds = new WeakMap<DaemonState, Map<string, number>>(); // GY-1622: per loop cursor, each held item's docs-sync hold bound; an item the step did not reach this cycle (put off by its budget) keeps the one it last left
+export const holdBoundWait = (state: DaemonState, wait: number, at: number) => { const bounds = holdBounds.get(state) ?? new Map<string, number>(); for (const [id, end] of bounds) if (end <= at) bounds.delete(id); const bound = bounds.size ? Math.min(...bounds.values()) : null; return bound !== null && bound - at < wait ? { wait: bound - at, bound } : { wait, bound: null }; };
 /** Step 4c: request and supervise the routine decisions. */
 export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, assessments: Record<string, ContainmentAssessment>, { capacities, approversSpent }: { capacities: RoleCapacity[]; approversSpent: boolean }) {
   const { config, state, now, snapshot, clock, performed, isolate, agents, open } = cycle;
@@ -45,7 +45,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
   //     refused one is left to the master to answer, a decision the server settled some other way
   //     is requested again, and one no session will judge is escalated and left standing on the
   //     silence measure.
-  const stamp = new Date(clock).toISOString(); holdBounds.delete(state);
+  const stamp = new Date(clock).toISOString(), bounds = holdBounds.get(state) ?? new Map<string, number>(); holdBounds.set(state, bounds); for (const id of bounds.keys()) if (!snapshot.work.some(work => work.id === id)) bounds.delete(id);
   const note = async (key: string, item: Work, kind: DaemonActionKind, outcome: 'done' | 'failed', detail: string, at = now(), faultKind?: FaultKind | null) =>
     performed.push(await record(state, key, { kind, work: item.key, principal: null, state: outcome, detail, attempts: (state.actions[key]?.attempts ?? 0) + 1, epoch: item.epoch, cycle: state.cycle }, at, effects.persist, faultKind));
   const approvers = createApproverSupervisor(cycle, effects, stamp, note, capacities, approversSpent);
@@ -437,7 +437,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
   const wake = effects.observe && observationWaker(effects.observe);
   const noteWait = async (item: Work, detail: string) => { const waitKey = `wait:rework:${item.id}`; if (detailChanged(state.actions[waitKey], detail)) await note(waitKey, item, 'decision', 'done', detail); };
   // GY-1436: one stable wait per held item, naming the docs-sync session, head, base and the end of its bound; that bound, still ahead, ends the loop's idle wait (GY-1622).
-  const noteHold = async (item: Work, { wait: detail, deadline }: { wait: string; deadline: string }) => { const bound = Date.parse(deadline), waitKey = `wait:docs-sync:${item.id}`; if (bound > clock) holdBounds.set(state, Math.min(holdBounds.get(state) ?? Infinity, bound)); if (detailChanged(state.actions[waitKey], detail)) await note(waitKey, item, 'decision', 'done', detail); };
+  const noteHold = async (item: Work, { wait: detail, deadline }: { wait: string; deadline: string }) => { const bound = Date.parse(deadline), waitKey = `wait:docs-sync:${item.id}`; if (bound > clock) bounds.set(item.id, bound); if (detailChanged(state.actions[waitKey], detail)) await note(waitKey, item, 'decision', 'done', detail); };
   const mechanical = effects.mechanicalFixes ? await effects.mechanicalFixes().then(read => read.requests, () => []) : []; // GY-971 planned bot rounds
   const routinePass = budget.pass(), attestPass = budget.pass();
   // GY-1439: while a close stands requested and unapplied on an item, nothing advances it (closingItems): no
@@ -452,7 +452,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
   const refusedByWork = new Map<string, RefusedAttestation[]>();
   for (const watch of Object.values(state.approvals)) if (watch.action === 'attest' && watch.refusal) refusedByWork.set(watch.work, [...refusedByWork.get(watch.work) ?? [], { decision: watch.decision, refusal: watch.refusal }]);
   for (const read of workToProcess) await isolate('decision', read, read.key, async () => {
-    let item = read;
+    let item = read; const reached = bounds.get(read.id); bounds.delete(read.id); // re-set below while its hold still stands
     const assessment = assessments[item.id];
     // A request step 2 refused this cycle is read as it was decided, not as the snapshot saw it, and
     // its decision is requested against that revision: one a partial widening moved past the
@@ -476,7 +476,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     }
     const close = decision.action === 'close' ? undefined : await closeStanding(effects, item, snapshot.work, closing);
     if (close) return noteClosing(item, decision.action, close);
-    let key = decisionKey(item, decision); if (routinePass.over()) { needed.add(key); budget.defer(item); return; }
+    let key = decisionKey(item, decision); if (routinePass.over()) { needed.add(key); budget.defer(item); if (reached !== undefined) bounds.set(read.id, reached); return; }
     // A confirmed conflict confined to docs pages is a docs-sync's, not a worker's (GY-566). A standing
     // hold is the item's recorded wait, never a bare skip (GY-1436); one that ended awaits an
     // observation since, which the step wakes below rather than waiting for one unprompted.
