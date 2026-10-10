@@ -89,7 +89,9 @@ test('unit:herdr-install-instance-created — a host whose default Herdr plugin 
   const applies = elsewhere.calls.filter(args => args[0] === 'install' && args.includes('--apply'));
   assert.ok(applies.length && applies.every(args => args.includes('--herdr-instance')), 'the install links the plugin in its own instance');
   assert.ok(!elsewhere.calls.flat().some(arg => arg === '--herdr-rebind' || arg === '--no-herdr'), 'the default instance is never rebound and Herdr is never skipped');
-  assert.deepEqual(host.log.filter(entry => entry.step !== 'binary'), [{ step: 'server', instance: own }, { step: 'record', instance: own, workspace: 'w9' }]);
+  // The instance is recorded as soon as its server answers, before the control-plane step and master init read it, and again
+  // once the install has written master.json (recordHerdrInstance changes nothing when the record already stands).
+  assert.deepEqual(host.log.filter(entry => entry.step !== 'binary'), [{ step: 'server', instance: own }, { step: 'record', instance: own, workspace: 'w9' }, { step: 'record', instance: own, workspace: 'w9' }]);
   assert.ok(events.some(event => event.kind === 'note' && event.text.includes(`own Herdr instance (session ${own.session})`)));
   assert.equal(JSON.parse(await readFile(join(root, '.graphyard/up.json'), 'utf8')).herdrInstance, true, 'the choice is kept for reruns');
 
