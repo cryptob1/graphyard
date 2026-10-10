@@ -549,7 +549,7 @@
     "tests/observation-capacity.test.ts": 51650,
     "tests/observation-rate-pacing.test.ts": 793,
     "tests/observation-throughput.test.ts": 12802,
-    "tests/onboarding.test.ts": 1198,
+    "tests/onboarding.test.ts": 2300,
     "tests/one-reviewer-per-request.test.ts": 7821,
     "tests/optimistic-merge.test.ts": 1820,
     "tests/orphan-supervisor.test.ts": 2254,

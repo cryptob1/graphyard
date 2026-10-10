@@ -396,9 +396,10 @@ export interface ApplyDependencies {
   /**
    * The `graphyard install` that already owns this repository's identities (GY-1413): its install
    * directory and its confirmed App. Apply then commits only the onboarding files — it never writes
-   * a second principals registry and never opens an App page of its own.
+   * a second principals registry and never opens an App page of its own. A null App is an install
+   * applied with `--no-github-app` (GY-1642): the onboarding is written with no App block.
    */
-  installed?: { directory: string; githubApp: { appId: number; slug: string } };
+  installed?: { directory: string; githubApp: { appId: number; slug: string } | null };
   /** Write each worker profile's credential file (GY-1412). Explicit, never implied: only `init --apply` passes it. */
   writeCredentials?: boolean;
   /**
@@ -514,8 +515,10 @@ export async function applyProposal(root: string, proposalInput: unknown, depend
 
   const previousState = await loadAppliedSetup(root);
   const savedApp = await readGithubApp(directory, proposal.repository);
-  let githubApp: { appId: number; slug: string } | null = dependencies.installed?.githubApp ?? (savedApp ? { appId: savedApp.appId, slug: savedApp.slug } : previousState?.artifacts.githubApp ?? null);
-  if (!githubApp && dependencies.githubSetup) {
+  // An install's App, or its choice of none, is the App: a saved or earlier registration is not
+  // revived beside it, and no App page is opened for it.
+  let githubApp: { appId: number; slug: string } | null = dependencies.installed ? dependencies.installed.githubApp : (savedApp ? { appId: savedApp.appId, slug: savedApp.slug } : previousState?.artifacts.githubApp ?? null);
+  if (!githubApp && !dependencies.installed && dependencies.githubSetup) {
     const registration = await dependencies.githubSetup(proposal.repository, server);
     if (!Number.isSafeInteger(registration?.appId) || !registration?.slug) throw new Error('The GitHub App flow returned an incomplete registration');
     githubApp = { appId: registration.appId, slug: registration.slug };

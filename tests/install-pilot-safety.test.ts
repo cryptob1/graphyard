@@ -94,8 +94,9 @@ test('unit:init-reuses-install-identities — init --scan --apply never mints a 
       } }, 'apply');
     await assert.rejects(applyInstall(session, await buildPlan(session)), InstallPaused);
     assert.ok(refusal, 'init refuses while the install waits at its App step');
-    assert.match(refusal!.message, /graphyard install --apply for owner\/project \(.*install\.json\) has not finished its GitHub App step/);
-    assert.match(refusal!.message, /finish step 4 on the App page it serves at http:\/\/127\.0\.0\.1:4311/);
+    assert.match(refusal!.message, /graphyard install --apply for owner\/project has not finished its GitHub App step/);
+    assert.match(refusal!.message, /its record .*install\.json names no App\. Finish the App step on the page graphyard install --apply serves/);
+    assert.doesNotMatch(refusal!.message, /https?:\/\//, 'the refusal names no hard-coded server');
     assert.match(refusal!.message, /init opens no App page of its own and mints no principals beside the install's; nothing was written/);
     assert.equal(await exists(join(fixture.root, '.graphyard/principals.json')), false, 'no second principals file');
 
