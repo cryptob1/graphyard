@@ -21,7 +21,7 @@ import { ensureDeployKey } from './install/deploy-key.js';
 import type { GitHubCli } from './install/github.js';
 import { herdrAttachCommand, installHerdrInstance, type HerdrInstance } from './master/herdr.js';
 import { ensureHerdrBinary, ensureHerdrServer, ensureHerdrWorkspace, HerdrSetupFailure, herdrSync, hostHerdrDeps, prepareHerdrInstance, withLocalBin, type HerdrHostDeps } from './herdr-host.js';
-import { herdrBoundElsewhere, herdrPluginBinding, herdrPluginEnabled } from './repository-setup.js';
+import { herdrBoundElsewhere, herdrPluginBinding, herdrPluginEnabled, serverOrigin } from './repository-setup.js';
 import { recordHerdrInstance } from './master/config.js';
 import { mergerModes, type MergerMode } from './merger-mode.js';
 
@@ -103,9 +103,9 @@ export interface UpRequest {
   /** GY-1477: serve a local dashboard on this host's tailnet (`--share-tailnet`); otherwise the command is only printed. */
   shareTailnet?: boolean;
   /**
-   * GY-1641: the control plane's address (`--url`), when it is not the one the install recorded. Every
-   * child command after the install is pointed at the recorded address (this, else master.json, else
-   * the install record), never at a default port.
+   * GY-1641: the control plane's address (`--url`), an origin master init accepts, and only where
+   * master.json records none or the same one (upUrlRefusal). Every child command after the install is
+   * pointed at the recorded address (this, else master.json, else the install record), never a default port.
    */
   url?: string | null;
 }
@@ -920,11 +920,28 @@ export async function upCommand(root: string, cliPath: () => Promise<string>, ar
   const handed = await upSudoCode(root, args);
   if (handed) return handed;
   const request = upRequestFromArgs(args, recordedUp(root));
+  const refusal = await upUrlRefusal(root, request.url);
+  if (refusal) throw new Error(refusal);
   const emit = (event: UpEvent) => console.error(request.agent ? JSON.stringify(event) : describeUpEvent(event));
   const dependencies = upDependencies(root, await cliPath(), request, emit);
   // Ctrl-C or SIGTERM stops the install child too, so nothing keeps serving its App page on 4311.
   const release = forwardSignals(dependencies.children);
   return runUp(request, dependencies).finally(release);
+}
+
+/**
+ * GY-1641: why --url cannot drive this checkout, or null when it can. master init accepts only the
+ * server .graphyard/master.json records (setupMaster), so a --url naming another one is refused here,
+ * before any step runs, rather than at host-supervisor after the earlier steps have changed things.
+ */
+export async function upUrlRefusal(root: string, url: string | null | undefined) {
+  if (!url) return null;
+  let recorded = '';
+  try { recorded = String(JSON.parse(await readFile(resolve(root, '.graphyard/master.json'), 'utf8')).url ?? ''); } catch { return null; }
+  let origin = recorded;
+  try { origin = new URL(recorded).origin; } catch { /* compared as written */ }
+  return !recorded || origin === url ? null
+    : `--url ${url} is not the control plane this checkout's master is set up with (${recorded} in .graphyard/master.json), and master init accepts no other; omit --url to use ${recorded}`;
 }
 
 /** `graphyard up --help` (GY-1510): up's usage, one line for each option. */
@@ -955,7 +972,7 @@ export const upUsage = [
   '  --wait MINUTES             how long each wait on a person lasts (agent default 20)',
   '  --no-wait                  at Confirm access, exit 3 with the App-import route instead of waiting',
   "  --share-tailnet            serve the dashboard on this host's tailnet (never publicly)",
-  '  --url URL                  the control plane\'s address when not the one the install recorded; every later step uses it',
+  '  --url URL                  the control plane\'s address before master init records one (HTTPS, or HTTP on loopback); every later step uses it',
   '  --json                     print the result as JSON',
   '  -h, --help                 print this help and exit',
   '',
@@ -1039,7 +1056,8 @@ export function upRequestFromArgs(args: string[], recorded: { repository: string
   const minutes = values.wait === undefined ? null : Number(values.wait);
   if (minutes !== null && (!Number.isSafeInteger(minutes) || minutes < 1 || minutes > 1_440)) throw new Error('Use --wait with whole minutes from 1 to 1440');
   let url: string | null = null;
-  if (values.url !== undefined) { try { const parsed = new URL(values.url); if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error(); url = parsed.origin; } catch { throw new Error('Use --url with the control plane\'s http(s) address, such as http://127.0.0.1:4311'); } }
+  // The origin rule master init applies (serverOrigin): HTTPS, or HTTP only on loopback.
+  if (values.url !== undefined) { try { url = serverOrigin(values.url); } catch { throw new Error('Use --url with the control plane\'s origin: HTTPS, or HTTP on loopback (such as http://127.0.0.1:4311); no credentials, query or path'); } }
   return { repository, provider: provider ?? recorded?.provider ?? 'compose', agent: !!values.agent, reviewer: values.reviewer ?? 'claude', master: values.master ?? 'claude',
     goalFile: values.goal ?? null, browserProfile: values['browser-profile'] ?? null, ...(merger ? { merger } : {}),
     install: { confirmPrice: values['confirm-price'] ?? null, maxMonthly: values['max-monthly'] ?? null, sshKey: values['ssh-key'] ?? null, sshHost: values['ssh-host'] ?? null, sshUser: values['ssh-user'] ?? null },
@@ -1420,14 +1438,8 @@ export function upDependencies(root: string, cliPath: string, request: UpRequest
     if (remoteLoopProviders.includes(request.provider)) return null;
     return (await readInstallRecord(installDirectory(installIdFor(request.repository))).catch(() => null))?.url ?? null;
   };
-  // The coordinator credential is the one master.json records for its own server, so an explicit --url
-  // naming a moved control plane still finds it; master init then records that new address.
-  const masterToken = async () => {
-    let recorded = '';
-    try { recorded = String(JSON.parse(await readFile(resolve(root, '.graphyard/master.json'), 'utf8')).url ?? ''); } catch { /* not recorded yet */ }
-    const url = recorded || await serverUrl();
-    return url ? (await masterCredential(root, url))?.token ?? null : null;
-  };
+  // upUrlRefusal keeps --url to the server master.json records, so its credential is the one for serverUrl.
+  const masterToken = async () => { const url = await serverUrl(); return url ? (await masterCredential(root, url))?.token ?? null : null; };
   const browser = request.agent ? upBrowserProfile(root, request, hostInstallRoots(), githubLogin, discoverLogin) : null;
   if (browser?.from) emit({ kind: 'note', text: `No --browser-profile given: the App pages are driven in Chrome profile ${browser.profile}, which the Graphyard install at ${browser.from} uses, signed in to GitHub as ${browser.login}, the login gh uses here; pass --browser-profile to use another.` });
   // The loop runs from the checkout of the CLI master init recorded, which is this CLI until it has.
