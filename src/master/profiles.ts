@@ -541,9 +541,9 @@ export const dirtyCheckoutEscalation = (refusal: string, leases: DirtyCheckoutLe
 //
 // A launch that cannot apply the confinement is refused with the reason named, never started
 // unconfined, exactly like a contained install (GY-174): install bubblewrap, or let the runtime
-// carry a workspace-write sandbox. The master session is not among the confined roles — it runs
-// the loop's own configuration and administration commands from the coordinator root, and is
-// bound by its own harness rules instead.
+// carry a workspace-write sandbox. The master session is confined too (GY-1658): the same read-only
+// mount with its managed `.graphyard` state writable and the host's process view and user bus kept,
+// since its admin commands restart the loop's unit and read the processes they manage (`hostView`).
 
 /** How a launch keeps the coordinator checkout unwritable for the session it starts. */
 export interface CoordinatorConfinement {
@@ -710,7 +710,7 @@ export const hostProcessLaunchTargets = (uid: number | undefined = process.getui
  * namespace; a session keeps the network and its own process tree. The wrapper ends with `--`, so
  * the runtime command follows it.
  */
-export function readOnlyMountWrapper(input: { coordinatorRoot: string; sessionDirectory: string; bwrap?: string | null; ownGitHubCredential?: boolean; secretsBus?: null }): readonly string[] {
+export function readOnlyMountWrapper(input: { coordinatorRoot: string; sessionDirectory: string; bwrap?: string | null; ownGitHubCredential?: boolean; secretsBus?: null; hostView?: boolean; writable?: readonly string[] }): readonly string[] {
   const root = resolve(input.coordinatorRoot), directory = resolve(input.sessionDirectory);
   const gitDir = checkoutGitDirectory(root);
   const adminDirectory = sessionGitAdminDirectory(directory, root);
@@ -722,16 +722,16 @@ export function readOnlyMountWrapper(input: { coordinatorRoot: string; sessionDi
   const shared = [...sharedDirectories, ...(existsSync(fetchHead) && !isDirectoryPath(fetchHead) ? [fetchHead] : [])];
   const own = withinCheckout(directory, root) ? [directory] : [];
   const bwrap = input.bwrap ?? 'bwrap';
-  const masks = processLaunchMaskWords({ ...hostProcessLaunchTargets(), ...(input.ownGitHubCredential || input.secretsBus === null ? { secretsBus: null } : {}) }, [root, directory]);
+  const masks = input.hostView ? [] : processLaunchMaskWords({ ...hostProcessLaunchTargets(), ...(input.ownGitHubCredential || input.secretsBus === null ? { secretsBus: null } : {}) }, [root, directory]);
   const externalGitDir = gitDir !== root && !withinCheckout(gitDir, root) && isDirectoryPath(gitDir) ? [gitDir] : [];
   // A session with no admin of its own re-exposes the whole worktrees area; when the coordinator is
   // itself a linked worktree its own admin (HEAD, index) lies there, so it is bound read-only again
   // after that re-exposure — only its FETCH_HEAD, bound after it, stays writable (GY-957, review finding).
   const coordinatorAdmin = checkoutWorktreeAdminDirectory(root);
   const protectAdmin = !adminDirectory && coordinatorAdmin && sharedDirectories.some(path => withinCheckout(coordinatorAdmin, path)) ? [coordinatorAdmin] : [];
-  return [bwrap, '--unshare-pid', '--dev-bind', '/', '/', ...masks, '--proc', '/proc', '--ro-bind', root, root,
+  return [bwrap, ...(input.hostView ? [] : ['--unshare-pid']), '--dev-bind', '/', '/', ...masks, ...(input.hostView ? [] : ['--proc', '/proc']), '--ro-bind', root, root,
     ...externalGitDir.flatMap(path => ['--ro-bind', path, path]),
-    ...[...sharedDirectories, ...own].flatMap(path => ['--bind', path, path]),
+    ...[...sharedDirectories, ...own, ...(input.writable ?? []).filter(isDirectoryPath)].flatMap(path => ['--bind', path, path]),
     ...protectAdmin.flatMap(path => ['--ro-bind', path, path]),
     ...shared.filter(path => !sharedDirectories.includes(path)).flatMap(path => ['--bind', path, path]), '--'];
 }

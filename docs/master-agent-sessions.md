@@ -15,7 +15,7 @@
 
 ### The coordinator checkout is confined at the OS level
 
-Non-master launches get own checkouts, coordinator's unwritable (Codex `--sandbox workspace-write`, others bubblewrap, session bus a [keyring-only proxy](operations.md#worker-host-keyring-proxy)); unconfinable refused; loop refuses dirty/moved checkouts ([details](master-agent.md#operate)).
+Launches get own checkouts (`run.worktreeRoot`; master: `.graphyard`, Git writable), coordinator's unwritable (Codex `--sandbox workspace-write`, others bubblewrap, session bus a [keyring-only proxy](operations.md#worker-host-keyring-proxy)); unconfinable refused; loop refuses dirty/moved checkouts ([details](master-agent.md#operate)).
 
 #### Worker sandbox
 

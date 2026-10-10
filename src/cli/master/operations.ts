@@ -1,4 +1,4 @@
-// Concern: `graphyard master` operations subcommands — status, settle-containment, dispatch, merge, verify-deployment, main-watch.
+// Concern: `graphyard master` operations subcommands — status, settle-containment, checkout-restore, dispatch, merge, verify-deployment, main-watch.
 import { parseArgs } from 'node:util';
 import { resourceConflicts } from '../../coordination.js';
 import { handSettlementRefusal } from '../../model/containment.js';
@@ -22,6 +22,7 @@ import { knownGoodState, pinKnownGood } from '../../master/known-good.js';
 import { alignLoopUnit, loopUnitOf, type LoopSupervisorHost } from '../../supervisor.js';
 import type { ChildRun } from '../../child-runner.js';
 import { readLockRefusal, supervisingUnit, unsupervisedHolderAttention } from '../../master/loop-restart.js';
+import { checkoutRestoreCommand } from '../master-checkout-restore.js';
 
 /** `master main-watch`: the watch's state and policy, or an admin's acknowledgement of one commit (GY-1519). */
 export const mainWatchUsage = 'Use master main-watch acknowledge SHA --reason TEXT --admin-token-stdin (the admin credential on stdin), or master main-watch status';
@@ -78,6 +79,8 @@ export async function operationsCommand(session: MasterSession, effects: Recover
     };
     return print({ ...report, ...attention, harnessDrift: harness?.drift ?? null, shadowGate, mergeWriter: mergeWriterSummary(state?.mergeWriter), daemon: { ...report.daemon, cycleBudget: state ? cycleBudget(state, master.run.intervalSeconds * 1000) : null, ...(master2 ? { master: master2 } : {}) } });
   }
+  // GY-1658: the loop restores a dirty coordinator checkout to a named ref and restarts itself; this files the request and reports the outcome.
+  if (id === 'checkout-restore') return print(await checkoutRestoreCommand(master, args, String(coordinator?.actor?.id ?? coordinator?.actor?.name ?? 'master')));
   if (id === 'settle-containment') {
     if (!args[0] || !args.slice(1).join(' ').trim()) throw new Error('Use master settle-containment GY-N REASON');
     const { snapshot, clockOffset } = await snapshotWithClock(() => masterApi('work-snapshot'));

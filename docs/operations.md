@@ -26,28 +26,24 @@ graphyard master settle-containment GY-N "reason"                       # settle
 graphyard recover-containment GY-N --previous-worker-stopped "reason"   # delivered, stop confirmed
 graphyard unblock GY-N "reason"                                         # unowned blocker
 systemctl --user restart graphyard-master-OWNER-NAME                    # loop down, supervised (units.json)
+graphyard master checkout-restore "reason"                              # dirty: refs/graphyard/checkout-restore/
 ```
 
 Never attest a stop you have not confirmed; merged work changes only via follow-ups. Outside the lock's PID namespace `master status` judges the loop by stall bound alone; if stalled or absent on the coordinator host: stop hand-started loops, install `examples/master/graphyard-master.service`, `systemctl --user daemon-reload && systemctl --user enable --now graphyard-master`.
 
 ## Worker host keyring proxy
 
-Confined masters, approvers and proof producers read GitHub login (`gh auth git-credential`) via a keyring-only D-Bus proxy; workers and reviewers use their own. Per host: copy `deploy/systemd/graphyard-secrets-bus.socket`, `graphyard-secrets-bus.service` and `graphyard-secrets-bus-filter.service`, then `systemctl --user enable --now graphyard-secrets-bus.socket`. Listens at `$XDG_RUNTIME_DIR/graphyard-secrets-bus` (or `GRAPHYARD_SECRETS_BUS`); absent, sessions push with `GH_TOKEN`.
+Confined approvers and proof producers read GitHub login (`gh auth git-credential`) via a keyring-only D-Bus proxy; workers and reviewers use their own. Per host: copy `deploy/systemd/graphyard-secrets-bus.socket`, `graphyard-secrets-bus.service` and `graphyard-secrets-bus-filter.service`, then `systemctl --user enable --now graphyard-secrets-bus.socket`. Listens at `$XDG_RUNTIME_DIR/graphyard-secrets-bus` (or `GRAPHYARD_SECRETS_BUS`); absent, sessions push with `GH_TOKEN`.
 
 ## Safety facts that never change
 
 - Workers never hold `admin`/`coordinator`/`producer` tokens. No AI principal can hold `admin`.
 - Proof authority: live [grant](operations-reference.md#proof-authority-grants); `admin` attests only `manual:` proofs; operator agents only add requirements.
 - GitHub merges on passing gates: no bypass, no lifecycle-state endpoint.
-- Non-master sessions use own checkouts under `run.worktreeRoot`.
 - History is append-only; only routine rows past retention are [compacted](operations-reference.md#storage-retention).
-
-## Deeper references
-
-[Operations reference](operations-reference.md), [delegation](delegation.md).
 
 ## Resources and disk
 
-`resourceRegistry` declares bounded resources ([remedies](operations-reference.md#control-plane-resources)). Loop reclaims finished worktrees after `run.reclaimIdleHours` (never dirty/unpushed; a Git refuse is held a day), stale temps, idle unowned [panes](master-agent-sessions.md#panes-are-closed-and-reclaimed) seen twice; `disk` attention below `run.diskThresholdGb`. Clean detached coordinator HEAD on a verified-release base descendant self-recovers (`upgrade:recovered`); otherwise `escalation:dirty-checkout` says restart onto it, never roll back. Dirty, non-detached or non-forward stays refused (naming paths, HEAD, sessions).
+`resourceRegistry` declares bounded resources ([remedies](operations-reference.md#control-plane-resources)). Loop reclaims finished worktrees after `run.reclaimIdleHours` (never dirty/unpushed; a Git refuse is held a day), stale temps, idle unowned [panes](master-agent-sessions.md#panes-are-closed-and-reclaimed) seen twice; `disk` attention below `run.diskThresholdGb`. Clean detached coordinator HEAD on a verified-release base descendant self-recovers (`upgrade:recovered`); otherwise `escalation:dirty-checkout` says restart onto it, never roll back. Dirty, non-detached or non-forward stays refused (naming paths, HEAD, suspected-writer panes).
 
 Main guard revert approver ([provisioning](deployment.md#manual-fallback)): redeploy; verify `/api/status` `mainGuard.revertApprover` names it, `mainGuard.attention` empty, `doctor` `revert-approver` ready.

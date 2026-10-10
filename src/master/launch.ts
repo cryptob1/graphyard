@@ -110,8 +110,11 @@ export function writeLaunchFiles(directory: string, name: string, text: { role?:
 // the OS level: a codex workspace-write sandbox confines it by leaving it ungranted, every other
 // runtime runs inside a bubblewrap mount namespace that bind-mounts the checkout read-only (see
 // profiles.ts). A launch that can carry no confinement is refused with the reason named, never
-// started unconfined. The master session opts out (`confinement: false`): it runs the loop's own
-// configuration and administration commands from the coordinator root, under its own harness rules.
+// started unconfined. The master session is confined as well (GY-1658, `confinement: 'master'`):
+// it runs from the coordinator root with the checkout read-only, and only its managed `.graphyard`
+// state and the shared Git areas writable; it keeps the host's process view and user bus, which its
+// own admin commands (`master restart`, `master executors restart`) drive. Unconfined sessions
+// patched the serving checkout until the GY-857 guard refused every loop start on it.
 
 /**
  * Whether `argv1` is one of the launcher's own entries: `bin/graphyard.mjs`, the `src/cli.ts` child
@@ -154,6 +157,35 @@ export function prepareConfinedGitPaths(root: string): void {
   for (const path of [join(gitDir, 'refs', 'heads', 'graphyard'), join(gitDir, 'logs', 'refs', 'heads', 'graphyard'), join(gitDir, 'refs', 'remotes'), join(gitDir, 'logs', 'refs', 'remotes')]) mkdirSync(path, { recursive: true });
   const fetchHead = join(checkoutWorktreeAdminDirectory(root) ?? gitDir, 'FETCH_HEAD');
   if (!existsSync(fetchHead)) closeSync(openSync(fetchHead, 'a'));
+}
+/** What a master-session confinement is judged against; tests name an absent bubblewrap or another platform. */
+export interface MasterConfinementProbe { bwrap?: string | null; platform?: string; mountNamespaceWorks?: boolean }
+/**
+ * The master session's confinement (GY-1658): the coordinator checkout at `root` bind-mounted
+ * read-only, with the checkout's managed `.graphyard` state and the shared Git areas a coordinator
+ * session writes (objects, worktrees, `graphyard/` branches, remote-tracking refs, FETCH_HEAD)
+ * re-exposed, and the host's process view and user bus kept (`hostView`). A host that cannot build
+ * it refuses the launch with the named reason: the master is never started unconfined.
+ */
+export async function masterSessionConfinement(kind: string, root: string, probe: MasterConfinementProbe = {}): Promise<CoordinatorConfinement> {
+  const refusal = await coordinatorConfinementRefusal({ kind, args: [], coordinatorRoot: root, sessionDirectory: root, ...probe });
+  if (refusal) throw new Error(`${refusal} The master session is refused rather than started with the checkout writable (GY-1658).`);
+  prepareConfinedGitPaths(root);
+  // The master's dispatches add worktrees: the shared worktrees area is re-exposed only where it exists.
+  if (existsSync(checkoutGitDirectory(root))) mkdirSync(join(checkoutGitDirectory(root), 'worktrees'), { recursive: true });
+  const managed = join(resolve(root), '.graphyard');
+  mkdirSync(managed, { recursive: true, mode: 0o700 });
+  const wrapper = readOnlyMountWrapper({ coordinatorRoot: root, sessionDirectory: root, bwrap: probe.bwrap ?? undefined, hostView: true, writable: [managed] });
+  const reexposed = wrapper.filter((word, index) => index > 0 && wrapper[index - 1] === '--bind');
+  return { mechanism: 'read-only-mount', wrapper, detail: `the coordinator checkout at ${resolve(root)} is bind-mounted read-only for the master session; only ${reexposed.join(', ')} are re-exposed writable, so no command it runs can patch the checkout's tracked files` };
+}
+/** The master launch's confinement against the launcher's own checkout (or `coordinatorRoot`), derived as every other role's is: null only where nothing is confined (the test runner, a non-CLI launcher), the named refusal when the launcher's checkout cannot be derived. */
+async function masterLaunchConfinement(kind: string, options: Pick<SessionStart, 'coordinatorRoot' | 'directory' | 'confinementProbe'>): Promise<CoordinatorConfinement | null> {
+  const root = options.coordinatorRoot !== undefined ? options.coordinatorRoot : launcherCoordinatorRoot();
+  if (root) return masterSessionConfinement(kind, root, options.confinementProbe);
+  const undetermined = launcherRootUndetermined();
+  if (undetermined) throw new Error(confinementRefusalText(kind, options.directory, { undetermined }));
+  return null;
 }
 /** The confinement the launch of `kind` carries, or null when nothing needs confining; throws the named refusal when the kind can carry none, or when the launcher's own checkout cannot be derived while running as the launcher. `coordinatorRoot` overrides the derived one, for a launcher embedded outside the CLI. The sandbox-claim check models the runtime's workspace root as its working directory (`cwd` when the pane starts elsewhere, GY-888); the read-only mount re-exposes the allocated `directory` separately, so a terminal reviewer or producer that starts from the coordinator root still gets its own checkout writable while the root stays read-only (GY-888, review finding). */
 export async function sessionConfinement(kind: string, args: readonly string[], options: { cwd?: string; directory: string; ownGitHubCredential?: boolean; secretsBus?: null }, coordinatorRoot: string | null | undefined = undefined): Promise<CoordinatorConfinement | null> {
@@ -470,8 +502,9 @@ export async function awaitRuntimeStart(pane: string, kind: string, command: str
  * the runtime says about its arguments (GY-101).
  */
 export interface SessionStart extends PromptDelivery, StartBounds { directory: string; role?: string | null; prefix?: string[]; confirm?: 'inline' | 'follow'; retry?: string; contract?: RegisteredLaunch | null;
-  /** Opts this launch out of the coordinator confinement (GY-888): only the master session, which runs the loop's own commands from the coordinator root, does. */
-  confinement?: false;
+  /** `'master'`: the master session's own confinement (masterSessionConfinement, GY-1658), judged with `confinementProbe`. `false` is a test seam for launches whose runner is faked: no production launch passes it (GY-1658). */
+  confinement?: false | 'master';
+  confinementProbe?: MasterConfinementProbe;
   /** The coordinator checkout to confine against, when the launcher's own cannot be derived from its entry — a launcher embedded outside the CLI passes it, so its sessions are confined too (GY-888). */
   coordinatorRoot?: string;
   /** The session carries a GitHub credential of its own (a reviewer's) or must never read the operator's (every worker, minted credential or not), so the confinement gives it no route to the operator's keyring (GY-1039). */
@@ -496,7 +529,9 @@ export async function startAgentSession(name: string, kind: string, pane: string
   // The coordinator checkout is unwritable for this session at the OS level (GY-888), or the
   // launch is refused with the reason named — never started unconfined. A failure here is a
   // launch failure like any other: the caller releases the claim and closes what it created.
-  const confinement = options.confinement === false ? null : await sessionConfinement(kind, args, options, options.coordinatorRoot);
+  const confinement = options.confinement === false ? null
+    : options.confinement === 'master' ? await masterLaunchConfinement(kind, options)
+    : await sessionConfinement(kind, args, options, options.coordinatorRoot);
   // Every session carries the autonomy contract: in its role file when the runtime loads one,
   // otherwise at the start of its first request (GY-184).
   const carried = withAutonomyContract(!!launchRoleContracts[kind], { request: text, role: options.role });
