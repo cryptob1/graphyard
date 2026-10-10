@@ -2,7 +2,7 @@ import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { copyFileSync, readFileSync, symlinkSync } from 'node:fs';
+import { copyFileSync, existsSync, readFileSync, symlinkSync } from 'node:fs';
 import { readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
@@ -498,6 +498,10 @@ test('integration:shadow-trial-env-parity — the loop\'s shadow trial of this r
   // The coordinator checkout: a shared clone of this repository holding both commits, borrowing this checkout's install for the trial's lockfile match.
   const scratch = await temporaryDirectory('shadow-parity', tmpdir()), root = join(scratch, 'repo');
   execFileSync('git', ['clone', '-q', '--shared', '--no-checkout', own, root], { stdio: 'ignore' });
+  // CI's checkout is shallow (two commits), and a clone of a worktree (the trial's own checkout, where this file runs
+  // nested) does not carry the shallow boundary, so merge-tree would walk past it to a commit it never fetched.
+  const shallow = ownGit('rev-parse', '--path-format=absolute', '--git-path', 'shallow');
+  if (existsSync(shallow)) copyFileSync(shallow, join(root, '.git', 'shallow'));
   execFileSync('git', ['-C', root, 'update-ref', 'refs/remotes/origin/main', mainTip]);
   copyFileSync(join(own, 'package-lock.json'), join(root, 'package-lock.json'));
   symlinkSync(resolve(dirname(createRequire(import.meta.url).resolve('tsx/package.json')), '..'), join(root, 'node_modules'));
