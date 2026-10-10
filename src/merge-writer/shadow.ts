@@ -168,6 +168,11 @@ export function shadowGateAttention(verdicts: readonly ShadowVerdict[], explanat
 export const trialCauseLength = 400;
 // A trial keeps FORCE_COLOR, so the runner's summary may carry ANSI escapes before every line it prints.
 const ansiEscape = /\u001b\[[0-9;?]*[ -/]*[@-~]/g;
+/**
+ * The line a trial's log tail puts where it cut a failing group's output (GY-1639): what follows may
+ * be the middle of a `failing tests:` summary whose heading was cut, so it reopens summary reading.
+ */
+export const trialCutLine = "… (this group's earlier output was cut)";
 const testId = (line: string) => line.replace(/^\s*✖\s*/, '').replace(/\s*\([\d.]+m?s\)\s*$/, '').split(' — ')[0]!.trim();
 
 /**
@@ -183,11 +188,12 @@ export function trialFailureCause(logTail: string | undefined | null): string | 
   // A trial concatenates its groups' output, so the log may carry one summary per failed group: each
   // `failing tests:` heading opens a summary, and an unindented line that is neither a test nor its file closes it.
   // The tail is cut to its last characters, so it may start inside a summary whose heading was cut off:
-  // complete entries before any other unindented line are read as that summary's.
+  // complete entries before any other unindented line are read as that summary's. A failing group's
+  // own cut output (`trialCutLine`) is read the same way.
   let inSummary = true, file: string | null = null;
   for (let index = 0; index < lines.length; index++) {
     const line = lines[index]!;
-    if (/^\s*✖ failing tests:\s*$/.test(line)) { inSummary = true; file = null; continue; }
+    if (/^\s*✖ failing tests:\s*$/.test(line) || line.trim() === trialCutLine) { inSummary = true; file = null; continue; }
     if (!inSummary || !line.trim()) continue;
     const at = line.match(/^test at (\S+?):\d+:\d+\s*$/);
     if (at) { file = at[1]!; continue; }
