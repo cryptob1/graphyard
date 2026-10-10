@@ -29,7 +29,7 @@ Flows read `GET /api/github/installation`, recording `.graphyard/master-actions/
 
 `nextAction` (one per item): `dispatch`, `request-review`, `request-rework`, `approve-scope`, `resync`, `reclaim`, `merge`, `verify-deployment`, `escalate`; judgements: `actions.needsHuman`. `graphyard init` starts `graphyard-executor@N`; `master executors restart` moves stale slots to the current release; verified deployments advance clean checkouts, restart executors and loop (dirty: `upgrade`; claim refusals 15 min: loop alone). Fenced (`POST /api/actions/presence`) or claim-renewing executors live; presence upserts from `serves`. `resync` (`POST /api/work/:id/resync` `{since}`) needs a newer observation. `dispatch`/`request-review` complete when a session already answers the head; busy profiles stall after 30min. Three failures with an unchanged reason mark a row stalled rather than retrying (a fleet that looks idle): in no count and no list, but in `actions.stalled` and on the item's own card; backoff never outlives it; eight escalate. Ticks requeue ownerless items (`liveness.violations`).
 
-Declared slot not `active` (systemd, else `PRINCIPAL@HOST/N` presence): `resources` fault naming `journalctl --user -u graphyard-executor@N.service` unless stopped <2min. `--install` needs `Restart=always`, `RestartSec` ≤60s. Worker starts fenced <2min retry after lapse; longer fail naming it.
+Declared slot not `active` (systemd, else `PRINCIPAL@HOST/N` presence): `resources` fault naming `journalctl --user -u graphyard-executor@N.service` unless stopped <2min. `--install` needs `Restart=always`, `RestartSec` ≤60s. Worker starts fenced <2min retry after lapse; longer fail, named.
 
 ## Recovery
 
@@ -41,7 +41,7 @@ Unacted producer requests (unstarted, launch refused, exited at launch) relaunch
 
 ## Fault classes
 
-`faultClass` (`master status` `faults`): recurring classes file one item; instances predating a delivered class item's landing (not opening) link to it; triage proposes closing items listing only those; a resource at bound files `resource:ID`; also `fleet-capacity`, `unanswered-request` (past `settledAnswerGraceMs`), `configuration`, `decision-unanswered` (not `loop-silence`), and `unclassified` unless named (`plane-unavailable`, `fix-item`, `decision-stale`, `overlong-session`). Review unlaunched 15min: `concurrency-starved`, `review-settlement`, `launch-review`. Unanswering planes: one `plane-unavailable`; `planeWaitMs` (control-plane time in flight) is neither `loop-cost` nor `cycle-p90`. Pre-start launch failures: one dispatch fault, not `session`.
+`faultClass` (`master status` `faults`): recurring classes file one item; instances predating a delivered class item's landing (not opening) link to it; triage proposes closing items listing only those; a resource at bound files `resource:ID`; also `fleet-capacity`, `unanswered-request` (past `settledAnswerGraceMs`), `configuration`, `decision-unanswered` (not `loop-silence`), and `unclassified` unless named (`plane-unavailable`, `fix-item`, `decision-stale`, `overlong-session`). Review unlaunched 15min: `concurrency-starved`, `review-settlement`, `launch-review`. Unanswering planes: `plane-unavailable`; `planeWaitMs` (control-plane time) is neither `loop-cost` nor `cycle-p90`. Pre-start launch failures: one dispatch fault, not `session`.
 
 ## Shadow merge gate
 
@@ -49,6 +49,6 @@ Unacted producer requests (unstarted, launch refused, exited at launch) relaunch
 
 ## Pipeline speed
 
-Target (10+ deliveries): submit→merge p50 ≤30min, p90 ≤60min. Row `speed`: `executionMs`, `waitMs`, `reworkRounds`, `interventions`; verdict `speed.submitToMerge`; `node scripts/measure-pipeline-speed.mjs` records what `manual:speed-target-met` reads.
+Target (10+ deliveries): submit→merge p50 ≤30 minutes, p90 ≤60 minutes. Row `speed`: `executionMs`, `waitMs`, `reworkRounds`, `interventions`; verdict `speed.submitToMerge`; `node scripts/measure-pipeline-speed.mjs` records what `manual:speed-target-met` reads.
 
 Loop's decisions step stays within 10 s a cycle: one `decision.*` ledger read names moved items; a history whose ledger has not moved is kept, not read. Widenings refused by 5xx or stale revision and timed-out decision history reads retry next cycle (twice: fault) unless moot (delivered, answered, lease ended, head moved).
