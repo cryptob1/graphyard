@@ -7,9 +7,9 @@ Criterion: `{"id":"AC-1","text":"OUTCOME","proofs":["integration:NAME"]}`. `unit
 
 ## Dispatch optimistically, smallest scope first
 
-`plannedFiles` (paths, `/`-ending prefixes) scope, never lock: `sync` and GitHub's [merges](delivery.md#one-delivery-path) integrate overlaps (`master status`: `overlap.concurrent`, `git merge-tree` failures). Root-level directories (`highConflict`) need `--allow-broad-scope`; only `exclusiveResources` (claim-reserved) hold dispatch. Asks fold past 20 new files/directory or the cap; asked new files need no creating criterion, even quarantined.
+`plannedFiles` (paths, `/`-ending prefixes) scope, never lock: `sync` and GitHub's [merges](delivery.md#one-delivery-path) integrate overlaps (`master status`: `overlap.concurrent`, `git merge-tree` failures). Root-level directories (`highConflict`) need `--allow-broad-scope`; only `exclusiveResources` (claim-reserved) hold dispatch. Asks fold past 20 new files/directory or the cap; asked files and fold directories need no creating criterion, even quarantined.
 
-`worktree GY-N EPOCH` detaches earlier worktrees (`workspace.preserved`), removes abandoned (`reclaimed`); failing, releases the claim. Launch renews lease from claim. Unacknowledged reviewer/producer launches fail after start bound + 120s. Lease-less idle/done Herdr sessions are launchable. **3** single-cause failures, fleet-idle excluded: `dispatchblock` blocker until `graphyard unblock GY-N REASON`; older fleet-idle ones (`dispatch-failure`) clear once launchable.
+`worktree GY-N EPOCH` detaches earlier worktrees (`workspace.preserved`), removes abandoned (`reclaimed`); failing, releases the claim. Launch renews lease from claim. Unacknowledged reviewer/producer launches fail after start bound + 120s. Lease-less idle/done Herdr sessions launch. **3** single-cause failures, fleet-idle excluded: `dispatchblock` blocker until `graphyard unblock GY-N REASON`; older fleet-idle ones (`dispatch-failure`) clear once launchable.
 
 ## Review gate: verdicts, not threads
 
@@ -31,4 +31,4 @@ Workers run build and `graphyard verify GY-N` (own proofs; CI: all), submit on p
 
 [Speed](master-agent-reference.md#pipeline-speed), [proofs in CI](github.md#proofs-in-ci). `graphyard diagnose GY-N` names holds; `base-behind`/`base-conflict`: rework or, docs-only, [docs-sync](development.md#documentation-that-rarely-conflicts) (own checkout). Polls save only on moved submission, candidate, policy or queue tip; three unsaved escalate (`observation.no-save-escalated`, `observation-starved` attention, `/api/status` `starvedJobs`).
 
-Stalled rows name remedies (`src/stall-remedies.ts`): App permission holds run `master browser installation-accept` (`app-permissions` first if needed) once per unchanged run (`POST /api/actions/:id/remedy`); refusals escalate once; full roles: `master registry role set ROLE ACCOUNT… --concurrency N` or session ending.
+Stalled rows name remedies (`src/stall-remedies.ts`): App permission holds run `master browser installation-accept` (`app-permissions` first) once per unchanged run (`POST /api/actions/:id/remedy`); refusals escalate once; full roles: `master registry role set ROLE ACCOUNT… --concurrency N` or session ending.

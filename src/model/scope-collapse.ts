@@ -234,19 +234,21 @@ export function scopeRequestOutcome(item: { key: string; plannedFiles?: readonly
   return { state: 'pending', text: `Graphyard: your scope request on ${item.key} (epoch ${ask.epoch}) for ${ask.paths.join(', ')} is ${own.decision ? 'with the independent approver: the widening rule could not ground it' : 'waiting for the widening rule'}; you keep your lease` };
 }
 /**
- * The paths a worker's open scope ask names (GY-1676): the live attempt's request, else the one an
- * ended attempt carried to the approver. A file the worker asked for is one it creates, so a
- * widening that answers the ask plans it although the base branch does not hold it yet; requiring
- * a criterion to say so instead makes the revision more than a planned-files widening, which a
- * live lease or containment quarantine refuses.
+ * The scopes a worker's open ask grounds (GY-1676): the paths the live attempt's request names,
+ * else the ones an ended attempt carried to the approver, and every directory entry the ask's own
+ * fold (`collapsePlannedFiles` against the item's current plannedFiles and area) produces for it.
+ * A file the worker asked for is one it creates, so a widening that answers the ask plans it
+ * although the base branch does not hold it yet; requiring a criterion to say so instead makes
+ * the revision more than a planned-files widening, which a live lease or containment quarantine
+ * refuses. A directory the fold produces — for the ask's width or to stay under the cap — is
+ * grounded the same way, since that fold is the very widening the loop proposes; a directory that
+ * merely contains an asked file is not, so asking for `newdir/a.ts` never plans the rest of `newdir/`.
  */
-export const askedScopePaths = (item: { scopeRequest?: ScopeRequestState | null; carriedScopeRequest?: ScopeRequestState | null }) =>
-  (item.scopeRequest ?? item.carriedScopeRequest)?.paths ?? [];
-/**
- * Whether an open ask grounds a planned path the base lacks: the path lies within a scope the ask
- * names, or it is a directory the ask itself folds into for its width (more than
- * `collapseDirectoryFiles` asked paths beneath it). A directory that merely contains one asked file
- * is never grounded, so asking for `newdir/a.ts` never plans the rest of `newdir/`.
- */
-export const askGrounds = (path: string, asked: readonly string[]) => asked.some(entry => pathScopeContains(entry, path))
-  || (pathScope(path).prefix && asked.filter(entry => pathScopeContains(path, entry)).length > collapseDirectoryFiles);
+export function askedScopes(item: { plannedFiles?: readonly string[]; criteria?: readonly ScopeCriterion[]; scopeRequest?: ScopeRequestState | null; carriedScopeRequest?: ScopeRequestState | null }): string[] {
+  const asked = (item.scopeRequest ?? item.carriedScopeRequest)?.paths ?? [];
+  const paths = unplannedPaths(item.plannedFiles, asked);
+  const folded = paths.length ? collapsePlannedFiles(item.plannedFiles ?? [], paths, collapseArea(item)).collapsed.map(entry => entry.scope) : [];
+  return [...new Set([...asked, ...folded])];
+}
+/** Whether an open ask grounds a planned path the base lacks: it lies within one of the scopes `askedScopes` returns. */
+export const askGrounds = (path: string, asked: readonly string[]) => asked.some(entry => pathScopeContains(entry, path));

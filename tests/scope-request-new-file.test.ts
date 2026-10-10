@@ -13,7 +13,7 @@ import { emptyDaemonState, runCycle, scopeRoutineDecision, type DaemonEffects, t
 import { approverSessionName, decisionInput, masterConfigSchema, type HerdrAgent, type MasterConfig } from '../src/master.js';
 import { derivedIntent } from '../src/cli/master.js';
 import { plannedFilesMax } from '../src/model/scope.js';
-import { askedScopePaths, collapseArea, collapsePlannedFiles } from '../src/model/scope-collapse.js';
+import { askedScopes, collapseArea, collapsePlannedFiles } from '../src/model/scope-collapse.js';
 import { derivePlannedFiles } from '../src/model/work.js';
 import type { Principal, Work } from '../src/model.js';
 
@@ -131,16 +131,36 @@ test('unit:scope-request-new-file — one new file beside 21 planned src paths i
 
   // AC-2's derivation: a path the item's open ask names is planned although the base does not hold it yet; any other is still refused.
   const tree = new Set(planned);
-  assert.deepEqual(askedScopePaths(item), [newFile]);
-  assert.deepEqual(askedScopePaths({ scopeRequest: null, carriedScopeRequest: item.scopeRequest }), [newFile], 'an ask an ended attempt carried counts too');
-  assert.deepEqual(derivePlannedFiles({ plannedFiles: [...planned, newFile], criteria }, tree, askedScopePaths(item)).missing, []);
+  assert.deepEqual(askedScopes(item), [newFile]);
+  assert.deepEqual(askedScopes({ ...item, scopeRequest: null, carriedScopeRequest: item.scopeRequest }), [newFile], 'an ask an ended attempt carried counts too');
+  assert.deepEqual(derivePlannedFiles({ plannedFiles: [...planned, newFile], criteria }, tree, askedScopes(item)).missing, []);
   assert.deepEqual(derivePlannedFiles({ plannedFiles: [...planned, newFile], criteria }, tree).missing, [newFile], 'without the ask the new path is refused as before');
-  assert.deepEqual(derivePlannedFiles({ plannedFiles: [...planned, newFile, 'src/typo.ts'], criteria }, tree, askedScopePaths(item)).missing, ['src/typo.ts']);
-  // A directory the base lacks is grounded only by an ask wide enough to fold into it, never by one asked file inside it.
-  assert.deepEqual(derivePlannedFiles({ plannedFiles: ['newdir/', 'newdir/**'], criteria }, tree, ['newdir/a.ts']).missing, ['newdir/', 'newdir/**']);
+  assert.deepEqual(derivePlannedFiles({ plannedFiles: [...planned, newFile, 'src/typo.ts'], criteria }, tree, askedScopes(item)).missing, ['src/typo.ts']);
+  // A directory the base lacks is grounded only by a fold the ask itself produces, never by one asked file inside it.
+  const newCriteria = [{ id: 'AC-1', text: 'The split job lives in newdir/a.ts', proofs: ['unit:split'] }];
+  const ask = (paths: string[], plannedFiles: readonly string[]) => askedScopes({ plannedFiles, criteria: newCriteria, scopeRequest: { ...item.scopeRequest!, paths } });
+  assert.deepEqual(ask(['newdir/a.ts'], planned), ['newdir/a.ts'], 'a one-file ask grounds only its path');
+  assert.deepEqual(derivePlannedFiles({ plannedFiles: ['newdir/', 'newdir/**'], criteria }, tree, ask(['newdir/a.ts'], planned)).missing, ['newdir/', 'newdir/**']);
   const wideNew = Array.from({ length: 21 }, (_, index) => `newdir/file-${String(index).padStart(2, '0')}.ts`);
-  assert.deepEqual(derivePlannedFiles({ plannedFiles: ['newdir/'], criteria }, tree, wideNew).missing, [], 'the fold of a 21-file ask is planned');
+  assert.deepEqual(ask(wideNew, planned), [...wideNew, 'newdir/'], 'a 21-file ask grounds the directory its width folds into');
+  assert.deepEqual(derivePlannedFiles({ plannedFiles: ['newdir/'], criteria }, tree, ask(wideNew, planned)).missing, [], 'the fold of a 21-file ask is planned');
   assert.deepEqual(derivePlannedFiles({ plannedFiles: ['newdir/a.ts'], criteria }, tree, ['newdir/']).missing, [], 'a file inside an asked directory is planned');
+  // AC-3: a two-file ask for a directory the base lacks, folded into that directory only to stay under
+  // the cap, is grounded by the fold the loop proposes: the cap fold applies while the lease stands.
+  const nearCap = Array.from({ length: plannedFilesMax - 1 }, (_, index) => `src/bulk/file-${String(index).padStart(3, '0')}.ts`);
+  const capFold = collapsePlannedFiles(nearCap, ['newdir/a.ts', 'newdir/b.ts'], collapseArea({ criteria: newCriteria, plannedFiles: nearCap }));
+  assert.deepEqual(capFold.collapsed.map(entry => entry.scope), ['newdir/'], 'the cap folds the two files into their directory');
+  assert.equal(capFold.plannedFiles.length, plannedFilesMax);
+  assert.deepEqual(ask(['newdir/a.ts', 'newdir/b.ts'], nearCap), ['newdir/a.ts', 'newdir/b.ts', 'newdir/']);
+  assert.deepEqual(derivePlannedFiles({ plannedFiles: capFold.plannedFiles, criteria: newCriteria }, new Set(nearCap), ask(['newdir/a.ts', 'newdir/b.ts'], nearCap)).missing, [], 'the cap fold into a directory the base lacks is planned');
+  assert.deepEqual(derivePlannedFiles({ plannedFiles: capFold.plannedFiles, criteria: newCriteria }, new Set(nearCap)).missing, ['newdir/'], 'without the ask the directory is refused as before');
+  assert.deepEqual(derivePlannedFiles({ plannedFiles: [...capFold.plannedFiles, 'other/'], criteria: newCriteria }, new Set(nearCap), ask(['newdir/a.ts', 'newdir/b.ts'], nearCap)).missing, ['other/'], 'a directory the fold did not produce is still refused');
+  // The decision the loop routes for that ask is the cap fold, and derivation accepts exactly what it proposes.
+  const cappedItem = { ...item, plannedFiles: nearCap, criteria: newCriteria, scopeRequest: { ...item.scopeRequest!, paths: ['newdir/a.ts', 'newdir/b.ts'], decision: { ...refused, paths: ['newdir/a.ts', 'newdir/b.ts'] } } } as unknown as Work;
+  const cappedDecision = scopeRoutineDecision(cappedItem, now, true)!;
+  assert.equal(cappedDecision.action, 'requirements');
+  assert.deepEqual(cappedDecision.input!.plannedFiles, capFold.plannedFiles);
+  assert.deepEqual(derivePlannedFiles({ plannedFiles: cappedDecision.input!.plannedFiles, criteria: newCriteria }, new Set(nearCap), askedScopes(cappedItem)).missing, []);
 });
 
 test('integration:scope-request-new-file — an approved exact-path widening for a file the base lacks applies under the live lease and containment quarantine, and the worker keeps its lease', async () => {

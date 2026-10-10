@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { defaultChildRun, type ChildRun } from '../child-runner.js';
 import { decisionInput, type MasterConfig } from '../master.js';
 import { derivePlannedFiles, plannedFilesRefusal, postDeployCriterionRefusal, type Work } from '../model/work.js';
-import { askedScopePaths } from '../model/scope-collapse.js';
+import { askedScopes } from '../model/scope-collapse.js';
 
 /**
  * The files of the base branch an item will be worked on, read from the coordinator checkout
@@ -44,8 +44,8 @@ export async function derivedIntent(root: string, config: Pick<MasterConfig, 'ba
   const postDeploy = postDeployCriterionRefusal(intent.criteria ?? []);
   if (postDeploy) throw new Error(postDeploy);
   const tree = await (deps.tree ?? baseTree)(root, config.baseBranch);
-  // A new file the item's open scope ask names is the worker's to create (GY-1676): planned without a criterion rewrite.
-  const derived = derivePlannedFiles({ plannedFiles: intent.plannedFiles ?? [], criteria: intent.criteria ?? [] }, tree.files, work ? askedScopePaths(work) : []);
+  // A new file the item's open scope ask names, or a directory the ask's fold produces, is the worker's to create (GY-1676): planned without a criterion rewrite.
+  const derived = derivePlannedFiles({ plannedFiles: intent.plannedFiles ?? [], criteria: intent.criteria ?? [] }, tree.files, work ? askedScopes(work) : []);
   if (derived.missing.length) throw new Error(plannedFilesRefusal(derived.missing, tree.ref));
   const result = await deps.mutate(work ? `work/${work.id}/requirements` : 'work', { ...intent, plannedFiles: derived.plannedFiles, reason }, process.env.GRAPHYARD_REQUEST_ID ?? randomUUID(), await deps.token());
   return { ...result, plannedFilesDerived: { base: tree.ref, added: derived.added } };

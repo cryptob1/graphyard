@@ -280,7 +280,7 @@ export interface PlannedFilesDerivation {
  */
 export function derivePlannedFiles(
   item: { plannedFiles?: readonly string[]; criteria: readonly CriterionText[]; documentation?: ItemDocumentation | null; origin?: WorkOrigin | null; description?: string | null },
-  tree: ReadonlySet<string>, asked: readonly string[] = [], // an open scope ask's paths (askedScopePaths, GY-1676): planned though the tree lacks them, when askGrounds
+  tree: ReadonlySet<string>, asked: readonly string[] = [], // the scopes an open ask grounds (askedScopes, GY-1676): planned though the tree lacks them
 ): PlannedFilesDerivation {
   const planned = [...new Set(item.plannedFiles ?? [])], added: PlannedFilesDerivation['added'] = [];
   const missing = planned.filter(path => !scopeExists(path, tree) && !describedAsNew(path, item.criteria) && !askGrounds(path, asked));
