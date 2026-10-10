@@ -24,7 +24,7 @@ import { coordinatorConfinementRefusal, rerunFailedChecks } from '../../src/mast
 import { doctorSettingsSchema } from '../../src/master/doctor-settings.js';
 import { headlessConfinementWrapper, sessionConfinement } from '../../src/master/launch.js';
 import { type DaemonEffects, type DaemonState, answeringWidening, emptyDaemonState, runCycle } from '../../src/master-daemon.js';
-import { type HostMemoryReading, owedUpgrade, readReclaimReports, readResources, reclaimResources, resourceAttention, settleTmpReclaim } from '../../src/master-resources.js';
+import { type HostMemoryReading, owedUpgrade, readReclaimReports, selfUpgradeBoundMs, readResources, reclaimResources, resourceAttention, settleTmpReclaim } from '../../src/master-resources.js';
 import { type DoctorFile } from '../../src/daemon/doctor.js';
 import { approvalWatchSchema, retainedActions } from '../../src/daemon/state.js';
 import { adoptHeadlessRuns, coordinatorCheckoutGuard, noteWatchdog } from '../../src/daemon/run.js';
@@ -62,6 +62,7 @@ import { type TmpReclaimReport, heldOpenPaths, reclaimTmpDirectories, tmpReclaim
 import { temporaryDirectory } from './temp-dirs.js';
 import { lostRunReason, sessionRetry } from '../../src/producer.js';
 import { type SelfUpgradeOutcome, performSelfUpgrade } from '../../src/daemon/upgrade.js';
+import { type ExecutorRegistration, executorFleetReport } from '../../src/executor-fleet.js';
 import { cycleDelay, watchdogPlan } from '../../src/daemon/liveness.js';
 import { LoopWake, loopWakeSubjects } from '../../src/daemon/loop-wake.js';
 import { loopSelfProvision, masterSetup } from '../../src/cli/master-setup.js';
@@ -269,8 +270,15 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
    * deploy thus finds a tip with loaded code the served release does not contain, and holds its
    * restart until a later deploy serves it. Every restart is sampled with the release production
    * served when it ran, and every pass with its outcome, its owed target and the upgrade rows.
+   * `fleet` (GY-1619) runs two executors on the release their last restart loaded, and feeds the
+   * fleet report master status builds (executorFleetReport, read with the held-CLI pin and the
+   * restart the cursor owes) into the loop's fault step every cycle: a restart attempted inside
+   * `refuse` is refused (a claim held), and from `strandAt` a restart reported done leaves the fleet
+   * on its release (a restart that never reached it), a split nothing owes. From `stalePinAt` the
+   * pin's lift fails (performSelfUpgrade swallows it), so the pointer outlives the hold and the
+   * executors restart through the stale launcher onto the pinned release.
    */
-  releaseLag?: { cutAgoMs: number } }) {
+  releaseLag?: { cutAgoMs: number; fleet?: { refuse?: { from: number; to: number }; strandAt?: number; stalePinAt?: number } } }) {
   const dayStart = clock.now();
   // A day may restage the shared scenario: the day-scoped view of the plan is what every fault
   // below arms from, while each test's own assertions still read the shared base plan.
@@ -2247,6 +2255,20 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
       return { items: report.attentionItems } as ReportedAttention;
     };
   }
+  if (options.releaseLag?.fleet) {
+    // GY-1619: what master status reports of the fleet (assembleReportedAttention), beside whatever else this day reports.
+    const attention = effects.reportedAttention ?? (async () => ({ items: [] }) as ReportedAttention);
+    const registration = (slot: number): ExecutorRegistration => ({ version: 1, name: `soak-executor/${slot}`, host: config.hostId, pid: 4000 + slot, principal: principals.coordinator.id, kinds: ['dispatch'], intervalSeconds: 15,
+      root: '/soak/coordinator', release: { commit: fleetDay.loaded, dirty: false }, supervisor: { unit: `graphyard-executor@${slot}.service`, restart: `systemctl --user restart graphyard-executor@${slot}.service` },
+      state: 'running', standDown: null, startedAt: new Date(dayStart).toISOString(), updatedAt: new Date(clock.now()).toISOString(), stoppedAt: null, claims: 0, lastClaim: null, inFlight: null, claiming: null });
+    effects.reportedAttention = async (...args) => {
+      const reported = await attention(...args), now = clock.now();
+      const report = executorFleetReport([1, 2].map(registration), { commit: checkout.head }, { hostId: config.hostId, now, alive: () => true, held: releaseLagDay.pin, upgrade: owedUpgrade(state), boundMs: selfUpgradeBoundMs });
+      fleetDay.samples.push({ elapsed: now - dayStart, loaded: fleetDay.loaded, coordinator: checkout.head, pin: releaseLagDay.pin, split: report.split, inMotionUntil: report.attention.find(item => item.subject === 'executors')?.inMotionUntil ?? null,
+        stall: state.upgrade.stalled?.cause ?? null, pending: state.upgrade.pending?.to ?? null });
+      return { ...reported, items: [...reported.items, ...report.attention] } as ReportedAttention;
+    };
+  }
   let publishedMergeQueue: string | null = null;
   const mergeQueuePosts: { at: number; settings: Record<string, number> }[] = [];
   effects.publishMergeSettings = async () => {
@@ -2290,6 +2312,9 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   // GY-1585: the base tip as each cycle found it, which a lagging promotion cuts its release from;
   // every restart the self-upgrade ran with the release production served then; every pass's sample.
   // `pin` is the release the checkout's launcher runs spawned CLI processes on, null while unpinned.
+  // GY-1619: the executors the self-upgrade restarts, on the release their last restart loaded, and every cycle's fleet report.
+  const fleetDay = { loaded: github.tip, refused: [] as { elapsed: number; to: string }[],
+    samples: [] as { elapsed: number; loaded: string; coordinator: string; pin: string | null; split: boolean; inMotionUntil: string | null; stall: string | null; pending: string | null }[] };
   const releaseLagDay = { tips: [] as { at: number; tip: string }[], pin: null as string | null, restarts: [] as { elapsed: number; kind: 'executors' | 'self'; to: string; served: string; contained: boolean; pin: string | null }[],
     passes: [] as { elapsed: number; outcome: SelfUpgradeOutcome['outcome'] | null; pending: string | null; stall: string | null; held: { state: string; attempts: number } | null; waiting: number; upgradeRows: number; head: string; served: string; fetches: number; pin: string | null }[] };
   const upgrades = { fetches: 0, checkouts: [] as { at: number; from: string; to: string }[], executors: [] as string[], self: 0, outcomes: [] as SelfUpgradeOutcome['outcome'][],
@@ -2331,10 +2356,16 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   };
   const selfUpgrade = (state: DaemonState) => performSelfUpgrade(config, state, {
     root: '/soak/coordinator', run: coordinatorGit, now: clock.now, persist: async () => {},
-    holdCli: async commit => { releaseLagDay.pin = commit; },
+    holdCli: async commit => {
+      if (commit === null && releaseLagDay.pin && clock.now() - dayStart >= (options.releaseLag?.fleet?.stalePinAt ?? Infinity)) throw new Error('EACCES: the pin could not be removed');
+      releaseLagDay.pin = commit;
+    },
     restartExecutors: async to => {
       // A busy fleet: a claim outlives restartExecutors' bounded wait for the first passes, and the restart is refused.
       if (upgrades.held.length < plan.heldClaimRestarts) { upgrades.held.push(to); return { result: 'refused', reason: `Restart refused while an executor on ${config.hostId} holds a claimed action`, coordinator: { commit: to }, held: [], restarted: [], unsupervised: [], forgotten: [] }; }
+      const fleet = options.releaseLag?.fleet, elapsed = clock.now() - dayStart;
+      if (fleet?.refuse && elapsed >= fleet.refuse.from && elapsed < fleet.refuse.to) { fleetDay.refused.push({ elapsed, to }); return { result: 'refused', reason: `Restart refused while an executor on ${config.hostId} holds a claimed action`, coordinator: { commit: to }, held: [], restarted: [], unsupervised: [], forgotten: [] }; }
+      if (fleet && elapsed < (fleet.strandAt ?? Infinity)) fleetDay.loaded = elapsed >= (fleet.stalePinAt ?? Infinity) && releaseLagDay.pin ? releaseLagDay.pin : to;
       if (options.releaseLag) releaseLagDay.restarts.push({ elapsed: clock.now() - dayStart, kind: 'executors', to, served: production.sha, contained: github.contains(production.sha, to), pin: releaseLagDay.pin });
       upgrades.executors.push(to); return { result: 'restarted', reason: null, coordinator: { commit: to }, held: [], restarted: [], unsupervised: [], forgotten: [] };
     },
@@ -3087,7 +3118,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     decided, misreads, prompts, screens, heldAccounts, approverAccounts, retryReset, limitMenuDay, menuReset, menuNotice, exitedLive, exitedClosed, exitedRowsSeen, reassign, workspaceFailures, workspaceCooled, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, fenced, mergeStallSightings, master, baseFailure,
     blockerEvents, blockerProbes, githubStatusReads, credentialReads, blockerRecords, blockerDecisions, blockerActions, blockerKeysPeak, attempts, lanesSeen, laneApplications, approverWorks, approverDecisions, failover, webhook, remedies, observeRequests, starvation, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size }, mechanical: { ledger, botRounds, misclassified, reviewHolds }, shared, charges: { ...charged, b: charged.b.length, instancesSeen: [...charged.instancesSeen], restarts: chargeRestarts },
     wakes, lateReading, staleMerges, restartLog, hostDay, guardDay, mainWatchDay, budgetDay, slowPlaneDay, observationDay, deploymentDay, decompositionDay: decompositionHistory, diagnosisRaces, diagnosisRequestRaces, transientRefused, lateReads, staleReleaseDay, drain, acceptanceDay: acceptance?.day ?? null, plannerDay: planner?.day ?? null, loopWakeDay: loopWakeDay || null,
-    restartDay: options.checkoutRestart ? restartDay : null, releaseLagDay: options.releaseLag ? releaseLagDay : null, failedLaunches };
+    restartDay: options.checkoutRestart ? restartDay : null, releaseLagDay: options.releaseLag ? releaseLagDay : null, fleetDay: options.releaseLag?.fleet ? fleetDay : null, failedLaunches };
 }
 
 /**

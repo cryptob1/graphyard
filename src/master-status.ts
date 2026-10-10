@@ -142,7 +142,7 @@ export async function resourceStatus(root: string, master: MasterConfig, observe
     profiles: { workers: master.workers, reviewers: master.reviewers, producers: master.producers },
     plane: await readPlaneResources(master.url, deps.fetcher), loop: observed.loop, revision, upgrade, reclaimSeen: reclaim.seen, disk: await readDisk(root, master), tmp: await readTmpInodes(root) });
   const attention = resourceAttention(readings);
-  return { readings, attention, report: resourceReport(readings, reclaim.reports.at(-1) ?? null) };
+  return { readings, attention, report: resourceReport(readings, reclaim.reports.at(-1) ?? null), upgrade };
 }
 
 /** The `resources` block of `master status`: one row per reading, with a one-line summary. */

@@ -31,7 +31,7 @@ One stateless container, Postgres: `node "$GRAPHYARD_CLI" install --provider rai
 
 A merge unserved five minutes after new `GRAPHYARD_BUILD_SHA` is `delivery.deployment-incident`; earlier or mid-deploy, `production` shows `aheadBy`, `rollingOut: true`, no attention. Deployments: Railway's API (`RAILWAY_API_TOKEN`/`RAILWAY_TOKEN`), else GitHub's under [production environment name](#production-environment-name); failures link logs. Fresh `master verify-deployment` (`servingSource: endpoint`) outranks a lagging list; the build's `/healthz` commit (`servingSource: build`) outranks both. Probe: `master init --deployment-url https://YOUR-DOMAIN/healthz --deployment-sha-field commit`. Idle, the loop reuses verified observations `run.deploymentReuseMinutes` (15; `0` every cycle).
 
-Release lag and `loaded-revision` [resource](operations-reference.md#control-plane-resources) skip deliveries awaiting [promotion](delivery.md). Self-upgrades await production serving their target; `release-lagged`/`upgrade:held` name both commits; `.graphyard/held-cli.json` pins `bin/graphyard.mjs`, executors, restarted loops to the served release.
+Release lag and `loaded-revision` [resource](operations-reference.md#control-plane-resources) skip deliveries awaiting [promotion](delivery.md). Self-upgrades await production serving them (`release-lagged`, `upgrade:held`); `.graphyard/held-cli.json` pins `bin/graphyard.mjs`, executors, loops to it; held executors' owed restarts aren't faults.
 
 Post-deploy the loop records throughput (`.graphyard/measurements/throughput`, `scripts/measure-throughput.mjs --record`), judging the serving release over the trailing 72h's merges (never pre-GY-87) minus operator-touched, grant-refused superseded idle, idle charged from window start; ≥20 all excluded, or ≥10 missing 48h+, escalates once/release (`escalation:throughput:GY-N:REV`) on an owner item the loop closes next cycle once an answering revision applies; `master status` then stops naming `master decide`.
 
@@ -45,7 +45,7 @@ Railway reports `<project> / production`. Startup takes `production.environment`
 
 ### Webhook delivery
 
-Hosted only: no `webhooks.lastDeliveryAt` for 1h, PR open → broken. `webhooks.settingsUrl` → Advanced deliveries: none → inactive; connection error/404 → URL ≠ `https://YOUR-HOST/api/github/webhook`; 401 → secret ≠ `GITHUB_WEBHOOK_SECRET`. Fix, redeliver.
+Hosted: no `webhooks.lastDeliveryAt` for 1h, PR open → broken. `webhooks.settingsUrl` → Advanced deliveries: none → inactive; connection error/404 → URL ≠ `https://YOUR-HOST/api/github/webhook`; 401 → secret ≠ `GITHUB_WEBHOOK_SECRET`. Fix, redeliver.
 
 ## Backup, upgrade, rollback
 
