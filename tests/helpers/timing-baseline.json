@@ -566,6 +566,7 @@
     "tests/pipeline-wait-hotspots.test.ts": 1750,
     "tests/plane-load.test.ts": 615867,
     "tests/planned-files-derived.test.ts": 1268,
+    "tests/post-deploy-criteria.test.ts": 600,
     "tests/post-merge-review.test.ts": 4000,
     "tests/pr-links.test.ts": 261,
     "tests/producer-environment.test.ts": 2661,

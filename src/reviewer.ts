@@ -18,7 +18,7 @@ import { defaultReviewRoundCap, pastReviewCap, reviewRoundCapOf, reviewRoundStat
 import { writeReviewBinding } from './review-post.js';
 import { criteriaRuleSection, followUpFilingKey, listedThreadAliases, listedThreadLimit, readUnresolvedThreads, resolveFollowUpThreads, resolveNamedThreads, threadAliasLimit, threadReadFailureSection, threadSection, unaccountedThreads, type LaunchThread, type ThreadResolution } from './review-threads.js';
 import type { FleetProbe } from './fleet.js';
-import { carriedApproval, implementerIdentities, type Work } from './model.js';
+import { carriedApproval, declaredPostDeploy, implementerIdentities, type Work } from './model.js';
 import { dataDirectory, removeSessionCheckout, type FilesystemProbe, type SessionCheckout } from './install/worktree-root.js';
 import { behindBaseHold, liveReviewRequest } from './model/dispatch.js';
 import { documentationReviewSection, type DocumentationObligation } from './model/documentation.js';
@@ -708,7 +708,22 @@ export async function coordinationCheckout(root: string, config: MasterConfig, k
  * its first parent, and says what becomes of its findings.
  */
 export interface ControlPlanePrompt { head: string; baseTip: string; postMerge?: { mergeSha: string } }
-export function reviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<Pick<MasterConfig, 'cliPath'>>, binding: Pick<ReviewBinding, 'key' | 'pr' | 'sha' | 'baseSha' | 'policyRevision'>, checkout?: SessionCheckout, threads?: { unresolved: LaunchThread[]; failure?: string; total?: number }, criteria?: { id: string; text: string }[], history?: ReviewHistory, documentation?: { obligation: DocumentationObligation; files?: readonly string[] | null }, research?: Pick<Work, 'key' | 'title' | 'description' | 'criteria' | 'researchBrief'> | null, roundsOrMemory?: ReviewRoundStatus | ProjectMemory | null, memory?: ProjectMemory | null, fresh?: FreshReadRecord | null, verification?: { maps: readonly VerificationMap[]; plannedFiles: readonly string[] } | null, plane?: ControlPlanePrompt | null, cappedRefusal?: CappedRefusalContext | null) {
+/** A criterion as the review prompt reads it; `proofs` marks a declared post-deploy verification (GY-1660). */
+export type ReviewCriterion = { id: string; text: string; proofs?: readonly string[] };
+/**
+ * How the reviewer judges declared post-deploy verifications (GY-1660): on the head's pre-merge
+ * evidence, never holding the merge for the live observation, which `master verify-deployment`
+ * checks on the serving release after delivery. Empty when no criterion is declared, so every
+ * other review request stays byte-identical.
+ */
+export function postDeployReviewSection(criteria?: readonly ReviewCriterion[]) {
+  const declared = (criteria ?? []).filter(criterion => criterion.proofs && declaredPostDeploy({ proofs: criterion.proofs })).map(criterion => criterion.id);
+  if (!declared.length) return '';
+  return `${declared.join(', ')} ${declared.length === 1 ? 'is a declared post-deploy verification' : 'are declared post-deploy verifications'}: the live install can only show ${declared.length === 1 ? 'its' : 'their'} outcome after this change is merged and deployed. `
+    + 'Judge each on this head\'s pre-merge evidence — the change that should produce the outcome, and what the head shows before merge — and never request changes or hold the merge because the live install or deployed release has not shown it yet; '
+    + 'master verify-deployment checks it on the serving release after delivery and files a follow-up naming the delivered item when it fails. ';
+}
+export function reviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<Pick<MasterConfig, 'cliPath'>>, binding: Pick<ReviewBinding, 'key' | 'pr' | 'sha' | 'baseSha' | 'policyRevision'>, checkout?: SessionCheckout, threads?: { unresolved: LaunchThread[]; failure?: string; total?: number }, criteria?: ReviewCriterion[], history?: ReviewHistory, documentation?: { obligation: DocumentationObligation; files?: readonly string[] | null }, research?: Pick<Work, 'key' | 'title' | 'description' | 'criteria' | 'researchBrief'> | null, roundsOrMemory?: ReviewRoundStatus | ProjectMemory | null, memory?: ProjectMemory | null, fresh?: FreshReadRecord | null, verification?: { maps: readonly VerificationMap[]; plannedFiles: readonly string[] } | null, plane?: ControlPlanePrompt | null, cappedRefusal?: CappedRefusalContext | null) {
   if (plane) return controlPlaneReviewPrompt(config, binding, plane, checkout, criteria, history, documentation, research, roundsOrMemory, memory, verification);
   let rounds: ReviewRoundStatus | undefined;
   if (roundsOrMemory && 'round' in roundsOrMemory && typeof roundsOrMemory.round === 'number') {
@@ -725,6 +740,7 @@ export function reviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<
     + reviewRoundSection(binding.sha, history, rounds)
     + cappedRefusalSection(cappedRefusal)
     + criteriaRuleSection(binding.key, binding.sha, criteria)
+    + postDeployReviewSection(criteria)
     + findingClassificationSection()
     + (fresh ? freshReadSection(fresh, binding.sha) : '')
     + (documentation ? documentationReviewSection(documentation.obligation, documentation.files) : '')
@@ -748,7 +764,7 @@ export function reviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<
  */
 export const controlPlaneFindingSection = 'Name each nit on its own "Nit: PATH:LINE — FINDING" line. Nits are advisory in control-plane mode: Graphyard keeps them in project memory for later workers, and no bot fixes them, so put anything that must be fixed on a BLOCKING: line instead. ';
 /** The control-plane form of the request (GY-1525 AC-5): head and base named, read from the shared object store, `review post` without a pull-request number. */
-function controlPlaneReviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<Pick<MasterConfig, 'cliPath'>>, binding: Pick<ReviewBinding, 'key' | 'policyRevision'>, plane: ControlPlanePrompt, checkout?: SessionCheckout, criteria?: { id: string; text: string }[], history?: ReviewHistory, documentation?: { obligation: DocumentationObligation; files?: readonly string[] | null }, research?: Pick<Work, 'key' | 'title' | 'description' | 'criteria' | 'researchBrief'> | null, roundsOrMemory?: ReviewRoundStatus | ProjectMemory | null, memory?: ProjectMemory | null, verification?: { maps: readonly VerificationMap[]; plannedFiles: readonly string[] } | null) {
+function controlPlaneReviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<Pick<MasterConfig, 'cliPath'>>, binding: Pick<ReviewBinding, 'key' | 'policyRevision'>, plane: ControlPlanePrompt, checkout?: SessionCheckout, criteria?: ReviewCriterion[], history?: ReviewHistory, documentation?: { obligation: DocumentationObligation; files?: readonly string[] | null }, research?: Pick<Work, 'key' | 'title' | 'description' | 'criteria' | 'researchBrief'> | null, roundsOrMemory?: ReviewRoundStatus | ProjectMemory | null, memory?: ProjectMemory | null, verification?: { maps: readonly VerificationMap[]; plannedFiles: readonly string[] } | null) {
   let rounds: ReviewRoundStatus | undefined;
   if (roundsOrMemory && 'round' in roundsOrMemory && typeof roundsOrMemory.round === 'number') rounds = roundsOrMemory;
   else if (roundsOrMemory && !memory) memory = roundsOrMemory as ProjectMemory;
@@ -766,6 +782,7 @@ function controlPlaneReviewPrompt(config: Pick<MasterConfig, 'repository'> & Par
     + verificationMapDigest(verification?.maps, verification?.plannedFiles, 'reviewer')
     + reviewRoundSection(plane.head, history, rounds)
     + criteriaRuleSection(binding.key, plane.head, criteria)
+    + postDeployReviewSection(criteria)
     + controlPlaneFindingSection
     + (documentation ? documentationReviewSection(documentation.obligation, documentation.files) : '')
     + repetitionReviewSection(documentation?.files)
@@ -786,7 +803,7 @@ function controlPlaneReviewPrompt(config: Pick<MasterConfig, 'repository'> & Par
  * it already judged — or, for a session that never took up its request (GY-93), the request
  * itself, from the launcher that sent it, so the message is complete whichever the case is.
  */
-export function reviewRetryPrompt(repository: string, record: Pick<ReviewRecord, 'key' | 'pr' | 'sha'> & Partial<Pick<ReviewRecord, 'baseSha' | 'policyRevision' | 'checkout' | 'reviewRound' | 'freshRead' | 'mode' | 'postMerge'>>, criteria?: { id: string; text: string }[], cliPath = launcherPath) {
+export function reviewRetryPrompt(repository: string, record: Pick<ReviewRecord, 'key' | 'pr' | 'sha'> & Partial<Pick<ReviewRecord, 'baseSha' | 'policyRevision' | 'checkout' | 'reviewRound' | 'freshRead' | 'mode' | 'postMerge'>>, criteria?: ReviewCriterion[], cliPath = launcherPath) {
   return `You stopped before posting the verdict for ${record.key}. Posting it is part of your reviewer role and already authorized, not a permission to request: post exactly one verdict now. `
     + reviewPostSection(cliPath, 'when the change is not acceptable')
     + `Do not ask for confirmation and do not re-read the diff; post the verdict you already judged. If review post cannot post it, record that as one review posted with --event COMMENT (or, when posting is itself refused, as a final line starting BLOCKED:) and stop. `

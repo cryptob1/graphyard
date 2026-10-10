@@ -12,6 +12,7 @@ import { registeredLaunch } from './model/session-state.js';
 import { answeredByPendingSession, independentProducerProfiles } from './producer.js';
 import { answeredByPendingReview } from './reviewer.js';
 import { daemonSummary, profileHealth, readDaemonState, type DaemonState, type DeploymentObservation } from './master-daemon.js';
+import { filePostDeployFollowUps } from './master-verification.js';
 import { withLaunchedRuntime } from './master/launch.js';
 import { launchedSessionHandle, selectReviewerProfile, type ExecutorEffects, type ExecutorHandler } from './auto-dispatch.js';
 import type { ExecutorRelease } from './executor-fleet.js';
@@ -401,13 +402,15 @@ export function controlPlaneHandlers(config: () => MasterConfig, effects: Contro
       return `${work.key}: GitHub merges ${work.candidate?.sha.slice(0, 12) ?? 'the candidate'} on its branch protection; Graphyard records the delivery from the merged observation`;
     },
     'verify-deployment': async action => {
-      const { work } = await find(action);
+      const { work, all } = await find(action);
       if (action.inputs.kind !== 'verify-deployment') throw new Error('unreachable');
       const observation = await effects.observeDeployment([work]);
       if (observation.source === 'unavailable' || !observation.sha) throw new Error(observation.reason ?? `no deployment could be read for ${work.key}`);
       if (!observation.deployed.includes(work.key)) throw new Error(observation.reason ?? `the running release ${observation.sha.slice(0, 12)} does not carry ${work.key}'s merge ${action.inputs.mergeSha.slice(0, 12)} yet`);
       await effects.mutate(`work/${work.id}/deployment`, { sha: observation.sha, mergeSha: action.inputs.mergeSha, source: observation.source, observedAt: observation.at }, randomUUID());
-      return `observed the release serving ${observation.sha.slice(0, 12)} for ${work.key}`;
+      // GY-1660: the release just observed checks the item's declared post-deploy verifications; an owed one files its follow-up.
+      const owed = (await filePostDeployFollowUps(work, observation.sha, all, (input, requestId) => effects.mutate('work', input, requestId))).filter(check => check.result === 'owed');
+      return `observed the release serving ${observation.sha.slice(0, 12)} for ${work.key}${owed.length ? `; ${owed.map(check => `${check.criterion} owes its post-deploy observation${check.followUp ? ` (${check.followUp})` : ''}`).join(', ')}` : ''}`;
     },
   };
   if (checkoutRefusal) for (const kind of Object.keys(handlers) as NextActionKind[]) {

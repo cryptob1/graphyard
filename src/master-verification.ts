@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm, symlink } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative } from 'node:path';
-import type { Work } from './model.js';
+import { postDeployChecks, type PostDeployCheck, type Work } from './model.js';
 import type { MasterConfig } from './master.js';
 import { observeDeployment, type DeploymentObservation } from './master-daemon.js';
 import { repositoryFromRemote } from './onboarding.js';
@@ -167,6 +167,8 @@ export interface VerificationEffects {
   record: (work: Work, data: VerificationRecord) => Promise<unknown>;
   /** The managed repository; see `VerificationInput.repository`. */
   repository?: string;
+  /** `POST work` with an idempotency key: files the follow-up an owed post-deploy verification needs (GY-1660), returning the created item. */
+  file?: (input: NonNullable<PostDeployCheck['followUp']>['input'], requestId: string) => Promise<{ key?: string } | unknown>;
   now?: () => number;
 }
 
@@ -190,11 +192,11 @@ export async function verifyDeployment(work: Work, effects: VerificationEffects,
   const emits = emitsManagedInstructions(coordinator, effects.repository);
   const isolate = emits && !!effects.isolate && !!observation.sha && !!coordinator.sha && coordinator.sha !== observation.sha;
   let release = coordinator, isolated: boolean = false;
-  const result = (assessment: ReturnType<typeof assessDeploymentVerification>, recorded: 'now' | 'existing' | null) => ({
+  const result = (assessment: ReturnType<typeof assessDeploymentVerification>, recorded: 'now' | 'existing' | null, postDeploy: Awaited<ReturnType<typeof filePostDeployFollowUps>> = []) => ({
     key: current.key, result: assessment.verifiable ? 'verified' as const : 'refused' as const,
     release: { sha: observation.sha, source: observation.source, observedAt: observation.at, covers: assessment.covers },
     checkout: { sha: coordinator.sha, clean: coordinator.clean }, emittedFrom: emits ? { sha: release.sha, clean: release.clean, isolated } : null,
-    checks: assessment.checks, refusals: assessment.refusals, recorded,
+    checks: assessment.checks, refusals: assessment.refusals, recorded, postDeploy,
   });
   // Before spending a scratch checkout, the release identity is presumed to be the one isolation
   // will produce; the full assessment judges the identity git reads back from it.
@@ -210,13 +212,30 @@ export async function verifyDeployment(work: Work, effects: VerificationEffects,
   } else if (emits) emitted = await effects.emit();
   const assessment = assessDeploymentVerification(current, { observation, release, emitted, now: now(), freshnessMs, repository: effects.repository });
   if (!assessment.verifiable) return result(assessment, null);
-  if (current.delivery!.deployment?.sha === assessment.record!.sha) return result(assessment, 'existing');
-  await effects.record(current, assessment.record!);
-  return result(assessment, 'now');
+  const existing = current.delivery!.deployment?.sha === assessment.record!.sha;
+  if (!existing) await effects.record(current, assessment.record!);
+  return result(assessment, existing ? 'existing' : 'now', await filePostDeployFollowUps(current, assessment.record!.sha, snapshot.work, effects.file));
+}
+
+/**
+ * GY-1660: a verified release checks the delivered item's declared post-deploy verifications on
+ * itself. An owed one files its follow-up — once: an item already holding that follow-up's title
+ * is named instead, and the request id makes a retried filing a replay — so the live observation
+ * the merge never waited for is owned by an item rather than by nobody.
+ */
+export async function filePostDeployFollowUps(work: Work, release: string, all: readonly Pick<Work, 'key' | 'title'>[], file?: VerificationEffects['file']) {
+  return Promise.all(postDeployChecks(work, release).map(async check => {
+    const { followUp, ...rest } = check;
+    if (!followUp) return { ...rest, followUp: null };
+    const filed = all.find(item => item.title === followUp.title)?.key;
+    if (filed || !file) return { ...rest, followUp: filed ?? null };
+    const created = await file(followUp.input, followUp.requestId) as { key?: string } | undefined;
+    return { ...rest, followUp: created?.key ?? null };
+  }));
 }
 
 /** Effects bound to the real coordinator process, mirroring the daemon's. */
-export function verificationEffects(config: MasterConfig, deps: { root: string; snapshot: () => Promise<{ work: Work[]; now: string }>; mutate: (path: string, data: unknown) => Promise<any>; run?: Run }): VerificationEffects {
+export function verificationEffects(config: MasterConfig, deps: { root: string; snapshot: () => Promise<{ work: Work[]; now: string }>; mutate: (path: string, data: unknown, requestId?: string) => Promise<any>; run?: Run }): VerificationEffects {
   const run = deps.run ?? defaultRun;
   return {
     snapshot: deps.snapshot, repository: config.repository,
@@ -226,5 +245,6 @@ export function verificationEffects(config: MasterConfig, deps: { root: string; 
     emit: () => emitInstructions(config, run),
     isolate: sha => isolateRelease(config, sha, run),
     record: (work, data) => deps.mutate(`work/${work.id}/deployment`, data),
+    file: (input, requestId) => deps.mutate('work', input, requestId),
   };
 }

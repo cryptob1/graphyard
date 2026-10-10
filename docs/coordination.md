@@ -3,7 +3,7 @@
 
 ## Write observable criteria
 
-Criterion: `{"id":"AC-1","text":"OUTCOME","proofs":["integration:NAME"]}`. `unit:`/`integration:`: producer-runnable on exact head ([dispatch](master-agent.md#automatic-dispatch-at-submit)); `manual:`: two-party attestation unless in `producerProofs`, judged, not title-counted; `e2e:`: [runner](validation.md). Any trusted pass proves it whatever it executed (`unit:`/`integration:`/`e2e:` need `executed > 0`). `graphyard master create` plans; `master requirements GY-N revision.json "REASON"` adds; rewrite/removal/narrowing: two-party `master decide GY-N requirements @revision.json "REASON"`. Revisions replace the document (`expectedPolicyRevision`), lapsing evidence, review, authorization.
+Criterion: `{"id":"AC-1","text":"OUTCOME","proofs":["integration:NAME"]}`. `unit:`/`integration:`: producer-runnable on exact head ([dispatch](master-agent.md#automatic-dispatch-at-submit)); `manual:`: two-party attestation unless in `producerProofs`, judged, not title-counted; `e2e:`: [runner](validation.md). Any trusted pass proves it whatever it executed (`unit:`/`integration:`/`e2e:` need `executed > 0`). `graphyard master create` plans; `master requirements GY-N revision.json "REASON"` adds; rewrite/removal/narrowing: two-party `master decide GY-N requirements @revision.json "REASON"`. Revisions replace the document (`expectedPolicyRevision`), lapsing evidence, review, authorization. Live-install outcomes visible only after deploy are refused at create and `requirements` unless proved by `manual:post-deploy/NAME` (or observed from this head): review judges these pre-merge; `master verify-deployment` checks them on the serving release, filing a follow-up if unmet.
 
 ## Dispatch optimistically, smallest scope first
 

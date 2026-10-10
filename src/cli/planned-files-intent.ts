@@ -3,7 +3,7 @@ import { wholeDocument } from '../model/work-summary.js';
 import { randomUUID } from 'node:crypto';
 import { defaultChildRun, type ChildRun } from '../child-runner.js';
 import { decisionInput, type MasterConfig } from '../master.js';
-import { derivePlannedFiles, plannedFilesRefusal, type Work } from '../model/work.js';
+import { derivePlannedFiles, plannedFilesRefusal, postDeployCriterionRefusal, type Work } from '../model/work.js';
 
 /**
  * The files of the base branch an item will be worked on, read from the coordinator checkout
@@ -26,6 +26,7 @@ export async function baseTree(root: string, baseBranch: string, run: ChildRun =
  * is resolved against the base branch before the intent is recorded. A planned path the tree does
  * not hold, which no criterion describes creating, refuses the item naming it; every file a
  * criterion names that the tree holds is carried in, and reported with the criterion that named it.
+ * A criterion whose outcome is a live-install observation is refused unless declared post-deploy (GY-1660).
  */
 export async function derivedIntent(root: string, config: Pick<MasterConfig, 'baseBranch'>, id: 'create' | 'requirements', args: string[],
   deps: { coordinator: (path: string) => Promise<any>; mutate: (path: string, data: unknown, requestId?: string, credential?: string) => Promise<any>; token: () => Promise<string>; tree?: typeof baseTree }) {
@@ -38,6 +39,9 @@ export async function derivedIntent(root: string, config: Pick<MasterConfig, 'ba
   const work = listed && await wholeDocument(listed, deps.coordinator);
   if (id === 'requirements' && !work) throw new Error(`Unknown work item ${args[0]}`);
   const intent = work ? decisionInput('requirements', work, input) : input;
+  // GY-1660: an undeclared live-install observation is refused at a requirements revision as at create, before anything is read or posted.
+  const postDeploy = postDeployCriterionRefusal(intent.criteria ?? []);
+  if (postDeploy) throw new Error(postDeploy);
   const tree = await (deps.tree ?? baseTree)(root, config.baseBranch);
   const derived = derivePlannedFiles({ plannedFiles: intent.plannedFiles ?? [], criteria: intent.criteria ?? [] }, tree.files);
   if (derived.missing.length) throw new Error(plannedFilesRefusal(derived.missing, tree.ref));
