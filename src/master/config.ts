@@ -28,6 +28,14 @@ export async function readCredentialFile(file: string) {
   if (value.length < 32 || value.length > 10_000) throw new Error('Worker credential file must contain one valid token');
   return value;
 }
+/**
+ * GY-1641: the server origin .graphyard/master.json records (install --apply writes it at the port its
+ * adapter bound), or null when none is recorded or it does not parse: what `master init` targets when
+ * neither --url, GRAPHYARD_URL nor a connection file names a server, instead of the default port.
+ */
+export async function recordedMasterUrl(root: string): Promise<string | null> {
+  try { const url = JSON.parse(await readFile(resolve(root, '.graphyard/master.json'), 'utf8'))?.url; return typeof url === 'string' && url ? serverOrigin(url) : null; } catch { return null; }
+}
 async function readMasterConfig(root: string): Promise<MasterConfig> {
   const file = resolve(root, '.graphyard/master.json');
   // A checkout no install or master init has configured names the step that writes it (GY-1352), not a bare lstat ENOENT.
