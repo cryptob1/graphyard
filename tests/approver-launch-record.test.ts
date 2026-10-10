@@ -367,15 +367,17 @@ test('unit:approver-stall-followup — stall checks date a session only by its o
       panes.clear(); panes.add('pane-replaced'); done.add('pane-replaced');
       // A registry that cannot be told keeps the replaced launch's session on the watch, unbound, rather than lose the only id that
       // ends its slot (the replacement shares its name, so reconciliation cannot tell them apart); the next cycle ends it, then rebinds.
+      // GY-1612: the cycle that first saw the replacement is kept on the watch, so the rebind dates it from then, not from the end.
+      const firstSeen = replacedAt - bound / 4;
       endRefusals = 1;
-      const refused = await runCycle(config, state, loop(replacedAt - 120_000), () => replacedAt - 120_000);
+      const refused = await runCycle(config, state, loop(firstSeen), () => firstSeen);
       assert.deepEqual([watch.pane, watch.session, watch.account], ['pane-relaunched', 'registry-relaunched', 'claude-earlier'], `a session the registry could not end is kept, and nothing rebound: ${JSON.stringify(refused.actions.map(action => action.detail))}`);
       assert.ok(refused.actions.some(action => action.state === 'failed' && action.detail.startsWith('Could not end approver registry session registry-relaunched')), 'the failed end is recorded');
       assert.deepEqual([closed, ended], [['pane-new'], []], 'and the replacement is neither closed nor judged by the replaced launch\'s age');
       const rebound = await runCycle(config, state, loop(replacedAt), () => replacedAt);
       assert.deepEqual(closed, ['pane-new'], `the already-watched replacement is not closed by the earlier launch's age: ${JSON.stringify(rebound.actions.map(action => action.detail))}`);
       assert.equal(watch.pane, 'pane-replaced', 'the watch is rebound to the replacement\'s pane');
-      assert.equal(watch.launchedAt, new Date(replacedAt).toISOString(), 'and dated from when the loop first saw it');
+      assert.equal(watch.launchedAt, new Date(firstSeen).toISOString(), 'and dated from when the loop first saw it, not from the cycle the end succeeded');
       assert.match(rebound.actions.find(action => action.detail.includes('which replaced the one the watch held'))?.detail ?? '', /no launch record names that pane, so it is dated from /);
       assert.deepEqual(ended, ['registry-relaunched: approver session ' + name + ' in pane pane-relaunched was replaced by pane pane-replaced'], 'the replaced launch\'s registry session is ended');
       assert.deepEqual([watch.session, watch.account, watch.runtime], [null, null, null], 'and the watch carries none of the replaced launch\'s registry session, account or runtime');
