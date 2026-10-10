@@ -482,13 +482,16 @@ export async function reclaimStep(cycle: Cycle) {
   const measured = assessable ? await containmentClock(clockOffset, effects.controlPlaneClock) : null;
   const observed: ContainmentObservation = measured ? { now: snapshot.now, clockOffset: measured.clockOffset, clockRoundTripMs: measured.roundTripMs, clockSource: measured.source } : { now: snapshot.now, clockOffset };
   const assessments = await effects.containment?.(snapshot.work, observed) ?? {};
-  await closeEndedWorkerPanes(state, effects, open, assessments, observed, now, performed);
-  // 3c. Reclaim the panes its ended launches left agentless (GY-842), and report what the host holds.
-  await reclaimLaunchedPanes(cycle);
   // GY-1633: a delivered item's fence is settled here too. A worker still running when its item was
   //     closed (a duplicate, a triage closure) leaves its fence on the delivered record, and only the
   //     host can verify its supervisor gone; left out of this step it waited for a hand `recover`.
+  //     Its finished pane is cleaned up first, exactly as an open item's, so settling never lowers
+  //     a fence around an idle shell still sitting in its worktree.
   const fenced = snapshot.work.filter(candidate => candidate.containmentQuarantine && settling(candidate));
+  const openIds = new Set(open.map(item => item.id));
+  await closeEndedWorkerPanes(state, effects, [...open, ...fenced.filter(item => !openIds.has(item.id))], assessments, observed, now, performed);
+  // 3c. Reclaim the panes its ended launches left agentless (GY-842), and report what the host holds.
+  await reclaimLaunchedPanes(cycle);
   for (const item of fenced) await isolate('settle', item, item.key, async () => {
     const epoch = item.containmentQuarantine!.epoch;
     const assessment = assessments[item.id];

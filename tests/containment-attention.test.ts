@@ -181,6 +181,19 @@ test('unit:idle-pane-shell-not-a-worker the pane\'s childless interactive shell 
   assert.equal(state.actions[`settle:${work.id}:1`]?.state, 'done');
 });
 
+test('unit:idle-pane-shell-not-a-worker a delivered item\'s finished pane is closed before its fence settles, as an open item\'s is (GY-1633)', async () => {
+  // A worker still running when its item was closed leaves its fence on the delivered record, its
+  // finished handle naming the pane whose idle shell still sits in the worktree.
+  const work = stranded({ stage: 'done', sessions: [{ ...session(pane), state: 'finished', outcome: 'closed by the loop: GY-74 has left build', endedAt: at(-300_000) }] as Work['sessions'] });
+  let probes = 0;
+  const { settled, state, closed } = await loop(work, { containment: (items, observed) => { probes += 1; return probedBy(probes === 1 ? paneShellProbe() : { ...paneShellProbe(), processes: [], held: [], paneShell: null })!(items, observed); } });
+  assert.deepEqual(closed, [pane], 'the pane is closed before the fence is lowered around it');
+  assert.equal(state.actions[closeKey(work)]?.state, 'done');
+  assert.equal(probes, 2, 'and the fence settles only on the probe taken once the pane was gone');
+  assert.equal(settled.length, 1);
+  assert.equal(state.actions[`settle:${work.id}:1`]?.state, 'done');
+});
+
 test('unit:idle-pane-shell-not-a-worker the host probe counts each held process\'s children and reads the recorded pane, and an idle pane shell it reports is excused', async () => {
   const table: Record<number, { argv: string[]; cwd: string; ppid: number }> = {
     [shellPid]: { argv: ['/usr/bin/bash'], cwd: workspace.path, ppid: 900 },
