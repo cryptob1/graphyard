@@ -9,7 +9,9 @@ import { emptyDaemonState, type DaemonEffects } from '../src/master-daemon.js';
 import { emptyHeldDecisions } from '../src/daemon/decision-reads.js';
 import { Launcher, type Cycle } from '../src/daemon/cycle.js';
 import { Timings } from '../src/master/timings.js';
-import { applyHarnessContract, routineRemedies, type DoctorEffects } from '../src/daemon/doctor.js';
+// A namespace import: a run without this change's remedy still loads the file, and its cases fail instead of the import.
+import * as doctor from '../src/daemon/doctor.js';
+import { routineRemedies, type DoctorEffects } from '../src/daemon/doctor.js';
 import { harnessDrift, writeHarnessPermissions } from '../src/harness.js';
 import { masterHarnessDrift } from '../src/cli/master/fleet.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -118,7 +120,7 @@ test('unit:harness-apply-keeps-operator-entries — the loop\'s harness remedy w
   try {
     assert.deepEqual((await writeHarnessPermissions(root, plan, false)).added.map(entry => entry.rule), [absent], 'the dry run names the one missing rule');
     const looped = cycle(root, master);
-    await applyHarnessContract(looped);
+    await doctor.applyHarnessContract(looped);
     const settings = JSON.parse(await readFile(settingsFile(root), 'utf8'));
     assert.deepEqual(settings.permissions.allow, installed.permissions.allow, 'every allow is kept, the operator\'s included');
     assert.deepEqual(settings.permissions.deny, [...installed.permissions.deny, absent], 'every deny is kept and the missing one appended');
