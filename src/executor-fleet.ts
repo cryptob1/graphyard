@@ -231,22 +231,53 @@ export interface ExecutorFleetRow {
 }
 export interface ExecutorFleetReport { coordinator: { commit: string | null }; executors: ExecutorFleetRow[]; split: boolean; needingRestart: string[]; attention: AttentionItem[] }
 
+const sameRelease = (a: string | null | undefined, b: string | null | undefined) => !!a && !!b && (a.startsWith(b) || b.startsWith(a));
+/**
+ * GY-1619. What the loop's own self-upgrade is doing about a split fleet. Every release advance
+ * moves the coordinator checkout first and restarts the fleet after it: under a held restart
+ * (GY-1585) the executors run the pinned snapshot of the release production serves until the plane
+ * serves the move, and a restart a held claim refuses is retried each pass (GY-916). Read against
+ * the checkout alone, each advance was one more configuration fault (three on 9-10 October 2026).
+ * `held` is the commit `.graphyard/held-cli.json` pins; `upgrade` the restart the cursor owes
+ * (owedUpgrade), and `boundMs` the self-upgrade's bound (upgradeBoundMs).
+ */
+export interface FleetAlignment {
+  held?: string | null;
+  upgrade?: { to: string | null; code: boolean; attemptedAt: number | null; stalled?: { cause: string; since: string } | null } | null;
+  boundMs?: number;
+}
+/**
+ * Until when a split onto `coordinator` is the alignment under way, or null when it is a fault: the
+ * cursor owes a loaded-code restart onto that commit, attempted within the bound, and nothing but a
+ * held restart or a claim-refused one stalls it — a refusal standing past the bound counts, as does
+ * a split no owed restart names (a checkout moved by hand) or one the loop stopped retrying.
+ */
+export function alignmentInMotionUntil(alignment: FleetAlignment, coordinator: string | null, now: number): string | null {
+  const owed = alignment.upgrade, bound = alignment.boundMs ?? 30 * 60_000;
+  if (!owed?.code || !sameRelease(owed.to, coordinator) || owed.attemptedAt === null || !Number.isFinite(owed.attemptedAt)) return null;
+  const cause = owed.stalled?.cause, since = Date.parse(owed.stalled?.since ?? '');
+  if (cause && cause !== 'release-lagged' && cause !== 'executors-refused') return null;
+  const until = Math.min(owed.attemptedAt + bound, cause === 'executors-refused' && Number.isFinite(since) ? since + bound : Infinity);
+  return until > now ? new Date(until).toISOString() : null;
+}
 /**
  * Each executor's release beside the coordinator's, and one attention item for every executor
  * that has to be restarted to run what the coordinator runs. A split fleet reads in one line per
  * executor: `exec-1 on host-a runs 0ea7ab5c0ea7 beside the coordinator's fdd31388fdd3 — split, standing down`.
  */
-export function executorFleetReport(registrations: ExecutorRegistration[], coordinator: { commit: string | null }, options: { hostId: string; now?: number; alive?: (pid: number) => boolean }): ExecutorFleetReport {
-  const alive = options.alive ?? processAlive;
+export function executorFleetReport(registrations: ExecutorRegistration[], coordinator: { commit: string | null }, options: { hostId: string; now?: number; alive?: (pid: number) => boolean } & FleetAlignment): ExecutorFleetReport {
+  const alive = options.alive ?? processAlive, held = options.held ?? null;
   const executors = registrations.map((registration): ExecutorFleetRow => {
     const local = registration.host === options.hostId;
     const running = local && registration.state !== 'stopped' ? alive(registration.pid) : null;
     const state = registration.state === 'running' && running === false ? 'gone' : registration.state;
-    const split = !!registration.release.commit && !!coordinator.commit && registration.release.commit !== coordinator.commit;
+    // GY-1619: an executor on the release a held restart pins runs what the alignment means it to (the entry takes the pin for its checkout).
+    const pinned = !!held && sameRelease(registration.release.commit, held) && !sameRelease(held, coordinator.commit);
+    const split = !pinned && !!registration.release.commit && !!coordinator.commit && registration.release.commit !== coordinator.commit;
     const up = state === 'running' || state === 'standing-down';
     const needsRestart = up && (split || state === 'standing-down');
     const standing = state === 'standing-down' ? ', standing down' : state === 'gone' ? ', process gone' : state === 'stopped' ? ', stopped' : '';
-    const line = `${registration.name} on ${registration.host} runs ${describeRelease(registration.release)} beside the coordinator's ${shortCommit(coordinator.commit)}${split ? ` — split${standing || ', claims until its next check'}` : standing ? ` —${standing.slice(1)}` : ''}`;
+    const line = `${registration.name} on ${registration.host} runs ${describeRelease(registration.release)} beside the coordinator's ${shortCommit(coordinator.commit)}${split ? ` — split${standing || ', claims until its next check'}` : standing ? ` —${standing.slice(1)}` : pinned ? ' — the release the held restart pins until production serves the checkout' : ''}`;
     return { name: registration.name, host: registration.host, pid: registration.pid, principal: registration.principal, kinds: registration.kinds, alive: running, state,
       release: registration.release, coordinator: coordinator.commit, split, needsRestart, supervisor: registration.supervisor, restart: registration.supervisor?.restart ?? executorRestartCommand,
       standDown: registration.standDown, claims: registration.claims, lastClaim: registration.lastClaim, inFlight: registration.inFlight,
@@ -258,6 +289,8 @@ export function executorFleetReport(registrations: ExecutorRegistration[], coord
     const named = needing.map(row => `${row.name} on ${row.host} (loaded ${describeRelease(row.release)}${row.state === 'standing-down' ? `, standing down since ${row.standDown?.at ?? 'its last check'}` : ', stands down at its next check'}${row.supervisor ? '' : '; no supervisor unit, so it must be stopped and started by hand'})`).join('; ');
     attention.push({ subject: 'executors', text: `${needing.length} executor${needing.length === 1 ? '' : 's'} run${needing.length === 1 ? 's' : ''} a release other than the coordinator's ${shortCommit(coordinator.commit)} and claim${needing.length === 1 ? 's' : ''} nothing until restarted: ${named}`,
       ...agentOwner('master', executorRestartCommand) });
+    const until = alignmentInMotionUntil(options, coordinator.commit, options.now ?? Date.now());
+    if (until) attention[0] = { ...attention[0], text: `${attention[0].text}; the loop's self-upgrade owes this restart onto ${shortCommit(coordinator.commit)} and retries it each pass (last attempted ${new Date(options.upgrade!.attemptedAt!).toISOString()}), so it is in motion until ${until}`, inMotionUntil: until };
   }
   // One item per executor whose previous process died mid-action (GY-646): the watchdog's abort,
   // or any other kill, is otherwise only a line in the journal, and the action it held is simply
