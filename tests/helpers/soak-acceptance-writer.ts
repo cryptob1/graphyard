@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import type { AcceptanceEffects, AcceptanceWriterPorts } from '../../src/daemon/acceptance.js';
 import { draftFiles, type AcceptanceDraft, type Goal, type Landing } from '../../src/model/goal.js';
-import { acceptanceMergeRefusal, recordLanding } from '../../src/server/routes/goals.js';
+import { acceptanceLandingRefusal, recordLanding } from '../../src/server/routes/goals.js';
 import type { GitRunner } from '../../src/merge-writer/local-observation.js';
 import { principals, store } from './soak-plane.js';
 import { clock, sha } from './soak-world.js';
@@ -14,7 +14,9 @@ import { clock, sha } from './soak-world.js';
  * commit fails, `audit`'s first approved change conflicts with the base, and `billing`'s first push
  * is refused because another landing moved `main` between the fetch and the push, after which its
  * landing record is lost once. The record is checked by the land route's own check
- * (`acceptanceMergeRefusal`) over that history before `recordLanding` records it.
+ * (`acceptanceLandingRefusal`) over that history before `recordLanding` records it; that check
+ * refreshes origin/main first, and `signup`'s first refresh fails (GY-1657), which the route answers
+ * with a refusal so the loop records it again on a later poll rather than judging a stale ref.
  */
 export function controlPlaneAcceptance(github: AcceptanceEffects, named: (key: string) => string, dayStart: number) {
   const at = () => clock.now() - dayStart;
@@ -25,9 +27,10 @@ export function controlPlaneAcceptance(github: AcceptanceEffects, named: (key: s
     fetches: [] as number[], merges: [] as { goal: string; head: string; at: number }[],
     pushes: [] as { goal: string; head: string; result: 'pushed' | 'rejected'; at: number }[],
     records: [] as { goal: string; ok: boolean; at: number }[], github: [] as string[],
+    refreshes: [] as { goal: string; ok: boolean; at: number }[],
   };
   const heads = new Map<string, { goal: string; draft: AcceptanceDraft }>();
-  let commitFailed = false, auditConflicted = false, billingRaced = false, recordLost = false, foreign = 0;
+  let commitFailed = false, auditConflicted = false, billingRaced = false, recordLost = false, refreshFailed = false, foreign = 0, refreshing = '';
   const ports: AcceptanceWriterPorts = {
     baseBranch: 'main', retrials: 2,
     fetch: async () => { writer.fetches.push(at()); return history[0]!.sha; },
@@ -51,6 +54,12 @@ export function controlPlaneAcceptance(github: AcceptanceEffects, named: (key: s
   // The control plane's own read of main, answered from the history above for the land route's check.
   const git: GitRunner = async args => {
     const answer = (stdout: string) => ({ status: 0, stdout, stderr: '' });
+    if (args[0] === 'fetch') {
+      const fail = refreshing === 'signup' && !refreshFailed;
+      writer.refreshes.push({ goal: refreshing, ok: !fail, at: at() });
+      if (fail) { refreshFailed = true; return { status: 128, stdout: '', stderr: 'fatal: unable to access origin: Could not resolve host' }; }
+      return answer('');
+    }
     if (args[0] === 'rev-parse') { const second = history.find(commit => `${commit.sha}^2` === args.at(-1))?.second; return second ? answer(`${second}\n`) : { status: 1, stdout: '', stderr: '' }; }
     if (args[0] === 'rev-list') return answer(history.map(commit => commit.sha).join('\n'));
     throw new Error(`unexpected git ${args.join(' ')}`);
@@ -78,8 +87,11 @@ export function controlPlaneAcceptance(github: AcceptanceEffects, named: (key: s
       writer.records.push({ goal: name, ok: !lose, at: at() });
       if (lose) { recordLost = true; throw new Error('Graphyard refused goals (502): Bad Gateway'); }
       assert.equal(goal.approval!.head, goal.acceptance!.head, 'a change is recorded merged only at its approved head');
-      const refusal = await acceptanceMergeRefusal(git, 'main', goal.approval!.head, mergeSha);
-      assert.equal(refusal, null, `the land route would refuse ${goal.key}'s merge ${mergeSha}: ${refusal}`);
+      refreshing = name;
+      const refusal = await acceptanceLandingRefusal(git, 'main', goal.approval!.head, mergeSha);
+      // A failed refresh is the route's 503: nothing is recorded, and the loop records it again later.
+      if (refusal?.kind === 'refresh') { writer.records.at(-1)!.ok = false; throw new Error(`Graphyard refused goals (503): ${refusal.refusal}`); }
+      assert.equal(refusal, null, `the land route would refuse ${goal.key}'s merge ${mergeSha}: ${refusal?.refusal}`);
       const landing: Landing = { state: 'merged', mergeSha, detail: `the merge writer merged ${goal.key}'s acceptance change as ${mergeSha}` };
       return { goal: await recordLanding(store, goal, landing, principals.operatorAgent), landing };
     },

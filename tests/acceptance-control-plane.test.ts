@@ -11,7 +11,7 @@ import { server } from '../src/server.js';
 import { Store } from '../src/store.js';
 import type { Observation, Principal } from '../src/model.js';
 import { acceptanceChangeRisk, acceptanceDraftSchema, applyGoalCommand, protectedCaseRefusals, recordGoal, type Goal } from '../src/model/goal.js';
-import { acceptanceEffects, acceptanceStep, clearDrafts, draftsSettled, mergeAcceptanceChange, type AcceptanceEffects, type AcceptanceWriterPorts } from '../src/daemon/acceptance.js';
+import { acceptanceEffects, acceptancePrompt, acceptanceStep, clearDrafts, draftsSettled, mergeAcceptanceChange, type AcceptanceEffects, type AcceptanceWriterPorts } from '../src/daemon/acceptance.js';
 import { clearPlans, planPayloadSchema, plannerStep, plansSettled, type PlannerEffects } from '../src/daemon/planner.js';
 import { mergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
 import { gitRunnerFor } from '../src/merge-writer/local-observation.js';
@@ -158,6 +158,14 @@ test('unit:acceptance-control-plane-change — in control-plane mode the accepta
   const forged = await call(author, `goals/${goal.key}/land`, { mergeSha: baseTip });
   assert.equal(forged.status, 422, forged.text); assert.match(forged.text, /is not a merge of the approved head/);
   assert.equal((await call(author, `goals/${goal.key}/land`, {})).status, 422, 'a merge-writer change is landed only by naming the merge the writer pushed');
+  // GY-1657: the route refreshes origin/main before judging; a refresh that fails (or throws) is a named refusal, never a verdict on the stale ref.
+  const real = engine.gitRunner!;
+  for (const failing of [async () => ({ status: 128, stdout: '', stderr: 'fatal: unable to access origin' }), async () => { throw new Error('spawn git ENOENT'); }] as const) {
+    engine.gitRunner = args => args[0] === 'fetch' ? failing() : real(args);
+    const stale = await call(author, `goals/${goal.key}/land`, { mergeSha: baseTip });
+    assert.equal(stale.status, 503, stale.text); assert.match(stale.text, /is not judged: the control plane could not refresh origin\/main .*(unable to access origin|spawn git ENOENT)/);
+  }
+  engine.gitRunner = real;
   assert.equal(world.spied.pushes, 0);
 
   // The merge writer lands it: one leased push onto main, recorded merged by the control plane, and the goal plans.
@@ -255,4 +263,11 @@ test('unit:planner-waits-for-acceptance — the planner never plans a goal whose
   assert.throws(() => planPayloadSchema.parse({ goal: 'GOAL-9', note: 'A static page.', items: [{ ...item, outcomes: [] }] }));
   const { outcomes: _dropped, ...unnamed } = item;
   assert.throws(() => planPayloadSchema.parse({ goal: 'GOAL-9', note: 'A static page.', items: [unnamed] }));
+});
+
+test('unit:acceptance-prompt-requires-new-case — the acceptance role is told each case id is new and which fields a case must carry (GY-1657)', () => {
+  const goal = recordGoal({ statement: 'Players can play the game', users: ['Players'], constraints: [], deployTarget: 'GitHub Pages' }, 'GOAL-10', { actor: author, at: '2026-10-10T00:00:00.000Z' });
+  const prompt = acceptancePrompt({ repository: 'example/game' }, goal, { outcomes: [{ id: 'play', cases: ['play'] }] });
+  assert.match(prompt, /whose id is new \(never one already declared\)/, 'a reused case id is rejected by commitDraft and wastes a draft round');
+  assert.match(prompt, /with id, title, target "uat", required true, and http or browser steps/);
 });

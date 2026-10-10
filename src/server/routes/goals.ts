@@ -106,6 +106,22 @@ export async function acceptanceMergeRefusal(git: GitRunner, base: string, head:
   return listed.stdout.split('\n').some(line => line.trim().toLowerCase() === mergeSha) ? null : `${base}'s first-parent history does not hold ${mergeSha.slice(0, 12)}`;
 }
 
+/**
+ * GY-1657: the merge-writer landing check the land route makes, on a freshly fetched base. The base
+ * ref is refreshed from origin first, so a landing is never judged against a stale
+ * `refs/remotes/origin/BASE`; a fetch that fails or throws is its own refusal (`refresh`), never a
+ * verdict on the ref already present. Otherwise the refusal is acceptanceMergeRefusal's (`landing`),
+ * or null when the base holds the merge.
+ */
+export async function acceptanceLandingRefusal(git: GitRunner, base: string, head: string, mergeSha: string): Promise<{ kind: 'refresh' | 'landing'; refusal: string } | null> {
+  let fetched: Awaited<ReturnType<GitRunner>>;
+  try { fetched = await git(['fetch', '--no-tags', 'origin', base]); }
+  catch (error) { fetched = { status: null, stdout: '', stderr: error instanceof Error ? error.message : String(error) }; }
+  if (fetched.status !== 0) return { kind: 'refresh', refusal: `the control plane could not refresh origin/${base} to judge the landing against: git fetch ${fetched.status === null ? 'failed' : `exited ${fetched.status}`}${fetched.stderr.trim() ? `: ${fetched.stderr.trim().slice(0, 500)}` : ''}` };
+  const refusal = await acceptanceMergeRefusal(git, base, head, mergeSha);
+  return refusal ? { kind: 'landing', refusal } : null;
+}
+
 /** What landing found, recorded under the lock unless the goal moved on meanwhile: merged at its approved head, else closed and drafted again. */
 export async function recordLanding(store: Pick<Store, 'transaction'>, goal: Goal, landing: Landing, actor: Principal): Promise<Goal> {
   const { pr, head } = goal.acceptance!;
@@ -208,9 +224,10 @@ export const goalRoutes = defineRoutes('goals', [
         demand(body.mergeSha, `${goal.key}'s acceptance change has no pull request: the merge writer lands it and names the merge commit it pushed`, 422);
         demand(goal.approval.by !== goal.acceptance.author && goal.approval.head === goal.acceptance.head, `${goal.key}'s acceptance change is sensitive and lands only on an approver's verdict on its exact head by another identity`, 403);
         if (engine.gitRunner === undefined) engine.gitRunner = gitRunnerFor(process.env.GRAPHYARD_REPOSITORY_ROOT ?? process.cwd());
-        demand(engine.gitRunner, 'The control plane has no checkout to read the merge writer\'s landing from', 503);
-        const refusal = await acceptanceMergeRefusal(engine.gitRunner, engine.baseBranch, goal.approval.head, body.mergeSha);
-        demand(!refusal, `${goal.key}'s acceptance change is not landed: ${refusal}`, 422);
+        demand(engine.gitRunner, "The control plane has no checkout to read the merge writer's landing from", 503);
+        const refusal = await acceptanceLandingRefusal(engine.gitRunner, engine.baseBranch, goal.approval.head, body.mergeSha);
+        demand(refusal?.kind !== 'refresh', `${goal.key}'s acceptance landing is not judged: ${refusal?.refusal}`, 503);
+        demand(!refusal, `${goal.key}'s acceptance change is not landed: ${refusal?.refusal}`, 422);
         const landing: Landing = { state: 'merged', mergeSha: body.mergeSha, detail: `the merge writer merged ${goal.key}'s acceptance change as ${body.mergeSha}` };
         return { goal: await recordLanding(engine.store, goal, landing, context.actor), landing };
       }

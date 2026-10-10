@@ -5,7 +5,7 @@ Sidebar: **Work**, **Workers**, **Shipped**, **Tests**, **Insights**, **Settings
 
 ## From your phone
 
-A local (compose) dashboard listens on `127.0.0.1:4310`, or the free port its install chose ([install](install.md)). With Tailscale, `graphyard up` prints `tailscale serve --bg --http=4310 http://127.0.0.1:4310` and its tailnet URL; `--share-tailnet` runs it, keeps it in `up.json` (`reachableUrl`) and its sign-in links use it: tailnet-only, never `tailscale funnel`. A green `up` ends with one single-use sign-in link (`signIn`, 10 minutes).
+A local (compose) dashboard listens on `127.0.0.1:4310`, or the free port its install chose ([install](install.md)). With Tailscale, `graphyard up` prints `tailscale serve --bg --http=4310 http://127.0.0.1:4310` and its tailnet URL; `--share-tailnet` runs it, keeps it in `up.json` (`reachableUrl`) and its sign-in links use it: tailnet-only, never `tailscale funnel`. The dashboard also works over plain `http://` on a non-localhost address (a tailnet or LAN IP), where browsers withhold `crypto.randomUUID`: its requests then carry a random v4 `Idempotency-Key` it generates itself. A green `up` ends with one single-use sign-in link (`signIn`, 10 minutes).
 
 ## Work
 
