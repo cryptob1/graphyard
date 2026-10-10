@@ -1150,10 +1150,10 @@ export function describeStandingTmpPass(report: ResourceReclaimReport) {
   // A pass that counted its reasons states each (GY-1628): a zero that kept only young or held entries
   // is the pass taking all it may, not a remedy that matches nothing, and reads so.
   const why = pass.keptFor ? `${pass.keptFor.young} younger than ${testAge}, ${pass.keptFor.held} held open or named by a live process, ${pass.keptFor.owner} with a live owner, ${pass.keptFor.bound} past the pass's bounds` : `younger than ${testAge}, a live owner or holder, or past the pass's bounds`;
-  const cache = pass.cacheKept ? `${pass.cacheKept.young} younger than ${cacheAge}, ${pass.cacheKept.held} held open by a live process` : `each younger than ${cacheAge} or held open by a live process`;
+  const cache = `each younger than ${cacheAge} or held open by a live process)${pass.cacheKept ? `: ${pass.cacheKept.young} younger, ${pass.cacheKept.held} held` : ''}`;
   const stale = pass.keptFor && pass.cacheKept && !pass.keptFor.bound ? `; nothing of this user's was both past its age bound and free to remove` : '';
   return [
-    `/tmp reclaim removed 0 entries while the inode bound stands: scanned ${roots}${sweep} ${entries(pass.scanned)} with this user's test temp names, ${pass.kept} kept (${why}), and no tsx cache file of this user's it could remove (${cache})${stale}`,
+    `/tmp reclaim removed 0 entries while the inode bound stands: scanned ${roots}${sweep} ${entries(pass.scanned)} with this user's test temp names, ${pass.kept} kept (${why}), and no tsx cache file of this user's it could remove (${cache}${stale}`,
     top ? `escalated to ${top.limit} per cycle and tsx cache files older than ${minutes(top.cacheAgeMs)} (${pass.escalated!.map(step => step.removed).join(' + ')} removed)` : '',
     pass.consumers?.length ? `what fills it is outside the pass's reach; top consumers: ${pass.consumers.map(consumer => `${consumer.path} (${consumer.capped ? 'at least ' : ''}${entries(consumer.entries)}, owner ${consumer.owner})`).join(', ')}` : '',
     errors.length ? `${errors.length} could not be reclaimed: ${errors[0]}` : '',

@@ -57,6 +57,12 @@ test('unit:tmp-reclaim-removes-stale-entries — a pass at the loop\'s bounds ov
   const again = await reclaimTmpDirectories({ ...loopTmpReclaimOptions([tmp]), workMs: 60_000, held: new Set() });
   assert.deepEqual(again.removed, []);
   assert.deepEqual(again.keptFor, { young: 1, held: 0, owner: 0, bound: 0 });
+  // Below the headroom that zero is ledgered, and the record states each reason as counted, not a list of possibilities.
+  const low = await reclaimTmpDirectories({ ...loopTmpReclaimOptions([tmp]), held: new Set(), volume: async () => ({ files: 4000, ffree: 100 }) });
+  const detail = describeStandingTmpPass({ at: low.at, reaped: { review: 0, producer: 0 }, closed: [], released: [], tmp: { removed: 0, bytes: 0 }, errors: [],
+    tmpPass: { roots: low.roots, scanned: low.scanned, kept: low.kept, keptFor: low.keptFor, cacheKept: low.cacheKept, boundStands: low.boundStands, escalated: low.escalated, consumers: low.consumers } });
+  assert.match(detail ?? '', /1 kept \(1 younger than 2 hours, 0 held open or named by a live process, 0 with a live owner, 0 past the pass's bounds\)/);
+  assert.match(detail ?? '', /no tsx cache file of this user's it could remove \(each younger than 10 minutes or held open by a live process\): 1 younger, 0 held; nothing of this user's was both past its age bound and free to remove/);
 
   // Held entries are counted as held, never removed, and the pass's entry bound leaves the rest as the next pass's.
   const next = await temporaryDirectory('reclaim-stale-entries-held');
