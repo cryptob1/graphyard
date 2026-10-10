@@ -3,7 +3,8 @@ import { mkdtemp, readFile, rm, symlink } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative } from 'node:path';
-import type { Work } from './model.js';
+import { implementerIdentities, postDeployProofPrefix, postDeployProofs, type Create, type Work } from './model.js';
+import { evidenceProves } from './model/mechanical-proofs.js';
 import type { MasterConfig } from './master.js';
 import { observeDeployment, type DeploymentObservation } from './master-daemon.js';
 import { repositoryFromRemote } from './onboarding.js';
@@ -167,6 +168,11 @@ export interface VerificationEffects {
   record: (work: Work, data: VerificationRecord) => Promise<unknown>;
   /** The managed repository; see `VerificationInput.repository`. */
   repository?: string;
+  /**
+   * `POST work` with an idempotency key, as an identity that may create work — the master's operator
+   * agent, never the coordinator: files the follow-up an owed post-deploy verification needs (GY-1660), returning the created item.
+   */
+  file?: (input: NonNullable<PostDeployCheck['followUp']>['input'], requestId: string) => Promise<{ key?: string } | unknown>;
   now?: () => number;
 }
 
@@ -190,11 +196,11 @@ export async function verifyDeployment(work: Work, effects: VerificationEffects,
   const emits = emitsManagedInstructions(coordinator, effects.repository);
   const isolate = emits && !!effects.isolate && !!observation.sha && !!coordinator.sha && coordinator.sha !== observation.sha;
   let release = coordinator, isolated: boolean = false;
-  const result = (assessment: ReturnType<typeof assessDeploymentVerification>, recorded: 'now' | 'existing' | null) => ({
+  const result = (assessment: ReturnType<typeof assessDeploymentVerification>, recorded: 'now' | 'existing' | null, postDeploy: Awaited<ReturnType<typeof filePostDeployFollowUps>> = []) => ({
     key: current.key, result: assessment.verifiable ? 'verified' as const : 'refused' as const,
     release: { sha: observation.sha, source: observation.source, observedAt: observation.at, covers: assessment.covers },
     checkout: { sha: coordinator.sha, clean: coordinator.clean }, emittedFrom: emits ? { sha: release.sha, clean: release.clean, isolated } : null,
-    checks: assessment.checks, refusals: assessment.refusals, recorded,
+    checks: assessment.checks, refusals: assessment.refusals, recorded, postDeploy,
   });
   // Before spending a scratch checkout, the release identity is presumed to be the one isolation
   // will produce; the full assessment judges the identity git reads back from it.
@@ -210,13 +216,82 @@ export async function verifyDeployment(work: Work, effects: VerificationEffects,
   } else if (emits) emitted = await effects.emit();
   const assessment = assessDeploymentVerification(current, { observation, release, emitted, now: now(), freshnessMs, repository: effects.repository });
   if (!assessment.verifiable) return result(assessment, null);
-  if (current.delivery!.deployment?.sha === assessment.record!.sha) return result(assessment, 'existing');
-  await effects.record(current, assessment.record!);
-  return result(assessment, 'now');
+  // Follow-ups are filed before the observation is recorded: a filing that fails leaves the delivery
+  // unobserved, so the retry files it, where recording first would refuse every retry as already observed.
+  const postDeploy = await filePostDeployFollowUps(current, assessment.record!.sha, snapshot.work, effects.file, new Date(now()));
+  const existing = current.delivery!.deployment?.sha === assessment.record!.sha;
+  if (!existing) await effects.record(current, assessment.record!);
+  return result(assessment, existing ? 'existing' : 'now', postDeploy);
+}
+
+export interface PostDeployCheck {
+  criterion: string; proof: string; result: 'observed' | 'owed';
+  /** The follow-up an owed observation files: its create input and the request id that makes filing it idempotent. */
+  followUp: { title: string; requestId: string; input: Pick<Create, 'title' | 'description' | 'type' | 'priority' | 'dependencies' | 'criteria'> & { reason: string } } | null;
+}
+/**
+ * `master verify-deployment`'s check of the delivered item's declared post-deploy criteria (GY-1660)
+ * on the serving release `release`: a proof is observed only by evidence the acceptance gate would
+ * itself accept there — trusted, unrevoked, under the item's current policy, unexpired, from no
+ * implementer, and passing by its family's rule — recorded at that release, against the delivered
+ * merge as its base and after the merge: evidence recorded before delivery is a pre-merge record,
+ * never the live observation. Owed otherwise. An owed one carries its follow-up: a chore depending
+ * on the delivered item, marked with its request id so two proofs of one criterion are two items
+ * however long their names, whose single criterion asks for the same observation
+ * from its own head against that serving release — a pre-merge observation there, never itself
+ * declared post-deploy.
+ */
+export function postDeployChecks(work: Work, release: string, now = new Date()): PostDeployCheck[] {
+  const implementers = implementerIdentities(work), mergedAt = work.delivery ? Date.parse(work.delivery.mergedAt) : NaN;
+  // The latest applicable record decides, as on the evidence path: a later trusted failure outranks an earlier pass.
+  const observes = (proof: string) => {
+    const latest = (work.evidence ?? []).filter(evidence => !!work.delivery && evidence.proof === proof && evidence.sha === release && evidence.trusted && !evidence.revocation
+      && evidence.baseSha === work.delivery.mergeSha && Date.parse(evidence.at) > mergedAt
+      && evidence.policyRevision === work.policyRevision && (!evidence.expiresAt || Date.parse(evidence.expiresAt) > now.getTime()) && !implementers.includes(evidence.producer))
+      .reduce<NonNullable<Work['evidence']>[number] | undefined>((last, evidence) => !last || Date.parse(evidence.at) >= Date.parse(last.at) ? evidence : last, undefined);
+    return !!latest && evidenceProves(proof, latest);
+  };
+  return work.criteria.flatMap(criterion => postDeployProofs(criterion).map(proof => {
+    if (observes(proof)) return { criterion: criterion.id, proof, result: 'observed' as const, followUp: null };
+    const name = proof.slice(postDeployProofPrefix.length), short = release.slice(0, 12);
+    const title = `Post-deploy verification of ${work.key} ${criterion.id} (${name}) on release ${short}`.slice(0, 200);
+    const text = `From this head against the serving release ${short} that carries ${work.key}'s merge ${work.delivery?.mergeSha.slice(0, 12) ?? ''}: ${criterion.text}`.slice(0, 2000);
+    const requestId = postDeployFollowUpId(work, criterion.id, proof, release);
+    return { criterion: criterion.id, proof, result: 'owed' as const, followUp: { title, requestId, input: {
+      title, type: 'chore' as const, priority: 1, dependencies: [work.id], reason: `${work.key} ${criterion.id}'s declared post-deploy verification ${proof} is unobserved on the serving release ${short}`.slice(0, 2000),
+      // The marker leads, so no truncation of a long criterion can cut the identity a later check matches by.
+      description: `${postDeployMarker}${requestId}\n\n${work.key} was delivered with ${criterion.id} declared a post-deploy verification (${proof}). master verify-deployment found no trusted passing ${proof} observation on the serving release ${release}, so this item owes it: observe the outcome on that release and record the proof.\n\n${work.key} ${criterion.id}: ${criterion.text}`.slice(0, 20000),
+      criteria: [{ id: 'AC-1', text, proofs: [`manual:${name.replace(/\//g, '-')}-on-serving-release`] }] } } };
+  }));
+}
+
+/** The follow-up's identity: a retried filing replays under it, and an item whose description leads with it is that follow-up. */
+export const postDeployFollowUpId = (work: Pick<Work, 'id'>, criterion: string, proof: string, release: string) => `post-deploy:${work.id}:${criterion}:${proof}:${release}`;
+const postDeployMarker = 'Post-deploy follow-up: ';
+const followUpOf = (item: Pick<Work, 'description'>) => item.description?.startsWith(postDeployMarker) ? item.description.slice(postDeployMarker.length).split('\n', 1)[0] : null;
+
+/**
+ * GY-1660: a verified release checks the delivered item's declared post-deploy verifications on
+ * itself. An owed one files its follow-up — once: an item already marked with that follow-up's
+ * request id is named instead, the request id makes a retried filing a replay, and checks are filed one after
+ * another so none is filed against a snapshot another has just changed — so the live observation
+ * the merge never waited for is owned by an item rather than by nobody.
+ */
+export async function filePostDeployFollowUps(work: Work, release: string, all: readonly Pick<Work, 'key' | 'description'>[], file?: VerificationEffects['file'], now = new Date()) {
+  const known = [...all], results: (Omit<PostDeployCheck, 'followUp'> & { followUp: string | null })[] = [];
+  for (const { followUp, ...rest } of postDeployChecks(work, release, now)) {
+    if (!followUp) { results.push({ ...rest, followUp: null }); continue; }
+    const filed = known.find(item => followUpOf(item) === followUp.requestId)?.key;
+    if (filed || !file) { results.push({ ...rest, followUp: filed ?? null }); continue; }
+    const created = await file(followUp.input, followUp.requestId) as { key?: string } | undefined;
+    if (created?.key) known.push({ key: created.key, description: followUp.input.description });
+    results.push({ ...rest, followUp: created?.key ?? null });
+  }
+  return results;
 }
 
 /** Effects bound to the real coordinator process, mirroring the daemon's. */
-export function verificationEffects(config: MasterConfig, deps: { root: string; snapshot: () => Promise<{ work: Work[]; now: string }>; mutate: (path: string, data: unknown) => Promise<any>; run?: Run }): VerificationEffects {
+export function verificationEffects(config: MasterConfig, deps: { root: string; snapshot: () => Promise<{ work: Work[]; now: string }>; mutate: (path: string, data: unknown, requestId?: string) => Promise<any>; file?: VerificationEffects['file']; run?: Run }): VerificationEffects {
   const run = deps.run ?? defaultRun;
   return {
     snapshot: deps.snapshot, repository: config.repository,
@@ -226,5 +301,6 @@ export function verificationEffects(config: MasterConfig, deps: { root: string; 
     emit: () => emitInstructions(config, run),
     isolate: sha => isolateRelease(config, sha, run),
     record: (work, data) => deps.mutate(`work/${work.id}/deployment`, data),
+    ...(deps.file ? { file: deps.file } : {}),
   };
 }

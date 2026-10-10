@@ -7,6 +7,7 @@ import { mechanicalFailure, mechanicalVerdicts, evidenceProves, attestedProof } 
 import { regressionRefusals } from '../regression-guard.js';
 import { itemLane, laneRequiresProof } from './policy.js';
 import { riskOf } from './risk-class.js';
+import { postDeployProof } from './post-merge-proofs.js';
 import type {} from './merge-ledger.js'; // Work.mergeLedger
 
 /**
@@ -85,6 +86,8 @@ function controlPlaneAcceptance(work: Work, all: Work[], now: Date): (Landabilit
   const tried = !!head && trial?.head.toLowerCase() === head ? trial : null;
   const sensitive = controlPlaneObserved(work) && riskOf(work).risk === 'sensitive';
   const refusal = (proof: string): string | null => {
+    // A declared post-deploy proof (GY-1660) is observed on the serving release after delivery, never gating the merge.
+    if (postDeployProof(proof)) return null;
     const family = proof.slice(0, Math.max(0, proof.indexOf(':')));
     if (family === 'unit' || family === 'integration') {
       const counts = tried?.proofs[proof];
@@ -159,7 +162,7 @@ function strayProofFailure(work: Work, all: Work[], now: Date, acceptance: (Land
   if (!candidate || !judged) return null;
   const refused = new Set(acceptance.flatMap(entry => entry.proof ? [entry.proof] : []));
   const required = new Set(requiredProofs(work, all));
-  const stray = (proof: string) => !required.has(proof) && !refused.has(proof) && !(currentEvidence(work, proof, now) && evidenceProves(proof, currentEvidence(work, proof, now)!));
+  const stray = (proof: string) => !postDeployProof(proof) && !required.has(proof) && !refused.has(proof) && !(currentEvidence(work, proof, now) && evidenceProves(proof, currentEvidence(work, proof, now)!));
   const failed = work.evidence.find(item => item.trusted && evidenceBindsCandidate(work, item) && item.policyRevision === work.policyRevision && item.result === 'fail' && stray(item.proof)
     && !(item.proof.startsWith('manual:') && item.executed === 0 && work.criteria.some(criterion => criterion.proofs.includes(item.proof))));
   return failed ? { gate: 'build', reason: `${failed.proof}, which no criterion requires, failed on ${candidate.sha.slice(0, 12)} (trusted evidence from ${failed.producer}); the head returns to its worker before review` } : null;

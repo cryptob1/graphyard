@@ -9,7 +9,8 @@
 //
 // It reads this host's .graphyard/master.json for the launch profiles the dispatching actions
 // need and authenticates with the coordinator credential named there — the same credential
-// `master run` uses, and nothing broader. `--kinds` narrows what this executor claims; the
+// `master run` uses, and nothing broader; the one exception is verify-deployment's filing of a
+// post-deploy follow-up, which, like the loop's own filings, creates work as the operator agent. `--kinds` narrows what this executor claims; the
 // default is every kind it has a handler for. Two kinds can never be among them: `escalate` and
 // `request-rework` are judgments made in the step itself, and the process refuses to start with a
 // handler for either, which is what keeps a language model out of the loop rather than inside it.
@@ -147,6 +148,16 @@ export function controlPlaneEffects(modules, context) {
     launchProducer: (work, producerRequest, profile, agents, observedAt) => pr.launchProducer(root, work, producerRequest, profile, agents, observedAt, { run }),
     observeDeployment: delivered => d.observeDeployment(current(), delivered, run, fetch, () => Date.now(), { root }),
     recordSession: (work, handle) => mutate(`work/${work.id}/session`, handle),
+    // GY-1660: the one call made beyond the coordinator credential, as the loop files its follow-ups:
+    // the follow-up an unobserved post-deploy verification owes, created as the master's operator agent.
+    // It may create work and nothing else this process needs; absent, verify-deployment fails rather than lose the follow-up.
+    ...(current().operatorAgent ? { fileWork: async (input, requestId) => {
+      const config = current(), operator = await m.agentToken(root, config, 'operatorAgent');
+      const response = await fetch(`${config.url}/api/work`, { method: 'POST', body: JSON.stringify(input), headers: { Authorization: `Bearer ${operator}`, 'Content-Type': 'application/json', 'Idempotency-Key': requestId }, signal: AbortSignal.timeout(30_000) });
+      const body = await response.json();
+      if (!response.ok) throw new Error(typeof body?.error === 'string' ? body.error : JSON.stringify(body));
+      return body;
+    } } : {}),
   };
 }
 

@@ -25,12 +25,12 @@ import { demand } from './refusal.js';
 export const CHECK_NAME = 'Graphyard / merge', LANDABLE_CHECK = 'graphyard/landable'; // GY-887: both are Graphyard's own, never CI inputs to the verdict
 export const stages = ['backlog', 'ready', 'build', 'review', 'test', 'acceptance', 'merge', 'done'] as const;
 export type Stage = typeof stages[number];
-export const sliceIds = ['product', 'infrastructure', 'docs-experience'] as const;
-export type SliceId = typeof sliceIds[number];
+export const sliceIds = ['product', 'infrastructure', 'docs-experience'] as const; export type SliceId = typeof sliceIds[number];
 export const escalationTriggers = ['lease-loss', 'evidence-policy-conflict', 'security-concern', 'requirement-weakening'] as const;
 export type EscalationTrigger = typeof escalationTriggers[number];
 /** The shipped setting: every new item is system-driven unless its intent says `"systemDriven": false`. */
 export const systemDrivenDefault = true;
+export { declaredPostDeploy, liveObservationPhrase, postDeployCriterionRefusal, postDeployProof, postDeployProofPrefix, postDeployProofs } from './post-merge-proofs.js';
 export const createSchema = z.object({
   title: z.string().min(1).max(200), description: z.string().max(20000).default(''),
   type: z.enum(['feature', 'bug', 'chore']).default('feature'),

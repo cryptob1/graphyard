@@ -2,6 +2,7 @@
 import { createHash } from 'node:crypto';
 import type { Engine } from '../engine.js';
 import type { Principal, Work } from '../model.js';
+import { postDeployProofPrefix } from '../model/post-merge-proofs.js';
 import { interventionKindLabel, type InterventionPattern, type InterventionPolicy } from '../model/interventions.js';
 import { boundedSnapshot } from '../store/bounded-snapshot.js';
 import { readInterventionLedger } from './ledger.js';
@@ -77,7 +78,13 @@ export async function openPatternItems(engine: Engine, policy: InterventionPolic
     const key = `intervention-pattern:${pattern.kind}:${stageSlug}:${createHash('sha256').update(instances.map(entry => entry.id).sort().join(',')).digest('hex').slice(0, 32)}`;
     const work = await engine.execute(options.actor ?? controlPlaneActor, 'create', null, {
       title: `Recurring ${label} interventions at ${where}: ${instances.length} in ${policy.windowDays} days`.slice(0, 200), description: description.slice(0, 20000), type: 'bug', priority: 1,
-      criteria: [{ id: 'AC-1', text: `The cause of the recurring ${label} interventions at ${where} is found and removed: the intervention report shows the ${pattern.kind} rate at ${where} below ${policy.threshold} per ${policy.windowDays} days after the change ships, and the linked instances could not recur`, proofs: [`manual:intervention-pattern-${pattern.kind}-${stageSlug}`] }],
+      // The post-ship rate is an observation only the serving release can make, so it is declared a
+      // post-deploy verification (GY-1660): judged on the head's evidence, checked after deploy, and
+      // owned by a follow-up when unobserved. What the head can show before merge is AC-2's regression test.
+      criteria: [
+        { id: 'AC-1', text: `The cause of the recurring ${label} interventions at ${where} is found and removed: the intervention report shows the ${pattern.kind} rate at ${where} below ${policy.threshold} per ${policy.windowDays} days after the change ships, and the linked instances could not recur`, proofs: [`${postDeployProofPrefix}intervention-pattern-${pattern.kind}-${stageSlug}`] },
+        { id: 'AC-2', text: `Each linked instance is reproduced against the base and shown not to recur against the candidate, by a test the change adds`, proofs: [`manual:intervention-pattern-${pattern.kind}-${stageSlug}`] },
+      ],
       origin: { pattern: origin }, reason: `Recurring ${label} interventions at ${where} crossed the threshold (${instances.length} ≥ ${policy.threshold} in ${policy.windowDays} days)`,
     }, key);
     opened.push(work);

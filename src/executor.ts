@@ -12,6 +12,7 @@ import { registeredLaunch } from './model/session-state.js';
 import { answeredByPendingSession, independentProducerProfiles } from './producer.js';
 import { answeredByPendingReview } from './reviewer.js';
 import { daemonSummary, profileHealth, readDaemonState, type DaemonState, type DeploymentObservation } from './master-daemon.js';
+import { filePostDeployFollowUps } from './master-verification.js';
 import { withLaunchedRuntime } from './master/launch.js';
 import { launchedSessionHandle, selectReviewerProfile, type ExecutorEffects, type ExecutorHandler } from './auto-dispatch.js';
 import type { ExecutorRelease } from './executor-fleet.js';
@@ -52,6 +53,12 @@ export interface ControlPlaneEffects {
   launchReview: (work: Work, request: DispatchRequest, agents: HerdrAgent[], observedAt: string) => Promise<any>;
   launchProducer: (work: Work, request: DispatchRequest, profile: ProducerProfile, agents: HerdrAgent[], observedAt: string) => Promise<any>;
   observeDeployment: (delivered: Work[]) => Promise<DeploymentObservation>;
+  /**
+   * `POST work` as the master's operator-agent identity, the one that may create work (GY-1660): files
+   * the follow-up a delivered item's unobserved post-deploy verification owes. The coordinator
+   * credential `mutate` carries cannot create work.
+   */
+  fileWork?: (input: unknown, requestId: string) => Promise<{ key?: string }>;
   /** Records a launched session's durable handle on the item (AC-8). */
   recordSession?: (work: Work, handle: SessionHandleInput) => Promise<unknown>;
   /** The clock and the wait a fenced worker start retries on (GY-1431); real time when absent. */
@@ -401,13 +408,20 @@ export function controlPlaneHandlers(config: () => MasterConfig, effects: Contro
       return `${work.key}: GitHub merges ${work.candidate?.sha.slice(0, 12) ?? 'the candidate'} on its branch protection; Graphyard records the delivery from the merged observation`;
     },
     'verify-deployment': async action => {
-      const { work } = await find(action);
+      const { work, all } = await find(action);
       if (action.inputs.kind !== 'verify-deployment') throw new Error('unreachable');
       const observation = await effects.observeDeployment([work]);
       if (observation.source === 'unavailable' || !observation.sha) throw new Error(observation.reason ?? `no deployment could be read for ${work.key}`);
       if (!observation.deployed.includes(work.key)) throw new Error(observation.reason ?? `the running release ${observation.sha.slice(0, 12)} does not carry ${work.key}'s merge ${action.inputs.mergeSha.slice(0, 12)} yet`);
+      // GY-1660: the release just observed checks the item's declared post-deploy verifications, and an
+      // owed one files its follow-up before the observation is recorded: a filing that fails fails the
+      // action, which retries it, where a recorded observation would refuse every retry.
+      const checks = await filePostDeployFollowUps(work, observation.sha, all, effects.fileWork);
+      const owed = checks.filter(check => check.result === 'owed');
+      const unfiled = owed.filter(check => !check.followUp);
+      if (unfiled.length) throw new Error(`${work.key}: ${unfiled.map(check => `${check.criterion} (${check.proof})`).join(', ')} owes its post-deploy follow-up, and ${effects.fileWork ? 'filing it returned no item' : 'this executor has no operator-agent identity to file it with; run graphyard master autonomy --admin-token-stdin --apply'}; the deployment observation waits for it`);
       await effects.mutate(`work/${work.id}/deployment`, { sha: observation.sha, mergeSha: action.inputs.mergeSha, source: observation.source, observedAt: observation.at }, randomUUID());
-      return `observed the release serving ${observation.sha.slice(0, 12)} for ${work.key}`;
+      return `observed the release serving ${observation.sha.slice(0, 12)} for ${work.key}${owed.length ? `; ${owed.map(check => `${check.criterion} owes its post-deploy observation${check.followUp ? ` (${check.followUp})` : ''}`).join(', ')}` : ''}`;
     },
   };
   if (checkoutRefusal) for (const kind of Object.keys(handlers) as NextActionKind[]) {
