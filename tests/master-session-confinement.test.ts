@@ -1,14 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
+import { existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { masterSessionConfinement, startAgentSession } from '../src/master/launch.js';
-import { dirtyCheckoutPaths, readCoordinatorCheckout, sessionMountNamespaceWorks } from '../src/master/profiles.js';
+import { masterConfinementVariable, masterSessionConfinement, startAgentSession } from '../src/master/launch.js';
+import { dirtyCheckoutPaths, hostProcessLaunchTargets, readCoordinatorCheckout, sessionMountNamespaceWorks } from '../src/master/profiles.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { checkoutRestoreRemedy, coordinatorCheckoutGuard } from '../src/daemon/run.js';
 import { emptyDaemonState } from '../src/master-daemon.js';
-import { checkoutRestoreCommand, checkoutRestoreRefPrefix, checkoutRestoreRequestPath, fileCheckoutRestoreRequest, readCheckoutRestoreRequest, serveCheckoutRestore } from '../src/cli/master-checkout-restore.js';
+import { checkoutRestoreCommand, checkoutRestoreRefPrefix, checkoutRestoreRequestPath, checkoutWriterProcesses, fileCheckoutRestoreRequest, freezeCheckoutWriters, loopRestartRequestPath, readCheckoutRestoreRequest, serveCheckoutRestore } from '../src/cli/master-checkout-restore.js';
 import { doctorCommandVerdict, doctorSanctionedCommands as piSanctioned } from '../integrations/pi/index.js';
 import { doctorPrompt, doctorSanctionedCommands } from '../src/daemon/doctor.js';
 import type { Work } from '../src/model.js';
@@ -40,7 +40,7 @@ const guardFor = (root: string, state: ReturnType<typeof emptyDaemonState>, agen
   state: () => state, read: () => readCoordinatorCheckout(root), agents: agents as never, snapshot: async () => ({ work: [] as Work[], now: new Date().toISOString() }),
   persist: async () => {}, now: () => Date.now(), log: () => {}, applies: () => true });
 
-test('integration:master-session-checkout-readonly — the master session cannot write a tracked path of the coordinator checkout, while its managed state, its admin writes and its host view still work', async () => {
+test('integration:master-session-checkout-readonly — the master session cannot write a tracked path of the coordinator checkout, directly or through a host process it asks to start, while its managed state and its admin writes still work', async () => {
   const base = await temporaryDirectory('master-confinement');
   const { root, git } = coordinator(base);
   const confinement = await masterSessionConfinement('claude', root, { bwrap: 'bwrap', platform: 'linux', mountNamespaceWorks: true });
@@ -49,15 +49,22 @@ test('integration:master-session-checkout-readonly — the master session cannot
   const at = words.indexOf(root);
   assert.ok(at > 0 && words[at - 1] === '--ro-bind', 'the checkout is bound read-only');
   assert.ok(words.includes(join(root, '.graphyard')) && words[words.indexOf(join(root, '.graphyard')) - 1] === '--bind', 'the managed .graphyard state is re-exposed writable');
-  assert.ok(!words.includes('--unshare-pid') && !words.includes('--proc'), 'the master keeps the host process view its admin commands read');
-  assert.ok(!words.includes('--tmpfs'), 'the master keeps the user bus `master restart` drives through systemctl');
+  assert.ok(words.includes('--unshare-pid') && words[words.indexOf('--proc') + 1] === '/proc', 'the master runs in its own PID namespace with a fresh /proc: no /proc/PID/root route back to the writable checkout');
+  // The host's process-launch channels are hidden exactly as for every other session: no systemd-run --user, no system bus.
+  const targets = hostProcessLaunchTargets();
+  for (const directory of targets.directories.filter(path => existsSync(path) && statSync(path).isDirectory()))
+    assert.ok(words.some((word, index) => word === '--tmpfs' && words[index + 1] === realpathSync(directory)), `${directory} is masked`);
+  for (const socket of targets.busSockets.filter(path => existsSync(path))) assert.ok(words.includes(realpathSync(socket)), `the session bus ${socket} is replaced`);
+  assert.deepEqual(words.slice(1, 4), ['--setenv', masterConfinementVariable, 'master'], 'the wrapper marks the session confined, so its master restart asks the loop');
   if (process.platform !== 'linux') return;
   assert.ok(await sessionMountNamespaceWorks(), 'mount namespaces work on this Linux host');
   const live = await masterSessionConfinement('claude', root);
   const outside = join(base, 'config'); mkdirSync(outside);
   const inside = (script: string) => spawnSync(live.wrapper[0], [...live.wrapper.slice(1), 'bash', '-c', script], { cwd: root, encoding: 'utf8' });
   // The scripted hotfix of a tracked path fails at the OS level, by every route.
-  for (const script of ['echo hotfix >> src/loop.ts', 'sed -i s/1/2/ src/loop.ts', 'cp Dockerfile src/loop.ts', `git -C ${root} commit -q --allow-empty -m hotfix`, `git -C ${root} stash push -q`, 'rm src/gone.ts'])
+  for (const script of ['echo hotfix >> src/loop.ts', 'sed -i s/1/2/ src/loop.ts', 'cp Dockerfile src/loop.ts', `git -C ${root} commit -q --allow-empty -m hotfix`, `git -C ${root} stash push -q`, 'rm src/gone.ts',
+    `echo hotfix >> /proc/1/root${root}/src/loop.ts`, `echo hotfix >> /proc/${process.pid}/root${root}/src/loop.ts`,
+    `systemd-run --user --quiet --wait sh -c 'echo hotfix >> ${root}/src/loop.ts'`, `systemctl --user show-environment`])
     assert.notEqual(inside(script).status, 0, `the master session cannot run: ${script}`);
   assert.equal(readFileSync(join(root, 'src', 'loop.ts'), 'utf8'), 'export const loop = 1;\n', 'the tracked file is unchanged');
   assert.deepEqual(dirtyCheckoutPaths(await readCoordinatorCheckout(root)), [], 'the checkout stays clean');
@@ -69,7 +76,11 @@ test('integration:master-session-checkout-readonly — the master session cannot
   const dispatch = inside(`git -C ${root} worktree add -q -b graphyard/gy-1-1 .graphyard/worktrees/GY-1-1 main && git -C ${root}/.graphyard/worktrees/GY-1-1 commit -q --allow-empty -m work`);
   assert.equal(dispatch.status, 0, dispatch.stderr);
   assert.equal(git('rev-parse', '--abbrev-ref', 'HEAD'), 'main', 'the coordinator checkout did not move');
-  assert.equal(inside(`kill -0 ${process.pid}`).status, 0, 'the master sees the host process its commands manage');
+  assert.notEqual(inside(`kill -0 ${process.pid}`).status, 0, 'no host process is visible to signal');
+  assert.equal(inside(`printenv ${masterConfinementVariable}`).stdout.trim(), 'master', 'the session knows it is confined');
+  // Its `master restart` files a request beside the cursor, which the loop serves through its own unit.
+  const restart = inside(`echo '{}' > ${loopRestartRequestPath({ credentialFile: join(outside, 'coordinator.token') })}`);
+  assert.equal(restart.status, 0, restart.stderr);
 });
 
 test('unit:master-session-confinement-refusal — a master launch that cannot carry the confinement is refused, never started unconfined', async () => {
@@ -124,6 +135,9 @@ test('integration:checkout-restore-clears-guard — the restore saves every dirt
   const head = git('rev-parse', 'HEAD');
   // The installation's shape: tracked hotfixes, a deleted file, new source, and scratch outside the source paths.
   writeFileSync(join(root, 'src', 'loop.ts'), 'export const loop = 2; // hotfix\n');
+  // A staged version and a different working version of the same path: both must survive.
+  writeFileSync(join(root, 'Dockerfile'), 'FROM node:22\nRUN apt-get install -y curl\n');
+  git('add', 'Dockerfile');
   writeFileSync(join(root, 'Dockerfile'), 'FROM node:22\nRUN apt-get install -y git\n');
   execFileSync('rm', [join(root, 'src', 'gone.ts')]);
   mkdirSync(join(root, 'src', 'fresh'));
@@ -137,10 +151,34 @@ test('integration:checkout-restore-clears-guard — the restore saves every dirt
   const file = checkoutRestoreRequestPath(config(base));
   assert.equal(file, join(base, 'coordinator.checkout-restore.json'));
   await fileCheckoutRestoreRequest(file, 'the loop refuses its dirty checkout', 'graphyard-operator-agent');
-  const restarts: string[] = [];
-  const outcome = await serveCheckoutRestore(file, root, { settle: () => guard.settle(), restart: async () => { restarts.push('graphyard-master.service'); } });
+  // The suspected writer: a standing process working in the checkout. It is stopped for the restore
+  // and continued after, so it can write nothing between the snapshot and the reset.
+  const writer = spawn('sleep', ['60'], { cwd: root, stdio: 'ignore' });
+  const processState = (pid: number) => readFileSync(`/proc/${pid}/stat`, 'utf8').split(') ')[1][0];
+  let frozenDuring: { pids: number[]; states: string[]; dirtyAtThaw: number } | null = null;
+  const quiesce = (directory: string) => {
+    const frozen = freezeCheckoutWriters(directory);
+    const states = frozen.pids.map(processState);
+    return { thaw: () => { frozenDuring = { pids: frozen.pids, states, dirtyAtThaw: Number(spawnSync('git', ['-C', root, 'status', '--porcelain', '--', 'src', 'Dockerfile'], { encoding: 'utf8' }).stdout.trim().length) }; frozen.thaw(); } };
+  };
+  const restarts: { pid: number }[] = [];
+  let failRestart = true;
+  const restart = (pid: number) => async () => { restarts.push({ pid }); if (failRestart) { failRestart = false; throw new Error('Failed to connect to bus'); } };
+  let outcome;
+  try {
+    assert.deepEqual(checkoutWriterProcesses(root), [writer.pid], 'the standing process in the checkout is the suspected writer; this process is spared');
+    outcome = await serveCheckoutRestore(file, root, { settle: () => guard.settle(), restart: restart(41), pid: 41, quiesce });
+    assert.notEqual(processState(writer.pid!), 'T', 'the writer is continued after the restore');
+  } finally { writer.kill(); }
   assert.equal(outcome?.state, 'restored', outcome?.detail);
-  assert.deepEqual(restarts, ['graphyard-master.service'], 'the loop restarts through its unit once');
+  assert.deepEqual(frozenDuring, { pids: [writer.pid], states: ['T'], dirtyAtThaw: 0 }, 'the writer stood stopped through the whole restore');
+  // The restart failed: recorded so, never as done, and asked again on the next pass until it lands.
+  assert.equal(outcome!.restart?.state, 'failed');
+  assert.equal((await readCheckoutRestoreRequest(file))?.outcome?.restart?.state, 'failed');
+  assert.equal((await serveCheckoutRestore(file, root, { restart: restart(41), pid: 41 }))?.restart?.state, 'requested', 'the same loop asks again');
+  assert.equal(await serveCheckoutRestore(file, root, { restart: restart(41), pid: 41 }), null, 'a restart already asked is not asked twice by the same loop');
+  assert.equal((await serveCheckoutRestore(file, root, { restart: restart(42), pid: 42 }))?.restart?.state, 'done', 'the restarted loop records the restart done');
+  assert.deepEqual(restarts, [{ pid: 41 }, { pid: 41 }], 'the loop restarts through its unit until it lands, and no restarted loop asks again');
   assert.ok(outcome!.ref!.startsWith(checkoutRestoreRefPrefix));
   assert.deepEqual(outcome!.paths.sort(), ['Dockerfile', 'src/fresh/', 'src/gone.ts', 'src/loop.ts']);
   // Clean, and nothing lost: the ref holds every byte, on top of the HEAD it was taken at.
@@ -150,7 +188,9 @@ test('integration:checkout-restore-clears-guard — the restore saves every dirt
   assert.equal(git('rev-parse', `${outcome!.ref}^`), head);
   assert.equal(git('show', `${outcome!.ref}:src/loop.ts`), 'export const loop = 2; // hotfix');
   assert.equal(git('show', `${outcome!.ref}:src/fresh/patch.ts`), 'export const fresh = 1;');
-  assert.match(git('show', `${outcome!.ref}:Dockerfile`), /apt-get install -y git/);
+  assert.match(git('show', `${outcome!.ref}:Dockerfile`), /apt-get install -y git/, 'the working version is saved');
+  assert.match(git('show', `${outcome!.ref}^2:Dockerfile`), /apt-get install -y curl/, 'and the staged version, as the index stood');
+  assert.equal(git('rev-parse', `${outcome!.ref}^2^`), head);
   assert.notEqual(spawnSync('git', ['-C', root, 'cat-file', '-e', `${outcome!.ref}:src/gone.ts`]).status, 0, 'the deletion is recorded too');
   assert.equal(readFileSync(join(root, 'src', 'gone.ts'), 'utf8'), 'export const gone = 1;\n', 'the deleted file is back at HEAD');
   assert.ok(existsSync(join(root, 'scratchpad.mjs')), 'scratch outside the source paths is left alone');
@@ -162,11 +202,16 @@ test('integration:checkout-restore-clears-guard — the restore saves every dirt
   assert.equal(state.actions['escalation:dirty-checkout']?.state, 'done');
   // The request carries its outcome, and is served once.
   assert.equal((await readCheckoutRestoreRequest(file))?.outcome?.ref, outcome!.ref);
-  assert.equal(await serveCheckoutRestore(file, root, { restart: async () => { restarts.push('again'); } }), null);
+  assert.equal(await serveCheckoutRestore(file, root, { restart: restart(43), pid: 43 }), null);
   // A request on a clean checkout restores nothing and restarts nothing.
   await fileCheckoutRestoreRequest(file, 'check again', 'graphyard-operator-agent');
-  assert.equal((await serveCheckoutRestore(file, root, { restart: async () => { restarts.push('again'); } }))?.state, 'clean');
-  assert.deepEqual(restarts, ['graphyard-master.service']);
+  assert.equal((await serveCheckoutRestore(file, root, { restart: restart(43), pid: 43 }))?.state, 'clean');
+  assert.equal(restarts.length, 2);
+  // The confined master's `master restart`: a request the loop serves by restarting through its unit.
+  const restartFile = loopRestartRequestPath(config(base));
+  await fileCheckoutRestoreRequest(restartFile, 'master restart from the confined master session', 'graphyard-master', new Date(), 'restart');
+  assert.equal((await serveCheckoutRestore(restartFile, root, { restart: restart(43), pid: 43 }))?.state, 'restart');
+  assert.deepEqual(restarts.at(-1), { pid: 43 });
 });
 
 test('integration:coordinator-serves-current-release — after a restore, a restarted loop on a newer commit serves it, with nothing refused', async () => {

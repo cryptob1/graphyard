@@ -111,10 +111,12 @@ export function writeLaunchFiles(directory: string, name: string, text: { role?:
 // runtime runs inside a bubblewrap mount namespace that bind-mounts the checkout read-only (see
 // profiles.ts). A launch that can carry no confinement is refused with the reason named, never
 // started unconfined. The master session is confined as well (GY-1658, `confinement: 'master'`):
-// it runs from the coordinator root with the checkout read-only, and only its managed `.graphyard`
-// state and the shared Git areas writable; it keeps the host's process view and user bus, which its
-// own admin commands (`master restart`, `master executors restart`) drive. Unconfined sessions
-// patched the serving checkout until the GY-857 guard refused every loop start on it.
+// it runs from the coordinator root with the checkout read-only, only its managed `.graphyard` state
+// and the shared Git areas writable, in its own PID namespace with the host's process-launch channels
+// hidden like every other session's — so no command it runs can start a host process that writes the
+// checkout. The wrapper marks it (GRAPHYARD_CONFINEMENT=master), and its `master restart` files a
+// request the loop serves (cli/master-checkout-restore.ts). Unconfined sessions patched the serving
+// checkout until the GY-857 guard refused every loop start on it.
 
 /**
  * Whether `argv1` is one of the launcher's own entries: `bin/graphyard.mjs`, the `src/cli.ts` child
@@ -158,14 +160,17 @@ export function prepareConfinedGitPaths(root: string): void {
   const fetchHead = join(checkoutWorktreeAdminDirectory(root) ?? gitDir, 'FETCH_HEAD');
   if (!existsSync(fetchHead)) closeSync(openSync(fetchHead, 'a'));
 }
+/** The variable the master session's wrapper sets: its `master restart` then asks the loop to restart itself instead of the host's systemd, which the confinement hides. */
+export const masterConfinementVariable = 'GRAPHYARD_CONFINEMENT';
 /** What a master-session confinement is judged against; tests name an absent bubblewrap or another platform. */
 export interface MasterConfinementProbe { bwrap?: string | null; platform?: string; mountNamespaceWorks?: boolean }
 /**
  * The master session's confinement (GY-1658): the coordinator checkout at `root` bind-mounted
  * read-only, with the checkout's managed `.graphyard` state and the shared Git areas a coordinator
  * session writes (objects, worktrees, `graphyard/` branches, remote-tracking refs, FETCH_HEAD)
- * re-exposed, and the host's process view and user bus kept (`hostView`). A host that cannot build
- * it refuses the launch with the named reason: the master is never started unconfined.
+ * re-exposed, in a PID namespace with the host's systemd and bus sockets hidden (the keyring-only
+ * proxy stands in for the session bus), and GRAPHYARD_CONFINEMENT=master set. A host that cannot
+ * build it refuses the launch with the named reason: the master is never started unconfined.
  */
 export async function masterSessionConfinement(kind: string, root: string, probe: MasterConfinementProbe = {}): Promise<CoordinatorConfinement> {
   const refusal = await coordinatorConfinementRefusal({ kind, args: [], coordinatorRoot: root, sessionDirectory: root, ...probe });
@@ -175,9 +180,10 @@ export async function masterSessionConfinement(kind: string, root: string, probe
   if (existsSync(checkoutGitDirectory(root))) mkdirSync(join(checkoutGitDirectory(root), 'worktrees'), { recursive: true });
   const managed = join(resolve(root), '.graphyard');
   mkdirSync(managed, { recursive: true, mode: 0o700 });
-  const wrapper = readOnlyMountWrapper({ coordinatorRoot: root, sessionDirectory: root, bwrap: probe.bwrap ?? undefined, hostView: true, writable: [managed] });
+  const [bwrap, ...words] = readOnlyMountWrapper({ coordinatorRoot: root, sessionDirectory: root, bwrap: probe.bwrap ?? undefined, writable: [managed] });
+  const wrapper = [bwrap, '--setenv', masterConfinementVariable, 'master', ...words];
   const reexposed = wrapper.filter((word, index) => index > 0 && wrapper[index - 1] === '--bind');
-  return { mechanism: 'read-only-mount', wrapper, detail: `the coordinator checkout at ${resolve(root)} is bind-mounted read-only for the master session; only ${reexposed.join(', ')} are re-exposed writable, so no command it runs can patch the checkout's tracked files` };
+  return { mechanism: 'read-only-mount', wrapper, detail: `the coordinator checkout at ${resolve(root)} is bind-mounted read-only for the master session in a bubblewrap namespace whose /proc shows only its own processes and whose host systemd and bus sockets are hidden; only ${reexposed.join(', ')} are re-exposed writable, so no command it runs, nor any host process it could ask to start, can patch the checkout's tracked files` };
 }
 /** The master launch's confinement against the launcher's own checkout (or `coordinatorRoot`), derived as every other role's is: null only where nothing is confined (the test runner, a non-CLI launcher), the named refusal when the launcher's checkout cannot be derived. */
 async function masterLaunchConfinement(kind: string, options: Pick<SessionStart, 'coordinatorRoot' | 'directory' | 'confinementProbe'>): Promise<CoordinatorConfinement | null> {

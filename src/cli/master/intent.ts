@@ -13,6 +13,8 @@ import { assertHandRework, loopBaseFailed } from '../hand-rework.js';
 import { readMechanicalFixRequests } from '../../mechanical-findings.js';
 import { cappedEscalationKey } from '../../daemon/cycle-review-cap.js';
 import { unhandled, type MasterSession } from './session.js';
+import { checkoutRestoreCommand } from '../master-checkout-restore.js';
+import { masterConfinementVariable } from '../../master/launch.js';
 
 /** The master's own intent (create, requirements, scope) and the decisions it requests, withdraws or refuses. */
 export async function intentCommand(session: MasterSession): Promise<unknown> {
@@ -33,6 +35,8 @@ export async function intentCommand(session: MasterSession): Promise<unknown> {
   };
   // GY-1502: a supervised install's autonomy apply is the promotion's, behind its checks and audit.
   if (id === 'autonomy') assertPromotionRoute(master, args);
+  // GY-1658: the confined master session sees no host systemd, so its restart is a request the loop serves through its own unit.
+  if (id === 'restart' && process.env[masterConfinementVariable] === 'master') return print(await checkoutRestoreCommand(master, args, String(coordinator?.actor?.id ?? coordinator?.actor?.name ?? 'master'), { act: 'restart' }));
   if ((autonomySubcommands as readonly string[]).includes(id ?? '')) return print(await runAutonomyCommand(root, master, id!, args,
     { coordinator: masterApi, readSecret: () => readSecretFromStdin(10_000), agents: listHerdrAgents, daemonLock: async () => (await readDaemonState(root, master)).lock, assertDecision, mutate: masterMutation }));
   if (id === 'promote') {
