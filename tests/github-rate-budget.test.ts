@@ -607,8 +607,8 @@ test('unit:webhook-attention-fires-on-failed-attempts — failed attempts in the
   assert.match(item.next, /https:\/\/github\.com\/settings\/apps\/graphyard-owner-project \(URL https:\/\/YOUR-HOST\/api\/github\/webhook/);
   assert.match(item.next, /failed deliveries listed under https:\/\/github\.com\/settings\/apps\/graphyard-owner-project\/advanced/);
   // A 403 for the managed repository fails, and so does one whose repository cannot be told
-  // foreign because the managed repository's identity is unavailable: only a positively foreign
-  // repository, or a delivery naming none (refused by design), excuses a 403.
+  // foreign because the managed repository's identity is unavailable, or because the delivery
+  // names none: only a repository the log proves foreign excuses a 403.
   const own403 = readLog([attempt('2026-10-10T11:00:00Z', 403, 'push', 77)], '2026-10-10T11:29:00Z');
   assert.deepEqual(corroborated(own403, receipt, now).failedStatusCodes, [403]);
   const unknownIdentity = corroborated(own403, receipt, now, null);
@@ -616,10 +616,19 @@ test('unit:webhook-attention-fires-on-failed-attempts — failed attempts in the
   const [unknownRow] = webhookAttention({ webhooks: unknownIdentity }, now);
   assert.match(unknownRow.text, /1 failed \(status 403;/); assert.match(unknownRow.next, /graphyard-owner-project/);
   const repoless = readLog([attempt('2026-10-10T11:00:00Z', 403, 'installation', null)], '2026-10-10T11:29:00Z');
-  assert.deepEqual([corroborated(repoless, receipt, now, null).state, corroborated(repoless, receipt, now).state], ['answered', 'answered'], 'a delivery naming no repository is refused by design');
-  // A read stopped at its page bound judges only what it covered.
+  for (const repoless403 of [corroborated(repoless, receipt, now, null), corroborated(repoless, receipt, now)]) {
+    assert.deepEqual([repoless403.failedAttempts, repoless403.failedStatusCodes, repoless403.state], [1, [403], 'failing'], 'a 403 naming no repository cannot be proved foreign');
+    const [row] = webhookAttention({ webhooks: repoless403 }, now);
+    assert.match(row.text, /1 failed \(status 403;/); assert.match(row.next, /graphyard-owner-project/);
+  }
+  const foreign = readLog([attempt('2026-10-10T11:00:00Z', 403, 'push', 91)], '2026-10-10T11:29:00Z');
+  assert.deepEqual([corroborated(foreign, receipt, now).failedAttempts, corroborated(foreign, receipt, now, null).failedAttempts], [0, 1], 'only a repository proved foreign excuses its 403');
+  // A read stopped at its page bound judges only what it covered, its oldest (boundary) attempt included.
   const partial = webhookCorroboration({ ...log, coversFrom: '2026-10-10T11:00:00Z' }, receipt, now, { installationId: 2, repositoryId: 77 });
   assert.deepEqual([partial.windowSince, partial.failedAttempts], ['2026-10-10T11:00:00.000Z', 2]);
+  const boundary = readLog([attempt('2026-10-10T11:20:00Z', 202), attempt('2026-10-10T11:00:00Z', 502)], '2026-10-10T11:29:00Z');
+  const atBound = corroborated({ ...boundary, coversFrom: '2026-10-10T11:00:00Z' }, receipt, now);
+  assert.deepEqual([atBound.attemptsInWindow, atBound.failedAttempts, atBound.failedStatusCodes, atBound.state], [2, 1, [502], 'failing'], 'the boundary attempt of a bounded read is judged');
 });
 
 test('unit:webhook-attention-202-only-stays-silent — a gap whose attempts were all answered 2xx never declares the webhook broken', () => {

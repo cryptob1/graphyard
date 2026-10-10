@@ -648,15 +648,15 @@ export interface WebhookCorroboration {
 /**
  * Whether one attempt failed. Any non-2xx answer is a failure (a connection GitHub could not make
  * is logged with status code 0), except a 403 for another repository's delivery: the webhook
- * route refuses repositories it does not manage with 403 by design. Only a refusal positively
- * known to be one is excused: a delivery that names no repository, or one naming a repository other
- * than the managed one. With the managed repository's id unknown, a 403 naming a repository cannot
- * be proved foreign, so it fails.
+ * route refuses repositories it does not manage with 403 by design. Only a refusal the log proves
+ * foreign is excused: one naming a repository other than the managed one, whose id is known. A
+ * delivery naming no repository, or any 403 while the managed repository's id is unknown, cannot be
+ * proved foreign, so it fails.
  */
 export function failedDelivery(attempt: WebhookDeliveryAttempt, repositoryId: number | null) {
   if (attempt.statusCode >= 200 && attempt.statusCode < 300) return false;
   if (attempt.statusCode !== 403) return true;
-  return attempt.repositoryId !== null && (repositoryId === null || attempt.repositoryId === repositoryId);
+  return attempt.repositoryId === null || repositoryId === null || attempt.repositoryId === repositoryId;
 }
 /**
  * Judges the receipts gap against GitHub's log: the attempts after the last receipt (or in the
@@ -667,8 +667,9 @@ export function webhookCorroboration(log: WebhookDeliveryLog | null, lastDeliver
     && (attempt.repositoryId === null || scope.repositoryId === null || attempt.repositoryId === scope.repositoryId));
   const receipt = lastDeliveryAt ? Date.parse(lastDeliveryAt) : now - 3_600_000;
   const covered = log?.coversFrom ? Date.parse(log.coversFrom) : null;
-  const since = covered !== null && covered > receipt ? covered : receipt;
-  const window = log?.observedAt ? ours.filter(attempt => Date.parse(attempt.at) > since) : [];
+  // A read stopped at its page bound covers its oldest attempt too: that boundary attempt is in the window.
+  const bounded = covered !== null && covered > receipt, since = bounded ? covered : receipt;
+  const window = log?.observedAt ? ours.filter(attempt => bounded ? Date.parse(attempt.at) >= since : Date.parse(attempt.at) > since) : [];
   const failed = window.filter(attempt => failedDelivery(attempt, scope.repositoryId));
   return { lastAttemptAt: ours[0]?.at ?? null, windowSince: log?.observedAt ? new Date(since).toISOString() : null, attemptsInWindow: window.length, failedAttempts: failed.length,
     failedStatusCodes: [...new Set(failed.map(attempt => attempt.statusCode))].sort((a, b) => a - b), deliveryLogAt: log?.observedAt ?? null, deliveryLogError: log?.error ?? null };
