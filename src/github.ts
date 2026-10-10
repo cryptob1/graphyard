@@ -648,12 +648,15 @@ export interface WebhookCorroboration {
 /**
  * Whether one attempt failed. Any non-2xx answer is a failure (a connection GitHub could not make
  * is logged with status code 0), except a 403 for another repository's delivery: the webhook
- * route refuses repositories it does not manage with 403 by design. With the managed repository's
- * id unknown, a 403 is taken for that refusal.
+ * route refuses repositories it does not manage with 403 by design. Only a refusal positively
+ * known to be one is excused: a delivery that names no repository, or one naming a repository other
+ * than the managed one. With the managed repository's id unknown, a 403 naming a repository cannot
+ * be proved foreign, so it fails.
  */
 export function failedDelivery(attempt: WebhookDeliveryAttempt, repositoryId: number | null) {
   if (attempt.statusCode >= 200 && attempt.statusCode < 300) return false;
-  return !(attempt.statusCode === 403 && (repositoryId === null || attempt.repositoryId !== repositoryId));
+  if (attempt.statusCode !== 403) return true;
+  return attempt.repositoryId !== null && (repositoryId === null || attempt.repositoryId === repositoryId);
 }
 /**
  * Judges the receipts gap against GitHub's log: the attempts after the last receipt (or in the
@@ -674,13 +677,14 @@ export function webhookCorroboration(log: WebhookDeliveryLog | null, lastDeliver
  * What a receipts gap is, corroborated (GY-1649): `delivering` within the hour; past it, `failing`
  * when GitHub attempted deliveries in the window that our endpoint did not answer 2xx, `quiet` when
  * it attempted none, `answered` when every attempt was answered 2xx (none could wake a job), and
- * `unverified` while the delivery log has never been read, so silence cannot be told apart.
+ * `unverified` while the delivery log has never been read or its last refresh failed: the sample a
+ * failed refresh keeps is history, not a current account, so it classifies nothing.
  */
 export type WebhookState = 'delivering' | 'quiet' | 'answered' | 'failing' | 'unverified';
-export function webhookState(webhooks: { lastDeliveryAt: string | null } & Partial<Pick<WebhookCorroboration, 'attemptsInWindow' | 'failedAttempts' | 'deliveryLogAt'>>, now: number): WebhookState {
+export function webhookState(webhooks: { lastDeliveryAt: string | null } & Partial<Pick<WebhookCorroboration, 'attemptsInWindow' | 'failedAttempts' | 'deliveryLogAt' | 'deliveryLogError'>>, now: number): WebhookState {
   if (webhooks.lastDeliveryAt && now - Date.parse(webhooks.lastDeliveryAt) < 3_600_000) return 'delivering';
+  if (!webhooks.deliveryLogAt || webhooks.deliveryLogError) return 'unverified';
   if ((webhooks.failedAttempts ?? 0) > 0) return 'failing';
-  if (!webhooks.deliveryLogAt) return 'unverified';
   return (webhooks.attemptsInWindow ?? 0) > 0 ? 'answered' : 'quiet';
 }
 const mergeQueueQuery = `query($owner: String!, $name: String!, $number: Int!, $branch: String!) {
@@ -916,13 +920,15 @@ export class GitHub {
    * GitHub's delivery log for the App's webhook (GY-1649), read with the App JWT and served from one
    * app-level cache: every `/api/status` read shares it, it is read again at most every five minutes
    * (fifteen while the request budget is tight), never while requests are paused, and concurrent
-   * readers share one read. A failed read keeps the last attempts and names its error. Never throws.
+   * readers share one read. A failed read, or a pause past the interval, keeps the last attempts as
+   * history and names its error, so the gap reads as unverified rather than as the old sample's
+   * classification. Never throws.
    */
   async webhookDeliveries(now = Date.now()): Promise<WebhookDeliveryLog> {
     const cached = this.deliveryLog;
     const ttl = budgetTight(this.budget(now)) ? webhookDeliveryLogTightMs : webhookDeliveryLogMs;
-    if (cached && now - cached.at < ttl || now < this.blockedUntil && cached) return cached.log;
-    if (now < this.blockedUntil) return { observedAt: null, attempts: [], coversFrom: null, error: `GitHub requests paused until ${new Date(this.blockedUntil).toISOString()} after a rate limit` };
+    if (cached && now - cached.at < ttl) return cached.log;
+    if (now < this.blockedUntil) return { ...(cached?.log ?? { observedAt: null, attempts: [], coversFrom: null }), error: `GitHub requests paused until ${new Date(this.blockedUntil).toISOString()} after a rate limit` };
     this.deliveryRead ??= this.readWebhookDeliveries(now, cached?.log ?? null).then(log => { this.deliveryLog = { at: now, log }; return log; }).finally(() => { this.deliveryRead = null; });
     // A status read waits for a slow read only briefly; it is served the previous log meanwhile.
     let timer: NodeJS.Timeout | undefined;

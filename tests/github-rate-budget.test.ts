@@ -8,7 +8,7 @@ import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server/index.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { CHECK_NAME, GitHub, comparePage, webhookCorroboration, webhookDeliveryLogMs, webhookDeliveryLogTightMs, webhookState, type WebhookDeliveryLog, mergePathReserve, observationBand, observationCadence, observationCadenceMs, processJob, reserveDecision, steadyStateInterval, steadyStateShare } from '../src/github.js';
+import { CHECK_NAME, GitHub, comparePage, webhookCorroboration, webhookDeliveryLogMs, webhookDeliveryLogTightMs, webhookState, type WebhookDeliveryAttempt, type WebhookDeliveryLog, mergePathReserve, observationBand, observationCadence, observationCadenceMs, processJob, reserveDecision, steadyStateInterval, steadyStateShare } from '../src/github.js';
 import { evaluate, type Principal, type Work } from '../src/model.js';
 import { exhaustionAttention, githubBudgetAttention, pauseAttention, webhookAttention } from '../src/cli/github-budget-attention.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -547,7 +547,7 @@ const corroborated = (log: WebhookDeliveryLog, lastDeliveryAt: string | null, no
   return { ...liveness, ...corroboration, state: webhookState({ ...liveness, ...corroboration }, now) };
 };
 const attempt = (at: string, statusCode: number, event = 'check_suite', repositoryId: number | null = 77) => ({ at, statusCode, event, installationId: 2, repositoryId });
-const readLog = (attempts: ReturnType<typeof attempt>[], observedAt: string): WebhookDeliveryLog => ({ observedAt, attempts, coversFrom: null, error: null });
+const readLog = (attempts: WebhookDeliveryAttempt[], observedAt: string): WebhookDeliveryLog => ({ observedAt, attempts, coversFrom: null, error: null });
 
 test('unit:webhook-attention-quiet-is-not-broken — a receipts gap of an hour or more in which GitHub attempted no delivery raises no attention row and is reported quiet, not broken', () => {
   // GY-1648's instance: the last receipt at 10:20:20.072Z, GitHub's last attempt at 10:20:21.981Z
@@ -574,6 +574,20 @@ test('unit:webhook-attention-quiet-is-not-broken — a receipts gap of an hour o
   const [item] = webhookAttention({ webhooks: unread }, now);
   assert.match(item.text, /could not be read \(GitHub GET \/app\/hook\/deliveries failed \(502\)\) to tell a quiet hour from a failing webhook/);
   assert.doesNotMatch(item.text, /broken/);
+  // A refresh that fails keeps the old sample as history but classifies nothing with it: a quiet
+  // sample does not stay quiet, nor a failing one failing, until a read succeeds again.
+  const later = Date.parse('2026-10-10T14:00:00Z');
+  const quietSample = readLog([attempt('2026-10-10T10:20:19.500Z', 202, 'push')], '2026-10-10T13:00:00Z');
+  const failingSample = readLog([attempt('2026-10-10T12:00:00Z', 502, 'push')], '2026-10-10T13:00:00Z');
+  const refreshFailed = (log: WebhookDeliveryLog) => ({ ...log, error: 'GitHub GET /app/hook/deliveries failed (502)' });
+  assert.deepEqual([corroborated(quietSample, receipt, later).state, corroborated(refreshFailed(quietSample), receipt, later).state], ['quiet', 'unverified']);
+  const staleFailing = corroborated(refreshFailed(failingSample), receipt, later);
+  assert.deepEqual([staleFailing.failedAttempts, staleFailing.deliveryLogAt, staleFailing.state], [1, '2026-10-10T13:00:00Z', 'unverified'], 'the old failures are kept as data, not as the current classification');
+  const [stale] = webhookAttention({ webhooks: staleFailing }, later);
+  assert.match(stale.text, /could not be read .* \(its last read, at 2026-10-10T13:00:00Z, is history, not this hour's account\)/); assert.doesNotMatch(stale.text, /broken/);
+  // Recovery: the next successful read classifies again.
+  assert.equal(corroborated(readLog(failingSample.attempts, '2026-10-10T13:59:00Z'), receipt, later).state, 'failing');
+  assert.equal(corroborated(readLog(quietSample.attempts, '2026-10-10T13:59:00Z'), receipt, later).state, 'quiet');
 });
 
 test('unit:webhook-attention-fires-on-failed-attempts — failed attempts in the gap raise the row, naming the failed count, the status codes and the App settings URL', () => {
@@ -592,9 +606,17 @@ test('unit:webhook-attention-fires-on-failed-attempts — failed attempts in the
   assert.match(item.text, /the webhook is broken/);
   assert.match(item.next, /https:\/\/github\.com\/settings\/apps\/graphyard-owner-project \(URL https:\/\/YOUR-HOST\/api\/github\/webhook/);
   assert.match(item.next, /failed deliveries listed under https:\/\/github\.com\/settings\/apps\/graphyard-owner-project\/advanced/);
-  // With the managed repository unknown a 403 is taken for the deliberate refusal; a 403 for the managed repository fails.
-  assert.deepEqual(corroborated(readLog([attempt('2026-10-10T11:00:00Z', 403, 'push', 77)], '2026-10-10T11:29:00Z'), receipt, now).failedStatusCodes, [403]);
-  assert.equal(corroborated(readLog([attempt('2026-10-10T11:00:00Z', 403, 'push', 77)], '2026-10-10T11:29:00Z'), receipt, now, null).state, 'answered');
+  // A 403 for the managed repository fails, and so does one whose repository cannot be told
+  // foreign because the managed repository's identity is unavailable: only a positively foreign
+  // repository, or a delivery naming none (refused by design), excuses a 403.
+  const own403 = readLog([attempt('2026-10-10T11:00:00Z', 403, 'push', 77)], '2026-10-10T11:29:00Z');
+  assert.deepEqual(corroborated(own403, receipt, now).failedStatusCodes, [403]);
+  const unknownIdentity = corroborated(own403, receipt, now, null);
+  assert.deepEqual([unknownIdentity.failedAttempts, unknownIdentity.failedStatusCodes, unknownIdentity.state], [1, [403], 'failing'], 'an unavailable repository identity cannot hide an own-repository 403');
+  const [unknownRow] = webhookAttention({ webhooks: unknownIdentity }, now);
+  assert.match(unknownRow.text, /1 failed \(status 403;/); assert.match(unknownRow.next, /graphyard-owner-project/);
+  const repoless = readLog([attempt('2026-10-10T11:00:00Z', 403, 'installation', null)], '2026-10-10T11:29:00Z');
+  assert.deepEqual([corroborated(repoless, receipt, now, null).state, corroborated(repoless, receipt, now).state], ['answered', 'answered'], 'a delivery naming no repository is refused by design');
   // A read stopped at its page bound judges only what it covered.
   const partial = webhookCorroboration({ ...log, coversFrom: '2026-10-10T11:00:00Z' }, receipt, now, { installationId: 2, repositoryId: 77 });
   assert.deepEqual([partial.windowSince, partial.failedAttempts], ['2026-10-10T11:00:00.000Z', 2]);
@@ -634,11 +656,18 @@ test('unit:webhook-deliveries-read-cached — the delivery log is one app-level 
   Object.assign(github, { blockedUntil: now + 3_600_000 });
   const paused = await github.webhookDeliveries(now + 3 * webhookDeliveryLogTightMs);
   assert.equal(api.deliveryReads, 3); assert.equal(paused.attempts.length, 1);
+  assert.match(paused.error ?? '', /^GitHub requests paused until /, 'a pause past the interval marks the kept sample as not current');
+  assert.equal(webhookState({ lastDeliveryAt: null, ...webhookCorroboration(paused, null, now + 3 * webhookDeliveryLogTightMs, { installationId: 2, repositoryId: null }) }, now + 3 * webhookDeliveryLogTightMs), 'unverified');
   Object.assign(github, { blockedUntil: 0 });
   // A failed read keeps the attempts it had and names its error; the next interval reads again.
   github.fetch = async () => new Response('{}', { status: 502 });
   const failed = await github.webhookDeliveries(now + 4 * webhookDeliveryLogTightMs);
   assert.deepEqual([failed.attempts.length, failed.error], [1, 'GitHub GET /app/hook/deliveries failed (502)']);
+  // The failed read is cached for the interval too, then a successful read clears its error.
+  await github.webhookDeliveries(now + 4 * webhookDeliveryLogTightMs + 60_000);
+  github.fetch = api.fetch;
+  const recovered = await github.webhookDeliveries(now + 4 * webhookDeliveryLogTightMs + webhookDeliveryLogMs);
+  assert.deepEqual([recovered.error, recovered.attempts.length, api.deliveryReads], [null, 1, 4]);
   // A busy log is paged back to the lookback and no further.
   let pages = 0; const pageAt = now + 5 * webhookDeliveryLogTightMs;
   github.fetch = async (url: unknown) => {

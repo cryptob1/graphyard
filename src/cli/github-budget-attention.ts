@@ -23,8 +23,8 @@ import { webhookState } from '../github.js';
  *   endpoint did not answer 2xx (GY-1649), named with the failures and the App settings page that
  *   fixes it, instead of being compensated by polling without a word. An hour in which GitHub
  *   attempted nothing is quiet, and one whose attempts were all answered is not broken: neither
- *   raises an item. While the delivery log cannot be read the gap is raised as unverified, never
- *   as broken.
+ *   raises an item. While the delivery log cannot be read, or its last refresh failed, the gap
+ *   is raised as unverified, never as broken nor as an old sample's quiet.
  */
 export interface BudgetStatus {
   githubBudget?: {
@@ -78,7 +78,8 @@ export function tokenProjectionAttention(status: BudgetStatus): AttentionItem[] 
 /**
  * No webhook delivery for an hour while pull requests are open, corroborated with GitHub's delivery
  * log (GY-1649): raised as broken only when GitHub attempted deliveries in the gap that failed, and
- * as unverified while the log cannot be read; a quiet or fully answered gap raises nothing.
+ * as unverified while the log cannot be read or its refresh failed; a quiet or fully answered gap
+ * raises nothing.
  */
 export function webhookAttention(status: BudgetStatus, now: number): AttentionItem[] {
   const webhooks = status.webhooks;
@@ -91,7 +92,7 @@ export function webhookAttention(status: BudgetStatus, now: number): AttentionIt
   const silence = `No GitHub webhook delivery has arrived ${since === null ? 'since the control plane started' : `for ${elapsed(since)} (last at ${webhooks.lastDeliveryAt})`} while ${open}`;
   const secret = webhooks.configured === false ? '; GITHUB_WEBHOOK_SECRET is not set, so every delivery is refused' : '';
   if (state === 'unverified') return [{ subject: 'github',
-    text: `${silence}, and GitHub's webhook delivery log could not be read${webhooks.deliveryLogError ? ` (${webhooks.deliveryLogError})` : ''} to tell a quiet hour from a failing webhook${secret}`,
+    text: `${silence}, and GitHub's webhook delivery log could not be read${webhooks.deliveryLogError ? ` (${webhooks.deliveryLogError})` : ''} to tell a quiet hour from a failing webhook${webhooks.deliveryLogAt ? ` (its last read, at ${webhooks.deliveryLogAt}, is history, not this hour's account)` : ''}${secret}`,
     ...agentOwner('master', `Read the deliveries under ${settings}/advanced: none attempted is a quiet hour, failed attempts are a broken webhook (URL https://YOUR-HOST/api/github/webhook, the secret matching GITHUB_WEBHOOK_SECRET); a delivery that arrives or a readable log clears this`) }];
   const failed = webhooks.failedAttempts ?? 0, attempts = webhooks.attemptsInWindow ?? failed;
   return [{ subject: 'github',

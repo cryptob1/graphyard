@@ -45,7 +45,7 @@ Railway reports `<project> / production`. Startup takes `production.environment`
 
 ### Webhook delivery
 
-Hosted: `webhooks.state` `failing` ([liveness](operations-reference.md#webhook-liveness)) → broken; `failedStatusCodes` 0/404 → URL ≠ `https://YOUR-HOST/api/github/webhook`; 401 → secret ≠ `GITHUB_WEBHOOK_SECRET`. Fix, redeliver (`webhooks.settingsUrl` Advanced).
+Hosted: `failing` ([liveness](operations-reference.md#webhook-liveness)) codes 0/404 → URL ≠ `https://YOUR-HOST/api/github/webhook`; 401 → secret ≠ `GITHUB_WEBHOOK_SECRET`. Fix, redeliver (`webhooks.settingsUrl` Advanced).
 
 ## Backup, upgrade, rollback
 
