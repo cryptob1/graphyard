@@ -3,7 +3,7 @@
 
 > install Graphyard for OWNER/REPO on PROVIDER following docs/install.md
 
-Ask only: **Which provider**; **Provider login**; **GitHub App confirmation click**, once (none with `--no-github-app`); **Approval of the printed plan**. Never a fifth.
+Ask only: **Which provider**; **Provider login**; **GitHub App confirmation click**, once (none with `--no-github-app`); **Approval of the printed plan**. Never invent a fifth.
 
 ## Hard rules
 
@@ -51,7 +51,7 @@ Skip with `--no-github-app`. Else `--apply` serves `http://127.0.0.1:4311` (no b
 
 ## Step 5: first pull request
 
-Skip with `--no-github-app` until an App is bound. Else dispatch a [small item](onboarding.md#4-prove-the-first-pr); once `Graphyard / merge` appears, rerun idempotent `--apply` to require it and `graphyard/landable`.
+Skip with `--no-github-app` until an App binds. Else dispatch a [small item](onboarding.md#4-prove-the-first-pr); once `Graphyard / merge` appears, rerun idempotent `--apply` requiring it and `graphyard/landable`.
 
 ## Self-contained host
 
