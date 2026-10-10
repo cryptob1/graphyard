@@ -103,12 +103,15 @@ test('unit:soak-invariants-hold — the real loop reads /api/status every cycle 
     const config = { ...soakConfig, url: planeUrl, credentialFile, workers: [] };
     const real = daemonEffects(root, config, { snapshot: async () => ({ work: await store.list(), now: new Date().toISOString() }), mutate: async () => ({}), run: async () => { throw new Error('no child processes in this soak'); } });
     const seen: { elapsed: number; stretch: Stretch['name']; state: string; failedAttempts: number; statusMs: number; rows: string[] }[] = [];
-    let statusMs = 0;
+    // The status the loop last read, and when it began: the rows and the stretch are judged against
+    // that read, never a second one the wall-clock part of the simulated clock may carry past a cache
+    // interval, and never at the cycle's time when the loop is still served a read in flight.
+    let statusMs = 0, cycleStatus = null as { at: number; value: any } | null;
     const effects: DaemonEffects = {
       agents: () => [], credentials: async () => ({}), snapshot: async () => ({ work: await store.list(), now: new Date().toISOString() }),
       closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, requestSmoke: () => {}, recordDeployment: async () => {}, persist: async () => {}, recordSession: async () => {},
       observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date().toISOString(), reason: 'not configured', deployed: [], pending: [] }),
-      controlPlane: async () => { const started = Date.now(); try { return await real.controlPlane!(); } finally { statusMs = Date.now() - started; } },
+      controlPlane: async () => { const started = Date.now(); try { const value = await real.controlPlane!(); cycleStatus = { at: started, value }; return value; } finally { statusMs = Date.now() - started; } },
       // The GitHub-budget lines master status adds (src/master-status.ts), read from the status the loop
       // just read. The rest of master status's attention runs host-wide passes (the /tmp reclaim) that
       // a simulated clock must not drive on a shared host, and none of it is this change's.
@@ -132,10 +135,11 @@ test('unit:soak-invariants-hold — the real loop reads /api/status every cycle 
       Object.assign(github, { blockedUntil: 'paused' in stretch ? dayStart + stretch.to : 0 });
       const before = state.faults.observedAt;
       try { await runCycle(config, state, effects, () => clock.now()); } catch (error) { failures.push(`+${elapsed / minute} min: ${error instanceof Error ? error.message : String(error)}`); }
-      if (state.faults.observedAt !== before) {
-        const status = await (await fetch(`${planeUrl}/api/status`, { headers: { Authorization: `Bearer ${token(principals.coordinator)}` } })).json() as any;
+      // Before the loop first reads the status there is no read to judge rows against.
+      if (state.faults.observedAt !== before && cycleStatus) {
+        const status = cycleStatus.value, readAt = cycleStatus.at - dayStart;
         const rows = state.faults.instances.filter(entry => entry.subject === 'github' && Object.values(state.faults.open).includes(entry.id)).map(entry => (entry as { text?: string }).text ?? entry.kind);
-        seen.push({ elapsed, stretch: stretch.name, state: status.webhooks.state, failedAttempts: status.webhooks.failedAttempts, statusMs, rows });
+        seen.push({ elapsed: readAt, stretch: stretchAt(readAt).name, state: status.webhooks.state, failedAttempts: status.webhooks.failedAttempts, statusMs, rows });
       }
       clock.advance(minute); await store.pool.query('UPDATE simulated_clock SET offset_ms=$1', [clock.offsetMs]);
     }

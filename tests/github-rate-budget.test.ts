@@ -623,12 +623,29 @@ test('unit:webhook-attention-fires-on-failed-attempts — failed attempts in the
   }
   const foreign = readLog([attempt('2026-10-10T11:00:00Z', 403, 'push', 91)], '2026-10-10T11:29:00Z');
   assert.deepEqual([corroborated(foreign, receipt, now).failedAttempts, corroborated(foreign, receipt, now, null).failedAttempts], [0, 1], 'only a repository proved foreign excuses its 403');
-  // A read stopped at its page bound judges only what it covered, its oldest (boundary) attempt included.
-  const partial = webhookCorroboration({ ...log, coversFrom: '2026-10-10T11:00:00Z' }, receipt, now, { installationId: 2, repositoryId: 77 });
-  assert.deepEqual([partial.windowSince, partial.failedAttempts], ['2026-10-10T11:00:00.000Z', 2]);
+  // A read stopped at its page bound judges what it fetched, its oldest (boundary) attempt included,
+  // and says the gap's head is unread; a fetched failure is still a failing webhook.
+  const partial = webhookCorroboration({ ...log, attempts: log.attempts.slice(0, 2), coversFrom: '2026-10-10T11:10:00Z' }, receipt, now, { installationId: 2, repositoryId: 77 });
+  assert.deepEqual([partial.windowSince, partial.coveredFrom, partial.failedAttempts], ['2026-10-10T10:00:00.000Z', '2026-10-10T11:10:00Z', 2]);
   const boundary = readLog([attempt('2026-10-10T11:20:00Z', 202), attempt('2026-10-10T11:00:00Z', 502)], '2026-10-10T11:29:00Z');
   const atBound = corroborated({ ...boundary, coversFrom: '2026-10-10T11:00:00Z' }, receipt, now);
   assert.deepEqual([atBound.attemptsInWindow, atBound.failedAttempts, atBound.failedStatusCodes, atBound.state], [2, 1, [502], 'failing'], 'the boundary attempt of a bounded read is judged');
+  // An own 502 45 minutes ago, behind more than five pages of newer deliveries for other
+  // repositories: the bounded read never fetched it, so the gap is not quiet but unverified, and the
+  // row names how far back the log was read.
+  const busyNow = Date.parse('2026-10-10T11:15:00Z'), busyReceipt = '2026-10-10T10:00:00.000Z';
+  const foreignFlood = Array.from({ length: 500 }, (_, index) => attempt(new Date(busyNow - 60_000 - index * 4_000).toISOString(), 202, 'push', 91));
+  const flooded = corroborated({ ...readLog(foreignFlood, new Date(busyNow - 30_000).toISOString()), coversFrom: foreignFlood[499].at }, busyReceipt, busyNow);
+  assert.deepEqual([flooded.attemptsInWindow, flooded.failedAttempts, flooded.coveredFrom, flooded.state], [0, 0, foreignFlood[499].at, 'unverified'], 'an unread older attempt cannot be classified quiet');
+  const [floodRow] = webhookAttention({ webhooks: flooded }, busyNow);
+  assert.match(floodRow.text, new RegExp(`read back only to ${foreignFlood[499].at}, after the gap began at 2026-10-10T10:00:00\\.000Z: .*an older attempt in the gap is unread`));
+  assert.doesNotMatch(floodRow.text, /broken/); assert.match(floodRow.next, /graphyard-owner-project\/advanced back to 2026-10-10T10:00:00\.000Z/);
+  // Nor answered: own 2xx attempts fetched before the bound do not vouch for the unread head.
+  const ownAnswered = corroborated({ ...readLog([attempt('2026-10-10T11:10:00Z', 202), ...foreignFlood], new Date(busyNow - 30_000).toISOString()), coversFrom: foreignFlood[499].at }, busyReceipt, busyNow);
+  assert.deepEqual([ownAnswered.attemptsInWindow, ownAnswered.state], [1, 'unverified']);
+  // Once the read reaches back past the receipt the gap is judged in full: the old 502 is fetched and fails it.
+  const reached = corroborated(readLog([...foreignFlood, attempt('2026-10-10T10:30:00Z', 502)], new Date(busyNow - 30_000).toISOString()), busyReceipt, busyNow);
+  assert.deepEqual([reached.coveredFrom, reached.failedStatusCodes, reached.state], [null, [502], 'failing']);
 });
 
 test('unit:webhook-attention-202-only-stays-silent — a gap whose attempts were all answered 2xx never declares the webhook broken', () => {
@@ -685,7 +702,7 @@ test('unit:webhook-deliveries-read-cached — the delivery log is one app-level 
     return new Response(JSON.stringify(body), { status: 200, headers: { link: `<https://api.github.com/app/hook/deliveries?per_page=100&cursor=${page + 1}>; rel="next"` } });
   };
   const paged = await github.webhookDeliveries(pageAt);
-  assert.equal(pages, 3, 'six hours at one attempt per 90 seconds is three pages'); assert.equal(paged.coversFrom, null);
+  assert.equal(pages, 3, 'six hours at one attempt per 90 seconds is three pages'); assert.equal(paged.coversFrom, paged.attempts[paged.attempts.length - 1].at, 'stopped at the lookback with older pages left, it is complete back to its oldest attempt');
   // A log too busy for the page bound says how far back it is complete.
   pages = 0; github.fetch = async (url: unknown) => {
     const page = Number(new URL(String(url)).searchParams.get('cursor') ?? 0); pages++;
@@ -694,6 +711,24 @@ test('unit:webhook-deliveries-read-cached — the delivery log is one app-level 
   };
   const bounded = await github.webhookDeliveries(pageAt + webhookDeliveryLogTightMs);
   assert.equal(pages, 5); assert.equal(bounded.coversFrom, bounded.attempts[bounded.attempts.length - 1].at);
+  // A read stopped at the lookback while GitHub still has older pages keeps its boundary too: a
+  // receipts gap older than the lookback is not complete back to its last receipt.
+  pages = 0; const lookbackAt = pageAt + 2 * webhookDeliveryLogTightMs;
+  github.fetch = async (url: unknown) => {
+    const page = Number(new URL(String(url)).searchParams.get('cursor') ?? 0); pages++;
+    const body = Array.from({ length: 100 }, (_, index) => ({ delivered_at: new Date(lookbackAt - (page * 100 + index) * 90_000).toISOString(), status_code: 202, event: 'check_run', installation_id: 2 }));
+    return new Response(JSON.stringify(body), { status: 200, headers: { link: `<https://api.github.com/app/hook/deliveries?per_page=100&cursor=${page + 1}>; rel="next"` } });
+  };
+  const lookedBack = await github.webhookDeliveries(lookbackAt);
+  assert.equal(pages, 3); assert.equal(lookedBack.coversFrom, lookedBack.attempts[lookedBack.attempts.length - 1].at, 'the lookback, not the log, ended the read');
+  const oldGap = webhookCorroboration(lookedBack, new Date(lookbackAt - 8 * 3_600_000).toISOString(), lookbackAt, { installationId: 2, repositoryId: null });
+  assert.deepEqual([oldGap.coveredFrom, webhookState({ lastDeliveryAt: new Date(lookbackAt - 8 * 3_600_000).toISOString(), ...oldGap }, lookbackAt)], [lookedBack.coversFrom, 'unverified']);
+  const recentGap = webhookCorroboration(lookedBack, new Date(lookbackAt - 2 * 3_600_000).toISOString(), lookbackAt, { installationId: 2, repositoryId: null });
+  assert.deepEqual([recentGap.coveredFrom, webhookState({ lastDeliveryAt: new Date(lookbackAt - 2 * 3_600_000).toISOString(), ...recentGap }, lookbackAt)], [null, 'answered'], 'a gap inside the lookback is covered');
+  // The last page GitHub has, with no next link, is complete whatever its age.
+  pages = 0; github.fetch = async () => { pages++; return new Response(JSON.stringify([{ delivered_at: new Date(lookbackAt - 10 * 3_600_000).toISOString(), status_code: 202, event: 'push', installation_id: 2 }]), { status: 200 }); };
+  const exhausted = await github.webhookDeliveries(lookbackAt + webhookDeliveryLogTightMs);
+  assert.deepEqual([pages, exhausted.coversFrom], [1, null]);
 });
 
 test('integration:webhook-status-corroboration-fields — /api/status carries the last attempt and the failed attempts in the window from the cached read, not a GitHub read per status call', async t => {

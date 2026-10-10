@@ -639,6 +639,12 @@ export interface WebhookCorroboration {
   lastAttemptAt: string | null;
   /** The window judged: after the last receipt (or the last hour, with none), up to the log's read. */
   windowSince: string | null;
+  /**
+   * Where the read's coverage begins when it begins after `windowSince`: a read stopped at its page
+   * bound (or its lookback) did not page back to the start of the gap, so an older attempt in the
+   * window may be unread. Null when the read covers the whole window.
+   */
+  coveredFrom: string | null;
   attemptsInWindow: number;
   failedAttempts: number;
   failedStatusCodes: number[];
@@ -665,13 +671,13 @@ export function failedDelivery(attempt: WebhookDeliveryAttempt, repositoryId: nu
 export function webhookCorroboration(log: WebhookDeliveryLog | null, lastDeliveryAt: string | null, now: number, scope: { installationId: number; repositoryId: number | null }): WebhookCorroboration {
   const ours = (log?.attempts ?? []).filter(attempt => (attempt.installationId === null || attempt.installationId === scope.installationId)
     && (attempt.repositoryId === null || scope.repositoryId === null || attempt.repositoryId === scope.repositoryId));
-  const receipt = lastDeliveryAt ? Date.parse(lastDeliveryAt) : now - 3_600_000;
-  const covered = log?.coversFrom ? Date.parse(log.coversFrom) : null;
-  // A read stopped at its page bound covers its oldest attempt too: that boundary attempt is in the window.
-  const bounded = covered !== null && covered > receipt, since = bounded ? covered : receipt;
-  const window = log?.observedAt ? ours.filter(attempt => bounded ? Date.parse(attempt.at) >= since : Date.parse(attempt.at) > since) : [];
+  const since = lastDeliveryAt ? Date.parse(lastDeliveryAt) : now - 3_600_000;
+  // A read stopped at its page bound or lookback is complete only back to its oldest attempt, which
+  // it judges too; when that is later than the gap's start, the head of the gap is unread.
+  const covered = log?.observedAt && log.coversFrom && Date.parse(log.coversFrom) > since ? log.coversFrom : null;
+  const window = log?.observedAt ? ours.filter(attempt => Date.parse(attempt.at) > since) : [];
   const failed = window.filter(attempt => failedDelivery(attempt, scope.repositoryId));
-  return { lastAttemptAt: ours[0]?.at ?? null, windowSince: log?.observedAt ? new Date(since).toISOString() : null, attemptsInWindow: window.length, failedAttempts: failed.length,
+  return { lastAttemptAt: ours[0]?.at ?? null, windowSince: log?.observedAt ? new Date(since).toISOString() : null, coveredFrom: covered, attemptsInWindow: window.length, failedAttempts: failed.length,
     failedStatusCodes: [...new Set(failed.map(attempt => attempt.statusCode))].sort((a, b) => a - b), deliveryLogAt: log?.observedAt ?? null, deliveryLogError: log?.error ?? null };
 }
 /**
@@ -679,13 +685,16 @@ export function webhookCorroboration(log: WebhookDeliveryLog | null, lastDeliver
  * when GitHub attempted deliveries in the window that our endpoint did not answer 2xx, `quiet` when
  * it attempted none, `answered` when every attempt was answered 2xx (none could wake a job), and
  * `unverified` while the delivery log has never been read or its last refresh failed: the sample a
- * failed refresh keeps is history, not a current account, so it classifies nothing.
+ * failed refresh keeps is history, not a current account, so it classifies nothing. A read that did
+ * not reach back to the gap's start (`coveredFrom`) is `failing` on a fetched failure, but never
+ * `quiet` nor `answered`: an unread older attempt in the gap may have failed, so it is `unverified`.
  */
 export type WebhookState = 'delivering' | 'quiet' | 'answered' | 'failing' | 'unverified';
-export function webhookState(webhooks: { lastDeliveryAt: string | null } & Partial<Pick<WebhookCorroboration, 'attemptsInWindow' | 'failedAttempts' | 'deliveryLogAt' | 'deliveryLogError'>>, now: number): WebhookState {
+export function webhookState(webhooks: { lastDeliveryAt: string | null } & Partial<Pick<WebhookCorroboration, 'attemptsInWindow' | 'failedAttempts' | 'deliveryLogAt' | 'deliveryLogError' | 'coveredFrom'>>, now: number): WebhookState {
   if (webhooks.lastDeliveryAt && now - Date.parse(webhooks.lastDeliveryAt) < 3_600_000) return 'delivering';
   if (!webhooks.deliveryLogAt || webhooks.deliveryLogError) return 'unverified';
   if ((webhooks.failedAttempts ?? 0) > 0) return 'failing';
+  if (webhooks.coveredFrom) return 'unverified';
   return (webhooks.attemptsInWindow ?? 0) > 0 ? 'answered' : 'quiet';
 }
 const mergeQueueQuery = `query($owner: String!, $name: String!, $number: Int!, $branch: String!) {
@@ -942,7 +951,7 @@ export class GitHub {
   private deliveryRead: Promise<WebhookDeliveryLog> | null = null;
   private async readWebhookDeliveries(now: number, previous: WebhookDeliveryLog | null): Promise<WebhookDeliveryLog> {
     const attempts: WebhookDeliveryAttempt[] = [];
-    let url: string | null = 'https://api.github.com/app/hook/deliveries?per_page=100', complete = false;
+    let url: string | null = 'https://api.github.com/app/hook/deliveries?per_page=100';
     try {
       for (let page = 0; url && page < webhookDeliveryPages; page++) {
         const response: Response = await this.fetch(url, { headers: this.appHeaders(), signal: AbortSignal.timeout(10_000) });
@@ -959,14 +968,15 @@ export class GitHub {
         }
         const oldest = attempts.length ? Date.parse(attempts[attempts.length - 1].at) : null;
         url = /<([^>]+)>;\s*rel="next"/.exec(response.headers.get('link') ?? '')?.[1] ?? null;
-        if (!url || oldest !== null && oldest <= now - webhookDeliveryLookbackMs) { complete = true; break; }
+        if (oldest !== null && oldest <= now - webhookDeliveryLookbackMs) break;
       }
     } catch (error) {
       return { ...(previous ?? { observedAt: null, attempts: [], coversFrom: null }), error: error instanceof Error ? error.message : 'GitHub\'s webhook delivery log could not be read' };
     }
     attempts.sort((a, b) => Date.parse(b.at) - Date.parse(a.at));
-    // A read that stopped at its page bound is complete only back to its oldest attempt.
-    return { observedAt: new Date(now).toISOString(), attempts, coversFrom: complete || !attempts.length ? null : attempts[attempts.length - 1].at, error: null };
+    // Only a read that exhausted GitHub's pages is complete; one stopped at its page bound or its
+    // lookback is complete back to its oldest attempt, which a gap older than that is not.
+    return { observedAt: new Date(now).toISOString(), attempts, coversFrom: !url || !attempts.length ? null : attempts[attempts.length - 1].at, error: null };
   }
   /** The live budget: what is left, how fast it is going, and what the control plane is doing about it. */
   budget(now = Date.now()): GitHubBudget {

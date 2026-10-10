@@ -68,7 +68,7 @@ Below **500 requests** by default, `GRAPHYARD_GITHUB_RESERVE`, non-merge observa
 
 ### Webhook liveness
 
-`webhooks` checks receipts against GitHub's delivery log (App JWT; cached 5min, 15 tight): `lastAttemptAt`/`windowSince`/`attemptsInWindow`/`failedAttempts`/`failedStatusCodes`/`deliveryLogAt`/`deliveryLogError`. `state`: `delivering` (<1h), `failing` (non-2xx; only a 403 for a repository the log proves foreign is excused), `quiet`, `answered` (2xx), `unverified` (read failed). PRs open: `failing`/`unverified` cite `https://github.com/settings/apps/APP-SLUG`.
+`webhooks` checks receipts against GitHub's delivery log (cached 5min/15 tight): `lastAttemptAt`/`windowSince`/`coveredFrom`/`attemptsInWindow`/`failedAttempts`/`failedStatusCodes`/`deliveryLogAt`/`deliveryLogError`. `state`: `delivering` (<1h), `failing` (non-2xx; proved-foreign 403 excused), `quiet`, `answered` (2xx), `unverified` (read failed/`coveredFrom` after `windowSince`). PRs open: `failing`/`unverified` cite `https://github.com/settings/apps/APP-SLUG`.
 
 ## Control-plane resources
 
