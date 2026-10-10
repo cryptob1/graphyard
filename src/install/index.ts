@@ -373,7 +373,8 @@ export async function prepareInstall(cwd: string, rawInputs: InstallRequest & Re
     } catch {}
   }
   const inputs = { ...rawInputs, provider, baseBranch: detectedBase ?? 'main' };
-  const repoCheckout = existsSync(resolve(root, '.git')) ? root : null;
+  // A compose server observes submitted heads from the operator's checkout, mounted at /repo; no other provider can mount it.
+  const repoCheckout = provider === 'compose' && existsSync(resolve(root, '.git')) ? root : null;
   const transport = dependencies.transport ?? localTransport();
   const ssh = dependencies.ssh ?? ((host: string, user = inputs.sshUser ?? 'root') => sshTransport(host, user, transport));
   // A self-hosted database password is generated once and reused, so re-apply never

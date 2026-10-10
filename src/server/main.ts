@@ -22,7 +22,7 @@ import { startDirectMerge } from '../direct-merge.js';
 import { GitHubCacheStore } from '../github-cache.js';
 import { pruneReceipts, receiptPruneIntervalMs } from '../store/receipts.js';
 import { compactLedger, configuredLedgerRetentionMs, ledgerCompactionIntervalMs } from '../store/compaction.js';
-import { observationClaim } from '../observation-priority.js';
+import { processControlPlaneJob } from './control-plane-observation.js';
 
 /** Overrides for tests that start the process entry in-process; the deployment reads PORT and HOST. */
 export interface MainOptions { port?: number; host?: string }
@@ -247,35 +247,6 @@ export const observationConcurrency = (poolMax = defaultDatabasePoolSize) => obs
  * and waits when there is none, so all of them together spend the budget above the merge-path
  * reserve evenly until its reset; the slot is returned with what the job actually charged.
  */
-export async function processControlPlaneJob(engine: Engine): Promise<boolean> {
-  const all = await engine.store.fleet();
-  const plan = observationClaim(all, Date.now(), false);
-  const job = await engine.store.takeJob(plan.order, plan.headCount);
-  if (!job) return false;
-  let work = all.find(w => w.id === job.work_id);
-  if (!work?.submission || work.stage === 'done' || !work.candidate) {
-    if (work && !work.submission && work.stage !== 'done') {
-      await engine.store.deferJob(job.work_id, job.token, new Date(Date.now() + 60_000).toISOString(), 'no submission to observe', null);
-    } else {
-      await engine.store.pool.query('DELETE FROM jobs WHERE work_id=$1 AND token=$2', [job.work_id, job.token]);
-    }
-    return true;
-  }
-  let observed = false;
-  try {
-    const observation = await engine.observeControlPlaneCandidate(work);
-    if (observation) {
-      work = await engine.observe(work.id, work.revision, observation, job.token);
-      observed = true;
-    }
-    await engine.store.finishJob(job.work_id, job.token, undefined, false, 20_000, observed);
-    return true;
-  } catch (error: any) {
-    await engine.store.finishJob(job.work_id, job.token, error instanceof Error ? error.message : String(error), false, 10_000, observed);
-    return false;
-  }
-}
-
 export async function observationWorkers(engine: Engine, github: GitHub | null, concurrency: number, stopped: () => boolean = () => false, idleMs = 1000): Promise<void> {
   const worker = async () => {
     while (!stopped()) {

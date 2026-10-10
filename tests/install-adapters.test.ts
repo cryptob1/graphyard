@@ -257,7 +257,8 @@ test('the multi-line App private key is written beside the bundle and mounted, n
     // must be given to the container user at write time: anything else crash-loops the server.
     assert.equal(key.owner, '1000:1000');
     assert.equal(key.content, appKey);
-    assert.match(bundle(fixture, 'compose.yaml')!.content, new RegExp(`volumes: \\["\\./github-private-key\\.pem:${PRIVATE_KEY_CONTAINER_PATH}:ro"\\]`));
+    // The key is mounted read-only, beside the operator's checkout the server observes heads from.
+    assert.match(bundle(fixture, 'compose.yaml')!.content, new RegExp(`volumes: \\["\\./github-private-key\\.pem:${PRIVATE_KEY_CONTAINER_PATH}:ro", "${fixture.root.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}:/repo"\\]`));
   } finally { await fixture.cleanup(); }
 });
 
