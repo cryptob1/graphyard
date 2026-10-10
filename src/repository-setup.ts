@@ -1,7 +1,9 @@
+import { existsSync } from 'node:fs';
 import { chmod, lstat, mkdir, readFile, rename, stat, writeFile } from 'node:fs/promises';
 import { execFileSync, spawn } from 'node:child_process';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { assertRepository, buildProposal, canonicalJson, collectScanInput, discover, localDirectory, saveDiscovery, writeDeliveryWorkflow, setupProposalSchema, type ScanInput, type SetupProposal } from './onboarding.js';
@@ -786,7 +788,10 @@ export async function installExecutorSupervision(root: string, options: { count?
   const units = await executorInstallUnits(primary, unitDirectory);
   const byHand = `copy examples/master/${executorUnitTemplate} to ~/.config/systemd/user/${units.executorTemplate}, edit WorkingDirectory and ExecStart to ${primary}, then systemctl --user daemon-reload && systemctl --user enable --now ${Array.from({ length: declaration.count }, (_, index) => executorUnit(index + 1, units)).join(' ') || '(no slot is declared)'}`;
   if (!manager.available) return { declaration, declarationFile: written.file, installed: false, reason: manager.reason, unitFile: null, units: [], disabled: [], merger, next: `Executors are not supervised on this host: ${manager.reason}. ${byHand}` };
-  const template = options.template ?? await readFile(resolve(primary, 'examples/master', executorUnitTemplate), 'utf8');
+  const templatePath = existsSync(resolve(primary, 'examples/master', executorUnitTemplate))
+    ? resolve(primary, 'examples/master', executorUnitTemplate)
+    : fileURLToPath(new URL('../examples/master/' + executorUnitTemplate, import.meta.url));
+  const template = options.template ?? await readFile(templatePath, 'utf8');
   const unitFile = resolve(unitDirectory, units.executorTemplate);
   // A template another checkout runs is that install's, and is never rewritten or restarted from here (GY-1441).
   assertUnitOwned(unitFile, primary);

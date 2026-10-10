@@ -34,7 +34,7 @@
 // service is accepted); `graphyard master executors restart` restarts every registered executor
 // through that unit, and no claim starts while its fence stands.
 import { randomUUID } from 'node:crypto';
-import { realpathSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -174,8 +174,10 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
     // Only a coordinator host can run an executor at all: without master.json every unit this
     // enables would fail on start and be restarted every ten seconds.
     await m.loadMasterConfig(root);
-    const installed = await s.installExecutorSupervision(root, { ...(options.count !== null ? { count: options.count } : {}), ...(options.kinds ? { kinds: options.kinds } : {}), ...(options.intervalSeconds !== null ? { intervalSeconds: options.intervalSeconds } : {}) });
-    return installCheck(installed, x, path => readFile(path, 'utf8'), resolve(root, 'examples/master', s.executorUnitTemplate));
+    const templatePath = existsSync(resolve(root, 'examples/master', s.executorUnitTemplate))
+      ? resolve(root, 'examples/master', s.executorUnitTemplate)
+      : resolve(new URL('../examples/master', import.meta.url).pathname, s.executorUnitTemplate);
+    return installCheck(installed, x, path => readFile(path, 'utf8'), templatePath);
   }
   // A supervised slot is configured by the host's declaration, not by its command line, so every
   // slot on a host serves the same kinds and a change to the declaration reaches all of them.
