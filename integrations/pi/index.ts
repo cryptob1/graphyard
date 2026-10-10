@@ -361,10 +361,11 @@ function doctorLineAllowed(line: string, context: DoctorGuardContext): GuardVerd
 /**
  * The positional words each sanctioned master command takes before its free-text reason, as the
  * CLI reads them: `master decide GY-N ACTION [JSON|@FILE] REASON` takes one more when the word
- * after ACTION opens with `{` or `@`, and `--precedent` and `--context` take a value.
+ * after ACTION opens with `{` or `@`. The flags each one reads a value after — `master decide`'s
+ * `--precedent` and `--context`, `master close`'s `--duplicate-of` and `--superseded-by` — are its own.
  */
 const doctorReasonAfter: Record<(typeof doctorSanctionedCommands)[number], number> = { scope: 1, requirements: 2, unblock: 1, decide: 2, approver: 2, 'settle-containment': 1, close: 1, create: 1, release: 1 };
-const doctorValueFlags = new Set(['--precedent', '--context']);
+const doctorValueFlags: Partial<Record<(typeof doctorSanctionedCommands)[number], Set<string>>> = { decide: new Set(['--precedent', '--context']), close: new Set(['--duplicate-of', '--superseded-by']) };
 /**
  * The line a sanctioned master command runs as when its reason broke the shell's reading of it:
  * the command's grammar — program, CLI script, `master`, subcommand, then the positional words,
@@ -394,13 +395,15 @@ function doctorProseReason(line: string, context: DoctorGuardContext, apostrophe
     const name = cli[1]?.value as (typeof doctorSanctionedCommands)[number];
     if (cli[0]?.value !== 'master' || !doctorSanctionedCommands.includes(name)) return null;
     const raw = text.slice(index + 1, -1);
-    let positionals = 0;
+    const valueFlags = doctorValueFlags[name];
+    let positionals = 0, flagValue = false;
     for (let at = 2; at < cli.length; at++) {
-      if (doctorValueFlags.has(cli[at].value)) at++;
+      if (valueFlags?.has(cli[at].value)) { at++; flagValue = at === cli.length; }
       else if (!cli[at].value.startsWith('-')) positionals++;
     }
-    // Too few words yet, or the quoted argument here is one the grammar reads before the reason: read on.
-    if (positionals < doctorReasonAfter[name] || name === 'decide' && positionals === 2 && /^[{@]/.test(raw)) continue;
+    // Too few words yet, the quoted argument here is the value of the flag just before it
+    // (`--precedent 'D-1'`), or it is one the grammar reads before the reason: read on.
+    if (flagValue || positionals < doctorReasonAfter[name] || name === 'decide' && positionals === 2 && /^[{@]/.test(raw)) continue;
     if (!doctorSegmentAllowed(words, context).allow) return null;
     const reason = closer === '"' ? raw.replace(/\\([\\"$`\n])/g, (_match, char: string) => char === '\n' ? '' : char) : raw;
     if (!reason.trim()) return null;

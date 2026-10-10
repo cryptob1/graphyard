@@ -182,6 +182,23 @@ test('integration:doctor-unblock-first-attempt — a stuck-gate unblock with an 
     assert.equal(submissions, 1, 'the unblock completes on its first submission, with no reformulation loop');
     assert.deepEqual(ran, ['master', 'unblock', 'GY-1652', reason], 'the CLI receives the reason exactly as the doctor wrote it');
   }
+  // A quoted flag value before the reason is that flag's value, never the reason's opening quote:
+  // master decide's `--precedent`/`--context` and master close's `--duplicate-of`/`--superseded-by`.
+  const flagged: [string, string[]][] = [
+    [`node ${cli} master decide GY-1652 attest '{"proof":"manual:audit"}' --precedent 'D-1' 'the item's most recent attempt passed'`,
+      ['master', 'decide', 'GY-1652', 'attest', '{"proof":"manual:audit"}', '--precedent', 'D-1', 'the item\'s most recent attempt passed']],
+    [`node ${cli} master decide GY-1652 rework --context "fp-1" --precedent 'D-1,D-2' 'the item's CI failed'`,
+      ['master', 'decide', 'GY-1652', 'rework', '--context', 'fp-1', '--precedent', 'D-1,D-2', 'the item\'s CI failed']],
+    [`node ${cli} master close GY-1652 --duplicate-of 'GY-2' 'the item's duplicate'`,
+      ['master', 'close', 'GY-1652', '--duplicate-of', 'GY-2', 'the item\'s duplicate']],
+    [`node ${cli} master close GY-1652 --superseded-by "GY-3" 'it's superseded'`,
+      ['master', 'close', 'GY-1652', '--superseded-by', 'GY-3', 'it\'s superseded']],
+  ];
+  for (const [written, argv] of flagged) {
+    const { verdict, command } = call(written);
+    assert.ok(!verdict?.block, `${written} is accepted on its first submission: ${verdict?.reason}`);
+    assert.deepEqual(run(command), argv, 'the flag keeps its own value and the CLI receives the reason whole');
+  }
   // The shell's own apostrophe idiom is already one argument, so it runs as written.
   const idiom = `node ${cli} master unblock GY-1652 'the item'\\''s most recent attempt'`;
   assert.equal(call(idiom).command, idiom);
