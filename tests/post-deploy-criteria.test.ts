@@ -6,7 +6,7 @@ import type { Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // Loaded inside each case, so a tree without this change fails these cases rather than the file.
-const modules = async () => ({ ...await import('../src/model.js'), ...await import('../src/model/approval.js'), ...await import('../src/model/bootstrap.js'), ...await import('../src/model/landability.js'), ...await import('../src/reviewer.js'), ...await import('../src/master-verification.js'), ...await import('../src/cli/planned-files-intent.js') });
+const modules = async () => ({ ...await import('../src/executor.js'), ...await import('../src/model/post-merge-proofs.js'), ...await import('../src/model.js'), ...await import('../src/model/approval.js'), ...await import('../src/model/bootstrap.js'), ...await import('../src/model/landability.js'), ...await import('../src/reviewer.js'), ...await import('../src/master-verification.js'), ...await import('../src/cli/planned-files-intent.js') });
 
 // unit:post-deploy-criteria (GY-1660) — a criterion only the live install can satisfy after merge
 // and deploy deadlocked reviewer and worker (GY-1652 AC-3, GY-1657 AC-1..4). It is refused at
@@ -30,7 +30,7 @@ test('unit:post-deploy-criteria — an undeclared live-install observation is re
     assert.match(message, new RegExp(`^${criterion.id} \\(`));
     assert.match(message, /manual:post-deploy\/NAME/);
   }
-  assert.match(postDeployCriterionRefusal([gy1652, { ...restarted, id: 'AC-4' }])!, /^AC-3 \("live install"\), AC-4 \("restarted loop"\) are live-install or post-deploy observations/);
+  assert.match(postDeployCriterionRefusal([gy1652, { ...restarted, id: 'AC-4' }])!, /^AC-3 \("on the live install"\), AC-4 \("restarted loop"\) are live-install or post-deploy observations/);
 });
 
 test('unit:post-deploy-criteria — the refusal holds on every requirements path: the shared criterion schema, a direct revision and a requirements decision', async () => {
@@ -71,15 +71,61 @@ test('unit:post-deploy-criteria — a declared post-deploy verification, a head-
   assert.equal(liveObservationPhrase(shipped), 'after the change ships');
   assert.equal(createSchema.safeParse(intent([shipped])).success, false);
   assert.equal(createSchema.safeParse(intent([{ id: 'AC-1', text: 'Ordinary behaviour is covered', proofs: ['unit:covered'] }])).success, true);
+  // Production and serving-release wording is a live outcome whatever its proof: refused undeclared, accepted declared.
+  for (const [text, phrase] of [
+    ['Production reports an escalation rate below 3 per 7 days', 'Production'], ['The escalation rate in production stays below 3 per 7 days', 'production'],
+    ['On the serving release the loop reports no harness drift', 'On the serving release'], ['The post-ship rate stays below 3 per 7 days', 'post-ship'],
+    ['The live loop journals the remedy', 'live loop'], ['With the loop paused, the coordinator checkout /home/vish/code/graphyard reports no modified paths', '/home/'],
+  ]) {
+    const live = { id: 'AC-1', text, proofs: ['manual:observed'] };
+    assert.equal(liveObservationPhrase(live), phrase, text);
+    assert.equal(createSchema.safeParse(intent([live])).success, false, text);
+    assert.equal(createSchema.safeParse(intent([{ ...live, proofs: ['manual:post-deploy/observed'] }])).success, true, text);
+  }
+  // A path or branch named production, and production code, are no deployment.
+  for (const text of ['release/production moves to the promoted candidate', 'rc-production/ID records the promotion', 'Production code paths are covered by the unit test'])
+    assert.equal(liveObservationPhrase({ text }), null, text);
 });
 
-test('unit:post-deploy-criteria — the criterion Graphyard files for a recurring intervention pattern names only what the head can show', async () => {
+// The linked instances of GY-1660's pattern, as their criteria were written when the item blocked. On the
+// base the only write-time rule was GY-188's post-merge refusal, which accepted every one of them, so each
+// entered as a pre-merge gate no worker could meet and the item blocked for a person (GY-1652, GY-1657).
+const linked = {
+  'GY-1652 AC-3': { id: 'AC-3', text: "master status on the live install reports harnessDrift null after a loop cycle running this remedy", proofs: ['manual:harness-drift-cleared'] },
+  'GY-1657 AC-1': { id: 'AC-1', text: 'With the loop paused, the coordinator checkout /home/vish/code/graphyard reports no modified and no untracked source paths (git status --porcelain empty at head >= e09c849886c3): each of the 6 dirty paths is committed, stashed or discarded by an operator act.', proofs: ['manual:coordinator-checkout-clean'] },
+  'GY-1657 AC-2': { id: 'AC-2', text: 'After the paths are clean, the master loop restarts through graphyard-master.service without the dirty-checkout refusal, and escalation:dirty-checkout records no new failed attempt across at least two consecutive daemon cycles (its attempts count stops climbing past 4).', proofs: ['integration:dirty-checkout-escalation-clears'] },
+  'GY-1657 AC-3': { id: 'AC-3', text: 'The restarted loop serves a commit newer than e09c849886c3, so fixes delivered while the fault stood are live in coordinator behaviour.', proofs: ['integration:coordinator-serves-current-release'] },
+  'GY-1657 AC-4': { id: 'AC-4', text: 'The two panes pointing at the checkout (agy w1V:pHHY, graphyard-master-graphyard w1V:pN93) are re-attached to the restarted loop or confirmed idle, and no session re-dirties the checkout afterwards (the dirty set stays empty for 24h).', proofs: ['manual:panes-released-or-reattached'] },
+};
+
+test('manual:intervention-pattern-escalation-build — GY-1660: each linked build-stage escalation is reproduced against the base rule and cannot recur on the candidate', async () => {
+  const { criterionSchema, postMergeProofRefusal, decisionInputs, postDeployReviewSection } = await modules();
+  for (const [instance, criterion] of Object.entries(linked)) {
+    // Base: the GY-188 rule alone accepted it, so it gated the merge it could only follow.
+    assert.equal(postMergeProofRefusal(criterion), null, `${instance} passed the base's write-time rule`);
+    // Candidate: undeclared, no create, requirements revision or requirements decision can record it…
+    assert.equal(criterionSchema.safeParse(criterion).success, false, `${instance} is refused undeclared`);
+    assert.equal(decisionInputs.requirements.safeParse({ expectedPolicyRevision: 1, criteria: [criterion], dependencies: [], plannedFiles: [], exclusiveResources: [], producerProofs: [] }).success, false, instance);
+    // …and declared, it is recorded, the reviewer judges it on pre-merge evidence, and it gates no merge.
+    const declared = { ...criterion, proofs: [`manual:post-deploy/${criterion.proofs[0].split(':')[1]}`] };
+    assert.equal(criterionSchema.safeParse(declared).success, true, `${instance} is accepted declared`);
+    assert.match(postDeployReviewSection([declared]), /never request changes or hold the merge/);
+  }
+});
+
+test('unit:post-deploy-criteria — a recurring intervention pattern keeps its post-ship rate as a declared post-deploy verification beside the regression its head can show', async () => {
   const source = await import('node:fs/promises').then(fs => fs.readFile(new URL('../src/interventions/patterns.ts', import.meta.url), 'utf8'));
-  const template = /criteria: \[\{ id: 'AC-1', text: `([^`]+)`/.exec(source)![1];
-  const text = template.replace(/\$\{[^}]+\}/g, 'X');
+  const [rate, regression] = [...source.matchAll(/\{ id: '(AC-\d)', text: `([^`]+)`, proofs: \[`([^`]+)`\] \}/g)].map(([, id, text, proof]) => ({ id, text: text.replace(/\$\{[^}]+\}/g, 'X'), proofs: [proof.replace('${postDeployProofPrefix}', 'manual:post-deploy/').replace(/\$\{[^}]+\}/g, 'x')] }));
   const { createSchema, liveObservationPhrase } = await modules();
-  assert.equal(liveObservationPhrase({ text }), null, text);
-  assert.equal(createSchema.safeParse(intent([{ id: 'AC-1', text, proofs: ['manual:intervention-pattern-escalation-build'] }])).success, true);
+  // The measured outcome is unchanged: the rate below the threshold after the change ships…
+  assert.match(rate.text, /the intervention report shows the X rate at X below X per X days after the change ships, and the linked instances could not recur$/);
+  assert.equal(liveObservationPhrase(rate), 'after the change ships');
+  // …declared, so it is accepted and gates no merge; undeclared it would be refused.
+  assert.deepEqual(rate.proofs, ['manual:post-deploy/intervention-pattern-x-x']);
+  assert.equal(createSchema.safeParse(intent([rate, regression])).success, true);
+  assert.equal(createSchema.safeParse(intent([{ ...rate, proofs: ['manual:intervention-pattern-x-x'] }])).success, false);
+  assert.equal(liveObservationPhrase(regression), null, regression.text);
+  assert.deepEqual(regression.proofs, ['manual:intervention-pattern-x-x']);
 });
 
 test('unit:post-deploy-criteria — a declared post-deploy proof gates no merge in any lane', async () => {
@@ -147,9 +193,13 @@ test('unit:post-deploy-criteria — master verify-deployment checks a declared c
   const followUp = owed.followUp!;
   assert.equal(followUp.title, `Post-deploy verification of GY-42 AC-3 (harness-drift-cleared) on release ${release.slice(0, 12)}`);
   assert.deepEqual(followUp.input.dependencies, ['e4b2a3c8-1c0e-4d0a-9b4e-1f2a3b4c5d6e']);
-  assert.match(followUp.input.description, /^GY-42 was delivered with AC-3 declared a post-deploy verification/);
+  assert.match(followUp.input.description, new RegExp(`^Post-deploy follow-up: ${followUp.requestId}\n\nGY-42 was delivered with AC-3 declared a post-deploy verification`));
+  // An operator-agent creation must carry its reason.
+  assert.match(followUp.input.reason, /^GY-42 AC-3's declared post-deploy verification manual:post-deploy\/harness-drift-cleared is unobserved on the serving release/);
   // The follow-up's own criterion observes its head against the serving release: accepted, and never itself post-deploy, so it files no further follow-up.
-  const parsed = createSchema.parse(followUp.input);
+  // The server's create input is this schema with the operator agent's reason beside it.
+  const { reason: _reason, ...created } = followUp.input;
+  const parsed = createSchema.parse(created);
   assert.match(parsed.criteria[0].text, new RegExp(`^From this head against the serving release ${release.slice(0, 12)} that carries GY-42's merge`));
   assert.deepEqual(postDeployChecks(delivered({ criteria: parsed.criteria.map(({ id, text, proofs }) => ({ id, text, proofs })) }), release), []);
   // Passing evidence recorded at the serving release is the observation: nothing is owed.
@@ -165,11 +215,25 @@ test('unit:post-deploy-criteria — master verify-deployment checks a declared c
     const checked = postDeployChecks(delivered({ evidence: [{ ...evidence[0], ...rejected } as never], workspaces: [{ owner: 'graphyard-claude-2' }] as never }), release);
     assert.equal(checked[0].result, 'owed', `${why} evidence observes nothing`);
   }
-  // Two declared proofs of one criterion owe two distinct follow-ups.
-  const twice = postDeployChecks(delivered({ criteria: [{ ...gy1652, proofs: ['manual:post-deploy/drift', 'manual:post-deploy/status'] }] }), release);
-  assert.equal(new Set(twice.map(check => check.followUp!.title)).size, 2);
+  // Evidence bound to the delivery only: a record from before the merge, or against another base, is a pre-merge record, never the live observation.
+  const premerge = new Date(Date.parse(delivered().delivery!.mergedAt) - 60_000).toISOString();
+  assert.equal(postDeployChecks(delivered({ evidence: [{ ...evidence[0], at: premerge }] }), release)[0].result, 'owed', 'evidence recorded before the merge observes nothing');
+  assert.equal(postDeployChecks(delivered({ evidence: [{ ...evidence[0], baseSha: 'e'.repeat(40) }] }), release)[0].result, 'owed', 'evidence against another base observes nothing');
+  // Two declared proofs of one criterion owe two distinct follow-ups, even when their names share a prefix longer than any title.
+  const long = 'x'.repeat(240);
+  const longWork = delivered({ criteria: [{ ...gy1652, proofs: [`manual:post-deploy/${long}-a`, `manual:post-deploy/${long}-b`] }] });
+  const twice = postDeployChecks(longWork, release);
+  assert.equal(twice[0].followUp!.title, twice[1].followUp!.title, 'the titles are cut alike');
+  assert.notEqual(twice[0].followUp!.requestId, twice[1].followUp!.requestId);
+  const longFiled: string[] = [];
+  const fileLong = async (input: any) => { longFiled.push(input.description); return { key: `GY-${60 + longFiled.length}` }; };
+  assert.deepEqual((await filePostDeployFollowUps(longWork, release, [longWork], fileLong)).map(check => check.followUp), ['GY-61', 'GY-62']);
+  // Checked again with both filed, each is matched by its own identity and neither is filed again.
+  const known = [longWork, ...longFiled.map((description, index) => ({ key: `GY-${61 + index}`, description }))];
+  assert.deepEqual((await filePostDeployFollowUps(longWork, release, known, fileLong)).map(check => check.followUp), ['GY-61', 'GY-62']);
+  assert.equal(longFiled.length, 2);
 
-  // Through verifyDeployment: the record is written, then the follow-up filed once with an idempotency key.
+  // Through verifyDeployment: the follow-up is filed once with an idempotency key, then the record is written.
   const now = Date.now();
   const work = [delivered()];
   const records: unknown[] = [], filed: { input: any; requestId: string }[] = [];
@@ -179,9 +243,12 @@ test('unit:post-deploy-criteria — master verify-deployment checks a declared c
     // A launcher checkout of another repository emits nothing: the served merge is the whole check.
     release: () => ({ sha: 'f'.repeat(40), clean: true, repository: 'other/repo', reason: null }),
     emit: async () => assert.fail('nothing is emitted'), repository: 'owner/project', now: () => now,
-    record: async (_work: Work, data: unknown) => { records.push(data); },
+    record: async (_work: Work, data: unknown) => { assert.equal(filed.length, 1, 'filed before the record'); records.push(data); },
     file: async (input: any, requestId: string) => { filed.push({ input, requestId }); return { key: 'GY-43' }; },
   };
+  // A filing that fails leaves the delivery unobserved, so the retry files it.
+  await assert.rejects(verifyDeployment(work[0], { ...effects, file: async () => { throw new Error('refused'); } }), /refused/);
+  assert.equal(records.length, 0);
   const verified = await verifyDeployment(work[0], effects);
   assert.equal(verified.result, 'verified', verified.refusals.join('; '));
   assert.equal(records.length, 1);
@@ -189,7 +256,7 @@ test('unit:post-deploy-criteria — master verify-deployment checks a declared c
   assert.equal(filed.length, 1);
   assert.equal(filed[0].requestId, `post-deploy:${work[0].id}:AC-3:manual:post-deploy/harness-drift-cleared:${release}`);
   // Verified again once the follow-up exists: it is named, never filed twice.
-  work.push({ ...delivered(), id: 'f0000000-0000-4000-8000-000000000043', key: 'GY-43', title: followUp.title, stage: 'ready' } as Work);
+  work.push({ ...delivered(), id: 'f0000000-0000-4000-8000-000000000043', key: 'GY-43', title: followUp.title, description: filed[0].input.description, stage: 'ready' } as Work);
   work[0].delivery!.deployment = { sha: release, mergeSha, source: 'endpoint', observedAt: new Date(now).toISOString() } as never;
   const again = await verifyDeployment(work[0], effects);
   assert.equal(again.recorded, 'existing');
@@ -198,7 +265,7 @@ test('unit:post-deploy-criteria — master verify-deployment checks a declared c
   // Filed one after another: two owed proofs of one criterion file two items, each once, with no title read across a stale snapshot.
   const pair = [delivered({ criteria: [{ ...gy1652, proofs: ['manual:post-deploy/drift', 'manual:post-deploy/status'] }] })];
   const paired: string[] = [];
-  const both = await filePostDeployFollowUps(pair[0], release, pair, async (input: any) => { paired.push(input.title); return { key: `GY-${50 + paired.length}` }; });
+  const both = await filePostDeployFollowUps(pair[0], release, pair, async (input: any) => { paired.push(input.description); return { key: `GY-${50 + paired.length}` }; });
   assert.deepEqual(both.map(check => check.followUp), ['GY-51', 'GY-52']);
   assert.equal(new Set(paired).size, 2);
   // A refused verification checks nothing and files nothing.
@@ -206,4 +273,26 @@ test('unit:post-deploy-criteria — master verify-deployment checks a declared c
   assert.equal(refused.result, 'refused');
   assert.deepEqual(refused.postDeploy, []);
   assert.equal(filed.length, 1);
+});
+
+test('unit:post-deploy-criteria — the loop\'s verify-deployment files an owed follow-up as the operator agent before recording the observation, and records nothing without one', async () => {
+  const { controlPlaneHandlers } = await modules();
+  const work = delivered(), calls: string[] = [];
+  const unusable = async (): Promise<never> => { throw new Error('not reached'); };
+  const handlers = (fileWork?: (input: unknown, requestId: string) => Promise<{ key?: string }>) => controlPlaneHandlers(() => ({}) as never, {
+    snapshot: async () => ({ work: [work], now: new Date().toISOString() }),
+    // The coordinator credential records the observation and never creates work.
+    mutate: async (path: string) => { assert.notEqual(path, 'work', 'the coordinator never creates work'); calls.push(path); return {}; },
+    agents: () => [], workerCredentials: async () => ({}), producerCredentials: async () => ({}),
+    dispatchWorker: unusable, launchReview: unusable, launchProducer: unusable,
+    observeDeployment: async () => ({ source: 'endpoint' as const, sha: release, at: new Date().toISOString(), reason: null, deployed: ['GY-42'], pending: [] }) as never,
+    ...(fileWork ? { fileWork } : {}),
+  });
+  const identity = { host: 'host-1', executor: 'executor-1' } as never;
+  const action = { id: 'row-1', work: work.id, key: 'GY-42', kind: 'verify-deployment', inputs: { kind: 'verify-deployment', mergeSha } } as never;
+  await assert.rejects(handlers()['verify-deployment']!(action, identity) as unknown as Promise<string>, /AC-3 \(manual:post-deploy\/harness-drift-cleared\) owes its post-deploy follow-up, and this executor has no operator-agent identity/);
+  assert.equal(calls.length, 0, 'nothing is recorded while the follow-up is unfiled');
+  const result = await handlers(async (input: any, requestId: string) => { calls.push(`file ${requestId}`); assert.ok(input.reason); return { key: 'GY-43' }; })['verify-deployment']!(action, identity) as unknown as Promise<string>;
+  assert.deepEqual(calls, [`file post-deploy:${work.id}:AC-3:manual:post-deploy/harness-drift-cleared:${release}`, `work/${work.id}/deployment`]);
+  assert.match(String(result), /AC-3 owes its post-deploy observation \(GY-43\)/);
 });

@@ -44,7 +44,7 @@ export function postMergeProofRefusal(criterion: { id: string; text: string; pro
 
 /**
  * Post-deploy verification criteria (GY-1660). A criterion whose outcome is an observation of the
- * live install — the restarted loop, the deployed release, the shipped change's report — can only
+ * live install — the restarted loop, the deployed release, the shipped change's report, production — can only
  * be shown after merge and deploy, yet a criterion gates the merge: the reviewer holds the merge
  * until the observation exists and no worker can make it, so the item deadlocks until a person
  * rewords it (GY-1652 AC-3, GY-1657 AC-1..4). `criterionSchema` therefore accepts one — at create,
@@ -58,7 +58,17 @@ export function postMergeProofRefusal(criterion: { id: string; text: string; pro
  * "before merge") or to a stub is a pre-merge observation.
  */
 export const postDeployProofPrefix = 'manual:post-deploy/';
-const liveObservation = /\blive\s+install(?:ation)?\b|\bon\s+this\s+installation\b|\brestarted\s+(?:master\s+)?loop\b|\bthe\s+master\s+loop\s+restarts\b|\bagainst\s+the\s+deployed\s+release\b|\b(?:after|once)\s+(?:the\s+(?:change|fix|merge)\s+(?:is\s+|has\s+)?)?(?:deploy(?:ed|ment)?|merged\s+and\s+deployed|ships|shipped|is\s+shipped|goes\s+live)\b|\bonce\s+the\s+fix\s+is\s+running\b|\bobservation\s+after\s+deploy|\b(?:at|in)\s+\/home\//i;
+const liveObservation = new RegExp([
+  /\blive\s+(?:install(?:ation)?|loop|daemon|server|service|deployment|system|environment|release|traffic)\b/, /\bon\s+this\s+installation\b/,
+  /\brestarted\s+(?:master\s+)?loop\b/, /\bthe\s+master\s+loop\s+restarts\b/,
+  // The release that serves the merge, however it is named: deployed, serving, running, production.
+  /\b(?:on|in|against|from|by)\s+the\s+(?:deployed|serving|running|live)\s+(?:release|install(?:ation)?|loop|daemon|server|service|control\s+plane|system|deployment)\b/,
+  /(?<![\/\w-])production\b(?!\s+(?:code|paths?|branch(?:es)?|builds?|bundles?|dependenc(?:y|ies)|modules?|sources?|files?)\b)/,
+  /\b(?:after|once)\s+(?:the\s+(?:change|fix|merge)\s+(?:is\s+|has\s+)?)?(?:deploy(?:ed|ment)?|merged\s+and\s+deployed|ships|shipped|is\s+shipped|goes\s+live)\b/,
+  /\bpost[-\s]?ship(?:ping|ped)?\b/, /\bonce\s+the\s+fix\s+is\s+running\b/, /\bobservation\s+after\s+deploy/,
+  // A path of the coordinator's own checkout is an operator act on the install, not a head's.
+  /(?:^|\s|`)\/home\//,
+].map(part => part.source).join('|'), 'i');
 const headAnchored = /\b(?:from|on|at)\s+(?:this|the)\s+(?:pull\s+request's\s+)?head\b|\bthis\s+head(?:'s)?\b|\bthe\s+candidate(?:'s)?\s+head\b|\bbefore\s+merge\b|\bstub(?:bed)?\b/i;
 type CriterionProofs = { id: string; text: string; proofs: readonly string[] };
 /** The criterion's declared post-deploy proofs; a criterion naming one is a declared post-deploy verification. */
@@ -68,7 +78,7 @@ export const declaredPostDeploy = (criterion: Pick<CriterionProofs, 'proofs'>) =
 /** The phrase that makes this criterion's outcome a live-install or post-deploy observation, or null. */
 export function liveObservationPhrase(criterion: Pick<CriterionProofs, 'text'> & Partial<CriterionProofs>): string | null {
   if (headAnchored.test(criterion.text)) return null;
-  return liveObservation.exec(criterion.text)?.[0] ?? null;
+  return liveObservation.exec(criterion.text)?.[0].trim() ?? null;
 }
 /** Why these criteria cannot be recorded, naming each undeclared live-observation criterion; null when none is. */
 export function postDeployCriterionRefusal(criteria: readonly CriterionProofs[]): string | null {
