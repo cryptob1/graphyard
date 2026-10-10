@@ -89,7 +89,7 @@ export const tmpConsumersScanBound = 500_000;
 export const tmpConsumersNamed = 5;
 /** How long one entry's removal retries a tree that refills or is still being released (ENOTEMPTY, EBUSY) before the pass reports it and the next retries it (GY-1401). */
 export const tmpReclaimRetryMs = 2_000;
-const retryable = new Set(['ENOTEMPTY', 'EBUSY', 'EPERM', 'EMFILE', 'ENFILE']), unfinishedRemovals = new Set<string>();
+const retryable = new Set(['ENOTEMPTY', 'EBUSY', 'EPERM', 'EMFILE', 'ENFILE']), unfinishedRemovals = new Set<string>(), unfinishedRegistrations = new Map<string, string>();
 /** The marker naming a directory's owner is a sibling file, `<directory>.owner`, not a file inside it: the dominant use of these directories is an embedded Postgres data dir, and `initdb` refuses any directory that holds so much as a dot file. */
 export const tempOwnerMarker = (directory: string) => `${directory}.owner`;
 
@@ -338,6 +338,8 @@ export interface TmpReclaimOptions {
   held?: Set<string>;
   /** Entries an earlier pass failed to finish removing, retried ahead of their age bound (this process's own set by default), and how long one removal retries. */
   unfinished?: Set<string>; retryMs?: number;
+  /** Linked worktrees' registrations whose removal has not yet succeeded, keyed by registration, naming its checkout: retried by each pass once that checkout is gone (this process's own map by default). */
+  registrations?: Map<string, string>;
   /**
    * Measures a root's volume: given, the default pass escalates through `tmpReclaimEscalation`
    * while a root's free inodes stay below `tmpInodeHeadroom`, and names the top consumers when they
@@ -377,8 +379,17 @@ export async function reclaimTmpDirectories(options: TmpReclaimOptions = {}): Pr
   const agentAge = options.prefixes ? null : options.maxAgeMs ?? agentScratchMinAgeMs;
   const runtimeRoots = options.prefixes ? [] : options.runtimeScratchRoots ?? agentRuntimeScratchRoots;
   const pass: PassState = { now, minAge, cacheAge, agentAge, runtimeRoots, limit: options.limit ?? tmpReclaimLimitPerCycle, uid: process.getuid?.(), held: options.held ?? null,
-    workMs: options.workMs ?? Number.POSITIVE_INFINITY, started: null, unfinished: options.unfinished ?? unfinishedRemovals, retryMs: options.retryMs ?? tmpReclaimRetryMs };
+    workMs: options.workMs ?? Number.POSITIVE_INFINITY, started: null, unfinished: options.unfinished ?? unfinishedRemovals, retryMs: options.retryMs ?? tmpReclaimRetryMs,
+    registrations: options.registrations ?? unfinishedRegistrations };
   for (const path of pass.unfinished) if (!existsSync(path)) pass.unfinished.delete(path);
+  // A registration is kept apart from its checkout's path: once the checkout is gone that path is
+  // dropped above, and a registration left behind would keep `git worktree add` refusing the path.
+  // One whose checkout is still being removed waits for it; its checkout's own retry takes it.
+  for (const [registration, checkout] of pass.registrations) {
+    if (existsSync(checkout)) continue;
+    try { await rm(registration, { recursive: true, force: true }); pass.registrations.delete(registration); }
+    catch (error) { report.errors.push(`${registration}: ${error instanceof Error ? error.message : String(error)}`); }
+  }
   const sweep = async (scanned = roots) => {
     for (const { path, real } of scanned) {
       await reclaimRoot(path, real, pass, report);
@@ -503,7 +514,7 @@ export async function tmpCensus(roots: string | readonly string[], bound = tmpCo
     .map(family => ({ path: family.members === 1 ? family.first : `${join(family.root, family.stem)}* (${family.members} top-level)`, entries: family.entries, owner: owner(family.uid), ...(family.capped ? { capped: true } : {}) })) };
 }
 
-interface PassState { now: number; minAge: (name: string) => number | null; cacheAge: number | null; agentAge: number | null; runtimeRoots: readonly string[]; limit: number; uid: number | undefined; held: Set<string> | null; workMs: number; started: number | null; unfinished: Set<string>; retryMs: number }
+interface PassState { now: number; minAge: (name: string) => number | null; cacheAge: number | null; agentAge: number | null; runtimeRoots: readonly string[]; limit: number; uid: number | undefined; held: Set<string> | null; workMs: number; started: number | null; unfinished: Set<string>; retryMs: number; registrations: Map<string, string> }
 /** Record one removal of `kind` in `report`. */
 function took(report: TmpReclaimReport, kind: TmpReclaimClass, path: string, bytes: number) {
   report.removed.push({ path, bytes });
@@ -601,9 +612,12 @@ async function reclaimRoot(root: string, real: string, pass: PassState, report: 
     if (at > pass.started + pass.workMs) break;
     try {
       const bytes = await sizeOf(path);
+      // The registration is recorded before the tree goes: a removal that fails partway may take the
+      // checkout's .git file with it, and a failed registration removal must outlive the checkout's path.
       const registration = await worktreeRegistration(path);
+      if (registration) pass.registrations.set(registration, path);
       await removeTree(path, pass.retryMs);
-      if (registration) await rm(registration, { recursive: true, force: true });
+      for (const [pending, checkout] of pass.registrations) if (checkout === path) { await rm(pending, { recursive: true, force: true }); pass.registrations.delete(pending); }
       await rm(tempOwnerMarker(path), { force: true });
       pass.unfinished.delete(path);
       took(report, kind, path, bytes);

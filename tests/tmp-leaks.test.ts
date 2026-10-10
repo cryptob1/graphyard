@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdir, readdir, symlink, utimes, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readdir, symlink, utimes, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -340,6 +340,26 @@ test('unit:tmp-leaks — a stale, unheld linked worktree or git checkout at the 
   const prefixed = await reclaimTmpDirectories({ tmpRoot: tmp, held: new Set(), prefixes: ['graphyard-'] });
   assert.deepEqual(prefixed.removed, []);
   assert.equal(existsSync(other.path), true);
+});
+
+test('unit:tmp-leaks — a worktree registration whose removal failed after its checkout went is retried by the next pass, though the checkout\'s own path is gone', { skip: process.getuid?.() === 0 ? 'root ignores directory permissions' : false }, async () => {
+  const base = await temporaryDirectory('agent-registration'), tmp = join(base, 'tmp'), repository = join(base, 'repository');
+  await mkdir(tmp); await mkdir(repository);
+  const stale = await linkedWorktree(tmp, 'feature381-red-0c615', repository), worktrees = join(repository, '.git', 'worktrees');
+  await backdateTree(stale.path, day + hour); await backdateTree(stale.gitdir, day + hour);
+  const registrations = new Map<string, string>(), unfinished = new Set<string>();
+  // The repository refuses the registration's removal: the checkout goes, its registration stays.
+  await chmod(worktrees, 0o555);
+  let first;
+  try { first = await reclaimTmpDirectories({ tmpRoot: tmp, held: new Set(), registrations, unfinished, retryMs: 0 }); } finally { await chmod(worktrees, 0o755); }
+  assert.equal(existsSync(stale.path), false, 'the checkout itself went');
+  assert.equal(existsSync(stale.gitdir), true, 'its registration could not');
+  assert.equal(first.errors.length, 1);
+  assert.deepEqual([...registrations], [[stale.gitdir, stale.path]], 'the registration is kept for retry, apart from the checkout\'s path');
+  const second = await reclaimTmpDirectories({ tmpRoot: tmp, held: new Set(), registrations, unfinished, retryMs: 0 });
+  assert.deepEqual(second.errors, []);
+  assert.equal(existsSync(stale.gitdir), false, 'the next pass unregisters the removed worktree');
+  assert.equal(registrations.size, 0);
 });
 
 test('unit:tmp-leaks — entries inside an agent runtime\'s scratch root (/tmp/opencode) older than the agent scratch bound go one by one; newer and held ones and the root itself stay', async () => {
