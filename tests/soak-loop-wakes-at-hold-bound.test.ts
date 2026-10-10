@@ -13,7 +13,7 @@ import { assertLaunchesConfined, simulateDay } from './helpers/soak-simulation.j
  * so only the loop's own round releases the hold: it must run at the bound, request the rework once, and
  * every system invariant must hold over the cycles after it.
  */
-soakControlPlanes('soak-loop-wakes-at-hold-bound', 433);
+soakControlPlanes('soak-loop-wakes-at-hold-bound', 434);
 
 test('unit:soak-invariants-hold — a 300 s idle loop whose docs-sync hold bound falls before its next idle wake runs a cycle at the bound, requests the conflict rework once and in time, and keeps every system invariant', { timeout: 600_000 }, async () => {
   const intervalSeconds = 300;
