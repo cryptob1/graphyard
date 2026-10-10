@@ -3,8 +3,7 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 import { masterConfigSchema, masterHarness, type MasterConfig } from '../src/master.js';
 import { emptyDaemonState, runDaemon, type DaemonEffects } from '../src/master-daemon.js';
 import { emptyHeldDecisions } from '../src/daemon/decision-reads.js';
@@ -26,10 +25,10 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 // checkout, and a checkout it may not apply against is refused once, naming the checkout, the
 // remedy and the unit to update.
 
-const launcher = resolve(fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url)));
 const observedAt = '2026-10-10T18:00:00.000Z';
 const key = 'remedy:harness:claude';
-const config = (root: string, extra: Record<string, unknown> = {}): MasterConfig => masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: join(root, '.graphyard-credentials/master/token'), cliPath: launcher,
+// The loop's managed checkout is the one its CLI runs from (coordinatorCheckoutRoot(cliPath)), so each checkout's config names its own CLI.
+const config = (root: string, extra: Record<string, unknown> = {}): MasterConfig => masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: join(root, '.graphyard-credentials/master/token'), cliPath: join(root, 'bin/graphyard.mjs'),
   repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [], ...extra });
 const settingsFile = (root: string) => join(root, '.claude/settings.local.json');
 const unitText = (checkout: string) => `[Unit]\nDescription=Graphyard master\n\n[Service]\nWorkingDirectory=${checkout}\nExecStart=/usr/bin/node ${checkout}/bin/graphyard.mjs master run\n`;
@@ -65,7 +64,7 @@ test('unit:harness-apply-checkout-resolution — the loop applies the harness co
   const master = config(own.root);
 
   // The loop's own checkout is applied against, though research names the scratch.
-  const looped = cycle(master, { research: { cwd: scratch.root }, harness: { root: own.root, unitDirectory: units } });
+  const looped = cycle(master, { research: { cwd: scratch.root }, harness: { unitDirectory: units } });
   await routineRemedies(looped);
   assert.equal(looped.state.actions[key]?.state, 'done', looped.state.actions[key]?.detail);
   assert.equal(await harnessDrift(own.root, masterHarness(own.root, master, 'claude')), null, 'the own checkout is healed');
@@ -73,7 +72,7 @@ test('unit:harness-apply-checkout-resolution — the loop applies the harness co
 
   // The units-less case: refused naming the checkout and master init, journaled once, no fault, nothing written.
   const before = await readFile(settingsFile(scratch.root), 'utf8');
-  const unitless = cycle(config(scratch.root), { harness: { root: scratch.root, unitDirectory: units } });
+  const unitless = cycle(config(scratch.root), { harness: { unitDirectory: units } });
   await routineRemedies(unitless);
   const refused = unitless.state.actions[key]!;
   assert.equal(refused.state, 'waiting');
@@ -100,7 +99,7 @@ test('unit:harness-apply-checkout-resolution — the loop applies the harness co
   // A pre-GY-1441 install whose legacy unit runs it is its own alias: no units recorded, still applied.
   const aliased = await checkout('harness-alias', false), aliasUnits = await temporaryDirectory('harness-alias-units');
   await writeFile(join(aliasUnits, legacyLoopUnit), unitText(aliased.root));
-  const alias = cycle(config(aliased.root), { harness: { root: aliased.root, unitDirectory: aliasUnits, servingUnit: legacyLoopUnit } });
+  const alias = cycle(config(aliased.root), { harness: { unitDirectory: aliasUnits, servingUnit: legacyLoopUnit } });
   await routineRemedies(alias);
   assert.equal(alias.state.actions[key]?.state, 'done', alias.state.actions[key]?.detail);
 
@@ -135,7 +134,7 @@ test('integration:harness-contract-apply — a loop run (runDaemon, research rew
     await runDaemon(master, state, effects, { once: true, intervalMs: 5, identity: { pid: process.pid, host: 'machine-a' }, signals: ['SIGUSR2'], repository: own.root, checkout: () => ({ root: own.root, commit: null, modified: [], untracked: [] }) as never, log: () => {} });
     return state;
   };
-  // Wired as daemonEffects wires a loop that serves no unit: research alone names the checkout, and runDaemon moves research to its scratch.
+  // Wired as daemonEffects wires a loop that serves no unit; runDaemon moves research to its scratch, and the apply still targets the CLI's checkout.
   const state = await run({});
   assert.equal(state.actions[key]?.state, 'done', state.actions[key]?.detail);
   assert.equal(state.actions[key]!.faultClass, undefined);
@@ -146,13 +145,40 @@ test('integration:harness-contract-apply — a loop run (runDaemon, research rew
   const drifted = await readFile(settingsFile(own.root), 'utf8').then(text => JSON.parse(text));
   drifted.permissions.deny = drifted.permissions.deny.filter((rule: string) => rule !== own.absent);
   await writeFile(settingsFile(own.root), JSON.stringify(drifted));
-  const mismatched = await run({ harness: { root: own.root, servingUnit: serving, unitDirectory: units } });
+  const mismatched = await run({ harness: { servingUnit: serving, unitDirectory: units } });
   assert.equal(mismatched.actions[key]?.state, 'waiting');
   assert.ok(mismatched.actions[key]!.detail.includes(`the unit serving this loop, ${join(units, serving)}, runs /srv/another/graphyard, not ${own.root}`), mismatched.actions[key]!.detail);
   assert.ok(!JSON.parse(await readFile(settingsFile(own.root), 'utf8')).permissions.deny.includes(own.absent), 'nothing is applied while the unit runs another checkout');
   // Updated, the next loop run applies.
   await writeFile(join(units, serving), unitText(own.root));
-  await run({ harness: { root: own.root, servingUnit: serving, unitDirectory: units } }, mismatched);
+  await run({ harness: { servingUnit: serving, unitDirectory: units } }, mismatched);
   assert.equal(mismatched.actions[key]?.state, 'done', mismatched.actions[key]?.detail);
   assert.ok(JSON.parse(await readFile(settingsFile(own.root), 'utf8')).permissions.deny.includes(own.absent));
+});
+
+test('integration:harness-remedy-ignores-research-scratch — the remedy resolves the loop\'s managed checkout (coordinatorCheckoutRoot(cliPath), the doctor\'s cwd as fallback), never research\'s cwd: a units-less research scratch beside a legacy unit running elsewhere is never applied against, and the managed checkout is healed and journaled done', async () => {
+  const own = await checkout('harness-managed', true), scratch = await checkout('harness-research-scratch', false);
+  const units = await temporaryDirectory('harness-managed-units');
+  await writeFile(join(units, legacyLoopUnit), unitText('/srv/another/graphyard'));
+  const scratchBefore = await readFile(settingsFile(scratch.root), 'utf8');
+  // Research names the scratch, which on its own would be refused (no units, legacy unit elsewhere); the doctor names it too, but the CLI's checkout wins.
+  const master = config(own.root);
+  const looped = cycle(master, { research: { cwd: scratch.root }, doctor: { cwd: scratch.root } as never, harness: { unitDirectory: units } });
+  await routineRemedies(looped);
+  const row = looped.state.actions[key]!;
+  assert.equal(row.state, 'done', row.detail);
+  assert.equal(row.faultClass, undefined);
+  assert.equal(await harnessDrift(own.root, masterHarness(own.root, master, 'claude')), null, 'the managed checkout is healed');
+  assert.equal(await readFile(settingsFile(scratch.root), 'utf8'), scratchBefore, 'the research scratch is never written');
+
+  // With no CLI path recorded, the doctor's checkout is the fallback; research's cwd is still never used.
+  const fallback = await checkout('harness-doctor-fallback', true);
+  const doctored = cycle(config(fallback.root, { cliPath: '' }), { research: { cwd: scratch.root }, doctor: { cwd: fallback.root } as never, harness: { unitDirectory: units } });
+  await routineRemedies(doctored);
+  assert.equal(doctored.state.actions[key]?.state, 'done', doctored.state.actions[key]?.detail);
+  assert.equal(await harnessDrift(fallback.root, masterHarness(fallback.root, config(fallback.root), 'claude')), null);
+  const neither = cycle(config(scratch.root, { cliPath: '' }), { research: { cwd: scratch.root }, harness: { unitDirectory: units } });
+  await routineRemedies(neither);
+  assert.equal(neither.state.actions[key], undefined, 'research alone names no checkout to apply against');
+  assert.equal(await readFile(settingsFile(scratch.root), 'utf8'), scratchBefore);
 });

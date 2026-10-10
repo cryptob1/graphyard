@@ -12,6 +12,7 @@ import { scopeRefusalBlocker, unplannedPaths } from '../model/scope.js';
 import { approverSessionName, guardBroadScope } from '../master/autonomy.js';
 import { containmentPhase, masterHarness, type MasterConfig } from '../master.js';
 import { HarnessCheckoutRefusal, harnessApplyCheckout } from '../master/harness.js';
+import { coordinatorCheckoutRoot } from '../master/profiles.js';
 import { harnessDrift, writeHarnessPermissions } from '../harness.js';
 import { selectFleetSession } from '../fleet.js';
 import { heldAwareProbe } from '../master/environments.js';
@@ -717,10 +718,10 @@ export const decisionCheckMs = 2 * 60_000;
  * (GY-888), so its repair always met EROFS and the row recurred every pass. The loop owns the file:
  * whenever the installed settings differ from the plan it makes the same idempotent write
  * `master harness claude --apply` makes — operator-added entries kept, only retired generated rules
- * removed — and journals one line. It runs on the loop's own checkout, named by its harness effect
- * (GY-1662), never by research's, which runDaemon rewrites to the research scratch worktree: that
- * worktree records no units, so on a host whose legacy unit runs another checkout every cycle met
- * the legacy unit refusal. A loop with no operator-agent identity or with the doctor off still owns
+ * removed — and journals one line. It runs on the loop's own checkout, the one its CLI runs from
+ * (coordinatorCheckoutRoot, the doctor's checkout as fallback; GY-1662), never research's, which
+ * runDaemon rewrites to the research scratch worktree: that worktree records no units, so on a host
+ * whose legacy unit runs another checkout every cycle met the legacy unit refusal. A loop with no operator-agent identity or with the doctor off still owns
  * its checkout, and its own cycle is then the only recurring reader that would heal host-derived drift.
  * A checkout it may not apply against (harnessApplyCheckout) waits on the remedy it names, journaled once.
  * A failure is journaled once per distinct cause and retried every cycle; a repeat of the same cause
@@ -728,8 +729,8 @@ export const decisionCheckMs = 2 * 60_000;
  */
 export async function applyHarnessContract(cycle: Cycle) {
   const { state, effects, now, performed, config, isolate } = cycle;
-  // GY-1662: the loop's own checkout (effects.harness), never the research scratch worktree runDaemon rewrites research's cwd to.
-  const root = effects.harness?.root ?? effects.research?.cwd ?? effects.doctor?.cwd;
+  // GY-1662: the loop's managed checkout (its CLI's), never the research scratch worktree runDaemon rewrites research's cwd to.
+  const root = (config.cliPath ? coordinatorCheckoutRoot(config.cliPath) : null) ?? effects.doctor?.cwd;
   if (!root) return;
   await isolate('config', null, 'harness contract', async () => {
     const key = remedyKey('harness', 'claude'), previous = state.actions[key], attempts = (previous?.attempts ?? 0) + 1;

@@ -282,7 +282,7 @@ export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffec
    * A loop wired without it, or whose config has no `run.research`, researches nothing and dispatches as before.
    */
   recordResearch?: (work: Work, event: ResearchEvent) => Promise<unknown>;
-  research?: { cwd: string; runner?: Runner }; harness?: { root: string; servingUnit?: string | null; unitDirectory?: string }; // GY-1662: the loop's own checkout the harness contract is applied against, and the unit serving it
+  research?: { cwd: string; runner?: Runner }; harness?: { servingUnit?: string | null; unitDirectory?: string }; // GY-1662: the unit serving this loop, checked against the checkout the harness contract is applied to
   recordDecomposition?: (work: Work, event: DecompositionEvent) => Promise<unknown>; // GY-1126: a split run's start, decision or failure, as the coordinator; runs in `research`'s checkout and runner
   adoptRuns?: () => Promise<AdoptedRun[]>; // the headless runs a restart left running (GY-453, run-adoption.ts); unwired adopts nothing
   recordTriage?: (work: Work, body: { judgement: TriageJudgement; runtime?: string }) => Promise<unknown>; // records a triage judgement on a machine-filed item as the coordinator (GY-402, POST work/ID/triage)
@@ -567,7 +567,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     browserFlow: flow => browserFlowChild(run, root, flow),
     recordRemedy: (row, attempt) => mutate(`actions/${row}/remedy`, attempt),
     recordResearch: (work, event) => mutate(`work/${work.id}/research`, event), recordDecomposition: (work, event) => mutate(`work/${work.id}/decomposition`, event),
-    research: { cwd: root }, harness: { root, servingUnit: detectLoopSupervisorUnit() },
+    research: { cwd: root }, harness: { servingUnit: detectLoopSupervisorUnit() },
     adoptRuns: loopRunAdoption(root, current, deps.fetcher),
     recordTriage: (work, body) => mutate(`work/${work.id}/triage`, body),
     withdrawTriage: (work, body) => mutate(`work/${work.id}/triage`, { withdraw: body }),
