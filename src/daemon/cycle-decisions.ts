@@ -452,7 +452,14 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
   const refusedByWork = new Map<string, RefusedAttestation[]>();
   for (const watch of Object.values(state.approvals)) if (watch.action === 'attest' && watch.refusal) refusedByWork.set(watch.work, [...refusedByWork.get(watch.work) ?? [], { decision: watch.decision, refusal: watch.refusal }]);
   for (const read of workToProcess) await isolate('decision', read, read.key, async () => {
-    let item = read; const reached = bounds.get(read.id); bounds.delete(read.id); // re-set below while its hold still stands
+    // Re-set below while its hold still stands; a throw before the hold was read as released keeps it (GY-1624), so a
+    // transient failure in closeStanding or docsSync.hold does not drop the bound the idle wait ends at.
+    const reached = bounds.get(read.id), released = { at: false }; bounds.delete(read.id);
+    try { await decideItem(read, reached, released); }
+    catch (error) { if (reached !== undefined && !released.at && !bounds.has(read.id)) bounds.set(read.id, reached); throw error; }
+  });
+  async function decideItem(read: Work, reached: number | undefined, released: { at: boolean }) {
+    let item = read;
     const assessment = assessments[item.id];
     // A request step 2 refused this cycle is read as it was decided, not as the snapshot saw it, and
     // its decision is requested against that revision: one a partial widening moved past the
@@ -487,6 +494,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     const docsConflict = (subject: Work, routine: RoutineDecision) => routine.action === 'rework' && !state.approvals[decisionKey(subject, routine)] && !!baseRefreshConflict(subject) && routine.binding === `${subject.candidate!.sha}:conflict`;
     const hold = docsConflict(item, decision) ? await docsSync.hold(item, observe) : null;
     if (hold?.held) return noteHold(item, hold);
+    released.at = true;
     if (synced.work && synced.work.candidate?.sha === item.candidate?.sha && synced.work.policyRevision === item.policyRevision) item = synced.work;
     needed.add(key);
     // Rework waits for an observation that still describes the item (GY-144); the step wakes it unless paused (GY-793) and re-decides.
@@ -524,7 +532,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     if (from && adopted) { delete state.approvals[from]; state.approvals[key] = adopted; return supervise(item, decision, key, adopted); }
     // A done entry with no watch adopts the standing decision and launches an approver.
     await requestNeeded(item, decision, key);
-  });
+  }
   // 4c+. Attestations (GY-521): one attest decision per `manual:` proof no producer may run, bound to its head, one at a time.
   for (const item of ordered) await isolate('decision', item, item.key, async () => {
     const attestations = attestDecisions(item, snapshot.work, clock);

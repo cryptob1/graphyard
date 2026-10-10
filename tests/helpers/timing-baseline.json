@@ -467,6 +467,7 @@
     "tests/loop-self-upgrade.test.ts": 1583,
     "tests/loop-restart-execstart.test.ts": 2000,
     "tests/loop-silence-owner.test.ts": 1330,
+    "tests/hold-bound-survives-throw.test.ts": 1000,
     "tests/loop-wakes-at-hold-bound.test.ts": 1000,
     "tests/machine-backlog-routes.test.ts": 3434,
     "tests/machine-backlog-triage.test.ts": 1111,
