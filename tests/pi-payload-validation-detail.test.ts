@@ -47,7 +47,7 @@ test('unit:pi-payload-validation-detail — a short or unserialisable payload is
 test('unit:pi-payload-validation-detail — the run\'s injected secrets and credential-shaped tokens are redacted before the payload is cut', async () => {
   const { payloadValidationFailure } = await import('../src/runner/pi.js');
   // Fake credentials are assembled at runtime so the secrets scan never sees a literal key.
-  const key = ['zai', 'key', '0123456789abcdef'].join('-'), ghp = `ghp_${'A'.repeat(36)}`;
+  const key = `zai-key-${'x'.repeat(16)}`, ghp = `ghp_${'A'.repeat(36)}`;
   const detail = payloadValidationFailure('graphyard_decide', new Error(`bad value ${key}`), { reason: `leaked ${key} and ${ghp}`, auth: 'Bearer abc.def.ghi', note: 'api_key=s3cr3tvalue' }, [key, 'short']);
   for (const secret of [key, ghp, 'abc.def.ghi', 's3cr3tvalue']) assert.ok(!detail.includes(secret), `${secret} is not shown`);
   assert.match(detail, /payload failed validation: bad value \[redacted\]; payload: \{"reason":"leaked \[redacted\] and \[redacted\]"/);
