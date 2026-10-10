@@ -67,8 +67,13 @@ export const statusRoutes = defineRoutes('status', [
       // left, how fast it goes, the pause in force, what each observation cost; and whether the
       // webhook is delivering at all, against the pull requests that are open to be woken.
       const githubBudget = github?.budget?.(observedAt.getTime()) ?? null;
-      const webhooks = { ...await engine.store.webhookLiveness(), configured: !!process.env.GITHUB_WEBHOOK_SECRET, settingsUrl: github?.webhookSettingsUrl?.() ?? null,
-        openPullRequests: work.filter(item => item.stage !== 'done' && !!item.submission && !!item.observation && !item.observation.merged && item.observation.prState !== 'closed').length };
+      const liveness = await engine.store.webhookLiveness();
+      const openPullRequests = work.filter(item => item.stage !== 'done' && !!item.submission && !!item.observation && !item.observation.merged && item.observation.prState !== 'closed').length;
+      // An hour without a receipt while pull requests are open is a quiet repository or a broken
+      // webhook; GitHub's own delivery log tells them apart (GY-1648), so it is read only then.
+      const silent = openPullRequests > 0 && (!liveness.lastDeliveryAt || observedAt.getTime() - Date.parse(liveness.lastDeliveryAt) >= 3_600_000);
+      const webhooks = { ...liveness, configured: !!process.env.GITHUB_WEBHOOK_SECRET, settingsUrl: github?.webhookSettingsUrl?.() ?? null, openPullRequests,
+        github: silent && github?.webhookDeliveries ? await github.webhookDeliveries(liveness.lastDeliveryAt, observedAt.getTime()) : null };
       // The fleet as the dashboard needs it (GY-105): how many executors are alive, and each kind
       // of pending action none of them serves, with its wait and what to start.
       // A pending merge row waits on a loop that merges, never on an executor (GY-916).

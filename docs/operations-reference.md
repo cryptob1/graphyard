@@ -60,7 +60,7 @@ Below **500 requests** by default, `GRAPHYARD_GITHUB_RESERVE`, non-merge observa
 
 ### What a pause means for gates
 
-A `403`/`429` pause stops requests; gates read the last observation until it lifts; GitHub merges on branch protection, recorded on resume ([prioritized wakes](protocol/github-webhook.md#prioritized-wakes)).
+`403`/`429` pauses requests; gates read the last observation until it lifts; GitHub merges on branch protection, recorded on resume ([prioritized wakes](protocol/github-webhook.md#prioritized-wakes)).
 
 ### Reading the budget
 
@@ -68,7 +68,7 @@ A `403`/`429` pause stops requests; gates read the last observation until it lif
 
 ### Webhook liveness
 
-Silent webhook hour: `master status` cites `https://github.com/settings/apps/APP-SLUG`.
+Refused deliveries: `master status` cites `https://github.com/settings/apps/APP-SLUG`.
 
 ## Control-plane resources
 

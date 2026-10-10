@@ -1,6 +1,6 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createHash, createHmac, randomUUID } from 'node:crypto';
+import { createHash, createHmac, generateKeyPairSync, randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import EmbeddedPostgres from 'embedded-postgres';
@@ -21,6 +21,7 @@ import { baseMoveSubjects, webhookSubjects } from '../src/server/routes/github.j
 // unit:unchanged-candidate-observation-cost, integration:rate-limit-pause-single-incident,
 // manual:github-budget-docs-review, unit:steady-state-spend-bounded,
 // integration:webhook-liveness-visible.
+// GY-1648: integration:github-webhook-endpoint.
 // GY-1231: unit:base-move-wakes-only-affected-items, unit:merge-burst-request-budget.
 // GY-1272: manual:fault-class-resources (the GitHub App budget spent at 06:36:13Z on 5 October 2026).
 
@@ -47,6 +48,9 @@ class Api {
   states = new Map<number, string>();
   limit = 5000; remaining = 5000; resetAt = Math.ceil(Date.now() / 1000) + 3000;
   refuse = false;
+  /** The App webhook's delivery log GitHub keeps (GY-1648), newest first; `hookRefusal` makes reading it fail. */
+  hookDeliveries: { delivered_at: string; event: string; status_code: number; status: string }[] = [];
+  hookRefusal: number | null = null;
   requests: { method: string; path: string; status: number }[] = [];
   open(pr: number, branch: string, options: { approved?: boolean; checks?: 'success' | 'in_progress' } = {}) {
     this.pulls.set(pr, { head: sha(`head-${pr}-${this.main}`), cut: this.main, branch, approved: options.approved ?? true, checks: options.checks ?? 'success' });
@@ -66,6 +70,7 @@ class Api {
   }
   private body(method: string, path: string): unknown {
     if (method !== 'GET') return { id: 12 };
+    if (path.startsWith('/app/hook/deliveries')) return this.hookDeliveries;
     const [route, query = ''] = path.replace(`/repos/${REPOSITORY}`, '').split('?'); const params = new URLSearchParams(query);
     if (route === '/git/ref/heads/main') return { ref: 'refs/heads/main', object: { type: 'commit', sha: this.main } };
     let match = /^\/pulls\/(\d+)$/.exec(route);
@@ -99,6 +104,7 @@ class Api {
     const method = options.method ?? 'GET'; const path = String(url).replace('https://api.github.com', '');
     if (this.refuse) { this.requests.push({ method, path, status: 403 }); return new Response('{"message":"API rate limit exceeded"}', { status: 403, headers: this.headers({ 'x-ratelimit-remaining': '0' }) }); }
     // A queue tip for a head cut from the base tip is the head itself: the merge is a no-op (204) and the ref is written.
+    if (this.hookRefusal !== null && path.startsWith('/app/hook/deliveries')) { this.requests.push({ method, path, status: this.hookRefusal }); return new Response('{"message":"Integration not found"}', { status: this.hookRefusal, headers: this.headers() }); }
     if (method === 'POST' && path.endsWith('/merges')) { this.remaining--; this.requests.push({ method, path, status: 204 }); return new Response(null, { status: 204, headers: this.headers() }); }
     const text = JSON.stringify(this.body(method, path)); const etag = etagOf(`${path}:${text}`);
     if (method === 'GET' && options.headers?.['If-None-Match'] === etag) { this.requests.push({ method, path, status: 304 }); return new Response(null, { status: 304, headers: this.headers({ etag }) }); }
@@ -527,6 +533,73 @@ test('integration:webhook-liveness-visible — status reports the last delivery 
   // With nothing open there is nothing to wake, so silence is not a fault.
   assert.deepEqual(webhookAttention({ ...after, webhooks: { ...after.webhooks, openPullRequests: 0 } }, Date.now() + 7_200_000), []);
   assert.equal(githubBudgetAttention(after, Date.now()).length, 0, 'nothing else is raised on a healthy budget');
+});
+
+/** How long the adapter reuses GitHub's delivery log (src/github.ts `webhookDeliveryLogMs`). */
+const webhookDeliveryLogMs = 5 * 60_000;
+test('integration:github-webhook-endpoint — a delivery signed with GITHUB_WEBHOOK_SECRET is answered 2xx and recorded once, a mismatched secret or an unset one is refused with the status GitHub logs, and GitHub\'s own delivery log tells a quiet repository from a broken webhook (GY-1648)', async t => {
+  const api = new Api();
+  t.mock.method(globalThis, 'fetch', api.fetch);
+  const github = api.client(); await serve(github);
+  // The App JWT that reads the delivery log is signed for real: the adapter never sees a placeholder key here.
+  Object.assign(github.config, { privateKey: generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey.export({ type: 'pkcs1', format: 'pem' }).toString() });
+  const open = await submitted(api, 'Open pull request'); await job(open, github);
+  process.env.GITHUB_WEBHOOK_SECRET ??= 'webhook-secret-for-the-test';
+  const post = (secret: string | null, delivery: string) => {
+    const raw = JSON.stringify({ action: 'synchronize', repository: { full_name: REPOSITORY }, pull_request: { number: 1 } });
+    return realFetch(`${origin}/api/github/webhook`, { method: 'POST', body: raw, headers: { 'content-type': 'application/json', 'x-github-event': 'pull_request', 'x-github-delivery': delivery,
+      ...(secret === null ? {} : { 'x-hub-signature-256': `sha256=${createHmac('sha256', secret).update(raw).digest('hex')}` }) } });
+  };
+  // The endpoint half: the configured secret is verified, the delivery answered 202 and recorded once.
+  const id = randomUUID();
+  assert.equal((await post(process.env.GITHUB_WEBHOOK_SECRET!, id)).status, 202, 'a delivery signed with the configured secret is accepted');
+  assert.equal((await post(process.env.GITHUB_WEBHOOK_SECRET!, id)).status, 202, 'GitHub redelivering it is accepted too');
+  assert.equal((await status()).webhooks.lastHour, 1, 'and recorded once');
+  const mismatched = await post('a-secret-the-app-settings-hold-instead', randomUUID());
+  assert.equal(mismatched.status, 401, 'a delivery signed with any other secret is refused, the 401 GitHub logs'); assert.match(await mismatched.text(), /Invalid webhook signature/);
+  assert.equal((await post(null, randomUUID())).status, 401, 'an unsigned delivery is refused');
+  const configured = process.env.GITHUB_WEBHOOK_SECRET; delete process.env.GITHUB_WEBHOOK_SECRET;
+  try { assert.equal((await post(configured!, randomUUID())).status, 503, 'with no secret configured every delivery is refused'); } finally { process.env.GITHUB_WEBHOOK_SECRET = configured; }
+  assert.equal((await status()).webhooks.lastHour, 1, 'no refused delivery counts as one that arrived');
+  const fresh = await status();
+  assert.equal(fresh.webhooks.openPullRequests, 1);
+  assert.equal(fresh.webhooks.github, null, 'inside the hour the delivery log is not read');
+  assert.equal(api.requests.filter(request => request.path.startsWith('/app/hook/deliveries')).length, 0);
+  // An hour on, GitHub has logged nothing it could not deliver: a quiet repository, and no item.
+  const last = fresh.webhooks.lastDeliveryAt as string;
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse(last) + 3_600_000 + 60_000 });
+  api.hookDeliveries = [{ delivered_at: new Date(Date.parse(last) + 1000).toISOString(), event: 'check_run', status_code: 202, status: 'OK' }, { delivered_at: new Date(Date.parse(last) - 5000).toISOString(), event: 'pull_request', status_code: 202, status: 'OK' }];
+  const quiet = webhookAttention({ webhooks: { ...fresh.webhooks, github: await github.webhookDeliveries(last) } }, Date.now());
+  assert.deepEqual(quiet, [], 'every delivery GitHub logged since the last receipt was accepted, so the silence is not the webhook\'s');
+  assert.equal(webhookAttention(fresh, Date.now()).length, 1, 'the receipts alone read the same hour as a broken webhook');
+  // A broken webhook: GitHub logged deliveries the endpoint refused since then, named with GitHub's status code and the setting it means.
+  t.mock.timers.setTime(Date.parse(last) + 3_600_000 + 60_000 + webhookDeliveryLogMs);
+  api.hookDeliveries = [{ delivered_at: new Date(Date.parse(last) + 120_000).toISOString(), event: 'push', status_code: 401, status: 'Invalid HTTP Response: 401' }, { delivered_at: new Date(Date.parse(last) + 60_000).toISOString(), event: 'check_run', status_code: 401, status: 'Invalid HTTP Response: 401' }, ...api.hookDeliveries];
+  const report = await github.webhookDeliveries(last);
+  assert.deepEqual([report.error, report.sinceReceipt, report.refusedSinceReceipt, report.lastRefusal?.event, report.lastRefusal?.statusCode], [null, 3, 2, 'push', 401]);
+  const broken = webhookAttention({ webhooks: { ...fresh.webhooks, github: report } }, Date.now());
+  assert.equal(broken.length, 1);
+  assert.match(broken[0].text, /GitHub's delivery log lists 2 deliveries since then the endpoint did not accept, the latest a push at .* answered 401 \(Invalid HTTP Response: 401\): the secret does not match GITHUB_WEBHOOK_SECRET/);
+  assert.match(broken[0].next, /a delivery that arrives clears this/);
+  // The log is reused for five minutes, so a status read never spends a request per poll.
+  const reads = api.requests.filter(request => request.path.startsWith('/app/hook/deliveries')).length;
+  await github.webhookDeliveries(last); assert.equal(api.requests.filter(request => request.path.startsWith('/app/hook/deliveries')).length, reads);
+  // An unreadable log keeps the receipts' reading and says why.
+  t.mock.timers.setTime(Date.parse(last) + 3_600_000 + 60_000 + 2 * webhookDeliveryLogMs);
+  api.hookRefusal = 404;
+  const unread = await github.webhookDeliveries(last);
+  assert.ok(unread.error, 'the refusal is reported, not thrown');
+  const fallback = webhookAttention({ webhooks: { ...fresh.webhooks, github: unread } }, Date.now());
+  assert.equal(fallback.length, 1); assert.match(fallback[0].text, /GitHub's delivery log could not be read/);
+  // The status read carries the report once the receipts have been silent an hour with a pull request open.
+  api.hookRefusal = null; api.hookDeliveries = [];
+  // The route judges by the database clock, so the receipts are aged rather than the clock moved.
+  t.mock.timers.reset(); Object.assign(github, { deliveryLog: null });
+  await store.pool.query("UPDATE webhook_receipts SET created_at = created_at - interval '2 hours'");
+  const silent = await status();
+  assert.ok(silent.webhooks.github, 'the status read consulted GitHub\'s delivery log');
+  assert.equal(silent.webhooks.github.latestAt, null);
+  assert.match(webhookAttention(silent, Date.now())[0].text, /lists no delivery at all, so the webhook may be inactive/);
 });
 
 test('unit:base-move-wakes-only-affected-items — a merge touching one file wakes exactly the open items whose pull requests touch it, or whose mergeability GitHub has not settled; every other job keeps its schedule', async t => {
