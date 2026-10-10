@@ -7,13 +7,17 @@ import { setTimeout as delay } from 'node:timers/promises';
  * The standing processes working in the checkout at `root` — a process whose working directory is
  * the checkout or inside it, outside the managed `.graphyard` area whose sessions see the checkout
  * read-only — and their descendants outside that area: the suspected writers the dirty-checkout
- * escalation names. This process and its ancestors are never among them. Linux /proc; elsewhere none.
+ * escalation names. This process and its ancestors are never among them. Read from Linux /proc; where
+ * the process table cannot be enumerated (another OS, a restricted mount) it throws, never reporting an
+ * unverifiable scan as no writers (GY-1658 review).
  */
 export function checkoutWriterProcesses(root: string, self = process.pid, proc = '/proc'): number[] {
   const base = resolve(root), managed = `${base}${sep}.graphyard`;
   const table = new Map<number, { ppid: number; cwd: string | null }>();
   let entries: string[];
-  try { entries = readdirSync(proc).filter(name => /^\d+$/.test(name)); } catch { return []; }
+  try { entries = readdirSync(proc).filter(name => /^\d+$/.test(name)); }
+  catch (error) { throw new Error(`the processes working in the checkout cannot be enumerated from ${proc} (${error instanceof Error ? error.message : String(error)}), so nothing was restored`); }
+  if (!entries.length) throw new Error(`the processes working in the checkout cannot be enumerated: ${proc} lists no process, so nothing was restored`);
   for (const name of entries) {
     try {
       const stat = readFileSync(join(proc, name, 'stat'), 'utf8');

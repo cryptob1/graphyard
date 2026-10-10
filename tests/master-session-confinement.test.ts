@@ -29,7 +29,7 @@ function coordinator(base: string) {
   writeFileSync(join(root, 'src', 'loop.ts'), 'export const loop = 1;\n');
   writeFileSync(join(root, 'src', 'gone.ts'), 'export const gone = 1;\n');
   writeFileSync(join(root, 'Dockerfile'), 'FROM node:22\n');
-  writeFileSync(join(root, '.gitignore'), '.graphyard/\n');
+  writeFileSync(join(root, '.gitignore'), '.graphyard/\n*.log\n');
   execFileSync('git', ['init', '-q', '-b', 'main', root]);
   git('config', 'user.email', 'graphyard@localhost'); git('config', 'user.name', 'Graphyard');
   git('add', '.'); git('commit', '-q', '-m', 'coordinator');
@@ -153,6 +153,9 @@ test('integration:checkout-restore-clears-guard — the restore saves every dirt
   // Untracked scratch outside the source paths the guard reads: preserved and restored like the rest.
   writeFileSync(join(root, 'scratchpad.mjs'), '// scratch\n');
   mkdirSync(join(root, 'scratchpad')); writeFileSync(join(root, 'scratchpad', 'notes.md'), 'notes\n');
+  // An ignored file inside that untracked directory: no dirty path, and never deleted with its neighbour.
+  writeFileSync(join(root, 'scratchpad', 'cache.log'), 'ignored work\n');
+  mkdirSync(join(root, 'src', 'fresh', 'deep'), { recursive: true }); writeFileSync(join(root, 'src', 'fresh', 'deep', 'more.ts'), 'export const more = 1;\n');
   const state = emptyDaemonState(config(base));
   const guard = guardFor(root, state);
   assert.ok(await guard.start(null), 'the dirty checkout is refused');
@@ -195,7 +198,7 @@ test('integration:checkout-restore-clears-guard — the restore saves every dirt
   assert.equal((await serveCheckoutRestore(file, root, { restart: restart(42), pid: 42 }))?.restart?.state, 'done', 'the restarted loop records the restart done');
   assert.deepEqual(restarts, [{ pid: 41 }, { pid: 41 }], 'the loop restarts through its unit until it lands, and no restarted loop asks again');
   assert.ok(outcome!.ref!.startsWith(checkoutRestoreRefPrefix));
-  assert.deepEqual(outcome!.paths.sort(), ['Dockerfile', 'scratchpad.mjs', 'scratchpad/', 'src/fresh/', 'src/gone.ts', 'src/loop.ts']);
+  assert.deepEqual(outcome!.paths.sort(), ['Dockerfile', 'scratchpad.mjs', 'scratchpad/notes.md', 'src/fresh/deep/more.ts', 'src/fresh/patch.ts', 'src/gone.ts', 'src/loop.ts'], 'every untracked file by its own path');
   // Clean, and nothing lost: the ref holds every byte, on top of the HEAD it was taken at.
   const checkout = await readCoordinatorCheckout(root);
   assert.deepEqual(dirtyCheckoutPaths(checkout), [], 'readCoordinatorCheckout reports an empty dirty set');
@@ -210,7 +213,9 @@ test('integration:checkout-restore-clears-guard — the restore saves every dirt
   assert.equal(readFileSync(join(root, 'src', 'gone.ts'), 'utf8'), 'export const gone = 1;\n', 'the deleted file is back at HEAD');
   assert.equal(git('show', `${outcome!.ref}:scratchpad.mjs`), '// scratch', 'untracked scratch outside the source paths is preserved');
   assert.equal(git('show', `${outcome!.ref}:scratchpad/notes.md`), 'notes');
-  assert.ok(!existsSync(join(root, 'scratchpad.mjs')) && !existsSync(join(root, 'scratchpad')), 'and returned to HEAD with the rest');
+  assert.ok(!existsSync(join(root, 'scratchpad.mjs')) && !existsSync(join(root, 'scratchpad', 'notes.md')), 'and returned to HEAD with the rest');
+  assert.equal(readFileSync(join(root, 'scratchpad', 'cache.log'), 'utf8'), 'ignored work\n', 'the ignored file beside it is never deleted');
+  assert.ok(!existsSync(join(root, 'src', 'fresh')), 'a directory the restore emptied goes too');
   assert.equal(git('status', '--porcelain'), '', 'no non-ignored dirty path is left');
   assert.equal(git('stash', 'list'), '', 'the shared stash stack is untouched');
   // The escalation settled before the restart, and records no further failed attempt.
@@ -292,6 +297,19 @@ test('unit:checkout-restore-freeze-fails-closed — a writer that cannot be stop
   assert.equal(readFileSync(join(root, 'src', 'loop.ts'), 'utf8'), 'export const loop = 2; // hotfix\n');
   assert.ok(existsSync(join(root, 'scratchpad.mjs')));
   assert.equal(git('for-each-ref', checkoutRestoreRefPrefix), '', 'no ref was written');
+  // An untracked nested repository cannot be saved in the ref: refused, untouched.
+  execFileSync('git', ['init', '-q', join(root, 'vendor')]); writeFileSync(join(root, 'vendor', 'local.txt'), 'nested work\n');
+  execFileSync('git', ['-C', join(root, 'vendor'), '-c', 'user.name=x', '-c', 'user.email=x@x', 'commit', '-q', '--allow-empty', '-m', 'nested']);
+  await assert.rejects(restoreCoordinatorCheckout(root, 'restore', undefined, new Date(), () => ({ thaw: () => {} })), /untracked nested repositories \(vendor\/\).*nothing was restored/);
+  assert.ok(existsSync(join(root, 'vendor', 'local.txt')) && existsSync(join(root, 'scratchpad.mjs')));
+  assert.equal(git('for-each-ref', checkoutRestoreRefPrefix), '', 'no ref was written');
+  // Writer discovery that cannot enumerate the process table is no empty writer set: the freeze refuses.
+  assert.throws(() => checkoutWriterProcesses(root, process.pid, join(base, 'no-proc')), /cannot be enumerated.*nothing was restored/);
+  mkdirSync(join(base, 'empty-proc'));
+  assert.throws(() => checkoutWriterProcesses(root, process.pid, join(base, 'empty-proc')), /lists no process/);
+  sent.length = 0;
+  await assert.rejects(freezeCheckoutWriters(root, { scan: directory => checkoutWriterProcesses(directory, process.pid, join(base, 'no-proc')), signal: signal([]), state }), /cannot be enumerated/);
+  assert.deepEqual(sent, [], 'nothing was signalled');
   assert.deepEqual(statusPaths(`R  new.ts\0old.ts\0?? scratch/\0 M src/a.ts\0`).sort(), ['new.ts', 'old.ts', 'scratch/', 'src/a.ts'], 'every status entry and rename origin is a restored path');
 });
 

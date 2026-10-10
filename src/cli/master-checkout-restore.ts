@@ -1,5 +1,5 @@
 // Concern: `graphyard master checkout-restore` and the confined master's `master restart` and `master executors` (GY-1658) — host acts a confined master identity requests and the loop, the one unconfined process, carries out.
-import { copyFileSync, existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdtempSync, rmdirSync, rmSync } from 'node:fs';
 import { readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
@@ -112,9 +112,14 @@ export async function restoreCoordinatorCheckout(root: string, reason: string, r
 async function restoreQuiesced(root: string, reason: string, run: ChildRun, at: Date) {
   const git = async (args: string[], env?: NodeJS.ProcessEnv) => String(await run('git', ['-C', root, '--literal-pathspecs', ...args], env ? { env } : undefined));
   const head = (await git(['rev-parse', 'HEAD'])).trim();
-  const status = () => git(['status', '--porcelain', '-z', '--untracked-files=normal']);
+  // Every untracked file by its own path (GY-1658 review): `normal` collapses an untracked directory to
+  // `dir/`, which `git add` saves without its ignored descendants while a recursive removal would delete them.
+  const status = () => git(['status', '--porcelain', '-z', '--untracked-files=all']);
   const paths = statusPaths(await status());
   if (!paths.length) return null;
+  // Only a nested repository is still named as a directory; its history is not the checkout's to save.
+  const nested = paths.filter(path => path.endsWith('/'));
+  if (nested.length) throw new Error(`the coordinator checkout at ${root} holds untracked nested repositories (${nested.slice(0, 8).join(', ')}), which a restore cannot save, so nothing was restored`);
   const scratch = mkdtempSync(join(tmpdir(), 'graphyard-checkout-restore-'));
   let commit: string;
   try {
@@ -134,14 +139,19 @@ async function restoreQuiesced(root: string, reason: string, run: ChildRun, at: 
   await git(['update-ref', '-m', `graphyard checkout-restore: ${reason.slice(0, 200)}`, ref, commit, '']);
   // Only once the ref holds them are the paths returned to HEAD.
   const tracked: string[] = [], added: string[] = [];
-  for (const path of paths) {
-    const inHead = !path.endsWith('/') && await Promise.resolve(run('git', ['-C', root, 'cat-file', '-e', `${head}:${path}`])).then(() => true, () => false);
-    (inHead ? tracked : added).push(path);
-  }
+  const holds = (tree: string, path: string) => Promise.resolve(run('git', ['-C', root, 'cat-file', '-e', `${tree}:${path}`])).then(() => true, () => false);
+  for (const path of paths) (await holds(head, path) ? tracked : added).push(path);
+  // A path is removed only once the saved tree is proven to hold it; one deleted in the working tree is absent from both and already gone.
+  const unsaved: string[] = [];
+  for (const path of added) if (existsSync(join(root, path)) && !await holds(commit, path)) unsaved.push(path);
+  if (unsaved.length) throw new Error(`the restore commit ${commit.slice(0, 12)} under ${ref} does not hold ${unsaved.slice(0, 8).join(', ')}, so nothing was returned to HEAD`);
   // Forced: a path staged differently from both HEAD and its file is already saved in the ref's second parent.
   if (added.length) await git(['rm', '-r', '-q', '-f', '--cached', '--ignore-unmatch', '--', ...added]);
   if (tracked.length) await git(['checkout', head, '--', ...tracked]);
-  for (const path of added) await rm(join(root, path), { recursive: true, force: true });
+  for (const path of added) await rm(join(root, path), { force: true });
+  // The directories those files emptied go too; one still holding anything (an ignored file) stays.
+  const parents = [...new Set(added.flatMap(path => path.split('/').slice(0, -1).map((_, depth, parts) => parts.slice(0, depth + 1).join('/'))))];
+  for (const directory of parents.sort((a, b) => b.length - a.length)) { try { rmdirSync(join(root, directory)); } catch { /* not empty, or not ours */ } }
   const after = statusPaths(await status());
   if (after.length) throw new Error(`the coordinator checkout at ${root} is still dirty after its paths were saved under ${ref} (${commit.slice(0, 12)}): ${after.slice(0, 8).join(', ')}`);
   return { ref, commit, paths };
