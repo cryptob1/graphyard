@@ -208,7 +208,8 @@ export const goalRoutes = defineRoutes('goals', [
         demand(body.mergeSha, `${goal.key}'s acceptance change has no pull request: the merge writer lands it and names the merge commit it pushed`, 422);
         demand(goal.approval.by !== goal.acceptance.author && goal.approval.head === goal.acceptance.head, `${goal.key}'s acceptance change is sensitive and lands only on an approver's verdict on its exact head by another identity`, 403);
         if (engine.gitRunner === undefined) engine.gitRunner = gitRunnerFor(process.env.GRAPHYARD_REPOSITORY_ROOT ?? process.cwd());
-        demand(engine.gitRunner, 'The control plane has no checkout to read the merge writer\'s landing from', 503);
+        demand(engine.gitRunner, "The control plane has no checkout to read the merge writer's landing from", 503);
+        await engine.gitRunner(['fetch', '--no-tags', 'origin', engine.baseBranch]).catch(() => undefined);
         const refusal = await acceptanceMergeRefusal(engine.gitRunner, engine.baseBranch, goal.approval.head, body.mergeSha);
         demand(!refusal, `${goal.key}'s acceptance change is not landed: ${refusal}`, 422);
         const landing: Landing = { state: 'merged', mergeSha: body.mergeSha, detail: `the merge writer merged ${goal.key}'s acceptance change as ${body.mergeSha}` };

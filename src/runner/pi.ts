@@ -351,7 +351,7 @@ function watchRun<T>(directory: string, meta: RunMeta, options: Pick<RunOptions<
     if (record.type === 'tool_execution_end' && record.toolName === options.tool) {
       if (record.isError === true) { invalid = `the ${options.tool} call was rejected: ${text(record.result?.content) || 'no reason given'}`; return; }
       try { accepted.push(options.validate(record.result?.details)); }
-      catch (error) { invalid = `the ${options.tool} payload failed validation: ${error instanceof Error ? error.message : String(error)}`; }
+      catch (error) { invalid = `the ${options.tool} payload failed validation: ${error instanceof Error ? error.message : String(error)}; payload: ${JSON.stringify(record.result?.details).slice(0, 1000)}`; }
     }
     if (record.type === 'agent_settled' && settledAt === null) settledAt = Date.now();
   };

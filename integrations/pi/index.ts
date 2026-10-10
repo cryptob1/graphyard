@@ -149,7 +149,7 @@ export const acceptanceParameters: JsonSchema = {
       properties: {
         id: { type: 'string', pattern: '^[a-z0-9][a-z0-9._-]*$', description: 'A new outcome id' }, title: text(200, 'The outcome as a customer would say it'),
         criteria: { type: 'array', minItems: 1, maxItems: 20, items: text(500, 'What the customer checks it by') },
-        case: { type: 'object', description: 'One case in the e2e/cases format proving the outcome: a new id, required true, target "uat", and steps that check what the customer sees' },
+        case: { type: 'object', required: ['id', 'title', 'target', 'required', 'steps'], additionalProperties: true, properties: { id: { type: 'string', pattern: '^[a-z0-9][a-z0-9._-]*$' }, title: { type: 'string' }, target: { type: 'string', enum: ['uat'] }, required: { type: 'boolean' }, steps: { type: 'array', items: { type: 'object', additionalProperties: true } } } },
       } } },
   },
 };

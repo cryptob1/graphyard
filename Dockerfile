@@ -29,6 +29,7 @@ LABEL org.opencontainers.image.title="Graphyard" \
       org.opencontainers.image.revision="${GRAPHYARD_BUILD_REVISION}" \
       org.opencontainers.image.source="https://github.com/cryptob1/graphyard" \
       org.opencontainers.image.licenses="Apache-2.0"
+RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
 COPY package*.json ./
 RUN npm ci --omit=dev
 COPY --from=build /app/dist ./dist
