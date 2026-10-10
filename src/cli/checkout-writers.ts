@@ -1,5 +1,5 @@
 // Concern: the coordinator checkout's standing writers (GY-1658) — finding the processes working in it and freezing them, fail-closed, for `master checkout-restore`.
-import { readdirSync, readFileSync, readlinkSync } from 'node:fs';
+import { readdirSync, readFileSync, readlinkSync, realpathSync } from 'node:fs';
 import { join, resolve, sep } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 
@@ -9,10 +9,15 @@ import { setTimeout as delay } from 'node:timers/promises';
  * read-only — and their descendants outside that area: the suspected writers the dirty-checkout
  * escalation names. This process and its ancestors are never among them. Read from Linux /proc; where
  * the process table cannot be enumerated (another OS, a restricted mount) it throws, never reporting an
- * unverifiable scan as no writers (GY-1658 review).
+ * unverifiable scan as no writers (GY-1658 review). The kernel reports each working directory by its
+ * physical path, so the checkout is compared by its canonical path too: a checkout reached through a
+ * symlinked ancestor is the same checkout, and one whose canonical path cannot be read throws.
  */
 export function checkoutWriterProcesses(root: string, self = process.pid, proc = '/proc'): number[] {
-  const base = resolve(root), managed = `${base}${sep}.graphyard`;
+  let base: string;
+  try { base = realpathSync(resolve(root)); }
+  catch (error) { throw new Error(`the checkout's canonical path cannot be read (${error instanceof Error ? error.message : String(error)}), so its writers cannot be found and nothing was restored`); }
+  const managed = `${base}${sep}.graphyard`;
   const table = new Map<number, { ppid: number; cwd: string | null }>();
   let entries: string[];
   try { entries = readdirSync(proc).filter(name => /^\d+$/.test(name)); }

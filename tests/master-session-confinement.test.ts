@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { masterConfinementVariable, masterSessionConfinement, startAgentSession } from '../src/master/launch.js';
 import { dirtyCheckoutPaths, hostProcessLaunchTargets, readCoordinatorCheckout, sessionMountNamespaceWorks } from '../src/master/profiles.js';
@@ -310,6 +310,25 @@ test('unit:checkout-restore-freeze-fails-closed — a writer that cannot be stop
   sent.length = 0;
   await assert.rejects(freezeCheckoutWriters(root, { scan: directory => checkoutWriterProcesses(directory, process.pid, join(base, 'no-proc')), signal: signal([]), state }), /cannot be enumerated/);
   assert.deepEqual(sent, [], 'nothing was signalled');
+  // A checkout reached through a symlinked ancestor is the same checkout: /proc reports the physical cwd.
+  symlinkSync(root, join(base, 'linked'));
+  const linkedWriter = spawn('sleep', ['60'], { cwd: root, stdio: 'ignore' });
+  try { assert.ok(checkoutWriterProcesses(join(base, 'linked')).includes(linkedWriter.pid!), 'a writer is found through the symlinked path'); }
+  finally { linkedWriter.kill('SIGKILL'); }
+  assert.throws(() => checkoutWriterProcesses(join(base, 'missing')), /canonical path cannot be read.*nothing was restored/);
+  // A directory standing where HEAD has a file, holding an ignored file: checking the file out would delete it, so nothing is touched.
+  rmSync(join(root, 'vendor'), { recursive: true, force: true });
+  execFileSync('rm', [join(root, 'src', 'loop.ts')]);
+  mkdirSync(join(root, 'src', 'loop.ts')); writeFileSync(join(root, 'src', 'loop.ts', 'bar'), 'bar\n'); writeFileSync(join(root, 'src', 'loop.ts', 'baz.log'), 'ignored work\n');
+  await assert.rejects(restoreCoordinatorCheckout(root, 'restore', undefined, new Date(), () => ({ thaw: () => {} })), /ignored files \(src\/loop\.ts\/baz\.log\).*nothing was restored/);
+  assert.equal(readFileSync(join(root, 'src', 'loop.ts', 'baz.log'), 'utf8'), 'ignored work\n');
+  assert.ok(existsSync(join(root, 'src', 'loop.ts', 'bar')) && existsSync(join(root, 'scratchpad.mjs')));
+  assert.equal(git('for-each-ref', checkoutRestoreRefPrefix), '', 'no ref was written');
+  // Without the ignored file the same shape restores: the untracked file is saved, then the tracked file returns.
+  rmSync(join(root, 'src', 'loop.ts', 'baz.log'));
+  const restored = await restoreCoordinatorCheckout(root, 'restore', undefined, new Date(), () => ({ thaw: () => {} }));
+  assert.equal(git('show', `${restored!.ref}:src/loop.ts/bar`), 'bar');
+  assert.equal(readFileSync(join(root, 'src', 'loop.ts'), 'utf8'), 'export const loop = 1;\n');
   assert.deepEqual(statusPaths(`R  new.ts\0old.ts\0?? scratch/\0 M src/a.ts\0`).sort(), ['new.ts', 'old.ts', 'scratch/', 'src/a.ts'], 'every status entry and rename origin is a restored path');
 });
 
