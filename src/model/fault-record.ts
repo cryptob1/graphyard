@@ -3,8 +3,12 @@
 import type { FaultInstance, FaultObservation } from './fault-classes.js';
 import { wording } from './fault-wording.js';
 
-/** The loop's record: every instance it retains, the one each standing fault is, and each failing action's run. */
-export interface FaultRecord { instances: FaultInstance[]; open: Record<string, string>; failing: Record<string, string>; observedAt?: string }
+/**
+ * The loop's record: every instance it retains, the one each standing fault is, and each failing action's run;
+ * and per item key the newest first-seen time of an instance linked to it (`linked`, GY-1632), which outlasts
+ * the instance's own retention while the item is open.
+ */
+export interface FaultRecord { instances: FaultInstance[]; open: Record<string, string>; failing: Record<string, string>; linked?: Record<string, string>; observedAt?: string }
 export const retainedFaultInstances = 1000;
 const instanceOf = (observation: FaultObservation, at: string, nth = 0): FaultInstance => ({ id: `${observation.kind}|${observation.subject.slice(0, 200)}|${at}${nth ? `#${nth}` : ''}`, kind: observation.kind, faultClass: observation.faultClass,
   subject: observation.subject.slice(0, 200), text: observation.text.slice(0, 500), at, lastSeenAt: at, linkedTo: null });
@@ -39,6 +43,22 @@ export function trackFaults(record: FaultRecord, observations: readonly FaultObs
   if (partial !== true) for (const key of Object.keys(record.open)) if (!seen.has(key) && !(partial && partial.has(key.slice(0, key.indexOf('|'))))) delete record.open[key];
   retain(record);
   return opened;
+}
+/**
+ * Links `instance` to the item `key` and keeps, under `linked`, the newest first-seen time of any instance linked
+ * to that item (GY-1632): retain drops the instance itself past the bound, but a recurrence after a delivered
+ * fix landed, linked to an open item, must still keep that item from closing as covered by the fix.
+ */
+export function linkInstance(record: Pick<FaultRecord, 'linked'>, instance: FaultInstance, key: string) {
+  instance.linkedTo = key;
+  const linked = record.linked ??= {}, latest = linked[key];
+  if (latest === undefined || Date.parse(instance.at) > Date.parse(latest)) linked[key] = instance.at;
+}
+/** Forgets the linked times of items that have reached done: no closure is proposed for them any more, so the map stays bounded by the open items. */
+export function forgetDoneLinks(record: Pick<FaultRecord, 'linked'>, work: readonly { key: string; stage: string }[]) {
+  if (!record.linked) return;
+  const done = new Set(work.filter(item => item.stage === 'done').map(item => item.key));
+  for (const key of Object.keys(record.linked)) if (done.has(key)) delete record.linked[key];
 }
 /** A fault that happens once rather than stands — a failed cycle — as its own instance. */
 export function noteFault(record: FaultRecord, observation: FaultObservation, at: string): FaultInstance {
