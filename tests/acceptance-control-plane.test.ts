@@ -11,7 +11,7 @@ import { server } from '../src/server.js';
 import { Store } from '../src/store.js';
 import type { Observation, Principal } from '../src/model.js';
 import { acceptanceChangeRisk, acceptanceDraftSchema, applyGoalCommand, protectedCaseRefusals, recordGoal, type Goal } from '../src/model/goal.js';
-import { acceptanceEffects, acceptanceStep, clearDrafts, draftsSettled, mergeAcceptanceChange, type AcceptanceEffects, type AcceptanceWriterPorts } from '../src/daemon/acceptance.js';
+import { acceptanceEffects, acceptancePrompt, acceptanceStep, clearDrafts, draftsSettled, mergeAcceptanceChange, type AcceptanceEffects, type AcceptanceWriterPorts } from '../src/daemon/acceptance.js';
 import { clearPlans, planPayloadSchema, plannerStep, plansSettled, type PlannerEffects } from '../src/daemon/planner.js';
 import { mergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
 import { gitRunnerFor } from '../src/merge-writer/local-observation.js';
@@ -263,4 +263,11 @@ test('unit:planner-waits-for-acceptance — the planner never plans a goal whose
   assert.throws(() => planPayloadSchema.parse({ goal: 'GOAL-9', note: 'A static page.', items: [{ ...item, outcomes: [] }] }));
   const { outcomes: _dropped, ...unnamed } = item;
   assert.throws(() => planPayloadSchema.parse({ goal: 'GOAL-9', note: 'A static page.', items: [unnamed] }));
+});
+
+test('unit:acceptance-prompt-requires-new-case — the acceptance role is told each case id is new and which fields a case must carry (GY-1657)', () => {
+  const goal = recordGoal({ statement: 'Players can play the game', users: ['Players'], constraints: [], deployTarget: 'GitHub Pages' }, 'GOAL-10', { actor: author, at: '2026-10-10T00:00:00.000Z' });
+  const prompt = acceptancePrompt({ repository: 'example/game' }, goal, { outcomes: [{ id: 'play', cases: ['play'] }] });
+  assert.match(prompt, /whose id is new \(never one already declared\)/, 'a reused case id is rejected by commitDraft and wastes a draft round');
+  assert.match(prompt, /with id, title, target "uat", required true, and http or browser steps/);
 });

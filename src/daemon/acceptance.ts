@@ -116,7 +116,7 @@ export function acceptancePrompt(config: { repository: string }, goal: Goal, exi
     + 'This session is read-only: never edit, commit, push, claim or decide anything, and never ask anyone anything. '
     + `Read ${caseDirectory}/ and ${contractFile} in this checkout for the case format and the outcomes already declared. `
     + `Then call the ${acceptanceTool} tool exactly once with goal "${goal.key}" and outcomes: each outcome a new id (lower-case letters, digits, ., _ and -), a plain-language title a customer would say, `
-    + 'the criteria they would check it by, and exactly one case proving it — a case in the e2e/cases format (must have id, title, target "uat", required true, and steps that check what the customer sees, not how it is built). '
+    + 'the criteria they would check it by, and exactly one case proving it — a case in the e2e/cases format whose id is new (never one already declared), with id, title, target "uat", required true, and http or browser steps that check what the customer sees, not how it is built. '
     + 'Answer any refusal of the last draft. Stop after the call.\n\n'
     + `The goal, as JSON:\n${clip(JSON.stringify(input), 50_000)}`;
 }
