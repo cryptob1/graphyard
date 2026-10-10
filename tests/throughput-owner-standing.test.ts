@@ -407,7 +407,7 @@ test('integration:throughput-escalation-answerable — an answered population st
       owner.policyRevision = 2;
       clock.now += minute;
       await runCycle(master, state, effects, () => clock.now);
-      assert.match(owner.closure!.reason, /raised at its requirements revision 1 on an escalated budget miss\) was answered by its requirements revision 2/);
+      assert.match(owner.closure!.reason, new RegExp(`raised at its requirements revision 1 on an escalated budget miss of ${revision.slice(0, 12)}\\) was answered by its requirements revision 2`));
       assert.equal(throughputAnsweredAt(work, revision), Date.parse(owner.closure!.at));
       assert.equal(filed.length, 1);
       assert.equal(throughputEscalatedAt(state.actions, filed[0]!), null, 'the answered escalated miss is not asked again');

@@ -18,9 +18,9 @@ graphyard up --agent --goal GOAL.md
 
 1. You give Graphyard a goal in a plain-language file.
 2. A planner agent turns the goal into small work items, each with acceptance criteria.
-3. A worker agent takes over, and the worker builds each work item on its own branch.
-4. Graphyard checks the merged tree, the change on latest main, by building it and running its tests, then performs the merge to main itself.
-5. An independent agent reviews, before the merge for sensitive changes such as authentication, and after the merge for everything else.
+3. A worker agent takes over: the worker builds each work item on its own branch.
+4. Graphyard checks the merged tree, the change on latest main, with build and tests, then does the merge to main itself.
+5. An independent agent reviews, before the merge for sensitive changes like authentication, and after the merge for everything else.
 6. About every ten merges a release candidate goes to a test environment for UAT + E2E, user acceptance plus the end-to-end suite.
 7. A passing candidate is promoted to production and checked there: production verified.
 8. A failure anywhere is reverted or fixed forward by a new work item.

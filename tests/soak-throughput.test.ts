@@ -6,9 +6,11 @@ import { join } from 'node:path';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { retainedActions } from '../src/daemon/state.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
-import { loopThroughputMeasurement, openThroughputOwner, throughputClaim, throughputMeasurementDirectory, throughputMeasurementRetention, throughputRemeasureMs, throughputStallBound, throughputStatus, verifyThroughput } from '../src/throughput.js';
+import { loopThroughputMeasurement, openThroughputOwner, throughputClaim, throughputDecisionRelease, throughputMeasurementDirectory, throughputMeasurementRetention, throughputOwnerAnswered, throughputRemeasureMs, throughputStallBound, throughputStatus, verifyThroughput } from '../src/throughput.js';
 import { appendThroughputLedger, recordedEntry, throughputEscalationMs, throughputLedgerFile } from '../src/throughput-ledger.js';
 import { standingThroughputStall } from '../src/daemon/throughput-effect.js';
+import { throughputEscalatedAt, throughputEscalationKey, throughputStandingReadMs } from '../src/daemon/cycle-delivery.js';
+import { backlogCounts, machineKind } from '../src/model/machine-backlog.js';
 import type { Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -87,7 +89,7 @@ async function world(root: string, initiallyBlocked: boolean, submittedMs: numbe
     observeDeployment: async delivered => ({ source: 'endpoint', sha: serving, at: new Date(now).toISOString(), reason: null, deployed: delivered.map(item => item.key), pending: [], requests: 0 }) as never,
     recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
     // The production read (`throughputEffects`): the needs-decision standing on the newest measurement recorded under `root`.
-    standingThroughputStall: standingThroughputStall(root),
+    standingThroughputStall: standingThroughputStall(root, () => now),
     measureThroughput: async (snapshot, observedSha) => {
       const outcome = await loopThroughputMeasurement(root, { work: snapshot, observedSha, now: () => now, origin: 'https://graphyard.example', claimKey: claim.key,
         status: async () => { counts.statusReads++; return { now: new Date(now).toISOString(), release: { version: '0.9.1', revision: serving } }; },
@@ -247,7 +249,7 @@ test('unit:soak-throughput-escalated-miss — over simulated days of one release
     owner.policyRevision = 2;
     await missing.cycles(start + day + 12 * hour);
     assert.deepEqual(closed, [owner.key]);
-    assert.match(work.find(item => item.key === owner.key)!.closure!.reason, /on an escalated budget miss\) was answered by its requirements revision 2/);
+    assert.match(work.find(item => item.key === owner.key)!.closure!.reason, new RegExp(`on an escalated budget miss of ${serving.slice(0, 12)}\\) was answered by its requirements revision 2`));
     assert.notEqual(state.actions[raisedKey]?.state, 'waiting', 'its answer consumed, the escalation is settled, and the bound may retire it');
     const successor = openThroughputOwner(work)!;
     assert.ok(successor && successor.key !== owner.key);
@@ -265,5 +267,184 @@ test('unit:soak-throughput-escalated-miss — over simulated days of one release
     assert.ok((await readdir(join(root, throughputMeasurementDirectory))).filter(name => name !== throughputLedgerFile).length <= throughputMeasurementRetention, 'the measurement directory stays within its retention');
     assert.deepEqual(missing.violations, [], 'every system invariant holds after every cycle');
     assert.ok(state.cycle >= 36 * 60);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+/**
+ * GY-1609 over simulated days. A throughput owner stays open across releases, so the escalated miss
+ * it is asked is the release serving when the loop raises it, whatever its title says; the master
+ * closed GY-1589 (2026-10-09T16:17:50Z) and GY-1605 (21:42:51Z) by hand because the loop raised that
+ * decision only after its answer was applied, so no applied revision could ever read as answering
+ * it, while master status kept asking `master decide` on it. Here the loop runs on a one-minute
+ * cycle, woken half a minute in every fourth minute, with the production measurement
+ * (`loopThroughputMeasurement`) and the production standing-ledger reader (`standingThroughputStall`)
+ * over two days and an hour in which the serving release changes every eight hours, a delivery
+ * merges every five minutes and misses its budget, and the master answers each decision master
+ * status asks `answerAfter` after it is asked. `approveFirst` applies a requirements revision to
+ * each open owner between the cycle's snapshot and the read that finds its decision standing, before
+ * the loop raises it. After every cycle:
+ *
+ * - master status asks a decision only on the open owner the loop raised it on, never one already applied;
+ * - every applied answer has its owner closed by the loop in the next cycle, and no owner is closed
+ *   on anything else; the reported operator backlog never holds an answered owner;
+ * - the standing ledger is read at most once per `throughputStandingReadMs`, the wakes adding no read;
+ * - every system invariant holds.
+ */
+async function releasesWorld(root: string, options: { answerAfter: number; approveFirst?: boolean }) {
+  const releaseEvery = 8 * hour, end = start + 2 * day + hour;
+  const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: join(root, 'coordinator.token'), cliPath: 'graphyard', repository: 'owner/project', baseBranch: 'main',
+    githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [], run: { intervalSeconds: 60, deploymentReuseMinutes: 0 } }) as MasterConfig;
+  const state = emptyDaemonState(config);
+  let now = start, release = sha('release-0'), next = 2;
+  state.lock = { id: 'lock', pid: process.pid, host: config.hostId, startedAt: new Date(now).toISOString(), heartbeatAt: new Date(now).toISOString() };
+  const claim = delivery(1, start - 2 * hour, false, 45 * minute);
+  claim.delivery!.deployment = { sha: release, mergeSha: claim.delivery!.mergeSha, source: 'endpoint', observedAt: new Date(start - hour).toISOString(), covers: 'exact', at: new Date(start - hour).toISOString(), observer: 'coordinator-1' } as never;
+  const work: Work[] = [claim];
+  // The pursuit opened 47 h before the soak on an unverified measurement, so it is escalated an hour in and stays so: every release's miss is escalated.
+  await appendThroughputLedger(join(root, throughputMeasurementDirectory), recordedEntry(verifyThroughput([claim], start - 47 * hour, { deployed: { revision: release, version: '0.9.1', origin: 'https://graphyard.example', observedAt: new Date(start - 47 * hour).toISOString(), containsClaim: true, reason: null } }), { source: 'loop', file: null, output: '' }));
+  const filed: string[] = [], closed: { key: string; at: number; serving: string }[] = [], standingReads: number[] = [], violations: string[] = [];
+  const preApproved = new Map<string, number>();
+  /** `approveFirst`: a requirements revision lands on the open owner after the cycle's snapshot, as the loop reads the decision standing on it, before it raises that decision. */
+  const approveFirst = () => {
+    const owner = options.approveFirst ? openThroughputOwner(work) : null;
+    if (!owner || preApproved.has(owner.key) || throughputEscalatedAt(state.actions, owner) !== null) return;
+    owner.policyRevision += 1;
+    preApproved.set(owner.key, owner.policyRevision);
+  };
+  const standing = standingThroughputStall(root, () => now);
+  const effects: DaemonEffects = {
+    agents: () => [], credentials: async profiles => Object.fromEntries(profiles.map(item => [item.name, { available: true, reason: null }])),
+    snapshot: async () => ({ work: work.map(item => ({ ...item })), now: new Date(now).toISOString() }), closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
+    observeDeployment: async delivered => ({ source: 'endpoint', sha: release, at: new Date(now).toISOString(), reason: null, deployed: delivered.map(item => item.key), pending: [], requests: 0 }) as never,
+    recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+    // Each read that finds the decision standing is where the revision lands: after the snapshot, before the raise.
+    standingThroughputStall: async revision => { standingReads.push(now); const stall = await standing(revision); if (stall) approveFirst(); return stall; },
+    measureThroughput: async (snapshot, observedSha) => {
+      const outcome = await loopThroughputMeasurement(root, { work: snapshot, observedSha, now: () => now, origin: 'https://graphyard.example', claimKey: claim.key,
+        status: async () => ({ now: new Date(now).toISOString(), release: { version: '0.9.1', revision: release } }) as never,
+        readItem: async id => work.find(item => item.id === id)!, contains: async () => true });
+      if (outcome.stall) approveFirst();
+      return outcome;
+    },
+    readThroughputOwner: async owner => ({ ...work.find(item => item.id === owner.id)! }),
+    fileThroughputOwner: async input => {
+      const owner = { ...delivery(next++, now, false), title: input.title, description: input.description, criteria: input.criteria, stage: 'backlog', ready: false, delivery: undefined, policyRevision: 1 } as unknown as Work;
+      filed.push(owner.key); work.push(owner); return owner;
+    },
+    closeThroughputOwner: async (owner, reason) => {
+      const held = work.find(item => item.id === owner.id)!;
+      Object.assign(held, { stage: 'done', closure: { kind: 'obsolete', reason, ref: null, by: 'operator-agent', at: new Date(now).toISOString(), from: held.stage } });
+      closed.push({ key: owner.key, at: now, serving: release }); return held;
+    },
+  };
+  /** master status's throughput line, as `assembleReportedAttention` reads it: the recorded measurement, the serving release and the loop's escalation record. */
+  const status = () => throughputStatus(root, { release: { version: '0.9.1', revision: release } }, work, now, owner => throughputEscalatedAt(state.actions, owner));
+  const decideOn = (line: string | undefined) => /graphyard master decide (GY-\d+) requirements/.exec(line ?? '')?.[1] ?? null;
+  const answeredInBacklog = () => work.filter(item => item.stage === 'backlog' && !item.ready && !machineKind(item)).filter(item => throughputOwnerAnswered(item, throughputEscalatedAt(state.actions, item)));
+  /** The release each owner's needs-decision was asked on, read from the escalation the loop recorded. */
+  const askedOn = new Map<string, string | null>();
+  const asked = new Map<string, number>(), applied = new Map<string, number>(), releases = [release];
+  const crossed = (from: number, every: number) => Math.floor((now - start) / every) > Math.floor((from - start) / every);
+  while (now < end) {
+    // A cycle a minute, and every fourth minute a wake half a minute in: the standing read is throttled, not paced by the cycle.
+    const from = now;
+    now += state.cycle % 4 === 3 ? minute / 2 : now % minute ? minute / 2 : minute;
+    if (crossed(from, releaseEvery)) { release = sha(`release-${releases.length}`); releases.push(release); }
+    if (crossed(from, 5 * minute)) work.push(delivery(next++, now - 30_000, false, 45 * minute));
+    await runCycle(config, state, effects, () => now);
+    for (const check of state.invariants.report) if (!check.holds) violations.push(`cycle ${state.cycle} (+${(now - start) / minute} min): ${check.invariant} — ${check.reading}`);
+    for (const item of work) {
+      const raisedAt = throughputEscalatedAt(state.actions, item);
+      if (raisedAt !== null && !askedOn.has(item.key)) askedOn.set(item.key, throughputDecisionRelease(state.actions[throughputEscalationKey(item.key, raisedAt)]?.detail));
+    }
+
+    // Every applied answer was closed by the loop in the cycle after it was applied, naming the release it was asked on.
+    for (const [key, at] of applied) {
+      const owner = work.find(item => item.key === key)!;
+      assert.ok(owner.closure, `+${(now - start) / minute} min: ${key}, answered at +${(at - start) / minute} min, is closed by the loop within one cycle`);
+      assert.equal(Date.parse(owner.closure!.at), now, `${key} closes in the first cycle after its answer`);
+      assert.match(owner.closure!.reason, new RegExp(`on an escalated budget miss of ${askedOn.get(key)}\\) was answered by its requirements revision ${owner.policyRevision}; the loop closes it`));
+      applied.delete(key);
+    }
+    // Nothing but an applied answer closes an owner: a revision that landed before its decision was raised answers nothing.
+    for (const { key } of closed) assert.ok(asked.has(key), `+${(now - start) / minute} min: ${key} closed only on the answer to the decision master status asked`);
+    assert.deepEqual(answeredInBacklog().map(item => item.key), [], `+${(now - start) / minute} min: the operator backlog holds no answered owner`);
+    assert.ok(backlogCounts(work, now).operator <= 1, 'at most the one open owner carries the serving release');
+
+    const line = await status(), key = decideOn(line.attention?.next);
+    if (!key) continue;
+    // master status asks only the decision the loop raised on the open owner, unanswered.
+    const owner = openThroughputOwner(work)!;
+    assert.equal(key, owner.key, 'asked on the open owner');
+    const raisedAt = throughputEscalatedAt(state.actions, owner);
+    assert.notEqual(raisedAt, null, `+${(now - start) / minute} min: ${key} is asked a decision the loop raised`);
+    assert.equal(throughputOwnerAnswered(owner, raisedAt), false, `${key} is never asked a decision already applied`);
+    if (!asked.has(key)) asked.set(key, now);
+    // The master decides, and the approver applies the revision `answerAfter` after the ask.
+    if (now - asked.get(key)! >= options.answerAfter) {
+      owner.policyRevision = raisedAt! + 1;
+      applied.set(key, now);
+      const after = await status();
+      assert.equal(decideOn(after.attention?.next), null, `${key}'s applied decision is not asked again`);
+      assert.doesNotMatch(after.attention!.next, /master approver/);
+    }
+  }
+  // The standing ledger is read at most once a minute, whatever the cycle cadence: the half-minute wakes add no read.
+  for (let index = 1; index < standingReads.length; index++) assert.ok(standingReads[index] - standingReads[index - 1] >= throughputStandingReadMs, `standing reads spaced: ${standingReads[index] - standingReads[index - 1]} ms`);
+  assert.ok(standingReads.length <= (end - start) / throughputStandingReadMs, `standing reads bounded by the interval: ${standingReads.length} over ${state.cycle} cycles`);
+  assert.ok(state.cycle > (end - start) / minute, 'the wakes ran cycles inside the interval');
+  assert.equal(work.filter(item => item.closure && !/the loop closes it/.test(item.closure.reason)).length, 0, 'every closure is the loop\'s');
+  assert.deepEqual(filed.filter(key => !work.find(item => item.key === key)!.closure), [openThroughputOwner(work)!.key], 'one open owner carries the serving release');
+  assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
+  return { work, releases, asked, askedOn, closed, preApproved, state };
+}
+
+test('integration:soak-answered-owner-close — over simulated days of release changes and decision-applied passes, with the production measurement and standing-ledger reader, every answered owner closes within one cycle, master status asks only a decision the loop raised and none already applied, the operator backlog never holds an answered owner, standing reads stay one a minute and every invariant holds; the GY-1589 and GY-1605 hand-close sequence no longer reproduces', { timeout: 600_000 }, async () => {
+  const root = await temporaryDirectory('soak-answered-owner-close');
+  try {
+    // The master answers each decision two minutes after master status asks it (the GY-1590 latency).
+    const { work, releases, asked, askedOn, closed } = await releasesWorld(root, { answerAfter: 2 * minute });
+    assert.ok(releases.length >= 6, `the serving release changed ${releases.length - 1} times`);
+    assert.equal(asked.size, releases.length, `one needs-decision asked per release: ${[...asked.keys()].join(', ')}`);
+    assert.deepEqual(new Set([...asked.keys()].map(key => askedOn.get(key))), new Set(releases.map(release => release.slice(0, 12))), 'each release asked on exactly one owner');
+    assert.deepEqual(closed.map(item => item.key), [...asked.keys()], 'the loop closed every answered owner; no master closed one by hand');
+    // The GY-1589/GY-1605 shape: an owner filed for one release, still open when the next serves, is asked and closed on the serving release's miss.
+    const carried = closed.filter(({ key }) => { const owner = work.find(item => item.key === key)!; return !owner.title.includes(askedOn.get(key)!); });
+    assert.ok(carried.length >= releases.length - 1, `owners open across a release change are asked and closed on the serving release's miss: ${carried.length}`);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('integration:soak-answered-owner-close-release-moved — when each answer is applied only after the serving release has changed since its ask, the closure names the release it was asked on, and the release serving then has its own escalated miss asked on the successor: one ask per release, an earlier release\'s answer never standing in for a later one\'s', { timeout: 600_000 }, async () => {
+  const root = await temporaryDirectory('soak-answered-owner-moved');
+  try {
+    // Nine hours from ask to answer, past the eight-hour release cadence: every answer lands on a later release.
+    const { releases, asked, askedOn, closed, state } = await releasesWorld(root, { answerAfter: 9 * hour });
+    assert.ok(closed.length >= 4, `answers applied after a release change: ${closed.length}`);
+    for (const { key, serving } of closed) {
+      const on = askedOn.get(key)!;
+      assert.notEqual(on, serving.slice(0, 12), `${key} was answered once a later release served`);
+      // The release serving at the answer was not answered by it: its own miss is asked on the successor, at once.
+      const successor = [...askedOn].find(([, release]) => release === serving.slice(0, 12));
+      assert.ok(successor, `${serving.slice(0, 12)}, serving when ${key}'s answer on ${on} was applied, has its own escalated miss asked`);
+      assert.ok(throughputEscalatedAt(state.actions, { key: successor[0] }) !== null || asked.has(successor[0]));
+    }
+    const perRelease = [...askedOn.values()];
+    assert.equal(new Set(perRelease).size, perRelease.length, `no release asked twice: ${perRelease.join(', ')}`);
+    assert.ok(perRelease.length >= releases.length - 1, `every release but the one still owned when the soak ends is asked: ${perRelease.length} of ${releases.length}`);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('integration:soak-answered-owner-close-approved-before-raise — a requirements revision applied to the open owner between the cycle\'s snapshot and the read that finds its decision standing answers nothing: the loop raises the decision at the applied revision, the owner stays open until the master\'s later answer and closes on that one', { timeout: 600_000 }, async () => {
+  const root = await temporaryDirectory('soak-answered-owner-early');
+  try {
+    const { releases, asked, closed, preApproved, work } = await releasesWorld(root, { answerAfter: 2 * minute, approveFirst: true });
+    assert.ok(preApproved.size >= releases.length - 1, `a revision landed before the decision on most owners: ${preApproved.size}`);
+    for (const [key, revision] of preApproved) {
+      const owner = work.find(item => item.key === key)!;
+      // Closed (if at all) only on the master's answer, a revision past the one applied before the raise.
+      if (owner.closure) assert.match(owner.closure.reason, new RegExp(`raised at its requirements revision ${revision} .*answered by its requirements revision ${revision + 1};`), `${key} raised at the revision applied before it, and closed on the later answer`);
+    }
+    assert.deepEqual(closed.map(item => item.key), [...asked.keys()], 'only the answers master status asked close an owner');
+    assert.equal(asked.size, releases.length, 'one needs-decision asked per release');
   } finally { await rm(root, { recursive: true, force: true }); }
 });
