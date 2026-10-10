@@ -22,7 +22,7 @@ function processEntry(proc: string, pid: number, options: { ppid?: number; state
   else writeFileSync(join(directory, 'cwd'), '');
 }
 
-test('unit:checkout-writers-unreadable-cwd: a process of this user whose cwd cannot be read is unverifiable and checkout-restore refuses before any snapshot or reset', async () => {
+test('unit:checkout-writers-unreadable-cwd — a process of this user whose cwd cannot be read is unverifiable and checkout-restore refuses before any snapshot or reset', async () => {
   const base = await temporaryDirectory('checkout-writers-unreadable-cwd');
   const root = join(base, 'coordinator');
   const git = (...args: string[]) => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
