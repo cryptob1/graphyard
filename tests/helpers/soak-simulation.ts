@@ -238,6 +238,12 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
    */
   loopWake?: { intervalSeconds: number; unreadableEvery?: number };
   /**
+   * GY-1624: with `loopWake`, one transient throw from `closeStanding` (its decision-history read) or
+   * `docsSync.hold` (its first read of the item's base refresh) for the docs-conflict item, on the last
+   * cycle before its standing hold bound, whose idle wait would otherwise sleep past it.
+   */
+  holdThrow?: 'closeStanding' | 'docsSync.hold';
+  /**
    * GY-1504: the day starts with `stuckWatches` approval watches for long-closed items (half hand
    * watches, half the loop's own) whose registry sessions aged out of the registry's history, so
    * every end of one answers 404 Unknown session. Each such end call is counted per session.
@@ -1984,6 +1990,31 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     } : {}),
   };
   if (supervisedDay) for (const key of supervisedAbsentEffects) delete (effects as unknown as Record<string, unknown>)[key];
+  // ---- GY-1624: the transient decisions-step failure while a docs-sync hold stands. The throw is read from the
+  // ---- call site's own stack frame, so only the decisions step's (decideItem's) read for the conflicted item fails, once. ----
+  const holdThrowDay = options.holdThrow ? { site: options.holdThrow, thrown: [] as { elapsed: number; bound: number }[] } : null;
+  if (holdThrowDay) {
+    const conflicted = items[plan.docsConflict.item - 1].id, frame = holdThrowDay.site === 'closeStanding' ? /at (async )?closeStanding \(/ : /at (async )?(Object\.)?hold \(/;
+    // The step drops the item's bound before it re-reads the hold, so the bound is read as the cycle's snapshot is taken.
+    let armed: number | null = null;
+    const fail = (site: string) => {
+      const now = clock.now(), bound = armed;
+      if (site !== holdThrowDay.site || holdThrowDay.thrown.length || bound === null || bound <= now || bound - now > config.run.intervalSeconds * 1000) return;
+      // The call site's frame lies below the effect wrappers, past V8's default ten frames.
+      const limit = Error.stackTraceLimit; Error.stackTraceLimit = 100; const stack = new Error().stack ?? ''; Error.stackTraceLimit = limit;
+      if (!frame.test(stack) || !/at (async )?decideItem \(/.test(stack)) return;
+      holdThrowDay.thrown.push({ elapsed: now - dayStart, bound });
+      throw new Error(`soak: transient ${site} failure`);
+    };
+    const reads = effects.decisions!, read = effects.snapshot;
+    effects.decisions = ((work: Work) => { if (work.id === conflicted) fail('closeStanding'); return reads(work); }) as DaemonEffects['decisions'];
+    effects.snapshot = async () => {
+      const taken = await read(), { next } = holdBoundWait(state, 0, clock.now());
+      if (next !== null) armed = next;
+      for (const item of taken.work) if (item.id === conflicted) { const refresh = item.baseRefresh; Object.defineProperty(item, 'baseRefresh', { enumerable: true, configurable: true, get: () => { fail('docsSync.hold'); return refresh; } }); }
+      return taken;
+    };
+  }
   // ---- The loop's own master session (GY-898): launched on the registry's master role, woken on
   // ---- material events, killed mid-day while the registry refuses to end sessions, rotated at its
   // ---- budget. Every launch, wake, registry end and refused end is recorded against the day's
@@ -3123,7 +3154,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     decided, misreads, prompts, screens, heldAccounts, approverAccounts, retryReset, limitMenuDay, menuReset, menuNotice, exitedLive, exitedClosed, exitedRowsSeen, reassign, workspaceFailures, workspaceCooled, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, fenced, mergeStallSightings, master, baseFailure,
     blockerEvents, blockerProbes, githubStatusReads, credentialReads, blockerRecords, blockerDecisions, blockerActions, blockerKeysPeak, attempts, lanesSeen, laneApplications, approverWorks, approverDecisions, failover, webhook, remedies, observeRequests, starvation, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size }, mechanical: { ledger, botRounds, misclassified, reviewHolds }, shared, charges: { ...charged, b: charged.b.length, instancesSeen: [...charged.instancesSeen], restarts: chargeRestarts },
     wakes, lateReading, staleMerges, restartLog, hostDay, guardDay, mainWatchDay, budgetDay, slowPlaneDay, observationDay, deploymentDay, decompositionDay: decompositionHistory, diagnosisRaces, diagnosisRequestRaces, transientRefused, lateReads, staleReleaseDay, drain, acceptanceDay: acceptance?.day ?? null, plannerDay: planner?.day ?? null, loopWakeDay: loopWakeDay || null,
-    restartDay: options.checkoutRestart ? restartDay : null, releaseLagDay: options.releaseLag ? releaseLagDay : null, fleetDay: options.releaseLag?.fleet ? fleetDay : null, failedLaunches };
+    holdThrowDay, restartDay: options.checkoutRestart ? restartDay : null, releaseLagDay: options.releaseLag ? releaseLagDay : null, fleetDay: options.releaseLag?.fleet ? fleetDay : null, failedLaunches };
 }
 
 /**
