@@ -5,7 +5,7 @@ import type { Work } from '../model.js';
 import { canonicalJson } from '../onboarding.js';
 import { type ContainmentAssessment, type RoleCapacity, approvedMerge, decisionInput } from '../master.js';
 import { recordSettledDecision } from '../model/project-memory.js';
-import { type ApprovalWatch, approvalWatchSchema, carriedSession, type DaemonActionKind, latencySampleSchema, message, scopeMeasurementSchema } from './state.js';
+import { type ApprovalWatch, approvalWatchSchema, carriedSession, type DaemonActionKind, type DaemonState, latencySampleSchema, message, scopeMeasurementSchema } from './state.js';
 import { decisionKey, scopeAnsweredAt, scopeKey, scopeOutcomeAnswered } from './reconcile.js';
 import { readyToRetry } from './sessions.js';
 import { approvalStep, recordWatchEnded, approverLaunchKey, attestDecisions, boundDetail, cappedReworkBound, exhaustedProofKey, decisionReasonMax, detailChanged, fitDecisionReason, githubPause, handWatchPrefix, maxApproverCloses, maxRefusalAnswers, maxDecisionRequests, namePaths, neededDecision, observedFrom, overtakenDecision, resolveCovers, reworkDecisionReason, refusalNamedIn, standingNamedIn, adoptedOnRefusal, conflictReworkOverdue, reworkObservationWait, routineDecision, type RoutineDecision, sameAnswers, scopeRoutineDecision, blockerScopeDecision, standingVerdict, uncountedScopeFailure, withheldDecision } from './decisions.js';
@@ -25,9 +25,11 @@ import { closeStanding, closingItems, recordingWrites, staleCloseStep } from './
 
 /** The approval-watch key prefix of a hand-launched approver, re-exported for the blocker step (GY-403). */
 export { handWatchPrefix };
+const holdBounds = new WeakMap<DaemonState, Map<string, number>>(); // GY-1622: per loop cursor, each held item's docs-sync hold bound on the local clock; an item the step did not reach this cycle (put off by its budget) keeps the one it last left; one already passed locally while its hold stood is a zero wait, so the next cycle re-reads it; one exactly a wait away still binds, so the guard's time comes off it. `bound` is the earliest bound when it ends this wait, `next` the earliest whether or not it does: one just beyond the wait still caps the sleep left after the checkout guard
+export const holdBoundWait = (state: DaemonState, wait: number, at: number) => { const bounds = holdBounds.get(state); const next = bounds?.size ? Math.min(...bounds.values()) : null; return next !== null && next - at <= wait ? { wait: Math.max(0, next - at), bound: next, next } : { wait, bound: null, next }; };
 /** Step 4c: request and supervise the routine decisions. */
 export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, assessments: Record<string, ContainmentAssessment>, { capacities, approversSpent }: { capacities: RoleCapacity[]; approversSpent: boolean }) {
-  const { config, state, now, snapshot, clock, performed, isolate, agents, open } = cycle;
+  const { config, state, now, snapshot, clock, clockOffset, performed, isolate, agents, open } = cycle;
   // The items this step writes, which the stale-close step leaves to the next cycle's read (GY-1439).
   const written = new Set<string>();
   const effects = recordingWrites(await decisionReads(cycle.effects, cycle.heldDecisions, snapshot.work, Object.values(state.approvals), clock, cycle.effects.decisionReadDeadlineMs), written);
@@ -43,7 +45,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
   //     refused one is left to the master to answer, a decision the server settled some other way
   //     is requested again, and one no session will judge is escalated and left standing on the
   //     silence measure.
-  const stamp = new Date(clock).toISOString();
+  const stamp = new Date(clock).toISOString(), bounds = holdBounds.get(state) ?? new Map<string, number>(); holdBounds.set(state, bounds); for (const id of bounds.keys()) if (!snapshot.work.some(work => work.id === id)) bounds.delete(id);
   const note = async (key: string, item: Work, kind: DaemonActionKind, outcome: 'done' | 'failed', detail: string, at = now(), faultKind?: FaultKind | null) =>
     performed.push(await record(state, key, { kind, work: item.key, principal: null, state: outcome, detail, attempts: (state.actions[key]?.attempts ?? 0) + 1, epoch: item.epoch, cycle: state.cycle }, at, effects.persist, faultKind));
   const approvers = createApproverSupervisor(cycle, effects, stamp, note, capacities, approversSpent);
@@ -434,8 +436,8 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
   };
   const wake = effects.observe && observationWaker(effects.observe);
   const noteWait = async (item: Work, detail: string) => { const waitKey = `wait:rework:${item.id}`; if (detailChanged(state.actions[waitKey], detail)) await note(waitKey, item, 'decision', 'done', detail); };
-  // GY-1436: one stable wait per held item, naming the docs-sync session, head, base and the end of its bound.
-  const noteHold = async (item: Work, detail: string) => { const waitKey = `wait:docs-sync:${item.id}`; if (detailChanged(state.actions[waitKey], detail)) await note(waitKey, item, 'decision', 'done', detail); };
+  // GY-1436: one stable wait per held item, naming the docs-sync session, head, base and the end of its bound; that bound, reached or still ahead, ends the loop's idle wait (GY-1622), kept at the latest local time the control plane can reach it (the read's upper clock offset): the cycle it wakes finds the hold ended, at most one round trip late.
+  const noteHold = async (item: Work, { wait: detail, deadline }: { wait: string; deadline: string }) => { const bound = Date.parse(deadline); const waitKey = `wait:docs-sync:${item.id}`; if (bound >= clock) bounds.set(item.id, bound + clockOffset.max); if (detailChanged(state.actions[waitKey], detail)) await note(waitKey, item, 'decision', 'done', detail); };
   const mechanical = effects.mechanicalFixes ? await effects.mechanicalFixes().then(read => read.requests, () => []) : []; // GY-971 planned bot rounds
   const routinePass = budget.pass(), attestPass = budget.pass();
   // GY-1439: while a close stands requested and unapplied on an item, nothing advances it (closingItems): no
@@ -450,7 +452,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
   const refusedByWork = new Map<string, RefusedAttestation[]>();
   for (const watch of Object.values(state.approvals)) if (watch.action === 'attest' && watch.refusal) refusedByWork.set(watch.work, [...refusedByWork.get(watch.work) ?? [], { decision: watch.decision, refusal: watch.refusal }]);
   for (const read of workToProcess) await isolate('decision', read, read.key, async () => {
-    let item = read;
+    let item = read; const reached = bounds.get(read.id); bounds.delete(read.id); // re-set below while its hold still stands
     const assessment = assessments[item.id];
     // A request step 2 refused this cycle is read as it was decided, not as the snapshot saw it, and
     // its decision is requested against that revision: one a partial widening moved past the
@@ -474,7 +476,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     }
     const close = decision.action === 'close' ? undefined : await closeStanding(effects, item, snapshot.work, closing);
     if (close) return noteClosing(item, decision.action, close);
-    let key = decisionKey(item, decision); if (routinePass.over()) { needed.add(key); budget.defer(item); return; }
+    let key = decisionKey(item, decision); if (routinePass.over()) { needed.add(key); budget.defer(item); if (reached !== undefined) bounds.set(read.id, reached); return; }
     // A confirmed conflict confined to docs pages is a docs-sync's, not a worker's (GY-566). A standing
     // hold is the item's recorded wait, never a bare skip (GY-1436); one that ended awaits an
     // observation since, which the step wakes below rather than waiting for one unprompted.
@@ -484,7 +486,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     const observe = async (work: Work) => { synced.work = wake ? await wake(work, clock) : null; if (!synced.work) await wakeObservationJob(cycle, work, 'docs-sync give-up'); return synced.work; };
     const docsConflict = (subject: Work, routine: RoutineDecision) => routine.action === 'rework' && !state.approvals[decisionKey(subject, routine)] && !!baseRefreshConflict(subject) && routine.binding === `${subject.candidate!.sha}:conflict`;
     const hold = docsConflict(item, decision) ? await docsSync.hold(item, observe) : null;
-    if (hold?.held) return noteHold(item, hold.wait);
+    if (hold?.held) return noteHold(item, hold);
     if (synced.work && synced.work.candidate?.sha === item.candidate?.sha && synced.work.policyRevision === item.policyRevision) item = synced.work;
     needed.add(key);
     // Rework waits for an observation that still describes the item (GY-144); the step wakes it unless paused (GY-793) and re-decides.
@@ -500,7 +502,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       item = fresh; decision = again; key = decisionKey(item, decision); needed.add(key);
       // The fresh reading settles an ended docs-sync hold in the cycle it ended (GY-1436).
       const settled = hold?.awaiting && docsConflict(item, decision) ? await docsSync.hold(item) : null;
-      if (settled?.held) return noteHold(item, settled.wait);
+      if (settled?.held) return noteHold(item, settled);
       wait = conflictReworkOverdue(item, decision, now()) ? null : settled?.awaiting ? endedWait(item, settled.awaiting) : reworkObservationWait(item, now(), pause);
     }
     const watch = state.approvals[key];

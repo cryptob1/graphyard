@@ -28,6 +28,7 @@ import { type HostMemoryReading, owedUpgrade, readReclaimReports, selfUpgradeBou
 import { type DoctorFile } from '../../src/daemon/doctor.js';
 import { approvalWatchSchema, retainedActions } from '../../src/daemon/state.js';
 import { adoptHeadlessRuns, coordinatorCheckoutGuard, noteWatchdog } from '../../src/daemon/run.js';
+import { holdBoundWait } from '../../src/daemon/cycle-decisions.js';
 import { type ExhaustedProof, handWatchPrefix } from '../../src/daemon/decisions.js';
 import { FleetUnreachableError } from '../../src/fleet.js';
 import { decisionEventKinds, decisionReadDeadlineMs } from '../../src/daemon/decision-reads.js';
@@ -2559,7 +2560,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   const loopWakeDay = options.loopWake && (() => {
     const tickMs = config.run.dispatchIntervalSeconds * 1000, unreadableEvery = options.loopWake.unreadableEvery ?? 0;
     const day = { tickMs, wake: new LoopWake(tickMs), ticks: 0, unreadable: 0, lastCycle: -Infinity, waitMs: 0,
-      cycles: [] as { elapsed: number; woken: string[]; waitMs: number; early: boolean }[], fresh: [] as { key: string; elapsed: number; absentTicks: number }[], lastSeen: new Map<string, number>(),
+      cycles: [] as { elapsed: number; woken: string[]; waitMs: number; early: boolean }[], holdWakes: [] as { elapsed: number; bound: number; waitMs: number }[], fresh: [] as { key: string; elapsed: number; absentTicks: number }[], lastSeen: new Map<string, number>(),
       /** One tick: observe, then answer whether the loop's sleep ends now. */
       async tick(at: number) {
         const unreadable = unreadableEvery > 0 && ++day.ticks % unreadableEvery === 0;
@@ -2575,7 +2576,11 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
         return true;
       },
       /** The cycle ran: the loop's wait is the one `runDaemon` takes after it. */
-      ran(result: Awaited<ReturnType<typeof runCycle>>) { day.waitMs = cycleDelay(config.run.intervalSeconds * 1000, result.silence); },
+      ran(result: Awaited<ReturnType<typeof runCycle>>) {
+        // GY-1622: as runDaemon, a docs-sync hold left standing ends the wait at its bound.
+        const held = holdBoundWait(state, cycleDelay(config.run.intervalSeconds * 1000, result.silence), clock.now());
+        day.waitMs = held.wait; if (held.bound !== null) day.holdWakes.push({ elapsed: day.lastCycle, bound: held.bound, waitMs: held.wait });
+      },
     };
     return day;
   })();
