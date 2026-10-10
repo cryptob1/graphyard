@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { chmod, readdir, readFile, writeFile } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import { hostname } from 'node:os';
@@ -364,7 +365,15 @@ export async function prepareInstall(cwd: string, rawInputs: InstallRequest & Re
   catch (error: any) { generatedFiles = { assignment: null, error: error.message }; }
   const reviewPolicy = rawInputs.reviewPolicy ?? 'github';
   const delivery = await repositoryDelivery(root);
-  const inputs = { ...rawInputs, provider, baseBranch: rawInputs.baseBranch ?? 'main' };
+  let detectedBase = rawInputs.baseBranch;
+  if (!detectedBase && existsSync(resolve(root, '.git'))) {
+    try {
+      const branches = execFileSync('git', ['-C', root, 'branch', '-r'], { encoding: 'utf8' });
+      if (!branches.includes('origin/main') && branches.includes('origin/master')) detectedBase = 'master';
+    } catch {}
+  }
+  const inputs = { ...rawInputs, provider, baseBranch: detectedBase ?? 'main' };
+  const repoCheckout = existsSync(resolve(root, '.git')) ? root : null;
   const transport = dependencies.transport ?? localTransport();
   const ssh = dependencies.ssh ?? ((host: string, user = inputs.sshUser ?? 'root') => sshTransport(host, user, transport));
   // A self-hosted database password is generated once and reused, so re-apply never
@@ -385,6 +394,7 @@ export async function prepareInstall(cwd: string, rawInputs: InstallRequest & Re
     image: inputs.image ?? (provider === 'compose' ? `graphyard-local:${installId}` : DEFAULT_IMAGE),
     workdir,
     sourceRoot: dependencies.sourceRoot ?? fileURLToPath(new URL('../..', import.meta.url)),
+    repoCheckout,
     sshHost: inputs.sshHost ?? null, sshUser: inputs.sshUser ?? 'root',
     sshKey: inputs.sshKey ?? null,
     workspace: inputs.workspace ?? null,
@@ -508,6 +518,7 @@ export function coreEnv(session: InstallSession): EnvValue[] {
     // a regenerated docs index instead of refusing it as an out-of-scope rewrite. A repository
     // that declares none leaves the variable unset, which is its correct deployment state.
     ...(session.generatedFiles.assignment ? [{ name: session.generatedFiles.assignment.variable, value: session.generatedFiles.assignment.value, secret: false }] : []),
+    ...(context.repoCheckout ? [{ name: 'GRAPHYARD_REPOSITORY_ROOT', value: '/repo', secret: false }] : []),
   ];
 }
 
