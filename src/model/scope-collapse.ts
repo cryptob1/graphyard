@@ -233,3 +233,12 @@ export function scopeRequestOutcome(item: { key: string; plannedFiles?: readonly
   if (!own) return { state: 'ended', text: `Graphyard: your scope request on ${item.key} (epoch ${ask.epoch}) is no longer open — withdrawn or re-asked — and nothing widened plannedFiles for it` };
   return { state: 'pending', text: `Graphyard: your scope request on ${item.key} (epoch ${ask.epoch}) for ${ask.paths.join(', ')} is ${own.decision ? 'with the independent approver: the widening rule could not ground it' : 'waiting for the widening rule'}; you keep your lease` };
 }
+/**
+ * The paths a worker's open scope ask names (GY-1676): the live attempt's request, else the one an
+ * ended attempt carried to the approver. A file the worker asked for is one it creates, so a
+ * widening that answers the ask plans it although the base branch does not hold it yet; requiring
+ * a criterion to say so instead makes the revision more than a planned-files widening, which a
+ * live lease or containment quarantine refuses.
+ */
+export const askedScopePaths = (item: { scopeRequest?: ScopeRequestState | null; carriedScopeRequest?: ScopeRequestState | null }) =>
+  (item.scopeRequest ?? item.carriedScopeRequest)?.paths ?? [];

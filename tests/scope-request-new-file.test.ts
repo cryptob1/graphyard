@@ -13,8 +13,8 @@ import { emptyDaemonState, runCycle, scopeRoutineDecision, type DaemonEffects, t
 import { approverSessionName, decisionInput, masterConfigSchema, type HerdrAgent, type MasterConfig } from '../src/master.js';
 import { derivedIntent } from '../src/cli/master.js';
 import { plannedFilesMax } from '../src/model/scope.js';
-import { collapseArea, collapsePlannedFiles } from '../src/model/scope-collapse.js';
-import { askedScopePaths, derivePlannedFiles } from '../src/model/work.js';
+import { askedScopePaths, collapseArea, collapsePlannedFiles } from '../src/model/scope-collapse.js';
+import { derivePlannedFiles } from '../src/model/work.js';
 import type { Principal, Work } from '../src/model.js';
 
 // GY-1676: a worker under a live lease and containment quarantine asked for one new file beside the

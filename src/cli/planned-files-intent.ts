@@ -3,7 +3,8 @@ import { wholeDocument } from '../model/work-summary.js';
 import { randomUUID } from 'node:crypto';
 import { defaultChildRun, type ChildRun } from '../child-runner.js';
 import { decisionInput, type MasterConfig } from '../master.js';
-import { askedScopePaths, derivePlannedFiles, plannedFilesRefusal, postDeployCriterionRefusal, type Work } from '../model/work.js';
+import { derivePlannedFiles, plannedFilesRefusal, postDeployCriterionRefusal, type Work } from '../model/work.js';
+import { askedScopePaths } from '../model/scope-collapse.js';
 
 /**
  * The files of the base branch an item will be worked on, read from the coordinator checkout

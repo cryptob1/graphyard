@@ -272,15 +272,6 @@ export interface PlannedFilesDerivation {
   missing: string[];
 }
 /**
- * The paths a worker's open scope ask names (GY-1676): the live attempt's request, else the one an
- * ended attempt carried to the approver. A file the worker asked for is one it creates, so a
- * widening that answers the ask plans it although the base branch does not hold it yet; requiring
- * a criterion to say so instead makes the revision more than a planned-files widening, which a
- * live lease or containment quarantine refuses.
- */
-export const askedScopePaths = (item: { scopeRequest?: ScopeRequestState | null; carriedScopeRequest?: ScopeRequestState | null }) =>
-  (item.scopeRequest ?? item.carriedScopeRequest)?.paths ?? [];
-/**
  * plannedFiles as `master create` and `master requirements` record it: every planned path is
  * resolved against the tree of the base branch the item will be worked on, and every file a
  * criterion names that the tree holds is carried in. Only criteria are read — a path the
@@ -289,9 +280,7 @@ export const askedScopePaths = (item: { scopeRequest?: ScopeRequestState | null;
  */
 export function derivePlannedFiles(
   item: { plannedFiles?: readonly string[]; criteria: readonly CriterionText[]; documentation?: ItemDocumentation | null; origin?: WorkOrigin | null; description?: string | null },
-  tree: ReadonlySet<string>,
-  /** Paths an open scope ask names (`askedScopePaths`): planned although the tree does not hold them yet. */
-  asked: readonly string[] = [],
+  tree: ReadonlySet<string>, asked: readonly string[] = [], // an open scope ask's paths (askedScopePaths, GY-1676): planned though the tree lacks them
 ): PlannedFilesDerivation {
   const planned = [...new Set(item.plannedFiles ?? [])], added: PlannedFilesDerivation['added'] = [];
   const missing = planned.filter(path => !scopeExists(path, tree) && !describedAsNew(path, item.criteria) && !asked.some(entry => pathScopeContains(path, entry)));
