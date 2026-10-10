@@ -215,11 +215,15 @@ test('unit:onboarding-nogithubapp-applies — a --no-github-app install supplies
   await assert.rejects(installedOnboarding(root, 'owner/repo', 'https://other.example', configHome), /not https:\/\/other\.example/);
 
   const proposal = await scanProposal(root, { url: 'http://127.0.0.1:4310', runtimes: [] });
+  // A stale saved App, for another repository, is irrelevant to an install that chose none and must not abort the apply.
+  await mkdir(join(root, '.graphyard'), { recursive: true });
+  await writeFile(join(root, '.graphyard/github-app.json'), JSON.stringify({ repository: 'other/repo', appId: 9, slug: 'stale' }));
   let appPage = false;
   const result = await applyProposal(root, proposal, { url: 'http://127.0.0.1:4310', installed: installed!, merger: 'control-plane',
     githubSetup: async () => { appPage = true; return { appId: 1, slug: 'unwanted' }; } });
   assert.equal(appPage, false, 'no App page is opened for an install that chose none');
   assert.equal(result.githubApp, null);
+  assert.equal(result.githubPending, false, 'an install that chose no App has no pending App step');
   assert.equal(result.principalsFile, null);
   assert.ok(result.applied.includes('AGENTS.md coordination section'), JSON.stringify(result.applied));
   assert.match(await readFile(join(root, 'AGENTS.md'), 'utf8'), /complete GY-N EPOCH --head SHA/, 'the control-plane worker block is written');
@@ -251,9 +255,11 @@ test('integration:onboarding-apply-without-app — init --scan --apply --url onb
   Object.assign(env, { GRAPHYARD_CONFIG_HOME: configHome, PATH: `${bin}:${process.env.PATH}` });
   const run = (args: string[]) => promisify(execFileCallback)(process.execPath, [launcher, 'init', ...args], { cwd: root, env });
   await run(['--scan', '--url', 'http://127.0.0.1:4310']);
+  await writeFile(join(root, '.graphyard/github-app.json'), '{ not json');
   const applied = JSON.parse((await run(['--scan', '--apply', '--url', 'http://127.0.0.1:4310'])).stdout);
   assert.equal(applied.installed, directory);
   assert.equal(applied.githubApp, null);
+  assert.equal(applied.githubPending, false, 'the CLI reports no pending App step for an install that chose none');
   assert.equal(applied.principalsFile, null);
   for (const file of onboardingFiles) assert.ok((await stat(join(root, file))).isFile(), `${file} is written for publishing`);
   assert.ok(applied.delivery?.workflows.length, 'a delivery workflow is written for the onboarding change');

@@ -514,9 +514,10 @@ export async function applyProposal(root: string, proposalInput: unknown, depend
   await writeProfile('reviewer', { provider: proposal.policy.reviewProvider, note: proposal.profiles.reviewer.note });
 
   const previousState = await loadAppliedSetup(root);
-  const savedApp = await readGithubApp(directory, proposal.repository);
   // An install's App, or its choice of none, is the App: a saved or earlier registration is not
-  // revived beside it, and no App page is opened for it.
+  // read or revived beside it, so a stale or malformed saved App cannot abort the apply, and no
+  // App page is opened for it.
+  const savedApp = dependencies.installed ? null : await readGithubApp(directory, proposal.repository);
   let githubApp: { appId: number; slug: string } | null = dependencies.installed ? dependencies.installed.githubApp : (savedApp ? { appId: savedApp.appId, slug: savedApp.slug } : previousState?.artifacts.githubApp ?? null);
   if (!githubApp && !dependencies.installed && dependencies.githubSetup) {
     const registration = await dependencies.githubSetup(proposal.repository, server);
@@ -549,7 +550,8 @@ export async function applyProposal(root: string, proposalInput: unknown, depend
   const documentationLine = documentationAssignment(documentation.policy).line;
   return { server, applied, unchanged, drift, githubApp, generatedFiles: generatedFiles?.line ?? null, documentation: { file: repositoryConfigFile, policy: documentation.policy, line: documentationLine },
     delivery: delivery ? { file: repositoryConfigFile, mode: delivery.policy.mode, requiredChecks: delivery.requiredChecks, workflows: delivery.workflows } : null,
-    githubPending: !githubApp,
+    // An install that chose no App has no App step pending; only an App-backed setup waits for one.
+    githubPending: !githubApp && !dependencies.installed,
     workerPrincipals,
     principalsFile: dependencies.installed ? null : principalsPath,
     next: dependencies.installed
