@@ -4,7 +4,8 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import graphyardExtension, { doctorCommandVerdict, doctorReasonLimit, doctorRules, doctorSegmentAllowed } from '../integrations/pi/index.js';
+// A namespace import, so on a tree without this change each case fails as a case rather than the file failing to load.
+import * as pi from '../integrations/pi/index.js';
 import { doctorPrompt } from '../src/daemon/doctor.js';
 
 // GY-1653: the doctor's allowlist judges a sanctioned master command by its grammar — program,
@@ -22,7 +23,7 @@ function stubCli() {
 /** The extension's tool_call hook under the doctor role, with the CLI the loop names. */
 function doctorHook(cli: string) {
   const hook: Record<string, (event: any, ctx: any) => unknown> = {};
-  graphyardExtension({ registerTool: () => {}, on: (event, handler) => { hook[event] = handler as never; return handler; } });
+  pi.default({ registerTool: () => {}, on: (event, handler) => { hook[event] = handler as never; return handler; } });
   return (command: string) => {
     const saved = { role: process.env.GRAPHYARD_PI_ROLE, cli: process.env.GRAPHYARD_DOCTOR_CLI };
     try {
@@ -71,11 +72,11 @@ test('unit:allowlist-grammar-only-scanning — the allowlist judges the command 
     // Prose naming refused programs and subcommands is still prose, for every sanctioned command.
     for (const prose of ['most recent', 'last attempt', 'requirements revised', 'policy revision', 'merge dispatch evidence claim', 'rm -rf src then git push']) {
       for (const name of ['unblock', 'scope', 'settle-containment', 'release']) {
-        const verdict = doctorCommandVerdict(`node ${cli} master ${name} GY-1652 "${prose} (as of 14:47); see 'GY-1649'"`, context);
+        const verdict = pi.doctorCommandVerdict(`node ${cli} master ${name} GY-1652 "${prose} (as of 14:47); see 'GY-1649'"`, context);
         assert.equal(verdict.allow, true, `master ${name} with reason "${prose}" is accepted`);
       }
       const words = ['graphyard', 'master', 'unblock', 'GY-1652', ...prose.split(' ')].map(value => ({ value, dynamic: false, glob: false }));
-      assert.deepEqual(doctorSegmentAllowed(words, context), { allow: true }, `the unquoted words of "${prose}" after a sanctioned grammar are not read as commands`);
+      assert.deepEqual(pi.doctorSegmentAllowed(words, context), { allow: true }, `the unquoted words of "${prose}" after a sanctioned grammar are not read as commands`);
     }
     // The grammar is still the gate: an unsanctioned subcommand, the CLI through another script and
     // a command chained after a closed reason are refused, whatever the reason says.
@@ -86,16 +87,16 @@ test('unit:allowlist-grammar-only-scanning — the allowlist judges the command 
       `node ${cli} master unblock GY-1652 "most recent" && git push origin main`,
       `node ${cli} master unblock GY-1652 "most recent"; rm -rf src`,
       `NODE_OPTIONS=--require=/tmp/x.js node ${cli} master unblock GY-1652 'it's recent'`,
-    ]) assert.equal(doctorCommandVerdict(line, context).allow, false, `${line} is refused`);
+    ]) assert.equal(pi.doctorCommandVerdict(line, context).allow, false, `${line} is refused`);
     // A reason running to the end of a line enclosed in quotes is prose all the way: nothing after the grammar runs.
-    const swallowed = doctorCommandVerdict(`node ${cli} master unblock GY-1652 'it's done'; cat '/etc/passwd'`, context);
+    const swallowed = pi.doctorCommandVerdict(`node ${cli} master unblock GY-1652 'it's done'; cat '/etc/passwd'`, context);
     assert.equal(swallowed.allow, true);
     assert.deepEqual(run(swallowed.command!), ['master', 'unblock', 'GY-1652', 'it\'s done\'; cat \'/etc/passwd'], 'the trailing text is the reason, never a command');
     // The reason's bounds: length and control characters.
-    const long = doctorCommandVerdict(`node ${cli} master unblock GY-1652 'it's ${'x'.repeat(doctorReasonLimit)}'`, context);
+    const long = pi.doctorCommandVerdict(`node ${cli} master unblock GY-1652 'it's ${'x'.repeat(pi.doctorReasonLimit)}'`, context);
     assert.equal(long.allow, false, 'a reason past the limit is refused');
     if (!long.allow) assert.match(long.reason, /reason-bounds rule/);
-    const control = doctorCommandVerdict(`node ${cli} master unblock GY-1652 'it's \u0007 recent'`, context);
+    const control = pi.doctorCommandVerdict(`node ${cli} master unblock GY-1652 'it's \u0007 recent'`, context);
     assert.equal(control.allow, false, 'a reason carrying a control character is refused');
     if (!control.allow) assert.match(control.reason, /reason-bounds rule/);
     // The prompt tells the doctor where the reason goes.
@@ -107,7 +108,7 @@ test('unit:allowlist-refusal-names-rule — every refusal names the rule that de
   const { cli, done } = stubCli();
   try {
     const context = { cwd: process.cwd(), cli, env: {} };
-    const cases: [string, keyof typeof doctorRules, RegExp][] = [
+    const cases: [string, keyof typeof pi.doctorRules, RegExp][] = [
       // The incident's shape: prose after an unquoted `;` is named as a segment the `;` began, not an unsanctioned command.
       [`graphyard master unblock GY-1652 blocked; most recent attempt`, 'read-programs', /word 1 "most", column 43 of segment 2, which the ";" at column 41 began outside any quote \(if these words are a reason's prose, enclose the whole reason in one pair of quotes\)/],
       [`node ${cli} master merge GY-1652`, 'sanctioned-commands', /word 4 "merge", column \d+ of segment 1/],
@@ -126,10 +127,10 @@ test('unit:allowlist-refusal-names-rule — every refusal names the rule that de
       [`npm install`, 'read-programs', /word 1 "npm", column 1 of segment 1/],
     ];
     for (const [line, rule, position] of cases) {
-      const verdict = doctorCommandVerdict(line, context);
+      const verdict = pi.doctorCommandVerdict(line, context);
       assert.equal(verdict.allow, false, `${line} is refused`);
       if (verdict.allow) continue;
-      assert.ok(verdict.reason.includes(`under its ${rule} rule (${doctorRules[rule]})`), `${line} names the ${rule} rule: ${verdict.reason}`);
+      assert.ok(verdict.reason.includes(`under its ${rule} rule (${pi.doctorRules[rule]})`), `${line} names the ${rule} rule: ${verdict.reason}`);
       assert.match(verdict.reason, position, `${line} names where the refused word came from: ${verdict.reason}`);
       assert.match(verdict.reason, /was not run.*Record the refused command/, 'the refusal still says it was recorded, not run');
     }
