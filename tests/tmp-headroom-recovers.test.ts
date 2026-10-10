@@ -51,7 +51,7 @@ test('unit:tmp-reclaim-removes-stale-entries — a pass at the loop\'s bounds ov
   assert.ok(report.bytes > 0, 'the bytes freed are reported');
   // What it kept, it counts by reason: the young temp is young, and the fresh cache file too.
   assert.deepEqual(report.keptFor, { young: 1, held: 0, owner: 0, bound: 0 });
-  assert.deepEqual(report.cacheKept, { young: 1, held: 0 });
+  assert.deepEqual(report.cacheKept, { young: 1, held: 0, bound: 0 });
 
   // A second pass over the same fixture removes nothing more, and says why: what is left is young.
   const again = await reclaimTmpDirectories({ ...loopTmpReclaimOptions([tmp]), workMs: 60_000, held: new Set() });
@@ -61,7 +61,7 @@ test('unit:tmp-reclaim-removes-stale-entries — a pass at the loop\'s bounds ov
   const low = await reclaimTmpDirectories({ ...loopTmpReclaimOptions([tmp]), held: new Set(), volume: async () => ({ files: 4000, ffree: 100 }) });
   const detail = describeStandingTmpPass({ at: low.at, reaped: { review: 0, producer: 0 }, closed: [], released: [], tmp: { removed: 0, bytes: 0 }, errors: [],
     tmpPass: { roots: low.roots, scanned: low.scanned, kept: low.kept, keptFor: low.keptFor, cacheKept: low.cacheKept, boundStands: low.boundStands, escalated: low.escalated, consumers: low.consumers } });
-  assert.match(detail ?? '', /1 kept \(1 younger than 2 hours, 0 held open or named by a live process, 0 with a live owner, 0 past the pass's bounds\)/);
+  assert.match(detail ?? '', /1 kept \(1 younger than their age bound \(2 hours for test temp names, 24 hours for agent scratch\), 0 held open or named by a live process, 0 with a live owner, 0 past the pass's bounds\)/);
   assert.match(detail ?? '', /no tsx cache file of this user's it could remove \(each younger than 10 minutes or held open by a live process\): 1 younger, 0 held; nothing of this user's was both past its age bound and free to remove/);
 
   // Held entries are counted as held, never removed, and the pass's entry bound leaves the rest as the next pass's.
@@ -73,6 +73,37 @@ test('unit:tmp-reclaim-removes-stale-entries — a pass at the loop\'s bounds ov
   assert.equal(bounded.keptFor?.held, 1);
   assert.equal(bounded.keptFor?.young, 1);
   assert.ok(bounded.keptFor!.bound >= 1, 'what the bound left is counted as the bound\'s');
+});
+
+const standing = (pass: Awaited<ReturnType<typeof reclaimTmpDirectories>>) => describeStandingTmpPass({ at: pass.at, reaped: { review: 0, producer: 0 }, closed: [], released: [], tmp: { removed: 0, bytes: 0 }, errors: [],
+  tmpPass: { roots: pass.roots, scanned: pass.scanned, kept: pass.kept, keptFor: pass.keptFor, cacheKept: pass.cacheKept, boundStands: true, escalated: pass.escalated, consumers: pass.consumers } }) ?? '';
+
+test('unit:tmp-reclaim-kept-counts-are-this-users — the bound\'s unexamined remainder counts only this user\'s entries, and old cache files the work bound left keep a zero record from calling nothing eligible', skip, async () => {
+  const tmp = await temporaryDirectory('reclaim-kept-own');
+  await seed(tmp);
+  // At an entry bound of 0 every candidate is the bound's remainder: as this user's, all seven; as another user's, none.
+  const own = await reclaimTmpDirectories({ tmpRoot: tmp, held: new Set(), limit: 0, workMs: 60_000 });
+  assert.deepEqual(own.keptFor, { young: 0, held: 0, owner: 0, bound: 7 }, 'this user\'s unexamined candidates are the bound\'s');
+  const foreign = await reclaimTmpDirectories({ tmpRoot: tmp, held: new Set(), limit: 0, workMs: 60_000, uid: process.getuid!() + 1 });
+  assert.deepEqual(foreign.keptFor, { young: 0, held: 0, owner: 0, bound: 0 }, 'another user\'s entries on a shared /tmp are never counted as left by the bound');
+  assert.equal(foreign.kept, 0);
+
+  // Work bound already spent: the stale cache files stay, are counted as the bound's, and the record names them.
+  // Only the cache is seeded, so no test temp's bound count stands in for the cache's.
+  const spent = await temporaryDirectory('reclaim-kept-cache-bound');
+  const cache = join(spent, ownCache()!), staleCache = [join(cache, 'compiled-old-1'), join(cache, 'compiled-old-2')];
+  await mkdir(cache);
+  for (const path of staleCache) { await writeFile(path, 'x'); await backdate(path, tmpReclaimMinAgeMs + hour); }
+  await writeFile(join(cache, 'compiled-fresh'), 'x');
+  const pass = await reclaimTmpDirectories({ tmpRoot: spent, held: new Set(), workMs: -1 });
+  assert.deepEqual(pass.removed, []);
+  assert.deepEqual(pass.keptFor, { young: 0, held: 0, owner: 0, bound: 0 });
+  for (const path of staleCache) assert.equal(existsSync(path), true, `${path} stays this cycle`);
+  assert.deepEqual(pass.cacheKept, { young: 1, held: 0, bound: 2 });
+  assert.equal(pass.kept, 2, 'what the cache\'s bound left is kept');
+  const detail = standing(pass);
+  assert.match(detail, /\(each younger than [^,]+, held open by a live process, or past the pass's bounds\): 1 younger, 0 held, 2 past the pass's bounds/);
+  assert.doesNotMatch(detail, /nothing of this user's was both past its age bound and free to remove/, 'eligible cache files remained, so the record does not say none did');
 });
 
 /**

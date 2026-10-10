@@ -1146,12 +1146,14 @@ export function describeStandingTmpPass(report: ResourceReclaimReport) {
   const roots = pass.roots?.length ? pass.roots.join(' and ') : 'its temporary directories';
   const top = pass.escalated?.at(-1), errors = tmpPassErrors(report);
   const sweep = top ? `; its last step, over the roots still below headroom, examined` : ':';
-  const testAge = `${testTempMinAgeMs / 3_600_000} hours`, cacheAge = minutes(top?.cacheAgeMs ?? tmpReclaimMinAgeMs);
+  const testAge = `${testTempMinAgeMs / 3_600_000} hours`, cacheAge = minutes(top?.cacheAgeMs ?? tmpReclaimMinAgeMs), cacheBound = pass.cacheKept?.bound;
   // A pass that counted its reasons states each (GY-1628): a zero that kept only young or held entries
   // is the pass taking all it may, not a remedy that matches nothing, and reads so.
-  const why = pass.keptFor ? `${pass.keptFor.young} younger than ${testAge}, ${pass.keptFor.held} held open or named by a live process, ${pass.keptFor.owner} with a live owner, ${pass.keptFor.bound} past the pass's bounds` : `younger than ${testAge}, a live owner or holder, or past the pass's bounds`;
-  const cache = `each younger than ${cacheAge} or held open by a live process)${pass.cacheKept ? `: ${pass.cacheKept.young} younger, ${pass.cacheKept.held} held` : ''}`;
-  const stale = pass.keptFor && pass.cacheKept && !pass.keptFor.bound ? `; nothing of this user's was both past its age bound and free to remove` : '';
+  // Each name class has its own age bound, so a young count names both: agent scratch waits a day.
+  const why = pass.keptFor ? `${pass.keptFor.young} younger than their age bound (${testAge} for test temp names, ${agentScratchMinAgeMs / 3_600_000} hours for agent scratch), ${pass.keptFor.held} held open or named by a live process, ${pass.keptFor.owner} with a live owner, ${pass.keptFor.bound} past the pass's bounds` : `younger than ${testAge}, a live owner or holder, or past the pass's bounds`;
+  // A cache file the bounds left was old and free: the clause names it, and only a pass that counted none of either kind concludes nothing stale stood.
+  const cache = `each younger than ${cacheAge}${cacheBound ? ', held open by a live process, or past the pass\'s bounds' : ' or held open by a live process'})${pass.cacheKept ? `: ${pass.cacheKept.young} younger, ${pass.cacheKept.held} held${cacheBound ? `, ${cacheBound} past the pass's bounds` : ''}` : ''}`;
+  const stale = pass.keptFor && cacheBound === 0 && !pass.keptFor.bound ? `; nothing of this user's was both past its age bound and free to remove` : '';
   return [
     `/tmp reclaim removed 0 entries while the inode bound stands: scanned ${roots}${sweep} ${entries(pass.scanned)} with this user's test temp names, ${pass.kept} kept (${why}), and no tsx cache file of this user's it could remove (${cache}${stale}`,
     top ? `escalated to ${top.limit} per cycle and tsx cache files older than ${minutes(top.cacheAgeMs)} (${pass.escalated!.map(step => step.removed).join(' + ')} removed)` : '',
