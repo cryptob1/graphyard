@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { checkoutProcessScan, checkoutWriterProcesses, freezeCheckoutWriters } from '../src/cli/checkout-writers.js';
+import * as writers from '../src/cli/checkout-writers.js';
+import { checkoutWriterProcesses, freezeCheckoutWriters } from '../src/cli/checkout-writers.js';
 import { checkoutRestoreRefPrefix, restoreCoordinatorCheckout } from '../src/cli/master-checkout-restore.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -41,13 +42,13 @@ test('unit:checkout-writers-unreadable-cwd — a process of this user whose cwd 
   processEntry(proc, 500, { cwd: checkout });                                 // a standing writer
   processEntry(proc, 600, { cwd: join(checkout, '.graphyard') });              // the managed area: no writer
 
-  const scan = checkoutProcessScan(root, 100, proc, uid);
+  const scan = writers.checkoutProcessScan(root, 100, proc, uid);
   assert.deepEqual(scan.writers, [500]);
   assert.deepEqual(scan.unverifiable.map(entry => entry.pid), [200], 'only the unreadable process of this user, outside the loop and its managed sessions, is unverifiable');
   assert.match(scan.unverifiable[0].error, /EINVAL/);
   assert.throws(() => checkoutWriterProcesses(root, 100, proc, uid), /pid 200 \(EINVAL[^)]*\) cannot be read.*nothing was restored/);
   // Another user's process is not this user's to judge.
-  assert.deepEqual(checkoutProcessScan(root, 100, proc, uid + 1).unverifiable, []);
+  assert.deepEqual(writers.checkoutProcessScan(root, 100, proc, uid + 1).unverifiable, []);
 
   // The freeze refuses before signalling anything, and the restore before any snapshot or reset.
   const sent: string[] = [];
