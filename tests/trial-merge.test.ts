@@ -508,7 +508,7 @@ test('integration:trial-run-build-and-tests — the trial reads package.json and
   // A probe that fails — an object store git cannot read — rejects as a runner failure naming the path, and the checkout still goes.
   const head = repo.commitOnBase({ 'tests/bad.test.ts': 'x\n' }, 'head with a failing test');
   const unreadable = ((command: string, args: string[], options: unknown) => {
-    if (command === 'git' && args[2] === 'ls-tree') throw Object.assign(new Error('Command failed: git ls-tree'), { status: 128, signal: null, stdout: '', stderr: 'fatal: unable to read tree\n' });
+    if (command === 'git' && (args[2] === 'cat-file' || args[2] === 'ls-tree')) throw Object.assign(new Error('Command failed: git ' + args[2]), { status: 128, signal: null, stdout: '', stderr: 'fatal: unable to read tree\n' });
     return defaultChildRun(command, args, options as never);
   }) as never;
   const base = await temporaryDirectory('trial-merge-root', tmpdir());

@@ -389,6 +389,8 @@ export async function runTrial(input: RunTrialInput): Promise<TrialRun> {
       // listing that answers and names no such path is absence: a probe git could not answer (a timeout,
       // an unreadable object store) is a runner failure, never a passing trial that skipped its checks.
       const holds = async (path: string) => {
+        try { await run('git', ['-C', input.root, 'cat-file', '-e', `${input.mergeSha}:${path}`], { timeoutMs: remaining() }); return true; }
+        catch { /* absent, or unreadable: the listing below tells them apart */ }
         let listing: string;
         try { listing = String(await run('git', ['-C', input.root, 'ls-tree', '--name-only', input.mergeSha, '--', path], { timeoutMs: remaining() })); }
         catch (error) {
