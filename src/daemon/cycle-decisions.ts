@@ -451,15 +451,8 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
   // Attestations an approver refused (GY-1394), kept on their watches, indexed once per cycle by item.
   const refusedByWork = new Map<string, RefusedAttestation[]>();
   for (const watch of Object.values(state.approvals)) if (watch.action === 'attest' && watch.refusal) refusedByWork.set(watch.work, [...refusedByWork.get(watch.work) ?? [], { decision: watch.decision, refusal: watch.refusal }]);
-  for (const read of workToProcess) await isolate('decision', read, read.key, async () => {
-    // Re-set below while its hold still stands; a throw before the hold was read as released keeps it (GY-1624), so a
-    // transient failure in closeStanding or docsSync.hold does not drop the bound the idle wait ends at.
-    const reached = bounds.get(read.id), released = { at: false }; bounds.delete(read.id);
-    try { await decideItem(read, reached, released); }
-    catch (error) { if (reached !== undefined && !released.at && !bounds.has(read.id)) bounds.set(read.id, reached); throw error; }
-  });
-  async function decideItem(read: Work, reached: number | undefined, released: { at: boolean }) {
-    let item = read;
+  for (const read of workToProcess) await isolate('decision', read, read.key, async () => { const reached = bounds.get(read.id), released = { at: false }; bounds.delete(read.id); try { await decideItem(read, reached, released); } catch (error) { if (reached !== undefined && !released.at && !bounds.has(read.id)) bounds.set(read.id, reached); throw error; } });
+  async function decideItem(item: Work, reached: number | undefined, released: { at: boolean }) { // the item's bound is re-set below while its hold stands; a throw before the hold read as released puts it back above, so a transient closeStanding or docsSync.hold failure keeps the idle wait ending there (GY-1624)
     const assessment = assessments[item.id];
     // A request step 2 refused this cycle is read as it was decided, not as the snapshot saw it, and
     // its decision is requested against that revision: one a partial widening moved past the
@@ -483,7 +476,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     }
     const close = decision.action === 'close' ? undefined : await closeStanding(effects, item, snapshot.work, closing);
     if (close) return noteClosing(item, decision.action, close);
-    let key = decisionKey(item, decision); if (routinePass.over()) { needed.add(key); budget.defer(item); if (reached !== undefined) bounds.set(read.id, reached); return; }
+    let key = decisionKey(item, decision); if (routinePass.over()) { needed.add(key); budget.defer(item); if (reached !== undefined) bounds.set(item.id, reached); return; }
     // A confirmed conflict confined to docs pages is a docs-sync's, not a worker's (GY-566). A standing
     // hold is the item's recorded wait, never a bare skip (GY-1436); one that ended awaits an
     // observation since, which the step wakes below rather than waiting for one unprompted.
@@ -493,8 +486,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     const observe = async (work: Work) => { synced.work = wake ? await wake(work, clock) : null; if (!synced.work) await wakeObservationJob(cycle, work, 'docs-sync give-up'); return synced.work; };
     const docsConflict = (subject: Work, routine: RoutineDecision) => routine.action === 'rework' && !state.approvals[decisionKey(subject, routine)] && !!baseRefreshConflict(subject) && routine.binding === `${subject.candidate!.sha}:conflict`;
     const hold = docsConflict(item, decision) ? await docsSync.hold(item, observe) : null;
-    if (hold?.held) return noteHold(item, hold);
-    released.at = true;
+    if (hold?.held) return noteHold(item, hold); released.at = true;
     if (synced.work && synced.work.candidate?.sha === item.candidate?.sha && synced.work.policyRevision === item.policyRevision) item = synced.work;
     needed.add(key);
     // Rework waits for an observation that still describes the item (GY-144); the step wakes it unless paused (GY-793) and re-decides.
