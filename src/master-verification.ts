@@ -243,9 +243,14 @@ export interface PostDeployCheck {
  */
 export function postDeployChecks(work: Work, release: string, now = new Date()): PostDeployCheck[] {
   const implementers = implementerIdentities(work), mergedAt = work.delivery ? Date.parse(work.delivery.mergedAt) : NaN;
-  const observes = (proof: string) => !!work.delivery && (work.evidence ?? []).some(evidence => evidence.proof === proof && evidence.sha === release && evidence.trusted && !evidence.revocation
-    && evidence.baseSha === work.delivery!.mergeSha && Date.parse(evidence.at) > mergedAt
-    && evidence.policyRevision === work.policyRevision && (!evidence.expiresAt || Date.parse(evidence.expiresAt) > now.getTime()) && !implementers.includes(evidence.producer) && evidenceProves(proof, evidence));
+  // The latest applicable record decides, as on the evidence path: a later trusted failure outranks an earlier pass.
+  const observes = (proof: string) => {
+    const latest = (work.evidence ?? []).filter(evidence => !!work.delivery && evidence.proof === proof && evidence.sha === release && evidence.trusted && !evidence.revocation
+      && evidence.baseSha === work.delivery.mergeSha && Date.parse(evidence.at) > mergedAt
+      && evidence.policyRevision === work.policyRevision && (!evidence.expiresAt || Date.parse(evidence.expiresAt) > now.getTime()) && !implementers.includes(evidence.producer))
+      .reduce<NonNullable<Work['evidence']>[number] | undefined>((last, evidence) => !last || Date.parse(evidence.at) >= Date.parse(last.at) ? evidence : last, undefined);
+    return !!latest && evidenceProves(proof, latest);
+  };
   return work.criteria.flatMap(criterion => postDeployProofs(criterion).map(proof => {
     if (observes(proof)) return { criterion: criterion.id, proof, result: 'observed' as const, followUp: null };
     const name = proof.slice(postDeployProofPrefix.length), short = release.slice(0, 12);

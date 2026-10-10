@@ -61,6 +61,8 @@ test('unit:post-deploy-criteria — a declared post-deploy verification, a head-
   assert.equal(createSchema.safeParse(intent([anchored])).success, true);
   // An integration proven against a stub is a pre-merge exercise.
   assert.equal(liveObservationPhrase({ id: 'AC-1', text: 'Proven before merge against a stubbed deployed release', proofs: ['integration:deploy'] }), null);
+  // The anchor covers its own clause only: a pre-merge clause cannot exempt a live observation beside it.
+  assert.equal(liveObservationPhrase({ id: 'AC-1', text: 'Before merge test the stub; after deployment verify production traffic', proofs: ['unit:x'] }), 'after deployment');
   // No proof-family shortcut: a unit-proven wording of a live outcome is a live outcome.
   const unitLive = { id: 'AC-1', text: 'The restarted loop serves the delivered commit', proofs: ['unit:serves'] };
   assert.equal(liveObservationPhrase(unitLive), 'restarted loop');
@@ -219,6 +221,10 @@ test('unit:post-deploy-criteria — master verify-deployment checks a declared c
   const premerge = new Date(Date.parse(delivered().delivery!.mergedAt) - 60_000).toISOString();
   assert.equal(postDeployChecks(delivered({ evidence: [{ ...evidence[0], at: premerge }] }), release)[0].result, 'owed', 'evidence recorded before the merge observes nothing');
   assert.equal(postDeployChecks(delivered({ evidence: [{ ...evidence[0], baseSha: 'e'.repeat(40) }] }), release)[0].result, 'owed', 'evidence against another base observes nothing');
+  // The latest applicable record decides: a later trusted failure outranks an earlier pass, and a later pass an earlier failure.
+  const later = new Date(Date.now() + 1000).toISOString();
+  assert.equal(postDeployChecks(delivered({ evidence: [evidence[0], { ...evidence[0], id: 'e2', result: 'fail' as const, at: later }] as never }), release)[0].result, 'owed', 'a later failure is the current observation');
+  assert.equal(postDeployChecks(delivered({ evidence: [{ ...evidence[0], id: 'e2', result: 'fail' as const }, { ...evidence[0], at: later }] as never }), release)[0].result, 'observed', 'a later pass is the current observation');
   // Two declared proofs of one criterion owe two distinct follow-ups, even when their names share a prefix longer than any title.
   const long = 'x'.repeat(240);
   const longWork = delivered({ criteria: [{ ...gy1652, proofs: [`manual:post-deploy/${long}-a`, `manual:post-deploy/${long}-b`] }] });

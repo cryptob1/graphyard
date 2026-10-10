@@ -77,8 +77,13 @@ export const postDeployProofs = (criterion: Pick<CriterionProofs, 'proofs'>) => 
 export const declaredPostDeploy = (criterion: Pick<CriterionProofs, 'proofs'>) => postDeployProofs(criterion).length > 0;
 /** The phrase that makes this criterion's outcome a live-install or post-deploy observation, or null. */
 export function liveObservationPhrase(criterion: Pick<CriterionProofs, 'text'> & Partial<CriterionProofs>): string | null {
-  if (headAnchored.test(criterion.text)) return null;
-  return liveObservation.exec(criterion.text)?.[0].trim() ?? null;
+  // The anchor covers only its own clause: "Before merge test the stub; after deployment verify
+  // production traffic" still carries an unanchored live observation in its second clause.
+  for (const clause of criterion.text.split(/[;\n]|\.\s+/)) {
+    const phrase = !headAnchored.test(clause) && liveObservation.exec(clause)?.[0].trim();
+    if (phrase) return phrase;
+  }
+  return null;
 }
 /** Why these criteria cannot be recorded, naming each undeclared live-observation criterion; null when none is. */
 export function postDeployCriterionRefusal(criteria: readonly CriterionProofs[]): string | null {
