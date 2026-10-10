@@ -31,72 +31,13 @@ export const escalationTriggers = ['lease-loss', 'evidence-policy-conflict', 'se
 export type EscalationTrigger = typeof escalationTriggers[number];
 /** The shipped setting: every new item is system-driven unless its intent says `"systemDriven": false`. */
 export const systemDrivenDefault = true;
-/**
- * Post-deploy verification criteria (GY-1660). A criterion whose outcome is an observation of the
- * live install — the restarted loop, the deployed release, the coordinator checkout on this host —
- * can only be shown after merge and deploy, yet a criterion gates the merge: the reviewer holds the
- * merge until the observation exists and no worker can make it, so the item deadlocks until a
- * person rewords it (GY-1652 AC-3, GY-1657 AC-1..4). Such a criterion is accepted at create and at
- * a requirements revision only when declared, by naming a `manual:post-deploy/NAME` proof; the
- * reviewer then judges it on the head's pre-merge evidence, and `master verify-deployment` checks
- * it on the serving release and files a follow-up naming the delivered item when it fails.
- *
- * The detector is deliberately narrow: only a criterion carrying a proof a unit test cannot be
- * (manual, integration or e2e) and whose text names a live target or a post-deploy moment, and
- * never one anchored to the head ("from this head against the live install") or to a stub.
- */
-export const postDeployProofPrefix = 'manual:post-deploy/';
-const liveObservation = /\blive\s+install(?:ation)?\b|\bon\s+this\s+installation\b|\brestarted\s+(?:master\s+)?loop\b|\bthe\s+master\s+loop\s+restarts\b|\bagainst\s+the\s+deployed\s+release\b|\b(?:after|once)\s+(?:the\s+(?:change|fix|merge)\s+(?:is\s+)?)?(?:deploy(?:ed|ment)?|merged\s+and\s+deployed)\b|\bonce\s+the\s+fix\s+is\s+running\b|\bobservation\s+after\s+deploy|\b(?:at|in)\s+\/home\//i;
-const headAnchored = /\b(?:from|on|at)\s+(?:this|the)\s+(?:pull\s+request's\s+)?head\b|\bthis\s+head(?:'s)?\b|\bthe\s+candidate(?:'s)?\s+head\b|\bbefore\s+merge\b|\bstub(?:bed)?\b/i;
-type CriterionProofs = { id: string; text: string; proofs: readonly string[] };
-/** The criterion's declared post-deploy proofs; a criterion naming one is a declared post-deploy verification. */
-export const postDeployProofs = (criterion: Pick<CriterionProofs, 'proofs'>) => criterion.proofs.filter(proof => proof.startsWith(postDeployProofPrefix));
-export const declaredPostDeploy = (criterion: Pick<CriterionProofs, 'proofs'>) => postDeployProofs(criterion).length > 0;
-/** The phrase that makes this criterion's outcome a live-install or post-deploy observation, or null. */
-export function liveObservationPhrase(criterion: CriterionProofs): string | null {
-  if (!criterion.proofs.some(proof => /^(?:manual|integration|e2e):/.test(proof)) || headAnchored.test(criterion.text)) return null;
-  return liveObservation.exec(criterion.text)?.[0] ?? null;
-}
-/** Why these criteria cannot be recorded, naming each undeclared live-observation criterion; null when none is. */
-export function postDeployCriterionRefusal(criteria: readonly CriterionProofs[]): string | null {
-  const undeclared = criteria.flatMap(criterion => { const phrase = !declaredPostDeploy(criterion) && liveObservationPhrase(criterion); return phrase ? [`${criterion.id} ("${phrase}")`] : []; });
-  if (!undeclared.length) return null;
-  return `${undeclared.join(', ')} ${undeclared.length === 1 ? 'is a live-install or post-deploy observation' : 'are live-install or post-deploy observations'} that no head can show before the merge it gates, so the reviewer would hold the merge on it while no worker can make it. `
-    + `Declare it a post-deploy verification by naming its proof ${postDeployProofPrefix}NAME — the reviewer judges it on the head's pre-merge evidence and master verify-deployment checks it on the serving release, filing a follow-up when it fails — or reword it to an observation this head can show before merge (from this head against the live install)`;
-}
-export interface PostDeployCheck {
-  criterion: string; proof: string; result: 'observed' | 'owed';
-  /** The follow-up an owed observation files: its create input and the request id that makes filing it idempotent. */
-  followUp: { title: string; requestId: string; input: Pick<Create, 'title' | 'description' | 'type' | 'priority' | 'dependencies' | 'criteria'> } | null;
-}
-/**
- * `master verify-deployment`'s check of the delivered item's declared post-deploy criteria on the
- * serving release `release`: a proof is observed when the item holds passing evidence for it
- * recorded at that release, and owed otherwise. An owed one carries the follow-up to file — a
- * chore depending on the delivered item, whose single criterion asks for the same observation
- * from its own head against that serving release, so it is a pre-merge observation there and
- * is never itself declared post-deploy.
- */
-export function postDeployChecks(work: Pick<Work, 'id' | 'key' | 'criteria' | 'evidence' | 'delivery'>, release: string): PostDeployCheck[] {
-  return work.criteria.flatMap(criterion => postDeployProofs(criterion).map(proof => {
-    const observed = (work.evidence ?? []).some(evidence => evidence.proof === proof && evidence.sha === release && evidence.result === 'pass' && !evidence.revocation);
-    if (observed) return { criterion: criterion.id, proof, result: 'observed' as const, followUp: null };
-    const name = proof.slice(postDeployProofPrefix.length).replace(/\//g, '-'), short = release.slice(0, 12);
-    const title = `Post-deploy verification of ${work.key} ${criterion.id} on release ${short}`;
-    const text = `From this head against the serving release ${short} that carries ${work.key}'s merge ${work.delivery?.mergeSha.slice(0, 12) ?? ''}: ${criterion.text}`.slice(0, 2000);
-    return { criterion: criterion.id, proof, result: 'owed' as const, followUp: { title, requestId: `post-deploy:${work.id}:${criterion.id}:${proof}:${release}`, input: {
-      title, type: 'chore' as const, priority: 1, dependencies: [work.id],
-      description: `${work.key} was delivered with ${criterion.id} declared a post-deploy verification (${proof}). master verify-deployment found no passing ${proof} observation on the serving release ${release}, so this item owes it: observe the outcome on that release and record the proof.\n\n${work.key} ${criterion.id}: ${criterion.text}`.slice(0, 20000),
-      criteria: [{ id: 'AC-1', text, proofs: [`manual:${name}-on-serving-release`] }] } } };
-  }));
-}
+export { declaredPostDeploy, liveObservationPhrase, postDeployCriterionRefusal, postDeployProof, postDeployProofPrefix, postDeployProofs } from './post-merge-proofs.js';
 export const createSchema = z.object({
   title: z.string().min(1).max(200), description: z.string().max(20000).default(''),
   type: z.enum(['feature', 'bug', 'chore']).default('feature'),
   priority: z.number().int().min(0).max(4).default(2),
   dependencies: z.array(z.string().uuid()).max(50).default([]),
-  // A live-install observation gates nothing it cannot be shown for: refused unless declared post-deploy (GY-1660).
-  criteria: z.array(criterionSchema).min(1).max(50).superRefine((criteria, context) => { const refusal = postDeployCriterionRefusal(criteria); if (refusal) context.addIssue({ code: 'custom', message: refusal }); }),
+  criteria: z.array(criterionSchema).min(1).max(50),
   policy: policySchema.default({ checks: ['test', 'typecheck'], review: true }),
   plannedFiles: z.array(z.string().min(1).max(500)).max(plannedFilesMax).default([]),
   exclusiveResources: resourcesSchema.optional(),

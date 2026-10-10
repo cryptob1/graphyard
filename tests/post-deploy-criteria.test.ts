@@ -6,7 +6,7 @@ import type { Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // Loaded inside each case, so a tree without this change fails these cases rather than the file.
-const modules = async () => ({ ...await import('../src/model.js'), ...await import('../src/reviewer.js'), ...await import('../src/master-verification.js'), ...await import('../src/cli/planned-files-intent.js') });
+const modules = async () => ({ ...await import('../src/model.js'), ...await import('../src/model/approval.js'), ...await import('../src/model/bootstrap.js'), ...await import('../src/model/landability.js'), ...await import('../src/reviewer.js'), ...await import('../src/master-verification.js'), ...await import('../src/cli/planned-files-intent.js') });
 
 // unit:post-deploy-criteria (GY-1660) — a criterion only the live install can satisfy after merge
 // and deploy deadlocked reviewer and worker (GY-1652 AC-3, GY-1657 AC-1..4). It is refused at
@@ -33,19 +33,66 @@ test('unit:post-deploy-criteria — an undeclared live-install observation is re
   assert.match(postDeployCriterionRefusal([gy1652, { ...restarted, id: 'AC-4' }])!, /^AC-3 \("live install"\), AC-4 \("restarted loop"\) are live-install or post-deploy observations/);
 });
 
-test('unit:post-deploy-criteria — a declared post-deploy verification, a head-anchored observation and ordinary criteria are accepted', async () => {
+test('unit:post-deploy-criteria — the refusal holds on every requirements path: the shared criterion schema, a direct revision and a requirements decision', async () => {
+  const { criterionSchema, decisionInputs } = await modules();
+  for (const criterion of [gy1652, gy1657, restarted]) {
+    const refused = criterionSchema.safeParse(criterion);
+    assert.equal(refused.success, false, `${criterion.id} is refused by the criterion schema every requirements input uses`);
+    assert.match(refused.error!.issues.map(issue => issue.message).join('\n'), /manual:post-deploy\/NAME/);
+    const decision = decisionInputs.requirements.safeParse({ expectedPolicyRevision: 1, criteria: [criterion], dependencies: [], plannedFiles: [], exclusiveResources: [], producerProofs: [] });
+    assert.equal(decision.success, false, 'an approved master decide requirements cannot carry it either');
+    assert.equal(decisionInputs.requirements.safeParse({ expectedPolicyRevision: 1, criteria: [{ ...criterion, proofs: ['manual:post-deploy/observed'] }], dependencies: [], plannedFiles: [], exclusiveResources: [], producerProofs: [] }).success, true);
+  }
+});
+
+test('unit:post-deploy-criteria — a declared post-deploy verification, a head-anchored observation and ordinary criteria are accepted; a live outcome is caught whatever its proof family', async () => {
   const { createSchema, liveObservationPhrase } = await modules();
   const declared = { ...gy1652, proofs: ['manual:post-deploy/harness-drift-cleared'] };
   assert.equal(createSchema.safeParse(intent([declared])).success, true);
+  // A declared criterion may open "After deploy": the GY-188 post-merge refusal yields to the declaration.
+  const afterDeploy = { id: 'AC-2', text: 'After deploy, the live install reports the remedy applied', proofs: ['manual:post-deploy/status'] };
+  assert.equal(createSchema.safeParse(intent([afterDeploy])).success, true);
+  // Undeclared, that wording is still refused, and a declared proof never excuses a post-merge proof name beside it.
+  assert.equal(createSchema.safeParse(intent([{ ...afterDeploy, proofs: ['manual:status'] }])).success, false);
+  assert.equal(createSchema.safeParse(intent([{ ...afterDeploy, proofs: ['manual:post-deploy/status', 'manual:status-postmerge'] }])).success, false);
   // GY-1652's reworded AC-3 observes this head against the live install: a pre-merge observation.
   const anchored = { id: 'AC-3', text: 'From this head against the live install, `node bin/graphyard.mjs master status` reports harnessDrift null', proofs: ['manual:harness-drift-cleared'] };
   assert.equal(liveObservationPhrase(anchored), null);
-  // A unit-proven criterion about deployment behaviour is a test, never a live observation.
-  assert.equal(liveObservationPhrase({ id: 'AC-1', text: 'After deploy the restarted loop records the delivery', proofs: ['unit:records-delivery'] }), null);
+  assert.equal(createSchema.safeParse(intent([anchored])).success, true);
   // An integration proven against a stub is a pre-merge exercise.
   assert.equal(liveObservationPhrase({ id: 'AC-1', text: 'Proven before merge against a stubbed deployed release', proofs: ['integration:deploy'] }), null);
-  // The criterion Graphyard files for a recurring intervention pattern stays accepted.
-  assert.equal(createSchema.safeParse(intent([{ id: 'AC-1', text: 'The cause of the recurring escalation interventions at the build stage is found and removed: the intervention report shows the escalation rate at the build stage below 3 per 7 days after the change ships, and the linked instances could not recur', proofs: ['manual:intervention-pattern-escalation-build'] }])).success, true);
+  // No proof-family shortcut: a unit-proven wording of a live outcome is a live outcome.
+  const unitLive = { id: 'AC-1', text: 'The restarted loop serves the delivered commit', proofs: ['unit:serves'] };
+  assert.equal(liveObservationPhrase(unitLive), 'restarted loop');
+  assert.equal(createSchema.safeParse(intent([unitLive])).success, false);
+  // The wording Graphyard filed for a recurring intervention pattern (GY-1660's own AC-1) is a post-ship
+  // outcome: undeclared, it is refused, naming the phrase.
+  const shipped = { id: 'AC-1', text: 'The cause of the recurring escalation interventions at the build stage is found and removed: the intervention report shows the escalation rate at the build stage below 3 per 7 days after the change ships, and the linked instances could not recur', proofs: ['manual:intervention-pattern-escalation-build'] };
+  assert.equal(liveObservationPhrase(shipped), 'after the change ships');
+  assert.equal(createSchema.safeParse(intent([shipped])).success, false);
+  assert.equal(createSchema.safeParse(intent([{ id: 'AC-1', text: 'Ordinary behaviour is covered', proofs: ['unit:covered'] }])).success, true);
+});
+
+test('unit:post-deploy-criteria — the criterion Graphyard files for a recurring intervention pattern names only what the head can show', async () => {
+  const source = await import('node:fs/promises').then(fs => fs.readFile(new URL('../src/interventions/patterns.ts', import.meta.url), 'utf8'));
+  const template = /criteria: \[\{ id: 'AC-1', text: `([^`]+)`/.exec(source)![1];
+  const text = template.replace(/\$\{[^}]+\}/g, 'X');
+  const { createSchema, liveObservationPhrase } = await modules();
+  assert.equal(liveObservationPhrase({ text }), null, text);
+  assert.equal(createSchema.safeParse(intent([{ id: 'AC-1', text, proofs: ['manual:intervention-pattern-escalation-build'] }])).success, true);
+});
+
+test('unit:post-deploy-criteria — a declared post-deploy proof gates no merge in any lane', async () => {
+  const { laneRequiresProof, requiredProofs, evaluateLandability } = await modules();
+  for (const lane of ['low', 'medium', 'high'] as const) assert.equal(laneRequiresProof(lane, 'manual:post-deploy/harness-drift-cleared'), false, lane);
+  assert.equal(laneRequiresProof('high', 'manual:harness-drift-cleared'), true);
+  // An unobserved change rides the high lane, where every other manual: proof is demanded before merge.
+  const reasons = (work: Work) => { const verdict = evaluateLandability(work, [work], new Date()); return verdict.verdict === 'refused' ? verdict.reasons.map(reason => reason.reason).join('\n') : ''; };
+  const declared = delivered({ stage: 'acceptance', delivery: undefined }), undeclared = delivered({ stage: 'acceptance', delivery: undefined, criteria: [{ ...gy1652 }] });
+  assert.deepEqual(requiredProofs(declared, [declared]).filter(proof => proof.startsWith('manual:post-deploy/')), []);
+  assert.ok(requiredProofs(undeclared, [undeclared]).includes('manual:harness-drift-cleared'));
+  assert.match(reasons(undeclared), /manual:harness-drift-cleared needs trusted passing evidence/);
+  assert.ok(!reasons(declared).includes('manual:post-deploy/'), reasons(declared));
 });
 
 test('unit:post-deploy-criteria — master requirements refuses an undeclared live observation before reading the tree or posting', async () => {
@@ -92,13 +139,13 @@ function delivered(overrides: Partial<Work> = {}): Work {
 }
 
 test('unit:post-deploy-criteria — master verify-deployment checks a declared criterion on the serving release and files one follow-up naming the delivered item when it fails', async () => {
-  const { createSchema, postDeployChecks, verifyDeployment } = await modules();
+  const { createSchema, filePostDeployFollowUps, postDeployChecks, verifyDeployment } = await modules();
   const checks = postDeployChecks(delivered(), release);
   assert.equal(checks.length, 1);
   const [owed] = checks;
   assert.equal(owed.result, 'owed'); assert.equal(owed.criterion, 'AC-3');
   const followUp = owed.followUp!;
-  assert.equal(followUp.title, `Post-deploy verification of GY-42 AC-3 on release ${release.slice(0, 12)}`);
+  assert.equal(followUp.title, `Post-deploy verification of GY-42 AC-3 (harness-drift-cleared) on release ${release.slice(0, 12)}`);
   assert.deepEqual(followUp.input.dependencies, ['e4b2a3c8-1c0e-4d0a-9b4e-1f2a3b4c5d6e']);
   assert.match(followUp.input.description, /^GY-42 was delivered with AC-3 declared a post-deploy verification/);
   // The follow-up's own criterion observes its head against the serving release: accepted, and never itself post-deploy, so it files no further follow-up.
@@ -109,6 +156,18 @@ test('unit:post-deploy-criteria — master verify-deployment checks a declared c
   const evidence = [{ id: 'e1', proof: 'manual:post-deploy/harness-drift-cleared', sha: release, baseSha: mergeSha, policyRevision: 1, producer: 'p', trusted: true, result: 'pass' as const, executed: 1, skipped: 0, at: new Date().toISOString() }];
   assert.deepEqual(postDeployChecks(delivered({ evidence }), release).map(check => [check.result, check.followUp]), [['observed', null]]);
   assert.equal(postDeployChecks(delivered({ evidence: [{ ...evidence[0], sha: 'e'.repeat(40) }] }), release)[0].result, 'owed', 'evidence at another commit observes nothing on this release');
+  // Only evidence the acceptance gate itself would accept observes it: an untrusted, stale-policy, expired, revoked,
+  // implementer-produced or failing record at the serving release is no observation, and the follow-up is owed.
+  for (const [why, rejected] of [
+    ['untrusted', { trusted: false }], ['under an earlier policy', { policyRevision: 0 }], ['expired', { expiresAt: new Date(Date.now() - 1000).toISOString() }],
+    ['revoked', { revocation: { at: new Date().toISOString(), by: 'operator', reason: 'wrong' } }], ['from an implementer', { producer: 'graphyard-claude-2' }], ['failing', { result: 'fail' }],
+  ] as const) {
+    const checked = postDeployChecks(delivered({ evidence: [{ ...evidence[0], ...rejected } as never], workspaces: [{ owner: 'graphyard-claude-2' }] as never }), release);
+    assert.equal(checked[0].result, 'owed', `${why} evidence observes nothing`);
+  }
+  // Two declared proofs of one criterion owe two distinct follow-ups.
+  const twice = postDeployChecks(delivered({ criteria: [{ ...gy1652, proofs: ['manual:post-deploy/drift', 'manual:post-deploy/status'] }] }), release);
+  assert.equal(new Set(twice.map(check => check.followUp!.title)).size, 2);
 
   // Through verifyDeployment: the record is written, then the follow-up filed once with an idempotency key.
   const now = Date.now();
@@ -136,6 +195,12 @@ test('unit:post-deploy-criteria — master verify-deployment checks a declared c
   assert.equal(again.recorded, 'existing');
   assert.deepEqual(again.postDeploy.map(check => check.followUp), ['GY-43']);
   assert.equal(filed.length, 1);
+  // Filed one after another: two owed proofs of one criterion file two items, each once, with no title read across a stale snapshot.
+  const pair = [delivered({ criteria: [{ ...gy1652, proofs: ['manual:post-deploy/drift', 'manual:post-deploy/status'] }] })];
+  const paired: string[] = [];
+  const both = await filePostDeployFollowUps(pair[0], release, pair, async (input: any) => { paired.push(input.title); return { key: `GY-${50 + paired.length}` }; });
+  assert.deepEqual(both.map(check => check.followUp), ['GY-51', 'GY-52']);
+  assert.equal(new Set(paired).size, 2);
   // A refused verification checks nothing and files nothing.
   const refused = await verifyDeployment(work[0], { ...effects, observe: async () => ({ source: 'unavailable' as const, sha: null, at: new Date(now).toISOString(), reason: 'no endpoint', deployed: [], pending: [] }) });
   assert.equal(refused.result, 'refused');

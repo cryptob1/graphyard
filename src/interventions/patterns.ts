@@ -77,7 +77,9 @@ export async function openPatternItems(engine: Engine, policy: InterventionPolic
     const key = `intervention-pattern:${pattern.kind}:${stageSlug}:${createHash('sha256').update(instances.map(entry => entry.id).sort().join(',')).digest('hex').slice(0, 32)}`;
     const work = await engine.execute(options.actor ?? controlPlaneActor, 'create', null, {
       title: `Recurring ${label} interventions at ${where}: ${instances.length} in ${policy.windowDays} days`.slice(0, 200), description: description.slice(0, 20000), type: 'bug', priority: 1,
-      criteria: [{ id: 'AC-1', text: `The cause of the recurring ${label} interventions at ${where} is found and removed: the intervention report shows the ${pattern.kind} rate at ${where} below ${policy.threshold} per ${policy.windowDays} days after the change ships, and the linked instances could not recur`, proofs: [`manual:intervention-pattern-${pattern.kind}-${stageSlug}`] }],
+      // A criterion gates the merge, so it names what the head can show (GY-1660): the post-ship rate is
+      // this detector's own observation, which opens a new item if the pattern recurs after delivery.
+      criteria: [{ id: 'AC-1', text: `The cause of the recurring ${label} interventions at ${where} is found and removed: each linked instance is reproduced against the base and shown not to recur against the candidate, by a test the change adds. The intervention report keeps counting the ${pattern.kind} rate at ${where}, and opens a new item if it again reaches ${policy.threshold} in ${policy.windowDays} days`, proofs: [`manual:intervention-pattern-${pattern.kind}-${stageSlug}`] }],
       origin: { pattern: origin }, reason: `Recurring ${label} interventions at ${where} crossed the threshold (${instances.length} ≥ ${policy.threshold} in ${policy.windowDays} days)`,
     }, key);
     opened.push(work);

@@ -3,7 +3,8 @@ import { mkdtemp, readFile, rm, symlink } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative } from 'node:path';
-import { postDeployChecks, type PostDeployCheck, type Work } from './model.js';
+import { implementerIdentities, postDeployProofPrefix, postDeployProofs, type Create, type Work } from './model.js';
+import { evidenceProves } from './model/mechanical-proofs.js';
 import type { MasterConfig } from './master.js';
 import { observeDeployment, type DeploymentObservation } from './master-daemon.js';
 import { repositoryFromRemote } from './onboarding.js';
@@ -214,24 +215,58 @@ export async function verifyDeployment(work: Work, effects: VerificationEffects,
   if (!assessment.verifiable) return result(assessment, null);
   const existing = current.delivery!.deployment?.sha === assessment.record!.sha;
   if (!existing) await effects.record(current, assessment.record!);
-  return result(assessment, existing ? 'existing' : 'now', await filePostDeployFollowUps(current, assessment.record!.sha, snapshot.work, effects.file));
+  return result(assessment, existing ? 'existing' : 'now', await filePostDeployFollowUps(current, assessment.record!.sha, snapshot.work, effects.file, new Date(now())));
+}
+
+export interface PostDeployCheck {
+  criterion: string; proof: string; result: 'observed' | 'owed';
+  /** The follow-up an owed observation files: its create input and the request id that makes filing it idempotent. */
+  followUp: { title: string; requestId: string; input: Pick<Create, 'title' | 'description' | 'type' | 'priority' | 'dependencies' | 'criteria'> } | null;
+}
+/**
+ * `master verify-deployment`'s check of the delivered item's declared post-deploy criteria (GY-1660)
+ * on the serving release `release`: a proof is observed only by evidence the acceptance gate would
+ * itself accept there — trusted, unrevoked, under the item's current policy, unexpired, from no
+ * implementer, and passing by its family's rule — recorded at that release; owed otherwise. An
+ * owed one carries its follow-up: a chore depending on the delivered item, titled for the proof so
+ * two proofs of one criterion are two items, whose single criterion asks for the same observation
+ * from its own head against that serving release — a pre-merge observation there, never itself
+ * declared post-deploy.
+ */
+export function postDeployChecks(work: Work, release: string, now = new Date()): PostDeployCheck[] {
+  const implementers = implementerIdentities(work);
+  const observes = (proof: string) => (work.evidence ?? []).some(evidence => evidence.proof === proof && evidence.sha === release && evidence.trusted && !evidence.revocation
+    && evidence.policyRevision === work.policyRevision && (!evidence.expiresAt || Date.parse(evidence.expiresAt) > now.getTime()) && !implementers.includes(evidence.producer) && evidenceProves(proof, evidence));
+  return work.criteria.flatMap(criterion => postDeployProofs(criterion).map(proof => {
+    if (observes(proof)) return { criterion: criterion.id, proof, result: 'observed' as const, followUp: null };
+    const name = proof.slice(postDeployProofPrefix.length), short = release.slice(0, 12);
+    const title = `Post-deploy verification of ${work.key} ${criterion.id} (${name}) on release ${short}`.slice(0, 200);
+    const text = `From this head against the serving release ${short} that carries ${work.key}'s merge ${work.delivery?.mergeSha.slice(0, 12) ?? ''}: ${criterion.text}`.slice(0, 2000);
+    return { criterion: criterion.id, proof, result: 'owed' as const, followUp: { title, requestId: `post-deploy:${work.id}:${criterion.id}:${proof}:${release}`, input: {
+      title, type: 'chore' as const, priority: 1, dependencies: [work.id],
+      description: `${work.key} was delivered with ${criterion.id} declared a post-deploy verification (${proof}). master verify-deployment found no trusted passing ${proof} observation on the serving release ${release}, so this item owes it: observe the outcome on that release and record the proof.\n\n${work.key} ${criterion.id}: ${criterion.text}`.slice(0, 20000),
+      criteria: [{ id: 'AC-1', text, proofs: [`manual:${name.replace(/\//g, '-')}-on-serving-release`] }] } } };
+  }));
 }
 
 /**
  * GY-1660: a verified release checks the delivered item's declared post-deploy verifications on
  * itself. An owed one files its follow-up — once: an item already holding that follow-up's title
- * is named instead, and the request id makes a retried filing a replay — so the live observation
+ * is named instead, the request id makes a retried filing a replay, and checks are filed one after
+ * another so none is filed against a snapshot another has just changed — so the live observation
  * the merge never waited for is owned by an item rather than by nobody.
  */
-export async function filePostDeployFollowUps(work: Work, release: string, all: readonly Pick<Work, 'key' | 'title'>[], file?: VerificationEffects['file']) {
-  return Promise.all(postDeployChecks(work, release).map(async check => {
-    const { followUp, ...rest } = check;
-    if (!followUp) return { ...rest, followUp: null };
-    const filed = all.find(item => item.title === followUp.title)?.key;
-    if (filed || !file) return { ...rest, followUp: filed ?? null };
+export async function filePostDeployFollowUps(work: Work, release: string, all: readonly Pick<Work, 'key' | 'title'>[], file?: VerificationEffects['file'], now = new Date()) {
+  const known = [...all], results: (Omit<PostDeployCheck, 'followUp'> & { followUp: string | null })[] = [];
+  for (const { followUp, ...rest } of postDeployChecks(work, release, now)) {
+    if (!followUp) { results.push({ ...rest, followUp: null }); continue; }
+    const filed = known.find(item => item.title === followUp.title)?.key;
+    if (filed || !file) { results.push({ ...rest, followUp: filed ?? null }); continue; }
     const created = await file(followUp.input, followUp.requestId) as { key?: string } | undefined;
-    return { ...rest, followUp: created?.key ?? null };
-  }));
+    if (created?.key) known.push({ key: created.key, title: followUp.title });
+    results.push({ ...rest, followUp: created?.key ?? null });
+  }
+  return results;
 }
 
 /** Effects bound to the real coordinator process, mirroring the daemon's. */
