@@ -47,9 +47,15 @@ test('unit:acceptance-landing-fetch — a merge commit pushed after the plane la
     // A merge that is not of the approved head is still refused after the fetch.
     assert.match(await acceptanceLandingRefusal(runner, 'main', 'd'.repeat(40), mergeSha) ?? '', /is not a merge of the approved head/);
 
-    // A failed fetch is not itself a refusal: the history the checkout holds is judged.
+    // A failed fetch records nothing: the plane's origin/main already holds the merge, yet a stale ref
+    // could as well hold an obsolete one, so the landing is refused with a retryable 503 and not judged.
     git(plane, 'remote', 'set-url', 'origin', join(fixture, 'missing.git'));
-    assert.equal(await acceptanceLandingRefusal(runner, 'main', head, mergeSha), null);
+    const judged: string[][] = [], failing: GitRunner = args => { judged.push([...args]); return runner(args); };
+    await assert.rejects(acceptanceLandingRefusal(failing, 'main', head, mergeSha), (error: { status?: number; message: string }) =>
+      error.status === 503 && /could not fetch main from origin .*nothing is recorded until it can/s.test(error.message));
+    assert.deepEqual(judged.map(args => args[0]), ['fetch'], 'nothing past the failed fetch is read');
+    // A runner that throws is a failed fetch too.
+    await assert.rejects(acceptanceLandingRefusal(async () => { throw new Error('spawn git ENOENT'); }, 'main', head, mergeSha), (error: { status?: number; message: string }) => error.status === 503 && /spawn git ENOENT/.test(error.message));
   } finally { await rm(fixture, { recursive: true, force: true }); }
 });
 

@@ -8,7 +8,8 @@ import { landableCarried } from '../../landable-check.js';
 import type { GitHub } from '../../github.js';
 import type { Store } from '../../store.js';
 import { recordedMergerMode } from '../../merger-mode.js';
-import { gitRunnerFor, type GitRunner } from '../../merge-writer/local-observation.js';
+import { gitRunnerFor, type GitResult, type GitRunner } from '../../merge-writer/local-observation.js';
+import { Refusal } from '../../model/refusal.js';
 import { defineRoutes, parseJson, type RouteContext } from '../routes.js';
 
 /**
@@ -109,10 +110,13 @@ export async function acceptanceMergeRefusal(git: GitRunner, base: string, head:
 /**
  * GY-1661: the land route's judgement of a merge-writer landing, read after fetching BASE from
  * origin, so a merge commit the writer pushed after this checkout's last fetch is found. A failed
- * fetch is not itself a refusal: the judgement then reads the history the checkout already holds.
+ * fetch records nothing: a stale origin/BASE could still hold an obsolete merge and protect its
+ * cases, so the landing is refused with 503 and the loop records it again on its next poll.
  */
 export async function acceptanceLandingRefusal(git: GitRunner, base: string, head: string, mergeSha: string): Promise<string | null> {
-  await git(['fetch', '--no-tags', 'origin', `+refs/heads/${base}:refs/remotes/origin/${base}`]).catch(() => undefined);
+  const fetched = await git(['fetch', '--no-tags', 'origin', `+refs/heads/${base}:refs/remotes/origin/${base}`])
+    .catch((error: unknown): GitResult => ({ status: null, stdout: '', stderr: error instanceof Error ? error.message : String(error) }));
+  if (fetched.status !== 0) throw new Refusal(`The control plane could not fetch ${base} from origin to read the merge writer's landing (${fetched.stderr.trim().slice(0, 500) || `git exited ${fetched.status}`}); nothing is recorded until it can`, 503);
   return acceptanceMergeRefusal(git, base, head, mergeSha);
 }
 

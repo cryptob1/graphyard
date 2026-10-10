@@ -20,7 +20,7 @@ import { diagnosticianSettings, type DiagnosticianSettings } from '../runner/pay
 import { piRunner } from '../runner/pi.js';
 import { registryHeadlessLaunch, registryRunner } from '../runner/roles.js';
 import type { Runner } from '../runner/types.js';
-import type { ChildRun } from '../child-runner.js';
+import { ChildProcessError, type ChildRun } from '../child-runner.js';
 import { type DaemonAction, message } from './state.js';
 import { record } from './effects.js';
 import { detailChanged } from './decisions.js';
@@ -95,8 +95,31 @@ interface Pending { revision: number; draft?: AcceptanceDraft | null; opened?: {
 export class UnopenableDraft extends Error {}
 /** The statuses a goal step's control-plane or GitHub request is refused outright with (GY-1661): an unchanged retry is answered the same. */
 export const outrightRefusalStatuses: readonly number[] = [401, 403, 409, 422];
-/** Refused for authority (401, 403), the current state (409) or the input (422); a reconciliation retry, which may pass once the state is re-read, is not. */
-export const refusedOutright = (error: unknown) => (error instanceof Refusal || error instanceof RefusedResponse) && !(error instanceof ReconciliationRetry) && outrightRefusalStatuses.includes(error.status);
+/**
+ * The HTTP status GitHub refused a `gh` or `git` child with, read from its stderr: gh's `HTTP 403:`
+ * or `(HTTP 409)`, git's `The requested URL returned error: 403`, and the refusals GitHub words
+ * without a number (`Bad credentials` is 401; `Resource not accessible by integration` and git's
+ * `Permission to OWNER/REPO denied` are 403). Null for any other failure, which a retry may pass.
+ */
+export function childRefusalStatus(error: unknown): number | null {
+  if (!(error instanceof ChildProcessError) || error.timedOut || !['gh', 'git'].includes(error.command)) return null;
+  const stderr = error.stderr;
+  const numbered = stderr.match(/\bHTTP (\d{3})\b|returned error: (\d{3})\b/);
+  if (numbered) return Number(numbered[1] ?? numbered[2]);
+  if (/\bBad credentials\b/i.test(stderr)) return 401;
+  if (/Resource not accessible by|Permission to \S+ denied/i.test(stderr)) return 403;
+  return null;
+}
+/**
+ * Refused for authority (401, 403), the current state (409) or the input (422), by the control
+ * plane or by GitHub through `gh` or `git`; a reconciliation retry, which may pass once the state is
+ * re-read, is not.
+ */
+export const refusedOutright = (error: unknown) => {
+  if (error instanceof ReconciliationRetry) return false;
+  const status = error instanceof Refusal || error instanceof RefusedResponse ? error.status : childRefusalStatus(error);
+  return status !== null && outrightRefusalStatuses.includes(status);
+};
 const unopenable = (error: unknown) => error instanceof UnopenableDraft || refusedOutright(error);
 const live = new Map<string, Promise<void>>();
 const pending = new Map<string, Pending>();
