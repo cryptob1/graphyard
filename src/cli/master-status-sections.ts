@@ -156,9 +156,10 @@ export async function assembleReportedAttention(
     starts: { records: await readApproverLaunches(root).catch(() => []), boundMs: launchStartMs(master), read: agent => readSessionScreen(agent.pane_id ?? agent.name!, undefined, stallScreenLines) } }),
     () => ({ listed: [], attentionItems: [] as AttentionItem[], unanswered: [], refused: 0 })));
   // GY-1609: the revision the loop raised the open owner's needs-decision at, from its cursor, so an
-  // applied answer reads as answered rather than as the decision asked again. Read only while one is open.
+  // applied answer reads as answered rather than as the decision asked again. Read only while one is open. GY-1630: with
+  // the operator-agent identity the loop requests that decision itself, so the attention names the loop, not a master.
   const escalations = openThroughputOwner(snapshot.work) ? (await readDaemonState(root, master).catch(() => null))?.actions ?? {} : {};
-  const throughput = await timedStep('attention: throughput', () => throughputStatus(root, coordinator, snapshot.work, Date.now(), owner => throughputEscalatedAt(escalations, owner)));
+  const throughput = await timedStep('attention: throughput', () => throughputStatus(root, coordinator, snapshot.work, Date.now(), owner => throughputEscalatedAt(escalations, owner), !!master.operatorAgent));
   // The readings judge the snapshot's leases and sessions at the snapshot's own instant (GY-1379): the
   // loop reads this at the end of a cycle that can run ten minutes, and a two-minute lease taken at its
   // start read against the wall clock then is a live worker misread as gone.

@@ -773,6 +773,13 @@ export const throughputDecisionCause = (detail: string | null | undefined): NonN
 /** The release a recorded needs-decision was asked on, read back from its text (`throughputStallText`), or null when it names none (GY-1609). */
 export const throughputDecisionRelease = (detail: string | null | undefined) => /(?:budgets missed|cannot accumulate) on ([0-9a-f]{12}) /.exec(detail ?? '')?.[1] ?? null;
 
+/**
+ * GY-1630: who asks a raised needs-decision, as the loop's escalation record and the status attention name it: the loop
+ * itself where it holds the decide and approver effects (the master's operator-agent identity), the hand path otherwise.
+ */
+export const throughputSelfAsked = (owner: string) => `The loop requests the requirements decision on ${owner} itself and routes it to the independent approver, relaunching one that leaves it unanswered; it closes ${owner} once the revision is applied`;
+export const throughputHandAsked = (owner: string, settles = 'answers it') => `This loop runs without the decision effects, so it cannot request it: graphyard master decide ${owner} requirements @revision.json "REASON" with a revision that ${settles}, then graphyard master approver ${owner} DECISION; the loop closes ${owner} once it is applied`;
+
 /** The needs-decision as the escalation and the attention word it, asked on the owner item it names. */
 export function throughputStallText(stall: Omit<ThroughputStall, 'text'>) {
   const decide = stall.cause === 'escalated-miss'
@@ -1011,13 +1018,14 @@ export interface ThroughputVisibility {
  * names the item that owns the verification and its progress (admitted of ten, from the newest
  * recorded measurement), and retires once a recorded measurement of the serving release verifies.
  * When that measurement shows session-free deliveries cannot accumulate (`throughputStall`) it is
- * the typed needs-decision instead, owned by the master and its approver on the owner item (GY-1438).
+ * the typed needs-decision instead, owned by the master and its approver on the owner item (GY-1438), or, where the
+ * loop holds the decision effects (`selfRequest`), by the loop that requests it and routes it to the approver (GY-1630).
  * A measurement judged under a population rule since revised raises no decision (GY-1458): the line
  * states that none remains and names the loop's re-measure, never `master decide` for the answered one.
  */
 export function throughputClaimVisibility(measurement: { report: ThroughputReport; file: string } | null, deployed: { revision: string | null; version: string | null }, deliveries: number,
   pursuit: ThroughputPursuit | null = null, ownerItem: Pick<Work, 'key'> & Partial<Pick<Work, 'policyRevision'>> | null = null, answeredAt: number | null = null,
-  raisedAt: number | null = null): ThroughputVisibility {
+  raisedAt: number | null = null, selfRequest = false): ThroughputVisibility {
   const command = throughputMeasurementCommand;
   const admitted = measurement?.report.population?.admitted ?? 0, ownerKey = ownerItem?.key ?? null;
   const owner = { item: ownerKey, admitted, needed: throughputClaim.minimumDeliveries, measuredAt: measurement?.report.measuredAt ?? null };
@@ -1049,7 +1057,8 @@ export function throughputClaimVisibility(measurement: { report: ThroughputRepor
     : `settles the population rule ${throughputClaim.item}'s claim is judged over or the coordination that leaves these fingerprints`;
   const attention = (reason: string): AttentionItem => {
     if (stall) return { subject: 'throughput', kind: 'throughput', text: `${throughputClaim.item}'s throughput claim is unverified against the deployed release and ${stall.text}`,
-      ...agentOwner('master', `graphyard master decide ${decideOn} requirements @revision.json "REASON" with a revision that ${settles}, then graphyard master approver ${decideOn} DECISION; the loop closes ${decideOn} once it is applied`, 'approver') };
+      ...(selfRequest ? agentOwner('control plane', throughputSelfAsked(decideOn), 'approver')
+        : agentOwner('master', `graphyard master decide ${decideOn} requirements @revision.json "REASON" with a revision that ${settles}, then graphyard master approver ${decideOn} DECISION; the loop closes ${decideOn} once it is applied`, 'approver')) };
     const text = `${throughputClaim.item}'s throughput claim is unverified against the deployed release: ${reason}. ${progress}${superseded}`;
     if (applied) return { subject: 'throughput', kind: 'throughput', text: `${text}; ${applied}`, ...agentOwner('control plane', `the loop closes ${ownerKey} on its next deployment step`) };
     if (!pursuit) return { subject: 'throughput', kind: 'throughput', text: `${text}; the loop re-measures the serving release at most every ${Math.round(throughputRemeasureMs / 60_000)} min while it stays unverified`, ...agentOwner('master', command) };
@@ -1084,14 +1093,14 @@ export function throughputClaimVisibility(measurement: { report: ThroughputRepor
 /**
  * The claim's visibility as master status reads it: the recorded measurement, the release the control
  * plane says is serving, and the delivered items. `raisedAt` is the owner's requirements revision at
- * which the loop raised its needs-decision, read from the loop's cursor (GY-1609).
+ * which the loop raised its needs-decision, read from the loop's cursor (GY-1609); `selfRequest`, whether the loop requests it itself (GY-1630).
  */
 export async function throughputStatus(root: string, coordinator: Parameters<typeof deployedRevision>[0] & { release?: { version?: string | null } | null }, work: Work[], now = Date.now(),
-  raisedAt: (owner: Work) => number | null = () => null): Promise<ThroughputVisibility> {
+  raisedAt: (owner: Work) => number | null = () => null, selfRequest = false): Promise<ThroughputVisibility> {
   const owner = openThroughputOwner(work);
   return throughputClaimVisibility(await readThroughputMeasurement(root).catch(() => null),
     { revision: deployedRevision(coordinator).revision, version: coordinator?.release?.version ?? null },
     work.filter(item => item.stage === 'done' && item.delivery).length,
     throughputPursuit(await readThroughputLedger(join(root, throughputMeasurementDirectory)), now), owner,
-    throughputAnsweredAt(work, deployedRevision(coordinator).revision ?? ''), owner ? raisedAt(owner) : null);
+    throughputAnsweredAt(work, deployedRevision(coordinator).revision ?? ''), owner ? raisedAt(owner) : null, selfRequest);
 }

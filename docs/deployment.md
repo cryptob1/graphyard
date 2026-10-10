@@ -33,7 +33,7 @@ A merge unserved five minutes after new `GRAPHYARD_BUILD_SHA` is `delivery.deplo
 
 Release lag and `loaded-revision` [resource](operations-reference.md#control-plane-resources) skip deliveries awaiting [promotion](delivery.md). Self-upgrades await production serving them (`release-lagged`, `upgrade:held`); `.graphyard/held-cli.json` pins `bin/graphyard.mjs`, executors, loops to it; held executors' owed restarts aren't faults.
 
-Post-deploy the loop records throughput (`.graphyard/measurements/throughput`, `scripts/measure-throughput.mjs --record`), judging the serving release over the trailing 72h's merges (never pre-GY-87) minus operator-touched, grant-refused superseded idle, idle charged from window start; ≥20 all excluded, or ≥10 missing 48h+, escalates once/release (`escalation:throughput:GY-N:REV`) on an owner item the loop closes next cycle once an answering revision applies; `master status` then stops naming `master decide`.
+Post-deploy the loop records throughput (`.graphyard/measurements/throughput`, `scripts/measure-throughput.mjs --record`), judging the serving release over the trailing 72h's merges (never pre-GY-87) minus operator-touched, grant-refused superseded idle, idle charged from window start; ≥20 all excluded, or ≥10 missing 48h+, escalates once/release (`escalation:throughput:GY-N:REV`) on an owner item; the loop itself requests its unchanged-budget requirements decision for the approver, closing the owner once applied.
 
 ### Deployment incident
 

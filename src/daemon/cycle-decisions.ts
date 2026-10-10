@@ -17,7 +17,7 @@ import type { FaultKind } from '../model/fault-classes.js';
 import type { Cycle } from './cycle.js';
 import { baseRefreshConflict } from '../merge-queue.js';
 import { docsSyncRoute } from './docs-sync-route.js';
-import { wakeObservationJob } from './cycle-delivery.js';
+import { throughputDecisionAdopts, throughputRoutineDecision, wakeObservationJob } from './cycle-delivery.js';
 import { createApproverSupervisor } from './cycle-approvers.js';
 import { decisionBudget, deferredFirst, settleDeferred } from './decision-budget.js';
 import { staleReleaseStep } from './stale-releases.js';
@@ -133,8 +133,8 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       }
       // The control plane holds one requirements decision at a time. One that answers no scope
       // request (a master's own revision) is not this request's answer: it is left to its
-      // requester, and this one is asked once it settles.
-      if (standing && decision.action === 'requirements' && !standing.input?.answers) {
+      // requester, and this one is asked once it settles. The throughput owner's needs-decision answers no scope request: only a revision whose whole input is its option of record is it (GY-1630).
+      if (standing && decision.action === 'requirements' && !standing.input?.answers && !throughputDecisionAdopts(standing.input, decision, item)) {
         const other = JSON.stringify(standing.input?.plannedFiles) !== JSON.stringify(decision.input?.plannedFiles) ? 'another planned-files revision' : 'a widening that answers no scope request';
         throw new Error(`requirements decision ${standing.id} is ${standing.state} for ${other}, not the widening ${item.key}'s scope request asks for; it is left to its requester, and the control plane holds one at a time, so this one is requested once it settles: graphyard master decisions ${item.key}`);
       }
@@ -461,7 +461,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     const scope = scopeRoutineDecision(scoped, clock, findingsJudged(scoped)) ?? blockerScopeDecision(scoped);
     if (scope) item = scoped;
     const refused = refusedByWork.get(item.key) ?? [];
-    let decision = scope ?? routineDecision(item, config, clock, assessment, cycle.baseFailed.get(item.id), exhausted, mechanical, refused);
+    let decision = scope ?? (effects.decide && effects.approver ? throughputRoutineDecision(item, state.actions) : null) ?? routineDecision(item, config, clock, assessment, cycle.baseFailed.get(item.id), exhausted, mechanical, refused); // GY-1630: the throughput owner's standing needs-decision is the loop's to request
     if (!decision) {
       // Still called for, only not attestable this cycle: its request is not one the item moved past.
       const called = neededDecision(item, config, cycle.baseFailed.get(item.id), exhausted, mechanical, refused);

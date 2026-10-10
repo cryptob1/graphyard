@@ -136,6 +136,27 @@ test('unit:throughput-attention-names-owner — the needs-decision attention nam
   assert.match(populationRule, /an approver session never exclude/);
   assert.match(criterion ?? '', /no coordination session other than an approver's recorded on it \(one recording no role excludes\)/);
   assert.deepEqual(throughputOwnerItem(revision, 0).criteria, [{ id: 'AC-1', text: criterion, proofs: ['manual:throughput-claim-verified'] }]);
+
+  // GY-1630: where the loop holds the decision effects it requests the decision itself, so the
+  // attention names the loop as the stall decision's agent-owner, never a master session to hand-drive it.
+  const loopOwned = throughputClaimVisibility({ report, file }, serving, throughputStallBound, null, { key: 'GY-7300' }, null, null, true);
+  assert.equal(loopOwned.attention!.role, 'control plane'); assert.equal(loopOwned.attention!.approvedBy, 'approver');
+  assert.match(loopOwned.attention!.next, /^The loop requests the requirements decision on GY-7300 itself and routes it to the independent approver/);
+  assert.doesNotMatch(loopOwned.attention!.next, /graphyard master (decide|approver)/);
+  // A loop without the decide/approver effects still records the waiting escalation naming the hand path.
+  const { throughputEscalationKey } = await import('../src/daemon/cycle-delivery.js');
+  const directory = await temporaryDirectory('throughput-attention-names-owner');
+  try {
+    const clock = { now: base + 2 * 24 * 60 * minute };
+    const work: Work[] = [...accumulated(staleRework(10, null)), openOwner('GY-7301')];
+    const { master, state, effects } = await convergenceLoop(directory, work, clock);
+    assert.equal(effects.decide, undefined, 'an effect-less loop');
+    await runCycle(master, state, effects, () => clock.now);
+    const raised = state.actions[throughputEscalationKey('GY-7301', 1)]!;
+    assert.equal(raised.state, 'waiting');
+    assert.match(raised.detail, /This loop runs without the decision effects, so it cannot request it: graphyard master decide GY-7301 requirements @revision\.json "REASON" .*then graphyard master approver GY-7301 DECISION/);
+    assert.ok(!Object.keys(state.approvals).length, 'and requests nothing');
+  } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
 test('integration:throughput-owner-filed-when-masterless — a needs-decision standing with no open owner (the previous one closed) gets a filed owner carrying the settled AC-1 within one cycle, under a key a reused release never collides on, and the decision is raised on it', async () => {
@@ -500,5 +521,216 @@ test('integration:throughput-owner-converges — after the fix the open owner re
     assert.equal(status.verdict, 'verified');
     assert.equal(status.attention, null, 'no unverified claim stands, owned or not, and no escalation repeats');
     assert.equal(status.pursuit, null);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+// GY-1630: the loop requests the owner's standing needs-decision itself, as a routine requirements
+// decision put to the independent approver, instead of waiting for a master or doctor to hand-drive it.
+type Ledgered = { id: string; action: string; state: string; input: any; reason: string; outcome: string | null; approvedBy: string | null; approvedAt?: string | null; refusal: { approver: string; reason: string } | null };
+/** The control plane's decision ledger and the approver sessions, as the loop's decision effects see them. */
+function decisionPlane(effects: DaemonEffects, clock: { now: number }) {
+  const gone = new Set<string>(), ledger = new Map<string, Ledgered[]>(), launches: { key: string; decision: string; agentName: string; at: number }[] = [], requests: { key: string; action: string; reason: string; input: any; at: number }[] = [], withdrawn: string[] = [];
+  let id = 0;
+  Object.assign(effects, {
+    herdr: () => ({ available: true, agents: launches.filter(launch => ledger.get(launch.key)!.find(entry => entry.id === launch.decision)?.state === 'requested').filter(launch => !gone.has(launch.agentName)).map(launch => ({ name: launch.agentName, agent_status: 'working' })) }),
+    decisions: async (work: Work) => ({ decisions: ledger.get(work.key) ?? [] }),
+    decide: async (work: Work, action: string, reason: string, input: Record<string, unknown> = {}) => {
+      const { decisionInput } = await import('../src/master.js');
+      const full = decisionInput(action, work, input), entry: Ledgered = { id: `00000000-0000-4000-8000-${String(++id).padStart(12, '0')}`, action, state: 'requested', input: full, reason, outcome: null, approvedBy: null, refusal: null };
+      requests.push({ key: work.key, action, reason, input: full, at: clock.now });
+      ledger.set(work.key, [...ledger.get(work.key) ?? [], entry]);
+      return { id: entry.id, state: 'requested' };
+    },
+    withdraw: async (work: Work, decision: string) => { withdrawn.push(`${work.key}:${decision}`); const entry = ledger.get(work.key)?.find(each => each.id === decision); if (entry) entry.state = 'withdrawn'; },
+    approver: async (work: Work, decision: string) => {
+      const agentName = `gy-approver-${work.key.toLowerCase()}-${decision.slice(-8)}-${launches.length}`;
+      launches.push({ key: work.key, decision, agentName, at: clock.now });
+      return { agentName, pane: null };
+    },
+  });
+  /** The independent approver's answer: an approval applies the revision (the owner's policy revision moves on), a refusal stands. */
+  const judge = (owner: Work, verdict: 'approve' | 'refuse') => {
+    const entry = ledger.get(owner.key)!.find(each => each.state === 'requested')!;
+    if (verdict === 'refuse') { Object.assign(entry, { state: 'refused', refusal: { approver: 'graphyard-approver', reason: 'Not this release' } }); return entry; }
+    Object.assign(entry, { state: 'applied', approvedBy: 'graphyard-approver', approvedAt: new Date(clock.now).toISOString(), outcome: 'Requirements revised to policy revision 2' });
+    owner.policyRevision = entry.input.expectedPolicyRevision + 1;
+    return entry;
+  };
+  return { ledger, launches, requests, withdrawn, judge, gone };
+}
+
+test('unit:throughput-stall-routine-decision — a waiting throughput escalation on the open owner at its raise revision yields one requirements decision in the option-of-record form, bound to that raise, and none once answered, settled, closed or unraised', async () => {
+  const { throughputRoutineDecision, throughputEscalationKey, throughputDecisionBound } = await import('../src/daemon/cycle-delivery.js');
+  const { throughputStallText } = await import('../src/throughput.js');
+  const owner = openOwner('GY-1626'), stall = throughputStall(measure(blockedWindow()), 'GY-1626')!;
+  const key = throughputEscalationKey('GY-1626', 1), raised = { kind: 'escalation', work: 'GY-1626', principal: null, state: 'waiting', detail: throughputStallText(stall), attempts: 1, cycle: 3, at: at(0) } as any;
+  const decision = throughputRoutineDecision(owner, { [key]: raised })!;
+  assert.equal(decision.action, 'requirements');
+  assert.equal(decision.binding, `throughput:1:${stall.measuredAt}`, 'one binding per raise: the revision raised at and the measurement it stands on');
+  assert.ok(throughputDecisionBound(decision.binding));
+  assert.equal(decision.input!.expectedPolicyRevision, 1, 'expectedPolicyRevision binds the revision to the raise');
+  assert.deepEqual(decision.input!.plannedFiles, owner.plannedFiles ?? []);
+  const [criterion] = decision.input!.criteria as Work['criteria'];
+  assert.deepEqual(criterion!.proofs, ['manual:throughput-claim-verified']);
+  assert.match(criterion!.text, /the coordination is left unchanged/);
+  assert.match(criterion!.text, /recorded unverified and never relaxed/);
+  assert.match(criterion!.text, new RegExp(`on the release ${revision.slice(0, 12)} it was asked on`));
+  assert.match(criterion!.text, /first-submit-to-merge p50 at most 30 minutes.*at least 10 session-free deliveries/);
+  assert.match(decision.reason, /requests it itself \(GY-1630\)/);
+  assert.match(decision.reason, /budgets unchanged and never relaxed/);
+  assert.ok(decision.reason.length <= 2000 && criterion!.text.length <= 2000);
+  assert.deepEqual(throughputRoutineDecision(owner, { [key]: raised }), decision, 'the same raise asks the same decision every cycle');
+  // Answered (a revision applied after the raise), settled, closed, never raised, or another item's: nothing to request.
+  assert.equal(throughputRoutineDecision({ ...owner, policyRevision: 2 } as Work, { [key]: raised }), null);
+  assert.equal(throughputRoutineDecision(owner, { [key]: { ...raised, state: 'done' } }), null);
+  assert.equal(throughputRoutineDecision({ ...owner, stage: 'done' } as Work, { [key]: raised }), null);
+  assert.equal(throughputRoutineDecision(owner, {}), null);
+  assert.equal(throughputRoutineDecision({ ...owner, key: 'GY-1627', title: 'Something else' } as Work, { [key]: raised }), null);
+});
+
+test('integration:throughput-owner-self-request — the loop requests the owner\'s standing needs-decision itself through effects.decide and routes it to the approver; an approved revision closes the owner in the same cycle and is never asked again on the release, and a refusal is left standing for the master', async () => {
+  const { throughputEscalationKey } = await import('../src/daemon/cycle-delivery.js');
+  const { throughputStatus } = await import('../src/throughput.js');
+  for (const verdict of ['approve', 'refuse'] as const) {
+    const directory = await temporaryDirectory(`throughput-owner-self-request-${verdict}`);
+    try {
+      const clock = { now: base + 2 * 24 * 60 * minute };
+      const owner = openOwner('GY-1626');
+      const work: Work[] = [...accumulated(staleRework(10, null)), owner];
+      const { master, state, effects, filed, closed } = await convergenceLoop(directory, work, clock);
+      const plane = decisionPlane(effects, clock);
+      await runCycle(master, state, effects, () => clock.now);
+      const key = throughputEscalationKey('GY-1626', 1);
+      assert.equal(state.actions[key]?.state, 'waiting', 'the needs-decision is raised on the open owner and stays the record');
+      assert.match(state.actions[key]!.detail, /The loop requests the requirements decision on GY-1626 itself and routes it to the independent approver/);
+      assert.doesNotMatch(state.actions[key]!.detail, /graphyard master decide/, 'a loop with the decision effects names no hand path');
+
+      // The next cycle's decision step asks it, with no master or doctor session in the path.
+      clock.now += 2 * minute;
+      await runCycle(master, state, effects, () => clock.now);
+      assert.equal(plane.requests.length, 1, 'requested once');
+      const [request] = plane.requests;
+      assert.deepEqual([request!.key, request!.action], ['GY-1626', 'requirements']);
+      assert.equal(request!.input.expectedPolicyRevision, 1);
+      assert.deepEqual(request!.input.plannedFiles, []);
+      assert.match(request!.input.criteria[0].text, /coordination is left unchanged.*recorded unverified and never relaxed/);
+      assert.deepEqual(plane.launches.map(launch => launch.key), ['GY-1626'], 'and put to the independent approver');
+      const watch = Object.values(state.approvals).find(entry => entry.work === 'GY-1626')!;
+      assert.equal(watch.action, 'requirements');
+      const status = await throughputStatus(directory, { release: { version: '1', revision } }, work, clock.now, () => 1, true);
+      assert.equal(status.attention!.role, 'control plane', 'master status names the loop, not a master session');
+      assert.match(status.attention!.next, /The loop requests the requirements decision on GY-1626 itself/);
+      assert.doesNotMatch(status.attention!.next, /graphyard master decide/);
+
+      // While it is with its approver, nothing is asked again.
+      for (let cycle = 0; cycle < 3; cycle++) { clock.now += 2 * minute; await runCycle(master, state, effects, () => clock.now); }
+      assert.equal(plane.requests.length, 1, 'one request per raise, never one per cycle');
+      assert.equal(plane.launches.length, 1);
+
+      plane.judge(owner, verdict);
+      clock.now += 2 * minute;
+      await runCycle(master, state, effects, () => clock.now);
+      if (verdict === 'approve') {
+        assert.deepEqual(closed, ['GY-1626'], 'the applied revision closes the owner in the same cycle, through the unchanged closure path');
+        assert.equal(state.actions[key]?.state, 'done');
+        assert.equal(filed.length, 1, 'the release stays owned by a successor');
+        for (let cycle = 0; cycle < 4; cycle++) { clock.now += 31 * minute; await runCycle(master, state, effects, () => clock.now); }
+        assert.equal(plane.requests.length, 1, 'the answered decision is never requested again on the same release');
+        assert.equal(Object.keys(state.actions).filter(entry => entry.startsWith('escalation:throughput:')).length, 1);
+      } else {
+        assert.deepEqual(closed, [], 'a refused decision answers nothing: the owner stays open');
+        assert.ok(Object.entries(state.actions).some(([entry, action]) => entry.startsWith('escalation:decision-refused:') && action.work === 'GY-1626'), 'the refusal is left standing for the master');
+        for (let cycle = 0; cycle < 4; cycle++) { clock.now += 2 * minute; await runCycle(master, state, effects, () => clock.now); }
+        assert.equal(plane.requests.length, 1, 'the loop does not request it again');
+        assert.equal(plane.launches.length, 1, 'or launch another approver');
+        assert.equal(state.actions[key]?.state, 'waiting');
+      }
+      assert.deepEqual(plane.withdrawn, [], 'nothing the loop asked was withdrawn');
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  }
+});
+
+test('integration:throughput-owner-approver-bound — an approver that leaves the loop\'s throughput decision unanswered is relaunched within unansweredDecisionMs (10 minutes) with no hand intervention, and the same request is judged by the replacement', async () => {
+  const { unansweredDecisionMs } = await import('../src/daemon/doctor.js');
+  const { approverJudgeBoundMs } = await import('../src/daemon/decisions.js');
+  assert.equal(unansweredDecisionMs, 10 * minute);
+  assert.ok(approverJudgeBoundMs <= unansweredDecisionMs, 'the supervision judges a silent approver on the same bound');
+  const directory = await temporaryDirectory('throughput-owner-approver-bound');
+  try {
+    const clock = { now: base + 2 * 24 * 60 * minute };
+    const owner = openOwner('GY-1626');
+    const work: Work[] = [...accumulated(staleRework(10, null)), owner];
+    const { master, state, effects, closed } = await convergenceLoop(directory, work, clock);
+    const plane = decisionPlane(effects, clock);
+    const cycleMs = 2 * minute;
+    const cycle = async () => { await runCycle(master, state, effects, () => clock.now); clock.now += cycleMs; };
+    for (let count = 0; count < 2; count++) await cycle();
+    assert.equal(plane.launches.length, 1);
+    const requestedAt = plane.requests[0]!.at;
+
+    // The approver vanishes without judging it (GY-1626's approver was lost so): a fresh one is launched well inside the bound.
+    await cycle();
+    plane.gone.add(plane.launches[0]!.agentName);
+    const vanishedAt = clock.now;
+    while (plane.launches.length < 2 && clock.now <= vanishedAt + unansweredDecisionMs) await cycle();
+    assert.equal(plane.launches.length, 2, 'the unanswered decision got a fresh approver');
+    assert.ok(plane.launches[1]!.at - vanishedAt < unansweredDecisionMs, `relaunched ${Math.round((plane.launches[1]!.at - vanishedAt) / 1000)}s after its approver vanished`);
+    assert.ok(plane.launches[1]!.at - requestedAt <= unansweredDecisionMs, 'and within ten minutes of the request');
+
+    // The replacement stays working and never judges it: the supervision replaces it once the judge bound passes, on the next cycle.
+    const relaunchedAt = plane.launches[1]!.at;
+    while (plane.launches.length < 3 && clock.now <= relaunchedAt + approverJudgeBoundMs + cycleMs) await cycle();
+    assert.equal(plane.launches.length, 3, 'a silent approver is replaced too');
+    assert.ok(plane.launches[2]!.at - relaunchedAt <= approverJudgeBoundMs + cycleMs, 'on the first cycle past the bound');
+    assert.ok(plane.launches.every(launch => launch.decision === plane.launches[0]!.decision), 'every replacement judges the same request');
+    assert.equal(plane.requests.length, 1, 'no second request');
+    plane.judge(owner, 'approve');
+    await cycle();
+    assert.deepEqual(closed, ['GY-1626'], 'its approval closes the owner');
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('integration:throughput-owner-self-request — a requirements revision standing on the owner that is not the option of record (a master\'s own criteria edit at the same revision) is left to its requester: the loop adopts only a standing request whose whole input is its own, launches no approver for another, and asks its own once that settles', async () => {
+  const { throughputRoutineDecision, throughputEscalationKey } = await import('../src/daemon/cycle-delivery.js');
+  const { decisionInput } = await import('../src/master.js');
+  const directory = await temporaryDirectory('throughput-owner-self-request-foreign');
+  try {
+    const clock = { now: base + 2 * 24 * 60 * minute };
+    const owner = openOwner('GY-1626');
+    const work: Work[] = [...accumulated(staleRework(10, null)), owner];
+    const { master, state, effects, closed } = await convergenceLoop(directory, work, clock);
+    const plane = decisionPlane(effects, clock);
+    await runCycle(master, state, effects, () => clock.now);
+    assert.equal(state.actions[throughputEscalationKey('GY-1626', 1)]?.state, 'waiting');
+    // A master's own revision at the raise revision, same planned files, other criteria: not the throughput decision.
+    const foreign = { id: '00000000-0000-4000-8000-00000000f00d', action: 'requirements', state: 'requested', reason: 'A master edits the criteria', outcome: null, approvedBy: null, refusal: null,
+      input: decisionInput('requirements', owner, { criteria: [{ id: 'AC-1', text: 'Something else entirely', proofs: ['unit:other'] }] }) };
+    plane.ledger.set('GY-1626', [foreign]);
+    for (let cycle = 0; cycle < 3; cycle++) { clock.now += 2 * minute; await runCycle(master, state, effects, () => clock.now); }
+    assert.equal(plane.requests.length, 0, 'the loop asks nothing while another requirements decision stands');
+    assert.equal(plane.launches.length, 0, 'and launches no approver for a request it did not make');
+    assert.deepEqual(plane.withdrawn, [], 'nor withdraws its requester\'s');
+    assert.deepEqual(closed, []);
+    // Once it settles (its requester withdrew it), the loop asks its own and routes it to the approver.
+    foreign.state = 'withdrawn';
+    clock.now += 2 * minute;
+    await runCycle(master, state, effects, () => clock.now);
+    assert.equal(plane.requests.length, 1);
+    assert.deepEqual(plane.launches.map(launch => launch.decision), [plane.ledger.get('GY-1626')!.at(-1)!.id]);
+
+    // A lost reply: the standing request whose whole input is the option of record is adopted, never asked twice.
+    const directory2 = await temporaryDirectory('throughput-owner-self-request-adopt');
+    try {
+      const second = openOwner('GY-1627'), clock2 = { now: clock.now };
+      const loop = await convergenceLoop(directory2, [...accumulated(staleRework(10, null)), second], clock2);
+      const plane2 = decisionPlane(loop.effects, clock2);
+      await runCycle(loop.master, loop.state, loop.effects, () => clock2.now);
+      const own = throughputRoutineDecision(second, loop.state.actions)!;
+      plane2.ledger.set('GY-1627', [{ id: '00000000-0000-4000-8000-00000000beef', action: 'requirements', state: 'requested', reason: own.reason, outcome: null, approvedBy: null, refusal: null, input: decisionInput('requirements', second, own.input!) }]);
+      clock2.now += 2 * minute;
+      await runCycle(loop.master, loop.state, loop.effects, () => clock2.now);
+      assert.deepEqual(plane2.requests, [], 'the standing request is the loop\'s own: adopted');
+      assert.deepEqual(plane2.launches.map(launch => launch.decision), ['00000000-0000-4000-8000-00000000beef'], 'and routed to the approver');
+    } finally { await rm(directory2, { recursive: true, force: true }); }
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
