@@ -595,6 +595,8 @@ export function throughputOwnerItem(revision: string, admitted: number | null) {
 
 /** How an owner's closure reason names an answered escalated miss (`throughputOwnerClosure`, GY-1587). */
 const escalatedMissAnswer = ' on an escalated budget miss';
+/** How that reason names the release the answered miss was asked on (GY-1609). */
+const escalatedMissRelease = ' of ';
 
 /**
  * Why the loop closes the owner now, or null while it must stay open: the newest answer for the
@@ -602,10 +604,11 @@ const escalatedMissAnswer = ' on an escalated budget miss';
  * so a release that is still unverified always has an open owner.
  */
 export function throughputOwnerClosure(owner: Pick<Work, 'key' | 'policyRevision'>, serving: { revision: string; verdict: ThroughputReport['verdict'] | null }, raisedAt: number | null,
-  cause: ThroughputStall['cause'] = 'stall'): string | null {
+  cause: ThroughputStall['cause'] = 'stall', asked: string | null = null): string | null {
   if (serving.verdict === 'verified') return `${throughputClaim.item}'s throughput claim verified on the serving release ${serving.revision}; the loop closes ${owner.key}, which owned that verification`;
   // GY-1587: the reason names an escalated miss it answered, so `throughputAnsweredAt` tells that answer from a stall's.
-  if (throughputOwnerAnswered(owner, raisedAt)) return `${owner.key}'s needs-decision (raised at its requirements revision ${raisedAt}${cause === 'escalated-miss' ? escalatedMissAnswer : ''}) was answered by its requirements revision ${owner.policyRevision}; the loop closes it, and files a second owner for ${serving.revision.slice(0, 12)} only while a measurement of it under the applied rule still shows a needs-decision standing, in this same cycle: the next release it measures unverified files a new one`;
+  // GY-1609: and the release that miss was asked on (`asked`), which the release serving now need not be.
+  if (throughputOwnerAnswered(owner, raisedAt)) return `${owner.key}'s needs-decision (raised at its requirements revision ${raisedAt}${cause === 'escalated-miss' ? `${escalatedMissAnswer}${asked ? `${escalatedMissRelease}${asked.slice(0, 12)}` : ''}` : ''}) was answered by its requirements revision ${owner.policyRevision}; the loop closes it, and files a second owner for ${serving.revision.slice(0, 12)} only while a measurement of it under the applied rule still shows a needs-decision standing, in this same cycle: the next release it measures unverified files a new one`;
   return null;
 }
 
@@ -615,7 +618,7 @@ export function throughputOwnerClosure(owner: Pick<Work, 'key' | 'policyRevision
  * successor's idempotency key names it, so one is filed per (release, answered revision) (GY-1467).
  */
 export function throughputOwnerAnsweredBy(owner: Pick<Work, 'closure'> | undefined): number | null {
-  const answered = /needs-decision \(raised at its requirements revision \d+(?: on an escalated budget miss)?\) was answered by its requirements revision (\d+)/.exec(owner?.closure?.reason ?? '');
+  const answered = /needs-decision \(raised at its requirements revision \d+(?: on an escalated budget miss(?: of [0-9a-f]{12})?)?\) was answered by its requirements revision (\d+)/.exec(owner?.closure?.reason ?? '');
   return answered ? Number(answered[1]) : null;
 }
 
@@ -723,10 +726,25 @@ export const throughputDecision = (report: ThroughputReport, pursuit: Pick<Throu
  * measurement verifies, and the next release asks afresh. An answered stall is a different decision
  * and never stands in for it: a population that accumulates after its stall was answered still has
  * its escalated miss asked.
+ *
+ * GY-1609: an owner stays open across releases, so the release its decision was answered on is the
+ * one the escalation asked it on, which its closure names (`on an escalated budget miss of REVISION`),
+ * whatever its title says or which release served when the answer landed: an owner asked on A whose
+ * answer is applied once B serves answers A's miss, never B's, which is asked afresh. A closure written
+ * before the release was named reads the release it served then (`files a second owner for REVISION`)
+ * or its title: GY-1471 (filed for 3de6fef53f00) and GY-1601 (filed for 77db400620f4) answered the
+ * escalated miss on 9a75e367d6ec and 07094753fccc. The loop judges it the same way, so master status
+ * never asks a successor the decision the loop does not raise on it, which no applied revision could then answer.
  */
 export function throughputAnsweredAt(work: readonly Pick<Work, 'title' | 'closure'>[], revision: string): number | null {
-  const title = throughputOwnerItem(revision, null).title;
-  const answered = work.filter(item => item.title === title && throughputOwnerAnsweredBy(item) !== null && (item.closure?.reason ?? '').includes(escalatedMissAnswer)).map(item => time(item.closure?.at)).filter((at): at is number => at !== null);
+  const title = throughputOwnerItem(revision, null).title, serving = `files a second owner for ${revision.slice(0, 12)} `;
+  const named = `${escalatedMissAnswer}${escalatedMissRelease}`, asked = `${named}${revision.slice(0, 12)})`;
+  const answeredOn = (item: Pick<Work, 'title' | 'closure'>) => {
+    const reason = item.closure?.reason ?? '';
+    if (!reason.includes(escalatedMissAnswer) || throughputOwnerAnsweredBy(item) === null) return false;
+    return reason.includes(named) ? reason.includes(asked) : item.title === title || reason.includes(serving);
+  };
+  const answered = work.filter(answeredOn).map(item => time(item.closure?.at)).filter((at): at is number => at !== null);
   return answered.length ? Math.max(...answered) : null;
 }
 
@@ -752,6 +770,8 @@ export const settledExclusions = (exclusions: readonly string[]) => exclusions.f
 const escalatedMissDecide = 'Decide whether the coordination that leaves the claim missing its budgets changes';
 /** What raised the needs-decision an escalation action records, read from its text (`throughputStallText`). */
 export const throughputDecisionCause = (detail: string | null | undefined): NonNullable<ThroughputStall['cause']> => detail?.includes(escalatedMissDecide) ? 'escalated-miss' : 'stall';
+/** The release a recorded needs-decision was asked on, read back from its text (`throughputStallText`), or null when it names none (GY-1609). */
+export const throughputDecisionRelease = (detail: string | null | undefined) => /(?:budgets missed|cannot accumulate) on ([0-9a-f]{12}) /.exec(detail ?? '')?.[1] ?? null;
 
 /** The needs-decision as the escalation and the attention word it, asked on the owner item it names. */
 export function throughputStallText(stall: Omit<ThroughputStall, 'text'>) {
@@ -996,7 +1016,8 @@ export interface ThroughputVisibility {
  * states that none remains and names the loop's re-measure, never `master decide` for the answered one.
  */
 export function throughputClaimVisibility(measurement: { report: ThroughputReport; file: string } | null, deployed: { revision: string | null; version: string | null }, deliveries: number,
-  pursuit: ThroughputPursuit | null = null, ownerItem: Pick<Work, 'key'> | null = null, answeredAt: number | null = null): ThroughputVisibility {
+  pursuit: ThroughputPursuit | null = null, ownerItem: Pick<Work, 'key'> & Partial<Pick<Work, 'policyRevision'>> | null = null, answeredAt: number | null = null,
+  raisedAt: number | null = null): ThroughputVisibility {
   const command = throughputMeasurementCommand;
   const admitted = measurement?.report.population?.admitted ?? 0, ownerKey = ownerItem?.key ?? null;
   const owner = { item: ownerKey, admitted, needed: throughputClaim.minimumDeliveries, measuredAt: measurement?.report.measuredAt ?? null };
@@ -1006,7 +1027,12 @@ export function throughputClaimVisibility(measurement: { report: ThroughputRepor
   // GY-1587: an escalated miss is asked once per release; once answered, the release stays owned
   // and the line says so, rather than repeating the escalation or asking the answered decision again.
   const answered = decision?.cause === 'escalated-miss' && answeredAt !== null ? new Date(answeredAt).toISOString() : null;
-  const stall = answered ? null : decision;
+  // GY-1609: a needs-decision the loop raised on the open owner and a requirements revision since
+  // answered is applied: the loop closes the owner on its next deployment step, so the line says so
+  // and never asks `master decide` and `master approver` for the decision already applied.
+  const applied = decision && ownerItem?.policyRevision !== undefined && throughputOwnerAnswered({ policyRevision: ownerItem.policyRevision }, raisedAt)
+    ? `${ownerKey}'s needs-decision (raised at its requirements revision ${raisedAt}) was answered by its requirements revision ${ownerItem.policyRevision}, which is applied; the loop closes ${ownerKey} on its next deployment step` : null;
+  const stall = answered || applied ? null : decision;
   // GY-1458: a measurement judged under a population rule since revised and applied asks no decision —
   // that one is answered — so the line says none remains and when the loop re-measures under the applied rule.
   const superseded = serving && throughputRuleSuperseded(measurement!.report)
@@ -1025,6 +1051,7 @@ export function throughputClaimVisibility(measurement: { report: ThroughputRepor
     if (stall) return { subject: 'throughput', kind: 'throughput', text: `${throughputClaim.item}'s throughput claim is unverified against the deployed release and ${stall.text}`,
       ...agentOwner('master', `graphyard master decide ${decideOn} requirements @revision.json "REASON" with a revision that ${settles}, then graphyard master approver ${decideOn} DECISION; the loop closes ${decideOn} once it is applied`, 'approver') };
     const text = `${throughputClaim.item}'s throughput claim is unverified against the deployed release: ${reason}. ${progress}${superseded}`;
+    if (applied) return { subject: 'throughput', kind: 'throughput', text: `${text}; ${applied}`, ...agentOwner('control plane', `the loop closes ${ownerKey} on its next deployment step`) };
     if (!pursuit) return { subject: 'throughput', kind: 'throughput', text: `${text}; the loop re-measures the serving release at most every ${Math.round(throughputRemeasureMs / 60_000)} min while it stays unverified`, ...agentOwner('master', command) };
     if (!pursuit.escalated) return { subject: 'throughput', kind: 'throughput', text: `${text}; ${pursuit.text}`, inMotionUntil: pursuit.dueAt, ...agentOwner('master', command) };
     // Past the bound the line names the blocker. Only two blockers are a human's to remove (AGENTS.md):
@@ -1054,11 +1081,17 @@ export function throughputClaimVisibility(measurement: { report: ThroughputRepor
   return { ...base, pursuit: null, verdict: 'verified', reason: measurement.report.reason, shortfall: null, attention: null };
 }
 
-/** The claim's visibility as master status reads it: the recorded measurement, the release the control plane says is serving, and the delivered items. */
-export async function throughputStatus(root: string, coordinator: Parameters<typeof deployedRevision>[0] & { release?: { version?: string | null } | null }, work: Work[], now = Date.now()): Promise<ThroughputVisibility> {
+/**
+ * The claim's visibility as master status reads it: the recorded measurement, the release the control
+ * plane says is serving, and the delivered items. `raisedAt` is the owner's requirements revision at
+ * which the loop raised its needs-decision, read from the loop's cursor (GY-1609).
+ */
+export async function throughputStatus(root: string, coordinator: Parameters<typeof deployedRevision>[0] & { release?: { version?: string | null } | null }, work: Work[], now = Date.now(),
+  raisedAt: (owner: Work) => number | null = () => null): Promise<ThroughputVisibility> {
+  const owner = openThroughputOwner(work);
   return throughputClaimVisibility(await readThroughputMeasurement(root).catch(() => null),
     { revision: deployedRevision(coordinator).revision, version: coordinator?.release?.version ?? null },
     work.filter(item => item.stage === 'done' && item.delivery).length,
-    throughputPursuit(await readThroughputLedger(join(root, throughputMeasurementDirectory)), now), openThroughputOwner(work),
-    throughputAnsweredAt(work, deployedRevision(coordinator).revision ?? ''));
+    throughputPursuit(await readThroughputLedger(join(root, throughputMeasurementDirectory)), now), owner,
+    throughputAnsweredAt(work, deployedRevision(coordinator).revision ?? ''), owner ? raisedAt(owner) : null);
 }
