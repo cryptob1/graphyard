@@ -181,7 +181,7 @@ export async function setupMaster(root: string, input: { url: string; token: str
   // GY-1553: control-plane merger installs correctly have no GitHub App; treat that as app-pending
   // so master init can write the worker block before any App exists (same as install --apply's allowPendingApp).
   const controlPlaneMerger = status.mergeWriter?.merger === 'control-plane';
-  const appPending = (input.allowPendingApp === true || controlPlaneMerger) && (status.githubAppId === null || status.githubAppId === undefined);
+  const appPending = (input.allowPendingApp === true || controlPlaneMerger) && (status.githubAppId == null || status.githubAppId <= 0);
   if (!appPending && (!Number.isSafeInteger(status.githubAppId) || status.githubAppId <= 0)) throw new Error('Master setup requires the control plane to identify its GitHub App');
   assertRepository(detected.repository, status.repository);
   if (!detected.repository) throw new Error('Master setup requires a recognized GitHub origin');
