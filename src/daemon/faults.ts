@@ -3,6 +3,7 @@
 import { createHash } from 'node:crypto';
 import type { Work } from '../model.js';
 import { classified, classifyAttention, faultClasses, faultClassItem, faultClassPolicyFromEnv, recurringClasses, standingScopeRequest, statusFaults, trackFaults, unboundedAttemptKey, workFaults, type FaultClassPolicy, type FaultKind, type FaultObservation } from '../model/fault-classes.js';
+import { forgetDoneLinks, linkInstance } from '../model/fault-record.js';
 import { buildMasterStatus, diskThresholdBytes, type AttentionItem, type ContainmentAssessment, type ControlPlaneStatus, type HerdrAgent, type MasterConfig } from '../master.js';
 import { worktreeRootMinFreeBytes } from '../install/worktree-root.js';
 import { hostMemoryAttention } from '../master-resources.js';
@@ -355,8 +356,9 @@ export function endFailingRuns(state: Pick<DaemonState, 'actions' | 'faults'>, p
  */
 export async function fileRecurringFaultClasses(state: DaemonState, effects: DaemonEffects, work: Work[], clock: number, now: () => number, performed: DaemonAction[], budget?: FilingBudget) {
   const policy = effects.faultClassPolicy ?? faultClassPolicyFromEnv(process.env);
+  forgetDoneLinks(state.faults, work);
   for (const recurrence of recurringClasses(state.faults.instances, work, policy, clock, standingFaultClassItem)) {
-    if (recurrence.item) { for (const instance of recurrence.unlinked) instance.linkedTo = recurrence.item.key; continue; }
+    if (recurrence.item) { for (const instance of recurrence.unlinked) linkInstance(state.faults, instance, recurrence.item.key); continue; }
     if (!recurrence.file || !effects.fileFaultClass) continue;
     const key = faultActionKey(recurrence.faultClass), previous = state.actions[key];
     if (previous && previous.state !== 'done' && !readyToRetry(previous, state.cycle)) continue;
@@ -368,7 +370,7 @@ export async function fileRecurringFaultClasses(state: DaemonState, effects: Dae
     await record(state, key, { kind: 'fault', work: null, principal: null, state: 'started', detail: `Filing one item for the recurring ${recurrence.faultClass} fault class: ${recurrence.count} instances in ${policy.windowHours} hours`, attempts, cycle: state.cycle }, now(), effects.persist);
     try {
       const filed = await spend(budget, () => effects.fileFaultClass!(faultClassItem(recurrence, policy, clock), idempotency));
-      for (const instance of recurrence.recent) instance.linkedTo = filed.key;
+      for (const instance of recurrence.recent) linkInstance(state.faults, instance, filed.key);
       work.push(filed);
       performed.push(await record(state, key, { kind: 'fault', work: filed.key, principal: null, state: 'done', detail: `Filed ${filed.key} for the recurring ${recurrence.faultClass} fault class (${recurrence.count} ≥ ${policy.threshold} in ${policy.windowHours} hours), linking ${recurrence.recent.length} instance(s); later instances link to it`, attempts, cycle: state.cycle }, now(), effects.persist));
     } catch (error) {

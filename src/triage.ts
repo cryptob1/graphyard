@@ -1,6 +1,6 @@
 import type { Work } from './model.js';
 import { isDelivered } from './model/closure.js';
-import { closesFaultClass, deliveredFaultClassCover, predateLanding, type FaultInstance } from './model/fault-classes.js';
+import { closesFaultClass, deliveredFaultClassCover, predateLanding, type FaultRecord } from './model/fault-classes.js';
 import { awaitsParent, followUpEntries, followUpParent, machineKind, overdueTriage, triageAttention, triageClosure, triageJudgementSchema, untriaged, type TriageJudgement } from './model/machine-backlog.js';
 import { agentOwner, type AttentionItem } from './master/attention.js';
 import type { ResearchSettings } from './research.js';
@@ -61,15 +61,17 @@ const closureName = (closure: { kind: string; ref: string | null }) => `${closur
 /**
  * The judgement a recurring-fault item needs no session for (GY-1632): close it as covered by the
  * newest delivered item naming its class, when every instance its origin lists, and every instance the
- * loop has since linked to it (`linked`), predates that item's landing: a recurrence after the landing
- * linked to the open item keeps it open, never suppressed by its closure. Null when it lists none, one
- * postdates the landing, or no delivered item names the class.
+ * loop has since linked to it, predates that item's landing: a recurrence after the landing linked to the
+ * open item keeps it open, never suppressed by its closure. The linked instances are the retained ones
+ * and the record's newest linked time per item (`faults.linked`), which outlasts their retention. Null
+ * when it lists none, one postdates the landing, or no delivered item names the class.
  */
-export function coveredByDelivery(work: Work, all: readonly Work[], linked: readonly Pick<FaultInstance, 'at' | 'linkedTo'>[] = []): Extract<TriageJudgement, { outcome: 'close' }> | null {
+export function coveredByDelivery(work: Work, all: readonly Work[], faults: Partial<Pick<FaultRecord, 'instances' | 'linked'>> = {}): Extract<TriageJudgement, { outcome: 'close' }> | null {
   const faultClass = closesFaultClass(work), instances = work.origin?.faultClass?.instances ?? [];
   if (!faultClass || !instances.length) return null;
   const cover = deliveredFaultClassCover(all.filter(item => item.id !== work.id), faultClass);
-  if (!cover || !predateLanding([...instances, ...linked.filter(entry => entry.linkedTo === work.key)], cover.landedAt)) return null;
+  const latest = faults.linked?.[work.key], linked = [...(faults.instances ?? []).filter(entry => entry.linkedTo === work.key), ...(latest ? [{ at: latest }] : [])];
+  if (!cover || !predateLanding([...instances, ...linked], cover.landedAt)) return null;
   const landed = new Date(cover.landedAt).toISOString();
   return { outcome: 'close', ref: cover.item.key, reason: `Covered by ${cover.item.key}, delivered for the ${faultClass} fault class at ${landed}: every instance this item lists (${instances.length}, the latest first seen ${instances.map(entry => entry.at).sort().at(-1)}) predates that landing, so the delivered fix already answers them` };
 }
@@ -127,8 +129,8 @@ export interface TriageStepInput {
   runner: Runner;
   /** Records the judgement on the item (POST work/ID/triage as the coordinator). */
   record: (work: Work, body: { judgement: TriageJudgement; runtime?: string }) => Promise<unknown>;
-  /** The loop's retained fault instances: those linked to an item keep it from closing as covered (GY-1632). */
-  faultInstances?: readonly FaultInstance[];
+  /** The loop's fault record: an instance linked to an item after a delivered fix landed keeps it from closing as covered (GY-1632). */
+  faults?: Partial<Pick<FaultRecord, 'instances' | 'linked'>>;
 }
 
 /**
@@ -146,7 +148,7 @@ export function triageStep(input: TriageStepInput): TriageStepAction[] {
     const failed = failedAt.get(work.id);
     if (failed !== undefined && input.clock - failed < triageRetryMs) continue;
     // GY-1632: every instance predates a delivered same-class item's landing — closing it as covered needs no session, and never releases it to a worker.
-    const covered = coveredByDelivery(work, input.work, input.faultInstances);
+    const covered = coveredByDelivery(work, input.work, input.faults);
     if (covered && !repeatsRefusedClosure(work, covered)) {
       const settled = input.record(work, { judgement: covered }).then(() => {}, () => { failedAt.set(work.id, Date.now()); }).finally(() => recording.delete(work.id));
       recording.set(work.id, settled);
