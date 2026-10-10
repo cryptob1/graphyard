@@ -98,10 +98,10 @@ test('unit:loop-wakes-at-hold-bound — with no hold pending, or one whose bound
   const idle = await replay(() => [], at('00:46:00'), 3);
   assert.deepEqual(idle.waits, [interval, interval, interval], 'no hold: the configured idle wait');
   assert.ok(!idle.lines.some(line => /hold bound/.test(line)));
-  // A hand-driven item keeps the docs-sync's own 30-minute bound, far past one idle wait: each wait stays 300s.
-  const far = await replay(observedAt => [gy1619(observedAt, false)], at('00:46:00'), 2);
-  assert.deepEqual(far.waits, [interval, interval]);
-  assert.ok(!far.lines.some(line => /hold bound/.test(line)));
+  // A hand-driven item keeps the docs-sync session's own bound, 00:56:00 for one launched at 00:46:00, two idle waits off: the wait stays 300s.
+  const far = await replay(observedAt => [gy1619(observedAt, false)], at('00:46:00'), 1);
+  assert.deepEqual(far.waits, [interval]);
+  assert.ok(!far.lines.some(line => /hold bound/.test(line)), far.lines.join('\n'));
   assert.deepEqual(far.decided, [], 'the hold still stands');
 });
 
@@ -125,6 +125,14 @@ test('unit:loop-wakes-at-hold-bound — time the checkout guard spends between c
   assert.deepEqual(loop.ran.map(iso), ['2026-10-10T00:46:00.000Z', '2026-10-10T00:51:20.000Z', iso(holdBound)],
     'the idle wait is the full 300s after the guard; the wait to the bound is shortened by the 20s the guard took');
   assert.deepEqual(loop.waits.slice(0, 2), [interval, holdBound - at('00:51:40')]);
+  assert.deepEqual(loop.decided.map(entry => [entry.action, iso(entry.at)]), [['rework', iso(holdBound)]], loop.lines.join('\n'));
+});
+
+test('unit:loop-wakes-at-hold-bound — a bound exactly one idle wait away still ends the sleep at it, after the checkout guard took its time', async () => {
+  const own = { key: 'GY-1619', id: '7c1e2a6b-3f4d-4e8a-9b0c-1d2e3f4e1619', conflictSince: since };
+  const loop = await replay(observedAt => [gy1619(observedAt, true, own)], holdBound - interval, 2, { guardMs: 20_000 });
+  assert.deepEqual(loop.ran.map(iso), [iso(holdBound - interval), iso(holdBound)], `the cycle runs at the bound, not 20s past it\n${loop.lines.join('\n')}`);
+  assert.equal(loop.waits[0], interval - 20_000, 'the guard\'s 20s comes off the wait to the bound');
   assert.deepEqual(loop.decided.map(entry => [entry.action, iso(entry.at)]), [['rework', iso(holdBound)]], loop.lines.join('\n'));
 });
 

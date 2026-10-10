@@ -25,8 +25,8 @@ import { closeStanding, closingItems, recordingWrites, staleCloseStep } from './
 
 /** The approval-watch key prefix of a hand-launched approver, re-exported for the blocker step (GY-403). */
 export { handWatchPrefix };
-const holdBounds = new WeakMap<DaemonState, Map<string, number>>(); // GY-1622: per loop cursor, each held item's docs-sync hold bound on the local clock; an item the step did not reach this cycle (put off by its budget) keeps the one it last left; one already passed locally while its hold stood is a zero wait, so the next cycle re-reads it
-export const holdBoundWait = (state: DaemonState, wait: number, at: number) => { const bounds = holdBounds.get(state); const bound = bounds?.size ? Math.min(...bounds.values()) : null; return bound !== null && bound - at < wait ? { wait: Math.max(0, bound - at), bound } : { wait, bound: null }; };
+const holdBounds = new WeakMap<DaemonState, Map<string, number>>(); // GY-1622: per loop cursor, each held item's docs-sync hold bound on the local clock; an item the step did not reach this cycle (put off by its budget) keeps the one it last left; one already passed locally while its hold stood is a zero wait, so the next cycle re-reads it; one exactly a wait away still binds, so the guard's time comes off it
+export const holdBoundWait = (state: DaemonState, wait: number, at: number) => { const bounds = holdBounds.get(state); const bound = bounds?.size ? Math.min(...bounds.values()) : null; return bound !== null && bound - at <= wait ? { wait: Math.max(0, bound - at), bound } : { wait, bound: null }; };
 /** Step 4c: request and supervise the routine decisions. */
 export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, assessments: Record<string, ContainmentAssessment>, { capacities, approversSpent }: { capacities: RoleCapacity[]; approversSpent: boolean }) {
   const { config, state, now, snapshot, clock, clockOffset, performed, isolate, agents, open } = cycle;
