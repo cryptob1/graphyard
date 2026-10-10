@@ -12,6 +12,7 @@ import { roleAtCapacity } from '../fleet.js';
 import { classified, type FaultClass, type FaultKind } from '../model/fault-classes.js';
 import { humanOnlyDecisions } from './harness.js';
 import { conflictReworkBoundMs, conflictReworkDue } from '../model/approval.js';
+import { containmentInMotion, containmentSettleWaitBoundMs } from '../model/containment.js';
 
 /** The control-plane facts `GET /api/status` reports that are not about any one work item. */
 export interface ControlPlaneStatus {
@@ -107,6 +108,10 @@ export function workAttentionOwner(work: Work, cause: WorkAttentionCause, now = 
       : agentOwner('control plane', `Nothing to run by hand: the loop's decisions step requests ${key}'s rework itself${bound}; past that bound master status names the step as stalled`);
   }
   if (cause === 'base-conflict') return agentOwner('master', `graphyard master decide ${key} rework REASON, then graphyard master approver ${key} DECISION`, 'approver');
+  // GY-1633: a lapsed fence inside its settle bound is the loop's reclaim step's to verify and settle; a hand settlement
+  // of it is a second executor for one fence, so the owner names the step and the bound, never the command.
+  if ((cause === 'containment-settleable' || cause === 'containment-grace') && containmentInMotion(work, now))
+    return agentOwner('control plane', `Nothing to run by hand: the loop's reclaim step verifies the host and settles ${key}'s fence itself within ${containmentSettleWaitBoundMs / 60_000} minutes of its grace window ending; past that bound graphyard master settle-containment ${key} REASON settles it`);
   if (cause === 'containment-settleable') return agentOwner('master', `graphyard master settle-containment ${key} REASON`);
   if (cause === 'containment-grace') return agentOwner('master', `Wait out the grace window, then graphyard master status verifies the host and graphyard master settle-containment ${key} REASON once settleable`);
   if (cause === 'containment') return agentOwner('master', `Stop the recorded supervisor on its host, then graphyard master decide ${key} ${work.stage === 'done' ? 'recover' : 'rework'} REASON and graphyard master approver ${key} DECISION`, 'approver');

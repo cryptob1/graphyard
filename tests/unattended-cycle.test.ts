@@ -10,6 +10,7 @@ import { masterStatusReport } from '../src/cli/master-status.js';
 import { approverSessionName, decisionInput, launchApprover, listHerdrAgents, masterConfigSchema, type ContainmentAssessment, type MasterConfig, type MasterRun, type WorkerProfile } from '../src/master.js';
 import { expandTypedCommand, requestOf } from './helpers/launch-shell.js';
 import { containmentGraceMs } from '../src/quarantine.js';
+import { containmentSettleWaitBoundMs } from '../src/model/containment.js';
 import type { Work } from '../src/model.js';
 import { decideScopeRequest } from '../src/model/scope.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -832,7 +833,10 @@ test('routine decisions rest on what the loop verified and are supervised to the
   assert.match(routineDecision(lapsed, master, at, assessed(true))!.reason, /the master loop verified on machine-a that the supervisor of epoch 1 is gone\.$/);
   const delivered = { ...lapsed, stage: 'done' } as Work;
   assert.equal(routineDecision(delivered, master, at, assessed(false, ['Epoch 1 is registered on host machine-b; automatic verification must run there'])), null, 'recovery lowers the same fence on the same attestation');
-  assert.equal(routineDecision(delivered, master, at, assessed(true))!.action, 'recover');
+  // GY-1633: inside the settle bound the reclaim step settles a delivered item's fence itself; only past it is recovery asked.
+  assert.equal(routineDecision(delivered, master, at, assessed(true)), null, 'a verified-dead delivered fence inside its settle bound is the reclaim step\'s');
+  const stranded = { ...delivered, containmentQuarantine: fence(at - containmentGraceMs - containmentSettleWaitBoundMs - 60_000) } as Work;
+  assert.equal(routineDecision(stranded, master, at, assessed(true))!.action, 'recover');
   assert.equal(routineDecision({ ...delivered, containmentQuarantine: fence(at - containmentGraceMs / 2) } as Work, master, at, assessed(true)), null);
 
   // The same in the cycle. A verdict stands, the worker's fence lapsed, and this host cannot

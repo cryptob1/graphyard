@@ -228,7 +228,7 @@ async function quarantinedByDeadSupervisor(hostId = 'coordinator-host') {
   // The supervisor dies without settling: every authority lapses beyond the grace window.
   // The lease deadline lapses on the quarantine too, exactly as an unrenewed lease does:
   // reconciliation then clears the lease record without shortening the window.
-  const lapsed = new Date(Date.now() - containmentGraceMs - 600_000).toISOString();
+  const lapsed = new Date(Date.now() - containmentGraceMs - 900_000).toISOString();
   await store.pool.query(`UPDATE work_items SET document=jsonb_set(jsonb_set(jsonb_set(document,'{lease,expiresAt}',to_jsonb($2::text)),
     '{containmentQuarantine,launchExpiresAt}',to_jsonb($2::text)),'{containmentQuarantine,leaseExpiresAt}',to_jsonb($2::text)) WHERE id=$1`, [w.id, lapsed]);
   await engine.reconcile();

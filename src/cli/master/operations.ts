@@ -1,6 +1,7 @@
 // Concern: `graphyard master` operations subcommands — status, settle-containment, dispatch, merge, verify-deployment, main-watch.
 import { parseArgs } from 'node:util';
 import { resourceConflicts } from '../../coordination.js';
+import { handSettlementRefusal } from '../../model/containment.js';
 import { dispatchWork, listHerdrAgents, readWorkerCredential, snapshotWithClock, verifyContainmentDeath, withReviewerDefaults, withRoleDefaults } from '../../master.js';
 import { readDaemonState } from '../../master-daemon.js';
 import { verificationEffects, verifyDeployment } from '../../master-verification.js';
@@ -83,6 +84,9 @@ export async function operationsCommand(session: MasterSession, effects: Recover
     const work = snapshot.work.find((item: any) => item.id === args[0] || item.key === args[0]);
     if (!work) throw new Error(`Unknown work item ${args[0]}`);
     if (!work.containmentQuarantine) throw new Error(`${work.key} has no containment quarantine to settle`);
+    // GY-1633: inside its settle bound a lapsed fence is the loop's reclaim step's to settle; a hand settlement is a second executor.
+    const loopOwned = handSettlementRefusal(work, Date.parse(snapshot.now));
+    if (loopOwned) throw new Error(loopOwned);
     const assessment = await verifyContainmentDeath(work, { hostId: master.hostId, observedAt: snapshot.now, clockOffset });
     if (!assessment.settleable) {
       // Every process still holding the fence is printed with its command line and working

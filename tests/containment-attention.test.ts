@@ -63,14 +63,22 @@ test('unit:containment-attention-live-worker a lapsed lease inside the grace win
   assert.equal(row.containment?.graceRemainingMs, 90_000);
   assert.equal(row.containment?.settleable, false);
   assert.equal(row.attention, `Worker lease for epoch 1 lapsed at ${at(-30_000)}; containment grace window has 90s remaining before supervisor absence can be verified`);
-  assert.match(row.attentionOwner!.next, /settle-containment GY-74 REASON once settleable/);
+  // GY-1633: a fence in its grace window is the loop's reclaim step's to settle, so no hand command is named for it.
+  assert.equal(row.attentionOwner!.role, 'control plane');
+  assert.match(row.attentionOwner!.next, /^Nothing to run by hand: the loop's reclaim step verifies the host and settles GY-74's fence itself within 10 minutes/);
   assert.equal(row.attentionOwner!.human, false);
   // Reconciliation may already have cleared the lapsed lease; the quarantine's own deadlines still time the window.
   assert.equal((await status(launched(null, at(-30_000)))).work[0].containment?.phase, 'grace');
 });
 
 test('unit:containment-attention-live-worker a lease past its grace window names the elapsed window and the settle command once settleable', async () => {
-  const stranded = launched(null, at(-600_000));
+  // GY-1633: inside the settle bound the loop settles a verified-dead fence itself; only past it is the command the master's.
+  const settling = (await status(launched(null, at(-600_000)))).work[0];
+  assert.equal(settling.containment?.settleable, true);
+  assert.equal(settling.attention, 'Containment quarantine from epoch 1 is verified settleable; the loop settles it within its settle bound');
+  assert.equal(settling.attentionOwner!.role, 'control plane');
+  assert.doesNotMatch(settling.attentionOwner!.next, /^graphyard master settle-containment/);
+  const stranded = launched(null, at(-900_000));
   const settleable = (await status(stranded)).work[0];
   assert.equal(settleable.containment?.phase, 'lapsed');
   assert.equal(settleable.containment?.settleable, true);
@@ -79,7 +87,7 @@ test('unit:containment-attention-live-worker a lease past its grace window names
 
   const held = (await status(stranded, () => ({ ...clean, processes: [{ pid: 4242, evidence: 'command' as const }] }) as any)).work[0];
   assert.equal(held.containment?.settleable, false);
-  assert.match(held.attention!, new RegExp(`^Containment quarantine from epoch 1 blocks dispatch: worker lease lapsed at ${at(-600_000).replace(/\./g, '\\.')}, past the 120s grace window; Process 4242 of the contained worker is still present`));
+  assert.match(held.attention!, new RegExp(`^Containment quarantine from epoch 1 blocks dispatch: worker lease lapsed at ${at(-900_000).replace(/\./g, '\\.')}, past the 120s grace window; Process 4242 of the contained worker is still present`));
   assert.match(held.attentionOwner!.next, /Stop the recorded supervisor/);
 });
 
@@ -170,6 +178,19 @@ test('unit:idle-pane-shell-not-a-worker the pane\'s childless interactive shell 
   assert.equal(settled.length, 1, 'the loop settles the quarantine in the same cycle it verified it');
   assert.equal(settled[0].settleable, true);
   assert.deepEqual(settled[0].refusals, []);
+  assert.equal(state.actions[`settle:${work.id}:1`]?.state, 'done');
+});
+
+test('unit:idle-pane-shell-not-a-worker a delivered item\'s finished pane is closed before its fence settles, as an open item\'s is (GY-1633)', async () => {
+  // A worker still running when its item was closed leaves its fence on the delivered record, its
+  // finished handle naming the pane whose idle shell still sits in the worktree.
+  const work = stranded({ stage: 'done', sessions: [{ ...session(pane), state: 'finished', outcome: 'closed by the loop: GY-74 has left build', endedAt: at(-300_000) }] as Work['sessions'] });
+  let probes = 0;
+  const { settled, state, closed } = await loop(work, { containment: (items, observed) => { probes += 1; return probedBy(probes === 1 ? paneShellProbe() : { ...paneShellProbe(), processes: [], held: [], paneShell: null })!(items, observed); } });
+  assert.deepEqual(closed, [pane], 'the pane is closed before the fence is lowered around it');
+  assert.equal(state.actions[closeKey(work)]?.state, 'done');
+  assert.equal(probes, 2, 'and the fence settles only on the probe taken once the pane was gone');
+  assert.equal(settled.length, 1);
   assert.equal(state.actions[`settle:${work.id}:1`]?.state, 'done');
 });
 

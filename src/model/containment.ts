@@ -29,3 +29,34 @@ export function containmentPhase(work: Work, now: number, graceMs = containmentG
   const lapsed = Math.max(...deadlines), lapsedAt = new Date(lapsed).toISOString();
   return lapsed + graceMs > now ? { state: 'grace', lapsedAt, remainingMs: lapsed + graceMs - now } : { state: 'lapsed', lapsedAt };
 }
+
+/**
+ * GY-1299. Whether a containment fence is still in motion: its owner's lease has lapsed and the
+ * fence is inside its grace window or within `containmentSettleWaitBoundMs` after it. The reclaim
+ * step probes the host and settles a verified-dead fence on its own (settleQuarantine; cycleFaults
+ * reads a fence whose settle action is done as gone, even in the cycle that settled it), so a fence
+ * that recent is a step the loop is already taking, not a fault: on 5 October 2026 GY-1147 counted
+ * 11s past its grace window and autosettled 28s later, and GY-1289 counted twice for one fence —
+ * once as verified settleable while its grace window still ran, once as a hold 90s later, in the
+ * very cycle that settled it. Neither kind counts inside the bound, so a fence the loop settles
+ * opens no instance, and one standing past it counts once, as the item's own `containment` fault
+ * (the settleable line restates it). A fence with no deadline to date it counts at once.
+ * It is also the window in which the fence is the loop's alone to settle (GY-1633): master status
+ * names no hand command for it and `master settle-containment` refuses it.
+ */
+export function containmentInMotion(work: Work | undefined, now: number): boolean {
+  const phase = work ? containmentPhase(work, now) : null;
+  if (!phase || phase.state === 'live') return false;
+  if (phase.state === 'grace') return true;
+  return !!phase.lapsedAt && now - Date.parse(phase.lapsedAt) - containmentGraceMs <= containmentSettleWaitBoundMs;
+}
+
+/**
+ * Why a hand settlement of `work`'s fence is refused at `now`, or null when one may proceed (GY-1633):
+ * while the fence is in motion the loop's reclaim step is already verifying the host and settling it,
+ * and a second executor for the same fence is what the intervention report counted on GY-1410.
+ */
+export function handSettlementRefusal(work: Work, now: number): string | null {
+  if (!work.containmentQuarantine || !containmentInMotion(work, now)) return null;
+  return `${work.key}'s containment fence of epoch ${work.containmentQuarantine.epoch} is the loop's to settle: its reclaim step verifies the host and settles it within ${containmentSettleWaitBoundMs / 60_000} minutes of its grace window ending. Settle it by hand only past that bound`;
+}

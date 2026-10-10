@@ -16,6 +16,7 @@ import { sessionActivity } from './launch.js';
 import { launchingSession, sessionView } from '../model/session-state.js';
 import type { HerdrAgent } from './herdr.js';
 import { type ContainmentAssessment, containmentHold, containmentPhase } from './containment.js';
+import { containmentInMotion } from '../model/containment.js';
 import { agentOwner, type AttentionItem, controlPlaneAttention, type ControlPlaneStatus, fleetStatus, workAttentionOwner, type WorkAttentionCause } from './attention.js';
 import { classified } from '../model/fault-classes.js';
 import { launchFailedBeforeStart } from '../model/escalation.js';
@@ -199,7 +200,7 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       : null;
     const seconds = (ms: number) => `${Math.ceil(ms / 1000)}s`;
     const containmentAttention: [string, Parameters<typeof workAttentionOwner>[1]] | null = !quarantine || quarantine.phase === 'live' ? null
-      : quarantine.settleable ? [`Containment quarantine from epoch ${quarantine.epoch} is verified settleable; run master settle-containment ${work.key}`, 'containment-settleable']
+      : quarantine.settleable ? [`Containment quarantine from epoch ${quarantine.epoch} is verified settleable; ${containmentInMotion(work, now) ? 'the loop settles it within its settle bound' : `run master settle-containment ${work.key}`}`, 'containment-settleable']
       : quarantine.phase === 'grace' ? [`Worker lease for epoch ${quarantine.epoch} lapsed at ${quarantine.lapsedAt}; containment grace window has ${seconds(quarantine.graceRemainingMs!)} remaining before supervisor absence can be verified`, 'containment-grace']
       : [`Containment quarantine from epoch ${quarantine.epoch} blocks dispatch: ${quarantine.lapsedAt ? `worker lease lapsed at ${quarantine.lapsedAt}, past the ${seconds(containmentGraceMs)} grace window; ` : ''}${quarantine.refusals[0]}`, 'containment'];
     const gaps = work.proofGaps ?? [];

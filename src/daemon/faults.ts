@@ -26,7 +26,7 @@ import { candidateKey } from './reconcile.js';
 import { checkInvariants, invariantFaultKind, invariantFaults } from '../model/invariants.js';
 import { baseRefreshConflict } from '../merge-queue.js';
 import { mergeBaseDismissal } from '../merge-base-ancestry.js';
-import { containmentGraceMs, containmentPhase, containmentSettleWaitBoundMs } from '../model/containment.js';
+import { containmentInMotion, containmentSettleWaitBoundMs } from '../model/containment.js';
 import { openAction } from '../model/next-action.js';
 import { carriedDecision } from '../model/concerns.js';
 import { masterTurnWaitBoundMs } from './decisions.js';
@@ -175,24 +175,7 @@ const fenceSettled = (state: Pick<DaemonState, 'actions'>, item: Work) =>
 /** The kinds a lapsed fence is counted under: the item's own record, and the settle or hold line master status derives for it. */
 const containmentKinds: ReadonlySet<FaultKind> = new Set<FaultKind>(['containment', 'containment-settleable']);
 export { containmentSettleWaitBoundMs };
-/**
- * GY-1299. Whether a containment fence is still in motion: its owner's lease has lapsed and the
- * fence is inside its grace window or within `containmentSettleWaitBoundMs` after it. The reclaim
- * step probes the host and settles a verified-dead fence on its own (settleQuarantine; cycleFaults
- * reads a fence whose settle action is done as gone, even in the cycle that settled it), so a fence
- * that recent is a step the loop is already taking, not a fault: on 5 October 2026 GY-1147 counted
- * 11s past its grace window and autosettled 28s later, and GY-1289 counted twice for one fence —
- * once as verified settleable while its grace window still ran, once as a hold 90s later, in the
- * very cycle that settled it. Neither kind counts inside the bound, so a fence the loop settles
- * opens no instance, and one standing past it counts once, as the item's own `containment` fault
- * (the settleable line restates it). A fence with no deadline to date it counts at once.
- */
-export function containmentInMotion(work: Work | undefined, now: number): boolean {
-  const phase = work ? containmentPhase(work, now) : null;
-  if (!phase || phase.state === 'live') return false;
-  if (phase.state === 'grace') return true;
-  return !!phase.lapsedAt && now - Date.parse(phase.lapsedAt) - containmentGraceMs <= containmentSettleWaitBoundMs;
-}
+export { containmentInMotion };
 /**
  * GY-1337. Whether an owed line names the item's containment escalation: its open action escalates
  * the `containment` trigger and the line carries that action's own owed decision (`needsHuman.decision`,
