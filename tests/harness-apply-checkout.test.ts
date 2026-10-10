@@ -114,12 +114,46 @@ test('unit:harness-apply-checkout-resolution — the loop applies the harness co
     assert.throws(() => harness.harnessApplyCheckout(root, wired), (error: unknown) => error instanceof harness.HarnessCheckoutRefusal && error.root === root && error.unit === null);
   }
 
-  // A units-less checkout that installed no Claude settings has nothing to apply: no row, nothing written (a fixture's or a launcher's checkout).
+  // A units-less checkout that installed no Claude settings is refused all the same, naming it and master init; nothing is written.
   const bare = await temporaryDirectory('harness-bare');
   const bareCycle = cycle(config(bare), { harness: { unitDirectory: noUnits } });
   await routineRemedies(bareCycle);
-  assert.equal(bareCycle.state.actions[key], undefined, bareCycle.state.actions[key]?.detail);
+  const bareRow = bareCycle.state.actions[key]!;
+  assert.equal(bareRow?.state, 'waiting', bareRow?.detail);
+  assert.ok(bareRow.detail.includes(`${bare} records no units (${installUnitsFile} is absent)`), bareRow.detail);
+  assert.ok(bareRow.detail.includes(`Run graphyard master init in ${bare}`), bareRow.detail);
   assert.equal(existsSync(settingsFile(bare)), false, 'nothing is written into a checkout with no settings installed');
+  await routineRemedies(bareCycle);
+  assert.equal(bareCycle.performed.length, 1, 'the refusal does not repeat on the next cycle');
+  // Once it records its units, the validated checkout with no settings installed has nothing to apply: the row closes.
+  await mkdir(join(bare, '.graphyard'), { recursive: true });
+  await writeFile(join(bare, installUnitsFile), JSON.stringify(perInstallUnits('owner/project')));
+  await routineRemedies(bareCycle);
+  assert.equal(bareCycle.state.actions[key]?.state, 'done', bareCycle.state.actions[key]?.detail);
+  assert.equal(existsSync(settingsFile(bare)), false);
+
+  // A master unit with no WorkingDirectory whose ExecStart launches another checkout's CLI is refused naming it; one launching ROOT's own CLI is not,
+  // and a unit whose WorkingDirectory establishes ROOT may run an external launcher.
+  const serving = perInstallUnits('owner/project').master, launched = await temporaryDirectory('harness-launched-units');
+  const withoutDirectory = (cli: string) => `[Unit]\nDescription=Graphyard master\n\n[Service]\nExecStart=/usr/bin/node ${cli} master run\n`;
+  await writeFile(join(launched, serving), withoutDirectory(`${elsewhere}/bin/graphyard.mjs`));
+  assert.throws(() => harness.harnessApplyCheckout(own.root, { servingUnit: serving, unitDirectory: launched }), (error: unknown) => {
+    assert.ok(error instanceof harness.HarnessCheckoutRefusal);
+    assert.equal(error.unit, join(launched, serving));
+    assert.ok(error.message.includes(`runs ${elsewhere}, not ${own.root}`), error.message);
+    return true;
+  });
+  const before2 = await readFile(settingsFile(own.root), 'utf8');
+  await writeFile(settingsFile(own.root), JSON.stringify({ permissions: { allow: [], deny: [] } }));
+  const launchedCycle = cycle(master, { harness: { servingUnit: serving, unitDirectory: launched } });
+  await routineRemedies(launchedCycle);
+  assert.equal(launchedCycle.state.actions[key]?.state, 'waiting', launchedCycle.state.actions[key]?.detail);
+  assert.deepEqual(JSON.parse(await readFile(settingsFile(own.root), 'utf8')), { permissions: { allow: [], deny: [] } }, 'nothing is applied while the serving unit launches another checkout');
+  await writeFile(settingsFile(own.root), before2);
+  await writeFile(join(launched, serving), withoutDirectory(`${own.root}/bin/graphyard.mjs`));
+  assert.equal(harness.harnessApplyCheckout(own.root, { servingUnit: serving, unitDirectory: launched }).units.master, serving);
+  await writeFile(join(launched, serving), `[Unit]\nDescription=Graphyard master\n\n[Service]\nWorkingDirectory=${own.root}\nExecStart=/opt/private/launcher master run\n`);
+  assert.equal(harness.harnessApplyCheckout(own.root, { servingUnit: serving, unitDirectory: launched }).units.master, serving);
 
   // The legacy-unit-points-elsewhere case for the serving unit: the apply names the unit to update rather than apply.
   assert.throws(() => harness.harnessApplyCheckout(own.root, { servingUnit: legacyLoopUnit, unitDirectory: units }), (error: unknown) => {

@@ -1,13 +1,13 @@
 // Concern: session and worker harness permissions, and starting the master session.
 import { lstat, mkdir } from 'node:fs/promises';
-import { existsSync, mkdirSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, resolve, basename } from 'node:path';
 import { type ChildRun, defaultChildRun } from '../child-runner.js';
 import { nameForLaunch } from '../session-name.js';
 import { executorUnitDirectory, launchAuthorization } from '../repository-setup.js';
 import { type HarnessHook, type HarnessPlan, type HarnessRule, writeHarnessPermissions, mergeHarnessHooks, masterHarnessPlan, harnessDecision, claudeRuleProblem, bashRuleMatches } from '../harness.js';
-import { executorInstance, foreignUnitText, initialiseUnitsCommand, installUnitsFile, type InstallUnits, LegacyUnitRefusal, legacyLoopUnit, readInstallUnits } from '../install/units.js';
+import { executorInstance, foreignUnitText, initialiseUnitsCommand, installUnitsFile, type InstallUnits, LegacyUnitRefusal, legacyLoopUnit, readInstallUnits, unitCheckout } from '../install/units.js';
 import type { Work } from '../model.js';
 import type { MasterConfig, WorkerProfile } from './profiles.js';
 import { coordinatorCheckoutRoot, promotionCommand, workerConfinementRefusal } from './profiles.js';
@@ -378,6 +378,22 @@ export class HarnessCheckoutRefusal extends Error {
  * UNITDIRECTORY) runs a checkout other than ROOT, cannot be read, or is not the master unit ROOT
  * records, naming that unit to update rather than applying against the wrong checkout.
  */
+/**
+ * The checkout a master unit with no WorkingDirectory launches, when it is not ROOT (GY-1662):
+ * foreignUnitText reads a master unit's checkout only from its WorkingDirectory, so one that omits
+ * it and runs another checkout's bin/graphyard.mjs passed. Without a WorkingDirectory the CLI its
+ * ExecStart runs is the only evidence of the checkout, so one naming no CLI under ROOT is refused;
+ * a unit whose WorkingDirectory is ROOT may run an external launcher (a private CLI path).
+ */
+function launchedCheckout(text: string, root: string, home: string): string | null {
+  const { workingDirectory, execStart } = unitCheckout(text, home);
+  if (workingDirectory) return null;
+  const real = (path: string) => { const absolute = resolve(path); try { return realpathSync(absolute); } catch { return absolute; } };
+  const cli = execStart?.split(/\s+/).map(part => part.replace(/^"|"$/g, '')).find(part => /\/bin\/graphyard\.mjs$/.test(part));
+  if (!cli) return `a command with no WorkingDirectory and no ${root}/bin/graphyard.mjs in its ExecStart (${execStart ?? 'none'})`;
+  const checkout = dirname(dirname(cli));
+  return real(checkout) === real(root) ? null : checkout;
+}
 export function harnessApplyCheckout(root: string, options: { servingUnit?: string | null; unitDirectory?: string; home?: string } = {}) {
   const unitDirectory = options.unitDirectory ?? executorUnitDirectory(), home = options.home ?? homedir();
   let units: InstallUnits;
@@ -397,7 +413,7 @@ export function harnessApplyCheckout(root: string, options: { servingUnit?: stri
       const code = (error as NodeJS.ErrnoException | null)?.code;
       if (code !== 'ENOENT') throw new HarnessCheckoutRefusal(root, path, `The harness contract was not applied: the unit serving this loop, ${path}, could not be read (${code ?? (error instanceof Error ? error.message : String(error))}), so it is not established that it runs ${root}, the checkout this apply targets. Make ${path} a readable unit file that runs ${root}, then systemctl --user daemon-reload and restart it`);
     }
-    const other = text === null ? null : foreignUnitText(text, root, home);
+    const other = text === null ? null : foreignUnitText(text, root, home) ?? launchedCheckout(text, root, home);
     if (other) throw new HarnessCheckoutRefusal(root, path, `The harness contract was not applied: the unit serving this loop, ${path}, runs ${other}, not ${root}, the checkout this apply targets. Update ${path} (its WorkingDirectory and ExecStart) to run ${root}, then systemctl --user daemon-reload and restart it, rather than apply against the wrong checkout`);
     if (options.servingUnit !== units.master) throw new HarnessCheckoutRefusal(root, path, `The harness contract was not applied: the unit serving this loop, ${options.servingUnit}, is not the master unit ${root} records (${units.master} in ${installUnitsFile}), so the contract built from the recorded units would misclassify the unit actually serving it. Serve the loop from ${units.master}, or record ${options.servingUnit} as the master unit in ${root}/${installUnitsFile} if it is this checkout's own`);
   }

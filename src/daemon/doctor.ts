@@ -736,14 +736,15 @@ export async function applyHarnessContract(cycle: Cycle) {
   const { state, effects, now, performed, config, isolate } = cycle;
   // GY-1662: the loop's managed checkout (its CLI's), never the research scratch worktree runDaemon rewrites research's cwd to.
   const root = (config.cliPath ? coordinatorCheckoutRoot(config.cliPath) : null) ?? effects.doctor?.cwd;
-  if (!root) return;
+  // A root that does not exist is no checkout at all (a configuration whose CLI path names no files): nothing to validate or write.
+  if (!root || !existsSync(root)) return;
   await isolate('config', null, 'harness contract', async () => {
     const key = remedyKey('harness', 'claude'), previous = state.actions[key], attempts = (previous?.attempts ?? 0) + 1;
     try {
-      // A checkout with no Claude settings installed has nothing to apply (harnessDrift is null without the file), so it is neither validated nor written: the checkout refusals guard a write, and a launcher or fixture checkout that installed none is no refusal (GY-1662).
-      const installed = existsSync(resolve(root, claudeSettingsFile));
-      if (installed) harnessApplyCheckout(root, { servingUnit: effects.harness?.servingUnit, unitDirectory: effects.harness?.unitDirectory });
-      const plan = installed ? masterHarness(root, config, 'claude') : null;
+      // Every resolved checkout is validated first, settings installed or not: one that records no units waits on master init (GY-1662).
+      harnessApplyCheckout(root, { servingUnit: effects.harness?.servingUnit, unitDirectory: effects.harness?.unitDirectory });
+      // A validated checkout with no Claude settings installed has nothing to apply (harnessDrift is null without the file).
+      const plan = existsSync(resolve(root, claudeSettingsFile)) ? masterHarness(root, config, 'claude') : null;
       if (!plan || !await harnessDrift(root, plan)) {
         // A refusal the operator's remedy has cleared, or a failure the checkout recovered from, closes once the contract already holds (GY-1662).
         if (previous && previous.state !== 'done') performed.push(await record(state, key, { kind: 'config', work: null, principal: null, state: 'done', detail: plan ? `The Claude harness contract already holds for ${root}: the earlier ${previous.state} row is resolved with nothing to apply` : `No Claude harness settings are installed under ${root} (${claudeSettingsFile}): the earlier ${previous.state} row is resolved with nothing to apply`, attempts, cycle: state.cycle }, now(), effects.persist));
