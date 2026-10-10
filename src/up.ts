@@ -751,19 +751,6 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
     }
     if (herdrAttach) deps.emit({ kind: 'note', text: `Watch this install's agents in Herdr: ${herdrAttach}` });
 
-    await step('host-supervisor', async () => {
-      const token = await deps.masterToken();
-      if (!token) throw new UpStop('host-supervisor: no master credential is recorded for the installed control plane', upExitCodes.failed);
-      // GY-1641: master init accepts the control plane on the recorded address, never its default port.
-      const server = await deps.serverUrl();
-      await run('host-supervisor', ['master', 'init', '--token-stdin', ...(server ? ['--url', server] : []), ...(request.browserProfile ? ['--browser-profile', request.browserProfile] : [])], { stdin: token });
-    });
-    // Recorded on every run (idempotent), so a resumed run that skipped master init still installs supervised.
-    if (supervised && deps.supervise) {
-      const { operatorLogin } = await deps.supervise();
-      deps.emit({ kind: 'note', text: `Supervised mode: you review and merge each pull request on GitHub${operatorLogin ? ` (as ${operatorLogin}; a pull request your own login opens needs another person's approval)` : ''}; no agent reviewer or approver runs.` });
-    }
-
     // GY-1552: deploy key under the install directory, then POST /api/merger as admin so the checklist
     // treats App and protection items as not required. Github mode never runs these steps.
     if (controlPlaneMerger) {
@@ -795,6 +782,19 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
         }
         return 'POST /api/merger set the control-plane writer';
       });
+    }
+
+    await step('host-supervisor', async () => {
+      const token = await deps.masterToken();
+      if (!token) throw new UpStop('host-supervisor: no master credential is recorded for the installed control plane', upExitCodes.failed);
+      // GY-1641: master init accepts the control plane on the recorded address, never its default port.
+      const server = await deps.serverUrl();
+      await run('host-supervisor', ['master', 'init', '--token-stdin', ...(server ? ['--url', server] : []), ...(request.browserProfile ? ['--browser-profile', request.browserProfile] : [])], { stdin: token });
+    });
+    // Recorded on every run (idempotent), so a resumed run that skipped master init still installs supervised.
+    if (supervised && deps.supervise) {
+      const { operatorLogin } = await deps.supervise();
+      deps.emit({ kind: 'note', text: `Supervised mode: you review and merge each pull request on GitHub${operatorLogin ? ` (as ${operatorLogin}; a pull request your own login opens needs another person's approval)` : ''}; no agent reviewer or approver runs.` });
     }
 
     // GY-1479: the master's operator-agent and approver identities (`master autonomy --apply`), provisioned
