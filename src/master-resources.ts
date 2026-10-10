@@ -506,7 +506,7 @@ export const describeTmpClasses = (classes: Record<TmpReclaimClass, number>) =>
 function describeTmpInodes(tmp: TmpInodes) {
   const parts = [`measured ${tmp.path}: ${tmp.freeInodes} of ${tmp.totalInodes} inodes free`];
   if (tmp.own) parts.push(`${tmp.own.capped ? 'at least ' : ''}${entries(tmp.own.entries)} are this user's (${tmp.own.testTemp} top-level with test temp names${tmp.own.agentScratch ? `, ${tmp.own.agentScratch} with agent scratch names` : ''}${tmp.own.tsxCache ? `, ${entries(tmp.own.tsxCache.entries)} under its tsx compile cache ${tmp.own.tsxCache.name}` : ''}); the per-user quota itself is not readable`);
-  if (tmp.latest) parts.push(`the loop's latest /tmp pass removed ${entries(tmp.latest.removed)} at ${tmp.latest.at}${tmp.latest.roots ? `, scanning ${tmp.latest.roots.join(' and ')}` : ''}${tmp.latest.removed && tmp.latest.classes ? ` (${describeTmpClasses(tmp.latest.classes)})` : ''}`);
+  if (tmp.latest) parts.push(`the loop's latest /tmp pass removed ${entries(tmp.latest.removed)} at ${tmp.latest.at}${tmp.latest.roots ? `, scanning ${tmp.latest.roots.join(' and ')}` : ''}${tmp.latest.classes ? ` (${describeTmpClasses(tmp.latest.classes)})` : ''}`);
   // Below the headroom the pass escalated in the same run (GY-1597): say how far, and what it could not reach.
   const top = tmp.latest?.escalated?.at(-1);
   if (top) parts.push(`below the inode headroom it escalated to ${top.limit} per cycle and tsx cache files older than ${minutes(top.cacheAgeMs)} (${tmp.latest!.escalated!.map(step => step.removed).join(' + ')} removed by the escalated steps)`);

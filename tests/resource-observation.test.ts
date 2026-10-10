@@ -538,5 +538,11 @@ test('unit:resource-observation — the tmp-inodes reading and master status nam
   assert.deepEqual(inodes?.latest?.classes, { testTemp: 1, tsxCache: 1, agentWorktree: 1, runtimeScratch: 1 });
   const reading = readResources(blank({ tmp: inodes })).find(entry => entry.id === 'tmp-inodes');
   assert.match(reading?.detail ?? '', /the loop's latest \/tmp pass removed 4 entries at [^;]*\(1 test temp, 1 tsx cache, 1 agent worktree, 1 runtime scratch\)/);
+  // A pass that removed nothing still names each class's count: zero for every one.
+  await reclaimResources(directory, { reviewers: [], producers: [] }, { work: [], agents: [] }, options);
+  await settleTmpReclaim();
+  const idle = await readTmpInodes(directory, tmp, async () => ({ files: 1_048_576, ffree: 400_000 }));
+  assert.deepEqual(idle?.latest?.classes, { testTemp: 0, tsxCache: 0, agentWorktree: 0, runtimeScratch: 0 });
+  assert.match(readResources(blank({ tmp: idle })).find(entry => entry.id === 'tmp-inodes')?.detail ?? '', /latest \/tmp pass removed 0 entries at [^;]*\(0 test temp, 0 tsx cache, 0 agent worktree, 0 runtime scratch\)/);
   assert.match(resourceRegistry.find(entry => entry.id === 'tmp-inodes')?.reclaim ?? '', /linked git worktree or git checkout, whatever its name.*opencode/);
 });

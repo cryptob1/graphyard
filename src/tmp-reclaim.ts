@@ -553,6 +553,11 @@ async function reclaimRoot(root: string, real: string, pass: PassState, report: 
       // A checkout an earlier pass half removed may have lost its .git already: it is still due.
       if (!pass.unfinished.has(path) && !await isGitCheckout(path)) continue;
       maxAgeMs = pass.agentAge!; kind = 'agentWorktree'; tree = true;
+    } else if (kind === 'testTemp' && pass.agentAge !== null && entry.isDirectory() && now - info.mtimeMs >= maxAgeMs && !pass.unfinished.has(path) && await isGitCheckout(path)) {
+      // A checkout is an agent's whatever its name: one named like a test temp is judged by the agent
+      // bound and its whole tree, not removed two hours after its last top-level write. Only a
+      // directory old by its name's bound is opened to look; a younger one is kept on one stat anyway.
+      maxAgeMs = Math.max(maxAgeMs, pass.agentAge); kind = 'agentWorktree'; tree = true;
     }
     report.scanned++;
     const owner = entry.isDirectory() ? await readTempOwner(path) : null;
@@ -687,10 +692,12 @@ async function reclaimRuntimeScratch(root: string, real: string, pass: PassState
       try { info = await lstat(path); } catch { continue; }
       if (pass.uid !== undefined && info.uid !== pass.uid) continue;
       report.scanned++;
-      if (pass.now - info.mtimeMs < maxAgeMs) { report.kept++; continue; }
+      // An entry an earlier pass began removing is due at once: its half-finished removal is what made it look young.
+      const unfinished = pass.unfinished.has(path);
+      if (!unfinished && pass.now - info.mtimeMs < maxAgeMs) { report.kept++; continue; }
       if (!held) { const all = pass.held ??= await heldOpenPaths(); held = new Set([...heldEntries(join(real, name), all), ...(root === real ? [] : heldEntries(scratch, all))]); }
       if (held.has(join(real, name, entry.name)) || held.has(path)) { report.kept++; continue; }
-      const written = entry.isDirectory() ? await treeLastWritten(path, info.mtimeMs) : info.mtimeMs;
+      const written = unfinished ? 0 : entry.isDirectory() ? await treeLastWritten(path, info.mtimeMs) : info.mtimeMs;
       if (pass.now - written < maxAgeMs) { report.kept++; continue; }
       old.push({ path, mtime: written });
     }
@@ -702,8 +709,9 @@ async function reclaimRuntimeScratch(root: string, real: string, pass: PassState
       try {
         const bytes = await sizeOf(path);
         await removeTree(path, pass.retryMs);
+        pass.unfinished.delete(path);
         took(report, 'runtimeScratch', path, bytes);
-      } catch (error) { report.errors.push(`${path}: ${error instanceof Error ? error.message : String(error)}`); }
+      } catch (error) { pass.unfinished.add(path); report.errors.push(`${path}: ${error instanceof Error ? error.message : String(error)}`); }
     }
   }
 }

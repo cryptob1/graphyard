@@ -311,16 +311,19 @@ test('unit:tmp-leaks — a stale, unheld linked worktree or git checkout at the 
   const committed = await linkedWorktree(tmp, 'chore12-release', repository);
   const plain = join(tmp, 'downloads'); await mkdir(plain); await writeFile(join(plain, 'file'), 'x');
   // A .git file naming something other than a worktrees/ entry (a submodule's modules/) is not a linked worktree.
+  // A checkout named like a test temp is still an agent's checkout: judged by the day bound and its whole tree, not two hours (review of a9a81b578cbf).
+  const namedYoung = await ownCheckout(tmp, 'graphyard-clone-3h'), namedLinked = await linkedWorktree(tmp, 'gy-1655-worktree', repository), namedStale = await ownCheckout(tmp, 'graphyard-clone-old');
   const submodule = join(tmp, 'vendored'); await mkdir(submodule); await writeFile(join(submodule, '.git'), `gitdir: ${join(repository, '.git', 'modules', 'vendored')}\n`);
-  for (const path of [feature.path, feature.gitdir, bug.path, bug.gitdir, clone, fresh.gitdir, held.path, held.gitdir, committed.path, committed.gitdir, plain, submodule]) await backdateTree(path, stale);
+  for (const path of [feature.path, feature.gitdir, bug.path, bug.gitdir, clone, fresh.gitdir, held.path, held.gitdir, committed.path, committed.gitdir, plain, submodule, namedStale]) await backdateTree(path, stale);
   await backdateTree(fresh.path, hour);
+  for (const path of [namedYoung, namedLinked.path, namedLinked.gitdir]) await backdateTree(path, 3 * hour);
   await backdate(join(committed.gitdir, 'index'), hour);
 
   const report = await reclaimTmpDirectories({ tmpRoot: tmp, held: new Set([join(held.path, 'node_modules', 'dep', 'index.js')]) });
   assert.deepEqual(report.errors, []);
-  assert.deepEqual(report.removed.map(entry => entry.path).sort(), [bug.path, clone, feature.path].sort(), 'every stale, unheld checkout goes, whatever its name');
-  assert.deepEqual(report.classes, { testTemp: 0, tsxCache: 0, agentWorktree: 3, runtimeScratch: 0 });
-  for (const path of [fresh.path, held.path, committed.path, plain, submodule]) assert.equal(existsSync(path), true, `${path} stays`);
+  assert.deepEqual(report.removed.map(entry => entry.path).sort(), [bug.path, clone, feature.path, namedStale].sort(), 'every stale, unheld checkout goes, whatever its name');
+  assert.deepEqual(report.classes, { testTemp: 0, tsxCache: 0, agentWorktree: 4, runtimeScratch: 0 });
+  for (const path of [fresh.path, held.path, committed.path, plain, submodule, namedYoung, namedLinked.path]) assert.equal(existsSync(path), true, `${path} stays`);
   assert.equal(existsSync(feature.gitdir), false, 'a reclaimed worktree is unregistered with it');
   for (const gitdir of [fresh.gitdir, held.gitdir, committed.gitdir]) assert.equal(existsSync(gitdir), true, `${gitdir} stays registered`);
 
@@ -366,5 +369,8 @@ test('unit:tmp-leaks — entries inside an agent runtime\'s scratch root (/tmp/o
   for (const name of ['a', 'b']) { const path = join(opencode, `${name}-packet.txt`); await writeFile(path, 'x'); await backdate(path, stale); }
   const bounded = await reclaimTmpDirectories({ tmpRoot: tmp, held: new Set([held]), limit: 1 });
   assert.equal(bounded.removed.length, 1);
+  // An entry an earlier pass failed to finish removing is due at once, though the partial removal refreshed it.
+  const retried = await reclaimTmpDirectories({ tmpRoot: tmp, held: new Set([held]), unfinished: new Set([young]) });
+  assert.ok(retried.removed.some(entry => entry.path === young), 'a half-removed runtime entry is retried on the next pass');
   assert.equal(existsSync(opencode), true, 'the root itself is never removed');
 });
