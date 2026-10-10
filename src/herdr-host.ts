@@ -69,6 +69,7 @@ After=network.target
 Type=simple
 Environment=${unitWord(`PATH=${path}`)}
 ${instance ? `Environment=${unitWord(`XDG_CONFIG_HOME=${instance.configHome}`)}
+Environment=${unitWord(`XDG_RUNTIME_DIR=/tmp`)}
 Environment=${unitWord(`${herdrInstanceEnv.configHome}=${instance.configHome}`)}
 Environment=${unitWord(`${herdrInstanceEnv.session}=${instance.session}`)}
 ` : ''}ExecStart=${[binary, ...call.args].map(unitWord).join(' ')}
