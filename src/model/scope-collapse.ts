@@ -6,13 +6,13 @@ import { type ScopeCriterion, type ScopeDecision, type ScopeRequestState, namedP
 // plannedFiles holds at most `plannedFilesMax` entries. A mechanical change that touches every test
 // file (GY-421: 158 of them) can never be scoped file by file: the list hits the cap and the item
 // stalls. So the widening the loop proposes folds the requested files into their deepest common
-// directory entries — `tests/` for the 158 — when a directory would otherwise be named more than
-// `collapseDirectoryFiles` times, or when the list would exceed the cap. A fold never reaches the
+// directory entries — `tests/` for the 158 — when the ask names more than `collapseDirectoryFiles`
+// files under one directory, or when the list would exceed the cap. A fold never reaches the
 // repository root and stays inside the item's own area: the top-level directories its criteria
 // name or its plannedFiles already carry. The decision names each directory and the files it covers.
 // ---------------------------------------------------------------------------
 
-/** More requested files than this under one directory are proposed as that directory. */
+/** More requested files than this under one directory are proposed as that directory; files already planned there do not count (GY-1676). */
 export const collapseDirectoryFiles = 20;
 /** A directory entry a widening proposes in place of the requested files it covers. */
 export interface CollapsedScope { scope: string; files: string[] }
@@ -45,8 +45,9 @@ export function collapseArea(item: { criteria?: readonly ScopeCriterion[]; plann
  * Entries already covered by another entry are normalized away first (GY-906): redundancy in the
  * item's own plannedFiles must never make a widening look unrepresentable — an item at the cap
  * holding `tests/` beside exact paths under it has room for the ask once the covered entries go.
- * Deepest directories first: one naming more than `collapseDirectoryFiles` entries becomes one
- * entry. Then, while the list is over `plannedFilesMax`, the directory that removes the most
+ * Deepest directories first: one the request names more than `collapseDirectoryFiles` new files
+ * under becomes one entry (the paths already planned there do not count: GY-1676). Then, while
+ * the list is over `plannedFilesMax`, the directory that removes the most
  * entries is folded (the deepest on a tie). Only directories inside `area` that hold a requested
  * path are considered, so a fold never widens past what the request and the item already name;
  * planned entries it contains are folded with it. Paths already planned are not asked for again.
@@ -59,7 +60,11 @@ export function collapsePlannedFiles(plannedFiles: readonly string[], paths: rea
     .sort((a, b) => depth(b) - depth(a) || a.localeCompare(b));
   const inside = (directory: string) => entries.filter(entry => pathScopeContains(directory, entry)).length;
   const fold = (directory: string) => { entries = [...entries.filter(entry => !pathScopeContains(directory, entry)), directory]; };
-  for (const directory of candidates) if (!entries.includes(directory) && inside(directory) > collapseDirectoryFiles) fold(directory);
+  // A directory folds for the width of the ask itself (GY-1676): one new file under a directory the
+  // item already plans 21 paths in is that exact path, never the directory; the cap below still folds.
+  // Only the entries the ask adds count, a deeper directory it already folded into as one.
+  const asked = (directory: string) => entries.filter(entry => pathScopeContains(directory, entry) && !plannedFiles.includes(entry)).length;
+  for (const directory of candidates) if (!entries.includes(directory) && asked(directory) > collapseDirectoryFiles) fold(directory);
   while (entries.length > plannedFilesMax) {
     const best = candidates.filter(directory => !entries.includes(directory)).map(directory => ({ directory, count: inside(directory) }))
       .filter(entry => entry.count > 1).sort((a, b) => b.count - a.count || depth(b.directory) - depth(a.directory))[0];
