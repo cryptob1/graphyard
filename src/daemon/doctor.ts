@@ -10,7 +10,8 @@ import { openFaultClassItem } from '../model/fault-classes.js';
 import { workerSubmissionBoundMs } from '../model/attempt-bound.js';
 import { scopeRefusalBlocker, unplannedPaths } from '../model/scope.js';
 import { approverSessionName, guardBroadScope } from '../master/autonomy.js';
-import { containmentPhase, type MasterConfig } from '../master.js';
+import { containmentPhase, masterHarness, type MasterConfig } from '../master.js';
+import { harnessDrift, writeHarnessPermissions } from '../harness.js';
 import { selectFleetSession } from '../fleet.js';
 import { heldAwareProbe } from '../master/environments.js';
 import { registryHeadlessLaunch, registryRunner, runConfinement } from '../runner/roles.js';
@@ -23,7 +24,7 @@ import { readyToRetry } from './sessions.js';
 import { stoppedStates, record } from './effects.js';
 import { maxApproverLaunches } from './decisions.js';
 import { decisionReadConcurrency } from './decision-reads.js';
-import { message, type DaemonAction, type DaemonState } from './state.js';
+import { message, touchStanding, type DaemonAction, type DaemonState } from './state.js';
 import type { Cycle } from './cycle.js';
 
 // ---------------------------------------------------------------------------
@@ -34,8 +35,8 @@ import type { Cycle } from './cycle.js';
 // requirements, unblock, decide + approver, settle-containment, close, create, release — never
 // merge, dispatch, evidence or lease commands (the shipped allowlist guard in integrations/pi
 // blocks the rest and the doctor records the refusal). Its prompt is the shipped template below,
-// naming every check bound. The three remedies that need no judgement at all the loop applies
-// itself, every cycle, in `routineRemedies`.
+// naming every check bound. The remedies that need no judgement at all the loop applies itself,
+// every cycle, in `routineRemedies`.
 // ---------------------------------------------------------------------------
 
 export const doctorRole = 'doctor';
@@ -705,11 +706,50 @@ export async function relaunchUnansweredApprovers(cycle: Cycle) {
 /** How often the approver remedy reads one item's decision history. */
 export const decisionCheckMs = 2 * 60_000;
 
-/** The three deterministic remedies, every cycle, before the doctor itself is scheduled. */
+/**
+ * Remedy 4 (GY-1652): apply the Claude harness contract from the loop's own unconfined process.
+ * The plan is derived live (second-install units on the host add denies, GY-1441), so the settings
+ * the checkout's sessions load drift whenever the host changes. `master status` repairs drift in
+ * place, but the only recurring automated reader is the doctor, whose checkout is bound read-only
+ * (GY-888), so its repair always met EROFS and the row recurred every pass. The loop owns the file:
+ * whenever the installed settings differ from the plan it makes the same idempotent write
+ * `master harness claude --apply` makes — operator-added entries kept, only retired generated rules
+ * removed — and journals one line. It runs on the checkout the doctor reads, which is the loop's
+ * own. The checkout is named by the loop's research effect, which every loop carries, not by the
+ * doctor's: a loop with no operator-agent identity or with the doctor off still owns its checkout,
+ * and its own cycle is then the only recurring reader that would heal host-derived drift.
+ * A failure is journaled once per distinct cause and retried every cycle; a repeat of the same cause
+ * moves the standing row's time, so the failure stays open for as long as it lasts.
+ */
+export async function applyHarnessContract(cycle: Cycle) {
+  const { state, effects, now, performed, config, isolate } = cycle;
+  const root = effects.research?.cwd ?? effects.doctor?.cwd;
+  if (!root) return;
+  await isolate('config', null, 'harness contract', async () => {
+    const key = remedyKey('harness', 'claude'), previous = state.actions[key], attempts = (previous?.attempts ?? 0) + 1;
+    try {
+      const plan = masterHarness(root, config, 'claude');
+      if (!await harnessDrift(root, plan)) return;
+      const written = await writeHarnessPermissions(root, plan, true);
+      const changed = [...written.removed.map(entry => `removed stale ${entry.list} ${entry.rule}`), ...written.added.map(entry => `added ${entry.list} ${entry.rule}`)].join(', ');
+      performed.push(await record(state, key, { kind: 'config', work: null, principal: null, state: 'done', detail: `Applied the Claude harness contract to ${written.file} from the loop's own process, as graphyard master harness claude --apply does, keeping operator-added entries: ${changed}`.slice(0, 2000), attempts, cycle: state.cycle }, now(), effects.persist));
+    } catch (error) {
+      // A filesystem refusal names its random temporary file; its code and the settings directory are the cause, stable across cycles.
+      const code = (error as NodeJS.ErrnoException | null)?.code;
+      const detail = `Could not apply the Claude harness contract from the loop's own process: ${code ? `${code} writing the harness settings under ${root}/.claude` : message(error)}`.slice(0, 2000);
+      // The same cause again is the one standing failure: its time moves (touchStanding), so the fault window keeps the run open while it lasts, but nothing new is journaled.
+      if (previous?.state === 'failed' && previous.detail === detail) { touchStanding(state, key, new Date(now()).toISOString()); await effects.persist(state); return; }
+      performed.push(await record(state, key, { kind: 'config', work: null, principal: null, state: 'failed', detail, attempts, cycle: state.cycle }, now(), effects.persist));
+    }
+  });
+}
+
+/** The deterministic remedies, every cycle, before the doctor itself is scheduled. */
 export async function routineRemedies(cycle: Cycle) {
   await settleSubmittedContainment(cycle);
   await clearCoveredBlockers(cycle);
   await relaunchUnansweredApprovers(cycle);
+  await applyHarnessContract(cycle);
 }
 
 /** The runs `master status` reports under daemon.doctor, newest first. */

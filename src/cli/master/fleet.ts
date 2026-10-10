@@ -1,5 +1,7 @@
 // Concern: `graphyard master` fleet subcommands — start, worker, producer, config, registry, reviewer, executors, review, protection, tip-cleanup, browser, harness.
-import { readFile } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { access, readFile } from 'node:fs/promises';
+import { dirname, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { agentOwner, listHerdrAgents, masterHarness, masterSettingsFromArgs, producerCommand, registeredReview, saveMasterSettings, saveWorkerProfile, startMaster, workerProfileSchema } from '../../master.js';
 import { readReviewLedger, reviewCommand as launchReview } from '../../reviewer.js';
@@ -15,6 +17,20 @@ import { assertHandReview } from '../hand-actions.js';
 import { unhandled, type MasterSession } from './session.js';
 import type { AttentionItem, MasterConfig } from '../../master.js';
 
+/** The write errors of a vantage that may read the checkout but not write it: a read-only bind (GY-888's confinement) or a directory it does not own. */
+const readOnlyCodes = ['EROFS', 'EACCES', 'EPERM'];
+const readOnlyCode = (error: unknown) => { const code = (error as NodeJS.ErrnoException | null)?.code; return code && readOnlyCodes.includes(code) ? code : null; };
+
+/** Whether this process may write the harness settings' directory (the nearest one that exists): the temporary file the write makes lands there. */
+export async function harnessWritable(root: string, file: string) {
+  let directory = dirname(resolve(root, file));
+  for (;;) {
+    try { await access(directory, constants.W_OK); return; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT' || directory === resolve(root)) throw error; }
+    directory = dirname(directory);
+  }
+}
+
 /**
  * The master's installed Claude harness judged against the current `masterHarness` plan (GY-1217):
  * an attention item naming the stale and missing rules, repaired by `master harness claude --apply`,
@@ -25,17 +41,25 @@ import type { AttentionItem, MasterConfig } from '../../master.js';
  * session in the checkout loads. With `repair` (the default, as `master status` reads it) the same
  * idempotent write `master harness claude --apply` makes runs first — operator-added entries are
  * kept — and the item is returned only when drift survives it; the repair itself is logged to stderr.
+ *
+ * A vantage that reads the checkout read-only (GY-1652: the doctor's confined session, bound
+ * read-only by GY-888) attempts no write: the drift row names that vantage and the loop's own
+ * remedy, which applies the contract from its unconfined process each cycle, instead of reporting a
+ * doomed "applying it automatically failed: EROFS" as a standing self-heal failure.
  */
-export async function masterHarnessDrift(root: string, master: MasterConfig, options: { repair?: boolean; log?: (line: string) => void } = {}): Promise<(AttentionItem & { drift: Awaited<ReturnType<typeof harnessDrift>> }) | null> {
+export async function masterHarnessDrift(root: string, master: MasterConfig, options: { repair?: boolean; log?: (line: string) => void; writable?: (root: string, file: string) => Promise<void> } = {}): Promise<(AttentionItem & { drift: Awaited<ReturnType<typeof harnessDrift>> }) | null> {
   const repair = 'graphyard master harness claude --apply';
   const plan = masterHarness(root, master, 'claude');
   try {
     let drift = await harnessDrift(root, plan);
     if (drift && (options.repair ?? true)) {
       try {
+        await (options.writable ?? harnessWritable)(root, drift.file);
         await writeHarnessPermissions(root, plan, true);
         (options.log ?? (line => console.error(line)))(`Repaired harness drift in ${drift.file} with ${repair}: ${drift.text.replace(/^Harness drift in \S+: /, '').replace(/ Run graphyard .*$/, '')}`);
       } catch (error) {
+        const code = readOnlyCode(error);
+        if (code) return { subject: 'harness', text: `${drift.text.replace(/ Run graphyard .*$/, '')} This vantage reads the checkout read-only (${code}), so master status applies nothing here; the loop's own harness remedy applies the contract from its unconfined process on its next cycle.`, drift, ...agentOwner('master', repair) };
         return { subject: 'harness', text: `${drift.text} Applying it automatically failed: ${error instanceof Error ? error.message : 'unknown reason'}`, drift, ...agentOwner('master', repair) };
       }
       drift = await harnessDrift(root, plan);
