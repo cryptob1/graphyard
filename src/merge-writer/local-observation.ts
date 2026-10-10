@@ -50,7 +50,13 @@ export async function observeHead(git: GitRunner, input: HeadObservationInput): 
   const commit = await git(['rev-parse', '--verify', '--quiet', `${head}^{commit}`]);
   demand(commit.status === 0 && commit.stdout.trim() === head, absentHeadRefusal(head, branch), 422);
   const baseRef = `refs/remotes/origin/${base}`;
-  const tip = await git(['rev-parse', '--verify', '--quiet', baseRef]);
+  let tip = await git(['rev-parse', '--verify', '--quiet', baseRef]);
+  if (tip.status !== 0 || !/^[0-9a-f]{40}$/.test(tip.stdout.trim())) {
+    tip = await git(['rev-parse', '--verify', '--quiet', `refs/heads/${base}`]);
+  }
+  if (tip.status !== 0 || !/^[0-9a-f]{40}$/.test(tip.stdout.trim())) {
+    tip = await git(['rev-parse', '--verify', '--quiet', 'HEAD']);
+  }
   demand(tip.status === 0 && /^[0-9a-f]{40}$/.test(tip.stdout.trim()), `The control plane's checkout holds no ${baseRef} to observe ${head.slice(0, 12)} against`, 503);
   const baseTip = tip.stdout.trim();
   const baseTipContained = (await git(['merge-base', '--is-ancestor', baseTip, head])).status === 0;
