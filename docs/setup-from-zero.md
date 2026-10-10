@@ -69,7 +69,7 @@ GitHub merger only. `--apply` serves `http://127.0.0.1:4311` and prints it; it o
 
 ## 6. Onboard the checkout
 
-`gy init --scan`, then `gy init --scan --apply --url http://127.0.0.1:4310`; merge `AGENTS.md .gitignore graphyard.json .github/workflows` to the base (never `.graphyard/`). Control-plane: worker block says `complete GY-N EPOCH --head SHA`. Apply reuses the install's principals and App and writes none; a `--no-github-app` install's onboarding is written with no App block, while an install still at its App step refuses, naming its `install.json`. **Verify:** readiness `setup-proposal` is `ready` ([onboarding](onboarding.md#documentation-policy)).
+`gy init --scan`, then `gy init --scan --apply --url http://127.0.0.1:4310`; merge `AGENTS.md .gitignore graphyard.json .github/workflows` to the base (never `.graphyard/`). Control-plane: worker block says `complete GY-N EPOCH --head SHA`. Apply reuses the install's principals and App and writes none; a `--no-github-app` install's onboarding is written with no App block, ignores any saved `.graphyard/github-app.json`, and reports `githubPending: false`, while an install still at its App step refuses, naming its `install.json`. **Verify:** readiness `setup-proposal` is `ready` ([onboarding](onboarding.md#documentation-policy)).
 
 ## 8. Agent environments
 
