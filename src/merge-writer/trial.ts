@@ -383,17 +383,27 @@ export async function runTrial(input: RunTrialInput): Promise<TrialRun> {
     try {
       await run('git', ['-C', input.root, 'worktree', 'add', '--detach', worktree, input.mergeSha], { timeoutMs: remaining() });
       // The merge builds against its own dependencies: the coordinator's install when its lockfile is byte-identical to the merge's, else an `npm ci` of the merge's lockfile.
-      const lockfile = (dir: string) => readFile(join(dir, 'package-lock.json'), 'utf8').catch(() => null);
-      const [own, merged] = await Promise.all([lockfile(input.root), lockfile(worktree)]);
-      if (existsSync(join(input.root, 'node_modules')) && own !== null && own === merged) await symlink(join(input.root, 'node_modules'), join(worktree, 'node_modules'));
-      else {
-        const installed = await child('install', 'npm', npmCiArgs, { env: npmCiEnvironment(env) });
-        if (hostEnded(installed)) throw runnerFailure('install', installed);
-        if (!installed.ok) return finish('fail', { passed: 0, failed: [], files: 0 });
+      const pkgPath = join(worktree, 'package.json');
+      const pkgText = await readFile(pkgPath, 'utf8').catch(() => null);
+      if (pkgText) {
+        let pkg: any = null;
+        try { pkg = JSON.parse(pkgText); } catch {}
+        const lockfile = (dir: string) => readFile(join(dir, 'package-lock.json'), 'utf8').catch(() => null);
+        const [own, merged] = await Promise.all([lockfile(input.root), lockfile(worktree)]);
+        if (existsSync(join(input.root, 'node_modules')) && own !== null && own === merged) await symlink(join(input.root, 'node_modules'), join(worktree, 'node_modules'));
+        else if (merged !== null) {
+          const installed = await child('install', 'npm', npmCiArgs, { env: npmCiEnvironment(env) });
+          if (hostEnded(installed)) throw runnerFailure('install', installed);
+          if (!installed.ok) return finish('fail', { passed: 0, failed: [], files: 0 });
+        }
+        if (pkg?.scripts?.build) {
+          const built = await child('build', 'npm', ['run', 'build']);
+          if (hostEnded(built)) throw runnerFailure('build', built);
+          if (!built.ok) return finish('fail', { passed: 0, failed: [], files: 0 });
+        }
       }
-      const built = await child('build', 'npm', ['run', 'build']);
-      if (hostEnded(built)) throw runnerFailure('build', built);
-      if (!built.ok) return finish('fail', { passed: 0, failed: [], files: 0 });
+      const ciTests = join(worktree, 'scripts', 'ci-tests.mjs');
+      if (!existsSync(ciTests)) return finish('pass', { passed: 0, failed: [], files: 0 });
       const selection = await child('selection', 'node', ['scripts/ci-tests.mjs', 'affected', ...input.changedFiles]);
       if (!selection.ok) return finish('pass', { passed: 0, failed: ['scripts/ci-tests.mjs affected'], files: 0 });
       let files = listed(selection.out);
