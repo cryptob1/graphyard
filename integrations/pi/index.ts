@@ -271,10 +271,12 @@ export function graphyardTools(role: string | undefined = process.env.GRAPHYARD_
 // ---- The doctor's command allowlist (GY-711) ----------------------------------------------------
 /**
  * The master subcommands the doctor's operator-agent identity may run: the sanctioned intents and
- * two-party requests, never `merge`, `dispatch`, an evidence submission or a lease command. A
+ * two-party requests, and `checkout-restore` (GY-1658), which asks the loop to save a dirty
+ * coordinator checkout under a named ref and restart — never `merge`, `dispatch`, an evidence
+ * submission, a lease command or a direct checkout mutation. A
  * command the allowlist refuses is recorded in the doctor's report, never run.
  */
-export const doctorSanctionedCommands = ['scope', 'requirements', 'unblock', 'decide', 'approver', 'settle-containment', 'close', 'create', 'release'] as const;
+export const doctorSanctionedCommands = ['scope', 'requirements', 'unblock', 'decide', 'approver', 'settle-containment', 'close', 'create', 'release', 'checkout-restore'] as const;
 /** The master subcommands and root commands that only read. */
 export const doctorReadOnlyCommands = ['status', 'decisions', 'context', 'guide', 'board'] as const;
 /**
@@ -364,7 +366,7 @@ function doctorLineAllowed(line: string, context: DoctorGuardContext): GuardVerd
  * after ACTION opens with `{` or `@`. The flags each one reads a value after — `master decide`'s
  * `--precedent` and `--context`, `master close`'s `--duplicate-of` and `--superseded-by` — are its own.
  */
-const doctorReasonAfter: Record<(typeof doctorSanctionedCommands)[number], number> = { scope: 1, requirements: 2, unblock: 1, decide: 2, approver: 2, 'settle-containment': 1, close: 1, create: 1, release: 1 };
+const doctorReasonAfter: Record<(typeof doctorSanctionedCommands)[number], number> = { scope: 1, requirements: 2, unblock: 1, decide: 2, approver: 2, 'settle-containment': 1, close: 1, create: 1, release: 1, 'checkout-restore': 0 };
 const doctorValueFlags: Partial<Record<(typeof doctorSanctionedCommands)[number], Set<string>>> = { decide: new Set(['--precedent', '--context']), close: new Set(['--duplicate-of', '--superseded-by']) };
 /**
  * The line a sanctioned master command runs as when its reason broke the shell's reading of it:

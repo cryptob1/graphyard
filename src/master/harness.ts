@@ -321,10 +321,10 @@ export async function startMaster(root: string, kind: WorkerProfile['kind'], age
     // The master starts on its own request too; a runtime without that contract is prompted
     // after start, with the text last and the confirmation following it. The request is the
     // shared master prompt (GY-898), the same one the loop's launch carries with its handover.
-    // The master is not one of the confined roles (GY-888): it runs the loop's own configuration,
-    // administration and browser-flow commands from the coordinator root, and its harness rules
-    // above remain what bounds it. Every other launched session carries the OS-level confinement.
-    ({ delivery } = await startAgentSession(name, kind, created.pane, launch.args, masterPrompt(config), run, { directory: root, confirm: 'follow', retry: masterRetry, environment: launch.environment, confinement: false }));
+    // The master is confined like every other launched session (GY-1658): its configuration,
+    // administration and browser-flow commands run from the coordinator root with the checkout
+    // read-only, its managed .graphyard state writable; a host that cannot confine it refuses.
+    ({ delivery } = await startAgentSession(name, kind, created.pane, launch.args, masterPrompt(config), run, { directory: root, confirm: 'follow', retry: masterRetry, environment: launch.environment, confinement: 'master' }));
   } catch (error) {
     const malformedTab = (error as any)?.herdrTab as string | undefined;
     if (pane || tabId || malformedTab) try { await stopCreatedHerdrTab(pane, tabId ?? malformedTab, run); }

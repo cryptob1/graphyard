@@ -20,6 +20,8 @@ export interface ExecutorsCommandApi {
   run?: (command: string, args: string[]) => string;
   alive?: (pid: number) => boolean;
   sleep?: (ms: number) => Promise<void>;
+  /** Fed while a restart waits, so a supervised loop running it is not mistaken for a hung one. */
+  onWait?: () => Promise<void>;
 }
 
 /**
@@ -29,6 +31,12 @@ export interface ExecutorsCommandApi {
  * supervisor unit and never signals a process itself.
  */
 export async function executorsCommand(master: Pick<MasterConfig, 'credentialFile' | 'hostId'>, args: string[], api: ExecutorsCommandApi): Promise<unknown> {
+  const outcome = await executorsAct(master, args, api);
+  if ((outcome as { result?: string }).result && (outcome as { result?: string }).result !== 'restarted') process.exitCode = 1;
+  return outcome;
+}
+/** The command's work without its exit status: the loop runs it for a confined master (GY-1658), whose PID namespace and hidden systemd cannot. */
+export async function executorsAct(master: Pick<MasterConfig, 'credentialFile' | 'hostId'>, args: string[], api: ExecutorsCommandApi): Promise<unknown> {
   const [action, ...rest] = args;
   if (!action) {
     const report = executorFleetReport(await readExecutorRegistrations(master), { commit: api.coordinatorCommit }, { hostId: master.hostId, alive: api.alive });
@@ -38,8 +46,7 @@ export async function executorsCommand(master: Pick<MasterConfig, 'credentialFil
     const { values } = parseArgs({ args: rest, options: { timeout: { type: 'string' }, all: { type: 'boolean' } }, allowPositionals: false });
     const timeoutSeconds = values.timeout ? Number(values.timeout) : executorRestartTimeoutMs / 1000;
     if (!Number.isInteger(timeoutSeconds) || timeoutSeconds < 5 || timeoutSeconds > 900) throw new Error('Use master executors restart --timeout with whole seconds between 5 and 900');
-    const result: ExecutorRestartResult = await restartExecutors(master, { actions: api.actions, coordinatorCommit: api.coordinatorCommit, run: api.run, alive: api.alive, sleep: api.sleep, timeoutMs: timeoutSeconds * 1000, skipCurrent: !values.all });
-    if (result.result !== 'restarted') process.exitCode = 1;
+    const result: ExecutorRestartResult = await restartExecutors(master, { actions: api.actions, coordinatorCommit: api.coordinatorCommit, run: api.run, alive: api.alive, sleep: api.sleep, onWait: api.onWait, timeoutMs: timeoutSeconds * 1000, skipCurrent: !values.all });
     return { host: master.hostId, ...result };
   }
   throw new Error('Use master executors, or master executors restart [--timeout SECONDS] [--all]');
