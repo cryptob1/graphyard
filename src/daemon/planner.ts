@@ -10,6 +10,9 @@ import { agentToken } from '../master/autonomy.js';
 import { capacityRefusal, selectFleetSession } from '../fleet.js';
 import { heldAwareProbe } from '../master/environments.js';
 import { Refusal, RefusedResponse } from '../model/refusal.js';
+import { refusedOutright } from './acceptance.js';
+/** A plan the control plane rejects as input (422): it counts as a refused plan round. Authority and state refusals (401, 403, 409) do not, and are posted again in an hour. */
+const invalidPlan = (error: unknown) => (error instanceof Refusal || error instanceof RefusedResponse) && error.status === 422;
 import type { MasterConfig } from '../master.js';
 import { diagnosticianSettings, type DiagnosticianSettings } from '../runner/payloads.js';
 import { piRunner } from '../runner/pi.js';
@@ -124,7 +127,6 @@ function launch(cycle: Cycle, planner: PlannerEffects, goal: Goal, role: 'plan' 
 }
 const due = (cycle: Cycle, goal: Goal, step: string) => cycle.clock >= (retryAt.get(`${goal.id}:${step}`) ?? -Infinity);
 const later = (cycle: Cycle, goal: Goal, step: string, ms: number) => { retryAt.set(`${goal.id}:${step}`, cycle.clock + ms); };
-const refusedOutright = (error: unknown) => (error instanceof Refusal || error instanceof RefusedResponse) && error.status === 422;
 
 /**
  * One loop step over every goal past its acceptance (GY-1418). Each goal moves at most one
@@ -184,7 +186,9 @@ async function planning(cycle: Cycle, planner: PlannerEffects, goal: Goal, note:
     if (refusals.length) return refuse(refusals.join('; '));
     try { await planner.plan(goal, result.plan); }
     catch (error) {
-      if (refusedOutright(error)) return refuse(message(error));
+      if (invalidPlan(error)) return refuse(message(error));
+      // Refused for authority or state (401, 403, 409), the plan is kept and posted again in an hour: recording it as invalid with the same credential would be refused too.
+      if (refusedOutright(error)) { later(cycle, goal, 'post', planRetryMs); return note(goal, 'failed', `The plan for ${goal.key} could not be recorded: ${message(error)}; the control plane refused it outright, so it is posted again in an hour`); }
       later(cycle, goal, 'post', planStepRetryMs); return note(goal, 'failed', `The plan for ${goal.key} could not be recorded: ${message(error)}; it is posted again in ten minutes`);
     }
     pending.delete(goal.id);
@@ -219,7 +223,11 @@ async function releasing(cycle: Cycle, planner: PlannerEffects, goal: Goal, note
   if (!due(cycle, goal, 'release')) return;
   let released: Goal;
   try { released = await planner.release(goal); }
-  catch (error) { later(cycle, goal, 'release', planStepRetryMs); return note(goal, 'failed', `Could not release ${goal.key}'s approved plan: ${message(error)}; it is asked again in ten minutes, reusing the items already created`); }
+  catch (error) {
+    // Refused outright (401, 403, 409 or 422), asking again in ten minutes is answered the same: it waits the hour a paid run does.
+    if (refusedOutright(error)) { later(cycle, goal, 'release', planRetryMs); return note(goal, 'failed', `Could not release ${goal.key}'s approved plan: ${message(error)}; the control plane refused it outright, so it is asked again in an hour, reusing the items already created`); }
+    later(cycle, goal, 'release', planStepRetryMs); return note(goal, 'failed', `Could not release ${goal.key}'s approved plan: ${message(error)}; it is asked again in ten minutes, reusing the items already created`);
+  }
   return note(goal, 'done', `Released ${goal.key}'s approved plan: ${(released.items ?? []).map(item => item.key).join(', ')}; the dispatcher launches each only after the items it depends on are delivered`);
 }
 

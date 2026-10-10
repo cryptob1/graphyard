@@ -29,6 +29,8 @@ LABEL org.opencontainers.image.title="Graphyard" \
       org.opencontainers.image.revision="${GRAPHYARD_BUILD_REVISION}" \
       org.opencontainers.image.source="https://github.com/cryptob1/graphyard" \
       org.opencontainers.image.licenses="Apache-2.0"
+# The land route fetches the base branch to judge a merge-writer landing (GY-1661), so the image carries git.
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates && rm -rf /var/lib/apt/lists/*
 COPY package*.json ./
 RUN npm ci --omit=dev
 COPY --from=build /app/dist ./dist
