@@ -478,38 +478,68 @@ test('integration:shadow-verdict-route-coordinator-only — POST /api/work/:id/s
 });
 
 // ——— GY-1639: the trial runs the files as CI does, and a failing verdict names its cause. ———
-const parityIdentity = { GIT_AUTHOR_NAME: 'Someone', GIT_AUTHOR_EMAIL: 'someone@example.com', GIT_COMMITTER_NAME: 'Someone', GIT_COMMITTER_EMAIL: 'someone@example.com', GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
 const parityDurable: FilesystemProbe = async path => ({ probed: path, volatile: null, freeBytes: 200e9 });
 const removeCheckout = async (_root: string, _base: string, directory: string) => { await rm(directory, { recursive: true, force: true }); };
 
-test('integration:shadow-trial-env-parity — run against this tree, tests/managed-worktree-root.test.ts and tests/runner-executor.test.ts pass inside the shadow trial\'s environment: its own temporary directory is sticky as CI\'s /tmp is, and a checkout under a temporary root never reads as a prompt naming /tmp, so a head CI passes records agree-pass', async () => {
-  const keep = ['tests/managed-worktree-root.test.ts', 'tests/runner-executor.test.ts'];
+test('integration:shadow-trial-env-parity — the loop\'s shadow trial of this repository\'s head on the current main tip (the real merge, the real build, the real affected selection, the real test runner) runs tests/managed-worktree-root.test.ts and tests/runner-executor.test.ts and both pass inside its environment, whose own temporary directory is sticky as CI\'s /tmp is; the verdict is recorded through the coordinator route and GitHub merging the head makes it agree-pass', async () => {
+  const named = ['tests/managed-worktree-root.test.ts', 'tests/runner-executor.test.ts'];
   const own = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-  // This repository's HEAD with tests/ reduced to the two files, committed in a shared scratch clone that borrows this checkout's install.
-  const scratch = await temporaryDirectory('shadow-parity', tmpdir()), root = join(scratch, 'repo'), index = join(scratch, 'index');
-  const git = (args: string[], input?: string) => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', input, env: { ...process.env, ...parityIdentity, GIT_INDEX_FILE: index } }).trim();
+  const ownGit = (...args: string[]) => execFileSync('git', ['-C', own, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+  // The head and the main tip it is tried on. CI's checkout of a pull request is GitHub's merge of
+  // its head onto main (first parent: the main tip), and merging that commit onto its first parent is
+  // the same tree; a branch checkout is tried on origin/main; main itself on its own first parent.
+  const [headSha, firstParent, secondParent] = ownGit('rev-list', '--parents', '-n', '1', 'HEAD').split(' ');
+  let main = '';
+  try { main = ownGit('rev-parse', '--verify', '--quiet', 'refs/remotes/origin/main^{commit}'); } catch { /* none fetched */ }
+  const mainTip = (secondParent || !main || main === headSha ? firstParent! : main).toLowerCase(), head = headSha!.toLowerCase();
+  // The coordinator checkout: a shared clone of this repository holding both commits, borrowing this checkout's install for the trial's lockfile match.
+  const scratch = await temporaryDirectory('shadow-parity', tmpdir()), root = join(scratch, 'repo');
   execFileSync('git', ['clone', '-q', '--shared', '--no-checkout', own, root], { stdio: 'ignore' });
-  const head = git(['rev-parse', 'HEAD']);
-  git(['read-tree', head]);
-  const dropped = git(['ls-tree', '--name-only', head, 'tests/']).split('\n').filter(path => path.endsWith('.test.ts') && !keep.includes(path));
-  git(['update-index', '--force-remove', '--stdin'], `${dropped.join('\n')}\n`);
-  const mergeSha = git(['commit-tree', git(['write-tree']), '-p', head, '-m', 'Trial of the two files']);
+  execFileSync('git', ['-C', root, 'update-ref', 'refs/remotes/origin/main', mainTip]);
   copyFileSync(join(own, 'package-lock.json'), join(root, 'package-lock.json'));
   symlinkSync(resolve(dirname(createRequire(import.meta.url).resolve('tsx/package.json')), '..'), join(root, 'node_modules'));
-  // The runner's tsx runs the sources, so the build is answered at once; the test runner is the real one, and what it is handed is read.
-  const seen: { tmp: string; mode: number }[] = [];
+  // Every child is the real one, with two exceptions: the clone already holds both commits, so there
+  // is no remote to fetch from; and of the head's real affected selection (which must name both
+  // files) the runner is handed the two named files, not the whole suite this test sits in.
+  const selected: string[][] = [], seen: { tmp: string; mode: number }[] = [];
   const run: ChildRun = async (command, args, options) => {
-    if (command === 'npm' && args.join(' ') === 'run build') return '';
+    if (command === 'git' && args[2] === 'fetch') return '';
+    if (command === 'node' && args[0] === 'scripts/ci-tests.mjs' && args[1] === 'affected') {
+      const lines = String(await defaultChildRun(command, args, options)).split('\n');
+      selected.push(lines.map(line => line.trim()).filter(line => /^tests\/.*\.test\.ts$/.test(line)));
+      return [lines[0], ...named.filter(file => selected.at(-1)!.includes(file))].join('\n');
+    }
     if (command === 'node' && args.includes('tests/helpers/run-tests.ts')) seen.push({ tmp: options!.env!.TMPDIR!, mode: (await stat(options!.env!.TMPDIR!)).mode });
     return defaultChildRun(command, args, options);
   };
-  const result = await runTrial({ root, base: join(scratch, 'base'), mergeSha, changedFiles: ['tests/helpers/run-tests.ts'], timeoutMs: 10 * 60_000, key: 'GY-1639', run,
-    temporaryRoots: [await temporaryDirectory('roots', scratch)], probe: parityDurable, remove: removeCheckout });
-  assert.equal(result.build, 'pass', result.logTail);
-  assert.deepEqual(result.tests, { passed: 2, failed: [], files: 2 }, result.logTail);
-  assert.equal(result.runnerExit, 0, result.logTail);
+  const id = randomUUID();
+  await store.pool.query('INSERT INTO work_items(id, document) VALUES ($1,$2)', [id, JSON.stringify({ id, key: 'GY-1639', stage: 'build' })]);
+  const posted: number[] = [], recordKey = randomUUID();
+  const reads = shadowReads(config, root, run, {
+    base: join(scratch, 'base'),
+    record: async (work, verdict) => { const response = await request(token(coordinator), `work/${work.id}/shadow-verdict`, shadowVerdictBody(verdict), recordKey); posted.push(response.status); assert.equal(response.status, 200, JSON.stringify(response.body)); },
+    trial: async input => runTrial({ ...input, temporaryRoots: [await temporaryDirectory('roots', scratch)], probe: parityDurable, remove: removeCheckout }),
+  });
+  let merged = false;
+  const candidate = { sha: head, baseSha: mainTip, pr: 1094, branch: 'graphyard/gy-1639-2', author: 'worker' };
+  const items = () => [submitted(1639, 5, { id, key: 'GY-1639', candidate, ...(merged ? { stage: 'done', delivery: delivery(sha('gh-merge-1639')) } : {}) })];
+  const state = emptyDaemonState(config), effects = effectsFor({ work: items, now: () => start, shadow: reads });
+  for (let cycle = 0; cycle < 3; cycle++) { await runCycle(config, state, effects, () => start); await shadowIdle(state); }
+  const failures = Object.entries(state.actions).filter(([key]) => key.startsWith('shadow-')).map(([key, action]) => `${key}: ${action.detail}`);
+  assert.deepEqual(failures, [], 'the trial reached a verdict');
+  assert.ok(selected.length === 1 && named.every(file => selected[0]!.includes(file)), `the head's own affected selection names both files (${selected[0]?.length ?? 0} selected)`);
+  assert.deepEqual(posted, [200], 'the verdict is recorded once through the coordinator route');
+  const event = (await store.pool.query("SELECT payload FROM events WHERE kind='shadow.verdict' AND work_id=$1", [id])).rows.map(row => row.payload);
+  assert.equal(event.length, 1);
+  assert.deepEqual([event[0].head, event[0].baseTip, event[0].build, event[0].tests, event[0].conflict], [head, mainTip, 'pass', { passed: 2, failed: [], files: 2 }, []], event[0].logTail ?? '');
   assert.ok(seen.length > 0 && seen.every(entry => (entry.mode & 0o7777) === 0o1700), `the runner's own TMPDIR is sticky and private (${seen.map(entry => `${entry.tmp} ${(entry.mode & 0o7777).toString(8)}`).join(', ')})`);
-  assert.equal(compareVerdicts({ build: result.build, tests: result.tests, conflict: [] }, 'merged'), 'agree-pass', 'a head GitHub merged comes out agree-pass');
+  assert.deepEqual(state.shadow.map(verdict => [verdict.head, verdict.baseTip, verdict.outcome]), [[head, mainTip, 'pending']]);
+  // GitHub merges the head: the recorded verdict is judged against it.
+  merged = true;
+  const raised: string[] = [];
+  for (let cycle = 0; cycle < 2; cycle++) raised.push(...(await runCycle(config, state, effects, () => start)).actions.filter(action => action.detail.startsWith('Shadow merge gate:')).map(action => action.detail));
+  assert.deepEqual(state.shadow.map(verdict => verdict.outcome), ['agree-pass']);
+  assert.deepEqual(raised, [], 'an agreement raises nothing');
 });
 
 test('integration:shadow-failure-log-tail — a shadow-only-fail verdict whose test file fails records that file\'s failing test name and its log tail, even when a later group printed more than the tail holds; the cause is never \'no log tail recorded\'', async () => {
