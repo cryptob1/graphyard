@@ -8,7 +8,7 @@ import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server/index.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { CHECK_NAME, GitHub, comparePage, mergePathReserve, observationBand, observationCadence, observationCadenceMs, processJob, reserveDecision, steadyStateInterval, steadyStateShare } from '../src/github.js';
+import { CHECK_NAME, GitHub, comparePage, webhookCorroboration, webhookDeliveryLogMs, webhookDeliveryLogTightMs, webhookState, type WebhookDeliveryLog, mergePathReserve, observationBand, observationCadence, observationCadenceMs, processJob, reserveDecision, steadyStateInterval, steadyStateShare } from '../src/github.js';
 import { evaluate, type Principal, type Work } from '../src/model.js';
 import { exhaustionAttention, githubBudgetAttention, pauseAttention, webhookAttention } from '../src/cli/github-budget-attention.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -23,6 +23,9 @@ import { baseMoveSubjects, webhookSubjects } from '../src/server/routes/github.j
 // integration:webhook-liveness-visible.
 // GY-1231: unit:base-move-wakes-only-affected-items, unit:merge-burst-request-budget.
 // GY-1272: manual:fault-class-resources (the GitHub App budget spent at 06:36:13Z on 5 October 2026).
+// GY-1649: unit:webhook-attention-quiet-is-not-broken, integration:webhook-attention-delivery-log-corroboration,
+// unit:webhook-attention-fires-on-failed-attempts, unit:webhook-attention-202-only-stays-silent,
+// integration:webhook-status-corroboration-fields, unit:webhook-deliveries-read-cached.
 
 // ---- GitHub's REST surface at the fetch level: ETags, rate-limit headers, and a refusal mode ----
 
@@ -95,8 +98,12 @@ class Api {
   private headers(extra: Record<string, string> = {}) {
     return { 'x-ratelimit-limit': String(this.limit), 'x-ratelimit-remaining': String(Math.max(0, this.remaining)), 'x-ratelimit-used': String(this.limit - this.remaining), 'x-ratelimit-reset': String(this.resetAt), 'x-ratelimit-resource': 'core', ...extra };
   }
+  /** GitHub's webhook delivery log, newest first, as `GET /app/hook/deliveries` lists it (GY-1649); reads cost the App's own allowance. */
+  deliveries: { delivered_at: string; status_code: number; event: string; installation_id?: number; repository_id?: number }[] = [];
+  deliveryReads = 0;
   fetch = async (url: unknown, options: any = {}): Promise<Response> => {
     const method = options.method ?? 'GET'; const path = String(url).replace('https://api.github.com', '');
+    if (path.startsWith('/app/hook/deliveries')) { this.deliveryReads++; return new Response(JSON.stringify(this.deliveries), { status: 200, headers: { 'content-type': 'application/json' } }); }
     if (this.refuse) { this.requests.push({ method, path, status: 403 }); return new Response('{"message":"API rate limit exceeded"}', { status: 403, headers: this.headers({ 'x-ratelimit-remaining': '0' }) }); }
     // A queue tip for a head cut from the base tip is the head itself: the merge is a no-op (204) and the ref is written.
     if (method === 'POST' && path.endsWith('/merges')) { this.remaining--; this.requests.push({ method, path, status: 204 }); return new Response(null, { status: 204, headers: this.headers() }); }
@@ -108,7 +115,7 @@ class Api {
   /** A client already authenticated against this provider, with its check publication kept in the provider too. */
   client() {
     const github = new GitHub({ repository: REPOSITORY, base: 'main', appId: APP, installationId: 2, privateKey: 'not-used' });
-    Object.assign(github, { token: 'fixture-token', expires: Date.now() + 3_600_000 });
+    Object.assign(github, { token: 'fixture-token', expires: Date.now() + 3_600_000, appHeaders: () => ({ Authorization: 'Bearer fixture-app-jwt' }) });
     github.controlPlaneLogin = async () => 'graphyard-owner-project[bot]';
     return github;
   }
@@ -506,8 +513,10 @@ test('integration:webhook-liveness-visible — status reports the last delivery 
   t.mock.method(globalThis, 'fetch', api.fetch);
   const github = api.client(); await serve(github);
   for (let index = 0; index < 3; index++) { const work = await submitted(api, `Open ${index}`); await job(work, github); }
+  // GitHub attempted deliveries in the last hour and our endpoint failed them (GY-1649).
+  api.deliveries = [{ delivered_at: new Date(Date.now() - 60_000).toISOString(), status_code: 502, event: 'push', installation_id: 2 }];
   const before = await status();
-  assert.deepEqual([before.webhooks.lastDeliveryAt, before.webhooks.lastHour, before.webhooks.settingsUrl, before.webhooks.openPullRequests], [null, 0, 'https://github.com/settings/apps', 3]);
+  assert.deepEqual([before.webhooks.lastDeliveryAt, before.webhooks.lastHour, before.webhooks.settingsUrl, before.webhooks.openPullRequests, before.webhooks.failedAttempts], [null, 0, 'https://github.com/settings/apps', 3, 1]);
   const silent = webhookAttention(before, Date.now());
   assert.equal(silent.length, 1);
   assert.match(silent[0].text, new RegExp(`^No GitHub webhook delivery has arrived since the control plane started while ${before.webhooks.openPullRequests} pull requests are open`));
@@ -521,12 +530,173 @@ test('integration:webhook-liveness-visible — status reports the last delivery 
   const after = await status();
   assert.equal(after.webhooks.lastHour, 2); assert.ok(Date.now() - Date.parse(after.webhooks.lastDeliveryAt) < 10_000);
   assert.deepEqual(webhookAttention(after, Date.now()), []);
-  // An hour of silence with pull requests open raises it again, naming the last delivery.
-  const stale = webhookAttention(after, Date.now() + 3_600_000 + 60_000);
+  // An hour of silence with pull requests open and failed attempts in it raises it again, naming the last delivery.
+  const stale = webhookAttention({ ...after, webhooks: { ...after.webhooks, attemptsInWindow: 1, failedAttempts: 1, failedStatusCodes: [502] } }, Date.now() + 3_600_000 + 60_000);
   assert.equal(stale.length, 1); assert.match(stale[0].text, new RegExp(`for 1h1m \\(last at ${after.webhooks.lastDeliveryAt.replace(/[.]/g, '[.]')}\\)`));
   // With nothing open there is nothing to wake, so silence is not a fault.
-  assert.deepEqual(webhookAttention({ ...after, webhooks: { ...after.webhooks, openPullRequests: 0 } }, Date.now() + 7_200_000), []);
+  assert.deepEqual(webhookAttention({ ...after, webhooks: { ...after.webhooks, failedAttempts: 1, openPullRequests: 0 } }, Date.now() + 7_200_000), []);
   assert.equal(githubBudgetAttention(after, Date.now()).length, 0, 'nothing else is raised on a healthy budget');
+});
+
+// ---- GY-1649: a receipts gap corroborated with GitHub's own delivery log ----
+
+/** The webhooks block as `/api/status` serves it, judged at `now` against a delivery log. */
+const corroborated = (log: WebhookDeliveryLog, lastDeliveryAt: string | null, now: number, repositoryId: number | null = 77) => {
+  const corroboration = webhookCorroboration(log, lastDeliveryAt, now, { installationId: 2, repositoryId });
+  const liveness = { lastDeliveryAt, lastHour: 0, configured: true, settingsUrl: 'https://github.com/settings/apps/graphyard-owner-project', openPullRequests: 1 };
+  return { ...liveness, ...corroboration, state: webhookState({ ...liveness, ...corroboration }, now) };
+};
+const attempt = (at: string, statusCode: number, event = 'check_suite', repositoryId: number | null = 77) => ({ at, statusCode, event, installationId: 2, repositoryId });
+const readLog = (attempts: ReturnType<typeof attempt>[], observedAt: string): WebhookDeliveryLog => ({ observedAt, attempts, coversFrom: null, error: null });
+
+test('unit:webhook-attention-quiet-is-not-broken — a receipts gap of an hour or more in which GitHub attempted no delivery raises no attention row and is reported quiet, not broken', () => {
+  // GY-1648's instance: the last receipt at 10:20:20.072Z, GitHub's last attempt at 10:20:21.981Z
+  // (an own-check publication answered 202), and nothing attempted through 11:48Z.
+  const receipt = '2026-10-10T10:20:20.072Z', now = Date.parse('2026-10-10T11:36:20Z');
+  const log = readLog([attempt('2026-10-10T10:20:21.981Z', 202), attempt('2026-10-10T10:20:19.500Z', 202, 'push'), attempt('2026-10-10T03:20:00Z', 502)], '2026-10-10T11:35:00Z');
+  const instance = corroborated(log, receipt, now);
+  assert.equal(instance.lastAttemptAt, '2026-10-10T10:20:21.981Z');
+  assert.deepEqual([instance.failedAttempts, instance.state], [0, 'answered'], 'the one attempt in the gap was answered: the earlier 502 burst predates the window');
+  assert.deepEqual(webhookAttention({ webhooks: instance }, now), []);
+  // No attempt at all after the last receipt: quiet, and nothing is raised however long it lasts.
+  const quiet = corroborated(readLog([attempt('2026-10-10T10:20:19.500Z', 202, 'push')], '2026-10-10T13:00:00Z'), receipt, Date.parse('2026-10-10T13:00:00Z'));
+  assert.deepEqual([quiet.attemptsInWindow, quiet.failedAttempts, quiet.state], [0, 0, 'quiet']);
+  assert.deepEqual(webhookAttention({ webhooks: quiet }, Date.parse('2026-10-10T13:00:00Z')), []);
+  assert.deepEqual(githubBudgetAttention({ webhooks: quiet }, Date.parse('2026-10-10T13:00:00Z')), [], 'master status raises nothing for a quiet stretch');
+  // No receipt ever and nothing attempted in the last hour: still quiet.
+  const fresh = corroborated(readLog([], '2026-10-10T13:00:00Z'), null, Date.parse('2026-10-10T13:00:00Z'));
+  assert.equal(fresh.state, 'quiet'); assert.deepEqual(webhookAttention({ webhooks: fresh }, Date.parse('2026-10-10T13:00:00Z')), []);
+  // Within the hour it is delivering, whatever the log says.
+  assert.equal(corroborated(log, receipt, Date.parse('2026-10-10T10:50:00Z')).state, 'delivering');
+  // Unread, the gap is raised as unverified, never as broken.
+  const unread = corroborated({ observedAt: null, attempts: [], coversFrom: null, error: 'GitHub GET /app/hook/deliveries failed (502)' }, receipt, now);
+  assert.equal(unread.state, 'unverified');
+  const [item] = webhookAttention({ webhooks: unread }, now);
+  assert.match(item.text, /could not be read \(GitHub GET \/app\/hook\/deliveries failed \(502\)\) to tell a quiet hour from a failing webhook/);
+  assert.doesNotMatch(item.text, /broken/);
+});
+
+test('unit:webhook-attention-fires-on-failed-attempts — failed attempts in the gap raise the row, naming the failed count, the status codes and the App settings URL', () => {
+  const receipt = '2026-10-10T10:00:00.000Z', now = Date.parse('2026-10-10T11:30:00Z');
+  const log = readLog([
+    attempt('2026-10-10T11:20:00Z', 502, 'pull_request'), attempt('2026-10-10T11:10:00Z', 0, 'push'), attempt('2026-10-10T10:50:00Z', 500),
+    attempt('2026-10-10T10:40:00Z', 202), attempt('2026-10-10T10:30:00Z', 403, 'push', 91), attempt('2026-10-10T10:20:00Z', 401, 'push', 77),
+    { ...attempt('2026-10-10T10:10:00Z', 500), installationId: 9 }, attempt('2026-10-10T09:00:00Z', 502),
+  ], '2026-10-10T11:29:00Z');
+  const webhooks = corroborated(log, receipt, now);
+  // Another installation's attempt, and another repository's deliberate 403, are not ours to count.
+  assert.deepEqual([webhooks.attemptsInWindow, webhooks.failedAttempts, webhooks.failedStatusCodes, webhooks.state], [5, 4, [0, 401, 500, 502], 'failing']);
+  const [item, ...rest] = webhookAttention({ webhooks }, now);
+  assert.equal(rest.length, 0);
+  assert.match(item.text, /^No GitHub webhook delivery has arrived for 1h30m \(last at 2026-10-10T10:00:00\.000Z\) while 1 pull request is open: GitHub attempted 5 deliveries since 2026-10-10T10:00:00\.000Z and 4 failed \(status 0, 401, 500, 502; last attempt at 2026-10-10T11:20:00Z\)/);
+  assert.match(item.text, /the webhook is broken/);
+  assert.match(item.next, /https:\/\/github\.com\/settings\/apps\/graphyard-owner-project \(URL https:\/\/YOUR-HOST\/api\/github\/webhook/);
+  assert.match(item.next, /failed deliveries listed under https:\/\/github\.com\/settings\/apps\/graphyard-owner-project\/advanced/);
+  // With the managed repository unknown a 403 is taken for the deliberate refusal; a 403 for the managed repository fails.
+  assert.deepEqual(corroborated(readLog([attempt('2026-10-10T11:00:00Z', 403, 'push', 77)], '2026-10-10T11:29:00Z'), receipt, now).failedStatusCodes, [403]);
+  assert.equal(corroborated(readLog([attempt('2026-10-10T11:00:00Z', 403, 'push', 77)], '2026-10-10T11:29:00Z'), receipt, now, null).state, 'answered');
+  // A read stopped at its page bound judges only what it covered.
+  const partial = webhookCorroboration({ ...log, coversFrom: '2026-10-10T11:00:00Z' }, receipt, now, { installationId: 2, repositoryId: 77 });
+  assert.deepEqual([partial.windowSince, partial.failedAttempts], ['2026-10-10T11:00:00.000Z', 2]);
+});
+
+test('unit:webhook-attention-202-only-stays-silent — a gap whose attempts were all answered 2xx never declares the webhook broken', () => {
+  const receipt = '2026-10-10T08:00:00.000Z', now = Date.parse('2026-10-10T11:00:00Z');
+  // Three hours of own-check publications and pushes, every one answered 202 or 200, after an earlier 500 burst.
+  const attempts = Array.from({ length: 36 }, (_, index) => attempt(new Date(now - 60_000 - index * 5 * 60_000).toISOString(), index % 3 ? 202 : 200, index % 2 ? 'check_run' : 'check_suite'));
+  const webhooks = corroborated(readLog([...attempts, attempt('2026-10-10T07:30:00Z', 500)], new Date(now - 30_000).toISOString()), receipt, now);
+  assert.deepEqual([webhooks.attemptsInWindow, webhooks.failedAttempts, webhooks.failedStatusCodes, webhooks.state], [36, 0, [], 'answered']);
+  assert.deepEqual(webhookAttention({ webhooks }, now), []);
+  assert.deepEqual(webhookAttention({ webhooks: { ...webhooks, openPullRequests: 4 } }, now + 7_200_000), [], 'however long the gap and however many pull requests are open');
+});
+
+test('unit:webhook-deliveries-read-cached — the delivery log is one app-level read shared by every status call, read again only after its interval (longer under a tight budget), never while requests are paused', async () => {
+  const api = new Api(); const github = api.client(); github.fetch = api.fetch;
+  const now = Date.now();
+  api.deliveries = [{ delivered_at: new Date(now - 120_000).toISOString(), status_code: 202, event: 'push', installation_id: 2 }];
+  // Concurrent status reads share one read, and later ones within the interval are served from it.
+  const [first, second] = await Promise.all([github.webhookDeliveries(now), github.webhookDeliveries(now)]);
+  assert.equal(api.deliveryReads, 1); assert.equal(first, second);
+  assert.deepEqual([first.observedAt, first.attempts.length, first.attempts[0].statusCode, first.error], [new Date(now).toISOString(), 1, 202, null]);
+  for (let index = 0; index < 20; index++) await github.webhookDeliveries(now + index * 10_000);
+  assert.equal(api.deliveryReads, 1, 'twenty status reads in the interval read GitHub once');
+  await github.webhookDeliveries(now + webhookDeliveryLogMs);
+  assert.equal(api.deliveryReads, 2, 'past the interval it is read again');
+  // Under a tight budget the interval stretches to fifteen minutes.
+  const budget = github.budget.bind(github);
+  github.budget = (at?: number) => ({ ...budget(at), belowReserve: true });
+  await github.webhookDeliveries(now + webhookDeliveryLogMs * 2 + 1);
+  assert.equal(api.deliveryReads, 2, 'a tight budget does not read again at five minutes');
+  await github.webhookDeliveries(now + webhookDeliveryLogMs + webhookDeliveryLogTightMs);
+  assert.equal(api.deliveryReads, 3);
+  github.budget = budget;
+  // While requests are paused the last log is served and GitHub is not asked.
+  Object.assign(github, { blockedUntil: now + 3_600_000 });
+  const paused = await github.webhookDeliveries(now + 3 * webhookDeliveryLogTightMs);
+  assert.equal(api.deliveryReads, 3); assert.equal(paused.attempts.length, 1);
+  Object.assign(github, { blockedUntil: 0 });
+  // A failed read keeps the attempts it had and names its error; the next interval reads again.
+  github.fetch = async () => new Response('{}', { status: 502 });
+  const failed = await github.webhookDeliveries(now + 4 * webhookDeliveryLogTightMs);
+  assert.deepEqual([failed.attempts.length, failed.error], [1, 'GitHub GET /app/hook/deliveries failed (502)']);
+  // A busy log is paged back to the lookback and no further.
+  let pages = 0; const pageAt = now + 5 * webhookDeliveryLogTightMs;
+  github.fetch = async (url: unknown) => {
+    const page = Number(new URL(String(url)).searchParams.get('cursor') ?? 0); pages++;
+    const body = Array.from({ length: 100 }, (_, index) => ({ delivered_at: new Date(pageAt - (page * 100 + index) * 90_000).toISOString(), status_code: 202, event: 'check_run', installation_id: 2 }));
+    return new Response(JSON.stringify(body), { status: 200, headers: { link: `<https://api.github.com/app/hook/deliveries?per_page=100&cursor=${page + 1}>; rel="next"` } });
+  };
+  const paged = await github.webhookDeliveries(pageAt);
+  assert.equal(pages, 3, 'six hours at one attempt per 90 seconds is three pages'); assert.equal(paged.coversFrom, null);
+  // A log too busy for the page bound says how far back it is complete.
+  pages = 0; github.fetch = async (url: unknown) => {
+    const page = Number(new URL(String(url)).searchParams.get('cursor') ?? 0); pages++;
+    const body = Array.from({ length: 100 }, (_, index) => ({ delivered_at: new Date(pageAt + webhookDeliveryLogTightMs - (page * 100 + index) * 1000).toISOString(), status_code: 202, event: 'check_run', installation_id: 2 }));
+    return new Response(JSON.stringify(body), { status: 200, headers: { link: `<https://api.github.com/app/hook/deliveries?per_page=100&cursor=${page + 1}>; rel="next"` } });
+  };
+  const bounded = await github.webhookDeliveries(pageAt + webhookDeliveryLogTightMs);
+  assert.equal(pages, 5); assert.equal(bounded.coversFrom, bounded.attempts[bounded.attempts.length - 1].at);
+});
+
+test('integration:webhook-status-corroboration-fields — /api/status carries the last attempt and the failed attempts in the window from the cached read, not a GitHub read per status call', async t => {
+  const api = new Api();
+  t.mock.method(globalThis, 'fetch', api.fetch);
+  const github = api.client(); await serve(github);
+  const work = await submitted(api, 'Open for corroboration'); await job(work, github);
+  const last = new Date(Date.now() - 5 * 60_000).toISOString();
+  api.deliveries = [{ delivered_at: last, status_code: 500, event: 'pull_request', installation_id: 2 }, { delivered_at: new Date(Date.now() - 10 * 60_000).toISOString(), status_code: 202, event: 'check_suite', installation_id: 2 }];
+  const first = await status();
+  assert.equal(first.webhooks.lastAttemptAt, last);
+  assert.deepEqual([first.webhooks.attemptsInWindow, first.webhooks.failedAttempts, first.webhooks.failedStatusCodes, first.webhooks.deliveryLogError, first.webhooks.state], [2, 1, [500], null, 'failing']);
+  assert.ok(first.webhooks.deliveryLogAt && first.webhooks.windowSince, 'the read and the window it judged are named');
+  for (let index = 0; index < 5; index++) await status();
+  assert.equal(api.deliveryReads, 1, 'six status reads made one delivery-log read');
+  // A receipt after the failures starts a new window; the cached attempts are judged against it.
+  await webhook();
+  const after = await status();
+  assert.deepEqual([after.webhooks.lastAttemptAt, after.webhooks.attemptsInWindow, after.webhooks.failedAttempts, after.webhooks.state], [last, 0, 0, 'delivering']);
+  assert.equal(api.deliveryReads, 1);
+});
+
+test('integration:webhook-attention-delivery-log-corroboration — with pull requests open and no receipt, master status raises nothing while GitHub attempted nothing, and raises the broken-webhook row once GitHub logs failed attempts', async t => {
+  const api = new Api();
+  t.mock.method(globalThis, 'fetch', api.fetch);
+  const github = api.client(); await serve(github);
+  for (let index = 0; index < 2; index++) { const work = await submitted(api, `Quiet ${index}`); await job(work, github); }
+  // GitHub's own log: the last attempt two hours ago, answered; nothing attempted since.
+  api.deliveries = [{ delivered_at: new Date(Date.now() - 2 * 3_600_000).toISOString(), status_code: 202, event: 'push', installation_id: 2 }];
+  const quiet = await status();
+  assert.deepEqual([quiet.webhooks.lastDeliveryAt, quiet.webhooks.openPullRequests, quiet.webhooks.attemptsInWindow, quiet.webhooks.state], [null, 2, 0, 'quiet']);
+  assert.deepEqual(webhookAttention(quiet, Date.now()), [], 'a quiet hour is not a broken webhook');
+  assert.deepEqual(githubBudgetAttention(quiet, Date.now()), []);
+  // The next read finds attempts our endpoint failed.
+  Object.assign(github, { deliveryLog: null });
+  api.deliveries = [{ delivered_at: new Date(Date.now() - 60_000).toISOString(), status_code: 502, event: 'pull_request', installation_id: 2 }, ...api.deliveries];
+  const failing = await status();
+  assert.equal(failing.webhooks.state, 'failing');
+  const [item] = githubBudgetAttention(failing, Date.now());
+  assert.match(item.text, /while 2 pull requests are open: GitHub attempted 1 delivery since .* and 1 failed \(status 502;/);
+  assert.match(item.next, /https:\/\/github\.com\/settings\/apps/);
 });
 
 test('unit:base-move-wakes-only-affected-items — a merge touching one file wakes exactly the open items whose pull requests touch it, or whose mergeability GitHub has not settled; every other job keeps its schedule', async t => {

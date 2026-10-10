@@ -68,7 +68,7 @@ A `403`/`429` pause stops requests; gates read the last observation until it lif
 
 ### Webhook liveness
 
-Silent webhook hour: `master status` cites `https://github.com/settings/apps/APP-SLUG`.
+Silent hour → `https://github.com/settings/apps/APP-SLUG` only if `webhooks.state` `failing`: GitHub-logged non-2xx attempts (`lastAttemptAt`, `failedAttempts`; cached 5min).
 
 ## Control-plane resources
 
