@@ -98,8 +98,12 @@ test('integration:harness-remedy-loop-cycle — the loop\'s routine remedies app
       await chmod(join(root, '.claude'), 0o500);
       const refused = cycle(root, master);
       await routineRemedies(refused);
+      // A later cycle meeting the same cause moves the standing row's time, so the fault window keeps the failure open while it lasts.
+      const later = Date.parse(observedAt) + 3 * 3_600_000;
+      refused.now = () => later;
       await routineRemedies(refused);
       assert.equal(refused.performed.length, 1, 'the same failure is journaled once');
+      assert.equal(refused.state.actions['remedy:harness:claude']?.at, new Date(later).toISOString(), 'the standing failure is refreshed, not left to lapse');
       assert.equal(refused.state.actions['remedy:harness:claude']?.state, 'failed');
       assert.match(refused.state.actions['remedy:harness:claude']!.detail, /^Could not apply the Claude harness contract from the loop's own process: EACCES/);
       await chmod(join(root, '.claude'), 0o700);

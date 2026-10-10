@@ -24,7 +24,7 @@ import { readyToRetry } from './sessions.js';
 import { stoppedStates, record } from './effects.js';
 import { maxApproverLaunches } from './decisions.js';
 import { decisionReadConcurrency } from './decision-reads.js';
-import { message, type DaemonAction, type DaemonState } from './state.js';
+import { message, touchStanding, type DaemonAction, type DaemonState } from './state.js';
 import type { Cycle } from './cycle.js';
 
 // ---------------------------------------------------------------------------
@@ -716,7 +716,8 @@ export const decisionCheckMs = 2 * 60_000;
  * `master harness claude --apply` makes — operator-added entries kept, only retired generated rules
  * removed — and journals one line. It runs on the checkout the doctor reads, which is the loop's
  * own; a loop with no doctor has no confined reader, and any status reader heals drift itself.
- * A failure is journaled once per distinct cause and retried every cycle.
+ * A failure is journaled once per distinct cause and retried every cycle; a repeat of the same cause
+ * moves the standing row's time, so the failure stays open for as long as it lasts.
  */
 export async function applyHarnessContract(cycle: Cycle) {
   const { state, effects, now, performed, config, isolate } = cycle;
@@ -734,7 +735,8 @@ export async function applyHarnessContract(cycle: Cycle) {
       // A filesystem refusal names its random temporary file; its code and the settings directory are the cause, stable across cycles.
       const code = (error as NodeJS.ErrnoException | null)?.code;
       const detail = `Could not apply the Claude harness contract from the loop's own process: ${code ? `${code} writing the harness settings under ${root}/.claude` : message(error)}`.slice(0, 2000);
-      if (previous?.state === 'failed' && previous.detail === detail) return;
+      // The same cause again is the one standing failure: its time moves (touchStanding), so the fault window keeps the run open while it lasts, but nothing new is journaled.
+      if (previous?.state === 'failed' && previous.detail === detail) { touchStanding(state, key, new Date(now()).toISOString()); await effects.persist(state); return; }
       performed.push(await record(state, key, { kind: 'config', work: null, principal: null, state: 'failed', detail, attempts, cycle: state.cycle }, now(), effects.persist));
     }
   });
