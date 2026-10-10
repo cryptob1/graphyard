@@ -14,13 +14,13 @@ import { agentToken } from '../master/autonomy.js';
 import { worktreeRoot } from '../install/worktree-root.js';
 import { capacityRefusal, selectFleetSession } from '../fleet.js';
 import { heldAwareProbe } from '../master/environments.js';
-import { Refusal, RefusedResponse } from '../model/refusal.js';
+import { ReconciliationRetry, Refusal, RefusedResponse } from '../model/refusal.js';
 import type { MasterConfig } from '../master.js';
 import { diagnosticianSettings, type DiagnosticianSettings } from '../runner/payloads.js';
 import { piRunner } from '../runner/pi.js';
 import { registryHeadlessLaunch, registryRunner } from '../runner/roles.js';
 import type { Runner } from '../runner/types.js';
-import type { ChildRun } from '../child-runner.js';
+import { ChildProcessError, type ChildRun } from '../child-runner.js';
 import { type DaemonAction, message } from './state.js';
 import { record } from './effects.js';
 import { detailChanged } from './decisions.js';
@@ -88,9 +88,39 @@ export interface AcceptanceEffects {
 
 /** A finished run, kept until it is posted: the draft (and the pull request it was opened as) or the verdict; `deferred` names the full role no run started on. */
 interface Pending { revision: number; draft?: AcceptanceDraft | null; opened?: { pr: number | null; branch: string; head: string }; judgement?: Judgement | null; runs: string[]; deferred?: string }
-/** A draft the current base can never take (an outcome, case or file it names already exists): it is dropped and drafted again, never reopened. */
+/**
+ * A draft the current base can never take (an outcome, case or file it names already exists), or one
+ * refused outright (401, 403, 409 or 422): it is dropped and drafted again, never reopened.
+ */
 export class UnopenableDraft extends Error {}
-const unopenable = (error: unknown) => error instanceof UnopenableDraft || ((error instanceof Refusal || error instanceof RefusedResponse) && error.status === 422);
+/** The statuses a goal step's control-plane or GitHub request is refused outright with (GY-1661): an unchanged retry is answered the same. */
+export const outrightRefusalStatuses: readonly number[] = [401, 403, 409, 422];
+/**
+ * The HTTP status GitHub refused a `gh` or `git` child with, read from its stderr: gh's `HTTP 403:`
+ * or `(HTTP 409)`, git's `The requested URL returned error: 403`, and the refusals GitHub words
+ * without a number (`Bad credentials` is 401; `Resource not accessible by integration` and git's
+ * `Permission to OWNER/REPO denied` are 403). Null for any other failure, which a retry may pass.
+ */
+export function childRefusalStatus(error: unknown): number | null {
+  if (!(error instanceof ChildProcessError) || error.timedOut || !['gh', 'git'].includes(error.command)) return null;
+  const stderr = error.stderr;
+  const numbered = stderr.match(/\bHTTP (\d{3})\b|returned error: (\d{3})\b/);
+  if (numbered) return Number(numbered[1] ?? numbered[2]);
+  if (/\bBad credentials\b/i.test(stderr)) return 401;
+  if (/Resource not accessible by|Permission to \S+ denied/i.test(stderr)) return 403;
+  return null;
+}
+/**
+ * Refused for authority (401, 403), the current state (409) or the input (422), by the control
+ * plane or by GitHub through `gh` or `git`; a reconciliation retry, which may pass once the state is
+ * re-read, is not.
+ */
+export const refusedOutright = (error: unknown) => {
+  if (error instanceof ReconciliationRetry) return false;
+  const status = error instanceof Refusal || error instanceof RefusedResponse ? error.status : childRefusalStatus(error);
+  return status !== null && outrightRefusalStatuses.includes(status);
+};
+const unopenable = (error: unknown) => error instanceof UnopenableDraft || refusedOutright(error);
 const live = new Map<string, Promise<void>>();
 const pending = new Map<string, Pending>();
 /** When each goal's next try of a step may run: `${goal.id}:${step}`. */

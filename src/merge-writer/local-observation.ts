@@ -6,15 +6,16 @@ import { parseLocalScopeDiff } from '../sync.js';
 
 /** What one git invocation returned; a non-zero exit is an answer here, never a throw. */
 export interface GitResult { status: number | null; stdout: string; stderr: string }
-/** Runs `git` with `args` in the checkout whose object store holds the submitted heads. */
-export type GitRunner = (args: readonly string[]) => Promise<GitResult>;
+/** Runs `git` with `args` in the checkout whose object store holds the submitted heads; `timeoutMs` kills a run that outlasts it. */
+export type GitRunner = (args: readonly string[], options?: { timeoutMs?: number }) => Promise<GitResult>;
 
 /** The default runner: `git -C root`, the coordinator checkout the control plane serves from. */
 export function gitRunnerFor(root: string): GitRunner {
-  return args => new Promise(resolve => {
-    execFile('git', ['-C', root, ...args], { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 }, (error, stdout, stderr) => {
+  return (args, options = {}) => new Promise(resolve => {
+    execFile('git', ['-C', root, ...args], { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, timeout: options.timeoutMs ?? 0, killSignal: 'SIGKILL' }, (error, stdout, stderr) => {
       const status = error ? (typeof (error as { code?: unknown }).code === 'number' ? (error as { code: number }).code : null) : 0;
-      resolve({ status, stdout: String(stdout ?? ''), stderr: String(stderr ?? '') });
+      const killed = error && (error as { killed?: boolean }).killed && options.timeoutMs ? `git ${args[0]} was stopped after ${options.timeoutMs}ms` : '';
+      resolve({ status, stdout: String(stdout ?? ''), stderr: [String(stderr ?? '').trim(), killed].filter(Boolean).join('\n') });
     });
   });
 }
