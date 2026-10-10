@@ -43,3 +43,29 @@ test('unit:pi-payload-validation-detail — a short or unserialisable payload is
   assert.match(payloadValidationFailure('graphyard_plan', new Error('bad'), cyclic), /payload: \[object Object\]$/);
   assert.equal(payloadValidationFailure('graphyard_plan', new Error('bad'), 'y'.repeat(5000)).split('; payload: ')[1].length, 1000);
 });
+
+test('unit:pi-payload-validation-detail — the run\'s injected secrets and credential-shaped tokens are redacted before the payload is cut', async () => {
+  const { payloadValidationFailure } = await import('../src/runner/pi.js');
+  const key = 'zai-key-0123456789abcdef', ghp = `ghp_${'A'.repeat(36)}`;
+  const detail = payloadValidationFailure('graphyard_decide', new Error(`bad value ${key}`), { reason: `leaked ${key} and ${ghp}`, auth: 'Bearer abc.def.ghi', note: 'api_key=s3cr3tvalue' }, [key, 'short']);
+  for (const secret of [key, ghp, 'abc.def.ghi', 's3cr3tvalue']) assert.ok(!detail.includes(secret), `${secret} is not shown`);
+  assert.match(detail, /payload failed validation: bad value \[redacted\]; payload: \{"reason":"leaked \[redacted\] and \[redacted\]"/);
+  // A secret straddling the cut is redacted before the cut, so no prefix of it survives.
+  const cut = payloadValidationFailure('graphyard_decide', new Error('bad'), { reason: `${'x'.repeat(980)}${key}` }, [key]);
+  assert.ok(!cut.includes(key.slice(0, 10)));
+});
+
+test('unit:pi-payload-validation-detail — a registry runner\'s environment key never appears in an invalid-payload failure', async () => {
+  const directory = await temporaryDirectory('pi-payload-redact');
+  try {
+    const script = join(directory, 'fake-pi.mjs'), scenario = join(directory, 'scenario.json');
+    const key = 'provider-key-9f8e7d6c5b4a3210';
+    await writeFile(script, fakePi);
+    await writeFile(scenario, JSON.stringify([{ type: 'agent_start' }, decide({ decision: 'decision-1', approve: 'yes', reason: `env says ${key}` }), ...settled]));
+    const runner = piRunner({ command: process.execPath, commandArgs: [script, scenario], model: 'zai/glm-5.3-flash', extension: '/extensions/graphyard.ts', exitGraceMs: 2_000, environment: { ZAI_API_KEY: key } });
+    const result = await runner.start('Judge decision-1', { cwd: directory, tool: graphyardTools.decide, validate: (value: unknown) => decidePayloadSchema.parse(value), timeoutMs: 5_000 }).result();
+    const detail = !result.ok ? result.failure.detail : '';
+    assert.equal(!result.ok && result.failure.reason, 'invalid-payload');
+    assert.ok(!detail.includes(key) && detail.includes('env says [redacted]'), detail);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});

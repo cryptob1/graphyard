@@ -59,6 +59,28 @@ test('unit:acceptance-landing-fetch — a merge commit pushed after the plane la
   } finally { await rm(fixture, { recursive: true, force: true }); }
 });
 
+test('unit:acceptance-landing-fetch — a fetch that stalls is bounded and refused with the retryable 503', async () => {
+  const { acceptanceLandingRefusal, acceptanceFetchTimeoutMs } = await import('../src/server/routes/goals.js');
+  assert.ok(acceptanceFetchTimeoutMs > 0 && acceptanceFetchTimeoutMs < 30_000, 'the bound sits inside the loop\'s 30-second land request');
+  // A runner that never answers (a stalled origin, DNS lookup, SSH negotiation or credential helper).
+  const asked: { args: readonly string[]; timeoutMs?: number }[] = [];
+  const stalled: GitRunner = (args, options) => { asked.push({ args, timeoutMs: options?.timeoutMs }); return new Promise(() => {}); };
+  const started = Date.now();
+  await assert.rejects(acceptanceLandingRefusal(stalled, 'main', 'a'.repeat(40), 'b'.repeat(40), 200), (error: { status?: number; message: string }) =>
+    error.status === 503 && /could not fetch main from origin .*\(git fetch did not finish within 200ms\)/.test(error.message));
+  assert.ok(Date.now() - started < 5_000, 'the route stops waiting at the bound');
+  assert.deepEqual(asked.map(call => [call.args[0], call.timeoutMs]), [['fetch', 200]], 'the runner is asked to kill git at the same bound, and nothing past the fetch is read');
+
+  // The default runner kills a git that outlasts its bound and says so.
+  const fixture = await realpath(await temporaryDirectory('landing-fetch-timeout'));
+  try {
+    execFileSync('git', ['init', '-q', fixture]);
+    const result = await gitRunnerFor(fixture)(['-c', 'alias.hang=!sleep 5', 'hang'], { timeoutMs: 200 });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /git -c was stopped after 200ms|was stopped after 200ms/);
+  } finally { await rm(fixture, { recursive: true, force: true }); }
+});
+
 test('unit:acceptance-landing-fetch — the land route judges through the fetching check, and the image installs git', async () => {
   const route = await readFile(join(root, 'src/server/routes/goals.ts'), 'utf8');
   assert.match(route, /const refusal = await acceptanceLandingRefusal\(engine\.gitRunner, engine\.baseBranch, goal\.approval\.head, body\.mergeSha\)/);

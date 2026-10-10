@@ -7,14 +7,14 @@ Records each environment's intended release, verified by service-scoped observer
 
 Main → candidate → uat → production; `.railway/railway.ts` deploys `release/uat`, `release/production`, moved only by `graphyard release` to candidate's exact SHA.
 
-- `release cut [--trigger schedule|manual] [--max-prs N]` tags `rc/ID` with at most N first-parent merges after the last candidate (`GRAPHYARD_RC_MAX_PRS`, 10; GY-1491), the rest queued for the next; a failed candidate's successor starts after it. `.github/workflows/release-candidate.yml` cuts on loop dispatch (cron a fallback; [long suites](#pre-merge-gate-and-release-candidate-validation)).
+- `release cut [--trigger schedule|manual] [--max-prs N]` tags `rc/ID` with ≤N first-parent merges after the last candidate (`GRAPHYARD_RC_MAX_PRS`, 10; GY-1491), the rest queued for the next; a failed candidate's successor starts after it. `.github/workflows/release-candidate.yml` cuts on loop dispatch (cron a fallback; [long suites](#pre-merge-gate-and-release-candidate-validation)).
 - `release uat ID` deploys `uat` (own Postgres, no `GITHUB_*` credentials), refused while UAT serves unjudged candidate <4 h old.
 - `release validate ID --url UAT_URL [--api] [--suite NAME=COMMAND]...` awaits `/healthz`; runs endpoint, API (`GRAPHYARD_UAT_TOKEN`), `browser`, suites (container, chart, `zero-touch` gate; soak, timing advisory; `GRAPHYARD_UAT_URL`, never `GRAPHYARD_TOKEN`); records `rc-uat/ID`.
 - `release promote ID` needs that (or [accepted flaky cases](validation.md#release-verdicts)), deploys production as `rc-production/ID`; `release verify --url URL` confirms.
 - Failed candidates file [hold](validation.md#release-holds) per failed outcome, else one follow-up (`release follow-up ID` retries), as the [filing credential](#release-filing-credential).
 - `release soak ID --sha SHA --result success|failure|cancelled [--run URL] [--report NAME]` (GY-1513; `release-candidate-soak.yml`'s `record` job) records the advisory verdict as `rc-soak/ID`; promotion never reads it.
 
-**The master loop drives promotion continuously** (GY-1488): it dispatches the workflow (`promote=true`) once main differs from the last `rc-production/` and cut SHAs, no run is queued and `run.promoteEveryMinutes` (`graphyard master config promoteEveryMinutes=N`; 10, `0` off) has passed; failed dispatches raise `promotion:failed` with backoff. `master status` `promotion` shows it. Under a `control-plane` merger the loop cuts (`run.candidates.everyMerges` 10, `idleMinutes` 15), validates, promotes and verifies (`GRAPHYARD_UAT_URL` or a static site's `GRAPHYARD_UAT_STATIC`/`GRAPHYARD_UAT_BUILD`, `GRAPHYARD_PRODUCTION_URL`; no workflow; a managed repository runs its own required cases, [validation](validation.md)); a failed required E2E case reverts the newest candidate item a matching verification map covers (`candidateReverts`; reopened); a main-watch freeze holds all. `release status` lists candidates; `release GY-N EPOCH` leases. Needs `vars.UAT_URL`, `vars.PRODUCTION_URL`, `GRAPHYARD_UAT_TOKEN`, `GRAPHYARD_RELEASE_TOKEN`, `GRAPHYARD_E2E_RECORD_TOKEN`.
+**The master loop drives promotion** (GY-1488): it dispatches the workflow (`promote=true`) once main differs from the last `rc-production/` and cut SHAs, no run is queued and `run.promoteEveryMinutes` (`graphyard master config promoteEveryMinutes=N`; 10, `0` off) has passed; failed dispatches raise `promotion:failed` with backoff. `master status` `promotion` shows it. Under a `control-plane` merger the loop cuts (`run.candidates.everyMerges` 10, `idleMinutes` 15), validates, promotes and verifies (`GRAPHYARD_UAT_URL` or a static site's `GRAPHYARD_UAT_STATIC`/`GRAPHYARD_UAT_BUILD`, `GRAPHYARD_PRODUCTION_URL`; no workflow; a managed repository runs its own required cases, [validation](validation.md)); a failed required E2E case reverts the newest candidate item a matching verification map covers (`candidateReverts`; reopened); a main-watch freeze holds all. `release status` lists candidates; `release GY-N EPOCH` leases. Needs `vars.UAT_URL`, `vars.PRODUCTION_URL`, `GRAPHYARD_UAT_TOKEN`, `GRAPHYARD_RELEASE_TOKEN`, `GRAPHYARD_E2E_RECORD_TOKEN`.
 
 ### Release filing credential
 
@@ -26,7 +26,7 @@ Required: `typecheck`, `test` (`ci.yml`), under ten minutes; soak/timing files (
 
 ### One delivery path
 
-Exact-head CI and review gate merges; [candidates](#release-candidates) deploy validated builds. The decided replacement, where only Graphyard writes to main, is [the delivery redesign](delivery-redesign.md).
+Exact-head CI and review gate merges; [candidates](#release-candidates) deploy validated builds. [The delivery redesign](delivery-redesign.md) has only Graphyard write main.
 
 ### Main guard
 

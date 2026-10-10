@@ -111,14 +111,24 @@ export async function acceptanceMergeRefusal(git: GitRunner, base: string, head:
  * GY-1661: the land route's judgement of a merge-writer landing, read after fetching BASE from
  * origin, so a merge commit the writer pushed after this checkout's last fetch is found. A failed
  * fetch records nothing: a stale origin/BASE could still hold an obsolete merge and protect its
- * cases, so the landing is refused with 503 and the loop records it again on its next poll.
+ * cases, so the landing is refused with 503 and the loop records it again on its next poll. The
+ * fetch is bounded by `timeoutMs` (the runner kills git at it, and the route stops waiting at it
+ * whatever the runner does), so a stalled origin, DNS lookup, SSH negotiation or credential helper
+ * answers with the same retryable 503 inside the caller's own timeout.
  */
-export async function acceptanceLandingRefusal(git: GitRunner, base: string, head: string, mergeSha: string): Promise<string | null> {
-  const fetched = await git(['fetch', '--no-tags', 'origin', `+refs/heads/${base}:refs/remotes/origin/${base}`])
-    .catch((error: unknown): GitResult => ({ status: null, stdout: '', stderr: error instanceof Error ? error.message : String(error) }));
+export async function acceptanceLandingRefusal(git: GitRunner, base: string, head: string, mergeSha: string, timeoutMs = acceptanceFetchTimeoutMs): Promise<string | null> {
+  let timer: NodeJS.Timeout | undefined;
+  const expired = new Promise<GitResult>(resolve => { timer = setTimeout(() => resolve({ status: null, stdout: '', stderr: `git fetch did not finish within ${timeoutMs}ms` }), timeoutMs); timer.unref(); });
+  const fetched = await Promise.race([
+    git(['fetch', '--no-tags', 'origin', `+refs/heads/${base}:refs/remotes/origin/${base}`], { timeoutMs })
+      .catch((error: unknown): GitResult => ({ status: null, stdout: '', stderr: error instanceof Error ? error.message : String(error) })),
+    expired,
+  ]).finally(() => clearTimeout(timer));
   if (fetched.status !== 0) throw new Refusal(`The control plane could not fetch ${base} from origin to read the merge writer's landing (${fetched.stderr.trim().slice(0, 500) || `git exited ${fetched.status}`}); nothing is recorded until it can`, 503);
   return acceptanceMergeRefusal(git, base, head, mergeSha);
 }
+/** How long the land route waits on its base fetch (GY-1661): well inside the loop's 30-second request timeout. */
+export const acceptanceFetchTimeoutMs = 20_000;
 
 /** What landing found, recorded under the lock unless the goal moved on meanwhile: merged at its approved head, else closed and drafted again. */
 export async function recordLanding(store: Pick<Store, 'transaction'>, goal: Goal, landing: Landing, actor: Principal): Promise<Goal> {
