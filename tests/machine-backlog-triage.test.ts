@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Work } from '../src/model.js';
+import type { FaultInstance } from '../src/model/fault-classes.js';
 import { backlogCounts, machineKind, overdueTriage, triageDeadlineMs, untriaged, type TriageJudgement } from '../src/model/machine-backlog.js';
 import { clearTriageRuns, triageSettled, triageStep, triageTool, untriagedAttention } from '../src/triage.js';
 import { researchSettings } from '../src/research.js';
@@ -193,7 +194,7 @@ test('unit:triage-pre-landing-instances-close — a recurring-fault item whose i
   const answered = item('GY-1610', 'Recurring resources faults: 4 in 24 hours', hours(20), { stage: 'done', origin: origin([hours(19)]), closure: { kind: 'duplicate', ref: 'GY-1618', reason: 'answered', by: 'master', at: hours(18), from: 'backlog' } } as Partial<Work>);
   const recorded: { key: string; judgement: TriageJudgement }[] = [];
   const { runner, starts } = fakeRunner(() => ({ outcome: 'release', priority: 1, reason: 'real work' }));
-  const step = (work: Work[]) => triageStep({ work, clock: NOW, settings: researchSettings({ research: {} }), config: { repository: 'owner/project' }, cwd: process.cwd(), runner, record: async (entry, body) => { recorded.push({ key: entry.key, judgement: body.judgement }); } });
+  const step = (work: Work[], faultInstances: FaultInstance[] = []) => triageStep({ work, clock: NOW, settings: researchSettings({ research: {} }), config: { repository: 'owner/project' }, cwd: process.cwd(), runner, record: async (entry, body) => { recorded.push({ key: entry.key, judgement: body.judgement }); }, faultInstances });
   const actions = step([filed, fix, answered]);
   await triageSettled();
   assert.equal(starts.length, 0, 'no triage session runs, so nothing can release it to a worker');
@@ -214,4 +215,19 @@ test('unit:triage-pre-landing-instances-close — a recurring-fault item whose i
   await triageSettled();
   assert.equal(starts.length, 1);
   assert.deepEqual(recorded.map(entry => entry.judgement.outcome), ['release']);
+
+  // Its origin all predates the landing, but the loop linked a later recurrence to the open item:
+  // closing it would suppress that recurrence, so a session judges it instead.
+  clearTriageRuns(); recorded.length = 0;
+  const instance = (at: string, linkedTo: string | null): FaultInstance => ({ id: `resource-bound|tmp-inodes|${at}`, kind: 'resource-bound', faultClass: 'resources', subject: 'resource:tmp-inodes', text: 'tmp inodes at bound', at, lastSeenAt: at, linkedTo });
+  step([filed, fix, answered], [instance(hours(2), 'GY-1628'), instance(hours(1), 'GY-1999')]);
+  await triageSettled();
+  assert.equal(starts.length, 2, 'a post-landing instance linked to the item keeps it from closing as covered');
+  assert.deepEqual(recorded.map(entry => entry.judgement.outcome), ['release']);
+  // Linked instances that all predate the landing still close it as covered.
+  clearTriageRuns(); recorded.length = 0;
+  step([filed, fix, answered], [instance(hours(5), 'GY-1628')]);
+  await triageSettled();
+  assert.equal(starts.length, 2);
+  assert.deepEqual(recorded.map(entry => [entry.key, entry.judgement.outcome]), [['GY-1628', 'close']]);
 });
