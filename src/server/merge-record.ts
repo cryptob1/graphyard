@@ -92,7 +92,10 @@ export async function recordMergeEvent(services: Services, actor: Principal, id:
   demand(actor.role === 'coordinator', 'Only the loop\'s coordinator identity records the merge writer\'s ledger', 403);
   const data = (body as { kind?: unknown } | null)?.kind === 'revert' ? revertRecordBodySchema.parse(body) : mergeRecordBodySchema.parse(body);
   demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
-  const fingerprint = createHash('sha256').update(JSON.stringify({ id, data })).digest('hex');
+  const fingerprintData = typeof data === 'object' && data !== null
+    ? Object.fromEntries(Object.entries(data).filter(([k]) => k !== 'at' && k !== 'pushedAt' && k !== 'durationMs'))
+    : data;
+  const fingerprint = createHash('sha256').update(JSON.stringify({ id, data: fingerprintData })).digest('hex');
   const engine = services.engine, base = engine.baseBranch;
   // Whether the base branch holds the merge (or revert) commit is read from the checkout before the transaction, as every provider read is.
   let held: boolean | null = null;
