@@ -541,9 +541,9 @@ export const dirtyCheckoutEscalation = (refusal: string, leases: DirtyCheckoutLe
 //
 // A launch that cannot apply the confinement is refused with the reason named, never started
 // unconfined, exactly like a contained install (GY-174): install bubblewrap, or let the runtime
-// carry a workspace-write sandbox. The master session is not among the confined roles — it runs
-// the loop's own configuration and administration commands from the coordinator root, and is
-// bound by its own harness rules instead.
+// carry a workspace-write sandbox. The master session is confined too (GY-1658): the same read-only
+// mount, PID namespace and hidden process-launch channels, with its managed `.graphyard` state
+// writable; the host acts its admin commands need (a loop restart) are requests the loop serves.
 
 /** How a launch keeps the coordinator checkout unwritable for the session it starts. */
 export interface CoordinatorConfinement {
@@ -710,7 +710,7 @@ export const hostProcessLaunchTargets = (uid: number | undefined = process.getui
  * namespace; a session keeps the network and its own process tree. The wrapper ends with `--`, so
  * the runtime command follows it.
  */
-export function readOnlyMountWrapper(input: { coordinatorRoot: string; sessionDirectory: string; bwrap?: string | null; ownGitHubCredential?: boolean; secretsBus?: null }): readonly string[] {
+export function readOnlyMountWrapper(input: { coordinatorRoot: string; sessionDirectory: string; bwrap?: string | null; ownGitHubCredential?: boolean; secretsBus?: null; writable?: readonly string[] }): readonly string[] {
   const root = resolve(input.coordinatorRoot), directory = resolve(input.sessionDirectory);
   const gitDir = checkoutGitDirectory(root);
   const adminDirectory = sessionGitAdminDirectory(directory, root);
@@ -731,7 +731,7 @@ export function readOnlyMountWrapper(input: { coordinatorRoot: string; sessionDi
   const protectAdmin = !adminDirectory && coordinatorAdmin && sharedDirectories.some(path => withinCheckout(coordinatorAdmin, path)) ? [coordinatorAdmin] : [];
   return [bwrap, '--unshare-pid', '--dev-bind', '/', '/', ...masks, '--proc', '/proc', '--ro-bind', root, root,
     ...externalGitDir.flatMap(path => ['--ro-bind', path, path]),
-    ...[...sharedDirectories, ...own].flatMap(path => ['--bind', path, path]),
+    ...[...sharedDirectories, ...own, ...(input.writable ?? []).filter(isDirectoryPath)].flatMap(path => ['--bind', path, path]),
     ...protectAdmin.flatMap(path => ['--ro-bind', path, path]),
     ...shared.filter(path => !sharedDirectories.includes(path)).flatMap(path => ['--bind', path, path]), '--'];
 }

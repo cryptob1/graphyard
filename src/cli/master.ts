@@ -12,7 +12,7 @@ import { closeHelp } from './master-close.js';
 import { openMasterSession, unhandled } from './master/session.js';
 import { intentCommand } from './master/intent.js';
 import { fleetCommand } from './master/fleet.js';
-import { operationsCommand } from './master/operations.js';
+import { confinedMaster, operationsCommand } from './master/operations.js';
 import { loopCommand } from './master/loop.js';
 import { mergerCommand } from './merger.js';
 
@@ -59,6 +59,9 @@ export const masterCommands = defineCommands([
       '  master settle-containment GY-N REASON',
       '                                Settle a containment quarantine whose supervisor this host',
       '                                verifies dead; unverifiable signals refuse',
+      '  master checkout-restore REASON  Have the loop save every dirty path of the coordinator',
+      '                                checkout under refs/graphyard/checkout-restore/, return them to',
+      '                                HEAD and restart through graphyard-master.service',
       '  master merge                  Say that GitHub merges; Graphyard runs no merge of its own',
       '  master config FIELD=VALUE…   Tune owned run settings and profile accounts',
       '                                (accounts:PROFILE=a,b); autoMerge and credential paths stay operator-only',
@@ -103,7 +106,9 @@ export const masterCommands = defineCommands([
       if (id === 'setup') return masterSetupCommand(context, root, await loadStoredMasterConfig(root));
       const session = await openMasterSession(context, root);
       // Each concern under ./master/ answers its own subcommands; the first that knows the id handles it.
-      for (const command of [intentCommand, fleetCommand, operationsCommand, loopCommand, mergerCommand]) if (await command(session) !== unhandled) return;
+      // A confined master's `restart` and `executors` are operations' loop requests (GY-1658), not acts on the host's systemd and pids it cannot reach.
+      const concerns = (id === 'restart' || id === 'executors') && confinedMaster() ? [operationsCommand] : [intentCommand, fleetCommand, operationsCommand, loopCommand, mergerCommand];
+      for (const command of concerns) if (await command(session) !== unhandled) return;
       throw new Error(`There is no master ${id}; use master guide for the subcommands`);
     },
   },
