@@ -177,7 +177,11 @@ export async function observeDeployment(config: MasterConfig, delivered: Work[],
     // first, until a release answers or a bound is reached.
     const releaseAncestry = localAncestry(options.root, config.baseBranch, run);
     let production: string;
-    try { production = config.run.productionEnvironment ?? productionEnvironmentFromEnv(); } catch (error) { return unavailable(message(error)); }
+    try {
+      production = config.run.productionEnvironment ?? (
+        existsSync(join(options.root, '.github/workflows/pages-deploy.yml')) ? 'github-pages' : productionEnvironmentFromEnv()
+      );
+    } catch (error) { return unavailable(message(error)); }
     let listed = 0, exhausted = false;
     // Whether a production deployment newer than the one being read has been listed: a release
     // Railway marked inactive is served only while nothing newer was deployed to production.

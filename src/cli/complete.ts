@@ -98,6 +98,13 @@ export const completeCommand: CliCommand = {
   run: async (context, work) => {
     let verification: Awaited<ReturnType<typeof selfVerification>> | { state: 'unavailable'; reason: string };
     try { verification = await selfVerification(context.repositoryRoot(), work.key); } catch (error: any) { verification = { state: 'unavailable', reason: `the worktree could not be read: ${error.message}` }; }
+    const root = context.repositoryRoot();
+    try {
+      const currentBranch = spawnSync('git', ['-C', root, 'rev-parse', '--abbrev-ref', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
+      if (currentBranch && currentBranch !== 'HEAD' && currentBranch.startsWith('graphyard/')) {
+        spawnSync('git', ['-C', root, 'push', '-u', 'origin', currentBranch], { encoding: 'utf8', stdio: 'ignore' });
+      }
+    } catch {}
     const body = completionBody(context.args, () => worktreeHead(context.repositoryRoot())), requestId = process.env.GRAPHYARD_REQUEST_ID ?? randomUUID();
     const submitted = await submitThroughPause(() => context.api(`work/${work.id}/submit`, body, requestId));
     context.print({ ...submitted, selfVerification: verification });
