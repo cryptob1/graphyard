@@ -42,6 +42,21 @@ export const testTempMinAgeMs = 2 * 3_600_000;
  */
 export const agentScratchPatterns: readonly RegExp[] = [/^voice\d+-/];
 /**
+ * The scratch roots agent runtimes keep in a temporary directory, by name under each scanned root
+ * (GY-1655): opencode writes a packet and a review file per session into `/tmp/opencode` and never
+ * removes them, ~288,700 entries by 10 October 2026. The pass ages the entries inside each root one
+ * by one, by `agentScratchMinAgeMs`, and never removes the root itself.
+ */
+export const agentRuntimeScratchRoots: readonly string[] = ['opencode'];
+/**
+ * What each removal of the pass was (GY-1655), so status can say which class took /tmp back: a test
+ * temp name, a tsx compile cache file, an agent's stale checkout (a linked git worktree or git
+ * checkout at the top of a root, whatever its name, or an agent scratch name) or an entry inside a
+ * runtime's scratch root.
+ */
+export type TmpReclaimClass = 'testTemp' | 'tsxCache' | 'agentWorktree' | 'runtimeScratch';
+export const tmpReclaimClassNames: Record<TmpReclaimClass, string> = { testTemp: 'test temp', tsxCache: 'tsx cache', agentWorktree: 'agent worktree', runtimeScratch: 'runtime scratch' };
+/**
  * How long an agent scratch entry must have gone unwritten before the pass removes it: a session
  * can leave its checkout idle for hours between commands, where a test run's temp lives minutes.
  * A directory's age is its newest write anywhere in its tree, and for a linked git worktree its
@@ -219,6 +234,19 @@ async function worktreeRegistration(path: string): Promise<string | null> {
   const back = (await readFile(join(gitdir, 'gitdir'), 'utf8').catch(() => '')).trim();
   return back === join(path, '.git') ? gitdir : null;
 }
+/**
+ * Whether `path` is a git checkout an agent left (GY-1655): a linked git worktree, whose `.git` file
+ * names a gitdir under a repository's `worktrees/`, or a checkout of its own, whose `.git` is a
+ * directory holding HEAD. Agents name their scratch after each repository's items
+ * (`feature381-red-0c615`, `bug316-display-sim-194`), so no name list keeps up; what they are does.
+ */
+async function isGitCheckout(path: string): Promise<boolean> {
+  const dotGit = join(path, '.git'), info = await lstat(dotGit).catch(() => null);
+  if (info?.isDirectory()) return existsSync(join(dotGit, 'HEAD'));
+  if (!info?.isFile()) return false;
+  const gitdir = (await readFile(dotGit, 'utf8').catch(() => '')).match(/^gitdir: (.+)$/m)?.[1]?.trim();
+  return !!gitdir && /\/worktrees\/[^/]+\/?$/.test(gitdir);
+}
 
 /** Recursively sum the sizes of the regular files under `path`, following no symlink. */
 async function sizeOf(path: string): Promise<number> {
@@ -262,6 +290,8 @@ export interface TmpReclaimReport {
   /** What the pass removed, oldest first, and the bytes that came back with them. */
   removed: { path: string; bytes: number }[];
   bytes: number;
+  /** How many of `removed` each class took (GY-1655); absent from a report of a pass that never ran. */
+  classes?: Record<TmpReclaimClass, number>;
   /** Directories kept: a live owner, an open holder, or past the per-pass bound. */
   kept: number;
   errors: string[];
@@ -302,6 +332,8 @@ export interface TmpReclaimOptions {
   workMs?: number;
   /** The steps a pass below its inode headroom escalates through; `tmpReclaimEscalation` by default. */
   escalation?: readonly { limit: number; cacheAgeMs: number; workMs: number }[];
+  /** The runtime scratch roots whose entries the default pass ages one by one; `agentRuntimeScratchRoots` by default. */
+  runtimeScratchRoots?: readonly string[];
   /** The live-holder set, when the caller has one; a fresh /proc scan runs when omitted. */
   held?: Set<string>;
   /** Entries an earlier pass failed to finish removing, retried ahead of their age bound (this process's own set by default), and how long one removal retries. */
@@ -331,7 +363,7 @@ const tsxCachePattern = /^tsx-\d+$/;
 export async function reclaimTmpDirectories(options: TmpReclaimOptions = {}): Promise<TmpReclaimReport> {
   const now = options.now ?? Date.now();
   const roots = await distinctRoots(options.tmpRoots ?? [options.tmpRoot ?? tmpdir()]);
-  const report: TmpReclaimReport = { at: new Date(now).toISOString(), roots: roots.map(root => root.path), scanned: 0, removed: [], bytes: 0, kept: 0, errors: [] };
+  const report: TmpReclaimReport = { at: new Date(now).toISOString(), roots: roots.map(root => root.path), scanned: 0, removed: [], bytes: 0, classes: { testTemp: 0, tsxCache: 0, agentWorktree: 0, runtimeScratch: 0 }, kept: 0, errors: [] };
   const minAge = options.prefixes
     ? (name: string) => options.prefixes!.some(prefix => name.startsWith(prefix)) ? options.maxAgeMs ?? tmpReclaimMinAgeMs : null
     : (name: string) => { const age = defaultMinAge(name); return age === null ? null : options.maxAgeMs ?? age; };
@@ -341,13 +373,17 @@ export async function reclaimTmpDirectories(options: TmpReclaimOptions = {}): Pr
   // pass's first removal: scanning a backlogged /tmp and /proc never spends it before anything goes.
   // A caller's own prefixes never sweep the tsx cache; the default pass ages its files by the cache's bound.
   const cacheAge = options.prefixes ? null : options.maxAgeMs ?? tmpReclaimMinAgeMs;
-  const pass: PassState = { now, minAge, cacheAge, limit: options.limit ?? tmpReclaimLimitPerCycle, uid: process.getuid?.(), held: options.held ?? null,
+  // Only the default pass recognises agent scratch by what it is (GY-1655): a caller's own prefixes are all it asked for.
+  const agentAge = options.prefixes ? null : options.maxAgeMs ?? agentScratchMinAgeMs;
+  const runtimeRoots = options.prefixes ? [] : options.runtimeScratchRoots ?? agentRuntimeScratchRoots;
+  const pass: PassState = { now, minAge, cacheAge, agentAge, runtimeRoots, limit: options.limit ?? tmpReclaimLimitPerCycle, uid: process.getuid?.(), held: options.held ?? null,
     workMs: options.workMs ?? Number.POSITIVE_INFINITY, started: null, unfinished: options.unfinished ?? unfinishedRemovals, retryMs: options.retryMs ?? tmpReclaimRetryMs };
   for (const path of pass.unfinished) if (!existsSync(path)) pass.unfinished.delete(path);
   const sweep = async (scanned = roots) => {
     for (const { path, real } of scanned) {
       await reclaimRoot(path, real, pass, report);
       await reclaimTsxCaches(path, real, pass, report);
+      await reclaimRuntimeScratch(path, real, pass, report);
     }
   };
   await sweep();
@@ -467,7 +503,13 @@ export async function tmpCensus(roots: string | readonly string[], bound = tmpCo
     .map(family => ({ path: family.members === 1 ? family.first : `${join(family.root, family.stem)}* (${family.members} top-level)`, entries: family.entries, owner: owner(family.uid), ...(family.capped ? { capped: true } : {}) })) };
 }
 
-interface PassState { now: number; minAge: (name: string) => number | null; cacheAge: number | null; limit: number; uid: number | undefined; held: Set<string> | null; workMs: number; started: number | null; unfinished: Set<string>; retryMs: number }
+interface PassState { now: number; minAge: (name: string) => number | null; cacheAge: number | null; agentAge: number | null; runtimeRoots: readonly string[]; limit: number; uid: number | undefined; held: Set<string> | null; workMs: number; started: number | null; unfinished: Set<string>; retryMs: number }
+/** Record one removal of `kind` in `report`. */
+function took(report: TmpReclaimReport, kind: TmpReclaimClass, path: string, bytes: number) {
+  report.removed.push({ path, bytes });
+  report.bytes += bytes;
+  if (report.classes) report.classes[kind]++;
+}
 /** Remove `path` recursively, retrying while its tree refills or is still being released, for at most `retryMs`. */
 async function removeTree(path: string, retryMs: number) {
   const until = Date.now() + retryMs;
@@ -485,7 +527,7 @@ async function reclaimRoot(root: string, real: string, pass: PassState, report: 
   // A marker goes with its directory, never as an entry of its own; a symlink is never followed or taken.
   // A tsx cache is never a whole-tree candidate, whatever a caller's prefixes: its sockets and per-cycle bound are the cache sweep's.
   const candidate = (entry: Dirent) => (entry.isDirectory() || entry.isFile()) && !entry.name.endsWith('.owner') && !tsxCachePattern.test(entry.name) && minAge(entry.name) !== null;
-  const removable: { path: string; mtime: number }[] = [];
+  const removable: { path: string; mtime: number; kind: TmpReclaimClass }[] = [];
   let held: Set<string> | null = null;
   for (const entry of dirents) {
     // A root reached after earlier roots spent the pass's limit has none left: it only counts its candidates as kept.
@@ -496,11 +538,22 @@ async function reclaimRoot(root: string, real: string, pass: PassState, report: 
       try { await rm(path, { force: true }); } catch { /* the next pass tries again */ }
       continue;
     }
-    if (!candidate(entry)) continue;
+    // A name the pass knows is judged by that name's bound; any other directory of this user's is an
+    // agent's stale checkout if it is a git checkout or linked worktree, judged by the agent scratch
+    // bound (GY-1655). Only an old one is opened to look: a young directory is kept on one stat.
+    let maxAgeMs = candidate(entry) ? minAge(entry.name) : null, kind: TmpReclaimClass = 'testTemp', tree = false;
+    if (maxAgeMs !== null && agentScratchPatterns.some(pattern => pattern.test(entry.name))) { kind = 'agentWorktree'; tree = entry.isDirectory(); }
+    else if (maxAgeMs === null && !(pass.agentAge !== null && entry.isDirectory() && !entry.name.endsWith('.owner') && !tsxCachePattern.test(entry.name) && !pass.runtimeRoots.includes(entry.name))) continue;
     let info;
     try { info = await lstat(path); } catch { continue; }
     // Another user's entry is theirs to clear: on a sticky /tmp it could not be removed anyway.
     if (uid !== undefined && info.uid !== uid) continue;
+    if (maxAgeMs === null) {
+      if (now - info.mtimeMs < pass.agentAge! && !pass.unfinished.has(path)) continue;
+      // A checkout an earlier pass half removed may have lost its .git already: it is still due.
+      if (!pass.unfinished.has(path) && !await isGitCheckout(path)) continue;
+      maxAgeMs = pass.agentAge!; kind = 'agentWorktree'; tree = true;
+    }
     report.scanned++;
     const owner = entry.isDirectory() ? await readTempOwner(path) : null;
     const gone = owner ? tempOwnerGone(owner) : false;
@@ -508,9 +561,8 @@ async function reclaimRoot(root: string, real: string, pass: PassState, report: 
     // pid would pass for the dead run's owner for as long as it lives, so such a directory is judged
     // as an ownerless one is — by its age and its live holders.
     if (owner && !gone && owner.startedAt !== null) { report.kept++; continue; }
-    if (owner && gone) { removable.push({ path, mtime: 0 }); }
+    if (owner && gone) { removable.push({ path, mtime: 0, kind }); }
     else {
-      const maxAgeMs = minAge(entry.name)!;
       // A directory's entries are read only once the directory itself is old: a young one is kept on one stat.
       // An entry an earlier pass began removing is due at once: its half-finished removal is what made it look young (GY-1401).
       let written = pass.unfinished.has(path) ? 0 : now - info.mtimeMs < maxAgeMs || !entry.isDirectory() ? info.mtimeMs : await lastWritten(path, info.mtimeMs);
@@ -523,11 +575,11 @@ async function reclaimRoot(root: string, real: string, pass: PassState, report: 
       if (!held) { const all = pass.held ??= await heldOpenPaths(); held = new Set([...heldEntries(real, all), ...(root === real ? [] : heldEntries(root, all))]); }
       if (held.has(join(real, entry.name)) || held.has(join(root, entry.name))) { report.kept++; continue; }
       // An agent's scratch checkout is judged by its whole tree, read last: only an old, unheld one is walked.
-      if (written && entry.isDirectory() && agentScratchPatterns.some(pattern => pattern.test(entry.name))) {
+      if (written && tree) {
         written = await treeLastWritten(path, written);
         if (now - written < maxAgeMs) { report.kept++; continue; }
       }
-      removable.push({ path, mtime: written });
+      removable.push({ path, mtime: written, kind });
     }
     // The scan is bounded with the removals: once this pass cannot remove more, another 10,000
     // candidates are the next pass's work, not this cycle's. Order in the directory otherwise.
@@ -538,7 +590,7 @@ async function reclaimRoot(root: string, real: string, pass: PassState, report: 
   report.kept += Math.max(0, dirents.reduce((total, entry) => total + (candidate(entry) ? 1 : 0), 0) - (report.scanned - scannedBefore));
   removable.sort((first, second) => first.mtime - second.mtime);
   const removedBefore = report.removed.length;
-  for (const { path } of removable.slice(0, limit)) {
+  for (const { path, kind } of removable.slice(0, limit)) {
     const at = Date.now();
     pass.started ??= at;
     if (at > pass.started + pass.workMs) break;
@@ -549,8 +601,7 @@ async function reclaimRoot(root: string, real: string, pass: PassState, report: 
       if (registration) await rm(registration, { recursive: true, force: true });
       await rm(tempOwnerMarker(path), { force: true });
       pass.unfinished.delete(path);
-      report.removed.push({ path, bytes });
-      report.bytes += bytes;
+      took(report, kind, path, bytes);
     } catch (error) { pass.unfinished.add(path); report.errors.push(`${path}: ${error instanceof Error ? error.message : String(error)}`); }
   }
   report.kept += Math.max(0, removable.length - (report.removed.length - removedBefore));
@@ -605,9 +656,55 @@ async function reclaimTsxCaches(root: string, real: string, pass: PassState, rep
     if (at > pass.started + pass.workMs) break;
     try {
       await rm(path, { force: true });
-      report.removed.push({ path, bytes });
-      report.bytes += bytes;
+      took(report, 'tsxCache', path, bytes);
     } catch (error) { report.errors.push(`${path}: ${error instanceof Error ? error.message : String(error)}`); }
+  }
+}
+
+/**
+ * One root's agent runtime scratch roots, aged entry by entry (GY-1655): each entry directly inside
+ * `<root>/<runtime root>` that this user owns, whose newest write in its tree is older than the
+ * agent scratch bound and that no live process holds or names, oldest first, within what the pass's
+ * entry and work bounds have left. The runtime root itself is never removed: a live session writes
+ * its next packet there.
+ */
+async function reclaimRuntimeScratch(root: string, real: string, pass: PassState, report: TmpReclaimReport) {
+  const maxAgeMs = pass.agentAge;
+  if (maxAgeMs === null) return;
+  for (const name of pass.runtimeRoots) {
+    const limit = pass.limit - report.removed.length;
+    if (limit <= 0) return;
+    const scratch = join(root, name), own = await lstat(scratch).catch(() => null);
+    if (!own?.isDirectory() || (pass.uid !== undefined && own.uid !== pass.uid)) continue;
+    const dirents = await readdir(scratch, { withFileTypes: true }).catch(() => [] as Dirent[]);
+    const old: { path: string; mtime: number }[] = [];
+    let held: Set<string> | null = null;
+    for (const entry of dirents) {
+      if (old.length >= limit) { report.kept++; continue; }
+      if (!entry.isDirectory() && !entry.isFile()) continue;
+      const path = join(scratch, entry.name);
+      let info;
+      try { info = await lstat(path); } catch { continue; }
+      if (pass.uid !== undefined && info.uid !== pass.uid) continue;
+      report.scanned++;
+      if (pass.now - info.mtimeMs < maxAgeMs) { report.kept++; continue; }
+      if (!held) { const all = pass.held ??= await heldOpenPaths(); held = new Set([...heldEntries(join(real, name), all), ...(root === real ? [] : heldEntries(scratch, all))]); }
+      if (held.has(join(real, name, entry.name)) || held.has(path)) { report.kept++; continue; }
+      const written = entry.isDirectory() ? await treeLastWritten(path, info.mtimeMs) : info.mtimeMs;
+      if (pass.now - written < maxAgeMs) { report.kept++; continue; }
+      old.push({ path, mtime: written });
+    }
+    old.sort((first, second) => first.mtime - second.mtime);
+    for (const { path } of old) {
+      const at = Date.now();
+      pass.started ??= at;
+      if (at > pass.started + pass.workMs) { report.kept++; continue; }
+      try {
+        const bytes = await sizeOf(path);
+        await removeTree(path, pass.retryMs);
+        took(report, 'runtimeScratch', path, bytes);
+      } catch (error) { report.errors.push(`${path}: ${error instanceof Error ? error.message : String(error)}`); }
+    }
   }
 }
 

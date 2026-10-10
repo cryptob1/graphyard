@@ -1,6 +1,6 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, readFile } from 'node:fs/promises';
+import { mkdir, readFile, utimes, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import EmbeddedPostgres from 'embedded-postgres';
@@ -19,8 +19,9 @@ import { runExecutorTick } from '../src/auto-dispatch.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { stalledActionAttention } from '../src/cli/master-status.js';
 import { attributeAttention, resourceStatus } from '../src/master-status.js';
-import { dispatchRefusal, loadedRevision, owedUpgrade, selfUpgradeBoundMs, planeVerdict, readGitHubBudget, resourceAttention, finishedSessionGraceMs, nameReclaimBoundMs, stuckSessionMs, ledgerRetentionMs, readReclaimReports, readResources, reclaimResources, registryGaps, resourceIds, resourceRegistry, reviewLedgerBound, type ResourceInputs } from '../src/master-resources.js';
+import { dispatchRefusal, loadedRevision, owedUpgrade, selfUpgradeBoundMs, planeVerdict, readGitHubBudget, resourceAttention, finishedSessionGraceMs, nameReclaimBoundMs, stuckSessionMs, ledgerRetentionMs, readReclaimReports, readResources, reclaimResources, readTmpInodes, settleTmpReclaim, registryGaps, resourceIds, resourceRegistry, reviewLedgerBound, type ResourceInputs } from '../src/master-resources.js';
 import { classifyAttention } from '../src/model/fault-classes.js';
+import { reclaimTmpDirectories } from '../src/tmp-reclaim.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
@@ -517,4 +518,25 @@ test('unit:loaded-revision-pending-promotion — commits the loop has not loaded
   // No deployment observation on the cursor: nothing rides along, and the count stands.
   assert.equal(owedUpgrade({ upgrade: { pending: null }, actions: {} }), null);
   assert.equal(read(null).used, 3);
+});
+
+test('unit:resource-observation — the tmp-inodes reading and master status name how many entries each class (test temp, tsx cache, agent worktree, runtime scratch) the latest /tmp pass removed', async () => {
+  const directory = await scratchRoot(), tmp = join(directory, 'tmp'), stale = 25 * 3_600_000;
+  const age = async (path: string) => { const past = new Date(Date.now() - stale); await utimes(path, past, past); };
+  // One of each class: a test temp name, a tsx compile cache file, a linked worktree no name list knows, an opencode packet.
+  const testTemp = join(tmp, 'native-leaked'), cache = join(tmp, `tsx-${process.getuid!()}`), worktree = join(tmp, 'feature381-red-0c615'), gitdir = join(directory, 'repository', '.git', 'worktrees', 'feature381-red-0c615'), opencode = join(tmp, 'opencode');
+  for (const path of [testTemp, cache, worktree, gitdir, opencode]) await mkdir(path, { recursive: true });
+  await writeFile(join(cache, 'compiled.mjs'), 'x'); await writeFile(join(opencode, '7e5bafba-review.txt'), 'x');
+  await writeFile(join(gitdir, 'HEAD'), 'abc\n'); await writeFile(join(gitdir, 'gitdir'), `${join(worktree, '.git')}\n`); await writeFile(join(worktree, '.git'), `gitdir: ${gitdir}\n`);
+  for (const path of [join(cache, 'compiled.mjs'), join(opencode, '7e5bafba-review.txt'), join(gitdir, 'HEAD'), join(gitdir, 'gitdir'), gitdir, join(worktree, '.git'), worktree, testTemp, opencode]) await age(path);
+  const options = { tmpRoot: tmp, tmpPass: (pass: Parameters<typeof reclaimTmpDirectories>[0]) => reclaimTmpDirectories({ ...pass, held: new Set() }) };
+  await reclaimResources(directory, { reviewers: [], producers: [] }, { work: [], agents: [] }, options);
+  await settleTmpReclaim();
+  await reclaimResources(directory, { reviewers: [], producers: [] }, { work: [], agents: [] }, options);
+  await settleTmpReclaim();
+  const inodes = await readTmpInodes(directory, tmp, async () => ({ files: 1_048_576, ffree: 400_000 }));
+  assert.deepEqual(inodes?.latest?.classes, { testTemp: 1, tsxCache: 1, agentWorktree: 1, runtimeScratch: 1 });
+  const reading = readResources(blank({ tmp: inodes })).find(entry => entry.id === 'tmp-inodes');
+  assert.match(reading?.detail ?? '', /the loop's latest \/tmp pass removed 4 entries at [^;]*\(1 test temp, 1 tsx cache, 1 agent worktree, 1 runtime scratch\)/);
+  assert.match(resourceRegistry.find(entry => entry.id === 'tmp-inodes')?.reclaim ?? '', /linked git worktree or git checkout, whatever its name.*opencode/);
 });
