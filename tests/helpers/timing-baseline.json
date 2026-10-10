@@ -649,7 +649,7 @@
     "tests/soak-dispatch.test.ts": 23662,
     "tests/soak-doctor.test.ts": 20000,
     "tests/soak-flake-ledger.test.ts": 1100,
-    "tests/soak-fleet-alignment.test.ts": 3000,
+    "tests/soak-fleet-alignment.test.ts": 40000,
     "tests/soak-local-promotion.test.ts": 6000,
     "tests/soak-loop-wake.test.ts": 34070,
     "tests/soak-main-guard.test.ts": 31000,

@@ -274,9 +274,11 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
    * fleet report master status builds (executorFleetReport, read with the held-CLI pin and the
    * restart the cursor owes) into the loop's fault step every cycle: a restart attempted inside
    * `refuse` is refused (a claim held), and from `strandAt` a restart reported done leaves the fleet
-   * on its release (a restart that never reached it), a split nothing owes.
+   * on its release (a restart that never reached it), a split nothing owes. From `stalePinAt` the
+   * pin's lift fails (performSelfUpgrade swallows it), so the pointer outlives the hold and the
+   * executors restart through the stale launcher onto the pinned release.
    */
-  releaseLag?: { cutAgoMs: number; fleet?: { refuse?: { from: number; to: number }; strandAt?: number } } }) {
+  releaseLag?: { cutAgoMs: number; fleet?: { refuse?: { from: number; to: number }; strandAt?: number; stalePinAt?: number } } }) {
   const dayStart = clock.now();
   // A day may restage the shared scenario: the day-scoped view of the plan is what every fault
   // below arms from, while each test's own assertions still read the shared base plan.
@@ -2354,13 +2356,16 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   };
   const selfUpgrade = (state: DaemonState) => performSelfUpgrade(config, state, {
     root: '/soak/coordinator', run: coordinatorGit, now: clock.now, persist: async () => {},
-    holdCli: async commit => { releaseLagDay.pin = commit; },
+    holdCli: async commit => {
+      if (commit === null && releaseLagDay.pin && clock.now() - dayStart >= (options.releaseLag?.fleet?.stalePinAt ?? Infinity)) throw new Error('EACCES: the pin could not be removed');
+      releaseLagDay.pin = commit;
+    },
     restartExecutors: async to => {
       // A busy fleet: a claim outlives restartExecutors' bounded wait for the first passes, and the restart is refused.
       if (upgrades.held.length < plan.heldClaimRestarts) { upgrades.held.push(to); return { result: 'refused', reason: `Restart refused while an executor on ${config.hostId} holds a claimed action`, coordinator: { commit: to }, held: [], restarted: [], unsupervised: [], forgotten: [] }; }
       const fleet = options.releaseLag?.fleet, elapsed = clock.now() - dayStart;
       if (fleet?.refuse && elapsed >= fleet.refuse.from && elapsed < fleet.refuse.to) { fleetDay.refused.push({ elapsed, to }); return { result: 'refused', reason: `Restart refused while an executor on ${config.hostId} holds a claimed action`, coordinator: { commit: to }, held: [], restarted: [], unsupervised: [], forgotten: [] }; }
-      if (fleet && elapsed < (fleet.strandAt ?? Infinity)) fleetDay.loaded = to;
+      if (fleet && elapsed < (fleet.strandAt ?? Infinity)) fleetDay.loaded = elapsed >= (fleet.stalePinAt ?? Infinity) && releaseLagDay.pin ? releaseLagDay.pin : to;
       if (options.releaseLag) releaseLagDay.restarts.push({ elapsed: clock.now() - dayStart, kind: 'executors', to, served: production.sha, contained: github.contains(production.sha, to), pin: releaseLagDay.pin });
       upgrades.executors.push(to); return { result: 'restarted', reason: null, coordinator: { commit: to }, held: [], restarted: [], unsupervised: [], forgotten: [] };
     },

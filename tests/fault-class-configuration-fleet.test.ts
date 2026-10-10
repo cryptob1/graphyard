@@ -108,6 +108,13 @@ test('manual:fault-class-configuration — a split nothing is fixing still count
   assert.equal(configurationFaults(entry, refused(standing), standing).faults.length, 1, 'a refusal standing past the bound counts though retried each pass');
   // A pin on a release the executors do not run is no cover.
   assert.equal(configurationFaults(entry, { held: instances[1].loaded }).faults.length, 1);
+  // A pin whose lift failed is no cover once the cursor no longer holds a restart onto the checkout (review of 48cc59e2a42a).
+  assert.equal(configurationFaults(entry, { held: entry.loaded }).faults.length, 1, 'a pin with no owed restart');
+  assert.equal(configurationFaults(entry, alignmentOf(cursor(entry, { pending: false, stalled: null }), entry.loaded)).faults.length, 1, 'a pin outliving its settled restart');
+  assert.equal(configurationFaults(entry, alignmentOf(cursor({ ...entry, coordinator: instances[1].coordinator }), entry.loaded)).faults.length, 1, 'a pin held for another commit');
+  const unheld = configurationFaults(entry, alignmentOf(cursor(entry, { stalled: { cause: 'executors-unavailable', reason: 'no restart', since: entry.movedAt, at: entry.movedAt } }), entry.loaded));
+  assert.equal(unheld.faults.length, 1, 'a pin beside a stall that is not the hold');
+  assert.equal(unheld.report.split, true);
 });
 
 test('manual:fault-class-configuration — alignmentInMotionUntil needs an attempted loaded-code restart onto the coordinator commit', () => {
@@ -121,9 +128,15 @@ test('manual:fault-class-configuration — alignmentInMotionUntil needs an attem
 test('manual:fault-class-configuration — the fleet report reads the held-CLI pin the self-upgrade writes', async () => {
   const root = await temporaryDirectory('gy-1619-held-');
   assert.equal(readHeldCli(root), null);
+  const snapshot = join(root, '.graphyard', 'held-cli', 'x');
   await mkdir(join(root, '.graphyard'), { recursive: true });
-  await writeFile(heldCliPointer(root), `${JSON.stringify({ commit: instances[2].loaded, root: join(root, '.graphyard', 'held-cli', 'x'), loop: true })}\n`);
+  await writeFile(heldCliPointer(root), `${JSON.stringify({ commit: instances[2].loaded, root: snapshot, loop: true })}\n`);
+  assert.equal(readHeldCli(root), null, 'a pin naming a snapshot the launcher cannot load is none');
+  await mkdir(join(snapshot, 'src'), { recursive: true });
+  await writeFile(join(snapshot, 'src', 'cli.ts'), '');
   assert.equal(readHeldCli(root), instances[2].loaded);
+  await writeFile(heldCliPointer(root), `${JSON.stringify({ commit: instances[2].loaded })}\n`);
+  assert.equal(readHeldCli(root), null, 'a pin naming no snapshot is none');
   await writeFile(heldCliPointer(root), 'not json');
   assert.equal(readHeldCli(root), null);
 });

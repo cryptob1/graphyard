@@ -238,8 +238,9 @@ const sameRelease = (a: string | null | undefined, b: string | null | undefined)
  * (GY-1585) the executors run the pinned snapshot of the release production serves until the plane
  * serves the move, and a restart a held claim refuses is retried each pass (GY-916). Read against
  * the checkout alone, each advance was one more configuration fault (three on 9-10 October 2026).
- * `held` is the commit `.graphyard/held-cli.json` pins; `upgrade` the restart the cursor owes
- * (owedUpgrade), and `boundMs` the self-upgrade's bound (upgradeBoundMs).
+ * `held` is the commit `.graphyard/held-cli.json` pins (readHeldCli), which covers an executor only
+ * while `upgrade`, the restart the cursor owes (owedUpgrade), is held (`release-lagged`) onto the
+ * coordinator's commit; `boundMs` is the self-upgrade's bound (upgradeBoundMs).
  */
 export interface FleetAlignment {
   held?: string | null;
@@ -266,13 +267,15 @@ export function alignmentInMotionUntil(alignment: FleetAlignment, coordinator: s
  * executor: `exec-1 on host-a runs 0ea7ab5c0ea7 beside the coordinator's fdd31388fdd3 — split, standing down`.
  */
 export function executorFleetReport(registrations: ExecutorRegistration[], coordinator: { commit: string | null }, options: { hostId: string; now?: number; alive?: (pid: number) => boolean } & FleetAlignment): ExecutorFleetReport {
-  const alive = options.alive ?? processAlive, held = options.held ?? null;
+  const alive = options.alive ?? processAlive, held = options.held ?? null, owed = options.upgrade;
+  const holding = !!held && !!owed?.code && sameRelease(owed.to, coordinator.commit) && owed.stalled?.cause === 'release-lagged';
   const executors = registrations.map((registration): ExecutorFleetRow => {
     const local = registration.host === options.hostId;
     const running = local && registration.state !== 'stopped' ? alive(registration.pid) : null;
     const state = registration.state === 'running' && running === false ? 'gone' : registration.state;
-    // GY-1619: an executor on the release a held restart pins runs what the alignment means it to (the entry takes the pin for its checkout).
-    const pinned = !!held && sameRelease(registration.release.commit, held) && !sameRelease(held, coordinator.commit);
+    // GY-1619: an executor on the release a held restart pins runs what the alignment means it to (the entry takes the pin for its checkout),
+    // but only while the cursor still holds that restart onto this checkout: a pin whose lift failed covers nothing once the hold is gone.
+    const pinned = holding && sameRelease(registration.release.commit, held) && !sameRelease(held, coordinator.commit);
     const split = !pinned && !!registration.release.commit && !!coordinator.commit && registration.release.commit !== coordinator.commit;
     const up = state === 'running' || state === 'standing-down';
     const needsRestart = up && (split || state === 'standing-down');

@@ -79,3 +79,16 @@ test('manual:fault-class-configuration — the real loop over a simulated day co
   assert.equal(counted.length, 1, `the standing split is one configuration fault, not one per cycle: ${counted.map(instance => instance.at)}`);
   assert.ok(elapsedOf(day, counted[0].at) > lastCarried, 'counted once nothing owes the restart');
 });
+
+test('manual:fault-class-configuration — the real loop over a simulated day counts a split a stale held-CLI pin would hide: a pin whose lift failed covers nothing once the hold is gone, and the fleet restarted through it onto the old release is one configuration fault, once', { timeout: 600_000 }, async () => {
+  const stalePinAt = 5 * hour + 45 * minute;
+  const day = await simulateDay({ hours: 7, plan, releaseLag: { cutAgoMs: 30 * minute, fleet: { stalePinAt } } });
+  const fleet = day.fleetDay!;
+  const stale = fleet.samples.find(sample => sample.elapsed >= stalePinAt && sample.pin !== null && sample.pending === null && sample.loaded === sample.pin && sample.loaded !== sample.coordinator);
+  assert.ok(stale, 'the self-upgrade settled its restart while the pin outlived the hold and the fleet ran the pinned release');
+  const lastCarried = assertAlignmentUncounted(day, stale.elapsed);
+  assert.ok(fleet.samples.filter(sample => sample.elapsed >= stale.elapsed).every(sample => sample.split && sample.inMotionUntil === null), 'the split behind the stale pin stands, never pinned or in motion');
+  const counted = fleetFaults(day);
+  assert.equal(counted.length, 1, `the standing split is one configuration fault, not one per cycle: ${counted.map(instance => instance.at)}`);
+  assert.ok(elapsedOf(day, counted[0].at) > lastCarried, 'counted once the hold the pin served is gone');
+});
