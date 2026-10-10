@@ -385,10 +385,20 @@ export async function runTrial(input: RunTrialInput): Promise<TrialRun> {
       // The merge builds against its own dependencies: the coordinator's install when its lockfile is byte-identical to the merge's, else an `npm ci` of the merge's lockfile.
       // A repository the merge does not make a Node package installs and builds nothing, and one without
       // scripts/ci-tests.mjs selects no tests. Each is read from the merge commit itself, never from the
-      // trial checkout, so an unreadable checkout file never skips a phase the merge carries.
+      // trial checkout, so an unreadable checkout file never skips a phase the merge carries. Only a
+      // listing that answers and names no such path is absence: a probe git could not answer (a timeout,
+      // an unreadable object store) is a runner failure, never a passing trial that skipped its checks.
       const holds = async (path: string) => {
-        try { await run('git', ['-C', input.root, 'cat-file', '-e', `${input.mergeSha}:${path}`], { timeoutMs: remaining() }); return true; }
-        catch { return false; }
+        let listing: string;
+        try { listing = String(await run('git', ['-C', input.root, 'ls-tree', '--name-only', input.mergeSha, '--', path], { timeoutMs: remaining() })); }
+        catch (error) {
+          const out = output(error);
+          log.push(`$ git ls-tree --name-only ${input.mergeSha} -- ${path}\n${out}\n${ending(error)}`);
+          if ((error as { timedOut?: boolean }).timedOut || now() >= deadline) throw new TrialTimeoutError('install', Math.max(0, now() - startedAt), tail());
+          const ended = endedOf(error, out);
+          throw runnerFailure('install', { ...ended, cause: ended.cause ?? `could not read ${path} from ${input.mergeSha.slice(0, 12)}` });
+        }
+        return listing.split('\n').some(line => line.trim() === path);
       };
       if (await holds('package.json')) {
         const lockfile = (dir: string) => readFile(join(dir, 'package-lock.json'), 'utf8').catch(() => null);

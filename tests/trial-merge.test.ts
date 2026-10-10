@@ -499,6 +499,24 @@ test('integration:shadow-trial-failure-diagnostics — a runner that exits non-z
   assert.ok(!state.actions[shadowErrorKey(crashed, repo.base)], 'a runner failure is not a trial error');
 });
 
+test('integration:trial-run-build-and-tests — the trial reads package.json and scripts/ci-tests.mjs from the merge commit: only a listing that answers without them skips install, build and selection, and a probe git cannot answer is a runner failure, never a passing trial with zero checks (GY-1675)', async () => {
+  const repo = await fixture();
+  // A merge that holds neither file installs, builds and selects nothing: a passing trial of no tests.
+  const bare = gitIn(repo.root, 'commit-tree', '4b825dc642cb6eb9a060e54bf8d69288fbee4904', '-m', 'a merge of no Node package');
+  const absent = await runTrial({ root: repo.root, base: await temporaryDirectory('trial-merge-root', tmpdir()), mergeSha: bare, changedFiles: ['README.md'], timeoutMs: 120_000, key: 'GY-9', environment: { PATH: process.env.PATH! } });
+  assert.equal(absent.build, 'pass'); assert.deepEqual(absent.tests, { passed: 0, failed: [], files: 0 });
+  // A probe that fails — an object store git cannot read — rejects as a runner failure naming the path, and the checkout still goes.
+  const head = repo.commitOnBase({ 'tests/bad.test.ts': 'x\n' }, 'head with a failing test');
+  const unreadable = ((command: string, args: string[], options: unknown) => {
+    if (command === 'git' && args[2] === 'ls-tree') throw Object.assign(new Error('Command failed: git ls-tree'), { status: 128, signal: null, stdout: '', stderr: 'fatal: unable to read tree\n' });
+    return defaultChildRun(command, args, options as never);
+  }) as never;
+  const base = await temporaryDirectory('trial-merge-root', tmpdir());
+  await assert.rejects(runTrial({ root: repo.root, base, mergeSha: await mergeOf(repo, head), changedFiles: ['tests/bad.test.ts'], timeoutMs: 120_000, key: 'GY-9', environment: { PATH: process.env.PATH! }, run: unreadable }),
+    (error: unknown) => error instanceof TrialRunnerError && error.phase === 'install' && error.status === 128 && /unable to read tree/.test(error.outputTail) && /could not read package\.json/.test(error.outputTail));
+  assert.equal(existsSync(base) ? readdirSync(base).length : 0, 0, 'the trial checkout is removed after a probe failure');
+});
+
 test('integration:shadow-trial-bounded-test-groups — the selection runs in groups of at most trialTestGroupSize files, each its own runner process over the exact trial merge tree, every file once and in order; a failing group names its files, whether a record names the failing test or the runner exited naming none; and the real pre-merge suite never fits one group', async () => {
   const repo = await fixture();
   const suite = Object.fromEntries(Array.from({ length: 8 }, (_, index) => [`tests/t${index}.test.ts`, 'x\n']));
