@@ -1,6 +1,8 @@
 // Concern: the pipeline doctor (GY-711) — the loop's ten-minute remedy worker, and the
 // deterministic remedies the loop applies itself without an agent.
 import { createHash } from 'node:crypto';
+import { existsSync } from 'node:fs';
+import { resolve } from 'node:path';
 import type { Work } from '../model.js';
 import { createSchema } from '../model.js';
 import { isClosed } from '../model/closure.js';
@@ -727,6 +729,9 @@ export const decisionCheckMs = 2 * 60_000;
  * A failure is journaled once per distinct cause and retried every cycle; a repeat of the same cause
  * moves the standing row's time, so the failure stays open for as long as it lasts.
  */
+/** The settings file the Claude harness contract is written to, relative to the checkout (masterHarnessPlan's file). */
+const claudeSettingsFile = '.claude/settings.local.json';
+
 export async function applyHarnessContract(cycle: Cycle) {
   const { state, effects, now, performed, config, isolate } = cycle;
   // GY-1662: the loop's managed checkout (its CLI's), never the research scratch worktree runDaemon rewrites research's cwd to.
@@ -735,11 +740,13 @@ export async function applyHarnessContract(cycle: Cycle) {
   await isolate('config', null, 'harness contract', async () => {
     const key = remedyKey('harness', 'claude'), previous = state.actions[key], attempts = (previous?.attempts ?? 0) + 1;
     try {
-      harnessApplyCheckout(root, { servingUnit: effects.harness?.servingUnit, unitDirectory: effects.harness?.unitDirectory });
-      const plan = masterHarness(root, config, 'claude');
-      if (!await harnessDrift(root, plan)) {
+      // A checkout with no Claude settings installed has nothing to apply (harnessDrift is null without the file), so it is neither validated nor written: the checkout refusals guard a write, and a launcher or fixture checkout that installed none is no refusal (GY-1662).
+      const installed = existsSync(resolve(root, claudeSettingsFile));
+      if (installed) harnessApplyCheckout(root, { servingUnit: effects.harness?.servingUnit, unitDirectory: effects.harness?.unitDirectory });
+      const plan = installed ? masterHarness(root, config, 'claude') : null;
+      if (!plan || !await harnessDrift(root, plan)) {
         // A refusal the operator's remedy has cleared, or a failure the checkout recovered from, closes once the contract already holds (GY-1662).
-        if (previous && previous.state !== 'done') performed.push(await record(state, key, { kind: 'config', work: null, principal: null, state: 'done', detail: `The Claude harness contract already holds for ${root}: the earlier ${previous.state} row is resolved with nothing to apply`, attempts, cycle: state.cycle }, now(), effects.persist));
+        if (previous && previous.state !== 'done') performed.push(await record(state, key, { kind: 'config', work: null, principal: null, state: 'done', detail: plan ? `The Claude harness contract already holds for ${root}: the earlier ${previous.state} row is resolved with nothing to apply` : `No Claude harness settings are installed under ${root} (${claudeSettingsFile}): the earlier ${previous.state} row is resolved with nothing to apply`, attempts, cycle: state.cycle }, now(), effects.persist));
         return;
       }
       const written = await writeHarnessPermissions(root, plan, true);

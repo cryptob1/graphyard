@@ -114,6 +114,13 @@ test('unit:harness-apply-checkout-resolution — the loop applies the harness co
     assert.throws(() => harness.harnessApplyCheckout(root, wired), (error: unknown) => error instanceof harness.HarnessCheckoutRefusal && error.root === root && error.unit === null);
   }
 
+  // A units-less checkout that installed no Claude settings has nothing to apply: no row, nothing written (a fixture's or a launcher's checkout).
+  const bare = await temporaryDirectory('harness-bare');
+  const bareCycle = cycle(config(bare), { harness: { unitDirectory: noUnits } });
+  await routineRemedies(bareCycle);
+  assert.equal(bareCycle.state.actions[key], undefined, bareCycle.state.actions[key]?.detail);
+  assert.equal(existsSync(settingsFile(bare)), false, 'nothing is written into a checkout with no settings installed');
+
   // The legacy-unit-points-elsewhere case for the serving unit: the apply names the unit to update rather than apply.
   assert.throws(() => harness.harnessApplyCheckout(own.root, { servingUnit: legacyLoopUnit, unitDirectory: units }), (error: unknown) => {
     assert.ok(error instanceof harness.HarnessCheckoutRefusal);
