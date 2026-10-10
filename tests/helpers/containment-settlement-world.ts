@@ -43,9 +43,14 @@ export function fenced(key: string, lapsedMs: number, overrides: Partial<Work> =
 export const running = (key: string, pane: string) => ({ id: 'worker-a:4', kind: 'implementation', principal: 'worker-a', runtime: 'claude', host, subject: key, state: 'running', outcome: null, pane, workspace: 'w1',
   epoch: null, startedAt: iso(-30 * minute), updatedAt: iso(-29 * minute), endedAt: null } as unknown as SessionHandle);
 
-export function world(initial: Work[], supervisorsRunning: string[] = []) {
+/**
+ * `supervisorsRunning` are the keys whose supervisor is up; of them, `ignoringStop` survive a stop
+ * through their scope. A pane closed while its item's supervisor still runs is recorded in
+ * `closedUnderLive`: that is the close the loop must never make.
+ */
+export function world(initial: Work[], supervisorsRunning: string[] = [], ignoringStop: string[] = []) {
   const plane = { items: new Map(initial.map(item => [item.id, clone(item)])), settles: [] as string[] };
-  const running = new Set(supervisorsRunning), panesClosed: string[] = [];
+  const running = new Set(supervisorsRunning), stubborn = new Set(ignoringStop), panesClosed: string[] = [], stopped: string[] = [], closedUnderLive: string[] = [];
   const byKey = (key: string) => [...plane.items.values()].find(item => item.key === key)!;
   const probe = (target: { key: string; workspacePath: string }): SupervisorProbeReport => {
     const live = running.has(target.key), scope = scopeOf(target.key);
@@ -71,14 +76,22 @@ export function world(initial: Work[], supervisorsRunning: string[] = []) {
     },
     preserveWork: async () => ({ state: 'clean' }),
     reportCapacity: async work => clone(plane.items.get(work.id)!),
+    // The guarded stop: a supervisor that honours SIGTERM through its scope exits.
+    stopSupervisor: async orphan => {
+      stopped.push(orphan.key);
+      if (!stubborn.has(orphan.key)) running.delete(orphan.key);
+    },
     // Closing a session's pane hangs up its runtime, and the supervisor it ran under exits with it.
     closeSession: async (pane: string) => {
       panesClosed.push(pane);
-      for (const item of plane.items.values()) if (item.sessions?.some(handle => handle.pane === pane)) running.delete(item.key);
+      for (const item of plane.items.values()) if (item.sessions?.some(handle => handle.pane === pane)) {
+        if (running.has(item.key)) closedUnderLive.push(`${item.key} (pane ${pane})`);
+        running.delete(item.key);
+      }
     },
     persist: async () => {},
   };
-  return { plane, byKey, running, panesClosed, effects, snapshot: () => [...plane.items.values()].map(clone) };
+  return { plane, byKey, running, stubborn, panesClosed, stopped, closedUnderLive, effects, snapshot: () => [...plane.items.values()].map(clone) };
 }
 
 /** The real loop over `effects`, reading `snapshot` each cycle. */

@@ -2,7 +2,7 @@
 import type { Work } from '../model.js';
 import { detectRetryingExhaustion, type CapacityRole, type ExhaustionSignal } from '../model/capacity.js';
 import { detectRuntimeExhaustion } from '../master/environments.js';
-import { classifyRuntimePrompt, continueAfterDecline, type EscalationSession, escalationProfile, type HerdrAgent, isProfileSession, ownLoginAccounts, profileAccount, type RuntimePrompt, type SessionIdentity } from '../master.js';
+import { classifyRuntimePrompt, continueAfterDecline, type EscalationSession, escalationProfile, type HerdrAgent, isProfileSession, ownLoginAccounts, profileAccount, type RuntimePrompt, type SessionIdentity, type WorkerProfile } from '../master.js';
 import { containmentPhase } from '../model/containment.js';
 import { standingEscalations } from '../model/escalation.js';
 import { capacityRecheckMs } from '../auto-dispatch.js';
@@ -13,7 +13,7 @@ import { paneAlreadyGone } from '../request-settlement.js';
 import { blockedPromptAnswers, blockedPromptFailMs, blockedPromptSettleMs, failoverKey, handlerSettleMs, launchAppearanceMs, launcherRetry, promptDigest, type LaunchedSession, preserveInterruptedAttempt, record, stoppedStates } from './effects.js';
 import { checkPaneStillBelongs, endWorkerAttempt, resumeStep, workerHandle } from './cycle-resume.js';
 import type { Cycle } from './cycle.js';
-import { settleEndedAttemptFence } from './cycle-reclaim.js';
+import { settleEndedAttemptFence, supervisorStillRunning } from './cycle-reclaim.js';
 
 export { idleLeaseMs, idleReclaimMs, idleRepromptGraceMs, resumeWaitKey, idleLeaseKey, resumePromptText, idlePromptText } from './cycle-resume.js';
 
@@ -575,9 +575,13 @@ async function closeExitedWorkerSessions(cycle: Cycle, runtime: { agents: HerdrA
     const seenKey = `exited:implementation:${item.id}:${handle.id}:${handle.startedAt}`;
     let reason: string | null = null;
     // GY-1633: a submitted attempt's supervisor that left its fence standing past the grace window
-    // holds nothing the record still authorizes; its session is over, and closing it settles the fence below.
-    const fence = item.containmentQuarantine;
-    const lingering = !leased && !!fence && handle.id === `${fence.owner}:${fence.epoch}` && item.submission?.epoch === fence.epoch && containmentPhase(item, clock)?.state === 'lapsed';
+    // holds nothing the record still authorizes; its session is over. A lapsed lease proves no
+    // process gone, so the supervisor is stopped through its recorded scope and verified gone on the
+    // host before its pane is closed (stopLingeringSupervisor), and the close settles the fence below.
+    // A loop that cannot stop or inspect it leaves the pane to the steps that read Herdr.
+    const fence = item.containmentQuarantine, owner = fence && config.workers.find(profile => profile.principal === fence.owner);
+    const lingering = !leased && !!fence?.scope && !!owner && !!effects.stopSupervisor && !!effects.containment && handle.id === `${fence.owner}:${fence.epoch}`
+      && item.submission?.epoch === fence.epoch && containmentPhase(item, clock)?.state === 'lapsed';
     if (item.stage !== 'build' && !leased) reason = `${item.key} has left build, the stage this implementation session was launched for, and is now in ${item.stage}`;
     else if (lingering) reason = `${item.key} epoch ${fence!.epoch} submitted pull request #${item.submission!.pr} and holds no lease, yet its containment fence still stands past the grace window`;
     else if (runtime?.available && handle.pane && !(clock - Date.parse(handle.startedAt) < launchAppearanceMs)) {
@@ -609,9 +613,10 @@ async function closeExitedWorkerSessions(cycle: Cycle, runtime: { agents: HerdrA
         // The pane goes first, so the record never says finished beside a pane still standing. A
         // close that fails leaves the handle running: the step is retried whole on a later cycle.
         let closed = '';
+        if (lingering) closed = `; ${await stopLingeringSupervisor(cycle, item, owner!)}`;
         if (handle.pane) {
-          try { await effects.closeSession(handle.pane); closed = `; pane ${handle.pane} closed`; }
-          catch (error) { if (!paneAlreadyGone(error)) throw error; closed = `; pane ${handle.pane} was already gone`; }
+          try { await effects.closeSession(handle.pane); closed += `; pane ${handle.pane} closed`; }
+          catch (error) { if (!paneAlreadyGone(error)) throw error; closed += `; pane ${handle.pane} was already gone`; }
         }
         const outcome = `closed by the loop: ${found}${closed}`.slice(0, 500);
         await effects.recordSession!(item, { id: handle.id, kind: 'implementation', runtime: handle.runtime, host: handle.host, subject: handle.subject, state: 'finished', outcome });
@@ -632,4 +637,23 @@ async function closeExitedWorkerSessions(cycle: Cycle, runtime: { agents: HerdrA
   const lapsed = Object.keys(state.actions).filter(key => key.startsWith('exited:implementation:') && state.actions[key].state === 'waiting' && !sighted.has(key));
   for (const key of lapsed) delete state.actions[key];
   if (lapsed.length) await effects.persist(state);
+}
+
+/**
+ * GY-1633. Stops a submitted attempt's lingering supervisor through the scope it recorded — the
+ * guarded stop endWorkerAttempt takes, which signals the pid only while it still runs this
+ * assignment — and returns how, once the host verifies it gone. Until then it throws, so the close
+ * is recorded failed and retried on a later cycle with the pane still standing: a pane that may
+ * hold a running supervisor is never closed under it.
+ */
+async function stopLingeringSupervisor(cycle: Cycle, item: Work, profile: WorkerProfile) {
+  const fence = item.containmentQuarantine!, scope = fence.scope!;
+  let stop: string;
+  try {
+    await cycle.effects.stopSupervisor!({ id: item.id, key: item.key, epoch: fence.epoch, owner: fence.owner, profile: profile.name, agentName: profile.agentName, scope, leaseExpiresAt: fence.leaseExpiresAt ?? new Date(cycle.clock).toISOString() }, 'SIGTERM');
+    stop = `its supervisor (pid ${scope.pid}) was stopped through ${scope.unit}`;
+  } catch (error) { stop = `its supervisor could not be signalled (${message(error)})`; }
+  const running = await supervisorStillRunning(cycle, item, { epoch: fence.epoch, owner: fence.owner });
+  if (running) throw new Error(`${stop}, but it is not yet verified gone, so its pane is left standing: ${running}`);
+  return `${stop} and verified gone`;
 }

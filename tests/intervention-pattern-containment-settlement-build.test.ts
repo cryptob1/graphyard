@@ -32,9 +32,10 @@ const scope = scopeOf('GY-1520');
 const fenced = (lapsedMs: number, overrides: Partial<Work> = {}) => fencedItem('GY-1520', lapsedMs, overrides);
 const running = (pane: string) => runningHandle('GY-1520', pane);
 /** One item's world: its plane record, its supervisor and the panes the loop closed. */
-function world(initial: Work, supervisorRunning: boolean) {
-  const built = fleet([initial], supervisorRunning ? [initial.key] : []);
-  return { plane: { get item() { return built.plane.items.get(initial.id)!; }, settles: built.plane.settles }, supervisor: { panesClosed: built.panesClosed }, effects: built.effects };
+function world(initial: Work, supervisorRunning: boolean, ignoresStop = false) {
+  const built = fleet([initial], supervisorRunning ? [initial.key] : [], ignoresStop ? [initial.key] : []);
+  return { plane: { get item() { return built.plane.items.get(initial.id)!; }, settles: built.plane.settles },
+    supervisor: { panesClosed: built.panesClosed, stopped: built.stopped, closedUnderLive: built.closedUnderLive, running: built.running }, effects: built.effects };
 }
 const clone = <T>(value: T): T => structuredClone(value);
 
@@ -46,10 +47,12 @@ test('manual:intervention-pattern-containment-settlement-build — GY-1520: a su
   try {
     const cycle = await harness.run();
     assert.equal(plane.item.stage, 'build', 'the item never left build');
+    assert.deepEqual(supervisor.stopped, ['GY-1520'], 'the loop stopped its supervisor through the recorded scope');
+    assert.deepEqual(supervisor.closedUnderLive, [], 'and closed its pane only once the host verified it gone');
     assert.deepEqual(supervisor.panesClosed, ['w1:pM68'], 'the loop closed the submitted attempt\'s pane');
     const handle = plane.item.sessions?.find(entry => entry.id === 'worker-a:4');
     assert.equal(handle?.state, 'finished');
-    assert.match(handle?.outcome ?? '', /^closed by the loop: GY-1520 epoch 4 submitted pull request #1004 and holds no lease, yet its containment fence still stands past the grace window/);
+    assert.match(handle?.outcome ?? '', /^closed by the loop: GY-1520 epoch 4 submitted pull request #1004 and holds no lease, yet its containment fence still stands past the grace window; its supervisor \(pid \d+\) was stopped through graphyard-watch-GY-1520\.scope and verified gone; pane w1:pM68 closed/);
     assert.equal(plane.item.containmentQuarantine, null, 'and settled the fence in that action');
     assert.deepEqual(plane.settles, ['GY-1520'], 'once, by the loop');
     assert.match(cycle.actions.find(action => action.kind === 'close' && action.work === 'GY-1520')?.detail ?? '', /its containment fence was settled/);
@@ -74,6 +77,26 @@ test('manual:intervention-pattern-containment-settlement-build — GY-1520: insi
     await again.run();
     assert.deepEqual(live.supervisor.panesClosed, []);
   } finally { await again.cleanup(); }
+});
+
+test('manual:intervention-pattern-containment-settlement-build — GY-1520: a lingering supervisor that survives its stop keeps its pane and its fence until the host verifies it gone', async () => {
+  const submitted = fenced(3 * minute, { submission: { epoch: 4, pr: 1004 }, sessions: [running('w1:pM68')] });
+  const { plane, supervisor, effects } = world(submitted, true, true);
+  const harness = await loop(effects, () => [clone(plane.item)]);
+  try {
+    const cycle = await harness.run();
+    assert.deepEqual(supervisor.stopped, ['GY-1520'], 'the loop asked the supervisor to stop');
+    assert.deepEqual(supervisor.panesClosed, [], 'a pane that may hold a running supervisor is never closed under it');
+    assert.equal(plane.item.sessions?.find(entry => entry.id === 'worker-a:4')?.state, 'running');
+    assert.notEqual(plane.item.containmentQuarantine, null);
+    assert.match(cycle.actions.find(action => action.kind === 'close' && action.work === 'GY-1520')?.detail ?? '', /not yet verified gone, so its pane is left standing/);
+    // Once it exits, a later close attempt finds it gone, closes the pane and settles the fence.
+    supervisor.running.delete('GY-1520');
+    await harness.run();
+    assert.deepEqual(supervisor.panesClosed, ['w1:pM68']);
+    assert.deepEqual(supervisor.closedUnderLive, []);
+    assert.deepEqual(plane.settles, ['GY-1520']);
+  } finally { await harness.cleanup(); }
 });
 
 test('manual:intervention-pattern-containment-settlement-build — GY-1627: a delivered item\'s verified-dead fence is settled by the loop\'s reclaim step, and no recover decision is asked of it inside the settle bound', async () => {
