@@ -16,7 +16,7 @@ import type { Goal } from '../src/model/goal.js';
  */
 soakControlPlanes('soak-acceptance-control-plane', 423);
 
-test('unit:soak.acceptance-control-plane — across a day the loop lands three goals\' acceptance changes through the merge writer with no pull request: one push per landed head, a push refused on a moved base made again on the new tip, a lost landing record recorded again without a second push, a conflicting change committed again from the current base without another draft run, landing tried at most once per poll interval, and every invariant holding', { timeout: 600_000 }, async () => {
+test('unit:soak.acceptance-control-plane — across a day the loop lands three goals\' acceptance changes through the merge writer with no pull request: one push per landed head, a push refused on a moved base made again on the new tip, a lost landing record recorded again without a second push, a failed base refresh refused and recorded again on a later poll, a conflicting change committed again from the current base without another draft run, landing tried at most once per poll interval, and every invariant holding', { timeout: 600_000 }, async () => {
   const day = await simulateDay({
     hours: 6, acceptance: 'control-plane',
     plan: { items: 4, leftovers: 1, slowRecompute: 0, workMs: 15 * minute, rework: new Set(), deaths: new Set(), flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set(), misread: new Set(), exits: new Set(), spentProducer: 0, lostRuns: 0, attested: 0, exhaustedReviewer: 0, unstable: 0, lowLane: 0, outOfQueue: { item: 4, afterMs: 99 * hour }, blind: { from: 99 * hour, to: 100 * hour }, split: { at: 99 * hour, item: 4 } },
@@ -77,6 +77,13 @@ test('unit:soak.acceptance-control-plane — across a day the loop lands three g
   assert.ok(writer.merges.length <= 8, `the writer made a bounded number of merges: ${writer.merges.length}`);
   assert.ok(writer.fetches.length <= 2 * writer.merges.length, `fetches stay bounded by the merges: ${writer.fetches.length}`);
   assert.ok(writer.pushes.length <= 4, `pushes stay bounded: ${writer.pushes.length}`);
+  // GY-1657: the land route refreshes origin/main before every judgement. signup's first refresh failed, so its
+  // record was refused rather than judged on a stale ref, and recorded again on a later poll without a second push.
+  assert.deepEqual(writer.refreshes.filter(entry => entry.goal === 'signup').map(entry => entry.ok), [false, true]);
+  const signup = writer.records.filter(entry => entry.goal === 'signup');
+  assert.deepEqual(signup.map(entry => entry.ok), [false, true]);
+  assert.ok(signup[1]!.at - signup[0]!.at >= acceptancePollMs, 'the refused record is made again after the poll interval, not every cycle');
+  assert.equal(writer.refreshes.length, writer.records.filter(entry => entry.goal !== 'billing' || entry.ok).length, 'one refresh per judged record: the repeated read stays bounded by the records');
   const keys = Object.keys(day.state.actions).filter(key => key.startsWith('acceptance:'));
   assert.equal(keys.length, 3, `one action per goal: ${keys.join(', ')}`);
 });

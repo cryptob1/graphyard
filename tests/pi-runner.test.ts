@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { decidePayloadSchema, graphyardTools } from '../src/runner/payloads.js';
-import { piArgs, piRunner, runEnvironment } from '../src/runner/pi.js';
+import { piArgs, piRunner, refusedPayload, runEnvironment } from '../src/runner/pi.js';
 import { runRecord, runRecordSchema, type RunEvent } from '../src/runner/types.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -104,7 +104,14 @@ test('unit:runner-pi-events an invalid submitted payload is a typed invalid-payl
     const result = await runner(file).start('Judge decision-1', options).result();
     assert.equal(!result.ok && result.failure.reason, 'invalid-payload');
     assert.match(!result.ok ? result.failure.detail : '', /failed validation/);
+    assert.match(!result.ok ? result.failure.detail : '', /payload: \{"decision":"decision-1","approve":"yes","reason":"fine"\}/, 'the refused payload is quoted');
     assert.deepEqual(result.payloads, []);
+
+    // GY-1657: a nominally successful call with no details at all is the same failure, never a throw out of the pump.
+    const missing = await scenario([...recorded, decide(undefined), ...settled]);
+    const absent = await runner(missing.file).start('Judge decision-1', options).result();
+    assert.equal(!absent.ok && absent.failure.reason, 'invalid-payload');
+    assert.match(!absent.ok ? absent.failure.detail : '', /failed validation: .*; payload: none$/s);
 
     // A call the extension rejected is the same failure, with the extension's reason.
     const rejected = await scenario([...recorded, decide({}, true), ...settled]);
@@ -147,4 +154,13 @@ test('unit:runner-pi-events cancel stops the run and resolves it as cancelled; t
     assert.deepEqual(launched.env.filter((name: string) => /^(GRAPHYARD_|HERDR_)/.test(name)), [], 'no inherited Graphyard or Herdr variable');
     assert.deepEqual(Object.keys(runEnvironment({ GRAPHYARD_TOKEN_FILE: '/x', HERDR_PANE: 'p', PATH: '/bin' }, { GRAPHYARD_URL: 'u' })).sort(), ['GRAPHYARD_URL', 'PATH']);
   } finally { await cleanup(); }
+});
+
+test('unit:runner-pi-events the refused payload quoted in a validation failure is bounded and never throws', () => {
+  assert.equal(refusedPayload(undefined), 'none');
+  assert.equal(refusedPayload({ approve: 'yes' }), '{"approve":"yes"}');
+  const cyclic: Record<string, unknown> = {}; cyclic.self = cyclic;
+  assert.match(refusedPayload(cyclic), /^unserializable \(/);
+  assert.match(refusedPayload(10n), /^unserializable \(/);
+  assert.equal(refusedPayload('x'.repeat(5000)).length, 1000);
 });

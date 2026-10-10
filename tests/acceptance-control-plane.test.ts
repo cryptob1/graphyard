@@ -158,6 +158,14 @@ test('unit:acceptance-control-plane-change — in control-plane mode the accepta
   const forged = await call(author, `goals/${goal.key}/land`, { mergeSha: baseTip });
   assert.equal(forged.status, 422, forged.text); assert.match(forged.text, /is not a merge of the approved head/);
   assert.equal((await call(author, `goals/${goal.key}/land`, {})).status, 422, 'a merge-writer change is landed only by naming the merge the writer pushed');
+  // GY-1657: the route refreshes origin/main before judging; a refresh that fails (or throws) is a named refusal, never a verdict on the stale ref.
+  const real = engine.gitRunner!;
+  for (const failing of [async () => ({ status: 128, stdout: '', stderr: 'fatal: unable to access origin' }), async () => { throw new Error('spawn git ENOENT'); }] as const) {
+    engine.gitRunner = args => args[0] === 'fetch' ? failing() : real(args);
+    const stale = await call(author, `goals/${goal.key}/land`, { mergeSha: baseTip });
+    assert.equal(stale.status, 503, stale.text); assert.match(stale.text, /is not judged: the control plane could not refresh origin\/main .*(unable to access origin|spawn git ENOENT)/);
+  }
+  engine.gitRunner = real;
   assert.equal(world.spied.pushes, 0);
 
   // The merge writer lands it: one leased push onto main, recorded merged by the control plane, and the goal plans.

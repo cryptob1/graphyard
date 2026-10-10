@@ -48,6 +48,16 @@ export function runEnvironment(base: NodeJS.ProcessEnv, extra: Record<string, st
 const text = (content: unknown): string => typeof content === 'string' ? content
   : Array.isArray(content) ? content.map(part => part?.type === 'text' ? String(part.text ?? '') : '').filter(Boolean).join('\n') : '';
 const bounded = (value: string, limit = 2000) => value.length > limit ? `${value.slice(0, limit - 1)}…` : value;
+/**
+ * GY-1657: the refused tool payload quoted in a validation failure, bounded. Never throws: a missing
+ * payload (JSON.stringify answers undefined) or one that cannot be serialized (a cycle, a BigInt) is
+ * named instead, so a malformed runtime event still ends as the invalid-payload failure.
+ */
+export function refusedPayload(details: unknown): string {
+  let serialized: string | undefined;
+  try { serialized = JSON.stringify(details); } catch (error) { return `unserializable (${error instanceof Error ? error.message : String(error)})`; }
+  return serialized === undefined ? 'none' : bounded(serialized, 1000);
+}
 
 /** One Pi JSONL record as a runner event; null for the streaming noise a record does not keep. */
 export function piEvent(record: any, at: string): RunEvent | null {
@@ -351,7 +361,7 @@ function watchRun<T>(directory: string, meta: RunMeta, options: Pick<RunOptions<
     if (record.type === 'tool_execution_end' && record.toolName === options.tool) {
       if (record.isError === true) { invalid = `the ${options.tool} call was rejected: ${text(record.result?.content) || 'no reason given'}`; return; }
       try { accepted.push(options.validate(record.result?.details)); }
-      catch (error) { invalid = `the ${options.tool} payload failed validation: ${error instanceof Error ? error.message : String(error)}; payload: ${JSON.stringify(record.result?.details).slice(0, 1000)}`; }
+      catch (error) { invalid = `the ${options.tool} payload failed validation: ${error instanceof Error ? error.message : String(error)}; payload: ${refusedPayload(record.result?.details)}`; }
     }
     if (record.type === 'agent_settled' && settledAt === null) settledAt = Date.now();
   };
