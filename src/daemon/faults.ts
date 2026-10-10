@@ -2,7 +2,7 @@
 // structural item filed per recurring class.
 import { createHash } from 'node:crypto';
 import type { Work } from '../model.js';
-import { classified, classifyAttention, faultClasses, faultClassItem, faultClassPolicyFromEnv, recurringClasses, standingScopeRequest, statusFaults, trackFaults, unboundedAttemptKey, workFaults, type FaultClassPolicy, type FaultKind, type FaultObservation } from '../model/fault-classes.js';
+import { classified, classifyAttention, faultClasses, faultClassItem, faultClassPolicyFromEnv, recurringClasses, releaseOvertakenLinks, standingScopeRequest, statusFaults, trackFaults, unboundedAttemptKey, workFaults, type FaultClassPolicy, type FaultKind, type FaultObservation } from '../model/fault-classes.js';
 import { forgetDoneLinks, linkInstance } from '../model/fault-record.js';
 import { buildMasterStatus, diskThresholdBytes, type AttentionItem, type ContainmentAssessment, type ControlPlaneStatus, type HerdrAgent, type MasterConfig } from '../master.js';
 import { worktreeRootMinFreeBytes } from '../install/worktree-root.js';
@@ -356,6 +356,7 @@ export function endFailingRuns(state: Pick<DaemonState, 'actions' | 'faults'>, p
  */
 export async function fileRecurringFaultClasses(state: DaemonState, effects: DaemonEffects, work: Work[], clock: number, now: () => number, performed: DaemonAction[], budget?: FilingBudget) {
   const policy = effects.faultClassPolicy ?? faultClassPolicyFromEnv(process.env);
+  releaseOvertakenLinks(state.faults.instances, work); // GY-1632: a closure applied before this cycle's links overtook them
   forgetDoneLinks(state.faults, work);
   for (const recurrence of recurringClasses(state.faults.instances, work, policy, clock, standingFaultClassItem)) {
     if (recurrence.item) { for (const instance of recurrence.unlinked) linkInstance(state.faults, instance, recurrence.item.key); continue; }

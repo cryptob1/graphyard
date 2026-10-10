@@ -259,7 +259,7 @@ export function openFaultClassItem(work: readonly Work[], faultClass: FaultClass
   return work.find(item => item.stage !== 'done' && !isClosed(item) && closesFaultClass(item) === faultClass) ?? null;
 }
 
-export { deliveredFaultClassCover, faultClassItem, landedAt, predateLanding, recurringClasses, type ClassRecurrence } from './fault-class-recurrence.js';
+export { deliveredFaultClassCover, faultClassItem, landedAt, predateLanding, recurringClasses, releaseOvertakenLinks, type ClassRecurrence } from './fault-class-recurrence.js';
 
 /** Problems the control plane's status reports beside any item (App permissions, integration jobs, production lag and
  *  incidents, a GitHub pause, unserved executors): the dashboard groups them with the items' faults, as master status does. */

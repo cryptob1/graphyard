@@ -10,7 +10,7 @@ import { server } from '../src/server.js';
 import { Store } from '../src/store.js';
 import type { Principal, Work } from '../src/model.js';
 import { decisionCapabilities, decisionInputs, decisionPrecondition } from '../src/model/approval.js';
-import { faultClassItem, recurringClasses as classes, type FaultInstance, type FaultClassPolicy } from '../src/model/fault-classes.js';
+import { faultClassItem, recurringClasses as classes, releaseOvertakenLinks, type FaultInstance, type FaultClassPolicy } from '../src/model/fault-classes.js';
 import { registryRoles, roleSchema, fleetRoles } from '../src/model/registry.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { decisionInput } from '../src/master/autonomy.js';
@@ -173,6 +173,15 @@ test('unit:fault-class-post-landing-files — an instance observed after the del
     triage: { judgement: { outcome: 'close', ref: 'GY-1618', reason: 'covered' }, state: 'proposed', by: 'master', at: t(4.5) } } as unknown as Work;
   assert.equal(overtakenClosure(filed, [filed, answered, fix], { instances: [{ ...after, linkedTo: 'GY-1628' }] })?.triageAt, t(4.5));
   assert.equal(overtakenClosure(filed, [filed, answered, fix], { instances: [{ ...instances[2]!, linkedTo: 'GY-1628' }] }), null, 'a pre-landing link leaves the closure standing');
+  // The closure applied before the link was made (approved in the same cycle's decision step): the post-landing link
+  // is released once the item shows closed, so it files afresh; a pre-landing link to it stays.
+  const closed = { ...filed, stage: 'done', closure: { kind: 'superseded', ref: 'GY-1618', reason: 'covered', by: 'approver', at: t(5), from: 'backlog' } } as unknown as Work;
+  const linked = [{ ...after, linkedTo: 'GY-1628' }, { ...instances[2]!, linkedTo: 'GY-1628' }];
+  releaseOvertakenLinks(linked, [closed, answered, fix]);
+  assert.deepEqual(linked.map(instance => instance.linkedTo), [null, 'GY-1628']);
+  const open = [{ ...after, linkedTo: 'GY-1628' }];
+  releaseOvertakenLinks(open, [filed, answered, fix]);
+  assert.equal(open[0]!.linkedTo, 'GY-1628', 'a link to the item while it is open stays');
 });
 
 test('unit:diagnostician-launched — a recurring-fault item is diagnosed within the cycle that files it, with its instances, excerpts and pull requests', async () => {

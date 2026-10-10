@@ -1,4 +1,4 @@
-import { isDelivered } from './closure.js';
+import { isClosed, isDelivered } from './closure.js';
 import { closesFaultClass, faultClasses, faultClassMeaning, openFaultClassItem } from './fault-classes.js';
 import type { FaultClass, FaultClassOrigin, FaultClassPolicy, FaultInstance } from './fault-classes.js';
 import type { Work } from './work.js';
@@ -27,6 +27,22 @@ export function deliveredFaultClassCover(work: readonly Work[], faultClass: Faul
     if (at !== null && (!cover || at > cover.landedAt)) cover = { item, landedAt: at };
   }
   return cover;
+}
+/**
+ * Releases the links a closure overtook (GY-1632): an instance linked to a class item that has closed as fixed by a
+ * delivered item, first seen after that item landed. The loop withdraws such a closure while it awaits its approver
+ * (triage.ts overtakenClosure), but an approval applied in the decision step closes the item before the fault step of
+ * the same cycle links a new instance to it from the cycle's snapshot, which still shows it open. Released, the
+ * instance counts toward filing the class afresh, as any recurrence after the fix landed does.
+ */
+export function releaseOvertakenLinks(instances: readonly FaultInstance[], work: readonly Work[]) {
+  const byKey = new Map(work.map(item => [item.key, item]));
+  for (const instance of instances) {
+    const item = instance.linkedTo ? byKey.get(instance.linkedTo) : undefined;
+    if (!item?.closure?.ref || !isClosed(item) || closesFaultClass(item) !== instance.faultClass) continue;
+    const fixer = byKey.get(item.closure.ref), landing = fixer && isDelivered(fixer) ? landedAt(fixer) : null;
+    if (landing !== null && Date.parse(instance.at) >= landing) instance.linkedTo = null;
+  }
 }
 /** Whether every instance listed was first seen before `landing`: none of them postdates the delivered fix. */
 export const predateLanding = (instances: readonly { at: string }[], landing: number) => instances.every(entry => Date.parse(entry.at) < landing);
