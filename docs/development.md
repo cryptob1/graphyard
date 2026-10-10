@@ -27,7 +27,7 @@ A required check failing on base head too: no rework (waits while base log is un
 
 ### Documentation that rarely conflicts
 
-Conflicts only in `docs/**/*.md` get docs-sync, not rework: base merges in keeping both sides; approval stays if non-docs diff holds. A Claude docs-sync session loads only user settings plus its role file (`.graphyard/harness/docs-sync-*.json`) and pushes only `HEAD:refs/heads/BRANCH`. One in Herdr is adopted, never relaunched; one stopped 3 minutes unpushed, gone or past the 10-minute blocked bound is reworked. On system-driven items that rework is the loop's round, due 10 minutes after the conflict is first recorded, then requested without a fresh GitHub reading; unrequested: `stalled-step` attention (`loop` class); a refused hand `master decide GY-N rework` names round and lateness.
+Conflicts only in `docs/**/*.md` get docs-sync, not rework: base merges in keeping both sides; approval stays if non-docs diff holds. A Claude docs-sync session loads only user settings plus its role file (`.graphyard/harness/docs-sync-*.json`) and pushes only `HEAD:refs/heads/BRANCH`. One in Herdr is adopted; one stopped 3 minutes unpushed, gone or past the 10-minute blocked bound is reworked. On system-driven items that rework is the loop's round, due 10 minutes after the conflict's first record, requested without fresh GitHub reading; idle loops wake at a hold's bound; unrequested: `stalled-step` attention; a refused hand `master decide GY-N rework` names round and lateness.
 
 ### Known hotspot: src/interventions.ts
 
