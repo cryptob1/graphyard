@@ -8,6 +8,7 @@ import { mechanicalFailure, mechanicalProof, mechanicalVerdicts, producerManualF
 import { extractProducerAccountsOrRuntimes, unactedProducerAttempts, unexercisedFindings } from '../auto-dispatch.js';
 import { conflictReworkDue, decisionBindingMax, type DecisionSituation } from '../model/approval.js'; import { unsettledApproval } from './decision-reads.js';
 import { guardBroadScope, type MasterConfig, type ContainmentAssessment, containmentPhase, type HerdrAgent } from '../master.js';
+import { containmentInMotion } from '../model/containment.js';
 import { researchRework } from '../research.js'; import { baseBreakHold } from '../master/base-break-refresh.js';
 import { unproducedManualProofs } from '../model/unproduced-attestation.js';
 import { mechanicalRework, type MechanicalFixRequest } from '../mechanical-findings.js';
@@ -255,6 +256,9 @@ export function routineDecision(work: Work, config: ReviewCapConfig, now: number
   // None attests anything about a worker: a merge is of a mergeable candidate, a triage closure of an unreleased backlog item,
   // and an attestation's approver judges the proof.
   if (needed.action === 'merge' || needed.action === 'close' || needed.action === 'attest') return needed;
+  // GY-1633: a delivered item's lapsed fence is the reclaim step's to settle within its bound; only one
+  // still standing past it (the loop could not settle it) is put to the approver as a recovery.
+  if (needed.action === 'recover' && containmentInMotion(work, now)) return null;
   const stopped = workerStopped(work, now, assessment);
   // The grounds travel with the request: the approver cannot verify this host, so it is told
   // exactly what the requester verified and judges the attestation on that. A situated request

@@ -457,7 +457,8 @@ test('master status reports each containment quarantine and only claims verifica
   const row = buildMasterStatus({ work: [stranded], now: observedAt }, [], [], {}, verified).work[0];
   assert.deepEqual({ settleable: row.containment?.settleable, refusals: row.containment?.refusals, host: row.containment?.host, verifiedAt: row.containment?.verifiedAt, attestation: row.containment?.attestation },
     { settleable: true, refusals: [], host: 'coordinator-host', verifiedAt: observedAt, attestation: null });
-  assert.match(row.attention!, /verified settleable; run master settle-containment GY-42/);
+  // Ten minutes past its lease, inside the settle bound: the loop's to settle (GY-1633).
+  assert.match(row.attention!, /verified settleable; the loop settles it within its settle bound/);
 
   // Another machine's quarantine is not this coordinator's to verify, and a probe that
   // cannot run is a refusal rather than a silent absence.

@@ -3,6 +3,7 @@ import type { Work } from '../model.js';
 import { detectRetryingExhaustion, type CapacityRole, type ExhaustionSignal } from '../model/capacity.js';
 import { detectRuntimeExhaustion } from '../master/environments.js';
 import { classifyRuntimePrompt, continueAfterDecline, type EscalationSession, escalationProfile, type HerdrAgent, isProfileSession, ownLoginAccounts, profileAccount, type RuntimePrompt, type SessionIdentity } from '../master.js';
+import { containmentPhase } from '../model/containment.js';
 import { standingEscalations } from '../model/escalation.js';
 import { capacityRecheckMs } from '../auto-dispatch.js';
 import { message, orphanObservationSchema } from './state.js';
@@ -573,7 +574,12 @@ async function closeExitedWorkerSessions(cycle: Cycle, runtime: { agents: HerdrA
     const leased = !!item.lease && item.lease.owner === handle.principal && Date.parse(item.lease.expiresAt) > clock;
     const seenKey = `exited:implementation:${item.id}:${handle.id}:${handle.startedAt}`;
     let reason: string | null = null;
+    // GY-1633: a submitted attempt's supervisor that left its fence standing past the grace window
+    // holds nothing the record still authorizes; its session is over, and closing it settles the fence below.
+    const fence = item.containmentQuarantine;
+    const lingering = !leased && !!fence && handle.id === `${fence.owner}:${fence.epoch}` && item.submission?.epoch === fence.epoch && containmentPhase(item, clock)?.state === 'lapsed';
     if (item.stage !== 'build' && !leased) reason = `${item.key} has left build, the stage this implementation session was launched for, and is now in ${item.stage}`;
+    else if (lingering) reason = `${item.key} epoch ${fence!.epoch} submitted pull request #${item.submission!.pr} and holds no lease, yet its containment fence still stands past the grace window`;
     else if (runtime?.available && handle.pane && !(clock - Date.parse(handle.startedAt) < launchAppearanceMs)) {
       const listed = runtime.agents.find(agent => agent.pane_id === handle.pane);
       if (!leased && listed && ['idle', 'done', 'blocked'].includes(listed.agent_status ?? '')) {

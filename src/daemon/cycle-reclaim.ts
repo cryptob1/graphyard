@@ -485,7 +485,11 @@ export async function reclaimStep(cycle: Cycle) {
   await closeEndedWorkerPanes(state, effects, open, assessments, observed, now, performed);
   // 3c. Reclaim the panes its ended launches left agentless (GY-842), and report what the host holds.
   await reclaimLaunchedPanes(cycle);
-  for (const item of open.filter(candidate => candidate.containmentQuarantine && settling(candidate))) await isolate('settle', item, item.key, async () => {
+  // GY-1633: a delivered item's fence is settled here too. A worker still running when its item was
+  //     closed (a duplicate, a triage closure) leaves its fence on the delivered record, and only the
+  //     host can verify its supervisor gone; left out of this step it waited for a hand `recover`.
+  const fenced = snapshot.work.filter(candidate => candidate.containmentQuarantine && settling(candidate));
+  for (const item of fenced) await isolate('settle', item, item.key, async () => {
     const epoch = item.containmentQuarantine!.epoch;
     const assessment = assessments[item.id];
     const key = `settle:${item.id}:${epoch}`;
@@ -504,8 +508,10 @@ export async function reclaimStep(cycle: Cycle) {
     // A supervisor verified gone with the lease lapsed is a worker killed outright — the whole
     // tree stopped, or the host rebooted. Its partial work goes on the record before the fence is
     // lowered, so the item is offered again only once the next attempt can be told where it is.
-    await preserveInterruptedAttempt(state, effects, item, epoch, config.workers.find(profile => profile.principal === item.containmentQuarantine!.owner), `${leaseLapsedEnding} and its supervisor (pid ${assessment.scope?.pid ?? 'unknown'}) is verified gone on ${assessment.host ?? 'this host'}`, now, performed);
-    await settleQuarantine(cycle, item, assessment);
+    // A delivered item has nothing left to offer again, so there is no partial work to put on its record.
+    if (item.stage !== 'done') await preserveInterruptedAttempt(state, effects, item, epoch, config.workers.find(profile => profile.principal === item.containmentQuarantine!.owner), `${leaseLapsedEnding} and its supervisor (pid ${assessment.scope?.pid ?? 'unknown'}) is verified gone on ${assessment.host ?? 'this host'}`, now, performed);
+    // The fence is gone from the record, so this cycle's decisions step never asks a hand `recover` of it.
+    if (await settleQuarantine(cycle, item, assessment) && item.stage === 'done') item.containmentQuarantine = null;
   });
   return assessments;
 }
