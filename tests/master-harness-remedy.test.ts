@@ -13,6 +13,7 @@ import * as doctor from '../src/daemon/doctor.js';
 import { routineRemedies, type DoctorEffects } from '../src/daemon/doctor.js';
 import { harnessDrift, writeHarnessPermissions } from '../src/harness.js';
 import { masterHarnessDrift } from '../src/cli/master/fleet.js';
+import { installUnitsFile, perInstallUnits } from '../src/install/units.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-1652: harness drift healed only from the vantage that read it, and the one recurring automated
@@ -31,13 +32,16 @@ const asRoot = process.getuid?.() === 0; // root ignores directory modes, so a c
 async function checkout() {
   const root = await temporaryDirectory('harness-remedy');
   execFileSync('git', ['init', '-q', root]);
+  // The checkout records its own units: the loop refuses a units-less one (GY-1662).
+  await mkdir(join(root, '.graphyard'), { recursive: true });
+  await writeFile(join(root, installUnitsFile), JSON.stringify(perInstallUnits('owner/project')));
   const master = config(join(root, '.graphyard-credentials/master/token'));
   const plan = masterHarness(root, master, 'claude');
   const absent = plan.deny.at(-1)!.rule;
   const installed = { permissions: { allow: [...plan.allow.map(entry => entry.rule), 'Bash(npm test)'], deny: [...plan.deny.map(entry => entry.rule).filter(rule => rule !== absent), 'Bash(rm -rf /)'] }, model: 'opus' };
   await mkdir(join(root, '.claude'), { recursive: true });
   await writeFile(settingsFile(root), JSON.stringify(installed));
-  await writeFile(join(root, '.gitignore'), '.claude/settings.local.json\n');
+  await writeFile(join(root, '.gitignore'), '.claude/settings.local.json\n.graphyard/\n');
   return { root, master, plan, absent, installed, cleanup: async () => { await chmod(join(root, '.claude'), 0o700).catch(() => {}); await rm(root, { recursive: true, force: true }); } };
 }
 

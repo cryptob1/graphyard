@@ -9,6 +9,7 @@ import { clearDoctorRuns, doctorRunsSettled, type DoctorEffects } from '../src/d
 import { doctorSettingsSchema } from '../src/master/doctor-settings.js';
 import { harnessDrift } from '../src/harness.js';
 import type { Runner } from '../src/runner/types.js';
+import { installUnitsFile, perInstallUnits } from '../src/install/units.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
@@ -37,12 +38,15 @@ test('unit:soak-harness-remedy-invariants — over a simulated day the loop heal
   const root = await temporaryDirectory('soak-harness-remedy');
   try {
     execFileSync('git', ['init', '-q', root]);
+    // The checkout records its own units: the loop refuses a units-less one (GY-1662).
+    await mkdir(join(root, '.graphyard'), { recursive: true });
+    await writeFile(join(root, installUnitsFile), JSON.stringify(perInstallUnits('owner/project')));
     const master = config(root), plan = masterHarness(root, master, 'claude');
     const file = join(root, '.claude/settings.local.json'), directory = join(root, '.claude');
     const absent = plan.deny.at(-1)!.rule;
     const widened = JSON.stringify({ permissions: { allow: [...plan.allow.map(entry => entry.rule), 'Bash(npm test)'], deny: [...plan.deny.map(entry => entry.rule).filter(rule => rule !== absent), 'Bash(rm -rf /)'] }, model: 'opus' });
     await mkdir(directory, { recursive: true });
-    await writeFile(join(root, '.gitignore'), '.claude/settings.local.json\n');
+    await writeFile(join(root, '.gitignore'), '.claude/settings.local.json\n.graphyard/\n');
 
     let now = start, doctorRuns = 0;
     const doctor: DoctorEffects = {

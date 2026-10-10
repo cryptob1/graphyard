@@ -1,6 +1,6 @@
 // Concern: session and worker harness permissions, and starting the master session.
 import { lstat, mkdir } from 'node:fs/promises';
-import { mkdirSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, resolve, basename } from 'node:path';
 import { type ChildRun, defaultChildRun } from '../child-runner.js';
@@ -374,7 +374,7 @@ export class HarnessCheckoutRefusal extends Error {
  * write. A loop's research effect names its scratch worktree, which records no units, so an apply
  * resolved from it met the legacy unit refusal every cycle; the loop's own checkout is what it
  * applies against. ROOT is refused, naming it and the `master init` remedy, when it records no units
- * and a legacy unit runs another checkout; and when the unit serving this loop (SERVINGUNIT, in
+ * (naming too the legacy unit that runs another checkout, when one does); and when the unit serving this loop (SERVINGUNIT, in
  * UNITDIRECTORY) runs a checkout other than ROOT, cannot be read, or is not the master unit ROOT
  * records, naming that unit to update rather than applying against the wrong checkout.
  */
@@ -386,6 +386,8 @@ export function harnessApplyCheckout(root: string, options: { servingUnit?: stri
     if (!(error instanceof LegacyUnitRefusal)) throw error;
     throw new HarnessCheckoutRefusal(root, error.unitPath, `The harness contract was not applied: ${root} records no units (${installUnitsFile} is absent) and the legacy unit ${error.unitPath} runs another checkout (${error.checkout}). Run ${initialiseUnitsCommand} in ${root} to record its own units, or update ${error.unitPath} if ${root} is the checkout it should run`);
   }
+  // The legacy alias readInstallUnits falls back to is no proof ROOT is this install's checkout: with no serving unit detected, a separate launcher checkout would pass and receive the managed repository's plan.
+  if (!existsSync(resolve(root, installUnitsFile))) throw new HarnessCheckoutRefusal(root, null, `The harness contract was not applied: ${root} records no units (${installUnitsFile} is absent), so it is not established that it is this install's checkout. Run ${initialiseUnitsCommand} in ${root} to record its own units`);
   if (options.servingUnit) {
     const path = resolve(unitDirectory, options.servingUnit);
     // Only an absent unit file names no checkout; one that exists but cannot be read cannot show it runs ROOT, so it is refused.

@@ -57,7 +57,7 @@ function cycle(master: MasterConfig, wired: Partial<DaemonEffects>): Cycle {
   } as Cycle;
 }
 
-test('unit:harness-apply-checkout-resolution — the loop applies the harness contract to its own checkout, never the units-less scratch its research names; a units-less checkout beside a legacy unit running elsewhere, and a serving unit running another checkout, are refused once naming the checkout, master init and the unit to update', async () => {
+test('unit:harness-apply-checkout-resolution — the loop applies the harness contract to its own checkout, never the units-less scratch its research names; every units-less checkout (beside a legacy unit running elsewhere, its own legacy alias, or no unit at all), and a serving unit running another checkout, are refused once naming the checkout, master init and the unit to update', async () => {
   const own = await checkout('harness-own', true), scratch = await checkout('harness-scratch', false);
   const units = await temporaryDirectory('harness-units'), elsewhere = '/srv/another/graphyard';
   await writeFile(join(units, legacyLoopUnit), unitText(elsewhere));
@@ -96,12 +96,23 @@ test('unit:harness-apply-checkout-resolution — the loop applies the harness co
   await routineRemedies(unitless);
   assert.equal(unitless.state.actions[key]?.state, 'done', unitless.state.actions[key]?.detail);
 
-  // A pre-GY-1441 install whose legacy unit runs it is its own alias: no units recorded, still applied.
+  // Every units-less checkout is refused, not only one beside a foreign legacy unit: the legacy alias, and a separate
+  // launcher checkout with no serving unit detected and no legacy unit at all, wait naming the checkout and master init.
   const aliased = await checkout('harness-alias', false), aliasUnits = await temporaryDirectory('harness-alias-units');
   await writeFile(join(aliasUnits, legacyLoopUnit), unitText(aliased.root));
-  const alias = cycle(config(aliased.root), { harness: { unitDirectory: aliasUnits, servingUnit: legacyLoopUnit } });
-  await routineRemedies(alias);
-  assert.equal(alias.state.actions[key]?.state, 'done', alias.state.actions[key]?.detail);
+  const launcher = await checkout('harness-launcher', false), noUnits = await temporaryDirectory('harness-no-units');
+  for (const [root, wired] of [[aliased.root, { unitDirectory: aliasUnits, servingUnit: legacyLoopUnit }], [aliased.root, { unitDirectory: aliasUnits }], [launcher.root, { unitDirectory: noUnits }]] as const) {
+    const unrecorded = await readFile(settingsFile(root), 'utf8');
+    const refusedCycle = cycle(config(root), { harness: wired });
+    await routineRemedies(refusedCycle);
+    const row = refusedCycle.state.actions[key]!;
+    assert.equal(row.state, 'waiting', row.detail);
+    assert.equal(row.faultClass, undefined);
+    assert.ok(row.detail.includes(`${root} records no units (${installUnitsFile} is absent)`), row.detail);
+    assert.ok(row.detail.includes(`Run graphyard master init in ${root}`), row.detail);
+    assert.equal(await readFile(settingsFile(root), 'utf8'), unrecorded, 'nothing is applied against a units-less checkout');
+    assert.throws(() => harness.harnessApplyCheckout(root, wired), (error: unknown) => error instanceof harness.HarnessCheckoutRefusal && error.root === root && error.unit === null);
+  }
 
   // The legacy-unit-points-elsewhere case for the serving unit: the apply names the unit to update rather than apply.
   assert.throws(() => harness.harnessApplyCheckout(own.root, { servingUnit: legacyLoopUnit, unitDirectory: units }), (error: unknown) => {
@@ -112,8 +123,7 @@ test('unit:harness-apply-checkout-resolution — the loop applies the harness co
     assert.match(error.message, /Update .* \(its WorkingDirectory and ExecStart\) to run /);
     return true;
   });
-  // A serving unit that runs this checkout, or none at all, is no refusal.
-  assert.deepEqual(harness.harnessApplyCheckout(aliased.root, { servingUnit: legacyLoopUnit, unitDirectory: aliasUnits }).units.master, legacyLoopUnit);
+  // A recorded checkout with no serving unit detected is no refusal.
   assert.equal(harness.harnessApplyCheckout(own.root, { servingUnit: null, unitDirectory: units }).units.master, perInstallUnits('owner/project').master);
 });
 

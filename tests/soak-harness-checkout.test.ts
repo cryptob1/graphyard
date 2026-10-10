@@ -17,7 +17,8 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
  * simulated working day of the real loop: a cycle a minute for eight hours over the loop's own
  * checkout (its CLI's), the doctor every ten minutes. The unit serving the loop is broken three
  * times — it runs another checkout, then it cannot be read, then it runs another checkout while the
- * host widens the plan — and each is repaired. The validation repeats every cycle, so after every
+ * host widens the plan — and the checkout's units record is then removed while the unit runs it; each
+ * is repaired. The validation repeats every cycle, so after every
  * cycle and at the end: a refused window is journaled once as a waiting row that is neither
  * refreshed nor retried as a fault, nothing is written while the unit is refused, the first cycle
  * after a repair closes the row (healing drift, or with nothing to apply when the contract already
@@ -28,7 +29,7 @@ const minute = 60_000, hour = 60 * minute, start = Date.parse('2026-10-10T06:00:
 const iso = (at: number) => new Date(at).toISOString();
 const key = 'remedy:harness:claude';
 /** The windows the serving unit is refused in, how it is broken in each, and the minutes the host widens the plan. */
-const refused = [{ from: 0, to: 60, broken: 'elsewhere' }, { from: 120, to: 180, broken: 'unreadable' }, { from: 240, to: 300, broken: 'elsewhere' }] as const;
+const refused = [{ from: 0, to: 60, broken: 'elsewhere' }, { from: 120, to: 180, broken: 'unreadable' }, { from: 240, to: 300, broken: 'elsewhere' }, { from: 400, to: 440, broken: 'unrecorded' }] as const;
 const widenings = [0, 250, 360];
 const unitText = (checkout: string) => `[Unit]\nDescription=Graphyard master\n\n[Service]\nWorkingDirectory=${checkout}\nExecStart=/usr/bin/node ${checkout}/bin/graphyard.mjs master run\n`;
 
@@ -74,6 +75,9 @@ test('unit:soak-harness-checkout-invariants — over a simulated day a refused s
       const window = refused.find(range => at >= range.from && at < range.to);
       // The serving unit as the operator leaves it this minute: broken inside a window, running this checkout otherwise.
       await rm(unit, { recursive: true, force: true });
+      // Unrecorded: the checkout records no units though the unit serving it runs it, which is still refused (GY-1662 AC-1).
+      if (window?.broken === 'unrecorded') await rm(join(root, installUnitsFile), { force: true });
+      else await writeFile(join(root, installUnitsFile), JSON.stringify(perInstallUnits('owner/project')));
       if (window?.broken === 'unreadable') await mkdir(unit);
       else await writeFile(unit, unitText(window?.broken === 'elsewhere' ? '/srv/another/graphyard' : root));
       if (widenings.includes(at)) await writeFile(file, widened);
@@ -93,7 +97,7 @@ test('unit:soak-harness-checkout-invariants — over a simulated day a refused s
         // Refused: one waiting row from the window's first minute, never refreshed, nothing written however long it stands.
         assert.equal(row?.state, 'waiting', `cycle ${cycle} (+${at} min): ${row?.detail}`);
         assert.equal(row!.at, iso(start + window.from * minute), `cycle ${cycle} (+${at} min): the waiting row was refreshed`);
-        assert.ok(row!.detail.includes(unit), row!.detail);
+        assert.ok(row!.detail.includes(window.broken === 'unrecorded' ? `${root} records no units` : unit), row!.detail);
         assert.equal(after, before, `cycle ${cycle} (+${at} min): the contract was applied while the serving unit is refused`);
       } else {
         // Accepted: the row is closed and no drift survives.
@@ -111,12 +115,14 @@ test('unit:soak-harness-checkout-invariants — over a simulated day a refused s
     assert.deepEqual(waiting.map(action => action.minute), refused.map(range => range.from), 'each refused window is journaled once');
     assert.match(waiting[0]!.detail, /runs \/srv\/another\/graphyard, not /);
     assert.match(waiting[1]!.detail, /could not be read \(EISDIR\)/);
+    assert.match(waiting[3]!.detail, /records no units .* Run graphyard master init in /);
     // Each repair closes its row on the first accepted cycle: by healing the drift that stood, or with nothing to apply.
     const done = harnessActions.filter(action => action.state === 'done');
-    assert.deepEqual(done.map(action => action.minute), [60, 180, 300, 360], 'one closing line per repair and per widening outside a window');
+    assert.deepEqual(done.map(action => action.minute), [60, 180, 300, 360, 440], 'one closing line per repair and per widening outside a window');
     assert.match(done[0]!.detail, /^Applied the Claude harness contract/);
     assert.match(done[1]!.detail, /already holds .* the earlier waiting row is resolved with nothing to apply/);
     assert.match(done[2]!.detail, new RegExp(`^Applied the Claude harness contract.*added deny ${absent.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+    assert.match(done[4]!.detail, /already holds .* the earlier waiting row is resolved with nothing to apply/);
     assert.equal(writes, done.filter(action => action.detail.startsWith('Applied')).length, 'the settings file is written exactly once per heal');
     assert.equal(state.actions[key]?.state, 'done', 'the day ends healed');
   } finally {
