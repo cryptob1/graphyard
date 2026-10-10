@@ -12,7 +12,7 @@ import { closeHelp } from './master-close.js';
 import { openMasterSession, unhandled } from './master/session.js';
 import { intentCommand } from './master/intent.js';
 import { fleetCommand } from './master/fleet.js';
-import { operationsCommand } from './master/operations.js';
+import { confinedMaster, operationsCommand } from './master/operations.js';
 import { loopCommand } from './master/loop.js';
 import { mergerCommand } from './merger.js';
 
@@ -106,7 +106,9 @@ export const masterCommands = defineCommands([
       if (id === 'setup') return masterSetupCommand(context, root, await loadStoredMasterConfig(root));
       const session = await openMasterSession(context, root);
       // Each concern under ./master/ answers its own subcommands; the first that knows the id handles it.
-      for (const command of [intentCommand, fleetCommand, operationsCommand, loopCommand, mergerCommand]) if (await command(session) !== unhandled) return;
+      // A confined master's `restart` is operations' loop request (GY-1658), not the autonomy restart through the host's systemd.
+      const concerns = id === 'restart' && confinedMaster() ? [operationsCommand] : [intentCommand, fleetCommand, operationsCommand, loopCommand, mergerCommand];
+      for (const command of concerns) if (await command(session) !== unhandled) return;
       throw new Error(`There is no master ${id}; use master guide for the subcommands`);
     },
   },

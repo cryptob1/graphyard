@@ -11,6 +11,7 @@ import { emptyDaemonState } from '../src/master-daemon.js';
 import { checkoutRestoreCommand, checkoutRestoreRefPrefix, checkoutRestoreRequestPath, checkoutWriterProcesses, fileCheckoutRestoreRequest, freezeCheckoutWriters, loopRestartRequestPath, readCheckoutRestoreRequest, serveCheckoutRestore } from '../src/cli/master-checkout-restore.js';
 import { doctorCommandVerdict, doctorSanctionedCommands as piSanctioned } from '../integrations/pi/index.js';
 import { doctorPrompt, doctorSanctionedCommands } from '../src/daemon/doctor.js';
+import { confinedMaster } from '../src/cli/master/operations.js';
 import type { Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -78,6 +79,7 @@ test('integration:master-session-checkout-readonly — the master session cannot
   assert.equal(git('rev-parse', '--abbrev-ref', 'HEAD'), 'main', 'the coordinator checkout did not move');
   assert.notEqual(inside(`kill -0 ${process.pid}`).status, 0, 'no host process is visible to signal');
   assert.equal(inside(`printenv ${masterConfinementVariable}`).stdout.trim(), 'master', 'the session knows it is confined');
+  assert.ok(confinedMaster({ [masterConfinementVariable]: 'master' }) && !confinedMaster({}), 'and routes its master restart to the loop request');
   // Its `master restart` files a request beside the cursor, which the loop serves through its own unit.
   const restart = inside(`echo '{}' > ${loopRestartRequestPath({ credentialFile: join(outside, 'coordinator.token') })}`);
   assert.equal(restart.status, 0, restart.stderr);
