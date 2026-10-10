@@ -1177,9 +1177,9 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
     else if (!herdr) wait('review', item, review, 'Herdr session inventory is unavailable');
     else if (memoryDeferred) wait('review', item, review, memoryDeferred);
     else if (spent('review')) wait('review', item, review, capacityWait('review'));
-    else if (!retryable(review)) wait('review', item, review, `launch refused ${cursor.failures[review.id].attempts} time(s): ${cursor.failures[review.id].reason}; ${cursor.failures[review.id].attempts >= dispatchFailureLimit ? 'no further automatic attempt, launch it with master review once the cause is fixed' : `next attempt at ${cursor.failures[review.id].nextAt}`}`);
     else {
-      const { profile, reason } = selectReviewerProfile(config, item.observation?.source === 'control-plane' ? 'control-plane' : 'github');
+      const mode = item.observation?.source === 'control-plane' || !config.githubAppId ? 'control-plane' : 'github';
+      const { profile, reason } = selectReviewerProfile(config, mode);
       // The selected profile answers; the other reviewer profiles are its failover when none of
       // its accounts can launch. A profile with no slot left is passed over for one with room,
       // and a request no profile has room for waits on the limit it names.

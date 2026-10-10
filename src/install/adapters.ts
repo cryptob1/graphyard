@@ -17,6 +17,7 @@ export interface AdapterContext {
   image: string;
   workdir: string;
   sourceRoot: string;
+  repoCheckout?: string | null;
   sshHost: string | null;
   sshUser: string;
   /** Hetzner Cloud SSH key the created server is registered with; without one it is unreachable for key-only SSH. */
@@ -163,6 +164,10 @@ export function composeBundle(ctx: AdapterContext, values: EnvValue[], publish: 
     });
   for (const key of keys) environment.push(`${key.file}=${key.container}`);
   const proxied = publish === 'proxy';
+  const serverVolumes = [
+    ...keys.map(key => `"./${key.bundle}:${key.container}:ro"`),
+    ...(ctx.repoCheckout ? [`"${ctx.repoCheckout}:/repo"`] : []),
+  ];
   const files: BundleFile[] = [
     { path: `${ctx.workdir}/db.env`, mode: 0o600, content: `POSTGRES_USER=graphyard\nPOSTGRES_DB=graphyard\nPOSTGRES_PASSWORD=${ctx.databasePassword}\n` },
     { path: `${ctx.workdir}/server.env`, mode: 0o600, content: `${environment.join('\n')}\n` },
@@ -182,7 +187,7 @@ ${options.databasePort ? `    ports: ["127.0.0.1:${options.databasePort}:5432"]\
     image: ${ctx.image}
     restart: unless-stopped
     env_file: [server.env]
-${keys.length ? `    volumes: [${keys.map(key => `"./${key.bundle}:${key.container}:ro"`).join(', ')}]\n` : ''}    depends_on:
+${serverVolumes.length ? `    volumes: [${serverVolumes.join(', ')}]\n` : ''}    depends_on:
       db: { condition: service_healthy }
 ${proxied ? '    expose: ["' + SERVER_PORT + '"]' : `    ports: ["127.0.0.1:${ctx.port}:${SERVER_PORT}"]`}
 ${proxied ? `  proxy:

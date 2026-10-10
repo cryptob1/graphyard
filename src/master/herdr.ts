@@ -1,4 +1,5 @@
 // Concern: the Herdr runtime adapter — the instance every herdr call targets, workspace health, agent inventory, panes and tabs.
+import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { delimiter, join } from 'node:path';
@@ -21,7 +22,16 @@ export const herdrInstanceEnv = { configHome: 'GRAPHYARD_HERDR_CONFIG_HOME', ses
 /** The instance an install whose default Herdr serves another install creates: ~/.config/graphyard/INSTALL/herdr, session graphyard-INSTALL. */
 export function installHerdrInstance(installId: string, home: string = homedir()): HerdrInstance {
   const id = installId.toLowerCase().replace(/[^a-z0-9._-]/g, '-').replace(/^[^a-z0-9]+/, '');
-  return { configHome: join(home, '.config', 'graphyard', id, 'herdr'), session: `graphyard-${id}`.slice(0, 64) };
+  const configHome = join(home, '.config', 'graphyard', id, 'herdr');
+  const full = `graphyard-${id}`.slice(0, 64);
+  const pathLen = (session: string) => join(configHome, 'herdr', 'sessions', session, 'herdr-client.sock').length;
+  let session = full;
+  if (pathLen(session) > 107) {
+    const hash = createHash('sha256').update(id).digest('hex').slice(0, 6);
+    const shortCandidate = `gy-${hash}`;
+    session = pathLen(shortCandidate) <= 107 ? shortCandidate : 'gy';
+  }
+  return { configHome, session };
 }
 function environmentInstance(env: NodeJS.ProcessEnv = process.env): HerdrInstance | null {
   const configHome = env[herdrInstanceEnv.configHome]?.trim(), session = env[herdrInstanceEnv.session]?.trim();
