@@ -322,8 +322,8 @@ function doctorScan(line: string) {
   return { redirect, open: quote ? opened : -1 };
 }
 
-/** The longest free-text reason the doctor's guard passes as prose (GY-1653). */
-export const doctorReasonLimit = 4000;
+/** The longest free-text reason the doctor's guard passes as prose (GY-1653): the 2000-character cap every sanctioned command's request schema enforces. */
+export const doctorReasonLimit = 2000;
 
 /**
  * Whether a whole command line is within the doctor role's allowlist, and the line to run (GY-1653).
@@ -600,7 +600,7 @@ export const doctorRules = {
   'inside-checkout': 'every path named lies inside the checkout',
   'no-redirection': 'no redirection (< or >)',
   'closed-quotes': 'every quote the line opens is closed',
-  'reason-bounds': 'a free-text reason is at most 4000 characters with no control characters but newline and tab',
+  'reason-bounds': 'a free-text reason is at most 2000 characters with no control characters but newline and tab',
 } as const;
 export type DoctorRule = keyof typeof doctorRules;
 /** Where a judged segment sits on its line: its number (1 is the first) and the raw line, to name the separator that began it. */
