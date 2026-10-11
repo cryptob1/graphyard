@@ -19,13 +19,13 @@ import type { ReworkGroundsWork as ReworkGrounds } from '../src/rework-grounds.j
 const source = (path: string) => readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
 const policy = { threshold: 3, windowDays: 7 };
 /**
- * The fold and its 7- and 30-day reports, as one digest. The pattern rows' `unlinked`, `accounted` and
- * `instances` fields (GY-1682) are left out, so the digests taken before them still pin the fold and
- * the rest of the report; tests/intervention-pattern-scope-widening-build.test.ts pins those three.
+ * The fold and its 7- and 30-day reports, as one digest. The pattern rows' `unlinked`, `accounted`,
+ * `instances` and `underThreshold` fields (GY-1682) are left out, so the digests taken before them still
+ * pin the fold and the rest of the report; tests/intervention-pattern-scope-widening-build.test.ts pins those.
  */
 const digest = (rows: InterventionLedgerRow[], work: Work[], now: string) => {
   const folded = foldInterventions(rows, work, now);
-  const reports = ([7, 30] as const).map(days => computeInterventionReport(folded, work, policy, { days, now })).map(report => ({ ...report, patterns: report.patterns.map(({ unlinked: _unlinked, accounted: _accounted, instances: _instances, ...row }) => row) }));
+  const reports = ([7, 30] as const).map(days => computeInterventionReport(folded, work, policy, { days, now })).map(report => ({ ...report, patterns: report.patterns.map(({ unlinked: _unlinked, accounted: _accounted, instances: _instances, underThreshold: _under, ...row }) => row) }));
   return createHash('sha256').update(JSON.stringify({ folded, reports })).digest('hex');
 };
 
@@ -153,7 +153,7 @@ test('unit:intervention-exemptions-module — the fold consults one ordered list
   assert.deepEqual(interventionExemptions.map(entry => entry.name), [
     'approved-autoscope', 'successor-replan', 'audited-scope-widening', 'routed-scope-widening', 'unstarted-replan',
     'routine-rework-ground', 'lane-rework-ground', 'failed-check-round', 'loop-rework-round',
-    'direct-merge-window', 'loop-autosettle-in-bound', 'answered-off-ledger', 'undecided-scope-request', 'loop-settling-scope-request', 'lease-loss-resolve', 'approved-decision-weakening',
+    'direct-merge-window', 'loop-autosettle-in-bound', 'answered-off-ledger', 'undecided-scope-request', 'approver-holds-scope-request', 'lease-loss-resolve', 'approved-decision-weakening',
   ]);
   assert.ok(interventionExemptions.every(entry => typeof entry.exempts === 'function'), 'one predicate per rule');
   const fold = source('src/interventions.ts');
@@ -167,8 +167,8 @@ test('unit:intervention-exemptions-module — the fold consults one ordered list
   const candidate = { sha: 'a'.repeat(40) };
   const decision = { seq: 1, at: at(0), id: 'd', stage: 'review' as const, binding: null, loopRequested: true, approvedBy: null };
   const item = { id: uuid('item'), key: 'GY-1', stage: 'build', epoch: 2, lease: null, blocker: 'SCOPE NEEDED', scopeRequest: null } as unknown as Work;
-  // GY-1682: a live attempt's additive ask the rule refused ten minutes ago, which the loop still settles inside its 15-minute bound.
-  const refusedAsk = { seq: 1, at: at(50), stage: 'build' as const, kind: 'scope-request' as const, blocked: 'x', paths: ['src/b.ts'], trigger: 'refused-by-loop', sources: [] };
+  // GY-1682: a live attempt's additive ask the rule refused ten minutes ago, which the record shows the loop put to the approver (`routed`), still inside the 15-minute bound.
+  const refusedAsk = { seq: 1, at: at(50), stage: 'build' as const, kind: 'scope-request' as const, blocked: 'x', paths: ['src/b.ts'], trigger: 'refused-by-loop', epoch: 2, routed: { seq: 2, at: at(51), decision: 'd-scope' }, sources: [] };
   const refusal = { state: 'refused' as const, reason: 'outside the rule', at: at(51), decidedBy: 'graphyard', waitedMs: 0, paths: ['src/b.ts'], requestedBy: worker, requestedAt: at(50), epoch: 2 };
   const routable = { ...item, plannedFiles: ['src/a.ts'], criteria: [], lease: { owner: worker, epoch: 2, expiresAt: at(90) }, scopeRequest: { epoch: 2, paths: ['src/b.ts'], reason: 'needs it', requestedBy: worker, at: at(50), decision: refusal } } as unknown as Work;
   const lost = { trigger: 'lease-loss' as const, reason: leaseLossReason({ owner: worker, epoch: 2 }), at: at(58), actor: 'graphyard' };
@@ -195,8 +195,9 @@ test('unit:intervention-exemptions-module — the fold consults one ordered list
     [{ at: 'open-ask', ask: { seq: 1, at: at(0), stage: 'build', kind: 'blocked-report', blocked: 'x', paths: [], sources: [] }, item: { ...item, blocker: null } as Work, now: at(60) }, 'answered-off-ledger'],
     [{ at: 'open-ask', ask: { seq: 1, at: at(0), stage: 'build', kind: 'scope-request', blocked: 'x', paths: ['a'], sources: [] }, item, now: at(60) }, 'undecided-scope-request'],
     [{ at: 'open-ask', ask: { seq: 1, at: at(0), stage: 'build', kind: 'scope-request', blocked: 'x', paths: ['a'], trigger: 'refused-by-loop', sources: [] }, item, now: at(60) }, null],
-    [{ at: 'open-ask', ask: refusedAsk, item: routable, now: at(60) }, 'loop-settling-scope-request'],
-    // Past the bound the loop promises, refused by the approver, or left by an ended attempt, the ask is somebody's to decide.
+    [{ at: 'open-ask', ask: refusedAsk, item: routable, now: at(60) }, 'approver-holds-scope-request'],
+    // No route on the record (a deployment that routes nothing, or the seconds before the loop's own answer), past the bound the loop promises, refused by the approver, or left by an ended attempt: the ask is somebody's to decide.
+    [{ at: 'open-ask', ask: { ...refusedAsk, routed: null }, item: routable, now: at(60) }, null],
     [{ at: 'open-ask', ask: refusedAsk, item: routable, now: at(70) }, null],
     [{ at: 'open-ask', ask: refusedAsk, item: { ...routable, scopeRequest: { ...(routable.scopeRequest as object), decision: { ...refusal, decidedBy: 'graphyard-approver-graphyard' } } } as Work, now: at(60) }, null],
     [{ at: 'open-ask', ask: refusedAsk, item: { ...routable, lease: null } as Work, now: at(60) }, null],
