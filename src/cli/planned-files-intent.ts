@@ -47,7 +47,7 @@ export async function derivedIntent(root: string, config: Pick<MasterConfig, 'ba
   const tree = await (deps.tree ?? baseTree)(root, config.baseBranch);
   // A new file the item's open scope ask names, or a directory the ask's fold produces, is the worker's to create (GY-1676): planned without a criterion rewrite.
   const derived = derivePlannedFiles({ plannedFiles: intent.plannedFiles ?? [], criteria: intent.criteria ?? [] }, tree.files, work ? askedScopes(work) : []);
-  if (derived.missing.length) throw new Error(plannedFilesRefusal(derived.missing, tree.ref));
+  if (derived.missing.length) throw new Error(plannedFilesRefusal(derived.missing, tree.ref, derived.misnamed));
   const result = await deps.mutate(work ? `work/${work.id}/requirements` : 'work', { ...intent, plannedFiles: derived.plannedFiles, reason }, process.env.GRAPHYARD_REQUEST_ID ?? randomUUID(), await deps.token());
   return { ...result, plannedFilesDerived: { base: tree.ref, added: derived.added } };
 }
