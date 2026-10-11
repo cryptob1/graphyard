@@ -15,7 +15,7 @@ import fs, { existsSync, writeFileSync } from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { checkoutRestoreGrantVariable, serveCheckoutRestoreAct } from '../../src/cli/checkout-restore-release.js';
+import { ancestorPids, checkoutRestoreGrantVariable, serveCheckoutRestoreAct } from '../../src/cli/checkout-restore-release.js';
 import { checkoutWriterScan, freezeCheckoutWriters } from '../../src/cli/checkout-writers.js';
 
 const proc = process.env.GRAPHYARD_TEST_FAKE_PROC!, record = process.env.GRAPHYARD_TEST_SERVE_RECORD!, snapshot = process.env.GRAPHYARD_TEST_SNAPSHOT ?? null;
@@ -24,6 +24,8 @@ const denied = new Set((process.env.GRAPHYARD_TEST_DENY_PATHS ?? '').split(',').
 const neverStops = new Set((process.env.GRAPHYARD_TEST_NEVER_STOPS ?? '').split(',').filter(Boolean).map(Number));
 /** How long the freeze is held before the restore (GRAPHYARD_TEST_SERVE_DELAY_MS): a long act the loop must keep its supervisor fed through. */
 const holdMs = Number(process.env.GRAPHYARD_TEST_SERVE_DELAY_MS ?? 0) || 0;
+/** The soak's simulated loop pid (GRAPHYARD_TEST_LOOP_PID): the real loop run under a fake identity by the test process, counted as an issuer beside this process's real ancestry; absent, the real ancestry alone decides. */
+const loopPid = Number(process.env.GRAPHYARD_TEST_LOOP_PID ?? '') || null;
 let frozenAt: number | null = null, thawedAt: number | null = null;
 const readlink = fs.readlinkSync;
 fs.readlinkSync = ((path: string, ...rest: unknown[]) => {
@@ -49,6 +51,7 @@ if (args[0] !== 'master' || args[1] !== 'checkout-restore' || args[2] !== '--ser
 try {
   const uid = process.getuid!();
   const output = await serveCheckoutRestoreAct(args.slice(3), {
+    ...(loopPid ? { ancestors: () => [process.pid, ...ancestorPids(), loopPid] } : {}),
     quiesce: async directory => {
       frozenAt = Date.now();
       const frozen = await freezeCheckoutWriters(directory, { scan: at => checkoutWriterScan(at, 100, proc, uid), signal: (pid, name) => { sent.push(`${name}:${pid}`); }, state: pid => !neverStops.has(pid) && sent.includes(`SIGSTOP:${pid}`) && !sent.includes(`SIGCONT:${pid}`) ? 'T' : 'S', settleMs: 50, pollMs: 1 });

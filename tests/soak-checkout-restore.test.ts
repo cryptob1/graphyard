@@ -80,7 +80,8 @@ async function installation() {
   const proc = join(root, 'proc'), record = join(root, 'serve-record.json');
   mkdirSync(join(proc, '1'), { recursive: true });
   writeFileSync(join(proc, '1', 'stat'), '1 (init) S 0 1 1 0 -1 4194560\n'); writeFileSync(join(proc, '1', 'cgroup'), '0::/init.scope\n'); symlinkSync('/', join(proc, '1', 'cwd'));
-  const env = { GRAPHYARD_TEST_FAKE_PROC: proc, GRAPHYARD_TEST_SERVE_RECORD: record };
+  // GRAPHYARD_TEST_LOOP_PID: the simulated loop's pid of the iteration (each loop below is this test process under its own identity), which the serve helper counts beside this process's real ancestry.
+  const env = { GRAPHYARD_TEST_FAKE_PROC: proc, GRAPHYARD_TEST_SERVE_RECORD: record, GRAPHYARD_TEST_LOOP_PID: '' };
   const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile, cliPath: join(main, 'bin', 'graphyard.mjs'),
     repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [] });
   // The installation as the serve entry reads it from the checkout: its private .graphyard/master.json, ignored by git.
@@ -151,6 +152,7 @@ test('unit:soak-checkout-restore-served-once — over two simulated days of the 
   const restoreEnv = withEnv({ ...env, GRAPHYARD_TEST_SERVE_DELAY_MS: String(holdMs) });
   try { while (clock < end) {
     const host = new EventEmitter(), own = ++pid;
+    process.env.GRAPHYARD_TEST_LOOP_PID = String(own);
     // Each wait between passes — the refused startup's and every cycle's — is ten simulated minutes.
     const intervalMs = () => {
       clock += 10 * minute;
@@ -189,7 +191,7 @@ test('unit:soak-checkout-restore-served-once — over two simulated days of the 
     assert.deepEqual(serve.args, ['master', 'checkout-restore', '--serve']);
     assert.equal(serve.snapshotHead, release); assert.equal(serve.snapshotBranch, null); assert.equal(serve.snapshotShared, true);
     assert.equal(serve.grant.file, checkoutRestoreGrantPath(config)); assert.equal(serve.grant.consumed, true);
-    assert.equal(serve.grant.content?.loop.pid, process.pid, 'issued by the loop process, the entry\'s grandparent');
+    assert.ok(restores.some(entry => entry.pid === serve.grant.content?.loop.pid), 'issued under the serving loop\'s own pid, the one its cursor lock names');
     const { signature, ...payload } = serve.grant.content!;
     assert.equal(signature, signCheckoutRestoreGrant(payload, credential), 'signed with the installation\'s coordinator credential');
     // The restore outlasted the watchdog window, and the supervisor was fed throughout it: no two keep-alives
@@ -203,7 +205,7 @@ test('unit:soak-checkout-restore-served-once — over two simulated days of the 
     assert.ok(around[0] < serve.frozenAt! && around.at(-1)! > serve.thawedAt!, 'fed before the freeze began and after it ended');
   }
   assert.ok(notifications.some(entry => entry.state === 'ready'), 'each loop told its supervisor it was ready');
-  assert.deepEqual(serves.map(serve => serve.grant.content?.loop.lock), restores.map(entry => entry.pid), 'each grant names the pid of the loop that served');
+  assert.deepEqual(serves.map(serve => serve.grant.content?.loop.pid), restores.map(entry => entry.pid), 'each grant names the one pid of the loop that served: its cursor lock\'s');
   assert.ok(!existsSync(checkoutRestoreGrantPath(config)), 'no grant outlives its serve');
   // The executors requests: each run once on the host, by the loop serving when it was filed, owing no loop restart.
   assert.deepEqual(executorRuns.map(entry => entry.args), [[], ['restart']], `executors runs: ${JSON.stringify(executorRuns)}`);
@@ -264,6 +266,7 @@ test('integration:soak-checkout-restore-drift — over two simulated days of the
   const restoreEnv = withEnv(env);
   try { while (clock < end) {
     const host = new EventEmitter(), own = ++pid;
+    process.env.GRAPHYARD_TEST_LOOP_PID = String(own);
     const intervalMs = () => {
       clock += 10 * minute;
       for (const step of plan.filter(entry => start + entry.at <= clock)) { step.act(); plan.splice(plan.indexOf(step), 1); }
@@ -292,7 +295,7 @@ test('integration:soak-checkout-restore-drift — over two simulated days of the
   assert.match(served[0].line, new RegExp(`checkout-restore adopted: the coordinator checkout at ${main} held no dirty path, but its HEAD ${adopted.slice(0, 12)} is not ${loaded.slice(0, 12)}, the commit the loop runs; the loop adopts it \\(GY-1531\\) and restarts through its supervising unit onto it; served from the origin base-branch release ${release.slice(0, 12)}, a detached shared-clone snapshot of it`));
   // The judgement ran in the release snapshot's CLI under the loop's grant, and found nothing to restore.
   const serve = serveRecord(record);
-  assert.equal(serve.snapshotHead, release); assert.equal(serve.grant.consumed, true); assert.equal(serve.grant.content?.loop.pid, process.pid); assert.equal(serve.grant.content?.loop.lock, served[0].pid);
+  assert.equal(serve.snapshotHead, release); assert.equal(serve.grant.consumed, true); assert.equal(serve.grant.content?.loop.pid, served[0].pid, 'the grant names the serving loop, as its cursor lock does');
   assert.ok(served[0].at - start - 3 * hour <= 10 * minute, 'on the next pass after it was filed');
   assert.deepEqual(restarts.map(entry => entry.pid), [served[0].pid], 'exactly one restart, asked by the loop that served the request');
   const stored = await readCheckoutRestoreRequest(checkoutRestoreRequestPath(config));

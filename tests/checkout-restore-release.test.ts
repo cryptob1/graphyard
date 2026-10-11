@@ -7,8 +7,10 @@ import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { defaultChildRun, type ChildRun } from '../src/child-runner.js';
-import { ancestorPids, type CheckoutRestoreGrant, type CheckoutRestoreGrantPayload, checkoutRestoreGrantKind, checkoutRestoreGrantVariable, checkoutRestoreServeFlag, releasePinnedRestore, releaseServes, serveCheckoutRestoreAct, servingReleases, signCheckoutRestoreGrant, snapshotRelease } from '../src/cli/checkout-restore-release.js';
-import { checkoutRestoreGrantPath, checkoutRestoreRefPrefix, checkoutRestoreRequestPath, fileCheckoutRestoreRequest, readCheckoutRestoreRequest, serveCheckoutRestore } from '../src/cli/master-checkout-restore.js';
+import { z } from 'zod';
+import { ancestorPids, type CheckoutRestoreGrant, type CheckoutRestoreGrantPayload, checkoutRestoreGrantKind, checkoutRestoreGrantVariable, checkoutRestoreServeFlag, commitServes, lockedLoop, releasePinnedRestore, releaseServes, serveCheckoutRestoreAct, servingReleases, signCheckoutRestoreGrant, snapshotRelease, staleServingLoop } from '../src/cli/checkout-restore-release.js';
+import { checkoutRestoreCommand, checkoutRestoreGrantPath, checkoutRestoreRefPrefix, checkoutRestoreRequestPath, fileCheckoutRestoreRequest, loopRestartRequestPath, readCheckoutRestoreRequest, serveCheckoutRestore } from '../src/cli/master-checkout-restore.js';
+import { atomicPrivateWrite } from '../src/master/config.js';
 import { checkoutRestoreDriftRemedy, coordinatorCheckoutGuard } from '../src/daemon/run.js';
 import { daemonStatePath, emptyDaemonState } from '../src/master-daemon.js';
 import { masterConfigSchema } from '../src/master.js';
@@ -113,10 +115,10 @@ async function fixture(name: string) {
   processEntry(proc, 100, { cwd: elsewhere });   // the loop
   processEntry(proc, 500, { cwd: checkout });    // a standing writer
   processEntry(proc, 1372, { cwd: checkout });   // sd-pam: this user's, non-dumpable, its cwd read refused EACCES
-  // The installation beside its cursor: the request file, the grant the loop signs for one serve, the credential it signs with, and the cursor the loop (pid 100) locks.
+  // The installation beside its cursor: the request file, the grant the loop signs for one serve, the credential it signs with, and the cursor the loop — this process, the entry's real ancestor — locks.
   const { credentialFile, cursor, file, grantFile } = installation(root, join(base, 'state'));
-  writeFileSync(cursor, JSON.stringify({ lock: { id: 'lock', pid: 100, host: 'machine-a' } }));
-  const grant = { file: grantFile, credentialFile, lock: 100 };
+  writeFileSync(cursor, JSON.stringify({ lock: { id: 'lock', pid: process.pid, host: 'machine-a' } }));
+  const grant = { file: grantFile, credentialFile, pid: process.pid };
   const env = { GRAPHYARD_TEST_FAKE_PROC: proc, GRAPHYARD_TEST_SERVE_RECORD: record, GRAPHYARD_TEST_DENY_PATHS: join(proc, '1372', 'cwd') };
   return { base, root, git, release, loaded, proc, record, checkout, file, grant, env };
 }
@@ -158,7 +160,7 @@ test('integration:checkout-restore-release-pinned-serve — the loop serves a ch
   assert.equal(record1.grant.content!.kind, checkoutRestoreGrantKind);
   assert.equal(record1.grant.content!.root, root); assert.equal(record1.grant.content!.reason, 'escalation:dirty-checkout (requested by graphyard-doctor)');
   assert.deepEqual(record1.grant.content!.request, { id: request.id });
-  assert.deepEqual(record1.grant.content!.loop, { pid: process.pid, lock: 100 });
+  assert.deepEqual(record1.grant.content!.loop, { pid: process.pid }, 'one issuing pid: this process, which the cursor lock names');
   assert.equal(record1.grant.consumed, true, 'the grant was consumed by the entry before it acted');
   assert.ok(!existsSync(grant.file), 'no grant is left behind');
   assert.notEqual(record1.ppid, process.pid, 'the entry ran as a grandchild, through the release\'s own bin');
@@ -232,6 +234,20 @@ test('integration:freeze-fail-closed-preserved — served from the release snaps
   served = serveRecord(record);
   assert.deepEqual(served.sent, [], 'nothing was signalled');
   untouched(served);
+  // A live leader whose own cwd read is refused is judged by its live threads too (review of GY-1680): one whose
+  // thread shows it inside the checkout is a writer the freeze must stop, and when it never shows stopped the act
+  // refuses with what it stopped continued; its leader's refusal alone never skips it.
+  execFileSync('rm', ['-rf', join(proc, '410')]);
+  processEntry(proc, 1380, { cwd: checkout }); threadEntry(proc, 1380, 1380, { cwd: checkout }); threadEntry(proc, 1380, 1381, { cwd: join(checkout, 'src') });
+  await fileCheckoutRestoreRequest(file, 'escalation:dirty-checkout, a live daemon in the checkout', 'graphyard-doctor');
+  restore = withEnv({ ...env, GRAPHYARD_TEST_DENY_PATHS: `${join(proc, '1372', 'cwd')},${join(proc, '1380', 'cwd')}`, GRAPHYARD_TEST_NEVER_STOPS: '1380' });
+  try { outcome = await serve(); } finally { restore(); }
+  assert.equal(outcome?.state, 'failed', outcome?.detail);
+  assert.match(outcome!.detail, /served from the verified serving release .*writer\(s\) 1380 did not stop within \d+ms of SIGSTOP, so nothing was restored/s);
+  served = serveRecord(record);
+  assert.deepEqual(served.sent.filter(entry => entry.startsWith('SIGSTOP')).sort(), ['SIGSTOP:1380', 'SIGSTOP:500'], 'the live thread-identified writer is stopped, not skipped on its leader\'s refusal');
+  assert.deepEqual(served.sent.filter(entry => entry.startsWith('SIGCONT')).sort(), ['SIGCONT:1380', 'SIGCONT:500']);
+  untouched(served);
 });
 
 test('unit:serve-uses-verified-release — the sanctioned releases are the deployment step\'s verified sha when the store holds it, then the fetched base-branch tip at origin; the act is the first that snapshots with the serve entry, its own CLI run with `--serve` and the loop\'s signed grant in its environment, the supervisor\'s keep-alive fed throughout; when neither serves, or the credential cannot sign, the act fails naming why, and the loop\'s own code never runs', async () => {
@@ -262,7 +278,7 @@ test('unit:serve-uses-verified-release — the sanctioned releases are the deplo
   mkdirSync(join(base, 'state'), { recursive: true });
   writeFileSync(credentialFile, credentialValue, { mode: 0o600 });
   const config = { credentialFile };
-  const grant = { file: checkoutRestoreGrantPath(config), credentialFile, lock: 100 };
+  const grant = { file: checkoutRestoreGrantPath(config), credentialFile, pid: process.pid };
   const request = { file: checkoutRestoreRequestPath(config), id: 'r-1' };
 
   // The releases, in order: the verified sha first; unobserved or missing from the store, the base branch's tip at origin, fetched; the same commit once.
@@ -325,7 +341,7 @@ test('unit:serve-uses-verified-release — the sanctioned releases are the deplo
   assert.equal(runs[0].env[checkoutRestoreGrantVariable], grant.file); assert.equal(runs[0].env.PATH, '/usr/bin');
   const issued = runs[0].grant!;
   assert.match(issued.nonce, /^[0-9a-f]{32}$/);
-  assert.deepEqual(payloadOf(issued), { kind: checkoutRestoreGrantKind, root, reason: 'the loop refuses its checkout (requested by graphyard-doctor)', request: { id: 'r-1' }, loop: { pid: process.pid, lock: 100 }, issuedAt: '2026-10-11T00:00:00.000Z', expiresAt: '2026-10-11T00:15:00.000Z', nonce: issued.nonce });
+  assert.deepEqual(payloadOf(issued), { kind: checkoutRestoreGrantKind, root, reason: 'the loop refuses its checkout (requested by graphyard-doctor)', request: { id: 'r-1' }, loop: { pid: process.pid }, issuedAt: '2026-10-11T00:00:00.000Z', expiresAt: '2026-10-11T00:15:00.000Z', nonce: issued.nonce });
   assert.equal(issued.signature, signCheckoutRestoreGrant(payloadOf(issued), credentialValue), 'signed with the coordinator credential');
   assert.notEqual(issued.signature, signCheckoutRestoreGrant(payloadOf(issued), 'another-credential'.padEnd(48, 'x')), 'another credential signs differently');
   assert.ok(!existsSync(grant.file), 'the grant does not outlive the serve');
@@ -388,10 +404,10 @@ test('unit:serve-entry-bound-to-loop-grant — the serve entry acts only on a gr
   git('add', '-A'); git('-c', 'user.name=x', '-c', 'user.email=x@x', 'commit', '-q', '-m', 'loaded');
   const head = git('rev-parse', 'HEAD');
   const { credentialFile, cursor, file, grantFile } = installation(root, join(base, 'state'));
-  writeFileSync(cursor, JSON.stringify({ lock: { id: 'lock', pid: 4242, host: 'machine-a' } }));
+  writeFileSync(cursor, JSON.stringify({ lock: { id: 'lock', pid: process.pid, host: 'machine-a' } }));
   const request = await fileCheckoutRestoreRequest(file, 'escalation:dirty-checkout', 'graphyard-doctor');
   const now = new Date('2026-10-11T00:05:00Z');
-  const payload = (overrides: Partial<CheckoutRestoreGrantPayload> = {}): CheckoutRestoreGrantPayload => ({ kind: checkoutRestoreGrantKind, root, reason: 'escalation:dirty-checkout (requested by graphyard-doctor)', request: { id: request.id }, loop: { pid: process.pid, lock: 4242 }, issuedAt: '2026-10-11T00:00:00.000Z', expiresAt: '2026-10-11T00:15:00.000Z', nonce: 'a'.repeat(32), ...overrides });
+  const payload = (overrides: Partial<CheckoutRestoreGrantPayload> = {}): CheckoutRestoreGrantPayload => ({ kind: checkoutRestoreGrantKind, root, reason: 'escalation:dirty-checkout (requested by graphyard-doctor)', request: { id: request.id }, loop: { pid: process.pid }, issuedAt: '2026-10-11T00:00:00.000Z', expiresAt: '2026-10-11T00:15:00.000Z', nonce: 'a'.repeat(32), ...overrides });
   /** A grant the loop issued: the payload signed with the installation's coordinator credential. */
   const issued = (overrides: Partial<CheckoutRestoreGrantPayload> = {}, credential = credentialValue): CheckoutRestoreGrant => ({ ...payload(overrides), signature: signCheckoutRestoreGrant(payload(overrides), credential) });
   const env = { [checkoutRestoreGrantVariable]: grantFile };
@@ -426,7 +442,7 @@ test('unit:serve-entry-bound-to-loop-grant — the serve entry acts only on a gr
   // holding its own request and cursor beside it serves nothing, whatever it holds.
   mkdirSync(join(base, 'forged'));
   writeFileSync(join(base, 'forged', 'graphyard-master.checkout-restore.json'), readFileSync(file));
-  writeFileSync(join(base, 'forged', 'graphyard-master.daemon.json'), JSON.stringify({ lock: { id: 'lock', pid: 4242, host: 'machine-a' } }));
+  writeFileSync(join(base, 'forged', 'graphyard-master.daemon.json'), JSON.stringify({ lock: { id: 'lock', pid: process.pid, host: 'machine-a' } }));
   await refused(issued(), /does not serve: it lies at .*forged\/graphyard-master\.checkout-restore-grant\.json, not where that installation's loop issues grants \(.*state\/graphyard-master\.checkout-restore-grant\.json\)/, { at: join(base, 'forged', 'graphyard-master.checkout-restore-grant.json') });
   // Forged: signed with a credential that is not the installation's — a process without the coordinator credential can
   // name the real checkout, the real request and a lock its own wrapper holds, and still issue nothing; tampered: a
@@ -438,9 +454,13 @@ test('unit:serve-entry-bound-to-loop-grant — the serve entry acts only on a gr
   // Expired.
   await refused(issued({ expiresAt: '2026-10-11T00:05:00.000Z' }), /does not serve: it expired at 2026-10-11T00:05:00.000Z/);
   // Issued by a process that is not an ancestor: a same-user process that wrote a grant and ran the entry itself is refused, and so is a grant naming the loop but run elsewhere.
-  await refused(issued({ loop: { pid: 999_999, lock: 4242 } }), /does not serve: the loop that issued it, pid 999999, is not an ancestor of this process \(\d+( < \d+)*\)/);
+  await refused(issued({ loop: { pid: 999_999 } }), /does not serve: the loop that issued it, pid 999999, is not an ancestor of this process \(\d+( < \d+)*\)/);
   await refused(issued(), /is not an ancestor of this process/, { ancestors: () => [1] });
-  // The installation's cursor: missing, unreadable or unlocked, no loop is known to serve — refused, never taken as unlocked; locked by another pid, refused.
+  // The grant names one issuing pid, checked against the ancestry and the cursor lock alike: round 3's shape, an issuer beside a separate
+  // lock pid — with which a credential holder named its own wrapper as the issuer and the real loop as the lock — is not a grant this entry reads.
+  await refused({ ...payload(), loop: { pid: process.pid, lock: 4242 }, signature: signCheckoutRestoreGrant(payload(), credentialValue) }, /cannot be read \(/);
+  // The installation's cursor: missing, unreadable or unlocked, no loop is known to serve — refused, never taken as unlocked; locked by a pid other
+  // than the issuer — the real loop's, while a credential holder among this process's ancestors signed the grant — refused: only the lock holder issues.
   const cursorWas = readFileSync(cursor);
   execFileSync('rm', ['-f', cursor]);
   await refused(issued(), /does not serve: that installation's cursor at .*graphyard-master\.daemon\.json cannot be read \(ENOENT.*\), so no loop is known to serve it/);
@@ -449,7 +469,7 @@ test('unit:serve-entry-bound-to-loop-grant — the serve entry acts only on a gr
   writeFileSync(cursor, JSON.stringify({ lock: null }));
   await refused(issued(), /does not serve: that installation's cursor at .* holds no lock, so no loop is known to serve it/);
   writeFileSync(cursor, JSON.stringify({ lock: { id: 'lock', pid: 5151, host: 'machine-a' } }));
-  await refused(issued(), /does not serve: that installation's cursor at .* is locked by pid 5151, not the pid 4242 it names/);
+  await refused(issued(), new RegExp(`does not serve: that installation's cursor at .* is locked by pid 5151, not the loop that issued it, pid ${process.pid}`));
   writeFileSync(cursor, cursorWas);
   // The installation's request: another id, another act, or already answered.
   await refused(issued({ request: { id: 'another' } }), /the request it names, another, no longer stands at .*graphyard-master\.checkout-restore\.json/);
@@ -550,4 +570,151 @@ test('unit:clean-drift-settles-and-restarts — a request that finds no dirty pa
   assert.equal(await guard.settle({ adopt: loaded }), null);
   assert.equal(guard.expected(), loaded, 'the HEAD the checkout holds is adopted');
   assert.equal(state.actions['escalation:dirty-checkout']?.state, 'done');
+});
+
+/**
+ * The loop every release before the serve path runs, as c531a1d7 (this item's base) serves requests:
+ * the request files parsed by GY-1658's strict schema — a field it does not know is a request it
+ * cannot read, and `readCheckoutRestoreRequest` leaves it standing — the checkout-restore served by
+ * its own loaded code, then the loop-restart request, written `requested` against its pid before its
+ * unit is asked to restart it. The checkout-restore it would serve is a failure of the test: that is
+ * the stale code the handoff exists to keep from the request.
+ */
+const baseRequestSchema = z.object({
+  id: z.string().max(100), act: z.enum(['checkout-restore', 'restart', 'executors']).default('checkout-restore'), reason: z.string().min(1).max(2000), requestedAt: z.string(), requestedBy: z.string().max(200),
+  args: z.array(z.string().max(200)).max(20).default([]), outcome: z.unknown().nullable(),
+}).strict();
+async function baseLoopPass(config: { credentialFile: string }, pid: number, restart: () => Promise<void>, log: string[]) {
+  const read = (file: string) => { try { return baseRequestSchema.parse(JSON.parse(readFileSync(file, 'utf8'))); } catch { return null; } };
+  const restore = read(checkoutRestoreRequestPath(config));
+  if (restore && !restore.outcome) { log.push(`served checkout-restore ${restore.id} from the stale loop's own code`); return; }
+  if (existsSync(checkoutRestoreRequestPath(config))) log.push(`checkout-restore request left standing: ${restore ? 'answered' : 'unreadable to this release'}`);
+  const owed = read(loopRestartRequestPath(config));
+  if (!owed || owed.outcome) return;
+  const asked = { at: new Date().toISOString(), state: 'restart', ref: null, commit: null, paths: [], detail: `the loop restarts through its supervising unit, as ${owed.requestedBy} asked: ${owed.reason}`, restart: { state: 'requested', pid, at: new Date().toISOString(), detail: 'the loop asked its supervising unit to restart it' } };
+  await atomicPrivateWrite(loopRestartRequestPath(config), { ...owed, outcome: asked });
+  log.push(`loop-restart ${owed.id} requested by pid ${pid}`);
+  try { await restart(); }
+  catch (error) { await atomicPrivateWrite(loopRestartRequestPath(config), { ...owed, outcome: { ...asked, restart: { state: 'failed', pid, at: new Date().toISOString(), detail: `the restart failed and is asked again on the loop's next pass: ${error instanceof Error ? error.message : String(error)}` } } }); log.push('restart failed'); }
+}
+
+test('integration:checkout-restore-stale-loop-handoff — a checkout-restore filed while the running loop\'s loaded code predates the serve path is handed off end to end: the command reads the loop\'s loaded commit from its cursor, files the request in a form that loop leaves standing and a loop-restart request beside it, the stale loop serves the restart through its unit without touching the request, and the loop that loads the checkout\'s HEAD serves the standing request from the verified serving release\'s snapshot — the unreadable-cwd daemon skipped, every dirty path saved, the escalation settled, the restart asked; a loop already holding the serve path is not handed off, and a stale loop whose restart fails fails the command with the request left standing', { timeout: 120_000 }, async () => {
+  // The checkout: `before` (no serve path; its own bin refuses) then `release`, the verified serving release whose CLI is
+  // the fixture entry; HEAD moved to `release` under a loop that loaded `before` — the standing installation's case.
+  const base = await fixtureDirectory('checkout-restore-stale-loop-handoff');
+  const root = join(base, 'coordinator');
+  const git = (...args: string[]) => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+  mkdirSync(join(root, 'src', 'cli'), { recursive: true }); mkdirSync(join(root, 'bin'), { recursive: true });
+  writeFileSync(join(root, 'src', 'loop.ts'), 'export const loop = 1;\n');
+  writeFileSync(join(root, 'bin', 'graphyard.mjs'), loadedEntry);
+  writeFileSync(join(root, '.gitignore'), '.graphyard/\nnode_modules/\n');
+  execFileSync('git', ['init', '-q', '-b', 'main', root]);
+  git('add', '-A'); git('-c', 'user.name=x', '-c', 'user.email=x@x', 'commit', '-q', '-m', 'before the serve path');
+  const before = git('rev-parse', 'HEAD');
+  writeFileSync(join(root, 'bin', 'graphyard.mjs'), releaseEntry);
+  writeFileSync(join(root, 'src', 'cli', 'checkout-restore-release.ts'), serveMarker);
+  git('add', '-A'); git('-c', 'user.name=x', '-c', 'user.email=x@x', 'commit', '-q', '-m', 'the serving release');
+  const release = git('rev-parse', 'HEAD');
+  git('checkout', '-q', '--detach');
+  const proc = join(base, 'proc'), record = join(base, 'serve-record.json');
+  const checkout = realpathSync(root), elsewhere = realpathSync(base);
+  processEntry(proc, 1, { cwd: '/' });
+  processEntry(proc, 100, { cwd: elsewhere });   // the stale loop
+  processEntry(proc, 500, { cwd: checkout });    // a standing writer
+  processEntry(proc, 1372, { cwd: checkout });   // sd-pam: non-dumpable, its cwd read refused EACCES
+  const { config, credentialFile, cursor, file, grantFile } = installation(root, join(base, 'state'));
+  const restartFile = loopRestartRequestPath(config);
+  const env = { GRAPHYARD_TEST_FAKE_PROC: proc, GRAPHYARD_TEST_SERVE_RECORD: record, GRAPHYARD_TEST_DENY_PATHS: join(proc, '1372', 'cwd') };
+  assert.equal(await commitServes(root, before), false); assert.equal(await commitServes(root, release), true); assert.equal(await commitServes(root, 'f'.repeat(40)), false);
+
+  // The cursor: the stale loop (pid 100) holds the lock and recorded loading `before`. The command judges that loop stale;
+  // one that loaded the release, or recorded no lock, is not handed off; one that recorded no loaded commit is.
+  const stale = { lock: { id: 'lock', pid: 100, host: 'machine-a' }, release: { commit: before, dirty: false } };
+  writeFileSync(cursor, JSON.stringify(stale));
+  assert.deepEqual(await lockedLoop(cursor), { pid: 100, loaded: before });
+  assert.deepEqual(await staleServingLoop(cursor, root), { pid: 100, loaded: before });
+  assert.deepEqual(await staleServingLoop(cursor, null), { pid: 100, loaded: before }, 'a loop whose loaded code cannot be judged against a checkout is not known to serve from the release');
+  writeFileSync(cursor, JSON.stringify({ ...stale, release: { commit: release, dirty: false } }));
+  assert.equal(await staleServingLoop(cursor, root), null, 'a loop that loaded the serving release serves from it');
+  writeFileSync(cursor, JSON.stringify({ ...stale, release: null }));
+  assert.deepEqual(await staleServingLoop(cursor, root), { pid: 100, loaded: null }, 'a loop that recorded no loaded commit is not known to serve from the release');
+  writeFileSync(cursor, JSON.stringify({ lock: null, release: { commit: before, dirty: false } }));
+  assert.equal(await staleServingLoop(cursor, root), null, 'no loop holds the lock: nothing to hand off');
+  assert.equal(await staleServingLoop(join(base, 'no-cursor.json'), root), null);
+
+  // The dirty checkout under the stale loop; the doctor files the request through the command (the checkout's CLI, this release).
+  writeFileSync(cursor, JSON.stringify(stale));
+  writeFileSync(join(root, 'src', 'loop.ts'), 'export const loop = 2; // hotfix\n');
+  writeFileSync(join(root, 'scratchpad.mjs'), '// scratch\n');
+  const baseLog: string[] = [], newLog: string[] = [];
+  const settled: (string | null)[] = []; let newRestarts = 0, unitRestarts = 0;
+  const restoreEnv = withEnv(env);
+  let result: Awaited<ReturnType<typeof checkoutRestoreCommand>>;
+  try {
+    const command = checkoutRestoreCommand(config, ['escalation:dirty-checkout', 'standing'], 'graphyard-doctor', { waitMs: 60_000, pollMs: 20 });
+    // The host: the stale loop's pass once both files stand; its unit restarts it onto HEAD — the loop of this release, this process.
+    while (!existsSync(restartFile)) await delay(10);
+    await baseLoopPass(config, 100, async () => {
+      unitRestarts++;
+      // The restarted loop: the lock passes to it, and it recorded loading the checkout's HEAD, the serving release.
+      writeFileSync(cursor, JSON.stringify({ lock: { id: 'lock-2', pid: process.pid, host: 'machine-a' }, release: { commit: release, dirty: false } }));
+      const deps = { pid: process.pid, restart: async () => { newRestarts++; }, settle: async (adopt: string | null) => { settled.push(adopt); }, loaded: () => release,
+        report: (outcome: { state: string; detail: string }) => newLog.push(`${outcome.state}: ${outcome.detail}`),
+        restore: releasePinnedRestore({ release: () => ({ deployment: { source: 'endpoint', sha: release }, baseBranch: 'main' }), grant: { file: grantFile, credentialFile, pid: process.pid } }) };
+      // Its pass, as serveLoopRequests orders it: the checkout-restore request, then the loop-restart request, which it finds owed by another pid.
+      const served = await serveCheckoutRestore(file, root, deps);
+      await serveCheckoutRestore(restartFile, root, served?.restart?.state === 'requested' ? { ...deps, restart: async () => {} } : deps);
+    }, baseLog);
+    result = await command;
+  } finally { restoreEnv(); }
+  // The stale loop never read the request — this release's `handoff` field is unknown to its strict schema — and served the restart.
+  assert.deepEqual(baseLog, ['checkout-restore request left standing: unreadable to this release', `loop-restart ${result!.handoff!.restart} requested by pid 100`]);
+  assert.equal(unitRestarts, 1);
+  // The command's outcome: restored by the restarted loop from the verified serving release's snapshot, the handoff named.
+  assert.equal(result!.state, 'restored', result!.detail);
+  assert.deepEqual(Object.keys(result!.handoff!).sort(), ['detail', 'loaded', 'pid', 'restart']);
+  assert.equal(result!.handoff!.pid, 100); assert.equal(result!.handoff!.loaded, before);
+  assert.match(result!.handoff!.detail, new RegExp(`^the loop \\(pid 100\\) runs ${before.slice(0, 12)}, from before the serve path, so loop-restart request ${result!.handoff!.restart} was filed at .*graphyard-master\\.loop-restart\\.json: it restarts through its unit onto the checkout's HEAD, and the loop that loads it serves this request from the serving release$`));
+  assert.match(result!.detail!, new RegExp(`2 dirty path\\(s\\) saved under refs/graphyard/checkout-restore/.*; the loop restarts through its supervising unit; skipped, their cwd unreadable: pid 1372 \\(EACCES.*; served from the verified serving release ${release.slice(0, 12)}, a detached shared-clone snapshot of it; handed off by loop-restart request ${result!.handoff!.restart} from the loop that ran ${before.slice(0, 12)}, from before the serve path$`));
+  const stored = await readCheckoutRestoreRequest(file);
+  assert.deepEqual(stored?.handoff, { loaded: before, restart: result!.handoff!.restart }, 'the request carries the handoff');
+  assert.equal(stored?.outcome?.state, 'restored'); assert.equal(stored?.outcome?.restart?.pid, process.pid);
+  assert.equal(stored?.requestedBy, 'graphyard-doctor'); assert.equal(stored?.reason, 'escalation:dirty-checkout standing');
+  const owed = await readCheckoutRestoreRequest(restartFile);
+  assert.equal(owed?.id, result!.handoff!.restart); assert.equal(owed?.act, 'restart'); assert.equal(owed?.requestedBy, 'graphyard-doctor');
+  assert.match(owed!.reason, new RegExp(`^GY-1680 handoff for checkout-restore: the loop \\(pid 100\\) runs ${before.slice(0, 12)}, from before the serve path`));
+  assert.equal(owed?.outcome?.restart?.state, 'done', 'the restarted loop recorded the stale loop\'s restart done');
+  assert.equal(owed?.outcome?.restart?.pid, 100); assert.equal(owed?.outcome?.restart?.detail, `the loop restarted: pid ${process.pid} serves the checkout after pid 100 asked for the restart`);
+  assert.equal(newLog.filter(line => line.startsWith('restored:')).length, 1);
+  // The act ran in the release snapshot under this loop's grant: GY-1672's skip applied, the writer stopped and continued, the checkout clean at HEAD.
+  const served = serveRecord(record);
+  assert.equal(served.snapshotHead, release); assert.equal(served.grant.consumed, true); assert.deepEqual(served.grant.content!.loop, { pid: process.pid });
+  assert.deepEqual(served.sent, ['SIGSTOP:500', 'SIGCONT:500']);
+  assert.equal(git('status', '--porcelain', '--untracked-files=all'), ''); assert.equal(git('rev-parse', 'HEAD'), release);
+  assert.equal(git('show', `${stored!.outcome!.ref}:src/loop.ts`), 'export const loop = 2; // hotfix');
+  assert.deepEqual(settled, [null]); assert.equal(newRestarts, 1);
+  assert.ok(!readFileSync(record, 'utf8').includes('own tree served'), 'the checkout\'s own entry never ran');
+
+  // A loop already holding the serve path is not handed off: the request is filed as it stands, no restart request beside it.
+  execFileSync('rm', ['-f', restartFile]);
+  const current = await checkoutRestoreCommand(config, ['a second request'], 'graphyard-doctor', { waitMs: 60, pollMs: 10 });
+  assert.equal(current.state, 'requested'); assert.equal('handoff' in current, false);
+  assert.ok(!existsSync(restartFile), 'no restart request was filed');
+  const plain = JSON.parse(readFileSync(file, 'utf8'));
+  assert.equal('handoff' in plain, false, 'a request without a handoff carries no such field, so every release since GY-1658 reads it');
+  assert.equal(plain.id, current.request);
+  // A stale loop that cannot restart through a unit: the command fails naming it, exits non-zero, and the request stands for the loop that next starts.
+  writeFileSync(cursor, JSON.stringify(stale));
+  const failing = checkoutRestoreCommand(config, ['a third request'], 'graphyard-doctor', { waitMs: 60_000, pollMs: 20 });
+  while (!existsSync(restartFile)) await delay(10);
+  const failLog: string[] = [];
+  await baseLoopPass(config, 100, async () => { throw new Error('this loop runs under no graphyard-master supervisor unit, so it cannot restart itself through one'); }, failLog);
+  const failed = await failing;
+  assert.equal(failed.state, 'failed');
+  assert.match(failed.detail!, /^the handoff failed: the restart failed and is asked again on the loop's next pass: this loop runs under no graphyard-master supervisor unit, so it cannot restart itself through one; the request stands at .*graphyard-master\.checkout-restore\.json for the loop that next starts, which serves it from the serving release$/);
+  assert.equal(process.exitCode, 1); process.exitCode = 0;
+  assert.deepEqual(failLog, ['checkout-restore request left standing: unreadable to this release', `loop-restart ${failed.handoff!.restart} requested by pid 100`, 'restart failed']);
+  const standing = await readCheckoutRestoreRequest(file);
+  assert.equal(standing?.id, failed.request); assert.equal(standing?.outcome, null, 'the request stands unanswered');
+  assert.deepEqual(standing?.handoff, { loaded: before, restart: failed.handoff!.restart });
 });

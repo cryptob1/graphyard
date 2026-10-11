@@ -1,5 +1,5 @@
 // Concern: the coordinator checkout's standing writers (GY-1658) — finding the processes working in it and freezing them, fail-closed, for `master checkout-restore`.
-import { readdirSync, readFileSync, readlinkSync, realpathSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, readlinkSync, realpathSync, statSync } from 'node:fs';
 import { join, resolve, sep } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 
@@ -21,8 +21,12 @@ import { setTimeout as delay } from 'node:timers/promises';
  * such processes stand permanently on a desktop host, so refusing on them left the restore no way to
  * complete. checkoutWriterScan returns them beside the writers, and the restore names them.
  * A kernel thread (PF_KTHREAD in its stat flags, seen when the scan runs as root) has no cwd and is
- * never a writer; a process whose state, read again after the failed cwd read, is a zombie is gone
- * unless a sibling thread still runs, whose own cwd then decides it (zombieLeader).
+ * never a writer. Whatever its state, read again after the failed cwd read — never taken from before
+ * it — a process whose own cwd read failed is judged by its live sibling threads (judgeByThreads,
+ * GY-1680 review): a thread whose cwd reads inside the checkout makes it a writer, EACCES on the leader
+ * or not; a zombie leader (its main thread called pthread_exit) is gone only when no thread lives; and a
+ * live leader is skipped only when every read, its own and its live threads', was refused EACCES. One
+ * whose state cannot be read either is unverifiable, never dropped, unless /proc/PID is gone with it.
  */
 export function checkoutWriterProcesses(root: string, self = process.pid, proc = '/proc', uid = process.getuid?.() ?? null): number[] {
   return checkoutWriterScan(root, self, proc, uid).writers;
@@ -42,8 +46,8 @@ const managedScope = /\/graphyard-watch-[A-Za-z0-9:@._-]+\.scope(?:\/|$)/m;
 /**
  * checkoutWriterProcesses's scan: the writers it finds, and the processes of this user (`uid`; null
  * when the platform has none, so every owner counts) whose working directory could not be read and
- * which are not provably outside the checkout — `skipped` when the read was refused EACCES,
- * `unverifiable` for any other failure.
+ * which are not provably outside the checkout — `skipped` when every read was refused EACCES,
+ * `unverifiable` for any other failure, a state that cannot be read included.
  */
 export function checkoutProcessScan(root: string, self = process.pid, proc = '/proc', uid = process.getuid?.() ?? null): { writers: number[]; unverifiable: UnverifiableProcess[]; skipped: UnverifiableProcess[] } {
   let base: string;
@@ -62,18 +66,23 @@ export function checkoutProcessScan(root: string, self = process.pid, proc = '/p
       let cwd: string | null = null, error: string | null = null, denied = false;
       try { cwd = readlinkSync(join(proc, name, 'cwd')); }
       catch (failure) {
-        // Another user's is not ours to judge; one gone, a zombie or a kernel thread writes nothing. Its
-        // state is read again after the failed read, never taken from before it: one that exited in
-        // between can keep /proc/PID as a zombie, and the earlier live state would misjudge it.
+        // Another user's is not ours to judge; one gone or a kernel thread writes nothing. Its state is
+        // read again after the failed read, never taken from before it: one that exited in between can
+        // keep /proc/PID as a zombie, and the earlier live state would misjudge it. Ours, it is judged
+        // by its live threads (judgeByThreads); one whose state cannot be read either is unverifiable
+        // (GY-1680 review), never dropped as not ours, unless /proc/PID is gone with it.
         let owner: number | null = null; try { owner = statSync(join(proc, name)).uid; } catch { /* gone */ }
-        let now: string | null = null; try { now = readFileSync(join(proc, name, 'stat'), 'utf8'); } catch { /* gone */ }
-        const fields = now?.slice(now.lastIndexOf(')') + 2).split(' ') ?? [];
-        const state = fields[0] ?? null, flags = Number(fields[6]);
-        const kernelThread = Number.isFinite(flags) && (flags & PF_KTHREAD) !== 0;
-        const ours = owner !== null && now !== null && (uid === null || owner === uid) && !kernelThread;
-        const reason = failure instanceof Error ? failure.message : String(failure);
-        if (ours && state !== 'Z' && state !== 'X') { error = reason; denied = (failure as NodeJS.ErrnoException).code === 'EACCES'; }
-        else if (ours) ({ cwd, error } = zombieLeader(proc, name, reason));
+        if (owner !== null && (uid === null || owner === uid)) {
+          let now: string | null = null; try { now = readFileSync(join(proc, name, 'stat'), 'utf8'); } catch { /* gone, or its state unreadable */ }
+          const reason = failure instanceof Error ? failure.message : String(failure);
+          if (now === null) { if (existsSync(join(proc, name))) error = `${reason}; its state cannot be read either`; }
+          else {
+            const fields = now.slice(now.lastIndexOf(')') + 2).split(' ');
+            const state = fields[0] ?? null, flags = Number(fields[6]);
+            const kernelThread = Number.isFinite(flags) && (flags & PF_KTHREAD) !== 0;
+            if (!kernelThread) ({ cwd, error, denied } = judgeByThreads(proc, name, failure, state === 'Z' || state === 'X'));
+          }
+        }
       }
       table.set(Number(name), { ppid, cwd, error, denied });
     } catch { /* exited while read */ }
@@ -93,34 +102,46 @@ export function checkoutProcessScan(root: string, self = process.pid, proc = '/p
   return { writers: [...writers].sort((a, b) => a - b), unverifiable: listed(false), skipped: listed(true) };
 }
 /**
- * A zombie thread-group leader whose sibling threads still run (the main thread called pthread_exit)
- * is not gone: its cwd reads as unreadable at /proc/PID, yet a live thread can still write. Its live
- * threads' cwd is read from /proc/PID/task/TID instead; a live thread whose cwd cannot be read, or a
- * task list that cannot be read, is unverifiable. A leader with no live thread is gone.
+ * A process of this user whose own cwd read failed (`failure`), judged by its live sibling threads at
+ * /proc/PID/task/TID: the first live thread whose cwd reads gives the process its cwd — a zombie
+ * thread-group leader whose main thread called pthread_exit still writes through such a thread
+ * (GY-1663), and a live leader whose own link is refused may still show one (GY-1680 review) — so one
+ * inside the checkout is a writer, never skipped. No live thread: a zombie leader (`leaderGone`) is gone,
+ * a live one stands on its own read — skipped when that was refused EACCES (GY-1672), unverifiable
+ * otherwise. Live threads none of whose cwd reads: a live leader is skipped only when every read, its
+ * own and theirs, was refused EACCES, the non-dumpable daemon GY-1672 names; a zombie leader's, or any
+ * other failure, or a task list that cannot be read, is unverifiable, and the restore refuses.
  */
-function zombieLeader(proc: string, name: string, reason: string): { cwd: string | null; error: string | null } {
+function judgeByThreads(proc: string, name: string, failure: unknown, leaderGone: boolean): { cwd: string | null; error: string | null; denied: boolean } {
+  const describe = (error: unknown) => error instanceof Error ? error.message : String(error);
+  const refused = (error: unknown) => (error as NodeJS.ErrnoException).code === 'EACCES';
+  const reason = describe(failure);
+  const own = { cwd: null, error: reason, denied: refused(failure) }, gone = { cwd: null, error: null, denied: false };
   let tasks: string[];
   try { tasks = readdirSync(join(proc, name, 'task')).filter(tid => /^\d+$/.test(tid) && tid !== name); }
-  catch (failure) {
-    if ((failure as NodeJS.ErrnoException).code === 'ENOENT') return { cwd: null, error: null };
-    return { cwd: null, error: `${reason}; its threads cannot be listed (${failure instanceof Error ? failure.message : String(failure)})` };
+  catch (listing) {
+    // No task list: the process is gone with it — or, still listed under /proc while live, stands on its own read.
+    if ((listing as NodeJS.ErrnoException).code === 'ENOENT') return leaderGone || !existsSync(join(proc, name)) ? gone : own;
+    return { cwd: null, error: `${reason}; its threads cannot be listed (${describe(listing)})`, denied: false };
   }
-  let error: string | null = null;
+  let error: string | null = null, denied = refused(failure), live = false;
   for (const tid of tasks) {
     let stat: string; try { stat = readFileSync(join(proc, name, 'task', tid, 'stat'), 'utf8'); } catch { continue; /* exited */ }
     const state = stat.slice(stat.lastIndexOf(')') + 2).split(' ')[0];
     if (state === 'Z' || state === 'X') continue;
-    try { return { cwd: readlinkSync(join(proc, name, 'task', tid, 'cwd')), error: null }; }
-    catch (failure) { error ??= `${reason}; its live thread ${tid}'s cwd cannot be read either (${failure instanceof Error ? failure.message : String(failure)})`; }
+    live = true;
+    try { return { cwd: readlinkSync(join(proc, name, 'task', tid, 'cwd')), error: null, denied: false }; }
+    catch (thread) { error ??= `${reason}; its live thread ${tid}'s cwd cannot be read either (${describe(thread)})`; if (!refused(thread)) denied = false; }
   }
-  return { cwd: null, error };
+  if (!live) return leaderGone ? gone : own;
+  return { cwd: null, error, denied: denied && !leaderGone };
 }
 const gone = (state: string | null) => state === null || state === 'Z' || state === 'X';
 const stoppedState = (state: string | null) => state === 'T' || state === 't';
 const stateLetter = (stat: string) => stat.slice(stat.lastIndexOf(')') + 2, stat.lastIndexOf(')') + 3) || null;
 /**
  * A process's state letter from /proc (R, S, D, T, t, Z, …), or null when it is gone. A zombie
- * thread-group leader whose sibling threads still run (zombieLeader) is judged by those threads, never
+ * thread-group leader whose sibling threads still run (judgeByThreads) is judged by those threads, never
  * as gone (GY-1663 review): a live thread not yet stopped gives its own state, and when every live
  * thread shows stopped the group is stopped (T). SIGSTOP sent to the leader's pid stops the whole group.
  */

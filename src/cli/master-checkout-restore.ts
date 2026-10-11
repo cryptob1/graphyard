@@ -8,6 +8,9 @@ import { z } from 'zod';
 import { type ChildRun, defaultChildRun } from '../child-runner.js';
 import { atomicPrivateWrite } from '../master/config.js';
 import { freezeCheckoutWriters, type UnverifiableProcess } from './checkout-writers.js';
+// Functions only, used inside checkoutRestoreCommand: checkout-restore-release.ts imports this module's request paths and restore act in turn.
+import { staleServingLoop } from './checkout-restore-release.js';
+import { coordinatorCheckoutRoot } from '../master/profiles.js';
 
 export { checkoutWriterProcesses, checkoutWriterScan, freezeCheckoutWriters, processStateOf, type WriterFreezeDeps } from './checkout-writers.js';
 import type { MasterConfig } from '../master/profiles.js';
@@ -31,6 +34,12 @@ import type { MasterConfig } from '../master/profiles.js';
 // so a fix to it reaches an installation whose loop cannot restart; a request that finds the
 // checkout clean but at a HEAD other than the commit the loop runs restarts the loop onto that HEAD
 // (the drift GY-1531 lets a restart adopt) instead of ending `clean` with the escalation standing.
+// A loop whose loaded code predates that serve path would still serve a request from its own code,
+// so the command hands such a loop off (review of GY-1680): the request carries a `handoff` field
+// only a loop holding the serve path reads — every release since GY-1658 parses requests strictly and
+// leaves an unknown field's request standing, unread — and a loop-restart request is filed beside
+// it, the act every such loop serves; the restarted loop, running the checkout's HEAD, serves the
+// standing request from the serving release.
 //
 // The confined master's `master restart` is the same kind of act: the systemd user manager is one of
 // the process-launch channels its confinement hides, so it files a restart request the loop serves.
@@ -57,15 +66,24 @@ const outcomeSchema = z.object({
   /** What `master executors` printed when the loop ran it for a confined master. */
   result: z.unknown().optional(),
 }).strict();
+/**
+ * GY-1680: the request was filed against a loop whose loaded code (`loaded`, as its cursor recorded it;
+ * null when it recorded none) predates the serve path, beside the loop-restart request `restart` that
+ * hands it off. Present only then — a request without it is read by every release since GY-1658; one
+ * with it only by a loop holding the serve path, since every earlier release parses strictly.
+ */
+const handoffSchema = z.object({ loaded: z.string().nullable(), restart: z.string().max(100) }).strict();
 const requestSchema = z.object({
   id: z.string().max(100), act: z.enum(['checkout-restore', 'restart', 'executors']).default('checkout-restore'), reason: z.string().min(1).max(2000), requestedAt: z.string(), requestedBy: z.string().max(200),
   /** The `master executors` arguments the loop runs. */
   args: z.array(z.string().max(200)).max(20).default([]),
   outcome: outcomeSchema.nullable(),
+  handoff: handoffSchema.optional(),
 }).strict();
 export type LoopRequestAct = z.infer<typeof requestSchema>['act'];
 export type CheckoutRestoreRequest = z.infer<typeof requestSchema>;
 export type CheckoutRestoreOutcome = z.infer<typeof outcomeSchema>;
+export type CheckoutRestoreHandoff = z.infer<typeof handoffSchema>;
 
 const besideCursor = (config: Pick<MasterConfig, 'credentialFile'>, suffix: string) =>
   resolve(dirname(config.credentialFile), `${basename(config.credentialFile).replace(/\.token$/, '')}.${suffix}.json`);
@@ -80,8 +98,12 @@ export const loopRequestPath = (config: Pick<MasterConfig, 'credentialFile'>, ac
 export async function readCheckoutRestoreRequest(file: string): Promise<CheckoutRestoreRequest | null> {
   try { return requestSchema.parse(JSON.parse(await readFile(file, 'utf8'))); } catch { return null; }
 }
-export async function fileCheckoutRestoreRequest(file: string, reason: string, requestedBy: string, now = new Date(), act: LoopRequestAct = 'checkout-restore', args: readonly string[] = []): Promise<CheckoutRestoreRequest> {
-  const request = requestSchema.parse({ id: `${now.getTime().toString(36)}-${Math.random().toString(36).slice(2, 8)}`, act, reason, requestedAt: now.toISOString(), requestedBy, args, outcome: null });
+/** A request as filed, not yet written: `handoff` (GY-1680) only when the loop it is filed against is handed off. */
+export function newLoopRequest(reason: string, requestedBy: string, now = new Date(), act: LoopRequestAct = 'checkout-restore', args: readonly string[] = [], handoff?: CheckoutRestoreHandoff): CheckoutRestoreRequest {
+  return requestSchema.parse({ id: `${now.getTime().toString(36)}-${Math.random().toString(36).slice(2, 8)}`, act, reason, requestedAt: now.toISOString(), requestedBy, args, outcome: null, ...(handoff ? { handoff } : {}) });
+}
+export async function fileCheckoutRestoreRequest(file: string, reason: string, requestedBy: string, now = new Date(), act: LoopRequestAct = 'checkout-restore', args: readonly string[] = [], handoff?: CheckoutRestoreHandoff): Promise<CheckoutRestoreRequest> {
+  const request = newLoopRequest(reason, requestedBy, now, act, args, handoff);
   await atomicPrivateWrite(file, request);
   return request;
 }
@@ -242,7 +264,7 @@ export async function serveCheckoutRestore(file: string, root: string, deps: Loo
   } else try {
     const act = deps.restore ?? restoreInProcess(deps.run, deps.quiesce);
     const { restored, head, served } = await act(root, `${request.reason} (requested by ${request.requestedBy})`, now(), { file, id: request.id });
-    const by = served ? `; ${served}` : '';
+    const by = (served ? `; ${served}` : '') + (request.handoff ? `; handed off by loop-restart request ${request.handoff.restart} from the loop that ran ${request.handoff.loaded ? request.handoff.loaded.slice(0, 12) : 'code it did not record'}, from before the serve path` : '');
     // GY-1680: a clean checkout whose HEAD is not the commit the loop runs is the drift GY-1531 lets a
     // restart adopt — the restart this request exists to make — never a `clean` outcome that leaves
     // the escalation standing.
@@ -279,25 +301,47 @@ async function restartOwed(file: string, request: CheckoutRestoreRequest, outcom
   }
 }
 
-/** `master checkout-restore REASON` (and the confined master's `master restart` and `master executors [restart]`): file the request, then wait for the loop's outcome. */
-export async function checkoutRestoreCommand(config: Pick<MasterConfig, 'credentialFile'>, args: readonly string[], requestedBy: string, options: { waitMs?: number; pollMs?: number; act?: LoopRequestAct } = {}) {
+/**
+ * `master checkout-restore REASON` (and the confined master's `master restart` and `master executors
+ * [restart]`): file the request, then wait for the loop's outcome. A checkout-restore filed against a
+ * loop whose loaded code predates the serve path (staleServingLoop) is handed off (GY-1680): the
+ * request carries `handoff`, which that loop cannot read and so leaves standing, and a loop-restart
+ * request is filed beside it, which every such loop serves; the loop its unit restarts, running the
+ * checkout's HEAD, serves the standing request from the serving release. A restart that loop reports
+ * failed (no supervising unit) fails the command, with the request left standing for the loop that
+ * next starts. `run` runs git against the checkout to judge the loaded code.
+ */
+export async function checkoutRestoreCommand(config: Pick<MasterConfig, 'credentialFile'> & Partial<Pick<MasterConfig, 'cliPath'>>, args: readonly string[], requestedBy: string, options: { waitMs?: number; pollMs?: number; act?: LoopRequestAct; run?: ChildRun } = {}) {
   const act = options.act ?? 'checkout-restore';
   const reason = act === 'executors' ? `master executors ${args.join(' ')} from the confined master session`.replace(/ {2,}/g, ' ')
     : args.join(' ').trim() || (act === 'restart' ? 'master restart from the confined master session' : '');
   if (!reason) throw new Error(checkoutRestoreUsage);
   if (reason.length > 2000) throw new Error(`The ${act} reason is limited to 2000 characters`);
-  const file = loopRequestPath(config, act);
-  const request = await fileCheckoutRestoreRequest(file, reason, requestedBy, new Date(), act, act === 'executors' ? args : []);
+  const file = loopRequestPath(config, act), now = new Date();
+  const stale = act === 'checkout-restore' ? await staleServingLoop(besideCursor(config, 'daemon'), config.cliPath ? coordinatorCheckoutRoot(config.cliPath) : null, options.run) : null;
+  const restartFile = loopRestartRequestPath(config);
+  const restart = stale ? newLoopRequest(`GY-1680 handoff for checkout-restore: the loop (pid ${stale.pid}) runs ${stale.loaded ? stale.loaded.slice(0, 12) : 'code it did not record'}, from before the serve path, so it would serve the request from that code; it restarts through its unit onto the checkout's HEAD, and the loop that loads it serves the standing request from the serving release`, requestedBy, now, 'restart') : null;
+  // The request first, in the form the stale loop leaves standing; then the restart it serves.
+  const request = await fileCheckoutRestoreRequest(file, reason, requestedBy, now, act, act === 'executors' ? args : [], restart && stale ? { loaded: stale.loaded, restart: restart.id } : undefined);
+  if (restart) await atomicPrivateWrite(restartFile, restart);
+  const handoff = restart && stale ? { pid: stale.pid, loaded: stale.loaded, restart: restart.id, detail: `the loop (pid ${stale.pid}) runs ${stale.loaded ? stale.loaded.slice(0, 12) : 'code it did not record'}, from before the serve path, so loop-restart request ${restart.id} was filed at ${restartFile}: it restarts through its unit onto the checkout's HEAD, and the loop that loads it serves this request from the serving release` } : null;
   const deadline = Date.now() + (options.waitMs ?? (act === 'executors' ? loopExecutorsWaitMs : checkoutRestoreWaitMs));
   while (Date.now() < deadline) {
     await delay(options.pollMs ?? 2_000);
     const current = await readCheckoutRestoreRequest(file);
-    if (current?.id !== request.id) return { request: request.id, act, state: 'superseded', detail: `a later ${act} request replaced this one` };
+    if (current?.id !== request.id) return { request: request.id, act, state: 'superseded', detail: `a later ${act} request replaced this one`, ...(handoff ? { handoff } : {}) };
     if (current.outcome) {
       const executors = (current.outcome.result as { result?: unknown } | undefined)?.result;
       if (current.outcome.state === 'failed' || typeof executors === 'string' && executors !== 'restarted') process.exitCode = 1;
-      return { request: request.id, act, ...current.outcome };
+      return { request: request.id, act, ...current.outcome, ...(handoff ? { handoff } : {}) };
+    }
+    if (handoff) {
+      const owed = await readCheckoutRestoreRequest(restartFile);
+      if (owed?.id === handoff.restart && owed.outcome?.restart?.state === 'failed') {
+        process.exitCode = 1;
+        return { request: request.id, act, state: 'failed', detail: `the handoff failed: ${owed.outcome.restart.detail}; the request stands at ${file} for the loop that next starts, which serves it from the serving release`, handoff };
+      }
     }
   }
-  return { request: request.id, act, state: 'requested', detail: `filed at ${file}; the loop carries it out on its next pass and records the outcome there` };
+  return { request: request.id, act, state: 'requested', detail: `filed at ${file}; the loop carries it out on its next pass and records the outcome there${handoff ? `, once the handoff's restart lands` : ''}`, ...(handoff ? { handoff } : {}) };
 }

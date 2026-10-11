@@ -307,7 +307,7 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
     const restoreCheckout = options.checkoutRestore ?? ((settle: (adopt: string | null) => Promise<unknown>, keepAlive?: () => Promise<void>) => serveLoopRequests(config, coordinatorCheckoutRoot(config.cliPath), {
       settle, report: outcome => log(`[graphyard-master] ${outcome.state === 'restart' ? 'loop-restart request' : outcome.state === 'executors' ? 'master executors request' : `checkout-restore ${outcome.state}`}: ${outcome.detail}${outcome.restart ? `; restart ${outcome.restart.state}: ${outcome.restart.detail}` : ''}`),
       restart: options.restartLoop ?? restartThroughUnit, pid: options.identity.pid, loaded: () => guard.expected(),
-      restore: releasePinnedRestore({ release: () => ({ deployment: state.deployment, baseBranch: config.baseBranch }), grant: { file: checkoutRestoreGrantPath(config), credentialFile: config.credentialFile, lock: options.identity.pid }, keepAlive, keepAliveEveryMs }),
+      restore: releasePinnedRestore({ release: () => ({ deployment: state.deployment, baseBranch: config.baseBranch }), grant: { file: checkoutRestoreGrantPath(config), credentialFile: config.credentialFile, pid: options.identity.pid }, keepAlive, keepAliveEveryMs }),
       ...(executorsAct ? { executors: (args: string[]) => executorsAct(args, keepAlive) } : {}) }));
     const serveRestore = async (keepAlive?: () => Promise<void>) => {
       try { await restoreCheckout(adopt => guard.settle({ adopt }), keepAlive); }
