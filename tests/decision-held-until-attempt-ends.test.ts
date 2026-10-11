@@ -112,7 +112,8 @@ async function start() {
     store.transaction = ((fn, options) => transaction.call(store, (db, now) => fn(db, new Date(now.getTime() + ms)), options)) as typeof transaction;
     try { return await during(); } finally { store.transaction = transaction; }
   };
-  return { engine, store, operator, implementer, master, approver, send, call, masterApi, decisions, current, claimed, revision, decided, ledger, later, paths, url };
+  const token = (principal: Principal) => credentials.find(entry => entry.id === principal.id)!.token;
+  return { engine, store, operator, implementer, master, approver, send, call, masterApi, decisions, current, claimed, revision, decided, ledger, later, paths, url, token };
 }
 
 // ---- AC-1: held, not failed ---------------------------------------------------------------------
@@ -238,6 +239,49 @@ test('unit:held-requirements-decision-applies-at-attempt-end — a blocked repor
   assert.match(stale.outcome, /Policy revision changed \(now 2\); the held decision was approved against revision 1 and was not applied when release ended attempt 1/);
   assert.equal((await current(widened)).policyRevision, 2, 'the stale decision changed nothing');
   assert.equal((await current(widened)).criteria[0].text, 'Works');
+});
+
+// ---- AC-2: the endings that never enter the engine's command path, and the one that starts the next attempt ----
+test('unit:held-requirements-decision-applies-at-attempt-end — a replacement claim over a lapsed lease applies the held decision before installing the new lease, and a park and a capacity exhaustion, which end the lease outside the engine, apply it in their own transaction', { timeout: 120_000 }, async () => {
+  const { engine, operator, implementer, decisions, current, claimed, decided, ledger, later, call, token } = await plane();
+  const applied = async (work: Work, how: RegExp) => {
+    const item = await current(work);
+    assert.equal(item.policyRevision, 2, 'applied at the revision it was approved against');
+    assert.equal(item.criteria[0].text, 'Works, as the deploy shows');
+    const [decision] = await decisions(work.key);
+    assert.equal(decision.state, 'applied', JSON.stringify(decision));
+    assert.match(decision.outcome, how);
+    assert.equal(decision.approvedBy, 'graphyard-approver-graphyard', 'the approval stands on the applied record');
+    return { item, rows: await ledger(work) };
+  };
+  // Codex review of 086e327d7695: a claim that arrives after the lease expired and before reconciliation closes the lapse
+  // itself; it used to install the new lease over the hold, so the new worker started on the stale requirements and the
+  // revision waited for that attempt to end too. The lapse is the previous attempt's end, so the decision applies there.
+  const reclaimed = await claimed('held-then-reclaimed');
+  await decided(reclaimed);
+  const next = await later(130_000, () => engine.execute(implementer, 'claim', reclaimed.id, {}, randomUUID()));
+  assert.deepEqual([next.epoch, next.lease?.epoch, next.lease?.owner, next.policyRevision, next.criteria[0].text], [2, 2, implementer.id, 2, 'Works, as the deploy shows'], 'the new attempt holds the revised item');
+  const { rows: reclaimRows } = await applied(reclaimed, /^Requirements revised to policy revision 2 when attempt 1's lease lapsed$/);
+  const revised = reclaimRows.findIndex(row => row.kind === 'requirements'), claim = reclaimRows.map(row => row.kind).lastIndexOf('claim');
+  assert.ok(revised >= 0 && revised < claim, 'the revision is written before the claim that installed the new lease, in one transaction');
+  assert.equal((next as unknown as { pipeline?: { attempts: { epoch: number; end: string | null }[] } }).pipeline?.attempts.find(attempt => attempt.epoch === 1)?.end, 'expired', 'the claim closed the lapse as the end of attempt 1');
+  assert.ok(!reclaimRows.some(row => row.kind === 'decision.held' && reclaimRows.indexOf(row) > revised), 'nothing is held for the new attempt');
+  // A park records a human-only decision and ends the lease in waits.ts, outside Engine.execute: the hold applies there too.
+  const parked = await claimed('held-then-parked');
+  await decided(parked);
+  const park = await call(token(implementer), `work/${parked.key}/park`, { epoch: parked.epoch, kind: 'money-or-accounts', needed: 'A paid plan on the example provider, which only the operator may buy', reason: 'AC-1 is judged on the paid plan', recommendation: 'Buy the smallest paid plan', why: 'Nothing else exercises the criterion.' }) as Work;
+  assert.ok(park.humanRequest && park.blocker, 'the item is parked for the human');
+  assert.deepEqual([park.lease, park.policyRevision], [null, 2]);
+  const { rows: parkRows } = await applied(parked, /^Requirements revised to policy revision 2 when human.requested ended attempt 1$/);
+  assert.ok(parkRows.findIndex(row => row.kind === 'requirements') < parkRows.findIndex(row => row.kind === 'human.requested'), 'applied in the park\'s own transaction, before its history entry');
+  // A worker whose account ran out mid-attempt: the coordinator's capacity report ends the lease the same way.
+  const exhausted = await claimed('held-then-exhausted');
+  await decided(exhausted);
+  const report = await call(token(operator), `work/${exhausted.key}/capacity`, { event: 'exhausted', role: 'worker', epoch: exhausted.epoch, profile: 'alpha', account: null, runtime: 'claude', reason: 'Claude AI usage limit reached', resetsAt: null, partialWork: { state: 'clean' } }) as Work;
+  assert.deepEqual([report.lease, report.policyRevision, report.capacity?.exhaustions.length], [null, 2, 1]);
+  const { rows: capacityRows } = await applied(exhausted, /^Requirements revised to policy revision 2 when capacity.exhausted ended attempt 1$/);
+  assert.ok(capacityRows.findIndex(row => row.kind === 'requirements') < capacityRows.findIndex(row => row.kind === 'capacity.exhausted'), 'applied in the report\'s own transaction');
+  assert.ok(!(await current(exhausted)).lease, 'the item is claimable on another account');
 });
 
 // ---- AC-2: the submitted head is re-reviewed on the new revision --------------------------------

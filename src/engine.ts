@@ -1279,6 +1279,11 @@ export class Engine {
             JSON.stringify({ details: { owner: work.lease.owner, epoch: work.lease.epoch, expiresAt: work.lease.expiresAt, submission: work.submission, ...explained, at: now.toISOString() } })]);
           else raiseEscalation(work, { trigger: 'lease-loss', reason: leaseLossReason(work.lease), at: now.toISOString(), actor: 'graphyard' });
           endLapsedAttempt(work, work.lease, now);
+          // GY-1687: the lapse this claim records is the end of the previous attempt, so the requirements decision
+          // held for it is applied here, before the replacement lease is installed: the new worker starts on the
+          // revised requirements, and the hold is not carried through a second attempt (Codex review of 086e327d7695).
+          const lapsed = work.lease; work.lease = null;
+          for (const write of await this.applyHeldDecisions(db, work, all, { lease: lapsed, containmentQuarantine: work.containmentQuarantine, plannedFiles: work.plannedFiles }, now, { command: null, submitted: false })) await write(db);
         }
         work.epoch++;
         // A fresh attempt asks afresh: the previous attempt's scope request belongs to a lease that no longer exists.
