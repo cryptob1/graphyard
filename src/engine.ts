@@ -52,7 +52,7 @@ import { blockedAttemptMarker, partialWorkSchema, retainedExhaustions, type Exha
 import { credentialBlockedReason, credentialFailure } from './worker-credential.js';
 import { beginAttempt, endAttempt, endLapsedAttempt, pipelineTimeline, recordAssignmentStart, recordIntervention, recordRework, recordSubmission } from './pipeline-speed.js';
 import { dispatchFailureBlockAfter } from './daemon/dispatch-failures.js';
-import { foldDecisions, type Decision } from './model/approval.js';
+import { assertDecisionAuthority, foldDecisions, liveLeaseRevisionRefusal, quarantinedRevisionRefusal, requiredDecisionCapabilities, type Decision, type HeldApplication } from './model/approval.js';
 import { coveringWindow, directMergeAuthorization, directMergeFromEnv, directMergeWindows, sweepDirectMerges, type DirectMergeWindow } from './direct-merge.js';
 import { deliverSplitParent, splitChildRevisionRefusal } from './decomposition.js';
 import { defaultRerunFailedChecks, maxRerunFailedChecks } from './master/profiles.js';
@@ -1187,158 +1187,7 @@ export class Engine {
         work.formalReviewResetRequired = true; work.formalReviewBaseline = undefined;
         work.observation = null; work.mergeAuthorization = null; work.reviewRequest = null;
       }
-      if (command === 'requirements') {
-        demand(!work.children?.length, `${work.key} was split into child items; revise the child items directly rather than the parent`);
-        if (actor.role !== 'operator-agent') admin(actor);
-        const flag = flagPathRefusal(data.plannedFiles, 'plannedFiles'); demand(!flag, flag!, 422);
-        demand(!work.observation?.merged, 'Merged work requires a follow-up task');
-        // A purely additive planned-files widening is non-weakening intent: applied to a live
-        // attempt it keeps the lease (and any containment fence) so the worker never hands the
-        // item back. Every other revision under a live lease or quarantine is refused exactly
-        // as before.
-        const leaseLive = !!work.lease && Date.parse(work.lease.expiresAt) > now.getTime();
-        // A revision read before the item's last one is refused as exactly that, first: judged
-        // against requirements it never saw, an additive widening reads as a narrowing and would be
-        // refused as a quarantine or lease breach it is not (GY-1293).
-        demand(data.expectedPolicyRevision === work.policyRevision, 'Policy revision changed; reload before revising');
-        widening = liveScopeWidening({ criteria: work.criteria, dependencies: work.dependencies, plannedFiles: work.plannedFiles ?? [], exclusiveResources: work.exclusiveResources, producerProofs: work.producerProofs }, data);
-        if (!widening) {
-          demand(!work.containmentQuarantine, `Task is quarantined by unverified containment from epoch ${work.containmentQuarantine?.epoch}; requirements remain immutable until settlement or stopped-worker recovery`);
-          demand(!leaseLive, 'Stop and release the active worker before revising requirements');
-        }
-        // A widening that answers one attempt's scope request (the loop's, on a review finding)
-        // holds only while that request is open, its attempt holds a live lease and the head the
-        // findings were read for is still the candidate: a claim, a lease end or a push changes
-        // one of those without a new policy revision, so a widening decided on reads made before
-        // that is moot and refused here, in the same transaction.
-        if (data.answers) {
-          demand(widening, 'Only an additive planned-files widening answers a scope request');
-          // An ask a claim inherited (GY-1568) is answered under the epoch that asked it and held by the attempt that inherited it.
-          const open = !!work.scopeRequest && askIdentity(work.scopeRequest).epoch === data.answers.epoch && work.scopeRequest.at === data.answers.at;
-          const held = leaseLive && work.lease!.epoch === (open ? work.scopeRequest!.epoch : data.answers.epoch);
-          // GY-1484: the independent approver's verified judgement of the worker's reason and the
-          // criteria (no head named) does not evaporate with the request: the approval routinely lands
-          // minutes after the ask, when the wait window or the asking attempt may already have ended.
-          // Applied through its approved decision, the additive widening stands for the item and
-          // whichever attempt holds it next. The client's Idempotency-Key alone proves nothing (GY-1347):
-          // the ledger must hold an approved `requirements` decision of that id, requested by this actor,
-          // whose recorded input answers the same request with the same plannedFiles, so no other
-          // approval (a resolve, or an earlier widening of other paths) can authorize it. A
-          // finding-grounded widening (it names a head) and any other one are refused exactly as before.
-          if ((!open || !held) && data.answers.sha === undefined && key.startsWith('decision:')) {
-            const approval = (await db.query(`SELECT a.actor, a.payload->>'reason' AS reason, r.actor AS requester, r.payload->'input' AS input FROM events a
-              JOIN events r ON r.work_id=a.work_id AND r.kind='decision.requested' AND r.payload->>'id'=a.payload->>'id' AND r.payload->>'action'='requirements'
-              WHERE a.work_id=$1 AND a.kind='decision.approved' AND a.payload->>'id'=$2 ORDER BY a.seq DESC LIMIT 1`, [work.id, key.slice('decision:'.length)])).rows[0] as { actor: string; reason: string | null; requester: string; input: Record<string, any> | null } | undefined;
-            if (approval && sameApprovedWidening(approval, actor.id, data)) lateAnswer = { approver: approval.actor, reason: approval.reason };
-          }
-          demand(open || lateAnswer, 'The scope request this widening answers is no longer open');
-          demand(held || lateAnswer, `Epoch ${data.answers.epoch}, which asked for this scope, no longer holds the lease`);
-          // Grounds read against one head (review findings) are another head's after a push; an
-          // approver's judgement of the worker's reason and the criteria (GY-176) names no head.
-          if (data.answers.sha !== undefined) demand((work.candidate?.sha ?? null) === data.answers.sha, `The findings this widening rests on were read for ${data.answers.sha?.slice(0, 12) ?? 'no head'}, which is no longer the item's head`);
-        }
-        // The loop's own re-plan onto a planned file's successors (GY-1397): only the operator agent
-        // names that rule, and only for a purely additive widening, so the record tells it apart
-        // from a widening a person or a coordinator made.
-        if (data.rule) demand(actor.role === 'operator-agent' && widening, 'Only the operator agent\'s purely additive planned-files widening is a rule-grounded re-plan');
-        // A hand widening of an ask the loop is putting to the independent approver pre-empts that
-        // judgement (GY-1388): a master or the doctor ran `master scope` minutes before the routed
-        // decision arrived, and each was an intervention the product had already taken on. While that
-        // decision is pending, or not yet requested within the bound the loop settles a scope ask in,
-        // only the loop's own answer (`answers`) or an applied decision (run as admin) widens for that
-        // ask. The Idempotency-Key is the client's to choose, so it exempts nothing.
-        const routedAsk = actor.role === 'operator-agent' && widening && !data.answers && !data.rule ? routedScopeAsk(work, data.plannedFiles, now.getTime()) : null;
-        if (routedAsk) {
-          const refusal = handScopeWideningRefusal(work.key, routedAsk, (await routedScopeDecisions(db, [work])).get(work.id) ?? [], now.getTime());
-          demand(!refusal, refusal!, 409);
-        }
-        demand(new Set(data.criteria.map((ac: { id: string }) => ac.id)).size === data.criteria.length, 'Criterion IDs must be unique');
-        if (work.parent) {
-          const parent: Work | undefined = (await db.query(`SELECT document FROM work_items WHERE id = ${workIdByRef('$1')}`, [work.parent])).rows[0]?.document;
-          const refusal = parent ? splitChildRevisionRefusal(work, parent, data.criteria) : null;
-          demand(!refusal, refusal!);
-        }
-        if (actor.role === 'operator-agent') {
-          demand(work.criteria.every(previous => data.criteria.some((next: typeof previous) => next.id === previous.id && next.text === previous.text && JSON.stringify(next.proofs) === JSON.stringify(previous.proofs))), 'Operator agents may add requirements but cannot weaken or rewrite existing criteria');
-          demand(work.dependencies.every(dependency => data.dependencies.includes(dependency)), 'Operator agents cannot remove dependencies');
-          // Folding planned files into a directory that contains them keeps their containment (GY-549).
-          demand(plannedFilesCovered(work.plannedFiles, data.plannedFiles), 'Operator agents cannot remove planned-file containment');
-          demand((work.exclusiveResources ?? []).every(resource => data.exclusiveResources.includes(resource)), 'Operator agents cannot remove exclusive-resource containment');
-        }
-        demand(data.criteria.every((ac: { id: string }) => !work!.retiredCriterionIds?.includes(ac.id)), 'Retired criterion IDs cannot be reused');
-        demand(new Set(data.dependencies).size === data.dependencies.length && data.dependencies.every((dep: string) => all.some(w => w.id === dep)), 'Unknown or duplicate dependency');
-        const reachesWork = (id: string, visited = new Set<string>()): boolean => {
-          if (id === work!.id) return true;
-          if (visited.has(id)) return false;
-          visited.add(id);
-          return all.find(w => w.id === id)!.dependencies.some(dep => reachesWork(dep, visited));
-        };
-        demand(!data.dependencies.some((dep: string) => reachesWork(dep)), 'Dependencies would create a cycle');
-        const revised = this.declareBootstrap(actor, data, work.criteria, work.policyRevision + 1, now, work);
-        const pins: Work['scenarioRequirements'] = [];
-        const proofs = [...new Set<string>(data.criteria.flatMap((ac: { proofs: string[] }) => ac.proofs))];
-        for (const proof of proofs.filter(p => p.startsWith('e2e:'))) {
-          const pinned = work.scenarioRequirements.find(s => s.proof === proof);
-          if (pinned) { pins.push(pinned); continue; }
-          const scenario = (await db.query('SELECT document FROM scenarios WHERE id=$1 ORDER BY revision DESC LIMIT 1', [proof.slice(4)])).rows[0]?.document;
-          demand(scenario, `Register E2E scenario ${proof.slice(4)} first`);
-          pins.push({ proof, revision: scenario.revision, environment: scenario.environment, hash: scenario.hash });
-        }
-        const retired = work.criteria.filter(ac => !data.criteria.some((next: { id: string }) => next.id === ac.id));
-        const narrowed = work.criteria.filter(ac => { const next = data.criteria.find((n: { id: string }) => n.id === ac.id); return next && ac.proofs.some(proof => !next.proofs.includes(proof)); });
-        if (retired.length || narrowed.length) {
-          // The idempotency key is the caller's to choose, so a `decision:` key alone proves nothing: the
-          // escalation names a decision only when this item's ledger records it approved (GY-1347).
-          const decision = key.startsWith('decision:') ? key.slice('decision:'.length) : null;
-          const approved = decision && (await db.query(`SELECT 1 FROM events WHERE work_id=$1 AND kind='decision.approved' AND payload->>'id'=$2 LIMIT 1`, [work.id, decision])).rowCount;
-          raiseEscalation(work, { trigger: 'requirement-weakening', reason: `Requirement revision retires ${retired.map(ac => ac.id).join(', ') || 'no criterion'} and narrows proofs for ${narrowed.map(ac => ac.id).join(', ') || 'no criterion'}`, at: now.toISOString(), actor: actor.id, ...(approved ? { decision: decision! } : {}) });
-        }
-        work.retiredCriterionIds = [...(work.retiredCriterionIds ?? []), ...work.criteria.filter(ac => !data.criteria.some((next: { id: string }) => next.id === ac.id)).map(ac => ac.id)];
-        work.criteria = revised;
-        work.dependencies = data.dependencies; work.plannedFiles = data.plannedFiles; work.exclusiveResources = data.exclusiveResources; work.producerProofs = data.producerProofs;
-        // Opting in or out of splitting before first dispatch (GY-1126); a revision that omits it keeps the item's setting.
-        if (data.split !== undefined) work.split = data.split;
-        work.scenarioRequirements = pins; work.policyRevision++;
-        this.refuseRenewedDeferral(work, all);
-        work.proofGaps = await unauthorizedProofs(db, this.principals, [...proofs, ...(deploySmokeRequired(work.policy) ? [deploySmokeProof] : [])], work.producerProofs);
-        work.formalReviewResetRequired = true; work.formalReviewBaseline = undefined;
-        // A request the widened scope fully covers is answered; a partial one stays open for the
-        // master. Answering it also lifts the refusal that was blocking the item on scope.
-        if (work.scopeRequest && work.scopeRequest.paths.every(path => data.plannedFiles.some((scope: string) => pathScopeContains(scope, path)))) {
-          // A widening that answers the request is its decision, kept where the asking worker's own
-          // `status` and `scope-request --wait` read it (GY-176): approved, and by whom and why,
-          // whether the loop routed it or a master widened by hand (`master scope`), since either
-          // clears the request the wait would otherwise read. A routed decision is applied as its
-          // requester, so the approver and their own reason come from the decision's approval entry.
-          const approval = data.answers && key.startsWith('decision:')
-            ? (await db.query(`SELECT actor, payload->>'reason' AS reason FROM events WHERE work_id=$1 AND kind='decision.approved' AND payload->>'id'=$2 ORDER BY seq DESC LIMIT 1`, [work.id, key.slice('decision:'.length)])).rows[0] as { actor: string; reason: string | null } | undefined
-            : undefined;
-          work.scopeDecision = { state: 'approved', reason: approval?.reason ?? data.reason, at: now.toISOString(), decidedBy: approval?.actor ?? actor.id, waitedMs: Math.max(0, now.getTime() - Date.parse(work.scopeRequest.at)),
-            paths: work.scopeRequest.paths, requestedBy: work.scopeRequest.requestedBy, requestedAt: work.scopeRequest.at, epoch: work.scopeRequest.epoch };
-          work.scopeRequest = null;
-          if (work.blocker?.startsWith(scopeRefusalBlocker)) work.blocker = null;
-        } else if (lateAnswer) {
-          // GY-1484: the approved widening is still the decision of the request it answers, though that
-          // request closed: recorded where `status` and the next attempt read it — the ask carried to the
-          // item when its attempt ended, or else the paths this widening added.
-          const asked = work.carriedScopeRequest?.at === data.answers.at ? work.carriedScopeRequest : null;
-          work.scopeDecision = { state: 'approved', reason: lateAnswer.reason ?? data.reason, at: now.toISOString(), decidedBy: lateAnswer.approver, waitedMs: Math.max(0, now.getTime() - Date.parse(data.answers.at)),
-            paths: asked?.paths ?? unplannedPaths(before!.plannedFiles, data.plannedFiles), requestedBy: asked?.requestedBy ?? actor.id, requestedAt: data.answers.at, epoch: data.answers.epoch };
-        }
-        // A carried request (GY-1484) the widened scope now covers is answered: nothing is left to inherit.
-        if (work.carriedScopeRequest && !unplannedPaths(work.plannedFiles, work.carriedScopeRequest.paths).length) work.carriedScopeRequest = null;
-        // A revision other than a live-scope widening is a hand-off for an item already under way:
-        // its timeline counts it, and the lapsed lease it discards (a live one was refused above)
-        // ends that attempt at its deadline. A widening keeps the attempt, so it counts neither.
-        if (!widening) {
-          if (work.lease) endLapsedAttempt(work, work.lease, now);
-          recordIntervention(work, 'requirements');
-          work.lease = null;
-        }
-        work.observation = null; work.mergeAuthorization = null; work.reviewRequest = null;
-        // A submitted implementation must be explicitly reconsidered for changed intent.
-        if (work.submission) work.reworkRequested = true;
-      }
+      if (command === 'requirements') ({ widening, lateAnswer } = await this.reviseRequirements(db, actor, work, all, data, key, now, before));
       if (command === 'ready') { if (actor.role !== 'operator-agent') admin(actor); work.ready = true; }
       if (command === 'unblock') { if (actor.role !== 'operator-agent') admin(actor); work.blocker = null; }
       if (command === 'resolve') {
@@ -1406,21 +1255,10 @@ export class Engine {
       if (command === 'claim') {
         demand(actor.role === 'worker' || actor.role === 'admin', 'Worker permission required', 403);
         demand(!work.children?.length, `${work.key} was split into ${work.children?.join(', ')} before dispatch; it is delivered when they are and is never claimed directly`);
-        demand(work.ready && !work.blocker, 'Task is not ready or has a blocker');
+        // A supervised item refuses on its containment fence before ownership (the recovery contract reads the fence first).
         demand(!work.containmentQuarantine, `Task is quarantined by unverified containment from epoch ${work.containmentQuarantine?.epoch}`);
-        demand(work.dependencies.every(dep => all.find(w => w.id === dep)?.stage === 'done'), 'Unfinished dependencies');
         demand(!work.lease || Date.parse(work.lease.expiresAt) <= now.getTime(), 'Task already has an active owner');
         demand(!work.submission || work.reworkRequested, 'Implementation is submitted; an operator must request rework before reassignment');
-        const resources = resourceConflicts(work, all, now.getTime());
-        demand(!resources.length, `Exclusive resources held: ${resources.map(r => `${r.resource} by ${r.key}`).join(', ')}`);
-        if (work.slice) {
-          // Capacity is a count of engineers, not of leases: one engineer holding
-          // two items in the slice still occupies one of the lead's seats.
-          const engineers = activeEngineers(all.filter(item => item.id !== work!.id), work.slice, now.getTime());
-          engineers.delete(actor.id);
-          const limit = delegationLimits().maxEngineersPerLead;
-          demand(engineers.size < limit, `Engineer limit for ${work.slice} exceeded: ${engineers.size}/${limit}`);
-        }
         // A replacement claim over a lapsed lease is the last chance to record how that
         // assignment ended, exactly as reconciliation would have: explained lapses are
         // history, a silently vanished worker is an escalation the overwrite cannot erase.
@@ -1430,6 +1268,27 @@ export class Engine {
             JSON.stringify({ details: { owner: work.lease.owner, epoch: work.lease.epoch, expiresAt: work.lease.expiresAt, submission: work.submission, ...explained, at: now.toISOString() } })]);
           else raiseEscalation(work, { trigger: 'lease-loss', reason: leaseLossReason(work.lease), at: now.toISOString(), actor: 'graphyard' });
           endLapsedAttempt(work, work.lease, now);
+          // GY-1687: the lapse this claim records is the end of the previous attempt, so the requirements decision
+          // held for it is applied here, before claim eligibility is derived and before the replacement lease is
+          // installed. A held revision can add an unfinished dependency or an exclusive resource another item
+          // holds; those checks must see the revised item, or the new attempt would be dispatched from stale
+          // requirements (review of fe3b4e08db8e).
+          const lapsed = work.lease; work.lease = null;
+          for (const write of await this.applyHeldDecisions(db, work, all, { lease: lapsed, containmentQuarantine: work.containmentQuarantine, plannedFiles: work.plannedFiles }, now, { command: null, submitted: false })) await write(db);
+        }
+        // Eligibility against the (possibly just-revised) requirements: ready, dependencies, exclusive
+        // resources and slice capacity are all derived from the document the new attempt will hold.
+        demand(work.ready && !work.blocker, 'Task is not ready or has a blocker');
+        demand(work.dependencies.every(dep => all.find(w => w.id === dep)?.stage === 'done'), 'Unfinished dependencies');
+        const resources = resourceConflicts(work, all, now.getTime());
+        demand(!resources.length, `Exclusive resources held: ${resources.map(r => `${r.resource} by ${r.key}`).join(', ')}`);
+        if (work.slice) {
+          // Capacity is a count of engineers, not of leases: one engineer holding
+          // two items in the slice still occupies one of the lead's seats.
+          const engineers = activeEngineers(all.filter(item => item.id !== work!.id), work.slice, now.getTime());
+          engineers.delete(actor.id);
+          const limit = delegationLimits().maxEngineersPerLead;
+          demand(engineers.size < limit, `Engineer limit for ${work.slice} exceeded: ${engineers.size}/${limit}`);
         }
         work.epoch++;
         // A fresh attempt asks afresh: the previous attempt's scope request belongs to a lease that no longer exists.
@@ -1831,6 +1690,9 @@ export class Engine {
       // request is the exception: its release is the hand-off that puts the refusal to a decider.
       const closedScope = attemptEndingCommands.has(command) ? closeEndedScopeRequest(work, now, command) : null;
       if (closedScope) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'scope.closed', JSON.stringify({ details: closedScope })]);
+      // GY-1687: a requirements decision held for the attempt this command ended applies in this same
+      // transaction, before the evaluation below derives any rework or dispatch from the ended attempt.
+      for (const write of await this.applyHeldDecisions(db, work, all, before, now, { command, submitted: command === 'submit' })) await write(db);
       if (command === 'requirements') resolveSatisfiedScopeRequests(work, path => (work!.plannedFiles ?? []).some(planned => pathScopeContains(planned, path)), now);
       retainQuarantineFence(work);
       // Delivery is an immutable snapshot. A late containment cleanup or a post-deployment fact may
@@ -1855,6 +1717,257 @@ export class Engine {
     // Lease commands take the lease pool (GY-274, GY-558): however busy every other pool is, a live
     // worker is never stopped because its renewal, claim, completion or blocker could not reach the database.
     }, { lane: leaseCommands.has(command) ? 'lease' : 'request', itemLock: id ?? undefined });
+  }
+
+  /**
+   * The `requirements` command: a revision of the item's criteria, dependencies, planned files, resources
+   * and producer proofs, applied inside the caller's transaction. Returns whether it was a live planned-files
+   * widening and, for an approved decision whose scope request closed meanwhile, the late answer (GY-1484).
+   * `resume` (GY-1687) says what a submitted item does next: `rework` sends it back to a worker, as a hand
+   * revision always has; `rereview` keeps the head it just submitted and has it re-reviewed on the new revision.
+   */
+  private async reviseRequirements(db: PoolClient, actor: Principal, work: Work, all: Work[], data: any, key: string, now: Date, before: Pick<Work, 'plannedFiles'> | null, resume: 'rework' | 'rereview' = 'rework'): Promise<{ widening: boolean; lateAnswer: { approver: string; reason: string | null } | null }> {
+    let widening = false;
+    let lateAnswer: { approver: string; reason: string | null } | null = null;
+    demand(!work.children?.length, `${work.key} was split into child items; revise the child items directly rather than the parent`);
+    if (actor.role !== 'operator-agent') admin(actor);
+    const flag = flagPathRefusal(data.plannedFiles, 'plannedFiles'); demand(!flag, flag!, 422);
+    demand(!work.observation?.merged, 'Merged work requires a follow-up task');
+    // A purely additive planned-files widening is non-weakening intent: applied to a live
+    // attempt it keeps the lease (and any containment fence) so the worker never hands the
+    // item back. Every other revision under a live lease or quarantine is refused exactly
+    // as before.
+    const leaseLive = !!work.lease && Date.parse(work.lease.expiresAt) > now.getTime();
+    // A revision read before the item's last one is refused as exactly that, first: judged
+    // against requirements it never saw, an additive widening reads as a narrowing and would be
+    // refused as a quarantine or lease breach it is not (GY-1293).
+    demand(data.expectedPolicyRevision === work.policyRevision, 'Policy revision changed; reload before revising');
+    widening = liveScopeWidening({ criteria: work.criteria, dependencies: work.dependencies, plannedFiles: work.plannedFiles ?? [], exclusiveResources: work.exclusiveResources, producerProofs: work.producerProofs }, data);
+    if (!widening) {
+      // GY-1687: these two refusals mean only that an attempt is live. An approved decision refused for
+      // exactly one of them is held by the server and applied here when the attempt ends (applyHeldDecisions).
+      demand(!work.containmentQuarantine, quarantinedRevisionRefusal(work.containmentQuarantine?.epoch));
+      demand(!leaseLive, liveLeaseRevisionRefusal);
+    }
+    // A widening that answers one attempt's scope request (the loop's, on a review finding)
+    // holds only while that request is open, its attempt holds a live lease and the head the
+    // findings were read for is still the candidate: a claim, a lease end or a push changes
+    // one of those without a new policy revision, so a widening decided on reads made before
+    // that is moot and refused here, in the same transaction.
+    if (data.answers) {
+      demand(widening, 'Only an additive planned-files widening answers a scope request');
+      // An ask a claim inherited (GY-1568) is answered under the epoch that asked it and held by the attempt that inherited it.
+      const open = !!work.scopeRequest && askIdentity(work.scopeRequest).epoch === data.answers.epoch && work.scopeRequest.at === data.answers.at;
+      const held = leaseLive && work.lease!.epoch === (open ? work.scopeRequest!.epoch : data.answers.epoch);
+      // GY-1484: the independent approver's verified judgement of the worker's reason and the
+      // criteria (no head named) does not evaporate with the request: the approval routinely lands
+      // minutes after the ask, when the wait window or the asking attempt may already have ended.
+      // Applied through its approved decision, the additive widening stands for the item and
+      // whichever attempt holds it next. The client's Idempotency-Key alone proves nothing (GY-1347):
+      // the ledger must hold an approved `requirements` decision of that id, requested by this actor,
+      // whose recorded input answers the same request with the same plannedFiles, so no other
+      // approval (a resolve, or an earlier widening of other paths) can authorize it. A
+      // finding-grounded widening (it names a head) and any other one are refused exactly as before.
+      if ((!open || !held) && data.answers.sha === undefined && key.startsWith('decision:')) {
+        const approval = (await db.query(`SELECT a.actor, a.payload->>'reason' AS reason, r.actor AS requester, r.payload->'input' AS input FROM events a
+          JOIN events r ON r.work_id=a.work_id AND r.kind='decision.requested' AND r.payload->>'id'=a.payload->>'id' AND r.payload->>'action'='requirements'
+          WHERE a.work_id=$1 AND a.kind='decision.approved' AND a.payload->>'id'=$2 ORDER BY a.seq DESC LIMIT 1`, [work.id, key.slice('decision:'.length)])).rows[0] as { actor: string; reason: string | null; requester: string; input: Record<string, any> | null } | undefined;
+        if (approval && sameApprovedWidening(approval, actor.id, data)) lateAnswer = { approver: approval.actor, reason: approval.reason };
+      }
+      demand(open || lateAnswer, 'The scope request this widening answers is no longer open');
+      demand(held || lateAnswer, `Epoch ${data.answers.epoch}, which asked for this scope, no longer holds the lease`);
+      // Grounds read against one head (review findings) are another head's after a push; an
+      // approver's judgement of the worker's reason and the criteria (GY-176) names no head.
+      if (data.answers.sha !== undefined) demand((work.candidate?.sha ?? null) === data.answers.sha, `The findings this widening rests on were read for ${data.answers.sha?.slice(0, 12) ?? 'no head'}, which is no longer the item's head`);
+    }
+    // The loop's own re-plan onto a planned file's successors (GY-1397): only the operator agent
+    // names that rule, and only for a purely additive widening, so the record tells it apart
+    // from a widening a person or a coordinator made.
+    if (data.rule) demand(actor.role === 'operator-agent' && widening, 'Only the operator agent\'s purely additive planned-files widening is a rule-grounded re-plan');
+    // A hand widening of an ask the loop is putting to the independent approver pre-empts that
+    // judgement (GY-1388): a master or the doctor ran `master scope` minutes before the routed
+    // decision arrived, and each was an intervention the product had already taken on. While that
+    // decision is pending, or not yet requested within the bound the loop settles a scope ask in,
+    // only the loop's own answer (`answers`) or an applied decision (run as admin) widens for that
+    // ask. The Idempotency-Key is the client's to choose, so it exempts nothing.
+    const routedAsk = actor.role === 'operator-agent' && widening && !data.answers && !data.rule ? routedScopeAsk(work, data.plannedFiles, now.getTime()) : null;
+    if (routedAsk) {
+      const refusal = handScopeWideningRefusal(work.key, routedAsk, (await routedScopeDecisions(db, [work])).get(work.id) ?? [], now.getTime());
+      demand(!refusal, refusal!, 409);
+    }
+    demand(new Set(data.criteria.map((ac: { id: string }) => ac.id)).size === data.criteria.length, 'Criterion IDs must be unique');
+    if (work.parent) {
+      const parent: Work | undefined = (await db.query(`SELECT document FROM work_items WHERE id = ${workIdByRef('$1')}`, [work.parent])).rows[0]?.document;
+      const refusal = parent ? splitChildRevisionRefusal(work, parent, data.criteria) : null;
+      demand(!refusal, refusal!);
+    }
+    if (actor.role === 'operator-agent') {
+      demand(work.criteria.every(previous => data.criteria.some((next: typeof previous) => next.id === previous.id && next.text === previous.text && JSON.stringify(next.proofs) === JSON.stringify(previous.proofs))), 'Operator agents may add requirements but cannot weaken or rewrite existing criteria');
+      demand(work.dependencies.every(dependency => data.dependencies.includes(dependency)), 'Operator agents cannot remove dependencies');
+      // Folding planned files into a directory that contains them keeps their containment (GY-549).
+      demand(plannedFilesCovered(work.plannedFiles, data.plannedFiles), 'Operator agents cannot remove planned-file containment');
+      demand((work.exclusiveResources ?? []).every(resource => data.exclusiveResources.includes(resource)), 'Operator agents cannot remove exclusive-resource containment');
+    }
+    demand(data.criteria.every((ac: { id: string }) => !work!.retiredCriterionIds?.includes(ac.id)), 'Retired criterion IDs cannot be reused');
+    demand(new Set(data.dependencies).size === data.dependencies.length && data.dependencies.every((dep: string) => all.some(w => w.id === dep)), 'Unknown or duplicate dependency');
+    const reachesWork = (id: string, visited = new Set<string>()): boolean => {
+      if (id === work!.id) return true;
+      if (visited.has(id)) return false;
+      visited.add(id);
+      return all.find(w => w.id === id)!.dependencies.some(dep => reachesWork(dep, visited));
+    };
+    demand(!data.dependencies.some((dep: string) => reachesWork(dep)), 'Dependencies would create a cycle');
+    const revised = this.declareBootstrap(actor, data, work.criteria, work.policyRevision + 1, now, work);
+    const pins: Work['scenarioRequirements'] = [];
+    const proofs = [...new Set<string>(data.criteria.flatMap((ac: { proofs: string[] }) => ac.proofs))];
+    for (const proof of proofs.filter(p => p.startsWith('e2e:'))) {
+      const pinned = work.scenarioRequirements.find(s => s.proof === proof);
+      if (pinned) { pins.push(pinned); continue; }
+      const scenario = (await db.query('SELECT document FROM scenarios WHERE id=$1 ORDER BY revision DESC LIMIT 1', [proof.slice(4)])).rows[0]?.document;
+      demand(scenario, `Register E2E scenario ${proof.slice(4)} first`);
+      pins.push({ proof, revision: scenario.revision, environment: scenario.environment, hash: scenario.hash });
+    }
+    const retired = work.criteria.filter(ac => !data.criteria.some((next: { id: string }) => next.id === ac.id));
+    const narrowed = work.criteria.filter(ac => { const next = data.criteria.find((n: { id: string }) => n.id === ac.id); return next && ac.proofs.some(proof => !next.proofs.includes(proof)); });
+    if (retired.length || narrowed.length) {
+      // The idempotency key is the caller's to choose, so a `decision:` key alone proves nothing: the
+      // escalation names a decision only when this item's ledger records it approved (GY-1347).
+      const decision = key.startsWith('decision:') ? key.slice('decision:'.length) : null;
+      const approved = decision && (await db.query(`SELECT 1 FROM events WHERE work_id=$1 AND kind='decision.approved' AND payload->>'id'=$2 LIMIT 1`, [work.id, decision])).rowCount;
+      raiseEscalation(work, { trigger: 'requirement-weakening', reason: `Requirement revision retires ${retired.map(ac => ac.id).join(', ') || 'no criterion'} and narrows proofs for ${narrowed.map(ac => ac.id).join(', ') || 'no criterion'}`, at: now.toISOString(), actor: actor.id, ...(approved ? { decision: decision! } : {}) });
+    }
+    work.retiredCriterionIds = [...(work.retiredCriterionIds ?? []), ...work.criteria.filter(ac => !data.criteria.some((next: { id: string }) => next.id === ac.id)).map(ac => ac.id)];
+    work.criteria = revised;
+    work.dependencies = data.dependencies; work.plannedFiles = data.plannedFiles; work.exclusiveResources = data.exclusiveResources; work.producerProofs = data.producerProofs;
+    // Opting in or out of splitting before first dispatch (GY-1126); a revision that omits it keeps the item's setting.
+    if (data.split !== undefined) work.split = data.split;
+    work.scenarioRequirements = pins; work.policyRevision++;
+    this.refuseRenewedDeferral(work, all);
+    work.proofGaps = await unauthorizedProofs(db, this.principals, [...proofs, ...(deploySmokeRequired(work.policy) ? [deploySmokeProof] : [])], work.producerProofs);
+    work.formalReviewResetRequired = true; work.formalReviewBaseline = undefined;
+    // A request the widened scope fully covers is answered; a partial one stays open for the
+    // master. Answering it also lifts the refusal that was blocking the item on scope.
+    if (work.scopeRequest && work.scopeRequest.paths.every(path => data.plannedFiles.some((scope: string) => pathScopeContains(scope, path)))) {
+      // A widening that answers the request is its decision, kept where the asking worker's own
+      // `status` and `scope-request --wait` read it (GY-176): approved, and by whom and why,
+      // whether the loop routed it or a master widened by hand (`master scope`), since either
+      // clears the request the wait would otherwise read. A routed decision is applied as its
+      // requester, so the approver and their own reason come from the decision's approval entry.
+      const approval = data.answers && key.startsWith('decision:')
+        ? (await db.query(`SELECT actor, payload->>'reason' AS reason FROM events WHERE work_id=$1 AND kind='decision.approved' AND payload->>'id'=$2 ORDER BY seq DESC LIMIT 1`, [work.id, key.slice('decision:'.length)])).rows[0] as { actor: string; reason: string | null } | undefined
+        : undefined;
+      work.scopeDecision = { state: 'approved', reason: approval?.reason ?? data.reason, at: now.toISOString(), decidedBy: approval?.actor ?? actor.id, waitedMs: Math.max(0, now.getTime() - Date.parse(work.scopeRequest.at)),
+        paths: work.scopeRequest.paths, requestedBy: work.scopeRequest.requestedBy, requestedAt: work.scopeRequest.at, epoch: work.scopeRequest.epoch };
+      work.scopeRequest = null;
+      if (work.blocker?.startsWith(scopeRefusalBlocker)) work.blocker = null;
+    } else if (lateAnswer) {
+      // GY-1484: the approved widening is still the decision of the request it answers, though that
+      // request closed: recorded where `status` and the next attempt read it — the ask carried to the
+      // item when its attempt ended, or else the paths this widening added.
+      const asked = work.carriedScopeRequest?.at === data.answers.at ? work.carriedScopeRequest : null;
+      work.scopeDecision = { state: 'approved', reason: lateAnswer.reason ?? data.reason, at: now.toISOString(), decidedBy: lateAnswer.approver, waitedMs: Math.max(0, now.getTime() - Date.parse(data.answers.at)),
+        paths: asked?.paths ?? unplannedPaths(before!.plannedFiles, data.plannedFiles), requestedBy: asked?.requestedBy ?? actor.id, requestedAt: data.answers.at, epoch: data.answers.epoch };
+    }
+    // A carried request (GY-1484) the widened scope now covers is answered: nothing is left to inherit.
+    if (work.carriedScopeRequest && !unplannedPaths(work.plannedFiles, work.carriedScopeRequest.paths).length) work.carriedScopeRequest = null;
+    // A revision other than a live-scope widening is a hand-off for an item already under way:
+    // its timeline counts it, and the lapsed lease it discards (a live one was refused above)
+    // ends that attempt at its deadline. A widening keeps the attempt, so it counts neither.
+    if (!widening) {
+      if (work.lease) endLapsedAttempt(work, work.lease, now);
+      recordIntervention(work, 'requirements');
+      work.lease = null;
+    }
+    work.observation = null; work.mergeAuthorization = null; work.reviewRequest = null;
+    // A submitted implementation must be explicitly reconsidered for changed intent. GY-1687: a held decision
+    // applied as the attempt submits its head has that head re-reviewed on the new revision instead (`rereview`).
+    if (work.submission && resume === 'rework') work.reworkRequested = true;
+    return { widening, lateAnswer };
+
+  }
+
+  /**
+   * GY-1687. An approved requirements decision the engine refused only because the item held a live lease
+   * or an unverified containment fence was recorded `held` (server/decisions.ts), its approval kept. The
+   * transaction that frees the item — a completion, release or blocked report, a stopped worker's rework,
+   * a containment settlement, or reconciliation closing a lapsed lease — applies it here, before the
+   * evaluation derives any rework or dispatch from the ended attempt, at the policy revision it was
+   * approved against: a decision whose revision moved first (a live widening) settles stale with the race
+   * recorded, as its approval would have, and one the engine now refuses for another reason settles failed.
+   * An attempt that ended by submitting its head keeps that head for a re-review on the new revision
+   * (`rereview`) rather than being sent back on the stale verdict's rework. The document is changed in
+   * place; the ledger writes come back as closures so a reconciliation dry run (GY-1290) records nothing.
+   */
+  private async applyHeldDecisions(db: PoolClient, work: Work, all: Work[], before: Pick<Work, 'lease' | 'containmentQuarantine' | 'plannedFiles'> | null, now: Date, ended: { command: string | null; submitted: boolean }): Promise<((db: PoolClient) => Promise<void>)[]> {
+    const free = (item: Pick<Work, 'lease' | 'containmentQuarantine'>) => !item.lease && !item.containmentQuarantine;
+    if (!before || work.stage === 'done' || !free(work) || free(before)) return [];
+    const rows = (await db.query("SELECT actor, kind, payload, created_at FROM events WHERE work_id=$1 AND kind LIKE 'decision.%' ORDER BY seq", [work.id])).rows as { actor: string; kind: string; payload: any; created_at: Date | string }[];
+    const held = foldDecisions(work.id, rows.map(row => ({ kind: row.kind, actor: row.actor, at: new Date(row.created_at).toISOString(), payload: row.payload }))).filter(decision => decision.state === 'held' && decision.action === 'requirements');
+    if (!held.length) return [];
+    const writes: ((db: PoolClient) => Promise<void>)[] = [];
+    const event = (actor: string, kind: string, payload: object) => writes.push(db => db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, actor, kind, JSON.stringify(payload)]).then(() => undefined));
+    const epoch = before.lease?.epoch ?? work.epoch;
+    const ending = ended.command ? `${ended.command} ended attempt ${epoch}` : `attempt ${epoch}'s lease lapsed`;
+    for (const decision of held) {
+      const expected = decision.input?.expectedPolicyRevision as number | undefined;
+      if (expected !== work.policyRevision) {
+        event('graphyard', 'decision.stale', { id: decision.id, action: decision.action, reason: `Policy revision changed (now ${work.policyRevision}); the held decision was approved against revision ${expected} and was not applied when ${ending}`,
+          expected: { policyRevision: expected }, current: { policyRevision: work.policyRevision }, observedBy: { id: 'graphyard', role: 'coordinator' } });
+        continue;
+      }
+      const application: HeldApplication = decision.held?.application ?? { actor: { id: decision.requestedBy, role: 'admin', sessionKind: 'ai' }, reason: decision.reason };
+      // The attempt that ended is a submitted one when the command says so or when its submission still stands unreworked:
+      // a contained attempt submits and keeps its fence until settlement, so the settlement that frees the item
+      // re-reviews that head instead of sending it back (Codex review of 24a0211d59b8).
+      const submitted = ended.submitted || work.submission?.epoch === epoch && !work.reworkRequested;
+      const resume = submitted ? 'rereview' : 'rework';
+      // Applied to a copy: a refusal leaves the document as the ending command left it.
+      const trial = structuredClone(work);
+      let data: any;
+      try {
+        // Codex review of fe3b4e08db8e: the delayed path must re-authorize the requester. The serialized
+        // HeldApplication.actor is an admin stand-in for the engine call; a requester revoked or stripped
+        // of policy:requirements while the attempt ran must not still mutate requirements here.
+        await this.authorizeHeldRequester(db, decision, trial);
+        data = commands.requirements.parse({ ...decision.input, reason: application.reason });
+        await this.reviseRequirements(db, application.actor, trial, all.map(item => item === work ? trial : item), data, `decision:${decision.id}`, now, before, resume);
+      } catch (error) {
+        if (!(error instanceof Refusal) && !(error instanceof z.ZodError)) throw error;
+        event(decision.approvedBy ?? 'graphyard', 'decision.failed', { id: decision.id, error: `${error.message}; the held decision was not applied when ${ending}` });
+        continue;
+      }
+      for (const field of Object.keys(work)) if (!(field in trial)) delete (work as unknown as Record<string, unknown>)[field];
+      Object.assign(work, trial);
+      // The approval resolves the requirement-weakening this application raised (GY-1348), as the approval's own application does.
+      const weakening = standingEscalations(work).find(entry => entry.trigger === 'requirement-weakening' && entry.decision === decision.id);
+      if (weakening) {
+        resolveEscalation(work, 'requirement-weakening');
+        event(decision.requestedBy, 'escalation.resolved', { details: { trigger: 'requirement-weakening', escalation: weakening, resolvedBy: decision.requestedBy, approvedBy: decision.approvedBy, decision: decision.id, sessionKind: 'ai',
+          reason: `Raised by requirements decision ${decision.id}, approved by ${decision.approvedBy}: ${decision.reason}`.slice(0, 2000), approvalReason: decision.approvalReason, at: now.toISOString() } });
+      }
+      const revised = work.policyRevision;
+      const outcome = `Requirements revised to policy revision ${revised} when ${ending}${resume === 'rereview' ? `; the submitted head is re-reviewed on revision ${revised}` : ''}${weakening ? '; the requirement-weakening it raised is resolved by this approval' : ''}`;
+      const detail = { ...data, liveScopeWidening: false, before: { plannedFiles: before.plannedFiles ?? [] }, heldDecision: { id: decision.id, approvedBy: decision.approvedBy, heldSince: decision.held?.at ?? null, appliedWhen: ending, resume } };
+      writes.push(db => save(db, work, application.actor.id, 'requirements', now, detail));
+      event(decision.approvedBy ?? 'graphyard', 'decision.applied', { id: decision.id, outcome, held: { since: decision.held?.at ?? null, appliedWhen: ending, resume } });
+    }
+    return writes;
+  }
+
+  /**
+   * GY-1687: re-resolve the held decision's requester in the attempt-ending transaction, as
+   * approveDecision and resumeApproved do before their engine call. A revoked operator agent, or one
+   * that lost `policy:requirements` or the item's scope while the attempt ran, fails the decision
+   * instead of mutating requirements under the admin stand-in HeldApplication.actor carries.
+   */
+  private async authorizeHeldRequester(db: PoolClient, decision: Pick<Decision, 'requestedBy' | 'action' | 'input'>, work: Work) {
+    let requester = this.principals.find(entry => entry.id === decision.requestedBy);
+    if (!requester) {
+      const agent = (await db.query('SELECT document FROM operator_agents WHERE id=$1', [decision.requestedBy])).rows[0]?.document as { id: string; revokedAt?: string | null; capabilities?: string[]; scope?: Principal['scope'] } | undefined;
+      demand(agent && !agent.revokedAt, `Requester ${decision.requestedBy} is no longer a live agent identity; the held decision was not applied`, 409);
+      requester = { id: agent!.id, role: 'operator-agent', capabilities: agent!.capabilities as Principal['capabilities'], scope: agent!.scope, sessionKind: 'ai' };
+    }
+    for (const capability of requiredDecisionCapabilities(decision.action, decision.input, work)) assertDecisionAuthority(requester!, capability, work, this.repository);
   }
 
   /**
@@ -2694,8 +2807,9 @@ export class Engine {
     // attestation. It is read only where a lapse or a standing lease-loss makes it relevant.
     const standingLoss = standingEscalations(work).some(entry => entry.trigger === 'lease-loss');
     const attestations = leaseLost || standingLoss ? await readAttestations(db, work.id) : [];
-    if (leaseLost) {
-      const lost = work.lease!; work.lease = null;
+    const lost = leaseLost ? work.lease! : null;
+    if (lost) {
+      work.lease = null;
       // A lease that lapses under the epoch it submitted is the expected end of an attempt
       // whose candidate is already bound, and one that lapses under a carried blocked report
       // or after a stopped-worker attestation for its epoch ended because the control plane
@@ -2721,24 +2835,28 @@ export class Engine {
       resolveEscalation(work, settled.escalation.trigger);
       ledger.push({ kind: 'escalation.auto-settled', details: { trigger: settled.escalation.trigger, epoch: settled.epoch, escalation: settled.escalation, note: settled.note, cause: settled.cause, attestation: settled.attestation, submission: work.submission } });
     }
+    // GY-1687: the lapse that ended the attempt applies the requirements decision held for it, before the
+    // evaluation derives a dispatch from the ended attempt; its ledger writes wait for the write phase.
+    const pending = lost ? await this.applyHeldDecisions(db, work, all, { lease: lost, containmentQuarantine: work.containmentQuarantine, plannedFiles: work.plannedFiles }, now, { command: null, submitted: false }) : [];
     this.evaluate(work, all, now);
     // Every violation found at the start of the tick is repaired by the evaluation above — the
     // derivation names its successor and the queue opens its row — and the ledger says so.
     if (stranded) ledger.push(livenessRepairEntry(stranded, work, all, now));
     if (!jsonChanged(before, work)) return false;
-    this.reconcileWrites.set(work, { ledger });
+    this.reconcileWrites.set(work, { ledger, pending });
     if (!dryRun) await this.writeReconciled(db, work, all, now);
     return true;
   }
   /** What `reconcileItem`'s evaluation of a document decided to write, kept until it is written (GY-1290). */
-  private readonly reconcileWrites = new WeakMap<Work, { delivered: true } | { ledger: { kind: string; details: Record<string, unknown> }[] }>();
+  private readonly reconcileWrites = new WeakMap<Work, { delivered: true } | { ledger: { kind: string; details: Record<string, unknown> }[]; pending: ((db: PoolClient) => Promise<void>)[] }>();
   /** Write `work` as `reconcileItem` evaluated it at `now`: its ledger entries, its dispatch transitions, the document and its wakes. */
   private async writeReconciled(db: PoolClient, work: Work, all: Work[], now: Date) {
     const write = this.reconcileWrites.get(work)!;
     this.reconcileWrites.delete(work);
     if ('delivered' in write) { await save(db, work, 'graphyard', 'delivery.settled', now); return; }
-    const { ledger } = write;
+    const { ledger, pending } = write;
     for (const entry of ledger) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', entry.kind, JSON.stringify({ details: { ...entry.details, at: now.toISOString() } })]);
+    for (const write of pending) await write(db);
     await this.recordDispatch(db, work, now);
     await save(db, work, 'graphyard', 'reconciled', now, ledger.length ? { ledger: ledger.map(entry => entry.kind) } : undefined);
     if (work.submission) await wakeJob(db, work.id);

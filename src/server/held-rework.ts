@@ -47,7 +47,8 @@ export function lapsedReauthorization(decision: Pick<Decision, 'id' | 'action'> 
  */
 export async function standingRequest<D extends Parameters<typeof lapsedReauthorization>[0] & { state: string }>(history: readonly D[], action: string, work: Pick<Work, 'key' | 'reworkRequested'>,
   settle: (decision: D, lapsed: { reason: string } & StaleRace) => Promise<unknown>): Promise<D | undefined> {
-  const pending = history.find(decision => decision.action === action && (decision.state === 'requested' || decision.state === 'approved'));
+  // GY-1687: a held decision is approved and waits only for the attempt to end; a second request of its action is refused naming it.
+  const pending = history.find(decision => decision.action === action && (decision.state === 'requested' || decision.state === 'approved' || decision.state === 'held'));
   const lapsed = pending?.state === 'requested' ? lapsedReauthorization(pending, work, history as Parameters<typeof heldRework>[1]) : null;
   if (!lapsed) return pending;
   await settle(pending!, { reason: `${lapsed.reason}; the decision was not applied`, ...lapsed.race });

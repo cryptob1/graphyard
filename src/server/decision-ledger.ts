@@ -15,9 +15,9 @@ import { workIdByRef } from '../store/locked-read.js';
 
 type Db = pg.PoolClient;
 /**
- * Terminal states only the server records: a decision overtaken by a revision race ('stale')
- * and one its requester took back ('withdrawn'). The model's fold predates them, so they are
- * folded on top of it from the same ledger.
+ * Terminal state only the server records beyond the model's fold: a decision its requester took
+ * back ('withdrawn'). `stale` is folded in the model (GY-1687) and re-enriched here with race and
+ * staleAt; withdrawn still lands only on this overlay.
  */
 type TerminalState = 'stale' | 'withdrawn';
 /**

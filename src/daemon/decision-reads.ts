@@ -9,7 +9,7 @@ import type { DaemonEffects } from './effects.js';
 import { staleReleaseCandidates } from '../model/stale-release.js';
 
 /** Every kind the control plane folds an item's decision history from (server/decision-ledger.ts). */
-export const decisionEventKinds = ['requested', 'concurred', 'refused', 'declined', 'approved', 'applied', 'failed', 'stale', 'withdrawn', 'superseded'].map(kind => `decision.${kind}`);
+export const decisionEventKinds = ['requested', 'concurred', 'refused', 'declined', 'approved', 'applied', 'failed', 'held', 'stale', 'withdrawn', 'superseded'].map(kind => `decision.${kind}`);
 type DecisionHistory = Awaited<ReturnType<NonNullable<DaemonEffects['decisions']>>>['decisions'];
 /** The decision histories the loop keeps across cycles, by work id, and the ledger seq they are current to. */
 export interface HeldDecisions { seq: string | null; histories: Map<string, DecisionHistory>; refreshedAt: number | null }
