@@ -5,8 +5,7 @@ import { fileURLToPath } from 'node:url';
 import type { Work } from '../src/model.js';
 import { decisionInput, masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { emptyDaemonState, runCycle, scopeBudget, type DaemonEffects } from '../src/master-daemon.js';
-import { coveringStandingScopeWatch } from '../src/daemon/metrics.js';
-import { coveringAdoptLeftAskOpen, coveringScopeAdoptWatch, standingCoversScopeAsk } from '../src/daemon/decisions.js';
+import { coveringAdoptLeftAskOpen, coveringScopeAdoptWatch, coveringStandingScopeWatch, standingCoversScopeAsk } from '../src/daemon/metrics.js';
 import { scopeBlockedBudgetMs, unplannedPaths } from '../src/model/scope.js';
 import { handFiledPatterns, type Intervention } from '../src/model/interventions.js';
 import { detectPatterns } from '../src/interventions.js';
@@ -229,8 +228,9 @@ test('manual:fault-class-decision — action:escalation|escalation:scope-budget:
   await runCycle(config(), state, fx, () => Date.parse(faultAt));
 
   const watch = Object.values(state.approvals).find(entry => entry.decision === standingId);
-  assert.ok(watch?.settledAt, 'the held covering revision is adopted and settled');
+  assert.equal(watch?.settledAt, null, 'held covering stays unsettled so status keeps the covering decision until apply');
   assert.ok(watch?.scope, 'the watch names the scope ask so the blocked bound can leave it out');
+  assert.equal(watch?.coveringAdopt, true);
   assert.equal(coveringStandingScopeWatch(work, state.approvals), true);
   assert.equal(Object.keys(state.actions).filter(key => key.startsWith('escalation:scope-budget:')).length, 0);
 
@@ -311,7 +311,8 @@ test('unit:covering-standing-scope-watch — only a coveringAdopt watch that nam
   assert.equal(cover?.settledAt, null);
   assert.equal(cover?.coveringAdopt, true);
   assert.equal(coveringScopeAdoptWatch(work, { id: standingId, state: 'held', approvedBy: 'a', approvedAt: faultAt, input: { plannedFiles: planned } },
-    { action: 'requirements', scope, input: { answers: { epoch: 4, at: askedAt } } }, faultAt)?.settledAt, faultAt);
+    { action: 'requirements', scope, input: { answers: { epoch: 4, at: askedAt } } }, faultAt)?.settledAt, null,
+    'held covering adopts stay unsettled for status and supervise');
 });
 
 test('manual:fault-class-decision — closing the scope ask drops the covering watch without withdrawing the master revision', async () => {

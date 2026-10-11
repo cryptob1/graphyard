@@ -276,14 +276,8 @@ export const approvalWatchSchema = z.object({
   observation: z.object({ at: z.string(), sha: z.string() }).strict().nullable().default(null),
   /** The account and runtime the current session was launched on, so its exhaustion holds the right account (GY-182). */
   account: z.string().max(200).nullable().default(null), runtime: z.string().max(40).nullable().default(null),
-  /** The worker scope request a `requirements` decision answers (GY-176): whose, and for what. */
-  scope: z.object({ epoch: z.number().int().min(1), at: z.string(), requestedBy: z.string().max(200), paths: z.array(z.string().max(500)).max(50) }).strict().nullable().default(null),
-  /**
-   * GY-1701. True when this watch adopted a foreign covering no-`answers` revision in place of a live
-   * scope widening: the blocked bound may leave the ask out, and stale-watch cleanup must not withdraw
-   * that revision if the worker's ask ends — it has its own requester and purpose.
-   */
-  coveringAdopt: z.boolean().default(false),
+  /** The worker scope request a `requirements` decision answers (GY-176); GY-1701 `coveringAdopt` marks a foreign covering adopt (ask end must not withdraw it). */
+  scope: z.object({ epoch: z.number().int().min(1), at: z.string(), requestedBy: z.string().max(200), paths: z.array(z.string().max(500)).max(50) }).strict().nullable().default(null), coveringAdopt: z.boolean().default(false),
   /** The failed decision whose request was given back because only its scope request closed (GY-1484): once per decision, never per cycle. */
   givenBack: z.string().max(100).nullable().default(null),
   /** The agent-registry session the current approver runs on (GY-190), ended once the decision is judged or its quota is spent (GY-182). */

@@ -8,7 +8,8 @@ import { recordSettledDecision } from '../model/project-memory.js';
 import { type ApprovalWatch, approvalWatchSchema, carriedSession, type DaemonActionKind, type DaemonState, latencySampleSchema, message, scopeMeasurementSchema } from './state.js';
 import { decisionKey, scopeAnsweredAt, scopeKey, scopeOutcomeAnswered } from './reconcile.js';
 import { readyToRetry } from './sessions.js';
-import { approvalStep, recordWatchEnded, approverLaunchKey, attestDecisions, boundDetail, cappedReworkBound, exhaustedProofKey, decisionReasonMax, detailChanged, fitDecisionReason, githubPause, handWatchPrefix, maxApproverCloses, maxRefusalAnswers, maxDecisionRequests, namePaths, neededDecision, observedFrom, overtakenDecision, resolveCovers, reworkDecisionReason, refusalNamedIn, standingNamedIn, adoptedOnRefusal, conflictReworkOverdue, reworkObservationWait, routineDecision, type RoutineDecision, sameAnswers, scopeRoutineDecision, blockerScopeDecision, coveringAdoptLeftAskOpen, coveringScopeAdoptWatch, standingVerdict, uncountedScopeFailure, withheldDecision } from './decisions.js';
+import { approvalStep, recordWatchEnded, approverLaunchKey, attestDecisions, boundDetail, cappedReworkBound, exhaustedProofKey, decisionReasonMax, detailChanged, fitDecisionReason, githubPause, handWatchPrefix, maxApproverCloses, maxRefusalAnswers, maxDecisionRequests, namePaths, neededDecision, observedFrom, overtakenDecision, resolveCovers, reworkDecisionReason, refusalNamedIn, standingNamedIn, adoptedOnRefusal, conflictReworkOverdue, reworkObservationWait, routineDecision, type RoutineDecision, sameAnswers, scopeRoutineDecision, blockerScopeDecision, standingVerdict, uncountedScopeFailure, withheldDecision } from './decisions.js';
+import { coveringAdoptLeftAskOpen, coveringScopeAdoptWatch } from './metrics.js';
 import { candidateMovedMeanwhile, decisionFailureKind, decisionReads, deliveredMeanwhile, lateDecisionRead, resumedApplication, selfHealingDecisionFailure } from './decision-reads.js';
 import { refusedAttestationWatch, type RefusedAttestation } from '../model/rework-ground.js';
 import { record } from './effects.js';
@@ -22,7 +23,6 @@ import { createApproverSupervisor } from './cycle-approvers.js';
 import { decisionBudget, deferredFirst, settleDeferred } from './decision-budget.js';
 import { staleReleaseStep } from './stale-releases.js';
 import { closeStanding, closingItems, recordingWrites, staleCloseStep } from './stale-closes.js';
-
 /** The approval-watch key prefix of a hand-launched approver, re-exported for the blocker step (GY-403). */
 export { handWatchPrefix };
 const holdBounds = new WeakMap<DaemonState, Map<string, number>>(); // GY-1622: per loop cursor, each held item's docs-sync hold bound on the local clock; an item the step did not reach this cycle (put off by its budget) keeps the one it last left; one already passed locally while its hold stood is a zero wait, so the next cycle re-reads it; one exactly a wait away still binds, so the guard's time comes off it. `bound` is the earliest bound when it ends this wait, `next` the earliest whether or not it does: one just beyond the wait still caps the sleep left after the checkout guard
@@ -57,11 +57,11 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       }
       // A request whose response was lost is already standing on the item, and the server refuses a second one; adopting it is what keeps a retry from leaving a decision nobody will judge.
       let standing = history.find(entry => entry.action === decision.action && (entry.state === 'requested' || entry.state === 'approved' || entry.state === 'held'));
-      // GY-1687: a held decision is approved and waits only for the item's attempt to end; GY-1701 names a covered live ask on the watch so the blocked bound does not run.
+      // GY-1687/GY-1701: held waits for attempt end; covering ask named so the blocked bound skips.
       if (standing?.state === 'held') {
         const cover = decision.scope ? coveringScopeAdoptWatch(item, standing, decision, stamp) : null;
         state.approvals[key] = cover ?? approvalWatchSchema.parse({ work: item.key, action: decision.action, decision: standing.id, requestedAt: stamp, settledAt: stamp, approvedAt: standing.approvedAt ?? null, approvedBy: standing.approvedBy ?? null });
-        const coverNote = cover ? `; its plannedFiles already cover the paths ${item.key}'s scope request asks for, so that revision answers the ask once applied` : '';
+        const coverNote = cover ? `; its plannedFiles already cover ${item.key}'s scope ask, so that revision answers once applied` : '';
         performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `${item.key}'s ${decision.action} decision ${standing.id} is approved by ${standing.approvedBy ?? 'its approver'} and held (${boundDetail(standing.outcome ?? 'the item holds a live attempt', 300)})${coverNote}; the control plane applies it when the attempt ends, so nothing is requested`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist)); return;
       }
       // An approved decision is already judged (GY-1300): it is never adopted for an approver session. The control plane is asked to apply what was approved,
@@ -125,7 +125,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
         performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `${item.key}'s attest decision ${refusedAttest.id} for ${String(decision.input?.proof)} on this head was already refused by ${refusedAttest.refusal?.approver ?? 'its approver'}; nothing to request, and ${item.key} returns to a worker on that refusal`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
         return;
       }
-      // One requirements decision at a time. A no-answers revision is not this widening — unless it already plans the ask (GY-1701: adopt, keep supervising while requested). Else wait (GY-1687/GY-1630).
+      // One requirements at a time. GY-1701: adopt a covering revision; else wait (GY-1687/GY-1630).
       if (standing && decision.action === 'requirements' && !standing.input?.answers && !throughputDecisionAdopts(standing.input, decision, item)) {
         const cover = coveringScopeAdoptWatch(item, standing, decision, stamp);
         if (cover) {
@@ -324,11 +324,10 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       return;
     }
     if (step.step === 'refused') {
-      // Settled for the loop: no replacement session and no re-request. The refusal stands in
-      // `master status` until the master answers it with a request that cites it, or acts on it.
+      // Settled for the loop: no replacement session; the refusal stands in `master status` until answered.
       await closeApprover(item, watch, 'its decision is refused');
       watch.settledAt = stamp;
-      // A refused widening is the worker's answer. A covering foreign revision that did not answer the ask (GY-1701) is cleared so the widening can be requested again.
+      // Refused widening answers the worker; GY-1701 clears a covering adopt that left the ask open.
       if (watch.scope && judged) {
         await noteScopeOutcome(item, watch, judged);
         if (coveringAdoptLeftAskOpen(watch, item, judged, clock)) {
@@ -337,8 +336,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
         }
         return;
       }
-      // A refused attestation is the approver's judgement that the head fails the proof (GY-1394): the
-      // routine step returns that head to a worker on it, applied with no second approver.
+      // GY-1394: a refused attestation returns the head to a worker on it, with no second approver.
       const attested = watch.action === 'attest' ? refusedAttestationWatch(judged) : null;
       if (attested) { watch.refusal = attested; await note(`${base}:refused`, item, 'decision', 'done', `${step.detail}; ${item.key} returns to a worker on that refusal`); return; }
       // GY-1606: a rework this binding adopted while it stood requested on other grounds (a capped review rework
@@ -380,7 +378,6 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     if (!state.actions[`${base}:ended`]) await note(`${base}:ended`, item, 'decision', moved ? 'done' : 'failed', `${step.detail}; ${item.key} still needs it, so it is requested again`);
     await request(item, decision, key, watch);
   };
-
   const needed = new Set<string>(), unattestable = new Set<string>(), budget = decisionBudget(state, now, (config.run.intervalSeconds ?? 20) * 1000);
   const pause = githubPause(snapshot.jobs, clock);
   // A scope request is judged by the review-finding rule (step 2a) before it is the approver's: the
@@ -502,7 +499,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       // Its one-per-item wake:observation entry stays for guarded merge; pruneDaemonState bounds it.
       return wakeObservationJob(cycle, item, 'rework');
     }
-    // Settled watches are done — except a covering adopt whose revision later refused/vanished (GY-1701): clear and re-request the widening.
+    // Settled watches are done; GY-1701 re-requests when a covering adopt's revision later vanishes.
     if (watch) {
       if (!watch.settledAt) await supervise(item, decision, key, watch);
       else {
@@ -558,9 +555,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     }
     // Another current watch holds this decision: the request is not moved past, only re-keyed.
     if (Object.entries(state.approvals).some(([other, entry]) => other !== key && needed.has(other) && entry.decision === watch.decision)) { delete state.approvals[key]; return; }
-    // GY-1701: a covering-adopt watch only borrowed a foreign no-`answers` revision. Closing the
-    // worker's ask must not withdraw that revision — it still has its own requester and purpose.
-    if (watch.coveringAdopt) {
+    if (watch.coveringAdopt) { // GY-1701: drop without withdrawing the foreign no-answers revision
       if (item) await closeApprover(item, watch, `${watch.work} no longer needs its covering watch for ${watch.action} decision ${watch.decision}`);
       else await endWatchSession(watch, `${watch.work} is no longer open`);
       delete state.approvals[key];

@@ -217,9 +217,9 @@ test('unit:soak-invariants-hold — over three simulated days, decisions held th
 /**
  * GY-1701. Covering asks across six items over two simulated days: the master's no-answers revision
  * already plans the path the worker asks for. Adoption excludes the blocked bound while the revision
- * stands; a refused covering revision clears its watch; held covering revisions settle when the
- * attempt ends; closing the ask while the foreign revision is still requested drops the covering
- * watch and never withdraws that revision; every system invariant holds.
+ * stands; a refused covering revision clears its watch; held covering watches stay active until
+ * apply or ask close; closing the ask while the foreign revision is still requested drops the
+ * covering watch and never withdraws that revision; every system invariant holds.
  */
 test('unit:soak-covering-scope-adopt — over two simulated days, covering asks across six items adopt standing revisions, exclude the blocked bound, clear watches on refusal, drop watches without withdrawing when the ask closes, and keep every invariant', { timeout: 300_000 }, async () => {
   let now = start;

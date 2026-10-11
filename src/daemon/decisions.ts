@@ -14,7 +14,6 @@ import { unproducedManualProofs } from '../model/unproduced-attestation.js';
 import { mechanicalRework, type MechanicalFixRequest } from '../mechanical-findings.js';
 import { triageClosure } from '../model/machine-backlog.js'; import { refusedAttestationRework, type RefusedAttestation } from '../model/rework-ground.js';
 import { actionDetailMax, approvalWatchSchema, type ApprovalWatch, message } from './state.js';
-import { scopeOutcomeAnswered } from './reconcile.js';
 import { blockingFindings, followUpFindingsOf, pastReviewCap, reviewRound, reviewRoundCapOf, reworkRoundsOf } from '../review-cap.js';
 import { sessionName } from '../session-name.js';
 import type { ScreenMotion } from '../master/approver-stall.js';
@@ -721,30 +720,6 @@ export function uncountedScopeFailure(watch: Pick<ApprovalWatch, 'action' | 'sco
   return asked.length > 0 && unplannedPaths(work.plannedFiles, asked).length > 0;
 }
 /**
- * GY-1701. Whether a standing requirements revision that answers no scope request (`answers` absent)
- * already plans every path of a live scope ask: adopting it lets that revision answer the ask once
- * applied, so the one-at-a-time slot does not starve the worker past the blocked bound.
- */
-export function standingCoversScopeAsk(standing: { input?: { plannedFiles?: readonly string[] | null; answers?: unknown } | null }, askPaths: readonly string[]): boolean {
-  if (standing.input?.answers || !askPaths.length) return false;
-  return unplannedPaths(standing.input?.plannedFiles ?? [], askPaths).length === 0;
-}
-/** GY-1701. Watch for a covering no-`answers` revision adopted in place of a live scope widening. A requested one stays unsettled so supervise clears it if the revision refuses; a held one is settled (already approved). Marked `coveringAdopt` so an ordinary widening's own watch never shares its budget or withdrawal treatment. */
-export function coveringScopeAdoptWatch(item: Pick<Work, 'key' | 'scopeRequest'>,
-  standing: { id: string; state: string; approvedAt?: string | null; approvedBy?: string | null; input?: { plannedFiles?: readonly string[] | null; answers?: unknown } | null },
-  decision: Pick<RoutineDecision, 'action' | 'scope' | 'input'>, stamp: string): ApprovalWatch | null {
-  const askPaths = decision.scope?.paths ?? item.scopeRequest?.paths ?? [];
-  if (!(decision.input?.answers || decision.scope) || !standingCoversScopeAsk(standing, askPaths)) return null;
-  return approvalWatchSchema.parse({ work: item.key, action: decision.action, decision: standing.id, requestedAt: stamp, coveringAdopt: true,
-    settledAt: standing.state === 'held' ? stamp : null, approvedAt: standing.approvedAt ?? null, approvedBy: standing.approvedBy ?? null, scope: decision.scope ?? null });
-}
-/** GY-1701. States in which a covering revision settled without applying — the adopted watch must be cleared so the ask is not stranded. */
-export const coveringRevisionGone = /^(refused|withdrawn|stale|failed|superseded)$/;
-/** GY-1701. True when a covering-adopt watch's judgement left the open ask unanswered (clear the watch and request the widening again). */
-export function coveringAdoptLeftAskOpen(watch: Pick<ApprovalWatch, 'scope' | 'coveringAdopt'>, item: Work, judged: { state: string; approvedAt?: string | null; refusal?: { at?: string } | null }, clock: number): boolean {
-  return !!watch.coveringAdopt && !!watch.scope && coveringRevisionGone.test(judged.state) && scopeOutcomeAnswered(item, watch.scope, judged, clock) !== 'answered';
-}
-/**
  * A headless approver run lost to something outside the loop (GY-453: killed, recording no exit)
  * judged nothing, so its launch is given back — but only this many times per decision. Past it, a
  * lost run spends its launch like any other ended session, so a decision whose approver keeps
@@ -770,9 +745,12 @@ export function approvalStep(watch: ApprovalWatch, decision: { id?: string; acti
   if (decision === undefined) return { step: 'wait', detail: `The decision history of ${watch.work} could not be read; ${label} is looked at again next cycle` };
   if (decision === null) return { step: 'rerequest', detail: `The control plane no longer holds ${label}` };
   if (decision.state === 'applied') return { step: 'settled', detail: `The approver applied ${label}` };
-  // GY-1687: a held decision is approved; the control plane applies it in the transaction that ends the item's attempt, so no
-  // session is waited on or relaunched for it and nothing is requested in its place.
-  if (decision.state === 'held') return { step: 'settled', detail: `${label} is approved and held (${decision.outcome ?? 'the item holds a live attempt'}); the control plane applies it when the attempt ends` };
+  // GY-1687: held is approved; the control plane applies it when the attempt ends. GY-1701: a covering adopt stays watched
+  // while held so status does not advertise `master scope` and the ask waits for that apply (not a settled foreign watch).
+  if (decision.state === 'held') {
+    if (watch.coveringAdopt) return { step: 'wait', detail: `${label} is approved and held (${decision.outcome ?? 'the item holds a live attempt'}); the covering ask waits until the control plane applies it` };
+    return { step: 'settled', detail: `${label} is approved and held (${decision.outcome ?? 'the item holds a live attempt'}); the control plane applies it when the attempt ends` };
+  }
   // A refusal is the approver's considered judgement (GY-141), not a session to replace or a request to repeat: the server refuses the same request unchanged, and answering it is the master's.
   if (decision.state === 'refused') return { step: 'refused', detail: `${label} was refused by ${decision.refusal?.approver ?? 'its approver'}: ${decision.refusal?.reason ?? decision.outcome ?? 'no reason recorded'}` };
   // An approved decision is already judged (GY-1300): no approver session is waited on, relaunched or spent for it. A session
