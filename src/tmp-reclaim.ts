@@ -15,7 +15,7 @@
 // owner marker naming the process that made it, which is what makes "whose owning process is
 // gone" checkable rather than guessed from a modification time.
 
-import { existsSync, readFileSync, type Dirent } from 'node:fs';
+import { existsSync, readFileSync, type Dirent, type Stats } from 'node:fs';
 import { lstat, opendir, readdir, readFile, readlink, realpath, rm, stat, statfs, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
@@ -54,8 +54,14 @@ export const agentRuntimeScratchRoots: readonly string[] = ['opencode'];
  * checkout at the top of a root, whatever its name, or an agent scratch name) or an entry inside a
  * runtime's scratch root.
  */
-export type TmpReclaimClass = 'testTemp' | 'tsxCache' | 'agentWorktree' | 'runtimeScratch';
-export const tmpReclaimClassNames: Record<TmpReclaimClass, string> = { testTemp: 'test temp', tsxCache: 'tsx cache', agentWorktree: 'agent worktree', runtimeScratch: 'runtime scratch' };
+export type TmpReclaimClass = 'testTemp' | 'tsxCache' | 'agentWorktree' | 'runtimeScratch' | 'packageStore' | 'compileCache';
+export const tmpReclaimClassNames: Record<TmpReclaimClass, string> = { testTemp: 'test temp', tsxCache: 'tsx cache', agentWorktree: 'agent worktree', runtimeScratch: 'runtime scratch', packageStore: 'pnpm store', compileCache: 'compile cache' };
+/**
+ * The classes every pass's record counts, even at 0 (GY-1655). The retention classes GY-1683 added
+ * (`packageStore`, `compileCache`) appear in a record once they take an entry, so a record written
+ * before them, and a reader of the four base counts, reads as it did.
+ */
+export const tmpReclaimBaseClasses: readonly TmpReclaimClass[] = ['testTemp', 'tsxCache', 'agentWorktree', 'runtimeScratch'];
 /**
  * How long an agent scratch entry must have gone unwritten before the pass removes it: a session
  * can leave its checkout idle for hours between commands, where a test run's temp lives minutes.
@@ -63,6 +69,32 @@ export const tmpReclaimClassNames: Record<TmpReclaimClass, string> = { testTemp:
  * gitdir's too, so a checkout an agent still edits or commits in is never stale.
  */
 export const agentScratchMinAgeMs = 24 * 3_600_000;
+/**
+ * The most entries a runtime scratch root keeps while a scanned root's volume is below its inode
+ * headroom (GY-1683): its most recently written ones, by their whole trees. On 10 October 2026 five
+ * long-lived opencode sessions kept ~18 full pnpm-workspace worktrees (~28,000 inodes each) warm
+ * inside the agent scratch bound under /tmp/opencode — 498,925 entries, 56% of /tmp's used inodes —
+ * so the pass, honouring that bound, removed 0 entries for 17 passes while the bound stood. Below
+ * headroom the oldest entries past the cap go whatever their age; above it the bound alone decides.
+ */
+export const runtimeScratchCapEntries = 12;
+/**
+ * The pnpm per-drive stores a scanned root may hold, by name under it (GY-1683): an install into a
+ * checkout under /tmp drags pnpm's store onto the same tmpfs (`/tmp/.pnpm-store`, 52,699 inodes on
+ * 10 October 2026, unwritten for two weeks). The pass ages this user's regular files under a store
+ * on the root's own volume one by one, by `packageStoreMinAgeMs`: pnpm's hardlinks keep installed
+ * node_modules whole, and the store refills on demand. Its directories are never removed.
+ */
+export const packageStoreNames: readonly string[] = ['.pnpm-store'];
+/** How long a package store file must have gone unwritten before the pass removes it. */
+export const packageStoreMinAgeMs = 7 * 24 * 3_600_000;
+/**
+ * Node's module compile cache under a scanned root (GY-1683): one directory per Node version under
+ * `node-compile-cache` (5,749 entries on 10 October 2026). A version directory whose newest write
+ * is older than the pass's cache age bound goes whole; one written inside it, a version in use, stays,
+ * as does the cache root itself.
+ */
+export const compileCacheName = 'node-compile-cache';
 /** The most directories one pass removes, and the most wall-clock time it spends removing: reclaim is bounded per cycle, whatever the backlog. */
 export const tmpReclaimLimitPerCycle = 100, tmpReclaimWorkMsPerCycle = 150;
 /**
@@ -223,6 +255,70 @@ async function treeLastWritten(path: string, own: number): Promise<number> {
   return newest;
 }
 /**
+ * The mount points this process's mount table lists (`/proc/self/mountinfo`, field 5, its octal
+ * escapes decoded), or null when the table cannot be read on Linux. A bind mount whose source is
+ * on the scanned volume keeps the volume's device number, so a device comparison alone cannot see
+ * it (Codex review of 519dc64fff); the table names the mount point itself. Off Linux there is no
+ * table to consult and the device check stands alone.
+ */
+export async function mountPoints(table = '/proc/self/mountinfo'): Promise<readonly string[] | null> {
+  if (process.platform !== 'linux') return [];
+  let text: string;
+  try { text = await readFile(table, 'utf8'); } catch { return null; }
+  const points: string[] = [];
+  for (const line of text.split('\n')) {
+    const point = line.split(' ')[4];
+    if (point) points.push(point.replace(/\\(\d{3})/g, (_, code: string) => String.fromCharCode(parseInt(code, 8))));
+  }
+  return points;
+}
+/** The mount points at or under `real`, rebased onto `path` (the same directory as a scan names it), or null when the table cannot be read. */
+async function mountsUnder(path: string, real: string, mounts?: readonly string[] | null): Promise<Set<string> | null> {
+  const points = mounts === undefined ? await mountPoints() : mounts;
+  if (points === null) return null;
+  return new Set(points.filter(point => point === real || point.startsWith(`${real}/`)).map(point => path + point.slice(real.length)));
+}
+/**
+ * Whether everything under `path` — every directory, file, link and socket in its tree, following
+ * no symlink — is on `device` and nothing in the tree, `path` included, is a mount point. A
+ * whole-tree removal unlinks whatever a path reaches, and a filesystem mounted anywhere inside a
+ * candidate is another volume's inodes, so a sweep that promises the scanned volume alone removes
+ * a tree whole only once this has read it to the end (review of 9c6cbd0fd7, GY-1683). A mount that
+ * is a single file is on another device too, which is why every entry is judged, not only the
+ * directories the walk would enter. A bind mount from the scanned volume itself reports the same
+ * device, so the process's mount table is read as well, and the walk fails closed: a tree whose
+ * mount table, path, directory or entry cannot be read is not known to be on the device and stays
+ * (Codex review of 519dc64fff). `mounts` is the mount table already read, when a caller has it.
+ */
+export async function treeOnDevice(path: string, device: number, mounts?: readonly string[] | null): Promise<boolean> {
+  let own: Stats;
+  try { own = await lstat(path); } catch { return false; }
+  if (own.dev !== device) return false;
+  // A symlink goes as the link alone, never its target, so the target's mounts are not its concern.
+  if (own.isSymbolicLink()) return true;
+  let real: string;
+  try { real = await realpath(path); } catch { return false; }
+  const mounted = await mountsUnder(path, real, mounts);
+  if (mounted === null || mounted.size) return false;
+  if (!own.isDirectory()) return true;
+  const stack = [path];
+  while (stack.length) {
+    const directory = stack.pop()!;
+    let entries: Dirent[];
+    try { entries = await readdir(directory, { withFileTypes: true }); } catch { return false; }
+    for (const entry of entries) {
+      const child = join(directory, entry.name);
+      let info: Stats;
+      try { info = await lstat(child); } catch { return false; }
+      if (info.dev !== device) return false;
+      if (info.isDirectory()) stack.push(child);
+    }
+  }
+  return true;
+}
+/** The device of a scanned root, through a symlinked root to the directory it names, or undefined when it cannot be read. */
+const rootDevice = async (root: string) => (await stat(root).catch(() => null))?.dev;
+/**
  * The repository's registration of a linked git worktree at `path` — `.git/worktrees/<name>`, whose
  * `gitdir` file names this checkout back — or null. Removing the checkout alone leaves it registered,
  * and `git worktree add` at the same path then fails as already registered; git's own prune deletes
@@ -290,8 +386,8 @@ export interface TmpReclaimReport {
   /** What the pass removed, oldest first, and the bytes that came back with them. */
   removed: { path: string; bytes: number }[];
   bytes: number;
-  /** How many of `removed` each class took (GY-1655); absent from a report of a pass that never ran. */
-  classes?: Record<TmpReclaimClass, number>;
+  /** How many of `removed` each class took (GY-1655): the base classes always, a retention class once it took one; absent from a report of a pass that never ran. */
+  classes?: Partial<Record<TmpReclaimClass, number>>;
   /** Directories kept: a live owner, an open holder, or past the per-pass bound. */
   kept: number;
   errors: string[];
@@ -334,8 +430,12 @@ export interface TmpReclaimOptions {
   escalation?: readonly { limit: number; cacheAgeMs: number; workMs: number }[];
   /** The runtime scratch roots whose entries the default pass ages one by one; `agentRuntimeScratchRoots` by default. */
   runtimeScratchRoots?: readonly string[];
+  /** The most entries a runtime scratch root keeps while a scanned root is below its inode headroom (GY-1683); `runtimeScratchCapEntries` by default. */
+  runtimeScratchCap?: number;
   /** The live-holder set, when the caller has one; a fresh /proc scan runs when omitted. */
   held?: Set<string>;
+  /** The mount table (`mountPoints`), when the caller has one: null for a table that could not be read; this process's own is read when omitted. */
+  mounts?: readonly string[] | null;
   /** Entries an earlier pass failed to finish removing, retried ahead of their age bound (this process's own set by default), and how long one removal retries. */
   unfinished?: Set<string>; retryMs?: number;
   /** Linked worktrees' registrations whose removal has not yet succeeded, keyed by registration, naming its checkout: retried by each pass once that checkout is gone (this process's own map by default). */
@@ -365,7 +465,7 @@ const tsxCachePattern = /^tsx-\d+$/;
 export async function reclaimTmpDirectories(options: TmpReclaimOptions = {}): Promise<TmpReclaimReport> {
   const now = options.now ?? Date.now();
   const roots = await distinctRoots(options.tmpRoots ?? [options.tmpRoot ?? tmpdir()]);
-  const report: TmpReclaimReport = { at: new Date(now).toISOString(), roots: roots.map(root => root.path), scanned: 0, removed: [], bytes: 0, classes: { testTemp: 0, tsxCache: 0, agentWorktree: 0, runtimeScratch: 0 }, kept: 0, errors: [] };
+  const report: TmpReclaimReport = { at: new Date(now).toISOString(), roots: roots.map(root => root.path), scanned: 0, removed: [], bytes: 0, classes: Object.fromEntries(tmpReclaimBaseClasses.map(kind => [kind, 0])), kept: 0, errors: [] };
   const minAge = options.prefixes
     ? (name: string) => options.prefixes!.some(prefix => name.startsWith(prefix)) ? options.maxAgeMs ?? tmpReclaimMinAgeMs : null
     : (name: string) => { const age = defaultMinAge(name); return age === null ? null : options.maxAgeMs ?? age; };
@@ -378,7 +478,9 @@ export async function reclaimTmpDirectories(options: TmpReclaimOptions = {}): Pr
   // Only the default pass recognises agent scratch by what it is (GY-1655): a caller's own prefixes are all it asked for.
   const agentAge = options.prefixes ? null : options.maxAgeMs ?? agentScratchMinAgeMs;
   const runtimeRoots = options.prefixes ? [] : options.runtimeScratchRoots ?? agentRuntimeScratchRoots;
-  const pass: PassState = { now, minAge, cacheAge, agentAge, runtimeRoots, limit: options.limit ?? tmpReclaimLimitPerCycle, uid: process.getuid?.(), held: options.held ?? null,
+  // The store and compile cache sweeps are the default pass's too (GY-1683): a caller's own prefixes never reach them.
+  const storeAge = options.prefixes ? null : options.maxAgeMs ?? packageStoreMinAgeMs;
+  const pass: PassState = { now, minAge, cacheAge, agentAge, storeAge, runtimeRoots, cap: null, written: new Map(), limit: options.limit ?? tmpReclaimLimitPerCycle, uid: process.getuid?.(), held: options.held ?? null, mounts: options.mounts,
     workMs: options.workMs ?? Number.POSITIVE_INFINITY, started: null, unfinished: options.unfinished ?? unfinishedRemovals, retryMs: options.retryMs ?? tmpReclaimRetryMs,
     registrations: options.registrations ?? unfinishedRegistrations };
   for (const path of pass.unfinished) if (!existsSync(path)) pass.unfinished.delete(path);
@@ -394,6 +496,8 @@ export async function reclaimTmpDirectories(options: TmpReclaimOptions = {}): Pr
     for (const { path, real } of scanned) {
       await reclaimRoot(path, real, pass, report);
       await reclaimTsxCaches(path, real, pass, report);
+      await reclaimPackageStores(path, real, pass, report);
+      await reclaimCompileCaches(path, real, pass, report);
       await reclaimRuntimeScratch(path, real, pass, report);
     }
   };
@@ -418,7 +522,9 @@ export async function reclaimTmpDirectories(options: TmpReclaimOptions = {}): Pr
     const before = report.removed.length;
     // A step's bounds are the whole pass's, base sweep included: 20,000 per cycle means 20,000, not
     // 20,000 more, and 30 s of removing is counted from the pass's first removal, not the step's.
-    Object.assign(pass, { limit: Math.max(before, step.limit), cacheAge: Math.min(cacheAge ?? step.cacheAgeMs, step.cacheAgeMs), workMs: step.workMs });
+    // Below headroom each runtime scratch root is also capped to its newest entries (GY-1683): the
+    // base sweep, and every pass above headroom, keeps the agent scratch bound alone.
+    Object.assign(pass, { limit: Math.max(before, step.limit), cacheAge: Math.min(cacheAge ?? step.cacheAgeMs, step.cacheAgeMs), workMs: step.workMs, cap: options.runtimeScratchCap ?? runtimeScratchCapEntries });
     report.scanned = 0; report.kept = 0;
     await sweep(lowRoots);
     (report.escalated ??= []).push({ limit: step.limit, cacheAgeMs: pass.cacheAge!, removed: report.removed.length - before });
@@ -514,12 +620,13 @@ export async function tmpCensus(roots: string | readonly string[], bound = tmpCo
     .map(family => ({ path: family.members === 1 ? family.first : `${join(family.root, family.stem)}* (${family.members} top-level)`, entries: family.entries, owner: owner(family.uid), ...(family.capped ? { capped: true } : {}) })) };
 }
 
-interface PassState { now: number; minAge: (name: string) => number | null; cacheAge: number | null; agentAge: number | null; runtimeRoots: readonly string[]; limit: number; uid: number | undefined; held: Set<string> | null; workMs: number; started: number | null; unfinished: Set<string>; retryMs: number; registrations: Map<string, string> }
+/** `cap`: the runtime scratch cap of the sweep under way, set only below headroom; `written`: each runtime scratch entry's tree write time, read once per pass. */
+interface PassState { now: number; minAge: (name: string) => number | null; cacheAge: number | null; agentAge: number | null; storeAge: number | null; runtimeRoots: readonly string[]; cap: number | null; written: Map<string, number>; limit: number; uid: number | undefined; held: Set<string> | null; mounts: readonly string[] | null | undefined; workMs: number; started: number | null; unfinished: Set<string>; retryMs: number; registrations: Map<string, string> }
 /** Record one removal of `kind` in `report`. */
 function took(report: TmpReclaimReport, kind: TmpReclaimClass, path: string, bytes: number) {
   report.removed.push({ path, bytes });
   report.bytes += bytes;
-  if (report.classes) report.classes[kind]++;
+  if (report.classes) report.classes[kind] = (report.classes[kind] ?? 0) + 1;
 }
 /** Remove `path` recursively, retrying while its tree refills or is still being released, for at most `retryMs`. */
 async function removeTree(path: string, retryMs: number) {
@@ -628,14 +735,25 @@ async function reclaimRoot(root: string, real: string, pass: PassState, report: 
 
 /** The name of this user's tsx compile cache directory in a temporary directory, or null where there are no uids. */
 export const tsxCacheName = (uid = process.getuid?.()) => uid === undefined ? null : `tsx-${uid}`;
-/** The regular files under `directory`, recursively, following no symlink: what a cache sweep may take. */
-async function cacheFiles(directory: string): Promise<string[]> {
+/**
+ * The regular files under `directory`, recursively, following no symlink and never leaving
+ * `device`: a directory mounted inside the walk is another filesystem's inodes, so a sweep that
+ * promises the scanned volume alone stops at its boundary. What a cache or store sweep may take,
+ * each still judged by `agedFileSweepable` on its own stats: a regular file bind-mounted into the
+ * walk is on another device too, and no directory check sees it.
+ */
+async function cacheFiles(directory: string, device: number, mounted: ReadonlySet<string>): Promise<string[]> {
   const files: string[] = [];
   const entries = await readdir(directory, { withFileTypes: true }).catch(() => [] as Dirent[]);
   for (const entry of entries) {
     const path = join(directory, entry.name);
+    // A mount point is another filesystem's, whatever device it reports: a bind mount from this volume keeps its number (Codex review of 519dc64fff).
+    if (mounted.has(path)) continue;
     if (entry.isFile()) files.push(path);
-    else if (entry.isDirectory()) files.push(...await cacheFiles(path));
+    else if (entry.isDirectory()) {
+      const info = await lstat(path).catch(() => null);
+      if (info?.dev === device) files.push(...await cacheFiles(path, device, mounted));
+    }
   }
   return files;
 }
@@ -650,24 +768,64 @@ async function cacheFiles(directory: string): Promise<string[]> {
  * sockets live tsx processes listen on are never removed, nor a file a live process holds open.
  */
 async function reclaimTsxCaches(root: string, real: string, pass: PassState, report: TmpReclaimReport) {
-  const limit = pass.limit - report.removed.length, maxAgeMs = pass.cacheAge;
-  if (maxAgeMs === null || limit <= 0) return;
+  if (pass.cacheAge === null) return;
   const names = (await readdir(root).catch(() => [] as string[])).filter(name => tsxCachePattern.test(name)).sort();
+  await reclaimAgedFiles(root, real, names, pass.cacheAge, 'tsxCache', pass, report);
+}
+/**
+ * One root's pnpm per-drive stores, aged file by file (GY-1683), as the tsx caches are: this user's
+ * regular files under each `packageStoreNames` directory this user owns on the root's own volume —
+ * a store mounted under the root is another filesystem's inodes, not this one's — older than the
+ * store age bound, oldest first, within what the pass's entry and work bounds have left, never one a
+ * live process holds open. The store's directories are never removed: pnpm refills them on demand.
+ */
+async function reclaimPackageStores(root: string, real: string, pass: PassState, report: TmpReclaimReport) {
+  if (pass.storeAge === null) return;
+  const device = await rootDevice(root), stores: string[] = [];
+  for (const name of packageStoreNames) {
+    const own = await lstat(join(root, name)).catch(() => null);
+    if (own?.isDirectory() && own.dev === device) stores.push(name);
+  }
+  await reclaimAgedFiles(root, real, stores, pass.storeAge, 'packageStore', pass, report);
+}
+/**
+ * This user's regular files under each of `names` (directories directly under `root`) that this
+ * user owns, older than `maxAgeMs`, oldest first, within what the pass's entry and work bounds have
+ * left; a file a live process holds open, a socket, a directory, the named directory itself and
+ * anything on another device — a filesystem mounted inside it, directory or single file — are never
+ * removed. The tsx cache and package store sweeps are this rule with their own bounds.
+ */
+/**
+ * Whether one entry an aged-file walk found may go: this user's regular file, on the swept
+ * directory's own device, older than `maxAgeMs`. The device is checked file by file, not only
+ * directory by directory (review of 966e92569881): a regular file bind-mounted into an otherwise
+ * same-volume store or cache is another filesystem's inode, and the walk's directory check never
+ * sees a mount that is a file.
+ */
+export const agedFileSweepable = (info: Pick<Stats, 'isFile' | 'dev' | 'uid' | 'mtimeMs'>, own: Pick<Stats, 'dev'>, uid: number | undefined, now: number, maxAgeMs: number) =>
+  info.isFile() && info.dev === own.dev && (uid === undefined || info.uid === uid) && now - info.mtimeMs >= maxAgeMs;
+async function reclaimAgedFiles(root: string, real: string, names: readonly string[], maxAgeMs: number, kind: TmpReclaimClass, pass: PassState, report: TmpReclaimReport) {
+  const limit = pass.limit - report.removed.length;
+  if (limit <= 0 || !names.length) return;
   const old: { path: string; mtime: number; bytes: number }[] = [];
   for (const name of names) {
     const own = await lstat(join(root, name)).catch(() => null);
     if (!own?.isDirectory() || (pass.uid !== undefined && own.uid !== pass.uid)) continue;
-    for (const path of await cacheFiles(join(root, name))) {
+    // A mount inside the directory is never entered and a mounted file never unlinked; a mount table that cannot be read keeps the directory whole this pass.
+    const mounted = await mountsUnder(join(root, name), join(real, name), pass.mounts);
+    if (mounted === null) { report.errors.push(`${join(root, name)}: the mount table could not be read, so no file of it was aged this pass`); continue; }
+    if (mounted.has(join(root, name))) continue;
+    for (const path of await cacheFiles(join(root, name), own.dev, mounted)) {
       let info;
       try { info = await lstat(path); } catch { continue; }
-      if (!info.isFile() || (pass.uid !== undefined && info.uid !== pass.uid) || pass.now - info.mtimeMs < maxAgeMs) continue;
+      if (!agedFileSweepable(info, own, pass.uid, pass.now, maxAgeMs)) continue;
       old.push({ path, mtime: info.mtimeMs, bytes: info.size });
     }
   }
   if (!old.length) return;
   const held = pass.held ??= await heldOpenPaths();
   // /proc names a holder by its resolved path, so a root reached through a symlink is matched by its realpath.
-  const removable = old.filter(file => !held.has(join(real, file.path.slice(root.length + 1)))).sort((first, second) => first.mtime - second.mtime);
+  const removable = old.filter(file => !held.has(join(real, file.path.slice(root.length + 1))) && !held.has(file.path)).sort((first, second) => first.mtime - second.mtime);
   report.kept += Math.max(0, removable.length - limit);
   for (const { path, bytes } of removable.slice(0, limit)) {
     const at = Date.now();
@@ -675,8 +833,58 @@ async function reclaimTsxCaches(root: string, real: string, pass: PassState, rep
     if (at > pass.started + pass.workMs) break;
     try {
       await rm(path, { force: true });
-      took(report, 'tsxCache', path, bytes);
+      took(report, kind, path, bytes);
     } catch (error) { report.errors.push(`${path}: ${error instanceof Error ? error.message : String(error)}`); }
+  }
+}
+/**
+ * One root's node compile cache, aged version by version (GY-1683): each directory directly under
+ * `<root>/node-compile-cache` that this user owns — Node keeps one per version — whose newest write
+ * anywhere in its tree is older than the pass's cache age bound, and that no live process holds or
+ * names, goes whole, oldest first, within what the pass's entry and work bounds have left. A version
+ * written inside the bound is in use and stays; the cache root is never removed. The cache, each
+ * version and everything under it must be on the scanned root's own volume: a filesystem mounted
+ * there is not this root's inodes and is never entered. A removal that fails partway (the version
+ * refilled while it went, or a file in it could not be unlinked) is recorded as unfinished and is
+ * due at once on the next pass, whatever the mtime the half-finished removal left on it.
+ */
+async function reclaimCompileCaches(root: string, real: string, pass: PassState, report: TmpReclaimReport) {
+  const maxAgeMs = pass.cacheAge, limit = pass.limit - report.removed.length;
+  if (maxAgeMs === null || limit <= 0) return;
+  const cache = join(root, compileCacheName), own = await lstat(cache).catch(() => null), device = await rootDevice(root);
+  if (device === undefined || !own?.isDirectory() || own.dev !== device || (pass.uid !== undefined && own.uid !== pass.uid)) return;
+  const stale: { path: string; mtime: number }[] = [];
+  let held: Set<string> | null = null;
+  for (const entry of await readdir(cache, { withFileTypes: true }).catch(() => [] as Dirent[])) {
+    if (!entry.isDirectory()) continue;
+    const path = join(cache, entry.name);
+    let info;
+    try { info = await lstat(path); } catch { continue; }
+    // Another user's version is theirs; one on another device is another volume's.
+    if ((pass.uid !== undefined && info.uid !== pass.uid) || info.dev !== device) continue;
+    report.scanned++;
+    // A version's own mtime is its newest file's creation; a cache file rewritten in place moves only its own, so the tree decides.
+    // One an earlier pass began removing is due at once: its half-finished removal is what made it look young.
+    const written = pass.unfinished.has(path) ? 0 : pass.now - info.mtimeMs < maxAgeMs ? info.mtimeMs : await treeLastWritten(path, info.mtimeMs);
+    if (pass.now - written < maxAgeMs) { report.kept++; continue; }
+    if (!held) { const all = pass.held ??= await heldOpenPaths(); held = new Set([...heldEntries(join(real, compileCacheName), all), ...(root === real ? [] : heldEntries(cache, all))]); }
+    if (held.has(join(real, compileCacheName, entry.name)) || held.has(path)) { report.kept++; continue; }
+    stale.push({ path, mtime: written });
+  }
+  stale.sort((first, second) => first.mtime - second.mtime);
+  report.kept += Math.max(0, stale.length - limit);
+  for (const { path } of stale.slice(0, limit)) {
+    const at = Date.now();
+    pass.started ??= at;
+    if (at > pass.started + pass.workMs) break;
+    // A version a mount reaches into is read to the end before it goes whole: one it does stays, counted as kept.
+    if (!await treeOnDevice(path, device, pass.mounts)) { report.kept++; continue; }
+    try {
+      const bytes = await sizeOf(path);
+      await removeTree(path, pass.retryMs);
+      pass.unfinished.delete(path);
+      took(report, 'compileCache', path, bytes);
+    } catch (error) { pass.unfinished.add(path); report.errors.push(`${path}: ${error instanceof Error ? error.message : String(error)}`); }
   }
 }
 
@@ -685,45 +893,74 @@ async function reclaimTsxCaches(root: string, real: string, pass: PassState, rep
  * `<root>/<runtime root>` that this user owns, whose newest write in its tree is older than the
  * agent scratch bound and that no live process holds or names, oldest first, within what the pass's
  * entry and work bounds have left. The runtime root itself is never removed: a live session writes
- * its next packet there.
+ * its next packet there. Below headroom (`pass.cap` set, GY-1683) the root is also capped: this
+ * user's entries are ranked by their newest tree write, the cap's newest are kept, and the rest are
+ * due whatever their age — still never one a live process holds or names, which is kept and counted.
+ * Every due entry is ranked before the pass's entry bound applies: the bound takes the oldest of
+ * them all, never the first in directory order, and counts the rest as kept for the next pass.
+ * The runtime root, each entry and everything under it must be on the scanned root's own volume: a
+ * filesystem mounted there is not this root's inodes, is never ranked against the cap and never goes.
  */
 async function reclaimRuntimeScratch(root: string, real: string, pass: PassState, report: TmpReclaimReport) {
   const maxAgeMs = pass.agentAge;
   if (maxAgeMs === null) return;
+  const device = await rootDevice(root);
+  if (device === undefined) return;
   for (const name of pass.runtimeRoots) {
     const limit = pass.limit - report.removed.length;
     if (limit <= 0) return;
     const scratch = join(root, name), own = await lstat(scratch).catch(() => null);
-    if (!own?.isDirectory() || (pass.uid !== undefined && own.uid !== pass.uid)) continue;
-    const dirents = await readdir(scratch, { withFileTypes: true }).catch(() => [] as Dirent[]);
-    const old: { path: string; mtime: number }[] = [];
-    let held: Set<string> | null = null;
-    for (const entry of dirents) {
-      if (old.length >= limit) { report.kept++; continue; }
+    if (!own?.isDirectory() || own.dev !== device || (pass.uid !== undefined && own.uid !== pass.uid)) continue;
+    const entries: { path: string; mtime: number; directory: boolean }[] = [];
+    for (const entry of await readdir(scratch, { withFileTypes: true }).catch(() => [] as Dirent[])) {
       if (!entry.isDirectory() && !entry.isFile()) continue;
       const path = join(scratch, entry.name);
       let info;
       try { info = await lstat(path); } catch { continue; }
-      if (pass.uid !== undefined && info.uid !== pass.uid) continue;
+      // Another user's entry is theirs; one on another device is another volume's, and neither counts against the cap.
+      if ((pass.uid !== undefined && info.uid !== pass.uid) || info.dev !== device) continue;
+      entries.push({ path, mtime: info.mtimeMs, directory: entry.isDirectory() });
+    }
+    // An entry an earlier pass began removing is due at once: its half-finished removal is what made it look young.
+    const written = async (entry: (typeof entries)[number]) => {
+      if (pass.unfinished.has(entry.path)) return 0;
+      if (!entry.directory) return entry.mtime;
+      let time = pass.written.get(entry.path);
+      if (time === undefined) pass.written.set(entry.path, time = await treeLastWritten(entry.path, entry.mtime));
+      return time;
+    };
+    // The cap ranks every entry by its tree, read once per pass: a worktree edited deep inside has an old top-level mtime and is among the newest.
+    const due = new Set<string>();
+    if (pass.cap !== null) {
+      const ranked = await Promise.all(entries.map(async entry => ({ path: entry.path, written: await written(entry) })));
+      for (const entry of ranked.sort((first, second) => second.written - first.written).slice(pass.cap)) due.add(entry.path);
+    }
+    const old: { path: string; mtime: number }[] = [];
+    let held: Set<string> | null = null;
+    for (const entry of entries) {
+      const { path } = entry;
       report.scanned++;
-      // An entry an earlier pass began removing is due at once: its half-finished removal is what made it look young.
-      const unfinished = pass.unfinished.has(path);
-      if (!unfinished && pass.now - info.mtimeMs < maxAgeMs) { report.kept++; continue; }
+      const capped = due.has(path);
+      // A young top-level mtime keeps an entry on one stat, unless the cap or an unfinished removal makes it due.
+      if (!capped && !pass.unfinished.has(path) && pass.now - entry.mtime < maxAgeMs) { report.kept++; continue; }
       if (!held) { const all = pass.held ??= await heldOpenPaths(); held = new Set([...heldEntries(join(real, name), all), ...(root === real ? [] : heldEntries(scratch, all))]); }
-      if (held.has(join(real, name, entry.name)) || held.has(path)) { report.kept++; continue; }
-      const written = unfinished ? 0 : entry.isDirectory() ? await treeLastWritten(path, info.mtimeMs) : info.mtimeMs;
-      if (pass.now - written < maxAgeMs) { report.kept++; continue; }
-      old.push({ path, mtime: written });
+      if (held.has(join(real, name, path.slice(scratch.length + 1))) || held.has(path)) { report.kept++; continue; }
+      const time = await written(entry);
+      if (!capped && pass.now - time < maxAgeMs) { report.kept++; continue; }
+      old.push({ path, mtime: time });
     }
     old.sort((first, second) => first.mtime - second.mtime);
-    for (const { path } of old) {
+    report.kept += Math.max(0, old.length - limit);
+    for (const { path } of old.slice(0, limit)) {
       const at = Date.now();
       pass.started ??= at;
       if (at > pass.started + pass.workMs) { report.kept++; continue; }
+      // An entry a mount reaches into is read to the end before it goes whole: one it does stays, counted as kept.
+      if (!await treeOnDevice(path, device, pass.mounts)) { report.kept++; continue; }
       try {
         const bytes = await sizeOf(path);
         await removeTree(path, pass.retryMs);
-        pass.unfinished.delete(path);
+        pass.unfinished.delete(path); pass.written.delete(path);
         took(report, 'runtimeScratch', path, bytes);
       } catch (error) { pass.unfinished.add(path); report.errors.push(`${path}: ${error instanceof Error ? error.message : String(error)}`); }
     }

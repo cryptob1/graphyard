@@ -93,6 +93,9 @@ const REQUIRED_STATEMENTS: [string, RegExp][] = [
   // GY-1607 AC-4: the deployment page says CI and release-candidate runners pull Docker Hub images through the mirror.
   ['docs/deployment.md', /CI and release-candidate runners pull Docker Hub images through the `mirror\.gcr\.io` mirror/],
   ['docs/recovery.md', /## Coordinator recovery\n\nSelf-merge stalled the loop, or main-watch froze: `graphyard master recover \[--to SHA\] --admin-token-stdin` repins, restarts; verified promotions repin\./],
+  // GY-1686 AC-3: both master-agent pages name master browser capture as the remedy for a criterion needing a live Confirm-access fixture, never a human.
+  ['docs/master-agent.md', /Live Confirm-access fixtures: \[`master browser capture`\]\(master-agent-reference\.md#github-administration-through-the-browser\), never a human/],
+  ['docs/master-agent-reference.md', /a criterion needing a live one runs `master browser capture \[--dry-run\]` on the sudo-protected App permissions page, submitting nothing, never a human/],
 ];
 
 test('unit:docs-word-budget — the pages graphyard.json budgets (README.md and every docs page) keep every page within its per-page budget and 200 words under it, counted as wc -w counts them; a total within 3% of the budget fails a change that adds to it and warns otherwise', () => {

@@ -78,7 +78,10 @@ recorded with agent-browser's own error) and reports the two-digit code in
 \`master status\`; approving that prompt on their device, and the three human-only
 decisions above, are the only
 operator interactions left. Never store, export, or reuse the profile's cookies
-outside those flows.
+outside those flows. A worker criterion that needs a fixture of GitHub's live
+Confirm-access page gets it from \`graphyard master browser capture\`, which keeps
+that page's views as redacted markup (listed by \`graphyard master browser fixtures\`)
+and submits nothing; never request that recording from a human.
 
 Keep cycling: status, dispatch ready work, shepherd review, reconcile what GitHub
 merged, then deployment verification. Repeat until both conditions hold:
