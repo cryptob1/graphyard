@@ -25,17 +25,21 @@ export const herdrSocketPathBytes = 107;
 export const herdrSocketPath = (instance: HerdrInstance) => join(instance.configHome, 'herdr', 'sessions', instance.session, 'herdr-client.sock');
 /**
  * The instance an install whose default Herdr serves another install creates: ~/.config/graphyard/INSTALL/herdr,
- * session graphyard-INSTALL, or the first of gy-HASH and gy whose socket path fits the byte limit.
- * A config home under which even `gy` does not fit is refused by name: a session Herdr cannot bind is no instance.
+ * session graphyard-INSTALL. The first spelling whose socket path fits the byte limit is the one: the
+ * session shortens to gy-HASH, then gy; then the config home moves to ~/.config/graphyard/gy-HASH/herdr
+ * (a long install id leaves no room beside its own directory) with those two names again. A home under
+ * which even that does not fit is refused by name: a session Herdr cannot bind is no instance.
  */
 export function installHerdrInstance(installId: string, home: string = homedir()): HerdrInstance {
   const id = installId.toLowerCase().replace(/[^a-z0-9._-]/g, '-').replace(/^[^a-z0-9]+/, '');
-  const configHome = join(home, '.config', 'graphyard', id, 'herdr');
-  const bytes = (session: string) => Buffer.byteLength(herdrSocketPath({ configHome, session }), 'utf8');
-  const hash = createHash('sha256').update(id).digest('hex').slice(0, 6);
-  const session = [`graphyard-${id}`.slice(0, 64), `gy-${hash}`, 'gy'].find(candidate => bytes(candidate) <= herdrSocketPathBytes);
-  if (!session) throw new Error(`No Herdr session name fits this install's socket path: ${herdrSocketPath({ configHome, session: 'gy' })} is ${bytes('gy')} bytes and a Unix socket path holds ${herdrSocketPathBytes}; install from a home directory with a shorter path`);
-  return { configHome, session };
+  const hash = `gy-${createHash('sha256').update(id).digest('hex').slice(0, 6)}`;
+  const named = join(home, '.config', 'graphyard', id, 'herdr'), hashed = join(home, '.config', 'graphyard', hash, 'herdr');
+  const candidates: HerdrInstance[] = [`graphyard-${id}`.slice(0, 64), hash, 'gy'].map(session => ({ configHome: named, session })).concat([hash, 'gy'].map(session => ({ configHome: hashed, session })));
+  const bytes = (instance: HerdrInstance) => Buffer.byteLength(herdrSocketPath(instance), 'utf8');
+  const fits = candidates.find(instance => bytes(instance) <= herdrSocketPathBytes);
+  if (fits) return fits;
+  const shortest = candidates[candidates.length - 1];
+  throw new Error(`No Herdr instance fits this install's socket path: ${herdrSocketPath(shortest)} is ${bytes(shortest)} bytes and a Unix socket path holds ${herdrSocketPathBytes}; install from a home directory with a shorter path`);
 }
 function environmentInstance(env: NodeJS.ProcessEnv = process.env): HerdrInstance | null {
   const configHome = env[herdrInstanceEnv.configHome]?.trim(), session = env[herdrInstanceEnv.session]?.trim();

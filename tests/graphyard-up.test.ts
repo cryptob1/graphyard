@@ -1744,10 +1744,18 @@ test('unit:land-coordinator-commits — the operator commits landed from the coo
   const fullMultibyte = socket({ configHome: multibyte.configHome, session: 'graphyard-owner-project' });
   assert.deepEqual([fullMultibyte.length, Buffer.byteLength(fullMultibyte)], [105, 109], 'a character count would have kept the full name');
   assert.match(multibyte.session, /^gy-[0-9a-f]{6}$/); assert.ok(Buffer.byteLength(socket(multibyte)) <= 107);
-  // One whose config home alone leaves no room for a hashed name falls back to the shortest, measured as well; a home even `gy` cannot fit under is refused by name.
+  // One whose config home alone leaves no room for a hashed name falls back to the shortest, measured as well.
   const shortest = installHerdrInstance('owner-project', `/${'x'.repeat(30)}`);
   assert.deepEqual([shortest.session, Buffer.byteLength(socket(shortest))], ['gy', 105]);
-  assert.throws(() => installHerdrInstance('owner-project', `/home/${'x'.repeat(60)}`), /herdr-client\.sock is 140 bytes and a Unix socket path holds 107; install from a home directory with a shorter path/);
+  // A long install id (the self-contained host's, under /home/graphyard) leaves no room beside its own directory: the
+  // config home moves to a hashed directory, whose socket path fits, instead of a name Herdr could not bind.
+  const longId = 'an-organization-with-a-very-long-name-and-an-equally-long-repository-name-for-testing';
+  const relocated = installHerdrInstance(longId, '/home/graphyard');
+  assert.match(relocated.configHome, /^\/home\/graphyard\/\.config\/graphyard\/gy-[0-9a-f]{6}\/herdr$/);
+  assert.equal(relocated.session, relocated.configHome.split('/')[5]); assert.ok(Buffer.byteLength(socket(relocated)) <= 107, socket(relocated));
+  assert.deepEqual(installHerdrInstance(longId, '/home/graphyard'), relocated, 'the relocation is deterministic');
+  // A home even the relocated `gy` cannot fit under is refused by name.
+  assert.throws(() => installHerdrInstance('owner-project', `/home/${'x'.repeat(60)}`), /gy-[0-9a-f]{6}\/herdr\/herdr\/sessions\/gy\/herdr-client\.sock is 136 bytes and a Unix socket path holds 107; install from a home directory with a shorter path/);
 
   // The executor unit runs the checkout's script when it has one, else the package's own.
   const template = 'WorkingDirectory=/x\nExecStart=/bin/false';
