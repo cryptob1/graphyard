@@ -9,7 +9,7 @@ import { type ApprovalWatch, type DaemonAction, type DaemonActionKind, type Daem
 import { type ItemClock, itemClockSchema, type LatencySample, latencySampleSchema } from './latency-clock.js';
 import { decisionKey } from './reconcile.js';
 import { docsSyncHolding } from '../model/docs-sync.js';
-import { approvedUnapplied, boundDetail, mergeableCandidate, namePaths, routineDecision, withheldDecision } from './decisions.js';
+import { approvedUnapplied, boundDetail, isHeldScopeAsk, mergeableCandidate, namePaths, routineDecision, withheldDecision } from './decisions.js';
 
 export function percentiles(values: number[]) {
   const sorted = [...values].sort((a, b) => a - b);
@@ -50,10 +50,11 @@ export function scopeBudget(work: Work[], decisions: ScopeMeasurement[], now: nu
   const open = work.flatMap(item => {
     const request = item.scopeRequest;
     const routed = routes && request?.decision?.decidedBy === 'graphyard' && !!routableScopeRequest(item, now);
-    // GY-1702: a routed ask on a quarantined attempt waits with the hold — a held requirements decision
-    // cannot apply until the attempt ends, and an escalation cannot hurry that. The wait itself is still
-    // measured from the ask; when the hold ends without applying, the breach clock resumes from that wait.
-    const heldByQuarantine = routed && !!item.containmentQuarantine;
+    // GY-1702: pause the scope-blocked breach only when a held requirements decision answers this ask
+    // and the attempt's quarantine is what holds that decision. A quarantine alone (or a held decision
+    // for another widening) must not hide an overdue ask; the wait is still measured from the ask, and
+    // when the hold ends without applying, the breach clock resumes from that recorded wait.
+    const heldByQuarantine = routed && !!item.containmentQuarantine && isHeldScopeAsk(decisions, item.key, request.epoch, request.at);
     return request && (!request.decision || routed) ? [{ key: item.key, epoch: request.epoch, waitedMs: Math.max(0, now - Date.parse(request.at)), routed, heldByQuarantine }] : [];
   }).sort((a, b) => b.waitedMs - a.waitedMs);
   // One id per breach, not per wording: the numbers in the detail move every cycle, and an

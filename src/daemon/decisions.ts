@@ -185,8 +185,49 @@ export interface RoutineDecision { action: RoutineDecisionAction; reason: string
  * the input as jsonb, which does not keep key order, so a serialised comparison never matches.
  */
 export const sameAnswers = (a: any, b: any) => !a || !b ? !a && !b : a.epoch === b.epoch && a.at === b.at;
-/** Whether two requirements inputs name the same planned-files list (jsonb key order is not kept). */
-export const samePlannedFiles = (a: unknown, b: unknown) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+/**
+ * Whether two requirements inputs name the same planned-files set. Compared as a sorted path set:
+ * jsonb does not keep array order, and a widening that lists the same paths in another order is the
+ * same revision (GY-1702).
+ */
+export const samePlannedFiles = (a: unknown, b: unknown) => {
+  if (!Array.isArray(a) || !Array.isArray(b)) return JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+  if (a.length !== b.length) return false;
+  const left = [...a].map(String).sort();
+  const right = [...b].map(String).sort();
+  return left.every((path, i) => path === right[i]);
+};
+/** GY-1702. Marker on a waiting held watch: the scope-budget pause keys off it for the bound ask. */
+export const heldWaitMarker = 'held: waiting for the attempt to end';
+/** The stable id of a scope ask the held-wait mark and the budget pause share (GY-1702). */
+export const heldScopeAskId = (key: string, epoch: number, at: string) => `${key}:${epoch}:${at}`;
+/**
+ * GY-1702. Scope-measurement arrays (`state.scope`) carry the set of asks whose answering requirements
+ * decision is held: the budget step runs before the decisions step each cycle, so the marks written
+ * when a hold is adopted are what the next cycle's pause reads. Keyed by the measurements array the
+ * cycle already passes into `scopeBudget`.
+ */
+const heldScopeAskMarks = new WeakMap<object, Set<string>>();
+export function markHeldScopeAsk(scopeMeasurements: object, key: string, epoch: number, at: string) {
+  let set = heldScopeAskMarks.get(scopeMeasurements);
+  if (!set) heldScopeAskMarks.set(scopeMeasurements, set = new Set());
+  set.add(heldScopeAskId(key, epoch, at));
+}
+export function clearHeldScopeAsk(scopeMeasurements: object, key: string, epoch: number, at: string) {
+  heldScopeAskMarks.get(scopeMeasurements)?.delete(heldScopeAskId(key, epoch, at));
+}
+/** Rebuild the held-ask marks from live watches (GY-1702): a restart or settled watch stays consistent. */
+export function syncHeldScopeAskMarks(scopeMeasurements: object, approvals: Iterable<{ work: string; action: string; settledAt?: string | null; scope?: { epoch: number; at: string } | null; ended?: string[] }>) {
+  const set = new Set<string>();
+  for (const watch of approvals) {
+    if (watch.action !== 'requirements' || watch.settledAt || !watch.scope) continue;
+    if (!(watch.ended ?? []).some(entry => entry.includes(heldWaitMarker))) continue;
+    set.add(heldScopeAskId(watch.work, watch.scope.epoch, watch.scope.at));
+  }
+  heldScopeAskMarks.set(scopeMeasurements, set);
+}
+export const isHeldScopeAsk = (scopeMeasurements: object, key: string, epoch: number, at: string) =>
+  heldScopeAskMarks.get(scopeMeasurements)?.has(heldScopeAskId(key, epoch, at)) ?? false;
 /**
  * GY-1702. A standing requirements decision whose plannedFiles match this scope ask's widening is that
  * ask's pending answer, even when it was requested without `input.answers` (a master's own revision, or

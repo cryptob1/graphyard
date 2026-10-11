@@ -51,4 +51,4 @@ Unacted producer requests (unstarted, refused, launch-exited) relaunch on untrie
 
 Target (10+ deliveries): submit→merge p50 ≤30 minutes, p90 ≤60 minutes. Row `speed`: `executionMs`, `waitMs`, `reworkRounds`, `interventions`; verdict `speed.submitToMerge`; measure-pipeline-speed.mjs feeds `manual:speed-target-met`.
 
-Loop's decisions step stays within 10 s a cycle: one `decision.*` ledger read names moved items; a history whose ledger has not moved is kept, not read. Standing/held requirements wait (no fault/resume); matching scope asks ride the hold (bound paused in quarantine). 5xx/stale/timed-out retries next cycle (twice: fault) unless moot; stale-revision decides re-compute.
+Loop's decisions step stays within 10 s a cycle: one `decision.*` ledger read names moved items; a history whose ledger has not moved is kept, not read. Standing/held requirements wait live until state changes (no fault/resume); matching asks ride the hold (paused under quarantine). 5xx/stale/timed-out retries next cycle (twice: fault) unless moot; stale-revision decides re-compute.

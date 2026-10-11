@@ -9,7 +9,7 @@ import { server } from '../src/server.js';
 import { Store } from '../src/store.js';
 import { emptyDaemonState, runCycle, scopeBudget, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import {
-  heldDecisionNamedIn, heldDecisionRefusal, samePlannedFiles, scopeRoutineDecision,
+  heldDecisionNamedIn, heldDecisionRefusal, markHeldScopeAsk, samePlannedFiles, scopeRoutineDecision,
   staleRevisionDecideNote, staleRevisionDecideRefusal, standingRequirementsAnswersAsk,
 } from '../src/daemon/decisions.js';
 import { decisionInput, masterConfigSchema, type HerdrAgent, type MasterConfig } from '../src/master.js';
@@ -130,8 +130,11 @@ test('unit:standing-requirements-adopted-no-fault — a same-plannedFiles standi
   assert.ok(decision.input?.answers, 'when the loop requests, input.answers names the ask');
   assert.deepEqual(decision.input!.answers, { epoch: 4, at });
   assert.ok(standingRequirementsAnswersAsk({ input: { plannedFiles: decision.input!.plannedFiles } }, decision), 'same plannedFiles with no answers still answers the ask');
+  assert.ok(standingRequirementsAnswersAsk({ input: { plannedFiles: [...(decision.input!.plannedFiles as string[])].reverse() } }, decision), 'the same paths in another order still answer the ask');
   assert.ok(!standingRequirementsAnswersAsk({ input: { plannedFiles: [layout] } }, decision), 'a different file list does not');
   assert.ok(samePlannedFiles(decision.input!.plannedFiles, decision.input!.plannedFiles));
+  assert.ok(samePlannedFiles([layout, helper], [helper, layout]), 'plannedFiles compare as a set, not by array order');
+  assert.ok(!samePlannedFiles([layout, helper], [layout]));
   const held = new Error('Graphyard refused work/x/decide (409): Decision 9a6095d9-c3e5-4357-93d6-48b8ccc61e5e (requirements) on GY-1700 was approved by graphyard-approver-graphyard at 2026-10-11T14:49:13.944Z and is held (Task is quarantined); the control plane applies it in the transaction that ends the attempt, so it need not be requested again');
   assert.ok(heldDecisionRefusal(held));
   assert.equal(heldDecisionNamedIn(held), '9a6095d9-c3e5-4357-93d6-48b8ccc61e5e');
@@ -141,7 +144,7 @@ test('unit:standing-requirements-adopted-no-fault — a same-plannedFiles standi
   assert.match(staleRevisionDecideNote, /moved past the revision/);
 });
 
-test('unit:scope-budget-holds-during-quarantine-held-decision — a routed ask on a quarantined item does not breach the blocked bound; without the quarantine the same wait does', () => {
+test('unit:scope-budget-holds-during-quarantine-held-decision — a routed ask answered by a quarantined held decision does not breach; quarantine alone, or a hold that does not answer the ask, does not pause', () => {
   const askedAt = '2026-10-11T14:47:50.740Z';
   const later = Date.parse(askedAt) + scopeBlockedBudgetMs + 60_000;
   const request = { epoch: 4, at: askedAt, paths: [helper], reason: 'needed', requestedBy: 'worker',
@@ -154,12 +157,16 @@ test('unit:scope-budget-holds-during-quarantine-held-decision — a routed ask o
   };
   const held = { ...base, containmentQuarantine: { owner: 'worker', epoch: 4, at: askedAt, settlementHash: 'a'.repeat(64), leaseExpiresAt: new Date(later + 60_000).toISOString() } } as unknown as Work;
   const free = { ...base, containmentQuarantine: null } as unknown as Work;
-  const paused = scopeBudget([held], [], later, true);
+  const measured: [] = [];
+  // Quarantine alone is not enough: without a held decision answering this ask, the bound still breaches.
+  assert.equal(scopeBudget([held], measured, later, true).breaches.length, 1, 'quarantine with no matching held decision still breaches');
+  markHeldScopeAsk(measured, 'GY-1700', 4, askedAt);
+  const paused = scopeBudget([held], measured, later, true);
   assert.equal(paused.open.length, 1);
   assert.equal(paused.open[0].heldByQuarantine, true);
-  assert.equal(paused.breaches.length, 0, 'quarantine holds the breach clock; the wait is still recorded');
+  assert.equal(paused.breaches.length, 0, 'matching held decision under quarantine holds the breach clock; the wait is still recorded');
   assert.ok(paused.open[0].waitedMs > scopeBlockedBudgetMs);
-  const resumed = scopeBudget([free], [], later, true);
+  const resumed = scopeBudget([free], measured, later, true);
   assert.equal(resumed.breaches.length, 1, 'once the hold ends without settling the ask, the recorded wait can breach');
   assert.match(resumed.breaches[0].detail, /with the independent approver/);
 });
@@ -172,7 +179,7 @@ test('unit:stale-revision-decide-classified-transient — the decisions-step cla
 
 // ---- Integration: held resume / standing adopt / ask settlement / post-apply revision ----------
 
-test('integration:held-decision-no-per-cycle-resume-409 — an approved-and-held requirements decision is adopted as a wait; cycles neither resume nor fault', { timeout: 120_000 }, async () => {
+test('integration:held-decision-no-per-cycle-resume-409 — an approved-and-held requirements decision is a wait (no resume/fault); a non-widening hold does not bind the ask, and when it fails the ask is requested', { timeout: 120_000 }, async () => {
   let work = await claimed('held no resume');
   // A non-widening revision under a live lease settles held (GY-1687); the control plane applies it when the attempt ends.
   const revision = { expectedPolicyRevision: work.policyRevision, criteria: [{ id: 'AC-1', text: 'Works, as the deploy shows', proofs: ['unit:layout'] }], dependencies: [], plannedFiles: work.plannedFiles, exclusiveResources: [] };
@@ -180,7 +187,7 @@ test('integration:held-decision-no-per-cycle-resume-409 — an approved-and-held
   const settled = await ok(approver.token, 'POST', `work/${work.id}/approve`, { decision: requested.id, reason: 'Judged on the release' });
   assert.equal(settled.state, 'held', JSON.stringify(settled));
   assert.match(settled.outcome, new RegExp(liveLeaseRevisionRefusal.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
-  // A routed scope ask would otherwise request a second requirements decision; the held one stands in its place.
+  // A routed scope ask would otherwise request a second requirements decision; the non-widening hold stands in the way without binding the ask.
   await ok(token(implementer), 'POST', `work/${work.id}/scope`, { epoch: work.epoch, paths: [helper], reason: 'AC-1 needs the measuring helper' });
   await ok(token(coordinator), 'POST', `work/${work.id}/autoscope`, { epoch: work.epoch });
   const loop = harness(), state = emptyDaemonState(loopConfig());
@@ -191,7 +198,21 @@ test('integration:held-decision-no-per-cycle-resume-409 — an approved-and-held
   assert.deepEqual(failed, [], `no decision fault: ${failed.map(action => action.detail).join(' | ')}`);
   const adopted = Object.values(state.actions).filter(action => action.work === work.key && /is approved .* and held/.test(action.detail ?? ''));
   assert.ok(adopted.length >= 1, 'the held decision was adopted as a wait');
+  assert.ok(adopted.some(action => /does not widen for this scope ask/.test(action.detail ?? '')), 'the non-widening hold is not bound to the ask');
+  assert.ok(!Object.values(state.approvals).some(watch => watch.decision === requested.id && watch.scope), 'the ask is not attached to the non-widening hold');
   assert.equal((await decisions(work)).find(entry => entry.id === requested.id)?.state, 'held');
+
+  // End the attempt: the non-widening hold applies; reclaim and re-ask so the loop must request a
+  // widening (proving no settled non-widening watch stuck on the ask's binding).
+  await engine.execute(implementer, 'release', work.id, { epoch: work.epoch }, randomUUID());
+  work = await reload(work.id);
+  assert.equal((await decisions(work)).find(entry => entry.id === requested.id)?.state, 'applied');
+  work = await engine.execute(implementer, 'claim', work.id, {}, randomUUID());
+  await ok(token(implementer), 'POST', `work/${work.id}/scope`, { epoch: work.epoch, paths: [helper], reason: 'AC-1 still needs the measuring helper after the hold' });
+  await ok(token(coordinator), 'POST', `work/${work.id}/autoscope`, { epoch: work.epoch });
+  loop.decided.length = 0;
+  await loop.cycle(state);
+  assert.ok(loop.decided.some(entry => entry.key === work.key && entry.action === 'requirements'), 'after the non-widening hold settled, the still-needed ask is requested');
 });
 
 test('integration:routed-ask-settled-by-standing-requirements — a standing same-plannedFiles decision is the ask\'s pending answer and settles the ask when it applies', { timeout: 120_000 }, async () => {

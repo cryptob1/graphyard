@@ -8,7 +8,7 @@ import { recordSettledDecision } from '../model/project-memory.js';
 import { type ApprovalWatch, approvalWatchSchema, carriedSession, type DaemonActionKind, type DaemonState, latencySampleSchema, message, scopeMeasurementSchema } from './state.js';
 import { decisionKey, scopeAnsweredAt, scopeKey, scopeOutcomeAnswered } from './reconcile.js';
 import { readyToRetry } from './sessions.js';
-import { approvalStep, recordWatchEnded, approverLaunchKey, attestDecisions, boundDetail, cappedReworkBound, exhaustedProofKey, decisionReasonMax, detailChanged, fitDecisionReason, githubPause, handWatchPrefix, maxApproverCloses, maxRefusalAnswers, maxDecisionRequests, namePaths, neededDecision, observedFrom, overtakenDecision, resolveCovers, reworkDecisionReason, refusalNamedIn, standingNamedIn, adoptedOnRefusal, conflictReworkOverdue, reworkObservationWait, routineDecision, type RoutineDecision, sameAnswers, samePlannedFiles, standingRequirementsAnswersAsk, heldDecisionRefusal, heldDecisionNamedIn, staleRevisionDecideRefusal, staleRevisionDecideNote, staleRevisionDecideDetail, scopeRoutineDecision, blockerScopeDecision, standingVerdict, uncountedScopeFailure, withheldDecision } from './decisions.js';
+import { approvalStep, recordWatchEnded, approverLaunchKey, attestDecisions, boundDetail, cappedReworkBound, exhaustedProofKey, decisionReasonMax, detailChanged, fitDecisionReason, githubPause, handWatchPrefix, maxApproverCloses, maxRefusalAnswers, maxDecisionRequests, namePaths, neededDecision, observedFrom, overtakenDecision, resolveCovers, reworkDecisionReason, refusalNamedIn, standingNamedIn, adoptedOnRefusal, conflictReworkOverdue, reworkObservationWait, routineDecision, type RoutineDecision, sameAnswers, samePlannedFiles, standingRequirementsAnswersAsk, heldDecisionRefusal, heldDecisionNamedIn, heldWaitMarker, markHeldScopeAsk, clearHeldScopeAsk, syncHeldScopeAskMarks, staleRevisionDecideRefusal, staleRevisionDecideNote, staleRevisionDecideDetail, scopeRoutineDecision, blockerScopeDecision, standingVerdict, uncountedScopeFailure, withheldDecision } from './decisions.js';
 import { candidateMovedMeanwhile, decisionFailureKind, decisionReads, deliveredMeanwhile, lateDecisionRead, resumedApplication, selfHealingDecisionFailure } from './decision-reads.js';
 import { refusedAttestationWatch, type RefusedAttestation } from '../model/rework-ground.js';
 import { record } from './effects.js';
@@ -66,29 +66,42 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       // A request whose response was lost is already standing on the item, and the server refuses a second one; adopting it is what keeps a retry from leaving a decision nobody will judge.
       let standing = history.find(entry => entry.action === decision.action && (entry.state === 'requested' || entry.state === 'approved' || entry.state === 'held'));
       // GY-1687 / GY-1702: a held decision is approved and waits only for the item's attempt to end, when the
-      // control plane applies it; no approver is launched, nothing is requested or resumed, and a matching
-      // scope ask is bound so its settlement follows the hold.
-      const adoptHeld = async (held: { id: string; approvedAt?: string | null; approvedBy?: string | null; outcome?: string | null }, why: string) => {
-        // Bind the scope ask this widening answers (GY-1702): when the hold applies, noteScopeOutcome / the engine settle it.
-        const scope = decision.scope ?? carried?.scope ?? null;
-        state.approvals[key] = approvalWatchSchema.parse({ work: item.key, action: decision.action, decision: held.id, requestedAt: carried?.requestedAt ?? stamp, settledAt: stamp, approvedAt: held.approvedAt ?? null, approvedBy: held.approvedBy ?? null, scope });
-        performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `${item.key}'s ${decision.action} decision ${held.id} is approved by ${held.approvedBy ?? 'its approver'} and held (${boundDetail(held.outcome ?? why, 300)}); the control plane applies it when the attempt ends, so nothing is requested`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
+      // control plane applies it; no approver is launched, nothing is requested or resumed. The watch stays
+      // unsettled so a later cycle can see the decision fail or apply; a matching scope ask is bound so its
+      // settlement follows the hold, and a non-matching held revision is waited on without binding the ask.
+      const adoptHeld = async (held: { id: string; approvedAt?: string | null; approvedBy?: string | null; outcome?: string | null; input?: { plannedFiles?: unknown } | null }, why: string) => {
+        const candidate = decision.scope ?? carried?.scope ?? null;
+        // Bind the scope ask only when this held revision widens for it. A non-matching hold still
+        // gets a live watch on this binding (so reconcile does not fault a started request) but
+        // without scope — when the hold settles the watch is dropped so the ask can be requested.
+        const scope = candidate && standingRequirementsAnswersAsk(held, { ...decision, scope: candidate }) ? candidate : null;
+        const unmatched = !!candidate && !scope;
+        if (carried?.scope && scope && (carried.scope.at !== scope.at || carried.scope.epoch !== scope.epoch)) clearHeldScopeAsk(state.scope, item.key, carried.scope.epoch, carried.scope.at);
+        state.approvals[key] = approvalWatchSchema.parse({
+          work: item.key, action: decision.action, decision: held.id, requestedAt: carried?.requestedAt ?? stamp,
+          settledAt: null, approvedAt: held.approvedAt ?? null, approvedBy: held.approvedBy ?? null, scope,
+          ended: scope ? [heldWaitMarker] : [],
+        });
+        if (scope) markHeldScopeAsk(state.scope, item.key, scope.epoch, scope.at);
+        const detail = unmatched
+          ? `${item.key}'s ${decision.action} decision ${held.id} is approved by ${held.approvedBy ?? 'its approver'} and held (${boundDetail(held.outcome ?? why, 300)}); it does not widen for this scope ask, so the ask waits until the hold settles and nothing is requested`
+          : `${item.key}'s ${decision.action} decision ${held.id} is approved by ${held.approvedBy ?? 'its approver'} and held (${boundDetail(held.outcome ?? why, 300)}); the control plane applies it when the attempt ends, so nothing is requested`;
+        performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
       };
       if (standing?.state === 'held') { await adoptHeld(standing, 'the item holds a live attempt'); return; }
       // An approved decision is already judged (GY-1300): it is never adopted for an approver session. The control plane is asked to apply what was approved,
       // and only one that settled failed, stale or superseded is asked for again, below, within the same bound. A loop without the resume settles it through the withdrawal below (GY-1297).
-      // GY-1702: a resume that finds the decision held, or a requirements approval the live attempt still refuses, is a wait — not a per-cycle fault.
+      // GY-1702: a resume that finds the decision held, or a decide refused because it is held, is a wait — not a per-cycle fault.
+      // A resume that returns `approved` without a hold (the holding attempt ended or was replaced) is not treated as held: the next try resumes again.
       if (standing?.state === 'approved' && effects.resume) {
         let resumed: Awaited<ReturnType<NonNullable<typeof effects.resume>>>;
         try { resumed = await effects.resume(item, standing.id); }
         catch (error) {
-          if (heldDecisionRefusal(error)) { await adoptHeld({ id: standing.id, approvedAt: standing.approvedAt, approvedBy: standing.approvedBy, outcome: message(error) }, 'the item holds a live attempt'); return; }
+          if (heldDecisionRefusal(error)) { await adoptHeld({ id: standing.id, approvedAt: standing.approvedAt, approvedBy: standing.approvedBy, outcome: message(error), input: standing.input }, 'the item holds a live attempt'); return; }
           throw error;
         }
-        if (resumed.state === 'held') { await adoptHeld({ id: resumed.id, approvedAt: resumed.approvedAt, approvedBy: resumed.approvedBy, outcome: resumed.outcome }, resumed.outcome ?? 'the item holds a live attempt'); return; }
+        if (resumed.state === 'held') { await adoptHeld({ id: resumed.id, approvedAt: resumed.approvedAt, approvedBy: resumed.approvedBy, outcome: resumed.outcome, input: (resumed as { input?: { plannedFiles?: unknown } | null }).input ?? standing.input }, resumed.outcome ?? 'the item holds a live attempt'); return; }
         if (resumed.state === 'approved') {
-          // Requirements under a live attempt become held on apply; re-resuming only faults. Other actions still retry.
-          if (decision.action === 'requirements') { await adoptHeld({ id: resumed.id, approvedAt: resumed.approvedAt, approvedBy: resumed.approvedBy, outcome: resumed.outcome ?? 'approved but the control plane could not apply it yet' }, 'approved but the control plane could not apply it yet'); return; }
           throw new Error(`${decision.action} decision ${standing.id} was approved by ${standing.approvedBy ?? 'its approver'} but the control plane could not apply it yet; it is resumed again on the next try`);
         }
         if (resumed.state === 'applied') {
@@ -294,7 +307,9 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       // wait / re-compute — not a decision fault.
       const heldId = heldDecisionNamedIn(error);
       if (heldId) {
-        state.approvals[key] = approvalWatchSchema.parse({ work: item.key, action: decision.action, decision: heldId, requestedAt: stamp, settledAt: stamp, scope: decision.scope ?? null });
+        // The refusal names the id but not the standing input: wait without binding the ask; the next
+        // cycle's history read adopts the held decision and binds only when its plannedFiles match.
+        state.approvals[key] = approvalWatchSchema.parse({ work: item.key, action: decision.action, decision: heldId, requestedAt: stamp, settledAt: null });
         performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `${item.key}'s ${decision.action} decision ${heldId} is approved and held; the control plane applies it when the attempt ends, so nothing is requested`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
         return;
       }
@@ -346,6 +361,22 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     if ((!judged || judged.state === 'requested') && await approverExhausted(item, watch)) return;
     // What the silence measure names this wait (GY-1298): an approval owed its settlement is not an approver judging it.
     if (judged?.state === 'approved') Object.assign(watch, { approvedAt: judged.approvedAt ?? null, approvedBy: judged.approvedBy });
+    // GY-1702: a held decision is a live wait — close any approver session, keep the watch unsettled, and
+    // name the hold until the decision applies or fails (approvalStep's held→settled path would skip that).
+    if (judged?.state === 'held') {
+      await closeApprover(item, watch, 'its decision is held');
+      Object.assign(watch, { approvedAt: judged.approvedAt ?? null, approvedBy: judged.approvedBy ?? null });
+      if (watch.scope) {
+        if (!watch.ended.some(entry => entry.includes(heldWaitMarker))) recordWatchEnded(watch, heldWaitMarker);
+        markHeldScopeAsk(state.scope, item.key, watch.scope.epoch, watch.scope.at);
+      }
+      const unmatched = !watch.scope && !!decision.scope;
+      const detail = unmatched
+        ? `${item.key}'s ${decision.action} decision ${watch.decision} is approved by ${judged.approvedBy ?? 'its approver'} and held (${boundDetail(judged.outcome ?? 'the item holds a live attempt', 300)}); it does not widen for this scope ask, so the ask waits until the hold settles and nothing is requested`
+        : `${item.key}'s ${decision.action} decision ${watch.decision} is approved by ${judged.approvedBy ?? 'its approver'} and held (${boundDetail(judged.outcome ?? 'the item holds a live attempt', 300)}); the control plane applies it when the attempt ends, so nothing is requested`;
+      if (detailChanged(state.actions[key], detail)) await note(key, item, 'decision', 'done', detail);
+      return;
+    }
     const seen = await sessions(), step = approvalStep(watch, judged, seen, clock, await stallInputs(watch, judged, seen));
     if (step.step === 'wait' || (watch.exhaustedAt && step.step === 'exhausted')) return;
     // A decision whose approver could not be launched for want of capacity is not a session that
@@ -367,6 +398,14 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     }
     if (step.step === 'settled') {
       await closeApprover(item, watch, 'its decision is applied');
+      if (watch.scope) clearHeldScopeAsk(state.scope, item.key, watch.scope.epoch, watch.scope.at);
+      // GY-1702: a non-matching hold watched on this ask's binding must free it when the hold ends,
+      // or a settled watch would block the widening the ask still needs.
+      if (!watch.scope && decision.scope) {
+        delete state.approvals[key];
+        await note(`${base}:settled`, item, 'decision', 'done', `${step.detail}; it did not answer ${item.key}'s scope ask, so the ask is requested next`);
+        return;
+      }
       watch.settledAt = stamp;
       // The shared memory takes the approver's judgement as it settled, never a refusal (GY-1125).
       recordSettledDecision(state.projectMemory, watch, judged, stamp);
@@ -378,6 +417,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       // Settled for the loop: no replacement session and no re-request. The refusal stands in
       // `master status` until the master answers it with a request that cites it, or acts on it.
       await closeApprover(item, watch, 'its decision is refused');
+      if (watch.scope) clearHeldScopeAsk(state.scope, item.key, watch.scope.epoch, watch.scope.at);
       watch.settledAt = stamp;
       // A refused widening is the worker's answer, not the master's: the control plane recorded it
       // on the item, and the worker reads there that it stays inside plannedFiles.
@@ -409,6 +449,9 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     // with the hand watches, GY-779). Only the re-request returns here: it is bound to this
     // request, so it is taken below.
     if (await actOnStep(item, watch, step) !== 'rerequest') return;
+    // GY-1702: a held decision that failed or went stale resumes the ask's wait and escalation.
+    if (watch.scope) clearHeldScopeAsk(state.scope, item.key, watch.scope.epoch, watch.scope.at);
+    if (!watch.scope && decision.scope) { delete state.approvals[key]; }
     // The server settled it some other way — failed on a precondition, stale, withdrawn — and
     // the item still needs the decision, so it is asked again: a bounded number of times, and on
     // the same widening interval as any refused action. The watch stays until a new request
@@ -591,6 +634,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       const judged = await effects.decisions(item).then(result => result.decisions.find(entry => entry.id === watch.decision), () => undefined);
       if (judged?.state === 'applied' || judged?.state === 'refused') {
         if (scopeOutcomeAnswered(item, watch.scope, judged, clock) === 'pending') return;
+        clearHeldScopeAsk(state.scope, item.key, watch.scope.epoch, watch.scope.at);
         watch.settledAt = stamp; await noteScopeOutcome(item, watch, judged);
       }
     }
@@ -627,6 +671,9 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
   await settleDeferred(cycle, budget);
   await approvers.superviseHandApprovers();
   await approvers.reconcileRegistrySessions();
+  // GY-1702: the scope-budget pause reads marks keyed on state.scope; rebuild from live held watches so a
+  // restart or a settled hold stays consistent for the next cycle's step 2.
+  syncHeldScopeAskMarks(state.scope, Object.values(state.approvals));
   // 4c++. A close that went stale on a revision race is requested again against the fresh revision, its grounds re-validated (GY-1439).
   await staleCloseStep(cycle, effects, written);
   // 4c+++. A stale release of a backlog item is asked again, whoever asked first (GY-1315): last, so its backlog reads hold nothing above.
