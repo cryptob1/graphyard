@@ -201,11 +201,12 @@ export async function readInterventionReport(store: Store, policy: InterventionP
  * `interventionLedgerLimit` rows since `since`; when it is truncated the rows before its oldest were
  * never read, and a reading that began at `since` would take them for an empty record — a streak and
  * a peak the record does not support. So a truncated read begins where the record it holds is whole:
- * at the oldest row the read retained (`retainedFrom`, which `readInterventionLedger` reads off the
- * retained window itself, so a retained decision row written inside the window counts as the
- * window's and the requests it reads from beyond the window do not), and no earlier than the read
- * — later is a shorter streak, never a false one. A read that retained no row holds no record to
- * read, and the reading begins now.
+ * at the insertion instant of the oldest row the read retained (`retainedFrom`, which
+ * `readInterventionLedger` reads off the retained window itself, so a retained decision row written
+ * inside the window counts as the window's and the requests it reads from beyond the window do
+ * not; past any instant the cut shares, and never a retained row's own earlier `updatedAt`, which
+ * omitted rows may follow), and no earlier than the read — later is a shorter streak, never a
+ * false one. A read that retained no row holds no record to read, and the reading begins now.
  */
 export function ledgerReach(retainedFrom: string | null, truncated: boolean, since: string, now: string): string {
   if (!truncated) return since;

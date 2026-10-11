@@ -121,3 +121,38 @@ test('manual:intervention-pattern-within-threshold — the report\'s `ledger.rea
   assert.equal(untruncated.ledger.truncated, false); assert.equal(untruncated.ledger.reach, untruncated.ledger.since);
   for (const row of untruncated.patterns) assert.equal(row.underThreshold.reach, untruncated.ledger.since);
 });
+
+test('manual:intervention-pattern-within-threshold — the reach is the cutoff row\'s insertion instant, never its document\'s earlier `updatedAt`, and steps past an instant the cut shares (rows one transaction wrote, cut between)', async () => {
+  // Codex on PR #1115 (src/interventions/ledger.ts, head 185ae9594c55): a reach moved back to a retained row's own
+  // earlier instant held rows the cut omitted, inserted before the cutoff; the record was not whole from it.
+  const now = Date.now(), since = iso(now - 7 * day);
+  // A row written with its document, whose `updatedAt` precedes the insertion by five seconds: the row's own instant.
+  const documented = iso(now - hour), documentedAt = iso(now - hour - 5_000);
+  await write('scope', documented, { work: { id: workId, key: 'GY-1675', title: 'GY-1675', stage: 'build', epoch: 2, plannedFiles: [], updatedAt: documentedAt } });
+  // Two rows inserted in one instant, as one transaction's writes share `created_at`.
+  const shared = iso(now - hour / 2);
+  await write('scope', shared, { details: { epoch: 2 } });
+  await write('scope', shared, { details: { epoch: 2 } });
+  // Cut between the two: the retained one's instant is the omitted one's too, and no retained row follows it — the read names no instant, and the reading begins now.
+  const between = await readInterventionLedger(store.pool, { since, limit: 1 });
+  assert.equal(between.truncated, true); assert.deepEqual(between.rows.map(row => row.at), [shared]);
+  assert.equal(between.retainedFrom, null);
+  assert.equal(ledgerReach(between.retainedFrom, between.truncated, since, iso(now)), iso(now));
+  const after = iso(now - 10 * 60_000);
+  await write('rework', after, { details: { epoch: 2 } });
+  // Cut between the two again: the reach steps to the first retained row inserted after the shared instant.
+  const stepped = await readInterventionLedger(store.pool, { since, limit: 2 });
+  assert.deepEqual(stepped.rows.map(row => row.at), [shared, after]);
+  assert.equal(stepped.retainedFrom, after);
+  // Cut before both: the newest omitted row precedes the shared instant, which is the reach.
+  const pair = await readInterventionLedger(store.pool, { since, limit: 3 });
+  assert.deepEqual(pair.rows.map(row => row.at), [shared, shared, after]);
+  assert.equal(pair.retainedFrom, shared);
+  // Cut at the documented row: the reach is its insertion instant; its own instant, five seconds earlier, lies before the reach, as the rows the cut omitted may.
+  const documentedCut = await readInterventionLedger(store.pool, { since, limit: 4 });
+  assert.equal(documentedCut.truncated, true);
+  assert.deepEqual(documentedCut.rows.map(row => row.at), [documentedAt, shared, shared, after], 'the row keeps its document\'s instant');
+  assert.equal(documentedCut.retainedFrom, documented);
+  assert.ok(documentedCut.rows[0].at < documentedCut.retainedFrom!, 'the reach never moves back to a retained row\'s earlier own instant');
+  assert.equal(ledgerReach(documentedCut.retainedFrom, documentedCut.truncated, since, iso(now)), documented);
+});
