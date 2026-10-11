@@ -54,7 +54,8 @@ export function computeInterventionReport(folded: { interventions: Intervention[
   for (const entry of folded.interventions) {
     if (entry.requestedAt < reach || entry.requestedAt >= to) continue;
     const key = `${entry.kind}|${stageKey(entry.stage)}`;
-    inReach.set(key, [...(inReach.get(key) ?? []), entry]);
+    const bucket = inReach.get(key);
+    if (bucket) bucket.push(entry); else inReach.set(key, [entry]);
   }
   /** The causes a list of instances shows and the rework rounds their items carried, each item once: an item's rounds are its cost once, however many of its asks the pair counted. */
   const tally = (entries: readonly Intervention[]) => {
@@ -181,14 +182,35 @@ export const windowStart = (now: string, days: number) => new Date(Date.parse(no
  * written inside the report window or the recurrence policy's, whichever reaches further back, and
  * the snapshot is the bounded one — open items whole, settled deliveries as the summaries the
  * report reads (key, title, stage, origin, delivery). A signal whose need was recorded before the
- * window opened is outside its reach; `ledger.since` says where the reach begins.
+ * window opened is outside its reach; `ledger.since` says where the read began and `ledger.reach`
+ * where the record it holds begins: the same instant, unless the read was truncated (`ledgerReach`).
  */
 export async function readInterventionReport(store: Store, policy: InterventionPolicy, options: { days?: InterventionWindow; kind?: InterventionKind | null; stage?: Stage | null; work?: string | null; limit?: number } = {}) {
   const days = options.days ?? 30;
   const snapshot = await boundedSnapshot(store.reportPool);
   const since = windowStart(snapshot.now, Math.max(days, policy.windowDays));
   const { rows, truncated } = await readInterventionLedger(store.reportPool, { limit: options.limit, since });
+  const reach = ledgerReach(rows, truncated, since, snapshot.now);
   const folded = foldInterventions(rows, snapshot.work, snapshot.now);
-  const report = computeInterventionReport(folded, snapshot.work, policy, { days, now: snapshot.now, kind: options.kind, stage: options.stage, work: options.work, reach: since });
-  return { ...report, ledger: { rows: rows.length, truncated, oldest: rows[0]?.at ?? null, since }, kinds: interventionKinds, windows: interventionWindows };
+  const report = computeInterventionReport(folded, snapshot.work, policy, { days, now: snapshot.now, kind: options.kind, stage: options.stage, work: options.work, reach });
+  return { ...report, ledger: { rows: rows.length, truncated, oldest: rows[0]?.at ?? null, since, reach }, kinds: interventionKinds, windows: interventionWindows };
+}
+
+/** The rows the ledger read adds beside its window: the requests of decisions the window settles (withDecisionsBeyondReach), each older than the window's oldest row. */
+const beyondReachKinds = new Set(['decision.requested', 'decision.approved']);
+/**
+ * GY-1682 AC-2: where the under-threshold reading begins. The ledger read is the newest
+ * `interventionLedgerLimit` rows since `since`; when it is truncated the rows before its oldest were
+ * never read, and a reading that began at `since` would take them for an empty record — a streak and
+ * a peak the record does not support. So a truncated read begins at the oldest row of the window
+ * it holds: the oldest row of a kind the window read itself, since the rows added beyond the window
+ * (`beyondReachKinds`) all precede it, and the reading may start no earlier than the record — later
+ * is a shorter streak, never a false one. A window with no such row holds no record to read, and the
+ * reading begins now.
+ */
+export function ledgerReach(rows: readonly { kind: string; at: string }[], truncated: boolean, since: string, now: string): string {
+  if (!truncated) return since;
+  let oldest: string | null = null;
+  for (const row of rows) if (!beyondReachKinds.has(row.kind) && (oldest === null || row.at < oldest)) oldest = row.at;
+  return oldest === null ? now : oldest > since ? oldest : since;
 }

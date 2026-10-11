@@ -4,7 +4,7 @@ import test from 'node:test';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { computeInterventionReport, detectPatterns, foldInterventions, type InterventionLedgerRow } from '../src/interventions.js';
-import { underThreshold } from '../src/interventions/report.js';
+import { ledgerReach, underThreshold } from '../src/interventions/report.js';
 import { exemption } from '../src/intervention-exemptions.js';
 import { interventionSummary } from '../src/cli/intervention-status.js';
 import { handFiledPatterns, patternCause, type Intervention, type PatternRow } from '../src/model/interventions.js';
@@ -288,6 +288,54 @@ test('manual:pattern-item-owns-scope-widening — a refused ask the loop put to 
   // A routed decision for another attempt's ask marks nothing: the row names the ask it answers.
   const other = { ...routedDecision, payload: { ...routedDecision.payload, input: { ...routedDecision.payload.input, answers: { epoch: 1, at: '2026-10-10T20:00:00.000Z' } } } };
   assert.deepEqual(buildWidenings([...rows, other], [done1617, live()], during), [waiting, ...resolved]);
+  // A decision naming no ask marks nothing either: the routed reason alone says the loop routed something, not which ask.
+  assert.deepEqual(buildWidenings([...rows, { ...routedDecision, payload: { ...routedDecision.payload, input: { plannedFiles: widened } } }], [done1617, live()], during), [waiting, ...resolved]);
+});
+
+test('manual:pattern-item-owns-scope-widening — a routed decision answers the ask of its exact identity, epoch and instant, as the server matches it: a worker\'s merged ask in the same attempt has a new instant, so a delayed decision for the earlier ask leaves it counted, and only a decision naming the merged ask holds it for the approver', () => {
+  // The worker adds a path to its refused ask (mergedScopeRequest): a new ask, same epoch, new instant, refused by the rule in turn.
+  const merged = [...asked, 'tests/trial-merge-phases.test.ts'], mergedAskedAt = '2026-10-10T23:13:20.100Z', mergedRefusedAt = '2026-10-10T23:13:28.004Z';
+  const mergedRows: InterventionLedgerRow[] = [...rows,
+    { seq: 2489238, workId: gy1675, actor: worker, kind: 'scope', at: '2026-10-10T23:13:20.517Z', stageBefore: 'build', details: { epoch: 2, paths: merged, reason: 'Answering review of 6defae905bcd | the phase test names the trial too' }, work: item1675({ epoch: 2, plannedFiles: withObservation, blocker: refusal }) },
+    { seq: 2489239, workId: gy1675, actor: 'graphyard-master', kind: 'autoscope', at: mergedRefusedAt, stageBefore: 'build',
+      details: { epoch: 2, before: { blocker: refusal, plannedFiles: withObservation }, decision: { ...decision, at: mergedRefusedAt, paths: merged, requestedAt: mergedAskedAt } }, work: item1675({ epoch: 2, plannedFiles: withObservation, blocker: refusal }) },
+  ];
+  const mergedRequest = { ...request, at: mergedAskedAt, paths: merged, decision: { ...decision, at: mergedRefusedAt, paths: merged, requestedAt: mergedAskedAt } };
+  const record = [done1617, live({ scopeRequest: mergedRequest })], now = '2026-10-10T23:13:35.000Z';
+  const answering = (at: string, seq = 2489241) => ({ ...routedDecision, seq, at: '2026-10-10T23:13:30.000Z', payload: { ...routedDecision.payload, input: { plannedFiles: [...widened, 'tests/trial-merge-phases.test.ts'], answers: { epoch: 2, at } } } });
+  const open = (ledger: InterventionLedgerRow[]) => foldInterventions(ledger, record, now).interventions.find(entry => entry.kind === 'scope-widening' && entry.resolvedAt === null);
+  // The merged ask is the one open ask, counted from its own instant.
+  assert.deepEqual(buildWidenings(mergedRows, record, now), [waiting, ...resolved]);
+  assert.equal(open(mergedRows)!.requestedAt, '2026-10-10T23:13:20.517Z');
+  // The decision for the earlier ask lands after the merge: same epoch, the earlier instant. The server would not apply it to the merged ask, and the fold does not hold the merged ask for it.
+  assert.deepEqual(buildWidenings([...mergedRows, answering(askedAt)], record, now), [waiting, ...resolved], 'the merged ask stays counted');
+  assert.equal(open([...mergedRows, answering(askedAt)])!.requestedAt, '2026-10-10T23:13:20.517Z');
+  // The decision naming the merged ask holds it for the approver while it stands.
+  assert.deepEqual(buildWidenings([...mergedRows, answering(mergedAskedAt)], record, now), resolved, 'the approver holds the merged ask');
+  // Both on the record, the earlier one first: only the one naming the merged ask marks it.
+  assert.deepEqual(buildWidenings([...mergedRows, answering(askedAt), answering(mergedAskedAt, 2489242)], record, now), resolved);
+  assert.deepEqual(buildWidenings([...mergedRows, answering(mergedAskedAt), { ...settledRouted('decision.stale', 2489243, '2026-10-10T23:13:33.000Z') }], record, now), [waiting, ...resolved], 'stale, the merged ask is back with whoever decides it');
+});
+
+test('manual:intervention-pattern-within-threshold — a truncated ledger read begins the under-threshold reading at the oldest row it holds, never at the window start the rows before it were cut from: the streak and the peak are read off the record, not off rows never read', () => {
+  const since = '2026-09-11T01:10:49.424Z';
+  const row = (kind: string, at: string, seq: number): InterventionLedgerRow => ({ seq, workId: gy1675, actor: operator, kind, at, details: null, work: null });
+  // Within the limit, the reach is the window start: every row since it was read.
+  assert.equal(ledgerReach([row('scope', '2026-10-01T00:00:00.000Z', 1)], false, since, reportAt), since);
+  // Truncated, the reach is the oldest row of the window itself; the request of a decision the window settles, read from beyond the window (withDecisionsBeyondReach), precedes it and is not the window's.
+  const window = [row('decision.requested', '2026-09-20T00:00:00.000Z', 5), row('decision.approved', '2026-09-21T00:00:00.000Z', 6), row('scope', '2026-10-02T06:00:00.000Z', 9), row('decision.declined', '2026-10-02T06:00:01.000Z', 10), row('rework', '2026-10-03T00:00:00.000Z', 11)];
+  assert.equal(ledgerReach(window, true, since, reportAt), '2026-10-02T06:00:00.000Z');
+  // A window holding only such requests holds no record to begin a reading at: it begins now, 0 days.
+  assert.equal(ledgerReach(window.slice(0, 2), true, since, reportAt), reportAt);
+  assert.equal(ledgerReach([], true, since, reportAt), reportAt);
+  // A row's own instant may precede its insertion; the reach never precedes the read.
+  assert.equal(ledgerReach([row('scope', '2026-09-11T01:10:49.000Z', 2)], true, since, reportAt), since);
+  // Read at the truncated reach, the row's reading begins there and claims nothing earlier: the instances before it are not the record's, and the reading says where it reads from.
+  const truncatedReach = '2026-10-08T00:00:00.000Z';
+  const truncatedRow = buildRow(report(fleet, reportAt, { reach: truncatedReach }))!;
+  assert.deepEqual(truncatedRow.underThreshold, { since: null, days: 0, holdDays: 14, peak: 3, projected: '2026-10-15T10:32:39.087Z', reach: truncatedReach }, 'the three instances recorded since the reach are at the threshold now; the 17 before it are not read');
+  assert.deepEqual(buildRow(report(fleet, '2026-10-15T10:32:39.088Z', { reach: truncatedReach }))!.underThreshold, { since: '2026-10-15T10:32:39.087Z', days: 0, holdDays: 14, peak: 3, projected: null, reach: truncatedReach });
+  assert.ok(underThreshold(interventions.filter(entry => entry.requestedAt >= truncatedReach), policy, truncatedReach, '2026-10-29T10:32:39.087Z').days <= underThreshold(interventions, policy, ledgerSince, '2026-10-29T10:32:39.087Z').days, 'a later reach never lengthens the streak');
 });
 
 test('manual:intervention-pattern-within-threshold — the causes and rounds are read against the owning item, and the row reads how long every rolling 7-day window has held under 3 over every counted instance, linked or not, within the ledger\'s reach: the instrument the 14 days are read off, truthful over the record as it stands', async () => {
