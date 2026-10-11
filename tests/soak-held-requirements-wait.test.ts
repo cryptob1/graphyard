@@ -6,7 +6,7 @@ import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import type { InvariantCheck } from '../src/model/invariants.js';
 import type { Work } from '../src/model.js';
 import { scopeBlockedBudgetMs, type ScopeRequestState } from '../src/model/scope.js';
-import { syncHeldScopeAskMarks } from '../src/daemon/metrics.js';
+import { coveringStandingScopeWatch, syncHeldScopeAskMarks } from '../src/daemon/metrics.js';
 
 /**
  * GY-1702 (review of 668c66d81763 / 535ff9680874). Standing or held requirements decisions must be
@@ -14,8 +14,9 @@ import { syncHeldScopeAskMarks } from '../src/daemon/metrics.js';
  * only for an ask the quarantined held decision answers, and when the hold fails the recorded wait
  * can breach again. A still-approved resume race keeps a live watch and retries each cycle with no
  * decision fault. These paths run every cycle for every open item, so the real loop runs here for
- * three simulated days over six held items plus a separate approved-resume soak: four matching
- * widenings held under quarantine (two apply when the attempt ends, two fail mid-hold), one
+ * three simulated days over eight held items plus a separate approved-resume soak: four matching
+ * widenings held under quarantine (two apply when the attempt ends, two fail mid-hold), two covering
+ * no-answers holds that fail while decide throws (watch must clear so the bound resumes), one
  * non-matching held revision that must not bind its ask, and one quarantined ask with no held
  * decision (must still breach). After every cycle every system invariant holds. At the end: no
  * resume or decide while a matching hold stands, no decision fault for a hold, the non-matching
@@ -29,7 +30,7 @@ const layout = 'src/widget/Layout.tsx';
 type Decision = { id: string; action: string; state: string; input: any; outcome: string | null; approvedBy: string | null; approvedAt: string | null; requestedAt: string; requestedBy: string };
 type Item = {
   key: string; n: number; epoch: number; live: boolean; policyRevision: number; plannedFiles: string[];
-  kind: 'match-apply' | 'match-fail' | 'nonmatch' | 'quarantine-only';
+  kind: 'match-apply' | 'match-fail' | 'cover-fail' | 'nonmatch' | 'quarantine-only';
   scopeRequest: ScopeRequestState | null; quarantine: boolean; askedAt: string;
 };
 
@@ -42,11 +43,11 @@ test('unit:soak-held-requirements-wait — over three simulated days matching qu
     run: { intervalSeconds: 120 },
   }) as MasterConfig;
 
-  const kinds: Item['kind'][] = ['match-apply', 'match-apply', 'match-fail', 'match-fail', 'nonmatch', 'quarantine-only'];
+  const kinds: Item['kind'][] = ['match-apply', 'match-apply', 'match-fail', 'match-fail', 'cover-fail', 'cover-fail', 'nonmatch', 'quarantine-only'];
   const items: Item[] = kinds.map((kind, n) => {
     const askedAt = iso(start - 20 * minute);
     const path = `src/widget/Extra-${n}.tsx`;
-    const scopeRequest: ScopeRequestState | null = kind === 'quarantine-only' || kind === 'match-apply' || kind === 'match-fail' || kind === 'nonmatch'
+    const scopeRequest: ScopeRequestState | null = kind === 'quarantine-only' || kind === 'match-apply' || kind === 'match-fail' || kind === 'cover-fail' || kind === 'nonmatch'
       ? { epoch: 1, at: askedAt, paths: [path], reason: 'AC-1 needs the extra module', requestedBy: 'worker',
           decision: { state: 'refused', reason: `No rule implies ${path}`, at: askedAt, decidedBy: 'graphyard' } } as ScopeRequestState
       : null;
@@ -56,16 +57,20 @@ test('unit:soak-held-requirements-wait — over three simulated days matching qu
   for (const item of items) {
     if (item.kind === 'quarantine-only') continue;
     const path = item.scopeRequest!.paths[0];
-    const plannedFiles = item.kind === 'nonmatch' ? [layout] : [layout, path];
+    const plannedFiles = item.kind === 'nonmatch' ? [layout]
+      : item.kind === 'cover-fail' ? [layout, path, `src/widget/Extra-${item.n}-more.tsx`]
+      : [layout, path];
     decisions.get(item.key)!.push({
       id: randomUUID(), action: 'requirements', state: 'held',
-      input: { plannedFiles, expectedPolicyRevision: 1, ...(item.kind === 'nonmatch' ? {} : { answers: { epoch: 1, at: item.askedAt } }) },
+      // cover-fail: no-answers covering revision (coveringAdopt); match-*: answers bind the ask.
+      input: { plannedFiles, expectedPolicyRevision: 1, ...(item.kind === 'nonmatch' || item.kind === 'cover-fail' ? {} : { answers: { epoch: 1, at: item.askedAt } }) },
       outcome: 'Task is quarantined; the approved decision is held and applied when the attempt ends',
       approvedBy: 'graphyard-approver', approvedAt: iso(start - 18 * minute), requestedAt: iso(start - 19 * minute), requestedBy: 'graphyard-master-project',
     });
   }
 
   const resumes: string[] = [], requested: string[] = [], withdrawals: string[] = [];
+  const coveringCleared: string[] = [], coveringStillExcluding: string[] = [];
   const view = (item: Item): Work => ({
     id: `work-${item.key}`, key: item.key, title: 'Held wait soak', description: '', type: 'bug', priority: 1, dependencies: [],
     plannedFiles: [...item.plannedFiles], criteria: [{ id: 'AC-1', text: 'The widget layout renders', proofs: ['unit:layout'] }],
@@ -87,7 +92,16 @@ test('unit:soak-held-requirements-wait — over three simulated days matching qu
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async () => {}, requestSmoke: () => {},
     decisions: async (work: Work) => ({ decisions: structuredClone(decisions.get(work.key) ?? []) }),
-    decide: async (work: Work, action: string) => { requested.push(`${work.key}|${action}|${now}`); return { id: randomUUID(), state: 'requested' }; },
+    // cover-fail: after the covering revision fails, decide throws so the replacement cannot land — the watch must still clear.
+    decide: async (work: Work, action: string) => {
+      const item = items.find(entry => entry.key === work.key);
+      if (item?.kind === 'cover-fail' && (decisions.get(work.key)?.[0]?.state === 'failed')) {
+        requested.push(`${work.key}|${action}|${now}|throw`);
+        throw new Error('Simulated: transient decide API error');
+      }
+      requested.push(`${work.key}|${action}|${now}`);
+      return { id: randomUUID(), state: 'requested' };
+    },
     withdraw: async (work: Work, decision: string) => { withdrawals.push(`${work.key}|${decision}`); },
     resume: async (work: Work, decision: string) => { resumes.push(`${work.key}|${decision}`); return decisions.get(work.key)!.find(entry => entry.id === decision)!; },
     approver: async () => ({ agentName: 'gy-approver-soak', pane: null }),
@@ -99,8 +113,8 @@ test('unit:soak-held-requirements-wait — over three simulated days matching qu
   const failAt = start + 30 * minute, applyAt = start + hour, quietFrom = start + day;
 
   for (let cycle = 0; now < start + 3 * day; cycle++, now += cycleMs) {
-    // Scripted world: fail two matching holds, then end attempts so the other matching holds apply.
-    if (now === failAt) for (const item of items.filter(entry => entry.kind === 'match-fail')) {
+    // Scripted world: fail matching and covering holds, then end attempts so the other matching holds apply.
+    if (now === failAt) for (const item of items.filter(entry => entry.kind === 'match-fail' || entry.kind === 'cover-fail')) {
       const decision = decisions.get(item.key)![0];
       Object.assign(decision, { state: 'failed', outcome: 'The holding attempt was replaced; the held decision failed' });
       item.quarantine = false;
@@ -129,14 +143,22 @@ test('unit:soak-held-requirements-wait — over three simulated days matching qu
     const { actions } = await runCycle(config, state, effects, () => now);
     for (const check of state.invariants.report as InvariantCheck[]) if (!check.holds) violations.push(`cycle ${cycle}: ${check.line}`);
 
-    // While matching holds stand under quarantine past the bound, the budget must not breach those asks.
+    // While matching/covering holds stand under quarantine past the bound, the budget must not breach those asks.
     if (now < failAt) {
       syncHeldScopeAskMarks(state.scope, Object.values(state.approvals));
-      const budget = scopeBudget(items.map(view), state.scope, now, true);
+      const budget = scopeBudget(items.map(view), state.scope, now, true, state.approvals);
       const blocked = budget.breaches.filter(breach => breach.id.startsWith('blocked:'));
-      assert.ok(blocked.every(breach => breach.id.includes('GY-1707') || breach.id.includes('GY-1706')),
-        `only quarantine-only / post-script items may breach before fails: ${blocked.map(b => b.id).join(',')}`);
-      assert.ok(!blocked.some(breach => /GY-1702|GY-1703|GY-1704|GY-1705/.test(breach.id)), 'matching held asks under quarantine do not breach');
+      assert.ok(blocked.every(breach => breach.id.includes('GY-1708') || breach.id.includes('GY-1709')),
+        `only nonmatch / quarantine-only may breach before fails: ${blocked.map(b => b.id).join(',')}`);
+      assert.ok(!blocked.some(breach => /GY-1702|GY-1703|GY-1704|GY-1705|GY-1706|GY-1707/.test(breach.id)), 'matching/covering held asks under quarantine do not breach');
+    }
+    // After covering holds fail, their watches must not keep excluding the bound across decide throws.
+    if (now > failAt) {
+      for (const item of items.filter(entry => entry.kind === 'cover-fail' && entry.scopeRequest)) {
+        const work = view(item);
+        if (coveringStandingScopeWatch(work, state.approvals)) coveringStillExcluding.push(`${item.key}@${iso(now)}`);
+        else coveringCleared.push(`${item.key}@${iso(now)}`);
+      }
     }
     void actions;
   }
@@ -147,9 +169,12 @@ test('unit:soak-held-requirements-wait — over three simulated days matching qu
     'no decision fault naming a hold');
   // Matching applies cleared their asks; matching fails left the ask open so a later decide or breach can resume.
   for (const item of items.filter(entry => entry.kind === 'match-apply')) assert.equal(item.scopeRequest, null, `${item.key}: applied hold settled the ask`);
-  for (const item of items.filter(entry => entry.kind === 'match-fail')) assert.ok(item.scopeRequest, `${item.key}: failed hold left the ask open`);
-  // Non-matching hold settled without binding; the re-opened ask was requested at least once.
-  assert.ok(requested.some(entry => entry.startsWith('GY-1706|requirements|')), `non-matching ask was requested after its hold settled: ${requested.join(' | ')}`);
+  for (const item of items.filter(entry => entry.kind === 'match-fail' || entry.kind === 'cover-fail')) assert.ok(item.scopeRequest, `${item.key}: failed hold left the ask open`);
+  assert.deepEqual(coveringStillExcluding, [], `failed covering adopts must not exclude the bound: ${coveringStillExcluding.slice(0, 5).join(' | ')}`);
+  assert.ok(coveringCleared.length > 0, 'covering fails cleared their watches across cycles');
+  assert.ok(requested.some(entry => /GY-1706|GY-1707/.test(entry) && /\|throw$/.test(entry)), 'cover-fail replacement decides threw');
+  // Non-matching hold settled without binding; the re-opened ask was requested at least once (GY-1708).
+  assert.ok(requested.some(entry => entry.startsWith('GY-1708|requirements|')), `non-matching ask was requested after its hold settled: ${requested.join(' | ')}`);
   // Quiet days after the script: no further decides for the applied items.
   const late = requested.filter(entry => Number(entry.split('|')[2]) >= quietFrom);
   assert.deepEqual(late.filter(entry => /GY-1702|GY-1703/.test(entry)), [], 'applied matching holds request nothing in the quiet days');

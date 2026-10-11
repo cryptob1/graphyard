@@ -103,7 +103,7 @@ export function cycleBudget(state: Pick<DaemonState, 'metrics'>, intervalMs: num
   };
 }
 
-/** GY-1701. Covering-adopt watch names this ask (unsettled through request and hold); bound skips while it stands. */
+/** GY-1701/GY-1702. Live covering-adopt watch names this ask; bound skips only while that watch still stands (cleared when the revision fails). */
 export function coveringStandingScopeWatch(item: Pick<Work, 'id' | 'policyRevision' | 'scopeRequest'>, approvals: Record<string, ApprovalWatch>): boolean {
   const request = item.scopeRequest;
   if (!request) return false;
@@ -128,6 +128,44 @@ export const coveringRevisionGone = /^(refused|withdrawn|stale|failed|superseded
 export function coveringAdoptLeftAskOpen(watch: Pick<ApprovalWatch, 'scope' | 'coveringAdopt'>, item: Work, judged: { state: string; approvedAt?: string | null; refusal?: { at?: string } | null }, clock: number): boolean {
   return !!watch.coveringAdopt && !!watch.scope && coveringRevisionGone.test(judged.state) && scopeOutcomeAnswered(item, watch.scope, judged, clock) !== 'answered';
 }
+/** GY-1702: drop a covering-adopt watch whose revision failed/vanished so the ask's wait and bound resume before any replacement request (incl. when that request defers or fails). */
+export function clearCoveringAdoptIfGone(
+  approvals: Record<string, ApprovalWatch>, scopeMeasurements: object, key: string,
+  watch: Pick<ApprovalWatch, 'coveringAdopt' | 'scope'>, item: Work,
+  judged: { state: string; approvedAt?: string | null; refusal?: { at?: string } | null } | null, clock: number,
+): boolean {
+  if (!watch.coveringAdopt || !watch.scope) return false;
+  if (judged !== null && !coveringAdoptLeftAskOpen(watch, item, judged, clock)) return false;
+  clearHeldScopeAsk(scopeMeasurements, item.key, watch.scope.epoch, watch.scope.at);
+  delete approvals[key];
+  return true;
+}
+/** GY-1702: live held watch (coveringAdopt when the revision covers the ask); caller marks the bound. */
+export function heldAdoptWatch(
+  item: Pick<Work, 'key' | 'scopeRequest'>, held: HeldDecisionLike, decision: Pick<RoutineDecision, 'action' | 'scope' | 'input'>,
+  carried: ApprovalWatch | null, stamp: string,
+): { watch: ApprovalWatch; bound: NonNullable<ApprovalWatch['scope']> | null; unmatched: boolean; clearPrevious: { epoch: number; at: string } | null } {
+  const cover = decision.scope
+    ? coveringScopeAdoptWatch(item, { id: held.id, state: 'held', approvedAt: held.approvedAt, approvedBy: held.approvedBy, input: held.input as { plannedFiles?: readonly string[] | null; answers?: unknown } | null }, decision, carried?.requestedAt ?? stamp)
+    : null;
+  const candidate = decision.scope ?? carried?.scope ?? null, { scope, unmatched } = heldWaitScope(held, decision, candidate);
+  const clearPrevious = carried?.scope && scope && (carried.scope.at !== scope.at || carried.scope.epoch !== scope.epoch)
+    ? { epoch: carried.scope.epoch, at: carried.scope.at } : null;
+  const bound = scope ?? cover?.scope ?? null;
+  const base = cover
+    ? approvalWatchSchema.parse({ ...cover, ended: bound ? [heldWaitMarker] : cover.ended })
+    : approvalWatchSchema.parse(heldWaitWatch(item.key, decision.action, held, carried?.requestedAt ?? stamp, scope));
+  return { watch: approvalWatchSchema.parse({ ...base, settledAt: null }), bound, unmatched, clearPrevious };
+}
+/** GY-1702: bind a race-discovered matching ask onto a live held watch; returns the wait detail and whether to mark the bound. */
+export function bindHeldSupervisedAsk(watch: ApprovalWatch, judged: HeldDecisionLike & { outcome?: string | null }, decision: Pick<RoutineDecision, 'action' | 'scope' | 'input'>, item: Pick<Work, 'key' | 'scopeRequest'>): { detail: string; mark: boolean } {
+  Object.assign(watch, { approvedAt: judged.approvedAt ?? null, approvedBy: judged.approvedBy ?? null });
+  if (!watch.scope && decision.scope && standingRequirementsAnswersAsk(judged, decision)) {
+    const cover = coveringScopeAdoptWatch(item, { id: judged.id, state: 'held', approvedAt: judged.approvedAt, approvedBy: judged.approvedBy, input: judged.input as { plannedFiles?: readonly string[] | null; answers?: unknown } | null }, decision, watch.requestedAt);
+    if (cover) Object.assign(watch, cover); else watch.scope = decision.scope;
+  }
+  return { detail: heldWaitDetail(item.key, decision.action, { id: watch.decision, approvedBy: judged.approvedBy, outcome: judged.outcome }, 'the item holds a live attempt', !watch.scope && !!decision.scope), mark: !!watch.scope };
+}
 
 /**
  * How the loop is keeping the promise a scope request rests on: request-to-decision percentiles
@@ -136,7 +174,8 @@ export function coveringAdoptLeftAskOpen(watch: Pick<ApprovalWatch, 'scope' | 'c
  * and nothing left undecided for longer than fifteen. A breach means workers are waiting on the
  * loop, so it is escalated with the numbers rather than left in the metrics.
  *
- * `approvals` (GY-1701): a covering-adopt watch on the open ask excludes it from the blocked bound.
+ * `approvals` (GY-1701/GY-1702): a live covering-adopt watch excludes the ask from the blocked bound;
+ * once that revision fails the watch is cleared so the recorded wait and escalation resume.
  */
 export function scopeBudget(work: Work[], decisions: ScopeMeasurement[], now: number, routes = false, approvals?: Record<string, ApprovalWatch>) {
   const measured = percentiles(decisions.map(entry => entry.waitedMs));

@@ -10,9 +10,13 @@ import { Store } from '../src/store.js';
 import { emptyDaemonState, runCycle, scopeBudget, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { scopeRoutineDecision } from '../src/daemon/decisions.js';
 import {
-  approvedResumePendingDetail, coveringPlannedFiles, heldDecisionNamedIn, heldDecisionRefusal, markHeldScopeAsk, samePlannedFiles,
-  staleRevisionDecideNote, staleRevisionDecideRefusal, standingRequirementsAnswersAsk,
+  approvedResumePendingDetail, clearCoveringAdoptIfGone, coveringPlannedFiles, coveringStandingScopeWatch,
+  heldDecisionNamedIn, heldDecisionRefusal, markHeldScopeAsk, samePlannedFiles,
+  staleRevisionDecideNote, staleRevisionDecideRefusal, standingRequirementsAnswersAsk, syncHeldScopeAskMarks,
 } from '../src/daemon/metrics.js';
+import { approvalWatchSchema } from '../src/daemon/state.js';
+import { decisionKey } from '../src/daemon/reconcile.js';
+import { scopeDecisionBinding } from '../src/model/scope.js';
 import { decisionInput, masterConfigSchema, type HerdrAgent, type MasterConfig } from '../src/master.js';
 import { liveLeaseRevisionRefusal } from '../src/model/approval.js';
 import { scopeBlockedBudgetMs } from '../src/model/scope.js';
@@ -404,4 +408,77 @@ test('integration:post-apply-decide-uses-applied-revision — after a held decis
   // Next cycle re-computes against the applied revision and requests cleanly.
   await loop.cycle(state);
   assert.ok(loop.decided.some(entry => entry.key === work.key && entry.action === 'requirements'), 'a fresh request is made against the current revision');
+});
+
+test('unit:scope-budget-holds-during-quarantine-held-decision — a failed covering adopt clears its watch so a deferred replacement request cannot keep excluding the blocked bound', async () => {
+  const askedAt = '2026-10-11T14:47:50.740Z';
+  const standingId = '9a6095d9-c3e5-4357-93d6-48b8ccc61e5e';
+  const later = Date.parse(askedAt) + scopeBlockedBudgetMs + 60_000;
+  const cfg = masterConfigSchema.parse({
+    version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: 'graphyard',
+    repository: 'owner/project', baseBranch: 'main', githubAppId: 1702, hostId: 'machine-a',
+    masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [],
+  }) as MasterConfig;
+  const scope = { epoch: 4, at: askedAt, requestedBy: 'worker', paths: [helper], reason: 'needs helper',
+    decision: { state: 'refused' as const, reason: 'No rule', at: askedAt, decidedBy: 'graphyard' as const } };
+  const work = {
+    id: 'work-1702', key: 'GY-1702', stage: 'build' as const, plannedFiles: [layout], policyRevision: 1, epoch: 4,
+    criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:layout'] }], title: 't', description: '', type: 'bug' as const, priority: 1,
+    dependencies: [], policy: { checks: ['test'], review: true }, revision: 1, ready: true, createdAt: askedAt, updatedAt: askedAt,
+    stageEnteredAt: askedAt, lease: { owner: 'worker', epoch: 4, expiresAt: new Date(later + 60_000).toISOString() },
+    workspaces: [], submission: null, candidate: null, scenarioRequirements: [], violations: [], evidence: [], observation: null,
+    blocker: null, scopeRequest: scope, carriedScopeRequest: null, scopeDecision: null, containmentQuarantine: null,
+    gates: [{ name: 'build', passed: false, reasons: ['Worker has not submitted'] }],
+  } as unknown as Work;
+  const key = decisionKey(work, { action: 'requirements', binding: scopeDecisionBinding(scope) });
+  const state = emptyDaemonState(cfg);
+  state.approvals[key] = approvalWatchSchema.parse({
+    work: work.key, action: 'requirements', decision: standingId, requestedAt: askedAt, coveringAdopt: true, settledAt: null,
+    scope: { epoch: 4, at: askedAt, requestedBy: 'worker', paths: [helper] },
+  });
+  assert.equal(clearCoveringAdoptIfGone(state.approvals, state.scope, key, state.approvals[key], work, { state: 'failed' }, later), true);
+  assert.equal(state.approvals[key], undefined);
+  assert.equal(coveringStandingScopeWatch(work, state.approvals), false);
+  assert.equal(scopeBudget([work], state.scope, later, true, state.approvals).breaches.length, 1);
+
+  // Multi-cycle: held covering adopt → fail → decide throws → watch stays cleared across deferred retries.
+  const live = { ...work, updatedAt: new Date(later).toISOString() } as Work;
+  const ledger = [{
+    id: standingId, action: 'requirements', state: 'held', input: { plannedFiles: [layout, helper, extra], expectedPolicyRevision: 1 },
+    outcome: 'held', approvedBy: 'graphyard-approver', approvedAt: askedAt, refusal: null, requestedAt: askedAt, requestedBy: 'graphyard-master',
+  }];
+  let decideCalls = 0;
+  const ask = () => ({ epoch: 4, at: askedAt, requestedBy: 'worker', paths: [helper], reason: 'needs helper',
+    decision: { state: 'refused' as const, reason: 'No rule', at: askedAt, decidedBy: 'graphyard' as const } });
+  const at = (clock: number) => ({ ...live, updatedAt: new Date(clock).toISOString(), lease: { ...live.lease!, expiresAt: new Date(clock + 60_000).toISOString() }, scopeRequest: ask() }) as Work;
+  const fx = {
+    agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
+    snapshot: async () => ({ work: [at(later)], now: new Date(later).toISOString(), jobs: [] }),
+    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date(later).toISOString(), reason: 'n/a', deployed: [], pending: [] }),
+    recordDeployment: async () => {}, requestSmoke: () => {},
+    decisions: async () => ({ decisions: structuredClone(ledger) }),
+    decide: async () => { decideCalls += 1; throw new Error('Simulated: transient decide API error'); },
+    withdraw: async () => {}, resume: async () => ledger[0],
+    approver: async () => ({ agentName: 'gy-approver', pane: null }), persist: async () => {},
+  } as unknown as DaemonEffects;
+  const loop = emptyDaemonState(cfg);
+  await runCycle(cfg, loop, fx, () => later);
+  assert.equal(coveringStandingScopeWatch(at(later), loop.approvals), true, 'held covering adopt excludes the bound while it stands');
+  ledger[0].state = 'failed';
+  ledger[0].outcome = 'The holding attempt was replaced';
+  const afterFail = later + 120_000;
+  fx.snapshot = async () => ({ work: [at(afterFail)], now: new Date(afterFail).toISOString(), jobs: [] });
+  await runCycle(cfg, loop, fx, () => afterFail);
+  assert.equal(coveringStandingScopeWatch(at(afterFail), loop.approvals), false, 'failed covering adopt no longer excludes the bound');
+  assert.ok(!Object.values(loop.approvals).some(watch => watch.work === live.key && watch.coveringAdopt), 'no coveringAdopt watch remains');
+  assert.ok(decideCalls >= 1, 'a replacement was attempted');
+  const retryAt = afterFail + 120_000;
+  fx.snapshot = async () => ({ work: [at(retryAt)], now: new Date(retryAt).toISOString(), jobs: [] });
+  await runCycle(cfg, loop, fx, () => retryAt);
+  assert.equal(coveringStandingScopeWatch(at(retryAt), loop.approvals), false, 'a failed decide leaves no covering exclusion');
+  syncHeldScopeAskMarks(loop.scope, Object.values(loop.approvals));
+  const budget = scopeBudget([at(retryAt)], loop.scope, retryAt, true, loop.approvals);
+  assert.equal(budget.open.some(entry => entry.key === live.key && !entry.heldByQuarantine), true, 'the ask is open again without a quarantine hold mark');
+  assert.equal(budget.breaches.length, 1, 'the ask breaches across deferred replacement retries');
 });
