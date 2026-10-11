@@ -13,9 +13,9 @@
   - Expired unsubmitted: [lost worker](operations-reference.md#lost-worker-before-submission); another attempt: [rework](operations-reference.md#submitted-implementation-needs-rework); fenced: [quarantine](operations-reference.md#supervisor-died-leaving-a-containment-quarantine).
   - Moving waits fault late: owed `request-rework` (`owed-decision`) 30min; lapsed containment 10min past grace; watched decision 15min after last approver launch; unwatched decision, owed escalation or blocker 30min; stale non-release 30min; unre-asked refusal once (`decision-refused`); `actorless` head behind base 30min.
   - Plane-wide failures (502–504, startup 503, refused, timeout) retry without `loop`/`session-liveness` fault; dispatch reads `plane-unavailable`. Slow fault/deployment reads defer (`faults:deferred`, `deployment:deferred`); `loop-cost` names the slowest.
-  - A failed manual proof a producer may run returns to worker, never to an operator escalation; one no producer may run needs operator witness, an unexecuted one an attestation.
+  - A failed manual proof a producer may run returns to worker, never an operator escalation; one no producer may run needs operator witness, an unexecuted one attestation.
 - **Merge refused**: wait or repair; never bypass. Auto-merge `BLOCKED` 10min with passing gates retries head-bound; after 30min one `merge-blocked` item quotes GitHub. **Merged outside Graphyard**: [bypass](operations-reference.md#merge-bypass). **Wrong evidence**: [revoke](operations-reference.md#accepted-evidence-turns-out-to-be-wrong). **GitHub paused/webhook silent**: [budget](operations-reference.md#github-request-budget). **Smoke failed**: [delivered with failure](operations-reference.md#delivered-with-a-failed-smoke-proof).
-- **Main ahead of production**: [deployment incident](deployment.md#production-deployment-observation). An up-to-date release takes no coordination locks; a migrating release fails fast within health check, touching only tables whose DDL changed since its per-table digest, retrying deadlocks and expired lock waits with backoff in one 30-second lock budget, each attempt waiting ≤3 s per lock so live writes never queue longer.
+- **Main ahead of production**: [deployment incident](deployment.md#production-deployment-observation). An up-to-date release takes no coordination locks; a migrating release fails fast within health check, touching only tables whose DDL changed since its per-table digest, retrying deadlocks and expired lock waits with backoff within one 30-second budget, ≤3 s per lock so live writes never queue longer.
 - **Diagnosis `waiting`**: provider quota hold ([diagnosis](master-agent.md#research-and-diagnosis)). **Loop down**: [loop](operations-reference.md#master-coordination-loop). **Self-proving**: [bootstrap](operations-reference.md#bootstrap-mode-for-a-self-proving-change).
 
 ## Recovery recipes
@@ -29,11 +29,11 @@ systemctl --user restart graphyard-master-OWNER-NAME                    # loop d
 graphyard master checkout-restore "reason"                              # dirty→refs/graphyard/checkout-restore/; moved HEAD→restart; EACCES skipped
 ```
 
-Never attest a stop you have not confirmed; merged work changes only via follow-ups. Outside the lock's PID namespace `master status` judges the loop by stall bound; stalled or absent: stop hand-started loops, install and enable `examples/master/graphyard-master.service`.
+Never attest a stop you have not confirmed; merged work changes only via follow-ups. Outside the lock's PID namespace `master status` judges the loop by stall bound; stalled or absent: stop hand-started loops, enable `examples/master/graphyard-master.service`.
 
 ## Worker host keyring proxy
 
-Confined masters, approvers, producers read GitHub login (`gh auth git-credential`) via a keyring-only D-Bus proxy; workers and reviewers don't. Per host: copy the three `deploy/systemd/graphyard-secrets-bus*` units and enable the socket. Listens at `$XDG_RUNTIME_DIR/graphyard-secrets-bus` (or `GRAPHYARD_SECRETS_BUS`); absent, sessions push with `GH_TOKEN`.
+Confined masters, approvers, producers read GitHub login (`gh auth git-credential`) via a keyring-only D-Bus proxy; workers and reviewers don't. Per host: install the three `deploy/systemd/graphyard-secrets-bus*` units, enable the socket. Listens at `$XDG_RUNTIME_DIR/graphyard-secrets-bus` (or `GRAPHYARD_SECRETS_BUS`); absent, sessions push with `GH_TOKEN`.
 
 ## Safety facts that never change
 
@@ -48,6 +48,6 @@ Confined masters, approvers, producers read GitHub login (`gh auth git-credentia
 
 ## Resources and disk
 
-`resourceRegistry` declares bounded resources ([remedies](operations-reference.md#control-plane-resources)). Loop reclaims finished worktrees after `run.reclaimIdleHours` (never dirty/unpushed; refusals hold a day), stale temps, idle unowned [panes](master-agent-sessions.md#panes-are-closed-and-reclaimed) seen twice; `disk` attention below `run.diskThresholdGb`. Clean detached coordinator HEAD descending from a verified-release base self-recovers (`upgrade:recovered`); otherwise `escalation:dirty-checkout` says restart onto it, never roll back. Dirty, non-detached or non-forward stays refused, naming paths, HEAD, suspected-writer panes. `master checkout-restore` serves from a detached shared clone of the verified serving release (else `origin/BASE`): fixes need no loop restart; a clean moved HEAD is `adopted`.
+`resourceRegistry` declares bounded resources ([remedies](operations-reference.md#control-plane-resources)). Loop reclaims finished worktrees after `run.reclaimIdleHours` (never dirty/unpushed; refusals hold a day), stale temps, idle unowned [panes](master-agent-sessions.md#panes-are-closed-and-reclaimed) seen twice; `disk` attention below `run.diskThresholdGb`. Clean detached coordinator HEAD descending from a verified-release base self-recovers (`upgrade:recovered`); otherwise `escalation:dirty-checkout` says restart onto it, never roll back. Dirty, non-detached or non-forward stays refused, naming paths, HEAD, suspected-writer panes. `master checkout-restore` runs in a detached shared clone of the verified serving release (else `origin/BASE`) under a single-use loop grant, never the loop's loaded code; no serve-capable release → `failed`, untouched; a clean moved HEAD is `adopted`.
 
 Main guard revert approver ([provisioning](deployment.md#manual-fallback)): redeploy; verify `mainGuard.revertApprover` names it, `mainGuard.attention` empty, `doctor` `revert-approver` ready.

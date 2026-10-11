@@ -73,6 +73,8 @@ const besideCursor = (config: Pick<MasterConfig, 'credentialFile'>, suffix: stri
 export const checkoutRestoreRequestPath = (config: Pick<MasterConfig, 'credentialFile'>) => besideCursor(config, 'checkout-restore');
 export const loopRestartRequestPath = (config: Pick<MasterConfig, 'credentialFile'>) => besideCursor(config, 'loop-restart');
 export const loopExecutorsRequestPath = (config: Pick<MasterConfig, 'credentialFile'>) => besideCursor(config, 'loop-executors');
+/** The single-use grant the loop writes for one serve of a checkout-restore request (GY-1680), beside the cursor like the request it names. */
+export const checkoutRestoreGrantPath = (config: Pick<MasterConfig, 'credentialFile'>) => besideCursor(config, 'checkout-restore-grant');
 export const loopRequestPath = (config: Pick<MasterConfig, 'credentialFile'>, act: LoopRequestAct) =>
   act === 'restart' ? loopRestartRequestPath(config) : act === 'executors' ? loopExecutorsRequestPath(config) : checkoutRestoreRequestPath(config);
 export async function readCheckoutRestoreRequest(file: string): Promise<CheckoutRestoreRequest | null> {
@@ -182,9 +184,9 @@ async function restoreQuiesced(root: string, reason: string, run: ChildRun, at: 
 
 /** What a restore act returns: the restore (null when nothing was dirty), the checkout's HEAD after, and which code served it. */
 export interface RestoreActOutcome { restored: { ref: string; commit: string; paths: string[]; skipped: UnverifiableProcess[] } | null; head: string | null; served?: string }
-/** The quiesce-and-restore of a checkout-restore request (GY-1680): the loop's runs it from the serving release (checkout-restore-release.ts). */
-export type RestoreAct = (root: string, reason: string, at: Date) => Promise<RestoreActOutcome>;
-/** The restore act run by this process's own code: what the serve entry runs, and what the loop falls back to. */
+/** The quiesce-and-restore of a checkout-restore request (GY-1680), told which standing request it serves: the loop's runs it from the serving release under a grant naming that request (checkout-restore-release.ts). */
+export type RestoreAct = (root: string, reason: string, at: Date, request: { file: string; id: string }) => Promise<RestoreActOutcome>;
+/** The restore act run by this process's own code: what the serve entry runs in the release snapshot. The loop never runs it on its loaded code (GY-1680). */
 export const restoreInProcess = (run: ChildRun = defaultChildRun, quiesce?: CheckoutQuiesce): RestoreAct => async (root, reason, at) => {
   const restored = await restoreCoordinatorCheckout(root, reason, run, at, quiesce);
   const head = String(await run('git', ['-C', root, 'rev-parse', 'HEAD'])).trim() || null;
@@ -239,7 +241,7 @@ export async function serveCheckoutRestore(file: string, root: string, deps: Loo
     outcome = { at: now().toISOString(), state: 'restart', ref: null, commit: null, paths: [], detail: `the loop restarts through its supervising unit, as ${request.requestedBy} asked: ${request.reason}`, restart: null };
   } else try {
     const act = deps.restore ?? restoreInProcess(deps.run, deps.quiesce);
-    const { restored, head, served } = await act(root, `${request.reason} (requested by ${request.requestedBy})`, now());
+    const { restored, head, served } = await act(root, `${request.reason} (requested by ${request.requestedBy})`, now(), { file, id: request.id });
     const by = served ? `; ${served}` : '';
     // GY-1680: a clean checkout whose HEAD is not the commit the loop runs is the drift GY-1531 lets a
     // restart adopt — the restart this request exists to make — never a `clean` outcome that leaves

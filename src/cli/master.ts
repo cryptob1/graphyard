@@ -107,12 +107,12 @@ export const masterCommands = defineCommands([
       if (id === 'guide') return console.log(`${masterInstructions}\n` + (await readFile(fileURLToPath(new URL('../../docs/master-agent.md', import.meta.url)), 'utf8')).replace(/^<!-- page:[^\n]*\n/, ''));
       if (id === 'init') return masterInit(context, root);
       if (id === 'setup') return masterSetupCommand(context, root, await loadStoredMasterConfig(root));
-      // GY-1680: the serve entry the loop runs in a snapshot of the serving release — the quiesce-and-restore itself,
-      // needing no session; a confined master, which sees the checkout read-only, files a request instead.
-      if (id === 'checkout-restore' && context.args[0] === checkoutRestoreServeFlag) {
-        if (confinedMaster()) throw new Error(`master checkout-restore ${checkoutRestoreServeFlag} is the loop's own act; a confined master files master checkout-restore REASON, which the loop serves`);
-        return context.print(await serveCheckoutRestoreAct(context.args.slice(1)));
-      }
+      // GY-1680: the serve entry the loop runs in a snapshot of the serving release — the quiesce-and-restore itself.
+      // It opens no session and takes no root: it serves only the grant the loop issued (its path and token in
+      // this process's environment), which names the checkout, the reason and the standing request, and
+      // which the entry verifies against its own ancestry and the loop's cursor before anything is touched.
+      // A confined master, a worker or a hand has no grant and is refused; they file master checkout-restore REASON.
+      if (id === 'checkout-restore' && context.args[0] === checkoutRestoreServeFlag) return context.print(await serveCheckoutRestoreAct(context.args.slice(1)));
       const session = await openMasterSession(context, root);
       // Each concern under ./master/ answers its own subcommands; the first that knows the id handles it.
       // A confined master's `restart` and `executors` are operations' loop requests (GY-1658), not acts on the host's systemd and pids it cannot reach.

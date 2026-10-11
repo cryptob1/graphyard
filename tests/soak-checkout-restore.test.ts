@@ -2,14 +2,16 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
-import { writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { Work } from '../src/model.js';
+import { checkoutRestoreGrantVariable } from '../src/cli/checkout-restore-release.js';
 import { emptyDaemonState, runDaemon, type DaemonEffects } from '../src/master-daemon.js';
 import { masterConfigSchema } from '../src/master.js';
 import { dirtyCheckoutPaths, readCoordinatorCheckout } from '../src/master/profiles.js';
-import { checkoutRestoreRefPrefix, checkoutRestoreRequestPath, loopExecutorsRequestPath, loopRestartRequestPath, readCheckoutRestoreRequest } from '../src/cli/master-checkout-restore.js';
+import { checkoutRestoreGrantPath, checkoutRestoreRefPrefix, checkoutRestoreRequestPath, loopExecutorsRequestPath, loopRestartRequestPath, readCheckoutRestoreRequest } from '../src/cli/master-checkout-restore.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
@@ -20,30 +22,65 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
  * until one lands (the first ask here fails), an executors request run on the host without a loop
  * restart, and
  * the restarted loops must stay settled: no request re-served, no restart asked again, no further
- * failed dirty-checkout attempt, for the rest of the days.
+ * failed dirty-checkout attempt, for the rest of the days. Since GY-1680 the loop serves each
+ * checkout-restore from a snapshot of the serving release — here origin's base-branch tip, whose CLI
+ * is the fixture release entry starting tests/helpers/checkout-restore-serve-child.ts — under a
+ * single-use grant, never from its own loaded code, and a clean moved HEAD is adopted.
  */
 
 const minute = 60_000, hour = 60 * minute, day = 24 * hour;
 const git = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 
+const worktree = fileURLToPath(new URL('..', import.meta.url));
+const helper = fileURLToPath(new URL('./helpers/checkout-restore-serve-child.ts', import.meta.url));
+/** The fixture release's CLI entry: starts the serve helper the way bin/graphyard.mjs starts src/cli.ts, naming the snapshot it runs from. */
+const releaseEntry = `#!/usr/bin/env node
+import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+const here = fileURLToPath(new URL('../', import.meta.url));
+const child = spawn(process.execPath, ['--import', 'tsx', ${JSON.stringify(helper)}, ...process.argv.slice(2)], { cwd: ${JSON.stringify(worktree)}, stdio: 'inherit', env: { ...process.env, GRAPHYARD_TEST_SNAPSHOT: here } });
+child.on('exit', code => process.exit(code ?? 1));
+`;
+
+/**
+ * A coordinator checkout whose base commit is the release origin's main serves (its CLI the fixture
+ * entry, its checkout-restore-release.ts reading the loop's grant), with no deployment observed, so
+ * the loop serves from origin's base-branch tip. The serve helper scans a fake /proc holding only
+ * pid 1 (no writer to stop) and records each serve to `record`.
+ */
 async function installation() {
   const root = await temporaryDirectory('soak-checkout-restore');
   const credentials = join(root, 'credentials');
   await mkdir(credentials, { recursive: true, mode: 0o700 });
   const credentialFile = join(credentials, 'coordinator.token');
   await writeFile(credentialFile, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
-  const main = join(root, 'repo');
+  const main = join(root, 'repo'), origin = join(root, 'origin.git');
   execFileSync('git', ['init', '-q', '-b', 'main', main], { stdio: 'ignore' });
   git(main, 'config', 'user.email', 't@example.com'); git(main, 'config', 'user.name', 'T');
-  await mkdir(join(main, 'src'), { recursive: true }); await mkdir(join(main, 'bin'), { recursive: true });
-  await writeFile(join(main, 'bin', 'graphyard.mjs'), '#!/usr/bin/env node\n');
+  await mkdir(join(main, 'src', 'cli'), { recursive: true }); await mkdir(join(main, 'bin'), { recursive: true });
+  await writeFile(join(main, 'bin', 'graphyard.mjs'), releaseEntry);
+  await writeFile(join(main, 'src', 'cli', 'checkout-restore-release.ts'), `export const checkoutRestoreServeFlag = '--serve';\nexport const checkoutRestoreGrantVariable = ${JSON.stringify(checkoutRestoreGrantVariable)};\n`);
   await writeFile(join(main, 'src', 'loop.ts'), 'export const loop = 1;\n');
   await writeFile(join(main, '.gitignore'), '.graphyard/\n');
   git(main, 'add', '.'); git(main, 'commit', '-q', '-m', 'base');
+  const release = git(main, 'rev-parse', 'HEAD');
+  execFileSync('git', ['clone', '-q', '--bare', main, origin], { stdio: 'ignore' });
+  git(main, 'remote', 'add', 'origin', origin);
+  const proc = join(root, 'proc'), record = join(root, 'serve-record.json');
+  mkdirSync(join(proc, '1'), { recursive: true });
+  writeFileSync(join(proc, '1', 'stat'), '1 (init) S 0 1 1 0 -1 4194560\n'); writeFileSync(join(proc, '1', 'cgroup'), '0::/init.scope\n'); symlinkSync('/', join(proc, '1', 'cwd'));
+  const env = { GRAPHYARD_TEST_FAKE_PROC: proc, GRAPHYARD_TEST_SERVE_RECORD: record };
   const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile, cliPath: join(main, 'bin', 'graphyard.mjs'),
     repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [] });
-  return { main, config };
+  return { main, config, release, record, env };
 }
+/** Sets the serve helper's environment for the children the loop spawns, returning its restoration. */
+function withEnv(env: Record<string, string>) {
+  const before = Object.fromEntries(Object.keys(env).map(key => [key, process.env[key]]));
+  Object.assign(process.env, env);
+  return () => { for (const [key, value] of Object.entries(before)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; } };
+}
+const serveRecord = (record: string) => JSON.parse(readFileSync(record, 'utf8')) as { args: string[]; snapshotHead: string | null; snapshotBranch: string | null; snapshotShared: boolean; grant: { file: string | null; consumed: boolean | null; content: { loop: { pid: number; lock: number } } | null }; ppid: number };
 
 function effects(now: () => number): DaemonEffects {
   const iso = () => new Date(now()).toISOString();
@@ -60,13 +97,14 @@ function effects(now: () => number): DaemonEffects {
 }
 
 test('unit:soak-checkout-restore-served-once — over two simulated days of the real loop, each checkout-restore and confined master-restart request is served once, a failed restart is asked again until it lands, the escalation settles and stays settled, and no restarted loop serves anything again', { timeout: 600_000 }, async () => {
-  const { main, config } = await installation();
+  const { main, config, release, record, env } = await installation();
   const start = Date.parse('2030-01-01T00:00:00Z');
   let clock = start;
   const now = () => clock;
   const state = emptyDaemonState(config);
   const journal: { at: number; pid: number; line: string }[] = [];
   const restarts: { at: number; pid: number; landed: boolean }[] = [];
+  const serves: ReturnType<typeof serveRecord>[] = [];
   const reads: { at: number; pid: number; escalation: string | null; attempts: number | null }[] = [];
   // The day's plan, keyed by simulated time: hotfixes written into the checkout and the requests the
   // doctor and the master file (as `master checkout-restore` and the confined `master restart` write them).
@@ -84,11 +122,13 @@ test('unit:soak-checkout-restore-served-once — over two simulated days of the 
   plan[0].act(); plan.shift();
   let failNextRestart = true, pid = 1000;
   const end = start + 2 * day;
-  while (clock < end) {
+  const restoreEnv = withEnv(env);
+  try { while (clock < end) {
     const host = new EventEmitter(), own = ++pid;
     // Each wait between passes — the refused startup's and every cycle's — is ten simulated minutes.
     const intervalMs = () => {
       clock += 10 * minute;
+      if (existsSync(record)) { serves.push(serveRecord(record)); unlinkSync(record); }
       for (const step of plan.filter(entry => start + entry.at <= clock)) { step.act(); plan.splice(plan.indexOf(step), 1); }
       if (clock >= end) host.emit('SIGTERM');
       return 1;
@@ -108,11 +148,24 @@ test('unit:soak-checkout-restore-served-once — over two simulated days of the 
     const executors = async (args: string[]) => { executorRuns.push({ at: clock, pid: own, args }); return args[0] === 'restart' ? { host: 'machine-a', result: 'restarted' } : { host: 'machine-a', executors: [] }; };
     await runDaemon(config, state, effects(now), { intervalMs, identity: { pid: own, host: 'machine-a' }, signals: ['SIGTERM'], process: host as never, now, checkout, restartLoop, executors,
       log: line => journal.push({ at: clock, pid: own, line }) });
-  }
+  } } finally { restoreEnv(); }
 
   // Each request was carried out once: two restores, each to its own named ref, and one restart request answered.
   const served = journal.filter(entry => /\] checkout-restore (restored|clean|failed)|\] loop-restart request|\] master executors request/.test(entry.line) && !/restart (done|failed):/.test(entry.line));
   assert.equal(served.length, 5, `five requests served once each: ${served.map(entry => entry.line).join(' | ')}`);
+  // Each restore ran in the release snapshot's own CLI — detached at origin's base-branch tip, sharing the checkout's object store — under a grant the serving loop issued and the entry consumed; never in the loop's loaded code.
+  const restores = served.filter(entry => entry.line.includes('checkout-restore restored'));
+  assert.equal(restores.length, 2);
+  assert.ok(restores.every(entry => entry.line.includes(`served from the origin base-branch release ${release.slice(0, 12)}, a detached shared-clone snapshot of it`)), restores.map(entry => entry.line).join(' | '));
+  assert.equal(serves.length, 2, 'the snapshot\'s CLI ran once per restore');
+  for (const serve of serves) {
+    assert.deepEqual(serve.args, ['master', 'checkout-restore', '--serve']);
+    assert.equal(serve.snapshotHead, release); assert.equal(serve.snapshotBranch, null); assert.equal(serve.snapshotShared, true);
+    assert.equal(serve.grant.file, checkoutRestoreGrantPath(config)); assert.equal(serve.grant.consumed, true);
+    assert.equal(serve.grant.content?.loop.pid, process.pid, 'issued by the loop process, the entry\'s grandparent');
+  }
+  assert.deepEqual(serves.map(serve => serve.grant.content?.loop.lock), restores.map(entry => entry.pid), 'each grant names the pid of the loop that served');
+  assert.ok(!existsSync(checkoutRestoreGrantPath(config)), 'no grant outlives its serve');
   // The executors requests: each run once on the host, by the loop serving when it was filed, owing no loop restart.
   assert.deepEqual(executorRuns.map(entry => entry.args), [[], ['restart']], `executors runs: ${JSON.stringify(executorRuns)}`);
   assert.ok(executorRuns.every(entry => entry.at - start - (entry.args.length ? 28 : 26) * hour <= 10 * minute), 'each on the next pass after it was filed');
@@ -149,7 +202,7 @@ test('unit:soak-checkout-restore-served-once — over two simulated days of the 
 });
 
 test('integration:soak-checkout-restore-drift — over two simulated days of the real loop, a checkout-restore request against a clean checkout whose HEAD moved under the loop is adopted: the drift escalation settles, the loop restarts through its unit onto that HEAD, the restarted loop runs it, and nothing is served, restarted or raised again', { timeout: 600_000 }, async () => {
-  const { main, config } = await installation();
+  const { main, config, release, record, env } = await installation();
   git(main, 'checkout', '-q', '--detach');
   const loaded = git(main, 'rev-parse', 'HEAD');
   const start = Date.parse('2030-01-01T00:00:00Z');
@@ -168,7 +221,8 @@ test('integration:soak-checkout-restore-drift — over two simulated days of the
   ];
   let pid = 2000;
   const end = start + 2 * day;
-  while (clock < end) {
+  const restoreEnv = withEnv(env);
+  try { while (clock < end) {
     const host = new EventEmitter(), own = ++pid;
     const intervalMs = () => {
       clock += 10 * minute;
@@ -185,7 +239,7 @@ test('integration:soak-checkout-restore-drift — over two simulated days of the
     const restartLoop = async () => { restarts.push({ at: clock, pid: own }); host.emit('SIGTERM'); };
     await runDaemon(config, state, effects(now), { intervalMs, identity: { pid: own, host: 'machine-a' }, signals: ['SIGTERM'], process: host as never, now, checkout, restartLoop,
       log: line => journal.push({ at: clock, pid: own, line }) });
-  }
+  } } finally { restoreEnv(); }
   const adopted = git(main, 'rev-parse', 'HEAD'), movedTo = moved as string | null;
   assert.ok(movedTo === adopted && adopted !== loaded, 'HEAD moved');
   // Before the request: the drift stood as a failed escalation naming the remedy the installation runs itself.
@@ -195,7 +249,10 @@ test('integration:soak-checkout-restore-drift — over two simulated days of the
   // The request was served once, as an adoption: no dirty path, HEAD adopted, settled, restarted — by the loop that found it.
   const served = journal.filter(entry => /\] checkout-restore (restored|adopted|clean|failed)/.test(entry.line) && !/restart (done|failed):/.test(entry.line));
   assert.equal(served.length, 1, `one request served once: ${served.map(entry => entry.line).join(' | ')}`);
-  assert.match(served[0].line, new RegExp(`checkout-restore adopted: the coordinator checkout at ${main} held no dirty path, but its HEAD ${adopted.slice(0, 12)} is not ${loaded.slice(0, 12)}, the commit the loop runs; the loop adopts it \\(GY-1531\\) and restarts through its supervising unit onto it; served by the loop's own code: no serving release could be materialized`));
+  assert.match(served[0].line, new RegExp(`checkout-restore adopted: the coordinator checkout at ${main} held no dirty path, but its HEAD ${adopted.slice(0, 12)} is not ${loaded.slice(0, 12)}, the commit the loop runs; the loop adopts it \\(GY-1531\\) and restarts through its supervising unit onto it; served from the origin base-branch release ${release.slice(0, 12)}, a detached shared-clone snapshot of it`));
+  // The judgement ran in the release snapshot's CLI under the loop's grant, and found nothing to restore.
+  const serve = serveRecord(record);
+  assert.equal(serve.snapshotHead, release); assert.equal(serve.grant.consumed, true); assert.equal(serve.grant.content?.loop.pid, process.pid); assert.equal(serve.grant.content?.loop.lock, served[0].pid);
   assert.ok(served[0].at - start - 3 * hour <= 10 * minute, 'on the next pass after it was filed');
   assert.deepEqual(restarts.map(entry => entry.pid), [served[0].pid], 'exactly one restart, asked by the loop that served the request');
   const stored = await readCheckoutRestoreRequest(checkoutRestoreRequestPath(config));

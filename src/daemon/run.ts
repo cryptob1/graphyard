@@ -9,7 +9,7 @@ import { allocateManagedCheckout } from '../master/worktrees.js';
 import { worktreeRoot } from '../install/worktree-root.js';
 import { loopScratchCheckout } from '../producer.js';
 import { checkoutGuardApplies, coordinatorCheckoutRefusal, coordinatorCheckoutRoot, dirtyCheckoutEscalation, dirtyCheckoutLeases, dirtyCheckoutPaths, readCoordinatorCheckout, type CoordinatorCheckout } from '../master/profiles.js';
-import { acquireDaemonLock, masterSummary, type DaemonAction, type DaemonState, message, storeAction, touchStanding } from './state.js';
+import { acquireDaemonLock, daemonStatePath, masterSummary, type DaemonAction, type DaemonState, message, storeAction, touchStanding } from './state.js';
 import { faultClassPolicyFromEnv, type FaultClassPolicy } from '../model/fault-classes.js';
 import { faultRecurrenceReport } from './faults.js';
 import { diagnosisReport } from './diagnosis.js';
@@ -20,7 +20,7 @@ import { Launcher, defaultLaunchConcurrency, runCycle } from './cycle.js';
 import { holdBoundWait } from './cycle-decisions.js';
 import { detailChanged } from './decisions.js';
 import { awaitSupervisorRestart, describeSelfUpgrade, detectLoopSupervisorUnit, restartEndedBySupervisorStop, type SelfUpgradeOutcome } from './upgrade.js';
-import { checkoutRestoreRequestPath, loopExecutorsRequestPath, loopRestartRequestPath, serveCheckoutRestore, type CheckoutRestoreOutcome } from '../cli/master-checkout-restore.js';
+import { checkoutRestoreGrantPath, checkoutRestoreRequestPath, loopExecutorsRequestPath, loopRestartRequestPath, serveCheckoutRestore, type CheckoutRestoreOutcome } from '../cli/master-checkout-restore.js';
 import { releasePinnedRestore } from '../cli/checkout-restore-release.js';
 import { describeTimings } from '../master/timings.js';
 import { stopDoctorRuns, doctorReport } from './doctor.js';
@@ -304,7 +304,7 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
     const restoreCheckout = options.checkoutRestore ?? ((settle: (adopt: string | null) => Promise<unknown>, keepAlive?: () => Promise<void>) => serveLoopRequests(config, coordinatorCheckoutRoot(config.cliPath), {
       settle, report: outcome => log(`[graphyard-master] ${outcome.state === 'restart' ? 'loop-restart request' : outcome.state === 'executors' ? 'master executors request' : `checkout-restore ${outcome.state}`}: ${outcome.detail}${outcome.restart ? `; restart ${outcome.restart.state}: ${outcome.restart.detail}` : ''}`),
       restart: options.restartLoop ?? restartThroughUnit, pid: options.identity.pid, loaded: () => guard.expected(),
-      restore: releasePinnedRestore({ release: () => ({ deployment: state.deployment, baseBranch: config.baseBranch }) }),
+      restore: releasePinnedRestore({ release: () => ({ deployment: state.deployment, baseBranch: config.baseBranch }), grant: { file: checkoutRestoreGrantPath(config), cursor: daemonStatePath(config), lock: options.identity.pid } }),
       ...(executorsAct ? { executors: (args: string[]) => executorsAct(args, keepAlive) } : {}) }));
     const serveRestore = async (keepAlive?: () => Promise<void>) => {
       try { await restoreCheckout(adopt => guard.settle({ adopt }), keepAlive); }

@@ -1,16 +1,18 @@
 // The serve entry as a release snapshot's CLI runs it (GY-1680), for the integration proofs in
-// tests/checkout-restore-release.test.ts: the fixture release's bin/graphyard.mjs starts this file
-// with the loop's arguments (`master checkout-restore --serve ROOT REASON`). It runs the real serve
-// entry against a fake /proc the test wrote (GRAPHYARD_TEST_FAKE_PROC), refusing the cwd reads the
-// test names EACCES (GRAPHYARD_TEST_DENY_PATHS, as the kernel does for a non-dumpable process),
-// recording the signals it would send instead of sending them, and writes what it saw — the
-// snapshot it ran from, that snapshot's HEAD and object store, the signals — to
+// tests/checkout-restore-release.test.ts and the soaks in tests/soak-checkout-restore.test.ts: the
+// fixture release's bin/graphyard.mjs starts this file with the loop's arguments (`master
+// checkout-restore --serve`) and environment (the loop's grant and token). It runs the real serve
+// entry — the grant verified against this process's real ancestry — against a fake /proc the test
+// wrote (GRAPHYARD_TEST_FAKE_PROC), refusing the cwd reads the test names EACCES
+// (GRAPHYARD_TEST_DENY_PATHS, as the kernel does for a non-dumpable process), recording the signals
+// it would send instead of sending them, and writes what it saw — the snapshot it ran from, that
+// snapshot's HEAD and object store, the grant it was handed, the signals — to
 // GRAPHYARD_TEST_SERVE_RECORD for the test to assert on.
 import { execFileSync } from 'node:child_process';
 import fs, { existsSync, writeFileSync } from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 import { join } from 'node:path';
-import { serveCheckoutRestoreAct } from '../../src/cli/checkout-restore-release.js';
+import { checkoutRestoreGrantTokenVariable, checkoutRestoreGrantVariable, serveCheckoutRestoreAct } from '../../src/cli/checkout-restore-release.js';
 import { checkoutWriterScan, freezeCheckoutWriters } from '../../src/cli/checkout-writers.js';
 
 const proc = process.env.GRAPHYARD_TEST_FAKE_PROC!, record = process.env.GRAPHYARD_TEST_SERVE_RECORD!, snapshot = process.env.GRAPHYARD_TEST_SNAPSHOT ?? null;
@@ -26,8 +28,12 @@ syncBuiltinESMExports();
 
 const sent: string[] = [];
 const git = (...args: string[]) => { try { return execFileSync('git', ['-C', snapshot!, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch { return null; } };
+const grantFile = process.env[checkoutRestoreGrantVariable] ?? null;
+const grant = (() => { try { return grantFile ? JSON.parse(fs.readFileSync(grantFile, 'utf8')) : null; } catch { return null; } })();
 const write = (outcome: unknown) => writeFileSync(record, JSON.stringify({
   entry: process.argv[1], args: process.argv.slice(2), snapshot, sent, outcome,
+  grant: { file: grantFile, token: process.env[checkoutRestoreGrantTokenVariable] ?? null, content: grant, consumed: grantFile ? !existsSync(grantFile) : null },
+  pid: process.pid, ppid: process.ppid,
   snapshotHead: snapshot ? git('rev-parse', 'HEAD') : null, snapshotBranch: snapshot ? git('symbolic-ref', '-q', 'HEAD') : null,
   snapshotShared: snapshot ? existsSync(join(snapshot, '.git', 'objects', 'info', 'alternates')) : null,
   snapshotModules: snapshot ? existsSync(join(snapshot, 'node_modules')) : null,
