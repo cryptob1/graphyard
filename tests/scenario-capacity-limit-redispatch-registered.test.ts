@@ -14,8 +14,10 @@ import { caseDirectory, loadCases, parseCase, scenarioDefinition, syncCases } fr
 import {
   capacityLimitRedispatchRevision,
   capacityLimitRedispatchScenario,
+  ensureShippedScenarios,
   recordCaseRun,
   resolveScenario,
+  scenarios,
   shippedScenario,
 } from '../src/scenarios.js';
 
@@ -190,6 +192,51 @@ test('unit:scenario-capacity-limit-redispatch-registered — recordCaseRun mater
       "SELECT count(*)::int AS n FROM events WHERE kind='scenario.defined' AND payload->'scenario'->>'id'=$1",
       [id],
     )).rows[0].n, 1, 'materializing appends scenario.defined');
+  } finally {
+    await store.close();
+    await database.stop();
+  }
+});
+
+test('unit:scenario-capacity-limit-redispatch-registered — listing materializes through one transaction: a failed scenario.defined rolls the revision back', async () => {
+  const id = capacityLimitRedispatchScenario;
+  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 177;
+  const database = new EmbeddedPostgres({
+    databaseDir: await temporaryDirectory('scenario-capacity-redispatch-tx'),
+    user: 'graphyard', password: 'testing-only', port, persistent: false,
+    onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'],
+  });
+  await database.initialise(); await database.start(); await database.createDatabase('scenario_capacity_redispatch_tx');
+  const store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/scenario_capacity_redispatch_tx`);
+  try {
+    await store.init();
+    assert.equal((await store.pool.query('SELECT 1 FROM scenarios WHERE id=$1', [id])).rowCount, 0);
+    await assert.rejects(
+      store.transaction(async db => {
+        const original = db.query.bind(db);
+        db.query = ((sql: string | { text: string }, params?: unknown[]) => {
+          const text = typeof sql === 'string' ? sql : sql.text;
+          if (text.startsWith('INSERT INTO events(')) return Promise.reject(new Error('forced scenario.defined failure'));
+          return original(sql as string, params);
+        }) as typeof db.query;
+        await ensureShippedScenarios(db);
+      }),
+      /forced scenario\.defined failure/,
+    );
+    assert.equal((await store.pool.query('SELECT 1 FROM scenarios WHERE id=$1', [id])).rowCount, 0,
+      'a failed event write must not leave a durable scenario row');
+    assert.equal((await store.pool.query(
+      "SELECT count(*)::int AS n FROM events WHERE kind='scenario.defined' AND payload->'scenario'->>'id'=$1",
+      [id],
+    )).rows[0].n, 0, 'the failed append leaves no scenario.defined either');
+    // A later listing retries the same path and lands both writes together.
+    const listed = await scenarios(store);
+    assert.ok(listed.some(entry => entry.id === id && entry.revision === 1));
+    assert.equal((await store.pool.query('SELECT revision FROM scenarios WHERE id=$1', [id])).rows[0].revision, 1);
+    assert.equal((await store.pool.query(
+      "SELECT count(*)::int AS n FROM events WHERE kind='scenario.defined' AND payload->'scenario'->>'id'=$1",
+      [id],
+    )).rows[0].n, 1);
   } finally {
     await store.close();
     await database.stop();

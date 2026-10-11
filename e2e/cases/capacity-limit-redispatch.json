@@ -27,7 +27,7 @@
     {
       "kind": "command",
       "name": "mid-attempt capacity redispatch proofs",
-      "run": "node --import tsx --test tests/capacity-redispatch-preserves-attempt.test.ts tests/capacity-hold-respects-machine-bounds.test.ts",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/capacity-redispatch-preserves-attempt.test.ts tests/capacity-hold-respects-machine-bounds.test.ts",
       "timeoutSeconds": 600
     }
   ]

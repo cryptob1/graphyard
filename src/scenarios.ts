@@ -31,7 +31,9 @@ export function capacityLimitRedispatchRevision(createdAt = '1970-01-01T00:00:00
   });
   const proofStep = JSON.stringify({
     kind: 'command', name: 'mid-attempt capacity redispatch proofs',
-    run: 'node --import tsx --test tests/capacity-redispatch-preserves-attempt.test.ts tests/capacity-hold-respects-machine-bounds.test.ts',
+    // Through the reserving harness: e2e stepEnvironment omits GRAPHYARD_TEST_PORT, so
+    // `node --test` would bind fixed ports outside any reserved window.
+    run: 'node --import tsx tests/helpers/run-tests.ts tests/capacity-redispatch-preserves-attempt.test.ts tests/capacity-hold-respects-machine-bounds.test.ts',
     timeoutSeconds: 600,
   });
   const definition = {
@@ -116,7 +118,9 @@ export type Scenario = Omit<z.infer<typeof scenarioSchema>, 'expectedRevision'> 
 export async function scenarios(store: Store): Promise<Scenario[]> {
   // GY-1708: materialize shipped revisions into the table so GET never advertises a virtual row
   // that e2e sync would treat as unchanged while leaving recordCaseRun with nothing to look up.
-  await ensureShippedScenarios(store.pool);
+  // The revision row and scenario.defined append in one Store.transaction: a failed event write
+  // rolls both back so a later listing retries instead of leaving an unaudited durable row.
+  await store.transaction(async db => { await ensureShippedScenarios(db); });
   return (await store.pool.query('SELECT document FROM scenarios ORDER BY id,revision DESC')).rows.map(r => r.document as Scenario);
 }
 /**
