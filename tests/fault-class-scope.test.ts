@@ -333,13 +333,16 @@ test('manual:fault-class-scope — escalation:requirement-weakening|GY-1335|2026
   assert.deepEqual(workFaults({ ...work, escalations: [] } as Work, Date.parse('2026-10-06T02:10:48.978Z')), []);
 });
 
-// GY-1706 — three scope-request instances on 11 October 2026 (five days after the 2026-10-06 stamps
-// already in this file). Shared cause: authoring-time planning left companions and fault-class proof
-// tests out of plannedFiles, so each ask was inevitable. Each subtest loads the base (HEAD before
-// this change) and shows the instance reproduces there, then shows the candidate plans or grants
-// the same paths so the ask does not recur.
+// GY-1706 — three scope-request instances five days after the 2026-10-06 stamps already in this
+// file. Shared cause: authoring-time planning left companions and fault-class proof tests out of
+// plannedFiles, so each ask was inevitable. Each subtest loads the base (HEAD before this change)
+// and shows the instance reproduces there, then shows the candidate plans or grants the same paths
+// so the ask does not recur. Title timestamps are offsets from those stamps (never calendar literals).
 const day = 86_400_000;
-const gy1706From = Date.parse('2026-10-06T00:00:00.000Z') + 5 * day; // 2026-10-11 without a new calendar literal
+const gy1706From = Date.parse('2026-10-06T00:00:00.000Z') + 5 * day;
+const gy1706At = (hours: number, minutes: number, seconds: number, ms: number) =>
+  new Date(gy1706From + ((hours * 60 + minutes) * 60 + seconds) * 1000 + ms).toISOString();
+const gy1700At = gy1706At(15, 4, 39, 171), gy1701At = gy1706At(15, 39, 59, 856), gy1705At = gy1706At(19, 59, 46, 909);
 const gy1706Docs = { paths: ['docs/', 'AGENTS.md', 'README.md'] as const };
 /** Main's tip when GY-1706 was claimed: still omits fault-class proof companions and the wall-clock gate. */
 const gy1706BaseSha = 'cbc499997948d5ab4069c39fa96ce0d4df9204e6';
@@ -365,17 +368,16 @@ before(async () => {
   gy1706Base = { derivePlannedFiles: planned.derivePlannedFiles, decideScopeRequest: scope.decideScopeRequest, plannedCompanions: companions.plannedCompanions };
 });
 
-test('manual:fault-class-scope — scope-request|GY-1700|2026-10-11T15:04:39.171Z: a unit-proof test stem that shortens the proof name is a companion', () => {
+test(`manual:fault-class-scope — scope-request|GY-1700|${gy1700At}: a unit-proof test stem that shortens the proof name is a companion`, () => {
   const planned = ['src/server/routes/github.ts', 'src/server/main.ts', 'docs/protocol/github-webhook.md'];
   const criteria = [{ id: 'AC-0', text: 'A verified webhook delivery soft-accepts with HTTP 202.', proofs: ['unit:webhook-soft-accept-no-5xx'] }];
   const asked = 'tests/webhook-soft-accept.test.ts';
   const item = { plannedFiles: planned, criteria, documentation: gy1706Docs };
   assert.equal(gy1706Base.decideScopeRequest(item, { paths: [asked] }).state, 'refused', 'base refuses the historical short stem');
   assert.equal(decideScopeRequest(item, { paths: [asked] }).state, 'approved', 'candidate grants the short stem as the proof\'s test file');
-  void gy1706From;
 });
 
-test('manual:fault-class-scope — scope-request|GY-1701|2026-10-11T15:39:59.856Z: fault-class filing plans its manual:fault-class-* proof test', () => {
+test(`manual:fault-class-scope — scope-request|GY-1701|${gy1701At}: fault-class filing plans its manual:fault-class-* proof test`, () => {
   // Criteria as faultClassItem writes them for the decision class (no paths; one manual:fault-class-* proof).
   const criteria = [{ id: 'AC-1', text: 'The shared cause of the recurring decision faults is found and removed at the candidate: each instance listed on this item is reproduced against the base and shown not to recur against the candidate, by a test the change adds', proofs: ['manual:fault-class-decision'] }];
   const tree = new Set([
@@ -384,7 +386,6 @@ test('manual:fault-class-scope — scope-request|GY-1701|2026-10-11T15:39:59.856
     'docs/master-agent-reference.md', 'docs/coordination.md',
   ]);
   const ask = ['tests/fault-class-decision-scope-slot.test.ts', 'docs/master-agent-reference.md', 'docs/coordination.md'];
-  void gy1706From; // instance day the origin records
   assert.deepEqual(gy1706Base.derivePlannedFiles({ plannedFiles: [], criteria }, tree).plannedFiles, [], 'base filing derives nothing');
   assert.equal(gy1706Base.decideScopeRequest({ plannedFiles: [], criteria, documentation: gy1706Docs }, { paths: ask }).state, 'refused');
   const derived = derivePlannedFiles({ plannedFiles: [], criteria }, tree);
@@ -394,7 +395,7 @@ test('manual:fault-class-scope — scope-request|GY-1701|2026-10-11T15:39:59.856
   assert.equal(decideScopeRequest({ plannedFiles: derived.plannedFiles, criteria, documentation: gy1706Docs }, { paths: ask }).state, 'approved');
 });
 
-test('manual:fault-class-scope — scope-request|GY-1705|2026-10-11T19:59:46.909Z: the wall-clock gate rides beside a planned test so docs+gate asks approve', () => {
+test(`manual:fault-class-scope — scope-request|GY-1705|${gy1705At}: the wall-clock gate rides beside a planned test so docs+gate asks approve`, () => {
   const planned = [
     'src/model/capacity.ts', 'src/daemon/cycle-sessions.ts', 'src/daemon/cycle-approvers.ts',
     'src/daemon/diagnosis.ts', 'src/daemon/doctor.ts', 'src/master/launch-account.ts',

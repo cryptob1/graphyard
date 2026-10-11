@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "commit": "2f2b272b9da16e16f877745075ea63c1f5440fbe",
-  "treeUnchanged": true,
+  "treeUnchanged": false,
   "command": [
     "npm",
     "test"
@@ -792,6 +792,7 @@
     "tests/uat-follow-up-filing.test.ts": 3000,
     "tests/checkout-writers-unreadable-cwd.test.ts": 800,
     "tests/standing-held-requirements-wait.test.ts": 3200,
-    "tests/soak-held-requirements-wait.test.ts": 3500
+    "tests/soak-held-requirements-wait.test.ts": 3500,
+    "tests/soak-fault-class-filing.test.ts": 2000
   }
 }
