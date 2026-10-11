@@ -124,10 +124,16 @@ test('unit:hold-charged-to-selected-account — sessionAccount and repeatedLimit
   assert.equal((await sessionAccount(root, config, 'approver', approverProfile, { work: 'GY-1701' }))?.environment, 'claude-c');
   assert.equal((await sessionAccount(root, config, 'doctor', 'doctor'))?.environment, 'zai-a');
   assert.equal((await sessionAccount(root, config, 'diagnostician', 'diagnostician', { work: 'GY-1682' }))?.environment, 'zai-b');
-  const at = new Date().toISOString();
-  const exhaustion = (requestId: string) => ({ at, role: 'approver' as const, account: 'claude-c', profile: approverProfile, reason: 'silent', resetsAt: null, requestId, recordedBy: 'loop', owner: null, runtime: 'claude', partialWork: { state: 'not-applicable' as const, detail: 'n/a' } });
-  const work = { key: 'GY-1', epoch: 2, capacity: { escalations: [], exhaustions: [exhaustion('req-1'), exhaustion('req-2')] } };
-  assert.equal(repeatedLimitAccount(work, Date.now(), 'approver')?.account, 'claude-c');
+  const base = Date.now();
+  const exhaustion = (requestId: string, offsetMs: number) => ({
+    at: new Date(base + offsetMs).toISOString(), role: 'approver' as const, account: 'claude-c', profile: approverProfile, reason: 'silent', resetsAt: null, requestId,
+    recordedBy: 'loop', owner: null, runtime: 'claude', partialWork: { state: 'not-applicable' as const, detail: 'n/a' },
+  });
+  // Distinct sessions share one decision/request id across failover relaunches — they still count.
+  const work = { key: 'GY-1', epoch: 2, capacity: { escalations: [], exhaustions: [exhaustion('same-decision', 0), exhaustion('same-decision', 60_000)] } };
+  assert.equal(repeatedLimitAccount(work, base + 60_000, 'approver')?.account, 'claude-c');
+  const duplicateReport = { key: 'GY-1', epoch: 2, capacity: { escalations: [], exhaustions: [exhaustion('req-1', 0), exhaustion('req-1', 0)] } };
+  assert.equal(repeatedLimitAccount(duplicateReport, base, 'approver'), null, 'the same instant reported twice is one session');
 });
 
 test('integration:no-repeat-launch-into-silent-account — holdRepeatedLimitAccount before selectApproverAccount keeps a repeatedly spent pane account out of selection', async () => {
@@ -136,25 +142,36 @@ test('integration:no-repeat-launch-into-silent-account — holdRepeatedLimitAcco
   await writeFile(credentialFile, 'token', { mode: 0o600 });
   await mkdir(join(dir, 'env-a'), { recursive: true }); await mkdir(join(dir, 'env-b'), { recursive: true });
   await writeFile(join(dir, 'env-a/.credentials.json'), JSON.stringify({ claudeAiOauth: { accessToken: 'x', refreshToken: 'x' } }));
-  await writeFile(join(dir, 'env-b/auth.json'), JSON.stringify({ tokens: { access_token: 'x' } }));
+  await writeFile(join(dir, 'env-b/.credentials.json'), JSON.stringify({ claudeAiOauth: { accessToken: 'x', refreshToken: 'x' } }));
   const config = masterConfigSchema.parse({
     version: 1, url: 'https://graphyard.example', credentialFile, cliPath: 'graphyard', repository: 'owner/project', baseBranch: 'main',
     githubAppId: 1, hostId: 'machine-a', masterAgentName: 'gy-master', autoMerge: true, mergeMethod: 'merge', workers: [],
-    environments: [{ name: 'env-a', kind: 'claude', home: join(dir, 'env-a') }, { name: 'env-b', kind: 'codex', home: join(dir, 'env-b') }],
+    environments: [{ name: 'env-a', kind: 'claude', home: join(dir, 'env-a') }, { name: 'env-b', kind: 'claude', home: join(dir, 'env-b') }],
     reviewers: [{ name: 'reviewer-a', agentName: 'agent-reviewer-a', kind: 'claude', agentArgs: [], approvals: 'auto', environment: {}, accounts: ['env-a', 'env-b'] }],
   }) as MasterConfig;
-  const at = new Date().toISOString();
-  const exhaustion = (requestId: string) => ({
-    at, role: 'approver' as const, account: 'env-a', profile: approverProfile, reason: 'quota', resetsAt: null, requestId,
-    recordedBy: 'loop', owner: null, runtime: 'claude', partialWork: { state: 'not-applicable' as const, detail: 'n/a' },
+  const base = Date.now();
+  const exhaustion = (role: 'approver' | 'reviewer', offsetMs: number) => ({
+    at: new Date(base + offsetMs).toISOString(), role, account: 'env-a', profile: role === 'approver' ? approverProfile : 'reviewer-a', reason: 'quota', resetsAt: null,
+    requestId: 'shared-request', recordedBy: 'loop', owner: null, runtime: 'claude', partialWork: { state: 'not-applicable' as const, detail: 'n/a' },
   });
-  const work = { key: 'GY-1701', epoch: 2, capacity: { escalations: [], exhaustions: [exhaustion('req-1'), exhaustion('req-2')] } };
-  assert.equal(repeatedLimitAccount(work, Date.now(), 'approver')?.account, 'env-a');
-  const placed = await holdRepeatedLimitAccount(config, work, Date.now(), {}, 'approver');
+  const work = { key: 'GY-1701', epoch: 2, capacity: { escalations: [], exhaustions: [exhaustion('approver', 0), exhaustion('approver', 60_000)] } };
+  assert.equal(repeatedLimitAccount(work, base + 60_000, 'approver')?.account, 'env-a');
+  const placed = await holdRepeatedLimitAccount(config, work, base + 60_000, {}, 'approver');
   assert.equal(placed?.account, 'env-a');
-  assert.ok((await observedExhaustions(config, Date.now()))['env-a']);
+  assert.ok((await observedExhaustions(config, base + 60_000))['env-a']);
   const chosen = await selectApproverAccount(config, work.key, 'approver-agent', { quota: false, cacheMs: 0, registry: undefined });
   assert.equal(chosen.account?.name, 'env-b', 'real selection path skips the repeatedly held pane-role account');
+  // Reviewer selection after the assumed hold lapses: two spent sessions sharing one request id
+  // still re-hold before selectAccount (the launchReview path).
+  const reviewWork = { key: 'GY-1701', epoch: 2, capacity: { escalations: [], exhaustions: [exhaustion('reviewer', 0), exhaustion('reviewer', 90_000)] } };
+  assert.equal(repeatedLimitAccount(reviewWork, base + 90_000, 'reviewer')?.account, 'env-a');
+  const afterLapse = base + 90_000 + 3_600_000 + 1;
+  assert.equal((await observedExhaustions(config, afterLapse))['env-a'], undefined, 'the earlier hold has lapsed');
+  const reviewHold = await holdRepeatedLimitAccount(config, reviewWork, afterLapse, {}, 'reviewer');
+  assert.equal(reviewHold?.account, 'env-a');
+  const reviewProfile = config.reviewers[0]!;
+  const reviewChosen = await selectAccount(config, 'reviewer', reviewProfile, { quota: false, cacheMs: 0, now: () => afterLapse, work: reviewWork.key });
+  assert.equal(reviewChosen.account?.name, 'env-b', 'launchReview\'s selectAccount path skips the repeatedly held reviewer account');
 });
 
 type Herdr = { agents: { name: string; pane_id: string; agent_status: string }[]; output: Record<string, string> };
@@ -256,6 +273,23 @@ test('integration:approver-silent-exhaustion-failover — an idle pane whose scr
   assert.equal((await observedExhaustions(config, Date.now() + clock.skewMs))['env-a'], undefined);
 });
 
+test('integration:approver-silent-exhaustion-failover — a done pane whose screen shows its decision is not silent exhaustion', async () => {
+  const { config, herdr, clock, decisions, work, cycle } = await silentApproverLoop('done-worked');
+  const state = emptyDaemonState(config);
+  await cycle(state);
+  const decision = decisions[0].id;
+  const name = approverSessionName(work, decision);
+  const agent = herdr.agents.find(entry => entry.name === name)!;
+  agent.agent_status = 'done';
+  herdr.output[name] = `${decision}\nAPPROVED\n`;
+  clock.skewMs += 61_000;
+  const detection = await cycle(state);
+  const silent = detection.actions.find(action => action.kind === 'failover' && /without working|without a readable provider limit notice|ended without working/.test(action.detail ?? ''));
+  assert.equal(silent, undefined, `silent exhaustion must not charge a done pane that shows its decision: ${JSON.stringify(detection.actions)}`);
+  assert.equal((await observedExhaustions(config, Date.now() + clock.skewMs))['env-a'], undefined);
+  assert.equal((await reload(work.id)).capacity?.exhaustions.length ?? 0, 0, 'no capacity exhaustion was recorded');
+});
+
 test('integration:no-repeat-launch-into-silent-account — after a silent death selection skips the held account', async () => {
   const { config, herdr, clock, decisions, launches, work, cycle, now } = await silentApproverLoop('no-repeat');
   const state = emptyDaemonState(config);
@@ -306,47 +340,65 @@ function recurring(key: string, faultClass: FaultClass, at: number) {
   return diagnosisItem(key, at, { title: input.title, description: input.description, origin: input.origin } as Partial<Work>);
 }
 
-async function diagnosisRound(account: string, held: { account: string; role: string }[], eventsFor: (attempt: 'primary' | 'fallback') => RunEvent[] = () => [{ kind: 'retry', at: new Date(limitNow).toISOString(), attempt: 1, error: limitError }]) {
+async function diagnosisRound(account: string, held: { account: string; role: string; at?: number }[], eventsFor: (attempt: 'primary' | 'fallback') => RunEvent[] = () => [{ kind: 'retry', at: new Date(limitNow).toISOString(), attempt: 1, error: limitError }],
+  options: { elapseAttemptMs?: number } = {}) {
   const settings = diagnosticianSettings({ diagnostician: {} });
+  /** 2030-01-01T12:00:00Z as a millisecond epoch — the diagnosis step's fixed clock. */
+  let at = 1_893_499_200_000;
+  const launchAt = at;
+  const elapse = options.elapseAttemptMs ?? 0;
   const diagnostician: DiagnosticianEffects = {
     settings, cwd: '/checkout',
-    runner: async attempt => ({ runner: limitedTimeoutRunner(eventsFor(attempt)), runtime: 'pi', model: attempt === 'primary' ? 'zai/glm-5.3-flash' : 'zai/glm-5.3', account }),
+    runner: async attempt => {
+      if (elapse) at += elapse;
+      return { runner: limitedTimeoutRunner(eventsFor(attempt)), runtime: 'pi', model: attempt === 'primary' ? 'zai/glm-5.3-flash' : 'zai/glm-5.3', account };
+    },
     context: async () => ({ journal: [], serverLog: [], pullRequests: [] }),
     file: async () => { throw new Error('no fix'); },
     decide: async () => ({ id: randomUUID() }),
   };
-  /** 2030-01-01T12:00:00Z as a millisecond epoch — the diagnosis step's fixed clock. */
-  const at = 1_893_499_200_000;
   const state = emptyDaemonState(diagnosisConfig());
-  const work = [recurring('GY-1682', 'scope', at)];
+  const work = [recurring('GY-1682', 'scope', launchAt)];
   const fx = {
     diagnostician, persist: async () => {},
-    holdAccount: async (name: string, observed: { role: string }) => { held.push({ account: name, role: observed.role }); },
+    holdAccount: async (name: string, observed: { role: string; at?: string }) => { held.push({ account: name, role: observed.role, at: observed.at ? Date.parse(observed.at) : at }); },
   } as unknown as DaemonEffects;
-  const cycle = { config: diagnosisConfig(), state, effects: fx, now: () => at, snapshot: { work, now: new Date(at).toISOString() }, clock: at, performed: [] as any[],
-    isolate: async (_k: string, _i: unknown, _n: string, body: () => Promise<unknown>) => body() } as unknown as Cycle;
-  await diagnosisStep(cycle); await diagnosesSettled();
-  await diagnosisStep(cycle); await diagnosesSettled();
-  return state;
+  const cycle = () => ({ config: diagnosisConfig(), state, effects: fx, now: () => at, snapshot: { work, now: new Date(at).toISOString() }, clock: at, performed: [] as any[],
+    isolate: async (_k: string, _i: unknown, _n: string, body: () => Promise<unknown>) => body() }) as unknown as Cycle;
+  await diagnosisStep(cycle()); await diagnosesSettled();
+  await diagnosisStep(cycle()); await diagnosesSettled();
+  return { state, launchAt, settledAt: at };
 }
 
 test('integration:diagnostician-timeout-limit-wait — an all-timeout round whose retries carry a limit waits and holds the registry account', async () => {
-  const held: { account: string; role: string }[] = [];
-  const state = await diagnosisRound('zai-diag', held);
+  const held: { account: string; role: string; at?: number }[] = [];
+  const { state } = await diagnosisRound('zai-diag', held);
   const entry = state.diagnoses['GY-1682'];
   assert.equal(entry.state, 'waiting', entry.detail);
   assert.ok(entry.retryAt);
-  assert.deepEqual(held, [{ account: 'zai-diag', role: 'diagnostician' }]);
+  assert.equal(held[0]?.account, 'zai-diag');
+  assert.equal(held[0]?.role, 'diagnostician');
   assert.equal(state.faults.instances.filter(entry => entry.kind === 'overlong-session').length, 0);
 });
 
 test('integration:diagnostician-timeout-limit-wait — a primary limit notice with a bare-timeout fallback still waits, never overlong-session', async () => {
-  const held: { account: string; role: string }[] = [];
+  const held: { account: string; role: string; at?: number }[] = [];
   const retry: RunEvent = { kind: 'retry', at: new Date(limitNow).toISOString(), attempt: 1, error: limitError };
-  const state = await diagnosisRound('zai-one-notice', held, attempt => attempt === 'primary' ? [retry] : []);
+  const { state } = await diagnosisRound('zai-one-notice', held, attempt => attempt === 'primary' ? [retry] : []);
   assert.equal(state.diagnoses['GY-1682'].state, 'waiting', state.diagnoses['GY-1682'].detail);
-  assert.deepEqual(held, [{ account: 'zai-one-notice', role: 'diagnostician' }]);
+  assert.equal(held[0]?.account, 'zai-one-notice');
   assert.equal(state.faults.instances.filter(entry => entry.kind === 'overlong-session').length, 0);
+});
+
+test('integration:diagnostician-timeout-limit-wait — the assumed-hour hold starts at settlement after two elapsed timeout bounds', async () => {
+  const held: { account: string; role: string; at?: number }[] = [];
+  const attemptMs = 20 * 60_000;
+  const { state, launchAt, settledAt } = await diagnosisRound('zai-elapsed', held, undefined, { elapseAttemptMs: attemptMs });
+  assert.equal(state.diagnoses['GY-1682'].state, 'waiting');
+  assert.equal(settledAt, launchAt + 2 * attemptMs, 'both timeout bounds elapsed before settlement');
+  assert.equal(Date.parse(state.diagnoses['GY-1682'].retryAt!), settledAt + 3_600_000, 'retryAt is one hour after settlement, not launch');
+  assert.equal(Date.parse(state.diagnoses['GY-1682'].refusedAt!), settledAt);
+  assert.equal(held[0]?.at, settledAt, 'the account hold is stamped at settlement');
 });
 
 test('integration:replay-diagnostician-timeouts — GY-1682 waits for its provider reset then completes without overlong-session', async () => {
@@ -354,6 +406,8 @@ test('integration:replay-diagnostician-timeouts — GY-1682 waits for its provid
   const settings = diagnosticianSettings({ diagnostician: {} });
   /** 2030-01-01T12:00:00Z as a millisecond epoch — the diagnosis step's fixed clock. */
   let at = 1_893_499_200_000;
+  const launchAt = at;
+  const attemptMs = 20 * 60_000;
   let phase: 'limit' | 'ok' = 'limit';
   const covering = diagnosisItem('GY-99', at, { title: 'Covering fix', stage: 'ready' } as Partial<Work>);
   const successPayload = {
@@ -367,12 +421,13 @@ test('integration:replay-diagnostician-timeouts — GY-1682 waits for its provid
     settings, cwd: '/checkout',
     runner: async attempt => {
       if (phase === 'limit') {
+        at += attemptMs;
         const retry: RunEvent = { kind: 'retry', at: new Date(at).toISOString(), attempt: 1, error: limitError };
         return { runner: limitedTimeoutRunner(attempt === 'primary' ? [retry] : []), runtime: 'pi', model: attempt === 'primary' ? 'zai/glm-5.3-flash' : 'zai/glm-5.3', account: 'zai-replay' };
       }
       const runner: Runner = {
         name: 'pi',
-        start<T>(prompt: string, options: { validate: (payload: unknown) => T; tool?: string }) {
+        start<T>(_prompt: string, options: { validate: (payload: unknown) => T; tool?: string }) {
           const parsed = options.validate(successPayload);
           return { id: randomUUID(), events: [], onEvent: () => () => {}, cancel() {}, result: async () => ({ ok: true as const, tool: options.tool ?? 'diagnose', payload: parsed, payloads: [parsed] }) };
         },
@@ -384,7 +439,7 @@ test('integration:replay-diagnostician-timeouts — GY-1682 waits for its provid
     decide: async () => ({ id: randomUUID() }),
   };
   const state = emptyDaemonState(diagnosisConfig());
-  const work = [recurring('GY-1682', 'scope', at), covering];
+  const work = [recurring('GY-1682', 'scope', launchAt), covering];
   const decisions = new Map<string, { id: string; state: string; action: string; approvedBy?: string }>();
   const fx = {
     diagnostician, persist: async () => {},
@@ -400,6 +455,7 @@ test('integration:replay-diagnostician-timeouts — GY-1682 waits for its provid
   assert.equal(state.diagnoses['GY-1682'].state, 'waiting');
   assert.match(state.diagnoses['GY-1682'].detail, /quota or rate limit/);
   assert.equal(held[0]?.account, 'zai-replay');
+  assert.equal(Date.parse(state.diagnoses['GY-1682'].retryAt!), launchAt + 2 * attemptMs + 3_600_000, 'elapsed timeout bounds are included in the wait');
   phase = 'ok';
   at = Date.parse(state.diagnoses['GY-1682'].retryAt!) + 1;
   await diagnosisStep(cycle()); await diagnosesSettled();

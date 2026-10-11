@@ -559,9 +559,8 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       else { const ledger = await readProducerLedger(root); await saveProducerLedger(root, { ...ledger, producers: ledger.producers.map(entry => entry.id === session.record && entry.state === 'pending' ? { ...entry, ...ended } : entry) }); }
     },
     relaunch: async (session, work, snapshot) => {
-      // GY-1705: re-hold a pane-role account the item's last two sessions of this role each spent,
-      // before selectAccount inside launchReview/launchProducer, so a lapsed assumed reset cannot
-      // hand the spent account back on the failover that replaces a silent or quota-spent pane.
+      // launchReview/launchProducer also re-hold before selectAccount (GY-1705); this call keeps the
+      // failover path refusing early when the durable hold cannot be written, before a pane starts.
       const holdAt = Date.now();
       await holdRepeatedLimitAccount(current(), work, holdAt, { fetch: fetcher }, session.role).catch((error: unknown) => {
         throw new Error(`${work.key}'s last ${session.role} sessions each ended on one account's limit notice, and the hold that keeps the next launch off it could not be placed: ${message(error).slice(0, 300)}; nothing was relaunched`, { cause: error });

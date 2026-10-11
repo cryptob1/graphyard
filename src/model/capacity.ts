@@ -219,7 +219,7 @@ export function silentPaneExhaustion(input: {
   hasOutcome: boolean;
   notice: ExhaustionSignal | null;
   pastStartBound: boolean;
-  /** True only when the pane finished (`done`) or an idle screen stayed still with no request trace. */
+  /** True only when a still, untouched screen (or a no-screen loop's bare `done`) shows the pane ended with no request trace. */
   ended: boolean;
 }): ExhaustionSignal | null {
   if (!input.listed || !input.ended || input.everWorking || input.hasOutcome || input.notice || !input.pastStartBound) return null;

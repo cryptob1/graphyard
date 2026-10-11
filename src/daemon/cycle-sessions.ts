@@ -181,10 +181,10 @@ export async function closeStep(cycle: Cycle) {
         performed.push(await record(state, key, { kind: 'failover', work: item.key, principal: profile.principal, epoch, state: 'failed', detail: `${item.key} epoch ${epoch} exhausted its account (${signal.reason}) but could not be failed over: ${message(error)}`, attempts, cycle: state.cycle }, now(), effects.persist));
       }
     });
-    // GY-1705: idle reviewer/producer screens past the start bound share one pause — start every
-    // motion read before awaiting any, so twenty idle panes cost ~one pause, not twenty, keeping
-    // the cycle under the 30s cycle-p90 invariant. Marker is the work key (in every launch prompt),
-    // never the request id (reviewer/producer prompts do not include it).
+    // GY-1705: idle/done reviewer/producer screens past the start bound share one pause — start
+    // every motion read before awaiting any, so twenty such panes cost ~one pause, not twenty,
+    // keeping the cycle under the 30s cycle-p90 invariant. Marker is the work key (in every launch
+    // prompt), never the request id (reviewer/producer prompts do not include it).
     const launched = await effects.launchedSessions?.().catch(() => [] as LaunchedSession[]) ?? [];
     const idleMotions = new Map<string, Promise<'still' | 'started' | 'moving' | 'unreadable'>>();
     if (effects.sessionOutput) {
@@ -198,7 +198,10 @@ export async function closeStep(cycle: Cycle) {
           : running.find(entry => entry.agentName === session.agentName || (!!session.pane && entry.pane === session.pane));
         const startedAt = handle?.startedAt ? Date.parse(handle.startedAt) : Number.NaN;
         const pastStart = Number.isFinite(startedAt) && clock - startedAt >= launchStartMs(config);
-        if ((agent.agent_status ?? '') === 'idle' && pastStart && !idleMotions.has(session.record)) {
+        const status = agent.agent_status ?? '';
+        // `done` is checked too: a session that finished between ticks may never have been observed
+        // working, and its screen still shows whether the request ran before charging silence.
+        if ((status === 'idle' || status === 'done') && pastStart && !idleMotions.has(session.record)) {
           idleMotions.set(session.record, screenMotion(() => effects.sessionOutput!(agent, stallScreenLines), session.work, effects.idleScreenPauseMs));
         }
       }
@@ -216,12 +219,19 @@ export async function closeStep(cycle: Cycle) {
       const startedAt = handle?.startedAt ? Date.parse(handle.startedAt) : Number.NaN;
       const pastStart = Number.isFinite(startedAt) && clock - startedAt >= launchStartMs(config);
       const status = agent.agent_status ?? '';
-      // Ended means the pane finished: `done`, or idle with a still, untouched screen. Bare idle is
-      // not enough — Herdr reports a long or silent command as idle while it still runs (GY-1705).
-      let ended = status === 'done';
-      if (!ended && !noticeSignal && status === 'idle' && pastStart && effects.sessionOutput) {
-        const motion = await (idleMotions.get(session.record) ?? screenMotion(() => effects.sessionOutput!(agent, stallScreenLines), session.work, effects.idleScreenPauseMs));
-        ended = motion === 'still';
+      // Ended means a still, untouched screen past the start bound — for `done` as for idle. Bare
+      // `done` is not enough: a session that started and finished between ticks may never have
+      // `observed === 'working'`, while its screen still shows the work-key marker (GY-1705). Bare
+      // idle is not enough either — Herdr reports a long or silent command as idle while it runs.
+      // A loop that reads no screens still treats `done` alone as ended.
+      let ended = false;
+      if (!noticeSignal && pastStart && (status === 'done' || status === 'idle')) {
+        if (effects.sessionOutput) {
+          const motion = await (idleMotions.get(session.record) ?? screenMotion(() => effects.sessionOutput!(agent, stallScreenLines), session.work, effects.idleScreenPauseMs));
+          ended = motion === 'still';
+        } else {
+          ended = status === 'done';
+        }
       }
       const signal = noticeSignal ?? silentPaneExhaustion({
         listed: true,

@@ -55,7 +55,7 @@ export const repeatedLimitLaunches = 2;
 /**
  * The account an item's latest launches of `role` each ended on (GY-1582, GY-1705), when the last
  * `repeatedLimitLaunches` of its quota exhaustions all name it, were recorded by consecutive launch
- * epochs (workers) or consecutive request ids (pane roles) ending at the item's latest, and the
+ * epochs (workers) or consecutive spent sessions (pane roles) ending at the item's latest, and the
  * latest is within `repeatedLimitWindowMs`. An attempt interrupted for another cause, or one that
  * ended without a limit notice (a gap), ends the run, as does one on no named account. A repeat
  * whose last notice named a reset that has since passed is over: the account has recovered, and
@@ -80,10 +80,12 @@ export function repeatedLimitAccount(work: Pick<Work, 'capacity'> & Partial<Pick
     return records.length >= repeatedLimitLaunches ? { account: last.account, records } : null;
   }
   // Pane roles: consecutive quota exhaustions on the same account within the window, newest last.
+  // Distinct sessions count even when failover reuses one request/decision id; only a duplicate
+  // report of the same instant is collapsed (one session's notice reported twice).
   const records: ExhaustionRecord[] = [];
   for (const entry of [...ofRole].reverse()) {
     if (entry.account !== last.account || (entry.cause ?? 'quota') !== 'quota') break;
-    if (records.some(prior => prior.requestId && prior.requestId === entry.requestId)) continue;
+    if (records.some(prior => prior.at === entry.at)) continue;
     records.unshift(entry);
     if (records.length >= repeatedLimitLaunches) break;
   }
@@ -96,9 +98,9 @@ export function repeatedLimitAccount(work: Pick<Work, 'capacity'> & Partial<Pick
  * its account as it is read, but a hold that was charged elsewhere, or lapsed on an assumed reset,
  * would let selection hand the spent account back; here it is held again, until the last notice's
  * reset or the assumed hour, so the attempt is routed to an eligible account. Workers call this from
- * dispatch; approvers from the loop's approver launch; reviewers and producers from the failover
- * relaunch that runs before their next `selectAccount`. Returns the hold placed, or null when none
- * was needed.
+ * dispatch; approvers from the loop's approver launch; reviewers and producers from every
+ * `launchReview` / `launchProducer` (and the failover relaunch) before `selectAccount`. Returns the
+ * hold placed, or null when none was needed.
  */
 export async function holdRepeatedLimitAccount(config: Pick<MasterConfig, 'credentialFile'> & Partial<Pick<MasterConfig, 'environments' | 'url' | 'hostId'>>, work: Pick<Work, 'key' | 'capacity'> & Partial<Pick<Work, 'epoch'>>, now = Date.now(), report?: Parameters<typeof recordObservedExhaustion>[4], role: CapacityRole = 'worker'): Promise<{ account: string; hold: ObservedExhaustion } | null> {
   const repeated = repeatedLimitAccount(work, now, role);

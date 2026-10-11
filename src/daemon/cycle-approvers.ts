@@ -275,9 +275,11 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
    * each — keeping the cycle under the 30s cycle-p90 invariant while still protecting long commands.
    */
   let screens: { seen: unknown; reads: Map<string, Promise<ScreenMotion>> } | null = null;
-  const idlePastStart = (watch: ApprovalWatch, seen: { agents: HerdrAgent[]; available: boolean }, startMs: number) => {
+  // Idle or done past the start bound: both need a screen read before silent exhaustion (GY-1705).
+  const screenPastStart = (watch: ApprovalWatch, seen: { agents: HerdrAgent[]; available: boolean }, startMs: number) => {
     const agent = seen.available ? seen.agents.find(candidate => candidate.name === watch.agentName) : undefined;
-    return agent?.agent_status === 'idle' && agent.pane_id && Number.isFinite(Date.parse(watch.launchedAt ?? '')) && clock - Date.parse(watch.launchedAt!) >= startMs ? agent : undefined;
+    const status = agent?.agent_status ?? '';
+    return agent && (status === 'idle' || status === 'done') && agent.pane_id && Number.isFinite(Date.parse(watch.launchedAt ?? '')) && clock - Date.parse(watch.launchedAt!) >= startMs ? agent : undefined;
   };
   const readScreen = (agent: HerdrAgent, decision: string) => screenMotion(() => effects.sessionOutput!(agent, stallScreenLines), decision, effects.idleScreenPauseMs);
   const sharedIdleScreen = async (watch: ApprovalWatch, agent: HerdrAgent, seen: { agents: HerdrAgent[]; available: boolean }) => {
@@ -286,8 +288,8 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
     if (screens?.seen !== seen) {
       screens = { seen, reads: new Map() };
       for (const other of Object.values(state.approvals)) {
-        const idle = !other.settledAt && !other.exhaustedAt ? idlePastStart(other, seen, startMs) : undefined;
-        if (idle && (!other.pane || other.pane === idle.pane_id) && !screens.reads.has(idle.pane_id!)) screens.reads.set(idle.pane_id!, readScreen(idle, other.decision));
+        const candidate = !other.settledAt && !other.exhaustedAt ? screenPastStart(other, seen, startMs) : undefined;
+        if (candidate && (!other.pane || other.pane === candidate.pane_id) && !screens.reads.has(candidate.pane_id!)) screens.reads.set(candidate.pane_id!, readScreen(candidate, other.decision));
       }
     }
     const read = screens.reads.get(agent.pane_id!) ?? readScreen(agent, watch.decision);
@@ -301,8 +303,8 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
    * hour), the exhaustion is recorded against the decision, the session is closed, and the same
    * decision goes to the next eligible account in the same cycle. The launch it spent is not
    * counted against the decision's bound. An idle pane whose command may still be running is not
-   * this signal: ended means `done`, or idle with a still, untouched screen (same long-command
-   * protection as the stall path). Idle screens share one pause with the stall path above.
+   * this signal: ended means a still, untouched screen for `done` or idle (same long-command
+   * protection as the stall path). Idle and done screens share one pause with the stall path above.
    */
   const approverExhausted = async (item: Work, watch: ApprovalWatch) => {
     if (!effects.reportCapacity || !watch.agentName) return false;
@@ -319,10 +321,18 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
     const launchedAt = watch.launchedAt ? Date.parse(watch.launchedAt) : Number.NaN;
     const pastStart = Number.isFinite(launchedAt) && clock - launchedAt >= launchStartMs(config);
     const status = agent.agent_status ?? '';
-    let ended = status === 'done';
-    if (!ended && !notice && status === 'idle' && pastStart && effects.sessionOutput) {
-      const motion = await sharedIdleScreen(watch, agent, seen);
-      ended = motion === 'still';
+    // Ended means a still, untouched screen — for `done` as for idle (GY-1705). A session that
+    // finished between ticks may never have been observed working while its screen still shows the
+    // decision marker; bare `done` must not charge silence. A loop that reads no screens still
+    // treats `done` alone as ended.
+    let ended = false;
+    if (!notice && pastStart && (status === 'done' || status === 'idle')) {
+      if (effects.sessionOutput) {
+        const motion = await sharedIdleScreen(watch, agent, seen);
+        ended = motion === 'still';
+      } else {
+        ended = status === 'done';
+      }
     }
     const signal: ExhaustionSignal | null = notice ?? silentPaneExhaustion({
       listed: true,

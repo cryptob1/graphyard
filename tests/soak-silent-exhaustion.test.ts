@@ -13,8 +13,8 @@ import {
 } from '../src/model/capacity.js';
 import { faultClassItem, type FaultClass, type FaultInstance } from '../src/model/fault-classes.js';
 import {
-  approverRoleHealth, approverSessionName, masterConfigSchema, observedExhaustions, recordObservedExhaustion,
-  selectApproverAccount, type MasterConfig,
+  approverRoleHealth, approverSessionName, holdRepeatedLimitAccount, masterConfigSchema, observedExhaustions, recordObservedExhaustion,
+  repeatedLimitAccount, selectAccount, selectApproverAccount, type MasterConfig,
 } from '../src/master.js';
 import { clearDiagnoses, diagnosesSettled, type DiagnosticianEffects } from '../src/daemon/diagnosis.js';
 import { clearDoctorRuns, doctorDue, doctorRunsSettled, type DoctorEffects } from '../src/daemon/doctor.js';
@@ -165,6 +165,8 @@ test('unit:soak-invariants-hold — over a simulated hour silent ended failover 
     recordRun: async () => {},
   };
   const applied = new Map<string, { id: string; state: string; action: string; approvedBy?: string }>();
+  // Elapsed timeout bounds are proved in capacity-silent-exhaustion (settlement after 2×20m);
+  // advancing soak `now` inside a cycle would inflate cycle duration past cycle-p90.
   const diagnostician: DiagnosticianEffects = {
     settings: diagnosticianSettings({ diagnostician: {} }), cwd: '/checkout',
     runner: async attempt => diagnosisPhase === 'limit'
@@ -328,6 +330,30 @@ test('unit:soak-invariants-hold — over a simulated hour silent ended failover 
   assert.ok(['closing', 'answered', 'releasing', 'diagnosed'].includes(state.diagnoses['GY-1682'].state), state.diagnoses['GY-1682'].state);
   assert.equal(state.faults.instances.filter(entry => entry.kind === 'overlong-session').length, 0);
   assert.ok(heldAccounts.some(entry => entry.account === 'zai-diag' && entry.role === 'diagnostician'));
+
+  // Multi-cycle reviewer selection: two spent sessions sharing one request id re-hold before selectAccount.
+  const reviewBase = soakStart + 55 * minute;
+  const reviewExhaustion = (offsetMs: number) => ({
+    at: new Date(reviewBase + offsetMs).toISOString(), role: 'reviewer' as const, account: 'env-a', profile: 'reviewer-a', reason: 'quota', resetsAt: null,
+    requestId: 'review-request-shared', recordedBy: 'loop', owner: null, runtime: 'claude',
+    partialWork: { state: 'not-applicable' as const, detail: 'a reviewer session edits nothing' },
+  });
+  const reviewItem = {
+    key: silentWork.key, epoch: 2,
+    capacity: { escalations: [], exhaustions: [reviewExhaustion(0), reviewExhaustion(5 * minute)] },
+  };
+  assert.equal(repeatedLimitAccount(reviewItem, reviewBase + 5 * minute, 'reviewer')?.account, 'env-a');
+  // Assumed hold has lapsed; the next selection must re-hold before choosing.
+  const afterLapse = reviewBase + 5 * minute + 3_600_000 + 1;
+  assert.equal((await observedExhaustions(config, afterLapse))['env-a'], undefined, 'the earlier silent-death hold has lapsed');
+  const reheld = await holdRepeatedLimitAccount(config, reviewItem, afterLapse, {}, 'reviewer');
+  assert.equal(reheld?.account, 'env-a');
+  const reviewProfile = { ...config.reviewers[0]!, accounts: ['env-a'] };
+  await assert.rejects(
+    selectAccount(config, 'reviewer', reviewProfile, { quota: false, cacheMs: 0, now: () => afterLapse, work: reviewItem.key }),
+    /exhausted|no healthy|spent|quota|NoHealthy/i,
+    'post-lapse reviewer selectAccount refuses the repeatedly spent account',
+  );
 
   const round = headlessTimeoutLimit([
     { result: 'timeout', detail: 'no terminal event within 1200s; the run was stopped', events: [retry] },

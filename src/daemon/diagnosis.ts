@@ -407,7 +407,7 @@ async function launch(cycle: Cycle, diagnostician: DiagnosticianEffects, subject
 }
 
 async function advance(cycle: Cycle, diagnostician: DiagnosticianEffects, entry: DiagnosisRecord, note: Note) {
-  const { state, effects, snapshot, clock } = cycle;
+  const { state, effects, snapshot, clock, now } = cycle;
   if (entry.state === 'running') {
     const outcome = outcomes.get(entry.subject);
     if (!outcome) {
@@ -422,12 +422,14 @@ async function advance(cycle: Cycle, diagnostician: DiagnosticianEffects, entry:
     entry.runs = outcome.runs.slice(-4);
     if (!outcome.diagnosis && outcome.limit) {
       const named = outcome.limit.resetsAt ? Date.parse(outcome.limit.resetsAt) : Number.NaN;
-      // A reset already past says nothing about when the provider recovers: the hour's hold, as for none.
+      // Settlement time, not the launch-cycle snapshot: two real timeouts can finish long after
+      // `clock` was snapped, and the assumed-hour hold must start when the limit is known (GY-1705).
+      const settledAt = now();
       entry.state = 'waiting';
-      entry.retryAt = iso(Number.isFinite(named) && named > clock ? Math.max(named, clock + diagnosisLimitMinimumMs) : clock + diagnosisLimitHoldMs);
-      entry.refusedAt = iso(clock);
+      entry.retryAt = iso(Number.isFinite(named) && named > settledAt ? Math.max(named, settledAt + diagnosisLimitMinimumMs) : settledAt + diagnosisLimitHoldMs);
+      entry.refusedAt = iso(settledAt);
       // Charge the hold to the account the round launched on (GY-1705), never a nominal profile.
-      if (outcome.account) await effects.holdAccount?.(outcome.account, { at: iso(clock), resetsAt: outcome.limit.resetsAt, reason: outcome.limit.reason, role: 'diagnostician', profile: diagnosticianRole, work: entry.work });
+      if (outcome.account) await effects.holdAccount?.(outcome.account, { at: iso(settledAt), resetsAt: outcome.limit.resetsAt, reason: outcome.limit.reason, role: 'diagnostician', profile: diagnosticianRole, work: entry.work });
       // The provider's capacity, not the loop's failure: no fault kind, so no loop fault instance.
       await note(entry, 'waiting', `The diagnostician's provider refused the diagnosis of ${entry.subject} for its quota or rate limit (${outcome.limit.reason}); it is diagnosed again at ${entry.retryAt}, and no other diagnosis is launched before then`, null);
       return;
