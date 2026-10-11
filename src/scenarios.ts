@@ -9,10 +9,71 @@ import type { Store } from './store.js';
 
 /**
  * GY-1708: scenario id the capacity fault-class filing cites as `e2e:capacity-limit-redispatch`.
- * Registered as a revision from `e2e/cases/capacity-limit-redispatch.json` via `graphyard e2e sync`
- * (or an admin's defineScenario); create refuses filings that cite it before that revision exists.
+ * Revision 1 ships in this module (`capacityLimitRedispatchRevision`); create and listing resolve
+ * it without a separate `graphyard e2e sync`. The matching optional case under `e2e/cases/` stays
+ * the source e2e sync revises later.
  */
 export const capacityLimitRedispatchScenario = 'capacity-limit-redispatch';
+
+/** Query surface used to resolve a scenario revision (pool or a transaction client). */
+type ScenarioDb = { query: (sql: string, params?: unknown[]) => Promise<{ rows: { document: Scenario }[] }> };
+
+/**
+ * GY-1708: revision 1 of `capacity-limit-redispatch`, shipped with the release so master create
+ * accepts `e2e:capacity-limit-redispatch` before any e2e sync. Fields match
+ * `scenarioDefinition` of `e2e/cases/capacity-limit-redispatch.json`.
+ */
+export function capacityLimitRedispatchRevision(createdAt = '1970-01-01T00:00:00.000Z', createdBy = 'graphyard'): Scenario {
+  const listStep = JSON.stringify({
+    kind: 'http', name: 'shipped scenario revision is listed', method: 'GET', path: '/api/scenarios', status: 200,
+    expect: [{ path: '', includes: { id: capacityLimitRedispatchScenario, revision: 1, runner: caseRunner, testPath: `e2e/cases/${capacityLimitRedispatchScenario}.json` } }],
+  });
+  const proofStep = JSON.stringify({
+    kind: 'command', name: 'mid-attempt capacity redispatch proofs',
+    run: 'node --import tsx --test tests/capacity-redispatch-preserves-attempt.test.ts tests/capacity-hold-respects-machine-bounds.test.ts',
+    timeoutSeconds: 600,
+  });
+  const definition = {
+    id: capacityLimitRedispatchScenario,
+    title: 'Mid-attempt provider limit exhaustion redispatches without losing work',
+    purpose: 'Asserts the shipped capacity-limit-redispatch scenario revision is listed and runs the mid-attempt redispatch proofs (hold, failover, preserved work, truthful role bounds) without creating backlog items.',
+    setup: [] as string[],
+    steps: [listStep, proofStep],
+    expected: [
+      'GET /api/scenarios answers 200',
+      `(body) includes ${JSON.stringify({ id: capacityLimitRedispatchScenario, revision: 1, runner: caseRunner, testPath: `e2e/cases/${capacityLimitRedispatchScenario}.json` })}`,
+      'mid-attempt capacity redispatch proofs exits 0',
+    ],
+    environment: 'any',
+    runner: caseRunner,
+    testPath: `e2e/cases/${capacityLimitRedispatchScenario}.json`,
+    tags: ['capacity'],
+    required: false,
+  };
+  return { ...definition, revision: 1, hash: createHash('sha256').update(JSON.stringify(definition)).digest('hex'), createdAt, createdBy };
+}
+
+/** Every scenario revision this release ships in code (GY-1708). */
+export const shippedScenarioRevisions = (): Scenario[] => [capacityLimitRedispatchRevision()];
+
+/** The shipped revision for `id`, or undefined when this release does not ship one. */
+export const shippedScenario = (id: string): Scenario | undefined => shippedScenarioRevisions().find(entry => entry.id === id);
+
+/**
+ * Latest revision of `id`: the scenarios table when present, else the shipped revision. When
+ * `persist` is set and only the shipped revision exists, it is inserted so create pins a real row
+ * without a test-only or operator e2e sync.
+ */
+export async function resolveScenario(db: ScenarioDb, id: string, persist?: { at: Date; by: string }): Promise<Scenario | undefined> {
+  const latest = (await db.query('SELECT document FROM scenarios WHERE id=$1 ORDER BY revision DESC LIMIT 1', [id])).rows[0]?.document;
+  if (latest) return latest;
+  const shipped = shippedScenario(id);
+  if (!shipped) return undefined;
+  if (!persist) return shipped;
+  const document: Scenario = { ...shipped, createdAt: persist.at.toISOString(), createdBy: persist.by };
+  await db.query('INSERT INTO scenarios(id,revision,document) VALUES($1,$2,$3) ON CONFLICT (id,revision) DO NOTHING', [document.id, document.revision, JSON.stringify(document)]);
+  return (await db.query('SELECT document FROM scenarios WHERE id=$1 ORDER BY revision DESC LIMIT 1', [id])).rows[0]?.document ?? document;
+}
 
 export const scenarioSchema = z.object({
   id: z.string().regex(/^[a-z0-9][a-z0-9._-]*$/).max(100),
@@ -32,7 +93,12 @@ export const scenarioSchema = z.object({
 }).strict();
 export type Scenario = Omit<z.infer<typeof scenarioSchema>, 'expectedRevision'> & { revision: number; hash: string; createdAt: string; createdBy: string };
 export async function scenarios(store: Store): Promise<Scenario[]> {
-  return (await store.pool.query('SELECT document FROM scenarios ORDER BY id,revision DESC')).rows.map(r => r.document);
+  const rows = (await store.pool.query('SELECT document FROM scenarios ORDER BY id,revision DESC')).rows.map(r => r.document as Scenario);
+  const seen = new Set(rows.map(entry => entry.id));
+  // GY-1708: a shipped revision appears in the registry before e2e sync, so filings and the optional
+  // case can observe it on a fresh install.
+  for (const shipped of shippedScenarioRevisions()) if (!seen.has(shipped.id)) rows.push(shipped);
+  return rows.sort((a, b) => a.id.localeCompare(b.id) || b.revision - a.revision);
 }
 /**
  * An operator, or an operator agent holding `e2e:record` (GY-1614): the uat job records a candidate's

@@ -10,10 +10,16 @@ import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import type { Principal, Work } from '../src/model.js';
-import { caseDirectory, loadCases, parseCase, scenarioDefinition, syncCases } from '../src/e2e/case.js';
+import { caseDirectory, loadCases, parseCase, scenarioDefinition } from '../src/e2e/case.js';
+import {
+  capacityLimitRedispatchRevision,
+  capacityLimitRedispatchScenario,
+  resolveScenario,
+  shippedScenario,
+} from '../src/scenarios.js';
 
-// GY-1708 AC-3: the capacity-limit-redispatch e2e case registers as a scenario revision so create
-// accepts e2e:capacity-limit-redispatch (the fault-class filing the loop previously refused).
+// GY-1708 AC-3: capacity-limit-redispatch ships as revision 1 in src/scenarios.ts so create accepts
+// e2e:capacity-limit-redispatch without a test-only e2e sync (the loop's own filing path).
 
 const operator: Principal = { id: 'operator', role: 'admin' };
 const tokens = new Map([[operator.id, `operator-${'t'.repeat(32)}`]]);
@@ -53,30 +59,40 @@ const api = async (path: string, data?: unknown, key: string = randomUUID()) => 
   return body;
 };
 
-test('unit:scenario-capacity-limit-redispatch-registered — the shipped e2e case syncs to a scenario revision and create accepts e2e:capacity-limit-redispatch', async () => {
-  const id = 'capacity-limit-redispatch';
-  const scenarios = await import('../src/scenarios.js') as { capacityLimitRedispatchScenario?: string };
-  assert.equal(scenarios.capacityLimitRedispatchScenario, id, 'src/scenarios.ts exports the scenario id filings cite');
+test('unit:scenario-capacity-limit-redispatch-registered — revision 1 ships in src/scenarios.ts and create accepts e2e:capacity-limit-redispatch without e2e sync', async () => {
+  const id = capacityLimitRedispatchScenario;
+  assert.equal(id, 'capacity-limit-redispatch');
+  const shipped = shippedScenario(id);
+  assert.ok(shipped, 'src/scenarios.ts ships revision 1');
+  assert.equal(shipped.revision, 1);
+  assert.equal(shipped.runner, 'graphyard-e2e');
+  assert.equal(shipped.testPath, `e2e/cases/${id}.json`);
+  assert.equal(capacityLimitRedispatchRevision().hash, shipped.hash);
+
   const file = join(root, caseDirectory, `${id}.json`);
-  assert.ok(existsSync(file), `e2e/cases/${id}.json must be shipped so e2e sync can register a revision`);
+  assert.ok(existsSync(file), `e2e/cases/${id}.json must ship beside the revision`);
   const definition = parseCase(`e2e/cases/${id}.json`, await readFile(file, 'utf8'));
-  assert.equal(definition.id, id);
-  assert.equal(definition.required, false, 'the case is optional: it registers the scenario, it does not block releases');
+  assert.equal(definition.required, false, 'the case is optional: it never blocks releases');
   assert.equal(definition.target, 'any');
+  assert.ok(!definition.steps.some(step => step.kind === 'http' && step.method === 'POST' && step.path === '/api/work'),
+    'the case must not create backlog items on every run');
+  const fromCase = scenarioDefinition({ file: `e2e/cases/${id}.json`, definition });
+  assert.equal(fromCase.id, shipped.id);
+  assert.equal(fromCase.title, shipped.title);
+  assert.equal(fromCase.purpose, shipped.purpose);
+  assert.deepEqual(fromCase.steps, shipped.steps);
+  assert.deepEqual(fromCase.expected, shipped.expected);
+  assert.equal(fromCase.environment, shipped.environment);
+  assert.deepEqual(fromCase.tags, shipped.tags);
+  assert.equal(fromCase.required, shipped.required);
 
-  const shipped = (await loadCases(root)).find(entry => entry.definition.id === id);
-  assert.ok(shipped, 'loadCases includes the shipped capacity-limit-redispatch case');
-  const [synced] = await syncCases(api, [shipped!]);
-  assert.equal(synced.id, id);
-  assert.equal(synced.change, 'created');
-  assert.equal(synced.revision, 1);
+  const loaded = (await loadCases(root)).find(entry => entry.definition.id === id);
+  assert.ok(loaded, 'loadCases includes the shipped capacity-limit-redispatch case');
 
-  const registry = await api('scenarios') as { id: string; revision: number; testPath: string; runner: string }[];
-  const revision = registry.find(entry => entry.id === id && entry.revision === 1);
-  assert.ok(revision, 'src/scenarios.ts holds revision 1 after e2e sync');
-  assert.equal(revision.testPath, `e2e/cases/${id}.json`);
-  assert.equal(revision.runner, 'graphyard-e2e');
-  assert.equal(scenarioDefinition(shipped!).id, id);
+  // No syncCases: create must succeed from the shipped revision alone (AC-3).
+  const before = await api('scenarios') as { id: string; revision: number }[];
+  assert.ok(before.some(entry => entry.id === id && entry.revision === 1), 'listing surfaces the shipped revision before sync');
+  assert.equal((await store.pool.query('SELECT 1 FROM scenarios WHERE id=$1', [id])).rowCount, 0, 'the table is empty until create persists the shipped revision');
 
   await assert.rejects(
     api('work', {
@@ -95,4 +111,11 @@ test('unit:scenario-capacity-limit-redispatch-registered — the shipped e2e cas
   assert.equal(pinned.scenarioRequirements.length, 1);
   assert.equal(pinned.scenarioRequirements[0].proof, `e2e:${id}`);
   assert.equal(pinned.scenarioRequirements[0].revision, 1);
+  assert.equal(pinned.scenarioRequirements[0].hash, shipped.hash);
+
+  const persisted = await resolveScenario(store.pool, id);
+  assert.ok(persisted, 'create persisted the shipped revision into the scenarios table');
+  assert.equal(persisted.revision, 1);
+  assert.equal(persisted.hash, shipped.hash);
+  assert.equal((await store.pool.query('SELECT revision FROM scenarios WHERE id=$1', [id])).rows[0].revision, 1);
 });

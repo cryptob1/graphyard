@@ -1,40 +1,34 @@
 {
   "id": "capacity-limit-redispatch",
   "title": "Mid-attempt provider limit exhaustion redispatches without losing work",
-  "description": "When an approver, reviewer or worker session hits a model-account limit mid-attempt, the control plane records capacity.exhausted, holds the spent account, and redispatches the in-flight attempt so its work and any recorded judgement survive. This optional case registers the capacity-limit-redispatch scenario so fault-class filings may cite e2e:capacity-limit-redispatch.",
-  "tags": ["capacity", "api"],
+  "description": "Asserts the shipped capacity-limit-redispatch scenario revision is listed and runs the mid-attempt redispatch proofs (hold, failover, preserved work, truthful role bounds) without creating backlog items.",
+  "tags": ["capacity"],
   "target": "any",
   "required": false,
   "steps": [
     {
       "kind": "http",
-      "name": "create an item the registered scenario may pin",
-      "method": "POST",
-      "path": "/api/work",
-      "body": {
-        "title": "Capacity redispatch pin {{case}} {{run}}",
-        "description": "Created by the capacity-limit-redispatch E2E case to prove the scenario revision is registered.",
-        "type": "chore",
-        "priority": 3,
-        "criteria": [{ "id": "AC-1", "text": "The capacity-limit-redispatch scenario is registered", "proofs": ["manual:capacity-limit-redispatch-registered"] }],
-        "plannedFiles": ["src/scenarios.ts"],
-        "policy": { "checks": ["test"], "review": false }
-      },
+      "name": "shipped scenario revision is listed",
+      "method": "GET",
+      "path": "/api/scenarios",
       "status": 200,
       "expect": [
-        { "path": "stage", "equals": "backlog" },
-        { "path": "key", "type": "string" },
-        { "path": "title", "equals": "Capacity redispatch pin {{case}} {{run}}" }
-      ],
-      "save": { "id": "id", "key": "key" }
+        {
+          "path": "",
+          "includes": {
+            "id": "capacity-limit-redispatch",
+            "revision": 1,
+            "runner": "graphyard-e2e",
+            "testPath": "e2e/cases/capacity-limit-redispatch.json"
+          }
+        }
+      ]
     },
     {
-      "kind": "http",
-      "name": "list the created item",
-      "method": "GET",
-      "path": "/api/work",
-      "status": 200,
-      "expect": [{ "path": "", "includes": { "id": "{{id}}", "key": "{{key}}" } }]
+      "kind": "command",
+      "name": "mid-attempt capacity redispatch proofs",
+      "run": "node --import tsx --test tests/capacity-redispatch-preserves-attempt.test.ts tests/capacity-hold-respects-machine-bounds.test.ts",
+      "timeoutSeconds": 600
     }
   ]
 }
