@@ -1,6 +1,7 @@
 // Concern: measurement — stage percentiles, the scope-decision budget, silence and item latency.
 import { type Work, productionLatencyMs, postDeployMs, deliveryState, currentEvidence, deploySmokeRequired } from '../model.js';
-import { routableScopeRequest, scopeDecisionSample, scopeDecisionBudgetMs, scopeBlockedBudgetMs, redecidableScopeRefusal } from '../model/scope.js';
+import { routableScopeRequest, scopeDecisionBinding, scopeDecisionSample, scopeDecisionBudgetMs, scopeBlockedBudgetMs, redecidableScopeRefusal } from '../model/scope.js';
+import { askIdentity } from '../model/scope-collapse.js';
 import { pendingBaseRefresh } from '../merge-queue.js';
 import { standingCapacity } from '../model/capacity.js';
 import { stalledItems } from '../model/action-account.js';
@@ -37,20 +38,38 @@ export function cycleBudget(state: Pick<DaemonState, 'metrics'>, intervalMs: num
 }
 
 /**
+ * GY-1701. True when the loop adopted a standing requirements revision in place of this ask's own
+ * widening (a covering no-answers revision, or a held one whose plannedFiles cover the ask): the
+ * watch names the ask and is settled, so the blocked bound does not run while that revision stands.
+ */
+export function coveringStandingScopeWatch(item: Pick<Work, 'id' | 'policyRevision' | 'scopeRequest'>, approvals: Record<string, ApprovalWatch>): boolean {
+  const request = item.scopeRequest;
+  if (!request) return false;
+  const watch = approvals[decisionKey(item as Work, { action: 'requirements', binding: scopeDecisionBinding(request) })];
+  const identity = askIdentity(request);
+  return !!watch?.settledAt && !!watch.scope && watch.scope.at === identity.at && watch.scope.epoch === identity.epoch;
+}
+
+/**
  * How the loop is keeping the promise a scope request rests on: request-to-decision percentiles
  * over the decisions it has taken, every request still undecided with how long it has waited, and
  * the breaches of the two bounds — p90 within five minutes once ten requests have been decided,
  * and nothing left undecided for longer than fifteen. A breach means workers are waiting on the
  * loop, so it is escalated with the numbers rather than left in the metrics.
+ *
+ * `approvals` (GY-1701): a settled watch that names the open ask means the loop adopted a covering
+ * standing revision in its place; that wait is on the revision applying, not on the loop failing to
+ * act, so the blocked bound does not count it.
  */
-export function scopeBudget(work: Work[], decisions: ScopeMeasurement[], now: number, routes = false) {
+export function scopeBudget(work: Work[], decisions: ScopeMeasurement[], now: number, routes = false, approvals?: Record<string, ApprovalWatch>) {
   const measured = percentiles(decisions.map(entry => entry.waitedMs));
   // A rule refusal the loop puts to the approver (`routes`, GY-176) is not the worker's answer: the
   // request stays open, and its wait counts, until the approver approves or refuses it.
   const open = work.flatMap(item => {
     const request = item.scopeRequest;
-    const routed = routes && request?.decision?.decidedBy === 'graphyard' && !!routableScopeRequest(item, now);
-    return request && (!request.decision || routed) ? [{ key: item.key, epoch: request.epoch, waitedMs: Math.max(0, now - Date.parse(request.at)), routed }] : [];
+    if (!request || (approvals && coveringStandingScopeWatch(item, approvals))) return [];
+    const routed = routes && request.decision?.decidedBy === 'graphyard' && !!routableScopeRequest(item, now);
+    return !request.decision || routed ? [{ key: item.key, epoch: request.epoch, waitedMs: Math.max(0, now - Date.parse(request.at)), routed }] : [];
   }).sort((a, b) => b.waitedMs - a.waitedMs);
   // One id per breach, not per wording: the numbers in the detail move every cycle, and an
   // escalation that changed key each time would read as a new incident every twenty seconds.

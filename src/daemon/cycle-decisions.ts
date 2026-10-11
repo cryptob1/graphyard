@@ -8,7 +8,7 @@ import { recordSettledDecision } from '../model/project-memory.js';
 import { type ApprovalWatch, approvalWatchSchema, carriedSession, type DaemonActionKind, type DaemonState, latencySampleSchema, message, scopeMeasurementSchema } from './state.js';
 import { decisionKey, scopeAnsweredAt, scopeKey, scopeOutcomeAnswered } from './reconcile.js';
 import { readyToRetry } from './sessions.js';
-import { approvalStep, recordWatchEnded, approverLaunchKey, attestDecisions, boundDetail, cappedReworkBound, exhaustedProofKey, decisionReasonMax, detailChanged, fitDecisionReason, githubPause, handWatchPrefix, maxApproverCloses, maxRefusalAnswers, maxDecisionRequests, namePaths, neededDecision, observedFrom, overtakenDecision, resolveCovers, reworkDecisionReason, refusalNamedIn, standingNamedIn, adoptedOnRefusal, conflictReworkOverdue, reworkObservationWait, routineDecision, type RoutineDecision, sameAnswers, scopeRoutineDecision, blockerScopeDecision, standingVerdict, uncountedScopeFailure, withheldDecision } from './decisions.js';
+import { approvalStep, recordWatchEnded, approverLaunchKey, attestDecisions, boundDetail, cappedReworkBound, exhaustedProofKey, decisionReasonMax, detailChanged, fitDecisionReason, githubPause, handWatchPrefix, maxApproverCloses, maxRefusalAnswers, maxDecisionRequests, namePaths, neededDecision, observedFrom, overtakenDecision, resolveCovers, reworkDecisionReason, refusalNamedIn, standingNamedIn, adoptedOnRefusal, conflictReworkOverdue, reworkObservationWait, routineDecision, type RoutineDecision, sameAnswers, scopeRoutineDecision, blockerScopeDecision, standingCoversScopeAsk, standingVerdict, uncountedScopeFailure, withheldDecision } from './decisions.js';
 import { candidateMovedMeanwhile, decisionFailureKind, decisionReads, deliveredMeanwhile, lateDecisionRead, resumedApplication, selfHealingDecisionFailure } from './decision-reads.js';
 import { refusedAttestationWatch, type RefusedAttestation } from '../model/rework-ground.js';
 import { record } from './effects.js';
@@ -66,9 +66,13 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       // A request whose response was lost is already standing on the item, and the server refuses a second one; adopting it is what keeps a retry from leaving a decision nobody will judge.
       let standing = history.find(entry => entry.action === decision.action && (entry.state === 'requested' || entry.state === 'approved' || entry.state === 'held'));
       // GY-1687: a held decision is approved and waits only for the item's attempt to end, when the control plane applies it; no approver is launched for it and nothing is requested in its place.
+      // GY-1701: when its plannedFiles already cover a live scope ask, the watch names that ask so the blocked bound does not run while the hold stands.
       if (standing?.state === 'held') {
-        state.approvals[key] = approvalWatchSchema.parse({ work: item.key, action: decision.action, decision: standing.id, requestedAt: stamp, settledAt: stamp, approvedAt: standing.approvedAt ?? null, approvedBy: standing.approvedBy ?? null });
-        performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `${item.key}'s ${decision.action} decision ${standing.id} is approved by ${standing.approvedBy ?? 'its approver'} and held (${boundDetail(standing.outcome ?? 'the item holds a live attempt', 300)}); the control plane applies it when the attempt ends, so nothing is requested`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist)); return;
+        const askPaths = decision.scope?.paths ?? [];
+        const covers = !!decision.scope && standingCoversScopeAsk(standing, askPaths);
+        state.approvals[key] = approvalWatchSchema.parse({ work: item.key, action: decision.action, decision: standing.id, requestedAt: stamp, settledAt: stamp, approvedAt: standing.approvedAt ?? null, approvedBy: standing.approvedBy ?? null, scope: covers ? decision.scope : null });
+        const coverNote = covers ? `; its plannedFiles already cover the paths ${item.key}'s scope request asks for, so that revision answers the ask once applied` : '';
+        performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `${item.key}'s ${decision.action} decision ${standing.id} is approved by ${standing.approvedBy ?? 'its approver'} and held (${boundDetail(standing.outcome ?? 'the item holds a live attempt', 300)})${coverNote}; the control plane applies it when the attempt ends, so nothing is requested`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist)); return;
       }
       // An approved decision is already judged (GY-1300): it is never adopted for an approver session. The control plane is asked to apply what was approved,
       // and only one that settled failed, stale or superseded is asked for again, below, within the same bound. A loop without the resume settles it through the withdrawal below (GY-1297).
@@ -132,9 +136,19 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
         return;
       }
       // The control plane holds one requirements decision at a time. One that answers no scope
-      // request (a master's own revision) is not this request's answer: it is left to its
-      // requester, and this one is asked once it settles. The throughput owner's needs-decision answers no scope request: only a revision whose whole input is its option of record is it (GY-1630).
+      // request (a master's own revision) is not this request's answer — unless its plannedFiles
+      // already cover the live scope ask (GY-1701): adopting it lets that revision answer the ask
+      // once applied, and the blocked bound does not run while it stands. Otherwise it is left to
+      // its requester (GY-1687: a held one is never withdrawn for a routed widening), and this one
+      // is asked once it settles. The throughput owner's needs-decision answers no scope request:
+      // only a revision whose whole input is its option of record is it (GY-1630).
       if (standing && decision.action === 'requirements' && !standing.input?.answers && !throughputDecisionAdopts(standing.input, decision, item)) {
+        const askPaths = decision.scope?.paths ?? item.scopeRequest?.paths ?? [];
+        if ((decision.input?.answers || decision.scope) && standingCoversScopeAsk(standing, askPaths)) {
+          state.approvals[key] = approvalWatchSchema.parse({ work: item.key, action: decision.action, decision: standing.id, requestedAt: stamp, settledAt: stamp, approvedAt: standing.approvedAt ?? null, approvedBy: standing.approvedBy ?? null, scope: decision.scope ?? null });
+          performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `${item.key}'s requirements decision ${standing.id} is ${standing.state} and already plans the paths its scope request asks for; that revision answers the ask once applied, so nothing is requested for the widening`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
+          return;
+        }
         const other = JSON.stringify(standing.input?.plannedFiles) !== JSON.stringify(decision.input?.plannedFiles) ? 'another planned-files revision' : 'a widening that answers no scope request';
         throw new Error(`requirements decision ${standing.id} is ${standing.state} for ${other}, not the widening ${item.key}'s scope request asks for; it is left to its requester, and the control plane holds one at a time, so this one is requested once it settles: graphyard master decisions ${item.key}`);
       }

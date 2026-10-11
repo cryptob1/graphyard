@@ -720,6 +720,15 @@ export function uncountedScopeFailure(watch: Pick<ApprovalWatch, 'action' | 'sco
   return asked.length > 0 && unplannedPaths(work.plannedFiles, asked).length > 0;
 }
 /**
+ * GY-1701. Whether a standing requirements revision that answers no scope request (`answers` absent)
+ * already plans every path of a live scope ask: adopting it lets that revision answer the ask once
+ * applied, so the one-at-a-time slot does not starve the worker past the blocked bound.
+ */
+export function standingCoversScopeAsk(standing: { input?: { plannedFiles?: readonly string[] | null; answers?: unknown } | null }, askPaths: readonly string[]): boolean {
+  if (standing.input?.answers || !askPaths.length) return false;
+  return unplannedPaths(standing.input?.plannedFiles ?? [], askPaths).length === 0;
+}
+/**
  * A headless approver run lost to something outside the loop (GY-453: killed, recording no exit)
  * judged nothing, so its launch is given back — but only this many times per decision. Past it, a
  * lost run spends its launch like any other ended session, so a decision whose approver keeps
