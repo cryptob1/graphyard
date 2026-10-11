@@ -1,12 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
+import { emptyDaemonState, runCycle, scopeBudget, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { approverSessionName, masterConfigSchema, type MasterConfig } from '../src/master.js';
 import type { InvariantCheck } from '../src/model/invariants.js';
 import type { Work } from '../src/model.js';
 import { liveLeaseRevisionRefusal } from '../src/model/approval.js';
 import type { ScopeRequestState } from '../src/model/scope.js';
+import { coveringStandingScopeWatch } from '../src/daemon/metrics.js';
+import { scopeBlockedBudgetMs } from '../src/model/scope.js';
 
 /**
  * GY-1687 (review of 086e327d7695). A requirements decision approved while its item holds a live attempt is `held`
@@ -22,6 +24,10 @@ import type { ScopeRequestState } from '../src/model/scope.js';
  * approver launch, withdrawal or resume was ever made for a held decision; every hand-launched approver session
  * was closed once, within three cycles of its hold, and none lingers; each attempt's decision settled exactly
  * once; and the two quiet days after the last attempt ended performed no work at all.
+ *
+ * GY-1701 (review of a09e087ac2e6) adds a second soak below: covering scope asks whose standing
+ * no-answers revision already plans the asked path — adoption, budget exclusion, settlement, and
+ * clear-on-refusal across items and attempts.
  */
 const minute = 60_000, hour = 60 * minute, day = 24 * hour, cycleMs = 2 * minute, start = Date.parse('2026-10-11T00:00:00.000Z');
 const iso = (at: number) => new Date(at).toISOString();
@@ -205,4 +211,147 @@ test('unit:soak-invariants-hold — over three simulated days, decisions held th
   assert.ok(quiet.length > day / cycleMs, `the quiet period spans more than a day: ${quiet.length} cycles`);
   assert.deepEqual(quiet.filter(entry => entry.count > 0).map(entry => `${iso(entry.at)}: ${entry.count}`), [], 'no action was performed in the quiet days');
   assert.ok(Math.max(...quiet.map(entry => entry.reads)) <= items.length, `quiet cycles read at most once per item: ${Math.max(...quiet.map(entry => entry.reads))}`);
+});
+
+/**
+ * GY-1701. Covering asks across six items and two attempts each over two simulated days: the master's
+ * no-answers revision already plans the path the worker asks for. Adoption excludes the blocked
+ * bound while the revision stands; a refused covering revision clears its watch so the ask is not
+ * stranded; held covering revisions settle when the attempt ends; every system invariant holds.
+ */
+test('unit:soak-covering-scope-adopt — over two simulated days, covering asks across six items and two attempts adopt standing revisions, exclude the blocked bound, clear watches when a covering revision is refused, and keep every invariant', { timeout: 300_000 }, async () => {
+  let now = start;
+  const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: 'graphyard', repository: 'owner/project', baseBranch: 'main',
+    githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [], producers: [], run: { intervalSeconds: 600 } }) as MasterConfig;
+
+  type CoverItem = Item & { cover: string };
+  const items: CoverItem[] = [0, 1, 2, 3, 4, 5].map(n => ({
+    key: `GY-${1700 + n}`, n, epoch: 1, live: true, policyRevision: 1, text: 'The widget layout renders',
+    plannedFiles: [layout], cover: `src/widget/Cover-${n}.tsx`, stage: 'build', submission: null, candidate: null, reworkRequested: false, scopeRequest: null,
+  }));
+  type CoverDecision = Decision & { refusal: { approver: string; reason: string; at: string } | null };
+  const decisions = new Map<string, CoverDecision[]>(items.map(item => [item.key, []]));
+  const sessions: { name: string; pane: string; status: 'working' | 'done'; key: string; decision: string }[] = [];
+  const closes: { pane: string; at: number }[] = [], adopted: string[] = [], requested: string[] = [];
+  const standing = (item: CoverItem) => decisions.get(item.key)!.find(decision => ['requested', 'held'].includes(decision.state));
+  const revision = (item: CoverItem) => ({
+    expectedPolicyRevision: item.policyRevision,
+    criteria: [{ id: 'AC-1', text: `The widget layout renders, as release ${item.policyRevision + 1} shows`, proofs: ['unit:layout'] }],
+    dependencies: [], plannedFiles: [layout, item.cover], exclusiveResources: [],
+  });
+  const request = (item: CoverItem) => {
+    assert.ok(item.live && !standing(item), `${item.key}: one decision per attempt`);
+    const id = randomUUID();
+    decisions.get(item.key)!.push({ id, action: 'requirements', state: 'requested', input: revision(item), outcome: null, approvedBy: null, approvedAt: null, approvalReason: null, refusal: null, requestedAt: iso(now), requestedBy: 'graphyard-master-project', held: null });
+    sessions.push({ name: approverSessionName(item, id), pane: `pane-${id.slice(0, 8)}`, status: 'working', key: item.key, decision: id });
+  };
+  const approve = (item: CoverItem) => {
+    const decision = standing(item)!;
+    assert.equal(decision.state, 'requested');
+    const reason = `${liveLeaseRevisionRefusal}; the approved decision is held and applied when the attempt ends`;
+    Object.assign(decision, { state: 'held', approvedBy: 'graphyard-approver', approvedAt: iso(now), approvalReason: 'The criterion names the deployed behaviour', outcome: reason,
+      held: { reason, at: iso(now), application: { actor: { id: 'graphyard-master-project', role: 'admin', sessionKind: 'ai' }, reason: 'Judged on the release [decision approved]' } } });
+    sessions.find(session => session.decision === decision.id)!.status = 'done';
+  };
+  const refuse = (item: CoverItem) => {
+    const decision = standing(item)!;
+    assert.equal(decision.state, 'requested');
+    Object.assign(decision, { state: 'refused', outcome: 'refused', refusal: { approver: 'graphyard-approver', reason: 'criteria rewrite not needed', at: iso(now) } });
+    sessions.find(session => session.decision === decision.id)!.status = 'done';
+  };
+  const ask = (item: CoverItem) => {
+    item.scopeRequest = { epoch: item.epoch, at: iso(now), paths: [item.cover], reason: 'AC-1 needs the cover module', requestedBy: 'worker',
+      decision: { state: 'refused', reason: `No rule implies ${item.cover}`, at: iso(now + 1_000), decidedBy: 'graphyard' } } as ScopeRequestState;
+  };
+  const end = (item: CoverItem) => {
+    assert.ok(item.live);
+    const decision = standing(item);
+    if (decision?.state === 'held') {
+      item.policyRevision++; item.text = decision.input.criteria[0].text; item.plannedFiles = [...decision.input.plannedFiles];
+      Object.assign(decision, { state: 'applied', outcome: `Requirements revised to policy revision ${item.policyRevision} when attempt ${item.epoch} ended` });
+    }
+    item.live = false; item.scopeRequest = null;
+  };
+  const claim = (item: CoverItem) => { assert.ok(!item.live); item.epoch++; item.live = true; item.stage = 'build'; };
+
+  const steps: Step[] = [];
+  const at = (when: number, item: CoverItem, run: () => void) => steps.push({ at: when, key: item.key, run });
+  for (const item of items) {
+    const n = item.n, requested = start + n * minute;
+    at(requested, item, () => request(item));
+    // Even items: ask while requested, then refuse the covering revision (watch must clear).
+    // Odd items: ask while requested, then hold, then end the attempt (covering settles applied).
+    at(requested + 2 * minute, item, () => ask(item));
+    if (n % 2 === 0) at(requested + judgeAfter, item, () => refuse(item));
+    else {
+      at(requested + judgeAfter, item, () => approve(item));
+      at(requested + hour, item, () => end(item));
+      at(requested + hour + 20 * minute, item, () => claim(item));
+      at(requested + hour + 25 * minute, item, () => request(item));
+      at(requested + hour + 27 * minute, item, () => ask(item));
+      at(requested + hour + 25 * minute + judgeAfter, item, () => approve(item));
+      at(requested + hour + 90 * minute, item, () => end(item));
+    }
+  }
+  steps.sort((a, b) => a.at - b.at);
+  const lastStep = steps.at(-1)!.at;
+  let next = 0;
+  const advance = () => { for (; next < steps.length && steps[next].at <= now; next++) steps[next].run(); };
+
+  const view = (item: CoverItem): Work => ({
+    id: `work-${item.key}`, key: item.key, title: 'Widget research', description: '', type: 'feature', priority: 1, dependencies: [], plannedFiles: [...item.plannedFiles],
+    criteria: [{ id: 'AC-1', text: item.text, proofs: ['unit:layout'] }], policy: { checks: ['test'], review: true },
+    stage: item.stage, ready: true, epoch: item.epoch, revision: 10 + decisions.get(item.key)!.length + item.policyRevision, policyRevision: item.policyRevision,
+    createdAt: iso(start - hour), updatedAt: iso(now), stageEnteredAt: iso(start - hour), lease: item.live ? { owner: `worker-${item.n % 3}`, epoch: item.epoch, expiresAt: iso(now + hour) } : null,
+    workspaces: [], submission: item.submission, candidate: item.candidate, reworkRequested: item.reworkRequested, scenarioRequirements: [], violations: [], evidence: [], observation: null, blocker: null,
+    scopeRequest: item.scopeRequest, carriedScopeRequest: null, scopeDecision: null,
+    containmentQuarantine: standing(item)?.state === 'held' ? { at: iso(now - minute), epoch: item.epoch, owner: `worker-${item.n % 3}`, scope: { pid: 1, unit: 'u' }, leaseExpiresAt: iso(now + hour), settlementHash: 'a'.repeat(64), launchExpiresAt: iso(now - minute), launchAcknowledgedAt: iso(now - minute) } : undefined,
+    gates: item.stage === 'build' ? [{ name: 'build', passed: false, reasons: ['Worker has not submitted implementation for this attempt'] }]
+      : [{ name: 'build', passed: true, reasons: [] }, { name: 'review', passed: false, reasons: ['A new independent GitHub approval after the requirement-review baseline is required'] }],
+  } as unknown as Work);
+
+  const effects = {
+    agents: () => [], herdr: () => ({ agents: sessions.map(session => ({ name: session.name, agent_status: session.status, pane_id: session.pane })), available: true }), credentials: async () => ({}),
+    snapshot: async () => { advance(); return { work: items.map(view), now: iso(now) }; },
+    closeSession: (pane: string) => { closes.push({ pane, at: now }); const index = sessions.findIndex(session => session.pane === pane); if (index >= 0) sessions.splice(index, 1); },
+    dispatch: async () => {}, requestProof: () => {}, merge: async () => ({}), wakeObservation: async () => {},
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {}, requestSmoke: () => {},
+    decisions: async (work: Work) => ({ decisions: structuredClone(decisions.get(work.key) ?? []) }),
+    decide: async (work: Work, action: string, reason: string) => { requested.push(`${work.key}: ${action}: ${reason}`); return { id: randomUUID(), state: 'requested' }; },
+    withdraw: async () => {}, resume: async (work: Work, decision: string) => decisions.get(work.key)!.find(entry => entry.id === decision)!,
+    approver: async () => ({ agentName: 'gy-approver', pane: null }),
+    widenScope: async () => ({}), persist: async () => {},
+  } as unknown as DaemonEffects;
+
+  const state: DaemonState = emptyDaemonState(config);
+  const violations: string[] = [], budgetBreaches: string[] = [];
+  for (let cycle = 0; now < start + 2 * day; cycle++, now += cycleMs) {
+    await runCycle(config, state, effects, () => now);
+    for (const check of state.invariants.report as InvariantCheck[]) if (!check.holds) violations.push(`cycle ${cycle}: ${check.line}`);
+    const live = items.filter(item => item.scopeRequest).map(view);
+    const budget = scopeBudget(live, state.scope, now, true, state.approvals);
+    for (const breach of budget.breaches) if (breach.id.startsWith('blocked:')) budgetBreaches.push(`${iso(now)}: ${breach.detail}`);
+    for (const item of items) {
+      if (item.scopeRequest && coveringStandingScopeWatch(view(item), state.approvals)) adopted.push(`${item.key}@${iso(now)}`);
+    }
+  }
+
+  assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
+  assert.equal(next, steps.length, 'the whole script ran');
+  assert.ok(adopted.length > 0, 'covering asks were adopted across cycles');
+  assert.deepEqual(budgetBreaches, [], 'no covering ask breached the blocked bound while its revision stood');
+  // Even items: covering revision refused — watch cleared, and a fresh widening may be requested (not starved silently).
+  for (const item of items.filter(entry => entry.n % 2 === 0)) {
+    assert.ok(Object.values(state.actions).some(action => action.work === item.key && /covering revision did not answer|Cleared covering watch/.test(action.detail ?? '')),
+      `${item.key}: the refused covering revision cleared its watch`);
+  }
+  // Odd items: covering hold applied on attempt end — no stranded covering watch remains.
+  for (const item of items.filter(entry => entry.n % 2 === 1)) {
+    assert.ok(!Object.values(state.approvals).some(watch => watch.work === item.key && watch.scope && !watch.settledAt),
+      `${item.key}: no unsettled covering watch lingers after both attempts`);
+  }
+  assert.ok(now > lastStep + scopeBlockedBudgetMs, 'the soak outlasts the blocked bound so a stranded ask would have breached');
+  assert.deepEqual(state.faults.instances.filter(instance => instance.faultClass === 'decision' && /left to its requester/.test(instance.text ?? '')), [],
+    'covering asks never throw the one-at-a-time starvation fault');
+  assert.ok(closes.length >= 0 && requested.every(entry => !/left to its requester/.test(entry)));
 });

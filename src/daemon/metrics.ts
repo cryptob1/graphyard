@@ -38,16 +38,16 @@ export function cycleBudget(state: Pick<DaemonState, 'metrics'>, intervalMs: num
 }
 
 /**
- * GY-1701. True when the loop adopted a standing requirements revision in place of this ask's own
- * widening (a covering no-answers revision, or a held one whose plannedFiles cover the ask): the
- * watch names the ask and is settled, so the blocked bound does not run while that revision stands.
+ * GY-1701. True when the loop adopted a covering standing revision in place of this ask: the watch
+ * names the ask (settled while held, or unsettled while still requested under supervision). The
+ * blocked bound does not run while that revision stands; a refused/withdrawn revision clears the watch.
  */
 export function coveringStandingScopeWatch(item: Pick<Work, 'id' | 'policyRevision' | 'scopeRequest'>, approvals: Record<string, ApprovalWatch>): boolean {
   const request = item.scopeRequest;
   if (!request) return false;
   const watch = approvals[decisionKey(item as Work, { action: 'requirements', binding: scopeDecisionBinding(request) })];
   const identity = askIdentity(request);
-  return !!watch?.settledAt && !!watch.scope && watch.scope.at === identity.at && watch.scope.epoch === identity.epoch;
+  return !!watch?.scope && watch.scope.at === identity.at && watch.scope.epoch === identity.epoch;
 }
 
 /**
@@ -57,9 +57,8 @@ export function coveringStandingScopeWatch(item: Pick<Work, 'id' | 'policyRevisi
  * and nothing left undecided for longer than fifteen. A breach means workers are waiting on the
  * loop, so it is escalated with the numbers rather than left in the metrics.
  *
- * `approvals` (GY-1701): a settled watch that names the open ask means the loop adopted a covering
- * standing revision in its place; that wait is on the revision applying, not on the loop failing to
- * act, so the blocked bound does not count it.
+ * `approvals` (GY-1701): a covering-adopt watch that names the open ask means the wait is on that
+ * revision settling, not on the loop failing to act, so the blocked bound does not count it.
  */
 export function scopeBudget(work: Work[], decisions: ScopeMeasurement[], now: number, routes = false, approvals?: Record<string, ApprovalWatch>) {
   const measured = percentiles(decisions.map(entry => entry.waitedMs));

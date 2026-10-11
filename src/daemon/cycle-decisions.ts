@@ -8,7 +8,7 @@ import { recordSettledDecision } from '../model/project-memory.js';
 import { type ApprovalWatch, approvalWatchSchema, carriedSession, type DaemonActionKind, type DaemonState, latencySampleSchema, message, scopeMeasurementSchema } from './state.js';
 import { decisionKey, scopeAnsweredAt, scopeKey, scopeOutcomeAnswered } from './reconcile.js';
 import { readyToRetry } from './sessions.js';
-import { approvalStep, recordWatchEnded, approverLaunchKey, attestDecisions, boundDetail, cappedReworkBound, exhaustedProofKey, decisionReasonMax, detailChanged, fitDecisionReason, githubPause, handWatchPrefix, maxApproverCloses, maxRefusalAnswers, maxDecisionRequests, namePaths, neededDecision, observedFrom, overtakenDecision, resolveCovers, reworkDecisionReason, refusalNamedIn, standingNamedIn, adoptedOnRefusal, conflictReworkOverdue, reworkObservationWait, routineDecision, type RoutineDecision, sameAnswers, scopeRoutineDecision, blockerScopeDecision, standingCoversScopeAsk, standingVerdict, uncountedScopeFailure, withheldDecision } from './decisions.js';
+import { approvalStep, recordWatchEnded, approverLaunchKey, attestDecisions, boundDetail, cappedReworkBound, exhaustedProofKey, decisionReasonMax, detailChanged, fitDecisionReason, githubPause, handWatchPrefix, maxApproverCloses, maxRefusalAnswers, maxDecisionRequests, namePaths, neededDecision, observedFrom, overtakenDecision, resolveCovers, reworkDecisionReason, refusalNamedIn, standingNamedIn, adoptedOnRefusal, conflictReworkOverdue, reworkObservationWait, routineDecision, type RoutineDecision, sameAnswers, scopeRoutineDecision, blockerScopeDecision, coveringAdoptLeftAskOpen, coveringScopeAdoptWatch, standingVerdict, uncountedScopeFailure, withheldDecision } from './decisions.js';
 import { candidateMovedMeanwhile, decisionFailureKind, decisionReads, deliveredMeanwhile, lateDecisionRead, resumedApplication, selfHealingDecisionFailure } from './decision-reads.js';
 import { refusedAttestationWatch, type RefusedAttestation } from '../model/rework-ground.js';
 import { record } from './effects.js';
@@ -33,15 +33,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
   // The items this step writes, which the stale-close step leaves to the next cycle's read (GY-1439).
   const written = new Set<string>();
   const effects = recordingWrites(await decisionReads(cycle.effects, cycle.heldDecisions, snapshot.work, Object.values(state.approvals), clock, cycle.effects.decisionReadDeadlineMs), written);
-  // 4c. The routine decisions. A standing verdict, a base the control plane could not merge in, and a delivered item
-  //     still fenced by a dead supervisor each have one correct answer, and each used to wait for a master session to
-  //     notice. The loop requests the decision with the master's own operator-agent identity and launches the independent
-  //     approver session for it; it never approves its own request, so the separation the server enforces is unchanged.
-  //     Automatic merging turned off is the fourth: the merge itself then waits for that approval. A request is not the
-  //     end of it. The approver is a launched session like any other, so every cycle reads the decision back and looks at
-  //     its session again (see `approvalStep`): a finished session is closed, a dead, stalled or hung one is replaced within
-  //     a bound, a refused one is left to the master to answer, a decision the server settled some other way is requested
-  //     again, and one no session will judge is escalated and left standing on the silence measure.
+  // 4c. Routine decisions: request with the master's operator-agent identity, launch an independent approver, supervise every cycle (see `approvalStep`).
   const stamp = new Date(clock).toISOString(), bounds = holdBounds.get(state) ?? new Map<string, number>(); holdBounds.set(state, bounds); for (const id of bounds.keys()) if (!snapshot.work.some(work => work.id === id)) bounds.delete(id);
   const note = async (key: string, item: Work, kind: DaemonActionKind, outcome: 'done' | 'failed', detail: string, at = now(), faultKind?: FaultKind | null) =>
     performed.push(await record(state, key, { kind, work: item.key, principal: null, state: outcome, detail, attempts: (state.actions[key]?.attempts ?? 0) + 1, epoch: item.epoch, cycle: state.cycle }, at, effects.persist, faultKind));
@@ -65,13 +57,11 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       }
       // A request whose response was lost is already standing on the item, and the server refuses a second one; adopting it is what keeps a retry from leaving a decision nobody will judge.
       let standing = history.find(entry => entry.action === decision.action && (entry.state === 'requested' || entry.state === 'approved' || entry.state === 'held'));
-      // GY-1687: a held decision is approved and waits only for the item's attempt to end, when the control plane applies it; no approver is launched for it and nothing is requested in its place.
-      // GY-1701: when its plannedFiles already cover a live scope ask, the watch names that ask so the blocked bound does not run while the hold stands.
+      // GY-1687: a held decision is approved and waits only for the item's attempt to end; GY-1701 names a covered live ask on the watch so the blocked bound does not run.
       if (standing?.state === 'held') {
-        const askPaths = decision.scope?.paths ?? [];
-        const covers = !!decision.scope && standingCoversScopeAsk(standing, askPaths);
-        state.approvals[key] = approvalWatchSchema.parse({ work: item.key, action: decision.action, decision: standing.id, requestedAt: stamp, settledAt: stamp, approvedAt: standing.approvedAt ?? null, approvedBy: standing.approvedBy ?? null, scope: covers ? decision.scope : null });
-        const coverNote = covers ? `; its plannedFiles already cover the paths ${item.key}'s scope request asks for, so that revision answers the ask once applied` : '';
+        const cover = decision.scope ? coveringScopeAdoptWatch(item, standing, decision, stamp) : null;
+        state.approvals[key] = cover ?? approvalWatchSchema.parse({ work: item.key, action: decision.action, decision: standing.id, requestedAt: stamp, settledAt: stamp, approvedAt: standing.approvedAt ?? null, approvedBy: standing.approvedBy ?? null });
+        const coverNote = cover ? `; its plannedFiles already cover the paths ${item.key}'s scope request asks for, so that revision answers the ask once applied` : '';
         performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `${item.key}'s ${decision.action} decision ${standing.id} is approved by ${standing.approvedBy ?? 'its approver'} and held (${boundDetail(standing.outcome ?? 'the item holds a live attempt', 300)})${coverNote}; the control plane applies it when the attempt ends, so nothing is requested`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist)); return;
       }
       // An approved decision is already judged (GY-1300): it is never adopted for an approver session. The control plane is asked to apply what was approved,
@@ -135,17 +125,11 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
         performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `${item.key}'s attest decision ${refusedAttest.id} for ${String(decision.input?.proof)} on this head was already refused by ${refusedAttest.refusal?.approver ?? 'its approver'}; nothing to request, and ${item.key} returns to a worker on that refusal`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
         return;
       }
-      // The control plane holds one requirements decision at a time. One that answers no scope
-      // request (a master's own revision) is not this request's answer — unless its plannedFiles
-      // already cover the live scope ask (GY-1701): adopting it lets that revision answer the ask
-      // once applied, and the blocked bound does not run while it stands. Otherwise it is left to
-      // its requester (GY-1687: a held one is never withdrawn for a routed widening), and this one
-      // is asked once it settles. The throughput owner's needs-decision answers no scope request:
-      // only a revision whose whole input is its option of record is it (GY-1630).
+      // One requirements decision at a time. A no-answers revision is not this widening — unless it already plans the ask (GY-1701: adopt, keep supervising while requested). Else wait (GY-1687/GY-1630).
       if (standing && decision.action === 'requirements' && !standing.input?.answers && !throughputDecisionAdopts(standing.input, decision, item)) {
-        const askPaths = decision.scope?.paths ?? item.scopeRequest?.paths ?? [];
-        if ((decision.input?.answers || decision.scope) && standingCoversScopeAsk(standing, askPaths)) {
-          state.approvals[key] = approvalWatchSchema.parse({ work: item.key, action: decision.action, decision: standing.id, requestedAt: stamp, settledAt: stamp, approvedAt: standing.approvedAt ?? null, approvedBy: standing.approvedBy ?? null, scope: decision.scope ?? null });
+        const cover = coveringScopeAdoptWatch(item, standing, decision, stamp);
+        if (cover) {
+          state.approvals[key] = cover;
           performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `${item.key}'s requirements decision ${standing.id} is ${standing.state} and already plans the paths its scope request asks for; that revision answers the ask once applied, so nothing is requested for the widening`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
           return;
         }
@@ -176,21 +160,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       // A rework request names the observation it was decided from (GY-144), so its approver sees
       // at once whether the item has moved since; the watch keeps the same pair.
       const observed = decision.action === 'rework' && item.observation ? { at: item.observation.at, sha: item.observation.candidate.sha } : null;
-      // The server refuses a request identical to a refused one unless it cites that refusal. The loop
-      // reaches this point only on grounds no refused request of its own rested on (a rework binding
-      // names its grounds, and a refused binding is never requested again), so it answers the prior
-      // refusals of this action on the item by citing them. The first scan judges the exact input the
-      // request carries — the routine input plus its grounds binding (GY-407) — so a refusal the
-      // server would name is cited here, before it costs a refused round-trip and one of the bounded
-      // retries (GY-475); the ledger keeps inputs as jsonb, which does not keep key order, so the
-      // inputs compare in a canonical form. The second keeps answering the refusals recorded before
-      // the binding was kept, which name only the bare attestation no request carries any more, as
-      // they always were answered. A refusal an earlier refused request already cited is answered
-      // through it, so only the uncited ones are named: however many refusals the item gathers, the
-      // citation stays the newest one or few (GY-163). A refusal stands only against the candidate
-      // and base it judged (GY-229): one refused for an earlier candidate is not this request's to
-      // answer, so only this candidate's refusals are cited. A recover request is situated the same
-      // way and answers its refusals alike (GY-265).
+      // Cite uncited refusals of this action on this candidate (GY-163/GY-229/GY-265/GY-407/GY-475) before the request is refused for repeating them.
       const situated = decision.action === 'rework' || decision.action === 'recover' ? decision.action : null;
       const prefix = decision.action === 'rework' ? `${observedFrom(item)} ` : '';
       let refused: string[] = [];
@@ -358,9 +328,15 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       // `master status` until the master answers it with a request that cites it, or acts on it.
       await closeApprover(item, watch, 'its decision is refused');
       watch.settledAt = stamp;
-      // A refused widening is the worker's answer, not the master's: the control plane recorded it
-      // on the item, and the worker reads there that it stays inside plannedFiles.
-      if (watch.scope && judged) { await noteScopeOutcome(item, watch, judged); return; }
+      // A refused widening is the worker's answer. A covering foreign revision that did not answer the ask (GY-1701) is cleared so the widening can be requested again.
+      if (watch.scope && judged) {
+        await noteScopeOutcome(item, watch, judged);
+        if (coveringAdoptLeftAskOpen(watch, item, judged, clock)) {
+          delete state.approvals[key];
+          await note(`${base}:refused`, item, 'decision', 'done', `${step.detail}; the covering revision did not answer ${item.key}'s scope request, so the ask is requested again`);
+        }
+        return;
+      }
       // A refused attestation is the approver's judgement that the head fails the proof (GY-1394): the
       // routine step returns that head to a worker on it, applied with no second approver.
       const attested = watch.action === 'attest' ? refusedAttestationWatch(judged) : null;
@@ -526,10 +502,17 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       // Its one-per-item wake:observation entry stays for guarded merge; pruneDaemonState bounds it.
       return wakeObservationJob(cycle, item, 'rework');
     }
-    // A settled watch is supervised no more; an unclosed registry session is retried.
+    // Settled watches are done — except a covering adopt whose revision later refused/vanished (GY-1701): clear and re-request the widening.
     if (watch) {
       if (!watch.settledAt) await supervise(item, decision, key, watch);
-      else if (watch.session) await endApproverSession(item, watch, `approver for ${watch.work} decision ${watch.decision} settled`);
+      else {
+        const stranded = watch.scope && effects.decisions ? await effects.decisions(item).then(r => r.decisions.find(e => e.id === watch.decision), () => undefined) : undefined;
+        if (stranded && coveringAdoptLeftAskOpen(watch, item, stranded, clock)) {
+          delete state.approvals[key];
+          await note(`approver:${watch.decision}:covering-cleared`, item, 'decision', 'done', `Cleared covering watch for ${watch.decision} (${stranded.state}); ${item.key}'s scope ask is requested again`);
+          await requestNeeded(item, decision, key);
+        } else if (watch.session) await endApproverSession(item, watch, `approver for ${watch.work} decision ${watch.decision} settled`);
+      }
       return;
     }
     // GY-1606: a request of these grounds another binding adopted comes back to this key, so its refusal is answered as this binding's.
