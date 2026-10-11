@@ -3,7 +3,7 @@
 
 ## Items, scope and human waits
 
-Unplanned file: `scope-request GY-N EPOCH PATH… [--wait] -- REASON`; auto-granted if grounded: docs; files criteria, follow-ups or findings name; `web/`/`browser-tests/` for `docs/` planners; tests pinning planned text; symbol definitions; successors; companions (budget gate, timing baseline, importing tests, module imports). Else `approve-scope` executor replays standing decisions or asks approver; `master scope GY-N [--allow-broad-scope] REASON` applies refused requests save approver's (`master decisions`); `--wait` reads outcomes ≤15 min. Ending attempts close requests `attempt ended` (one awaiting the approver carries over intact); `master unblock GY-N` closes stale or carried. Human decisions: `park GY-N EPOCH KIND NEEDED --ask ASK [--step STEP]… --recommend TEXT --why WHY [--choice LABEL]… -- REASON` ([Needs you](dashboard.md#needs-you)); `graphyard answer GY-N …`; [host-doable](deployment.md) asks refused.
+Unplanned file: `scope-request GY-N EPOCH PATH… [--wait] -- REASON`; auto-granted if grounded: docs; files criteria, follow-ups or findings name; `web/`/`browser-tests/` for `docs/` planners; tests pinning planned text; symbol definitions; successors; companions (budget gate, timing baseline, importing tests, module imports). Else `approve-scope` executor replays standing decisions or asks approver; `master scope GY-N [--allow-broad-scope] REASON` applies refused requests save approver's (`master decisions`); `--wait` reads outcomes ≤15 min. Ending attempts close requests `attempt ended` (one awaiting the approver carries over); `master unblock GY-N` closes stale or carried. Human decisions: `park GY-N EPOCH KIND NEEDED --ask ASK [--step STEP]… --recommend TEXT --why WHY [--choice LABEL]… -- REASON` ([Needs you](dashboard.md#needs-you)); `graphyard answer GY-N …`; [host-doable](deployment.md) asks refused.
 
 ## Promotion to autonomy
 
@@ -23,7 +23,7 @@ Dispatch is optimistic (overlap holds nothing), smallest planned scope first ([r
 | `installation-accept` | Accept pending requests
 | `protection` | Reconcile branch protection
 
-Flows read `GET /api/github/installation`, recording `.graphyard/master-actions/` `record.json`, `ledger.json` and redacted Confirm-access markup (`master browser fixtures`). Approving *Confirm access* GitHub Mobile code on device: human-only; master never stores cookies, uses merge bypass, pushes code, reads worker credentials. On classifier refusals `master harness claude --apply` (or `codex`) writes `.claude/settings.local.json` rules denying `gh pr merge`/`review`, merging, reviewing, token-minting or mutating `gh api`; missing or retired rules are `harness` drift the loop reapplies each cycle to its CLI's checkout, not research scratch (no `.graphyard/units.json`: waits on `master init`; unit unreadable, elsewhere, unrecorded or `WorkingDirectory`-less launching another CLI: waits); `master status` too, unless read-only (reports).
+Flows read `GET /api/github/installation`, recording `.graphyard/master-actions/` `record.json`, `ledger.json` and redacted Confirm-access markup (`master browser fixtures`); a criterion needing a live one runs `master browser capture [--dry-run]` on the sudo-protected App permissions page, submitting nothing, never a human. Approving *Confirm access* GitHub Mobile code on device: human-only; master never stores cookies, uses merge bypass, pushes code, reads worker credentials. On classifier refusals `master harness claude|codex --apply` writes `.claude/settings.local.json` rules denying `gh pr merge`/`review`, merging, reviewing, token-minting or mutating `gh api`; missing or retired rules are `harness` drift the loop reapplies each cycle to its CLI's checkout (unit unresolvable: waits); `master status` too (read-only: reports).
 
 ## Typed actions and executors
 
@@ -45,7 +45,7 @@ Unacted producer requests (unstarted, refused, launch-exited) relaunch on untrie
 
 ## Shadow merge gate
 
-`run.shadowGate` (defaults: `enabled` true, `timeoutMinutes` 20): each cycle trial-merges, builds, affected-tests the oldest untried head credential-free in an empty, sticky, tmp-reclaimed `TMPDIR` (`gy-t*`), pushing nothing; `shadow.verdict` (failing: runner-ran files; 4000-character summary-keeping `logTail`) joins GitHub's outcome in `master status` `shadowGate` (`shadow-only-fail`/`shadow-missed`: one line each naming its failing test, shared-tmp contamination or missing evidence); errors, timeouts, mid-trial poisoning record nothing; third timeout, one line. `GET /api/shadow-disagreements`, `/api/shadow-explanations?pair=KEY:HEAD:BASETIP` (≤50).
+`run.shadowGate` (`enabled` true, `timeoutMinutes` 20): each cycle trial-merges, builds, affected-tests the oldest untried head credential-free in an empty, sticky, tmp-reclaimed `TMPDIR` (`gy-t*`), pushing nothing; `shadow.verdict` (failing: runner-ran files; 4000-character summary-keeping `logTail`) joins GitHub's outcome in `master status` `shadowGate` (`shadow-only-fail`/`shadow-missed`: one line each naming the failing test, contamination or missing evidence); errors, timeouts, mid-trial poisoning record nothing; third timeout, one line. `GET /api/shadow-disagreements`, `/api/shadow-explanations?pair=KEY:HEAD:BASETIP` (≤50).
 
 ## Pipeline speed
 
