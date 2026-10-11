@@ -268,24 +268,28 @@ test('unit:setup-attention-owner — a missing derivable deployment variable is 
 // secret — was parked on the human as a credential decision. The identity is an agent's, the install's admin
 // credential is saved on the host, and the host's gh login administers the repository: `master setup --apply`
 // keeps the credential current, and the loop runs it itself.
-import { credentialIssuedAt, provisionReleaseFiling, releaseFilingAdministratorStep, releaseFilingTransitionSeconds, type ReleaseFilingDeps } from '../src/master/release-filing.js';
+import { credentialIssuedAt, provisionReleaseFiling, releaseFilingAdministratorStep, releaseFilingTransitionSeconds, secretPredatesCredential, type ReleaseFilingDeps } from '../src/master/release-filing.js';
 
 /** A control plane's operator-agent API as the admin sees it, and GitHub's uat secret as gh reads and sets it. */
 function releaseFilingHost(options: { agents?: any[]; secretUpdatedAt?: string | null; admin?: string | null; setFails?: boolean } = {}) {
   const agents: any[] = options.agents ?? [];
   let secret = options.secretUpdatedAt === undefined ? '2026-10-05T04:08:40Z' : options.secretUpdatedAt;
   const planeCalls: { path: string; method: string; body: any; token: string | null }[] = [], ghCalls: { args: string[]; input?: string }[] = [];
+  /** The plane's rotate route refuses while set (a mutation that fails after an earlier one in the same run succeeded). */
+  const faults = { rotateFails: false };
   const fetcher = (async (url: string, init: RequestInit) => {
     const path = url.replace('https://graphyard.example/api/', ''), body = init.body ? JSON.parse(String(init.body)) : undefined;
     planeCalls.push({ path, method: init.method ?? 'GET', body, token: String((init.headers as Record<string, string>).Authorization ?? '').replace('Bearer ', '') || null });
     const json = (status: number, value: unknown) => new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } });
     if (planeCalls.at(-1)!.token !== 'admin-token-' + 'a'.repeat(32)) return json(403, { error: 'Administrator permission required' });
     if (path === 'operator-agents' && init.method === 'GET') return json(200, agents);
-    if (path === 'operator-agents') { agents.push({ id: body.id, displayName: body.displayName, role: 'operator-agent', capabilities: body.capabilities, scope: body.scope, revision: 1, createdAt: '2026-10-11T06:00:00.000Z', lastMutation: { kind: 'setup', at: '2026-10-11T06:00:00.000Z' } }); return json(200, agents.at(-1)); }
+    // The document as src/operator-agent.ts keeps it: credentialIssuedAt set by setup and rotate, kept through configure (GY-1692).
+    if (path === 'operator-agents') { agents.push({ id: body.id, displayName: body.displayName, role: 'operator-agent', capabilities: body.capabilities, scope: body.scope, revision: 1, createdAt: '2026-10-11T06:00:00.000Z', lastMutation: { kind: 'setup', at: '2026-10-11T06:00:00.000Z' }, credentialIssuedAt: '2026-10-11T06:00:00.000Z' }); return json(200, agents.at(-1)); }
     const match = /^operator-agents\/([^/]+)\/(configure|rotate)$/.exec(path);
     if (match) {
       const agent = agents.find(entry => entry.id === decodeURIComponent(match[1]));
       if (match[2] === 'configure') { if (body.expectedRevision !== agent.revision) return json(409, { error: 'Operator-agent revision changed' }); agent.capabilities = body.capabilities; agent.scope = body.scope; }
+      if (match[2] === 'rotate') { if (faults.rotateFails) return json(503, { error: 'the credential store is unavailable' }); agent.credentialIssuedAt = '2026-10-11T06:30:00.000Z'; }
       agent.revision++; agent.lastMutation = { kind: match[2], at: '2026-10-11T06:30:00.000Z', ...(match[2] === 'rotate' ? { transitionEndsAt: 'later' } : {}) };
       return json(200, agent);
     }
@@ -299,7 +303,7 @@ function releaseFilingHost(options: { agents?: any[]; secretUpdatedAt?: string |
   };
   const audits: any[] = [];
   const deps: ReleaseFilingDeps = { adminToken: async () => options.admin === undefined ? 'admin-token-' + 'a'.repeat(32) : options.admin, fetch: fetcher, gh, token: () => 'b'.repeat(64), now: () => Date.parse('2026-10-11T06:30:00.000Z'), audit: async entry => { audits.push(entry); } };
-  return { agents, deps, planeCalls, ghCalls, audits, secretUpdatedAt: () => secret };
+  return { agents, deps, planeCalls, ghCalls, audits, faults, secretUpdatedAt: () => secret };
 }
 const filingMaster = { url: 'https://graphyard.example', repository: 'cryptob1/graphyard' };
 const filingScope = { repositories: ['cryptob1/graphyard'], workItems: ['*'] };
@@ -398,4 +402,47 @@ test('manual:intervention-pattern-human-only-decision-build — GY-1691 (GY-1692
       if (expectHuman) assert.equal(item.humanOnly, 'issuing credentials to people');
     }
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+
+test('manual:intervention-pattern-human-only-decision-build — GY-1691 (GY-1692): the credential issue time survives a later configure, so a narrowing that succeeds before its rotation fails leaves the stale secret stale for the next run; an unrecorded issue is bounded by the last mutation; a store landing in the rotation\'s second is current', async () => {
+  // Rotated out of band at T1 (the secret, stored T0 < T1, was never updated) and since widened: this run narrows,
+  // then the plane refuses the rotation. lastMutation now reads configure, but credentialIssuedAt still reads T1.
+  const wide = { repositories: ['cryptob1/graphyard', 'cryptob1/other'], workItems: ['*'] };
+  const host = releaseFilingHost({ secretUpdatedAt: '2026-10-09T12:00:00.000Z', agents: [{ id: 'graphyard-release-follow-up', role: 'operator-agent', capabilities: ['intent:create'], scope: wide, revision: 4, createdAt: '2026-10-09T00:00:00.000Z', credentialIssuedAt: '2026-10-10T00:00:00.000Z', lastMutation: { kind: 'rotate', at: '2026-10-10T00:00:00.000Z' } }] });
+  host.faults.rotateFails = true;
+  const first = await provisionReleaseFiling(filingMaster, { apply: true }, host.deps);
+  assert.equal(first.state, 'failed', first.detail);
+  assert.match(first.detail, /Graphyard refused operator-agents\/graphyard-release-follow-up\/rotate \(503\)/);
+  assert.deepEqual(host.planeCalls.filter(call => call.method === 'POST').map(call => call.path.split('/').at(-1)), ['configure', 'rotate'], 'the narrowing succeeded before the rotation was refused');
+  assert.deepEqual([host.agents[0].lastMutation.kind, host.agents[0].credentialIssuedAt, host.agents[0].scope], ['configure', '2026-10-10T00:00:00.000Z', filingScope]);
+  assert.equal(credentialIssuedAt(host.agents[0]), '2026-10-10T00:00:00.000Z', 'the issue time is the rotation, not the configure that followed it');
+  // The next run still finds the secret stale: it plans the rotation alone (nothing left to narrow), and with the plane back it rotates and stores.
+  const planned = await provisionReleaseFiling(filingMaster, { apply: false }, host.deps);
+  assert.equal(planned.state, 'planned', planned.detail);
+  assert.match(planned.detail, /would rotate graphyard-release-follow-up's credential .*the one stored 2026-10-09T12:00:00.000Z predates the credential issued 2026-10-10T00:00:00.000Z/);
+  assert.ok(!planned.detail.includes('narrow'), planned.detail);
+  const stillRefused = await provisionReleaseFiling(filingMaster, { apply: true }, host.deps);
+  assert.equal(stillRefused.state, 'failed', 'a run while the plane still refuses never reads the secret as current');
+  host.faults.rotateFails = false;
+  const rotated = await provisionReleaseFiling(filingMaster, { apply: true }, host.deps);
+  assert.equal(rotated.state, 'rotated', rotated.detail);
+  assert.equal(host.planeCalls.filter(call => call.path.endsWith('/configure')).length, 1, 'the identity is narrowed once');
+  assert.equal((await provisionReleaseFiling(filingMaster, { apply: true }, host.deps)).state, 'current');
+  assert.equal(host.ghCalls.filter(call => call.args[0] === 'secret').length, 1, 'the secret is stored once, by the rotation that succeeded');
+
+  // A document kept before credentialIssuedAt was recorded: its last mutation bounds the issue from above, so a
+  // configure after an unseen rotation still rotates once more, and a secret newer than every mutation is current.
+  const legacy = { id: 'graphyard-release-follow-up', role: 'operator-agent', capabilities: ['intent:create'], scope: filingScope, revision: 5, createdAt: '2026-10-09T00:00:00.000Z', updatedAt: '2026-10-10T06:00:00.000Z', lastMutation: { kind: 'configure', at: '2026-10-10T06:00:00.000Z' } };
+  assert.equal(credentialIssuedAt(legacy), '2026-10-10T06:00:00.000Z');
+  assert.equal(credentialIssuedAt({ createdAt: '2026-10-09T00:00:00.000Z' }), '2026-10-09T00:00:00.000Z');
+  assert.equal((await provisionReleaseFiling(filingMaster, { apply: true }, releaseFilingHost({ secretUpdatedAt: '2026-10-10T03:00:00.000Z', agents: [{ ...legacy }] }).deps)).state, 'rotated', 'a secret older than the last mutation is rotated');
+  assert.equal((await provisionReleaseFiling(filingMaster, { apply: true }, releaseFilingHost({ secretUpdatedAt: '2026-10-10T07:00:00.000Z', agents: [{ ...legacy }] }).deps)).state, 'current', 'a secret newer than every mutation is current');
+
+  // GitHub records the store to the second: one landing in the rotation's second is as new as the credential; one a second earlier is not.
+  assert.equal(secretPredatesCredential('2026-10-11T06:30:00Z', '2026-10-11T06:30:00.700Z'), false);
+  assert.equal(secretPredatesCredential('2026-10-11T06:29:59Z', '2026-10-11T06:30:00.700Z'), true);
+  const sameSecond = releaseFilingHost({ secretUpdatedAt: '2026-10-11T06:30:00Z', agents: [{ id: 'graphyard-release-follow-up', role: 'operator-agent', capabilities: ['intent:create'], scope: filingScope, revision: 2, createdAt: '2026-10-09T00:00:00.000Z', credentialIssuedAt: '2026-10-11T06:30:00.700Z', lastMutation: { kind: 'rotate', at: '2026-10-11T06:30:00.700Z' } }] });
+  assert.equal((await provisionReleaseFiling(filingMaster, { apply: true }, sameSecond.deps)).state, 'current');
+  assert.deepEqual(sameSecond.planeCalls.map(call => call.method), ['GET'], 'nothing is rotated for a store within the rotation\'s second');
 });

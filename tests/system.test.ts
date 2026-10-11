@@ -693,6 +693,7 @@ test('scoped operator-agent credentials are deny-by-default, auditable, rotation
   assert.equal((await post('operator-agents', { ...setup, id: `collision-${randomUUID()}`, token: 'w'.repeat(32) }, 'o'.repeat(32))).status, 409, 'dynamic credential cannot inherit a configured principal role');
   const configured: any = await (await post('operator-agents', setup, 'o'.repeat(32), setupKey)).json();
   assert.equal(configured.role, 'operator-agent'); assert.deepEqual(configured.fingerprints, [createHash('sha256').update(firstToken).digest('hex').slice(0, 16)]); assert.equal(JSON.stringify(configured).includes(firstToken), false);
+  assert.equal(configured.credentialIssuedAt, configured.createdAt, 'the document records when its credential was issued (GY-1692)');
   const inferredEngine = new Engine(store, [15368], 120, '');
   server(inferredEngine, [{ ...operator, token: 'o'.repeat(32) }], { config: { repository: 'owner/project' } } as GitHub);
   assert.equal(inferredEngine.repository, 'owner/project', 'the GitHub-inferred repository also binds engine mutation authorization');
@@ -739,8 +740,12 @@ test('scoped operator-agent credentials are deny-by-default, auditable, rotation
   const weakened = { expectedPolicyRevision: created.policyRevision, reason: 'Remove the requirement', criteria: [{ id: 'AC-2', text: 'Less', proofs: ['unit:less'] }], dependencies: [], plannedFiles: [], exclusiveResources: [] };
   assert.equal((await post(`work/${created.id}/requirements`, weakened, firstToken)).status, 409);
   const unchanged = (await store.list()).find(w => w.id === created.id)!; assert.deepEqual(unchanged.criteria, created.criteria); assert.equal(unchanged.policyRevision, created.policyRevision);
+  // GY-1692: a configure moves lastMutation but never the credential's issue; a rotation moves both.
+  const reconfigured: any = await (await post(`operator-agents/${setup.id}/configure`, { expectedRevision: priorDocument.revision, capabilities: setup.capabilities, scope: setup.scope, reason: 'Restated unchanged' })).json();
+  assert.equal(reconfigured.lastMutation.kind, 'configure'); assert.equal(reconfigured.credentialIssuedAt, configured.credentialIssuedAt, 'configure keeps the credential issue time');
   const rotated: any = await (await post(`operator-agents/${setup.id}/rotate`, { token: secondToken, transitionSeconds: 0, reason: 'Scheduled rotation' })).json();
-  assert.equal(rotated.lastMutation.kind, 'rotate'); assert.equal((await fetch(`${url}/api/status`, { headers: { Authorization: `Bearer ${firstToken}` } })).status, 401); assert.equal((await fetch(`${url}/api/status`, { headers: { Authorization: `Bearer ${secondToken}` } })).status, 200);
+  assert.equal(rotated.lastMutation.kind, 'rotate'); assert.equal(rotated.credentialIssuedAt, rotated.lastMutation.at, 'rotate moves the credential issue time to the rotation');
+  assert.ok(Date.parse(rotated.credentialIssuedAt) >= Date.parse(configured.credentialIssuedAt)); assert.equal((await fetch(`${url}/api/status`, { headers: { Authorization: `Bearer ${firstToken}` } })).status, 401); assert.equal((await fetch(`${url}/api/status`, { headers: { Authorization: `Bearer ${secondToken}` } })).status, 200);
   const capturedActor = await new OperatorAgents(store, 'owner/project').authenticate(secondToken); assert.ok(capturedActor);
   assert.equal((await post(`operator-agents/${setup.id}/revoke`, { reason: 'Automation disabled by human' })).status, 200);
   assert.equal((await fetch(`${url}/api/status`, { headers: { Authorization: `Bearer ${secondToken}` } })).status, 401);

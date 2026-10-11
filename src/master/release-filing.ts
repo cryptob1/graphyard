@@ -54,9 +54,23 @@ export const releaseFilingSetupNext = 'graphyard master setup --apply';
 export const releaseFilingAdministratorStep = (repository: string) =>
   `the administrator issues ${releaseFilingIdentity.id} once with graphyard operator-agent setup FILE --token-stdin (docs/delivery.md#release-filing-credential) and stores the printed token with gh secret set ${releaseFilingSecret} --repo ${repository} --env ${releaseFilingEnvironment}`;
 
-/** The identity's credential, as the uat secret must be at least as new as: its last rotation, else its creation. */
-export const credentialIssuedAt = (document: { createdAt?: string; lastMutation?: { kind?: string; at?: string } | null }) =>
-  document.lastMutation?.kind === 'rotate' && document.lastMutation.at ? document.lastMutation.at : document.createdAt ?? null;
+/**
+ * When the identity's newest credential was issued, which the uat secret must be at least as new
+ * as: `credentialIssuedAt`, which the plane records at setup and rotate and keeps through configure
+ * (src/operator-agent.ts). A document recorded before that field was kept has only its last
+ * mutation: a configure after a rotation overwrote the rotation's instant, so the newest mutation
+ * bounds the issue from above — a secret older than it is rotated once more than it had to be,
+ * never read as current while it predates a rotation it cannot see.
+ */
+export const credentialIssuedAt = (document: { createdAt?: string; updatedAt?: string; credentialIssuedAt?: string; lastMutation?: { kind?: string; at?: string } | null }) =>
+  document.credentialIssuedAt ?? document.lastMutation?.at ?? document.updatedAt ?? document.createdAt ?? null;
+/**
+ * GitHub records a secret's `updated_at` to the second, so a store that lands in the same second as
+ * the rotation it follows reads as that second: the credential's issue is compared at the same
+ * granularity, or a store within the rotation's second would read as stale and be rotated every run.
+ */
+export const secretPredatesCredential = (secretUpdatedAt: string, issuedAt: string) =>
+  Date.parse(secretUpdatedAt) < Math.floor(Date.parse(issuedAt) / 1000) * 1000;
 
 /**
  * Plan or apply the release filing credential for MASTER's repository (above). Nothing it returns
@@ -87,7 +101,7 @@ export async function provisionReleaseFiling(master: { url: string; repository: 
     const misfit = actor ? followUpFilingRefusal(actor, repository) ?? followUpFilingExcess(actor, repository) : null;
     const secret = await readSecret(gh, repository);
     const issuedAt = current ? credentialIssuedAt(current) : null;
-    const stale = !!current && (!secret || (!!issuedAt && Date.parse(secret.updatedAt) < Date.parse(issuedAt)));
+    const stale = !!current && (!secret || (!!issuedAt && secretPredatesCredential(secret.updatedAt, issuedAt)));
     const scope = { repositories: [repository], workItems: ['*'] }, capabilities = [...releaseFilingIdentity.capabilities];
     const steps = [...(!current ? [`issue ${identity} holding only intent:create over ${repository} and store its token as the ${releaseFilingEnvironment} ${releaseFilingSecret}${secret ? ` (the one stored ${secret.updatedAt} predates the identity)` : ' (none is stored)'}`] : []),
       ...(misfit ? [`narrow ${identity} to intent:create over ${repository} alone (${misfit})`] : []),
