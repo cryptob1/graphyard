@@ -83,7 +83,8 @@ function Trend({ report }: { report: Report }) {
  * One pattern row as the report folds it (GY-1682): the count, the unlinked count the threshold
  * judges, the item standing for the pair (the scan's or one filed by hand for its fault), every item
  * that owns counted instances with its share, the causes its instances show and the rework rounds
- * their items carried, how long every rolling window has held under the threshold, and the counted
+ * their items carried, the whole pattern's causes and rounds against the standing item, how long
+ * every rolling window has held under the threshold over every counted instance, and the counted
  * instances themselves — their item, trigger, instant, owner, cause and rounds — so the board shows
  * the fold the row was judged on, not a bare count.
  */
@@ -94,7 +95,8 @@ function PatternFold({ pattern, open }: { pattern: PatternRow; open(id: string |
   return <li className={pattern.crossed && !pattern.work ? 'tone-stuck' : ''}>
     <span>{pattern.count} × {interventionKindLabel[pattern.kind]} at {stageLabel(pattern.stage)} <span className="muted">· {pattern.unlinked} of {pattern.threshold} unlinked</span></span>
     {pattern.work ? <button className="text-button" onClick={() => open(pattern.work!.id)}>{pattern.work.key}</button> : pattern.crossed ? <span className="muted">an item opens within a minute</span> : null}
-    {under && <span className="muted">{under.since ? `under the threshold in every rolling window for ${under.days} day${under.days === 1 ? '' : 's'} (since ${new Date(under.since).toLocaleString()}, peak ${under.peak}, read from ${new Date(under.reach).toLocaleDateString()})` : `at or past the threshold now (peak ${under.peak} since ${new Date(under.reach).toLocaleDateString()})`}</span>}
+    {(Object.keys(pattern.causes ?? {}).length > 0 || (pattern.reworkRounds ?? 0) > 0) && <span className="muted">counted: {causes(pattern.causes) || 'no typed cause'}{rounds(pattern.reworkRounds)}</span>}
+    {under && <span className="muted">{under.since ? `under the threshold in every rolling window for ${under.days} of ${under.holdDays} days (since ${new Date(under.since).toLocaleString()}, peak ${under.peak}, read from ${new Date(under.reach).toLocaleDateString()})` : `at or past the threshold now (peak ${under.peak} since ${new Date(under.reach).toLocaleDateString()}${under.projected ? `; under it from ${new Date(under.projected).toLocaleString()} if nothing further is recorded` : ''})`}</span>}
     {accounted.length > 0 && <span className="muted">owned by {accounted.map((owner, index) => <Fragment key={owner.id}>{index > 0 ? '; ' : ''}<button className="text-button" onClick={() => open(owner.id)}>{owner.key}</button> ({owner.count}{owner.stage === 'done' ? ', delivered' : ''}{causes(owner.causes) ? `: ${causes(owner.causes)}` : ''}{rounds(owner.reworkRounds)})</Fragment>)}</span>}
     {instances.length > 0 && <details><summary>{instances.length < pattern.count ? `Newest ${instances.length} of ${pattern.count} counted instances` : `Counted instance${pattern.count === 1 ? '' : 's'}`}</summary>
       <ul>{instances.map(instance => <li key={instance.id}>{instance.work ? <button className="text-button" onClick={() => open(instance.work!.id)}>{instance.work.key}</button> : 'no item'} · {instance.trigger ?? interventionKindLabel[pattern.kind]}{instance.cause ? ` (${patternCauseLabel[instance.cause]})` : ''} · {new Date(instance.requestedAt).toLocaleString()}{instance.resolvedAt ? '' : ' · still open'} · {instance.owner ? `owned by ${instance.owner}` : 'no owner'}{rounds(instance.reworkRounds)}</li>)}</ul></details>}

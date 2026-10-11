@@ -20,12 +20,12 @@ const source = (path: string) => readFileSync(new URL(`../${path}`, import.meta.
 const policy = { threshold: 3, windowDays: 7 };
 /**
  * The fold and its 7- and 30-day reports, as one digest. The pattern rows' `unlinked`, `accounted`,
- * `instances` and `underThreshold` fields (GY-1682) are left out, so the digests taken before them still
+ * `causes`, `reworkRounds`, `instances` and `underThreshold` fields (GY-1682) are left out, so the digests taken before them still
  * pin the fold and the rest of the report; tests/intervention-pattern-scope-widening-build.test.ts pins those.
  */
 const digest = (rows: InterventionLedgerRow[], work: Work[], now: string) => {
   const folded = foldInterventions(rows, work, now);
-  const reports = ([7, 30] as const).map(days => computeInterventionReport(folded, work, policy, { days, now })).map(report => ({ ...report, patterns: report.patterns.map(({ unlinked: _unlinked, accounted: _accounted, instances: _instances, underThreshold: _under, ...row }) => row) }));
+  const reports = ([7, 30] as const).map(days => computeInterventionReport(folded, work, policy, { days, now })).map(report => ({ ...report, patterns: report.patterns.map(({ unlinked: _unlinked, accounted: _accounted, causes: _causes, reworkRounds: _rounds, instances: _instances, underThreshold: _under, ...row }) => row) }));
   return createHash('sha256').update(JSON.stringify({ folded, reports })).digest('hex');
 };
 

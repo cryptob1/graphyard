@@ -17,9 +17,9 @@ Cards: ask, **Recommended** choice (or safest way), one-line why, numbered steps
 
 ## Workers
 
-**Workers** (`web/pages/index.tsx`): a row is one [session handle](master-agent-sessions.md#session-handles) from the item, not from Herdr. A handle unobserved over **15 minutes** (`sessionStaleThresholdMs`, `web/workers-view.ts`) reads *not seen for <time>*, never running, not counted open; the loop's [session report](master-agent.md#session-liveness-is-reconciled-not-trusted) ends a dead handle.
+**Workers** (sidebar, beside Shipped and Insights; `web/pages/index.tsx`): a row is one [session handle](master-agent-sessions.md#session-handles) from the item, not from Herdr. A running handle unobserved over **15 minutes** by default (`sessionStaleThresholdMs`, `web/workers-view.ts`) reads *not seen for <time since that observation>*, never as running, and isn't counted open; the loop's [session report](master-agent.md#session-liveness-is-reconciled-not-trusted) ends a dead handle.
 
-**Copy local** (launching host): `herdr agent attach w1V:pJD`; **Copy remote** (`herdr --machine <label-or-id> <command>`, `herdr --remote <ssh-target>`; attachment isn't forwarded: focus, then attach): `herdr --machine vishrog agent focus w1V:pJD && herdr --remote vishrog`.
+**Copy local** (launching host): `herdr agent attach w1V:pJD`; **Copy remote** (`herdr --machine <label-or-id> <command>`, `herdr --remote <ssh-target>` per `herdr --help`; attachment isn't forwarded: focus, then attach): `herdr --machine vishrog agent focus w1V:pJD && herdr --remote vishrog`.
 
 ## Settings › Agents
 
@@ -31,4 +31,4 @@ Cards: ask, **Recommended** choice (or safest way), one-line why, numbered steps
 
 ## Insights
 
-**Flow** (landed/day, merges/hour, waits); **Show details**: shipping pulse, PR-to-production (`POST /api/production-observations`), flow analytics, conflict hotspots. **Shipped**: **Interventions** ([retro](operations-reference.md#retro-synthesis); repeats filed `bug` unless `GRAPHYARD_INTERVENTION_PATTERNS=0`; pattern rows: unlinked, standing item, owners (causes, rework rounds), days under threshold, counted instances; what counts: [read endpoints](protocol/read-endpoints.md)), **Validation**, **Releases**.
+**Flow** (landed/day, merges/hour, waits); **Show details**: shipping pulse, PR-to-production (`POST /api/production-observations`), flow analytics, conflict hotspots. **Shipped**: **Interventions** ([retro](operations-reference.md#retro-synthesis); repeats filed `bug` unless `GRAPHYARD_INTERVENTION_PATTERNS=0`; pattern rows ([read endpoints](protocol/read-endpoints.md)): owners, causes, rounds, days under threshold), **Validation**, **Releases**.

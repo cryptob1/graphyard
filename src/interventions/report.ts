@@ -1,6 +1,6 @@
 // Concern: the interventions report — the window's counts, trend, costliest items and the recurring kind-at-stage patterns.
 import type { Stage, Work } from '../model.js';
-import { handFiledPatterns, interventionKinds, interventionWindows, patternCause, patternInstancesShown, type Intervention, type InterventionKind, type InterventionPolicy, type InterventionReport, type InterventionWindow, type Judgement, type PatternOwner, type PatternRow, type UnderThreshold } from '../model/interventions.js';
+import { handFiledPatterns, interventionKinds, interventionWindows, patternCause, patternHoldDays, patternInstancesShown, type Intervention, type InterventionKind, type InterventionPolicy, type InterventionReport, type InterventionWindow, type Judgement, type PatternCause, type PatternOwner, type PatternRow, type UnderThreshold } from '../model/interventions.js';
 import type { PipelineTimeline } from '../pipeline-speed.js';
 import type { Store } from '../store.js';
 import { boundedSnapshot } from '../store/bounded-snapshot.js';
@@ -49,40 +49,48 @@ export function computeInterventionReport(folded: { interventions: Intervention[
   for (const item of work) { byId.set(item.id, item); for (const instance of item.origin?.pattern?.instances ?? []) if (!accountedBy.has(instance.id)) accountedBy.set(instance.id, item); }
   const reworkRoundsOf = (entry: Intervention) => { const item = entry.work ? byId.get(entry.work.id) as (Work & { pipeline?: PipelineTimeline }) | undefined : undefined; return item ? item.pipeline?.reworkRounds ?? 0 : null; };
   const reach = options.reach ?? from;
-  // The pair's unlinked instances inside the reach, for the under-threshold reading: one pass over the fold.
-  const unlinkedInReach = new Map<string, Intervention[]>();
+  // The pair's every instance inside the reach, linked or not, for the under-threshold reading (AC-2): one pass over the fold.
+  const inReach = new Map<string, Intervention[]>();
   for (const entry of folded.interventions) {
-    if (entry.requestedAt < reach || entry.requestedAt >= to || accountedBy.has(entry.id)) continue;
+    if (entry.requestedAt < reach || entry.requestedAt >= to) continue;
     const key = `${entry.kind}|${stageKey(entry.stage)}`;
-    unlinkedInReach.set(key, [...(unlinkedInReach.get(key) ?? []), entry]);
+    inReach.set(key, [...(inReach.get(key) ?? []), entry]);
   }
+  /** The causes a list of instances shows and the rework rounds their items carried, each item once: an item's rounds are its cost once, however many of its asks the pair counted. */
+  const tally = (entries: readonly Intervention[]) => {
+    const causes: Partial<Record<PatternCause, number>> = {}, items = new Set<string>();
+    let reworkRounds = 0;
+    for (const entry of entries) {
+      const cause = patternCause(entry.kind, entry.trigger);
+      if (cause) causes[cause] = (causes[cause] ?? 0) + 1;
+      if (entry.work && !items.has(entry.work.id)) { items.add(entry.work.id); reworkRounds += reworkRoundsOf(entry) ?? 0; }
+    }
+    return { causes, reworkRounds };
+  };
   const seen = new Set<string>();
   const patterns: PatternRow[] = detectPatterns(folded.interventions, work, policy, to).map(pattern => {
     const key = `${pattern.kind}|${stageKey(pattern.stage)}`;
     seen.add(key);
-    const accounted = new Map<string, PatternOwner & { items: Set<string> }>();
     const owner = (entry: Intervention) => accountedBy.get(entry.id) ?? pattern.item ?? null;
+    const owned = new Map<string, { item: Work; entries: Intervention[] }>();
     for (const entry of pattern.entries) {
       const item = owner(entry);
       if (!item) continue;
-      const row = accounted.get(item.id) ?? { id: item.id, key: item.key, stage: item.stage, count: 0, causes: {}, reworkRounds: 0, items: new Set<string>() };
-      row.count++;
-      const cause = patternCause(entry.kind, entry.trigger);
-      if (cause) row.causes[cause] = (row.causes[cause] ?? 0) + 1;
-      // An item's rounds are its cost once, however many of its asks the pair counted.
-      if (entry.work && !row.items.has(entry.work.id)) { row.items.add(entry.work.id); row.reworkRounds += reworkRoundsOf(entry) ?? 0; }
-      accounted.set(item.id, row);
+      const bucket = owned.get(item.id) ?? { item, entries: [] };
+      bucket.entries.push(entry);
+      owned.set(item.id, bucket);
     }
+    const accounted: PatternOwner[] = [...owned.values()].map(({ item, entries }) => ({ id: item.id, key: item.key, stage: item.stage, count: entries.length, ...tally(entries) })).sort((a, b) => b.count - a.count || a.key.localeCompare(b.key));
     const instances = [...pattern.entries].sort((a, b) => b.requestedAt.localeCompare(a.requestedAt)).slice(0, patternInstancesShown)
       .map(entry => ({ id: entry.id, work: entry.work ? { id: entry.work.id, key: entry.work.key } : null, requestedAt: entry.requestedAt, resolvedAt: entry.resolvedAt, trigger: entry.trigger ?? null, owner: owner(entry)?.key ?? null, cause: patternCause(entry.kind, entry.trigger), reworkRounds: reworkRoundsOf(entry) }));
     return { kind: pattern.kind, stage: stageKey(pattern.stage), count: pattern.count, unlinked: pattern.unlinked.length, threshold: policy.threshold, crossed: pattern.item !== null || pattern.unlinked.length >= policy.threshold,
-      work: pattern.item ? { id: pattern.item.id, key: pattern.item.key, stage: pattern.item.stage } : null, accounted: [...accounted.values()].sort((a, b) => b.count - a.count || a.key.localeCompare(b.key)).map(({ items: _items, ...row }) => row), instances,
-      underThreshold: underThreshold(unlinkedInReach.get(key) ?? [], policy, reach, to) };
+      work: pattern.item ? { id: pattern.item.id, key: pattern.item.key, stage: pattern.item.stage } : null, accounted, ...tally(pattern.entries), instances,
+      underThreshold: underThreshold(inReach.get(key) ?? [], policy, reach, to) };
   });
   // A pair with no instance left in the policy window but some inside the reach keeps its reading (AC-2): the days it has held under the rule are read, not inferred from an absent row.
-  for (const [key, entries] of [...unlinkedInReach].filter(([key]) => !seen.has(key)).sort(([a], [b]) => a.localeCompare(b))) {
+  for (const [key, entries] of [...inReach].filter(([key]) => !seen.has(key)).sort(([a], [b]) => a.localeCompare(b))) {
     const [kind, stage] = key.split('|') as [InterventionKind, Stage | 'none'];
-    patterns.push({ kind, stage, count: 0, unlinked: 0, threshold: policy.threshold, crossed: false, work: null, accounted: [], instances: [], underThreshold: underThreshold(entries, policy, reach, to) });
+    patterns.push({ kind, stage, count: 0, unlinked: 0, threshold: policy.threshold, crossed: false, work: null, accounted: [], causes: {}, reworkRounds: 0, instances: [], underThreshold: underThreshold(entries, policy, reach, to) });
   }
   return {
     window: { days: options.days, from, to }, policy, deliveries: deliveries.length,
@@ -98,25 +106,32 @@ export function computeInterventionReport(folded: { interventions: Intervention[
 }
 
 /**
- * GY-1682 AC-2: the pair's unlinked instances inside the reach against the threshold over every
- * rolling window of the policy's days, by one sweep of their entries and exits (an instance is
- * inside the window [t − days, t) from its instant until `days` later; one leaving at the instant
- * another arrives has left). The reading is exact over the instances the fold holds: the
- * instances' instants are fixed, so the count at every instant between them is known.
+ * GY-1682 AC-2: the pair's every instance inside the reach — linked to an item or not — against the
+ * threshold over every rolling window of the policy's days, by one sweep of their entries and exits
+ * (an instance is inside the window [t − days, t) from its instant until `days` later; one leaving
+ * at the instant another arrives has left). The reading is exact over the instances the fold holds:
+ * the instances' instants are fixed, so the count at every instant between them is known, and so is
+ * the instant the window next falls under the threshold if nothing further is recorded (`projected`).
  */
-export function underThreshold(unlinked: readonly Intervention[], policy: InterventionPolicy, reach: string, now: string): UnderThreshold {
+export function underThreshold(instances: readonly Intervention[], policy: InterventionPolicy, reach: string, now: string): UnderThreshold {
   const windowMs = policy.windowDays * day, end = Date.parse(now), start = Date.parse(reach);
-  const events = unlinked.flatMap(entry => { const at = Date.parse(entry.requestedAt); return [{ at, delta: 1 }, { at: at + windowMs, delta: -1 }]; })
-    .filter(event => event.at < end).sort((a, b) => a.at - b.at || a.delta - b.delta);
-  let count = 0, peak = 0, since: number | null = start;
+  // An instance recorded at or after `now` is not on the record yet; the recorded ones' exits past now are kept for `projected`.
+  const events = instances.map(entry => Date.parse(entry.requestedAt)).filter(at => at < end).flatMap(at => [{ at, delta: 1 }, { at: at + windowMs, delta: -1 }])
+    .sort((a, b) => a.at - b.at || a.delta - b.delta);
+  let count = 0, peak = 0, since: number | null = start, projected: number | null = null;
   for (const event of events) {
     count += event.delta;
+    if (event.at >= end) {
+      // Past now the recorded instances only leave: the first drop under the threshold is where the streak would begin.
+      if (since === null && projected === null && count < policy.threshold) projected = event.at;
+      continue;
+    }
     if (event.at >= start) peak = Math.max(peak, count);
     // At or past the threshold, the streak has not begun; the first drop under it afterwards begins it.
     if (count >= policy.threshold) since = null;
     else if (since === null) since = Math.max(event.at, start);
   }
-  return { since: since === null ? null : new Date(since).toISOString(), days: since === null ? 0 : Math.floor((end - since) / day), peak, reach };
+  return { since: since === null ? null : new Date(since).toISOString(), days: since === null ? 0 : Math.floor((end - since) / day), holdDays: patternHoldDays, peak, projected: projected === null ? null : new Date(projected).toISOString(), reach };
 }
 
 /**

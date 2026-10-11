@@ -51,9 +51,12 @@ import type { Dashboard } from '../web/pages/dashboard.js';
 // `origin.pattern` lookup never saw, so the row named no owner and a third unlinked instance would have
 // opened a second item beside it — stands for every pair its text quotes (handFiledPatterns). The row
 // names the count the threshold judges (`unlinked`), the items that own every counted instance with
-// the causes their instances show and the rework rounds their items carried (`accounted`), the
-// instances themselves (`instances`), and how long every rolling window has held under the threshold
-// within the ledger's reach (`underThreshold`); the board renders the fold.
+// the causes their instances show and the rework rounds their items carried (`accounted`), the whole
+// pattern's causes and rounds against the standing item (`causes`, `reworkRounds`), the instances
+// themselves (`instances`), and how long every rolling window has held under the threshold within the
+// ledger's reach over every counted instance, linked or not (`underThreshold`): 20 in 7 days is 20
+// interventions whoever owns them, so that reading is 0 days at the report, and the 14 days AC-2 asks
+// for begin no earlier than 2026-10-15T10:32:39.087Z, when the count falls to 2; the board renders the fold.
 
 const uuid = (name: string) => { const hex = createHash('sha256').update(name).digest('hex'); return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20, 32)}`; };
 const policy = { threshold: 3, windowDays: 7 };
@@ -114,8 +117,8 @@ const page = (data: object) => renderToStaticMarkup(createElement(InterventionsP
 
 test('manual:pattern-item-owns-scope-widening — the board\'s pattern row names the count the threshold judges, every counted instance, and the items that own them: the delivered pattern items for 18 and GY-1682, filed by hand for the pattern\'s fault, for the two the threshold judges', async () => {
   const row = buildRow(report(fleet))!;
-  assert.deepEqual({ count: row.count, unlinked: row.unlinked, threshold: row.threshold, crossed: row.crossed, work: row.work, accounted: row.accounted },
-    { count: 20, unlinked: 2, threshold: 3, crossed: true, work: { id: uuid('GY-1682'), key: 'GY-1682', stage: 'build' },
+  assert.deepEqual({ count: row.count, unlinked: row.unlinked, threshold: row.threshold, crossed: row.crossed, work: row.work, causes: row.causes, reworkRounds: row.reworkRounds, accounted: row.accounted },
+    { count: 20, unlinked: 2, threshold: 3, crossed: true, work: { id: uuid('GY-1682'), key: 'GY-1682', stage: 'build' }, causes: { 'requirements-ambiguity': 18, 'triage-scope-decision': 2 }, reworkRounds: 3,
       accounted: [
         { id: uuid('GY-1388'), key: 'GY-1388', stage: 'done', count: 14, causes: { 'requirements-ambiguity': 14 }, reworkRounds: 0 },
         { id: uuid('GY-1568'), key: 'GY-1568', stage: 'done', count: 4, causes: { 'requirements-ambiguity': 4 }, reworkRounds: 0 },
@@ -175,7 +178,7 @@ test('manual:pattern-item-owns-scope-widening — the Interventions board render
   const patterns = markup.slice(markup.indexOf('aria-label="Patterns"'), markup.indexOf('aria-label="Judgement about delivered work"'));
   for (const needle of ['20 × scope widening at build', '2 of 3 unlinked', '>GY-1682</button>', 'owned by ',
     '>GY-1388</button> (14, delivered: 14 from requirements the plan left ambiguous · 0 rework rounds)', '>GY-1568</button> (4, delivered: 4 from requirements the plan left ambiguous · 0 rework rounds)', '>GY-1682</button> (2: 2 from triage scope decisions · 3 rework rounds)',
-    'under the threshold in every rolling window for 7 days', 'peak 2', 'Counted instances', '>GY-1617</button>', '>GY-1675</button>', 'operator-widening (from triage scope decisions)', 'refused-by-loop (from requirements the plan left ambiguous)', 'owned by GY-1682 · 3 rework rounds', 'owned by GY-1388'])
+    'counted: 18 from requirements the plan left ambiguous, 2 from triage scope decisions · 3 rework rounds', 'at or past the threshold now (peak 20 since', 'if nothing further is recorded', 'Counted instances', '>GY-1617</button>', '>GY-1675</button>', 'operator-widening (from triage scope decisions)', 'refused-by-loop (from requirements the plan left ambiguous)', 'owned by GY-1682 · 3 rework rounds', 'owned by GY-1388'])
     assert.ok(patterns.includes(needle), needle);
   assert.doesNotMatch(patterns, /an item opens within a minute/);
   assert.equal(patterns.match(/<li/g)!.length, 1 + 20, 'one row, twenty instances');
@@ -183,10 +186,10 @@ test('manual:pattern-item-owns-scope-widening — the Interventions board render
   assert.match(page({ ...data, patterns: [{ ...data.patterns[0], work: null, unlinked: 3, crossed: true }] }), /an item opens within a minute/);
   const under = page({ ...report(owners), ledger: data.ledger });
   assert.ok(under.includes('2 of 3 unlinked') && under.includes('>GY-1388</button> (14, delivered') && !under.includes('within a minute'), 'owned, not unfiled');
-  // A pair at the threshold now reads so, with its peak; a pair whose instances all left the window keeps its reading at count 0.
+  // A pair at the threshold now reads so, with its peak over every counted instance; a pair whose instances all left the window keeps its reading at count 0, with its days of the 14.
   const third = instance(['GY-X', 2480000, '2026-10-10T12:00:00.000Z', 'refused-by-loop', null]);
-  assert.match(page({ ...report(fleet, reportAt, { interventions: [...interventions, third] }), ledger: data.ledger }), /3 of 3 unlinked.*at or past the threshold now \(peak 3/);
-  assert.match(page({ ...report(fleet, '2026-10-19T00:00:00.000Z', { reach: ledgerSince }), ledger: data.ledger }), /0 × scope widening at build.*0 of 3 unlinked.*under the threshold in every rolling window for 15 days/);
+  assert.match(page({ ...report(fleet, reportAt, { interventions: [...interventions, third] }), ledger: data.ledger }), /3 of 3 unlinked.*at or past the threshold now \(peak 21/);
+  assert.match(page({ ...report(fleet, '2026-10-19T00:00:00.000Z', { reach: ledgerSince }), ledger: data.ledger }), /0 × scope widening at build.*0 of 3 unlinked.*under the threshold in every rolling window for 3 of 14 days/);
 });
 
 // GY-1675's rows from 23:12:05Z to 23:13:27Z and GY-1617's one, as the ledger holds them.
@@ -287,51 +290,49 @@ test('manual:pattern-item-owns-scope-widening — a refused ask the loop put to 
   assert.deepEqual(buildWidenings([...rows, other], [done1617, live()], during), [waiting, ...resolved]);
 });
 
-test('manual:intervention-pattern-within-threshold — the causes are read against the owning item, and the row reads how long every rolling 7-day window has held under 3 within the ledger\'s reach: the instrument the 14 days are read off, exact over the recorded instances', async () => {
+test('manual:intervention-pattern-within-threshold — the causes and rounds are read against the owning item, and the row reads how long every rolling 7-day window has held under 3 over every counted instance, linked or not, within the ledger\'s reach: the instrument the 14 days are read off, truthful over the record as it stands', async () => {
   // Each counted instance carries its cause — the typed half the trigger holds — and its item's rework rounds; the owner tallies both.
   assert.deepEqual([patternCause('scope-widening', 'refused-by-loop'), patternCause('scope-widening', 'scope-request'), patternCause('scope-widening', 'operator-widening'), patternCause('scope-widening', 'recorded-by-hand'), patternCause('escalation', 'operator-widening')],
     ['requirements-ambiguity', 'requirements-ambiguity', 'triage-scope-decision', null, null]);
   const row = buildRow(report(fleet, reportAt, { reach: ledgerSince }))!;
   const gy1682Owner = row.accounted.find(entry => entry.key === 'GY-1682')!;
   assert.deepEqual({ causes: gy1682Owner.causes, reworkRounds: gy1682Owner.reworkRounds }, { causes: { 'triage-scope-decision': 2 }, reworkRounds: 3 }, 'GY-1682 owns two triage scope decisions, one of them GY-1675\'s with its 3 rework rounds');
+  // The whole pattern's causes and rounds are recorded against the item that stands for it: all 20, not only the two no delivered item links.
+  assert.deepEqual({ work: row.work?.key, causes: row.causes, reworkRounds: row.reworkRounds }, { work: 'GY-1682', causes: { 'requirements-ambiguity': 18, 'triage-scope-decision': 2 }, reworkRounds: 3 });
   assert.deepEqual(row.instances.filter(entry => entry.owner === 'GY-1682').map(entry => [entry.work!.key, entry.cause, entry.reworkRounds]), [['GY-1675', 'triage-scope-decision', 3], ['GY-1617', 'triage-scope-decision', 0]]);
   assert.deepEqual(row.instances.filter(entry => entry.owner !== 'GY-1682').map(entry => entry.cause), Array(18).fill('requirements-ambiguity'), '18 asks the plan did not carry');
   assert.equal(row.instances.find(entry => entry.work!.key === 'GY-1272')!.reworkRounds, null, 'an item the snapshot does not hold has no rounds to read');
-  // The under-threshold reading: within the read ledger no rolling window held 3 unlinked, so the streak is as old as the reach, 7 whole days at the report, peak 2.
-  assert.deepEqual(row.underThreshold, { since: ledgerSince, days: 7, peak: 2, reach: ledgerSince });
-  // The sweep is exact: a third unlinked instance on 2026-10-10 puts the window at the threshold until GY-1617 leaves it, 7 days after its instant, and the streak begins then.
+  // The truthful reading at the report: 20 build-stage scope widenings in 7 days, linked to a delivered item or not — linking owns an
+  // instance, it does not undo the intervention — so no rolling window has held under 3 since the reach, the peak is 20 and the streak
+  // has not begun. The recorded instants fix where it would: when GY-1520's instance leaves the window at 2026-10-15T10:32:39.087Z, only
+  // GY-1617's and GY-1675's remain, if nothing further is recorded.
+  const streakFrom = '2026-10-15T10:32:39.087Z';
+  assert.deepEqual(row.underThreshold, { since: null, days: 0, holdDays: 14, peak: 20, projected: streakFrom, reach: ledgerSince });
+  assert.deepEqual(buildRow(report([gy1682, record1675, record1617], reportAt, { reach: ledgerSince }))!.underThreshold, row.underThreshold, 'linking changes who owns an instance, never the count the rate is read from');
+  assert.deepEqual(buildRow(report(fleet))!.underThreshold, { ...row.underThreshold, reach: '2026-10-04T01:10:49.424Z' }, 'a 7-day read reads the same over its own reach');
+  // The sweep is exact at the edges: the instant the count falls under 3 begins the streak, 14 whole days later the reading is 14.
+  assert.deepEqual(underThreshold(interventions, policy, ledgerSince, streakFrom), { since: null, days: 0, holdDays: 14, peak: 20, projected: streakFrom, reach: ledgerSince });
+  assert.deepEqual(underThreshold(interventions, policy, ledgerSince, '2026-10-15T10:32:39.088Z'), { since: streakFrom, days: 0, holdDays: 14, peak: 20, projected: null, reach: ledgerSince });
+  assert.deepEqual(underThreshold(interventions, policy, ledgerSince, '2026-10-29T10:32:39.086Z'), { since: streakFrom, days: 13, holdDays: 14, peak: 20, projected: null, reach: ledgerSince });
+  assert.deepEqual(underThreshold(interventions, policy, ledgerSince, '2026-10-29T10:32:39.087Z'), { since: streakFrom, days: 14, holdDays: 14, peak: 20, projected: null, reach: ledgerSince });
+  // One further instance under the threshold keeps the streak; two more while GY-1617's and GY-1675's are still inside put the window at 4, and the streak begins again only when it falls under 3.
+  const later = (key: string, at: string) => instance([key, 2500000, at, 'refused-by-loop', null]);
+  assert.deepEqual(underThreshold([...interventions, later('GY-A', '2026-10-20T00:00:00.000Z')], policy, ledgerSince, '2026-10-29T10:32:39.087Z'), { since: streakFrom, days: 14, holdDays: 14, peak: 20, projected: null, reach: ledgerSince });
+  assert.deepEqual(underThreshold([...interventions, later('GY-A', '2026-10-16T00:00:00.000Z'), later('GY-B', '2026-10-16T00:00:00.000Z')], policy, ledgerSince, '2026-10-20T00:00:00.000Z'), { since: '2026-10-17T23:12:05.763Z', days: 2, holdDays: 14, peak: 20, projected: null, reach: ledgerSince });
+  assert.deepEqual(underThreshold([...interventions, later('GY-A', '2026-10-16T00:00:00.000Z'), later('GY-B', '2026-10-16T00:00:00.000Z')], policy, ledgerSince, '2026-10-16T12:00:00.000Z'), { since: null, days: 0, holdDays: 14, peak: 20, projected: '2026-10-17T23:12:05.763Z', reach: ledgerSince });
+  assert.deepEqual(underThreshold([], policy, ledgerSince, reportAt), { since: ledgerSince, days: 7, holdDays: 14, peak: 0, projected: null, reach: ledgerSince });
+  assert.deepEqual(underThreshold([later('GY-A', '2026-10-12T00:00:00.000Z')], policy, ledgerSince, reportAt), { since: ledgerSince, days: 7, holdDays: 14, peak: 0, projected: null, reach: ledgerSince }, 'an instance recorded after now is not on the record yet');
+  // A third unlinked instance crosses the scan's rule and the row says so; the reading counts it with the rest, and its exit moves where the streak would begin.
   const third = instance(['GY-X', 2480000, '2026-10-10T12:00:00.000Z', 'refused-by-loop', null]);
-  const unlinkedThree = [...interventions.slice(18), third];
-  assert.deepEqual(underThreshold(unlinkedThree, policy, ledgerSince, reportAt), { since: null, days: 0, peak: 3, reach: ledgerSince });
-  assert.deepEqual(underThreshold(unlinkedThree, policy, ledgerSince, '2026-10-16T23:48:58.837Z'), { since: null, days: 0, peak: 3, reach: ledgerSince });
-  assert.deepEqual(underThreshold(unlinkedThree, policy, ledgerSince, '2026-10-16T23:48:58.839Z'), { since: '2026-10-16T23:48:58.838Z', days: 0, peak: 3, reach: ledgerSince });
-  assert.deepEqual(underThreshold(unlinkedThree, policy, ledgerSince, '2026-10-18T00:00:00.000Z'), { since: '2026-10-16T23:48:58.838Z', days: 1, peak: 3, reach: ledgerSince });
-  assert.deepEqual(underThreshold([], policy, ledgerSince, reportAt), { since: ledgerSince, days: 7, peak: 0, reach: ledgerSince });
   const crossedRow = buildRow(report(fleet, reportAt, { reach: ledgerSince, interventions: [...interventions, third] }))!;
-  assert.deepEqual({ unlinked: crossedRow.unlinked, crossed: crossedRow.crossed, work: crossedRow.work?.key, under: crossedRow.underThreshold }, { unlinked: 3, crossed: true, work: 'GY-1682', under: { since: null, days: 0, peak: 3, reach: ledgerSince } });
-  // Fourteen consecutive days from the report over the recorded instances and GY-1675's rows as they settled, the
-  // reach fixed where a 30-day read begins: each day's row reads one more day under the threshold, GY-1682 stands
-  // while an instance is inside the window, the row stays at count 0 once they have left it, nothing waits and
-  // nothing is owed an item. This is the instrument's reading over the record as it stands; the fourteen live days
-  // are the serving release's to show on GET /api/interventions?window=30 after this ships, and the independent
-  // producer judges that reading, not this walk.
-  const settled = [done1617, live({ blocker: null, scopeRequest: null, plannedFiles: widened })];
-  for (let dayIndex = 0; dayIndex < 14; dayIndex++) {
-    const now = new Date(Date.parse(reportAt) + dayIndex * day).toISOString();
-    const replayed = foldInterventions([...rows, loopWidening], settled, now).interventions.filter(entry => entry.kind === 'scope-widening' && entry.stage === 'build');
-    assert.deepEqual(replayed.filter(entry => entry.resolvedAt === null), [], `nothing waits on day ${dayIndex}`);
-    const pattern = buildPattern(fleet, now);
-    const unlinked = pattern?.unlinked.length ?? 0;
-    assert.ok(unlinked < policy.threshold, `day ${dayIndex} (${now}): ${unlinked} unlinked of ${pattern?.count ?? 0} counted`);
-    assert.equal(pattern?.item ?? null, pattern ? gy1682 : null, `GY-1682 stands on day ${dayIndex}`);
-    const daily = report(fleet, now, { reach: ledgerSince }), dailyRow = buildRow(daily)!;
-    assert.deepEqual(await attention(daily), [], `nothing is owed an item on day ${dayIndex}`);
-    assert.deepEqual({ count: dailyRow.count, unlinked: dailyRow.unlinked, work: dailyRow.work?.key ?? null, unowned: dailyRow.instances.filter(entry => !entry.owner).length, under: dailyRow.underThreshold },
-      { count: pattern?.count ?? 0, unlinked, work: pattern ? 'GY-1682' : null, unowned: 0, under: { since: ledgerSince, days: 7 + dayIndex, peak: 2, reach: ledgerSince } }, `day ${dayIndex}`);
-  }
-  // The two leave the 7-day window at 2026-10-17T23:12:05.763Z, inside the 14 days; from then the pair has no counted instance, and its row reads the days instead.
-  assert.equal(buildPattern(fleet, '2026-10-17T23:12:05.764Z'), undefined);
-  assert.equal(buildPattern(fleet, new Date(Date.parse(reportAt) + 13 * day).toISOString()), undefined);
+  assert.deepEqual({ unlinked: crossedRow.unlinked, crossed: crossedRow.crossed, work: crossedRow.work?.key, under: crossedRow.underThreshold }, { unlinked: 3, crossed: true, work: 'GY-1682', under: { since: null, days: 0, holdDays: 14, peak: 21, projected: '2026-10-16T23:48:58.838Z', reach: ledgerSince } });
+  // The fourteen days themselves are not this test's to show: they pass on the serving release, and the independent producer reads them
+  // off GET /api/interventions?window=30 — `underThreshold.days` of `holdDays` on this row — no earlier than 2026-10-29T10:32:39.087Z, and
+  // only if no further build-stage scope widening is recorded before then. What this test fixes is what that reading says over the record
+  // as it stands and that it stays readable once the counted instances have left the policy window.
+  assert.equal(buildPattern(fleet, '2026-10-17T23:12:05.764Z'), undefined, 'the last counted instance leaves the 7-day window at 2026-10-17T23:12:05.763Z');
   assert.equal(buildRow(report(fleet, '2026-10-17T23:12:05.764Z')), undefined, 'a 7-day read reaches no instance, so it has no row to read');
-  assert.deepEqual(buildRow(report(fleet, '2026-10-25T01:10:49.424Z', { reach: ledgerSince }))!.underThreshold, { since: ledgerSince, days: 21, peak: 2, reach: ledgerSince }, 'a 30-day read keeps the reading');
+  const kept = buildRow(report(fleet, '2026-10-25T01:10:49.424Z', { reach: ledgerSince }))!;
+  assert.deepEqual({ count: kept.count, unlinked: kept.unlinked, work: kept.work, under: kept.underThreshold }, { count: 0, unlinked: 0, work: null, under: { since: streakFrom, days: 9, holdDays: 14, peak: 20, projected: null, reach: ledgerSince } }, 'a 30-day read keeps the reading at count 0');
+  assert.deepEqual(await attention(report(fleet, '2026-10-25T01:10:49.424Z', { reach: ledgerSince })), [], 'nothing is owed an item');
 });

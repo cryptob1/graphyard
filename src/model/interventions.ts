@@ -148,6 +148,8 @@ export interface PatternRow {
   work: { id: string; key: string; stage: Stage } | null;
   /** The items that own counted instances, each with its share, the causes its instances show and the rework rounds their items carried (GY-1682). */
   accounted: PatternOwner[];
+  /** The whole pattern's causes and rework rounds (each item once), recorded against the item that stands for it, `work` (GY-1682 AC-2). */
+  causes: Partial<Record<PatternCause, number>>; reworkRounds: number;
   instances: PatternInstance[];
   underThreshold: UnderThreshold;
 }
@@ -179,14 +181,21 @@ export function patternCause(kind: InterventionKind, trigger: string | null | un
 }
 /**
  * GY-1682: the pair against its threshold over every rolling window inside the ledger's reach, so
- * the days a pattern has stayed under the rule are read off the row rather than asserted. `since` is
- * the instant from which every rolling window of the policy's days held fewer unlinked instances than
- * the threshold — the reach's start when none ever crossed, null while the current window is at or
- * past it — `days` the whole days since then, `peak` the most one window held, and `reach` where the
- * reading begins: an instance recorded before it is outside the report, so the reading never claims
- * more than the rows it read.
+ * the days a pattern has stayed under the rule are read off the row rather than asserted. It counts
+ * every instance of the pair, linked to an item or not: linking an instance owns it, it does not undo
+ * the intervention, and the rate the rule judges is the rate people were made to intervene at. `since`
+ * is the instant from which every rolling window of the policy's days held fewer instances than the
+ * threshold — the reach's start when none ever crossed, null while the current window is at or past
+ * it — `days` the whole days since then, `holdDays` the days the pair must hold before its pattern
+ * is read as under the rule (patternHoldDays), `peak` the most one window held, `projected` the
+ * instant the current window falls under the threshold if no further instance is recorded (fixed by
+ * the recorded instants; null once `since` is set), and `reach` where the reading begins: an
+ * instance recorded before it is outside the report, so the reading never claims more than the rows
+ * it read. The days themselves pass on the serving release; the reading says how many have.
  */
-export interface UnderThreshold { since: string | null; days: number; peak: number; reach: string }
+export interface UnderThreshold { since: string | null; days: number; holdDays: number; peak: number; projected: string | null; reach: string }
+/** The consecutive days a pair must hold under the threshold in every rolling window before its pattern item's reading is met (GY-1682 AC-2). */
+export const patternHoldDays = 14;
 
 /**
  * GY-1682: a pattern item filed by hand. The scan opens an item with `origin.pattern` for a pair that
@@ -242,9 +251,11 @@ export interface InterventionReport {
    * unlinked rest (GY-1682), so a count past the threshold with no crossing reads as owned, not unfiled.
    * `instances` names the counted instances themselves (the newest `patternInstancesShown` of them),
    * each with its item, trigger, owner, cause and rework rounds, so the board shows the fold the row
-   * was judged on and the causes are recorded against the item that owns them; `underThreshold` reads
-   * how long every rolling window has held under the rule. A pair whose instances have all left the
-   * policy window but not the ledger's reach keeps a row at count 0, so that reading stays readable.
+   * was judged on and the causes are recorded against the item that owns them, and `causes` and
+   * `reworkRounds` tally the whole pattern against the standing item; `underThreshold` reads how
+   * long every rolling window has held under the rule over every instance, linked or not. A pair
+   * whose instances have all left the policy window but not the ledger's reach keeps a row at count
+   * 0, so that reading stays readable.
    */
   patterns: PatternRow[];
   judgements: Judgement[];
