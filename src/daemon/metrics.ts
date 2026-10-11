@@ -47,9 +47,21 @@ export function syncHeldScopeAskMarks(scopeMeasurements: object, approvals: Iter
 export const isHeldScopeAsk = (scopeMeasurements: object, key: string, epoch: number, at: string) =>
   heldScopeAskMarks.get(scopeMeasurements)?.has(heldScopeAskId(key, epoch, at)) ?? false;
 /**
+ * GY-1702: quarantined routed asks whose held status could not be read this cycle. The budget must
+ * not breach them until a successful history read determines whether a matching hold answers them;
+ * a transient cold-start failure must not record escalation:scope-budget:blocked.
+ */
+const unknownHeldScopeAskMarks = new WeakMap<object, Set<string>>();
+export const isUnknownHeldScopeAsk = (scopeMeasurements: object, key: string, epoch: number, at: string) =>
+  unknownHeldScopeAskMarks.get(scopeMeasurements)?.has(heldScopeAskId(key, epoch, at)) ?? false;
+/** Per-call deadline for cold-start history discovery (matches the decisions step's 10 s bound). */
+const discoverHeldReadDeadlineMs = 10_000;
+/**
  * GY-1702: before `scopeBudget`, mark a quarantined routed ask that a history-held requirements
  * decision already answers. On a cold start `state.approvals` is empty and the decisions step has
- * not run yet, so sync from watches alone would leave the ask unmarked and falsely breach.
+ * not run yet, so sync from watches alone would leave the ask unmarked and falsely breach. A read
+ * that fails or misses the deadline marks the ask unknown so the budget preserves it until the
+ * held status can be determined (each read is deadline-bounded; it does not hold the cycle).
  */
 export async function discoverHeldScopeAskMarks(
   scopeMeasurements: object,
@@ -58,17 +70,27 @@ export async function discoverHeldScopeAskMarks(
   routes: boolean,
   readDecisions: ((item: Work) => Promise<{ decisions: Array<{ action: string; state: string; input?: { plannedFiles?: unknown } | null }> }>) | undefined,
 ): Promise<void> {
-  if (!routes || !readDecisions) return;
+  if (!routes || !readDecisions) { unknownHeldScopeAskMarks.set(scopeMeasurements, new Set()); return; }
+  const unknown = new Set<string>(), until = performance.now() + discoverHeldReadDeadlineMs;
   await Promise.all(items.map(async item => {
     const request = item.scopeRequest;
     if (!request || request.decision?.decidedBy !== 'graphyard' || !item.containmentQuarantine) return;
     if (!routableScopeRequest(item, now) || isHeldScopeAsk(scopeMeasurements, item.key, request.epoch, request.at)) return;
+    const askId = heldScopeAskId(item.key, request.epoch, request.at);
     let history: Array<{ action: string; state: string; input?: { plannedFiles?: unknown } | null }>;
-    try { history = (await readDecisions(item)).decisions; } catch { return; }
+    try {
+      const left = until - performance.now();
+      if (left <= 0) { unknown.add(askId); return; }
+      const made = readDecisions(item);
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const expired = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('discover held-scope history read deadline')), left); timer.unref?.(); });
+      history = (await Promise.race([made, expired]).finally(() => clearTimeout(timer))).decisions;
+    } catch { unknown.add(askId); return; }
     const held = history.find(entry => entry.action === 'requirements' && entry.state === 'held');
     if (!held || unplannedPaths((held.input?.plannedFiles as string[] | null) ?? [], request.paths).length) return;
     markHeldScopeAsk(scopeMeasurements, item.key, request.epoch, request.at);
   }));
+  unknownHeldScopeAskMarks.set(scopeMeasurements, unknown);
 }
 type RequirementsAsk = { action: string; scope?: unknown; input?: { plannedFiles?: unknown } | null };
 /** A covering standing/held requirements revision is the ask's pending answer (no-answers ok). */
@@ -212,8 +234,9 @@ export function scopeBudget(work: Work[], decisions: ScopeMeasurement[], now: nu
     // GY-1701: a covering-adopt watch excludes the ask from the blocked bound entirely.
     if (!request || (approvals && coveringStandingScopeWatch(item, approvals))) return [];
     const routed = routes && request.decision?.decidedBy === 'graphyard' && !!routableScopeRequest(item, now);
-    // GY-1702: quarantine pause only when a held requirements decision answers this ask.
-    const heldByQuarantine = routed && !!item.containmentQuarantine && isHeldScopeAsk(decisions, item.key, request.epoch, request.at);
+    // GY-1702: pause when a held decision answers this ask, or its history is still unknown this cycle.
+    const heldByQuarantine = routed && !!item.containmentQuarantine
+      && (isHeldScopeAsk(decisions, item.key, request.epoch, request.at) || isUnknownHeldScopeAsk(decisions, item.key, request.epoch, request.at));
     return !request.decision || routed ? [{ key: item.key, epoch: request.epoch, waitedMs: Math.max(0, now - Date.parse(request.at)), routed, heldByQuarantine }] : [];
   }).sort((a, b) => b.waitedMs - a.waitedMs);
   // One id per breach, not per wording: the numbers in the detail move every cycle, and an

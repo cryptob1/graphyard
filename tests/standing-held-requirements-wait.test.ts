@@ -210,6 +210,26 @@ test('unit:scope-budget-holds-during-quarantine-held-decision — cold start dis
   assert.equal(scopeBudget([item], other, later, true, {}).breaches.length, 1, 'a hold that does not answer the ask still breaches');
 });
 
+test('unit:scope-budget-holds-during-quarantine-held-decision — a cold-start history read failure keeps the ask unknown through the budget so it does not false-breach; a later successful empty read resumes the bound', async () => {
+  const askedAt = '2026-10-11T14:47:50.740Z';
+  const later = Date.parse(askedAt) + scopeBlockedBudgetMs + 60_000;
+  const request = { epoch: 4, at: askedAt, paths: [helper], reason: 'needed', requestedBy: 'worker',
+    decision: { state: 'refused' as const, reason: 'No rule', at: askedAt, decidedBy: 'graphyard' as const } };
+  const item = {
+    id: 'work-1700-unread', key: 'GY-1700', stage: 'build' as const, plannedFiles: [layout],
+    criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:layout'] }],
+    lease: { owner: 'worker', epoch: 4, expiresAt: new Date(later + 60_000).toISOString() },
+    scopeRequest: request,
+    containmentQuarantine: { owner: 'worker', epoch: 4, at: askedAt, settlementHash: 'a'.repeat(64), leaseExpiresAt: new Date(later + 60_000).toISOString() },
+  } as unknown as Work;
+  const measured: [] = [];
+  syncHeldScopeAskMarks(measured, []);
+  await discoverHeldScopeAskMarks(measured, [item], later, true, async () => { throw new Error('Simulated: transient decision history read failure'); });
+  assert.equal(scopeBudget([item], measured, later, true, {}).breaches.length, 0, 'unknown history must not record a scope-budget breach');
+  await discoverHeldScopeAskMarks(measured, [item], later, true, async () => ({ decisions: [] }));
+  assert.equal(scopeBudget([item], measured, later, true, {}).breaches.length, 1, 'once history is known empty the recorded wait can breach');
+});
+
 test('unit:standing-requirements-adopted-no-fault — held adoption preserves a carried registry session until close succeeds', () => {
   const askedAt = '2026-10-11T14:47:50.740Z';
   const item = { key: 'GY-1700', scopeRequest: { epoch: 4, at: askedAt, paths: [helper], reason: 'needed', requestedBy: 'worker' } };

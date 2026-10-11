@@ -81,7 +81,8 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
         if (resumed.state === 'approved') {
           const cover = decision.scope ? coveringScopeAdoptWatch(item, standing, decision, carried?.requestedAt ?? stamp) : null;
           const { scope } = heldWaitScope({ id: standing.id, input: standing.input }, decision, decision.scope ?? carried?.scope ?? null);
-          state.approvals[key] = cover ?? approvalWatchSchema.parse({ work: item.key, action: decision.action, decision: standing.id, requestedAt: carried?.requestedAt ?? stamp, settledAt: null, approvedAt: standing.approvedAt ?? null, approvedBy: standing.approvedBy ?? null, scope });
+          const kept = carried ? { ...carriedSession(carried), closeAttempts: carried.closeAttempts } : {};
+          state.approvals[key] = approvalWatchSchema.parse({ ...(cover ?? { work: item.key, action: decision.action, decision: standing.id, requestedAt: carried?.requestedAt ?? stamp, settledAt: null, approvedAt: standing.approvedAt ?? null, approvedBy: standing.approvedBy ?? null, scope }), ...kept, settledAt: null });
           if (scope) markHeldScopeAsk(state.scope, item.key, scope.epoch, scope.at);
           performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: approvedResumePendingDetail(item.key, decision.action, standing.id, standing.approvedBy), attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
           return;

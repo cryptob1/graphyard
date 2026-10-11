@@ -14,12 +14,14 @@ import { coveringStandingScopeWatch, syncHeldScopeAskMarks } from '../src/daemon
  * only for an ask the quarantined held decision answers, and when the hold fails the recorded wait
  * can breach again. A still-approved resume race keeps a live watch and retries each cycle with no
  * decision fault. Cold start: the first cycle's scope step must discover a history-held match before
- * measuring the bound (approvals are empty until the later decisions step). These paths run every
- * cycle for every open item, so the real loop runs here for three simulated days over eight held
- * items plus a separate approved-resume soak: four matching widenings held under quarantine (two
- * apply when the attempt ends, two fail mid-hold), two covering no-answers holds that fail while
- * decide throws (watch must clear so the bound resumes), one non-matching held revision that must
- * not bind its ask, and one quarantined ask with no held decision (must still breach). After every
+ * measuring the bound (approvals are empty until the later decisions step). That first discovery
+ * read fails once per item so unknown history is preserved through the budget — no false breach —
+ * and the decisions-step retry then succeeds. These paths run every cycle for every open item, so
+ * the real loop runs here for three simulated days over eight held items plus a separate
+ * approved-resume soak: four matching widenings held under quarantine (two apply when the attempt
+ * ends, two fail mid-hold), two covering no-answers holds that fail while decide throws (watch must
+ * clear so the bound resumes), one non-matching held revision that must not bind its ask, and one
+ * quarantined ask with no held decision (must still breach once history is known). After every
  * cycle every system invariant holds. At the end: no resume or decide while a matching hold stands,
  * no decision fault for a hold, the non-matching ask is requested once its hold settles, failed
  * holds resume their breach clock, applied holds leave no open ask, and approved-resume races retry
@@ -73,6 +75,8 @@ test('unit:soak-held-requirements-wait — over three simulated days matching qu
 
   const resumes: string[] = [], requested: string[] = [], withdrawals: string[] = [];
   const coveringCleared: string[] = [], coveringStillExcluding: string[] = [];
+  // Cold-start: first history read per item fails (scope discovery); the decisions-step retry succeeds.
+  const historyFailedOnce = new Set<string>();
   const view = (item: Item): Work => ({
     id: `work-${item.key}`, key: item.key, title: 'Held wait soak', description: '', type: 'bug', priority: 1, dependencies: [],
     plannedFiles: [...item.plannedFiles], criteria: [{ id: 'AC-1', text: 'The widget layout renders', proofs: ['unit:layout'] }],
@@ -93,7 +97,15 @@ test('unit:soak-held-requirements-wait — over three simulated days matching qu
     closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async () => {}, requestSmoke: () => {},
-    decisions: async (work: Work) => ({ decisions: structuredClone(decisions.get(work.key) ?? []) }),
+    decisions: async (work: Work) => {
+      // First cold-start read for a quarantined ask (scope discovery) fails; the decisions-step retry succeeds.
+      const item = items.find(entry => entry.key === work.key);
+      if (now === start && item?.quarantine && item.scopeRequest && !historyFailedOnce.has(work.key)) {
+        historyFailedOnce.add(work.key);
+        throw new Error('Simulated: transient decision history read failure');
+      }
+      return { decisions: structuredClone(decisions.get(work.key) ?? []) };
+    },
     // cover-fail: after the covering revision fails, decide throws so the replacement cannot land — the watch must still clear.
     decide: async (work: Work, action: string) => {
       const item = items.find(entry => entry.key === work.key);
@@ -145,12 +157,13 @@ test('unit:soak-held-requirements-wait — over three simulated days matching qu
     const { actions } = await runCycle(config, state, effects, () => now);
     for (const check of state.invariants.report as InvariantCheck[]) if (!check.holds) violations.push(`cycle ${cycle}: ${check.line}`);
 
-    // Cold start (cycle 0): scope measured before decisions adopted watches — no false scope-budget fault.
+    // Cold start (cycle 0): first history reads fail — unknown marks must prevent a false scope-budget fault.
     if (cycle === 0) {
+      assert.ok(historyFailedOnce.size > 0, 'cold-start discovery must have attempted history reads that failed once');
       const cold = Object.entries(state.actions).filter(([key, action]) =>
         key.startsWith('escalation:scope-budget:blocked:') && action.state === 'failed'
-        && /GY-1702|GY-1703|GY-1704|GY-1705|GY-1706|GY-1707/.test(key));
-      assert.deepEqual(cold, [], `cold-start cycle must not breach matching/covering held asks: ${cold.map(([key]) => key).join(',')}`);
+        && /GY-1702|GY-1703|GY-1704|GY-1705|GY-1706|GY-1707|GY-1709/.test(key));
+      assert.deepEqual(cold, [], `cold-start cycle must not breach while history is unknown or held: ${cold.map(([key]) => key).join(',')}`);
     }
 
     // While matching/covering holds stand under quarantine past the bound, the budget must not breach those asks.
