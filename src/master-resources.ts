@@ -7,7 +7,7 @@ import { agentOwner, atomicPrivateWrite, closeHerdrPane, diskThresholdBytes, isP
 import type { HerdrPane } from './master/herdr.js';
 import { pinnedSessionRecords, readReviewLedger, sessionLedgerBound, SessionLedgerFullError, sessionLedgerRefusal, terminalSessionStates, updateReviewLedger, type ReviewRecord } from './reviewer.js';
 import { readProducerLedger, saveProducerLedger, type ProducerRecord } from './producer.js';
-import { agentRuntimeScratchRoots, agentScratchMinAgeMs, agentScratchPatterns, describeTmpReclaim, tmpReclaimClassNames, type TmpReclaimClass, hostTmpRoots, reclaimTmpDirectories, testTempMinAgeMs, testTempPatterns, tmpInodeHeadroom, tmpReclaimEscalation, tmpReclaimLimitPerCycle, tmpReclaimMinAgeMs, tmpConsumersScanBound, tmpReclaimWorkMsPerCycle, tsxCacheName, type TmpConsumer, type TmpRootPressure, type TmpReclaimOptions, type TmpReclaimReport } from './tmp-reclaim.js';
+import { agentRuntimeScratchRoots, agentScratchMinAgeMs, agentScratchPatterns, compileCacheName, describeTmpReclaim, packageStoreMinAgeMs, packageStoreNames, runtimeScratchCapEntries, tmpReclaimBaseClasses, tmpReclaimClassNames, type TmpReclaimClass, hostTmpRoots, reclaimTmpDirectories, testTempMinAgeMs, testTempPatterns, tmpInodeHeadroom, tmpReclaimEscalation, tmpReclaimLimitPerCycle, tmpReclaimMinAgeMs, tmpConsumersScanBound, tmpReclaimWorkMsPerCycle, tsxCacheName, type TmpConsumer, type TmpRootPressure, type TmpReclaimOptions, type TmpReclaimReport } from './tmp-reclaim.js';
 import { alignKey, upgradeTouchesCode } from './daemon/upgrade.js';
 import type { UpgradeStall } from './daemon/state.js';
 import { workerReclaimBoundMs, workerSubmissionBoundMs } from './model/attempt-bound.js';
@@ -103,9 +103,9 @@ export interface ResourceInputs {
  * The latest finished /tmp pass: its count, when it was recorded and the directories it scanned
  * (GY-1081, GY-1368); the escalation steps it ran below the inode headroom and, when the bound
  * still stood at its end, the top consumers it named (GY-1597); and how many entries each class
- * took (GY-1655).
+ * took (GY-1655) — the base classes always, a retention class (pnpm store, compile cache) once it took one (GY-1683).
  */
-export interface TmpPassRecord { removed: number; at: string; roots?: string[]; classes?: Record<TmpReclaimClass, number>; escalated?: TmpReclaimReport['escalated']; consumers?: TmpConsumer[]; pressure?: TmpRootPressure[] }
+export interface TmpPassRecord { removed: number; at: string; roots?: string[]; classes?: Partial<Record<TmpReclaimClass, number>>; escalated?: TmpReclaimReport['escalated']; consumers?: TmpConsumer[]; pressure?: TmpRootPressure[] }
 export interface TmpInodes {
   path: string; totalInodes: number; freeInodes: number;
   /** What the last /tmp pass to remove anything removed, and when it was recorded. */
@@ -461,7 +461,7 @@ export const resourceRegistry: ResourceDefinition[] = [
     // not readable without quotactl, so the reading warns early rather than claiming to track it.
     bound: 'the inode count of the filesystem holding the host temporary directory (filesystem-wide, not the per-user quota, which can break shells first), so it warns at a quarter free',
     usage: 'statfs of the host temporary directory (os.tmpdir() of the reading process)', owner: 'test runs and sessions on the coordinator host, and the loop\'s /tmp reclaim pass (src/tmp-reclaim.ts)',
-    reclaim: `the loop's reclaim pass scans its own tmpdir and /tmp, each once, and removes this user's test temp entries (${testTempPatterns.map(pattern => `${pattern.source.slice(1)}*`).join(', ')}) older than ${testTempMinAgeMs / 3_600_000} hours, this user's agent scratch entries (${agentScratchPatterns.map(pattern => `${pattern.source.slice(1).replace('\\d+', '<n>')}*`).join(', ')}) and agent worktrees (any top-level linked git worktree or git checkout, whatever its name) whose whole tree, and a linked worktree's gitdir, went unwritten for ${agentScratchMinAgeMs / 3_600_000} hours, the entries inside agent runtimes' scratch roots (${agentRuntimeScratchRoots.join(', ')}) unwritten as long, one by one and never the root, and the regular files in this user's tsx compile cache (tsx-<uid>) older than ${tmpReclaimMinAgeMs / 3_600_000} hours, that no live process holds open or names in its command line, at most ${tmpReclaimLimitPerCycle} per cycle; while /tmp stays below a quarter of its inodes free the same pass escalates (${tmpReclaimEscalation.map(step => `${step.limit} per cycle and cache files older than ${minutes(step.cacheAgeMs)}`).join(', then ')}) and, if the bound still stands, names the top /tmp consumers by path, entry count and owner`,
+    reclaim: `the loop's reclaim pass scans its own tmpdir and /tmp, each once, and removes this user's test temp entries (${testTempPatterns.map(pattern => `${pattern.source.slice(1)}*`).join(', ')}) older than ${testTempMinAgeMs / 3_600_000} hours, this user's agent scratch entries (${agentScratchPatterns.map(pattern => `${pattern.source.slice(1).replace('\\d+', '<n>')}*`).join(', ')}) and agent worktrees (any top-level linked git worktree or git checkout, whatever its name) whose whole tree, and a linked worktree's gitdir, went unwritten for ${agentScratchMinAgeMs / 3_600_000} hours, the entries inside agent runtimes' scratch roots (${agentRuntimeScratchRoots.join(', ')}) unwritten as long, one by one and never the root, the regular files in this user's tsx compile cache (tsx-<uid>) older than ${tmpReclaimMinAgeMs / 3_600_000} hours and under a same-volume pnpm store (${packageStoreNames.join(', ')}) older than ${packageStoreMinAgeMs / 86_400_000} days, and ${compileCacheName} version directories whose whole tree went unwritten for the cache bound, that no live process holds open or names in its command line, at most ${tmpReclaimLimitPerCycle} per cycle; while /tmp stays below a quarter of its inodes free the same pass escalates (${tmpReclaimEscalation.map(step => `${step.limit} per cycle and cache files older than ${minutes(step.cacheAgeMs)}`).join(', then ')}), caps each runtime scratch root to its ${runtimeScratchCapEntries} most recently written entries whatever their age and, if the bound still stands, names the top /tmp consumers by path, entry count and owner`,
     remedy: 'graphyard master run --once reclaims now; find what else fills /tmp (ls /tmp | sort | uniq -c) and stop the process leaking it',
     warnBelow: tmpInodeHeadroom, symptoms: [],
     // The quarter-free line is an early warning on a filesystem-wide count every process on the host
@@ -499,9 +499,13 @@ export function tmpPassAnswers(tmp: TmpInodes, now: number) {
 const entries = (count: number) => `${count} entr${count === 1 ? 'y' : 'ies'}`;
 /** The consumers the latest pass named in this directory: its own census, or, from a record without one, those under its path. */
 const consumersOf = (tmp: TmpInodes) => tmp.consumers ?? tmp.latest?.consumers?.filter(consumer => consumer.path.startsWith(`${tmp.path}/`)) ?? [];
-/** How many entries each class of the /tmp pass took (GY-1655): `3 test temp, 0 tsx cache, 2 agent worktree, 40 runtime scratch`. */
-export const describeTmpClasses = (classes: Record<TmpReclaimClass, number>) =>
-  (Object.keys(tmpReclaimClassNames) as TmpReclaimClass[]).map(kind => `${classes[kind] ?? 0} ${tmpReclaimClassNames[kind]}`).join(', ');
+/**
+ * How many entries each class of the /tmp pass took (GY-1655): `3 test temp, 0 tsx cache, 2 agent
+ * worktree, 40 runtime scratch`, the base classes always and a retention class the record carries
+ * after them (`…, 52699 pnpm store, 2 compile cache`, GY-1683).
+ */
+export const describeTmpClasses = (classes: Partial<Record<TmpReclaimClass, number>>) =>
+  (Object.keys(tmpReclaimClassNames) as TmpReclaimClass[]).filter(kind => tmpReclaimBaseClasses.includes(kind) || classes[kind] !== undefined).map(kind => `${classes[kind] ?? 0} ${tmpReclaimClassNames[kind]}`).join(', ');
 /** The tmp-inodes detail: free inodes, this user's share, the latest pass's count and the last count that was not 0. */
 function describeTmpInodes(tmp: TmpInodes) {
   const parts = [`measured ${tmp.path}: ${tmp.freeInodes} of ${tmp.totalInodes} inodes free`];
