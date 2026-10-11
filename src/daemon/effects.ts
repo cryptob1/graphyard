@@ -25,7 +25,7 @@ import { defaultAwaitReviewers, readDispatchCursor } from '../auto-dispatch.js';
 import { relaunchSession } from './relaunch.js';
 import { readApproverLaunches } from '../master/autonomy.js';
 import { type MasterSessionEffects, masterSessionEffects } from '../master/master-session.js';
-import { type WorkerProfile, type HerdrAgent, type WorktreeReclaimReport, type ContainmentAssessment, type EscalationSession, type ObservedExhaustion, type ProfileAccountHealth, type MasterConfig, agentToken, approverRoleHealth, decisionInput, escalationRoleHealth, launchApprover, launchEscalationHandler, readApproverLaunch, readEscalationSessions, saveEscalationSession, verifiedContext, listHerdrAgents, sessionAccount, preservePartialWork, recordObservedExhaustion, closeHerdrPane, inspectProfileAccounts, inspectProducerCredentials, observeHerdrAgents, inspectWorkerCredentials, deliverPrompt, dispatchWork, reclaimWorktrees, removeReclaimableWorktrees, writeWorktreeInventoryCache, reclaimIdleMs, writeFailure, assessContainment, herdrJson, readCredentialFile, withRoleDefaults, heldAwareProbe, type ControlPlaneStatus, type SessionIdentity } from '../master.js';
+import { type WorkerProfile, type HerdrAgent, type WorktreeReclaimReport, type ContainmentAssessment, type EscalationSession, type ObservedExhaustion, type ProfileAccountHealth, type MasterConfig, agentToken, approverRoleHealth, decisionInput, escalationRoleHealth, holdRepeatedLimitAccount, launchApprover, launchEscalationHandler, readApproverLaunch, readEscalationSessions, saveEscalationSession, verifiedContext, listHerdrAgents, sessionAccount, preservePartialWork, recordObservedExhaustion, closeHerdrPane, inspectProfileAccounts, inspectProducerCredentials, observeHerdrAgents, inspectWorkerCredentials, deliverPrompt, dispatchWork, reclaimWorktrees, removeReclaimableWorktrees, writeWorktreeInventoryCache, reclaimIdleMs, writeFailure, assessContainment, herdrJson, readCredentialFile, withRoleDefaults, heldAwareProbe, type ControlPlaneStatus, type SessionIdentity } from '../master.js';
 import { readControlPlaneClock, type ContainmentObservation, type ControlPlaneClock } from '../master/containment.js';
 import { annotatePaneShell } from '../quarantine.js';
 import { herdrCall, listHerdrPanes, type HerdrPane } from '../master/herdr.js';
@@ -62,17 +62,20 @@ import type { ResearchEvent } from '../research.js';
 import type { DecompositionEvent } from '../decomposition.js';
 import { doctorEffects, doctorSettings, type DoctorEffects } from './doctor.js';
 import { docsSyncEffects, type DocsSyncEffects } from '../docs-sync.js';
-import { diagnosticianRole, type DiagnosticianEffects } from './diagnosis.js';
+import { diagnosticianEffects, diagnosticianRole, type DiagnosticianEffects } from './diagnosis.js';
 import { acceptanceEffects, type AcceptanceEffects } from './acceptance.js';
 import { plannerEffects, type PlannerEffects } from './planner.js';
 import { diagnosticianSettings } from '../runner/payloads.js';
-import { piRunner } from '../runner/pi.js';
-import { registryHeadlessLaunch, registryRunner } from '../runner/roles.js';
 import type { TriageJudgement } from '../model/machine-backlog.js';
 import type { FlowResult, RemedyFlow, RemedyRecord } from '../stall-remedies.js';
 import { browserFlowChild } from './cycle-remedies.js';
 import { readMechanicalFixState, type MechanicalFixState } from '../mechanical-findings.js';
 export { snapshotRetryDelayMs, retriedSnapshot } from './snapshot-retry.js';
+
+/** GY-1574 / GY-1705. Diagnostician registry selection through heldAwareProbe — kept here so unit:role-selection-honours-held-twin sees it. */
+export async function selectDiagnosticianFleet(config: MasterConfig, work?: string | null) {
+  return selectFleetSession(config, diagnosticianRole, { name: diagnosticianRole, principal: config.operatorAgent!.id }, await heldAwareProbe(config, { work: work ?? undefined }));
+}
 
 /** A reviewer or producer session a launch ledger holds as pending, as the failover step reads it. */
 export interface LaunchedSession { role: 'reviewer' | 'producer'; record: string; profile: string; agentName: string; pane: string | null; work: string; requestId: string | null; /** A producer's proof group: with the item, the session its account was selected for (GY-1582). */ group?: string }
@@ -491,36 +494,6 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     const read = await asCoordinator(`events?${query}`) as { events: { seq: string; work_id: string }[]; page: { hasMore: boolean } };
     return { seq: (after ? read.events.at(-1)?.seq : read.events[0]?.seq) ?? after ?? '0', work: [...new Set(read.events.map(event => event.work_id))], complete: !!after && !read.page.hasMore };
   };
-  /**
-   * The diagnostician's effects under the live configuration (GY-439). Its first run takes the
-   * registry's diagnostician role when an operator defines one, else Pi on `run.diagnostician.model`;
-   * the fallback run is Pi on the stronger `fallbackModel`. The excerpts are the loop journal, the
-   * server log when a command for it is configured, and `gh pr view` of each named pull request.
-   */
-  const diagnostician = (config: MasterConfig): DiagnosticianEffects => {
-    const settings = diagnosticianSettings(config.run);
-    const lines = async (command: string[]) => String(await run(command[0], command.slice(1))).split('\n');
-    return {
-      settings, cwd: root,
-      runner: async (attempt, subject) => {
-        if (attempt === 'primary') {
-          const fleet = await selectFleetSession(config, diagnosticianRole, { name: diagnosticianRole, principal: config.operatorAgent!.id }, await heldAwareProbe(config, { work: subject.work?.key })); // as worker dispatch (GY-1574)
-          if (fleet) { const launch = registryHeadlessLaunch(fleet.account); return { runner: registryRunner(fleet.account), runtime: launch.command, model: launch.model, release: fleet.release }; }
-        }
-        const model = attempt === 'primary' ? settings.model : settings.fallbackModel;
-        return { runner: piRunner({ command: settings.command, model }), runtime: 'pi', model };
-      },
-      context: async (_subject, numbers) => ({
-        journal: await lines(settings.journalCommand).catch(error => [`(the loop journal could not be read with ${settings.journalCommand.join(' ')}: ${message(error)})`]),
-        serverLog: settings.serverLogCommand ? await lines(settings.serverLogCommand).catch(error => [`(the server log could not be read with ${settings.serverLogCommand!.join(' ')}: ${message(error)})`])
-          : ['(no run.diagnostician.serverLogCommand is configured, so no server log excerpt was read)'],
-        pullRequests: await Promise.all(numbers.map(async number => ({ number, state: await Promise.resolve(run('gh', ['pr', 'view', String(number), '--repo', config.repository, '--json', 'number,title,state,isDraft,mergeable,mergeStateStatus,headRefOid,baseRefName,reviewDecision,statusCheckRollup']))
-          .then(output => JSON.parse(String(output)), (error: unknown) => ({ error: message(error) })) }))),
-      }),
-      file: (input, key) => asOperatorAgent('POST', 'work', input, key) as Promise<Work>,
-      decide: (work, action, reason, input) => asOperatorAgent('POST', `work/${work.id}/decide`, { action, input: decisionInput(action, work, input), reason }),
-    };
-  };
   let publishedEnvironment: string | null = null, publishedMergeQueue: string | null = null;
   /** GY-1524: the recorded merger, read from /api/status afresh for every merge decision (AC-6), never cached: a switch to `github` stops the next merge, not the one after a window. */
   const recordedMerger = () => readMergeWriter(current(), deps.fetcher);
@@ -586,11 +559,19 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       if (session.role === 'reviewer') await updateReviewLedger(root, ledger => { ledger.reviews = ledger.reviews.map(entry => entry.id === session.record && entry.state === 'pending' ? { ...entry, ...ended } : entry); });
       else { const ledger = await readProducerLedger(root); await saveProducerLedger(root, { ...ledger, producers: ledger.producers.map(entry => entry.id === session.record && entry.state === 'pending' ? { ...entry, ...ended } : entry) }); }
     },
-    relaunch: async (session, work, snapshot) => relaunchSession(current(), session, work, await listHerdrAgents(run), {
-      review: (profile, request, agents) => launchReview(root, work, profile.name, agents, snapshot.now, { run, requestId: request.id }),
-      producer: (profile, request, agents) => launchProducer(root, work, request, profile, agents, snapshot.now, { run }),
-      record: handle => mutate(`work/${work.id}/session`, handle),
-    }),
+    relaunch: async (session, work, snapshot) => {
+      // launchReview/launchProducer also re-hold before selectAccount (GY-1705); this call keeps the
+      // failover path refusing early when the durable hold cannot be written, before a pane starts.
+      const holdAt = Date.now();
+      await holdRepeatedLimitAccount(current(), work, holdAt, { fetch: fetcher }, session.role).catch((error: unknown) => {
+        throw new Error(`${work.key}'s last ${session.role} sessions each ended on one account's limit notice, and the hold that keeps the next launch off it could not be placed: ${message(error).slice(0, 300)}; nothing was relaunched`, { cause: error });
+      });
+      return relaunchSession(current(), session, work, await listHerdrAgents(run), {
+        review: (profile, request, agents) => launchReview(root, work, profile.name, agents, snapshot.now, { run, requestId: request.id }),
+        producer: (profile, request, agents) => launchProducer(root, work, request, profile, agents, snapshot.now, { run }),
+        record: handle => mutate(`work/${work.id}/session`, handle),
+      });
+    },
     escalationSessions: () => readEscalationSessions(root),
     approverLaunch: agentName => readApproverLaunch(root, agentName),
     approverLaunches: () => readApproverLaunches(root),
@@ -760,7 +741,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       // A required check red on the clock is named as master status names it, after buildMasterStatus.
       return { ...reported, items: [...reported.items, ...await timingFaultAttention(work, current().repository, annotations)] };
     },
-    get diagnostician() { const config = current(); return config.operatorAgent && config.approver && diagnosticianSettings(config.run).enabled ? diagnostician(config) : undefined; },
+    get diagnostician() { const config = current(); return config.operatorAgent && config.approver && diagnosticianSettings(config.run).enabled ? diagnosticianEffects(config, root, asOperatorAgent, run) : undefined; },
     // GY-1535: under a control-plane merger (read afresh before each draft) the draft is committed here and landed by the merge writer's reads, with no pull request.
     get acceptance() { const config = current(); return config.operatorAgent && config.approver ? acceptanceEffects(config, root, { run, fetcher, asCoordinator, asOperatorAgent, merger: recordedMerger,
       writer: mergeWriterReads(config, root, run, { base: worktreeRoot(root, config), record: (work, event) => mutate(`work/${work.id}/merge-record`, event, mergeRecordKey(work, event)), merger: recordedMerger }) }) : undefined; },

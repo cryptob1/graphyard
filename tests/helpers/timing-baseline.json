@@ -225,6 +225,7 @@
   "files": {
     "tests/answered-owner-close.test.ts": 1257,
     "tests/approved-scope-widening.test.ts": 3529,
+    "tests/capacity-silent-exhaustion.test.ts": 2000,
     "tests/conflict-rework-bound.test.ts": 1658,
     "tests/daemon-state-unknown-keys.test.ts": 1355,
     "tests/daemon-unsubmitted-bound.test.ts": 4071,
@@ -256,6 +257,7 @@
     "tests/shared-account-identity.test.ts": 995,
     "tests/shared-identity-followups.test.ts": 11000,
     "tests/no-wall-clock-time-bombs.test.ts": 1000,
+    "tests/soak-silent-exhaustion.test.ts": 2500,
     "tests/stale-close-convergence.test.ts": 1902,
     "tests/stale-release-decision.test.ts": 1874,
     "tests/stalled-gate-in-motion.test.ts": 2746,

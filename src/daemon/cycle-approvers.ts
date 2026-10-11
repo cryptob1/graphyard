@@ -1,9 +1,10 @@
 // Concern: approver sessions — launch, supervise, fail over, close and record how they ended, for the loop's own and hand-launched approvers.
 import type { Work } from '../model.js';
+import { silentPaneExhaustion, type ExhaustionSignal } from '../model/capacity.js';
 import { approverRuntime } from '../master/autonomy.js';
 import { type ScreenMotion, approverStallVerdict, boundLaunch, judgeApproverStall, screenMotion, stallScreenLines } from '../master/approver-stall.js';
 import { launchStartMs } from '../master/launch.js';
-import { type HerdrAgent, type RoleCapacity, approverProfile, ownLoginAccounts, approverSessionId, approverSessionName } from '../master.js';
+import { type HerdrAgent, type RoleCapacity, approverProfile, holdRepeatedLimitAccount, ownLoginAccounts, repeatedLimitAccount, approverSessionId, approverSessionName } from '../master.js';
 import { type ApprovalWatch, approvalWatchSchema, type DaemonActionKind, message } from './state.js';
 import { readyToRetry } from './sessions.js';
 import { approvalStep, type ApprovalStep, approverLaunchKey, approverSettleMs, approverPrefixes, boundDetail, handWatchPrefix, maxApproverCloses, maxApproverLaunches, maxDecisionRequests, maxLostApproverRuns, lostRunRefunded, recordWatchEnded } from './decisions.js';
@@ -230,6 +231,13 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
       const standDownBy = Date.now() + 300_000;
       while (capacityRelaunchInFlight(watch.decision) && Date.now() < standDownBy) await new Promise(resolve => setTimeout(resolve, 50));
     }
+    // GY-1705: re-hold only when the item's last two approver sessions each spent one account — a
+    // no-op must not await (that reordered the capacity-refusal persists the relaunch test pins).
+    if (repeatedLimitAccount(item, clock, 'approver')) {
+      await holdRepeatedLimitAccount(config, item, clock, {}, 'approver').catch((error: unknown) => {
+        throw new Error(`${item.key}'s last approver sessions each ended on one account's limit notice, and the hold that keeps the next launch off it could not be placed: ${message(error).slice(0, 300)}; nothing was launched`, { cause: error });
+      });
+    }
     let launched: Awaited<ReturnType<NonNullable<DaemonEffects['approver']>>>;
     try { launched = await effects.approver!(item, watch.decision); }
     catch (error) {
@@ -263,20 +271,50 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
     launched?.settled?.then(async record => { if (watch.agentName === launched.agentName) { watch.run = record; await effects.persist(state); } }).catch(() => { /* the next cycle judges the decision itself */ });
     return `${launched?.replaced ? `${launched.replaced}; ` : ''}launched independent approver session ${watch.agentName}${watch.account ? ` on ${watch.account}` : ''} (launch ${watch.launches} of ${maxApproverLaunches})`;
   };
-  /**
-   * An approver that stopped on its provider's limit notice (GY-182) has judged nothing and never
-   * will: its account is held until the reset the notice names, the exhaustion is recorded against
-   * the decision, the session is closed, and the same decision goes to the next eligible account
-   * in the same cycle. The launch it spent is not counted against the decision's bound.
-   */
+  /** Idle/done screens past the start bound share one pause (GY-1598 / GY-1705 cycle-p90). */
+  let screens: { seen: unknown; reads: Map<string, Promise<ScreenMotion>> } | null = null;
+  const readScreen = (agent: HerdrAgent, decision: string) => screenMotion(() => effects.sessionOutput!(agent, stallScreenLines), decision, effects.idleScreenPauseMs);
+  const sharedIdleScreen = async (watch: ApprovalWatch, agent: HerdrAgent, seen: { agents: HerdrAgent[]; available: boolean }) => {
+    const startMs = launchStartMs(config);
+    if (watch.pane && watch.pane !== agent.pane_id) return 'unreadable' as const;
+    if (screens?.seen !== seen) {
+      screens = { seen, reads: new Map() };
+      for (const other of Object.values(state.approvals)) {
+        const a = seen.available ? seen.agents.find(c => c.name === other.agentName) : undefined;
+        const ok = a && ['idle', 'done'].includes(a.agent_status ?? '') && a.pane_id && Number.isFinite(Date.parse(other.launchedAt ?? '')) && clock - Date.parse(other.launchedAt!) >= startMs;
+        if (!other.settledAt && !other.exhaustedAt && ok && (!other.pane || other.pane === a!.pane_id) && !screens.reads.has(a!.pane_id!)) screens.reads.set(a!.pane_id!, readScreen(a!, other.decision));
+      }
+    }
+    const read = screens.reads.get(agent.pane_id!) ?? readScreen(agent, watch.decision);
+    screens.reads.set(agent.pane_id!, read);
+    return read;
+  };
+  /** Limit notice (GY-182) or silent Herdr `done` past start (GY-1705): hold, close, fail over. Idle → stall. */
   const approverExhausted = async (item: Work, watch: ApprovalWatch) => {
-    if (!effects.sessionOutput || !effects.reportCapacity || !watch.agentName) return false;
-    const agent = (await sessions()).agents.find(candidate => candidate.name === watch.agentName);
+    if (!effects.reportCapacity || !watch.agentName) return false;
+    const seen = await sessions();
+    const agent = seen.agents.find(candidate => candidate.name === watch.agentName);
     if (!agent) return false;
-    // Judged against the approver's own runtime's provider messages: free prose about a quota is
-    // not a provider limit notice, whatever it mentions (GY-421). A working approver counts only
-    // when its runtime is retrying on the notice (GY-973).
-    const signal = await Promise.resolve(effects.sessionOutput(agent)).then(output => output ? sessionExhaustion(output, stoppedStates.includes(agent.agent_status ?? ''), watch.runtime ?? approverRuntime(config), clock) : null, () => null);
+    // Provider messages only (GY-421); working counts only beside the retry marker (GY-973).
+    const notice = effects.sessionOutput
+      ? await Promise.resolve(effects.sessionOutput(agent)).then(output => output ? sessionExhaustion(output, stoppedStates.includes(agent.agent_status ?? ''), watch.runtime ?? approverRuntime(config), clock) : null, () => null)
+      : null;
+    const handle = (item.sessions ?? []).find(entry => entry.id === approverSessionId(watch.decision) && entry.state === 'running');
+    const launchedAt = watch.launchedAt ? Date.parse(watch.launchedAt) : Number.NaN;
+    const pastStart = Number.isFinite(launchedAt) && clock - launchedAt >= launchStartMs(config);
+    const status = agent.agent_status ?? '';
+    let ended = false;
+    if (!notice && pastStart && status === 'done') {
+      ended = effects.sessionOutput ? (await sharedIdleScreen(watch, agent, seen)) === 'still' : true;
+    }
+    const signal: ExhaustionSignal | null = notice ?? silentPaneExhaustion({
+      listed: true,
+      everWorking: status === 'working' || handle?.observed === 'working',
+      hasOutcome: !!handle?.outcome || !!watch.settledAt,
+      notice: null,
+      pastStartBound: pastStart,
+      ended,
+    });
     if (!signal) return false;
     const session = `${watch.decision}:${watch.launchedAt ?? watch.launches}`;
     const key = failoverKey('approver', item, session), previous = state.actions[key];
@@ -313,33 +351,15 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
     }
     return true;
   };
-  /**
-   * GY-1598. What `approvalStep` needs to end a stopped approver the way `master approver` would: its start bound, and for an idle
-   * one past it, whether its screen stays still across a pause and shows no trace of its decision. Herdr reports a long or silent
-   * command as idle, so the loop reads the screen before ending it; a session in a pane other than its watch's is unread, so it waits
-   * for the judge bound. A loop that reads no screens judges by status and age alone. Every watched idle approver's screen is read
-   * together on the cycle's first need, across one shared pause, so a fleet of idle approvers costs the cycle one pause, not one each.
-   */
-  let screens: { seen: unknown; reads: Map<string, Promise<ScreenMotion>> } | null = null;
+  /** Stall inputs: start bound, and for idle past it a shared screen read. */
   const idleCandidate = (watch: ApprovalWatch, seen: { agents: HerdrAgent[]; available: boolean }, startMs: number) => {
     const agent = seen.available ? seen.agents.find(candidate => candidate.name === watch.agentName) : undefined;
     return agent?.agent_status === 'idle' && agent.pane_id && clock - Date.parse(watch.launchedAt ?? watch.requestedAt) >= Math.max(approverSettleMs, startMs) ? agent : undefined;
   };
-  const readScreen = (agent: HerdrAgent, decision: string) => screenMotion(() => effects.sessionOutput!(agent, stallScreenLines), decision, effects.idleScreenPauseMs);
   const stallInputs = async (watch: ApprovalWatch, judged: { state: string } | null | undefined, seen: { agents: HerdrAgent[]; available: boolean }) => {
     const startMs = launchStartMs(config), agent = judged?.state === 'requested' ? idleCandidate(watch, seen, startMs) : undefined;
     if (!agent || !effects.sessionOutput) return { startMs };
-    if (watch.pane && watch.pane !== agent.pane_id) return { startMs, screen: 'unreadable' as const };
-    if (screens?.seen !== seen) {
-      screens = { seen, reads: new Map() };
-      for (const other of Object.values(state.approvals)) {
-        const idle = !other.settledAt && !other.exhaustedAt ? idleCandidate(other, seen, startMs) : undefined;
-        if (idle && (!other.pane || other.pane === idle.pane_id) && !screens.reads.has(idle.pane_id!)) screens.reads.set(idle.pane_id!, readScreen(idle, other.decision));
-      }
-    }
-    const read = screens.reads.get(agent.pane_id!) ?? readScreen(agent, watch.decision);
-    screens.reads.set(agent.pane_id!, read);
-    return { startMs, screen: await read };
+    return { startMs, screen: await sharedIdleScreen(watch, agent, seen) };
   };
   const escalateUnjudged = async (item: Work, watch: ApprovalWatch, detail: string) => {
     watch.exhaustedAt = stamp;

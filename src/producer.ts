@@ -5,7 +5,7 @@ import { z } from 'zod';
 import { consentAnswerSchema } from './consent-prompt.js';
 import { LaunchRefusedError } from './harness.js';
 import { defaultChildRun, type ChildRun } from './child-runner.js';
-import { closeFailedLaunch, launchStartMs, withLaunchClose, accountLaunch, acknowledgeLaunch, acknowledgementMs, allocateManagedCheckout, atomicPrivateWrite, autonomousSession, closeHerdrPane, createdHerdrTab, deliverPrompt, destructivePromptGuidance, herdrJson, loadMasterConfig, markReprompted, neverStarted, onSelectedSession, prepareSessionHarness, privateFile, profileAtLimit, profileSessions, registrySessionOf, readProducerCredential, readSessionScreen, repromptText, selectAccount, selectRegistryAccount, sessionActivity, sessionAgentName, settleCheckout, settlementDue, settlementReason, startAgentSession, stopCreatedHerdrTab, writeFailure, type PromptDelivery, type StartBounds, type HerdrAgent, type MasterConfig, type ProducerProfile, type RequestDelivery, type SessionRetryReport } from './master.js';
+import { closeFailedLaunch, launchStartMs, withLaunchClose, accountLaunch, acknowledgeLaunch, acknowledgementMs, allocateManagedCheckout, atomicPrivateWrite, autonomousSession, closeHerdrPane, createdHerdrTab, deliverPrompt, destructivePromptGuidance, herdrJson, holdRepeatedLimitAccount, loadMasterConfig, markReprompted, neverStarted, onSelectedSession, prepareSessionHarness, privateFile, profileAtLimit, profileSessions, registrySessionOf, readProducerCredential, readSessionScreen, repromptText, selectAccount, selectRegistryAccount, sessionActivity, sessionAgentName, settleCheckout, settlementDue, settlementReason, startAgentSession, stopCreatedHerdrTab, writeFailure, type PromptDelivery, type StartBounds, type HerdrAgent, type MasterConfig, type ProducerProfile, type RequestDelivery, type SessionRetryReport } from './master.js';
 import type { FleetProbe, selectFleetSession } from './fleet.js';
 import { implementerIdentities, type Work } from './model.js';
 import type { DispatchRequest } from './model/dispatch.js';
@@ -448,6 +448,11 @@ export async function launchProducer(root: string, work: Work, request: Dispatch
   if (missingEnv.length) throw new Error(`Graphyard refuses to launch the ${binding.key} ${binding.group} proofs (${binding.proofs.join(', ')}): ${missingEnv.join(' and ')} ${missingEnv.length > 1 ? 'are' : 'is'} not set in ${resolve(root, '.env')} on this coordinator; add ${missingEnv.length > 1 ? 'them' : 'it'} there (docs/install.md) and the request is launched again`);
   // The group is part of the request: a producer session answers one proof group of one item, so a
   // relaunch for that group replaces its own predecessor instead of being refused by it.
+  // GY-1705: re-hold a producer account this item's last two sessions each spent, before registry /
+  // selectAccount — auto-dispatch and manual launches call this path directly, not only failover.
+  await holdRepeatedLimitAccount(config, work, now().getTime(), {}, 'producer').catch((error: unknown) => {
+    throw new Error(`${work.key}'s last producer sessions each ended on one account's limit notice, and the hold that keeps the next launch off it could not be placed: ${error instanceof Error ? error.message : String(error)}`.slice(0, 500), { cause: error });
+  });
   // GY-170: when the registry defines the producer role its choice decides the runtime: a unit-group
   // session on a `pi` account runs headless on that account, and any other group on one is refused
   // below; `run.runtimes` covers only a producer role the registry does not define.

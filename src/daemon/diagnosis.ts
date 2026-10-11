@@ -3,18 +3,22 @@
 // item through the normal two-party decision.
 import { createHash } from 'node:crypto';
 import { createSchema, type Work } from '../model.js';
-import { providerLimit, type ExhaustionSignal } from '../model/capacity.js';
+import { headlessTimeoutLimitCharge, providerLimit, type ExhaustionSignal, type LimitRunEvent } from '../model/capacity.js';
 import { isClosed } from '../model/closure.js';
 import { planeWideRefusal } from '../model/blocker-class.js';
 import { closesFaultClass, faultClassMeaning, openFaultClassItem, type FaultClass, type FaultInstance, type FaultKind } from '../model/fault-classes.js';
 import { derivePlannedFiles, plannedFilesRefusal, scopeExists, type PlannedFilesDerivation } from '../model/planned-files.js';
 import { namedPaths } from '../model/scope.js';
-import { guardBroadScope } from '../master/autonomy.js';
+import { decisionInput, guardBroadScope } from '../master/autonomy.js';
+import type { MasterConfig } from '../master/profiles.js';
+import { recordEnvironmentLog, selectionKey } from '../master/environments.js';
 import { baseTree } from '../cli/planned-files-intent.js';
-import { diagnosisPayloadSchema, diagnosisSettled, graphyardTools, type DiagnosisPayload, type DiagnosisRecord, type DiagnosticianSettings } from '../runner/payloads.js';
+import { diagnosisPayloadSchema, diagnosisSettled, diagnosticianSettings, graphyardTools, type DiagnosisPayload, type DiagnosisRecord, type DiagnosticianSettings } from '../runner/payloads.js';
+import { piRunner } from '../runner/pi.js';
+import { registryHeadlessLaunch, registryRunner } from '../runner/roles.js';
 import type { Runner } from '../runner/types.js';
 import { type DaemonAction, type DaemonState, message } from './state.js';
-import { record } from './effects.js';
+import { record, selectDiagnosticianFleet } from './effects.js';
 import { createRefused } from './doctor.js';
 import { maxDecisionRequests } from './decisions.js';
 import type { Cycle } from './cycle.js';
@@ -79,8 +83,8 @@ export function standingFaultClassItem(work: readonly Work[], faultClass: FaultC
 export interface DiagnosisSubject { id: string; kind: 'recurring' | 'invariant'; faultClass: FaultClass; work: Work | null; instances: FaultInstance[] }
 /** What the diagnostician reads beside the repository: the excerpts, bounded, and the named pull requests' state. */
 export interface DiagnosisContext { journal: string[]; serverLog: string[]; pullRequests: { number: number; state: unknown }[] }
-/** The runner one attempt uses, what it runs on, and how its registry session (if any) is ended. */
-export interface DiagnosticianRun { runner: Runner; runtime: string; model: string; release?: (reason: string) => Promise<unknown> }
+/** The runner one attempt uses, what it runs on, the registry account it launched on (GY-1705), and how its registry session (if any) is ended. */
+export interface DiagnosticianRun { runner: Runner; runtime: string; model: string; account?: string | null; release?: (reason: string) => Promise<unknown> }
 export interface DiagnosticianEffects {
   settings: DiagnosticianSettings;
   /** The repository checkout the diagnostician reads: the loop's own. */
@@ -102,8 +106,45 @@ export interface DiagnosticianEffects {
 }
 export type FixInput = ReturnType<typeof createSchema.parse> & { reason: string };
 
-/** `limit`: every run ended on its provider's quota or rate limit — the earliest known reset among them. */
-interface Outcome { runs: DiagnosisRecord['runs']; diagnosis: DiagnosisPayload | null; limit?: ExhaustionSignal | null }
+/** One call as the master's operator-agent identity, as `daemonEffects` wires it. */
+export type DiagnosticianPost = (method: 'GET' | 'POST', path: string, body?: unknown, key?: string) => Promise<unknown>;
+/**
+ * The diagnostician's effects under the live configuration (GY-439, GY-1705). Its first run takes
+ * the registry's diagnostician role when an operator defines one, else Pi on `run.diagnostician.model`;
+ * the fallback run is Pi on the stronger `fallbackModel`. The registry account is returned with the
+ * runner so a limit hold charges the selection, never a nominal profile.
+ */
+export const diagnosticianEffects = (config: MasterConfig, root: string, post: DiagnosticianPost, run: (command: string, args: string[]) => string | Promise<unknown>): DiagnosticianEffects => {
+  const settings = diagnosticianSettings(config.run);
+  const lines = async (command: string[]) => String(await run(command[0], command.slice(1))).split('\n');
+  return {
+    settings, cwd: root,
+    runner: async (attempt, subject) => {
+      if (attempt === 'primary') {
+        const fleet = await selectDiagnosticianFleet(config, subject.work?.key);
+        if (fleet) {
+          const launch = registryHeadlessLaunch(fleet.account);
+          await recordEnvironmentLog(config, fleet.health ? [fleet.health] : [], fleet.skipped, { key: selectionKey('diagnostician', diagnosticianRole), environment: fleet.account.name, kind: fleet.account.kind, at: new Date().toISOString(), work: subject.work?.key ?? null }).catch(() => {});
+          return { runner: registryRunner(fleet.account), runtime: launch.command, model: launch.model, account: fleet.account.name, release: fleet.release };
+        }
+      }
+      const model = attempt === 'primary' ? settings.model : settings.fallbackModel;
+      return { runner: piRunner({ command: settings.command, model }), runtime: 'pi', model, account: null };
+    },
+    context: async (_subject, numbers) => ({
+      journal: await lines(settings.journalCommand).catch(error => [`(the loop journal could not be read with ${settings.journalCommand.join(' ')}: ${message(error)})`]),
+      serverLog: settings.serverLogCommand ? await lines(settings.serverLogCommand).catch(error => [`(the server log could not be read with ${settings.serverLogCommand!.join(' ')}: ${message(error)})`])
+        : ['(no run.diagnostician.serverLogCommand is configured, so no server log excerpt was read)'],
+      pullRequests: await Promise.all(numbers.map(async number => ({ number, state: await Promise.resolve(run('gh', ['pr', 'view', String(number), '--repo', config.repository, '--json', 'number,title,state,isDraft,mergeable,mergeStateStatus,headRefOid,baseRefName,reviewDecision,statusCheckRollup']))
+        .then(output => JSON.parse(String(output)), (error: unknown) => ({ error: message(error) })) }))),
+    }),
+    file: (input, key) => post('POST', 'work', input, key) as Promise<Work>,
+    decide: (work, action, reason, input) => post('POST', `work/${work.id}/decide`, { action, input: decisionInput(action, work, input), reason }) as Promise<{ id: string }>,
+  };
+};
+
+/** `limit`: every run ended on its provider's quota or rate limit — the earliest known reset among them. `account`: the registry account the round spent (GY-1705). */
+interface Outcome { runs: DiagnosisRecord['runs']; diagnosis: DiagnosisPayload | null; limit?: ExhaustionSignal | null; account?: string | null; holds?: { account: string; limit: ExhaustionSignal }[] }
 /** How long a diagnosis refused by a provider naming no readable reset waits before it is run again. */
 export const diagnosisLimitHoldMs = 60 * 60_000;
 /** The least a provider-limited diagnosis waits, whatever reset the provider named: never a retry every cycle. */
@@ -234,12 +275,15 @@ export const diagnosisEvidenceMax = 100_000;
 
 /** Run the primary attempt, and the fallback once when the primary returns no valid diagnosis. */
 async function runDiagnosis(diagnostician: DiagnosticianEffects, subject: DiagnosisSubject, prompt: string): Promise<Outcome> {
-  const runs: DiagnosisRecord['runs'] = [], limits: (ExhaustionSignal | null)[] = [], timeoutMs = diagnostician.settings.timeoutMinutes * 60_000;
+  const runs: DiagnosisRecord['runs'] = [], limits: (ExhaustionSignal | null)[] = [], timed: { result: string; detail: string; events: LimitRunEvent[]; account: string | null }[] = [];
+  let limitedAccount: string | null = null;
+  const timeoutMs = diagnostician.settings.timeoutMinutes * 60_000, now = () => Date.now();
   for (const attempt of ['primary', 'fallback'] as const) {
     const startedAt = new Date().toISOString();
     let chosen: DiagnosticianRun;
     try { chosen = await diagnostician.runner(attempt, subject); }
     catch (error) { runs.push({ runtime: 'none', model: attempt, startedAt, endedAt: new Date().toISOString(), result: 'spawn', detail: clip(`No ${attempt} runner: ${message(error)}`, 500) }); limits.push(null); continue; }
+    const attemptAccount = chosen.account ?? null;
     const run = chosen.runner.start(prompt, { cwd: diagnostician.cwd, env: { GRAPHYARD_PI_ROLE: diagnosticianRole }, tool: graphyardTools.diagnose, timeoutMs,
       validate: payload => {
         const parsed = diagnosisPayloadSchema.parse(payload);
@@ -248,19 +292,29 @@ async function runDiagnosis(diagnostician: DiagnosticianEffects, subject: Diagno
       } });
     const result = await run.result();
     await Promise.resolve(chosen.release?.(`the ${attempt} diagnosis of ${subject.id} ended`)).catch(() => {});
-    runs.push({ runtime: chosen.runtime, model: chosen.model, startedAt, endedAt: new Date().toISOString(), result: result.ok ? 'diagnosed' : result.failure.reason,
-      detail: clip(result.ok ? `Diagnosed as ${result.payload.faultClass}: ${result.payload.cause}` : result.failure.detail, 500) });
-    if (result.ok) return { runs, diagnosis: result.payload };
-    // Only the provider's own error is read — the last error a run that made no call ended on. An
-    // invalid payload's detail is the agent's submission, and an exit's carries stderr, which can
-    // mix in the agent's output: a limit phrase there must not turn a real failure into a wait.
-    const providerError = result.failure.reason === 'no-payload' ? /\(last error: ([\s\S]*)\)$/.exec(result.failure.detail)?.[1] : undefined;
-    limits.push(providerError ? providerLimit(providerError, Date.now()) : null);
+    const detail = clip(result.ok ? `Diagnosed as ${result.payload.faultClass}: ${result.payload.cause}` : result.failure.detail, 500);
+    const outcome = result.ok ? 'diagnosed' : result.failure.reason;
+    runs.push({ runtime: chosen.runtime, model: chosen.model, startedAt, endedAt: new Date().toISOString(), result: outcome, detail });
+    if (result.ok) return { runs, diagnosis: result.payload, account: attemptAccount };
+    // Only the provider's own error is read — the last error a run that made no call ended on, or
+    // (GY-1705) the retry/stream errors of a run stopped at its terminal-event bound. An invalid
+    // payload's detail is the agent's submission, and an exit's carries stderr, which can mix in
+    // the agent's output: a limit phrase there must not turn a real failure into a wait.
+    timed.push({ result: outcome, detail, events: [...run.events], account: attemptAccount });
+    if (result.failure.reason === 'timeout') limits.push(null); // resolved from `timed` below
+    else {
+      const providerError = result.failure.reason === 'no-payload' ? /\(last error: ([\s\S]*)\)$/.exec(result.failure.detail)?.[1] : undefined;
+      const signal = providerError ? providerLimit(providerError, now()) : null;
+      limits.push(signal);
+      if (signal && attemptAccount) limitedAccount = attemptAccount;
+    }
     if (result.failure.reason === 'cancelled') break;
   }
-  const limited = limits.length > 0 && limits.every(Boolean) ? limits as ExhaustionSignal[] : null;
-  const resets = limited?.map(entry => entry.resetsAt).filter((at): at is string => !!at).sort() ?? [];
-  return { runs, diagnosis: null, limit: limited ? { reason: limited.at(-1)!.reason, resetsAt: resets[0] ?? null } : null };
+  const fromTimeout = headlessTimeoutLimitCharge(timed, now());
+  const limited = fromTimeout ? null : (limits.length > 0 && limits.every(Boolean) ? limits as ExhaustionSignal[] : null);
+  const signal = fromTimeout?.limit ?? (limited ? { reason: limited.at(-1)!.reason, resetsAt: limited.map(entry => entry.resetsAt).filter((at): at is string => !!at).sort()[0] ?? null } : null);
+  const holds = fromTimeout?.holds ?? (limited && limitedAccount ? [{ account: limitedAccount, limit: signal! }] : []);
+  return { runs, diagnosis: null, limit: signal, account: fromTimeout?.account ?? (limited ? limitedAccount : null), holds };
 }
 
 const iso = (at: number) => new Date(at).toISOString();
@@ -438,7 +492,7 @@ async function launch(cycle: Cycle, diagnostician: DiagnosticianEffects, subject
 }
 
 async function advance(cycle: Cycle, diagnostician: DiagnosticianEffects, entry: DiagnosisRecord, note: Note) {
-  const { state, effects, snapshot, clock } = cycle;
+  const { state, effects, snapshot, clock, now } = cycle;
   if (entry.state === 'running') {
     const outcome = outcomes.get(entry.subject);
     if (!outcome) {
@@ -453,10 +507,14 @@ async function advance(cycle: Cycle, diagnostician: DiagnosticianEffects, entry:
     entry.runs = outcome.runs.slice(-4);
     if (!outcome.diagnosis && outcome.limit) {
       const named = outcome.limit.resetsAt ? Date.parse(outcome.limit.resetsAt) : Number.NaN;
-      // A reset already past says nothing about when the provider recovers: the hour's hold, as for none.
+      // Settlement time, not the launch-cycle snapshot: two real timeouts can finish long after
+      // `clock` was snapped, and the assumed-hour hold must start when the limit is known (GY-1705).
+      const settledAt = now();
       entry.state = 'waiting';
-      entry.retryAt = iso(Number.isFinite(named) && named > clock ? Math.max(named, clock + diagnosisLimitMinimumMs) : clock + diagnosisLimitHoldMs);
-      entry.refusedAt = iso(clock);
+      entry.retryAt = iso(Number.isFinite(named) && named > settledAt ? Math.max(named, settledAt + diagnosisLimitMinimumMs) : settledAt + diagnosisLimitHoldMs);
+      entry.refusedAt = iso(settledAt);
+      // Hold every named account whose own attempt reported the limit (GY-1705), never a nominal profile.
+      for (const hold of outcome.holds ?? []) await effects.holdAccount?.(hold.account, { at: iso(settledAt), resetsAt: hold.limit.resetsAt, reason: hold.limit.reason, role: 'diagnostician', profile: diagnosticianRole, work: entry.work });
       // The provider's capacity, not the loop's failure: no fault kind, so no loop fault instance.
       await note(entry, 'waiting', `The diagnostician's provider refused the diagnosis of ${entry.subject} for its quota or rate limit (${outcome.limit.reason}); it is diagnosed again at ${entry.retryAt}, and no other diagnosis is launched before then`, null);
       return;
