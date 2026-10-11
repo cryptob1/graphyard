@@ -790,6 +790,8 @@
     "tests/zero-touch-onboarding.test.ts": 5900,
     "tests/capped-refusal-rereview.test.ts": 600,
     "tests/uat-follow-up-filing.test.ts": 3000,
-    "tests/checkout-writers-unreadable-cwd.test.ts": 800
+    "tests/checkout-writers-unreadable-cwd.test.ts": 800,
+    "tests/standing-held-requirements-wait.test.ts": 3200,
+    "tests/soak-held-requirements-wait.test.ts": 3500
   }
 }

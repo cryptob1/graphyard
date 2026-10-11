@@ -11,7 +11,7 @@ import { guardBroadScope } from '../master.js';
 import { RefusedResponse } from '../model/refusal.js';
 import { message, scopeMeasurementSchema } from './state.js';
 import { scopeKey } from './reconcile.js';
-import { scopeBudget } from './metrics.js';
+import { discoverHeldScopeAskMarks, scopeBudget, syncHeldScopeAskMarks } from './metrics.js';
 import { readyToRetry } from './sessions.js';
 import { boundDetail, detailChanged, namePaths } from './decisions.js';
 import { findingRecheckMs, record } from './effects.js';
@@ -289,7 +289,13 @@ export async function scopeStep(cycle: Cycle) {
   // 2b. The promise that decision rests on: workers wait minutes, not a shift. A p90 above the
   //     budget, or any request left undecided past the blocked bound, is escalated with the
   //     numbers — the loop is the only thing that could have answered them.
-  const budget = scopeBudget(open.map(item => settled.get(item.id) ?? item), state.scope, clock, !!effects.decide && !!effects.approver, state.approvals);
+  // GY-1702: sync watches, then discover history-held matches before measuring (scope runs before
+  // decisions; a cold start has no approval watch yet for an already-held quarantined ask).
+  const waiting = open.map(item => settled.get(item.id) ?? item);
+  const routes = !!effects.decide && !!effects.approver;
+  syncHeldScopeAskMarks(state.scope, Object.values(state.approvals));
+  await discoverHeldScopeAskMarks(state.scope, waiting, clock, routes, effects.decisions);
+  const budget = scopeBudget(waiting, state.scope, clock, routes, state.approvals);
   for (const breach of budget.breaches) {
     const key = `escalation:scope-budget:${breach.id}`;
     if (!detailChanged(state.actions[key], breach.detail)) continue;
