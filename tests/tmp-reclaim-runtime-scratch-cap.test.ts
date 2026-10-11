@@ -132,7 +132,7 @@ test('unit:runtime-scratch-cap-keeps-held — below headroom an entry beyond the
   assert.equal(existsSync(newest), true);
 });
 
-test('unit:runtime-scratch-cap-stays-on-device — an entry beyond the cap goes whole only once its tree is read to the end on the scanned root\'s own device: a filesystem mounted anywhere inside it, directory or single file, keeps it', async () => {
+test('unit:runtime-scratch-cap-stays-on-device — an entry beyond the cap goes whole only once its tree is read to the end on the scanned root\'s own device with no mount point inside it: a filesystem mounted anywhere inside it, directory, single file or same-volume bind mount, keeps it, as does a tree or mount table that cannot be read', async () => {
   const base = await temporaryDirectory('scratch-cap-device'), tmp = join(base, 'tmp'), scratch = join(tmp, 'opencode');
   await mkdir(scratch, { recursive: true });
   const now = Date.now();
@@ -142,8 +142,26 @@ test('unit:runtime-scratch-cap-stays-on-device — an entry beyond the cap goes 
   // No mount can be made in the sandbox: the walk is judged against a device the tree is not on,
   // which is what a filesystem mounted inside the entry is (review of 9c6cbd0fd7).
   assert.equal(await tmpReclaim.treeOnDevice(entry, dev + 1), false, 'an entry on another device anywhere in the tree keeps the whole');
-  // The same tree, on its own device, is what the capped pass takes.
-  const report = await reclaimTmpDirectories({ tmpRoot: tmp, now, held: new Set(), volume: lowVolume(scratch, () => [entry], 28_000, 900_000), runtimeScratchCap: 0 });
+  // A bind mount from the scanned volume itself reports the same device (Codex review of 519dc64fff):
+  // the process's mount table names the point, and one at or under the entry keeps it; a table that
+  // cannot be read keeps it too. Here the table is given, since no mount can be made in the sandbox.
+  assert.equal(await tmpReclaim.treeOnDevice(entry, dev, [join(entry, 'node_modules')]), false, 'a mount point inside the entry keeps the whole');
+  assert.equal(await tmpReclaim.treeOnDevice(entry, dev, [entry]), false, 'an entry that is itself a mount point stays');
+  assert.equal(await tmpReclaim.treeOnDevice(entry, dev, [`${entry}-other`, '/']), true, 'a mount elsewhere, or above the scanned root, is not inside the entry');
+  assert.equal(await tmpReclaim.treeOnDevice(entry, dev, null), false, 'an unreadable mount table keeps the whole');
+  assert.equal(await tmpReclaim.treeOnDevice(join(entry, 'missing'), dev, []), false, 'a tree that cannot be read is not known to be on the device');
+  // The table is /proc/self/mountinfo's fifth field, with its octal escapes decoded.
+  const table = join(base, 'mountinfo');
+  await writeFile(table, '4593 3450 0:30 /@ / rw,relatime - btrfs /dev/mapper/root rw\n4600 4593 0:30 /@/srv/x /tmp/opencode/he\\040mounted/node_modules rw,relatime - btrfs /dev/mapper/root rw\n\n');
+  assert.deepEqual(await tmpReclaim.mountPoints(table), ['/', '/tmp/opencode/he mounted/node_modules']);
+  assert.equal(await tmpReclaim.mountPoints(join(base, 'no-such-table')), process.platform === 'linux' ? null : [], 'a table that cannot be read is null, so the walk fails closed');
+  assert.ok((await tmpReclaim.mountPoints())?.includes('/'), 'the live table lists the root mount');
+  // The capped pass keeps an entry the table says a mount reaches into, counted as kept, and takes the same tree once nothing is mounted there.
+  const mounted = await reclaimTmpDirectories({ tmpRoot: tmp, now, held: new Set(), volume: lowVolume(scratch, () => [entry], 28_000, 900_000), runtimeScratchCap: 0, mounts: [join(entry, 'node_modules')] });
+  assert.deepEqual(mounted.removed, []);
+  assert.ok(mounted.kept >= 1, 'the mounted entry is counted as kept');
+  assert.equal(existsSync(entry), true);
+  const report = await reclaimTmpDirectories({ tmpRoot: tmp, now, held: new Set(), volume: lowVolume(scratch, () => [entry], 28_000, 900_000), runtimeScratchCap: 0, mounts: [] });
   assert.deepEqual(report.removed.map(removed => removed.path), [entry]);
 });
 

@@ -255,21 +255,61 @@ async function treeLastWritten(path: string, own: number): Promise<number> {
   return newest;
 }
 /**
- * Whether everything under `path` — every directory, file, link and socket in its tree, following
- * no symlink — is on `device`. A whole-tree removal unlinks whatever a path reaches, and a
- * filesystem mounted anywhere inside a candidate is another volume's inodes, so a sweep that
- * promises the scanned volume alone removes a tree whole only once this has read it to the end
- * (review of 9c6cbd0fd7, GY-1683). A mount that is a single file is on another device too, which
- * is why every entry is judged, not only the directories the walk would enter.
+ * The mount points this process's mount table lists (`/proc/self/mountinfo`, field 5, its octal
+ * escapes decoded), or null when the table cannot be read on Linux. A bind mount whose source is
+ * on the scanned volume keeps the volume's device number, so a device comparison alone cannot see
+ * it (Codex review of 519dc64fff); the table names the mount point itself. Off Linux there is no
+ * table to consult and the device check stands alone.
  */
-export async function treeOnDevice(path: string, device: number): Promise<boolean> {
+export async function mountPoints(table = '/proc/self/mountinfo'): Promise<readonly string[] | null> {
+  if (process.platform !== 'linux') return [];
+  let text: string;
+  try { text = await readFile(table, 'utf8'); } catch { return null; }
+  const points: string[] = [];
+  for (const line of text.split('\n')) {
+    const point = line.split(' ')[4];
+    if (point) points.push(point.replace(/\\(\d{3})/g, (_, code: string) => String.fromCharCode(parseInt(code, 8))));
+  }
+  return points;
+}
+/** The mount points at or under `real`, rebased onto `path` (the same directory as a scan names it), or null when the table cannot be read. */
+async function mountsUnder(path: string, real: string, mounts?: readonly string[] | null): Promise<Set<string> | null> {
+  const points = mounts === undefined ? await mountPoints() : mounts;
+  if (points === null) return null;
+  return new Set(points.filter(point => point === real || point.startsWith(`${real}/`)).map(point => path + point.slice(real.length)));
+}
+/**
+ * Whether everything under `path` — every directory, file, link and socket in its tree, following
+ * no symlink — is on `device` and nothing in the tree, `path` included, is a mount point. A
+ * whole-tree removal unlinks whatever a path reaches, and a filesystem mounted anywhere inside a
+ * candidate is another volume's inodes, so a sweep that promises the scanned volume alone removes
+ * a tree whole only once this has read it to the end (review of 9c6cbd0fd7, GY-1683). A mount that
+ * is a single file is on another device too, which is why every entry is judged, not only the
+ * directories the walk would enter. A bind mount from the scanned volume itself reports the same
+ * device, so the process's mount table is read as well, and the walk fails closed: a tree whose
+ * mount table, path, directory or entry cannot be read is not known to be on the device and stays
+ * (Codex review of 519dc64fff). `mounts` is the mount table already read, when a caller has it.
+ */
+export async function treeOnDevice(path: string, device: number, mounts?: readonly string[] | null): Promise<boolean> {
+  let own: Stats;
+  try { own = await lstat(path); } catch { return false; }
+  if (own.dev !== device) return false;
+  // A symlink goes as the link alone, never its target, so the target's mounts are not its concern.
+  if (own.isSymbolicLink()) return true;
+  let real: string;
+  try { real = await realpath(path); } catch { return false; }
+  const mounted = await mountsUnder(path, real, mounts);
+  if (mounted === null || mounted.size) return false;
+  if (!own.isDirectory()) return true;
   const stack = [path];
   while (stack.length) {
     const directory = stack.pop()!;
-    for (const entry of await readdir(directory, { withFileTypes: true }).catch(() => [] as Dirent[])) {
+    let entries: Dirent[];
+    try { entries = await readdir(directory, { withFileTypes: true }); } catch { return false; }
+    for (const entry of entries) {
       const child = join(directory, entry.name);
-      const info = await lstat(child).catch(() => null);
-      if (!info) continue;
+      let info: Stats;
+      try { info = await lstat(child); } catch { return false; }
       if (info.dev !== device) return false;
       if (info.isDirectory()) stack.push(child);
     }
@@ -394,6 +434,8 @@ export interface TmpReclaimOptions {
   runtimeScratchCap?: number;
   /** The live-holder set, when the caller has one; a fresh /proc scan runs when omitted. */
   held?: Set<string>;
+  /** The mount table (`mountPoints`), when the caller has one: null for a table that could not be read; this process's own is read when omitted. */
+  mounts?: readonly string[] | null;
   /** Entries an earlier pass failed to finish removing, retried ahead of their age bound (this process's own set by default), and how long one removal retries. */
   unfinished?: Set<string>; retryMs?: number;
   /** Linked worktrees' registrations whose removal has not yet succeeded, keyed by registration, naming its checkout: retried by each pass once that checkout is gone (this process's own map by default). */
@@ -438,7 +480,7 @@ export async function reclaimTmpDirectories(options: TmpReclaimOptions = {}): Pr
   const runtimeRoots = options.prefixes ? [] : options.runtimeScratchRoots ?? agentRuntimeScratchRoots;
   // The store and compile cache sweeps are the default pass's too (GY-1683): a caller's own prefixes never reach them.
   const storeAge = options.prefixes ? null : options.maxAgeMs ?? packageStoreMinAgeMs;
-  const pass: PassState = { now, minAge, cacheAge, agentAge, storeAge, runtimeRoots, cap: null, written: new Map(), limit: options.limit ?? tmpReclaimLimitPerCycle, uid: process.getuid?.(), held: options.held ?? null,
+  const pass: PassState = { now, minAge, cacheAge, agentAge, storeAge, runtimeRoots, cap: null, written: new Map(), limit: options.limit ?? tmpReclaimLimitPerCycle, uid: process.getuid?.(), held: options.held ?? null, mounts: options.mounts,
     workMs: options.workMs ?? Number.POSITIVE_INFINITY, started: null, unfinished: options.unfinished ?? unfinishedRemovals, retryMs: options.retryMs ?? tmpReclaimRetryMs,
     registrations: options.registrations ?? unfinishedRegistrations };
   for (const path of pass.unfinished) if (!existsSync(path)) pass.unfinished.delete(path);
@@ -579,7 +621,7 @@ export async function tmpCensus(roots: string | readonly string[], bound = tmpCo
 }
 
 /** `cap`: the runtime scratch cap of the sweep under way, set only below headroom; `written`: each runtime scratch entry's tree write time, read once per pass. */
-interface PassState { now: number; minAge: (name: string) => number | null; cacheAge: number | null; agentAge: number | null; storeAge: number | null; runtimeRoots: readonly string[]; cap: number | null; written: Map<string, number>; limit: number; uid: number | undefined; held: Set<string> | null; workMs: number; started: number | null; unfinished: Set<string>; retryMs: number; registrations: Map<string, string> }
+interface PassState { now: number; minAge: (name: string) => number | null; cacheAge: number | null; agentAge: number | null; storeAge: number | null; runtimeRoots: readonly string[]; cap: number | null; written: Map<string, number>; limit: number; uid: number | undefined; held: Set<string> | null; mounts: readonly string[] | null | undefined; workMs: number; started: number | null; unfinished: Set<string>; retryMs: number; registrations: Map<string, string> }
 /** Record one removal of `kind` in `report`. */
 function took(report: TmpReclaimReport, kind: TmpReclaimClass, path: string, bytes: number) {
   report.removed.push({ path, bytes });
@@ -700,15 +742,17 @@ export const tsxCacheName = (uid = process.getuid?.()) => uid === undefined ? nu
  * each still judged by `agedFileSweepable` on its own stats: a regular file bind-mounted into the
  * walk is on another device too, and no directory check sees it.
  */
-async function cacheFiles(directory: string, device: number): Promise<string[]> {
+async function cacheFiles(directory: string, device: number, mounted: ReadonlySet<string>): Promise<string[]> {
   const files: string[] = [];
   const entries = await readdir(directory, { withFileTypes: true }).catch(() => [] as Dirent[]);
   for (const entry of entries) {
     const path = join(directory, entry.name);
+    // A mount point is another filesystem's, whatever device it reports: a bind mount from this volume keeps its number (Codex review of 519dc64fff).
+    if (mounted.has(path)) continue;
     if (entry.isFile()) files.push(path);
     else if (entry.isDirectory()) {
       const info = await lstat(path).catch(() => null);
-      if (info?.dev === device) files.push(...await cacheFiles(path, device));
+      if (info?.dev === device) files.push(...await cacheFiles(path, device, mounted));
     }
   }
   return files;
@@ -767,7 +811,11 @@ async function reclaimAgedFiles(root: string, real: string, names: readonly stri
   for (const name of names) {
     const own = await lstat(join(root, name)).catch(() => null);
     if (!own?.isDirectory() || (pass.uid !== undefined && own.uid !== pass.uid)) continue;
-    for (const path of await cacheFiles(join(root, name), own.dev)) {
+    // A mount inside the directory is never entered and a mounted file never unlinked; a mount table that cannot be read keeps the directory whole this pass.
+    const mounted = await mountsUnder(join(root, name), join(real, name), pass.mounts);
+    if (mounted === null) { report.errors.push(`${join(root, name)}: the mount table could not be read, so no file of it was aged this pass`); continue; }
+    if (mounted.has(join(root, name))) continue;
+    for (const path of await cacheFiles(join(root, name), own.dev, mounted)) {
       let info;
       try { info = await lstat(path); } catch { continue; }
       if (!agedFileSweepable(info, own, pass.uid, pass.now, maxAgeMs)) continue;
@@ -830,7 +878,7 @@ async function reclaimCompileCaches(root: string, real: string, pass: PassState,
     pass.started ??= at;
     if (at > pass.started + pass.workMs) break;
     // A version a mount reaches into is read to the end before it goes whole: one it does stays, counted as kept.
-    if (!await treeOnDevice(path, device)) { report.kept++; continue; }
+    if (!await treeOnDevice(path, device, pass.mounts)) { report.kept++; continue; }
     try {
       const bytes = await sizeOf(path);
       await removeTree(path, pass.retryMs);
@@ -908,7 +956,7 @@ async function reclaimRuntimeScratch(root: string, real: string, pass: PassState
       pass.started ??= at;
       if (at > pass.started + pass.workMs) { report.kept++; continue; }
       // An entry a mount reaches into is read to the end before it goes whole: one it does stays, counted as kept.
-      if (!await treeOnDevice(path, device)) { report.kept++; continue; }
+      if (!await treeOnDevice(path, device, pass.mounts)) { report.kept++; continue; }
       try {
         const bytes = await sizeOf(path);
         await removeTree(path, pass.retryMs);

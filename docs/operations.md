@@ -3,7 +3,7 @@
 
 ## Daily checklist
 
-- `/healthz` healthy at expected `commit`; `/api/status` without job errors, `delegationLimits.attention` or `production.incidents`.
+- `/healthz` healthy at expected `commit`; `/api/status` without job errors, `delegationLimits.attention`, `production.incidents`.
 - `master status`: `daemon.liveness` `running`, attention owned; recent verified `graphyard db backup`.
 
 ## Incident decision tree
@@ -26,7 +26,7 @@ graphyard master settle-containment GY-N "reason"                       # settle
 graphyard recover-containment GY-N --previous-worker-stopped "reason"   # delivered
 graphyard unblock GY-N "reason"                                         # unowned blocker
 systemctl --user restart graphyard-master-OWNER-NAME                    # loop down
-graphyard master checkout-restore "reason"                              # dirty checkout → refs/graphyard/checkout-restore/
+graphyard master checkout-restore "reason"                              # dirty → refs/graphyard/checkout-restore/
 ```
 
 Never attest a stop you have not confirmed; merged work changes only via follow-ups. Outside the lock's PID namespace `master status` judges the loop by stall bound; stalled or absent: stop hand-started loops, install `examples/master/graphyard-master.service`, `systemctl --user daemon-reload && systemctl --user enable --now graphyard-master`.
@@ -40,7 +40,7 @@ Confined masters, approvers and producers read GitHub login through a keyring-on
 - Workers never hold `admin`/`coordinator`/`producer` tokens. No AI principal can hold `admin`.
 - Proof authority: live [grant](operations-reference.md#proof-authority-grants); `admin` attests only `manual:` proofs; operator agents only add requirements.
 - GitHub merges on passing gates: no bypass, no lifecycle-state endpoint.
-- History is append-only; only routine rows past retention are [compacted](operations-reference.md#storage-retention).
+- History is append-only; routine rows past retention are [compacted](operations-reference.md#storage-retention).
 
 ## Deeper references
 
@@ -48,6 +48,8 @@ Confined masters, approvers and producers read GitHub login through a keyring-on
 
 ## Resources and disk
 
-Bounded resources: `resourceRegistry` ([remedies](operations-reference.md#control-plane-resources)). Loop reclaims finished worktrees after `run.reclaimIdleHours` (never dirty/unpushed), idle unowned [panes](master-agent-sessions.md#panes-are-closed-and-reclaimed) seen twice; `disk` attention below `run.diskThresholdGb`. Clean detached coordinator HEAD on a verified-release descendant self-recovers (`upgrade:recovered`); otherwise `escalation:dirty-checkout`: restart onto it, never roll back; dirty, non-detached or non-forward stays refused.
+Bounded resources: `resourceRegistry` ([remedies](operations-reference.md#control-plane-resources)). Loop reclaims finished worktrees after `run.reclaimIdleHours` (never dirty/unpushed), idle unowned [panes](master-agent-sessions.md#panes-are-closed-and-reclaimed) seen twice; `disk` attention below `run.diskThresholdGb`. Clean detached coordinator HEAD on a verified-release descendant self-recovers (`upgrade:recovered`); otherwise `escalation:dirty-checkout`: restart onto it, never roll back.
 
-`/tmp` pass (this user's, unheld, same-device): test temps 2h; agent checkouts, `opencode` scratch 24h; `tsx-UID` files, `node-compile-cache` versions 6h; `.pnpm-store` files 7d; below a quarter inodes free it escalates, capping runtime roots to 12 newest entries. Record classes: test temp, tsx cache, agent worktree, runtime scratch, pnpm store, compile cache.
+Main guard revert approver ([provisioning](deployment.md#manual-fallback)): redeploy; verify `/api/status` `mainGuard.revertApprover` names it, `mainGuard.attention` empty, `doctor` `revert-approver` ready.
+
+`/tmp` pass (own, unheld, mount-free, same-device): test temps 2h; agent checkouts, `opencode` scratch 24h; `tsx-UID` files, `node-compile-cache` versions 6h; `.pnpm-store` files 7d; below a quarter inodes free, runtime roots cap at 12 newest entries. Record `classes`: `testTemp`, `tsxCache`, `agentWorktree`, `runtimeScratch`, `packageStore`, `compileCache`.

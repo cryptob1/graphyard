@@ -102,6 +102,37 @@ test('unit:pnpm-store-aged-file-sweep — the pass removes this user\'s regular 
   assert.match(reading?.reclaim ?? '', /node-compile-cache version directories/, 'the registry describes the compile cache sweep');
 });
 
+test('unit:pnpm-store-mounted-subtree-kept — a store directory or file the process\'s mount table names as a mount point is never entered or unlinked, although a bind mount from the same volume reports the store\'s own device, and a store whose mount table cannot be read ages nothing this pass, named in the record\'s errors', async () => {
+  const base = await temporaryDirectory('pnpm-store-mounted'), tmp = join(base, 'tmp');
+  await mkdir(tmp);
+  const now = Date.now();
+  const { root, paths } = await store(tmp, { 'plain-old': 15 * day, 'mounted-file': 14 * day, 'index/cd/old-index.json': 9 * day }, now);
+  // A directory bind-mounted into the store from this volume: same device, listed in the table.
+  const mountedDirectory = join(root, 'v10', 'files', 'ab'), indexDirectory = join(root, 'v10', 'index', 'cd');
+  const mounted = await reclaimTmpDirectories({ tmpRoot: tmp, now, held: new Set(), mounts: [mountedDirectory] });
+  assert.deepEqual(mounted.errors, []);
+  assert.deepEqual(mounted.removed.map(entry => entry.path), [paths['index/cd/old-index.json']], 'only the file outside the mounted directory goes');
+  for (const name of ['plain-old', 'mounted-file']) assert.equal(existsSync(paths[name]!), true, `${name} is under the mount and stays`);
+  // A single file bind-mounted into the store: listed in the table, never unlinked, while its neighbour goes.
+  await writeFile(paths['index/cd/old-index.json']!, 'package bytes'); await backdate(paths['index/cd/old-index.json']!, 9 * day, now); await backdate(indexDirectory, 20 * day, now);
+  const file = await reclaimTmpDirectories({ tmpRoot: tmp, now, held: new Set(), mounts: [paths['mounted-file']!] });
+  assert.deepEqual(file.errors, []);
+  assert.deepEqual(file.removed.map(entry => entry.path), [paths['plain-old'], paths['index/cd/old-index.json']]);
+  assert.equal(existsSync(paths['mounted-file']!), true, 'the mounted file stays');
+  // A mount table that cannot be read: nothing of the store is aged, and the record says why.
+  const unreadable = await reclaimTmpDirectories({ tmpRoot: tmp, now, held: new Set(), mounts: null });
+  assert.deepEqual(unreadable.removed, []);
+  assert.equal(existsSync(paths['mounted-file']!), true);
+  assert.deepEqual(unreadable.errors, [`${root}: the mount table could not be read, so no file of it was aged this pass`]);
+  // A store that is itself a mount point, bind-mounted from this volume, is another filesystem's: nothing of it is aged.
+  const whole = await reclaimTmpDirectories({ tmpRoot: tmp, now, held: new Set(), mounts: [root] });
+  assert.deepEqual(whole.removed, []);
+  assert.deepEqual(whole.errors, []);
+  // The live table, read by the pass itself, lists no mount inside a test directory: the file goes.
+  const live = await reclaimTmpDirectories({ tmpRoot: tmp, now, held: new Set() });
+  assert.deepEqual(live.removed.map(entry => entry.path), [paths['mounted-file']]);
+});
+
 test('unit:pnpm-store-held-files-kept — a store file a live process holds open stays whatever its age, and the rest of the aged files go', async () => {
   const base = await temporaryDirectory('pnpm-store-held'), tmp = join(base, 'tmp');
   await mkdir(tmp);
@@ -157,6 +188,13 @@ test('unit:compile-cache-stale-versions-swept — a node-compile-cache version d
   const { dev } = await lstat(cache);
   assert.equal(await tmpReclaim.treeOnDevice(active, dev), true, 'a version on the scanned device may go whole');
   assert.equal(await tmpReclaim.treeOnDevice(active, dev + 1), false, 'an entry on another device anywhere in the tree keeps the whole version');
+  // A same-volume bind mount keeps the device number: the mount table names it, and a version it reaches into stays, counted as kept (Codex review of 519dc64fff).
+  assert.equal(await tmpReclaim.treeOnDevice(active, dev, [join(active, 'inner')]), false, 'a mount point inside the version keeps it whole');
+  await backdateTree(active, 3 * day, now); await backdate(cache, stale, now);
+  const mountedVersion = await reclaimTmpDirectories({ tmpRoot: tmp, now, held: new Set(), mounts: [join(active, 'inner')] });
+  assert.equal(mountedVersion.removed.some(entry => entry.path === active), false, 'the version a mount reaches into is not removed');
+  assert.equal(existsSync(active), true);
+  assert.ok(mountedVersion.kept >= 1, 'it is counted as kept');
 });
 
 test('unit:compile-cache-unfinished-version-retried — a version whose removal fails partway is recorded as unfinished and is due at once on the next pass, although the half-finished removal left it looking freshly written', { skip: process.getuid?.() === 0 ? 'root ignores directory permissions' : false }, async () => {
