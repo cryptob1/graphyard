@@ -372,6 +372,8 @@ test('unit:recurring-class-item — the loop files through the master operator-a
   const root = await temporaryDirectory('fault-root'), secrets = await temporaryDirectory('fault-secrets');
   try {
     execFileSync('git', ['init', '-q', '-b', 'main', root]);
+    for (const [key, value] of [['user.email', 'fault@example.invalid'], ['user.name', 'Fault Test'], ['commit.gpgsign', 'false']] as const)
+      execFileSync('git', ['config', key, value], { cwd: root });
     await mkdir(join(root, 'tests/helpers'), { recursive: true });
     await writeFile(join(root, 'tests/fault-class-scope.test.ts'), 'test("manual:fault-class-scope", () => {});\n');
     await writeFile(join(root, 'tests/helpers/timing-baseline.json'), '{}\n');

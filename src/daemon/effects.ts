@@ -82,13 +82,7 @@ export const stoppedStates = ['idle', 'done', 'blocked'];
 export const launcherRetry = (error: unknown) => { const retryAt = (error as { retryAt?: unknown } | null)?.retryAt; return typeof retryAt === 'string' ? retryAt : null; };
 export const failoverKey = (role: CapacityRole, work: Work, attempt: string | number) => `failover:${role}:${work.id}:${attempt}`;
 export const capacityKey = (role: CapacityRole) => `capacity:${role}`;
-/**
- * The address a paste to a session is delivered to (GY-852): the pane, which is the session's own
- * stable coordinate, and only for a session the runtime lists without one — a session the loop
- * cannot see in any pane — its name. Profiles reuse agent names across sessions, so a paste
- * resolved by name first lands on whichever session holds the name now, which is how one item's
- * re-prompt reached another item's pane (2026-09-26).
- */
+/** GY-852: paste by pane_id, else name (profiles reuse names across sessions). */
 export const promptTarget = (agent: Pick<HerdrAgent, 'name' | 'pane_id'>) => agent.pane_id ?? agent.name ?? '';
 
 /** An item the loop files as the operator-agent: a fault-class item, or the docs trim item (GY-574), which names no class. */
@@ -771,14 +765,12 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     get acceptance() { const config = current(); return config.operatorAgent && config.approver ? acceptanceEffects(config, root, { run, fetcher, asCoordinator, asOperatorAgent, merger: recordedMerger,
       writer: mergeWriterReads(config, root, run, { base: worktreeRoot(root, config), record: (work, event) => mutate(`work/${work.id}/merge-record`, event, mergeRecordKey(work, event)), merger: recordedMerger }) }) : undefined; },
     get planner() { const config = current(); return config.operatorAgent && config.approver ? plannerEffects(config, root, { fetcher, asCoordinator, asOperatorAgent }) : undefined; },
-    // GY-1706: a fault-class filing runs the same authoring derivation master create runs, so its
-    // manual:fault-class-* proof plans its test file (and companions) instead of an empty plannedFiles.
-    // Docs-trim, flake and advisory chores already set their own plannedFiles and are left alone.
+    // GY-1706: fault-class filing derives plannedFiles like master create; chores with their own plans are left alone.
     get fileFaultClass() {
       return current().operatorAgent ? async (input: LoopFiledItem, key: string) => {
         const filing = input as LoopFiledItem & { plannedFiles?: readonly string[] };
         if (!filing.origin?.faultClass) return asOperatorAgent('POST', 'work', input, key) as Promise<Work>;
-        const tree = await baseTree(root, current().baseBranch);
+        const tree = await baseTree(root, current().baseBranch, run);
         const derived = derivePlannedFiles(
           { plannedFiles: filing.plannedFiles ?? [], criteria: filing.criteria, origin: filing.origin, description: filing.description },
           tree.files,
@@ -795,17 +787,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       () => herdrJson(['status', 'server', '--json'], run)) }),
     settleContainment: (work, assessment) => mutate(`work/${work.id}/autosettle`, { epoch: assessment.epoch, settlementHash: work.containmentQuarantine!.settlementHash,
       reason: `The master loop verified on ${assessment.host ?? current().hostId} that the supervisor of epoch ${assessment.epoch} is gone; the item is released for a fresh attempt`, verification: assessment.verification, origin: 'loop' }),
-    // systemd's own keep-alive channel. `systemd-notify` is part of systemd, so it is present wherever NOTIFY_SOCKET is, and the loop
-    // only speaks to it when the supervisor set one. Node has no unix datagram socket, so the message goes through that short-lived
-    // child, which the unit admits with NotifyAccess=all. Since systemd 246 the tool waits on a barrier until the manager has processed
-    // the message, so it cannot exit before it is attributed; on an older systemd a keep-alive can be lost to that race, which is why
-    // the packaged window is 180s against a cycle of at most 30s: a healthy loop would have to lose six in a row. The keep-alive is a
-    // child too: it runs through the same runner, awaited on the event loop and bounded like every other child, and a keep-alive that fails is logged by the loop.
-    // GY-437: the loop upgrades its own checkout between cycles. The executors come first,
-    // through the shipped restart command — a refusal (a claim in flight, another restart's
-    // fence) leaves the owed restarts on the cursor for the next cycle — and the loop
-    // re-executes itself only through the supervisor unit it actually runs under, detected from
-    // its own cgroup like an executor's.
+    // systemd-notify keep-alive (NOTIFY_SOCKET; NotifyAccess=all; bounded child via `run`). GY-437: upgrade between cycles — executors first, then re-exec under the cgroup unit.
     loadedRelease: readRelease(root),
     selfUpgrade: (state, keepAlive) => performSelfUpgrade(current(), state, upgradeDeps(keepAlive)),
     recoverHead: (state, from, to, keepAlive) => recoverMovedHead(current(), state, from, to, upgradeDeps(keepAlive)),

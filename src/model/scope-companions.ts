@@ -42,12 +42,18 @@ const testStemParts = (path: string) => {
   const match = /^((?:[^/]+\/)*)([^/]+?)(\.(?:test|spec)\.[cm]?[jt]sx?)$/.exec(pathScope(path).path);
   return match && testFile(path) ? { directory: match[1], stem: match[2], suffix: match[3] } : null;
 };
-/** True when `path` is the proof-named test, or a same-suffix stem that lengthens or shortens it by a hyphenated suffix (GY-1700's webhook-soft-accept beside unit:webhook-soft-accept-no-5xx). */
+/**
+ * True when `path` is the proof-named test, or a same-suffix stem that lengthens or shortens it by
+ * a hyphenated suffix (GY-1700's webhook-soft-accept beside unit:webhook-soft-accept-no-5xx). The
+ * shorter stem must itself be hyphenated so a single token (fleet vs fleet-panel) is never a match
+ * (GY-945's new-file path must still reach newProofTestGround).
+ */
 const proofTestStemMatch = (path: string, named: string) => {
   if (path === named) return true;
   const asked = testStemParts(path), proof = testStemParts(named);
-  return !!asked && !!proof && asked.directory === proof.directory && asked.suffix === proof.suffix
-    && (proof.stem.startsWith(`${asked.stem}-`) || asked.stem.startsWith(`${proof.stem}-`));
+  if (!asked || !proof || asked.directory !== proof.directory || asked.suffix !== proof.suffix) return false;
+  const [shorter, longer] = asked.stem.length <= proof.stem.length ? [asked.stem, proof.stem] : [proof.stem, asked.stem];
+  return shorter.includes('-') && longer.startsWith(`${shorter}-`);
 };
 /** True when `path` is, or a scope that holds, documentation the item's repository configures. */
 export const documentationPath = (path: string, documentation: readonly string[]) =>
@@ -180,10 +186,19 @@ export function companionGround(path: string, item: { plannedFiles?: readonly st
  */
 export async function newProofTestGround(path: string, criteria: readonly CompanionCriterion[], held: (proof: string) => Promise<number>): Promise<string | null> {
   if (!testFile(path)) return null;
+  const directory = path.slice(0, path.lastIndexOf('/') + 1), extension = /\.(?:test|spec)\.[cm]?[jt]sx?$/.exec(path)?.[0];
   for (const entry of criterionTestProofs(criteria)) {
     const unheld: string[] = [];
     for (const proof of entry.proofs) if (await held(proof) === 0) unheld.push(proof);
-    if (unheld.length) return `${path} is the new test file ${entry.criterion}'s proofs (${unheld.join(', ')}) live in; no file on the base holds them`;
+    if (!unheld.length) continue;
+    // Fault-class manual proofs live in the proof-named file (or its hyphenated stem); an unrelated
+    // test path is not "whatever it is called" the way unit proofs are (GY-1287 / GY-1701).
+    if (unheld.some(proof => /^manual:fault-class-/.test(proof))) {
+      if (!extension) continue;
+      const named = proofTestFile(entry.proofs, { directory, extension });
+      if (!named || !proofTestStemMatch(path, named)) continue;
+    }
+    return `${path} is the new test file ${entry.criterion}'s proofs (${unheld.join(', ')}) live in; no file on the base holds them`;
   }
   return null;
 }
