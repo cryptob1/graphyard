@@ -183,34 +183,31 @@ export const windowStart = (now: string, days: number) => new Date(Date.parse(no
  * the snapshot is the bounded one — open items whole, settled deliveries as the summaries the
  * report reads (key, title, stage, origin, delivery). A signal whose need was recorded before the
  * window opened is outside its reach; `ledger.since` says where the read began and `ledger.reach`
- * where the record it holds begins: the same instant, unless the read was truncated (`ledgerReach`).
+ * where the record it holds is whole: the same instant, unless the read was truncated (`ledgerReach`).
  */
 export async function readInterventionReport(store: Store, policy: InterventionPolicy, options: { days?: InterventionWindow; kind?: InterventionKind | null; stage?: Stage | null; work?: string | null; limit?: number } = {}) {
   const days = options.days ?? 30;
   const snapshot = await boundedSnapshot(store.reportPool);
   const since = windowStart(snapshot.now, Math.max(days, policy.windowDays));
-  const { rows, truncated } = await readInterventionLedger(store.reportPool, { limit: options.limit, since });
-  const reach = ledgerReach(rows, truncated, since, snapshot.now);
+  const { rows, truncated, retainedFrom } = await readInterventionLedger(store.reportPool, { limit: options.limit, since });
+  const reach = ledgerReach(retainedFrom, truncated, since, snapshot.now);
   const folded = foldInterventions(rows, snapshot.work, snapshot.now);
   const report = computeInterventionReport(folded, snapshot.work, policy, { days, now: snapshot.now, kind: options.kind, stage: options.stage, work: options.work, reach });
   return { ...report, ledger: { rows: rows.length, truncated, oldest: rows[0]?.at ?? null, since, reach }, kinds: interventionKinds, windows: interventionWindows };
 }
 
-/** The rows the ledger read adds beside its window: the requests of decisions the window settles (withDecisionsBeyondReach), each older than the window's oldest row. */
-const beyondReachKinds = new Set(['decision.requested', 'decision.approved']);
 /**
  * GY-1682 AC-2: where the under-threshold reading begins. The ledger read is the newest
  * `interventionLedgerLimit` rows since `since`; when it is truncated the rows before its oldest were
  * never read, and a reading that began at `since` would take them for an empty record — a streak and
- * a peak the record does not support. So a truncated read begins at the oldest row of the window
- * it holds: the oldest row of a kind the window read itself, since the rows added beyond the window
- * (`beyondReachKinds`) all precede it, and the reading may start no earlier than the record — later
- * is a shorter streak, never a false one. A window with no such row holds no record to read, and the
- * reading begins now.
+ * a peak the record does not support. So a truncated read begins where the record it holds is whole:
+ * at the oldest row the read retained (`retainedFrom`, which `readInterventionLedger` reads off the
+ * retained window itself, so a retained decision row written inside the window counts as the
+ * window's and the requests it reads from beyond the window do not), and no earlier than the read
+ * — later is a shorter streak, never a false one. A read that retained no row holds no record to
+ * read, and the reading begins now.
  */
-export function ledgerReach(rows: readonly { kind: string; at: string }[], truncated: boolean, since: string, now: string): string {
+export function ledgerReach(retainedFrom: string | null, truncated: boolean, since: string, now: string): string {
   if (!truncated) return since;
-  let oldest: string | null = null;
-  for (const row of rows) if (!beyondReachKinds.has(row.kind) && (oldest === null || row.at < oldest)) oldest = row.at;
-  return oldest === null ? now : oldest > since ? oldest : since;
+  return retainedFrom === null ? now : retainedFrom > since ? retainedFrom : since;
 }

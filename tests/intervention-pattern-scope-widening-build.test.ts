@@ -317,19 +317,18 @@ test('manual:pattern-item-owns-scope-widening — a routed decision answers the 
   assert.deepEqual(buildWidenings([...mergedRows, answering(mergedAskedAt), { ...settledRouted('decision.stale', 2489243, '2026-10-10T23:13:33.000Z') }], record, now), [waiting, ...resolved], 'stale, the merged ask is back with whoever decides it');
 });
 
-test('manual:intervention-pattern-within-threshold — a truncated ledger read begins the under-threshold reading at the oldest row it holds, never at the window start the rows before it were cut from: the streak and the peak are read off the record, not off rows never read', () => {
+test('manual:intervention-pattern-within-threshold — a truncated ledger read begins the under-threshold reading where the record it holds is whole, never at the window start the rows before it were cut from: the streak and the peak are read off the record, not off rows never read', () => {
   const since = '2026-09-11T01:10:49.424Z';
-  const row = (kind: string, at: string, seq: number): InterventionLedgerRow => ({ seq, workId: gy1675, actor: operator, kind, at, details: null, work: null });
-  // Within the limit, the reach is the window start: every row since it was read.
-  assert.equal(ledgerReach([row('scope', '2026-10-01T00:00:00.000Z', 1)], false, since, reportAt), since);
-  // Truncated, the reach is the oldest row of the window itself; the request of a decision the window settles, read from beyond the window (withDecisionsBeyondReach), precedes it and is not the window's.
-  const window = [row('decision.requested', '2026-09-20T00:00:00.000Z', 5), row('decision.approved', '2026-09-21T00:00:00.000Z', 6), row('scope', '2026-10-02T06:00:00.000Z', 9), row('decision.declined', '2026-10-02T06:00:01.000Z', 10), row('rework', '2026-10-03T00:00:00.000Z', 11)];
-  assert.equal(ledgerReach(window, true, since, reportAt), '2026-10-02T06:00:00.000Z');
-  // A window holding only such requests holds no record to begin a reading at: it begins now, 0 days.
-  assert.equal(ledgerReach(window.slice(0, 2), true, since, reportAt), reportAt);
-  assert.equal(ledgerReach([], true, since, reportAt), reportAt);
-  // A row's own instant may precede its insertion; the reach never precedes the read.
-  assert.equal(ledgerReach([row('scope', '2026-09-11T01:10:49.000Z', 2)], true, since, reportAt), since);
+  // Within the limit, the reach is the window start: every row since it was read, whatever the oldest retained row's own instant.
+  assert.equal(ledgerReach('2026-10-01T00:00:00.000Z', false, since, reportAt), since);
+  assert.equal(ledgerReach('2026-09-10T02:00:00.000Z', false, since, reportAt), since);
+  // Truncated, the reach is the oldest row the read retained, as the ledger read names it (`retainedFrom`, tests/intervention-ledger-retained-reach.test.ts): a decision row written inside the window as much as any other.
+  assert.equal(ledgerReach('2026-10-02T06:00:00.000Z', true, since, reportAt), '2026-10-02T06:00:00.000Z');
+  // A read that retained no row holds no record to begin a reading at: it begins now, 0 days.
+  assert.equal(ledgerReach(null, true, since, reportAt), reportAt);
+  // A retained row's own instant may precede the read (a decision row inside the day before the window, kept for the decision it settles); the reach never precedes the read.
+  assert.equal(ledgerReach('2026-09-11T01:10:49.000Z', true, since, reportAt), since);
+  assert.equal(ledgerReach('2026-09-10T02:00:00.000Z', true, since, reportAt), since);
   // Read at the truncated reach, the row's reading begins there and claims nothing earlier: the instances before it are not the record's, and the reading says where it reads from.
   const truncatedReach = '2026-10-08T00:00:00.000Z';
   const truncatedRow = buildRow(report(fleet, reportAt, { reach: truncatedReach }))!;
