@@ -39,6 +39,8 @@ import { type OrphanSupervisor, stopWatchSupervisor } from './sessions.js';
 import { neededDecision, type ExhaustedProof, type RoutineDecisionAction } from './decisions.js';
 import { decisionEventKinds } from './decision-reads.js';
 import type { FaultClassPolicy, FaultKind, faultClassItem } from '../model/fault-classes.js';
+import { derivePlannedFiles, plannedFilesRefusal } from '../model/planned-files.js';
+import { baseTree } from '../cli/planned-files-intent.js';
 import { onceAnnotations, timingFaultAttention, type ReportedAttention } from './faults.js';
 import { type BaseFailureEffects, baseFailureEffects } from './base-failure-effects.js';
 import type { daemonSummary } from './run.js';
@@ -769,7 +771,22 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     get acceptance() { const config = current(); return config.operatorAgent && config.approver ? acceptanceEffects(config, root, { run, fetcher, asCoordinator, asOperatorAgent, merger: recordedMerger,
       writer: mergeWriterReads(config, root, run, { base: worktreeRoot(root, config), record: (work, event) => mutate(`work/${work.id}/merge-record`, event, mergeRecordKey(work, event)), merger: recordedMerger }) }) : undefined; },
     get planner() { const config = current(); return config.operatorAgent && config.approver ? plannerEffects(config, root, { fetcher, asCoordinator, asOperatorAgent }) : undefined; },
-    get fileFaultClass() { return current().operatorAgent ? (input: LoopFiledItem, key: string) => asOperatorAgent('POST', 'work', input, key) as Promise<Work> : undefined; },
+    // GY-1706: a fault-class filing runs the same authoring derivation master create runs, so its
+    // manual:fault-class-* proof plans its test file (and companions) instead of an empty plannedFiles.
+    // Docs-trim, flake and advisory chores already set their own plannedFiles and are left alone.
+    get fileFaultClass() {
+      return current().operatorAgent ? async (input: LoopFiledItem, key: string) => {
+        const filing = input as LoopFiledItem & { plannedFiles?: readonly string[] };
+        if (!filing.origin?.faultClass) return asOperatorAgent('POST', 'work', input, key) as Promise<Work>;
+        const tree = await baseTree(root, current().baseBranch);
+        const derived = derivePlannedFiles(
+          { plannedFiles: filing.plannedFiles ?? [], criteria: filing.criteria, origin: filing.origin, description: filing.description },
+          tree.files,
+        );
+        if (derived.missing.length) throw new Error(plannedFilesRefusal(derived.missing, tree.ref, derived.misnamed));
+        return asOperatorAgent('POST', 'work', { ...filing, plannedFiles: derived.plannedFiles }, key) as Promise<Work>;
+      } : undefined;
+    },
     get unblock() { return current().operatorAgent ? (work: Work, reason: string) => asOperatorAgent('POST', `work/${work.id}/unblock`, { reason, expectedRevision: work.revision }) as Promise<Work> : undefined; },
     get doctor() { const config = current(); return config.operatorAgent && doctorSettings(config.run).enabled ? doctorEffects(config, root, asOperatorAgent) : undefined; },
     controlPlaneClock: () => readControlPlaneClock(current().url, { fetcher }),
