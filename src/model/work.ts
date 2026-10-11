@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import type { BaseRefresh, BaseRefreshRequest, LandingCheck, MergeRefusal, RevertedDelivery } from '../merge-queue.js';
-import { criterionSchema, policySchema, resourcesSchema, type Criterion, type Lane } from './policy.js';
+import { criteriaSchema, policySchema, resourcesSchema, type Criterion, type Lane } from './policy.js';
 import type { Evidence } from './evidence.js';
 import type { AgentReview, ReviewFailover, ReviewRequest } from './review.js';
 import type { Delivery, ReleaseDelivery } from './delivery.js';
@@ -31,13 +31,13 @@ export const escalationTriggers = ['lease-loss', 'evidence-policy-conflict', 'se
 export type EscalationTrigger = typeof escalationTriggers[number];
 /** The shipped setting: every new item is system-driven unless its intent says `"systemDriven": false`. */
 export const systemDrivenDefault = true;
-export { declaredPostDeploy, liveObservationPhrase, postDeployCriterionRefusal, postDeployProof, postDeployProofPrefix, postDeployProofs } from './post-merge-proofs.js';
+export { declaredPostDeploy, liveObservationPhrase, postDeployCriterionRefusal, postDeployOnlyRefusal, postDeployProof, postDeployProofPrefix, postDeployProofs } from './post-merge-proofs.js';
 export const createSchema = z.object({
   title: z.string().min(1).max(200), description: z.string().max(20000).default(''),
   type: z.enum(['feature', 'bug', 'chore']).default('feature'),
   priority: z.number().int().min(0).max(4).default(2),
   dependencies: z.array(z.string().uuid()).max(50).default([]),
-  criteria: z.array(criterionSchema).min(1).max(50),
+  criteria: criteriaSchema(50),
   policy: policySchema.default({ checks: ['test', 'typecheck'], review: true }),
   plannedFiles: z.array(z.string().min(1).max(500)).max(plannedFilesMax).default([]),
   exclusiveResources: resourcesSchema.optional(),

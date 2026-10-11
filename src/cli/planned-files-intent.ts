@@ -3,7 +3,7 @@ import { wholeDocument } from '../model/work-summary.js';
 import { randomUUID } from 'node:crypto';
 import { defaultChildRun, type ChildRun } from '../child-runner.js';
 import { decisionInput, type MasterConfig } from '../master.js';
-import { derivePlannedFiles, plannedFilesRefusal, postDeployCriterionRefusal, type Work } from '../model/work.js';
+import { derivePlannedFiles, plannedFilesRefusal, postDeployCriterionRefusal, postDeployOnlyRefusal, type Work } from '../model/work.js';
 import { askedScopes } from '../model/scope-collapse.js';
 
 /**
@@ -40,8 +40,9 @@ export async function derivedIntent(root: string, config: Pick<MasterConfig, 'ba
   const work = listed && await wholeDocument(listed, deps.coordinator);
   if (id === 'requirements' && !work) throw new Error(`Unknown work item ${args[0]}`);
   const intent = work ? decisionInput('requirements', work, input) : input;
-  // GY-1660: an undeclared live-install observation is refused at a requirements revision as at create, before anything is read or posted.
-  const postDeploy = postDeployCriterionRefusal(intent.criteria ?? []);
+  // GY-1660: an undeclared live-install observation is refused at a requirements revision as at create, before anything is read or posted;
+  // so is an item of nothing but declared verifications (GY-1685).
+  const postDeploy = postDeployCriterionRefusal(intent.criteria ?? []) ?? postDeployOnlyRefusal(intent.criteria ?? []);
   if (postDeploy) throw new Error(postDeploy);
   const tree = await (deps.tree ?? baseTree)(root, config.baseBranch);
   // A new file the item's open scope ask names, or a directory the ask's fold produces, is the worker's to create (GY-1676): planned without a criterion rewrite.

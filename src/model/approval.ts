@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { demand } from './refusal.js';
 import { proofSchema } from './proof.js';
-import { criterionSchema, resourcesSchema } from './policy.js';
+import { criteriaSchema, resourcesSchema } from './policy.js';
 import { implementerIdentities, proofExerciseSchema } from './evidence.js';
 import { standingEscalations } from './escalation.js';
 import { closureKinds } from './closure.js';
@@ -52,7 +52,7 @@ export const decisionInputs = {
   // still raise the requirement-weakening escalation the engine records for any narrowing.
   // `answers` binds a widening to the worker scope request it answers (GY-176): the engine applies
   // it only while that request is open and its attempt holds the lease, in the same transaction.
-  requirements: z.object({ expectedPolicyRevision: revision, criteria: z.array(criterionSchema).min(1).max(50), dependencies: z.array(z.string().uuid()).max(50), plannedFiles: createSchema.shape.plannedFiles, exclusiveResources: resourcesSchema, producerProofs: createSchema.shape.producerProofs,
+  requirements: z.object({ expectedPolicyRevision: revision, criteria: criteriaSchema(50), dependencies: z.array(z.string().uuid()).max(50), plannedFiles: createSchema.shape.plannedFiles, exclusiveResources: resourcesSchema, producerProofs: createSchema.shape.producerProofs,
     answers: z.object({ epoch: revision, at: z.iso.datetime(), sha: sha.nullable().optional() }).strict().optional() }).strict(),
   resolve: z.object({ trigger: z.enum(escalationTriggers), expectedRevision: revision }).strict(),
   attest: z.object({ proof: proofSchema.refine(proof => proof.startsWith('manual:'), 'Only manual: proofs are attested; automated proofs come from producers'), sha, baseSha: sha, policyRevision: revision, result: z.enum(['pass', 'fail']), executed: z.number().int().min(0), skipped: z.number().int().min(0), url: z.url().max(2000).optional(), exercise: proofExerciseSchema.optional() }).strict(),

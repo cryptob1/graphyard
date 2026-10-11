@@ -518,6 +518,7 @@
     "tests/manual-proof-scoring.test.ts": 504,
     "tests/master-agent-envs.test.ts": 2965,
     "tests/master-autonomy.test.ts": 3884,
+    "tests/master-browser-capture.test.ts": 1000,
     "tests/master-browser.test.ts": 14502,
     "tests/master-config-retired-keys.test.ts": 525,
     "tests/master-daemon.test.ts": 1912,
