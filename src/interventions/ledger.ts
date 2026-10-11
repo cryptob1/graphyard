@@ -56,8 +56,21 @@ const workOf = (document: Record<string, any> | null): InterventionLedgerRow['wo
  * whole or as a delta. A delta is only ever written on the item's newest whole row and only when
  * the stage is unchanged (`appendSave`, under the coordination lock every ledger write takes), so
  * that stage is the stage of the item's newest earlier whole row — read from the timeline.
+ *
+ * `retainedFrom` is where the record the rows hold is whole (GY-1682): the insertion instant of the
+ * oldest row the read retained, whatever its kind — the oldest of the `limit` newest rows, or of
+ * the window when nothing was cut from it. Every row inserted from it on is among `rows`; the rows
+ * the read adds beside the window — the requests of decisions the window settles
+ * (`withDecisionsBeyondReach`) — precede it and are not it, nor are the pre-window decision rows
+ * the window drops (`windowOutcomes`). A retained decision row written inside the window is as
+ * much the window's as any other, so the kind of a row never decides it. The instant is the
+ * insertion's, never a retained row's own earlier `updatedAt`: the rows the cut omitted were
+ * inserted before the cutoff, so an earlier instant would hold omitted rows and the record would
+ * not be whole from it. When the newest omitted row shares the cutoff's instant — rows one
+ * transaction wrote together, cut between — the reach steps to the first retained row inserted
+ * after that instant, or `null` when none is. `null` also when the read retained no row at all.
  */
-export async function readInterventionLedger(db: Db, options: { limit?: number; workId?: string | null; since?: string | null } = {}): Promise<{ rows: InterventionLedgerRow[]; truncated: boolean }> {
+export async function readInterventionLedger(db: Db, options: { limit?: number; workId?: string | null; since?: string | null } = {}): Promise<{ rows: InterventionLedgerRow[]; truncated: boolean; retainedFrom: string | null }> {
   const limit = options.limit ?? interventionLedgerLimit;
   const columns = `seq, work_id, actor, kind, created_at, payload->'details' AS details,
       CASE WHEN kind LIKE 'decision.%' OR kind IN ('intervention.recorded','judgement.recorded') THEN payload ELSE NULL END AS top,
@@ -77,6 +90,15 @@ export async function readInterventionLedger(db: Db, options: { limit?: number; 
     : await db.query(`SELECT ${columns} FROM events WHERE kind = ANY($1) AND ($3::uuid IS NULL OR work_id=$3) ORDER BY seq DESC LIMIT $2`, [[...interventionLedgerKinds], limit + 1, options.workId ?? null]);
   const truncated = result.rows.length > limit;
   let window = result.rows.slice(0, limit).reverse();
+  // The oldest row the read retained, before the window drops or adds any row: the record is whole
+  // from its insertion instant on, unless the newest row the cut omitted was inserted in that same
+  // instant — then from the first retained row inserted after it.
+  const inserted = (row: { created_at: string | Date }) => new Date(row.created_at).toISOString();
+  let retainedFrom = window[0] ? inserted(window[0]) : null;
+  if (retainedFrom !== null && truncated && inserted(result.rows[limit]) >= retainedFrom) {
+    const shared = retainedFrom, next = window.find(row => inserted(row) > shared);
+    retainedFrom = next ? inserted(next) : null;
+  }
   if (options.since) window = await withDecisionsBeyondReach(db, windowOutcomes(window, options.since), columns);
 
   // The full snapshots the window's deltas extend, once each.
@@ -131,5 +153,5 @@ export async function readInterventionLedger(db: Db, options: { limit?: number; 
     return { seq, workId: row.work_id, actor: row.actor, kind: row.kind, at: instant(updatedAt, new Date(row.created_at).toISOString()), details: row.details, payload: row.top ?? undefined,
       work: row.whole || document ? workOf(document) : null, stageBefore, ...(row.kind === 'rework' ? { grounds: grounds as ReworkGroundsWork | null } : {}) };
   });
-  return { rows, truncated };
+  return { rows, truncated, retainedFrom };
 }
