@@ -190,39 +190,35 @@ export function runTimeoutLimit(events: readonly LimitRunEvent[], detail: string
   for (const text of texts) { const signal = providerLimit(text, now); if (signal) return signal; }
   return null;
 }
-/** All-timeout round with any readable limit (last reason, earliest reset for round retry). */
-export function headlessTimeoutLimit(
-  attempts: readonly { result: string; detail: string; events?: readonly LimitRunEvent[] | readonly { kind: string; error?: string | null; text?: string }[] }[],
-  now: number,
-): ExhaustionSignal | null {
-  const started = attempts.filter(attempt => attempt.result !== 'spawn' && attempt.result !== 'cancelled');
-  if (!started.length || !started.every(attempt => attempt.result === 'timeout')) return null;
-  const signals = started.map(attempt => runTimeoutLimit(attempt.events ?? [], attempt.detail, now)).filter((entry): entry is ExhaustionSignal => !!entry);
-  if (!signals.length) return null;
-  return { reason: signals.at(-1)!.reason, resetsAt: signals.map(e => e.resetsAt).filter((at): at is string => !!at).sort()[0] ?? null };
-}
 /**
- * GY-1705. Round wait uses the last readable reason and earliest reset; every named account whose
- * own attempt printed a limit is held with that attempt's own signal. A later null-account Pi
- * fallback must not clear a registry primary that reported its own limit.
+ * GY-1705: last reason + earliest reset for the round wait; hold every named account whose own
+ * attempt printed a limit (a later null-account Pi fallback must not clear a registry primary).
  */
 export function headlessTimeoutLimitCharge(
   attempts: readonly { result: string; detail: string; events?: readonly LimitRunEvent[] | readonly { kind: string; error?: string | null; text?: string }[]; account?: string | null }[],
   now: number,
 ): { limit: ExhaustionSignal; account: string | null; holds: { account: string; limit: ExhaustionSignal }[] } | null {
-  const started = attempts.filter(attempt => attempt.result !== 'spawn' && attempt.result !== 'cancelled');
-  if (!started.length || !started.every(attempt => attempt.result === 'timeout')) return null;
-  const holds: { account: string; limit: ExhaustionSignal }[] = [];
-  const signals: ExhaustionSignal[] = [];
-  for (const attempt of started) {
-    const signal = runTimeoutLimit(attempt.events ?? [], attempt.detail, now);
+  const started = attempts.filter(a => a.result !== 'spawn' && a.result !== 'cancelled');
+  if (!started.length || !started.every(a => a.result === 'timeout')) return null;
+  const holds: { account: string; limit: ExhaustionSignal }[] = [], signals: ExhaustionSignal[] = [];
+  for (const a of started) {
+    const signal = runTimeoutLimit(a.events ?? [], a.detail, now);
     if (!signal) continue;
     signals.push(signal);
-    if (attempt.account) holds.push({ account: attempt.account, limit: signal });
+    if (a.account) holds.push({ account: a.account, limit: signal });
   }
   if (!signals.length) return null;
-  const limit = { reason: signals.at(-1)!.reason, resetsAt: signals.map(entry => entry.resetsAt).filter((at): at is string => !!at).sort()[0] ?? null };
-  return { limit, account: holds.at(-1)?.account ?? null, holds };
+  return {
+    limit: { reason: signals.at(-1)!.reason, resetsAt: signals.map(e => e.resetsAt).filter((at): at is string => !!at).sort()[0] ?? null },
+    account: holds.at(-1)?.account ?? null, holds,
+  };
+}
+/** All-timeout round with any readable limit (delegates to the charge helper). */
+export function headlessTimeoutLimit(
+  attempts: readonly { result: string; detail: string; events?: readonly LimitRunEvent[] | readonly { kind: string; error?: string | null; text?: string }[] }[],
+  now: number,
+): ExhaustionSignal | null {
+  return headlessTimeoutLimitCharge(attempts, now)?.limit ?? null;
 }
 export const doctorLimitUntilMarker = 'provider limit until ';
 export function doctorLimitRetryAt(runs: readonly { state: string; detail: string }[], clock: number): string | null {
