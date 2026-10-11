@@ -63,6 +63,8 @@ test('unit:soak-invariants-hold — over a simulated day the real fileFaultClass
   const root = await temporaryDirectory('soak-fault-filing');
   const secrets = await temporaryDirectory('soak-fault-filing-secrets');
   execFileSync('git', ['init', '-q', '-b', 'main', root]);
+  for (const [key, value] of [['user.email', 'soak-fault@example.invalid'], ['user.name', 'Soak Fault'], ['commit.gpgsign', 'false']] as const)
+    execFileSync('git', ['config', key, value], { cwd: root });
   await seedTree(root, [
     proof('scope'), proof('decision'), proof('review-convergence'), ...companions,
   ]);
