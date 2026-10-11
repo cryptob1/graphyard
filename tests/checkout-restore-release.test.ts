@@ -404,7 +404,7 @@ test('unit:serve-uses-verified-release — the sanctioned releases are the deplo
   const command = (directory: string) => ({ command: 'node', args: [join(directory, 'bin', 'graphyard.mjs')] });
   const act = releasePinnedRestore({ release: () => inputs, run: entry(JSON.stringify({ restored: null, head: loaded })), command, grant, env: { PATH: '/usr/bin' }, now: () => clock });
   const outcome = await act(root, 'the loop refuses its checkout (requested by graphyard-doctor)', at, request);
-  assert.deepEqual(outcome, { restored: null, head: loaded, served: `served from the verified serving release ${served.slice(0, 12)}, a detached shared-clone snapshot of it` });
+  assert.deepEqual(outcome, { restored: null, head: loaded, served: `served from the verified serving release ${served.slice(0, 12)}, a detached shared-clone snapshot of it`, release: served });
   assert.equal(runs.length, 1);
   assert.equal(runs[0].command, 'node');
   assert.deepEqual(runs[0].args.slice(1), ['master', 'checkout-restore', checkoutRestoreServeFlag], 'no root or reason on the command line');
@@ -765,15 +765,16 @@ test('integration:checkout-restore-stale-loop-handoff — a checkout-restore fil
 
   // The cursor: the stale loop (pid 100) holds the lock and recorded loading `before`. The command judges that loop stale;
   // one that loaded the release, or recorded no lock, is not handed off; one that recorded no loaded commit is.
-  const stale = { lock: { id: 'lock', pid: 100, host: 'machine-a' }, release: { commit: before, dirty: false } };
+  // HEAD is at `release` (headServes), so a restart onto HEAD can serve — the standing moved-HEAD case.
+  const stale = { lock: { id: 'lock', pid: 100, host: 'machine-a' }, release: { commit: before, dirty: false }, deployment: { source: 'endpoint', sha: release, at: new Date().toISOString(), reason: null, deployed: [], pending: [] } };
   writeFileSync(cursor, JSON.stringify(stale));
   assert.deepEqual(await lockedLoop(cursor), { pid: 100, loaded: before });
-  assert.deepEqual(await staleServingLoop(cursor, root), { pid: 100, loaded: before });
-  assert.deepEqual(await staleServingLoop(cursor, null), { pid: 100, loaded: before }, 'a loop whose loaded code cannot be judged against a checkout is not known to serve from the release');
+  assert.deepEqual(await staleServingLoop(cursor, root), { pid: 100, loaded: before, head: release, headServes: true });
+  assert.deepEqual(await staleServingLoop(cursor, null), { pid: 100, loaded: before, head: null, headServes: false }, 'a loop whose loaded code cannot be judged against a checkout is not known to serve from the release');
   writeFileSync(cursor, JSON.stringify({ ...stale, release: { commit: release, dirty: false } }));
   assert.equal(await staleServingLoop(cursor, root), null, 'a loop that loaded the serving release serves from it');
   writeFileSync(cursor, JSON.stringify({ ...stale, release: null }));
-  assert.deepEqual(await staleServingLoop(cursor, root), { pid: 100, loaded: null }, 'a loop that recorded no loaded commit is not known to serve from the release');
+  assert.deepEqual(await staleServingLoop(cursor, root), { pid: 100, loaded: null, head: release, headServes: true }, 'a loop that recorded no loaded commit is not known to serve from the release');
   writeFileSync(cursor, JSON.stringify({ lock: null, release: { commit: before, dirty: false } }));
   assert.equal(await staleServingLoop(cursor, root), null, 'no loop holds the lock: nothing to hand off');
   assert.equal(await staleServingLoop(join(base, 'no-cursor.json'), root), null);
@@ -853,4 +854,78 @@ test('integration:checkout-restore-stale-loop-handoff — a checkout-restore fil
   const standing = await readCheckoutRestoreRequest(file);
   assert.equal(standing?.id, failed.request); assert.equal(standing?.outcome, null, 'the request stands unanswered');
   assert.deepEqual(standing?.handoff, { loaded: before, restart: failed.handoff!.restart });
+});
+
+test('integration:checkout-restore-stale-loop-old-head-handoff — a dirty checkout whose HEAD still predates the serve entry is handed off end to end: the command serves from the verified serving release\'s snapshot under a handoff grant (the stale loop still holds the cursor), advances the checkout onto that release, and files a loop-restart the stale loop serves so the unit loads it — a restart onto the old HEAD alone would leave the request unread', { timeout: 120_000 }, async () => {
+  const base = await fixtureDirectory('checkout-restore-stale-loop-old-head');
+  const root = join(base, 'coordinator');
+  const git = (...args: string[]) => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+  mkdirSync(join(root, 'src', 'cli'), { recursive: true }); mkdirSync(join(root, 'bin'), { recursive: true });
+  writeFileSync(join(root, 'src', 'loop.ts'), 'export const loop = 1;\n');
+  writeFileSync(join(root, 'bin', 'graphyard.mjs'), loadedEntry);
+  writeFileSync(join(root, '.gitignore'), '.graphyard/\nnode_modules/\n');
+  execFileSync('git', ['init', '-q', '-b', 'main', root]);
+  git('add', '-A'); git('-c', 'user.name=x', '-c', 'user.email=x@x', 'commit', '-q', '-m', 'before the serve path');
+  const before = git('rev-parse', 'HEAD');
+  writeFileSync(join(root, 'bin', 'graphyard.mjs'), releaseEntry);
+  writeFileSync(join(root, 'src', 'cli', 'checkout-restore-release.ts'), serveMarker);
+  git('add', '-A'); git('-c', 'user.name=x', '-c', 'user.email=x@x', 'commit', '-q', '-m', 'the serving release');
+  const release = git('rev-parse', 'HEAD');
+  // HEAD stays at `before`: the dirty old-HEAD installation the review names.
+  git('checkout', '-q', '--detach', before);
+  const proc = join(base, 'proc'), record = join(base, 'serve-record.json');
+  const checkout = realpathSync(root), elsewhere = realpathSync(base);
+  processEntry(proc, 1, { cwd: '/' });
+  processEntry(proc, 100, { cwd: elsewhere });
+  processEntry(proc, 500, { cwd: checkout });
+  processEntry(proc, 1372, { cwd: checkout });
+  const { config, credentialFile, cursor, file, grantFile } = installation(root, join(base, 'state'));
+  const restartFile = loopRestartRequestPath(config);
+  const env = { GRAPHYARD_TEST_FAKE_PROC: proc, GRAPHYARD_TEST_SERVE_RECORD: record, GRAPHYARD_TEST_DENY_PATHS: join(proc, '1372', 'cwd') };
+  assert.equal(await commitServes(root, before), false); assert.equal(await commitServes(root, release), true);
+  const stale = { lock: { id: 'lock', pid: 100, host: 'machine-a' }, release: { commit: before, dirty: false }, deployment: { source: 'endpoint', sha: release } };
+  writeFileSync(cursor, JSON.stringify(stale));
+  assert.deepEqual(await staleServingLoop(cursor, root), { pid: 100, loaded: before, head: before, headServes: false });
+  writeFileSync(join(root, 'src', 'loop.ts'), 'export const loop = 2; // hotfix\n');
+  writeFileSync(join(root, 'scratchpad.mjs'), '// scratch\n');
+  const baseLog: string[] = []; let unitRestarts = 0;
+  const restoreEnv = withEnv(env);
+  let result: Awaited<ReturnType<typeof checkoutRestoreCommand>>;
+  try {
+    const command = checkoutRestoreCommand(config, ['escalation:dirty-checkout', 'old-HEAD'], 'graphyard-doctor', {
+      waitMs: 60_000, pollMs: 20,
+      release: () => ({ deployment: { source: 'endpoint', sha: release }, baseBranch: 'main' }),
+    });
+    while (!existsSync(restartFile)) await delay(10);
+    // The command has already restored and advanced HEAD onto the release; the stale loop only serves the restart.
+    assert.equal(git('rev-parse', 'HEAD'), release, 'the command advanced the checkout onto the serving release before filing the restart');
+    assert.equal(git('status', '--porcelain', '--untracked-files=all'), '', 'the checkout is clean at the serving release');
+    await baseLoopPass(config, 100, async () => {
+      unitRestarts++;
+      writeFileSync(cursor, JSON.stringify({ lock: { id: 'lock-2', pid: process.pid, host: 'machine-a' }, release: { commit: release, dirty: false } }));
+    }, baseLog);
+    result = await command;
+  } finally { restoreEnv(); }
+  assert.deepEqual(baseLog, ['checkout-restore request left standing: unreadable to this release', `loop-restart ${result!.handoff!.restart} requested by pid 100`]);
+  assert.equal(unitRestarts, 1);
+  assert.equal(result!.state, 'restored', result!.detail);
+  assert.equal(result!.handoff!.pid, 100); assert.equal(result!.handoff!.loaded, before);
+  assert.match(result!.handoff!.detail, new RegExp(`HEAD ${before.slice(0, 12)} predates the serve entry`));
+  assert.match(result!.detail!, new RegExp(`2 dirty path\\(s\\) saved under refs/graphyard/checkout-restore/.*onto the verified serving release.*served from the verified serving release ${release.slice(0, 12)}.*HEAD ${before.slice(0, 12)} predating the serve entry`));
+  const stored = await readCheckoutRestoreRequest(file);
+  assert.equal(stored?.outcome?.state, 'restored');
+  assert.deepEqual(stored?.handoff, { loaded: before, restart: result!.handoff!.restart });
+  const served = serveRecord(record);
+  assert.equal(served.snapshotHead, release); assert.equal(served.grant.consumed, true);
+  assert.deepEqual(served.grant.content!.handoff, { head: before }, 'the grant names the old HEAD');
+  assert.deepEqual(served.grant.content!.loop, { pid: process.pid }, 'the command issued the grant, not the stale loop');
+  assert.deepEqual(served.sent, ['SIGSTOP:500', 'SIGCONT:500']);
+  assert.equal(git('rev-parse', 'HEAD'), release);
+  assert.equal(git('show', `${stored!.outcome!.ref}:src/loop.ts`), 'export const loop = 2; // hotfix');
+  assert.ok(!readFileSync(record, 'utf8').includes('own tree served'), 'the checkout\'s own entry never ran');
+  // A forged handoff grant is refused once HEAD already holds the serve entry (or no longer matches the named head).
+  const forged = checkoutRestoreGrantPath(config);
+  const payload = { kind: checkoutRestoreGrantKind, root, reason: 'forge', request: { id: 'x' }, loop: { pid: process.pid }, handoff: { head: before }, issuedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 60_000).toISOString(), nonce: 'a'.repeat(32) } as const;
+  await atomicPrivateWrite(forged, { ...payload, signature: signCheckoutRestoreGrant(payload, credentialValue) });
+  await assert.rejects(serveCheckoutRestoreAct([], { env: { [checkoutRestoreGrantVariable]: forged }, ancestors: () => [process.pid] }), /already holds the serve entry|old-HEAD handoff does not apply|HEAD is/);
 });

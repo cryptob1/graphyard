@@ -44,7 +44,11 @@ import { type CheckoutQuiesce, type RestoreAct, type RestoreActOutcome, checkout
 // every release since GY-1658 parses requests strictly and leaves one with a field it does not know
 // standing, unread — and a loop-restart request beside it, the act every such loop serves, so the
 // running loop restarts through its unit onto the checkout's HEAD and the loop that loads it serves
-// the standing request from the serving release.
+// the standing request from the serving release. When that HEAD itself predates the serve entry
+// (GY-1680 review), a restart onto it still cannot read the handoff or execute the verified release:
+// the command — already holding this release's code — serves the request itself from a snapshot under
+// a grant that names the old HEAD (`handoff`), advances the checkout onto the release that served,
+// and only then files the restart so the unit loads that release.
 //
 // The act can outlast the supervisor's watchdog window (the shipped unit's is 180 s; a fetch, a
 // clone and a freeze-and-restore each wait on their own), so the loop's keep-alive is fed on an
@@ -136,17 +140,25 @@ export async function lockedLoop(cursor: string): Promise<{ pid: number; loaded:
     return { pid: parsed.lock.pid, loaded: typeof parsed.release?.commit === 'string' ? parsed.release.commit : null };
   } catch { return null; }
 }
+/** What staleServingLoop found: the lock holder, and whether the checkout's HEAD already holds the serve entry (a restart onto it can serve) or not (the command must serve first). */
+export interface StaleServingLoop { pid: number; loaded: string | null; head: string | null; headServes: boolean }
 /**
  * The loop a checkout-restore request filed now would be read by, when its loaded code would serve
  * the request itself instead of from the serving release (GY-1680 review): the lock holder whose
  * recorded loaded commit predates the serve entry, or records none, or cannot be judged against the
- * checkout. Null when no loop holds the lock, or the locked loop serves from the release.
+ * checkout. Null when no loop holds the lock, or the locked loop serves from the release. `head` /
+ * `headServes` say whether a restart onto the checkout's HEAD would load the serve entry — when it
+ * would not, the command serves from the verified release itself before asking for that restart.
  */
-export async function staleServingLoop(cursor: string, root: string | null, run: ChildRun = defaultChildRun): Promise<{ pid: number; loaded: string | null } | null> {
+export async function staleServingLoop(cursor: string, root: string | null, run: ChildRun = defaultChildRun): Promise<StaleServingLoop | null> {
   const loop = await lockedLoop(cursor);
   if (!loop) return null;
   if (loop.loaded && root && await commitServes(root, loop.loaded, run)) return null;
-  return loop;
+  let head: string | null = null;
+  if (root) {
+    try { head = String(await run('git', ['-C', root, 'rev-parse', 'HEAD'])).trim() || null; } catch { head = null; }
+  }
+  return { ...loop, head, headServes: !!(head && root && await commitServes(root, head, run)) };
 }
 
 const serveOutputSchema = z.object({
@@ -155,17 +167,23 @@ const serveOutputSchema = z.object({
 }).strict();
 export type ServeOutput = z.infer<typeof serveOutputSchema>;
 
-/** What the loop signs: the grant without its signature. */
+/** What the loop (or the command's old-HEAD handoff) signs: the grant without its signature. */
 const grantPayloadSchema = z.object({
   kind: z.literal(checkoutRestoreGrantKind),
   root: z.string().min(1), reason: z.string().min(1),
   /** The standing request the grant serves, by id; the request's file is the installation's own. */
   request: z.object({ id: z.string().min(1) }).strict(),
-  /** The issuing loop's pid: an ancestor of the entry's process, and the pid the installation's cursor lock names — one pid, never one for each check. */
+  /** The issuing process's pid: an ancestor of the entry's process; for a loop grant, also the pid the installation's cursor lock names — one pid, never one for each check. */
   loop: z.object({ pid: z.number().int().positive() }).strict(),
+  /**
+   * Present only for the command's old-HEAD handoff (GY-1680 review): the checkout's HEAD that
+   * predates the serve entry, so a restart onto it cannot serve and this command — not the lock
+   * holder — issues the grant. Absent on every loop-issued grant.
+   */
+  handoff: z.object({ head: z.string().min(1) }).strict().optional(),
   issuedAt: z.string(), expiresAt: z.string(), nonce: z.string().length(32),
 }).strict();
-/** The grant the loop writes beside its cursor for one serve, read back by the snapshot's CLI: the payload and its HMAC-SHA256 under the coordinator credential. */
+/** The grant the loop (or the command's old-HEAD handoff) writes beside its cursor for one serve, read back by the snapshot's CLI: the payload and its HMAC-SHA256 under the coordinator credential. */
 const grantSchema = grantPayloadSchema.extend({ signature: z.string().length(64).regex(/^[0-9a-f]+$/) }).strict();
 export type CheckoutRestoreGrantPayload = z.infer<typeof grantPayloadSchema>;
 export type CheckoutRestoreGrant = z.infer<typeof grantSchema>;
@@ -187,8 +205,14 @@ export function checkoutRestoreGrantSigned(grant: CheckoutRestoreGrant, credenti
 export interface ReleaseRestoreDeps {
   /** The loop's deployment observation and base branch, read when a request is served. */
   release: () => ServingReleaseInputs;
-  /** Where the loop writes the grant (beside its cursor, checkoutRestoreGrantPath), the coordinator credential it signs with, and the loop's own pid as its cursor lock names it. */
+  /** Where the loop (or the command's old-HEAD handoff) writes the grant (beside its cursor, checkoutRestoreGrantPath), the coordinator credential it signs with, and the issuing pid — the loop's cursor lock holder, or this command when `handoff` is set. */
   grant: { file: string; credentialFile: string; pid: number };
+  /**
+   * When set, this is the command's old-HEAD handoff (GY-1680 review): the grant carries `handoff`
+   * naming that HEAD, the cursor lock is not required (the stale loop still holds it), and the
+   * issuer pid is this command's. Absent for every loop-served request.
+   */
+  handoff?: { head: string };
   run?: ChildRun; quiesce?: CheckoutQuiesce;
   /** The snapshot's CLI entry and how it is started; defaults to `node SNAPSHOT/bin/graphyard.mjs`. */
   command?: (directory: string) => { command: string; args: string[] };
@@ -233,7 +257,7 @@ export function releasePinnedRestore(deps: ReleaseRestoreDeps): RestoreAct {
         const served = `served from ${named}, a detached shared-clone snapshot of it`;
         const entry = deps.command?.(snapshot.directory) ?? { command: process.execPath, args: [join(snapshot.directory, 'bin', 'graphyard.mjs')] };
         const issued = now();
-        const payload: CheckoutRestoreGrantPayload = { kind: checkoutRestoreGrantKind, root, reason, request: { id: request.id }, loop: { pid: deps.grant.pid }, issuedAt: new Date(issued).toISOString(), expiresAt: new Date(issued + checkoutRestoreGrantTtlMs).toISOString(), nonce: randomBytes(16).toString('hex') };
+        const payload: CheckoutRestoreGrantPayload = { kind: checkoutRestoreGrantKind, root, reason, request: { id: request.id }, loop: { pid: deps.grant.pid }, ...(deps.handoff ? { handoff: deps.handoff } : {}), issuedAt: new Date(issued).toISOString(), expiresAt: new Date(issued + checkoutRestoreGrantTtlMs).toISOString(), nonce: randomBytes(16).toString('hex') };
         const grant: CheckoutRestoreGrant = { ...payload, signature: signCheckoutRestoreGrant(payload, credential) };
         await atomicPrivateWrite(deps.grant.file, grant);
         let output = '', failure: unknown = null;
@@ -249,7 +273,7 @@ export function releasePinnedRestore(deps: ReleaseRestoreDeps): RestoreAct {
         let parsed: ServeOutput;
         try { parsed = serveOutputSchema.parse(JSON.parse(output)); }
         catch (error) { throw new Error(`${served}, whose outcome could not be read (${message(error).split('\n')[0]}): ${output.trim().slice(0, 500)}`); }
-        return { ...parsed, served };
+        return { ...parsed, served, release: release.commit };
       } finally { await snapshot.dispose(); }
     }
     throw new Error(`no sanctioned release can serve this request, and the loop's own loaded code is not run (GY-1680): ${reasons.join('; ')}. Once a release holding the serve entry is observed serving or reaches origin, file master checkout-restore REASON again`.slice(0, 4000));
@@ -303,7 +327,7 @@ export interface ServeEntryOptions {
   stop?: StopThawDeps;
   /** The environment the grant is read from; defaults to this process's. */
   env?: NodeJS.ProcessEnv;
-  /** The pids the issuing loop may be: this process and its ancestors, by default. */
+  /** The pids the issuing loop (or the command's old-HEAD handoff) may be: this process and its ancestors, by default. */
   ancestors?: () => number[];
   /** Reads the installation whose coordinator checkout is `root` (its .graphyard/master.json); defaults to loadStoredMasterConfig. */
   installation?: (root: string) => Promise<MasterConfig>;
@@ -312,14 +336,17 @@ export interface ServeEntryOptions {
  * The grant the environment names, verified against the installation it names and nothing a caller
  * chooses: the checkout it names holds an installation whose coordinator checkout is that checkout;
  * the grant lies where that installation's loop issues grants; its signature is the installation's
- * coordinator credential's; it has not expired; the one issuing loop pid it names is among this
- * process's ancestors and is the pid the installation's cursor lock names; and the installation's request file holds
- * the request it names, unanswered. Consumed — the file removed — once verified, so it serves exactly
- * once. Anything short of that, a cursor that cannot be read included, is a refusal naming what is
- * missing, before anything is touched.
+ * coordinator credential's; it has not expired; the one issuing pid it names is among this
+ * process's ancestors; for a loop grant, that pid is also the pid the installation's cursor lock
+ * names; for the command's old-HEAD handoff grant (`handoff`), the checkout's HEAD still matches the
+ * named pre-serve HEAD and still predates the serve entry, and the cursor lock is not required
+ * (the stale loop still holds it); and the installation's request file holds the request it names,
+ * unanswered. Consumed — the file removed — once verified, so it serves exactly once. Anything short
+ * of that, a cursor that cannot be read included (loop grants), is a refusal naming what is missing,
+ * before anything is touched.
  */
 export async function verifyCheckoutRestoreGrant(options: ServeEntryOptions = {}): Promise<{ grant: CheckoutRestoreGrant; config: MasterConfig }> {
-  const env = options.env ?? process.env;
+  const env = options.env ?? process.env, run = options.run ?? defaultChildRun;
   const file = env[checkoutRestoreGrantVariable];
   if (!file) throw new Error(checkoutRestoreServeUsage);
   let grant: CheckoutRestoreGrant;
@@ -335,7 +362,7 @@ export async function verifyCheckoutRestoreGrant(options: ServeEntryOptions = {}
   if (coordinator !== resolve(grant.root)) throw refuse(`the installation at ${grant.root} runs its loop from ${coordinator}, not from that checkout`);
   const issuedAt = checkoutRestoreGrantPath(config);
   if (resolve(file) !== issuedAt) throw refuse(`it lies at ${resolve(file)}, not where that installation's loop issues grants (${issuedAt})`);
-  // The authority: the installation's coordinator credential signed it, or no loop issued it.
+  // The authority: the installation's coordinator credential signed it, or no loop (or old-HEAD handoff) issued it.
   let credential: string;
   try { credential = await readCredentialFile(config.credentialFile); }
   catch (error) { throw refuse(`that installation's coordinator credential at ${config.credentialFile} cannot be read (${message(error).split('\n')[0]}), so its signature cannot be verified`); }
@@ -343,16 +370,27 @@ export async function verifyCheckoutRestoreGrant(options: ServeEntryOptions = {}
   const at = (options.now ?? new Date()).getTime();
   if (!(Date.parse(grant.expiresAt) > at)) throw refuse(`it expired at ${grant.expiresAt}`);
   const ancestors = options.ancestors?.() ?? [process.pid, ...ancestorPids()];
-  if (!ancestors.includes(grant.loop.pid)) throw refuse(`the loop that issued it, pid ${grant.loop.pid}, is not an ancestor of this process (${ancestors.join(' < ') || 'none readable'})`);
-  // The installation's cursor: the loop's daemon state, locked by the loop that serves — the one issuing pid the grant names,
-  // so a credential holder cannot name its own wrapper as the issuer beside the real lock (review of GY-1680). Unreadable or
-  // unlocked, no loop is known to serve, and the grant is refused.
-  const cursor = daemonStatePath(config);
-  let lock: number | null = null;
-  try { const parsed = JSON.parse(await readFile(cursor, 'utf8')) as { lock?: { pid?: unknown } | null }; lock = typeof parsed.lock?.pid === 'number' ? parsed.lock.pid : null; }
-  catch (error) { throw refuse(`that installation's cursor at ${cursor} cannot be read (${message(error).split('\n')[0]}), so no loop is known to serve it`); }
-  if (lock === null) throw refuse(`that installation's cursor at ${cursor} holds no lock, so no loop is known to serve it`);
-  if (lock !== grant.loop.pid) throw refuse(`that installation's cursor at ${cursor} is locked by pid ${lock}, not the loop that issued it, pid ${grant.loop.pid}`);
+  if (!ancestors.includes(grant.loop.pid)) throw refuse(`the ${grant.handoff ? 'command' : 'loop'} that issued it, pid ${grant.loop.pid}, is not an ancestor of this process (${ancestors.join(' < ') || 'none readable'})`);
+  if (grant.handoff) {
+    // Old-HEAD handoff: the stale loop still holds the cursor, so the lock is not the issuer; the
+    // checkout's HEAD must still be the named pre-serve commit, or a later move would let any
+    // credential holder forge a handoff against a HEAD that already serves.
+    let head: string;
+    try { head = String(await run('git', ['-C', grant.root, 'rev-parse', 'HEAD'])).trim(); }
+    catch (error) { throw refuse(`the checkout's HEAD cannot be read (${message(error).split('\n')[0]}), so the old-HEAD handoff cannot be verified`); }
+    if (head !== grant.handoff.head) throw refuse(`the checkout's HEAD is ${short(head)}, not ${short(grant.handoff.head)} the old-HEAD handoff names`);
+    if (await commitServes(grant.root, head, run)) throw refuse(`the checkout's HEAD ${short(head)} already holds the serve entry, so the old-HEAD handoff does not apply`);
+  } else {
+    // The installation's cursor: the loop's daemon state, locked by the loop that serves — the one issuing pid the grant names,
+    // so a credential holder cannot name its own wrapper as the issuer beside the real lock (review of GY-1680). Unreadable or
+    // unlocked, no loop is known to serve, and the grant is refused.
+    const cursor = daemonStatePath(config);
+    let lock: number | null = null;
+    try { const parsed = JSON.parse(await readFile(cursor, 'utf8')) as { lock?: { pid?: unknown } | null }; lock = typeof parsed.lock?.pid === 'number' ? parsed.lock.pid : null; }
+    catch (error) { throw refuse(`that installation's cursor at ${cursor} cannot be read (${message(error).split('\n')[0]}), so no loop is known to serve it`); }
+    if (lock === null) throw refuse(`that installation's cursor at ${cursor} holds no lock, so no loop is known to serve it`);
+    if (lock !== grant.loop.pid) throw refuse(`that installation's cursor at ${cursor} is locked by pid ${lock}, not the loop that issued it, pid ${grant.loop.pid}`);
+  }
   // The request: the installation's own, standing unanswered under the id the grant names.
   const requestFile = checkoutRestoreRequestPath(config);
   const request = await readCheckoutRestoreRequest(requestFile);

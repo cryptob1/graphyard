@@ -289,11 +289,13 @@ test('unit:unreadable-cwd-still-refuses-in-checkout — GY-1680 leaves the quies
     writeFileSync(join(root, 'scratchpad.mjs'), '// more scratch\n');
     processEntry(proc, 1380, { cwd: checkout }); threadEntry(proc, 1380, 1380, { cwd: checkout }); threadEntry(proc, 1380, 1381, { cwd: join(checkout, 'src') }); // live, its own read refused, a thread shows it inside: a writer
     processEntry(proc, 1390, { cwd: checkout }); threadEntry(proc, 1390, 1391, { cwd: elsewhere });      // live, its own read refused, a thread shows it outside: no writer, nothing skipped
+    // Review of GY-1680: every live thread is inspected — an earlier outside cwd must not hide a later inside one.
+    processEntry(proc, 1500, { cwd: checkout }); threadEntry(proc, 1500, 1501, { cwd: elsewhere }); threadEntry(proc, 1500, 1502, { cwd: join(checkout, 'src') });
     processEntry(proc, 1400, { cwd: checkout }); threadEntry(proc, 1400, 1401, { cwd: checkout });       // live, every read refused EACCES: skipped (GY-1672)
     processEntry(proc, 1410, { cwd: checkout }); threadEntry(proc, 1410, 1411, { cwd: null });           // live, its own read refused, its thread's fails another way: unverifiable
     processEntry(proc, 1420, { cwd: null });                                                             // live, then its state cannot be read: unverifiable
     processEntry(proc, 1430, { cwd: null });                                                             // gone with its state between the reads: nothing
-    const live = denyCwd(proc, [1372, 1380, 1390, 1400, 1410]);
+    const live = denyCwd(proc, [1372, 1380, 1390, 1400, 1410, 1500]);
     const link = fs.readlinkSync;
     fs.readlinkSync = ((path: string, ...rest: unknown[]) => {
       if (String(path) === join(proc, '1400', 'task', '1401', 'cwd')) throw Object.assign(new Error(`EACCES: permission denied, readlink '${String(path)}'`), { code: 'EACCES' });
@@ -304,7 +306,7 @@ test('unit:unreadable-cwd-still-refuses-in-checkout — GY-1680 leaves the quies
     syncBuiltinESMExports();
     try {
       const judged = writers.checkoutProcessScan(root, 100, proc, uid);
-      assert.deepEqual(judged.writers, [500, 1380], 'a live leader whose thread shows it inside the checkout is a writer, its own read refused or not');
+      assert.deepEqual(judged.writers, [500, 1380, 1500], 'a live leader whose thread shows it inside the checkout is a writer, its own read refused or not — including when an earlier readable thread lies outside');
       assert.deepEqual(judged.skipped.map(entry => entry.pid), [1372, 1400], 'skipped only when every read, the leader\'s and its live threads\', was refused EACCES');
       assert.deepEqual(judged.unverifiable.map(entry => entry.pid), [1410, 1420], 'a thread read failing another way, or a state that cannot be read, is unverifiable');
       assert.match(judged.unverifiable[0].error, /^EACCES.*live thread 1411's cwd cannot be read either \(EINVAL/);
@@ -320,15 +322,15 @@ test('unit:unreadable-cwd-still-refuses-in-checkout — GY-1680 leaves the quies
       rmSync(join(proc, '1410'), { recursive: true, force: true }); rmSync(join(proc, '1420'), { recursive: true, force: true });
       sent.length = 0;
       await assert.rejects(restoreCoordinatorCheckout(root, 'restore', undefined, new Date(), freeze([1380])), /writer\(s\) 1380 did not stop within 20ms of SIGSTOP, so nothing was restored/);
-      assert.deepEqual((sent as string[]).filter(entry => entry.startsWith('SIGSTOP')).sort(), ['SIGSTOP:1380', 'SIGSTOP:500']);
-      assert.deepEqual((sent as string[]).filter(entry => entry.startsWith('SIGCONT')).sort(), ['SIGCONT:1380', 'SIGCONT:500']);
+      assert.deepEqual((sent as string[]).filter(entry => entry.startsWith('SIGSTOP')).sort(), ['SIGSTOP:1380', 'SIGSTOP:1500', 'SIGSTOP:500']);
+      assert.deepEqual((sent as string[]).filter(entry => entry.startsWith('SIGCONT')).sort(), ['SIGCONT:1380', 'SIGCONT:1500', 'SIGCONT:500']);
       assert.equal(git('for-each-ref', '--format=%(refname)', checkoutRestoreRefPrefix), saved, 'no ref was written');
-      // Judgeable, the restore proceeds: the thread-identified writer is stopped and continued like any other, the daemons skipped.
+      // Judgeable, the restore proceeds: the thread-identified writers are stopped and continued like any other, the daemons skipped.
       sent.length = 0;
       const judgedRestore = await restoreCoordinatorCheckout(root, 'restore', undefined, new Date(), freeze([]));
       assert.deepEqual(judgedRestore?.paths.sort(), ['scratchpad.mjs', 'src/loop.ts']);
       assert.deepEqual(judgedRestore?.skipped.map(entry => entry.pid), [1372, 1400]);
-      assert.deepEqual(sent, ['SIGSTOP:500', 'SIGSTOP:1380', 'SIGCONT:500', 'SIGCONT:1380']);
+      assert.deepEqual(sent, ['SIGSTOP:500', 'SIGSTOP:1380', 'SIGSTOP:1500', 'SIGCONT:500', 'SIGCONT:1380', 'SIGCONT:1500']);
     } finally { fs.readlinkSync = link; syncBuiltinESMExports(); live(); }
   } finally { restore(); }
 });

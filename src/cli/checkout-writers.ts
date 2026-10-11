@@ -55,6 +55,7 @@ export function checkoutProcessScan(root: string, self = process.pid, proc = '/p
   try { base = realpathSync(resolve(root)); }
   catch (error) { throw new Error(`the checkout's canonical path cannot be read (${error instanceof Error ? error.message : String(error)}), so its writers cannot be found and nothing was restored`); }
   const managed = `${base}${sep}.graphyard`;
+  const working = (cwd: string | null) => !!cwd && (cwd === base || cwd.startsWith(`${base}${sep}`)) && cwd !== managed && !cwd.startsWith(`${managed}${sep}`);
   const table = new Map<number, { ppid: number; cwd: string | null; error: string | null; denied: boolean }>();
   let entries: string[];
   try { entries = readdirSync(proc).filter(name => /^\d+$/.test(name)); }
@@ -81,7 +82,7 @@ export function checkoutProcessScan(root: string, self = process.pid, proc = '/p
             const fields = now.slice(now.lastIndexOf(')') + 2).split(' ');
             const state = fields[0] ?? null, flags = Number(fields[6]);
             const kernelThread = Number.isFinite(flags) && (flags & PF_KTHREAD) !== 0;
-            if (!kernelThread) ({ cwd, error, denied } = judgeByThreads(proc, name, failure, state === 'Z' || state === 'X'));
+            if (!kernelThread) ({ cwd, error, denied } = judgeByThreads(proc, name, failure, state === 'Z' || state === 'X', working));
           }
         }
       }
@@ -90,7 +91,6 @@ export function checkoutProcessScan(root: string, self = process.pid, proc = '/p
   }
   const spared = new Set<number>();
   for (let pid = self; pid > 1 && !spared.has(pid); pid = table.get(pid)?.ppid ?? 0) spared.add(pid);
-  const working = (cwd: string | null) => !!cwd && (cwd === base || cwd.startsWith(`${base}${sep}`)) && cwd !== managed && !cwd.startsWith(`${managed}${sep}`);
   const unmanaged = (cwd: string | null) => !cwd || (cwd !== managed && !cwd.startsWith(`${managed}${sep}`));
   const writers = new Set([...table].filter(([pid, entry]) => !spared.has(pid) && working(entry.cwd)).map(([pid]) => pid));
   for (let grown = true; grown;) {
@@ -104,16 +104,17 @@ export function checkoutProcessScan(root: string, self = process.pid, proc = '/p
 }
 /**
  * A process of this user whose own cwd read failed (`failure`), judged by its live sibling threads at
- * /proc/PID/task/TID: the first live thread whose cwd reads gives the process its cwd — a zombie
- * thread-group leader whose main thread called pthread_exit still writes through such a thread
- * (GY-1663), and a live leader whose own link is refused may still show one (GY-1680 review) — so one
- * inside the checkout is a writer, never skipped. No live thread: a zombie leader (`leaderGone`) is gone,
- * a live one stands on its own read — skipped when that was refused EACCES (GY-1672), unverifiable
- * otherwise. Live threads none of whose cwd reads: a live leader is skipped only when every read, its
- * own and theirs, was refused EACCES, the non-dumpable daemon GY-1672 names; a zombie leader's, or any
- * other failure, or a task list that cannot be read, is unverifiable, and the restore refuses.
+ * /proc/PID/task/TID: every live thread is inspected (GY-1680 review) — a zombie thread-group leader
+ * whose main thread called pthread_exit still writes through such a thread (GY-1663), and a live
+ * leader whose own link is refused may still show one — and any thread whose cwd is inside the
+ * checkout (`inside`) makes the process a writer, never skipped, even when an earlier readable
+ * thread lies outside. No live thread: a zombie leader (`leaderGone`) is gone, a live one stands on
+ * its own read — skipped when that was refused EACCES (GY-1672), unverifiable otherwise. Live threads
+ * none of whose cwd reads: a live leader is skipped only when every read, its own and theirs, was
+ * refused EACCES, the non-dumpable daemon GY-1672 names; a zombie leader's, or any other failure, or
+ * a task list that cannot be read, is unverifiable, and the restore refuses.
  */
-function judgeByThreads(proc: string, name: string, failure: unknown, leaderGone: boolean): { cwd: string | null; error: string | null; denied: boolean } {
+function judgeByThreads(proc: string, name: string, failure: unknown, leaderGone: boolean, inside: (cwd: string) => boolean): { cwd: string | null; error: string | null; denied: boolean } {
   const describe = (error: unknown) => error instanceof Error ? error.message : String(error);
   const refused = (error: unknown) => (error as NodeJS.ErrnoException).code === 'EACCES';
   const reason = describe(failure);
@@ -125,15 +126,19 @@ function judgeByThreads(proc: string, name: string, failure: unknown, leaderGone
     if ((listing as NodeJS.ErrnoException).code === 'ENOENT') return leaderGone || !existsSync(join(proc, name)) ? gone : own;
     return { cwd: null, error: `${reason}; its threads cannot be listed (${describe(listing)})`, denied: false };
   }
-  let error: string | null = null, denied = refused(failure), live = false;
+  let error: string | null = null, denied = refused(failure), live = false, outside: string | null = null;
   for (const tid of tasks) {
     let stat: string; try { stat = readFileSync(join(proc, name, 'task', tid, 'stat'), 'utf8'); } catch { continue; /* exited */ }
     const state = stat.slice(stat.lastIndexOf(')') + 2).split(' ')[0];
     if (state === 'Z' || state === 'X') continue;
     live = true;
-    try { return { cwd: readlinkSync(join(proc, name, 'task', tid, 'cwd')), error: null, denied: false }; }
-    catch (thread) { error ??= `${reason}; its live thread ${tid}'s cwd cannot be read either (${describe(thread)})`; if (!refused(thread)) denied = false; }
+    try {
+      const cwd = readlinkSync(join(proc, name, 'task', tid, 'cwd'));
+      if (inside(cwd)) return { cwd, error: null, denied: false };
+      outside ??= cwd;
+    } catch (thread) { error ??= `${reason}; its live thread ${tid}'s cwd cannot be read either (${describe(thread)})`; if (!refused(thread)) denied = false; }
   }
+  if (outside) return { cwd: outside, error: null, denied: false };
   if (!live) return leaderGone ? gone : own;
   return { cwd: null, error, denied: denied && !leaderGone };
 }
