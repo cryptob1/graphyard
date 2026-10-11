@@ -5,7 +5,7 @@ Sidebar: **Work**, **Workers**, **Shipped**, **Tests**, **Insights**, **Settings
 
 ## From your phone
 
-A local (compose) dashboard listens on `127.0.0.1:4310`, or its install's free port ([install](install.md)). With Tailscale, `graphyard up` prints `tailscale serve --bg --http=4310 http://127.0.0.1:4310` and its tailnet URL; `--share-tailnet` runs it, keeps it in `up.json` (`reachableUrl`) and its sign-in links use it: tailnet-only, never `tailscale funnel`. A green `up` ends with one single-use sign-in link (`signIn`, 10 minutes).
+A local (compose) dashboard listens on `127.0.0.1:4310`, or its install's free port ([install](install.md)). With Tailscale, `graphyard up` prints `tailscale serve --bg --http=4310 http://127.0.0.1:4310` and its tailnet URL; `--share-tailnet` runs it, keeps `up.json` `reachableUrl`, sign-in links use it: tailnet-only, never `tailscale funnel`. A green `up` ends with one single-use sign-in link (`signIn`, 10 minutes).
 
 ## Work
 
@@ -17,7 +17,7 @@ Cards: ask, **Recommended** choice (or safest way), one-line why, numbered steps
 
 ## Workers
 
-**Workers** (`web/pages/index.tsx`): a row is one [session handle](master-agent-sessions.md#session-handles) from the item, not Herdr. A running handle unobserved over **15 minutes** by default (`sessionStaleThresholdMs`, `web/workers-view.ts`) reads *not seen for <time since that observation>*, never running, nor counted open; the loop's [session report](master-agent.md#session-liveness-is-reconciled-not-trusted) ends a dead handle.
+**Workers** (sidebar, beside Shipped and Insights; `web/pages/index.tsx`): a row is one [session handle](master-agent-sessions.md#session-handles) from the item, not from Herdr. A running handle unobserved over **15 minutes** by default (`sessionStaleThresholdMs`, `web/workers-view.ts`) reads *not seen for <time since that observation>*, never as running, and isn't counted open; the loop's [session report](master-agent.md#session-liveness-is-reconciled-not-trusted) ends a dead handle.
 
 **Copy local** (launching host): `herdr agent attach w1V:pJD`; **Copy remote** (`herdr --machine <label-or-id> <command>`, `herdr --remote <ssh-target>` per `herdr --help`; attachment isn't forwarded: focus, then attach): `herdr --machine vishrog agent focus w1V:pJD && herdr --remote vishrog`.
 
@@ -31,4 +31,4 @@ Cards: ask, **Recommended** choice (or safest way), one-line why, numbered steps
 
 ## Insights
 
-**Flow** (landed/day, merges/hour, waits); **Show details**: shipping pulse, PR-to-production (`POST /api/production-observations`), flow analytics, conflict hotspots. **Shipped**: **Interventions** ([retro](operations-reference.md#retro-synthesis); repeats filed `bug` unless `GRAPHYARD_INTERVENTION_PATTERNS=0`; pattern rows: owners, causes, rounds, [days under threshold](protocol/read-endpoints.md)), **Validation**, **Releases**.
+**Flow** (landed/day, merges/hour, waits); **Show details**: shipping pulse, PR-to-production (`POST /api/production-observations`), flow analytics, conflict hotspots. **Shipped**: **Interventions** ([retro](operations-reference.md#retro-synthesis); repeats filed `bug` unless `GRAPHYARD_INTERVENTION_PATTERNS=0`; pattern: owners, causes, rounds, [under-threshold days](protocol/read-endpoints.md)), **Validation**, **Releases**.
