@@ -50,14 +50,18 @@ export function scopeBudget(work: Work[], decisions: ScopeMeasurement[], now: nu
   const open = work.flatMap(item => {
     const request = item.scopeRequest;
     const routed = routes && request?.decision?.decidedBy === 'graphyard' && !!routableScopeRequest(item, now);
-    return request && (!request.decision || routed) ? [{ key: item.key, epoch: request.epoch, waitedMs: Math.max(0, now - Date.parse(request.at)), routed }] : [];
+    // GY-1702: a routed ask on a quarantined attempt waits with the hold — a held requirements decision
+    // cannot apply until the attempt ends, and an escalation cannot hurry that. The wait itself is still
+    // measured from the ask; when the hold ends without applying, the breach clock resumes from that wait.
+    const heldByQuarantine = routed && !!item.containmentQuarantine;
+    return request && (!request.decision || routed) ? [{ key: item.key, epoch: request.epoch, waitedMs: Math.max(0, now - Date.parse(request.at)), routed, heldByQuarantine }] : [];
   }).sort((a, b) => b.waitedMs - a.waitedMs);
   // One id per breach, not per wording: the numbers in the detail move every cycle, and an
   // escalation that changed key each time would read as a new incident every twenty seconds.
   const breaches = [
     ...(measured.count >= scopeDecisionSample && measured.p90Ms > scopeDecisionBudgetMs
       ? [{ id: 'p90', detail: `Scope decisions are too slow: p90 is ${Math.round(measured.p90Ms / 1000)}s over the last ${measured.count} requests, above the ${scopeDecisionBudgetMs / 60_000}-minute budget` }] : []),
-    ...open.filter(entry => entry.waitedMs > scopeBlockedBudgetMs)
+    ...open.filter(entry => entry.waitedMs > scopeBlockedBudgetMs && !entry.heldByQuarantine)
       .map(entry => ({ id: `blocked:${entry.key}:${entry.epoch}`,
         detail: `${entry.key} has been blocked on its scope request for ${Math.round(entry.waitedMs / 60_000)} minutes, above the ${scopeBlockedBudgetMs / 60_000}-minute bound; ${entry.routed
           ? `its requirements decision is with the independent approver: read it with graphyard master decisions ${entry.key}` : `decide it with graphyard master scope ${entry.key} REASON`}` })),

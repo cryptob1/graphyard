@@ -8,7 +8,7 @@ import { recordSettledDecision } from '../model/project-memory.js';
 import { type ApprovalWatch, approvalWatchSchema, carriedSession, type DaemonActionKind, type DaemonState, latencySampleSchema, message, scopeMeasurementSchema } from './state.js';
 import { decisionKey, scopeAnsweredAt, scopeKey, scopeOutcomeAnswered } from './reconcile.js';
 import { readyToRetry } from './sessions.js';
-import { approvalStep, recordWatchEnded, approverLaunchKey, attestDecisions, boundDetail, cappedReworkBound, exhaustedProofKey, decisionReasonMax, detailChanged, fitDecisionReason, githubPause, handWatchPrefix, maxApproverCloses, maxRefusalAnswers, maxDecisionRequests, namePaths, neededDecision, observedFrom, overtakenDecision, resolveCovers, reworkDecisionReason, refusalNamedIn, standingNamedIn, adoptedOnRefusal, conflictReworkOverdue, reworkObservationWait, routineDecision, type RoutineDecision, sameAnswers, scopeRoutineDecision, blockerScopeDecision, standingVerdict, uncountedScopeFailure, withheldDecision } from './decisions.js';
+import { approvalStep, recordWatchEnded, approverLaunchKey, attestDecisions, boundDetail, cappedReworkBound, exhaustedProofKey, decisionReasonMax, detailChanged, fitDecisionReason, githubPause, handWatchPrefix, maxApproverCloses, maxRefusalAnswers, maxDecisionRequests, namePaths, neededDecision, observedFrom, overtakenDecision, resolveCovers, reworkDecisionReason, refusalNamedIn, standingNamedIn, adoptedOnRefusal, conflictReworkOverdue, reworkObservationWait, routineDecision, type RoutineDecision, sameAnswers, samePlannedFiles, standingRequirementsAnswersAsk, heldDecisionRefusal, heldDecisionNamedIn, staleRevisionDecideRefusal, staleRevisionDecideNote, staleRevisionDecideDetail, scopeRoutineDecision, blockerScopeDecision, standingVerdict, uncountedScopeFailure, withheldDecision } from './decisions.js';
 import { candidateMovedMeanwhile, decisionFailureKind, decisionReads, deliveredMeanwhile, lateDecisionRead, resumedApplication, selfHealingDecisionFailure } from './decision-reads.js';
 import { refusedAttestationWatch, type RefusedAttestation } from '../model/rework-ground.js';
 import { record } from './effects.js';
@@ -65,16 +65,32 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       }
       // A request whose response was lost is already standing on the item, and the server refuses a second one; adopting it is what keeps a retry from leaving a decision nobody will judge.
       let standing = history.find(entry => entry.action === decision.action && (entry.state === 'requested' || entry.state === 'approved' || entry.state === 'held'));
-      // GY-1687: a held decision is approved and waits only for the item's attempt to end, when the control plane applies it; no approver is launched for it and nothing is requested in its place.
-      if (standing?.state === 'held') {
-        state.approvals[key] = approvalWatchSchema.parse({ work: item.key, action: decision.action, decision: standing.id, requestedAt: stamp, settledAt: stamp, approvedAt: standing.approvedAt ?? null, approvedBy: standing.approvedBy ?? null });
-        performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `${item.key}'s ${decision.action} decision ${standing.id} is approved by ${standing.approvedBy ?? 'its approver'} and held (${boundDetail(standing.outcome ?? 'the item holds a live attempt', 300)}); the control plane applies it when the attempt ends, so nothing is requested`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist)); return;
-      }
+      // GY-1687 / GY-1702: a held decision is approved and waits only for the item's attempt to end, when the
+      // control plane applies it; no approver is launched, nothing is requested or resumed, and a matching
+      // scope ask is bound so its settlement follows the hold.
+      const adoptHeld = async (held: { id: string; approvedAt?: string | null; approvedBy?: string | null; outcome?: string | null }, why: string) => {
+        // Bind the scope ask this widening answers (GY-1702): when the hold applies, noteScopeOutcome / the engine settle it.
+        const scope = decision.scope ?? carried?.scope ?? null;
+        state.approvals[key] = approvalWatchSchema.parse({ work: item.key, action: decision.action, decision: held.id, requestedAt: carried?.requestedAt ?? stamp, settledAt: stamp, approvedAt: held.approvedAt ?? null, approvedBy: held.approvedBy ?? null, scope });
+        performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `${item.key}'s ${decision.action} decision ${held.id} is approved by ${held.approvedBy ?? 'its approver'} and held (${boundDetail(held.outcome ?? why, 300)}); the control plane applies it when the attempt ends, so nothing is requested`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
+      };
+      if (standing?.state === 'held') { await adoptHeld(standing, 'the item holds a live attempt'); return; }
       // An approved decision is already judged (GY-1300): it is never adopted for an approver session. The control plane is asked to apply what was approved,
       // and only one that settled failed, stale or superseded is asked for again, below, within the same bound. A loop without the resume settles it through the withdrawal below (GY-1297).
+      // GY-1702: a resume that finds the decision held, or a requirements approval the live attempt still refuses, is a wait — not a per-cycle fault.
       if (standing?.state === 'approved' && effects.resume) {
-        const resumed = await effects.resume(item, standing.id);
-        if (resumed.state === 'approved') throw new Error(`${decision.action} decision ${standing.id} was approved by ${standing.approvedBy ?? 'its approver'} but the control plane could not apply it yet; it is resumed again on the next try`);
+        let resumed: Awaited<ReturnType<NonNullable<typeof effects.resume>>>;
+        try { resumed = await effects.resume(item, standing.id); }
+        catch (error) {
+          if (heldDecisionRefusal(error)) { await adoptHeld({ id: standing.id, approvedAt: standing.approvedAt, approvedBy: standing.approvedBy, outcome: message(error) }, 'the item holds a live attempt'); return; }
+          throw error;
+        }
+        if (resumed.state === 'held') { await adoptHeld({ id: resumed.id, approvedAt: resumed.approvedAt, approvedBy: resumed.approvedBy, outcome: resumed.outcome }, resumed.outcome ?? 'the item holds a live attempt'); return; }
+        if (resumed.state === 'approved') {
+          // Requirements under a live attempt become held on apply; re-resuming only faults. Other actions still retry.
+          if (decision.action === 'requirements') { await adoptHeld({ id: resumed.id, approvedAt: resumed.approvedAt, approvedBy: resumed.approvedBy, outcome: resumed.outcome ?? 'approved but the control plane could not apply it yet' }, 'approved but the control plane could not apply it yet'); return; }
+          throw new Error(`${decision.action} decision ${standing.id} was approved by ${standing.approvedBy ?? 'its approver'} but the control plane could not apply it yet; it is resumed again on the next try`);
+        }
         if (resumed.state === 'applied') {
           const same = carried?.decision === standing.id ? carried : null;
           const watch = state.approvals[key] = approvalWatchSchema.parse({ ...same, work: item.key, action: decision.action, decision: standing.id, requestedAt: same?.requestedAt ?? stamp, settledAt: stamp, scope: same?.scope ?? decision.scope ?? null });
@@ -133,9 +149,13 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       }
       // The control plane holds one requirements decision at a time. One that answers no scope
       // request (a master's own revision) is not this request's answer: it is left to its
-      // requester, and this one is asked once it settles. The throughput owner's needs-decision answers no scope request: only a revision whose whole input is its option of record is it (GY-1630).
-      if (standing && decision.action === 'requirements' && !standing.input?.answers && !throughputDecisionAdopts(standing.input, decision, item)) {
-        const other = JSON.stringify(standing.input?.plannedFiles) !== JSON.stringify(decision.input?.plannedFiles) ? 'another planned-files revision' : 'a widening that answers no scope request';
+      // requester, and this one is asked once it settles. GY-1702: the same plannedFiles as this
+      // scope ask's widening is that ask's pending answer — adopt it, do not fault. The throughput
+      // owner's needs-decision answers no scope request: only a revision whose whole input is its
+      // option of record is it (GY-1630).
+      if (standing && decision.action === 'requirements' && !standing.input?.answers && !throughputDecisionAdopts(standing.input, decision, item)
+        && !standingRequirementsAnswersAsk(standing, decision)) {
+        const other = !samePlannedFiles(standing.input?.plannedFiles, decision.input?.plannedFiles) ? 'another planned-files revision' : 'a widening that answers no scope request';
         throw new Error(`requirements decision ${standing.id} is ${standing.state} for ${other}, not the widening ${item.key}'s scope request asks for; it is left to its requester, and the control plane holds one at a time, so this one is requested once it settles: graphyard master decisions ${item.key}`);
       }
       // A scope decision answers the one request it names (`answers`), against the requirements of
@@ -145,12 +165,15 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       // leaves its refusal unattached, so adopting it would settle this request unasked. Whatever
       // the file list now reads, the loop takes it back and asks — as a merge for an earlier
       // candidate — before treating a differing list as anything but its own stale request.
+      // GY-1702: a standing no-answers widening whose plannedFiles match this ask is not stale for
+      // wanting answers — it is the ask's pending answer, adopted below with this watch's scope.
       if (standing && decision.action === 'requirements') {
-        const stale = !sameAnswers(standing.input?.answers, decision.input?.answers)
+        const answersAsk = standingRequirementsAnswersAsk(standing, decision) && !standing.input?.answers;
+        const stale = !answersAsk && !sameAnswers(standing.input?.answers, decision.input?.answers)
           ? `requirements decision ${standing.id} is ${standing.state} for the scope request made at ${standing.input?.answers?.at}, not the one ${item.key}'s worker made at ${decision.scope?.at ?? 'now'}`
           : standing.input?.expectedPolicyRevision !== item.policyRevision
             ? `requirements decision ${standing.id} is ${standing.state} against policy revision ${String(standing.input?.expectedPolicyRevision)}, not ${item.key}'s current revision ${item.policyRevision}`
-            : JSON.stringify(standing.input?.plannedFiles) !== JSON.stringify(decision.input?.plannedFiles)
+            : !samePlannedFiles(standing.input?.plannedFiles, decision.input?.plannedFiles)
               ? `requirements decision ${standing.id} is ${standing.state} for another planned-files revision than the widening ${item.key}'s scope request now asks for`
               : null;
         if (stale) {
@@ -267,6 +290,18 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       // snapshot's head once a new head was submitted describes nothing (GY-1430): no fault. A put the
       // control plane did not answer, or a launch that lost the folder-trust race, heals itself on
       // the next cycle: the first at its key is no fault, a second in a row counts (GY-1505).
+      // GY-1702: a decide refused because the decision is held, or because the revision moved, is a
+      // wait / re-compute — not a decision fault.
+      const heldId = heldDecisionNamedIn(error);
+      if (heldId) {
+        state.approvals[key] = approvalWatchSchema.parse({ work: item.key, action: decision.action, decision: heldId, requestedAt: stamp, settledAt: stamp, scope: decision.scope ?? null });
+        performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `${item.key}'s ${decision.action} decision ${heldId} is approved and held; the control plane applies it when the attempt ends, so nothing is requested`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
+        return;
+      }
+      if (staleRevisionDecideRefusal(error)) {
+        performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `Could not put the ${decision.action} decision for ${item.key} to an approver: ${message(error)}; ${staleRevisionDecideNote}, so the request is re-computed next cycle against the applied revision`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist, null));
+        return;
+      }
       const detail = `Could not put the ${decision.action} decision for ${item.key} to an approver: ${message(error)}`;
       const moot = deliveredMeanwhile(detail), moved = !moot && candidateMovedMeanwhile(detail, item), late = lateDecisionRead(detail) && !(previous?.state === 'failed' && lateDecisionRead(previous.detail));
       const why = moot ? `; ${item.key} was delivered after this cycle's snapshot, so it needs no ${decision.action} decision` : moved ? `; ${item.key}'s candidate moved after this cycle's snapshot, so the next snapshot decides afresh` : '';
@@ -428,7 +463,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
   // A needed decision with no watch is requested once ready to retry, or escalated.
   const requestNeeded = async (item: Work, decision: RoutineDecision, key: string) => {
     const previous = state.actions[key];
-    if (previous?.state === 'failed' && !readyToRetry(previous, state.cycle) && !lateDecisionRead(previous.detail) && !selfHealingDecisionFailure(previous.detail)) return;
+    if (previous?.state === 'failed' && !readyToRetry(previous, state.cycle) && !lateDecisionRead(previous.detail) && !selfHealingDecisionFailure(previous.detail) && !staleRevisionDecideDetail(previous.detail)) return;
     if (effects.decide && effects.approver) return request(item, decision, key, null);
     const escalationKey = `escalation:decision:${item.id}:${decision.binding}`, input = decision.action === 'attest' ? ` '${JSON.stringify(decision.input)}'` : '';
     const detail = `${item.key} needs a${decision.action === 'attest' ? 'n' : ''} ${decision.action} decision: ${decision.reason} This loop runs without the decision effects, so it cannot request one: graphyard master decide ${item.key} ${decision.action}${input} REASON, then graphyard master approver ${item.key} DECISION`;

@@ -185,6 +185,38 @@ export interface RoutineDecision { action: RoutineDecisionAction; reason: string
  * the input as jsonb, which does not keep key order, so a serialised comparison never matches.
  */
 export const sameAnswers = (a: any, b: any) => !a || !b ? !a && !b : a.epoch === b.epoch && a.at === b.at;
+/** Whether two requirements inputs name the same planned-files list (jsonb key order is not kept). */
+export const samePlannedFiles = (a: unknown, b: unknown) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+/**
+ * GY-1702. A standing requirements decision whose plannedFiles match this scope ask's widening is that
+ * ask's pending answer, even when it was requested without `input.answers` (a master's own revision, or
+ * a request lost before the ask landed). The loop adopts it rather than faulting; when it applies, the
+ * engine settles the ask if the files cover its paths.
+ */
+export const standingRequirementsAnswersAsk = (standing: { input?: { answers?: unknown; plannedFiles?: unknown } | null }, decision: Pick<RoutineDecision, 'action' | 'scope' | 'input'>) =>
+  decision.action === 'requirements' && !!decision.scope && samePlannedFiles(standing.input?.plannedFiles, decision.input?.plannedFiles);
+/**
+ * GY-1702. A decide refused because a requirements decision is already approved and held for the live
+ * attempt: the control plane applies it when the attempt ends, so the loop waits — it does not re-request
+ * or resume, and the refusal is no decision fault.
+ */
+export const heldDecisionRefusal = (error: unknown) =>
+  / was approved by .+ and is held \(/.test(error instanceof Error ? error.message : String(error));
+/** The held decision id a decide-refusal names, or null (GY-1702). */
+export function heldDecisionNamedIn(error: unknown): string | null {
+  return /Decision ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}) \([^)]+\) on \S+ was approved by .+ and is held \(/.exec(error instanceof Error ? error.message : String(error))?.[1] ?? null;
+}
+/**
+ * GY-1702. A decide refused because the item moved past the policy revision the loop read ("Policy
+ * revision changed (now N); reload and request again"): the next attempt re-reads and re-computes, so
+ * the refusal is the moved-past-revision transient the scope step already handles, not a decision fault.
+ */
+export const staleRevisionDecideRefusal = (error: unknown) =>
+  /Policy revision changed(?: \(now \d+\))?; reload and request again/.test(error instanceof Error ? error.message : String(error));
+/** The detail suffix a stale-revision decide refusal records, so a retry can tell it from a real fault. */
+export const staleRevisionDecideNote = 'the item moved past the revision the loop read';
+/** Whether a prior decision action failed only for a stale-revision refuse the next cycle re-computes (GY-1702). */
+export const staleRevisionDecideDetail = (detail: string) => detail.includes(staleRevisionDecideNote);
 /**
  * The input a rework or recover request carries: the routine input plus the grounds binding, so
  * the server's refusal match sees what the watch key already keys (GY-407). A refusal judged on
