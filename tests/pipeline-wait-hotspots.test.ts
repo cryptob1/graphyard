@@ -12,6 +12,7 @@ import type { GitHubMergeQueueState } from '../src/merge-queue.js';
 import { masterConfigSchema, type HerdrAgent, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import type { Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2030-01-01 `clock` is handed explicitly to every loopWakeSubjects call; the real daemon and tick only ever see unleased `waiting()` items, and Date.now() measures sleep/wake latency.
 
 /*
  * GY-1490. Measured from master status and the flow ledger over the 88 items merged in the 24 h to

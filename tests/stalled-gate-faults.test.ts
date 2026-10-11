@@ -24,6 +24,7 @@ import { actionStallThreshold } from '../src/model/action-progress.js';
 import { controlPlaneEffects, load } from '../scripts/graphyard-executor.mjs';
 import { startedAtOnce } from './helpers/launch-shell.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2026-10-01/02 instants are past fixture ats whose stall reading (actionStall) reads row history, not the clock; Date.now()/new Date() stamp live submissions and mint tokens.
 
 // GY-1090 names this file for its proof: manual:fault-class-stalled-gate. The master loop filed 61
 // stalled-gate faults in 24 hours on 1 October 2026 — an item holding a failing gate with nothing

@@ -9,6 +9,7 @@ import { Refusal, type Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 // @ts-expect-error Dependency-free inspection script.
 import { evaluateEnforcement } from '../scripts/verify-enforcement.mjs';
+// Time-bomb allowance (GY-1694): the 2026-01-01, 2026-09-17 and 2026-10-05 instants are fixture stamps and fixed clocks handed to enforcement and reconcileCheckReruns; new Date() only stamps fake comment and failover records.
 const head = 'a'.repeat(40), base = 'b'.repeat(40);
 function fixture() {
   const calls: { path: string; method: string; body: any }[] = [];

@@ -8,6 +8,7 @@ import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-da
 import { masterConfigSchema } from '../src/master.js';
 import { openThroughputOwner, populationRule, recordThroughputMeasurement, throughputClaimVisibility, throughputOwnerItem, throughputStall, throughputStallBound, verifyThroughput, type ThroughputReport } from '../src/throughput.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2026-10-07 base is past and every measurement takes an explicit now/clock; the Date.now() cycles drive a stubbed measureThroughput, so no fixture instant meets the wall clock.
 
 // GY-1465: the throughput needs-decision applies the population rule settled by requirements
 // revision 48a9e55a (superseded control-plane actions are loop machinery of record), and while one

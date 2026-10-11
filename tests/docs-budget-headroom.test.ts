@@ -10,6 +10,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { dirname, join } from 'node:path';
+// Time-bomb allowance (GY-1694): the 2026-09-26 instants are the explicit now handed to fileDocsTrim, which only stamps the action it records; the Date.now() cycles are bounded by the open item, not elapsed time.
 
 // GY-574: main sat at exactly its 12,000-word docs budget, so two queued items that each added a few
 // words overflowed it together on a merge-queue tip and ejected the queue head. Headroom is now kept

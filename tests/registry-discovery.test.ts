@@ -10,6 +10,7 @@ import type { MasterConfig, HerdrAgent } from '../src/master.js';
 import type { Work } from '../src/model.js';
 import { applyRegistryMutation, emptyRegistry, fleetRoles, type AgentRegistry } from '../src/model/registry.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2030-01-01 `clock0` drives runCycle and the snapshot through `() => at.value`, so the master-session cycles never read the real clock; Date.now() only stamps discovered credentials' expiry.
 
 /**
  * GY-170 AC-1: `master registry propose` turns this installation's ~/.coding_agents tree into a

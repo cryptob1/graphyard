@@ -9,6 +9,7 @@ import { superviseAttempt, supervisionRequestSchema } from '../src/runner-attest
 import { collectArtifacts, verifyExecutionAttestation } from '../src/runner-collector.js';
 import { attemptBoundaryPath, preflightAttempt, type ExecutionPlan, type ExecutionRecord, type Runner, type Settler } from '../src/runner-executor.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2026-09-16 interval is a forged startedAt/finishedAt the attestation must reject whatever the date; the grant deadline is Date.now()+10 min on the real clock.
 
 const attestor = generateKeyPairSync('ed25519');
 const privateKey = attestor.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString();

@@ -5,6 +5,7 @@ import { acquireDaemonLock, daemonStateSchema, emptyDaemonState, loopAttention, 
 import { hostPidProbe } from '../src/daemon/liveness.js';
 // A namespace import, so the symbols GY-1370 adds read as missing test cases on a base without them, not a failed load.
 import * as daemon from '../src/master-daemon.js';
+// Time-bomb allowance (GY-1694): the 2026-10-06 instants are the explicit `now` of each loopLiveness call and a legacy lock the schema only parses; Date.now() just stamps the lock acquireDaemonLock writes.
 
 const interval = 20_000;
 const config = { url: 'http://127.0.0.1:1', repository: 'owner/repo' } as Parameters<typeof emptyDaemonState>[0];

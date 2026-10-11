@@ -20,6 +20,7 @@ const unclaimedLaunch = (...args: Parameters<typeof sessionState.unclaimedLaunch
 // @ts-expect-error Dependency-free fixture and screenshot script.
 import { fixtureWork } from '../scripts/dashboard-fixture.mjs';
 import { live } from '../browser-tests/ui-board.js';
+// Time-bomb allowance (GY-1694): the 2026-10-08/09 instants are fixed clocks handed to checkInvariants, observeSessions and buildMasterStatus; new Date()/Date.now() only mint leases for the live supervisor timed by performance.now().
 
 // GY-1506 names this file for its proof: manual:fault-class-session-liveness. The master loop
 // filed 5 session-liveness faults in 24 hours; the host journal names the two shapes they share.

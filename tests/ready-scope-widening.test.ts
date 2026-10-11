@@ -12,6 +12,7 @@ import { scopeRefusalBlocker } from '../src/model/scope.js';
 import { blockerScopeDecision } from '../src/daemon/decisions.js';
 import { foldInterventions, readInterventionLedger, type InterventionLedgerRow } from '../src/interventions.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2026-10-06 `at` values stamp exhaustion fixtures and feed foldInterventions as its explicit clock; new Date() is only the clock for DB-backed ledger rows the engine stamped itself.
 
 /**
  * GY-1396. Five scope widenings were counted at the ready stage in the week to 2026-10-07, every

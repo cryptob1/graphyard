@@ -29,6 +29,7 @@ import HumanRequestsPage from '../web/pages/human-requests.js';
 import type { Dashboard } from '../web/pages/dashboard.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2026-09-20/09-30 instants are the explicit now handed to detectExhaustion, parseResetTime and outputReadDue, which judge parsed resets against it; Date.now() builds relative resets.
 
 // GY-89: mid-session exhaustion and human-only waits must not stall an item or a fleet. A
 // session that runs out of provider quota is detected from its own output and its action moves

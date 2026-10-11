@@ -3,6 +3,7 @@ import test from 'node:test';
 import { actionIdleMs, type ActionRow } from '../src/model/actions.js';
 import type { Work } from '../src/model.js';
 import { deliveryRecord, exclusionClass, populationRule, throughputClaim, throughputStall, throughputStallBound, verifyThroughput } from '../src/throughput.js';
+// Time-bomb allowance (GY-1694): the 2026-10-07 base and the 2026-09-28 GY-468 span are past and every measurement takes an explicit now or clock; new Date() only stamps the daemon lock.
 
 // GY-1455: the measurement applies the admission rule the approvers settled (GY-1449 revision
 // 48a9e55a, GY-1454 AC-1), built here from plain documents so every shape is visible at a glance.

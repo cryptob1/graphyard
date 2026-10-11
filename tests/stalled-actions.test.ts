@@ -18,6 +18,7 @@ import { plainStatus, stalledStep } from '../src/model/plain-status.js';
 import WorkCard from '../web/components/work-card.js';
 import { readMasterGuide } from './helpers/master-guide.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2026-09-21 clock is passed explicitly to claim/settle/reconcile; the 2026-01-01 window and 2026-02-01 merge are past inside an open-ended window; new Date() judges live DB rows.
 
 /**
  * GY-110: an action that keeps failing for the same reason is a stall, not a retry.

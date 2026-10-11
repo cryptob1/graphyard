@@ -19,6 +19,7 @@ import { masterStatusReport } from '../src/cli/master-status.js';
 import { emptyDaemonState, writeDaemonState } from '../src/master-daemon.js';
 import { masterConfigSchema } from '../src/master.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): t0 (2026-09-20) drives a virtual clock (now = () => new Date(clock)) handed to settleDelivered and the retry rows; the Postgres half stamps and judges everything with the real clock.
 
 /**
  * GY-201: every open item always has exactly one owned next step with a deadline, and the server

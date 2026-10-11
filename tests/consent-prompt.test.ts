@@ -16,6 +16,7 @@ import { expandTypedCommand } from './helpers/launch-shell.js';
 import { autonomyContract } from '../src/autonomy.js';
 import { readMasterGuide } from './helpers/master-guide.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2026-09-23 `at`/clock stamps fixture items' createdAt/updatedAt; Date.now()/new Date() build live lease expiries and the explicit now for consentHoldItems only.
 
 // GY-130: a runtime that stops on a first-run consent prompt is not a started session. The
 // launcher reads the prompt off the pane, answers only the prompts on its allow-list with their

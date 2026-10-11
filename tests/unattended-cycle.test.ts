@@ -17,6 +17,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { installUnitsFile, perInstallUnits } from '../src/install/units.js';
 import { cappedEscalationKey, cappedFilingKey } from '../src/daemon/cycle-review-cap.js';
 import { observedReviewBody } from '../src/review-cap.js';
+// Time-bomb allowance (GY-1694): the 2031-03-01 clockStart is the loop's injected now and every verdict/lease instant and loopLiveness call takes it explicitly; new Date() only stamps an empty snapshot for a lockless status.
 
 /**
  * GY-84: the loop drives every routine decision unattended.

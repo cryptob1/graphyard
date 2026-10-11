@@ -14,6 +14,7 @@ import { releaseGuardedEffects, staleReleaseReason } from '../src/executor.js';
 import { detectSupervisorUnit, executorFleetReport, executorRegistrar, executorRestartCommand, executorsDirectory, readCommit, readExecutorRegistrations, readRelease, readRestartFence, restartFenceFile, removeExecutorRegistration, restartExecutors, writeExecutorRegistration, type ExecutorRegistration } from '../src/executor-fleet.js';
 import type { ActionRow } from '../src/model/actions.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2026-09-22 claimedAt/since stamps are claim fixtures restartExecutors reports verbatim (any claim refuses, lapsed or not); new Date() only stamps registrations and rows.
 
 /**
  * GY-126: a stateless executor loads its modules once, so a delivered fix never reached it and the

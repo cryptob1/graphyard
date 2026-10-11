@@ -15,6 +15,7 @@ import { completeCommand, completionBody } from '../src/cli/complete.js';
 import { syncWork } from '../src/cli/workspace.js';
 import type { CliContext } from '../src/cli/context.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2026-10-08 observation at and the 12:30 evaluate now are past and handed explicitly to observeHead/evaluate; new Date() only stamps a GitHub observation of a live DB item.
 
 /**
  * GY-1523: `complete GY-N EPOCH --head SHA` while the control plane is the merge writer. The engine

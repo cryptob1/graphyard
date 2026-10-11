@@ -10,6 +10,7 @@ import type { UpDependencies, UpEvent, UpRequest } from '../src/up.js';
 import type { MasterConfig } from '../src/master/profiles.js';
 import type { Observation, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): boundAt and the 2026-10-08 fixture instants are past and handed explicitly as seen/now to the registry, evaluate and buildMasterStatus; new Date() only stamps stub snapshots.
 
 /**
  * GY-1501: supervised mode for local installs. Each test is named for the proof it produces:

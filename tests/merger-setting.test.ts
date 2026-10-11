@@ -11,6 +11,7 @@ import { mergeWriterLine } from '../src/cli/status-attention.js';
 import { unhandled, type MasterSession } from '../src/cli/master/session.js';
 import type { Observation, Principal } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2026-10-08 `since` is a string mergerDoctorLine only renders; new Date() only stamps the observation the scenario submits.
 
 /** The merger install setting: `policy.merger.set` on the ledger, admin-only, surfaced as mergeWriter; the submit command reads it (GY-1523). */
 const repository = 'owner/project';

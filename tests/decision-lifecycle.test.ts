@@ -17,6 +17,7 @@ import { samePin } from '../src/server/decision-ledger.js';
 import { workFaults } from '../src/model/fault-classes.js';
 import { exemption } from '../src/intervention-exemptions.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2000-01-01 lease expiry forces a lapse that stays lapsed, and the 2030-01-01 escalation `at` is compared by samePin only between two pins; Date.now() serves live items.
 
 // GY-75: a decision whose approval is refused on a revision race must never stay 'requested'
 // forever. A pinned race settles the decision as stale, resolve and attest are pinned to what

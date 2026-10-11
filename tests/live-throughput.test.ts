@@ -20,6 +20,7 @@ import { readThroughputLedger, throughputLedgerFile } from '../src/throughput-le
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 // @ts-expect-error Dependency-free measurement script.
 import { claimContainment, main as measureMain, parseArguments } from '../scripts/measure-throughput.mjs';
+// Time-bomb allowance (GY-1694): windows at 2099/2100/2103 are isolation fences so real-clock deliveries from other tests fall below them; the 2026-09-21 and 2026-10-07 instants are fixture dates only rendered or keyed, never aged.
 
 /**
  * GY-99: post-deploy verification of GY-87's throughput claim.

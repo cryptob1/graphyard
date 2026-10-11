@@ -11,6 +11,7 @@ import { buildMasterStatus, masterConfigSchema, mergedWithoutAuthorization, type
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { type Observation, type Principal, type Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2026-09-20 merge instant is a recorded observation the status only renders; every stamp and the status `now` come from the real clock relative to itself.
 
 /**
  * GY-92, as GitHub delivers (GY-1235): an observed merge of a head whose gates had not passed is a

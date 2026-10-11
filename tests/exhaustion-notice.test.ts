@@ -13,6 +13,7 @@ import { inspectProfileAccounts, masterConfigSchema, observedExhaustions, preser
 import { detectRuntimeExhaustion, providerLimitNotices } from '../src/master/environments.js';
 import type { Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2026-09-26 and 2026-10-03 instants are the fixed now handed to detectRuntimeExhaustion and the resets it parses from notices; the loop cases build their reset from Date.now() plus five days.
 
 // GY-421: mid-session exhaustion is recognized only from the runtime's own provider-authored
 // limit notice. GY-402's epoch 2 was failed over on the worker's own narration — "tmp disk

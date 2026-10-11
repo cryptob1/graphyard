@@ -16,6 +16,7 @@ import { cappedRework } from '../src/server/lane-rework.js';
 import { cappedEscalation } from '../src/daemon/cycle-review-cap.js';
 import { routedScopeStatus } from '../src/cli/owed-report.js';
 import { coordinationWork } from '../src/server/work-view.js';
+// Time-bomb allowance (GY-1694): the 2026-09-24 instants stamp settled prior rounds and the reviewer binding, which the round logic orders by head rather than by clock; new Date() stamps the live item and the launch observedAt.
 
 // GY-167, 2026-09-24: every review round re-read the whole change and found new edge cases, and
 // nothing bounded the rounds. From the second review of a pull request the reviewer judges only

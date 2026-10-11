@@ -13,6 +13,7 @@ import { approverSessionName, decisionInput, masterConfigSchema, type HerdrAgent
 import { liveScopeWidening, plannedFilesMax, redecidableScopeRefusal, routableScopeRequest, scopeRequestOutcome, type ScopeRequestState } from '../src/model/scope.js';
 import { collapseArea, collapsePlannedFiles, mergedScopeRequest, widenedPlannedFiles } from '../src/model/scope-collapse.js';
 import type { Principal, Work } from '../src/model.js';
+// Time-bomb allowance (GY-1694): the 2031-03-01 lease and refusal instants meet only the explicit now Date.parse('2031-03-01T10:00:00Z') given to scopeRoutineDecision; Date.now() judges wall-clock-stamped DB items.
 
 // GY-549: a change that legitimately touches more than 100 files (GY-421 migrated 158 test files)
 // could never be scoped. File-by-file requests hit the plannedFiles cap, each batch was its own

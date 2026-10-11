@@ -11,6 +11,7 @@ import type { FleetClient, FleetProbe } from '../src/fleet.js';
 import { expandTypedCommand } from './helpers/launch-shell.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { masterStatusReport } from '../src/cli/master-status.js';
+// Time-bomb allowance (GY-1694): the 2026-09-25 `clock` is the ScreenPane's virtual start clock, advanced only by wait() and handed via bounds(); Date.now()/new Date() stamp the credential expiry and the dispatch observedAt.
 
 // GY-417: a runtime's start is judged from the runtime's own screen, and a launch whose preferred
 // account's runtime never starts is visible in the fallback it made. OpenCode 1.18's start screen

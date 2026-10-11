@@ -11,6 +11,7 @@ import { managedInstructions } from '../src/repository-setup.js';
 import { assessDeploymentVerification, checkoutRelease, deploymentFreshnessMs, emitInstructions, masterLoopStatements, missingLoopStatements, verificationEffects, verifyDeployment, type EmittedInstructions } from '../src/master-verification.js';
 import type { Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2030-01-01 clock is passed as `now` to assessDeploymentVerification beside observations dated from it; the integration halves take Date.now() and build observations relative to it.
 
 // integration:master-loop-deployment-verification — the deployment-verification step of the
 // perpetual master loop, proven against a stubbed deployed release: an endpoint that reports

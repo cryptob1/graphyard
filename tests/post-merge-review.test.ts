@@ -15,6 +15,7 @@ import { dispatchEffects, emptyDispatchCursor, filePostMergeFollowUps, postFollo
 import { controlPlaneRefusal, controlPlaneVerdict, staleReviewReason, type ReviewRecord } from '../src/reviewer.js';
 import { readProjectMemory } from '../src/project-memory.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2026-10-08 `at` fixtures are already past, so a delivery, launch or expiry stamped with them reads the same on any later day; Date.now()/new Date() only stamp the live-API launch and its filing.
 
 // GY-1525 AC-4: a normal-risk delta the merge writer delivered owes one post-merge review of its
 // merge delta; the loop launches it with the same binding mechanism, files one follow-up item per

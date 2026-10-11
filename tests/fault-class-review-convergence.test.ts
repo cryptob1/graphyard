@@ -13,6 +13,7 @@ import { bindReviewer, launchReview, readReviewLedger, saveReviewerProfile, upda
 import { dispatchEffects, emptyDispatchCursor, launchWaitAttention, launchWaits, observationWakeIntervalMs, reviewLaunchWaitAttentionMs, runDispatchTick, verdictIngestGraceMs, type DispatchCursor, type DispatchEffects } from '../src/auto-dispatch.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2026-10-07 request and verdict stamps are judged on handed ticks (tickAt, faultAt, clock); Date.now() only mints token expiries and snapshot stamps ahead of those ticks that nothing ages.
 
 // GY-1429 names this file for its proof: manual:fault-class-review-convergence. The master loop filed
 // three review-convergence faults in 24 hours on 7 October 2026, every one a `review-settlement` wait

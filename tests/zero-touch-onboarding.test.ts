@@ -24,6 +24,7 @@ import type { RunOptions, RunResult, Runner } from '../src/runner/types.js';
 import type { UpDependencies, UpEvent } from '../src/up.js';
 import { FakeGitHub, type Actor, type FakeApp } from './helpers/fake-github.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2026-10-07 clock is the scenario's injected now and advances only by its own sleeps; new Date() only stamps observations, which stay ahead of that fixed clock so nothing flips.
 
 /**
  * GY-1481: zero-touch onboarding as a release gate. `graphyard up --agent --goal FILE` runs on a

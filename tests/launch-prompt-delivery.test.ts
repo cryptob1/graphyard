@@ -16,6 +16,7 @@ import { expandTypedCommand, requestOf, roleOf, startedAtOnce } from './helpers/
 import { autonomyContract } from '../src/autonomy.js';
 import { readMasterGuide } from './helpers/master-guide.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): 2026-09-20 is the request clock (sessionRetry, reconcileProducers now: () => new Date(clock + offset)); the real clock only stamps snapshot times and the mint expiry relative to itself.
 
 // GY-93: a launched session receives its instruction as its own first request, never as pasted
 // content; the loop tells a session that never started from one that did the work and failed;

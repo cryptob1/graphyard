@@ -28,6 +28,7 @@ import {
 } from '../src/project-memory.js';
 import type { Work } from '../src/model/work.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2026-10-01 `at` values only order fixture decisions, pitfalls and merges, and the 2026-10-03 `now` is handed explicitly to checkAgentEnvironment; Date.now() stamps other fixtures on the real clock.
 
 test('unit:review-followups-triaged — decisions are retained strictly by answer time rather than work-item order (Finding 2)', () => {
   const memory = emptyProjectMemory();

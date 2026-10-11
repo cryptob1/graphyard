@@ -6,6 +6,7 @@ import { buildMasterStatus, loadMasterConfig, loadStoredMasterConfig, type Maste
 import { masterCommands } from '../src/cli/master.js';
 import { emptyDispatchCursor, runDispatchTick, selectReviewerProfile, supervisedReview } from '../src/auto-dispatch.js';
 import { fleet, requested } from './helpers/review-fleet.js';
+// Time-bomb allowance (GY-1694): the 2026-10-08 boundAt is reviewer config and the 2026-10-08 `now` is handed explicitly to promoteToAutonomy for its audit stamp; the one new Date() is the status snapshot's own now.
 
 // GY-1502: a supervised install becomes autonomous only through `graphyard master promote
 // --admin-token-stdin` — precondition-checked, provisioned through the existing autonomy apply, and

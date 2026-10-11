@@ -17,6 +17,7 @@ import { checkoutKinds } from '../src/install/worktree-root.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { reclaimTmpDirectories, tempOwnerMarker, testTempPatterns, writeTempOwner } from '../src/tmp-reclaim.js';
 import type { FilesystemProbe } from '../src/install/worktree-root.js';
+// Time-bomb allowance (GY-1694): the 2030-03-01 start is both the loop's injected now and its snapshot's now, so the fixture's stamps are judged against it; new Date() only stamps a crashed-trial owner marker.
 
 // GY-1522: the shadow gate's trial merge — the exact merge commit made in the object store, and its
 // build and affected tests run in a detached, credential-free checkout that is always removed.

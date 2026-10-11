@@ -11,6 +11,7 @@ import { canonicalThreadIds, resolveFollowUpThreads, listedThreadLimit, readUnre
 import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, reviewHistory, reviewPrompt, saveReviewerProfile, summarizeReviews, updateReviewLedger } from '../src/reviewer.js';
 import type { Observation, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2026-09-23/24 instants stamp threads, verdicts and legacy records that the resolution judges by listing and mutual order, never against a clock; Date.now()/new Date() stamp live items and mint expiry.
 
 // The reviewer names the threads it verified fixed on a `Resolved threads:` line of its approval and
 // the ones it overrides on an `Overridden threads:` line; the loop records both with the verdict and

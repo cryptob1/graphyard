@@ -33,6 +33,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 import type { Work } from '../src/model/work.js';
 import { emptyDaemonState, writeDaemonState, type DaemonState } from '../src/daemon/state.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master/profiles.js';
+// Time-bomb allowance (GY-1694): the 2026-10-02 instants are memory/answer timestamps that updateProjectMemoryFromWork only sorts; its 24 h merge window runs on Date.now() against mergedAt values also derived from Date.now().
 
 function createSampleMemory(): ProjectMemory {
   const memory = emptyProjectMemory('2026-10-02T12:00:00Z');

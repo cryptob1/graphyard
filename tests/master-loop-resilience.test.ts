@@ -21,6 +21,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 // @ts-expect-error Dependency-free operator script.
 import { assertRosterSafe, awaitServedTokens, generatedProducer, mergeRoster, parseOptions, pendingSecretSyncs, rosterPreview, secretsDue, secretSyncRecord, secretsToSync } from '../scripts/configure-integrations.mjs';
 import { readMasterGuide } from './helpers/master-guide.js';
+// Time-bomb allowance (GY-1694): the 2026-09-19 at dates the fixture item (createdAt/stageEnteredAt, already past) and the 2026-10-09 lock start is only rendered; the launcher runs on the real clock with relative mint expiries.
 
 // Each test is named for the proof it produces (GY-69): integration:producer-session-retry,
 // integration:master-config-reload, integration:master-profile-management,

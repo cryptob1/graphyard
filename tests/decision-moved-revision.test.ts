@@ -14,6 +14,7 @@ import * as decisionsModule from '../src/server/decisions.js';
 import type { DecisionRecord } from '../src/server/decision-ledger.js';
 import type { Services } from '../src/server/routes.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2030-01-01 lease and quarantine stamps are two snapshots decisionGroundsChange compares with each other, never with a clock; the one new Date() stamps a session's observedAt.
 
 // GY-1463: a requested decision binds the item revision it was requested at, and a worker's lease
 // renewal is itself a revision, about every 12 s. An approver takes minutes, so every decision on a

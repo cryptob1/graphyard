@@ -21,6 +21,7 @@ import { successorWidening } from '../src/model/successors.js';
 import { mootScopeWidening, supersededScopeAsk, supersededScopeNote } from '../src/daemon/cycle-scope.js';
 import { RefusedResponse } from '../src/model/refusal.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the only absolute instant is the 2000-01-01 lease expiry, a past date that forces a lapse the cycle keeps lapsed; Date.now() is the loop's live clock and only moves further past it.
 
 // GY-85: an additive scope request is decided by the loop, not by a master command. A worker
 // records the ask as structured state; the master loop asks the control plane to decide it on the
