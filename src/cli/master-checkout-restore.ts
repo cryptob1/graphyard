@@ -4,12 +4,15 @@ import { readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
+import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import { type ChildRun, defaultChildRun } from '../child-runner.js';
 import { atomicPrivateWrite } from '../master/config.js';
-import { freezeCheckoutWriters, type UnverifiableProcess } from './checkout-writers.js';
+import { checkoutGuardApplies, coordinatorCheckoutRoot } from '../master/profiles.js';
+import { cliCommit } from '../protocol-version.js';
+import { directRestoreRefusal, type DirectRestoreProbe, freezeCheckoutWriters, type UnverifiableProcess } from './checkout-writers.js';
 
-export { checkoutWriterProcesses, checkoutWriterScan, freezeCheckoutWriters, processStateOf, type WriterFreezeDeps } from './checkout-writers.js';
+export { checkoutWriterProcesses, checkoutWriterScan, directRestoreRefusal, freezeCheckoutWriters, processStateOf, type WriterFreezeDeps } from './checkout-writers.js';
 import type { MasterConfig } from '../master/profiles.js';
 
 // The GY-857 guard refuses every loop start, self-upgrade and restart from a coordinator checkout
@@ -26,7 +29,10 @@ import type { MasterConfig } from '../master/profiles.js';
 // supervising unit (graphyard-master.service). Nothing is discarded: the ref's first parent is HEAD,
 // its second the index as it stood, and its tree the working files, so `git diff HEAD REF` and
 // `git diff HEAD REF^2` show every byte. No stash entry is used: the stash stack is shared with every
-// worktree of the repository.
+// worktree of the repository. A `master checkout-restore` run by a process that is not confined
+// (directRestoreRefusal) restores from the revision it runs instead of filing for the loop, then
+// files the restart the loop serves (GY-1679): a loop whose loaded code predates a delivered rule
+// (GY-1672's skip of the EACCES processes) could not complete the remedy, and could not upgrade past it.
 //
 // The confined master's `master restart` is the same kind of act: the systemd user manager is one of
 // the process-launch channels its confinement hides, so it files a restart request the loop serves.
@@ -73,8 +79,8 @@ export const loopRequestPath = (config: Pick<MasterConfig, 'credentialFile'>, ac
 export async function readCheckoutRestoreRequest(file: string): Promise<CheckoutRestoreRequest | null> {
   try { return requestSchema.parse(JSON.parse(await readFile(file, 'utf8'))); } catch { return null; }
 }
-export async function fileCheckoutRestoreRequest(file: string, reason: string, requestedBy: string, now = new Date(), act: LoopRequestAct = 'checkout-restore', args: readonly string[] = []): Promise<CheckoutRestoreRequest> {
-  const request = requestSchema.parse({ id: `${now.getTime().toString(36)}-${Math.random().toString(36).slice(2, 8)}`, act, reason, requestedAt: now.toISOString(), requestedBy, args, outcome: null });
+export async function fileCheckoutRestoreRequest(file: string, reason: string, requestedBy: string, now = new Date(), act: LoopRequestAct = 'checkout-restore', args: readonly string[] = [], outcome: CheckoutRestoreOutcome | null = null): Promise<CheckoutRestoreRequest> {
+  const request = requestSchema.parse({ id: `${now.getTime().toString(36)}-${Math.random().toString(36).slice(2, 8)}`, act, reason, requestedAt: now.toISOString(), requestedBy, args, outcome });
   await atomicPrivateWrite(file, request);
   return request;
 }
@@ -230,7 +236,7 @@ export async function serveCheckoutRestore(file: string, root: string, deps: Loo
   return restartOwed(file, request, outcome, deps, pid, now);
 }
 const skippedDetail = (skipped: UnverifiableProcess[]) => skipped.length
-  ? `; skipped, their cwd unreadable: ${skipped.slice(0, 8).map(entry => `pid ${entry.pid} (${entry.error})`).join(', ')}${skipped.length > 8 ? ` and ${skipped.length - 8} more` : ''}`
+  ? `; skipped as unattributable, their cwd unreadable: ${skipped.slice(0, 8).map(entry => `pid ${entry.pid} (${entry.error})`).join(', ')}${skipped.length > 8 ? ` and ${skipped.length - 8} more` : ''}`
   : '';
 async function write(file: string, request: CheckoutRestoreRequest, outcome: CheckoutRestoreOutcome, deps: Pick<LoopRequestDeps, 'report'>) {
   await atomicPrivateWrite(file, { ...request, outcome });
@@ -246,16 +252,48 @@ async function restartOwed(file: string, request: CheckoutRestoreRequest, outcom
   }
 }
 
-/** `master checkout-restore REASON` (and the confined master's `master restart` and `master executors [restart]`): file the request, then wait for the loop's outcome. */
-export async function checkoutRestoreCommand(config: Pick<MasterConfig, 'credentialFile'>, args: readonly string[], requestedBy: string, options: { waitMs?: number; pollMs?: number; act?: LoopRequestAct } = {}) {
+export interface CheckoutRestoreCommandOptions { waitMs?: number; pollMs?: number; act?: LoopRequestAct;
+  /** GY-1679: the checkout this command restores itself when directRestoreRefusal allows (the configured launcher's by default), judged by `probe`; `run`, `quiesce`, `now` as restoreCoordinatorCheckout takes them. */
+  root?: string; probe?: DirectRestoreProbe; run?: ChildRun; quiesce?: CheckoutQuiesce; now?: () => Date }
+/**
+ * `master checkout-restore REASON` (and the confined master's `master restart` and `master executors [restart]`): file the request, then wait for the loop's outcome.
+ * A checkout-restore this process may carry out itself (GY-1679) is restored here instead, from the revision this command runs — the outcome recorded as the
+ * request's — and the restart the loop serves is filed and waited for; the checkout guard's own exemption (a test runner's checkout) files as before.
+ */
+export async function checkoutRestoreCommand(config: Pick<MasterConfig, 'credentialFile' | 'cliPath'>, args: readonly string[], requestedBy: string, options: CheckoutRestoreCommandOptions = {}) {
   const act = options.act ?? 'checkout-restore';
   const reason = act === 'executors' ? `master executors ${args.join(' ')} from the confined master session`.replace(/ {2,}/g, ' ')
     : args.join(' ').trim() || (act === 'restart' ? 'master restart from the confined master session' : '');
   if (!reason) throw new Error(checkoutRestoreUsage);
   if (reason.length > 2000) throw new Error(`The ${act} reason is limited to 2000 characters`);
-  const file = loopRequestPath(config, act);
+  const file = loopRequestPath(config, act), root = options.root ?? coordinatorCheckoutRoot(config.cliPath);
+  const filed = act !== 'checkout-restore' ? null : !checkoutGuardApplies(root) ? `the checkout guard does not apply to ${root}` : directRestoreRefusal(root, options.probe);
+  if (act === 'checkout-restore' && !filed) return restoreHere(config, root, reason, requestedBy, options);
   const request = await fileCheckoutRestoreRequest(file, reason, requestedBy, new Date(), act, act === 'executors' ? args : []);
-  const deadline = Date.now() + (options.waitMs ?? (act === 'executors' ? loopExecutorsWaitMs : checkoutRestoreWaitMs));
+  const outcome = await awaitLoopOutcome(file, request, options);
+  return filed ? { ...outcome, filed } : outcome;
+}
+/** The restore carried out by this process (GY-1679): its outcome is the request's record, and a restored checkout files the loop's restart. */
+async function restoreHere(config: Pick<MasterConfig, 'credentialFile'>, root: string, reason: string, requestedBy: string, options: CheckoutRestoreCommandOptions) {
+  const now = options.now ?? (() => new Date()), own = fileURLToPath(new URL('../..', import.meta.url));
+  const executor = { root: own, commit: cliCommit(own) }, by = `master checkout-restore running ${executor.commit?.slice(0, 12) ?? 'an unknown commit'} at ${own}`;
+  let outcome: CheckoutRestoreOutcome;
+  try {
+    const restored = await restoreCoordinatorCheckout(root, `${reason} (requested by ${requestedBy}, carried out by ${by})`, options.run, now(), options.quiesce);
+    outcome = restored
+      ? { at: now().toISOString(), state: 'restored', ref: restored.ref, commit: restored.commit, paths: restored.paths, detail: `${restored.paths.length} dirty path(s) saved under ${restored.ref} (${restored.commit.slice(0, 12)}; its second parent holds the index) and returned to HEAD by ${by}; the loop is asked to restart through its supervising unit${skippedDetail(restored.skipped)}`.slice(0, 4000), restart: null }
+      : { at: now().toISOString(), state: 'clean', ref: null, commit: null, paths: [], detail: `the coordinator checkout at ${root} held no dirty path; nothing was restored by ${by} and the loop was not restarted`, restart: null };
+  } catch (error) { outcome = { at: now().toISOString(), state: 'failed', ref: null, commit: null, paths: [], detail: `${by}: ${error instanceof Error ? error.message : String(error)}`.slice(0, 4000), restart: null }; }
+  const request = await fileCheckoutRestoreRequest(checkoutRestoreRequestPath(config), reason, requestedBy, now(), 'checkout-restore', [], outcome);
+  if (outcome.state === 'failed') process.exitCode = 1;
+  if (outcome.state !== 'restored') return { request: request.id, act: 'checkout-restore' as const, executor, ...outcome };
+  const restartFile = loopRestartRequestPath(config);
+  const restart = await fileCheckoutRestoreRequest(restartFile, `the coordinator checkout at ${root} was restored under ${outcome.ref} by ${by}: ${reason}`.slice(0, 2000), requestedBy, now(), 'restart');
+  return { request: request.id, act: 'checkout-restore' as const, executor, ...outcome, loopRestart: await awaitLoopOutcome(restartFile, restart, options) };
+}
+/** The loop's outcome of `request` at `file`, or that it is still filed when the wait ends. */
+async function awaitLoopOutcome(file: string, request: CheckoutRestoreRequest, options: Pick<CheckoutRestoreCommandOptions, 'waitMs' | 'pollMs'>) {
+  const { act } = request, deadline = Date.now() + (options.waitMs ?? (act === 'executors' ? loopExecutorsWaitMs : checkoutRestoreWaitMs));
   while (Date.now() < deadline) {
     await delay(options.pollMs ?? 2_000);
     const current = await readCheckoutRestoreRequest(file);

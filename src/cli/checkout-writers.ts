@@ -1,7 +1,8 @@
 // Concern: the coordinator checkout's standing writers (GY-1658) — finding the processes working in it and freezing them, fail-closed, for `master checkout-restore`.
-import { readdirSync, readFileSync, readlinkSync, realpathSync, statSync } from 'node:fs';
+import { accessSync, constants, readdirSync, readFileSync, readlinkSync, realpathSync, statSync } from 'node:fs';
 import { join, resolve, sep } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
+import { masterConfinementVariable } from '../master/launch.js';
 
 /**
  * The standing processes working in the checkout at `root` — a process whose working directory is
@@ -91,6 +92,27 @@ export function checkoutProcessScan(root: string, self = process.pid, proc = '/p
   const unreadable = [...table].filter(([pid, entry]) => entry.error !== null && !spared.has(pid) && !outside(pid)).sort(([a], [b]) => a - b);
   const listed = (denied: boolean) => unreadable.filter(([, entry]) => entry.denied === denied).map(([pid, entry]) => ({ pid, error: entry.error! }));
   return { writers: [...writers].sort((a, b) => a - b), unverifiable: listed(false), skipped: listed(true) };
+}
+/** What judges whether this process may carry a restore out itself (directRestoreRefusal); a test hands in its own. */
+export interface DirectRestoreProbe { env?: NodeJS.ProcessEnv; proc?: string; self?: number; writable?: (root: string) => void }
+/**
+ * Why this process cannot carry `master checkout-restore` out itself (GY-1679), or null when it can.
+ * The restore needs the host's whole process table — the writers it freezes — and the checkout
+ * writable. A confined master session (GRAPHYARD_CONFINEMENT set) and a session the loop launched
+ * (a `graphyard-watch-…` scope) see a /proc of their own processes only and the checkout read-only,
+ * and a checkout this process cannot write cannot be returned to HEAD: each files the request for
+ * the loop instead, as before. Any other process restores from the revision it runs, so a delivered
+ * rule the loop's loaded code predates still serves the remedy.
+ */
+export function directRestoreRefusal(root: string, probe: DirectRestoreProbe = {}): string | null {
+  const env = probe.env ?? process.env, proc = probe.proc ?? '/proc', self = probe.self ?? process.pid;
+  if (env[masterConfinementVariable]) return `this command runs in the confined master session (${masterConfinementVariable}=${env[masterConfinementVariable]}), whose /proc shows only its own processes and whose checkout is read-only`;
+  let scope: RegExpMatchArray | null = null;
+  try { scope = readFileSync(join(proc, String(self), 'cgroup'), 'utf8').match(managedScope); } catch { /* no cgroup to read: judged by the checkout */ }
+  if (scope) return `this command runs in a session the loop launched (${scope[0].replace(/^\/|\/$/g, '')}), whose /proc shows only its own processes and whose checkout is read-only`;
+  try { (probe.writable ?? (directory => accessSync(directory, constants.W_OK)))(root); }
+  catch (error) { return `the coordinator checkout at ${root} is not writable by this command (${error instanceof Error ? error.message : String(error)})`; }
+  return null;
 }
 /**
  * A zombie thread-group leader whose sibling threads still run (the main thread called pthread_exit)
