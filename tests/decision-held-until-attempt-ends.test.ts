@@ -38,6 +38,12 @@ test('unit:requirements-decision-held-on-live-attempt — the ledger folds decis
   const [applied] = foldDecisions('work-1682', [...events, { kind: 'decision.applied', actor: 'graphyard-approver-graphyard', at: at(60_000), payload: { id, outcome: 'Requirements revised to policy revision 4 when submit ended attempt 5' } }]);
   assert.equal(applied.state, 'applied');
   assert.equal(applied.held?.at, at(1_000));
+  // Stale when the revision moved first: the fold must leave state stale, not held — settleHeldOnClose
+  // re-folds the same ledger and would otherwise append decision.failed over the race.
+  const [stale] = foldDecisions('work-1682', [...events, { kind: 'decision.stale', actor: 'graphyard', at: at(60_000), payload: { id, action: 'requirements', reason: 'Policy revision changed (now 4); the held decision was approved against revision 3 and was not applied when work.closed ended attempt 5', expected: { policyRevision: 3 }, current: { policyRevision: 4 } } }]);
+  assert.equal(stale.state, 'stale');
+  assert.match(stale.outcome!, /Policy revision changed \(now 4\)/);
+  assert.deepEqual([stale.approvedBy, stale.approvedAt], ['graphyard-approver-graphyard', at(0)], 'the stale settlement keeps the approval');
   // Only the two live-attempt refusals hold a decision; any other refusal still fails it.
   assert.ok(heldByLiveAttempt(liveLeaseRevisionRefusal));
   assert.ok(heldByLiveAttempt(quarantinedRevisionRefusal(5)));
@@ -331,7 +337,7 @@ test('unit:held-requirements-decision-applies-at-attempt-end — a replacement c
 
 // ---- AC-2: close ends a live attempt and must not leave a hold stranded --------------------------
 test('unit:held-requirements-decision-applies-at-attempt-end — an approved close that ends a live lease applies the held requirements decision before the item is done', { timeout: 120_000 }, async () => {
-  const { master, approver, decisions, current, claimed, decided, call } = await plane();
+  const { engine, operator, master, approver, decisions, current, claimed, decided, call, ledger, paths } = await plane();
   const work = await claimed('held-then-closed');
   const held = await decided(work);
   assert.equal(held.state, 'held');
@@ -349,6 +355,26 @@ test('unit:held-requirements-decision-applies-at-attempt-end — an approved clo
   const [requirements] = (await decisions(work.key)).filter(entry => entry.action === 'requirements');
   assert.equal(requirements.state, 'applied', JSON.stringify(requirements));
   assert.match(requirements.outcome, /^Requirements revised to policy revision 2 when work\.closed ended attempt 1$/);
+  // AC-2 race on the close path: expectedPolicyRevision moved while the attempt was live. applyHeldDecisions
+  // records decision.stale; settleHeldOnClose must not re-fold that as held and append decision.failed.
+  const raced = await claimed('held-then-closed-stale');
+  const racedHold = await decided(raced);
+  assert.equal(racedHold.state, 'held');
+  await engine.execute(operator, 'requirements', raced.id, { expectedPolicyRevision: 1, reason: 'Widened while the worker runs, before close', criteria: raced.criteria, dependencies: [], plannedFiles: [...paths, 'src/server/routes/held-close-widening.ts'], exclusiveResources: [] }, randomUUID());
+  assert.equal((await current(raced)).policyRevision, 2);
+  assert.ok((await current(raced)).lease, 'the widening kept the attempt');
+  const raceClose = await call(master.token, `work/${raced.key}/decide`, { action: 'close', input: { kind: 'obsolete', expectedRevision: (await current(raced)).revision }, reason: 'Close after the held revision raced' });
+  const raceClosed = await call(approver.token, `work/${raced.key}/approve`, { decision: raceClose.id, reason: 'Nothing left under the moved revision' }) as { state: string };
+  assert.equal(raceClosed.state, 'applied', JSON.stringify(raceClosed));
+  const closedRaced = await current(raced);
+  assert.equal(closedRaced.stage, 'done');
+  assert.equal(closedRaced.policyRevision, 2, 'the stale decision changed nothing');
+  assert.equal(closedRaced.criteria[0].text, 'Works');
+  const [staleRequirements] = (await decisions(raced.key)).filter(entry => entry.action === 'requirements');
+  assert.equal(staleRequirements.state, 'stale', JSON.stringify(staleRequirements));
+  assert.deepEqual(staleRequirements.race, { expected: { policyRevision: 1 }, current: { policyRevision: 2 } });
+  assert.match(staleRequirements.outcome, /Policy revision changed \(now 2\); the held decision was approved against revision 1 and was not applied when work\.closed ended attempt 1/);
+  assert.ok(!(await ledger(raced)).some(row => row.kind === 'decision.failed' && row.payload.id === staleRequirements.id), 'settleHeldOnClose did not erase the stale outcome with decision.failed');
 });
 
 // ---- AC-2: the submitted head is re-reviewed on the new revision --------------------------------

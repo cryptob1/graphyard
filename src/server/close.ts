@@ -74,9 +74,10 @@ export async function closeWork(services: Services, caller: Principal, id: strin
 }
 
 /**
- * GY-1687: a held requirements decision that did not apply when the close ended the attempt (none was live,
- * or the revision moved) must not remain `held` on a done item — nothing will end an attempt again. Settle
- * each remaining hold as failed, naming the closure.
+ * GY-1687: a held requirements decision that did not apply when the close ended the attempt (none was live)
+ * must not remain `held` on a done item — nothing will end an attempt again. Settle each remaining hold
+ * as failed, naming the closure. A hold that `applyHeldDecisions` already settled stale (or applied /
+ * failed) in this transaction is folded out of `held` by `decision.stale` and is not failed again.
  */
 async function settleHeldOnClose(db: Db, work: Work, now: Date, closure: Closure) {
   const rows = (await db.query("SELECT actor, kind, payload, created_at FROM events WHERE work_id=$1 AND kind LIKE 'decision.%' ORDER BY seq", [work.id])).rows as { actor: string; kind: string; payload: any; created_at: Date | string }[];

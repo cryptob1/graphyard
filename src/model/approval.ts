@@ -89,7 +89,7 @@ export const decisionRefusalSchema = z.object({ action: z.literal('refuse'), dec
  * refused, why and when. It is distinct from `refusals`, the conflicted approvals the server
  * turned away, and from a decision still `requested` because no session ever judged it.
  */
-export type DecisionState = 'requested' | 'approved' | 'applied' | 'failed' | 'refused' | 'superseded' | 'held';
+export type DecisionState = 'requested' | 'approved' | 'applied' | 'failed' | 'refused' | 'superseded' | 'held' | 'stale';
 /**
  * GY-1687: the two engine refusals that mean only "the item has a live attempt", never that the revision
  * is wrong: a requirements revision under a live lease, and one under an unverified containment fence.
@@ -153,6 +153,10 @@ export function foldDecisions(workId: string, events: DecisionEvent[]): Decision
     if (event.kind === 'decision.applied') Object.assign(decision, { state: 'applied', outcome: details.outcome ?? null });
     if (event.kind === 'decision.failed') Object.assign(decision, { state: 'failed', outcome: details.error ?? null });
     if (event.kind === 'decision.held') Object.assign(decision, { state: 'held', outcome: details.reason ?? null, held: { reason: details.reason ?? null, at: event.at, application: details.application ?? null, ...(details.attempt ? { attempt: details.attempt } : {}) } });
+    // GY-1687: a held decision whose expectedPolicyRevision moved before the attempt ended settles
+    // `decision.stale` in that same transaction; without folding it, settleHeldOnClose still sees held
+    // and appends decision.failed over the required stale outcome.
+    if (event.kind === 'decision.stale') Object.assign(decision, { state: 'stale', outcome: details.reason ?? null });
     if (event.kind === 'decision.superseded') Object.assign(decision, { state: 'superseded', outcome: details.reason ?? null, superseded: { bound: details.bound ?? null, current: details.current ?? null } });
   }
   return [...decisions.values()];
