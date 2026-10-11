@@ -105,8 +105,10 @@ test('unit:post-deploy-follow-up-observation-window — a windowed follow-up rec
   assert.deepEqual(parsed.observationWindow, filed);
   assert.equal(createSchema.safeParse({ ...created, observationWindow: { notBefore: 'soon', basis: 'criterion-window', detail: '' } }).success, false, 'the instant is an ISO instant');
   // A report that cannot be read, or none, still files the follow-up — on the merge bound.
+  // The filing clock is the fixture's own instant (same as the readable-report case above), never the wall clock:
+  // the observation bound depends only on merge and the criterion window, so wall time cannot change the assertion.
   const unreadable: any[] = [];
-  await filePostDeployFollowUps(delivered(), release, [delivered()], async input => { unreadable.push(input); return { key: 'GY-1689' }; }, new Date(), async () => { throw new Error('report timed out'); });
+  await filePostDeployFollowUps(delivered(), release, [delivered()], async input => { unreadable.push(input); return { key: 'GY-1689' }; }, new Date('2026-10-11T03:36:11.661Z'), async () => { throw new Error('report timed out'); });
   assert.deepEqual([unreadable[0].observationWindow.notBefore, unreadable[0].observationWindow.basis], [iso(merge7), 'criterion-window']);
   const withoutReader = postDeployChecks(delivered(), release)[0].followUp!.input;
   assert.deepEqual([withoutReader.observationWindow!.notBefore, withoutReader.observationWindow!.basis], [iso(merge7), 'criterion-window']);
