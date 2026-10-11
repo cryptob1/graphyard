@@ -14,21 +14,21 @@ Main → candidate → uat → production; `.railway/railway.ts` deploys `releas
 - Failed candidates file [hold](validation.md#release-holds) per failed outcome, else one follow-up (`release follow-up ID` retries), as the [filing credential](#release-filing-credential).
 - `release soak ID --sha SHA --result success|failure|cancelled [--run URL] [--report NAME]` (`release-candidate-soak.yml`'s `record` job) records the advisory `rc-soak/ID`; promotion never reads it.
 
-**The master loop drives promotion**: it dispatches the workflow (`promote=true`) once main differs from the last `rc-production/` and cut SHAs, none is queued and `run.promoteEveryMinutes` (`master config promoteEveryMinutes=N`; 10, `0` off) has passed; failed dispatches raise `promotion:failed` (backoff; `master status` `promotion`). Under a `control-plane` merger the loop cuts (`run.candidates.everyMerges` 10, `idleMinutes` 15), validates, promotes and verifies (`GRAPHYARD_UAT_URL` or a static site's `GRAPHYARD_UAT_STATIC`/`GRAPHYARD_UAT_BUILD`, `GRAPHYARD_PRODUCTION_URL`; no workflow; a managed repository runs its own [required cases](validation.md)); a failed required E2E case reverts the newest candidate item a matching verification map covers (`candidateReverts`; reopened); a main-watch freeze holds all. `release status` lists candidates; `release GY-N EPOCH` leases. Needs `vars.UAT_URL`, `vars.PRODUCTION_URL`, `GRAPHYARD_UAT_TOKEN`, `GRAPHYARD_RELEASE_TOKEN`, `GRAPHYARD_E2E_RECORD_TOKEN`.
+**The master loop drives promotion**: it dispatches the workflow (`promote=true`) once main differs from the last `rc-production/` and cut SHAs, none is queued and `run.promoteEveryMinutes` (`graphyard master config promoteEveryMinutes=N`; 10, `0` off) has passed; failed dispatches raise `promotion:failed` (backoff; `master status` `promotion`). Under a `control-plane` merger the loop cuts (`run.candidates.everyMerges` 10, `idleMinutes` 15), validates, promotes and verifies (`GRAPHYARD_UAT_URL` or a static site's `GRAPHYARD_UAT_STATIC`/`GRAPHYARD_UAT_BUILD`, `GRAPHYARD_PRODUCTION_URL`; no workflow; a managed repository runs its own [required cases](validation.md)); a failed required E2E case reverts the newest candidate item a matching verification map covers (`candidateReverts`; reopened); a main-watch freeze holds all. `release status` lists candidates; `release GY-N EPOCH` leases. Needs `vars.UAT_URL`, `vars.PRODUCTION_URL`, `GRAPHYARD_UAT_TOKEN`, `GRAPHYARD_RELEASE_TOKEN`, `GRAPHYARD_E2E_RECORD_TOKEN`.
 
 ### Release filing credential
 
-The uat environment's `GRAPHYARD_TOKEN` (`GRAPHYARD_RELEASE_TOKEN`) files holds and follow-ups as operator agent `graphyard-release-follow-up`, only `intent:create` on work items `*`. Issue it: `graphyard operator-agent setup FILE --token-stdin` (`{"id":"graphyard-release-follow-up","displayName":"Release follow-up","capabilities":["intent:create"],"scope":{"repositories":["OWNER/REPO"],"workItems":["*"]},"reason":"..."}`); `doctor` prints `FAIL release-filing` if refused or broader. `e2e record` uses `GRAPHYARD_E2E_RECORD_TOKEN`, likewise `graphyard-e2e-recorder` with only `e2e:record`, never admin.
+UAT's `GRAPHYARD_TOKEN` (`GRAPHYARD_RELEASE_TOKEN`) files holds and follow-ups as operator agent `graphyard-release-follow-up`, only `intent:create` on work items `*`. Issue it: `graphyard operator-agent setup FILE --token-stdin` (`{"id":"graphyard-release-follow-up","displayName":"Release follow-up","capabilities":["intent:create"],"scope":{"repositories":["OWNER/REPO"],"workItems":["*"]},"reason":"..."}`); `doctor` prints `FAIL release-filing` if refused or broader. `e2e record` uses `GRAPHYARD_E2E_RECORD_TOKEN`, likewise `graphyard-e2e-recorder` with only `e2e:record`, never admin.
 
 ### Pre-merge gate and release-candidate validation
 
-Required: `typecheck`, `test` (`ci.yml`), under ten minutes; soak/timing files (`releaseCandidateTests`), container and chart checks per candidate. UAT's `zero-touch` suite (`up --agent --goal` against a fake GitHub) must merge a first item; any human step but App approval blocks promotion.
+Required: `typecheck`, `test` (`ci.yml`), under ten minutes; soak/timing (`releaseCandidateTests`), container and chart checks per candidate. UAT's `zero-touch` suite (`up --agent --goal` against a fake GitHub) must merge a first item; any human step but App approval blocks promotion.
 
-`deploy/helm/exercise.sh` waits for the upgrade's rollout, forwards to the new ReplicaSet's Ready pod before backing up and retries transient API failures (an empty reply, a reset connection, a non-2xx status or a 2xx with no body); an API staying unreachable ends the job's log with `api METHOD /api/PATH failed after 15 attempts: status STATUS, body: BODY`.
+`deploy/helm/exercise.sh` waits for the upgrade's rollout and the new ReplicaSet's Ready pod before backing up, retrying transient API failures (empty reply, reset, non-2xx, bodiless 2xx); an API staying unreachable ends the job's log with `api METHOD /api/PATH failed after 15 attempts: status STATUS, body: BODY`.
 
 ### One delivery path
 
-Exact-head CI and review gate merges; [candidates](#release-candidates) deploy validated builds; [the redesign](delivery-redesign.md) has only Graphyard write main.
+Exact-head CI and review gate merges; [candidates](#release-candidates) deploy validated builds. [The redesign](delivery-redesign.md) has only Graphyard write main.
 
 ### Main guard
 
@@ -36,7 +36,7 @@ Every 30 s the main guard reruns a merge failing a required check its parent pas
 
 ## Managed repositories
 
-`init --scan` splits checks into `delivery.mergeGate` and per-candidate; `--apply` renders `graphyard-release-candidate.yml` (cut on `candidateSchedule`, `--candidate-cron CRON|off`) and `graphyard-promotion.yml` (promote UAT-passed SHA, verify). `deploy.adapter`: `railway` (`deploy.project`) or `command` (`deploy.uat`/`deploy.production` with `GRAPHYARD_CANDIDATE_SHA`; unset renders none); UAT reports SHA at `/healthz` as `commit` or `revision`. `--delivery per-pr` (`"mode": "per-pr"`) keeps per-PR checks; `install --plan` lists resources, `human` ones needing `--apply --create-environments`.
+`init --scan` splits checks into `delivery.mergeGate` and per-candidate; `--apply` renders `graphyard-release-candidate.yml` (cut on `candidateSchedule`, `--candidate-cron CRON|off`) and `graphyard-promotion.yml` (promote, verify). `deploy.adapter`: `railway` (`deploy.project`) or `command` (`deploy.uat`/`deploy.production` with `GRAPHYARD_CANDIDATE_SHA`; unset renders none); UAT reports SHA at `/healthz` as `commit` or `revision`. `--delivery per-pr` (`"mode": "per-pr"`) keeps per-PR checks; `install --plan` lists resources, `human` ones needing `--apply --create-environments`.
 
 ```json
 {"kind":"environment","id":"production","expectedRevision":0,"repository":"owner/repository","url":"https://app.example.test","instance":"production-cluster","immutable":true,"services":["api","web"],"resources":["production-smoke-account"],"delivery":{"freshnessSeconds":300,"approvalRequired":true}}

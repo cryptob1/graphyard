@@ -97,7 +97,7 @@ const REQUIRED_STATEMENTS: [string, RegExp][] = [
   ['docs/master-agent.md', /Live Confirm-access fixtures: \[`master browser capture`\]\(master-agent-reference\.md#github-administration-through-the-browser\), never a human/],
   ['docs/master-agent-reference.md', /a criterion needing a live one runs `master browser capture \[--dry-run\]` on the sudo-protected App permissions page, submitting nothing, never a human/],
   // GY-1690 AC-3: the release-candidate section says the chart exercise waits for the rollout, retries transient API failures and names the last line a failed job ends on.
-  ['docs/delivery.md', /`deploy\/helm\/exercise\.sh` waits for the upgrade's rollout, forwards to the new ReplicaSet's Ready pod before backing up and retries transient API failures; an API staying unreachable ends the job's log with `api METHOD \/api\/PATH failed after 15 attempts: status STATUS, body: BODY`/],
+  ['docs/delivery.md', /`deploy\/helm\/exercise\.sh` waits for the upgrade's rollout and the new ReplicaSet's Ready pod before backing up, retrying transient API failures \(empty reply, reset, non-2xx, bodiless 2xx\); an API staying unreachable ends the job's log with `api METHOD \/api\/PATH failed after 15 attempts: status STATUS, body: BODY`/],
 ];
 
 test('unit:docs-word-budget — the pages graphyard.json budgets (README.md and every docs page) keep every page within its per-page budget and 200 words under it, counted as wc -w counts them; a total within 3% of the budget fails a change that adds to it and warns otherwise', () => {
