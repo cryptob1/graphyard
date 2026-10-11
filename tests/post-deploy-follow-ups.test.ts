@@ -5,7 +5,8 @@ import type { Work } from '../src/model.js';
 // Loaded inside each case, so a tree without this change fails these cases rather than the file.
 const modules = async () => ({ ...await import('../src/model.js'), ...await import('../src/master-verification.js'), ...await import('../src/executor.js'),
   ...await import('../src/model/next-action.js'), ...await import('../src/model/action-account.js'), ...await import('../src/model/liveness.js'),
-  ...await import('../src/model/actions.js'), ...await import('../src/model/actionless.js'), ...await import('../src/model/plain-status.js'), ...await import('../src/master/status.js') });
+  ...await import('../src/model/actions.js'), ...await import('../src/model/actionless.js'), ...await import('../src/model/plain-status.js'), ...await import('../src/master/status.js'),
+  ...await import('../src/master/dispatch.js'), ...await import('../src/coordination.js') });
 
 // GY-1698: a post-deploy follow-up for a windowed criterion — an intervention rate below a threshold
 // per N days, a hold for N consecutive days — can produce nothing before the window has run. GY-1689
@@ -129,7 +130,7 @@ test('unit:post-deploy-follow-up-observation-window — a windowed follow-up rec
 });
 
 test('unit:observation-window-holds-dispatch — a released follow-up is not dispatched before its recorded instant and is dispatched by the loop once it passes; before the fix GY-1689 was dispatched at once', async () => {
-  const { actionAccount, actionlessCards, actionlessItems, buildMasterStatus, createSchema, evaluate, livenessFallback, nextAction, plainStatus, postDeployChecks, reconcileActions, stalledCards, stalledItems } = await modules();
+  const { actionAccount, actionlessCards, actionlessItems, assertDispatchable, buildMasterStatus, createSchema, dispatchable, evaluate, livenessFallback, nextAction, plainStatus, postDeployChecks, reconcileActions, stalledCards, stalledItems } = await modules();
   const gy1685 = delivered();
   const notBefore = iso(mergedMs + 7 * day);
   // GY-1689 as the loop files it now: GY-1685's follow-up, carrying the window, released at 06:39Z.
@@ -151,8 +152,12 @@ test('unit:observation-window-holds-dispatch — a released follow-up is not dis
   const before = actionAccount(unwindowed, [gy1685, unwindowed], new Date(releasedAt));
   assert.equal(before.action?.kind, 'dispatch');
   assert.match(before.action!.reason, /^GY-1689 is ready and unassigned: Worker has not submitted implementation for this attempt/);
+  assert.equal(dispatchable(unwindowed, Date.parse(releasedAt)), true);
+  assert.doesNotThrow(() => assertDispatchable(unwindowed, [gy1685, unwindowed], releasedAt));
 
   // With the window: no dispatch action, a named wait on the instant, and the loop's queue requests nothing.
+  // The durable loop's claimable set (assertDispatchable) and master status's schedule (dispatchable)
+  // refuse the same way — nextAction alone never stopped GY-1689's launch.
   for (const at of [releasedAt, '2026-10-17T14:31:37.000Z', '2026-10-18T03:11:01.999Z']) {
     const account = actionAccount(item, all, new Date(at));
     assert.equal(account.action, null, `no action at ${at}`);
@@ -162,6 +167,8 @@ test('unit:observation-window-holds-dispatch — a released follow-up is not dis
     const queued = { ...item, actionQueue: { actions: [], history: [] } } as Work;
     assert.deepEqual(reconcileActions(queued, [gy1685, queued], new Date(at)), [], 'the dispatch step is asked for nothing');
     assert.deepEqual(queued.actionQueue!.actions, []);
+    assert.equal(dispatchable(item, Date.parse(at)), false, `dispatchable holds at ${at}`);
+    assert.throws(() => assertDispatchable(item, all, at), /Dispatch waits for its observation window: the reading it owes can first exist at/);
     // Not a stale wait, not stalled, not a stalled card: the wait is due at the instant.
     assert.equal(livenessFallback(item, all, new Date(at)), null);
     assert.deepEqual(stalledItems(all, new Date(at)), []);
@@ -189,6 +196,8 @@ test('unit:observation-window-holds-dispatch — a released follow-up is not dis
     const queued = { ...item, actionQueue: { actions: [], history: [] } } as Work;
     const transitions = reconcileActions(queued, [gy1685, queued], new Date(at));
     assert.deepEqual(transitions.map(entry => [entry.event, entry.action.kind, entry.action.requestedBy]), [['requested', 'dispatch', 'graphyard']]);
+    assert.equal(dispatchable(item, Date.parse(at)), true, `dispatchable at ${at}`);
+    assert.doesNotThrow(() => assertDispatchable(item, all, at));
     const later = buildMasterStatus({ work: all, now: at }, [], []).work.find(entry => entry.key === 'GY-1689')!;
     assert.equal(later.observationWindow!.waiting, false);
     assert.equal(plainStatus(item, Date.parse(at)).sentence, 'Waiting for someone to pick this up');

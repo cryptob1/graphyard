@@ -12,7 +12,7 @@ import { sweepExpiredWorkerCredentials, withdrawWorkerCredential, workerCredenti
 import { assertNoApprovalOptOut } from '../harness.js';
 import { parkedOnHuman, humanDecisionLabel, answerCommand } from '../model/human-request.js';
 import { documentationWorkerSection } from '../model/documentation.js';
-import type { Work } from '../model.js';
+import { observationWindowHold, type Work } from '../model.js';
 import { type ConsentAnswer, type ConsentHold, consentHoldAttention, consentHoldMs, writeConsentHold } from '../consent-prompt.js';
 import type { MasterConfig, WorkerProfile } from './profiles.js';
 import { atomicPrivateWrite, loadMasterConfig, readCredentialFile, readWorkerCredential } from './config.js';
@@ -186,6 +186,10 @@ export function assertDispatchable(work: Work, allWork: Work[], observedAt: stri
   if (work.submission && !work.reworkRequested) throw new Error('Dispatch requires operator-authorized rework for a submitted item');
   const conflicts = resourceConflicts(work, allWork, now);
   if (conflicts.length) throw new Error(`Dispatch blocked by exclusive resources: ${conflicts.map(conflict => `${conflict.resource} held by ${conflict.key}`).join(', ')}`);
+  // GY-1698: the durable loop offers claimable work through this gate, not only through the action
+  // queue's nextAction wait — a released follow-up whose reading cannot exist yet must not be claimed.
+  const window = observationWindowHold(work, new Date(now));
+  if (window) throw new Error(`Dispatch waits for its observation window: the reading it owes can first exist at ${window.notBefore} (${window.detail})`);
   // Planned-file overlap holds nothing: dispatch is optimistic, and the merge queue and a sync
   // round integrate whichever of two overlapping items lands second.
 }

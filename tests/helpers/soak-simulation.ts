@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import { type FileHandle, mkdir, open, utimes, writeFile } from 'node:fs/promises';
-import { readdirSync } from 'node:fs';
+import { existsSync, readdirSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { wakeFromWebhook } from '../../src/store.js';
@@ -374,8 +374,12 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   const reclaimRoot = await temporaryDirectory('soak-reclaim'), tmpRoot = await temporaryDirectory('soak-tmp');
   await mkdir(join(reclaimRoot, '.graphyard'));
   const leftover = async (name: string, ageMs: number, owner?: object) => {
+    // Recreate the scratch root if an earlier reclaim pass took it: the observation-window day's
+    // long idle stretch (10-minute steps while every open item waits on its instant) outlives the
+    // young leftovers the reclaim step is meant to keep, and a missing parent must not stop the day.
     const directory = join(tmpRoot, name), at = new Date(clock.now() - ageMs);
-    await mkdir(directory); await writeFile(join(directory, 'data'), 'x'.repeat(1024));
+    await mkdir(tmpRoot, { recursive: true }); await mkdir(directory, { recursive: true });
+    await writeFile(join(directory, 'data'), 'x'.repeat(1024));
     await utimes(join(directory, 'data'), at, at); await utimes(directory, at, at);
     if (owner) await writeFile(`${directory}.owner`, JSON.stringify(owner));
     return directory;
@@ -2659,7 +2663,9 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
       const commit = github.commit(`Split ${from}\n\nGraphyard-Successor: ${from} -> ${successors.join(', ')}`, [...github.files.filter(path => path !== from), ...successors]);
       github.successions.push(...successors.map(to => ({ from, to, commit: commit.sha, similarity: 70 })));
     }
-    if (elapsed > 0 && elapsed % hour === 0 && elapsed < options.hours * hour) hourly.push({ directory: await leftover(`graphyard-hour-${elapsed / hour}`, 0), at: elapsed });
+    // GY-1698: the observation-window day does not assert the hourly /tmp leftovers (soak-day does);
+    // skip them so a long idle hold never depends on recreating scratch the reclaim step may have taken.
+    if (!windowDay && elapsed > 0 && elapsed % hour === 0 && elapsed < options.hours * hour) hourly.push({ directory: await leftover(`graphyard-hour-${elapsed / hour}`, 0), at: elapsed });
     // GY-839: while the window stands, GitHub answers every open candidate's compares without a
     // usable merge base; afterwards its answers carry the true one again.
     const blind = plan.blind;
@@ -3132,31 +3138,56 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
         // The report's projection for the pattern: a streak not yet begun, projected half a day before the merge bound, as GY-1689's was.
         const projected = new Date(Date.parse(parent.delivery.mergedAt) + windowDay.windowDays * 24 * hour - 12 * hour).toISOString();
         const checks = await filePostDeployFollowUps(parent, parent.delivery.mergeSha, listed,
-          async (input, key) => { const filed = await api(principals.operatorAgent, 'POST', 'work', input, key) as Work; windowDay.created.push(filed.key); return filed; }, new Date(at), async () => ({ since: null, projected }));
+          async (input, key) => {
+            // File through the engine the same way the API create path does, so the window rides the
+            // create schema onto the item (a missing window would dispatch at once and is the bug).
+            assert.ok(input.observationWindow, `filePostDeployFollowUps must put observationWindow on the follow-up input: ${JSON.stringify(input)}`);
+            const filed = await engine.execute(principals.operator, 'create', null, input, key) as Work;
+            assert.ok(filed.observationWindow, `create must persist observationWindow: ${JSON.stringify(filed.observationWindow)}`);
+            windowDay.created.push(filed.key); return filed;
+          }, new Date(at), async () => ({ since: null, projected }));
         windowDay.filings += 1;
         const key = checks.find(check => check.proof === windowDay.proof)?.followUp ?? null;
         if (key && !windowDay.followUp) {
           const filed = (await store.list()).find(item => item.key === key)!;
+          assert.ok(filed.observationWindow, `the filed follow-up must carry observationWindow after create: ${filed.key}`);
           windowDay.followUp = filed; windowDay.filedAt = at;
           // Released at once, days before its instant: GY-1689 was released three hours after its filing.
           await engine.execute(principals.operator, 'ready', filed.id, {}, id()); windowDay.releasedAt = clock.now();
+          windowDay.followUp = (await store.list()).find(item => item.id === filed.id)!;
+          assert.ok(windowDay.followUp.observationWindow, `ready must keep observationWindow on ${filed.key}`);
         }
       }
       if (windowDay.followUp) {
-        const all = await store.list(), current = all.find(item => item.id === windowDay.followUp!.id)!, status = buildMasterStatus({ work: all, now: new Date(at).toISOString() }, [], []);
-        const row = status.work.find(entry => entry.key === current.key)!;
-        windowDay.samples.push({ elapsed, at: new Date(at).toISOString(), stage: current.stage, waiting: row.observationWindow?.waiting ?? null, attention: row.attention ?? null,
-          attentionRows: status.attentionItems.filter(entry => entry.subject === current.key).length, sentence: plainStatus(current, at).sentence,
-          dispatches: [...(current.actionQueue?.actions ?? []), ...(current.actionQueue?.history ?? [])].filter(action => action.kind === 'dispatch').map(action => ({ requestedBy: action.requestedBy, at: action.requestedAt })),
-          lease: current.lease?.owner ?? null, sessions: sessions.filter(session => session.key === current.key).length, masterLive: !!herdr.byName(config.masterAgentName!) || !!state.master.session,
-          faults: state.faults.instances.filter(instance => instance.subject === current.key).map(instance => instance.kind),
-          escalations: Object.values(state.actions).filter(action => action.kind === 'escalation' && action.work === current.key).map(action => action.detail) });
-        windowDay.followUp = current;
+        const all = await store.list(), current = all.find(item => item.id === windowDay.followUp!.id);
+        if (current) {
+          const status = buildMasterStatus({ work: all, now: new Date(at).toISOString() }, [], []);
+          const row = status.work.find(entry => entry.key === current.key);
+          // Status rows omit delivered items; the hold is still the item's own window when the row is gone.
+          const waiting = row ? row.observationWindow?.waiting ?? null : observationWindowHold(current, new Date(at)) !== null;
+          windowDay.samples.push({ elapsed, at: new Date(at).toISOString(), stage: current.stage, waiting, attention: row?.attention ?? null,
+            attentionRows: status.attentionItems.filter(entry => entry.subject === current.key).length, sentence: plainStatus(current, at).sentence,
+            dispatches: [...(current.actionQueue?.actions ?? []), ...(current.actionQueue?.history ?? [])].filter(action => action.kind === 'dispatch').map(action => ({ requestedBy: action.requestedBy, at: action.requestedAt })),
+            lease: current.lease?.owner ?? null, sessions: sessions.filter(session => session.key === current.key).length, masterLive: !!herdr.byName(config.masterAgentName!) || !!state.master.session,
+            faults: state.faults.instances.filter(instance => instance.subject === current.key).map(instance => instance.kind),
+            escalations: Object.values(state.actions).filter(action => action.kind === 'escalation' && action.work === current.key).map(action => action.detail) });
+          windowDay.followUp = current;
+        }
       }
     }
     const opened = (await store.list()).filter(item => item.stage !== 'done');
-    // GY-1698: a day whose every open item is held on its observation window is as idle as one with nothing open.
-    const idle = !opened.length || (!!windowDay && opened.every(item => observationWindowHold(item, new Date(clock.now())) !== null));
+    // GY-1698: a day whose every open item is held on its observation window (and none is leased) is as
+    // idle as one with nothing open — the production loop's 10-minute sleep. A live lease must keep
+    // the one-minute tick: the soak lease is two minutes, so a ten-minute jump would expire it before
+    // the session's next heartbeat. Until the follow-up is filed, keep the one-minute tick too: the
+    // filing is due `filedAfterMs` after the parent's merge, and a ten-minute jump overshoots that.
+    const tickAt = clock.now();
+    const filingDue = !!windowDay && !windowDay.followUp;
+    const heldIdle = !!windowDay && !filingDue && opened.length > 0 && opened.every(item => {
+      const live = item.lease && Date.parse(item.lease.expiresAt) > tickAt;
+      return !live && observationWindowHold(item, new Date(tickAt)) !== null;
+    });
+    const idle = (!opened.length && !filingDue) || heldIdle;
     const step = loopWakeDay ? loopWakeDay.tickMs : idle ? 10 * minute : minute;
     // The containment day's slow reads moved the clock inside the cycle; the day keeps one cycle a minute.
     elapsed += step; await moveClock(Math.max(0, step - fenced.drift)); fenced.drift = 0;
@@ -3216,7 +3247,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     decompositionHistory.deliveredParents = (await store.list()).filter(item => item.children?.length && item.stage === 'done').map(item => item.key);
   }
   await settleTmpReclaim(); await holder.close();
-  const tmp = { root: tmpRoot, backlog, deadOwned, cache, heldDirectory, liveOwned, hourly, passes: tmpPasses, peak: tmpPeak, reports: await readReclaimReports(reclaimRoot), left: readdirSync(tmpRoot) };
+  const tmp = { root: tmpRoot, backlog, deadOwned, cache, heldDirectory, liveOwned, hourly, passes: tmpPasses, peak: tmpPeak, reports: await readReclaimReports(reclaimRoot), left: existsSync(tmpRoot) ? readdirSync(tmpRoot) : [] };
   if (process.env.SOAK_TRACE) console.error(`landing: ${github.landingChecks} checks over ${github.landingBases.size} bases, ${github.ancestorCompares} ancestor compares, ${github.blindCompares} blind compares; false landing refusals: ${landingRefusals.map(entry => `${entry.key}@+${Math.round(entry.elapsed / minute)}min ${entry.sha.slice(0, 12)}`).join(', ') || 'none'}`);
   engine.execute = executeAll;
   return { observationWindowDay: windowDay, unmatchedRefusals, capAnswers, readinessDay, supervisedDay, stuck, unboundedDay, provisionDay, promotion, throughput, reconciled, outside, items, final, github, sessions, docsSyncRuns, docsSyncRoot, lost, launches, violations, faulted, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, headless, herdr, hand, stranded, withdrawals, resumes, strandedLaunches, escalations, spent, attestations, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, guardReads, checkout, landingRefusals, foreignPane, previousWorktrees, closedLeased,
