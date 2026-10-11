@@ -255,6 +255,30 @@ async function treeLastWritten(path: string, own: number): Promise<number> {
   return newest;
 }
 /**
+ * Whether everything under `path` — every directory, file, link and socket in its tree, following
+ * no symlink — is on `device`. A whole-tree removal unlinks whatever a path reaches, and a
+ * filesystem mounted anywhere inside a candidate is another volume's inodes, so a sweep that
+ * promises the scanned volume alone removes a tree whole only once this has read it to the end
+ * (review of 9c6cbd0fd7, GY-1683). A mount that is a single file is on another device too, which
+ * is why every entry is judged, not only the directories the walk would enter.
+ */
+export async function treeOnDevice(path: string, device: number): Promise<boolean> {
+  const stack = [path];
+  while (stack.length) {
+    const directory = stack.pop()!;
+    for (const entry of await readdir(directory, { withFileTypes: true }).catch(() => [] as Dirent[])) {
+      const child = join(directory, entry.name);
+      const info = await lstat(child).catch(() => null);
+      if (!info) continue;
+      if (info.dev !== device) return false;
+      if (info.isDirectory()) stack.push(child);
+    }
+  }
+  return true;
+}
+/** The device of a scanned root, through a symlinked root to the directory it names, or undefined when it cannot be read. */
+const rootDevice = async (root: string) => (await stat(root).catch(() => null))?.dev;
+/**
  * The repository's registration of a linked git worktree at `path` — `.git/worktrees/<name>`, whose
  * `gitdir` file names this checkout back — or null. Removing the checkout alone leaves it registered,
  * and `git worktree add` at the same path then fails as already registered; git's own prune deletes
@@ -713,7 +737,7 @@ async function reclaimTsxCaches(root: string, real: string, pass: PassState, rep
  */
 async function reclaimPackageStores(root: string, real: string, pass: PassState, report: TmpReclaimReport) {
   if (pass.storeAge === null) return;
-  const device = (await lstat(root).catch(() => null))?.dev, stores: string[] = [];
+  const device = await rootDevice(root), stores: string[] = [];
   for (const name of packageStoreNames) {
     const own = await lstat(join(root, name)).catch(() => null);
     if (own?.isDirectory() && own.dev === device) stores.push(name);
@@ -770,13 +794,17 @@ async function reclaimAgedFiles(root: string, real: string, names: readonly stri
  * `<root>/node-compile-cache` that this user owns — Node keeps one per version — whose newest write
  * anywhere in its tree is older than the pass's cache age bound, and that no live process holds or
  * names, goes whole, oldest first, within what the pass's entry and work bounds have left. A version
- * written inside the bound is in use and stays; the cache root is never removed.
+ * written inside the bound is in use and stays; the cache root is never removed. The cache, each
+ * version and everything under it must be on the scanned root's own volume: a filesystem mounted
+ * there is not this root's inodes and is never entered. A removal that fails partway (the version
+ * refilled while it went, or a file in it could not be unlinked) is recorded as unfinished and is
+ * due at once on the next pass, whatever the mtime the half-finished removal left on it.
  */
 async function reclaimCompileCaches(root: string, real: string, pass: PassState, report: TmpReclaimReport) {
   const maxAgeMs = pass.cacheAge, limit = pass.limit - report.removed.length;
   if (maxAgeMs === null || limit <= 0) return;
-  const cache = join(root, compileCacheName), own = await lstat(cache).catch(() => null);
-  if (!own?.isDirectory() || (pass.uid !== undefined && own.uid !== pass.uid)) return;
+  const cache = join(root, compileCacheName), own = await lstat(cache).catch(() => null), device = await rootDevice(root);
+  if (device === undefined || !own?.isDirectory() || own.dev !== device || (pass.uid !== undefined && own.uid !== pass.uid)) return;
   const stale: { path: string; mtime: number }[] = [];
   let held: Set<string> | null = null;
   for (const entry of await readdir(cache, { withFileTypes: true }).catch(() => [] as Dirent[])) {
@@ -784,10 +812,12 @@ async function reclaimCompileCaches(root: string, real: string, pass: PassState,
     const path = join(cache, entry.name);
     let info;
     try { info = await lstat(path); } catch { continue; }
-    if (pass.uid !== undefined && info.uid !== pass.uid) continue;
+    // Another user's version is theirs; one on another device is another volume's.
+    if ((pass.uid !== undefined && info.uid !== pass.uid) || info.dev !== device) continue;
     report.scanned++;
     // A version's own mtime is its newest file's creation; a cache file rewritten in place moves only its own, so the tree decides.
-    const written = pass.now - info.mtimeMs < maxAgeMs ? info.mtimeMs : await treeLastWritten(path, info.mtimeMs);
+    // One an earlier pass began removing is due at once: its half-finished removal is what made it look young.
+    const written = pass.unfinished.has(path) ? 0 : pass.now - info.mtimeMs < maxAgeMs ? info.mtimeMs : await treeLastWritten(path, info.mtimeMs);
     if (pass.now - written < maxAgeMs) { report.kept++; continue; }
     if (!held) { const all = pass.held ??= await heldOpenPaths(); held = new Set([...heldEntries(join(real, compileCacheName), all), ...(root === real ? [] : heldEntries(cache, all))]); }
     if (held.has(join(real, compileCacheName, entry.name)) || held.has(path)) { report.kept++; continue; }
@@ -799,11 +829,14 @@ async function reclaimCompileCaches(root: string, real: string, pass: PassState,
     const at = Date.now();
     pass.started ??= at;
     if (at > pass.started + pass.workMs) break;
+    // A version a mount reaches into is read to the end before it goes whole: one it does stays, counted as kept.
+    if (!await treeOnDevice(path, device)) { report.kept++; continue; }
     try {
       const bytes = await sizeOf(path);
       await removeTree(path, pass.retryMs);
+      pass.unfinished.delete(path);
       took(report, 'compileCache', path, bytes);
-    } catch (error) { report.errors.push(`${path}: ${error instanceof Error ? error.message : String(error)}`); }
+    } catch (error) { pass.unfinished.add(path); report.errors.push(`${path}: ${error instanceof Error ? error.message : String(error)}`); }
   }
 }
 
@@ -817,22 +850,27 @@ async function reclaimCompileCaches(root: string, real: string, pass: PassState,
  * due whatever their age — still never one a live process holds or names, which is kept and counted.
  * Every due entry is ranked before the pass's entry bound applies: the bound takes the oldest of
  * them all, never the first in directory order, and counts the rest as kept for the next pass.
+ * The runtime root, each entry and everything under it must be on the scanned root's own volume: a
+ * filesystem mounted there is not this root's inodes, is never ranked against the cap and never goes.
  */
 async function reclaimRuntimeScratch(root: string, real: string, pass: PassState, report: TmpReclaimReport) {
   const maxAgeMs = pass.agentAge;
   if (maxAgeMs === null) return;
+  const device = await rootDevice(root);
+  if (device === undefined) return;
   for (const name of pass.runtimeRoots) {
     const limit = pass.limit - report.removed.length;
     if (limit <= 0) return;
     const scratch = join(root, name), own = await lstat(scratch).catch(() => null);
-    if (!own?.isDirectory() || (pass.uid !== undefined && own.uid !== pass.uid)) continue;
+    if (!own?.isDirectory() || own.dev !== device || (pass.uid !== undefined && own.uid !== pass.uid)) continue;
     const entries: { path: string; mtime: number; directory: boolean }[] = [];
     for (const entry of await readdir(scratch, { withFileTypes: true }).catch(() => [] as Dirent[])) {
       if (!entry.isDirectory() && !entry.isFile()) continue;
       const path = join(scratch, entry.name);
       let info;
       try { info = await lstat(path); } catch { continue; }
-      if (pass.uid !== undefined && info.uid !== pass.uid) continue;
+      // Another user's entry is theirs; one on another device is another volume's, and neither counts against the cap.
+      if ((pass.uid !== undefined && info.uid !== pass.uid) || info.dev !== device) continue;
       entries.push({ path, mtime: info.mtimeMs, directory: entry.isDirectory() });
     }
     // An entry an earlier pass began removing is due at once: its half-finished removal is what made it look young.
@@ -869,6 +907,8 @@ async function reclaimRuntimeScratch(root: string, real: string, pass: PassState
       const at = Date.now();
       pass.started ??= at;
       if (at > pass.started + pass.workMs) { report.kept++; continue; }
+      // An entry a mount reaches into is read to the end before it goes whole: one it does stays, counted as kept.
+      if (!await treeOnDevice(path, device)) { report.kept++; continue; }
       try {
         const bytes = await sizeOf(path);
         await removeTree(path, pass.retryMs);

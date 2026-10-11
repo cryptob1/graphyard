@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
-import { mkdir, readdir, symlink, utimes, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, readdir, symlink, utimes, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 // A namespace import: on a base without GY-1683 the cases fail, not the file's load.
 import * as tmpReclaim from '../src/tmp-reclaim.js';
@@ -150,4 +150,40 @@ test('unit:compile-cache-stale-versions-swept — a node-compile-cache version d
   const bounded = await reclaimTmpDirectories({ tmpRoot: tmp, now, held: new Set(), limit: 1 });
   assert.equal(bounded.removed.length, 1);
   assert.ok(bounded.kept >= 2, 'the versions past the limit are counted as kept');
+  // A version goes whole only once its tree is read to the end on the scanned root's own device: a
+  // filesystem mounted anywhere inside it, directory or single file, keeps it. No mount can be made
+  // in the sandbox, so the walk is judged against a device the tree is not on, which is what a mount
+  // inside it is (review of 9c6cbd0fd7).
+  const { dev } = await lstat(cache);
+  assert.equal(await tmpReclaim.treeOnDevice(active, dev), true, 'a version on the scanned device may go whole');
+  assert.equal(await tmpReclaim.treeOnDevice(active, dev + 1), false, 'an entry on another device anywhere in the tree keeps the whole version');
+});
+
+test('unit:compile-cache-unfinished-version-retried — a version whose removal fails partway is recorded as unfinished and is due at once on the next pass, although the half-finished removal left it looking freshly written', { skip: process.getuid?.() === 0 ? 'root ignores directory permissions' : false }, async () => {
+  const base = await temporaryDirectory('compile-cache-unfinished'), tmp = join(base, 'tmp'), cache = join(tmp, 'node-compile-cache');
+  const version = join(cache, 'v24.0.0-locked'), inner = join(version, 'inner');
+  await mkdir(inner, { recursive: true });
+  for (const file of ['a1', 'b2']) await writeFile(join(version, file), 'compiled');
+  await writeFile(join(inner, 'c3'), 'compiled');
+  const now = Date.now(), stale = tmpReclaimMinAgeMs + hour;
+  await backdateTree(version, stale, now); await backdate(cache, stale, now);
+  const unfinished = new Set<string>();
+  // The inner directory refuses its file's unlinking: the removal fails partway through the version.
+  await chmod(inner, 0o555);
+  let first;
+  try { first = await reclaimTmpDirectories({ tmpRoot: tmp, now, held: new Set(), unfinished, retryMs: 0 }); } finally { await chmod(inner, 0o755); }
+  assert.deepEqual(first.removed, []);
+  assert.equal(first.errors.length, 1, `the failed removal is reported (${first.errors.join('; ')})`);
+  assert.deepEqual([...unfinished], [version], 'the version is recorded as unfinished');
+  assert.equal(existsSync(join(inner, 'c3')), true);
+  // Whatever the removal left of it, the version now looks written this instant.
+  await utimes(version, new Date(now), new Date(now));
+  const forgotten = await reclaimTmpDirectories({ tmpRoot: tmp, now, held: new Set(), unfinished: new Set(), retryMs: 0 });
+  assert.deepEqual(forgotten.removed, [], 'a pass that had not recorded the failure would keep the young-looking version until the bound passes again');
+  const second = await reclaimTmpDirectories({ tmpRoot: tmp, now, held: new Set(), unfinished, retryMs: 0 });
+  assert.deepEqual(second.errors, []);
+  assert.deepEqual(second.removed.map(entry => entry.path), [version], 'the next pass takes the unfinished version at once');
+  assert.equal(existsSync(version), false);
+  assert.equal(existsSync(cache), true, 'the cache root stays');
+  assert.equal(unfinished.size, 0, 'a finished removal is no longer unfinished');
 });

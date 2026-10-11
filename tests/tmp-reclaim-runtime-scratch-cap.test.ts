@@ -132,6 +132,21 @@ test('unit:runtime-scratch-cap-keeps-held — below headroom an entry beyond the
   assert.equal(existsSync(newest), true);
 });
 
+test('unit:runtime-scratch-cap-stays-on-device — an entry beyond the cap goes whole only once its tree is read to the end on the scanned root\'s own device: a filesystem mounted anywhere inside it, directory or single file, keeps it', async () => {
+  const base = await temporaryDirectory('scratch-cap-device'), tmp = join(base, 'tmp'), scratch = join(tmp, 'opencode');
+  await mkdir(scratch, { recursive: true });
+  const now = Date.now();
+  const entry = await checkout(scratch, 'he-mounted', 5 * hour, now);
+  const { dev } = await lstat(entry);
+  assert.equal(await tmpReclaim.treeOnDevice(entry, dev), true, 'a tree on the scanned device may go whole');
+  // No mount can be made in the sandbox: the walk is judged against a device the tree is not on,
+  // which is what a filesystem mounted inside the entry is (review of 9c6cbd0fd7).
+  assert.equal(await tmpReclaim.treeOnDevice(entry, dev + 1), false, 'an entry on another device anywhere in the tree keeps the whole');
+  // The same tree, on its own device, is what the capped pass takes.
+  const report = await reclaimTmpDirectories({ tmpRoot: tmp, now, held: new Set(), volume: lowVolume(scratch, () => [entry], 28_000, 900_000), runtimeScratchCap: 0 });
+  assert.deepEqual(report.removed.map(removed => removed.path), [entry]);
+});
+
 test('unit:runtime-scratch-uncapped-unchanged — above headroom the pass keeps today\'s rules: an entry of /tmp/opencode goes only once its tree has gone the agent scratch bound unwritten, so a healthy /tmp loses nothing new', async () => {
   const base = await temporaryDirectory('scratch-uncapped'), tmp = join(base, 'tmp'), scratch = join(tmp, 'opencode');
   await mkdir(scratch, { recursive: true });
