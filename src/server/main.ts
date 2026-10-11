@@ -93,7 +93,7 @@ export async function main(options: MainOptions = {}) {
   // opens first; until startup validation completes, /healthz reports `readiness: false`, every
   // mutation that could act on unvalidated state is refused with a retryable 503, and the
   // observation workers and production watch are not started. A failed attempt is logged and the
-  // reconciliation tick retries it.
+  // reconciliation tick retries it. Webhooks soft-accept while readiness is false (GY-1700).
   let ready = false, validating = false, prepared = false, closing = false;
   let watching: ReturnType<typeof startProductionWatch> | null = null;
   let scanning: ReturnType<typeof startPatternScan> | null = null;
@@ -191,6 +191,7 @@ export async function main(options: MainOptions = {}) {
 
   const close = async () => {
     closing = true;
+    services.readiness = false; // soft-accept webhooks before the pool drains (GY-1700)
     reconciliation.stop(); watching?.stop(); watching = null; await observing?.stop(); observing = null; await scanning?.stop(); scanning = null; retroIndex.stop();
     process.off('SIGTERM', shutdown); process.off('SIGINT', shutdown);
     await new Promise<void>(resolve => http.close(() => resolve()));
@@ -206,7 +207,8 @@ export async function main(options: MainOptions = {}) {
  * Whether a request is refused while startup validation runs (GY-1127): every mutation under /api
  * except a GitHub webhook delivery, which only wakes durable jobs, and a work lease heartbeat,
  * which reads no validation state and would otherwise lapse leases for the whole startup window.
- * Reads stay open, and /healthz answers liveness throughout.
+ * Reads stay open, and /healthz answers liveness throughout. Webhooks stay open for HMAC; the
+ * route soft-accepts while not ready (GY-1700) rather than this gate answering 503.
  */
 export function refusedBeforeReady(method = 'GET', url = '/'): boolean {
   if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS') return false;
