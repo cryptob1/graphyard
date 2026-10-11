@@ -106,21 +106,19 @@ test('unit:diagnosis-fix-filed-input-equals-derived — the filed plannedFiles e
  * covering those asks.
  */
 test('integration:replay-fault-class-filing-carries-asked-files — GY-1700, GY-1701 and GY-1705 filing shapes cover the files their workers asked for', () => {
-  // GY-1700: the worker asked for tests/webhook-soft-accept.test.ts (the AC-0 proof test vehicle that
-  // later stood in plannedFiles). The filed criteria name that path so derivation carries it the way
-  // master create carries a criterion-named base file — not only the proof-id stem companion.
+  // GY-1700 as filed (tests/fault-class-decision-scope-slot.test.ts:139): AC-0 text names no path;
+  // proof unit:webhook-soft-accept-no-5xx. Against a base that holds the shorter vehicle the worker
+  // asked for, derivation plans that existing file instead of inventing the proof-id stem.
   const gy1700 = deriveDiagnosisFixPlannedFiles({
     plannedFiles: ['src/server/routes/github.ts', 'src/server/main.ts', 'docs/protocol/github-webhook.md'],
-    criteria: [{
-      id: 'AC-0',
-      text: 'A verified webhook delivery soft-accepts with HTTP 202 when readiness is false, by a test in tests/webhook-soft-accept.test.ts.',
-      proofs: ['unit:webhook-soft-accept-no-5xx'],
-    }],
+    criteria: [{ id: 'AC-0', text: 'Soft-accept does not 5xx', proofs: ['unit:webhook-soft-accept-no-5xx'] }],
     kind: 'recurring',
     cause: 'receiver endpoint erroring in src/server/routes/github.ts mounted from src/server/main.ts',
   }, baseTree, 'main');
   assert.ok(gy1700.plannedFiles.includes('tests/webhook-soft-accept.test.ts'),
     'GY-1700 carries the AC-0 test vehicle its worker asked for');
+  assert.equal(gy1700.plannedFiles.includes('tests/webhook-soft-accept-no-5xx.test.ts'), false,
+    'the longer proof-id stem is not planned beside the existing short vehicle');
 
   // GY-1701: cause named the three daemon files; filed plannedFiles held none of them.
   const gy1701 = deriveDiagnosisFixPlannedFiles({
