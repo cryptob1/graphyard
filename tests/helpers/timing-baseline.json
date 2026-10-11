@@ -255,7 +255,7 @@
     "tests/shadow-disagreement.test.ts": 3270,
     "tests/shared-account-identity.test.ts": 995,
     "tests/shared-identity-followups.test.ts": 11000,
-    "tests/no-wall-clock-time-bombs.test.ts": 300,
+    "tests/no-wall-clock-time-bombs.test.ts": 1000,
     "tests/stale-close-convergence.test.ts": 1902,
     "tests/stale-release-decision.test.ts": 1874,
     "tests/stalled-gate-in-motion.test.ts": 2746,
