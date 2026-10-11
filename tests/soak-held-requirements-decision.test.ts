@@ -25,9 +25,10 @@ import { scopeBlockedBudgetMs } from '../src/model/scope.js';
  * was closed once, within three cycles of its hold, and none lingers; each attempt's decision settled exactly
  * once; and the two quiet days after the last attempt ended performed no work at all.
  *
- * GY-1701 (review of a09e087ac2e6) adds a second soak below: covering scope asks whose standing
- * no-answers revision already plans the asked path — adoption, budget exclusion, settlement, and
- * clear-on-refusal across items and attempts.
+ * GY-1701 (reviews of a09e087ac2e6 and 1e97d2a529) adds a second soak below: covering scope asks
+ * whose standing no-answers revision already plans the asked path — adoption, budget exclusion,
+ * settlement, clear-on-refusal, and ask closure that drops the covering watch without withdrawing
+ * the foreign revision.
  */
 const minute = 60_000, hour = 60 * minute, day = 24 * hour, cycleMs = 2 * minute, start = Date.parse('2026-10-11T00:00:00.000Z');
 const iso = (at: number) => new Date(at).toISOString();
@@ -214,12 +215,13 @@ test('unit:soak-invariants-hold — over three simulated days, decisions held th
 });
 
 /**
- * GY-1701. Covering asks across six items and two attempts each over two simulated days: the master's
- * no-answers revision already plans the path the worker asks for. Adoption excludes the blocked
- * bound while the revision stands; a refused covering revision clears its watch so the ask is not
- * stranded; held covering revisions settle when the attempt ends; every system invariant holds.
+ * GY-1701. Covering asks across six items over two simulated days: the master's no-answers revision
+ * already plans the path the worker asks for. Adoption excludes the blocked bound while the revision
+ * stands; a refused covering revision clears its watch; held covering revisions settle when the
+ * attempt ends; closing the ask while the foreign revision is still requested drops the covering
+ * watch and never withdraws that revision; every system invariant holds.
  */
-test('unit:soak-covering-scope-adopt — over two simulated days, covering asks across six items and two attempts adopt standing revisions, exclude the blocked bound, clear watches when a covering revision is refused, and keep every invariant', { timeout: 300_000 }, async () => {
+test('unit:soak-covering-scope-adopt — over two simulated days, covering asks across six items adopt standing revisions, exclude the blocked bound, clear watches on refusal, drop watches without withdrawing when the ask closes, and keep every invariant', { timeout: 300_000 }, async () => {
   let now = start;
   const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: 'graphyard', repository: 'owner/project', baseBranch: 'main',
     githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [], producers: [], run: { intervalSeconds: 600 } }) as MasterConfig;
@@ -232,7 +234,7 @@ test('unit:soak-covering-scope-adopt — over two simulated days, covering asks 
   type CoverDecision = Decision & { refusal: { approver: string; reason: string; at: string } | null };
   const decisions = new Map<string, CoverDecision[]>(items.map(item => [item.key, []]));
   const sessions: { name: string; pane: string; status: 'working' | 'done'; key: string; decision: string }[] = [];
-  const closes: { pane: string; at: number }[] = [], adopted: string[] = [], requested: string[] = [];
+  const closes: { pane: string; at: number }[] = [], adopted: string[] = [], requested: string[] = [], withdrawals: string[] = [];
   const standing = (item: CoverItem) => decisions.get(item.key)!.find(decision => ['requested', 'held'].includes(decision.state));
   const revision = (item: CoverItem) => ({
     expectedPolicyRevision: item.policyRevision,
@@ -263,6 +265,7 @@ test('unit:soak-covering-scope-adopt — over two simulated days, covering asks 
     item.scopeRequest = { epoch: item.epoch, at: iso(now), paths: [item.cover], reason: 'AC-1 needs the cover module', requestedBy: 'worker',
       decision: { state: 'refused', reason: `No rule implies ${item.cover}`, at: iso(now + 1_000), decidedBy: 'graphyard' } } as ScopeRequestState;
   };
+  const closeAsk = (item: CoverItem) => { item.scopeRequest = null; };
   const end = (item: CoverItem) => {
     assert.ok(item.live);
     const decision = standing(item);
@@ -277,12 +280,12 @@ test('unit:soak-covering-scope-adopt — over two simulated days, covering asks 
   const steps: Step[] = [];
   const at = (when: number, item: CoverItem, run: () => void) => steps.push({ at: when, key: item.key, run });
   for (const item of items) {
-    const n = item.n, requested = start + n * minute;
+    const n = item.n, requested = start + n * minute, kind = n % 3;
     at(requested, item, () => request(item));
-    // Even items: ask while requested, then refuse the covering revision (watch must clear).
-    // Odd items: ask while requested, then hold, then end the attempt (covering settles applied).
     at(requested + 2 * minute, item, () => ask(item));
-    if (n % 2 === 0) at(requested + judgeAfter, item, () => refuse(item));
+    // 0: refuse covering. 1: hold then settle across two attempts. 2: close ask while revision still requested.
+    if (kind === 0) at(requested + judgeAfter, item, () => refuse(item));
+    else if (kind === 2) at(requested + 4 * minute, item, () => closeAsk(item));
     else {
       at(requested + judgeAfter, item, () => approve(item));
       at(requested + hour, item, () => end(item));
@@ -318,38 +321,68 @@ test('unit:soak-covering-scope-adopt — over two simulated days, covering asks 
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {}, requestSmoke: () => {},
     decisions: async (work: Work) => ({ decisions: structuredClone(decisions.get(work.key) ?? []) }),
     decide: async (work: Work, action: string, reason: string) => { requested.push(`${work.key}: ${action}: ${reason}`); return { id: randomUUID(), state: 'requested' }; },
-    withdraw: async () => {}, resume: async (work: Work, decision: string) => decisions.get(work.key)!.find(entry => entry.id === decision)!,
+    withdraw: async (work: Work, decision: string, reason: string) => {
+      withdrawals.push(`${work.key}: ${decision}: ${reason}`);
+      const entry = decisions.get(work.key)?.find(each => each.id === decision);
+      if (entry) entry.state = 'withdrawn';
+    },
+    resume: async (work: Work, decision: string) => decisions.get(work.key)!.find(entry => entry.id === decision)!,
     approver: async () => ({ agentName: 'gy-approver', pane: null }),
     widenScope: async () => ({}), persist: async () => {},
   } as unknown as DaemonEffects;
 
   const state: DaemonState = emptyDaemonState(config);
-  const violations: string[] = [], budgetBreaches: string[] = [];
+  const violations: string[] = [], coveringBudgetBreaches: string[] = [];
+  let sawOrdinaryRouted = false;
   for (let cycle = 0; now < start + 2 * day; cycle++, now += cycleMs) {
     await runCycle(config, state, effects, () => now);
     for (const check of state.invariants.report as InvariantCheck[]) if (!check.holds) violations.push(`cycle ${cycle}: ${check.line}`);
     const live = items.filter(item => item.scopeRequest).map(view);
     const budget = scopeBudget(live, state.scope, now, true, state.approvals);
-    for (const breach of budget.breaches) if (breach.id.startsWith('blocked:')) budgetBreaches.push(`${iso(now)}: ${breach.detail}`);
     for (const item of items) {
-      if (item.scopeRequest && coveringStandingScopeWatch(view(item), state.approvals)) adopted.push(`${item.key}@${iso(now)}`);
+      if (!item.scopeRequest) continue;
+      const work = view(item);
+      if (coveringStandingScopeWatch(work, state.approvals)) {
+        assert.ok(Object.values(state.approvals).some(watch => watch.work === item.key && watch.coveringAdopt),
+          `${item.key}: covering budget exclusion requires coveringAdopt`);
+        adopted.push(`${item.key}@${iso(now)}`);
+        for (const breach of budget.breaches) if (breach.id === `blocked:${item.key}:${item.scopeRequest.epoch}`) {
+          coveringBudgetBreaches.push(`${iso(now)}: ${breach.detail}`);
+        }
+      } else {
+        const watch = Object.values(state.approvals).find(entry => entry.work === item.key && entry.scope && !entry.coveringAdopt);
+        if (watch) sawOrdinaryRouted = true;
+      }
     }
   }
 
   assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
   assert.equal(next, steps.length, 'the whole script ran');
   assert.ok(adopted.length > 0, 'covering asks were adopted across cycles');
-  assert.deepEqual(budgetBreaches, [], 'no covering ask breached the blocked bound while its revision stood');
-  // Even items: covering revision refused — watch cleared, and a fresh widening may be requested (not starved silently).
-  for (const item of items.filter(entry => entry.n % 2 === 0)) {
+  assert.deepEqual(coveringBudgetBreaches, [], 'no covering ask breached the blocked bound while its coveringAdopt watch stood');
+  assert.ok(sawOrdinaryRouted, 'after a covering refusal the loop routes an ordinary widening whose watch does not suppress the bound');
+  // kind 0: covering revision refused — watch cleared.
+  for (const item of items.filter(entry => entry.n % 3 === 0)) {
     assert.ok(Object.values(state.actions).some(action => action.work === item.key && /covering revision did not answer|Cleared covering watch/.test(action.detail ?? '')),
       `${item.key}: the refused covering revision cleared its watch`);
   }
-  // Odd items: covering hold applied on attempt end — no stranded covering watch remains.
-  for (const item of items.filter(entry => entry.n % 2 === 1)) {
-    assert.ok(!Object.values(state.approvals).some(watch => watch.work === item.key && watch.scope && !watch.settledAt),
+  // kind 1: covering hold applied on attempt end — no stranded covering watch remains.
+  for (const item of items.filter(entry => entry.n % 3 === 1)) {
+    assert.ok(!Object.values(state.approvals).some(watch => watch.work === item.key && watch.coveringAdopt && !watch.settledAt),
       `${item.key}: no unsettled covering watch lingers after both attempts`);
   }
+  // kind 2: ask closed while the foreign revision was still requested — watch dropped, revision not withdrawn.
+  for (const item of items.filter(entry => entry.n % 3 === 2)) {
+    const foreign = decisions.get(item.key)!.find(entry => entry.requestedBy === 'graphyard-master-project');
+    assert.ok(foreign, `${item.key}: the master revision exists`);
+    assert.equal(foreign!.state, 'requested', `${item.key}: closing the ask left the foreign revision requested`);
+    assert.ok(!Object.values(state.approvals).some(watch => watch.work === item.key && watch.coveringAdopt),
+      `${item.key}: the covering watch was dropped when the ask closed`);
+    assert.ok(!withdrawals.some(entry => entry.startsWith(`${item.key}: ${foreign!.id}:`)),
+      `${item.key}: the foreign covering revision was not withdrawn because the ask ended`);
+  }
+  assert.deepEqual(withdrawals.filter(entry => /moved past the requirements/.test(entry)), [],
+    'no covering adopt was withdrawn as a decision the item moved past');
   assert.ok(now > lastStep + scopeBlockedBudgetMs, 'the soak outlasts the blocked bound so a stranded ask would have breached');
   assert.deepEqual(state.faults.instances.filter(instance => instance.faultClass === 'decision' && /left to its requester/.test(instance.text ?? '')), [],
     'covering asks never throw the one-at-a-time starvation fault');

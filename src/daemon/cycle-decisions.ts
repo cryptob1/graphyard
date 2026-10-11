@@ -558,6 +558,14 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     }
     // Another current watch holds this decision: the request is not moved past, only re-keyed.
     if (Object.entries(state.approvals).some(([other, entry]) => other !== key && needed.has(other) && entry.decision === watch.decision)) { delete state.approvals[key]; return; }
+    // GY-1701: a covering-adopt watch only borrowed a foreign no-`answers` revision. Closing the
+    // worker's ask must not withdraw that revision — it still has its own requester and purpose.
+    if (watch.coveringAdopt) {
+      if (item) await closeApprover(item, watch, `${watch.work} no longer needs its covering watch for ${watch.action} decision ${watch.decision}`);
+      else await endWatchSession(watch, `${watch.work} is no longer open`);
+      delete state.approvals[key];
+      return;
+    }
     if (item && !watch.settledAt && !unattestable.has(key) && effects.withdraw && effects.decisions) {
       try {
         const standing = (await effects.decisions(item)).decisions.find(entry => entry.id === watch.decision);

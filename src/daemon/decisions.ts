@@ -729,20 +729,20 @@ export function standingCoversScopeAsk(standing: { input?: { plannedFiles?: read
   if (standing.input?.answers || !askPaths.length) return false;
   return unplannedPaths(standing.input?.plannedFiles ?? [], askPaths).length === 0;
 }
-/** GY-1701. Watch for a covering no-`answers` revision adopted in place of a live scope widening. A requested one stays unsettled so supervise clears it if the revision refuses; a held one is settled (already approved). */
+/** GY-1701. Watch for a covering no-`answers` revision adopted in place of a live scope widening. A requested one stays unsettled so supervise clears it if the revision refuses; a held one is settled (already approved). Marked `coveringAdopt` so an ordinary widening's own watch never shares its budget or withdrawal treatment. */
 export function coveringScopeAdoptWatch(item: Pick<Work, 'key' | 'scopeRequest'>,
   standing: { id: string; state: string; approvedAt?: string | null; approvedBy?: string | null; input?: { plannedFiles?: readonly string[] | null; answers?: unknown } | null },
   decision: Pick<RoutineDecision, 'action' | 'scope' | 'input'>, stamp: string): ApprovalWatch | null {
   const askPaths = decision.scope?.paths ?? item.scopeRequest?.paths ?? [];
   if (!(decision.input?.answers || decision.scope) || !standingCoversScopeAsk(standing, askPaths)) return null;
-  return approvalWatchSchema.parse({ work: item.key, action: decision.action, decision: standing.id, requestedAt: stamp,
+  return approvalWatchSchema.parse({ work: item.key, action: decision.action, decision: standing.id, requestedAt: stamp, coveringAdopt: true,
     settledAt: standing.state === 'held' ? stamp : null, approvedAt: standing.approvedAt ?? null, approvedBy: standing.approvedBy ?? null, scope: decision.scope ?? null });
 }
 /** GY-1701. States in which a covering revision settled without applying — the adopted watch must be cleared so the ask is not stranded. */
 export const coveringRevisionGone = /^(refused|withdrawn|stale|failed|superseded)$/;
 /** GY-1701. True when a covering-adopt watch's judgement left the open ask unanswered (clear the watch and request the widening again). */
-export function coveringAdoptLeftAskOpen(watch: Pick<ApprovalWatch, 'scope'>, item: Work, judged: { state: string; approvedAt?: string | null; refusal?: { at?: string } | null }, clock: number): boolean {
-  return !!watch.scope && coveringRevisionGone.test(judged.state) && scopeOutcomeAnswered(item, watch.scope, judged, clock) !== 'answered';
+export function coveringAdoptLeftAskOpen(watch: Pick<ApprovalWatch, 'scope' | 'coveringAdopt'>, item: Work, judged: { state: string; approvedAt?: string | null; refusal?: { at?: string } | null }, clock: number): boolean {
+  return !!watch.coveringAdopt && !!watch.scope && coveringRevisionGone.test(judged.state) && scopeOutcomeAnswered(item, watch.scope, judged, clock) !== 'answered';
 }
 /**
  * A headless approver run lost to something outside the loop (GY-453: killed, recording no exit)

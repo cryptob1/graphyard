@@ -104,7 +104,7 @@ function plane(effects: DaemonEffects, work: Work, standing: Ledgered) {
     decisions: async (item: Work) => ({ decisions: structuredClone(ledger.get(item.key) ?? []) }),
     decide: async (_item: Work, action: string, _reason: string, input: Record<string, unknown> = {}) => {
       const id = '00000000-0000-4000-8000-00000000scope';
-      const entry: Ledgered = { id, action, state: 'requested', input: decisionInput(action, work, input), reason: _reason, outcome: null, approvedBy: null, approvedAt: null, refusal: null, requestedAt: new Date().toISOString() };
+      const entry: Ledgered = { id, action, state: 'requested', input: decisionInput(action, work, input), reason: _reason, outcome: null, approvedBy: null, approvedAt: null, refusal: null, requestedAt: work.updatedAt };
       requests.push({ action, input: entry.input });
       ledger.set(work.key, [...(ledger.get(work.key) ?? []), entry]);
       return { id, state: 'requested' };
@@ -204,6 +204,7 @@ test('manual:fault-class-decision — action:decision|GY-1700|2026-10-11T14:48:2
     `expected covering-adopt detail, got ${JSON.stringify(Object.values(state.actions).map(a => a.detail))}`);
   const watch = Object.values(state.approvals).find(entry => entry.decision === standingId);
   assert.ok(watch?.scope, 'the watch names the scope ask');
+  assert.equal(watch?.coveringAdopt, true, 'the watch is marked coveringAdopt, not an ordinary widening');
   assert.equal(watch?.settledAt, null, 'a requested covering revision stays under supervision until held, applied or refused');
   assert.equal(coveringStandingScopeWatch(work, state.approvals), true);
   assert.deepEqual(state.faults.instances.filter(instance => instance.faultClass === 'decision'), [], 'no decision fault on the covering adopt');
@@ -286,22 +287,47 @@ test('manual:fault-class-decision — a refused covering revision clears the ado
   assert.equal(baseScopeBudget([live], later, true).breaches.length, 1);
 });
 
-test('unit:covering-standing-scope-watch — a watch that names this ask defers the blocked bound whether or not it is settled yet', () => {
+test('unit:covering-standing-scope-watch — only a coveringAdopt watch that names this ask defers the blocked bound', () => {
   const work = gy1700(faultAt);
   const binding = scopeDecisionBinding(work.scopeRequest!);
   const key = decisionKey(work, { action: 'requirements', binding });
+  const scope = { epoch: 4, at: askedAt, requestedBy: 'graphyard-claude-1', paths: [testFile] };
+  const ordinary = {
+    [key]: approvalWatchSchema.parse({
+      work: work.key, action: 'requirements', decision: '00000000-0000-4000-8000-00000000scope', requestedAt: faultAt, settledAt: null, scope,
+    }),
+  };
+  assert.equal(coveringStandingScopeWatch(work, ordinary), false, 'an ordinary widening watch with scope does not suppress the bound');
   const unsettled = {
     [key]: approvalWatchSchema.parse({
-      work: work.key, action: 'requirements', decision: standingId, requestedAt: faultAt, settledAt: null,
-      scope: { epoch: 4, at: askedAt, requestedBy: 'graphyard-claude-1', paths: [testFile] },
+      work: work.key, action: 'requirements', decision: standingId, requestedAt: faultAt, settledAt: null, coveringAdopt: true, scope,
     }),
   };
   assert.equal(coveringStandingScopeWatch(work, unsettled), true, 'requested covering adopt excludes the bound while supervised');
   assert.equal(coveringStandingScopeWatch(work, { [key]: { ...unsettled[key], settledAt: faultAt } }), true, 'held covering adopt excludes the bound');
   assert.equal(coveringStandingScopeWatch(work, { [key]: { ...unsettled[key], scope: null } }), false);
   const cover = coveringScopeAdoptWatch(work, { id: standingId, state: 'requested', input: { plannedFiles: planned } },
-    { action: 'requirements', scope: unsettled[key].scope!, input: { answers: { epoch: 4, at: askedAt } } }, faultAt);
+    { action: 'requirements', scope, input: { answers: { epoch: 4, at: askedAt } } }, faultAt);
   assert.equal(cover?.settledAt, null);
+  assert.equal(cover?.coveringAdopt, true);
   assert.equal(coveringScopeAdoptWatch(work, { id: standingId, state: 'held', approvedBy: 'a', approvedAt: faultAt, input: { plannedFiles: planned } },
-    { action: 'requirements', scope: unsettled[key].scope!, input: { answers: { epoch: 4, at: askedAt } } }, faultAt)?.settledAt, faultAt);
+    { action: 'requirements', scope, input: { answers: { epoch: 4, at: askedAt } } }, faultAt)?.settledAt, faultAt);
+});
+
+test('manual:fault-class-decision — closing the scope ask drops the covering watch without withdrawing the master revision', async () => {
+  const work = gy1700(faultAt, 'requested');
+  const fx = effectsOf(work);
+  const { withdrawn, ledger } = plane(fx, work, masterStanding('requested'));
+  const state = emptyDaemonState(config());
+  await runCycle(config(), state, fx, () => Date.parse(faultAt));
+  assert.ok(Object.values(state.approvals).some(entry => entry.decision === standingId && entry.coveringAdopt && !entry.settledAt));
+
+  // Worker resolves the ask while the master's covering revision is still requested.
+  const closed = { ...work, scopeRequest: null, updatedAt: breachAt, lease: { ...work.lease!, expiresAt: new Date(Date.parse(breachAt) + 60_000).toISOString() } };
+  fx.snapshot = async () => ({ work: [closed], now: breachAt, jobs: [] });
+  await runCycle(config(), state, fx, () => Date.parse(breachAt));
+
+  assert.deepEqual(withdrawn, [], 'the master covering revision is not withdrawn because the ask ended');
+  assert.equal(ledger.get('GY-1700')![0].state, 'requested', 'the foreign revision still stands for its own requester');
+  assert.equal(Object.values(state.approvals).find(entry => entry.decision === standingId), undefined, 'the covering watch is dropped');
 });

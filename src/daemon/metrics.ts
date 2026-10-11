@@ -39,15 +39,17 @@ export function cycleBudget(state: Pick<DaemonState, 'metrics'>, intervalMs: num
 
 /**
  * GY-1701. True when the loop adopted a covering standing revision in place of this ask: the watch
- * names the ask (settled while held, or unsettled while still requested under supervision). The
- * blocked bound does not run while that revision stands; a refused/withdrawn revision clears the watch.
+ * is marked `coveringAdopt` and names the ask (settled while held, or unsettled while still requested
+ * under supervision). An ordinary widening's own watch also carries `scope` once routed, so the marker
+ * alone distinguishes the foreign covering revision. The blocked bound does not run while that revision
+ * stands; a refused/withdrawn revision clears the watch.
  */
 export function coveringStandingScopeWatch(item: Pick<Work, 'id' | 'policyRevision' | 'scopeRequest'>, approvals: Record<string, ApprovalWatch>): boolean {
   const request = item.scopeRequest;
   if (!request) return false;
   const watch = approvals[decisionKey(item as Work, { action: 'requirements', binding: scopeDecisionBinding(request) })];
   const identity = askIdentity(request);
-  return !!watch?.scope && watch.scope.at === identity.at && watch.scope.epoch === identity.epoch;
+  return !!watch?.coveringAdopt && !!watch.scope && watch.scope.at === identity.at && watch.scope.epoch === identity.epoch;
 }
 
 /**
