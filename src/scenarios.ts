@@ -61,16 +61,18 @@ export const shippedScenarioRevisions = (): Scenario[] => [capacityLimitRedispat
 export const shippedScenario = (id: string): Scenario | undefined => shippedScenarioRevisions().find(entry => entry.id === id);
 
 /**
- * Insert every shipped revision that is not yet a row. Listing, create and run-recording call this
- * so a fresh install has a usable registered revision for sync and `recordCaseRun`, not a virtual
- * GET-only entry that leaves the table empty (GY-1708 AC-3).
+ * Insert every shipped revision that is not yet a row, appending `scenario.defined` when the insert
+ * lands. Listing, create and run-recording call this so a fresh install has a usable registered
+ * revision for sync and `recordCaseRun`, not a virtual GET-only entry that leaves the table empty
+ * (GY-1708 AC-3).
  */
-export async function ensureShippedScenarios(db: ScenarioDb): Promise<void> {
+export async function ensureShippedScenarios(db: ScenarioDb, actor = 'graphyard'): Promise<void> {
   for (const shipped of shippedScenarioRevisions()) {
-    await db.query(
-      'INSERT INTO scenarios(id,revision,document) VALUES($1,$2,$3) ON CONFLICT (id,revision) DO NOTHING',
+    const inserted = (await db.query(
+      'INSERT INTO scenarios(id,revision,document) VALUES($1,$2,$3) ON CONFLICT (id,revision) DO NOTHING RETURNING document',
       [shipped.id, shipped.revision, JSON.stringify(shipped)],
-    );
+    )).rows[0];
+    if (inserted) await db.query('INSERT INTO events(actor,kind,payload) VALUES($1,$2,$3)', [actor, 'scenario.defined', JSON.stringify({ scenario: shipped })]);
   }
 }
 
@@ -86,7 +88,11 @@ export async function resolveScenario(db: ScenarioDb, id: string, persist?: { at
   if (!shipped) return undefined;
   if (!persist) return shipped;
   const document: Scenario = { ...shipped, createdAt: persist.at.toISOString(), createdBy: persist.by };
-  await db.query('INSERT INTO scenarios(id,revision,document) VALUES($1,$2,$3) ON CONFLICT (id,revision) DO NOTHING', [document.id, document.revision, JSON.stringify(document)]);
+  const inserted = (await db.query(
+    'INSERT INTO scenarios(id,revision,document) VALUES($1,$2,$3) ON CONFLICT (id,revision) DO NOTHING RETURNING document',
+    [document.id, document.revision, JSON.stringify(document)],
+  )).rows[0];
+  if (inserted) await db.query('INSERT INTO events(actor,kind,payload) VALUES($1,$2,$3)', [persist.by, 'scenario.defined', JSON.stringify({ scenario: document })]);
   return (await db.query('SELECT document FROM scenarios WHERE id=$1 ORDER BY revision DESC LIMIT 1', [id])).rows[0]?.document as Scenario | undefined ?? document;
 }
 

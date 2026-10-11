@@ -46,7 +46,7 @@ const reload = async (id: string) => (await store.list()).find(item => item.id =
 const git = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 17081;
+  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 178;
   database = new EmbeddedPostgres({
     databaseDir: await temporaryDirectory('capacity-redispatch-db'),
     user: 'graphyard', password: 'testing-only', port, persistent: false,

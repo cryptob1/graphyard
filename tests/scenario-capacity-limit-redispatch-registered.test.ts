@@ -29,7 +29,7 @@ const root = new URL('..', import.meta.url).pathname;
 let database: EmbeddedPostgres, store: Store, engine: Engine, http: ReturnType<typeof server>, url: string;
 
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1708;
+  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 175;
   database = new EmbeddedPostgres({
     databaseDir: await temporaryDirectory('scenario-capacity-redispatch'),
     user: 'graphyard', password: 'testing-only', port, persistent: false,
@@ -98,6 +98,13 @@ test('unit:scenario-capacity-limit-redispatch-registered — revision 1 ships in
   assert.equal((await store.pool.query('SELECT revision FROM scenarios WHERE id=$1', [id])).rows[0].revision, 1,
     'listing materializes revision 1 into the scenarios table');
   assert.equal((await store.pool.query('SELECT document FROM scenarios WHERE id=$1 AND revision=1', [id])).rows[0].document.hash, shipped.hash);
+  const defined = (await store.pool.query(
+    "SELECT payload FROM events WHERE kind='scenario.defined' AND payload->'scenario'->>'id'=$1 ORDER BY seq",
+    [id],
+  )).rows;
+  assert.equal(defined.length, 1, 'materializing appends scenario.defined once');
+  assert.equal(defined[0].payload.scenario.revision, 1);
+  assert.equal(defined[0].payload.scenario.hash, shipped.hash);
 
   // e2e sync on a fresh install sees the materialized row and reports unchanged — not a virtual
   // GET-only match that would leave the table empty.
@@ -154,7 +161,7 @@ test('unit:scenario-capacity-limit-redispatch-registered — revision 1 ships in
 
 test('unit:scenario-capacity-limit-redispatch-registered — recordCaseRun materializes a shipped revision when the table is still empty', async () => {
   const id = capacityLimitRedispatchScenario;
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 2708;
+  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 176;
   const database = new EmbeddedPostgres({
     databaseDir: await temporaryDirectory('scenario-capacity-redispatch-record'),
     user: 'graphyard', password: 'testing-only', port, persistent: false,
@@ -179,6 +186,10 @@ test('unit:scenario-capacity-limit-redispatch-registered — recordCaseRun mater
     assert.equal(run.scenarioRevision, 1);
     assert.equal((await store.pool.query('SELECT revision FROM scenarios WHERE id=$1', [id])).rows[0].revision, 1,
       'recordCaseRun materializes revision 1 before looking it up');
+    assert.equal((await store.pool.query(
+      "SELECT count(*)::int AS n FROM events WHERE kind='scenario.defined' AND payload->'scenario'->>'id'=$1",
+      [id],
+    )).rows[0].n, 1, 'materializing appends scenario.defined');
   } finally {
     await store.close();
     await database.stop();

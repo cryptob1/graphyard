@@ -43,7 +43,7 @@ const ok = async (principal: Principal, method: 'GET' | 'POST', path: string, bo
 const reload = async (id: string) => (await store.list()).find(item => item.id === id)!;
 
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 17082;
+  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 179;
   database = new EmbeddedPostgres({
     databaseDir: await temporaryDirectory('capacity-bounds-db'),
     user: 'graphyard', password: 'testing-only', port, persistent: false,
