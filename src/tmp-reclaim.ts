@@ -15,7 +15,7 @@
 // owner marker naming the process that made it, which is what makes "whose owning process is
 // gone" checkable rather than guessed from a modification time.
 
-import { existsSync, readFileSync, type Dirent } from 'node:fs';
+import { existsSync, readFileSync, type Dirent, type Stats } from 'node:fs';
 import { lstat, opendir, readdir, readFile, readlink, realpath, rm, stat, statfs, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
@@ -672,7 +672,9 @@ export const tsxCacheName = (uid = process.getuid?.()) => uid === undefined ? nu
 /**
  * The regular files under `directory`, recursively, following no symlink and never leaving
  * `device`: a directory mounted inside the walk is another filesystem's inodes, so a sweep that
- * promises the scanned volume alone stops at its boundary. What a cache or store sweep may take.
+ * promises the scanned volume alone stops at its boundary. What a cache or store sweep may take,
+ * each still judged by `agedFileSweepable` on its own stats: a regular file bind-mounted into the
+ * walk is on another device too, and no directory check sees it.
  */
 async function cacheFiles(directory: string, device: number): Promise<string[]> {
   const files: string[] = [];
@@ -722,9 +724,18 @@ async function reclaimPackageStores(root: string, real: string, pass: PassState,
  * This user's regular files under each of `names` (directories directly under `root`) that this
  * user owns, older than `maxAgeMs`, oldest first, within what the pass's entry and work bounds have
  * left; a file a live process holds open, a socket, a directory, the named directory itself and
- * anything under a filesystem mounted inside it are never removed. The tsx cache and package store
- * sweeps are this rule with their own bounds.
+ * anything on another device — a filesystem mounted inside it, directory or single file — are never
+ * removed. The tsx cache and package store sweeps are this rule with their own bounds.
  */
+/**
+ * Whether one entry an aged-file walk found may go: this user's regular file, on the swept
+ * directory's own device, older than `maxAgeMs`. The device is checked file by file, not only
+ * directory by directory (review of 966e92569881): a regular file bind-mounted into an otherwise
+ * same-volume store or cache is another filesystem's inode, and the walk's directory check never
+ * sees a mount that is a file.
+ */
+export const agedFileSweepable = (info: Pick<Stats, 'isFile' | 'dev' | 'uid' | 'mtimeMs'>, own: Pick<Stats, 'dev'>, uid: number | undefined, now: number, maxAgeMs: number) =>
+  info.isFile() && info.dev === own.dev && (uid === undefined || info.uid === uid) && now - info.mtimeMs >= maxAgeMs;
 async function reclaimAgedFiles(root: string, real: string, names: readonly string[], maxAgeMs: number, kind: TmpReclaimClass, pass: PassState, report: TmpReclaimReport) {
   const limit = pass.limit - report.removed.length;
   if (limit <= 0 || !names.length) return;
@@ -735,7 +746,7 @@ async function reclaimAgedFiles(root: string, real: string, names: readonly stri
     for (const path of await cacheFiles(join(root, name), own.dev)) {
       let info;
       try { info = await lstat(path); } catch { continue; }
-      if (!info.isFile() || (pass.uid !== undefined && info.uid !== pass.uid) || pass.now - info.mtimeMs < maxAgeMs) continue;
+      if (!agedFileSweepable(info, own, pass.uid, pass.now, maxAgeMs)) continue;
       old.push({ path, mtime: info.mtimeMs, bytes: info.size });
     }
   }

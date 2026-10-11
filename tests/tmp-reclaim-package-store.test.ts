@@ -85,6 +85,17 @@ test('unit:pnpm-store-aged-file-sweep — the pass removes this user\'s regular 
   assert.deepEqual(viaLink.removed, []);
   assert.equal(existsSync(away), true, 'a store reached only through a symlink stays');
 
+  // A regular file bind-mounted into the store is another filesystem's inode, which the walk's
+  // directory device check cannot see: the per-file rule refuses any file whose device is not the
+  // store's own. No mount can be made in this sandbox, so the rule is checked on the stats it reads.
+  const stats = (overrides: Partial<{ dev: number; uid: number; mtimeMs: number; file: boolean }> = {}) => ({ isFile: () => overrides.file ?? true, dev: overrides.dev ?? 7, uid: overrides.uid ?? realUid, mtimeMs: overrides.mtimeMs ?? now - 10 * day });
+  assert.equal(tmpReclaim.agedFileSweepable(stats(), { dev: 7 }, realUid, now, 7 * day), true, 'this user\'s aged regular file on the store\'s device goes');
+  assert.equal(tmpReclaim.agedFileSweepable(stats({ dev: 8 }), { dev: 7 }, realUid, now, 7 * day), false, 'a file on another device than its store stays, however old');
+  assert.equal(tmpReclaim.agedFileSweepable(stats({ uid: realUid + 1 }), { dev: 7 }, realUid, now, 7 * day), false, 'another user\'s file stays');
+  assert.equal(tmpReclaim.agedFileSweepable(stats({ mtimeMs: now - day }), { dev: 7 }, realUid, now, 7 * day), false, 'a file inside the bound stays');
+  assert.equal(tmpReclaim.agedFileSweepable(stats({ file: false }), { dev: 7 }, realUid, now, 7 * day), false, 'only a regular file goes');
+  assert.equal(tmpReclaim.agedFileSweepable(stats({ uid: realUid + 1 }), { dev: 7 }, undefined, now, 7 * day), true, 'without uids, age and device alone decide');
+
   // The tmp-inodes reading states the store bound.
   const reading = readResources(blank({ tmp: await readTmpInodes(await temporaryDirectory('pnpm-store-root'), tmp, async () => ({ files: 1_048_576, ffree: 400_000 })) })).find(entry => entry.id === 'tmp-inodes');
   assert.match(reading?.reclaim ?? '', /same-volume pnpm store \(\.pnpm-store\) older than 7 days/, 'the registry describes the store sweep');
