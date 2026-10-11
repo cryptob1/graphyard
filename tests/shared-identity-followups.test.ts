@@ -25,7 +25,11 @@ import { clock, minute } from './helpers/soak-world.js';
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 const HOST = 'vishrog';
 const spentAt = Date.parse('2026-10-09T05:30:28Z'), now = spentAt + 60_000;
-const resetsAt = new Date(Date.UTC(2026, 9, 11, 5)).toISOString();
+// The hold's reset lies past the fixture clock and past the wall clock (two days on, at the hour):
+// selections judged at Date.now() read a reset already behind the wall clock as no hold at all, and
+// a fixed date fails the file the moment the calendar passes it (CI of GY-1680 on 2026-10-11T05:00Z).
+const resetsAt = new Date(Math.ceil(Math.max(now, Date.now()) / 3_600_000) * 3_600_000 + 2 * 86_400_000).toISOString();
+const resetsAtPattern = resetsAt.replace(/[.]/g, '\\.');
 const notice = `You've hit your weekly limit · resets Oct 10, 10pm (America/Los_Angeles)`;
 const shared = 'claude:' + 'a'.repeat(32);
 const directories: string[] = [];
@@ -85,7 +89,7 @@ test('unit:quota-mark-explicit-null-identity — an operator quota mark naming i
   const cleared = applyRegistryMutation(kept, 'account.quota', { name: 'claude-a', quota: { state: 'exhausted', resetsAt, identity: null }, reason: 'weekly limit; now an API-key login' }, at).registry;
   assert.equal(account(cleared, 'claude-a').quota.identity, null, 'an explicit null clears it, as the schema states');
   assert.equal(accountIneligibility(cleared, account(cleared, 'claude'), now, HOST), null, 'an account of a former login is not over-held until the reset');
-  assert.match(accountIneligibility(cleared, account(cleared, 'claude-a'), now, HOST)!, /^claude-a quota is exhausted until 2026-10-11T05:00:00\.000Z/, 'the marked account itself stays held');
+  assert.match(accountIneligibility(cleared, account(cleared, 'claude-a'), now, HOST)!, new RegExp(`^claude-a quota is exhausted until ${resetsAtPattern}`), 'the marked account itself stays held');
 
   // Through the wire schema as well: null is carried, not stripped to "omitted".
   const wire = applyRegistryMutation(kept, 'account.quota', JSON.parse(JSON.stringify({ name: 'claude-a', quota: { state: 'exhausted', resetsAt, identity: null }, reason: 'cleared' })), at).registry;
@@ -247,7 +251,7 @@ test('unit:exhaustion-hold-observe-retried — a transient failure of the immedi
   await recordObservedExhaustion(config, 'claude-a', { ...spent, identity: shared }, now, { registry: flaky });
   assert.equal(calls, 2, 'the failed observe is sent again');
   assert.equal((await observedExhaustions(config, now))['claude-a'].reported, true, 'the hold is delivered, not left for a later selection');
-  assert.match(twinHeld(registry)!, /^claude quota is exhausted until 2026-10-11T05:00:00\.000Z: it is the same provider login as claude-a/, 'the twin on the other host is refused at once');
+  assert.match(twinHeld(registry)!, new RegExp(`^claude quota is exhausted until ${resetsAtPattern}: it is the same provider login as claude-a`), 'the twin on the other host is refused at once');
 
   // A registry still down after the retry leaves the hold pending for the loop's next cycle.
   const down = { credentialFile: join(root, 'down.token'), hostId: HOST };

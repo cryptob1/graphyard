@@ -1,9 +1,11 @@
-// Concern: the serve entry of a checkout-restore (GY-1680) — `master checkout-restore --serve`, answered by the serving release's own CLI in the loop's snapshot: the grant verified against the installation the checkout holds and nothing the caller chose, the quiesce-and-restore under it, and the thaw of the writers it stopped when it is ended by a signal. The release and the grant it serves under are checkout-restore-release.ts's.
+// Concern: the serve entry of a checkout-restore (GY-1680) — `master checkout-restore --serve`, answered by the serving release's own CLI in the loop's snapshot: the grant verified against the installation the checkout holds and nothing the caller chose, the quiesce-and-restore under it, its Git children ended and reaped before the thaw of the writers it stopped when it is ended by a signal. The release and the grant it serves under are checkout-restore-release.ts's.
+import { type ChildProcess, spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { readFile, unlink } from 'node:fs/promises';
 import { constants as osConstants } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
-import { type ChildRun, defaultChildRun } from '../child-runner.js';
+import { setTimeout as delay } from 'node:timers/promises';
+import { ChildProcessError, type ChildRun, childKillGraceMs, defaultChildRun, defaultChildTimeoutMs } from '../child-runner.js';
 import { daemonStatePath } from '../daemon/state.js';
 import { loadStoredMasterConfig, readCredentialFile } from '../master/config.js';
 import { coordinatorCheckoutRoot, type MasterConfig } from '../master/profiles.js';
@@ -28,29 +30,98 @@ export function ancestorPids(proc = '/proc', self = process.pid, limit = 8): num
   return chain;
 }
 
-type SignalHost = Pick<NodeJS.EventEmitter, 'on' | 'removeListener'>;
-/** What continuing the frozen writers on the entry's own stop needs: the signal host (this process), how it exits, and how writers are signalled and read (continueFrozenWriters). */
-export interface StopThawDeps extends Pick<WriterFreezeDeps, 'signal' | 'state'> { host?: SignalHost; exit?: (code: number) => void; log?: (line: string) => void }
+/** The Git children of a restore: run through `run`, each the leader of its own process group while it lives; `halt` ends every live one with its whole group and resolves once each has exited, naming their pids; `live` lists them. */
+export interface RestoreChildren { run: ChildRun; halt: (signal?: NodeJS.Signals) => Promise<number[]>; live: () => number[] }
 /**
- * While the entry acts, a SIGTERM or SIGINT — the loop's timeout, a hand's interrupt — continues the
- * writers the freeze ledger at `file` names stopped before the process exits with the signal's
- * conventional status (review of GY-1680): the freeze's `finally` never runs after a signal. Returns
- * what removes the listeners once the act has ended on its own.
+ * The runner the entry's quiesce-and-restore spawns Git through (review of GY-1680): each child is
+ * started detached, so it leads a process group its own descendants — a filter, a hook — belong to,
+ * and `halt` can end the whole tree with one signal to the group and wait for the child to be
+ * reaped before anything else is done. The entry's stop handler halts before it continues a single
+ * writer: a thaw with a Git child still saving or resetting files would let a writer resume beside
+ * it. `signal` first (SIGTERM, which Git answers by removing its lock files), SIGKILL to whatever is
+ * still alive `graceMs` later, and the halt resolves only once every child has exited — bounded
+ * well inside the loop's own kill grace on the entry (childKillGraceMs), so the timeout path halts
+ * and thaws before the loop's SIGKILL could end the entry with a Git child still running. A child
+ * that outlives `timeoutMs` (defaultChildTimeoutMs) is ended the same way, and its run rejects as
+ * timed out.
+ */
+export function restoreChildren(options: { graceMs?: number; timeoutMs?: number } = {}): RestoreChildren {
+  const graceMs = options.graceMs ?? 1_500, timeoutMs = options.timeoutMs ?? defaultChildTimeoutMs;
+  const live = new Map<number, { child: ChildProcess; exited: Promise<void> }>();
+  const group = (pid: number, signal: NodeJS.Signals) => { try { process.kill(-pid, signal); } catch { try { process.kill(pid, signal); } catch { /* gone */ } } };
+  const end = async (entries: { pid: number; exited: Promise<void> }[], signal: NodeJS.Signals) => {
+    for (const entry of entries) group(entry.pid, signal);
+    let alive = entries.length;
+    const settle = Promise.all(entries.map(entry => entry.exited.then(() => { alive--; })));
+    await Promise.race([settle, delay(Math.max(0, Math.min(graceMs, childKillGraceMs - 1_000)))]);
+    if (alive) { for (const entry of entries) group(entry.pid, 'SIGKILL'); await settle; }
+  };
+  const run: ChildRun = (command, args, runOptions = {}) => new Promise<string>((resolve, reject) => {
+    let child: ChildProcess;
+    try { child = spawn(command, args, { cwd: runOptions.cwd, env: runOptions.env, stdio: ['ignore', 'pipe', 'pipe'], detached: true }); }
+    catch (error) { reject(new ChildProcessError(command, args, { stdout: '', stderr: '', status: null, signal: null, timedOut: false, cause: error })); return; }
+    const out: Buffer[] = [], err: Buffer[] = [];
+    child.stdout?.on('data', (chunk: Buffer) => out.push(chunk)); child.stderr?.on('data', (chunk: Buffer) => err.push(chunk));
+    let timedOut = false, settled = false, failure: unknown;
+    const pid = child.pid;
+    // Live until it has exited, not until its streams close: a halt waits for the exit, and what it halted is no longer live.
+    const exited = new Promise<void>(done => child.once('exit', () => { if (pid) live.delete(pid); done(); }));
+    if (pid) live.set(pid, { child, exited });
+    const timer = setTimeout(() => { timedOut = true; if (pid) void end([{ pid, exited }], 'SIGTERM'); }, runOptions.timeoutMs ?? timeoutMs);
+    timer.unref?.();
+    child.on('error', error => { failure ??= error; });
+    child.on('close', (status, signal) => {
+      if (settled) return;
+      settled = true; clearTimeout(timer);
+      const stdout = Buffer.concat(out).toString('utf8'), stderr = Buffer.concat(err).toString('utf8');
+      if (failure !== undefined) reject(new ChildProcessError(command, args, { stdout, stderr, status, signal, timedOut, cause: failure }));
+      else if (timedOut) reject(new ChildProcessError(command, args, { stdout, stderr, status, signal, timedOut: true, timeoutMs: runOptions.timeoutMs ?? timeoutMs }));
+      else if (status === 0) resolve(stdout);
+      else reject(new ChildProcessError(command, args, { stdout, stderr, status, signal, timedOut: false }));
+    });
+  });
+  const halt = async (signal: NodeJS.Signals = 'SIGTERM') => {
+    const entries = [...live].map(([pid, entry]) => ({ pid, exited: entry.exited }));
+    await end(entries, signal);
+    return entries.map(entry => entry.pid);
+  };
+  return { run, halt, live: () => [...live.keys()] };
+}
+
+type SignalHost = Pick<NodeJS.EventEmitter, 'on' | 'removeListener'>;
+/** What continuing the frozen writers on the entry's own stop needs: the signal host (this process), how it exits, how writers are signalled and read (continueFrozenWriters), and `halt`, which ends the restore's live Git children and resolves once they are reaped (restoreChildren) — awaited before any writer is continued. */
+export interface StopThawDeps extends Pick<WriterFreezeDeps, 'signal' | 'state'> { host?: SignalHost; exit?: (code: number) => void; log?: (line: string) => void; halt?: () => Promise<number[]> }
+/**
+ * While the entry acts, a SIGTERM or SIGINT — the loop's timeout, a hand's interrupt — first ends
+ * and reaps the restore's live Git children (`halt`, review of GY-1680: the loop's timeout signals
+ * the entry alone, so a Git child mid-save or mid-reset would otherwise run on beside the writers
+ * the thaw resumes), then continues the writers the freeze ledger at `file` names stopped, then
+ * exits with the signal's conventional status: the freeze's `finally` never runs after a signal. A
+ * second signal while the first is being answered changes nothing. Returns what removes the
+ * listeners once the act has ended on its own.
  */
 export function thawFrozenWritersOnStop(file: string, deps: StopThawDeps = {}): () => void {
   const host = deps.host ?? process, exit = deps.exit ?? (code => process.exit(code)), log = deps.log ?? (line => console.error(line));
+  let stopping = false;
   const listeners = (['SIGTERM', 'SIGINT'] as const).map(signal => [signal, () => {
-    const thawed = continueFrozenWriters(file, deps);
-    log(`master checkout-restore ${checkoutRestoreServeFlag} was ended by ${signal} before its thaw: ${thawed?.continued.length ? `continued the writer(s) it had stopped, pid ${thawed.continued.join(', ')}` : 'it had stopped nothing still stopped'}; nothing more was touched`);
-    exit(128 + (osConstants.signals[signal] ?? 0));
+    if (stopping) return;
+    stopping = true;
+    void (async () => {
+      let halted: number[] = [];
+      try { halted = await deps.halt?.() ?? []; } catch { /* nothing of the restore's was left to end */ }
+      const thawed = continueFrozenWriters(file, deps);
+      log(`master checkout-restore ${checkoutRestoreServeFlag} was ended by ${signal} before its thaw: ${halted.length ? `ended its Git child(ren) pid ${halted.join(', ')} and waited for them, then ` : ''}${thawed?.continued.length ? `continued the writer(s) it had stopped, pid ${thawed.continued.join(', ')}` : 'it had stopped nothing still stopped'}; nothing more was touched`);
+      exit(128 + (osConstants.signals[signal] ?? 0));
+    })();
   }] as const);
   for (const [signal, listener] of listeners) host.on(signal, listener);
   return () => { for (const [signal, listener] of listeners) host.removeListener(signal, listener); };
 }
 
 export interface ServeEntryOptions {
+  /** How the act runs Git; defaults to restoreChildren, whose children the stop handler ends and reaps before it thaws. */
   run?: ChildRun; quiesce?: CheckoutQuiesce; now?: Date;
-  /** How the entry continues its frozen writers when it is stopped mid-act (thawFrozenWritersOnStop); defaults to this process and its signals. */
+  /** How the entry continues its frozen writers when it is stopped mid-act (thawFrozenWritersOnStop); defaults to this process and its signals, halting the default runner's children first. */
   stop?: StopThawDeps;
   /** The environment the grant is read from; defaults to this process's. */
   env?: NodeJS.ProcessEnv;
@@ -139,18 +210,22 @@ export async function verifyCheckoutRestoreGrant(options: ServeEntryOptions = {}
  * between the restore and the HEAD advance. Without a grant that verifies there is no act. A refusal (an unverifiable
  * writer, a path a restore cannot save) is an error on stderr and a failed exit, which the loop
  * records as the request's outcome. The writers it stops are recorded in the installation's freeze
- * ledger before each SIGSTOP and continued on SIGTERM or SIGINT (review of GY-1680); the loop
- * continues whatever the ledger still names once the entry has ended.
+ * ledger before each SIGSTOP and continued on SIGTERM or SIGINT (review of GY-1680) — after every
+ * Git child of the act has been ended and reaped (restoreChildren), so no writer resumes beside a
+ * Git process still touching the checkout; the loop continues whatever the ledger still names once
+ * the entry has ended.
  */
 export async function serveCheckoutRestoreAct(args: readonly string[], options: ServeEntryOptions = {}): Promise<ServeOutput> {
   if (args.length) throw new Error(`master checkout-restore ${checkoutRestoreServeFlag} takes no arguments: the checkout and the reason are in the loop's grant. ${checkoutRestoreServeUsage}`);
   const { grant, config } = await verifyCheckoutRestoreGrant(options);
   const ledger = checkoutRestoreFreezeLedgerPath(config);
   const quiesce = options.quiesce ?? ((root: string) => freezeCheckoutWriters(root, { ledger }));
-  const release = thawFrozenWritersOnStop(ledger, options.stop);
+  const children = options.run ? null : restoreChildren();
+  const run = options.run ?? children!.run;
+  const release = thawFrozenWritersOnStop(ledger, { ...options.stop, halt: options.stop?.halt ?? children?.halt });
   try {
     // An old-HEAD handoff's checkout is advanced onto the grant's release inside the same freeze (review of GY-1680).
-    const { restored, head } = await restoreInProcess(options.run ?? defaultChildRun, quiesce, grant.handoff?.advance ?? null)(grant.root, grant.reason, options.now ?? new Date(), { file: checkoutRestoreRequestPath(config), id: grant.request.id });
+    const { restored, head } = await restoreInProcess(run, quiesce, grant.handoff?.advance ?? null)(grant.root, grant.reason, options.now ?? new Date(), { file: checkoutRestoreRequestPath(config), id: grant.request.id });
     return { restored, head };
   } finally { release(); }
 }

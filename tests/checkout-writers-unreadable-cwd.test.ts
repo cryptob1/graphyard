@@ -288,7 +288,7 @@ test('unit:unreadable-cwd-still-refuses-in-checkout — GY-1680 leaves the quies
     writeFileSync(join(root, 'src', 'loop.ts'), 'export const loop = 4; // a second hotfix\n');
     writeFileSync(join(root, 'scratchpad.mjs'), '// more scratch\n');
     processEntry(proc, 1380, { cwd: checkout }); threadEntry(proc, 1380, 1380, { cwd: checkout }); threadEntry(proc, 1380, 1381, { cwd: join(checkout, 'src') }); // live, its own read refused, a thread shows it inside: a writer
-    processEntry(proc, 1390, { cwd: checkout }); threadEntry(proc, 1390, 1391, { cwd: elsewhere });      // live, its own read refused, a thread shows it outside: no writer, nothing skipped
+    processEntry(proc, 1390, { cwd: checkout }); threadEntry(proc, 1390, 1391, { cwd: elsewhere });      // live, its own read refused, a thread shows it outside: the leader itself is unjudged, so unverifiable (review of GY-1680), never outside, never skipped
     // Review of GY-1680: every live thread is inspected — an earlier outside cwd must not hide a later inside one.
     processEntry(proc, 1500, { cwd: checkout }); threadEntry(proc, 1500, 1501, { cwd: elsewhere }); threadEntry(proc, 1500, 1502, { cwd: join(checkout, 'src') });
     // Review of GY-1680: an outside thread beside a live thread whose cwd cannot be read — EINVAL or EACCES — is not fully judged: that thread may be inside, so the process is unverifiable, never outside, never skipped.
@@ -311,20 +311,21 @@ test('unit:unreadable-cwd-still-refuses-in-checkout — GY-1680 leaves the quies
       const judged = writers.checkoutProcessScan(root, 100, proc, uid);
       assert.deepEqual(judged.writers, [500, 1380, 1500], 'a live leader whose thread shows it inside the checkout is a writer, its own read refused or not — including when an earlier readable thread lies outside');
       assert.deepEqual(judged.skipped.map(entry => entry.pid), [1372, 1400], 'skipped only when every read, the leader\'s and its live threads\', was refused EACCES');
-      assert.deepEqual(judged.unverifiable.map(entry => entry.pid), [1410, 1420, 1510, 1520], 'a thread read failing another way, a state that cannot be read, or an unread thread beside an outside one is unverifiable');
-      assert.match(judged.unverifiable[0].error, /^EACCES.*live thread 1411's cwd cannot be read either \(EINVAL/);
-      assert.match(judged.unverifiable[1].error, /^EINVAL.*; its state cannot be read either$/);
-      assert.match(judged.unverifiable[2].error, /^EACCES.*live thread 1512's cwd cannot be read either \(EINVAL.*\), while its live thread 1511's reads outside the checkout$/);
-      assert.match(judged.unverifiable[3].error, /^EACCES.*live thread 1522's cwd cannot be read either \(EACCES.*\), while its live thread 1521's reads outside the checkout$/);
+      assert.deepEqual(judged.unverifiable.map(entry => entry.pid), [1390, 1410, 1420, 1510, 1520], 'a live leader unjudged beside an outside thread, a thread read failing another way, a state that cannot be read, or an unread thread beside an outside one is unverifiable');
+      assert.match(judged.unverifiable[0].error, /^EACCES.*readlink.*; its own working directory is unjudged, while its live thread 1391's reads outside the checkout$/);
+      assert.match(judged.unverifiable[1].error, /^EACCES.*live thread 1411's cwd cannot be read either \(EINVAL/);
+      assert.match(judged.unverifiable[2].error, /^EINVAL.*; its state cannot be read either$/);
+      assert.match(judged.unverifiable[3].error, /^EACCES.*live thread 1512's cwd cannot be read either \(EINVAL.*\), while its live thread 1511's reads outside the checkout$/);
+      assert.match(judged.unverifiable[4].error, /^EACCES.*live thread 1522's cwd cannot be read either \(EACCES.*\), while its live thread 1521's reads outside the checkout$/);
       sent.length = 0;
       processEntry(proc, 1420, { cwd: null }); // its state, gone during the scan above, is readable again until the restore's own scan
-      await assert.rejects(restoreCoordinatorCheckout(root, 'restore', undefined, new Date(), freeze([])), /pid 1410 \(EACCES.*live thread 1411's cwd cannot be read either.*\), pid 1420 \(EINVAL.*; its state cannot be read either\), pid 1510 \(EACCES.*live thread 1512's cwd cannot be read either \(EINVAL.*\), while its live thread 1511's reads outside the checkout\), pid 1520 \(EACCES.*live thread 1522's cwd cannot be read either \(EACCES.*\), while its live thread 1521's reads outside the checkout\) cannot be read, so whether it writes in the checkout cannot be verified and nothing was restored/s);
+      await assert.rejects(restoreCoordinatorCheckout(root, 'restore', undefined, new Date(), freeze([])), /pid 1390 \(EACCES.*its own working directory is unjudged, while its live thread 1391's reads outside the checkout\), pid 1410 \(EACCES.*live thread 1411's cwd cannot be read either.*\), pid 1420 \(EINVAL.*; its state cannot be read either\), pid 1510 \(EACCES.*live thread 1512's cwd cannot be read either \(EINVAL.*\), while its live thread 1511's reads outside the checkout\), pid 1520 \(EACCES.*live thread 1522's cwd cannot be read either \(EACCES.*\), while its live thread 1521's reads outside the checkout\) cannot be read, so whether it writes in the checkout cannot be verified and nothing was restored/s);
       assert.equal(sent.length, 0, 'nothing was signalled');
       assert.equal(readFileSync(join(root, 'src', 'loop.ts'), 'utf8'), 'export const loop = 4; // a second hotfix\n', 'the tracked change stands');
       assert.ok(existsSync(join(root, 'scratchpad.mjs')), 'the untracked file stands');
       assert.equal(git('for-each-ref', '--format=%(refname)', checkoutRestoreRefPrefix), saved, 'no ref was written');
       // The thread-identified live writer never showing stopped refuses the act too, with what it stopped continued.
-      rmSync(join(proc, '1410'), { recursive: true, force: true }); rmSync(join(proc, '1420'), { recursive: true, force: true });
+      rmSync(join(proc, '1390'), { recursive: true, force: true }); rmSync(join(proc, '1410'), { recursive: true, force: true }); rmSync(join(proc, '1420'), { recursive: true, force: true });
       rmSync(join(proc, '1510'), { recursive: true, force: true }); rmSync(join(proc, '1520'), { recursive: true, force: true });
       sent.length = 0;
       await assert.rejects(restoreCoordinatorCheckout(root, 'restore', undefined, new Date(), freeze([1380])), /writer\(s\) 1380 did not stop within 20ms of SIGSTOP, so nothing was restored/);

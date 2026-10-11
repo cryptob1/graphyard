@@ -108,13 +108,17 @@ export function checkoutProcessScan(root: string, self = process.pid, proc = '/p
  * whose main thread called pthread_exit still writes through such a thread (GY-1663), and a live
  * leader whose own link is refused may still show one — and any thread whose cwd is inside the
  * checkout (`inside`) makes the process a writer, never skipped, even when an earlier readable
- * thread lies outside. The process is outside the checkout only when fully judged: every live
- * thread's cwd read, none inside. A live thread whose cwd cannot be read beside one that reads
- * outside leaves the process unverifiable (GY-1680 review), never outside and never skipped: that
- * thread may be inside, and the restore refuses. No live thread: a zombie leader (`leaderGone`) is
- * gone, a live one stands on its own read — skipped when that was refused EACCES (GY-1672),
- * unverifiable otherwise. Live threads none of whose cwd reads: a live leader is skipped only when
- * every read, its own and theirs, was refused EACCES, the non-dumpable daemon GY-1672 names; a
+ * thread lies outside. Threads may hold distinct working directories (a clone without CLONE_FS), so
+ * a thread reading outside proves nothing about another: a live thread whose cwd cannot be read
+ * beside one that reads outside leaves the process unverifiable (GY-1680 review), never outside and
+ * never skipped, and so does the live leader's own failed read (GY-1680 review): its working
+ * directory is a thread's too, unjudged, so a live leader with a sibling that reads outside is
+ * unverifiable whatever refused the leader's read, and the restore refuses. Only a zombie leader
+ * (`leaderGone`, its own thread exited with no cwd) is judged by its live siblings alone: every
+ * live thread's cwd read and none inside is outside. No live thread: a zombie leader is gone, a
+ * live one stands on its own read — skipped when that was refused EACCES (GY-1672), unverifiable
+ * otherwise. Live threads none of whose cwd reads: a live leader is skipped only when every read,
+ * its own and its live threads', was refused EACCES, the non-dumpable daemon GY-1672 names; a
  * zombie leader's, or any other failure, or a task list that cannot be read, is unverifiable, and
  * the restore refuses.
  */
@@ -143,11 +147,13 @@ function judgeByThreads(proc: string, name: string, failure: unknown, leaderGone
     } catch (thread) { error ??= `${reason}; its live thread ${tid}'s cwd cannot be read either (${describe(thread)})`; if (!refused(thread)) denied = false; }
   }
   if (!live) return leaderGone ? gone : own;
-  // Outside only when fully judged: every live thread's cwd read and none inside. One that could not be
-  // read beside an outside one may be inside, so the process is unverifiable — EACCES or not, never the
-  // skip GY-1672 delivers for a process every read of which was refused (GY-1680 review).
-  if (outside && error === null) return { cwd: outside.cwd, error: null, denied: false };
-  if (outside) return { cwd: null, error: `${error}, while its live thread ${outside.tid}'s reads outside the checkout`, denied: false };
+  // Outside only when fully judged: every live thread's cwd read and none inside — the leader's own
+  // included, so only a zombie leader's siblings can settle it. A live leader whose own read failed, or
+  // a thread that could not be read, beside an outside one may be inside, so the process is
+  // unverifiable — EACCES or not, never the skip GY-1672 delivers for a process every read of which was
+  // refused (GY-1680 review).
+  if (outside && error === null && leaderGone) return { cwd: outside.cwd, error: null, denied: false };
+  if (outside) return { cwd: null, error: `${error ?? `${reason}; its own working directory is unjudged`}, while its live thread ${outside.tid}'s reads outside the checkout`, denied: false };
   return { cwd: null, error, denied: denied && !leaderGone };
 }
 const gone = (state: string | null) => state === null || state === 'Z' || state === 'X';

@@ -10,7 +10,7 @@ import { defaultChildRun, type ChildRun } from '../src/child-runner.js';
 import { z } from 'zod';
 import { EventEmitter } from 'node:events';
 import { type CheckoutRestoreGrant, type CheckoutRestoreGrantPayload, checkoutRestoreGrantKind, checkoutRestoreGrantVariable, checkoutRestoreServeFlag, commitServes, lockedLoop, releasePinnedRestore, releaseServes, servingReleases, signCheckoutRestoreGrant, snapshotRelease, staleServingLoop } from '../src/cli/checkout-restore-release.js';
-import { ancestorPids, serveCheckoutRestoreAct, thawFrozenWritersOnStop } from '../src/cli/checkout-restore-serve.js';
+import { ancestorPids, restoreChildren, serveCheckoutRestoreAct, thawFrozenWritersOnStop } from '../src/cli/checkout-restore-serve.js';
 import { continueFrozenWriters, freezeCheckoutWriters, frozenWritersLedgerKind, readFrozenWritersLedger } from '../src/cli/checkout-writers.js';
 import { checkoutRestoreCommand, checkoutRestoreFreezeLedgerPath, checkoutRestoreGrantPath, checkoutRestoreRefPrefix, checkoutRestoreRequestPath, fileCheckoutRestoreRequest, loopRestartRequestPath, readCheckoutRestoreRequest, restoreInProcess, serveCheckoutRestore } from '../src/cli/master-checkout-restore.js';
 import { atomicPrivateWrite } from '../src/master/config.js';
@@ -319,14 +319,62 @@ test('unit:freeze-ledger-and-stop-thaw — the freeze records each writer in its
   writeFileSync(ledger, JSON.stringify({ kind: frozenWritersLedgerKind, root: base, pid: process.pid, at: '2030-01-01T00:00:00Z', stopped: [31, 32] }));
   const host = new EventEmitter(), exits: number[] = [], log: string[] = [];
   sent.length = 0;
-  const release = thawFrozenWritersOnStop(ledger, { host, exit: code => { exits.push(code); }, log: line => { log.push(line); }, signal: (pid, name) => { sent.push(`${name}:${pid}`); }, state: pid => pid === 31 ? 'T' : 'R' });
+  // Review of GY-1680: the restore's live Git children are ended and reaped (`halt`) before any SIGCONT —
+  // a writer continued beside a Git child still saving or resetting files would race it — and a second
+  // signal while the first is answered changes nothing.
+  let haltResolved = false, halts = 0;
+  const halt = async () => { halts++; sent.push('halt:asked'); await delay(20); haltResolved = true; sent.push('halt:reaped'); return [777]; };
+  const release = thawFrozenWritersOnStop(ledger, { host, halt, exit: code => { exits.push(code); }, log: line => { log.push(line); }, signal: (pid, name) => { assert.ok(haltResolved, `${name} to ${pid} only after the Git children were reaped`); sent.push(`${name}:${pid}`); }, state: pid => pid === 31 ? 'T' : 'R' });
   assert.equal(host.listenerCount('SIGTERM'), 1); assert.equal(host.listenerCount('SIGINT'), 1);
-  host.emit('SIGTERM');
-  assert.deepEqual(sent, ['SIGCONT:31']); assert.deepEqual(exits, [143]);
-  assert.match(log[0], /was ended by SIGTERM before its thaw: continued the writer\(s\) it had stopped, pid 31; nothing more was touched/);
+  host.emit('SIGTERM'); host.emit('SIGINT');
+  assert.deepEqual(sent, ['halt:asked'], 'nothing is continued until the halt resolves');
+  for (const deadline = Date.now() + 2_000; !exits.length && Date.now() < deadline;) await delay(5);
+  assert.deepEqual(sent, ['halt:asked', 'halt:reaped', 'SIGCONT:31']); assert.deepEqual(exits, [143]); assert.equal(halts, 1, 'the second signal is not answered again');
+  assert.match(log[0], /was ended by SIGTERM before its thaw: ended its Git child\(ren\) pid 777 and waited for them, then continued the writer\(s\) it had stopped, pid 31; nothing more was touched/);
   assert.ok(!existsSync(ledger));
   release();
   assert.equal(host.listenerCount('SIGTERM'), 0); assert.equal(host.listenerCount('SIGINT'), 0);
+});
+
+test('unit:serve-stop-halts-git-children — the serve entry runs Git through restoreChildren: each child leads its own process group, `halt` ends the whole group (a grandchild included), SIGKILLs what ignores SIGTERM after the grace, and resolves only once every child has exited, with the child\'s run rejected; a child past its timeout is ended the same way; the entry\'s stop handler halts before it thaws (review of GY-1680)', async () => {
+  const base = await fixtureDirectory('serve-stop-halts-children');
+  const children = restoreChildren({ graceMs: 200 });
+  // A shell whose grandchild (`sleep`) is in the same group: its pid is written for the test to watch.
+  const pidFile = join(base, 'grandchild.pid');
+  const shell = children.run('sh', ['-c', `sleep 60 & echo $! > ${JSON.stringify(pidFile)}; wait`], { cwd: base }) as Promise<string>;
+  shell.catch(() => {});
+  for (const deadline = Date.now() + 5_000; !existsSync(pidFile) && Date.now() < deadline;) await delay(10);
+  const grandchild = Number(readFileSync(pidFile, 'utf8').trim());
+  assert.ok(Number.isInteger(grandchild) && grandchild > 0, 'the grandchild started');
+  assert.equal(children.live().length, 1, 'one live child');
+  const [child] = children.live();
+  assert.equal(process.kill(child, 0), true, 'the child is alive before the halt');
+  const halted = await children.halt();
+  assert.deepEqual(halted, [child], 'the halt names the child it ended');
+  assert.deepEqual(children.live(), [], 'nothing is live after the halt resolves');
+  await assert.rejects(shell, (error: Error & { signal?: string }) => error.name === 'ChildProcessError' && error.signal === 'SIGTERM', 'the run rejects with the signal that ended it');
+  const alive = (pid: number) => { try { process.kill(pid, 0); return readFileSync(`/proc/${pid}/stat`, 'utf8').split(') ')[1]?.[0] !== 'Z'; } catch { return false; } };
+  for (const deadline = Date.now() + 2_000; alive(grandchild) && Date.now() < deadline;) await delay(10);
+  assert.ok(!alive(grandchild), 'the grandchild in the group was ended with it');
+  // One that ignores SIGTERM is SIGKILLed after the grace, and the halt still waits for it.
+  // The shell ignores SIGTERM and outlives each `sleep` the group signal ends; only the SIGKILL ends it.
+  const ready = join(base, 'stubborn.ready');
+  const stubborn = children.run('sh', ['-c', `trap "" TERM; : > ${JSON.stringify(ready)}; while :; do sleep 1; done`], { cwd: base }) as Promise<string>;
+  stubborn.catch(() => {});
+  for (const deadline = Date.now() + 5_000; !existsSync(ready) && Date.now() < deadline;) await delay(5);
+  assert.ok(existsSync(ready), 'the stubborn shell installed its trap');
+  const started = Date.now();
+  const killed = await children.halt();
+  assert.equal(killed.length, 1); assert.ok(Date.now() - started >= 150, 'the grace was given before SIGKILL');
+  await assert.rejects(stubborn, (error: Error & { signal?: string }) => error.name === 'ChildProcessError' && error.signal === 'SIGKILL');
+  assert.deepEqual(children.live(), []);
+  // A child past its timeout is ended the same way and its run rejects as timed out.
+  const slow = restoreChildren({ graceMs: 100, timeoutMs: 150 });
+  await assert.rejects(slow.run('sleep', ['60'], { cwd: base }) as Promise<string>, /sleep 60 did not finish within 150ms and was killed/);
+  assert.deepEqual(slow.live(), []);
+  // A healthy run resolves with its stdout, as the default runner does.
+  assert.equal(await children.run('sh', ['-c', 'printf hello'], { cwd: base }), 'hello');
+  await assert.rejects(children.run('sh', ['-c', 'echo bad >&2; exit 3'], { cwd: base }) as Promise<string>, /Command failed: sh -c echo bad >&2; exit 3\nbad/);
 });
 
 test('unit:serve-uses-verified-release — the sanctioned releases are the deployment step\'s verified sha when the store holds it, then the fetched base-branch tip at origin; the act is the first that snapshots with the serve entry, its own CLI run with `--serve` and the loop\'s signed grant in its environment, the supervisor\'s keep-alive fed throughout; when neither serves, or the credential cannot sign, the act fails naming why, and the loop\'s own code never runs', async () => {
@@ -707,6 +755,22 @@ test('unit:adoption-reverts-when-restart-fails — an adopted HEAD whose restart
   assert.equal(state.actions['escalation:dirty-checkout']?.state, 'done');
   assert.equal((await readCheckoutRestoreRequest(file))?.outcome?.restart?.state, 'requested');
   assert.equal((await guard.betweenCycles()).refusal, null);
+  // Review of GY-1680: the owed restart's record failing (the state directory unwritable) reverts the
+  // adoption before the failure is raised, and no restart is asked — the loop still runs the old commit,
+  // and the drift escalation must explain it.
+  if (process.getuid?.() === 0) return;
+  git('checkout', '-q', '--detach', loaded); await guard.settle({ revert: loaded }); git('checkout', '-q', '--detach', moved);
+  assert.ok((await guard.betweenCycles()).refusal, 'the drift stands again for the next request');
+  await fileCheckoutRestoreRequest(file, 'escalation:dirty-checkout again', 'graphyard-doctor');
+  settled.length = 0; unadopted.length = 0; asked.length = 0;
+  chmodSync(join(base, 'state'), 0o500);
+  try {
+    await assert.rejects(serveCheckoutRestore(file, root, deps), /the restart could not be recorded at .*checkout-restore\.json, so it was not asked: .*EACCES.*; the adoption of \w{12} is reverted and the drift escalation stands until a restart lands/s);
+  } finally { chmodSync(join(base, 'state'), 0o700); }
+  assert.deepEqual(settled, [moved], 'adopted before the record'); assert.deepEqual(unadopted, [loaded], 'reverted when the record failed'); assert.deepEqual(asked, [], 'no restart was asked');
+  assert.equal(guard.expected(), loaded);
+  assert.equal(state.actions['escalation:dirty-checkout']?.state, 'failed', 'the drift escalation stands');
+  assert.equal((await readCheckoutRestoreRequest(file))?.outcome, null, 'the request stands unanswered for the next pass');
 });
 
 /**
