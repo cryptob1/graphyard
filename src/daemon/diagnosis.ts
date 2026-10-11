@@ -7,7 +7,9 @@ import { providerLimit, type ExhaustionSignal } from '../model/capacity.js';
 import { isClosed } from '../model/closure.js';
 import { planeWideRefusal } from '../model/blocker-class.js';
 import { closesFaultClass, faultClassMeaning, openFaultClassItem, type FaultClass, type FaultInstance, type FaultKind } from '../model/fault-classes.js';
+import { deriveDiagnosisFixPlannedFiles } from '../model/work.js';
 import { guardBroadScope } from '../master/autonomy.js';
+import { baseTree } from '../cli/planned-files-intent.js';
 import { diagnosisPayloadSchema, diagnosisSettled, graphyardTools, type DiagnosisPayload, type DiagnosisRecord, type DiagnosticianSettings } from '../runner/payloads.js';
 import type { Runner } from '../runner/types.js';
 import { type DaemonAction, type DaemonState, message } from './state.js';
@@ -82,6 +84,11 @@ export interface DiagnosticianEffects {
   settings: DiagnosticianSettings;
   /** The repository checkout the diagnostician reads: the loop's own. */
   cwd: string;
+  /**
+   * The base branch's tree the fix item's plannedFiles resolve against before filing (GY-1707).
+   * Absent, the loop reads `cwd` the way `master create` does (`baseTree`).
+   */
+  tree?: (baseBranch: string) => Promise<{ ref: string; files: Set<string> }>;
   /** The primary run's runner (the registry's role, else Pi on `model`), or the fallback's (Pi on `fallbackModel`). */
   runner: (attempt: 'primary' | 'fallback', subject: DiagnosisSubject) => Promise<DiagnosticianRun>;
   /** The loop journal and server log excerpts and the GitHub state of the named pull requests. */
@@ -269,8 +276,9 @@ const diagnosisKey = (subject: string) => `diagnosis:${createHash('sha256').upda
 /** How long past its bound a run recorded as running, with no run in this process, is waited for before it is recorded as lost. */
 export const diagnosisLostGraceMs = 5 * 60_000;
 
-/** The fix item as `master create` would file it: the create schema's checks and the broad-scope guard, unflagged. */
-export function fixItem(entry: Pick<DiagnosisRecord, 'subject' | 'kind' | 'work'>, diagnosis: DiagnosisPayload): FixInput {
+/** The fix item as `master create` would file it (GY-1707): schema, broad-scope guard, and plannedFiles derived against the base tree — never the diagnostician's list verbatim. */
+export function fixItem(entry: Pick<DiagnosisRecord, 'subject' | 'kind' | 'work'>, diagnosis: DiagnosisPayload,
+  tree: { ref: string; files: ReadonlySet<string> }): FixInput {
   const fix = diagnosis.fix!;
   const answers = entry.kind === 'recurring' ? `the recurring-fault item ${entry.work}` : `the invariant violation ${entry.subject}`;
   const description = clip([
@@ -278,7 +286,9 @@ export function fixItem(entry: Pick<DiagnosisRecord, 'subject' | 'kind' | 'work'
     `Filed by the master loop from the diagnostician's diagnosis of ${answers} (GY-439). Cause: ${diagnosis.cause}`,
     `Evidence:\n${[...diagnosis.evidence.logLines.map(line => `- log: ${line}`), ...diagnosis.evidence.commands.map(line => `- ran: ${line}`)].join('\n')}`,
   ].join('\n\n'), 20_000);
-  const input = createSchema.parse({ title: fix.title, description, type: fix.type, priority: fix.priority, criteria: fix.criteria, plannedFiles: fix.plannedFiles });
+  const derived = deriveDiagnosisFixPlannedFiles(
+    { plannedFiles: fix.plannedFiles, criteria: fix.criteria, cause: diagnosis.cause, kind: entry.kind }, tree.files, tree.ref);
+  const input = createSchema.parse({ title: fix.title, description, type: fix.type, priority: fix.priority, criteria: fix.criteria, plannedFiles: derived.plannedFiles });
   const reason = guardBroadScope(input, `The diagnostician found the root cause of ${answers}: ${clip(diagnosis.cause, 1500)}`, { allow: false, command: 'master create' });
   return { ...input, reason };
 }
@@ -408,7 +418,10 @@ async function advance(cycle: Cycle, diagnostician: DiagnosticianEffects, entry:
         `${entry.work} recurs from a cause ${covering.key} already covers, so it is closed as its duplicate. Diagnosis: ${diagnosis.cause}`, note);
     }
     let input: FixInput;
-    try { input = fixItem(entry, diagnosis); }
+    try {
+      const tree = await (diagnostician.tree ?? (branch => baseTree(diagnostician.cwd, branch)))(cycle.config.baseBranch);
+      input = fixItem(entry, diagnosis, tree);
+    }
     catch (error) { entry.state = 'failed'; await note(entry, 'failed', `The diagnostician's fix item for ${entry.subject} fails the checks master create applies: ${message(error)}`, 'fix-item'); return; }
     let fix: Work;
     try { fix = await diagnostician.file(input, `${diagnosisKey(entry.subject)}:fix`); }
