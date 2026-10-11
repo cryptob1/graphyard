@@ -26,14 +26,16 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 //      child's script from a label and a reading it misses is a bomb it misses. A stub covers exactly
 //      the code that runs after it, until the clock is restored. Installed at module
 //      scope, it covers the file from the stub on: a reading above it at module scope ran at load,
-//      before the stub. Installed in a before/beforeEach hook, it covers the braced blocks nested in
-//      the block the hook belongs to that run once the hook has (the test bodies of the file for a
-//      top-level hook, of the describe for a hook in one, the blocks inside a sibling describe but
-//      not that describe's own code, which ran at collection; a before hook written above it, or any
-//      before hook beside a beforeEach stub, ran earlier and is not covered), and the hook's own body
-//      from the stub on, but not the code written directly in that block: that code ran at load or
-//      at collection, before any hook. Installed inside any other block, a test body above all, it
-//      covers that block from the stub to its closing brace, and no other test in the file;
+//      before the stub. Installed in a before/beforeEach hook, with a brace body or as the one
+//      expression of `before(() => clock.install(now))`, it covers the test bodies that run once the
+//      hook has (the tests of the file for a top-level hook, of the describe for a hook in one, the
+//      tests inside a sibling describe or loop but not that block's own code, which ran at
+//      collection), the hooks that run after it (a before hook written above it, or any before hook
+//      beside a beforeEach stub, ran earlier and is not covered) and the hook's own body from the
+//      stub on, but neither the code written directly in the hook's block, which ran at load or at
+//      collection before any hook, nor a helper's body, which runs whenever it is called. Installed
+//      inside any other block, a test body above all, it covers that block from the stub to its
+//      closing brace, and no other test in the file;
 //   4. a restoration ends the coverage: mock.timers.reset(), mock.reset(), clock.uninstall() or an
 //      assignment of the saved real Date back to globalThis.Date (`globalThis.Date = original` after
 //      `const original = Date`). Written in the block the stub covers, it ends the coverage there; in
@@ -69,10 +71,8 @@ const assignsDate = /\b(?:globalThis|global)\.Date\s*=(?!=)\s*([A-Za-z_$][\w$]*)
 /** `const original = Date` / `= globalThis.Date`: the name assigning the real Date back is a restoration, not a stub. */
 const savesDate = /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:globalThis\.|global\.)?Date\s*(?=[;,)]|$)/g;
 const restoresDate = /\bmock\.timers\.reset\(|\bmock\.reset\(|\bclock\.uninstall\(/g;
-/** The code before a block's `{` ends in a hook, describe or after call whose callback the block is: `before(async () => {`. */
-const opener = /\b(before|beforeEach|after|afterEach|describe|suite)\s*\((?:[^()]|\([^()]*\))*$/;
-/** The code before a brace-less restoration ends in an after call it is the callback of: `after(() => clock.uninstall())`. */
-const deferred = /\b(?:after|afterEach)\s*\((?:[^()]|\([^()]*\))*$/;
+/** The hook, describe or test call whose `(` the code ends at: `test.only(`, `t.before(`, `suite(`. */
+const callee = /\b(before|beforeEach|after|afterEach|describe|suite|test|it)(?:\.(?:only|skip|todo))?\s*$/;
 
 /** A position in the source: 1-based line, 0-based column in that line's code. */
 interface Position { line: number; column: number }
@@ -124,9 +124,57 @@ export function parse(source: string): { lines: string[]; code: string[]; blocks
 
 /** The innermost block holding `at`. */
 const enclosing = (blocks: Block[], at: Position) => blocks.filter(block => within(at, block.open, block.close) && !(at.line === block.open.line && at.column === block.open.column)).sort((a, b) => before(a.open, b.open) ? 1 : -1)[0] ?? null;
-type Kind = 'before' | 'beforeEach' | 'after' | 'afterEach' | 'describe' | null;
-/** What call a block is the callback of, read off the code before its `{` on that line; `suite` is `describe`. */
-const kindOf = (code: string[], block: Block | null): Kind => { const kind = block && opener.exec(code[block.open.line - 1].slice(0, block.open.column))?.[1]; return kind === 'suite' ? 'describe' : (kind as Kind) ?? null; };
+type Kind = 'before' | 'beforeEach' | 'after' | 'afterEach' | 'describe' | 'test' | null;
+/** A hook, describe or test call: what it is, where its `(` is and where the matching `)` closes it (the end of the file if it never does). */
+interface Call { kind: Exclude<Kind, null>; open: Position; close: Position }
+/**
+ * The hook, describe or test call the code at `at` is an argument of, read by walking back over the code to the call's
+ * `(` past whole (…) and {…} pairs: for a block's `{`, the call it is the callback body of, however many lines the header
+ * spans (`test('a',\n  async () => {`); for a stub or restoration, the call whose brace-less callback it is
+ * (`before(() => clock.install(now))`), since the walk stops at a `{` or a `;` of the block it is written in, and at a
+ * call that is none of these (`assert.ok(`, `foo(() => {`). `suite` is `describe`, `it` is `test`.
+ */
+function callAround(code: string[], at: Position): Call | null {
+  let parens = 0, braces = 0;
+  for (let line = at.line; line >= 1; line--) {
+    const text = code[line - 1];
+    for (let column = (line === at.line ? at.column : text.length) - 1; column >= 0; column--) {
+      const char = text[column];
+      if (char === ')') parens++;
+      else if (char === '}') braces++;
+      else if (char === '{') { if (braces === 0) return null; braces--; }
+      else if (char === ';' && parens === 0 && braces === 0) return null;
+      else if (char === '(' && braces === 0) {
+        if (parens > 0) { parens--; continue; }
+        const name = callee.exec(text.slice(0, column))?.[1];
+        if (!name) return null;
+        const open = { line, column };
+        return { kind: name === 'suite' ? 'describe' : name === 'it' ? 'test' : name as Exclude<Kind, null>, open, close: callEnd(code, open) };
+      }
+    }
+  }
+  return null;
+}
+/** Where the call opened by the `(` at `from` closes: the matching `)`, or the end of the file if there is none. */
+function callEnd(code: string[], from: Position): Position {
+  let depth = 0;
+  for (let line = from.line; line <= code.length; line++) {
+    const text = code[line - 1];
+    for (let column = line === from.line ? from.column : 0; column < text.length; column++) {
+      if (text[column] === '(') depth++;
+      else if (text[column] === ')' && --depth === 0) return { line, column };
+    }
+  }
+  return { line: code.length, column: code[code.length - 1].length };
+}
+/** What call a block is the callback body of: the test, describe or hook whose `{` it opens with, or null for a helper, an object literal, a loop or any other block. */
+const kindOf = (code: string[], block: Block | null): Kind => block ? callAround(code, block.open)?.kind ?? null : null;
+/** The before/beforeEach call a stub is the brace-less callback of, as a block standing in for the body it has none of: `before(() => clock.install(now))`. */
+function bracelessHook(code: string[], at: Position, parent: Block | null): { hook: Block; kind: 'before' | 'beforeEach' } | null {
+  const call = callAround(code, at);
+  if (!call || (call.kind !== 'before' && call.kind !== 'beforeEach')) return null;
+  return { hook: { open: call.open, close: call.close, parent }, kind: call.kind };
+}
 /** A stretch of code one stub covers, and the block whose code it is (null for module scope). */
 interface Range { from: Position; to: Position; block: Block | null }
 
@@ -143,15 +191,19 @@ function clockEvents(lines: string[], code: string[]): Array<{ at: Position; kin
   return events.sort((a, b) => before(a.at, b.at) ? -1 : 1);
 }
 
-/** The blocks a hook's stub covers: the siblings that run once the hook has, and the blocks inside sibling describes, but never a describe's own code or a hook that ran earlier. */
+/**
+ * The blocks a hook's stub covers: the test bodies and the hooks beside it that run once the hook has, and the same
+ * inside a sibling describe, loop or any other block, but never a describe's own code (it ran at collection), a
+ * helper's or any other block's own code (it runs whenever it is called, which no hook orders) or a hook that ran earlier.
+ */
 function coveredByHook(blocks: Block[], code: string[], hook: Block, kind: 'before' | 'beforeEach', parent: Block | null = hook.parent, nested = false): Range[] {
   const ranges: Range[] = [];
   for (const sibling of blocks) {
-    if (sibling.parent !== parent || sibling === hook) continue;
+    if (sibling.parent !== parent || sibling === hook || within(sibling.open, hook.open, hook.close)) continue; // a block inside the hook call (its stub's own `{ apis }`) is the hook's own
     const other = kindOf(code, sibling);
     if (other === 'before' && (kind === 'beforeEach' || (!nested && before(sibling.open, hook.open)))) continue; // every before hook runs before any beforeEach; same-kind hooks run in the order written
     if (other === 'beforeEach' && kind === 'beforeEach' && !nested && before(sibling.open, hook.open)) continue;
-    if (other === 'describe') { ranges.push(...coveredByHook(blocks, code, hook, kind, sibling, true)); continue; } // a describe's own code ran at collection; the blocks in it run after the outer hook
+    if (other === 'describe' || other === null) { ranges.push(...coveredByHook(blocks, code, hook, kind, sibling, true)); continue; } // the block's own code is not covered; the test bodies in it run after the hook
     ranges.push({ from: sibling.open, to: sibling.close, block: sibling });
   }
   return ranges;
@@ -170,14 +222,15 @@ export function stubbedRanges(lines: string[], code: string[], blocks: Block[]):
   const events = clockEvents(lines, code);
   let ranges: Range[] = [];
   for (const { at } of events.filter(event => event.kind === 'stub')) {
-    const block = enclosing(blocks, at), kind = kindOf(code, block);
-    if (!block) ranges.push({ from: at, to: end, block: null }); // module scope: the file's clock from here on; a reading above ran at load
+    const block = enclosing(blocks, at), kind = kindOf(code, block), braceless = bracelessHook(code, at, block);
+    if (braceless) ranges.push({ from: at, to: braceless.hook.close, block: braceless.hook }, ...coveredByHook(blocks, code, braceless.hook, braceless.kind)); // `before(() => clock.install(now))`: a hook without a body block is a hook still, not the scope it is written in
+    else if (!block) ranges.push({ from: at, to: end, block: null }); // module scope: the file's clock from here on; a reading above ran at load
     else if (kind === 'before' || kind === 'beforeEach') ranges.push({ from: at, to: block.close, block }, ...coveredByHook(blocks, code, block, kind)); // a hook stubs the bodies its block runs, not the block's own code
     else ranges.push({ from: at, to: block.close, block }); // a test body: this test, from here on
   }
   for (const { at } of events.filter(event => event.kind === 'restore')) {
-    const inner = enclosing(blocks, at), innerKind = kindOf(code, inner);
-    if (innerKind !== 'after' && innerKind !== 'afterEach' && deferred.test(code[at.line - 1].slice(0, at.column))) continue; // `after(() => clock.uninstall())`: runs once the tests have, ends nothing written here
+    const inner = enclosing(blocks, at), call = callAround(code, at);
+    if (call && (call.kind === 'after' || call.kind === 'afterEach')) continue; // `after(() => clock.uninstall())`: runs once the tests have, ends nothing written here
     ranges = ranges.flatMap(range => {
       if (!before(range.from, at) || !before(at, range.to)) return [range];
       let child: Block | null = null, cursor: Block | null = inner;
@@ -200,16 +253,27 @@ export interface TimeBomb {
   readings: number[];
 }
 
+/** Every match of `pattern` in the lines read as one text, with the position of its first character: a call split over lines (`Date.parse(\n  '2030-…'\n)`) is one match, on the line it starts. */
+function matchesIn(lines: string[], pattern: RegExp): Array<{ match: RegExpMatchArray; at: Position }> {
+  const text = lines.join('\n'), found: Array<{ match: RegExpMatchArray; at: Position }> = [];
+  let line = 1, start = 0;
+  for (const match of text.matchAll(pattern)) {
+    for (let newline = text.indexOf('\n', start); newline !== -1 && newline < match.index!; newline = text.indexOf('\n', start)) { start = newline + 1; line++; }
+    found.push({ match, at: { line, column: match.index! - start } });
+  }
+  return found;
+}
+
 /** The time bomb in one file's source, if the file constructs an absolute instant and reads the wall clock where no stub covers the reading. */
 export function timeBombIn(file: string, source: string): TimeBomb | null {
   const { lines, code, blocks } = parse(source);
   const ranges = stubbedRanges(lines, code, blocks);
-  const dated = new Map<string, number>(), instantLines: number[] = [], readings: number[] = [];
-  lines.forEach((line, index) => { const matches = [...line.matchAll(instant)]; if (matches.length) instantLines.push(index + 1); for (const match of matches) if (!dated.has(dateOf(match))) dated.set(dateOf(match), index + 1); });
-  lines.forEach((line, index) => { for (const match of line.matchAll(wallClock)) if (!ranges.some(range => within({ line: index + 1, column: match.index! }, range.from, range.to))) readings.push(index + 1); });
+  const dated = new Map<string, number>(), instantLines = new Set<number>(), readings: number[] = [];
+  for (const { match, at } of matchesIn(lines, instant)) { instantLines.add(at.line); if (!dated.has(dateOf(match))) dated.set(dateOf(match), at.line); }
+  for (const { at } of matchesIn(lines, wallClock)) if (!ranges.some(range => within(at, range.from, range.to))) readings.push(at.line);
   const readingLines = [...new Set(readings)];
-  if (!instantLines.length || !readings.length) return null;
-  return { file, instant: instantLines[0], wallClock: readingLines[0], instants: instantLines.length, wallClocks: readingLines.length, dates: [...dated].map(([date, line]) => ({ date, line })).sort((a, b) => a.date.localeCompare(b.date)), readings };
+  if (!instantLines.size || !readings.length) return null;
+  return { file, instant: [...instantLines][0], wallClock: readingLines[0], instants: instantLines.size, wallClocks: readingLines.length, dates: [...dated].map(([date, line]) => ({ date, line })).sort((a, b) => a.date.localeCompare(b.date)), readings };
 }
 
 async function* sources(directory: string): AsyncGenerator<string> {
@@ -549,6 +613,90 @@ test('unit:no-wall-clock-time-bombs — hooks run in the order written, every be
   ], 'the before hook written above the stubbing before hook, the before hook beside a beforeEach stub wherever it is written, and the describe body\'s own code are named; the later same-kind hook, the later beforeEach, the describe\'s before hook and every test body are covered');
 });
 
+test('unit:no-wall-clock-time-bombs — a hook is a hook without a brace body: before(() => clock.install(now)) covers the test bodies, in a describe or a loop and under a header split over lines, never the module-scope or describe code beside it nor a helper\'s body; a hook\'s stub covers no helper either', async () => {
+  // The reviewer's case on abb26c93c11c: a brace-less before callback has no block for the stub to be enclosed in, so the
+  // stub was taken for a module-scope install covering the file from there on, and the module-scope reading below it, which
+  // runs at load before any hook, passed as covered. The file must be named with both lines, as its braced twin is.
+  const braceless = sourceLines(
+    `import { before, test } from 'node:test';`,
+    `import { clock } from './helpers/soak-world.js';`,
+    `const expiry = Date.UTC(2030, 0, 1);`,
+    `before(() => clock.install(expiry - 60_000));`,
+    `const observed = Date.now();`,
+    `test('unit:stubbed', () => { assert.ok(observed < Date.now()); });`);
+  const braced = braceless.replace(`before(() => clock.install(expiry - 60_000));`, `before(() => { clock.install(expiry - 60_000); });`);
+  const bracelessInDescribe = sourceLines(
+    `import { before, describe, mock, test } from 'node:test';`,
+    `const expiry = Date.UTC(2030, 0, 1);`,
+    `describe('held', () => {`,
+    `  before(() => mock.timers.enable({ apis: ['Date'], now: expiry - 60_000 }));`,
+    `  const collected = Date.now();`,
+    `  test('unit:in-describe', () => { assert.ok(collected < Date.now()); });`,
+    `});`);
+  const bracelessCovers = sourceLines(
+    `import { after, before, test } from 'node:test';`,
+    `import { clock } from './helpers/soak-world.js';`,
+    `const start = Date.parse('2031-06-02T08:00:00Z');`,
+    `before(async () => clock.install(start));`,
+    `after(() => clock.uninstall());`,
+    `test('unit:a', () => { assert.ok(Date.now() >= start); });`,
+    `test('unit:b',`,
+    `  async () => { assert.equal(new Date().toISOString(), new Date(start).toISOString()); });`,
+    `for (const name of ['c', 'd']) {`,
+    `  test(\`unit:\${name}\`, () => { assert.ok(Date.now() >= start); });`,
+    `}`);
+  const bracelessBeforeEach = sourceLines(
+    `import { before, beforeEach, mock, test } from 'node:test';`,
+    `const expiry = Date.UTC(2030, 0, 1);`,
+    `beforeEach(() => mock.timers.enable({ apis: ['Date'], now: expiry - 60_000 }));`,
+    `before(() => assert.ok(expiry > Date.now()));`,
+    `test('unit:covered', () => { assert.ok(expiry > Date.now()); });`);
+  // The reviewer's case on abb26c93c11c beside it: a helper's braced body is not a test body. It runs whenever the helper is
+  // called, at load here, so a hook's stub covers none of it; a loop's own code is not covered either, the tests in it are.
+  const helperBesideHook = sourceLines(
+    `import { before, mock, test } from 'node:test';`,
+    `const expiry = Date.UTC(2030, 0, 1);`,
+    `before(() => { mock.timers.enable({ apis: ['Date'], now: expiry - 60_000 }); });`,
+    `function stamp() { return Date.now(); }`,
+    `const loadedAt = stamp();`,
+    `test('unit:stubbed', () => { assert.ok(loadedAt < Date.now()); });`);
+  const loopBesideHook = sourceLines(
+    `import { before, mock, test } from 'node:test';`,
+    `const expiry = Date.UTC(2030, 0, 1);`,
+    `before(() => { mock.timers.enable({ apis: ['Date'], now: expiry - 60_000 }); });`,
+    `for (const name of ['a', 'b']) {`,
+    `  const registeredAt = Date.now();`,
+    `  test(\`unit:\${name}\`, () => { assert.ok(registeredAt < Date.now()); });`,
+    `}`);
+  const { run, file } = await fixtures('braceless-hooks', { 'tests/braceless.test.ts': braceless, 'tests/braced.test.ts': braced, 'tests/braceless-in-describe.test.ts': bracelessInDescribe, 'tests/braceless-covers.test.ts': bracelessCovers, 'tests/braceless-before-each.test.ts': bracelessBeforeEach, 'tests/helper-beside-hook.test.ts': helperBesideHook, 'tests/loop-beside-hook.test.ts': loopBesideHook });
+  assert.deepEqual((await run()).bombs.map(bomb => [bomb.file, bomb.instant, bomb.wallClock, bomb.wallClocks]), [
+    [file('tests/braced.test.ts'), 3, 5, 1],
+    [file('tests/braceless-before-each.test.ts'), 2, 4, 1],
+    [file('tests/braceless-in-describe.test.ts'), 2, 5, 1],
+    [file('tests/braceless.test.ts'), 3, 5, 1],
+    [file('tests/helper-beside-hook.test.ts'), 2, 4, 1],
+    [file('tests/loop-beside-hook.test.ts'), 2, 5, 1],
+  ], 'the brace-less hook\'s file is named with the module-scope reading below the hook, as its braced twin is; so is the describe\'s own reading beside a brace-less hook in it, the before hook beside a brace-less beforeEach stub, the helper\'s body and the loop\'s own code; the test bodies (a brace-less hook\'s, a header split over lines, the tests a loop registers) are covered, and a brace-less after(() => clock.uninstall()) ends nothing');
+  assert.equal(timeBombIn('reviewer.ts', sourceLines(`const expiry = Date.UTC(2030, 0, 1);`, `before(() => clock.install(now));`, `const observed = Date.now();`))?.wallClock, 3, 'the reviewer\'s three lines name line 3');
+});
+
+test('unit:no-wall-clock-time-bombs — an instant or a reading split over lines is one call, found on the line it starts', async () => {
+  // The reviewer's case on abb26c93c11c: a Date.parse whose string sits on the next line matched no line on its own.
+  const split = sourceLines(
+    `import { test } from 'node:test';`,
+    `const expiresAt = Date.parse(`,
+    `  '2030-01-01T00:00:00Z',`,
+    `);`,
+    `const windowOpens = new Date(`,
+    `  '2030-01-02T00:00:00Z');`,
+    `const resetsAt = Date.UTC(`,
+    `  2030, 0, 3);`,
+    `test('unit:real-clock', () => { const at = new Date(`,
+    `); assert.ok(expiresAt > at.getTime()); });`);
+  const { run, file } = await fixtures('split', { 'tests/split.test.ts': split });
+  assert.deepEqual((await run()).bombs, [{ file: file('tests/split.test.ts'), instant: 2, wallClock: 9, instants: 3, wallClocks: 1, dates: [{ date: '2030-01-01', line: 2 }, { date: '2030-01-02', line: 5 }, { date: '2030-01-03', line: 7 }], readings: [9] }], 'each split constructor is an instant on the line it starts, with its date; the split new Date() is a reading on its line');
+});
+
 test('unit:no-wall-clock-time-bombs — a wall-clock stamp, an elapsed-time measurement or an instant handed to the code under test as its clock is not told apart from a judgement: the file is named, and its allowance documents why', async () => {
   const handed = sourceLines(
     `import { test } from 'node:test';`,
@@ -639,7 +787,6 @@ test('unit:no-wall-clock-time-bombs — an allowance is bound to the dates and u
   assert.deepEqual((await run({ ...Object.fromEntries(files.map(path => [path, bound])), [file('tests/grown.test.ts')]: { why, dates: ['2000-01-01', '2030-01-01'], readings: 2 }, [file('tests/reading.test.ts')]: { why, dates: ['2000-01-01'], readings: 2 }, [file('tests/gone.test.ts')]: { why, dates: ['1999-12-31'], readings: 1 } })).refused, [], 'rebound to what each file holds now, every allowance holds');
 });
 
-/**
 /**
  * Files allowed to keep an absolute calendar instant beside a wall-clock reading, each by the comment in it that
  * documents why its absolute date is safe, bound to the calendar dates it constructs and to how many wall-clock
