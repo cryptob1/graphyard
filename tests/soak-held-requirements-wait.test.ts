@@ -6,19 +6,21 @@ import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import type { InvariantCheck } from '../src/model/invariants.js';
 import type { Work } from '../src/model.js';
 import { scopeBlockedBudgetMs, type ScopeRequestState } from '../src/model/scope.js';
-import { syncHeldScopeAskMarks } from '../src/daemon/decisions.js';
+import { syncHeldScopeAskMarks } from '../src/daemon/metrics.js';
 
 /**
- * GY-1702 (review of 668c66d81763). Standing or held requirements decisions must be waits, not
- * per-cycle faults: matching scope asks ride the hold, the scope-blocked bound pauses only for an
- * ask the quarantined held decision answers, and when the hold fails the recorded wait can breach
- * again. These paths run every cycle for every open item, so the real loop runs here for three
- * simulated days over six items: four matching widenings held under quarantine (two apply when the
- * attempt ends, two fail mid-hold), one non-matching held revision that must not bind its ask, and
- * one quarantined ask with no held decision (must still breach). After every cycle every system
- * invariant holds. At the end: no resume or decide while a matching hold stands, no decision fault
- * for a hold, the non-matching ask is requested once its hold settles, failed holds resume their
- * breach clock, and applied holds leave no open ask.
+ * GY-1702 (review of 668c66d81763 / 535ff9680874). Standing or held requirements decisions must be
+ * waits, not per-cycle faults: matching scope asks ride the hold, the scope-blocked bound pauses
+ * only for an ask the quarantined held decision answers, and when the hold fails the recorded wait
+ * can breach again. A still-approved resume race keeps a live watch and retries each cycle with no
+ * decision fault. These paths run every cycle for every open item, so the real loop runs here for
+ * three simulated days over six held items plus a separate approved-resume soak: four matching
+ * widenings held under quarantine (two apply when the attempt ends, two fail mid-hold), one
+ * non-matching held revision that must not bind its ask, and one quarantined ask with no held
+ * decision (must still breach). After every cycle every system invariant holds. At the end: no
+ * resume or decide while a matching hold stands, no decision fault for a hold, the non-matching
+ * ask is requested once its hold settles, failed holds resume their breach clock, applied holds
+ * leave no open ask, and approved-resume races retry across days without faults.
  */
 const minute = 60_000, hour = 60 * minute, day = 24 * hour, cycleMs = 2 * minute, start = Date.parse('2026-10-11T00:00:00.000Z');
 const iso = (at: number) => new Date(at).toISOString();
@@ -154,4 +156,96 @@ test('unit:soak-held-requirements-wait — over three simulated days matching qu
   assert.ok(now >= start + 3 * day - cycleMs, 'the soak covered three simulated days');
   assert.ok(scopeBlockedBudgetMs > 0);
   void withdrawals;
+});
+
+test('unit:soak-approved-resume-race — over three simulated days a still-approved resume race keeps a live watch, retries each cycle with no decision fault, and every invariant holds', { timeout: 300_000 }, async () => {
+  let now = start;
+  const config = masterConfigSchema.parse({
+    version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: 'graphyard',
+    repository: 'owner/project', baseBranch: 'main', githubAppId: 1702, hostId: 'machine-a',
+    masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [], producers: [],
+    run: { intervalSeconds: 120 },
+  }) as MasterConfig;
+
+  const items = [0, 1, 2].map(n => {
+    const askedAt = iso(start - 20 * minute);
+    const path = `src/widget/Resume-${n}.tsx`;
+    return {
+      key: `GY-${1710 + n}`, n, epoch: 1, live: true, policyRevision: 1, plannedFiles: [layout] as string[],
+      scopeRequest: {
+        epoch: 1, at: askedAt, paths: [path], reason: 'AC-1 needs the resume module', requestedBy: 'worker',
+        decision: { state: 'refused' as const, reason: `No rule implies ${path}`, at: askedAt, decidedBy: 'graphyard' as const },
+      } as ScopeRequestState | null,
+      askedAt, path,
+    };
+  });
+  const decisions = new Map(items.map(item => [item.key, [{
+    id: randomUUID(), action: 'requirements', state: 'approved',
+    input: { plannedFiles: [layout, item.path], expectedPolicyRevision: 1, answers: { epoch: 1, at: item.askedAt } },
+    outcome: null as string | null, approvedBy: 'graphyard-approver', approvedAt: iso(start - 18 * minute),
+    requestedAt: iso(start - 19 * minute), requestedBy: 'graphyard-master-project',
+  }]]));
+  const applyAt = start + day;
+  const resumes: string[] = [], requested: string[] = [];
+  const view = (item: typeof items[number]): Work => ({
+    id: `work-${item.key}`, key: item.key, title: 'Approved resume soak', description: '', type: 'bug', priority: 1, dependencies: [],
+    plannedFiles: [...item.plannedFiles], criteria: [{ id: 'AC-1', text: 'The widget layout renders', proofs: ['unit:layout'] }],
+    policy: { checks: ['test'], review: true }, stage: 'build', ready: true, epoch: item.epoch, revision: 10, policyRevision: item.policyRevision,
+    createdAt: iso(start - hour), updatedAt: iso(now), stageEnteredAt: iso(start - hour),
+    lease: item.live ? { owner: 'worker', epoch: item.epoch, expiresAt: iso(now + hour) } : null,
+    workspaces: [], submission: null, candidate: null, scenarioRequirements: [], violations: [], evidence: [], observation: null, blocker: null,
+    scopeRequest: item.scopeRequest, carriedScopeRequest: null, scopeDecision: null, containmentQuarantine: null,
+    gates: [{ name: 'build', passed: false, reasons: ['Worker has not submitted implementation for this attempt'] }],
+  } as unknown as Work);
+
+  const effects = {
+    agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
+    snapshot: async () => ({ work: items.map(view), now: iso(now) }),
+    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }),
+    recordDeployment: async () => {}, requestSmoke: () => {},
+    decisions: async (work: Work) => ({ decisions: structuredClone(decisions.get(work.key) ?? []) }),
+    decide: async (work: Work, action: string) => { requested.push(`${work.key}|${action}|${now}`); return { id: randomUUID(), state: 'requested' }; },
+    withdraw: async () => {},
+    resume: async (work: Work, decision: string) => {
+      resumes.push(`${work.key}|${decision}|${now}`);
+      const entry = decisions.get(work.key)!.find(row => row.id === decision)!;
+      // Still-approved race until applyAt, then the control plane applies on resume.
+      if (now >= applyAt && entry.state === 'approved') Object.assign(entry, { state: 'applied', outcome: 'Applied after the holding attempt ended' });
+      return { ...entry };
+    },
+    approver: async () => ({ agentName: 'gy-approver-soak', pane: null }),
+    persist: async () => {},
+  } as unknown as DaemonEffects;
+
+  const state: DaemonState = emptyDaemonState(config);
+  const violations: string[] = [];
+  let cyclesBeforeApply = 0;
+  for (let cycle = 0; now < start + 3 * day; cycle++, now += cycleMs) {
+    if (now < applyAt) cyclesBeforeApply++;
+    if (now === applyAt) for (const item of items) {
+      item.plannedFiles = [layout, item.path];
+      item.policyRevision++;
+      item.scopeRequest = null;
+    }
+    const { actions } = await runCycle(config, state, effects, () => now);
+    for (const check of state.invariants.report as InvariantCheck[]) if (!check.holds) violations.push(`cycle ${cycle}: ${check.line}`);
+    if (now < applyAt) {
+      assert.ok(!Object.values(state.actions).some(action => action.kind === 'decision' && action.state === 'failed'),
+        `no decision fault while the approved-resume race stands at cycle ${cycle}`);
+      for (const item of items) {
+        const watch = Object.values(state.approvals).find(entry => entry.work === item.key && entry.action === 'requirements');
+        assert.ok(watch && !watch.settledAt, `${item.key}: live watch during approved-resume race`);
+      }
+    }
+    void actions;
+  }
+
+  assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
+  assert.ok(cyclesBeforeApply > 100, `approved-resume raced across many cycles (${cyclesBeforeApply})`);
+  assert.ok(resumes.length >= items.length * cyclesBeforeApply, `resume retried each cycle for each item: ${resumes.length} resumes over ${cyclesBeforeApply} pre-apply cycles`);
+  assert.ok(!Object.values(state.actions).some(action => action.kind === 'decision' && action.state === 'failed'), 'no decision fault across the soak');
+  assert.deepEqual(requested, [], 'nothing new was decided; the standing approvals were resumed');
+  for (const item of items) assert.equal(item.scopeRequest, null, `${item.key}: ask settled when resume applied`);
+  assert.ok(now >= start + 3 * day - cycleMs, 'the soak covered three simulated days');
 });

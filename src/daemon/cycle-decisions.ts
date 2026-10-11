@@ -8,7 +8,8 @@ import { recordSettledDecision } from '../model/project-memory.js';
 import { type ApprovalWatch, approvalWatchSchema, carriedSession, type DaemonActionKind, type DaemonState, latencySampleSchema, message, scopeMeasurementSchema } from './state.js';
 import { decisionKey, scopeAnsweredAt, scopeKey, scopeOutcomeAnswered } from './reconcile.js';
 import { readyToRetry } from './sessions.js';
-import { approvalStep, recordWatchEnded, approverLaunchKey, attestDecisions, boundDetail, cappedReworkBound, exhaustedProofKey, decisionReasonMax, detailChanged, fitDecisionReason, githubPause, handWatchPrefix, maxApproverCloses, maxRefusalAnswers, maxDecisionRequests, namePaths, neededDecision, observedFrom, overtakenDecision, resolveCovers, reworkDecisionReason, refusalNamedIn, standingNamedIn, adoptedOnRefusal, conflictReworkOverdue, reworkObservationWait, routineDecision, type RoutineDecision, sameAnswers, samePlannedFiles, standingRequirementsAnswersAsk, heldDecisionRefusal, heldDecisionNamedIn, heldWaitMarker, heldWaitScope, heldWaitDetail, heldWaitWatch, approvedResumePendingDetail, markHeldScopeAsk, clearHeldScopeAsk, syncHeldScopeAskMarks, staleRevisionDecideRefusal, staleRevisionDecideNote, staleRevisionDecideDetail, scopeRoutineDecision, blockerScopeDecision, standingVerdict, uncountedScopeFailure, withheldDecision } from './decisions.js';
+import { approvalStep, recordWatchEnded, approverLaunchKey, attestDecisions, boundDetail, cappedReworkBound, exhaustedProofKey, decisionReasonMax, detailChanged, fitDecisionReason, githubPause, handWatchPrefix, maxApproverCloses, maxRefusalAnswers, maxDecisionRequests, namePaths, neededDecision, observedFrom, overtakenDecision, resolveCovers, reworkDecisionReason, refusalNamedIn, standingNamedIn, adoptedOnRefusal, conflictReworkOverdue, reworkObservationWait, routineDecision, type RoutineDecision, sameAnswers, scopeRoutineDecision, blockerScopeDecision, standingVerdict, uncountedScopeFailure, withheldDecision } from './decisions.js';
+import { coveringPlannedFiles, standingRequirementsAnswersAsk, heldDecisionRefusal, heldDecisionNamedIn, heldWaitMarker, heldWaitScope, heldWaitDetail, heldWaitWatch, approvedResumePendingDetail, markHeldScopeAsk, clearHeldScopeAsk, syncHeldScopeAskMarks, staleRevisionDecideRefusal, staleRevisionDecideNote, staleRevisionDecideDetail } from './metrics.js';
 import { candidateMovedMeanwhile, decisionFailureKind, decisionReads, deliveredMeanwhile, lateDecisionRead, resumedApplication, selfHealingDecisionFailure } from './decision-reads.js';
 import { refusedAttestationWatch, type RefusedAttestation } from '../model/rework-ground.js';
 import { record } from './effects.js';
@@ -130,20 +131,20 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
         performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `${item.key}'s attest decision ${refusedAttest.id} for ${String(decision.input?.proof)} on this head was already refused by ${refusedAttest.refusal?.approver ?? 'its approver'}; nothing to request, and ${item.key} returns to a worker on that refusal`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
         return;
       }
-      // One requirements at a time: GY-1702 adopts a same-plannedFiles no-answers widening; GY-1630 throughput adopts its option of record.
+      // One requirements at a time: GY-1702 adopts a covering no-answers widening; GY-1630 throughput adopts its option of record.
       if (standing && decision.action === 'requirements' && !standing.input?.answers && !throughputDecisionAdopts(standing.input, decision, item)
         && !standingRequirementsAnswersAsk(standing, decision)) {
-        const other = !samePlannedFiles(standing.input?.plannedFiles, decision.input?.plannedFiles) ? 'another planned-files revision' : 'a widening that answers no scope request';
+        const other = !coveringPlannedFiles(standing.input?.plannedFiles, decision.input?.plannedFiles) ? 'another planned-files revision' : 'a widening that answers no scope request';
         throw new Error(`requirements decision ${standing.id} is ${standing.state} for ${other}, not the widening ${item.key}'s scope request asks for; it is left to its requester, and the control plane holds one at a time, so this one is requested once it settles: graphyard master decisions ${item.key}`);
       }
-      // Stale answers/revision/plannedFiles: withdraw and re-ask. GY-1702: matching no-answers widening is not stale for lacking answers.
+      // Stale answers/revision/plannedFiles: withdraw and re-ask. GY-1702: a covering no-answers widening is not stale for lacking answers.
       if (standing && decision.action === 'requirements') {
         const answersAsk = standingRequirementsAnswersAsk(standing, decision) && !standing.input?.answers;
         const stale = !answersAsk && !sameAnswers(standing.input?.answers, decision.input?.answers)
           ? `requirements decision ${standing.id} is ${standing.state} for the scope request made at ${standing.input?.answers?.at}, not the one ${item.key}'s worker made at ${decision.scope?.at ?? 'now'}`
           : standing.input?.expectedPolicyRevision !== item.policyRevision
             ? `requirements decision ${standing.id} is ${standing.state} against policy revision ${String(standing.input?.expectedPolicyRevision)}, not ${item.key}'s current revision ${item.policyRevision}`
-            : !samePlannedFiles(standing.input?.plannedFiles, decision.input?.plannedFiles)
+            : !coveringPlannedFiles(standing.input?.plannedFiles, decision.input?.plannedFiles)
               ? `requirements decision ${standing.id} is ${standing.state} for another planned-files revision than the widening ${item.key}'s scope request now asks for`
               : null;
         if (stale) {

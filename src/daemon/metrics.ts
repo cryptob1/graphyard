@@ -1,6 +1,7 @@
 // Concern: measurement — stage percentiles, the scope-decision budget, silence and item latency.
 import { type Work, productionLatencyMs, postDeployMs, deliveryState, currentEvidence, deploySmokeRequired } from '../model.js';
 import { routableScopeRequest, scopeDecisionSample, scopeDecisionBudgetMs, scopeBlockedBudgetMs, redecidableScopeRefusal } from '../model/scope.js';
+import { plannedFilesCovered } from '../model/scope-collapse.js';
 import { pendingBaseRefresh } from '../merge-queue.js';
 import { standingCapacity } from '../model/capacity.js';
 import { stalledItems } from '../model/action-account.js';
@@ -9,7 +10,71 @@ import { type ApprovalWatch, type DaemonAction, type DaemonActionKind, type Daem
 import { type ItemClock, itemClockSchema, type LatencySample, latencySampleSchema } from './latency-clock.js';
 import { decisionKey } from './reconcile.js';
 import { docsSyncHolding } from '../model/docs-sync.js';
-import { approvedUnapplied, boundDetail, isHeldScopeAsk, mergeableCandidate, namePaths, routineDecision, withheldDecision } from './decisions.js';
+import { approvedUnapplied, boundDetail, mergeableCandidate, namePaths, routineDecision, withheldDecision } from './decisions.js';
+
+// ---- GY-1702: standing/held requirements waits (marks feed scopeBudget; covering matches engine settle) ----
+/** Sorted-set equality for plannedFiles (jsonb order is not kept). */
+export const samePlannedFiles = (a: unknown, b: unknown) => {
+  if (!Array.isArray(a) || !Array.isArray(b)) return JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+  if (a.length !== b.length) return false;
+  const left = [...a].map(String).sort(), right = [...b].map(String).sort();
+  return left.every((path, i) => path === right[i]);
+};
+/** Standing plannedFiles cover the ask's widening (superset or broader directory). */
+export const coveringPlannedFiles = (standing: unknown, needed: unknown) =>
+  !Array.isArray(standing) || !Array.isArray(needed) ? samePlannedFiles(standing, needed) : plannedFilesCovered(needed.map(String), standing.map(String));
+export const heldWaitMarker = 'held: waiting for the attempt to end';
+export const heldScopeAskId = (key: string, epoch: number, at: string) => `${key}:${epoch}:${at}`;
+const heldScopeAskMarks = new WeakMap<object, Set<string>>();
+export function markHeldScopeAsk(scopeMeasurements: object, key: string, epoch: number, at: string) {
+  let set = heldScopeAskMarks.get(scopeMeasurements);
+  if (!set) heldScopeAskMarks.set(scopeMeasurements, set = new Set());
+  set.add(heldScopeAskId(key, epoch, at));
+}
+export function clearHeldScopeAsk(scopeMeasurements: object, key: string, epoch: number, at: string) {
+  heldScopeAskMarks.get(scopeMeasurements)?.delete(heldScopeAskId(key, epoch, at));
+}
+export function syncHeldScopeAskMarks(scopeMeasurements: object, approvals: Iterable<{ work: string; action: string; settledAt?: string | null; scope?: { epoch: number; at: string } | null; ended?: string[] }>) {
+  const set = new Set<string>();
+  for (const watch of approvals) {
+    if (watch.action !== 'requirements' || watch.settledAt || !watch.scope) continue;
+    if (!(watch.ended ?? []).some(entry => entry.includes(heldWaitMarker))) continue;
+    set.add(heldScopeAskId(watch.work, watch.scope.epoch, watch.scope.at));
+  }
+  heldScopeAskMarks.set(scopeMeasurements, set);
+}
+export const isHeldScopeAsk = (scopeMeasurements: object, key: string, epoch: number, at: string) =>
+  heldScopeAskMarks.get(scopeMeasurements)?.has(heldScopeAskId(key, epoch, at)) ?? false;
+type RequirementsAsk = { action: string; scope?: unknown; input?: { plannedFiles?: unknown } | null };
+/** A covering standing/held requirements revision is the ask's pending answer (no-answers ok). */
+export const standingRequirementsAnswersAsk = (standing: { input?: { plannedFiles?: unknown } | null }, decision: RequirementsAsk) =>
+  decision.action === 'requirements' && !!decision.scope && coveringPlannedFiles(standing.input?.plannedFiles, decision.input?.plannedFiles);
+export type HeldDecisionLike = { id: string; approvedAt?: string | null; approvedBy?: string | null; outcome?: string | null; input?: { plannedFiles?: unknown } | null };
+export function heldWaitScope(held: HeldDecisionLike, decision: RequirementsAsk, candidate: NonNullable<ApprovalWatch['scope']> | null) {
+  const scope = candidate && standingRequirementsAnswersAsk(held, { ...decision, scope: candidate }) ? candidate : null;
+  return { scope, unmatched: !!candidate && !scope };
+}
+export function heldWaitDetail(itemKey: string, action: string, held: HeldDecisionLike, why: string, unmatched: boolean) {
+  const hold = boundDetail(held.outcome ?? why, 300), by = held.approvedBy ?? 'its approver';
+  return unmatched
+    ? `${itemKey}'s ${action} decision ${held.id} is approved by ${by} and held (${hold}); it does not widen for this scope ask, so the ask waits until the hold settles and nothing is requested`
+    : `${itemKey}'s ${action} decision ${held.id} is approved by ${by} and held (${hold}); the control plane applies it when the attempt ends, so nothing is requested`;
+}
+export const heldWaitWatch = (itemKey: string, action: string, held: HeldDecisionLike, requestedAt: string, scope: NonNullable<ApprovalWatch['scope']> | null) => ({
+  work: itemKey, action, decision: held.id, requestedAt, settledAt: null as null,
+  approvedAt: held.approvedAt ?? null, approvedBy: held.approvedBy ?? null, scope, ended: scope ? [heldWaitMarker] : [] as string[],
+});
+export const approvedResumePendingDetail = (itemKey: string, action: string, decisionId: string, approvedBy: string | null | undefined) =>
+  `${itemKey}'s ${action} decision ${decisionId} was approved by ${approvedBy ?? 'its approver'} but the control plane could not apply it yet; the watch stays live and resume is tried again next cycle`;
+export const heldDecisionRefusal = (error: unknown) =>
+  / was approved by .+ and is held \(/.test(error instanceof Error ? error.message : String(error));
+export function heldDecisionNamedIn(error: unknown): string | null {
+  return /Decision ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}) \([^)]+\) on \S+ was approved by .+ and is held \(/.exec(error instanceof Error ? error.message : String(error))?.[1] ?? null;
+}
+export const staleRevisionDecideRefusal = (error: unknown) =>
+  /Policy revision changed(?: \(now \d+\))?; reload and request again/.test(error instanceof Error ? error.message : String(error));
+export const staleRevisionDecideNote = 'the item moved past the revision the loop read';
+export const staleRevisionDecideDetail = (detail: string) => detail.includes(staleRevisionDecideNote);
 
 export function percentiles(values: number[]) {
   const sorted = [...values].sort((a, b) => a - b);

@@ -8,16 +8,17 @@ import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { Store } from '../src/store.js';
 import { emptyDaemonState, runCycle, scopeBudget, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
+import { scopeRoutineDecision } from '../src/daemon/decisions.js';
 import {
-  approvedResumePendingDetail, heldDecisionNamedIn, heldDecisionRefusal, markHeldScopeAsk, samePlannedFiles,
-  scopeRoutineDecision, staleRevisionDecideNote, staleRevisionDecideRefusal, standingRequirementsAnswersAsk,
-} from '../src/daemon/decisions.js';
+  approvedResumePendingDetail, coveringPlannedFiles, heldDecisionNamedIn, heldDecisionRefusal, markHeldScopeAsk, samePlannedFiles,
+  staleRevisionDecideNote, staleRevisionDecideRefusal, standingRequirementsAnswersAsk,
+} from '../src/daemon/metrics.js';
 import { decisionInput, masterConfigSchema, type HerdrAgent, type MasterConfig } from '../src/master.js';
 import { liveLeaseRevisionRefusal } from '../src/model/approval.js';
 import { scopeBlockedBudgetMs } from '../src/model/scope.js';
 import type { Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-// Time-bomb allowance (GY-1694): pure helper cases pass an explicit `now`; DB-backed cases use the engine's own stamps.
+// Fixture stamps are absolute 2026-10-11 instants the classifiers and harness receive as data; no wall-clock reading remains in this file.
 
 /**
  * GY-1702. A requirements decision that stands requested or approved-and-held must be a wait, not a
@@ -33,7 +34,8 @@ const credentials = [operator, implementer, coordinator].map(principal => ({ ...
 const master = { id: 'wait-master', token: `wait-master-${'m'.repeat(32)}`, capabilities: ['intent:create', 'intent:ready', 'intent:unblock', 'policy:requirements'] };
 const approver = { id: 'graphyard-approver-graphyard', token: `wait-approver-${'a'.repeat(32)}`, capabilities: ['decision:approve', 'policy:requirements'] };
 const token = (principal: Principal) => credentials.find(entry => entry.id === principal.id)!.token;
-const layout = 'src/widget/Layout.tsx', helper = 'src/widget/measure.ts';
+const layout = 'src/widget/Layout.tsx', helper = 'src/widget/measure.ts', extra = 'src/widget/extra.ts', widgetDir = 'src/widget/';
+const fixtureNow = '2026-10-11T15:00:00.000Z';
 
 let database: EmbeddedPostgres, store: Store, engine: Engine, http: ReturnType<typeof server>, url: string;
 
@@ -85,7 +87,7 @@ function harness(options: { resume?: DaemonEffects['resume'] } = {}) {
     closeSession: pane => { sessions.splice(0, sessions.length, ...sessions.filter(agent => agent.pane_id !== pane)); },
     dispatch: async () => {},
     requestProof: () => {},
-    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date().toISOString(), reason: 'no deployment endpoint', deployed: [], pending: [] }),
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: fixtureNow, reason: 'no deployment endpoint', deployed: [], pending: [] }),
     recordDeployment: async () => {},
     requestSmoke: () => {},
     decideScope: work => ok(token(coordinator), 'POST', `work/${work.id}/autoscope`, { epoch: work.scopeRequest!.epoch }) as Promise<Work>,
@@ -117,7 +119,7 @@ function harness(options: { resume?: DaemonEffects['resume'] } = {}) {
 
 // ---- Pure classifiers (AC-1 / AC-2 / AC-4 unit surface) ----------------------------------------
 
-test('unit:standing-requirements-adopted-no-fault — a same-plannedFiles standing decision answers the scope ask; a held or stale-revision refuse is classified, not faulted', () => {
+test('unit:standing-requirements-adopted-no-fault — a covering plannedFiles standing decision answers the scope ask; a held or stale-revision refuse is classified, not faulted', () => {
   const at = '2026-10-11T14:47:50.740Z';
   const decision = scopeRoutineDecision({
     key: 'GY-1700', stage: 'build', policyRevision: 2, plannedFiles: [layout],
@@ -131,10 +133,15 @@ test('unit:standing-requirements-adopted-no-fault — a same-plannedFiles standi
   assert.deepEqual(decision.input!.answers, { epoch: 4, at });
   assert.ok(standingRequirementsAnswersAsk({ input: { plannedFiles: decision.input!.plannedFiles } }, decision), 'same plannedFiles with no answers still answers the ask');
   assert.ok(standingRequirementsAnswersAsk({ input: { plannedFiles: [...(decision.input!.plannedFiles as string[])].reverse() } }, decision), 'the same paths in another order still answer the ask');
-  assert.ok(!standingRequirementsAnswersAsk({ input: { plannedFiles: [layout] } }, decision), 'a different file list does not');
+  assert.ok(standingRequirementsAnswersAsk({ input: { plannedFiles: [layout, helper, extra] } }, decision), 'a covering superset answers the ask');
+  assert.ok(standingRequirementsAnswersAsk({ input: { plannedFiles: [widgetDir] } }, decision), 'a broader directory entry that contains every asked path answers the ask');
+  assert.ok(!standingRequirementsAnswersAsk({ input: { plannedFiles: [layout] } }, decision), 'a different file list that does not cover the ask does not');
   assert.ok(samePlannedFiles(decision.input!.plannedFiles, decision.input!.plannedFiles));
   assert.ok(samePlannedFiles([layout, helper], [helper, layout]), 'plannedFiles compare as a set, not by array order');
   assert.ok(!samePlannedFiles([layout, helper], [layout]));
+  assert.ok(coveringPlannedFiles([layout, helper, extra], [layout, helper]));
+  assert.ok(coveringPlannedFiles([widgetDir], [layout, helper]));
+  assert.ok(!coveringPlannedFiles([layout], [layout, helper]));
   const held = new Error('Graphyard refused work/x/decide (409): Decision 9a6095d9-c3e5-4357-93d6-48b8ccc61e5e (requirements) on GY-1700 was approved by graphyard-approver-graphyard at 2026-10-11T14:49:13.944Z and is held (Task is quarantined); the control plane applies it in the transaction that ends the attempt, so it need not be requested again');
   assert.ok(heldDecisionRefusal(held));
   assert.equal(heldDecisionNamedIn(held), '9a6095d9-c3e5-4357-93d6-48b8ccc61e5e');
@@ -289,6 +296,71 @@ test('integration:routed-ask-settled-by-standing-requirements — a standing sam
   assert.equal(work.scopeRequest, null, 'the ask settled without a hand master scope');
   assert.equal(work.scopeDecision?.state, 'approved');
   assert.ok(work.lease, 'the attempt kept its lease; settlement did not wait for the attempt to end');
+});
+
+test('integration:covering-requested-requirements-answers-ask — a standing no-answers revision that covers the ask (superset) is adopted with no decision fault and settles the ask when it applies', { timeout: 120_000 }, async () => {
+  let work = await claimed('covering requested answers ask');
+  const requested = await ok(master.token, 'POST', `work/${work.id}/decide`, {
+    action: 'requirements',
+    input: decisionInput('requirements', work, { plannedFiles: [layout, helper, extra] }),
+    reason: 'Pending requirements decision covers the helper and an extra companion',
+  });
+  assert.equal(requested.input?.answers, undefined);
+  await ok(token(implementer), 'POST', `work/${work.id}/scope`, { epoch: work.epoch, paths: [helper], reason: 'AC-1 needs the measuring helper' });
+  await ok(token(coordinator), 'POST', `work/${work.id}/autoscope`, { epoch: work.epoch });
+  work = await reload(work.id);
+  const loop = harness(), state = emptyDaemonState(loopConfig());
+  await loop.cycle(state);
+  assert.equal(Object.values(state.actions).filter(action => action.work === work.key && action.kind === 'decision' && action.state === 'failed').length, 0,
+    `no decision fault for a covering standing revision: ${Object.values(state.actions).filter(a => a.work === work.key).map(a => `${a.state}:${a.detail}`).join(' | ')}`);
+  assert.ok(!loop.decided.some(entry => entry.key === work.key), 'the covering standing decision is adopted, not re-requested');
+  const watch = Object.values(state.approvals).find(entry => entry.decision === requested.id);
+  assert.ok(watch?.scope, 'the covering requested decision binds the ask');
+  await ok(approver.token, 'POST', `work/${work.id}/approve`, { decision: requested.id, reason: 'The covering revision answers the helper ask' });
+  await loop.cycle(state);
+  work = await reload(work.id);
+  assert.ok(work.plannedFiles.includes(helper) && work.plannedFiles.includes(extra), 'the covering revision applied');
+  assert.equal(work.scopeRequest, null, 'the ask settled from the covering revision');
+});
+
+test('integration:covering-held-requirements-binds-ask — a held covering revision binds the ask so quarantine pauses the scope-blocked bound', { timeout: 120_000 }, async () => {
+  let work = await claimed('covering held binds ask');
+  const requested = await ok(master.token, 'POST', `work/${work.id}/decide`, {
+    action: 'requirements',
+    input: decisionInput('requirements', work, { plannedFiles: [layout, helper, extra] }),
+    reason: 'Covering held revision adds the helper and extra under quarantine',
+  });
+  await ok(token(implementer), 'POST', `work/${work.id}/scope`, { epoch: work.epoch, paths: [helper], reason: 'AC-1 needs the measuring helper while the covering hold stands' });
+  await ok(token(coordinator), 'POST', `work/${work.id}/autoscope`, { epoch: work.epoch });
+  work = await reload(work.id);
+  // History reports the covering revision as held (quarantine race); the loop must bind the ask, not leave a scope-less watch.
+  const loop = harness(), state = emptyDaemonState(loopConfig());
+  const realDecisions = loop.effects.decisions!;
+  loop.effects.decisions = async (item) => {
+    const body = await realDecisions(item);
+    return {
+      decisions: body.decisions.map((entry: any) => entry.id === requested.id
+        ? { ...entry, state: 'held', approvedBy: 'graphyard-approver-graphyard', approvedAt: fixtureNow,
+            outcome: 'Task is quarantined; the approved decision is held and applied when the attempt ends' }
+        : entry),
+    };
+  };
+  await loop.cycle(state);
+  const watch = Object.values(state.approvals).find(entry => entry.decision === requested.id);
+  assert.ok(watch && !watch.settledAt, 'the covering held decision stays on a live watch');
+  assert.ok(watch!.scope, 'the covering hold binds the ask');
+  assert.ok(watch!.ended?.some(entry => entry.includes('held: waiting for the attempt to end')), 'the hold marker is recorded for the budget pause');
+  assert.equal(Object.values(state.actions).filter(action => action.work === work.key && action.kind === 'decision' && action.state === 'failed').length, 0,
+    `no decision fault: ${Object.values(state.actions).filter(a => a.work === work.key).map(a => `${a.state}:${a.detail}`).join(' | ')}`);
+  // Budget pause: quarantine + the held-ask mark from the bound watch.
+  markHeldScopeAsk(state.scope, work.key, watch!.scope!.epoch, watch!.scope!.at);
+  const quarantined = {
+    ...work,
+    containmentQuarantine: { owner: implementer.id, epoch: work.epoch, at: work.scopeRequest!.at, settlementHash: 'b'.repeat(64),
+      leaseExpiresAt: new Date(Date.parse(work.scopeRequest!.at) + scopeBlockedBudgetMs + 120_000).toISOString() },
+  } as Work;
+  const later = Date.parse(work.scopeRequest!.at) + scopeBlockedBudgetMs + 60_000;
+  assert.equal(scopeBudget([quarantined], state.scope, later, true).breaches.length, 0, 'covering held ask under quarantine does not breach');
 });
 
 test('integration:post-apply-decide-uses-applied-revision — after a held decision applies, a stale-revision decide refuse is done (not faulted) and the next cycle re-computes', { timeout: 120_000 }, async () => {
