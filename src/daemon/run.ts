@@ -9,7 +9,7 @@ import { allocateManagedCheckout } from '../master/worktrees.js';
 import { worktreeRoot } from '../install/worktree-root.js';
 import { loopScratchCheckout } from '../producer.js';
 import { checkoutGuardApplies, coordinatorCheckoutRefusal, coordinatorCheckoutRoot, dirtyCheckoutEscalation, dirtyCheckoutLeases, dirtyCheckoutPaths, readCoordinatorCheckout, type CoordinatorCheckout } from '../master/profiles.js';
-import { acquireDaemonLock, daemonStatePath, masterSummary, type DaemonAction, type DaemonState, message, storeAction, touchStanding } from './state.js';
+import { acquireDaemonLock, masterSummary, type DaemonAction, type DaemonState, message, storeAction, touchStanding } from './state.js';
 import { faultClassPolicyFromEnv, type FaultClassPolicy } from '../model/fault-classes.js';
 import { faultRecurrenceReport } from './faults.js';
 import { diagnosisReport } from './diagnosis.js';
@@ -299,12 +299,15 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
     // the one unconfined process: every dirty path saved under a named ref and returned to HEAD, the
     // escalation settled, and the loop restarted through its supervising unit onto the clean checkout.
     // GY-1680: the quiesce-and-restore runs from the verified serving release's own snapshot, never
-    // this process's loaded code, and a clean checkout at a HEAD the loop did not load is adopted.
+    // this process's loaded code, under a grant signed with the coordinator credential, and a clean
+    // checkout at a HEAD the loop did not load is adopted. The act can outlast the watchdog window,
+    // so the keep-alive is fed on a quarter of it for as long as the act runs.
     const executorsAct = options.executors;
+    const keepAliveEveryMs = watchdog.windowMs ? Math.max(250, Math.floor(watchdog.windowMs / 4)) : undefined;
     const restoreCheckout = options.checkoutRestore ?? ((settle: (adopt: string | null) => Promise<unknown>, keepAlive?: () => Promise<void>) => serveLoopRequests(config, coordinatorCheckoutRoot(config.cliPath), {
       settle, report: outcome => log(`[graphyard-master] ${outcome.state === 'restart' ? 'loop-restart request' : outcome.state === 'executors' ? 'master executors request' : `checkout-restore ${outcome.state}`}: ${outcome.detail}${outcome.restart ? `; restart ${outcome.restart.state}: ${outcome.restart.detail}` : ''}`),
       restart: options.restartLoop ?? restartThroughUnit, pid: options.identity.pid, loaded: () => guard.expected(),
-      restore: releasePinnedRestore({ release: () => ({ deployment: state.deployment, baseBranch: config.baseBranch }), grant: { file: checkoutRestoreGrantPath(config), cursor: daemonStatePath(config), lock: options.identity.pid } }),
+      restore: releasePinnedRestore({ release: () => ({ deployment: state.deployment, baseBranch: config.baseBranch }), grant: { file: checkoutRestoreGrantPath(config), credentialFile: config.credentialFile, lock: options.identity.pid }, keepAlive, keepAliveEveryMs }),
       ...(executorsAct ? { executors: (args: string[]) => executorsAct(args, keepAlive) } : {}) }));
     const serveRestore = async (keepAlive?: () => Promise<void>) => {
       try { await restoreCheckout(adopt => guard.settle({ adopt }), keepAlive); }

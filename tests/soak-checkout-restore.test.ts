@@ -4,11 +4,12 @@ import { execFileSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { existsSync, mkdirSync, readFileSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Work } from '../src/model.js';
-import { checkoutRestoreGrantVariable } from '../src/cli/checkout-restore-release.js';
-import { emptyDaemonState, runDaemon, type DaemonEffects } from '../src/master-daemon.js';
+import { checkoutRestoreGrantKind, checkoutRestoreGrantVariable, signCheckoutRestoreGrant, type CheckoutRestoreGrant } from '../src/cli/checkout-restore-release.js';
+import { emptyDaemonState, runDaemon, writeDaemonState, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { masterConfigSchema } from '../src/master.js';
 import { dirtyCheckoutPaths, readCoordinatorCheckout } from '../src/master/profiles.js';
 import { checkoutRestoreGrantPath, checkoutRestoreRefPrefix, checkoutRestoreRequestPath, loopExecutorsRequestPath, loopRestartRequestPath, readCheckoutRestoreRequest } from '../src/cli/master-checkout-restore.js';
@@ -25,9 +26,19 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
  * failed dirty-checkout attempt, for the rest of the days. Since GY-1680 the loop serves each
  * checkout-restore from a snapshot of the serving release — here origin's base-branch tip, whose CLI
  * is the fixture release entry starting tests/helpers/checkout-restore-serve-child.ts — under a
- * single-use grant, never from its own loaded code, and a clean moved HEAD is adopted.
+ * single-use grant signed with the coordinator credential, never from its own loaded code, feeding
+ * its supervisor's watchdog for as long as the act runs, and a clean moved HEAD is adopted.
  */
 
+/**
+ * The fixture's directory under the host's tmpdir, tracked for the file's after hook but carrying no
+ * owner marker: a marker names this process's pid, and a worker's session runs in its own PID
+ * namespace (bwrap --unshare-pid), where that pid means nothing to the host — whose tmp sweeps (the
+ * loop's reclaim pass, another suite's runner) read the marker, find no such live process and remove
+ * the directory within a second of its creation, mid-test. Ownerless, a `graphyard-*` directory is
+ * reclaimed only once two hours old, so a killed run's leftover still goes.
+ */
+const fixtureDirectory = (label: string) => temporaryDirectory(`graphyard-${label}`, tmpdir());
 const minute = 60_000, hour = 60 * minute, day = 24 * hour;
 const git = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 
@@ -49,7 +60,7 @@ child.on('exit', code => process.exit(code ?? 1));
  * pid 1 (no writer to stop) and records each serve to `record`.
  */
 async function installation() {
-  const root = await temporaryDirectory('soak-checkout-restore');
+  const root = await fixtureDirectory('soak-checkout-restore');
   const credentials = join(root, 'credentials');
   await mkdir(credentials, { recursive: true, mode: 0o700 });
   const credentialFile = join(credentials, 'coordinator.token');
@@ -59,7 +70,7 @@ async function installation() {
   git(main, 'config', 'user.email', 't@example.com'); git(main, 'config', 'user.name', 'T');
   await mkdir(join(main, 'src', 'cli'), { recursive: true }); await mkdir(join(main, 'bin'), { recursive: true });
   await writeFile(join(main, 'bin', 'graphyard.mjs'), releaseEntry);
-  await writeFile(join(main, 'src', 'cli', 'checkout-restore-release.ts'), `export const checkoutRestoreServeFlag = '--serve';\nexport const checkoutRestoreGrantVariable = ${JSON.stringify(checkoutRestoreGrantVariable)};\n`);
+  await writeFile(join(main, 'src', 'cli', 'checkout-restore-release.ts'), `export const checkoutRestoreServeFlag = '--serve';\nexport const checkoutRestoreGrantVariable = ${JSON.stringify(checkoutRestoreGrantVariable)};\nexport const checkoutRestoreGrantKind = ${JSON.stringify(checkoutRestoreGrantKind)};\n`);
   await writeFile(join(main, 'src', 'loop.ts'), 'export const loop = 1;\n');
   await writeFile(join(main, '.gitignore'), '.graphyard/\n');
   git(main, 'add', '.'); git(main, 'commit', '-q', '-m', 'base');
@@ -72,7 +83,10 @@ async function installation() {
   const env = { GRAPHYARD_TEST_FAKE_PROC: proc, GRAPHYARD_TEST_SERVE_RECORD: record };
   const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile, cliPath: join(main, 'bin', 'graphyard.mjs'),
     repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [] });
-  return { main, config, release, record, env };
+  // The installation as the serve entry reads it from the checkout: its private .graphyard/master.json, ignored by git.
+  await mkdir(join(main, '.graphyard'), { recursive: true });
+  await writeFile(join(main, '.graphyard', 'master.json'), JSON.stringify(config), { mode: 0o600 });
+  return { main, config, release, record, env, credential: 'coordinator-token-'.padEnd(40, 'x') };
 }
 /** Sets the serve helper's environment for the children the loop spawns, returning its restoration. */
 function withEnv(env: Record<string, string>) {
@@ -80,11 +94,17 @@ function withEnv(env: Record<string, string>) {
   Object.assign(process.env, env);
   return () => { for (const [key, value] of Object.entries(before)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; } };
 }
-const serveRecord = (record: string) => JSON.parse(readFileSync(record, 'utf8')) as { args: string[]; snapshotHead: string | null; snapshotBranch: string | null; snapshotShared: boolean; grant: { file: string | null; consumed: boolean | null; content: { loop: { pid: number; lock: number } } | null }; ppid: number };
+const serveRecord = (record: string) => JSON.parse(readFileSync(record, 'utf8')) as { args: string[]; snapshotHead: string | null; snapshotBranch: string | null; snapshotShared: boolean; grant: { file: string | null; consumed: boolean | null; content: CheckoutRestoreGrant | null }; ppid: number; frozenAt: number | null; thawedAt: number | null; holdMs: number };
 
-function effects(now: () => number): DaemonEffects {
+/**
+ * `persist` writes the loop's cursor as the real loop does — the serve entry reads the lock it holds —
+ * and `notify` records each supervisor notification with the wall clock it was sent at: the watchdog
+ * it feeds runs on the wall clock, not the simulated one.
+ */
+function effects(now: () => number, persist: (state: DaemonState) => Promise<void>, notifications?: { at: number; state: string }[]): DaemonEffects {
   const iso = () => new Date(now()).toISOString();
   return {
+    ...(notifications ? { notify: (state: 'ready' | 'alive') => { notifications.push({ at: Date.now(), state }); } } : {}),
     agents: () => [] as never[],
     credentials: async (profiles: { name: string }[]) => Object.fromEntries(profiles.map(item => [item.name, { available: true, reason: null }])),
     workerCredentials: async () => ({}), producerCredentials: async () => ({}),
@@ -92,16 +112,22 @@ function effects(now: () => number): DaemonEffects {
     snapshot: async () => ({ work: [] as Work[], now: iso() }),
     closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
     observeDeployment: async () => ({ source: 'unavailable' as const, sha: null, at: iso(), reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+    recordDeployment: async () => {}, requestSmoke: () => {}, persist,
   } as unknown as DaemonEffects;
 }
 
-test('unit:soak-checkout-restore-served-once — over two simulated days of the real loop, each checkout-restore and confined master-restart request is served once, a failed restart is asked again until it lands, the escalation settles and stays settled, and no restarted loop serves anything again', { timeout: 600_000 }, async () => {
-  const { main, config, release, record, env } = await installation();
+test('unit:soak-checkout-restore-served-once — over two simulated days of the real loop under a supervisor watchdog, each checkout-restore and confined master-restart request is served once, each restore — held past the watchdog window — keeps the supervisor fed, a failed restart is asked again until it lands, the escalation settles and stays settled, and no restarted loop serves anything again', { timeout: 600_000 }, async () => {
+  const { main, config, release, record, env, credential } = await installation();
+  // The supervisor: a 2 s watchdog window (the shipped unit's is 180 s), so the loop feeds it every 500 ms; each
+  // restore's freeze is held 3 s — longer than the window — the way a large restore or a slow fetch outlasts it.
+  const watchdogMs = 2_000, holdMs = 3_000;
+  const environment = { NOTIFY_SOCKET: '/run/graphyard-soak/notify', WATCHDOG_USEC: String(watchdogMs * 1000) };
+  const notifications: { at: number; state: string }[] = [];
   const start = Date.parse('2030-01-01T00:00:00Z');
   let clock = start;
   const now = () => clock;
   const state = emptyDaemonState(config);
+  const persist = (current: DaemonState) => writeDaemonState(config, current);
   const journal: { at: number; pid: number; line: string }[] = [];
   const restarts: { at: number; pid: number; landed: boolean }[] = [];
   const serves: ReturnType<typeof serveRecord>[] = [];
@@ -122,7 +148,7 @@ test('unit:soak-checkout-restore-served-once — over two simulated days of the 
   plan[0].act(); plan.shift();
   let failNextRestart = true, pid = 1000;
   const end = start + 2 * day;
-  const restoreEnv = withEnv(env);
+  const restoreEnv = withEnv({ ...env, GRAPHYARD_TEST_SERVE_DELAY_MS: String(holdMs) });
   try { while (clock < end) {
     const host = new EventEmitter(), own = ++pid;
     // Each wait between passes — the refused startup's and every cycle's — is ten simulated minutes.
@@ -146,7 +172,7 @@ test('unit:soak-checkout-restore-served-once — over two simulated days of the 
       host.emit('SIGTERM');
     };
     const executors = async (args: string[]) => { executorRuns.push({ at: clock, pid: own, args }); return args[0] === 'restart' ? { host: 'machine-a', result: 'restarted' } : { host: 'machine-a', executors: [] }; };
-    await runDaemon(config, state, effects(now), { intervalMs, identity: { pid: own, host: 'machine-a' }, signals: ['SIGTERM'], process: host as never, now, checkout, restartLoop, executors,
+    await runDaemon(config, state, effects(now, persist, notifications), { intervalMs, identity: { pid: own, host: 'machine-a' }, signals: ['SIGTERM'], process: host as never, now, checkout, restartLoop, executors, environment,
       log: line => journal.push({ at: clock, pid: own, line }) });
   } } finally { restoreEnv(); }
 
@@ -158,12 +184,25 @@ test('unit:soak-checkout-restore-served-once — over two simulated days of the 
   assert.equal(restores.length, 2);
   assert.ok(restores.every(entry => entry.line.includes(`served from the origin base-branch release ${release.slice(0, 12)}, a detached shared-clone snapshot of it`)), restores.map(entry => entry.line).join(' | '));
   assert.equal(serves.length, 2, 'the snapshot\'s CLI ran once per restore');
+  const alive = notifications.filter(entry => entry.state === 'alive').map(entry => entry.at);
   for (const serve of serves) {
     assert.deepEqual(serve.args, ['master', 'checkout-restore', '--serve']);
     assert.equal(serve.snapshotHead, release); assert.equal(serve.snapshotBranch, null); assert.equal(serve.snapshotShared, true);
     assert.equal(serve.grant.file, checkoutRestoreGrantPath(config)); assert.equal(serve.grant.consumed, true);
     assert.equal(serve.grant.content?.loop.pid, process.pid, 'issued by the loop process, the entry\'s grandparent');
+    const { signature, ...payload } = serve.grant.content!;
+    assert.equal(signature, signCheckoutRestoreGrant(payload, credential), 'signed with the installation\'s coordinator credential');
+    // The restore outlasted the watchdog window, and the supervisor was fed throughout it: no two keep-alives
+    // around or during the held freeze lie further apart than the window, and several fell inside it.
+    assert.ok(serve.frozenAt && serve.thawedAt && serve.thawedAt - serve.frozenAt >= holdMs, `the freeze was held ${serve.thawedAt! - serve.frozenAt!} ms, past the ${watchdogMs} ms window`);
+    const around = alive.filter(at => at >= serve.frozenAt! - watchdogMs && at <= serve.thawedAt! + watchdogMs).sort((a, b) => a - b);
+    const inside = around.filter(at => at >= serve.frozenAt! && at <= serve.thawedAt!);
+    assert.ok(inside.length >= 4, `the keep-alive was fed ${inside.length} times during the ${holdMs} ms freeze (every ${watchdogMs / 4} ms): ${around.map(at => at - serve.frozenAt!).join(', ')} ms from the freeze`);
+    const gaps = around.slice(1).map((at, index) => at - around[index]);
+    assert.ok(gaps.every(gap => gap < watchdogMs), `no keep-alive gap reached the watchdog window through the restore: ${gaps.join(', ')} ms`);
+    assert.ok(around[0] < serve.frozenAt! && around.at(-1)! > serve.thawedAt!, 'fed before the freeze began and after it ended');
   }
+  assert.ok(notifications.some(entry => entry.state === 'ready'), 'each loop told its supervisor it was ready');
   assert.deepEqual(serves.map(serve => serve.grant.content?.loop.lock), restores.map(entry => entry.pid), 'each grant names the pid of the loop that served');
   assert.ok(!existsSync(checkoutRestoreGrantPath(config)), 'no grant outlives its serve');
   // The executors requests: each run once on the host, by the loop serving when it was filed, owing no loop restart.
@@ -209,6 +248,7 @@ test('integration:soak-checkout-restore-drift — over two simulated days of the
   let clock = start;
   const now = () => clock;
   const state = emptyDaemonState(config);
+  const persist = (current: DaemonState) => writeDaemonState(config, current);
   const journal: { at: number; pid: number; line: string }[] = [];
   const restarts: { at: number; pid: number }[] = [];
   const reads: { at: number; pid: number; head: string | null; escalation: string | null; attempts: number | null; detail: string | null }[] = [];
@@ -237,7 +277,7 @@ test('integration:soak-checkout-restore-drift — over two simulated days of the
       return read;
     };
     const restartLoop = async () => { restarts.push({ at: clock, pid: own }); host.emit('SIGTERM'); };
-    await runDaemon(config, state, effects(now), { intervalMs, identity: { pid: own, host: 'machine-a' }, signals: ['SIGTERM'], process: host as never, now, checkout, restartLoop,
+    await runDaemon(config, state, effects(now, persist), { intervalMs, identity: { pid: own, host: 'machine-a' }, signals: ['SIGTERM'], process: host as never, now, checkout, restartLoop,
       log: line => journal.push({ at: clock, pid: own, line }) });
   } } finally { restoreEnv(); }
   const adopted = git(main, 'rev-parse', 'HEAD'), movedTo = moved as string | null;

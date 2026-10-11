@@ -73,7 +73,7 @@ const besideCursor = (config: Pick<MasterConfig, 'credentialFile'>, suffix: stri
 export const checkoutRestoreRequestPath = (config: Pick<MasterConfig, 'credentialFile'>) => besideCursor(config, 'checkout-restore');
 export const loopRestartRequestPath = (config: Pick<MasterConfig, 'credentialFile'>) => besideCursor(config, 'loop-restart');
 export const loopExecutorsRequestPath = (config: Pick<MasterConfig, 'credentialFile'>) => besideCursor(config, 'loop-executors');
-/** The single-use grant the loop writes for one serve of a checkout-restore request (GY-1680), beside the cursor like the request it names. */
+/** The single-use grant the loop signs for one serve of a checkout-restore request (GY-1680), beside the cursor like the request it names; the entry accepts it nowhere else. */
 export const checkoutRestoreGrantPath = (config: Pick<MasterConfig, 'credentialFile'>) => besideCursor(config, 'checkout-restore-grant');
 export const loopRequestPath = (config: Pick<MasterConfig, 'credentialFile'>, act: LoopRequestAct) =>
   act === 'restart' ? loopRestartRequestPath(config) : act === 'executors' ? loopExecutorsRequestPath(config) : checkoutRestoreRequestPath(config);

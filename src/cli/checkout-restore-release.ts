@@ -1,13 +1,15 @@
-// Concern: the release a checkout-restore request is served from (GY-1680) — the verified serving release, materialized as a detached shared-clone snapshot whose CLI runs the quiesce-and-restore under a grant the loop issues — and the serve entry that CLI answers.
-import { createHash, randomBytes } from 'node:crypto';
+// Concern: the release a checkout-restore request is served from (GY-1680) — the verified serving release, materialized as a detached shared-clone snapshot whose CLI runs the quiesce-and-restore under a grant the loop signs with the coordinator credential — and the serve entry that CLI answers.
+import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { mkdtemp, readFile, rm, symlink, unlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 import { z } from 'zod';
 import { ChildProcessError, type ChildRun, defaultChildRun } from '../child-runner.js';
-import { atomicPrivateWrite } from '../master/config.js';
-import { type CheckoutQuiesce, type RestoreAct, type RestoreActOutcome, readCheckoutRestoreRequest, restoreInProcess } from './master-checkout-restore.js';
+import { daemonStatePath } from '../daemon/state.js';
+import { atomicPrivateWrite, loadStoredMasterConfig, readCredentialFile } from '../master/config.js';
+import { coordinatorCheckoutRoot, type MasterConfig } from '../master/profiles.js';
+import { type CheckoutQuiesce, type RestoreAct, type RestoreActOutcome, checkoutRestoreGrantPath, checkoutRestoreRequestPath, readCheckoutRestoreRequest, restoreInProcess } from './master-checkout-restore.js';
 
 // GY-1679: the loop served `master checkout-restore` from the code it had loaded, so a fix to the
 // serve path (GY-1672's unreadable-cwd skip) reached no installation whose loop could not restart —
@@ -20,26 +22,37 @@ import { type CheckoutQuiesce, type RestoreAct, type RestoreActOutcome, readChec
 // entry, the request fails with the reasons, and nothing is touched (review of GY-1680).
 //
 // The serve entry alters files, so it is not a command but a capability (review of GY-1680): the
-// loop writes a single-use grant beside its cursor — the checkout, the reason, the standing request,
-// its own pid and the pid its cursor lock names, an expiry, and the digest of a random token — and
-// hands the snapshot's CLI the grant's path and the token through its environment. The entry serves
-// only when the token matches, the grant has not expired, the issuing pid is this process's ancestor,
-// the request the grant names still stands unanswered beside it, and the cursor beside it (when one
-// holds a lock) is locked by the pid the grant names; it consumes the grant before touching anything.
-// A confined master, a worker, or a hand that runs the entry has no grant and is refused.
+// loop writes a single-use grant beside its cursor — the checkout, the reason, the standing request's
+// id, its own pid and the pid its cursor lock names, an expiry and a nonce — signed (HMAC-SHA256)
+// with the coordinator credential, the authority only the loop and the master identities hold: a
+// worker, a confined master session or a hand has no credential and so can forge no grant. The
+// entry is handed only the grant's path, and trusts nothing else a caller could choose: it reads
+// the installation from the checkout the grant names (.graphyard/master.json, which must name that
+// checkout as its coordinator checkout), verifies the signature with that installation's credential,
+// and requires the grant to lie where that installation's loop issues grants, the installation's
+// cursor to be locked by the pid the grant names and the issuing pid to be this process's ancestor,
+// and the installation's request file to hold the request the grant names still unanswered. A
+// cursor that cannot be read or holds no lock refuses: no loop is known to serve. It consumes the
+// grant before touching anything, so a grant serves exactly once.
+//
+// The act can outlast the supervisor's watchdog window (the shipped unit's is 180 s; a fetch, a
+// clone and a freeze-and-restore each wait on their own), so the loop's keep-alive is fed on an
+// interval for as long as the act runs (review of GY-1680): a long restore is not a hung loop.
 
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
 const short = (commit: string) => commit.slice(0, 12);
-const digest = (token: string) => createHash('sha256').update(token).digest('hex');
 
 /** The flag the loop runs the snapshot's CLI with: `master checkout-restore --serve`, everything else in the grant. */
 export const checkoutRestoreServeFlag = '--serve';
-/** The environment the loop hands the snapshot's CLI: the grant's path, and the token whose digest the grant holds. */
+/** The environment the loop hands the snapshot's CLI: the grant's path, and nothing else of the act. */
 export const checkoutRestoreGrantVariable = 'GRAPHYARD_CHECKOUT_RESTORE_GRANT';
-export const checkoutRestoreGrantTokenVariable = 'GRAPHYARD_CHECKOUT_RESTORE_GRANT_TOKEN';
-export const checkoutRestoreServeUsage = `master checkout-restore ${checkoutRestoreServeFlag} is the loop's own act, run in a snapshot of the serving release under a grant the loop issues (${checkoutRestoreGrantVariable}); it is not a command to run by hand: file master checkout-restore REASON, which the loop serves`;
+/** The kind a grant declares; a release whose entry reads this kind of grant answers the serve entry. */
+export const checkoutRestoreGrantKind = 'graphyard-checkout-restore-grant/1';
+export const checkoutRestoreServeUsage = `master checkout-restore ${checkoutRestoreServeFlag} is the loop's own act, run in a snapshot of the serving release under a grant the loop signs with the coordinator credential (${checkoutRestoreGrantVariable}); it is not a command to run by hand: file master checkout-restore REASON, which the loop serves`;
 /** How long a grant serves after it is issued: the snapshot's act is bounded well inside it. */
 export const checkoutRestoreGrantTtlMs = 15 * 60_000;
+/** How often the loop's keep-alive is fed while the act runs, when the loop names no cadence of its own. */
+export const checkoutRestoreKeepAliveEveryMs = 30_000;
 
 /** A release the act may run from: the verified serving release, or the base branch's tip at origin. */
 export interface ServingRelease { commit: string; source: 'deployment' | 'origin' }
@@ -88,9 +101,9 @@ export async function snapshotRelease(root: string, commit: string, run: ChildRu
     return { directory, dispose };
   } catch (error) { await dispose(); throw error; }
 }
-/** Whether a snapshot's CLI answers the serve entry under a grant: a release from before it would file a request of its own, or take a root from the command line. */
+/** Whether a snapshot's CLI answers the serve entry under a signed grant: a release from before it would file a request of its own, take a root from the command line, or read a grant it cannot verify. */
 export function releaseServes(directory: string): boolean {
-  try { return readFileSync(join(directory, 'src', 'cli', 'checkout-restore-release.ts'), 'utf8').includes(checkoutRestoreGrantVariable); } catch { return false; }
+  try { return readFileSync(join(directory, 'src', 'cli', 'checkout-restore-release.ts'), 'utf8').includes(checkoutRestoreGrantKind); } catch { return false; }
 }
 
 const serveOutputSchema = z.object({
@@ -99,21 +112,40 @@ const serveOutputSchema = z.object({
 }).strict();
 export type ServeOutput = z.infer<typeof serveOutputSchema>;
 
-/** The grant the loop writes beside its cursor for one serve, read back by the snapshot's CLI. */
-const grantSchema = z.object({
-  token: z.string().length(64), root: z.string().min(1), reason: z.string().min(1),
-  request: z.object({ file: z.string().min(1), id: z.string().min(1) }).strict(),
-  /** The issuing loop: its process, the pid its cursor lock names, and the cursor itself (beside the grant). */
-  loop: z.object({ pid: z.number().int().positive(), lock: z.number().int().positive(), cursor: z.string().min(1) }).strict(),
-  issuedAt: z.string(), expiresAt: z.string(),
+/** What the loop signs: the grant without its signature. */
+const grantPayloadSchema = z.object({
+  kind: z.literal(checkoutRestoreGrantKind),
+  root: z.string().min(1), reason: z.string().min(1),
+  /** The standing request the grant serves, by id; the request's file is the installation's own. */
+  request: z.object({ id: z.string().min(1) }).strict(),
+  /** The issuing loop: its process, and the pid the installation's cursor lock names. */
+  loop: z.object({ pid: z.number().int().positive(), lock: z.number().int().positive() }).strict(),
+  issuedAt: z.string(), expiresAt: z.string(), nonce: z.string().length(32),
 }).strict();
+/** The grant the loop writes beside its cursor for one serve, read back by the snapshot's CLI: the payload and its HMAC-SHA256 under the coordinator credential. */
+const grantSchema = grantPayloadSchema.extend({ signature: z.string().length(64).regex(/^[0-9a-f]+$/) }).strict();
+export type CheckoutRestoreGrantPayload = z.infer<typeof grantPayloadSchema>;
 export type CheckoutRestoreGrant = z.infer<typeof grantSchema>;
+
+/** The payload as signed: its keys in sorted order at every depth, so the same grant always signs the same bytes. */
+const canonical = (value: unknown): string =>
+  Array.isArray(value) ? `[${value.map(canonical).join(',')}]`
+    : value && typeof value === 'object' ? `{${Object.keys(value as object).sort().map(key => `${JSON.stringify(key)}:${canonical((value as Record<string, unknown>)[key])}`).join(',')}}`
+      : JSON.stringify(value);
+/** The grant's signature: HMAC-SHA256 of its canonical payload under the coordinator credential. */
+export const signCheckoutRestoreGrant = (payload: CheckoutRestoreGrantPayload, credential: string): string => createHmac('sha256', credential).update(canonical(grantPayloadSchema.parse(payload))).digest('hex');
+/** Whether `grant` carries the signature `credential` gives its payload, compared in constant time. */
+export function checkoutRestoreGrantSigned(grant: CheckoutRestoreGrant, credential: string): boolean {
+  const { signature, ...payload } = grant;
+  const expected = Buffer.from(signCheckoutRestoreGrant(payload, credential), 'hex'), presented = Buffer.from(signature, 'hex');
+  return expected.length === presented.length && timingSafeEqual(expected, presented);
+}
 
 export interface ReleaseRestoreDeps {
   /** The loop's deployment observation and base branch, read when a request is served. */
   release: () => ServingReleaseInputs;
-  /** Where the loop writes the grant (beside its cursor, checkoutRestoreGrantPath), its cursor (daemonStatePath) and the pid its cursor lock names. */
-  grant: { file: string; cursor: string; lock: number };
+  /** Where the loop writes the grant (beside its cursor, checkoutRestoreGrantPath), the coordinator credential it signs with, and the pid its cursor lock names. */
+  grant: { file: string; credentialFile: string; lock: number };
   run?: ChildRun; quiesce?: CheckoutQuiesce;
   /** The snapshot's CLI entry and how it is started; defaults to `node SNAPSHOT/bin/graphyard.mjs`. */
   command?: (directory: string) => { command: string; args: string[] };
@@ -121,19 +153,24 @@ export interface ReleaseRestoreDeps {
   timeoutMs?: number;
   /** The environment the snapshot's CLI inherits beneath the grant; defaults to this process's. */
   env?: NodeJS.ProcessEnv;
+  /** The supervisor's keep-alive, fed every `keepAliveEveryMs` (checkoutRestoreKeepAliveEveryMs) for as long as the act runs. */
+  keepAlive?: () => Promise<void>; keepAliveEveryMs?: number;
   now?: () => number;
 }
 /**
  * The loop's restore act (GY-1680): the quiesce-and-restore run by a sanctioned release's own CLI in
- * a detached shared-clone snapshot of it, under a single-use grant, so a fix delivered to the serve
- * path serves the next request without the loop having loaded it. The verified serving release is
- * tried first, then origin's base-branch tip; when neither can be snapshotted with the serve entry the
- * act fails naming why, and the loop's own loaded code — what this request exists to replace — is
- * never run.
+ * a detached shared-clone snapshot of it, under a single-use grant signed with the coordinator
+ * credential, so a fix delivered to the serve path serves the next request without the loop having
+ * loaded it. The verified serving release is tried first, then origin's base-branch tip; when neither
+ * can be snapshotted with the serve entry the act fails naming why, and the loop's own loaded code —
+ * what this request exists to replace — is never run. The keep-alive is fed throughout.
  */
 export function releasePinnedRestore(deps: ReleaseRestoreDeps): RestoreAct {
   const run = deps.run ?? defaultChildRun, now = deps.now ?? Date.now;
-  return async (root, reason, _at, request): Promise<RestoreActOutcome> => {
+  const act = async (root: string, reason: string, request: { id: string }): Promise<RestoreActOutcome> => {
+    let credential: string;
+    try { credential = await readCredentialFile(deps.grant.credentialFile); }
+    catch (error) { throw new Error(`the coordinator credential at ${deps.grant.credentialFile} cannot be read (${message(error).split('\n')[0]}), so no checkout-restore grant can be signed and nothing was restored`); }
     const { releases, reasons } = await servingReleases(root, deps.release(), run);
     for (const release of releases) {
       const named = `the ${release.source === 'deployment' ? 'verified serving' : 'origin base-branch'} release ${short(release.commit)}`;
@@ -144,13 +181,14 @@ export function releasePinnedRestore(deps: ReleaseRestoreDeps): RestoreAct {
         if (!releaseServes(snapshot.directory)) { reasons.push(`${named} predates the serve entry`); continue; }
         const served = `served from ${named}, a detached shared-clone snapshot of it`;
         const entry = deps.command?.(snapshot.directory) ?? { command: process.execPath, args: [join(snapshot.directory, 'bin', 'graphyard.mjs')] };
-        const token = randomBytes(32).toString('hex'), issued = now();
-        const grant: CheckoutRestoreGrant = { token: digest(token), root, reason, request, loop: { pid: process.pid, lock: deps.grant.lock, cursor: deps.grant.cursor }, issuedAt: new Date(issued).toISOString(), expiresAt: new Date(issued + checkoutRestoreGrantTtlMs).toISOString() };
+        const issued = now();
+        const payload: CheckoutRestoreGrantPayload = { kind: checkoutRestoreGrantKind, root, reason, request: { id: request.id }, loop: { pid: process.pid, lock: deps.grant.lock }, issuedAt: new Date(issued).toISOString(), expiresAt: new Date(issued + checkoutRestoreGrantTtlMs).toISOString(), nonce: randomBytes(16).toString('hex') };
+        const grant: CheckoutRestoreGrant = { ...payload, signature: signCheckoutRestoreGrant(payload, credential) };
         await atomicPrivateWrite(deps.grant.file, grant);
         let output: string;
         try {
           output = String(await run(entry.command, [...entry.args, 'master', 'checkout-restore', checkoutRestoreServeFlag],
-            { cwd: snapshot.directory, timeoutMs: deps.timeoutMs ?? 10 * 60_000, env: { ...(deps.env ?? process.env), [checkoutRestoreGrantVariable]: deps.grant.file, [checkoutRestoreGrantTokenVariable]: token } }));
+            { cwd: snapshot.directory, timeoutMs: deps.timeoutMs ?? 10 * 60_000, env: { ...(deps.env ?? process.env), [checkoutRestoreGrantVariable]: deps.grant.file } }));
         } catch (error) { throw new Error(`${served}: ${error instanceof ChildProcessError && error.stderr.trim() ? error.stderr.trim() : message(error)}`.slice(0, 4000)); }
         finally { await unlink(deps.grant.file).catch(() => {}); }
         let parsed: ServeOutput;
@@ -160,6 +198,13 @@ export function releasePinnedRestore(deps: ReleaseRestoreDeps): RestoreAct {
       } finally { await snapshot.dispose(); }
     }
     throw new Error(`no sanctioned release can serve this request, and the loop's own loaded code is not run (GY-1680): ${reasons.join('; ')}. Once a release holding the serve entry is observed serving or reaches origin, file master checkout-restore REASON again`.slice(0, 4000));
+  };
+  return async (root, reason, _at, request) => {
+    // The supervisor's watchdog is fed for as long as the act runs — the fetch, the clone, the snapshot's
+    // freeze-and-restore — so a restore longer than its window is not restarted as a hung loop.
+    const pulse = deps.keepAlive ? setInterval(() => { void deps.keepAlive!().catch(() => {}); }, deps.keepAliveEveryMs ?? checkoutRestoreKeepAliveEveryMs) : null;
+    try { return await act(root, reason, request); }
+    finally { if (pulse) clearInterval(pulse); }
   };
 }
 
@@ -183,37 +228,59 @@ export interface ServeEntryOptions {
   env?: NodeJS.ProcessEnv;
   /** The pids the issuing loop may be: this process and its ancestors, by default. */
   ancestors?: () => number[];
+  /** Reads the installation whose coordinator checkout is `root` (its .graphyard/master.json); defaults to loadStoredMasterConfig. */
+  installation?: (root: string) => Promise<MasterConfig>;
 }
 /**
- * The grant the environment names, verified: its token's digest, its expiry, the issuing loop among
- * this process's ancestors, the request it names standing unanswered beside it, and the cursor beside
- * it (when one holds a lock) locked by the pid it names. Consumed — the file removed — once verified,
- * so it serves exactly once. Anything short of that is a refusal naming what is missing.
+ * The grant the environment names, verified against the installation it names and nothing a caller
+ * chooses: the checkout it names holds an installation whose coordinator checkout is that checkout;
+ * the grant lies where that installation's loop issues grants; its signature is the installation's
+ * coordinator credential's; it has not expired; the issuing loop is among this process's ancestors;
+ * the installation's cursor is locked by the pid it names; and the installation's request file holds
+ * the request it names, unanswered. Consumed — the file removed — once verified, so it serves exactly
+ * once. Anything short of that, a cursor that cannot be read included, is a refusal naming what is
+ * missing, before anything is touched.
  */
-export async function verifyCheckoutRestoreGrant(options: ServeEntryOptions = {}): Promise<CheckoutRestoreGrant> {
+export async function verifyCheckoutRestoreGrant(options: ServeEntryOptions = {}): Promise<{ grant: CheckoutRestoreGrant; config: MasterConfig }> {
   const env = options.env ?? process.env;
-  const file = env[checkoutRestoreGrantVariable], token = env[checkoutRestoreGrantTokenVariable];
-  if (!file || !token) throw new Error(checkoutRestoreServeUsage);
+  const file = env[checkoutRestoreGrantVariable];
+  if (!file) throw new Error(checkoutRestoreServeUsage);
   let grant: CheckoutRestoreGrant;
   try { grant = grantSchema.parse(JSON.parse(await readFile(file, 'utf8'))); }
   catch (error) { throw new Error(`the checkout-restore grant at ${file} cannot be read (${message(error).split('\n')[0]}); ${checkoutRestoreServeUsage}`); }
   const refuse = (why: string) => new Error(`the checkout-restore grant at ${file} does not serve: ${why}; nothing was restored`);
-  if (grant.token !== digest(token)) throw refuse('its token does not match the one presented');
+  // The installation: read from the checkout the grant names, which must be that installation's own coordinator checkout.
+  if (!isAbsolute(grant.root)) throw refuse(`the checkout it names, ${grant.root}, is not an absolute path`);
+  let config: MasterConfig;
+  try { config = await (options.installation ?? loadStoredMasterConfig)(grant.root); }
+  catch (error) { throw refuse(`the checkout it names, ${grant.root}, holds no installation whose configuration can be read (${message(error).split('\n')[0]})`); }
+  const coordinator = resolve(coordinatorCheckoutRoot(config.cliPath));
+  if (coordinator !== resolve(grant.root)) throw refuse(`the installation at ${grant.root} runs its loop from ${coordinator}, not from that checkout`);
+  const issuedAt = checkoutRestoreGrantPath(config);
+  if (resolve(file) !== issuedAt) throw refuse(`it lies at ${resolve(file)}, not where that installation's loop issues grants (${issuedAt})`);
+  // The authority: the installation's coordinator credential signed it, or no loop issued it.
+  let credential: string;
+  try { credential = await readCredentialFile(config.credentialFile); }
+  catch (error) { throw refuse(`that installation's coordinator credential at ${config.credentialFile} cannot be read (${message(error).split('\n')[0]}), so its signature cannot be verified`); }
+  if (!checkoutRestoreGrantSigned(grant, credential)) throw refuse('its signature is not that installation\'s coordinator credential\'s, so no loop issued it');
   const at = (options.now ?? new Date()).getTime();
   if (!(Date.parse(grant.expiresAt) > at)) throw refuse(`it expired at ${grant.expiresAt}`);
   const ancestors = options.ancestors?.() ?? [process.pid, ...ancestorPids()];
   if (!ancestors.includes(grant.loop.pid)) throw refuse(`the loop that issued it, pid ${grant.loop.pid}, is not an ancestor of this process (${ancestors.join(' < ') || 'none readable'})`);
-  const beside = dirname(resolve(file));
-  if (dirname(resolve(grant.request.file)) !== beside || dirname(resolve(grant.loop.cursor)) !== beside) throw refuse(`the request (${grant.request.file}) and cursor (${grant.loop.cursor}) it names do not both lie beside it`);
-  const request = await readCheckoutRestoreRequest(grant.request.file);
-  if (!request || request.id !== grant.request.id || request.act !== 'checkout-restore') throw refuse(`the request it names, ${grant.request.id} at ${grant.request.file}, no longer stands`);
-  if (request.outcome) throw refuse(`the request it names, ${grant.request.id}, was already answered ${request.outcome.state}`);
-  // The cursor beside the grant: the loop's daemon state, locked by the loop that serves (a cursor not yet written holds no lock to judge).
+  // The installation's cursor: the loop's daemon state, locked by the loop that serves. Unreadable or unlocked, no loop is known to serve, and the grant is refused.
+  const cursor = daemonStatePath(config);
   let lock: number | null = null;
-  try { const parsed = JSON.parse(await readFile(grant.loop.cursor, 'utf8')) as { lock?: { pid?: unknown } | null }; lock = typeof parsed.lock?.pid === 'number' ? parsed.lock.pid : null; } catch { lock = null; }
-  if (lock !== null && lock !== grant.loop.lock) throw refuse(`the loop's cursor at ${grant.loop.cursor} is locked by pid ${lock}, not the pid ${grant.loop.lock} it names`);
+  try { const parsed = JSON.parse(await readFile(cursor, 'utf8')) as { lock?: { pid?: unknown } | null }; lock = typeof parsed.lock?.pid === 'number' ? parsed.lock.pid : null; }
+  catch (error) { throw refuse(`that installation's cursor at ${cursor} cannot be read (${message(error).split('\n')[0]}), so no loop is known to serve it`); }
+  if (lock === null) throw refuse(`that installation's cursor at ${cursor} holds no lock, so no loop is known to serve it`);
+  if (lock !== grant.loop.lock) throw refuse(`that installation's cursor at ${cursor} is locked by pid ${lock}, not the pid ${grant.loop.lock} it names`);
+  // The request: the installation's own, standing unanswered under the id the grant names.
+  const requestFile = checkoutRestoreRequestPath(config);
+  const request = await readCheckoutRestoreRequest(requestFile);
+  if (!request || request.id !== grant.request.id || request.act !== 'checkout-restore') throw refuse(`the request it names, ${grant.request.id}, no longer stands at ${requestFile}`);
+  if (request.outcome) throw refuse(`the request it names, ${grant.request.id}, was already answered ${request.outcome.state}`);
   try { await unlink(file); } catch (error) { throw refuse(`it could not be consumed (${message(error).split('\n')[0]})`); }
-  return grant;
+  return { grant, config };
 }
 
 /**
@@ -225,7 +292,7 @@ export async function verifyCheckoutRestoreGrant(options: ServeEntryOptions = {}
  */
 export async function serveCheckoutRestoreAct(args: readonly string[], options: ServeEntryOptions = {}): Promise<ServeOutput> {
   if (args.length) throw new Error(`master checkout-restore ${checkoutRestoreServeFlag} takes no arguments: the checkout and the reason are in the loop's grant. ${checkoutRestoreServeUsage}`);
-  const grant = await verifyCheckoutRestoreGrant(options);
-  const { restored, head } = await restoreInProcess(options.run ?? defaultChildRun, options.quiesce)(grant.root, grant.reason, options.now ?? new Date(), grant.request);
+  const { grant, config } = await verifyCheckoutRestoreGrant(options);
+  const { restored, head } = await restoreInProcess(options.run ?? defaultChildRun, options.quiesce)(grant.root, grant.reason, options.now ?? new Date(), { file: checkoutRestoreRequestPath(config), id: grant.request.id });
   return { restored, head };
 }

@@ -108,10 +108,11 @@ export const masterCommands = defineCommands([
       if (id === 'init') return masterInit(context, root);
       if (id === 'setup') return masterSetupCommand(context, root, await loadStoredMasterConfig(root));
       // GY-1680: the serve entry the loop runs in a snapshot of the serving release — the quiesce-and-restore itself.
-      // It opens no session and takes no root: it serves only the grant the loop issued (its path and token in
-      // this process's environment), which names the checkout, the reason and the standing request, and
-      // which the entry verifies against its own ancestry and the loop's cursor before anything is touched.
-      // A confined master, a worker or a hand has no grant and is refused; they file master checkout-restore REASON.
+      // It opens no session and takes no root: it serves only a grant signed with the coordinator credential
+      // (its path in this process's environment), which names the checkout, the reason and the standing
+      // request, and which the entry verifies against that checkout's own installation — its credential,
+      // its cursor's lock, its request file — and its own ancestry before anything is touched. A confined
+      // master, a worker or a hand holds no credential to sign one and is refused; they file master checkout-restore REASON.
       if (id === 'checkout-restore' && context.args[0] === checkoutRestoreServeFlag) return context.print(await serveCheckoutRestoreAct(context.args.slice(1)));
       const session = await openMasterSession(context, root);
       // Each concern under ./master/ answers its own subcommands; the first that knows the id handles it.

@@ -1,24 +1,30 @@
 // The serve entry as a release snapshot's CLI runs it (GY-1680), for the integration proofs in
 // tests/checkout-restore-release.test.ts and the soaks in tests/soak-checkout-restore.test.ts: the
 // fixture release's bin/graphyard.mjs starts this file with the loop's arguments (`master
-// checkout-restore --serve`) and environment (the loop's grant and token). It runs the real serve
-// entry — the grant verified against this process's real ancestry — against a fake /proc the test
+// checkout-restore --serve`) and environment (the path of the loop's signed grant). It runs the real
+// serve entry — the grant verified against the installation the checkout holds and this process's
+// real ancestry — against a fake /proc the test
 // wrote (GRAPHYARD_TEST_FAKE_PROC), refusing the cwd reads the test names EACCES
 // (GRAPHYARD_TEST_DENY_PATHS, as the kernel does for a non-dumpable process), recording the signals
-// it would send instead of sending them, and writes what it saw — the snapshot it ran from, that
-// snapshot's HEAD and object store, the grant it was handed, the signals — to
-// GRAPHYARD_TEST_SERVE_RECORD for the test to assert on.
+// it would send instead of sending them, holding the freeze for GRAPHYARD_TEST_SERVE_DELAY_MS when
+// the test names one (a restore outlasting the supervisor's watchdog window), and writes what it saw
+// — the snapshot it ran from, that snapshot's HEAD and object store, the grant it was handed, the
+// signals, when the freeze began and ended — to GRAPHYARD_TEST_SERVE_RECORD for the test to assert on.
 import { execFileSync } from 'node:child_process';
 import fs, { existsSync, writeFileSync } from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 import { join } from 'node:path';
-import { checkoutRestoreGrantTokenVariable, checkoutRestoreGrantVariable, serveCheckoutRestoreAct } from '../../src/cli/checkout-restore-release.js';
+import { setTimeout as delay } from 'node:timers/promises';
+import { checkoutRestoreGrantVariable, serveCheckoutRestoreAct } from '../../src/cli/checkout-restore-release.js';
 import { checkoutWriterScan, freezeCheckoutWriters } from '../../src/cli/checkout-writers.js';
 
 const proc = process.env.GRAPHYARD_TEST_FAKE_PROC!, record = process.env.GRAPHYARD_TEST_SERVE_RECORD!, snapshot = process.env.GRAPHYARD_TEST_SNAPSHOT ?? null;
 const denied = new Set((process.env.GRAPHYARD_TEST_DENY_PATHS ?? '').split(',').filter(Boolean));
 /** Writers that never show stopped (GRAPHYARD_TEST_NEVER_STOPS): the freeze must refuse on them. */
 const neverStops = new Set((process.env.GRAPHYARD_TEST_NEVER_STOPS ?? '').split(',').filter(Boolean).map(Number));
+/** How long the freeze is held before the restore (GRAPHYARD_TEST_SERVE_DELAY_MS): a long act the loop must keep its supervisor fed through. */
+const holdMs = Number(process.env.GRAPHYARD_TEST_SERVE_DELAY_MS ?? 0) || 0;
+let frozenAt: number | null = null, thawedAt: number | null = null;
 const readlink = fs.readlinkSync;
 fs.readlinkSync = ((path: string, ...rest: unknown[]) => {
   if (denied.has(String(path))) throw Object.assign(new Error(`EACCES: permission denied, readlink '${String(path)}'`), { code: 'EACCES', errno: -13, syscall: 'readlink', path: String(path) });
@@ -32,8 +38,8 @@ const grantFile = process.env[checkoutRestoreGrantVariable] ?? null;
 const grant = (() => { try { return grantFile ? JSON.parse(fs.readFileSync(grantFile, 'utf8')) : null; } catch { return null; } })();
 const write = (outcome: unknown) => writeFileSync(record, JSON.stringify({
   entry: process.argv[1], args: process.argv.slice(2), snapshot, sent, outcome,
-  grant: { file: grantFile, token: process.env[checkoutRestoreGrantTokenVariable] ?? null, content: grant, consumed: grantFile ? !existsSync(grantFile) : null },
-  pid: process.pid, ppid: process.ppid,
+  grant: { file: grantFile, content: grant, consumed: grantFile ? !existsSync(grantFile) : null },
+  pid: process.pid, ppid: process.ppid, frozenAt, thawedAt, holdMs,
   snapshotHead: snapshot ? git('rev-parse', 'HEAD') : null, snapshotBranch: snapshot ? git('symbolic-ref', '-q', 'HEAD') : null,
   snapshotShared: snapshot ? existsSync(join(snapshot, '.git', 'objects', 'info', 'alternates')) : null,
   snapshotModules: snapshot ? existsSync(join(snapshot, 'node_modules')) : null,
@@ -43,7 +49,12 @@ if (args[0] !== 'master' || args[1] !== 'checkout-restore' || args[2] !== '--ser
 try {
   const uid = process.getuid!();
   const output = await serveCheckoutRestoreAct(args.slice(3), {
-    quiesce: directory => freezeCheckoutWriters(directory, { scan: at => checkoutWriterScan(at, 100, proc, uid), signal: (pid, name) => { sent.push(`${name}:${pid}`); }, state: pid => !neverStops.has(pid) && sent.includes(`SIGSTOP:${pid}`) && !sent.includes(`SIGCONT:${pid}`) ? 'T' : 'S', settleMs: 50, pollMs: 1 }),
+    quiesce: async directory => {
+      frozenAt = Date.now();
+      const frozen = await freezeCheckoutWriters(directory, { scan: at => checkoutWriterScan(at, 100, proc, uid), signal: (pid, name) => { sent.push(`${name}:${pid}`); }, state: pid => !neverStops.has(pid) && sent.includes(`SIGSTOP:${pid}`) && !sent.includes(`SIGCONT:${pid}`) ? 'T' : 'S', settleMs: 50, pollMs: 1 });
+      if (holdMs) await delay(holdMs);
+      return { ...frozen, thaw: () => { thawedAt = Date.now(); frozen.thaw(); } };
+    },
   });
   write(output);
   console.log(JSON.stringify(output, null, 2));
