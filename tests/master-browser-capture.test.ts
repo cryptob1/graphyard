@@ -26,9 +26,10 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
  * followed, and GitHub Mobile is never triggered.
  *
  * unit:master-browser-capture-outcomes — sudo already held (no Confirm access shown), a page that
- * cannot be reached, a profile not signed in, and `--dry-run`: each records its outcome and reason
- * as a step of its record, saves no fixture, names the next step, and carries the same actor,
- * profile and audit ledger entry as the other flows; the dry run launches no browser.
+ * cannot be reached, a profile not signed in, a profile GitHub denies the page to, an offered view
+ * that could not be kept, and `--dry-run`: each records its outcome and reason as a step of its
+ * record, names the next step, and carries the same actor, profile and audit ledger entry as the
+ * other flows; only kept views become fixtures, and the dry run launches no browser.
  */
 
 // Loaded per test, so on a base without this change each case fails on its own assertion.
@@ -76,13 +77,15 @@ const installation = async (): Promise<InstallationState> => {
  * The App permissions page as the profile sees it. `confirm`: GitHub asks to confirm access first,
  * each method view opened by its link alone; `held`: sudo mode is held, the permissions page shows
  * at once; `unreachable`: the page cannot be opened; `signed-out`: GitHub redirects to its login
- * page. Typing, Verify, the passkey button, "Send a code via email" and "Use GitHub Mobile" fail the test.
+ * page; `denied`: a signed-in profile that cannot administer the App lands on GitHub's not-found page;
+ * `partial`: the authenticator view's link is offered but fails to open. Typing, Verify, the passkey
+ * button, "Send a code via email" and "Use GitHub Mobile" fail the test.
  */
 class AppPermissionsPage {
   view: View;
   clicked: string[] = []; opened: string[] = [];
   links: Record<string, Located> = { 'Use your passkey': located('#passkey', 'Use your passkey'), 'Use your authenticator app': located('#totp', 'Use your authenticator app'), 'Use email': located('#email-view', 'Use email') };
-  constructor(readonly mode: 'confirm' | 'held' | 'unreachable' | 'signed-out') { this.view = mode === 'held' ? 'permissions' : 'landing'; }
+  constructor(readonly mode: 'confirm' | 'held' | 'unreachable' | 'signed-out' | 'denied' | 'partial') { this.view = mode === 'held' ? 'permissions' : 'landing'; }
   page(): BrowserPage {
     const self = this;
     return {
@@ -92,8 +95,8 @@ class AppPermissionsPage {
         if (self.mode === 'unreachable') throw new Error('agent-browser open failed: net::ERR_NAME_NOT_RESOLVED at https://github.com/');
         self.view = self.mode === 'held' ? 'permissions' : 'landing';
       },
-      url: () => self.mode === 'signed-out' ? `https://github.com/login?return_to=${encodeURIComponent(PERMISSIONS)}` : PERMISSIONS,
-      text: () => self.mode === 'signed-out' ? 'Sign in to GitHub' : TEXT[self.view],
+      url: () => self.mode === 'signed-out' ? `https://github.com/login?return_to=${encodeURIComponent(PERMISSIONS)}` : self.mode === 'denied' ? 'https://github.com/settings/apps' : PERMISSIONS,
+      text: () => self.mode === 'signed-out' ? 'Sign in to GitHub' : self.mode === 'denied' ? '404\nThis is not the web page you are looking for.' : TEXT[self.view],
       meta: name => name === 'user-login' && self.mode !== 'signed-out' ? 'operator' : null,
       locate(kind, text) {
         if (self.view !== 'landing') return null;
@@ -104,13 +107,14 @@ class AppPermissionsPage {
       click(selector) {
         self.clicked.push(selector);
         const views: Record<string, View> = { '#passkey': 'passkey', '#totp': 'authenticator', '#email-view': 'email' };
+        if (self.mode === 'partial' && selector === '#totp') throw new Error('agent-browser click failed: element #totp is detached');
         if (views[selector]) self.view = views[selector];
         else assert.fail(`the capture must not activate ${selector}`);
       },
       setChecked() { assert.fail('nothing is checked'); }, select() { assert.fail('nothing is selected'); },
       screenshot() {}, wait() {}, close() {},
       fill() { assert.fail('nothing is typed into Confirm access'); },
-      markup: () => self.view === 'permissions' ? null : MARKUP[self.view],
+      markup: () => self.view === 'permissions' || self.mode === 'denied' ? null : MARKUP[self.view],
     };
   }
 }
@@ -147,7 +151,7 @@ test('unit:master-browser-capture-keeps-views — master browser capture keeps t
     for (const forbidden of ['sudo-method', 'sudo-code', 'sudo-fallback', 'fill', 'select', 'setChecked']) assert.ok(!actions.includes(forbidden), `no ${forbidden} step: the capture confirms nothing`);
     assert.deepEqual(record.steps.filter((step: { action: string }) => step.action === 'confirm-access-capture').map((step: { args: string[] }) => step.args[0]), ['landing', 'passkey', 'authenticator', 'email'], 'each kept view is a recorded step');
     assert.deepEqual(record.steps.filter((step: { action: string }) => step.action === 'capture').map((step: { args: string[] }) => step.args), [['applied', result.reason]], 'the outcome is a recorded step with its reason');
-    assert.deepEqual(record.after, { url: PERMISSIONS, views: ['landing', 'passkey', 'authenticator', 'email'] });
+    assert.deepEqual(record.after, { url: PERMISSIONS, views: ['landing', 'passkey', 'authenticator', 'email'], missed: [] });
     const captures = join(root, result.record, 'confirm-access');
     const files = (await readdir(captures)).sort();
     assert.deepEqual(files, ['confirm-access-authenticator.html', 'confirm-access-email.html', 'confirm-access-landing.html', 'confirm-access-passkey.html'], 'the mobile view is never kept: no prompt was issued');
@@ -176,7 +180,7 @@ test('unit:master-browser-capture-keeps-views — master browser capture keeps t
   } finally { await cleanup(); }
 });
 
-test('unit:master-browser-capture-outcomes — sudo already held, an unreachable page, a signed-out profile and --dry-run each record their outcome and reason as a step, keep no fixture, name the next step and carry the same actor and audit entry; the dry run launches no browser', async () => {
+test('unit:master-browser-capture-outcomes — sudo already held, an unreachable page, a signed-out profile, a profile GitHub denies the page to, an offered view that could not be kept and --dry-run each record their outcome and reason as a step, name the next step and carry the same actor and audit entry; only the kept views become fixtures and the dry run launches no browser', async () => {
   const { root, config, cleanup } = await master();
   try {
     const { readAdministrationLedger } = await browser();
@@ -209,6 +213,27 @@ test('unit:master-browser-capture-outcomes — sudo already held, an unreachable
     assert.deepEqual(outcomeStep(out.record), [['refused', out.result.reason]]);
     await noFixture(out.result.record);
 
+    // A signed-in profile that cannot administer the App: GitHub shows neither Confirm access nor the
+    // permissions page, which is refused by name rather than read as sudo mode already held.
+    const denied = await capture(root, config, new AppPermissionsPage('denied'));
+    assert.equal(denied.result.outcome, 'refused'); assert.equal(denied.result.verified, false);
+    assert.match(denied.result.reason!, /^GitHub showed neither Confirm access nor the App permissions page at https:\/\/github\.com\/settings\/apps; the browser profile Default may not administer the App graphyard-owner-project, and the recorded page shows what it offered instead$/);
+    assert.deepEqual(outcomeStep(denied.record), [['refused', denied.result.reason]]);
+    assert.match(denied.result.next, /^Inspect .*record\.json and its screenshots, then rerun master browser capture$/);
+    await noFixture(denied.result.record);
+
+    // An offered view the capture could not open: the kept views are fixtures, the run is refused
+    // naming the missed one, so a worker is never sent to a fixture set that lacks the view it needs.
+    const partial = await capture(root, config, new AppPermissionsPage('partial'));
+    assert.equal(partial.result.outcome, 'refused'); assert.equal(partial.result.verified, false);
+    assert.equal(partial.result.reason, 'Kept landing, passkey, email but not the offered authenticator view(s); the recorded steps name each failure, so rerun until every offered view is kept');
+    assert.deepEqual(outcomeStep(partial.record), [['refused', partial.result.reason]]);
+    assert.deepEqual(partial.record.after, { url: PERMISSIONS, views: ['landing', 'passkey', 'email'], missed: ['authenticator'] });
+    assert.ok(partial.record.steps.some((step: { action: string; args: string[] }) => step.action === 'sudo-form-capture' && step.args[0] === 'authenticator' && /^failed: agent-browser click failed/.test(step.args[1])), 'the missed view is a recorded failure step');
+    assert.deepEqual(partial.record.confirmAccess.map((capture: { view: string }) => capture.view).sort(), ['email', 'landing', 'passkey']);
+    assert.equal(await exists(join(root, partial.result.record, 'confirm-access', 'confirm-access-authenticator.html')), false, 'no authenticator fixture is written');
+    assert.match(partial.result.next, /^Inspect .*record\.json and its screenshots, then rerun master browser capture$/);
+
     // --dry-run: what would be opened is recorded; no page is opened and no browser launched.
     const dry = new AppPermissionsPage('confirm');
     dry.page = () => ({ ...new AppPermissionsPage('confirm').page(), open: () => assert.fail('a dry run opens no page') });
@@ -226,8 +251,11 @@ test('unit:master-browser-capture-outcomes — sudo already held, an unreachable
     // Every run carries the same actor, profile and audit entry as the administrative flows.
     const ledger = await readAdministrationLedger(root);
     assert.deepEqual(ledger.entries.map(entry => [entry.flow, entry.outcome, entry.actor.profile, entry.actor.coordinator, entry.sudo]),
-      [['capture', 'unchanged', 'Default', 'master', null], ['capture', 'refused', 'Default', 'master', null], ['capture', 'refused', 'Default', 'master', null], ['capture', 'unchanged', 'Default', 'master', null], ['capture', 'unchanged', 'Default', 'master', null]]);
+      [['capture', 'unchanged', 'Default', 'master', null], ['capture', 'refused', 'Default', 'master', null], ['capture', 'refused', 'Default', 'master', null], ['capture', 'refused', 'Default', 'master', null], ['capture', 'refused', 'Default', 'master', null], ['capture', 'unchanged', 'Default', 'master', null], ['capture', 'unchanged', 'Default', 'master', null]]);
     for (const entry of ledger.entries) assert.deepEqual(entry.target, { repository: 'owner/project', appId: 1234, slug: SLUG, installationId: 91011 });
-    assert.deepEqual(await fleet(root, ['fixtures']), { fixtures: [], latest: {}, total: 0 }, 'no outcome without a Confirm-access page lists a fixture');
+    // Only the partial capture kept any view; every outcome without a Confirm-access page lists none.
+    const fixtures = await fleet(root, ['fixtures']);
+    assert.deepEqual(fixtures.fixtures.map((fixture: { view: string; flow: string }) => [fixture.flow, fixture.view]).sort(), [['capture', 'email'], ['capture', 'landing'], ['capture', 'passkey']], 'the kept views of the partial capture are listed, the missed one is not');
+    assert.equal(fixtures.total, 3); assert.deepEqual(Object.keys(fixtures.latest).sort(), ['email', 'landing', 'passkey']);
   } finally { await cleanup(); }
 });

@@ -885,15 +885,27 @@ export async function runBrowserFlow(root: string, config: MasterConfig, flow: B
         if (!browserLogin && /github\.com\/login\b/.test(page.url())) throw new Error(`The browser profile ${config.browser.profile} is not signed in to GitHub; sign in once in that profile, then rerun master browser capture`);
         const current = page.url(), text = page.text();
         if (!detectSudo(current, text).sudo) {
+          // No Confirm access proves sudo is held only when the page asked for actually loaded: a
+          // profile that cannot administer the App lands on a not-found or access-denied page instead.
+          if (current.split(/[?#]/)[0] !== url || !/\bpermissions\b/i.test(text)) throw new Error(`GitHub showed neither Confirm access nor the App permissions page at ${current}; the browser profile ${config.browser.profile} may not administer the App ${installation.slug}, and the recorded page shows what it offered instead`);
           outcome = 'unchanged'; verified = true; reason = `GitHub showed no Confirm access at ${current}: the profile's session already holds sudo mode, so there is no view to keep`;
           page.note?.('capture', ['none', reason]);
         } else {
+          // The views the page offers are judged exactly as captureSudoForms chooses which to follow;
+          // the passkey view falls back to the landing form, so the landing alone keeps it.
+          const offered = offeredSudoMethods(text);
+          const expected = ['landing', ...(['passkey', 'authenticator', 'email'] as const).filter(view => offered[view] || sudoViewLinks[view].some(label => text.toLowerCase().includes(label.toLowerCase())))];
           sudoForms.push(...await captureSudoForms(page, directory, { now, onCapture: saved }));
           const kept: string[] = [];
           for (const capture of confirmAccess) { try { await stat(resolve(directory, capture.file)); kept.push(capture.view); } catch { /* its capture step records the failure */ } }
-          after = { url: current, views: kept };
-          verified = kept.includes('landing'); outcome = kept.length ? 'applied' : 'refused';
-          reason = kept.length ? `Kept ${kept.length} Confirm-access view(s) as redacted markup: ${kept.join(', ')}` : 'The Confirm-access page offered no view the capture could keep; its recorded steps name each failure';
+          const missed = expected.filter(view => !kept.includes(view));
+          after = { url: current, views: kept, missed };
+          // A view the page offered but the capture could not keep is a failed capture, never a
+          // success a worker is sent to: the fixture it needs may be the one that is absent.
+          verified = !missed.length; outcome = verified ? 'applied' : 'refused';
+          reason = verified ? `Kept ${kept.length} Confirm-access view(s) as redacted markup: ${kept.join(', ')}`
+            : kept.length ? `Kept ${kept.join(', ')} but not the offered ${missed.join(', ')} view(s); the recorded steps name each failure, so rerun until every offered view is kept`
+              : 'The Confirm-access page offered no view the capture could keep; its recorded steps name each failure';
           page.note?.('capture', [outcome, reason]);
         }
       }
