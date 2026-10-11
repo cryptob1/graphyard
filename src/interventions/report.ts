@@ -12,7 +12,7 @@ const deliveredAt = (item: Work) => item.stage === 'done' && !item.closure ? ite
 const stageKey = (stage: Stage | null): Stage | 'none' => stage ?? 'none';
 
 /** The report over a window ending now (AC-2): what the product made people do by hand, and where. */
-/** `reach`: where the fold's ledger read began (`ledger.since`), the start of the under-threshold reading; the report window's start when unstated. */
+/** `reach`: where the record the fold read is whole (`ledger.reach`), which the under-threshold reading reads from; the report window's start when unstated. */
 export function computeInterventionReport(folded: { interventions: Intervention[]; judgements: Judgement[] }, work: readonly Work[], policy: InterventionPolicy, options: { days: InterventionWindow; now: string; kind?: InterventionKind | null; stage?: Stage | null; work?: string | null; reach?: string | null }): InterventionReport {
   const to = options.now, from = new Date(Date.parse(to) - options.days * day).toISOString();
   const inWindow = (intervention: Intervention) => intervention.requestedAt < to && (intervention.resolvedAt === null || intervention.resolvedAt >= from);
@@ -50,6 +50,7 @@ export function computeInterventionReport(folded: { interventions: Intervention[
   const reworkRoundsOf = (entry: Intervention) => { const item = entry.work ? byId.get(entry.work.id) as (Work & { pipeline?: PipelineTimeline }) | undefined : undefined; return item ? item.pipeline?.reworkRounds ?? 0 : null; };
   const reach = options.reach ?? from;
   // The pair's every instance inside the reach, linked or not, for the under-threshold reading (AC-2): one pass over the fold.
+  // The reading establishes itself one policy window past the reach (`underThreshold`): the instances before the reach were not read.
   const inReach = new Map<string, Intervention[]>();
   for (const entry of folded.interventions) {
     if (entry.requestedAt < reach || entry.requestedAt >= to) continue;
@@ -110,29 +111,46 @@ export function computeInterventionReport(folded: { interventions: Intervention[
  * GY-1682 AC-2: the pair's every instance inside the reach — linked to an item or not — against the
  * threshold over every rolling window of the policy's days, by one sweep of their entries and exits
  * (an instance is inside the window [t − days, t) from its instant until `days` later; one leaving
- * at the instant another arrives has left). The reading is exact over the instances the fold holds:
- * the instances' instants are fixed, so the count at every instant between them is known, and so is
- * the instant the window next falls under the threshold if nothing further is recorded (`projected`).
+ * at the instant another arrives has left). The reading is exact over the windows the record
+ * establishes: the record is whole from `reach` on, and the instances before it were not read, so a
+ * window reaching before the reach may hold instances the sweep never saw, and the count at any
+ * instant before `reach + days` is a floor, not a reading. The reading is established from that
+ * instant on (`established`): the streak begins no earlier, the peak is the most one established
+ * window held, and the instant the streak would begin if nothing further is recorded (`projected`)
+ * is never before it. A floor at or past the threshold is a crossing all the same, so the streak
+ * has not begun while the instances the record holds are at or past it; a floor under it proves
+ * nothing, and while `established` lies past `now` the reading says so: `since` null, `projected`
+ * where the streak would begin, `peak` 0. The instances' instants are fixed, so the count at every
+ * established instant is known, and so is the instant the window next falls under the threshold if
+ * nothing further is recorded.
  */
 export function underThreshold(instances: readonly Intervention[], policy: InterventionPolicy, reach: string, now: string): UnderThreshold {
-  const windowMs = policy.windowDays * day, end = Date.parse(now), start = Date.parse(reach);
+  const windowMs = policy.windowDays * day, end = Date.parse(now), established = Date.parse(reach) + windowMs;
   // An instance recorded at or after `now` is not on the record yet; the recorded ones' exits past now are kept for `projected`.
   const events = instances.map(entry => Date.parse(entry.requestedAt)).filter(at => at < end).flatMap(at => [{ at, delta: 1 }, { at: at + windowMs, delta: -1 }])
     .sort((a, b) => a.at - b.at || a.delta - b.delta);
-  let count = 0, peak = 0, since: number | null = start, projected: number | null = null;
-  for (const event of events) {
+  const recorded = events.filter(event => event.at < end), later = events.filter(event => event.at >= end);
+  // `under`: the instant from which the count has held under the threshold, no earlier than the reading is established; null while at or past it.
+  let count = 0, peak = 0, under: number | null = established, sampled = false;
+  for (const event of recorded) {
+    // The count at `established` itself is the count before the first event past it: an established window with no event of its own.
+    if (!sampled && event.at > established) { sampled = true; peak = Math.max(peak, count); }
     count += event.delta;
-    if (event.at >= end) {
-      // Past now the recorded instances only leave: the first drop under the threshold is where the streak would begin.
-      if (since === null && projected === null && count < policy.threshold) projected = event.at;
-      continue;
-    }
-    if (event.at >= start) peak = Math.max(peak, count);
-    // At or past the threshold, the streak has not begun; the first drop under it afterwards begins it.
-    if (count >= policy.threshold) since = null;
-    else if (since === null) since = Math.max(event.at, start);
+    if (event.at >= established) peak = Math.max(peak, count);
+    // At or past the threshold, the streak has not begun; the first drop under it afterwards begins it, once the reading is established.
+    if (count >= policy.threshold) under = null;
+    else if (under === null) under = Math.max(event.at, established);
   }
-  return { since: since === null ? null : new Date(since).toISOString(), days: since === null ? 0 : Math.floor((end - since) / day), holdDays: patternHoldDays, peak, projected: projected === null ? null : new Date(projected).toISOString(), reach };
+  if (!sampled && established <= end) peak = Math.max(peak, count);
+  const since = under !== null && established <= end ? under : null;
+  let projected: number | null = null;
+  if (since === null) {
+    // Under the threshold but not yet established: the streak begins when the reading is. At or past it: past now the
+    // recorded instances only leave, and the first drop under the threshold, once established, is where the streak would begin.
+    if (count < policy.threshold) projected = established;
+    else for (const event of later) { count += event.delta; if (count < policy.threshold) { projected = Math.max(event.at, established); break; } }
+  }
+  return { since: since === null ? null : new Date(since).toISOString(), days: since === null ? 0 : Math.floor((end - since) / day), holdDays: patternHoldDays, peak, projected: projected === null ? null : new Date(projected).toISOString(), reach, established: new Date(established).toISOString() };
 }
 
 /**
@@ -207,6 +225,8 @@ export async function readInterventionReport(store: Store, policy: InterventionP
  * not; past any instant the cut shares, and never a retained row's own earlier `updatedAt`, which
  * omitted rows may follow), and no earlier than the read — later is a shorter streak, never a
  * false one. A read that retained no row holds no record to read, and the reading begins now.
+ * Either way the reading establishes itself one policy window later (`underThreshold`): the rows
+ * before the reach, cut or never read, may still belong to the windows that reach before it.
  */
 export function ledgerReach(retainedFrom: string | null, truncated: boolean, since: string, now: string): string {
   if (!truncated) return since;

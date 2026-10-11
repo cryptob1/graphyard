@@ -180,20 +180,25 @@ export function patternCause(kind: InterventionKind, trigger: string | null | un
   return trigger === 'operator-widening' ? 'triage-scope-decision' : null;
 }
 /**
- * GY-1682: the pair against its threshold over every rolling window inside the ledger's reach, so
- * the days a pattern has stayed under the rule are read off the row rather than asserted. It counts
+ * GY-1682: the pair against its threshold over every rolling window the ledger's reach establishes,
+ * so the days a pattern has stayed under the rule are read off the row rather than asserted. It counts
  * every instance of the pair, linked to an item or not: linking an instance owns it, it does not undo
- * the intervention, and the rate the rule judges is the rate people were made to intervene at. `since`
- * is the instant from which every rolling window of the policy's days held fewer instances than the
- * threshold — the reach's start when none ever crossed, null while the current window is at or past
- * it — `days` the whole days since then, `holdDays` the days the pair must hold before its pattern
- * is read as under the rule (patternHoldDays), `peak` the most one window held, `projected` the
- * instant the current window falls under the threshold if no further instance is recorded (fixed by
- * the recorded instants; null once `since` is set), and `reach` where the reading begins: an
- * instance recorded before it is outside the report, so the reading never claims more than the rows
- * it read. The days themselves pass on the serving release; the reading says how many have.
+ * the intervention, and the rate the rule judges is the rate people were made to intervene at. `reach`
+ * is where the record the reading reads is whole: an instance recorded before it is outside the
+ * report. A rolling window of the policy's days is whole only once every instant it spans lies inside
+ * the record, so the reading is established from `established` — the reach plus the policy's window —
+ * and never claims a window the omitted rows before the reach may still belong to. `since` is the
+ * instant from which every rolling window held fewer instances than the threshold — `established`
+ * when none ever crossed, null while the current window is at or past it, and null while
+ * `established` lies past the report's own instant (no window is whole yet; the row's count still says
+ * what the record shows) — `days` the whole days since then, `holdDays` the days the pair must hold
+ * before its pattern is read as under the rule (patternHoldDays), `peak` the most one established
+ * window held, and `projected` the instant the streak would begin if no further instance is recorded:
+ * when the current window is under the threshold but not yet whole, `established`; when it is at or
+ * past the threshold, the instant it falls under it, fixed by the recorded instants (null once `since`
+ * is set). The days themselves pass on the serving release; the reading says how many have.
  */
-export interface UnderThreshold { since: string | null; days: number; holdDays: number; peak: number; projected: string | null; reach: string }
+export interface UnderThreshold { since: string | null; days: number; holdDays: number; peak: number; projected: string | null; reach: string; established: string }
 /** The consecutive days a pair must hold under the threshold in every rolling window before its pattern item's reading is met (GY-1682 AC-2). */
 export const patternHoldDays = 14;
 

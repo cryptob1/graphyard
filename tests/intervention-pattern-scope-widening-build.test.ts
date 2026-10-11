@@ -330,11 +330,46 @@ test('manual:intervention-pattern-within-threshold — a truncated ledger read b
   assert.equal(ledgerReach('2026-09-11T01:10:49.000Z', true, since, reportAt), since);
   assert.equal(ledgerReach('2026-09-10T02:00:00.000Z', true, since, reportAt), since);
   // Read at the truncated reach, the row's reading begins there and claims nothing earlier: the instances before it are not the record's, and the reading says where it reads from.
-  const truncatedReach = '2026-10-08T00:00:00.000Z';
+  // The 17 instances before the reach still belong to every rolling window reaching before it, so the reading is established only a policy
+  // window past the reach (2026-10-15T00:00Z): at the report no window is whole, the reading says so rather than reading the three retained
+  // instances as the whole count, and the streak begins at the first established instant the recorded count is under 3 — when GY-1520's leaves.
+  const truncatedReach = '2026-10-08T00:00:00.000Z', truncatedEstablished = '2026-10-15T00:00:00.000Z';
   const truncatedRow = buildRow(report(fleet, reportAt, { reach: truncatedReach }))!;
-  assert.deepEqual(truncatedRow.underThreshold, { since: null, days: 0, holdDays: 14, peak: 3, projected: '2026-10-15T10:32:39.087Z', reach: truncatedReach }, 'the three instances recorded since the reach are at the threshold now; the 17 before it are not read');
-  assert.deepEqual(buildRow(report(fleet, '2026-10-15T10:32:39.088Z', { reach: truncatedReach }))!.underThreshold, { since: '2026-10-15T10:32:39.087Z', days: 0, holdDays: 14, peak: 3, projected: null, reach: truncatedReach });
+  assert.deepEqual(truncatedRow.underThreshold, { since: null, days: 0, holdDays: 14, peak: 0, projected: '2026-10-15T10:32:39.087Z', reach: truncatedReach, established: truncatedEstablished }, 'no window is whole yet; the three instances recorded since the reach and the 17 before it are not a reading');
+  assert.deepEqual(buildRow(report(fleet, '2026-10-15T00:00:00.000Z', { reach: truncatedReach }))!.underThreshold, { since: null, days: 0, holdDays: 14, peak: 3, projected: '2026-10-15T10:32:39.087Z', reach: truncatedReach, established: truncatedEstablished }, 'the first whole window holds the three retained instances: at the threshold');
+  assert.deepEqual(buildRow(report(fleet, '2026-10-15T10:32:39.088Z', { reach: truncatedReach }))!.underThreshold, { since: '2026-10-15T10:32:39.087Z', days: 0, holdDays: 14, peak: 3, projected: null, reach: truncatedReach, established: truncatedEstablished });
   assert.ok(underThreshold(interventions.filter(entry => entry.requestedAt >= truncatedReach), policy, truncatedReach, '2026-10-29T10:32:39.087Z').days <= underThreshold(interventions, policy, ledgerSince, '2026-10-29T10:32:39.087Z').days, 'a later reach never lengthens the streak');
+});
+
+test('manual:intervention-pattern-within-threshold — a truncated read never reads the windows the omitted instances may still belong to: the streak begins no earlier than one policy window past the reach, and until then the reading says no window is whole', () => {
+  // graphyard-reviewer on PR #1115 (src/interventions/report.ts:55,117, head 0329d99533aa): two scope widenings omitted just before the cutoff
+  // and one retained just after it are three in one rolling window — at the threshold — but a reading that began at the cutoff with
+  // count 0 read them as one, and after 14 days reported a streak only the last seven of which the record established.
+  const cut = '2026-10-10T12:00:00.000Z', whole = '2026-10-17T12:00:00.000Z';
+  const omitted = [instance(['GY-O1', 2470000, '2026-10-10T11:58:00.000Z', 'refused-by-loop', null]), instance(['GY-O2', 2470001, '2026-10-10T11:59:00.000Z', 'refused-by-loop', null])];
+  const retained = [instance(['GY-R1', 2470002, '2026-10-10T12:01:00.000Z', 'refused-by-loop', null])];
+  // What the record truly holds at the threshold: read whole, the window is at 3 from GY-R1's instant until GY-O1's leaves.
+  assert.deepEqual(underThreshold([...omitted, ...retained], policy, '2026-10-03T12:00:00.000Z', '2026-10-11T00:00:00.000Z'),
+    { since: null, days: 0, holdDays: 14, peak: 3, projected: '2026-10-17T11:58:00.000Z', reach: '2026-10-03T12:00:00.000Z', established: '2026-10-10T12:00:00.000Z' });
+  // Read from the cut, the one retained instance is a floor under the threshold, which proves nothing: no window is whole before `whole`.
+  const atCut = (now: string) => underThreshold(retained, policy, cut, now);
+  assert.deepEqual(atCut('2026-10-11T00:00:00.000Z'), { since: null, days: 0, holdDays: 14, peak: 0, projected: whole, reach: cut, established: whole }, 'the streak would begin when the reading is established, not at the cut');
+  assert.deepEqual(atCut('2026-10-17T11:59:59.999Z'), { since: null, days: 0, holdDays: 14, peak: 0, projected: whole, reach: cut, established: whole }, 'not yet whole a millisecond before');
+  assert.deepEqual(atCut(whole), { since: whole, days: 0, holdDays: 14, peak: 1, projected: null, reach: cut, established: whole }, 'the first whole window holds the retained instance alone');
+  assert.deepEqual(atCut('2026-10-24T12:00:00.000Z'), { since: whole, days: 7, holdDays: 14, peak: 1, projected: null, reach: cut, established: whole });
+  assert.deepEqual(atCut('2026-10-31T12:00:00.000Z'), { since: whole, days: 14, holdDays: 14, peak: 1, projected: null, reach: cut, established: whole }, '14 days are read only once 14 established days have passed: 21 after the cut');
+  assert.equal(atCut('2026-10-24T11:59:59.999Z').days, 6, 'a reading that began at the cut would have read 13 here');
+  // Three retained just after the cut are a floor at the threshold, which is a crossing whatever was omitted: the streak begins at the first established drop under it.
+  const three = [retained[0], instance(['GY-R2', 2470003, '2026-10-10T12:02:00.000Z', 'refused-by-loop', null]), instance(['GY-R3', 2470004, '2026-10-10T12:03:00.000Z', 'refused-by-loop', null])];
+  assert.deepEqual(underThreshold(three, policy, cut, '2026-10-11T00:00:00.000Z'), { since: null, days: 0, holdDays: 14, peak: 0, projected: '2026-10-17T12:01:00.000Z', reach: cut, established: whole });
+  assert.deepEqual(underThreshold(three, policy, cut, '2026-10-17T12:00:30.000Z'), { since: null, days: 0, holdDays: 14, peak: 3, projected: '2026-10-17T12:01:00.000Z', reach: cut, established: whole }, 'the first whole window holds all three');
+  assert.deepEqual(underThreshold(three, policy, cut, '2026-10-17T12:01:00.001Z'), { since: '2026-10-17T12:01:00.000Z', days: 0, holdDays: 14, peak: 3, projected: null, reach: cut, established: whole });
+  // A read that retained no row reads from now and establishes nothing for a policy window.
+  assert.deepEqual(underThreshold([], policy, reportAt, reportAt), { since: null, days: 0, holdDays: 14, peak: 0, projected: '2026-10-18T01:10:49.424Z', reach: reportAt, established: '2026-10-18T01:10:49.424Z' });
+  // The board says so, in place of a crossing it cannot read.
+  const data = { ...report(fleet, reportAt, { reach: cut }), ledger: { rows: 0, truncated: true, oldest: null } };
+  assert.match(page(data), /no whole window on the record yet \(read from .*; the reading is established from .*, and the streak begins .* if nothing further is recorded\)/);
+  assert.doesNotMatch(page(data), /at or past the threshold now|under the threshold in every rolling window/);
 });
 
 test('manual:intervention-pattern-within-threshold — the causes and rounds are read against the owning item, and the row reads how long every rolling 7-day window has held under 3 over every counted instance, linked or not, within the ledger\'s reach: the instrument the 14 days are read off, truthful over the record as it stands', async () => {
@@ -354,25 +389,29 @@ test('manual:intervention-pattern-within-threshold — the causes and rounds are
   // has not begun. The recorded instants fix where it would: when GY-1520's instance leaves the window at 2026-10-15T10:32:39.087Z, only
   // GY-1617's and GY-1675's remain, if nothing further is recorded.
   const streakFrom = '2026-10-15T10:32:39.087Z';
-  assert.deepEqual(row.underThreshold, { since: null, days: 0, holdDays: 14, peak: 20, projected: streakFrom, reach: ledgerSince });
+  // The reading is established one policy window past the reach, 2026-10-11T00:00Z: the windows before it reach before the read.
+  const established = '2026-10-11T00:00:00.000Z';
+  assert.deepEqual(row.underThreshold, { since: null, days: 0, holdDays: 14, peak: 20, projected: streakFrom, reach: ledgerSince, established });
   assert.deepEqual(buildRow(report([gy1682, record1675, record1617], reportAt, { reach: ledgerSince }))!.underThreshold, row.underThreshold, 'linking changes who owns an instance, never the count the rate is read from');
-  assert.deepEqual(buildRow(report(fleet))!.underThreshold, { ...row.underThreshold, reach: '2026-10-04T01:10:49.424Z' }, 'a 7-day read reads the same over its own reach');
+  assert.deepEqual(buildRow(report(fleet))!.underThreshold, { ...row.underThreshold, reach: '2026-10-04T01:10:49.424Z', established: reportAt }, 'a 7-day read reads the same over its own reach: its one whole window is the current one');
   // The sweep is exact at the edges: the instant the count falls under 3 begins the streak, 14 whole days later the reading is 14.
-  assert.deepEqual(underThreshold(interventions, policy, ledgerSince, streakFrom), { since: null, days: 0, holdDays: 14, peak: 20, projected: streakFrom, reach: ledgerSince });
-  assert.deepEqual(underThreshold(interventions, policy, ledgerSince, '2026-10-15T10:32:39.088Z'), { since: streakFrom, days: 0, holdDays: 14, peak: 20, projected: null, reach: ledgerSince });
-  assert.deepEqual(underThreshold(interventions, policy, ledgerSince, '2026-10-29T10:32:39.086Z'), { since: streakFrom, days: 13, holdDays: 14, peak: 20, projected: null, reach: ledgerSince });
-  assert.deepEqual(underThreshold(interventions, policy, ledgerSince, '2026-10-29T10:32:39.087Z'), { since: streakFrom, days: 14, holdDays: 14, peak: 20, projected: null, reach: ledgerSince });
+  assert.deepEqual(underThreshold(interventions, policy, ledgerSince, streakFrom), { since: null, days: 0, holdDays: 14, peak: 20, projected: streakFrom, reach: ledgerSince, established });
+  assert.deepEqual(underThreshold(interventions, policy, ledgerSince, '2026-10-15T10:32:39.088Z'), { since: streakFrom, days: 0, holdDays: 14, peak: 20, projected: null, reach: ledgerSince, established });
+  assert.deepEqual(underThreshold(interventions, policy, ledgerSince, '2026-10-29T10:32:39.086Z'), { since: streakFrom, days: 13, holdDays: 14, peak: 20, projected: null, reach: ledgerSince, established });
+  assert.deepEqual(underThreshold(interventions, policy, ledgerSince, '2026-10-29T10:32:39.087Z'), { since: streakFrom, days: 14, holdDays: 14, peak: 20, projected: null, reach: ledgerSince, established });
   // One further instance under the threshold keeps the streak; two more while GY-1617's and GY-1675's are still inside put the window at 4, and the streak begins again only when it falls under 3.
   const later = (key: string, at: string) => instance([key, 2500000, at, 'refused-by-loop', null]);
-  assert.deepEqual(underThreshold([...interventions, later('GY-A', '2026-10-20T00:00:00.000Z')], policy, ledgerSince, '2026-10-29T10:32:39.087Z'), { since: streakFrom, days: 14, holdDays: 14, peak: 20, projected: null, reach: ledgerSince });
-  assert.deepEqual(underThreshold([...interventions, later('GY-A', '2026-10-16T00:00:00.000Z'), later('GY-B', '2026-10-16T00:00:00.000Z')], policy, ledgerSince, '2026-10-20T00:00:00.000Z'), { since: '2026-10-17T23:12:05.763Z', days: 2, holdDays: 14, peak: 20, projected: null, reach: ledgerSince });
-  assert.deepEqual(underThreshold([...interventions, later('GY-A', '2026-10-16T00:00:00.000Z'), later('GY-B', '2026-10-16T00:00:00.000Z')], policy, ledgerSince, '2026-10-16T12:00:00.000Z'), { since: null, days: 0, holdDays: 14, peak: 20, projected: '2026-10-17T23:12:05.763Z', reach: ledgerSince });
-  assert.deepEqual(underThreshold([], policy, ledgerSince, reportAt), { since: ledgerSince, days: 7, holdDays: 14, peak: 0, projected: null, reach: ledgerSince });
-  assert.deepEqual(underThreshold([later('GY-A', '2026-10-12T00:00:00.000Z')], policy, ledgerSince, reportAt), { since: ledgerSince, days: 7, holdDays: 14, peak: 0, projected: null, reach: ledgerSince }, 'an instance recorded after now is not on the record yet');
+  assert.deepEqual(underThreshold([...interventions, later('GY-A', '2026-10-20T00:00:00.000Z')], policy, ledgerSince, '2026-10-29T10:32:39.087Z'), { since: streakFrom, days: 14, holdDays: 14, peak: 20, projected: null, reach: ledgerSince, established });
+  assert.deepEqual(underThreshold([...interventions, later('GY-A', '2026-10-16T00:00:00.000Z'), later('GY-B', '2026-10-16T00:00:00.000Z')], policy, ledgerSince, '2026-10-20T00:00:00.000Z'), { since: '2026-10-17T23:12:05.763Z', days: 2, holdDays: 14, peak: 20, projected: null, reach: ledgerSince, established });
+  assert.deepEqual(underThreshold([...interventions, later('GY-A', '2026-10-16T00:00:00.000Z'), later('GY-B', '2026-10-16T00:00:00.000Z')], policy, ledgerSince, '2026-10-16T12:00:00.000Z'), { since: null, days: 0, holdDays: 14, peak: 20, projected: '2026-10-17T23:12:05.763Z', reach: ledgerSince, established });
+  // No instance at all: the streak begins when the reading is established, a policy window past the reach, never at the reach.
+  assert.deepEqual(underThreshold([], policy, ledgerSince, reportAt), { since: established, days: 0, holdDays: 14, peak: 0, projected: null, reach: ledgerSince, established });
+  assert.deepEqual(underThreshold([], policy, ledgerSince, '2026-10-18T01:10:49.424Z'), { since: established, days: 7, holdDays: 14, peak: 0, projected: null, reach: ledgerSince, established });
+  assert.deepEqual(underThreshold([later('GY-A', '2026-10-12T00:00:00.000Z')], policy, ledgerSince, reportAt), { since: established, days: 0, holdDays: 14, peak: 0, projected: null, reach: ledgerSince, established }, 'an instance recorded after now is not on the record yet');
   // A third unlinked instance crosses the scan's rule and the row says so; the reading counts it with the rest, and its exit moves where the streak would begin.
   const third = instance(['GY-X', 2480000, '2026-10-10T12:00:00.000Z', 'refused-by-loop', null]);
   const crossedRow = buildRow(report(fleet, reportAt, { reach: ledgerSince, interventions: [...interventions, third] }))!;
-  assert.deepEqual({ unlinked: crossedRow.unlinked, crossed: crossedRow.crossed, work: crossedRow.work?.key, under: crossedRow.underThreshold }, { unlinked: 3, crossed: true, work: 'GY-1682', under: { since: null, days: 0, holdDays: 14, peak: 21, projected: '2026-10-16T23:48:58.838Z', reach: ledgerSince } });
+  assert.deepEqual({ unlinked: crossedRow.unlinked, crossed: crossedRow.crossed, work: crossedRow.work?.key, under: crossedRow.underThreshold }, { unlinked: 3, crossed: true, work: 'GY-1682', under: { since: null, days: 0, holdDays: 14, peak: 21, projected: '2026-10-16T23:48:58.838Z', reach: ledgerSince, established } });
   // The fourteen days themselves are not this test's to show: they pass on the serving release, and the independent producer reads them
   // off GET /api/interventions?window=30 — `underThreshold.days` of `holdDays` on this row — no earlier than 2026-10-29T10:32:39.087Z, and
   // only if no further build-stage scope widening is recorded before then. What this test fixes is what that reading says over the record
@@ -380,6 +419,6 @@ test('manual:intervention-pattern-within-threshold — the causes and rounds are
   assert.equal(buildPattern(fleet, '2026-10-17T23:12:05.764Z'), undefined, 'the last counted instance leaves the 7-day window at 2026-10-17T23:12:05.763Z');
   assert.equal(buildRow(report(fleet, '2026-10-17T23:12:05.764Z')), undefined, 'a 7-day read reaches no instance, so it has no row to read');
   const kept = buildRow(report(fleet, '2026-10-25T01:10:49.424Z', { reach: ledgerSince }))!;
-  assert.deepEqual({ count: kept.count, unlinked: kept.unlinked, work: kept.work, under: kept.underThreshold }, { count: 0, unlinked: 0, work: null, under: { since: streakFrom, days: 9, holdDays: 14, peak: 20, projected: null, reach: ledgerSince } }, 'a 30-day read keeps the reading at count 0');
+  assert.deepEqual({ count: kept.count, unlinked: kept.unlinked, work: kept.work, under: kept.underThreshold }, { count: 0, unlinked: 0, work: null, under: { since: streakFrom, days: 9, holdDays: 14, peak: 20, projected: null, reach: ledgerSince, established } }, 'a 30-day read keeps the reading at count 0');
   assert.deepEqual(await attention(report(fleet, '2026-10-25T01:10:49.424Z', { reach: ledgerSince })), [], 'nothing is owed an item');
 });
