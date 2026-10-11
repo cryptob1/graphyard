@@ -9,14 +9,15 @@ import type { Store } from './store.js';
 
 /**
  * GY-1708: scenario id the capacity fault-class filing cites as `e2e:capacity-limit-redispatch`.
- * Revision 1 ships in this module (`capacityLimitRedispatchRevision`); create and listing resolve
- * it without a separate `graphyard e2e sync`. The matching optional case under `e2e/cases/` stays
+ * Revision 1 ships in this module (`capacityLimitRedispatchRevision`); listing, create and
+ * run-recording materialize it into the scenarios table so filings, e2e sync and case runs work
+ * on a fresh install without a prior sync. The matching optional case under `e2e/cases/` stays
  * the source e2e sync revises later.
  */
 export const capacityLimitRedispatchScenario = 'capacity-limit-redispatch';
 
 /** Query surface used to resolve a scenario revision (pool or a transaction client). */
-type ScenarioDb = { query: (sql: string, params?: unknown[]) => Promise<{ rows: { document: Scenario }[] }> };
+type ScenarioDb = { query: (sql: string, params?: unknown[]) => Promise<{ rows: any[] }> };
 
 /**
  * GY-1708: revision 1 of `capacity-limit-redispatch`, shipped with the release so master create
@@ -60,19 +61,33 @@ export const shippedScenarioRevisions = (): Scenario[] => [capacityLimitRedispat
 export const shippedScenario = (id: string): Scenario | undefined => shippedScenarioRevisions().find(entry => entry.id === id);
 
 /**
+ * Insert every shipped revision that is not yet a row. Listing, create and run-recording call this
+ * so a fresh install has a usable registered revision for sync and `recordCaseRun`, not a virtual
+ * GET-only entry that leaves the table empty (GY-1708 AC-3).
+ */
+export async function ensureShippedScenarios(db: ScenarioDb): Promise<void> {
+  for (const shipped of shippedScenarioRevisions()) {
+    await db.query(
+      'INSERT INTO scenarios(id,revision,document) VALUES($1,$2,$3) ON CONFLICT (id,revision) DO NOTHING',
+      [shipped.id, shipped.revision, JSON.stringify(shipped)],
+    );
+  }
+}
+
+/**
  * Latest revision of `id`: the scenarios table when present, else the shipped revision. When
  * `persist` is set and only the shipped revision exists, it is inserted so create pins a real row
  * without a test-only or operator e2e sync.
  */
 export async function resolveScenario(db: ScenarioDb, id: string, persist?: { at: Date; by: string }): Promise<Scenario | undefined> {
-  const latest = (await db.query('SELECT document FROM scenarios WHERE id=$1 ORDER BY revision DESC LIMIT 1', [id])).rows[0]?.document;
+  const latest = (await db.query('SELECT document FROM scenarios WHERE id=$1 ORDER BY revision DESC LIMIT 1', [id])).rows[0]?.document as Scenario | undefined;
   if (latest) return latest;
   const shipped = shippedScenario(id);
   if (!shipped) return undefined;
   if (!persist) return shipped;
   const document: Scenario = { ...shipped, createdAt: persist.at.toISOString(), createdBy: persist.by };
   await db.query('INSERT INTO scenarios(id,revision,document) VALUES($1,$2,$3) ON CONFLICT (id,revision) DO NOTHING', [document.id, document.revision, JSON.stringify(document)]);
-  return (await db.query('SELECT document FROM scenarios WHERE id=$1 ORDER BY revision DESC LIMIT 1', [id])).rows[0]?.document ?? document;
+  return (await db.query('SELECT document FROM scenarios WHERE id=$1 ORDER BY revision DESC LIMIT 1', [id])).rows[0]?.document as Scenario | undefined ?? document;
 }
 
 export const scenarioSchema = z.object({
@@ -93,12 +108,10 @@ export const scenarioSchema = z.object({
 }).strict();
 export type Scenario = Omit<z.infer<typeof scenarioSchema>, 'expectedRevision'> & { revision: number; hash: string; createdAt: string; createdBy: string };
 export async function scenarios(store: Store): Promise<Scenario[]> {
-  const rows = (await store.pool.query('SELECT document FROM scenarios ORDER BY id,revision DESC')).rows.map(r => r.document as Scenario);
-  const seen = new Set(rows.map(entry => entry.id));
-  // GY-1708: a shipped revision appears in the registry before e2e sync, so filings and the optional
-  // case can observe it on a fresh install.
-  for (const shipped of shippedScenarioRevisions()) if (!seen.has(shipped.id)) rows.push(shipped);
-  return rows.sort((a, b) => a.id.localeCompare(b.id) || b.revision - a.revision);
+  // GY-1708: materialize shipped revisions into the table so GET never advertises a virtual row
+  // that e2e sync would treat as unchanged while leaving recordCaseRun with nothing to look up.
+  await ensureShippedScenarios(store.pool);
+  return (await store.pool.query('SELECT document FROM scenarios ORDER BY id,revision DESC')).rows.map(r => r.document as Scenario);
 }
 /**
  * An operator, or an operator agent holding `e2e:record` (GY-1614): the uat job records a candidate's
@@ -196,6 +209,9 @@ export async function recordCaseRun(store: Store, actor: Principal, id: string, 
   const data = caseRunSchema.parse(input);
   return store.transaction(async (db, now) => {
     if (recorder) await revalidateRecorder(db, now, actor, authorize);
+    // GY-1708: a shipped revision must be a real row before lookup, so a fresh install can record
+    // a case run without a prior sync (or a create that happened to persist it).
+    await ensureShippedScenarios(db);
     const scenario: Scenario | undefined = (await db.query('SELECT document FROM scenarios WHERE id=$1 AND revision=$2', [id, data.revision])).rows[0]?.document;
     if (recorder && scenario) repositoryCase(scenario.runner);
     demand(scenario, `Scenario ${id} has no revision ${data.revision}; run graphyard e2e sync first`, 404);

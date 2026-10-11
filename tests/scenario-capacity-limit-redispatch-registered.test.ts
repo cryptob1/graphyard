@@ -10,16 +10,17 @@ import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import type { Principal, Work } from '../src/model.js';
-import { caseDirectory, loadCases, parseCase, scenarioDefinition } from '../src/e2e/case.js';
+import { caseDirectory, loadCases, parseCase, scenarioDefinition, syncCases } from '../src/e2e/case.js';
 import {
   capacityLimitRedispatchRevision,
   capacityLimitRedispatchScenario,
+  recordCaseRun,
   resolveScenario,
   shippedScenario,
 } from '../src/scenarios.js';
 
-// GY-1708 AC-3: capacity-limit-redispatch ships as revision 1 in src/scenarios.ts so create accepts
-// e2e:capacity-limit-redispatch without a test-only e2e sync (the loop's own filing path).
+// GY-1708 AC-3: capacity-limit-redispatch ships as revision 1 in src/scenarios.ts; listing, create
+// and run-recording materialize it so filings, e2e sync and case runs work without a prior sync.
 
 const operator: Principal = { id: 'operator', role: 'admin' };
 const tokens = new Map([[operator.id, `operator-${'t'.repeat(32)}`]]);
@@ -59,7 +60,7 @@ const api = async (path: string, data?: unknown, key: string = randomUUID()) => 
   return body;
 };
 
-test('unit:scenario-capacity-limit-redispatch-registered — revision 1 ships in src/scenarios.ts and create accepts e2e:capacity-limit-redispatch without e2e sync', async () => {
+test('unit:scenario-capacity-limit-redispatch-registered — revision 1 ships in src/scenarios.ts; listing materializes it; create, sync and run-recording work on a fresh install without a prior sync', async () => {
   const id = capacityLimitRedispatchScenario;
   assert.equal(id, 'capacity-limit-redispatch');
   const shipped = shippedScenario(id);
@@ -89,10 +90,37 @@ test('unit:scenario-capacity-limit-redispatch-registered — revision 1 ships in
   const loaded = (await loadCases(root)).find(entry => entry.definition.id === id);
   assert.ok(loaded, 'loadCases includes the shipped capacity-limit-redispatch case');
 
-  // No syncCases: create must succeed from the shipped revision alone (AC-3).
-  const before = await api('scenarios') as { id: string; revision: number }[];
-  assert.ok(before.some(entry => entry.id === id && entry.revision === 1), 'listing surfaces the shipped revision before sync');
-  assert.equal((await store.pool.query('SELECT 1 FROM scenarios WHERE id=$1', [id])).rowCount, 0, 'the table is empty until create persists the shipped revision');
+  // Fresh install: the table is empty until listing materializes the shipped revision.
+  assert.equal((await store.pool.query('SELECT 1 FROM scenarios WHERE id=$1', [id])).rowCount, 0, 'the table starts empty');
+
+  const listed = await api('scenarios') as { id: string; revision: number; hash: string }[];
+  assert.ok(listed.some(entry => entry.id === id && entry.revision === 1), 'listing surfaces the shipped revision');
+  assert.equal((await store.pool.query('SELECT revision FROM scenarios WHERE id=$1', [id])).rows[0].revision, 1,
+    'listing materializes revision 1 into the scenarios table');
+  assert.equal((await store.pool.query('SELECT document FROM scenarios WHERE id=$1 AND revision=1', [id])).rows[0].document.hash, shipped.hash);
+
+  // e2e sync on a fresh install sees the materialized row and reports unchanged — not a virtual
+  // GET-only match that would leave the table empty.
+  const [synced] = await syncCases(api, [loaded]);
+  assert.deepEqual(synced, { id, revision: 1, change: 'unchanged' });
+  assert.equal((await store.pool.query('SELECT count(*)::int AS n FROM scenarios WHERE id=$1', [id])).rows[0].n, 1);
+
+  // Run recording looks up revision 1 in the table (the path that 404'd on a virtual-only registry).
+  const run = await recordCaseRun(store, operator, id, {
+    revision: 1,
+    runId: `capacity-redispatch-${randomUUID()}`,
+    baseUrl: url,
+    sha: null,
+    environment: 'any',
+    durationMs: 12,
+    outcome: 'pass',
+    executed: 2,
+    failingStep: null,
+  });
+  assert.equal(run.scenarioId, id);
+  assert.equal(run.scenarioRevision, 1);
+  assert.equal(run.result, 'pass');
+  assert.equal(run.run.kind, 'e2e');
 
   await assert.rejects(
     api('work', {
@@ -112,10 +140,47 @@ test('unit:scenario-capacity-limit-redispatch-registered — revision 1 ships in
   assert.equal(pinned.scenarioRequirements[0].proof, `e2e:${id}`);
   assert.equal(pinned.scenarioRequirements[0].revision, 1);
   assert.equal(pinned.scenarioRequirements[0].hash, shipped.hash);
+  assert.equal((await resolveScenario(store.pool, id))!.hash, shipped.hash);
 
-  const persisted = await resolveScenario(store.pool, id);
-  assert.ok(persisted, 'create persisted the shipped revision into the scenarios table');
-  assert.equal(persisted.revision, 1);
-  assert.equal(persisted.hash, shipped.hash);
-  assert.equal((await store.pool.query('SELECT revision FROM scenarios WHERE id=$1', [id])).rows[0].revision, 1);
+  // An edit after materialization revises with expectedRevision 1 (the fresh-install sync path
+  // that used to send expectedRevision 1 against an empty table and get refused).
+  const edited = {
+    ...loaded,
+    definition: { ...loaded.definition, title: `${loaded.definition.title} (edited before next sync)` },
+  };
+  const [revised] = await syncCases(api, [edited]);
+  assert.deepEqual(revised, { id, revision: 2, change: 'revised' });
+});
+
+test('unit:scenario-capacity-limit-redispatch-registered — recordCaseRun materializes a shipped revision when the table is still empty', async () => {
+  const id = capacityLimitRedispatchScenario;
+  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 2708;
+  const database = new EmbeddedPostgres({
+    databaseDir: await temporaryDirectory('scenario-capacity-redispatch-record'),
+    user: 'graphyard', password: 'testing-only', port, persistent: false,
+    onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'],
+  });
+  await database.initialise(); await database.start(); await database.createDatabase('scenario_capacity_redispatch_record');
+  const store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/scenario_capacity_redispatch_record`);
+  try {
+    await store.init();
+    assert.equal((await store.pool.query('SELECT 1 FROM scenarios WHERE id=$1', [id])).rowCount, 0);
+    const run = await recordCaseRun(store, operator, id, {
+      revision: 1,
+      runId: `capacity-redispatch-empty-${randomUUID()}`,
+      baseUrl: 'http://127.0.0.1:9',
+      sha: null,
+      environment: 'any',
+      durationMs: 1,
+      outcome: 'pass',
+      executed: 1,
+      failingStep: null,
+    });
+    assert.equal(run.scenarioRevision, 1);
+    assert.equal((await store.pool.query('SELECT revision FROM scenarios WHERE id=$1', [id])).rows[0].revision, 1,
+      'recordCaseRun materializes revision 1 before looking it up');
+  } finally {
+    await store.close();
+    await database.stop();
+  }
 });
