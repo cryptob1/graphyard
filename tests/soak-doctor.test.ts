@@ -79,11 +79,11 @@ test('unit:soak-invariants-hold — over a simulated day the doctor drops and cl
 
   // The control plane's create route, as the operator-agent post sees it: a 502 while the plane is out, the
   // engine's own 409 for an e2e proof whose scenario nothing registered, else the item, once per idempotency key.
-  const creates: { key: string; title: string; at: number; outcome: string; origin: string | null }[] = [];
+  const creates: { key: string; title: string; at: number; outcome: string; origin: string | null; plannedFiles: string[] }[] = [];
   const created = new Map<string, Work>();
   let next = 100;
   const create = async (input: any, key: string): Promise<Work> => {
-    const log = (outcome: string) => creates.push({ key, title: input.title, at: now, outcome, origin: input.origin?.faultClass?.class ?? null });
+    const log = (outcome: string) => creates.push({ key, title: input.title, at: now, outcome, origin: input.origin?.faultClass?.class ?? null, plannedFiles: [...(input.plannedFiles ?? [])] });
     if (inOutage()) { log('502'); throw new RefusedResponse('Graphyard refused work (502): Application failed to respond', 502, null); }
     const scenario = (input.criteria as { proofs: string[] }[]).flatMap(criterion => criterion.proofs).map(proof => /^e2e:(.+)$/.exec(proof)?.[1]).find(name => name && !registered.has(name));
     if (scenario) { log('409'); throw new RefusedResponse(`Graphyard refused work (409): Register E2E scenario ${scenario} before creating work that requires it`, 409, { error: `Register E2E scenario ${scenario} before creating work that requires it` }); }
@@ -123,7 +123,8 @@ test('unit:soak-invariants-hold — over a simulated day the doctor drops and cl
         const payload: DiagnosisPayload = { subject: given.subject, cause: 'The loaded-revision bound sits at zero headroom for hours: the owed restart only retries while an executor holds a claim',
           evidence: { logLines: [`${iso(now)} graphyard-master: loaded revision ok/bound flipped`], commands: ['graphyard master status — the loaded-revision line stood all day'] }, faultClass: given.faultClass, covering: null, fix: null };
         if (given.subject === refusedFix.key) payload.fix = { title: fixTitle, description: 'The dirty-checkout guard stands for hours while HEAD moves under the running loop.', type: 'bug', priority: 1,
-          criteria: [{ id: 'AC-1', text: 'The loop restarts onto the checkout revision once the guard clears, by a test', proofs: [`e2e:${unregistered.loop}`] }], plannedFiles: ['src/daemon/self-upgrade.ts'] };
+          // Unit proof forces derivePlannedFiles to add its test companion before create refuses the e2e proof.
+          criteria: [{ id: 'AC-1', text: 'The loop restarts onto the checkout revision once the guard clears, by a test', proofs: [`e2e:${unregistered.loop}`, 'unit:dirty-checkout-restart'] }], plannedFiles: ['src/daemon/self-upgrade.ts'] };
         else payload.covering = control.key;
         try { const parsed = options.validate(payload); result = { ok: true, tool: options.tool, payload: parsed, payloads: [parsed] }; }
         catch (error) { result = { ok: false, failure: { reason: 'invalid-payload', detail: String(error) }, payloads: [] }; }
@@ -133,8 +134,16 @@ test('unit:soak-invariants-hold — over a simulated day the doctor drops and cl
   });
   const ledger: { id: string; work: string; action: string; state: string; input: Record<string, any>; approvedBy: string | null; refusal: null; outcome: string | null }[] = [];
   const approvers: { work: string; decision: string; at: number }[] = [];
+  // GY-1707: every fix filing resolves plannedFiles against the base tree; the soak checkout is not a
+  // git worktree, so the diagnostician supplies the tree the loop would read from origin/main.
+  const soakTree = {
+    ref: 'main',
+    files: new Set(['src/daemon/self-upgrade.ts', 'tests/helpers/timing-baseline.json', 'tests/docs-budget.test.ts']),
+  };
+  const treeReads: { branch: string; at: number }[] = [];
   const diagnostician: DiagnosticianEffects = {
     settings, cwd: '/soak/checkout',
+    tree: async branch => { treeReads.push({ branch, at: now }); return { ref: soakTree.ref, files: new Set(soakTree.files) }; },
     runner: async attempt => ({ runner: diagnosisRunner(attempt), runtime: 'pi', model: attempt === 'primary' ? settings.model : settings.fallbackModel }),
     context: async () => ({ journal: [`${iso(now)} graphyard-master: 1 integration job(s) held on a permission shortfall`], serverLog: [`${iso(now)} POST /api/status 200`], pullRequests: [] }),
     file: create,
@@ -186,6 +195,13 @@ test('unit:soak-invariants-hold — over a simulated day the doctor drops and cl
   assert.ok(retried.at(-1)!.at - start >= outage.to, 'and that answer came once the plane was back');
   assert.deepEqual(of(filings.accepted.title).map(entry => entry.outcome), ['created'], 'the accepted filing was filed once');
   assert.deepEqual(of(fixTitle).map(entry => entry.outcome), ['409'], 'the diagnostician\'s refused fix reached create once, never again');
+  // GY-1707: the fix reached create with plannedFiles derived against the soak tree (not the diagnostician's list alone),
+  // and the base-tree lookup ran once for that filing — not every cycle after the entry settled.
+  const refusedCreate = of(fixTitle)[0]!;
+  assert.ok(refusedCreate.plannedFiles.includes('src/daemon/self-upgrade.ts'), 'derived filing keeps the named source file');
+  assert.ok(refusedCreate.plannedFiles.includes('tests/dirty-checkout-restart.test.ts'), 'derived filing carries the unit-proof companion');
+  assert.ok(refusedCreate.plannedFiles.includes('tests/helpers/timing-baseline.json'), 'derived filing carries the timing baseline companion');
+  assert.deepEqual(treeReads.map(entry => entry.branch), ['main'], 'one base-tree read for the one fix filing all day');
   assert.deepEqual(state.doctor.pendingFiles, [], 'nothing stays pending');
   const stable = new Map<string, Set<string>>();
   for (const entry of creates) stable.set(entry.title, new Set([...stable.get(entry.title) ?? [], entry.key]));

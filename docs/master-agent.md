@@ -29,7 +29,7 @@ Per cycle (`daemon.invariants.lines`): `follow-ups-per-parent` (1 open), `linger
 
 ## Research and diagnosis
 
-`Recurring <class>` and `invariant:` faults past `invariantBoundMinutes` get a read-only diagnostician (`run.diagnostician`; none for human-only parks); quota refusals wait until `retryAt` (`daemon.diagnoses`); `stale`/`withdrawn` decisions, stale backlog releases: re-requested ≤3×, then escalated (`decision-stale`); raced, delivered, [plane-wide](operations.md#incident-decision-tree) requests retry faultless; a refused fix `create` is `fix-item`, never re-filed; bound: `overlong-session`/GY-1705; no `loop` fault for restart-lost diagnoses, approver refusals, nor `merge` for base conflicts <30m.
+`Recurring <class>` and `invariant:` faults past `invariantBoundMinutes` get a read-only diagnostician (`run.diagnostician`; none for human-only parks); fix `plannedFiles` as `master create`; quota refusals wait until `retryAt` (`daemon.diagnoses`); `stale`/`withdrawn` decisions, stale backlog releases: re-requested ≤3×, then escalated (`decision-stale`); raced, delivered, [plane-wide](operations.md#incident-decision-tree) requests retry faultless; a refused fix `create` is `fix-item`, never re-filed; bound: `overlong-session`/GY-1705; no `loop` fault for restart-lost diagnoses, approver refusals, nor `merge` for base conflicts <30m.
 
 ## Machine-filed backlog
 

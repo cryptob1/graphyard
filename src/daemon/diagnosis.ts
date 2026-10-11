@@ -7,10 +7,12 @@ import { headlessTimeoutLimitCharge, providerLimit, type ExhaustionSignal, type 
 import { isClosed } from '../model/closure.js';
 import { planeWideRefusal } from '../model/blocker-class.js';
 import { closesFaultClass, faultClassMeaning, openFaultClassItem, type FaultClass, type FaultInstance, type FaultKind } from '../model/fault-classes.js';
-import { guardBroadScope } from '../master/autonomy.js';
-import { decisionInput } from '../master/autonomy.js';
+import { derivePlannedFiles, plannedFilesRefusal, scopeExists, type PlannedFilesDerivation } from '../model/planned-files.js';
+import { namedPaths } from '../model/scope.js';
+import { decisionInput, guardBroadScope } from '../master/autonomy.js';
 import type { MasterConfig } from '../master/profiles.js';
 import { recordEnvironmentLog, selectionKey } from '../master/environments.js';
+import { baseTree } from '../cli/planned-files-intent.js';
 import { diagnosisPayloadSchema, diagnosisSettled, diagnosticianSettings, graphyardTools, type DiagnosisPayload, type DiagnosisRecord, type DiagnosticianSettings } from '../runner/payloads.js';
 import { piRunner } from '../runner/pi.js';
 import { registryHeadlessLaunch, registryRunner } from '../runner/roles.js';
@@ -87,6 +89,12 @@ export interface DiagnosticianEffects {
   settings: DiagnosticianSettings;
   /** The repository checkout the diagnostician reads: the loop's own. */
   cwd: string;
+  /**
+   * The base branch's tree the fix item's plannedFiles resolve against before filing (GY-1707).
+   * Absent, the loop reads `cwd` the way `master create` does (`baseTree`); an unreadable checkout
+   * fails the same way. Fix-producing fixtures supply this effect rather than inventing a tree.
+   */
+  tree?: (baseBranch: string) => Promise<{ ref: string; files: Set<string> }>;
   /** The primary run's runner (the registry's role, else Pi on `model`), or the fallback's (Pi on `fallbackModel`). */
   runner: (attempt: 'primary' | 'fallback', subject: DiagnosisSubject) => Promise<DiagnosticianRun>;
   /** The loop journal and server log excerpts and the GitHub state of the named pull requests. */
@@ -324,8 +332,83 @@ const diagnosisKey = (subject: string) => `diagnosis:${createHash('sha256').upda
 /** How long past its bound a run recorded as running, with no run in this process, is waited for before it is recorded as lost. */
 export const diagnosisLostGraceMs = 5 * 60_000;
 
-/** The fix item as `master create` would file it: the create schema's checks and the broad-scope guard, unflagged. */
-export function fixItem(entry: Pick<DiagnosisRecord, 'subject' | 'kind' | 'work'>, diagnosis: DiagnosisPayload): FixInput {
+/**
+ * The base tree a fix filing resolves against (GY-1707): the diagnostician's `tree` effect when
+ * supplied, else a real `baseTree` read of `cwd` — the same read `master create` uses. An
+ * unreadable checkout throws; there is no synthetic tree from the diagnosis's own paths.
+ */
+async function filingTree(diagnostician: DiagnosticianEffects, baseBranch: string) {
+  if (diagnostician.tree) return diagnostician.tree(baseBranch);
+  return baseTree(diagnostician.cwd, baseBranch);
+}
+
+/** A test path's directory, stem and suffix, or null. */
+const testStemParts = (path: string) => {
+  const match = /^((?:[^/]+\/)*)([^/]+?)(\.(?:test|spec)\.[cm]?[jt]sx?)$/.exec(path);
+  return match ? { directory: match[1], stem: match[2], suffix: match[3] } : null;
+};
+/**
+ * The base-tree test whose stem is a hyphenated prefix of a proof-named companion (GY-1700's
+ * `tests/webhook-soft-accept.test.ts` beside `unit:webhook-soft-accept-no-5xx`), or null when the
+ * named path already resolves or no shorter vehicle exists on the base.
+ */
+function existingProofVehicle(named: string, tree: ReadonlySet<string>): string | null {
+  if (tree.has(named)) return null;
+  const parts = testStemParts(named);
+  if (!parts) return null;
+  let best: string | null = null;
+  for (const file of tree) {
+    const candidate = testStemParts(file);
+    if (!candidate || candidate.directory !== parts.directory || candidate.suffix !== parts.suffix) continue;
+    if (parts.stem.startsWith(`${candidate.stem}-`) && (!best || file < best)) best = file;
+  }
+  return best;
+}
+
+/**
+ * GY-1707: plannedFiles for a fix item the loop files from a diagnosis — the same derivation
+ * `master create` applies (base-tree resolution, criteria-named tree files, planned companions),
+ * plus the paths the diagnosis cause names that resolve in the tree when the subject is a
+ * recurring-fault item (the cause is that item's own requirement, not prose). When a proof
+ * companion invents a longer stem than a test the base already holds, that existing vehicle is
+ * planned instead (GY-1700) — except a path the diagnosis itself planned stays as filed, so a
+ * criterion that creates a longer new test is not rewritten to the shorter neighbour. Short-suffix
+ * proof companions that `derivePlannedFiles` would refuse as misnamed (e.g. `unit:orphan-supervisor-x`
+ * beside `tests/orphan-supervisor.test.ts`) are remapped to that vehicle before the refusal runs.
+ * A path the tree does not hold and no criterion describes creating is refused with
+ * `plannedFilesRefusal`.
+ */
+export function deriveDiagnosisFixPlannedFiles(
+  input: { plannedFiles?: readonly string[]; criteria: readonly { id: string; text: string; proofs?: readonly string[] }[]; cause?: string; kind?: 'recurring' | 'invariant' },
+  tree: ReadonlySet<string>,
+  base: string,
+): PlannedFilesDerivation {
+  const explicit = new Set(input.plannedFiles ?? []);
+  const causeNamed = input.kind === 'recurring' && input.cause
+    ? namedPaths(input.cause).filter(path => scopeExists(path, tree))
+    : [];
+  const derived = derivePlannedFiles({ plannedFiles: [...new Set([...explicit, ...causeNamed])], criteria: input.criteria }, tree);
+  const vehicleFor = (path: string) => (explicit.has(path) ? null : existingProofVehicle(path, tree));
+  // Remap before refusing: a short-suffix proof companion lands in `missing` as misnamed, and must
+  // become its existing vehicle rather than permanently failing the diagnosis (Codex PRRT on work.ts).
+  const rescued = new Map<string, string>();
+  for (const path of [...derived.plannedFiles, ...derived.missing]) {
+    const vehicle = vehicleFor(path);
+    if (vehicle) rescued.set(path, vehicle);
+  }
+  const missing = derived.missing.filter(path => !rescued.has(path));
+  const misnamed = derived.misnamed.filter(entry => missing.includes(entry.path));
+  if (missing.length) throw new Error(plannedFilesRefusal(missing, base, misnamed));
+  const plannedFiles = [...new Set([
+    ...derived.plannedFiles.map(path => rescued.get(path) ?? path),
+    ...[...rescued.values()],
+  ])];
+  return { ...derived, plannedFiles, missing, misnamed };
+}
+
+/** The fix item as `master create` would file it (GY-1707): schema, broad-scope guard, and plannedFiles derived against the base tree — never the diagnostician's list verbatim. */
+export function fixItem(entry: Pick<DiagnosisRecord, 'subject' | 'kind' | 'work'>, diagnosis: DiagnosisPayload,
+  tree: { ref: string; files: ReadonlySet<string> }): FixInput {
   const fix = diagnosis.fix!;
   const answers = entry.kind === 'recurring' ? `the recurring-fault item ${entry.work}` : `the invariant violation ${entry.subject}`;
   const description = clip([
@@ -333,7 +416,9 @@ export function fixItem(entry: Pick<DiagnosisRecord, 'subject' | 'kind' | 'work'
     `Filed by the master loop from the diagnostician's diagnosis of ${answers} (GY-439). Cause: ${diagnosis.cause}`,
     `Evidence:\n${[...diagnosis.evidence.logLines.map(line => `- log: ${line}`), ...diagnosis.evidence.commands.map(line => `- ran: ${line}`)].join('\n')}`,
   ].join('\n\n'), 20_000);
-  const input = createSchema.parse({ title: fix.title, description, type: fix.type, priority: fix.priority, criteria: fix.criteria, plannedFiles: fix.plannedFiles });
+  const derived = deriveDiagnosisFixPlannedFiles(
+    { plannedFiles: fix.plannedFiles, criteria: fix.criteria, cause: diagnosis.cause, kind: entry.kind }, tree.files, tree.ref);
+  const input = createSchema.parse({ title: fix.title, description, type: fix.type, priority: fix.priority, criteria: fix.criteria, plannedFiles: derived.plannedFiles });
   const reason = guardBroadScope(input, `The diagnostician found the root cause of ${answers}: ${clip(diagnosis.cause, 1500)}`, { allow: false, command: 'master create' });
   return { ...input, reason };
 }
@@ -467,7 +552,10 @@ async function advance(cycle: Cycle, diagnostician: DiagnosticianEffects, entry:
         `${entry.work} recurs from a cause ${covering.key} already covers, so it is closed as its duplicate. Diagnosis: ${diagnosis.cause}`, note);
     }
     let input: FixInput;
-    try { input = fixItem(entry, diagnosis); }
+    try {
+      const tree = await filingTree(diagnostician, cycle.config.baseBranch);
+      input = fixItem(entry, diagnosis, tree);
+    }
     catch (error) { entry.state = 'failed'; await note(entry, 'failed', `The diagnostician's fix item for ${entry.subject} fails the checks master create applies: ${message(error)}`, 'fix-item'); return; }
     let fix: Work;
     try { fix = await diagnostician.file(input, `${diagnosisKey(entry.subject)}:fix`); }

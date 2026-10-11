@@ -169,7 +169,10 @@ function diagnosisWorld(proof: string) {
     const result: RunResult<T> = { ok: true, tool: options.tool, payload: parsed, payloads: [parsed] };
     return { id: 'run', events: [], onEvent: () => () => {}, cancel() {}, result: async () => result };
   } };
-  const diagnostician: DiagnosticianEffects = { settings, cwd: '/checkout/project', runner: async () => ({ runner, runtime: 'pi', model: settings.model }),
+  const diagnostician: DiagnosticianEffects = { settings, cwd: '/checkout/project',
+    // GY-1707: fix filing derives against this tree; a nonexistent cwd must not invent one.
+    tree: async () => ({ ref: 'main', files: new Set(['src/merge-queue.ts', 'tests/refresh.test.ts', 'tests/helpers/timing-baseline.json', 'tests/docs-budget.test.ts']) }),
+    runner: async () => ({ runner, runtime: 'pi', model: settings.model }),
     context: async () => ({ journal: [], serverLog: [], pullRequests: [] }),
     file: async input => { const filed = backlog('GY-201', { title: input.title, criteria: input.criteria, plannedFiles: input.plannedFiles } as Partial<Work>); work.push(filed); return filed; },
     decide: async (target, action) => { const id = `decision-${ledger.length + 1}`; ledger.push({ id, work: target.key, action, state: 'requested', input: { expectedRevision: target.revision }, requestedAt: iso(now - gy1402Clock), outcome: null, approvedBy: null }); return { id }; } };
