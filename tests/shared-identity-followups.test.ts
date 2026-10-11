@@ -1,8 +1,11 @@
 import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import * as environments from '../src/master/environments.js';
 import { heldTwin, observedExhaustions, providerIdentity, recordObservedExhaustion, reportPendingExhaustions, selectAccount, type ObservedExhaustion } from '../src/master/environments.js';
@@ -12,7 +15,7 @@ import { acceptanceEffects } from '../src/daemon/acceptance.js';
 import { doctorEffects } from '../src/daemon/doctor.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { claudeHomes as loopHomes, controlPlane, heldAccountLoop, loopConfig, registryOf as loopRegistryOf } from './helpers/held-account-loop.js';
-import { clock, minute } from './helpers/soak-world.js';
+import { clock, hour, minute } from './helpers/soak-world.js';
 
 /**
  * GY-1574: follow-ups from GY-1573's shared-identity holds. An operator quota mark naming identity
@@ -20,18 +23,28 @@ import { clock, minute } from './helpers/soak-world.js';
  * judged by its own home; a hold the registry missed is retried at once and every cycle until it
  * lands, a pre-upgrade hold is resent with its login kept on it first, a reset already past holds
  * nothing beyond the fallback hour, and every narrow role's selection reports what this host holds.
+ *
+ * GY-1694: every hold, reset and selection here is judged against one clock, `now`. The reset is
+ * derived from it, and Date itself reads it for the whole file (the roles under test and the fake
+ * control plane take no clock argument), so the file's verdict is the same on any calendar day.
  */
 
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 const HOST = 'vishrog';
 const spentAt = Date.parse('2026-10-09T05:30:28Z'), now = spentAt + 60_000;
-const resetsAt = new Date(Date.UTC(2026, 9, 11, 5)).toISOString();
+const resetsAt = new Date(now + 47 * hour + 28 * minute + 32_000).toISOString(); // 2026-10-11T05:00Z, the notice's reset, derived from now
 const notice = `You've hit your weekly limit · resets Oct 10, 10pm (America/Los_Angeles)`;
+const untilReset = (text: string) => new RegExp(`^${text}${resetsAt.replace('.', '\\.')}`);
+clock.install(now); // one clock for the file: the code under test and the fakes below read it through Date
 const shared = 'claude:' + 'a'.repeat(32);
-const directories: string[] = [];
-after(async () => { for (const directory of directories) await rm(directory, { recursive: true, force: true }); });
+after(() => clock.uninstall());
 const token = `${'t'.repeat(40)}\n`;
-const scratch = async (name: string) => { const directory = await temporaryDirectory(name); directories.push(directory); return directory; };
+// Every scratch directory lives under one unmarked parent, removed by the helper's after hook. A marked
+// `graphyard-*` directory is judged by its owner's pid, which a sandboxed test's /proc does not share
+// with the host: the host loop's reclaim pass (src/tmp-reclaim.ts) took the loop's hold log away
+// mid-test. An unmarked one is judged by its age alone, and the file is done long before that bound.
+const parent = await temporaryDirectory('graphyard-shared-identity-followups', tmpdir());
+const scratch = (name: string) => temporaryDirectory(name, parent);
 const spent = { at: new Date(spentAt).toISOString(), resetsAt, reason: notice, role: 'worker' as const, profile: 'builder', work: 'GY-1571' };
 type ObserveRequest = { host: string; observations: { account: string; quota: QuotaObservation }[] };
 
@@ -85,7 +98,7 @@ test('unit:quota-mark-explicit-null-identity — an operator quota mark naming i
   const cleared = applyRegistryMutation(kept, 'account.quota', { name: 'claude-a', quota: { state: 'exhausted', resetsAt, identity: null }, reason: 'weekly limit; now an API-key login' }, at).registry;
   assert.equal(account(cleared, 'claude-a').quota.identity, null, 'an explicit null clears it, as the schema states');
   assert.equal(accountIneligibility(cleared, account(cleared, 'claude'), now, HOST), null, 'an account of a former login is not over-held until the reset');
-  assert.match(accountIneligibility(cleared, account(cleared, 'claude-a'), now, HOST)!, /^claude-a quota is exhausted until 2026-10-11T05:00:00\.000Z/, 'the marked account itself stays held');
+  assert.match(accountIneligibility(cleared, account(cleared, 'claude-a'), now, HOST)!, untilReset('claude-a quota is exhausted until '), 'the marked account itself stays held');
 
   // Through the wire schema as well: null is carried, not stripped to "omitted".
   const wire = applyRegistryMutation(kept, 'account.quota', JSON.parse(JSON.stringify({ name: 'claude-a', quota: { state: 'exhausted', resetsAt, identity: null }, reason: 'cleared' })), at).registry;
@@ -247,7 +260,8 @@ test('unit:exhaustion-hold-observe-retried — a transient failure of the immedi
   await recordObservedExhaustion(config, 'claude-a', { ...spent, identity: shared }, now, { registry: flaky });
   assert.equal(calls, 2, 'the failed observe is sent again');
   assert.equal((await observedExhaustions(config, now))['claude-a'].reported, true, 'the hold is delivered, not left for a later selection');
-  assert.match(twinHeld(registry)!, /^claude quota is exhausted until 2026-10-11T05:00:00\.000Z: it is the same provider login as claude-a/, 'the twin on the other host is refused at once');
+  assert.match(twinHeld(registry)!, untilReset('claude quota is exhausted until '), 'the twin on the other host is refused at once');
+  assert.match(twinHeld(registry)!, /: it is the same provider login as claude-a/);
 
   // A registry still down after the retry leaves the hold pending for the loop's next cycle.
   const down = { credentialFile: join(root, 'down.token'), hostId: HOST };
@@ -265,11 +279,10 @@ test('unit:pending-exhaustion-report-retried-across-cycles — under the real lo
   probed(registry.current, HOST, [{ account: 'claude', identity: shared }]);
   const plane = controlPlane(registry), loop = heldAccountLoop(config, root, plane.fetcher);
   const sends = () => plane.observes.filter(observe => observe.accounts.includes('claude-a'));
-  clock.install(now);
   try {
     // claude-a is spent while the control plane is down: the immediate report and its retry both fail.
     plane.mode = 'down';
-    await recordObservedExhaustion({ ...config, environments: [] }, 'claude-a', { ...spent, identity: shared }, Date.now(), { fetch: plane.fetcher });
+    await recordObservedExhaustion({ ...config, environments: [] }, 'claude-a', { ...spent, identity: shared }, clock.now(), { fetch: plane.fetcher });
     assert.equal(sends().length, 2, 'reported at once, and retried at once');
     assert.equal((await observedExhaustions(config))['claude-a'].reported, false);
 
@@ -297,21 +310,21 @@ test('unit:pending-exhaustion-report-retried-across-cycles — under the real lo
     assert.deepEqual(sends().map(observe => observe.delivered), [false, false, false, false, false, true]);
     assert.equal((await observedExhaustions(config))['claude-a'].reported, true);
     assert.equal(account(registry.current, 'claude-a').quota.state, 'exhausted');
-    assert.match(accountIneligibility(registry.current, account(registry.current, 'claude'), Date.now(), HOST)!, /same provider login as claude-a/, 'the twin is held fleet-wide');
+    assert.match(accountIneligibility(registry.current, account(registry.current, 'claude'), clock.now(), HOST)!, /same provider login as claude-a/, 'the twin is held fleet-wide');
     // Later cycles send a delivered hold no more.
     for (let cycle = 0; cycle < 3; cycle++) { clock.advance(minute); await loop.cycle(); }
     assert.equal(sends().length, 6, 'a delivered hold is not sent again');
 
     // A hold that never landed is resent until its reset and drops out of the pending set once it passes.
     plane.mode = 'down';
-    await recordObservedExhaustion({ ...config, environments: [] }, 'claude-c', { ...spent, resetsAt: new Date(Date.now() + 10 * minute).toISOString() }, Date.now(), { fetch: plane.fetcher });
+    await recordObservedExhaustion({ ...config, environments: [] }, 'claude-c', { ...spent, resetsAt: new Date(clock.now() + 10 * minute).toISOString() }, clock.now(), { fetch: plane.fetcher });
     const lapsing = () => plane.observes.filter(observe => observe.accounts.includes('claude-c')).length;
     clock.advance(minute); await loop.cycle();
     assert.equal(lapsing(), 3, 'pending: resent by the cycle');
     clock.advance(10 * minute); await loop.cycle();
     assert.equal(lapsing(), 3, 'nothing past its reset is reported');
     assert.equal((await observedExhaustions(config)).hasOwnProperty('claude-c'), false);
-  } finally { clock.uninstall(); }
+  } finally { clock.install(now); } // back to the file's clock for the tests after this one
 });
 
 test('unit:legacy-hold-without-reported-is-pending — a hold saved before `reported` existed is sent to the registry like a reported:false hold', async () => {
@@ -369,14 +382,14 @@ test('unit:role-selection-honours-held-twin — the planner, acceptance and doct
   // The control plane, in memory, behind the HTTP client every role uses; any other request (a provider usage read) is refused.
   const original = globalThis.fetch;
   globalThis.fetch = (async (url: string | URL, init?: RequestInit) => {
-    const path = new URL(String(url)).pathname, body = init?.body ? JSON.parse(String(init.body)) : undefined, at = { actor: 'executor', at: new Date().toISOString() };
+    const path = new URL(String(url)).pathname, body = init?.body ? JSON.parse(String(init.body)) : undefined, at = { actor: 'executor', at: new Date(clock.now()).toISOString() };
     const json = (value: unknown) => new Response(JSON.stringify(value), { status: 200 });
     if (path === '/api/agent-registry/document') return json(registry);
     if (path === '/api/agent-registry/observe') { foldObservations(registry, body, at); return json(registry); }
     if (path.startsWith('/api/agent-registry/sessions/')) { const id = path.split('/')[4]; registry = { ...registry, sessions: registry.sessions.map(session => session.id === id ? { ...session, endedAt: at.at, endReason: body.reason } : session) }; return json({}); }
     if (path === '/api/agent-registry/select') {
       foldObservations(registry, body, at);
-      const choice = chooseSession(registry, body, Date.now());
+      const choice = chooseSession(registry, body, clock.now());
       if (!choice.account) return json({ selected: false, reason: choice.reason, skipped: choice.skipped, session: null, account: null, runtime: null, model: null, revision: registry.revision });
       const session: FleetSession = { id: crypto.randomUUID(), role: body.role, account: choice.account.name, runtime: choice.runtime.name, model: choice.model.name, host: HOST, work: body.work, principal: body.principal, group: body.group,
         selectedAt: at.at, selectedBy: 'coordinator', reason: choice.reason, skipped: choice.skipped, endedAt: null, endReason: null };
@@ -397,7 +410,7 @@ test('unit:role-selection-honours-held-twin — the planner, acceptance and doct
     // The acceptance and doctor roles list only the twin and a healthy account; the twin is reported spent from this host's hold.
     for (const [role, run] of [['acceptance', () => acceptanceEffects(config, root, calls).runner('draft', 'primary', goal)], ['doctor', () => doctorEffects(config, root, async () => ({})).runner('primary')]] as const) {
       // A registry that has not heard of claude-a's hold: only this host's report can hold the twin.
-      foldObservations(registry, { host: HOST, observations: [{ account: 'claude-a', quota: { loggedIn: true, state: 'available', usage: [], resetsAt: null, reason: null, identity: login } }] }, { actor: 'executor', at: new Date().toISOString() });
+      foldObservations(registry, { host: HOST, observations: [{ account: 'claude-a', quota: { loggedIn: true, state: 'available', usage: [], resetsAt: null, reason: null, identity: login } }] }, { actor: 'executor', at: new Date(clock.now()).toISOString() });
       await run();
       const session = registry.sessions.filter(entry => entry.role === role).at(-1)!;
       assert.equal(session.account, 'claude-c', `${role} lands on the healthy login`);
@@ -439,4 +452,29 @@ test('unit:legacy-hold-identity-persisted-before-reported — a pre-upgrade hold
   assert.equal(reported.reported, true);
   assert.equal(reported.identity, spentLogin);
   assert.match((await heldTwin(configured, await observedExhaustions(config, now), 'claude'))!.reason, /same provider login as claude-a/);
+});
+
+/** The Date stub a child process loads before this file: the system clock reads `at`, whatever the day. */
+const stubbedClock = (at: string) => 'data:text/javascript,' + encodeURIComponent(`const Real = Date, offset = Date.parse(${JSON.stringify(at)}) - Real.now();
+globalThis.Date = class extends Real { constructor(...args) { if (args.length) super(...args); else super(Real.now() + offset); } static now() { return Real.now() + offset; } };
+console.error('system clock stubbed at ' + new Date().toISOString());`);
+const childClock = 'GRAPHYARD_SHARED_IDENTITY_FOLLOWUPS_CLOCK';
+
+test('unit:shared-identity-followups-clock-independent — the whole file passes with the system clock before the hold\'s reset, after it, and months later', { skip: process.env[childClock] ? `a child at ${process.env[childClock]}` : false, timeout: 180_000 }, async () => {
+  const file = fileURLToPath(import.meta.url), tsx = import.meta.resolve('tsx');
+  // Under `node --test` this process is a runner child; its NODE_TEST_CONTEXT would make each child one too, with no report of its own.
+  const { NODE_TEST_CONTEXT: _runner, ...environment } = process.env;
+  const runs = await Promise.all(['2026-10-11T04:00:00Z', '2026-10-11T06:00:00Z', '2027-01-01T00:00:00Z'].map(async at => {
+    const child = promisify(execFile)(process.execPath, ['--import', tsx, '--import', stubbedClock(at), file], { encoding: 'utf8', timeout: 150_000, maxBuffer: 16 * 1024 * 1024, env: { ...environment, [childClock]: at } });
+    const { stdout, stderr, code } = await child.then(result => ({ ...result, code: 0 }), (error: Error & { stdout?: string; stderr?: string; code?: number | string }) => ({ stdout: error.stdout ?? '', stderr: error.stderr ?? String(error), code: error.code ?? 1 }));
+    return { at, code, stdout, stderr };
+  }));
+  for (const run of runs) {
+    const count = (label: string) => Number(/ℹ (?:pass|fail|tests) (\d+)/.exec(run.stdout.split('\n').find(line => line.includes(`ℹ ${label} `)) ?? '')?.[1] ?? NaN);
+    assert.ok(run.stderr.includes(`system clock stubbed at ${at(run.at)}`), `the child at ${run.at} ran on the stubbed clock: ${run.stderr.slice(0, 400)}`);
+    assert.equal(run.code, 0, `the file passes with the system clock at ${run.at}:\n${run.stdout.split('\n').filter(line => /not ok|✖|AssertionError|expected|actual/.test(line)).slice(0, 20).join('\n')}\n${run.stderr.slice(-800)}`);
+    assert.equal(count('fail'), 0, `no test fails at ${run.at}`);
+    assert.ok(count('pass') >= 8, `every test ran at ${run.at}: ${count('pass')} passed of ${count('tests')}`);
+  }
+  function at(iso: string) { return new Date(iso).toISOString(); }
 });
