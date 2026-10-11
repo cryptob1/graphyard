@@ -1,16 +1,17 @@
 // Concern: measurement — stage percentiles, the scope-decision budget, silence and item latency.
 import { type Work, productionLatencyMs, postDeployMs, deliveryState, currentEvidence, deploySmokeRequired } from '../model.js';
-import { routableScopeRequest, scopeDecisionSample, scopeDecisionBudgetMs, scopeBlockedBudgetMs, redecidableScopeRefusal } from '../model/scope.js';
-import { plannedFilesCovered } from '../model/scope-collapse.js';
+import { routableScopeRequest, scopeDecisionBinding, scopeDecisionSample, scopeDecisionBudgetMs, scopeBlockedBudgetMs, redecidableScopeRefusal, unplannedPaths } from '../model/scope.js';
+import { askIdentity, plannedFilesCovered } from '../model/scope-collapse.js';
 import { pendingBaseRefresh } from '../merge-queue.js';
 import { standingCapacity } from '../model/capacity.js';
 import { stalledItems } from '../model/action-account.js';
 import { type MasterConfig, type ContainmentAssessment, assertDispatchable, containmentPhase } from '../master.js';
-import { type ApprovalWatch, type DaemonAction, type DaemonActionKind, type DaemonState, type CycleMetrics, type ScopeMeasurement } from './state.js';
+import { approvalWatchSchema, type ApprovalWatch, type DaemonAction, type DaemonActionKind, type DaemonState, type CycleMetrics, type ScopeMeasurement } from './state.js';
 import { type ItemClock, itemClockSchema, type LatencySample, latencySampleSchema } from './latency-clock.js';
-import { decisionKey } from './reconcile.js';
+import { decisionKey, scopeOutcomeAnswered } from './reconcile.js';
 import { docsSyncHolding } from '../model/docs-sync.js';
 import { approvedUnapplied, boundDetail, mergeableCandidate, namePaths, routineDecision, withheldDecision } from './decisions.js';
+import type { RoutineDecision } from './decisions.js';
 
 // ---- GY-1702: standing/held requirements waits (marks feed scopeBudget; covering matches engine settle) ----
 /** Sorted-set equality for plannedFiles (jsonb order is not kept). */
@@ -34,11 +35,11 @@ export function markHeldScopeAsk(scopeMeasurements: object, key: string, epoch: 
 export function clearHeldScopeAsk(scopeMeasurements: object, key: string, epoch: number, at: string) {
   heldScopeAskMarks.get(scopeMeasurements)?.delete(heldScopeAskId(key, epoch, at));
 }
-export function syncHeldScopeAskMarks(scopeMeasurements: object, approvals: Iterable<{ work: string; action: string; settledAt?: string | null; scope?: { epoch: number; at: string } | null; ended?: string[] }>) {
+export function syncHeldScopeAskMarks(scopeMeasurements: object, approvals: Iterable<{ work: string; action: string; settledAt?: string | null; scope?: { epoch: number; at: string } | null; ended?: string[]; coveringAdopt?: boolean }>) {
   const set = new Set<string>();
   for (const watch of approvals) {
     if (watch.action !== 'requirements' || watch.settledAt || !watch.scope) continue;
-    if (!(watch.ended ?? []).some(entry => entry.includes(heldWaitMarker))) continue;
+    if (!watch.coveringAdopt && !(watch.ended ?? []).some(entry => entry.includes(heldWaitMarker))) continue;
     set.add(heldScopeAskId(watch.work, watch.scope.epoch, watch.scope.at));
   }
   heldScopeAskMarks.set(scopeMeasurements, set);
@@ -76,6 +77,7 @@ export const staleRevisionDecideRefusal = (error: unknown) =>
 export const staleRevisionDecideNote = 'the item moved past the revision the loop read';
 export const staleRevisionDecideDetail = (detail: string) => detail.includes(staleRevisionDecideNote);
 
+
 export function percentiles(values: number[]) {
   const sorted = [...values].sort((a, b) => a - b);
   const at = (p: number) => sorted.length ? Math.max(0, Math.round(sorted[Math.min(sorted.length - 1, Math.ceil(p / 100 * sorted.length) - 1)])) : 0;
@@ -101,26 +103,53 @@ export function cycleBudget(state: Pick<DaemonState, 'metrics'>, intervalMs: num
   };
 }
 
+/** GY-1701. Covering-adopt watch names this ask (unsettled through request and hold); bound skips while it stands. */
+export function coveringStandingScopeWatch(item: Pick<Work, 'id' | 'policyRevision' | 'scopeRequest'>, approvals: Record<string, ApprovalWatch>): boolean {
+  const request = item.scopeRequest;
+  if (!request) return false;
+  const watch = approvals[decisionKey(item as Work, { action: 'requirements', binding: scopeDecisionBinding(request) })];
+  const identity = askIdentity(request);
+  return !!watch?.coveringAdopt && !!watch.scope && watch.scope.at === identity.at && watch.scope.epoch === identity.epoch;
+}
+/** GY-1701. Standing no-`answers` revision already plans every path of a live scope ask. */
+export function standingCoversScopeAsk(standing: { input?: { plannedFiles?: readonly string[] | null; answers?: unknown } | null }, askPaths: readonly string[]): boolean {
+  return !standing.input?.answers && askPaths.length > 0 && unplannedPaths(standing.input?.plannedFiles ?? [], askPaths).length === 0;
+}
+/** GY-1701. Covering-adopt watch; stays unsettled (incl. held) so status keeps the decision until apply/refuse. */
+export function coveringScopeAdoptWatch(item: Pick<Work, 'key' | 'scopeRequest'>,
+  standing: { id: string; state: string; approvedAt?: string | null; approvedBy?: string | null; input?: { plannedFiles?: readonly string[] | null; answers?: unknown } | null },
+  decision: Pick<RoutineDecision, 'action' | 'scope' | 'input'>, stamp: string): ApprovalWatch | null {
+  const askPaths = decision.scope?.paths ?? item.scopeRequest?.paths ?? [];
+  if (!(decision.input?.answers || decision.scope) || !standingCoversScopeAsk(standing, askPaths)) return null;
+  return approvalWatchSchema.parse({ work: item.key, action: decision.action, decision: standing.id, requestedAt: stamp, coveringAdopt: true,
+    settledAt: null, approvedAt: standing.approvedAt ?? null, approvedBy: standing.approvedBy ?? null, scope: decision.scope ?? null });
+}
+export const coveringRevisionGone = /^(refused|withdrawn|stale|failed|superseded)$/;
+export function coveringAdoptLeftAskOpen(watch: Pick<ApprovalWatch, 'scope' | 'coveringAdopt'>, item: Work, judged: { state: string; approvedAt?: string | null; refusal?: { at?: string } | null }, clock: number): boolean {
+  return !!watch.coveringAdopt && !!watch.scope && coveringRevisionGone.test(judged.state) && scopeOutcomeAnswered(item, watch.scope, judged, clock) !== 'answered';
+}
+
 /**
  * How the loop is keeping the promise a scope request rests on: request-to-decision percentiles
  * over the decisions it has taken, every request still undecided with how long it has waited, and
  * the breaches of the two bounds — p90 within five minutes once ten requests have been decided,
  * and nothing left undecided for longer than fifteen. A breach means workers are waiting on the
  * loop, so it is escalated with the numbers rather than left in the metrics.
+ *
+ * `approvals` (GY-1701): a covering-adopt watch on the open ask excludes it from the blocked bound.
  */
-export function scopeBudget(work: Work[], decisions: ScopeMeasurement[], now: number, routes = false) {
+export function scopeBudget(work: Work[], decisions: ScopeMeasurement[], now: number, routes = false, approvals?: Record<string, ApprovalWatch>) {
   const measured = percentiles(decisions.map(entry => entry.waitedMs));
   // A rule refusal the loop puts to the approver (`routes`, GY-176) is not the worker's answer: the
   // request stays open, and its wait counts, until the approver approves or refuses it.
   const open = work.flatMap(item => {
     const request = item.scopeRequest;
-    const routed = routes && request?.decision?.decidedBy === 'graphyard' && !!routableScopeRequest(item, now);
-    // GY-1702: pause the scope-blocked breach only when a held requirements decision answers this ask
-    // and the attempt's quarantine is what holds that decision. A quarantine alone (or a held decision
-    // for another widening) must not hide an overdue ask; the wait is still measured from the ask, and
-    // when the hold ends without applying, the breach clock resumes from that recorded wait.
+    // GY-1701: a covering-adopt watch excludes the ask from the blocked bound entirely.
+    if (!request || (approvals && coveringStandingScopeWatch(item, approvals))) return [];
+    const routed = routes && request.decision?.decidedBy === 'graphyard' && !!routableScopeRequest(item, now);
+    // GY-1702: quarantine pause only when a held requirements decision answers this ask.
     const heldByQuarantine = routed && !!item.containmentQuarantine && isHeldScopeAsk(decisions, item.key, request.epoch, request.at);
-    return request && (!request.decision || routed) ? [{ key: item.key, epoch: request.epoch, waitedMs: Math.max(0, now - Date.parse(request.at)), routed, heldByQuarantine }] : [];
+    return !request.decision || routed ? [{ key: item.key, epoch: request.epoch, waitedMs: Math.max(0, now - Date.parse(request.at)), routed, heldByQuarantine }] : [];
   }).sort((a, b) => b.waitedMs - a.waitedMs);
   // One id per breach, not per wording: the numbers in the detail move every cycle, and an
   // escalation that changed key each time would read as a new incident every twenty seconds.

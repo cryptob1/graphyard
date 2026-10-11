@@ -289,10 +289,8 @@ export async function scopeStep(cycle: Cycle) {
   // 2b. The promise that decision rests on: workers wait minutes, not a shift. A p90 above the
   //     budget, or any request left undecided past the blocked bound, is escalated with the
   //     numbers — the loop is the only thing that could have answered them.
-  // GY-1702: rebuild held-ask marks from live watches before measuring — a quarantine alone must not
-  // pause the bound; only an ask whose answering requirements decision is held does.
   syncHeldScopeAskMarks(state.scope, Object.values(state.approvals));
-  const budget = scopeBudget(open.map(item => settled.get(item.id) ?? item), state.scope, clock, !!effects.decide && !!effects.approver);
+  const budget = scopeBudget(open.map(item => settled.get(item.id) ?? item), state.scope, clock, !!effects.decide && !!effects.approver, state.approvals);
   for (const breach of budget.breaches) {
     const key = `escalation:scope-budget:${breach.id}`;
     if (!detailChanged(state.actions[key], breach.detail)) continue;

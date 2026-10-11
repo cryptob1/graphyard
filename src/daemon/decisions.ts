@@ -13,7 +13,7 @@ import { researchRework } from '../research.js'; import { baseBreakHold } from '
 import { unproducedManualProofs } from '../model/unproduced-attestation.js';
 import { mechanicalRework, type MechanicalFixRequest } from '../mechanical-findings.js';
 import { triageClosure } from '../model/machine-backlog.js'; import { refusedAttestationRework, type RefusedAttestation } from '../model/rework-ground.js';
-import { actionDetailMax, type ApprovalWatch, message } from './state.js';
+import { actionDetailMax, approvalWatchSchema, type ApprovalWatch, message } from './state.js';
 import { blockingFindings, followUpFindingsOf, pastReviewCap, reviewRound, reviewRoundCapOf, reworkRoundsOf } from '../review-cap.js';
 import { sessionName } from '../session-name.js';
 import type { ScreenMotion } from '../master/approver-stall.js';
@@ -745,9 +745,12 @@ export function approvalStep(watch: ApprovalWatch, decision: { id?: string; acti
   if (decision === undefined) return { step: 'wait', detail: `The decision history of ${watch.work} could not be read; ${label} is looked at again next cycle` };
   if (decision === null) return { step: 'rerequest', detail: `The control plane no longer holds ${label}` };
   if (decision.state === 'applied') return { step: 'settled', detail: `The approver applied ${label}` };
-  // GY-1687: a held decision is approved; the control plane applies it in the transaction that ends the item's attempt, so no
-  // session is waited on or relaunched for it and nothing is requested in its place.
-  if (decision.state === 'held') return { step: 'settled', detail: `${label} is approved and held (${decision.outcome ?? 'the item holds a live attempt'}); the control plane applies it when the attempt ends` };
+  // GY-1687: held is approved; the control plane applies it when the attempt ends. GY-1701: a covering adopt stays watched
+  // while held so status does not advertise `master scope` and the ask waits for that apply (not a settled foreign watch).
+  if (decision.state === 'held') {
+    if (watch.coveringAdopt) return { step: 'wait', detail: `${label} is approved and held (${decision.outcome ?? 'the item holds a live attempt'}); the covering ask waits until the control plane applies it` };
+    return { step: 'settled', detail: `${label} is approved and held (${decision.outcome ?? 'the item holds a live attempt'}); the control plane applies it when the attempt ends` };
+  }
   // A refusal is the approver's considered judgement (GY-141), not a session to replace or a request to repeat: the server refuses the same request unchanged, and answering it is the master's.
   if (decision.state === 'refused') return { step: 'refused', detail: `${label} was refused by ${decision.refusal?.approver ?? 'its approver'}: ${decision.refusal?.reason ?? decision.outcome ?? 'no reason recorded'}` };
   // An approved decision is already judged (GY-1300): no approver session is waited on, relaunched or spent for it. A session
