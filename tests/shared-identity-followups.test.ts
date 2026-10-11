@@ -471,10 +471,11 @@ test('unit:shared-identity-followups-clock-independent — the whole file passes
   }));
   for (const run of runs) {
     const count = (label: string) => Number(/ℹ (?:pass|fail|tests) (\d+)/.exec(run.stdout.split('\n').find(line => line.includes(`ℹ ${label} `)) ?? '')?.[1] ?? NaN);
-    assert.ok(run.stderr.includes(`system clock stubbed at ${at(run.at)}`), `the child at ${run.at} ran on the stubbed clock: ${run.stderr.slice(0, 400)}`);
+    // The stub logs its clock a tick after computing its offset, so the reading may trail `at` by a millisecond or two: read it within a second, not as the exact string.
+    const stubbed = /system clock stubbed at (\S+)/.exec(run.stderr)?.[1];
+    assert.ok(stubbed && Math.abs(Date.parse(stubbed) - Date.parse(run.at)) < 1_000, `the child at ${run.at} ran on the stubbed clock (read ${stubbed ?? 'nothing'}): ${run.stderr.slice(0, 400)}`);
     assert.equal(run.code, 0, `the file passes with the system clock at ${run.at}:\n${run.stdout.split('\n').filter(line => /not ok|✖|AssertionError|expected|actual/.test(line)).slice(0, 20).join('\n')}\n${run.stderr.slice(-800)}`);
     assert.equal(count('fail'), 0, `no test fails at ${run.at}`);
     assert.ok(count('pass') >= 8, `every test ran at ${run.at}: ${count('pass')} passed of ${count('tests')}`);
   }
-  function at(iso: string) { return new Date(iso).toISOString(); }
 });

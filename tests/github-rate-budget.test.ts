@@ -125,6 +125,7 @@ class Api {
 // ---- Hand-built work items, for the unit cases that need no database ----
 
 const item = (key: string, pr: number, head: string, baseSha: string, overrides: Partial<Work> = {}): Work => ({
+// The 2026-09-21 item stamps and PR payload dates are past fixtures that evaluate's real new Date() only trails, the 2026-10-10 webhook attempts are judged by the now each corroboration case hands in, and Date.now() seeds rate-limit resets and delivery times relative to the real clock.
   id: key.toLowerCase(), key, title: key, description: '', type: 'feature', priority: 2, dependencies: [], criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['manual:budget'] }],
   policy: { checks: ['test', 'typecheck'], review: true }, plannedFiles: ['src/'], stage: 'build', revision: 3, policyRevision: 1, createdAt: '2026-09-21T09:00:00Z', updatedAt: '2026-09-21T09:00:00Z',
   stageEnteredAt: '2026-09-21T09:00:00Z', ready: true, epoch: 1, lease: null, workspaces: [{ host: 'machine', path: `/w/${key}`, branch: `graphyard/${key.toLowerCase()}-1`, epoch: 1, owner: 'implementer' }],

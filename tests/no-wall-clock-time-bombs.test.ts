@@ -18,14 +18,20 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 // The rule, per file under tests/:
 //   1. the file constructs an absolute calendar instant: Date.UTC(YYYY, …), new Date('YYYY-…'),
 //      Date.parse('YYYY-…') or an ISO date literal 'YYYY-MM-DDT…' (data the code under test parses);
-//   2. the file also calls Date.now() or new Date();
-//   3. and the file installs no stubbed clock: clock.install (tests/helpers/soak-world.ts), node:test's
-//      mock.timers.enable with 'Date' among its apis, or an assignment to globalThis.Date.
-// A file that meets all three fails this test, named with its first instant line and its first
-// wall-clock line. The way out is to derive the instant from the test's fixed now, to stub Date for
-// the file, or to list the file in `allowances` by the comment in it that documents why its absolute
-// date is safe (a past instant that forces an expiry and stays past; fixture dates the code under test
-// receives beside a clock it is handed; a stamp on a record nothing compares with the fixture). An
+//   2. the file also calls Date.now() or new Date() where no stubbed clock covers the call;
+//   3. a stubbed clock is clock.install (tests/helpers/soak-world.ts), node:test's mock.timers.enable
+//      with 'Date' among its apis, or an assignment to globalThis.Date, and it covers exactly the code
+//      that runs after it: installed at module scope, or in a before/beforeEach hook, it covers the
+//      block the hook belongs to (the whole file for a top-level hook); installed inside any other
+//      block, a test body above all, it covers that block from the stub to its closing brace, and no
+//      other test in the file. A reading in another test body, in a helper, or earlier in the same
+//      body ran on the real clock, however many stubs the file holds elsewhere.
+// A file that meets the rule fails this test, named with its first instant line and its first
+// uncovered wall-clock line. The way out is to derive the instant from the test's fixed now, to stub
+// Date where the reading happens (or for the file), or to list the file in `allowances` by the comment
+// in it that documents why its absolute date is safe (a past instant that forces an expiry and stays
+// past; fixture dates the code under test receives beside a clock it is handed; a stamp on a record
+// nothing compares with the fixture; helpers that read Date only while a test's stub is installed). An
 // allowance for a file without that comment, or for a file that no longer trips the rule, fails.
 // This file is the one file the rule skips, by name: its fixtures are strings holding instants,
 // wall-clock calls and stubs for the lint to find, so no reading of its text says anything true.
@@ -33,20 +39,74 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 const self = relative(process.cwd(), fileURLToPath(import.meta.url)).split('\\').join('/');
 
 const instant = /\bDate\.UTC\(\s*(?:19|20)\d\d\b|\bnew Date\(\s*['"`](?:19|20)\d\d-\d\d-\d\d|\bDate\.parse\(\s*['"`](?:19|20)\d\d-\d\d-\d\d|['"`](?:19|20)\d\d-\d\d-\d\dT\d\d:\d\d/;
-const wallClock = /\bDate\.now\(\)|\bnew Date\(\s*\)/;
-const stubsDate = /\bclock\.install\(|\bmock\.timers\.enable\(\s*\{[^}]*apis:\s*\[[^\]]*'Date'|\b(?:globalThis|global)\.Date\s*=[^=]/;
+const wallClock = /\bDate\.now\(\)|\bnew Date\(\s*\)/g;
+const stubsDate = /\bclock\.install\(|\bmock\.timers\.enable\(\s*\{[^}]*apis:\s*\[[^\]]*'Date'|\b(?:globalThis|global)\.Date\s*=[^=]/g;
+/** The code before a block's `{` ends in a before/beforeEach call whose callback the block is: `before(async () => {`. */
+const hookOpener = /\b(?:before|beforeEach)\s*\((?:[^()]|\([^()]*\))*$/;
 
-/** The code of a line: nothing for a comment line, and a trailing `// …` dropped. */
-const code = (line: string) => { const text = line.trimStart(); return text.startsWith('//') || text.startsWith('*') || text.startsWith('/*') ? '' : line.replace(/\s\/\/\s.*$/, ''); };
+/** A position in the source: 1-based line, 0-based column in that line's code. */
+interface Position { line: number; column: number }
+/** A `{ … }` block: where it opens and closes, and the block around it. */
+interface Block { open: Position; close: Position; parent: Block | null }
+const before = (a: Position, b: Position) => a.line < b.line || (a.line === b.line && a.column < b.column);
+const within = (at: Position, from: Position, to: Position) => !before(at, from) && !before(to, at);
+
+/**
+ * The source read as code: each line with its comments dropped (strings kept, so an ISO literal is still an instant),
+ * and every brace block with its position. Strings and comments contribute no braces; a string other than a template
+ * literal ends with its line, so a regex literal mistaken for one costs at most that line's braces.
+ */
+export function parse(source: string): { lines: string[]; blocks: Block[] } {
+  const lines: string[] = [], blocks: Block[] = [], open: Block[] = [];
+  let line = '', quote: '\'' | '"' | '`' | null = null, comment: 'line' | 'block' | null = null, escaped = false;
+  const here = (): Position => ({ line: lines.length + 1, column: line.length });
+  for (let index = 0; index < source.length; index++) {
+    const char = source[index], next = source[index + 1];
+    if (char === '\n') { lines.push(line); line = ''; if (comment === 'line') comment = null; if (quote && quote !== '`') quote = null; escaped = false; continue; }
+    if (comment === 'line') continue;
+    if (comment === 'block') { if (char === '*' && next === '/') { comment = null; index++; } continue; }
+    if (quote) { line += char; if (escaped) escaped = false; else if (char === '\\') escaped = true; else if (char === quote) quote = null; continue; }
+    if (char === '/' && next === '/') { comment = 'line'; continue; }
+    if (char === '/' && next === '*') { comment = 'block'; index++; continue; }
+    if (char === '\'' || char === '"' || char === '`') quote = char;
+    else if (char === '{') { const block = { open: here(), close: here(), parent: open.at(-1) ?? null }; open.push(block); blocks.push(block); }
+    else if (char === '}') { const block = open.pop(); if (block) block.close = here(); }
+    line += char;
+  }
+  lines.push(line);
+  for (const block of open) block.close = { line: lines.length, column: line.length }; // never closed: runs to the end of the file
+  return { lines, blocks };
+}
+
+const start: Position = { line: 1, column: 0 };
+/** The innermost block holding `at`. */
+const enclosing = (blocks: Block[], at: Position) => blocks.filter(block => within(at, block.open, block.close) && !(at.line === block.open.line && at.column === block.open.column)).sort((a, b) => before(a.open, b.open) ? 1 : -1)[0] ?? null;
+
+/** The stretches of code a stubbed clock covers: each from a stub to the end of what it governs. */
+export function stubbedRanges(lines: string[], blocks: Block[]): Array<{ from: Position; to: Position }> {
+  const end: Position = { line: lines.length, column: lines[lines.length - 1].length };
+  const ranges: Array<{ from: Position; to: Position }> = [];
+  for (const [index, text] of lines.entries()) {
+    for (const match of text.matchAll(stubsDate)) {
+      const at: Position = { line: index + 1, column: match.index };
+      const block = enclosing(blocks, at);
+      if (!block) { ranges.push({ from: start, to: end }); continue; } // module scope: the file's clock
+      const opener = lines[block.open.line - 1].slice(0, block.open.column);
+      if (hookOpener.test(opener)) ranges.push(block.parent ? { from: block.parent.open, to: block.parent.close } : { from: start, to: end }); // a hook stubs the block its tests run in
+      else ranges.push({ from: at, to: block.close }); // a test body: this test, from here on
+    }
+  }
+  return ranges;
+}
 
 export interface TimeBomb { file: string; instant: number; wallClock: number; instants: number; wallClocks: number }
 
-/** The time bomb in one file's source, if the file constructs an absolute instant and reads the wall clock without stubbing Date. */
+/** The time bomb in one file's source, if the file constructs an absolute instant and reads the wall clock where no stub covers the reading. */
 export function timeBombIn(file: string, source: string): TimeBomb | null {
-  const lines = source.split('\n').map(code);
-  if (lines.some(line => stubsDate.test(line))) return null;
+  const { lines, blocks } = parse(source);
+  const ranges = stubbedRanges(lines, blocks);
   const instants = lines.flatMap((line, index) => instant.test(line) ? [index + 1] : []);
-  const wallClocks = lines.flatMap((line, index) => wallClock.test(line) ? [index + 1] : []);
+  const wallClocks = lines.flatMap((line, index) => [...line.matchAll(wallClock)].some(match => !ranges.some(range => within({ line: index + 1, column: match.index }, range.from, range.to))) ? [index + 1] : []);
   if (!instants.length || !wallClocks.length) return null;
   return { file, instant: instants[0], wallClock: wallClocks[0], instants: instants.length, wallClocks: wallClocks.length };
 }
@@ -73,7 +133,7 @@ export async function timeBombs(root: string, allowed: Record<string, string>) {
 }
 
 const count = (n: number, noun: string) => n === 1 ? `` : ` (and ${n - 1} more ${noun}${n > 2 ? 's' : ''})`;
-export const describeBomb = (bomb: TimeBomb) => `${bomb.file}:${bomb.instant} constructs an absolute calendar instant${count(bomb.instants, 'instant')} and ${bomb.file}:${bomb.wallClock} reads the wall clock${count(bomb.wallClocks, 'reading')} without a stubbed clock; derive the instant from the test's fixed now, stub Date for the file, or document in the file why its absolute date is safe and list that comment in allowances`;
+export const describeBomb = (bomb: TimeBomb) => `${bomb.file}:${bomb.instant} constructs an absolute calendar instant${count(bomb.instants, 'instant')} and ${bomb.file}:${bomb.wallClock} reads the wall clock${count(bomb.wallClocks, 'reading')} where no stubbed clock covers it; derive the instant from the test's fixed now, stub Date where the reading runs (a module-scope stub or a before hook covers the file), or document in the file why its absolute date is safe and list that comment in allowances`;
 
 test('unit:no-wall-clock-time-bombs — no test file under tests/ constructs an absolute calendar instant and calls Date.now() or new Date() without a stubbed clock, beyond the fixtures whose allowance quotes their own comment on why their date is safe', async () => {
   const { bombs, refused } = await timeBombs(join(process.cwd(), 'tests'), allowances);
@@ -104,7 +164,7 @@ test('unit:no-wall-clock-time-bombs — GY-1694\'s file is named with its instan
   const { run, file } = await fixtures('gy-1694', { 'tests/followups.test.ts': gy1694 });
   const { bombs, refused } = await run();
   assert.deepEqual(bombs, [{ file: file('tests/followups.test.ts'), instant: 2, wallClock: 7, instants: 2, wallClocks: 1 }], 'the first instant line and the first wall-clock line, with the count of lines holding each (line 7 reads the clock twice)');
-  assert.match(describeBomb(bombs[0]), /followups\.test\.ts:2 constructs an absolute calendar instant \(and 1 more instant\) and .*followups\.test\.ts:7 reads the wall clock without a stubbed clock/);
+  assert.match(describeBomb(bombs[0]), /followups\.test\.ts:2 constructs an absolute calendar instant \(and 1 more instant\) and .*followups\.test\.ts:7 reads the wall clock where no stubbed clock covers it/);
   assert.deepEqual(refused, []);
   // The original fuse of 2026-10-11T05:00Z is reported before, at and after the instant alike: the rule reads no clock.
   const past = gy1694.replace('Date.UTC(2026, 9, 11, 5)', 'Date.UTC(2000, 0, 1)');
@@ -126,6 +186,64 @@ test('unit:no-wall-clock-time-bombs — a file that stubs Date, one without an a
   const timersOnly = gy1694.replace(`test('unit:role-selection', async () => {`, `test('unit:role-selection', async () => {\n  mock.timers.enable({ apis: ['setTimeout'] });`);
   const { run, file } = await fixtures('safe', { 'tests/stubbed.test.ts': stubbed, 'tests/per-test.test.ts': perTest, 'tests/assigned.test.ts': assigned, 'tests/derived.test.ts': derived, 'tests/fixed.test.ts': fixed, 'tests/commented.test.ts': commented, 'tests/timers-only.test.ts': timersOnly });
   assert.deepEqual((await run()).bombs.map(bomb => bomb.file), [file('tests/timers-only.test.ts')], 'mocking setTimeout alone stubs no clock; every other file is safe');
+});
+
+test('unit:no-wall-clock-time-bombs — a stub installed in one test covers that test from the stub on, not the file: a reading in another test, in a helper or before the stub is named, while a module-scope stub or a before hook covers the file', async () => {
+  // The reviewer's case on 1b52f78fadff: one test stubs Date, another compares a fixed 2030 expiry with the real clock.
+  const mixed = sourceLines(
+    `import { mock, test } from 'node:test';`,
+    `const expiresAt = Date.UTC(2030, 0, 1);`,
+    `test('unit:stubbed', () => { mock.timers.enable({ apis: ['Date'], now: expiresAt - 60_000 }); assert.ok(expiresAt > Date.now()); });`,
+    `test('unit:real-clock', () => {`,
+    `  assert.ok(expiresAt > Date.now());`,
+    `});`);
+  const helper = sourceLines(
+    `import { mock, test } from 'node:test';`,
+    `const resetsAt = new Date('2030-01-01T00:00:00Z');`,
+    `const stamp = () => ({ at: new Date().toISOString(), resetsAt });`,
+    `test('unit:stubbed', () => {`,
+    `  mock.timers.enable({ apis: ['Date'], now: 0 });`,
+    `  assert.equal(stamp().at, new Date(0).toISOString());`,
+    `});`);
+  const late = sourceLines(
+    `import { test } from 'node:test';`,
+    `import { clock } from './helpers/soak-world.js';`,
+    `const start = Date.parse('2031-06-02T08:00:00Z');`,
+    `test('unit:stubbed-late', async () => {`,
+    `  const observedAt = new Date().toISOString();`,
+    `  clock.install(start);`,
+    `  assert.ok(Date.parse(observedAt) < Date.now());`,
+    `});`);
+  const describeHook = sourceLines(
+    `import { before, describe, test } from 'node:test';`,
+    `const start = Date.parse('2031-06-02T08:00:00Z');`,
+    `describe('held', () => {`,
+    `  before(() => { mock.timers.enable({ apis: ['Date'], now: start }); });`,
+    `  test('unit:in-describe', () => { assert.ok(Date.now() >= start); });`,
+    `});`,
+    `test('unit:outside', () => { assert.ok(Date.now() < start); });`);
+  const topHook = sourceLines(
+    `import { beforeEach, test } from 'node:test';`,
+    `const start = Date.parse('2031-06-02T08:00:00Z');`,
+    `beforeEach(async () => {`,
+    `  mock.timers.enable({ apis: ['setTimeout', 'Date'], now: start });`,
+    `});`,
+    `const stamp = () => new Date().toISOString();`,
+    `test('unit:a', () => { assert.ok(Date.now() >= start); });`,
+    `test('unit:b', () => { assert.equal(stamp(), new Date(start).toISOString()); });`);
+  const oneLiners = sourceLines(
+    `import { mock, test } from 'node:test';`,
+    `const start = Date.parse('2031-06-02T08:00:00Z');`,
+    `test('unit:a', () => { mock.timers.enable({ apis: ['Date'], now: start }); assert.equal(Date.now(), start); });`,
+    `test('unit:b', () => { assert.ok(Date.now() < start); });`);
+  const { run, file } = await fixtures('scoped', { 'tests/mixed.test.ts': mixed, 'tests/helper.test.ts': helper, 'tests/late.test.ts': late, 'tests/describe-hook.test.ts': describeHook, 'tests/top-hook.test.ts': topHook, 'tests/one-liners.test.ts': oneLiners });
+  assert.deepEqual((await run()).bombs.map(bomb => [bomb.file, bomb.instant, bomb.wallClock, bomb.wallClocks]), [
+    [file('tests/describe-hook.test.ts'), 2, 7, 1],
+    [file('tests/helper.test.ts'), 2, 3, 1],
+    [file('tests/late.test.ts'), 3, 5, 1],
+    [file('tests/mixed.test.ts'), 2, 5, 1],
+    [file('tests/one-liners.test.ts'), 2, 4, 1],
+  ], 'the uncovered reading is the one named: the other test (mixed, one-liners), the helper, the line before the stub, the test outside the describe; a top-level hook covers the file');
 });
 
 test('unit:no-wall-clock-time-bombs — a wall-clock stamp, an elapsed-time measurement or an instant handed to the code under test as its clock is not told apart from a judgement: the file is named, and its allowance documents why', async () => {
@@ -229,11 +347,13 @@ export const allowances: Record<string, string> = {
   'tests/escalation-context.test.ts': 'the 2026-01-01 and 2026-09-2x stamps are ledger and decision fixtures assembleEscalationContext copies verbatim',
   'tests/every-launch-registered.test.ts': 'the 2026-09-01 boundAt is reviewer-binding fixture data nothing ages',
   'tests/evidence-reuse.test.ts': 'the 2000-01-01 attempt expiry is written to force a lapse that stays lapsed',
+  'tests/executor-presence-restart.test.ts': 'The 2026-10-05 `at` instants are the clock each replay installs with mock.timers before its first call; stubEngine\'s new Date() stamp runs only inside those replays',
   'tests/executor-release.test.ts': 'the 2026-09-22 claimedAt/since stamps are claim fixtures restartExecutors reports verbatim (any claim refuses, lapsed or not)',
   'tests/executor-supervision.test.ts': 'the 2026-09-21T10:00Z t0 is handed to registry.observe and registry.live as their clock',
   'tests/exhaustion-launch-account.test.ts': 'the 2026-10-09T09:40Z selection entry is a profile-keyed log row nothing ages or prunes (only \'|\' session keys are pruned)',
   'tests/exhaustion-notice.test.ts': 'the 2026-09-26 and 2026-10-03 instants are the fixed now handed to detectRuntimeExhaustion and the resets it parses from notices',
   'tests/failed-launch-pane.test.ts': 'the 2030-01-01T12:00Z observedAt is the clock handed to runCycle, containmentSettlementRefusals and assessContainment',
+  'tests/fault-class-configuration.test.ts': 'The 2030-01-01 clock and the iso() offsets from it are handed explicitly as now to ledgerLoopMerger, observe and performSelfUpgrade',
   'tests/fault-class-containment.test.ts': 'the 2026-10-03/05 instance stamps are replayed ledger fixtures judged on Date.parse(entry.observedAt)',
   'tests/fault-class-review-convergence.test.ts': 'the 2026-10-07 request and verdict stamps are judged on handed ticks (tickAt, faultAt, clock)',
   'tests/fault-class-scope.test.ts': 'the 2026-10-01..06 scope-request stamps are ledger fixtures judged on Date.parse(observedAt) handed to cycleFaults, runCycle and workFaults',
@@ -242,6 +362,7 @@ export const allowances: Record<string, string> = {
   'tests/github-budget.test.ts': 'the 2026-09-26 instants are the clock handed to github.clock and the charge ledger, plus PR created_at fixtures',
   'tests/github-delivery.test.ts': 'the 2026-10-04T12:30Z now is handed to evaluate, mergeQueueAction and reviewNeed with observations stamped from it',
   'tests/github-http.test.ts': 'the 2026-09-18 suspended_at is installation fixture data preflight reads for truthiness only',
+  'tests/github-rate-budget.test.ts': 'The 2026-09-21 item stamps and PR payload dates are past fixtures that evaluate\'s real new Date() only trails, the 2026-10-10 webhook attempts are judged by the now each corroboration case hands in',
   'tests/github.test.ts': 'the 2026-01-01, 2026-09-17 and 2026-10-05 instants are fixture stamps and fixed clocks handed to enforcement and reconcileCheckReruns',
   'tests/goal-acceptance.test.ts': 'the 2026-10-07 daemon clock lies behind every approval the server stamps, so the day-after-approval verdict needs the explicit Date.now() + 25h',
   'tests/goal-pipeline-outright-refusals.test.ts': 'the 2026-10-10T00:00Z daemon clock lies behind every goal stamped with new Date(), so no acceptanceStuckMs bound is crossed',
@@ -251,6 +372,7 @@ export const allowances: Record<string, string> = {
   'tests/harness-apply-checkout.test.ts': 'the 2026-10-10T18:00Z observedAt is the clock handed to each cycle (now: () => clock, later = clock + 1h)',
   'tests/headless-restart.test.ts': 'the 2030-01-01 records are sessionRetry fixtures judged on the now handed beside them',
   'tests/helpers/review-fleet.ts': 'the 2026-10-01T10:00Z at stamps createdAt, stageEnteredAt and evidence of fixture items',
+  'tests/helpers/soak-plane.ts': 'start is the simulated day\'s clock, installed by soakControlPlanes\' before hook; failoverInstalled\'s Date.now() runs inside a soak test, after that hook',
   'tests/human-decisions-ui.test.ts': 'the 2026-09-26 and 2026-10-02 instants are clocks handed to HumanSignIn',
   'tests/install-harness.ts': 'the 2024-01-01 deprecation announcement is Hetzner server-type fixture data the pricing reads for presence only',
   'tests/intervention-feedback.test.ts': 'the 2026-09-01, 2026-10-06 and 2026-10-07 instants are ledger rows and the now handed to foldInterventions, detectPatterns and loopSettledInBound',
@@ -267,6 +389,7 @@ export const allowances: Record<string, string> = {
   'tests/live-scope-widening.test.ts': 'the 2030-01-03 clock is handed to every runCycle (() => at) over a 2030 ',
   'tests/live-throughput.test.ts': 'windows at 2099/2100/2103 are isolation fences so real-clock deliveries ',
   'tests/liveness-invariant.test.ts': 't0 (2026-09-20) drives a virtual clock (now = () => new Date(clock)) han',
+  'tests/loop-faults.test.ts': 'slowPlane\'s Date.now() runs under the cycle tests\' mock.timers clock, and the checkout guards\' snapshots hold no work, so the Date.now() stamping their now meets no lease',
   'tests/loop-liveness-namespace.test.ts': 'the 2026-10-06 instants are the explicit `now` of each loopLiveness call',
   'tests/loop-self-upgrade.test.ts': 'the 2030-01-01 clock is passed as now: () => clock to performSelfUpgrade',
   'tests/main-guard.test.ts': '2026-10-05T08:00 is the guard\'s explicit `now` in every runMainGuard/app',
@@ -325,6 +448,8 @@ export const allowances: Record<string, string> = {
   'tests/session-liveness-model.test.ts': 'the 2026-09-24 and 2026-10-08 fixture instants are past and handed explicitly as now to observeSessions/sessio',
   'tests/session-liveness.test.ts': 'boundAt 2026-09-01 is config fixture and the 2026-09-21 instants are explicit past now/at arguments; the Date.',
   'tests/session-reconcile.test.ts': 'the 2026-09-23 request instants are past and judged only against the explicit now Date.parse(\'2026-09-23T07:36',
+  'tests/soak-approver-idle-stall.test.ts': 'item() stamps its work with new Date() only inside the soak test, after mock.timers installed the 2026-10-09 clock',
+  'tests/soak-approver-pane-rebind.test.ts': 'item() stamps its work with new Date() only inside the soak tests, after mock.timers installed the 2026-10-09 clock',
   'tests/soak-checkout-restore.test.ts': 'the 2030-01-01 simulated clock is the loop\'s injected now and every request/journal instant derives from it; D',
   'tests/speed-metric.test.ts': 'the 2026-10-07 delivery and timeline fixtures are measured against the explicit now constant; pipelineSpeedSum',
   'tests/stale-rework-requests.test.ts': 'the 2030-01-01 clock is the loop\'s injected now beside the snapshot\'s now iso(0); the Date.now()-based pause t',
@@ -334,6 +459,7 @@ export const allowances: Record<string, string> = {
   'tests/submit-head.test.ts': 'the 2026-10-08 observation at and the 12:30 evaluate now are past and handed explicitly to observeHead/evaluat',
   'tests/sudo-form-capture.test.ts': 'the 2026-10-07 tick clock is handed explicitly as now to the browser flow; Date.now() only fakes a form timest',
   'tests/supervised-local.test.ts': 'boundAt and the 2026-10-08 fixture instants are past and handed explicitly as seen/now to the registry, evalua',
+  'tests/system.test.ts': 'Every 2000-01-01 expiry is written to force a lease, evidence or observation lapse that stays lapsed on any later day; the 2099 Date proxy serves one test\'s clock-skew check',
   'tests/test-case-repository.test.ts': 'artifact createdAt 2026-09-01 is provenance fixture nothing dates against the clock; new Date()/Date.now() sta',
   'tests/test-isolation.test.ts': 'the 2026-09-24 pause resets are judged against the injected now () => clock of that test; the live command\'s r',
   'tests/throughput-admission.test.ts': 'the 2026-10-07 base and the 2026-09-28 GY-468 span are past and every measurement takes an explicit now or clo',

@@ -29,6 +29,7 @@ const worker: Principal = { id: 'agent-a', role: 'worker', displayName: 'Atlas',
 const other: Principal = { id: 'agent-b', role: 'worker' };
 const coordinator: Principal = { id: 'master', role: 'coordinator' };
 const otherCoordinator: Principal = { id: 'other-master', role: 'coordinator' };
+// Every 2000-01-01 expiry is written to force a lease, evidence or observation lapse that stays lapsed on any later day; the 2099 Date proxy serves one test's clock-skew check; new Date()/Date.now() stamp live records and build relative expiries on the real clock.
 const producer: Principal = { id: 'ci-runner', role: 'producer', proofs: ['integration:claim-safety'] };
 const otherProducer: Principal = { id: 'other-ci-runner', role: 'producer', proofs: ['integration:unrelated'] };
 const head = 'a'.repeat(40), base = 'b'.repeat(40);

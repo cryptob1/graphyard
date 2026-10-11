@@ -37,6 +37,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
  */
 
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
+// The 2030-01-01 clock and the iso() offsets from it are handed explicitly as now to ledgerLoopMerger, observe and performSelfUpgrade; the Date.now()/new Date() readings stamp the live registry, claim and executor cases, which judge age by their own offsets from the real clock.
 const clock = Date.parse('2030-01-01T12:00:00.000Z');
 const iso = (offsetMs: number) => new Date(clock + offsetMs).toISOString();
 const hex = (letter: string) => letter.repeat(40);

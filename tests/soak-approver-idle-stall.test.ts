@@ -28,6 +28,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 const minute = 60_000, hour = 60 * minute;
 
+// item() stamps its work with new Date() only inside the soak test, after mock.timers installed the 2026-10-09 clock, so every stamp sits on the simulated clock it is judged by.
 function item(n: number): Work {
   const now = new Date().toISOString();
   return {
