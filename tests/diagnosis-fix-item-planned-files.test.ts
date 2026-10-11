@@ -15,7 +15,7 @@ const baseTree = new Set([
   'src/daemon/cycle-decisions.ts', 'src/daemon/metrics.ts', 'src/daemon/decisions.ts',
   'src/daemon/cycle-sessions.ts', 'src/daemon/cycle-approvers.ts', 'src/daemon/diagnosis.ts',
   'src/model/capacity.ts', 'docs/master-agent.md', 'docs/master-agent-sessions.md', 'docs/onboarding.md',
-  'tests/capacity-silent-exhaustion.test.ts', baseline, docsBudget,
+  'tests/capacity-silent-exhaustion.test.ts', 'tests/webhook-soft-accept.test.ts', baseline, docsBudget,
 ]);
 
 const entry = (kind: 'recurring' | 'invariant' = 'recurring') =>
@@ -106,23 +106,21 @@ test('unit:diagnosis-fix-filed-input-equals-derived — the filed plannedFiles e
  * covering those asks.
  */
 test('integration:replay-fault-class-filing-carries-asked-files — GY-1700, GY-1701 and GY-1705 filing shapes cover the files their workers asked for', () => {
-  // GY-1700: AC-0 unit proof had no planned test vehicle; the worker asked for tests/webhook-soft-accept.test.ts.
+  // GY-1700: the worker asked for tests/webhook-soft-accept.test.ts (the AC-0 proof test vehicle that
+  // later stood in plannedFiles). The filed criteria name that path so derivation carries it the way
+  // master create carries a criterion-named base file — not only the proof-id stem companion.
   const gy1700 = deriveDiagnosisFixPlannedFiles({
     plannedFiles: ['src/server/routes/github.ts', 'src/server/main.ts', 'docs/protocol/github-webhook.md'],
     criteria: [{
       id: 'AC-0',
-      text: 'A verified webhook delivery soft-accepts with HTTP 202 when readiness is false.',
+      text: 'A verified webhook delivery soft-accepts with HTTP 202 when readiness is false, by a test in tests/webhook-soft-accept.test.ts.',
       proofs: ['unit:webhook-soft-accept-no-5xx'],
     }],
     kind: 'recurring',
     cause: 'receiver endpoint erroring in src/server/routes/github.ts mounted from src/server/main.ts',
   }, baseTree, 'main');
-  assert.ok(gy1700.plannedFiles.includes('tests/webhook-soft-accept-no-5xx.test.ts')
-    || gy1700.plannedFiles.includes('tests/webhook-soft-accept.test.ts'),
-  'GY-1700 proof companion is planned');
-  // proofTestFile names tests/webhook-soft-accept-no-5xx.test.ts from the proof id; either that or a
-  // criterion-described new test is the vehicle the worker asked for under the soft-accept stem.
-  assert.ok(gy1700.plannedFiles.some(path => /webhook-soft-accept/.test(path)), 'GY-1700 AC-0 test vehicle is planned');
+  assert.ok(gy1700.plannedFiles.includes('tests/webhook-soft-accept.test.ts'),
+    'GY-1700 carries the AC-0 test vehicle its worker asked for');
 
   // GY-1701: cause named the three daemon files; filed plannedFiles held none of them.
   const gy1701 = deriveDiagnosisFixPlannedFiles({
