@@ -11,6 +11,7 @@ import type { CliContext } from './context.js';
 import { deploymentTarget, derivedFrom, derivedVariables, installIdFor, prepareInstall, providers, revertApproverFromFile, selfProvision, type DerivedVariable, type PendingRedeploy, type PendingSetup, type Provider, type SelfProvisionAudit } from '../install/index.js';
 import type { AdapterContext, ProviderAdapter } from '../install/adapters.js';
 import { installDirectory, readInstallRecord } from '../install/secrets.js';
+import { provisionReleaseFiling, type ReleaseFilingAudit, type ReleaseFilingDeps, type ReleaseFilingStep, releaseFilingSetupNext } from '../master/release-filing.js';
 
 /**
  * The `setup` section of master status: installation state that silently stops every launch or
@@ -30,7 +31,7 @@ export const browserProfileMissing = 'No browser profile is configured: App perm
  * master's, never the human's (GY-1416): `master setup --apply` sets it, and the loop runs that
  * itself whenever the provider adapter can apply variables in place.
  */
-export const setupApplyNext = 'graphyard master setup --apply: sets GRAPHYARD_REVERT_APPROVER_APP_ID, GRAPHYARD_REVERT_APPROVER_INSTALLATION_ID and GRAPHYARD_REVERT_APPROVER_PRIVATE_KEY from the reviewer App registration saved on this host, and every other derived deployment variable the deployment lacks, through the provider adapter, then redeploys; the loop runs it itself when the adapter can apply variables. graphyard doctor then shows revert-approver ready';
+export const setupApplyNext = 'graphyard master setup --apply: sets GRAPHYARD_REVERT_APPROVER_APP_ID, GRAPHYARD_REVERT_APPROVER_INSTALLATION_ID and GRAPHYARD_REVERT_APPROVER_PRIVATE_KEY from the reviewer App registration saved on this host, and every other derived deployment variable the deployment lacks, through the provider adapter, then redeploys, and keeps the release filing identity and its uat GRAPHYARD_RELEASE_TOKEN current with the install\'s admin credential (GY-1692); the loop runs it itself when the adapter can apply variables. graphyard doctor then shows revert-approver ready';
 export const browserProfileNext = (cliPath: string) => `node ${cliPath} master init --token-stdin --browser-profile PROFILE`;
 /**
  * What the loop's cursor records of its own supervision (GY-1400), for a probe that could not reach
@@ -60,16 +61,22 @@ export async function setupHealth(root: string, master: MasterConfig, supervisor
   if (herdrWorkspace.exists === false) attention.push({ subject: 'setup', text: herdrWorkspace.reason!, ...agentOwner('master', 'Set herdrWorkspace in .graphyard/master.json to a workspace herdr workspace list shows; master run adopts it on its next tick') });
   if (revertApprover) attention.push({ subject: 'setup', text: revertApprover, ...agentOwner('master', setupApplyNext) });
   if (selfProvisioned?.failed) attention.push({ subject: 'setup', text: `The loop's master setup --apply ${selfProvisioned.outcome} (${selfProvisioned.at})`, ...agentOwner('master', setupApplyNext) });
+  // GY-1692 (GY-1691): the release filing credential is the master's to keep current; only a host holding no admin credential names the administrator's step, here, never in a park.
+  const filing = selfProvisioned?.releaseFiling;
+  if (filing?.state === 'unavailable') attention.push({ subject: 'setup', text: `The release filing credential cannot be issued from this host: ${filing.detail}`, ...humanOwner('issuing credentials to people', filing.next ?? releaseFilingSetupNext) });
+  else if (filing?.state === 'failed' || filing?.state === 'planned') attention.push({ subject: 'setup', text: `The loop's master setup --apply left the release filing credential ${filing.state}: ${filing.detail}`, ...agentOwner('master', setupApplyNext) });
   if (!master.browser) attention.push({ subject: 'setup', text: browserProfileMissing, ...humanOwner('issuing credentials to people', browserProfileNext(master.cliPath)) });
   return { setup, attention };
 }
 
 /** The loop's latest own run of `master setup --apply`: when it started and what it did (`running` until it settles). */
-export interface LoopSelfProvision { at: string; outcome: string; failed: boolean }
+export interface LoopSelfProvision { at: string; outcome: string; failed: boolean;
+  /** What the run did for the release filing credential (GY-1692), when the setup reported it. */
+  releaseFiling?: ReleaseFilingStep }
 const loopProvisionIntervalMs = 3_600_000, loopProvisionRetryMs = 600_000, loopProvisionRetryCapMs = 86_400_000;
 /** The wait before the next run: an hour after a success; after the Nth failure in a row 10 min × 2^(N-1), at most a day, so a setup or redeploy that keeps failing is retried a bounded number of times a day. */
 export const loopProvisionDelay = (failures: number) => failures ? Math.min(loopProvisionRetryMs * 2 ** (failures - 1), loopProvisionRetryCapMs) : loopProvisionIntervalMs;
-const loopProvisionRuns = new Map<string, { at: number; running: boolean; outcome: string; failed: boolean; failures: number; reported: boolean }>();
+const loopProvisionRuns = new Map<string, { at: number; running: boolean; outcome: string; failed: boolean; failures: number; reported: boolean; releaseFiling?: ReleaseFilingStep }>();
 /** Where the loop's latest run is kept, so `master status` in another process reads its outcome. */
 export const loopProvisionFile = (root: string) => resolve(root, '.graphyard', 'setup-self-provision.json');
 /**
@@ -80,20 +87,23 @@ export const loopProvisionFile = (root: string) => resolve(root, '.graphyard', '
  * attention keeps naming the command. A failed run is thrown on the next step, so the cycle records
  * the failed config action, and its outcome is kept for `master status`, which never runs it.
  */
-export async function loopSelfProvision(root: string, master: Pick<MasterConfig, 'repository' | 'reviewer'>, options: { now?: number; setup?: typeof masterSetup } = {}): Promise<LoopSelfProvision> {
+export async function loopSelfProvision(root: string, master: Pick<MasterConfig, 'repository' | 'reviewer' | 'url'>, options: { now?: number; setup?: typeof masterSetup } = {}): Promise<LoopSelfProvision> {
   const now = options.now ?? Date.now(), last = loopProvisionRuns.get(root);
   // A failed run is reported once, after its retry starts when due: reporting never costs the retry a step.
   const unreported = last && !last.running && last.failed && !last.reported ? last : null;
   if (unreported) unreported.reported = true;
   if (!last || (!last.running && now - last.at >= loopProvisionDelay(last.failures))) {
-    const entry = { at: now, running: true, outcome: 'running', failed: false, failures: last?.failures ?? 0, reported: false };
+    const entry: NonNullable<ReturnType<typeof loopProvisionRuns.get>> = { at: now, running: true, outcome: 'running', failed: false, failures: last?.failures ?? 0, reported: false };
     loopProvisionRuns.set(root, entry);
     void (options.setup ?? masterSetup)(root, master, { apply: true })
-      .then(report => { entry.failures = 0; entry.outcome = report.set.length ? `set ${report.set.join(', ')}` : report.redeployed.length ? `redeployed ${report.redeployed.join(', ')}` : report.next ?? 'every derived variable is present'; },
+      .then(report => {
+        entry.failures = 0; entry.outcome = report.set.length ? `set ${report.set.join(', ')}` : report.redeployed.length ? `redeployed ${report.redeployed.join(', ')}` : report.next ?? 'every derived variable is present';
+        if (report.releaseFiling) { entry.releaseFiling = report.releaseFiling; if (report.releaseFiling.state !== 'current') entry.outcome += `; release filing ${report.releaseFiling.state}: ${report.releaseFiling.detail}`; }
+      },
         error => { entry.outcome = `failed: ${error instanceof Error ? error.message : String(error)}`; entry.failed = true; entry.failures++; })
       .finally(async () => {
         entry.running = false;
-        await writeAtomically(loopProvisionFile(root), { at: new Date(entry.at).toISOString(), outcome: entry.outcome, failed: entry.failed }).catch(() => undefined);
+        await writeAtomically(loopProvisionFile(root), { at: new Date(entry.at).toISOString(), outcome: entry.outcome, failed: entry.failed, ...(entry.releaseFiling ? { releaseFiling: entry.releaseFiling } : {}) }).catch(() => undefined);
       });
   }
   if (unreported) throw new Error(`setup self-provision ${unreported.outcome}`);
@@ -101,7 +111,7 @@ export async function loopSelfProvision(root: string, master: Pick<MasterConfig,
 }
 export async function lastLoopSelfProvision(root: string): Promise<LoopSelfProvision | null> {
   const current = loopProvisionRuns.get(root);
-  if (current) return { at: new Date(current.at).toISOString(), outcome: current.outcome, failed: current.failed };
+  if (current) return { at: new Date(current.at).toISOString(), outcome: current.outcome, failed: current.failed, ...(current.releaseFiling ? { releaseFiling: current.releaseFiling } : {}) };
   // A missing or unreadable file is no report: it is a diagnostic, and `master status` never fails on it.
   return readFile(loopProvisionFile(root), 'utf8').then(text => JSON.parse(text) as LoopSelfProvision).catch(() => null);
 }
@@ -120,6 +130,8 @@ export interface MasterSetupDependencies {
   /** The deployment and the variables its install record derives; the install record's by default (`recordedDeployment`). */
   locate?: (root: string, master: Pick<MasterConfig, 'repository'>, options: MasterSetupOptions) => Promise<{ adapter: ProviderAdapter; context: AdapterContext; derived: DerivedVariable[] } | null>;
   now?: () => number;
+  /** How the release filing step (GY-1692) reads the admin credential, the plane and gh; the host's by default. */
+  releaseFiling?: ReleaseFilingDeps;
 }
 
 /**
@@ -143,22 +155,24 @@ export async function recordedDeployment(root: string, master: Pick<MasterConfig
  * the reviewer App bound in .graphyard/master.json — planned, or set with --apply through the
  * provider adapter with one audit entry each. Nothing is printed but names and fingerprints.
  */
-export async function masterSetup(root: string, master: Pick<MasterConfig, 'repository' | 'reviewer'>, options: MasterSetupOptions, deps: MasterSetupDependencies = {}) {
+export async function masterSetup(root: string, master: Pick<MasterConfig, 'repository' | 'reviewer' | 'url'>, options: MasterSetupOptions, deps: MasterSetupDependencies = {}) {
+  const audit = async (entry: SelfProvisionAudit | ReleaseFilingAudit) => { await mkdir(resolve(root, '.graphyard'), { recursive: true }); await appendFile(setupAuditFile(root), `${JSON.stringify(entry)}\n`, { mode: 0o600 }); };
+  // GY-1692 (GY-1691): the release filing credential needs no deployment record, only the install's admin credential and the host's gh login.
+  const releaseFiling = await provisionReleaseFiling(master, { apply: options.apply }, { ...deps.releaseFiling, audit: deps.releaseFiling?.audit ?? audit, ...(deps.releaseFiling?.now ? {} : deps.now ? { now: deps.now } : {}) });
   const located = await (deps.locate ?? recordedDeployment)(root, master, options);
-  if (!located) return { mode: options.apply ? 'apply' as const : 'plan' as const, target: null, observed: false, canApply: false, missing: [], set: [], redeployed: [] as string[], pendingRedeploy: [] as string[], audit: [],
+  if (!located) return { mode: options.apply ? 'apply' as const : 'plan' as const, target: null, observed: false, canApply: false, missing: [], set: [], redeployed: [] as string[], pendingRedeploy: [] as string[], audit: [], releaseFiling,
     next: `No deployment is recorded for ${master.repository} on this host (no graphyard install record): name it with graphyard master setup --provider railway --service NAME --link-dir DIR${options.apply ? ' --apply' : ''}` };
   const reviewer = master.reviewer ? derivedFrom(await revertApproverFromFile(master.reviewer.credentialFile), `the reviewer App ${master.reviewer.slug} registration ${master.reviewer.credentialFile}`) : [];
-  const audit = async (entry: SelfProvisionAudit) => { await mkdir(resolve(root, '.graphyard'), { recursive: true }); await appendFile(setupAuditFile(root), `${JSON.stringify(entry)}\n`, { mode: 0o600 }); };
   const pendingFile = resolve(root, '.graphyard', `setup-redeploy-${located.context.provider}-${located.context.service}.json`);
   const pending: PendingRedeploy = {
     read: () => readFile(pendingFile, 'utf8').then(text => JSON.parse(text) as PendingSetup, () => ({ redeploy: [], audit: [] })),
     write: async staged => { await (staged.redeploy.length || staged.audit.length ? writeAtomically(pendingFile, staged) : rm(pendingFile, { force: true })); },
   };
   // The reviewer bound now comes first: the first occurrence of a name wins, and the install record's reviewer may since have been replaced.
-  return { target: { provider: located.context.provider, service: located.context.service }, ...await selfProvision(located, [...reviewer, ...located.derived], { apply: options.apply, audit, now: deps.now, pending }) };
+  return { target: { provider: located.context.provider, service: located.context.service }, ...await selfProvision(located, [...reviewer, ...located.derived], { apply: options.apply, audit, now: deps.now, pending }), releaseFiling };
 }
 
-export async function masterSetupCommand(context: CliContext, root: string, master: Pick<MasterConfig, 'repository' | 'reviewer'>) {
+export async function masterSetupCommand(context: CliContext, root: string, master: Pick<MasterConfig, 'repository' | 'reviewer' | 'url'>) {
   const { values } = parseArgs({ args: context.args, options: { apply: { type: 'boolean' }, provider: { type: 'string' }, service: { type: 'string' }, 'link-dir': { type: 'string' }, workspace: { type: 'string' } }, allowPositionals: false });
   if (values.provider && !providers.includes(values.provider as Provider)) throw new Error(`--provider is one of ${providers.join(', ')}`);
   return context.print(await masterSetup(root, master, { apply: !!values.apply, ...(values.provider ? { provider: values.provider as Provider } : {}), ...(values.service ? { service: values.service } : {}), ...(values['link-dir'] ? { linkDirectory: values['link-dir'] } : {}), ...(values.workspace ? { workspace: values.workspace } : {}) }));

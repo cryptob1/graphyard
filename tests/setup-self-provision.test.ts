@@ -262,3 +262,140 @@ test('unit:setup-attention-owner — a missing derivable deployment variable is 
     assert.match(Object.values(state.actions).find(action => action.kind === 'config')?.detail ?? '', /setup self-provision.*railway is not logged in/, 'a failed run is its own action');
   } finally { await rm(root, { recursive: true, force: true }); }
 });
+
+// GY-1692 (GY-1691): the uat GRAPHYARD_RELEASE_TOKEN predated the operator agent graphyard-release-follow-up,
+// so every failed candidate's filing was refused, and the fix — issue the identity, store its token as the
+// secret — was parked on the human as a credential decision. The identity is an agent's, the install's admin
+// credential is saved on the host, and the host's gh login administers the repository: `master setup --apply`
+// keeps the credential current, and the loop runs it itself.
+import { credentialIssuedAt, provisionReleaseFiling, releaseFilingAdministratorStep, releaseFilingTransitionSeconds, type ReleaseFilingDeps } from '../src/master/release-filing.js';
+
+/** A control plane's operator-agent API as the admin sees it, and GitHub's uat secret as gh reads and sets it. */
+function releaseFilingHost(options: { agents?: any[]; secretUpdatedAt?: string | null; admin?: string | null; setFails?: boolean } = {}) {
+  const agents: any[] = options.agents ?? [];
+  let secret = options.secretUpdatedAt === undefined ? '2026-10-05T04:08:40Z' : options.secretUpdatedAt;
+  const planeCalls: { path: string; method: string; body: any; token: string | null }[] = [], ghCalls: { args: string[]; input?: string }[] = [];
+  const fetcher = (async (url: string, init: RequestInit) => {
+    const path = url.replace('https://graphyard.example/api/', ''), body = init.body ? JSON.parse(String(init.body)) : undefined;
+    planeCalls.push({ path, method: init.method ?? 'GET', body, token: String((init.headers as Record<string, string>).Authorization ?? '').replace('Bearer ', '') || null });
+    const json = (status: number, value: unknown) => new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } });
+    if (planeCalls.at(-1)!.token !== 'admin-token-' + 'a'.repeat(32)) return json(403, { error: 'Administrator permission required' });
+    if (path === 'operator-agents' && init.method === 'GET') return json(200, agents);
+    if (path === 'operator-agents') { agents.push({ id: body.id, displayName: body.displayName, role: 'operator-agent', capabilities: body.capabilities, scope: body.scope, revision: 1, createdAt: '2026-10-11T06:00:00.000Z', lastMutation: { kind: 'setup', at: '2026-10-11T06:00:00.000Z' } }); return json(200, agents.at(-1)); }
+    const match = /^operator-agents\/([^/]+)\/(configure|rotate)$/.exec(path);
+    if (match) {
+      const agent = agents.find(entry => entry.id === decodeURIComponent(match[1]));
+      if (match[2] === 'configure') { if (body.expectedRevision !== agent.revision) return json(409, { error: 'Operator-agent revision changed' }); agent.capabilities = body.capabilities; agent.scope = body.scope; }
+      agent.revision++; agent.lastMutation = { kind: match[2], at: '2026-10-11T06:30:00.000Z', ...(match[2] === 'rotate' ? { transitionEndsAt: 'later' } : {}) };
+      return json(200, agent);
+    }
+    return json(404, { error: `no route ${path}` });
+  }) as unknown as typeof fetch;
+  const gh: NonNullable<ReleaseFilingDeps['gh']> = async (args, input) => {
+    ghCalls.push({ args, ...(input === undefined ? {} : { input }) });
+    if (args[0] === 'api') return secret ? { code: 0, stdout: JSON.stringify({ name: 'GRAPHYARD_RELEASE_TOKEN', created_at: secret, updated_at: secret }), stderr: '' } : { code: 1, stdout: '', stderr: 'gh: Not Found (HTTP 404)' };
+    if (args[0] === 'secret' && args[1] === 'set') { if (options.setFails) return { code: 1, stdout: '', stderr: 'HTTP 403: Resource not accessible by personal access token' }; secret = '2026-10-11T06:31:00.000Z'; return { code: 0, stdout: '', stderr: '' }; }
+    return { code: 1, stdout: '', stderr: `unexpected gh ${args.join(' ')}` };
+  };
+  const audits: any[] = [];
+  const deps: ReleaseFilingDeps = { adminToken: async () => options.admin === undefined ? 'admin-token-' + 'a'.repeat(32) : options.admin, fetch: fetcher, gh, token: () => 'b'.repeat(64), now: () => Date.parse('2026-10-11T06:30:00.000Z'), audit: async entry => { audits.push(entry); } };
+  return { agents, deps, planeCalls, ghCalls, audits, secretUpdatedAt: () => secret };
+}
+const filingMaster = { url: 'https://graphyard.example', repository: 'cryptob1/graphyard' };
+const filingScope = { repositories: ['cryptob1/graphyard'], workItems: ['*'] };
+
+test('manual:intervention-pattern-human-only-decision-build — GY-1691 (GY-1692): master setup --apply issues graphyard-release-follow-up with the install\'s admin credential and stores its token as the uat GRAPHYARD_RELEASE_TOKEN through gh, the token never printed; a plan only names the steps', async () => {
+  // As recorded: no identity, a secret stored 2026-10-05 that predates it.
+  const host = releaseFilingHost();
+  const planned = await provisionReleaseFiling(filingMaster, { apply: false }, host.deps);
+  assert.equal(planned.state, 'planned');
+  assert.match(planned.detail, /graphyard master setup --apply would issue graphyard-release-follow-up holding only intent:create over cryptob1\/graphyard and store its token as the uat GRAPHYARD_RELEASE_TOKEN \(the one stored 2026-10-05T04:08:40Z predates the identity\)/);
+  assert.deepEqual(host.planeCalls.map(call => call.method), ['GET'], 'a plan reads and writes nothing');
+  assert.deepEqual(host.ghCalls.map(call => call.args[0]), ['api']);
+  const applied = await provisionReleaseFiling(filingMaster, { apply: true }, host.deps);
+  assert.equal(applied.state, 'provisioned', applied.detail);
+  assert.match(applied.detail, /provisioned graphyard-release-follow-up \(intent:create over cryptob1\/graphyard\) and stored its token as the uat GRAPHYARD_RELEASE_TOKEN of cryptob1\/graphyard through gh/);
+  const setup = host.planeCalls.find(call => call.path === 'operator-agents' && call.method === 'POST')!;
+  assert.deepEqual([setup.body.id, setup.body.displayName, setup.body.capabilities, setup.body.scope, setup.body.token], ['graphyard-release-follow-up', 'Release follow-up', ['intent:create'], filingScope, 'b'.repeat(64)]);
+  assert.match(setup.body.reason, /^A failed release candidate files its follow-up\. GY-1692/);
+  const stored = host.ghCalls.find(call => call.args[0] === 'secret')!;
+  assert.deepEqual(stored.args, ['secret', 'set', 'GRAPHYARD_RELEASE_TOKEN', '--repo', 'cryptob1/graphyard', '--env', 'uat']);
+  assert.equal(stored.input, 'b'.repeat(64), 'the token goes to gh over standard input, never as an argument');
+  assert.ok(!JSON.stringify(applied).includes('b'.repeat(64)) && !JSON.stringify(host.audits).includes('b'.repeat(64)), 'neither the report nor the audit carries the token');
+  assert.deepEqual(host.audits.map(entry => [entry.variable, entry.secret, entry.provider, entry.service, entry.at, entry.fingerprint.length]), [['GRAPHYARD_RELEASE_TOKEN', true, 'github', 'cryptob1/graphyard/environments/uat', '2026-10-11T06:30:00.000Z', 16]]);
+  // Current afterwards: the secret stored now is as new as the credential.
+  const current = await provisionReleaseFiling(filingMaster, { apply: true }, host.deps);
+  assert.equal(current.state, 'current', current.detail);
+  assert.equal(host.ghCalls.filter(call => call.args[0] === 'secret').length, 1, 'nothing is stored again');
+});
+
+test('manual:intervention-pattern-human-only-decision-build — GY-1691 (GY-1692): a secret older than the identity\'s credential is rotated with a transition, a broader identity is narrowed, a failed store is retried by the next run, and a host without the admin credential names the administrator\'s step in the setup attention, never a park', async () => {
+  // The secret predates the credential the identity holds: rotate, the replaced credential staying valid for a running workflow.
+  const stale = releaseFilingHost({ agents: [{ id: 'graphyard-release-follow-up', role: 'operator-agent', capabilities: ['intent:create'], scope: filingScope, revision: 3, createdAt: '2026-10-09T00:00:00.000Z', lastMutation: { kind: 'rotate', at: '2026-10-10T00:00:00.000Z' } }] });
+  assert.equal(credentialIssuedAt(stale.agents[0]), '2026-10-10T00:00:00.000Z');
+  const rotated = await provisionReleaseFiling(filingMaster, { apply: true }, stale.deps);
+  assert.equal(rotated.state, 'rotated', rotated.detail);
+  const rotate = stale.planeCalls.find(call => call.path.endsWith('/rotate'))!;
+  assert.deepEqual([rotate.body.token, rotate.body.transitionSeconds], ['b'.repeat(64), releaseFilingTransitionSeconds]);
+  assert.match(rotated.detail, /the replaced credential stays valid 60 minutes/);
+  assert.equal(stale.secretUpdatedAt(), '2026-10-11T06:31:00.000Z');
+  // A missing secret rotates too; a secret as new as the credential does not.
+  const missing = releaseFilingHost({ secretUpdatedAt: null, agents: [{ id: 'graphyard-release-follow-up', role: 'operator-agent', capabilities: ['intent:create'], scope: filingScope, revision: 1, createdAt: '2026-10-09T00:00:00.000Z', lastMutation: { kind: 'setup', at: '2026-10-09T00:00:00.000Z' } }] });
+  assert.equal((await provisionReleaseFiling(filingMaster, { apply: false }, missing.deps)).detail.includes('(none is stored)'), true);
+  assert.equal((await provisionReleaseFiling(filingMaster, { apply: true }, missing.deps)).state, 'rotated');
+  // Broader than filing needs: narrowed to intent:create over this repository alone, the secret untouched.
+  const broad = releaseFilingHost({ secretUpdatedAt: '2026-10-10T12:00:00.000Z', agents: [{ id: 'graphyard-release-follow-up', role: 'operator-agent', capabilities: ['intent:create', 'intent:ready'], scope: { repositories: ['cryptob1/graphyard', 'cryptob1/other'], workItems: ['*'] }, revision: 2, createdAt: '2026-10-09T00:00:00.000Z', lastMutation: { kind: 'configure', at: '2026-10-10T00:00:00.000Z' } }] });
+  const narrowed = await provisionReleaseFiling(filingMaster, { apply: true }, broad.deps);
+  assert.equal(narrowed.state, 'configured', narrowed.detail);
+  assert.match(narrowed.detail, /also holds intent:ready/);
+  const configure = broad.planeCalls.find(call => call.path.endsWith('/configure'))!;
+  assert.deepEqual([configure.body.expectedRevision, configure.body.capabilities, configure.body.scope], [2, ['intent:create'], filingScope]);
+  assert.equal(broad.ghCalls.some(call => call.args[0] === 'secret'), false);
+  // gh refuses the store: the identity was rotated, so the next run sees the secret older than the credential and rotates again.
+  const refusedStore = releaseFilingHost({ setFails: true, agents: [{ id: 'graphyard-release-follow-up', role: 'operator-agent', capabilities: ['intent:create'], scope: filingScope, revision: 1, createdAt: '2026-10-10T00:00:00.000Z', lastMutation: { kind: 'setup', at: '2026-10-10T00:00:00.000Z' } }] });
+  const failedStore = await provisionReleaseFiling(filingMaster, { apply: true }, refusedStore.deps);
+  assert.equal(failedStore.state, 'failed');
+  assert.match(failedStore.detail, /rotated but storing GRAPHYARD_RELEASE_TOKEN in the uat environment of cryptob1\/graphyard failed \(gh exited 1\): HTTP 403.*the next run rotates it again/);
+  assert.deepEqual(refusedStore.audits, [], 'nothing stored, nothing audited');
+  assert.equal((await provisionReleaseFiling(filingMaster, { apply: false }, refusedStore.deps)).state, 'planned', 'the next run plans the rotation again');
+  // A revoked identity, and a credential the plane refuses, are failures the master owns.
+  const revoked = releaseFilingHost({ agents: [{ id: 'graphyard-release-follow-up', role: 'operator-agent', capabilities: ['intent:create'], scope: filingScope, revision: 1, createdAt: '2026-10-09T00:00:00.000Z', revokedAt: '2026-10-10T00:00:00.000Z' }] });
+  assert.match((await provisionReleaseFiling(filingMaster, { apply: true }, revoked.deps)).detail, /was revoked at 2026-10-10T00:00:00.000Z; restore it/);
+  const notAdmin = releaseFilingHost({ admin: 'worker-token-' + 'w'.repeat(32) });
+  assert.match((await provisionReleaseFiling(filingMaster, { apply: true }, notAdmin.deps)).detail, /Graphyard refused operator-agents \(403\): Administrator permission required/);
+  // No admin credential on this host: the one case a person is needed, named as a setup step with the exact commands, and nothing is called.
+  const absent = releaseFilingHost({ admin: null });
+  const unavailable = await provisionReleaseFiling(filingMaster, { apply: true }, absent.deps);
+  assert.equal(unavailable.state, 'unavailable');
+  assert.equal(unavailable.next, releaseFilingAdministratorStep('cryptob1/graphyard'));
+  assert.match(unavailable.next!, /graphyard operator-agent setup FILE --token-stdin .*gh secret set GRAPHYARD_RELEASE_TOKEN --repo cryptob1\/graphyard --env uat$/);
+  assert.deepEqual([absent.planeCalls, absent.ghCalls], [[], []]);
+
+  // Through master setup and the loop's own run: the report and the kept outcome carry the step, and the setup attention owns it.
+  const root = await temporaryDirectory('release-filing-setup');
+  try {
+    const master = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: join(root, 'coordinator.token'), cliPath: '/opt/graphyard/bin/graphyard.mjs',
+      repository: 'cryptob1/graphyard', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-graphyard', autoMerge: true, mergeMethod: 'merge', workers: [], browser: { profile: 'Default' } }) as MasterConfig;
+    const provisioning = releaseFilingHost();
+    const report = await masterSetup(root, master, { apply: true }, { locate: async () => null, releaseFiling: { ...provisioning.deps, audit: undefined } });
+    assert.equal(report.releaseFiling.state, 'provisioned', report.releaseFiling.detail);
+    const audit = (await readFile(setupAuditFile(root), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+    assert.deepEqual(audit.map(entry => [entry.variable, entry.provider, entry.service]), [['GRAPHYARD_RELEASE_TOKEN', 'github', 'cryptob1/graphyard/environments/uat']], 'the setup audit records the store by fingerprint');
+    assert.ok(!(await readFile(setupAuditFile(root), 'utf8')).includes('b'.repeat(64)));
+    const host = { platform: 'linux' as NodeJS.Platform, temporaryDirectories: [] as string[], home: root, run: () => '' };
+    const now = Date.parse('2026-10-11T07:00:00.000Z');
+    for (const [step, expectHuman, text] of [[unavailable, true, /cannot be issued from this host: no installation admin credential/], [failedStore, false, /left the release filing credential failed/]] as const) {
+      const setupStub = (async () => ({ set: [], redeployed: [], next: null, releaseFiling: step })) as unknown as typeof masterSetup;
+      const kept = await loopSelfProvision(join(root, step.state), master, { now, setup: setupStub });
+      assert.equal(kept.outcome, 'running');
+      await new Promise(resolve => setTimeout(resolve, 20));
+      const settled = await loopSelfProvision(join(root, step.state), master, { now: now + 1000, setup: setupStub });
+      assert.deepEqual(settled.releaseFiling, step, 'the loop keeps what the step did');
+      assert.ok(settled.outcome.includes(`release filing ${step.state}: `), settled.outcome);
+      const item = (await setupHealth(join(root, step.state), master, host, null, async () => null)).attention.find(entry => text.test(entry.text))!;
+      assert.ok(item, `${step.state} is attention`);
+      assert.deepEqual([item.human, item.role, item.next], [expectHuman, expectHuman ? 'human' : 'master', expectHuman ? step.next : setupApplyNext]);
+      if (expectHuman) assert.equal(item.humanOnly, 'issuing credentials to people');
+    }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});

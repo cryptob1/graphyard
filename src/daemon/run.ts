@@ -300,7 +300,7 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
     const executorsAct = options.executors;
     const restoreCheckout = options.checkoutRestore ?? ((settle: () => Promise<unknown>, keepAlive?: () => Promise<void>) => serveLoopRequests(config, coordinatorCheckoutRoot(config.cliPath), {
       settle, report: outcome => log(`[graphyard-master] ${outcome.state === 'restart' ? 'loop-restart request' : outcome.state === 'executors' ? 'master executors request' : `checkout-restore ${outcome.state}`}: ${outcome.detail}${outcome.restart ? `; restart ${outcome.restart.state}: ${outcome.restart.detail}` : ''}`),
-      restart: options.restartLoop ?? restartThroughUnit, pid: options.identity.pid, ...(executorsAct ? { executors: (args: string[]) => executorsAct(args, keepAlive) } : {}) }));
+      restart: options.restartLoop ?? restartThroughUnit, pid: options.identity.pid, target: () => ({ loaded: guard.expected(), base: `origin/${config.baseBranch}` }), ...(executorsAct ? { executors: (args: string[]) => executorsAct(args, keepAlive) } : {}) }));
     const serveRestore = async (keepAlive?: () => Promise<void>) => {
       try { await restoreCheckout(() => guard.settle(), keepAlive); }
       catch (error) { log(`[graphyard-master] checkout-restore could not be served: ${message(error)}`); }
@@ -427,7 +427,7 @@ export async function serveLoopRequests(config: Pick<MasterConfig, 'credentialFi
 
 const escalationKey = 'escalation:dirty-checkout';
 /** The remedy a dirty-checkout escalation names (GY-1658): one the installation runs itself, the doctor's allowlist included. */
-export const checkoutRestoreRemedy = 'Remedy the installation runs itself: graphyard master checkout-restore REASON (sanctioned for the doctor) saves every dirty path under refs/graphyard/checkout-restore/, returns them to HEAD and restarts the loop through graphyard-master.service.';
+export const checkoutRestoreRemedy = 'Remedy the installation runs itself: graphyard master checkout-restore REASON (sanctioned for the doctor) saves every dirty path, and a HEAD moved off the commit the loop runs, under refs/graphyard/checkout-restore/, discarding nothing, returns the checkout to that commit and restarts the loop through graphyard-master.service.';
 /**
  * GY-857/GY-866: the coordinator checkout guard the loop runs at startup and after every cycle.
  * A tree holding uncommitted work, or a HEAD that moved away from the commit the loop runs, is
@@ -527,7 +527,8 @@ export function coordinatorCheckoutGuard(deps: {
       // GY-1658: a standing pane working in the checkout is the suspected writer — every launched
       // session sees it read-only, the master's included — and the installation's own remedy is named.
       else if (pointing.length) detail += ` Suspected ${pointing.length === 1 ? 'writer — one standing session\'s pane still points at it' : `writers — ${pointing.length} standing sessions' panes still point at it`}: ${pointing.slice(0, 8).join('; ')}${pointing.length > 8 ? `; and ${pointing.length - 8} more` : ''}.`;
-      if (coordinatorCheckoutRefusal(checkout, 'the master loop')) detail += ` ${checkoutRestoreRemedy}`;
+      // GY-1692 (GY-1666): a moved HEAD the loop could not adopt has the same remedy as a dirty tree; a person's git is never the only way back.
+      detail += ` ${checkoutRestoreRemedy}`;
       enriched = { refusal, detail, at: deps.now() };
     }
     const state = deps.state(), existing = state.actions[escalationKey];
@@ -560,7 +561,8 @@ export function coordinatorCheckoutGuard(deps: {
         const drift = headDrift(checkout);
         if (drift) {
           deps.log(`[graphyard-master] stopping with the coordinator checkout's HEAD at ${(checkout.commit ?? '').slice(0, 12)}, not ${(expectedHead ?? '').slice(0, 12)} the loop loaded: the next loop runs the checkout's HEAD, so no dirty-checkout refusal is recorded`);
-          return { refusal: drift, upgraded: null };
+          // The refusal as the standing escalation words it, read from nothing: a stopping loop neither records nor reads the inventory again.
+          return { refusal: enriched && enriched.refusal === drift ? enriched.detail : drift, upgraded: null };
         }
       }
       // A forward move adopted here settles any drift attention it raised, and is this cycle's upgrade.

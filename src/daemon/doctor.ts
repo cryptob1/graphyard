@@ -13,7 +13,8 @@ import { workerSubmissionBoundMs } from '../model/attempt-bound.js';
 import { scopeRefusalBlocker, unplannedPaths } from '../model/scope.js';
 import { approverSessionName, guardBroadScope } from '../master/autonomy.js';
 import { containmentPhase, masterHarness, type MasterConfig } from '../master.js';
-import { HarnessCheckoutRefusal, harnessApplyCheckout } from '../master/harness.js';
+import { HarnessCheckoutRefusal, harnessApplyCheckout, recordServingUnits } from '../master/harness.js';
+import { installUnitsFile } from '../install/units.js';
 import { coordinatorCheckoutRoot } from '../master/profiles.js';
 import { harnessDrift, writeHarnessPermissions } from '../harness.js';
 import { selectFleetSession } from '../fleet.js';
@@ -741,18 +742,21 @@ export async function applyHarnessContract(cycle: Cycle) {
   await isolate('config', null, 'harness contract', async () => {
     const key = remedyKey('harness', 'claude'), previous = state.actions[key], attempts = (previous?.attempts ?? 0) + 1;
     try {
+      // GY-1692 (GY-1666): a checkout that records no units, served by a unit that runs it, records its own before validation, instead of waiting on a person's master init.
+      const units = effects.harness?.servingUnit ? await recordServingUnits(root, config.repository, { servingUnit: effects.harness.servingUnit, unitDirectory: effects.harness.unitDirectory }) : null;
+      const recorded = units ? `Recorded this install's units (${units.master}, ${units.executorTemplate}) in ${root}/${installUnitsFile} from ${effects.harness!.servingUnit}, the unit serving the loop, which runs it. ` : '';
       // Every resolved checkout is validated first, settings installed or not: one that records no units waits on master init (GY-1662).
       harnessApplyCheckout(root, { servingUnit: effects.harness?.servingUnit, unitDirectory: effects.harness?.unitDirectory });
       // A validated checkout with no Claude settings installed has nothing to apply (harnessDrift is null without the file).
       const plan = existsSync(resolve(root, claudeSettingsFile)) ? masterHarness(root, config, 'claude') : null;
       if (!plan || !await harnessDrift(root, plan)) {
         // A refusal the operator's remedy has cleared, or a failure the checkout recovered from, closes once the contract already holds (GY-1662).
-        if (previous && previous.state !== 'done') performed.push(await record(state, key, { kind: 'config', work: null, principal: null, state: 'done', detail: plan ? `The Claude harness contract already holds for ${root}: the earlier ${previous.state} row is resolved with nothing to apply` : `No Claude harness settings are installed under ${root} (${claudeSettingsFile}): the earlier ${previous.state} row is resolved with nothing to apply`, attempts, cycle: state.cycle }, now(), effects.persist));
+        if ((previous && previous.state !== 'done') || units) performed.push(await record(state, key, { kind: 'config', work: null, principal: null, state: 'done', detail: `${recorded}${plan ? `The Claude harness contract already holds for ${root}` : `No Claude harness settings are installed under ${root} (${claudeSettingsFile})`}${previous && previous.state !== 'done' ? `: the earlier ${previous.state} row is resolved with nothing to apply` : ': nothing to apply'}`.slice(0, 2000), attempts, cycle: state.cycle }, now(), effects.persist));
         return;
       }
       const written = await writeHarnessPermissions(root, plan, true);
       const changed = [...written.removed.map(entry => `removed stale ${entry.list} ${entry.rule}`), ...written.added.map(entry => `added ${entry.list} ${entry.rule}`)].join(', ');
-      performed.push(await record(state, key, { kind: 'config', work: null, principal: null, state: 'done', detail: `Applied the Claude harness contract to ${written.file} from the loop's own process, as graphyard master harness claude --apply does, keeping operator-added entries: ${changed}`.slice(0, 2000), attempts, cycle: state.cycle }, now(), effects.persist));
+      performed.push(await record(state, key, { kind: 'config', work: null, principal: null, state: 'done', detail: `${recorded}Applied the Claude harness contract to ${written.file} from the loop's own process, as graphyard master harness claude --apply does, keeping operator-added entries: ${changed}`.slice(0, 2000), attempts, cycle: state.cycle }, now(), effects.persist));
     } catch (error) {
       // A checkout refusal waits on the operator's remedy, which it names: journaled once, never refreshed or retried as a fault, until its cause changes.
       if (error instanceof HarnessCheckoutRefusal) {

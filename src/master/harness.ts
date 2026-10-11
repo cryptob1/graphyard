@@ -7,7 +7,7 @@ import { type ChildRun, defaultChildRun } from '../child-runner.js';
 import { nameForLaunch } from '../session-name.js';
 import { executorUnitDirectory, launchAuthorization } from '../repository-setup.js';
 import { type HarnessHook, type HarnessPlan, type HarnessRule, writeHarnessPermissions, mergeHarnessHooks, masterHarnessPlan, harnessDecision, claudeRuleProblem, bashRuleMatches } from '../harness.js';
-import { executorInstance, foreignUnitText, initialiseUnitsCommand, installUnitsFile, type InstallUnits, LegacyUnitRefusal, legacyLoopUnit, readInstallUnits, unitCheckout } from '../install/units.js';
+import { executorInstance, foreignUnitText, initialiseUnitsCommand, installUnitsFile, type InstallUnits, LegacyUnitRefusal, legacyLoopUnit, proposedInstallUnits, readInstallUnits, resolveInstallUnits, unitCheckout } from '../install/units.js';
 import type { Work } from '../model.js';
 import type { MasterConfig, WorkerProfile } from './profiles.js';
 import { coordinatorCheckoutRoot, promotionCommand, workerConfinementRefusal } from './profiles.js';
@@ -393,6 +393,25 @@ function launchedCheckout(text: string, root: string, home: string): string | nu
   if (!cli) return `a command with no WorkingDirectory and no ${root}/bin/graphyard.mjs in its ExecStart (${execStart ?? 'none'})`;
   const checkout = dirname(dirname(cli));
   return real(checkout) === real(root) ? null : checkout;
+}
+/**
+ * GY-1692 (GY-1666): the unit record `master init` writes, written by the loop itself when the
+ * evidence `harnessApplyCheckout` asks for is in hand — the unit serving this loop is read and runs
+ * ROOT, and its name is the master unit ROOT would record (the legacy alias when every legacy unit
+ * installed runs ROOT, else the per-install name). GY-1662 refused every units-less checkout because
+ * with no serving unit a separate launcher checkout could pass; a serving unit that runs ROOT is that
+ * proof, so waiting on a person to run `master init` for it asked them for the loop's own job. Returns
+ * the units recorded now, or null when nothing was recorded: a record exists, no serving unit is known,
+ * its file cannot be read or runs elsewhere, or its name is not the one ROOT would record.
+ */
+export async function recordServingUnits(root: string, repository: string, options: { servingUnit?: string | null; unitDirectory?: string; home?: string } = {}): Promise<InstallUnits | null> {
+  const unitDirectory = options.unitDirectory ?? executorUnitDirectory(), home = options.home ?? homedir();
+  if (!options.servingUnit || existsSync(resolve(root, installUnitsFile))) return null;
+  let text: string;
+  try { text = readFileSync(resolve(unitDirectory, options.servingUnit), 'utf8'); } catch { return null; }
+  if (foreignUnitText(text, root, home) ?? launchedCheckout(text, root, home)) return null;
+  if (proposedInstallUnits(root, repository, unitDirectory, home).master !== options.servingUnit) return null;
+  return resolveInstallUnits(root, repository, unitDirectory, home);
 }
 export function harnessApplyCheckout(root: string, options: { servingUnit?: string | null; unitDirectory?: string; home?: string } = {}) {
   const unitDirectory = options.unitDirectory ?? executorUnitDirectory(), home = options.home ?? homedir();

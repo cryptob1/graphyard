@@ -26,7 +26,7 @@ graphyard master settle-containment GY-N "reason"                       # settle
 graphyard recover-containment GY-N --previous-worker-stopped "reason"   # delivered
 graphyard unblock GY-N "reason"                                         # unowned blocker
 systemctl --user restart graphyard-master-OWNER-NAME                    # loop down
-graphyard master checkout-restore "reason"                              # dirty → refs/graphyard/checkout-restore/
+graphyard master checkout-restore "reason"                              # dirty paths/moved HEAD → refs/graphyard/checkout-restore/
 ```
 
 Never attest a stop you have not confirmed; merged work changes only via follow-ups. Outside the lock's PID namespace `master status` judges the loop by stall bound; stalled or absent: stop hand-started loops, install `examples/master/graphyard-master.service`, `systemctl --user daemon-reload && systemctl --user enable --now graphyard-master`.
@@ -48,7 +48,7 @@ Confined masters, approvers and producers read GitHub login through a keyring-on
 
 ## Resources and disk
 
-Bounded resources: `resourceRegistry` ([remedies](operations-reference.md#control-plane-resources)). Loop reclaims finished worktrees after `run.reclaimIdleHours` (never dirty/unpushed), idle unowned [panes](master-agent-sessions.md#panes-are-closed-and-reclaimed) seen twice; `disk` attention below `run.diskThresholdGb`. Clean detached coordinator HEAD on a verified-release descendant self-recovers (`upgrade:recovered`); otherwise `escalation:dirty-checkout`: restart onto it, never roll back.
+Bounded resources: `resourceRegistry` ([remedies](operations-reference.md#control-plane-resources)). Loop reclaims finished worktrees after `run.reclaimIdleHours` (never dirty/unpushed), idle unowned [panes](master-agent-sessions.md#panes-are-closed-and-reclaimed) seen twice; `disk` attention below `run.diskThresholdGb`. Clean detached coordinator HEAD on a verified-release descendant self-recovers (`upgrade:recovered`); otherwise `escalation:dirty-checkout`: `master checkout-restore` (merged code: restart, never roll back).
 
 Main guard revert approver ([provisioning](deployment.md#manual-fallback)): redeploy; verify `/api/status` `mainGuard.revertApprover` names it, `mainGuard.attention` empty, `doctor` `revert-approver` ready.
 

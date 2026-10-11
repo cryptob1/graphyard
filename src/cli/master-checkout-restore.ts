@@ -28,6 +28,15 @@ import type { MasterConfig } from '../master/profiles.js';
 // `git diff HEAD REF^2` show every byte. No stash entry is used: the stash stack is shared with every
 // worktree of the repository.
 //
+// GY-1692 (GY-1666): a HEAD that moved under the loop onto commits it does not run — an operator's
+// unpushed commits, detached — had no remedy but a person's git: the restore returned only dirty
+// paths, and a clean moved checkout was "nothing to restore". The loop hands the restore the commit
+// it runs (LOADED) and the base ref; a HEAD that differs is kept under the same ref prefix
+// (refs/graphyard/checkout-restore/STAMP-HEAD, the moved HEAD itself, so every commit it reached
+// stays reachable), the checkout is returned to LOADED, and the loop restarts; a HEAD the base
+// branch already contains (merged code moved forward, GY-1359) is never rolled back — the restart
+// alone adopts it.
+//
 // The confined master's `master restart` is the same kind of act: the systemd user manager is one of
 // the process-launch channels its confinement hides, so it files a restart request the loop serves.
 // A restart the loop owes is recorded before it is asked for, against the loop's pid, and retried on
@@ -45,9 +54,12 @@ export const checkoutRestoreWaitMs = 120_000;
 export const loopExecutorsWaitMs = 1_200_000;
 
 const restartSchema = z.object({ state: z.enum(['requested', 'failed', 'done']), pid: z.number().int(), at: z.string(), detail: z.string().max(4000) }).strict();
+/** A HEAD that moved under the loop (GY-1692): where it stood, the ref that keeps it (null when it was left in place as merged code), and the commit the checkout now holds. */
+const movedHeadSchema = z.object({ from: z.string(), ref: z.string().nullable(), to: z.string() }).strict();
 const outcomeSchema = z.object({
   at: z.string(), state: z.enum(['restored', 'clean', 'failed', 'restart', 'executors']), detail: z.string().max(4000),
   ref: z.string().nullable(), commit: z.string().nullable(), paths: z.array(z.string()).max(10_000),
+  head: movedHeadSchema.nullable().optional(),
   restart: restartSchema.nullable().default(null),
   /** What `master executors` printed when the loop ran it for a confined master. */
   result: z.unknown().optional(),
@@ -108,21 +120,55 @@ const refStamp = (at: Date) => at.toISOString().replace(/[-:]/g, '').replace(/\.
  */
 type Quiesced = { thaw: () => void; skipped?: UnverifiableProcess[] };
 export type CheckoutQuiesce = (root: string) => Quiesced | Promise<Quiesced>;
-export async function restoreCoordinatorCheckout(root: string, reason: string, run: ChildRun = defaultChildRun, at = new Date(), quiesce: CheckoutQuiesce = freezeCheckoutWriters): Promise<{ ref: string; commit: string; paths: string[]; skipped: UnverifiableProcess[] } | null> {
+/** What the loop knows of the checkout (GY-1692): the commit it runs, and the base ref whose commits are merged code. */
+export interface CheckoutRestoreTarget { loaded?: string | null; base?: string | null }
+export type MovedHead = z.infer<typeof movedHeadSchema>;
+export interface CheckoutRestored { ref: string | null; commit: string | null; paths: string[]; head: MovedHead | null; skipped: UnverifiableProcess[] }
+export async function restoreCoordinatorCheckout(root: string, reason: string, run: ChildRun = defaultChildRun, at = new Date(), quiesce: CheckoutQuiesce = freezeCheckoutWriters, target: CheckoutRestoreTarget = {}): Promise<CheckoutRestored | null> {
   const frozen = await quiesce(root);
   try {
-    const restored = await restoreQuiesced(root, reason, run, at);
+    const restored = await restoreQuiesced(root, reason, run, at, target);
     return restored && { ...restored, skipped: frozen.skipped ?? [] };
   } finally { frozen.thaw(); }
 }
-async function restoreQuiesced(root: string, reason: string, run: ChildRun, at: Date) {
+async function restoreQuiesced(root: string, reason: string, run: ChildRun, at: Date, target: CheckoutRestoreTarget): Promise<Omit<CheckoutRestored, 'skipped'> | null> {
   const git = async (args: string[], env?: NodeJS.ProcessEnv) => String(await run('git', ['-C', root, '--literal-pathspecs', ...args], env ? { env } : undefined));
   const head = (await git(['rev-parse', 'HEAD'])).trim();
   // Every untracked file by its own path (GY-1658 review): `normal` collapses an untracked directory to
   // `dir/`, which `git add` saves without its ignored descendants while a recursive removal would delete them.
   const status = () => git(['status', '--porcelain', '-z', '--untracked-files=all']);
   const paths = statusPaths(await status());
-  if (!paths.length) return null;
+  const saved = paths.length ? await savePaths(root, reason, run, at, git, head, paths, status) : null;
+  const moved = await returnMovedHead(root, reason, git, head, target, at, saved);
+  if (!saved && !moved) return null;
+  return { ref: saved?.ref ?? null, commit: saved?.commit ?? null, paths, head: moved };
+}
+/**
+ * GY-1692: a HEAD that is not LOADED, the commit the loop runs, is kept under a named ref and the
+ * checkout returned to LOADED — once the dirty paths are saved and returned, so the checkout moves
+ * clean. Null when HEAD is LOADED or LOADED is unknown. A HEAD that is merged code the base ref
+ * already contains is left where it is (`ref` null, `to` HEAD): rolling merged code back is never
+ * the remedy (GY-1359); the restart this restore owes adopts it. Throws when LOADED is not a commit
+ * of this repository.
+ */
+async function returnMovedHead(root: string, reason: string, git: (args: string[]) => Promise<string>, head: string, target: CheckoutRestoreTarget, at: Date, saved: { ref: string } | null): Promise<MovedHead | null> {
+  const loaded = target.loaded?.trim();
+  if (!loaded || loaded === head) return null;
+  const after = saved ? ` (the dirty paths were saved under ${saved.ref} and returned to HEAD)` : '';
+  const contains = (ref: string, commit: string) => git(['merge-base', '--is-ancestor', commit, ref]).then(() => true, () => false);
+  if (target.base && await contains(target.base, head)) return { from: head, ref: null, to: head };
+  const known = await git(['cat-file', '-e', `${loaded}^{commit}`]).then(() => true, () => false);
+  if (!known) throw new Error(`the commit the loop runs, ${loaded.slice(0, 12)}, is not in the coordinator checkout at ${root}, so its HEAD ${head.slice(0, 12)} was not moved${after}`);
+  const ref = `${checkoutRestoreRefPrefix}${refStamp(at)}-${head.slice(0, 12)}`;
+  // The ref names the HEAD it keeps, so two restores of the same HEAD within a second meet the same ref already holding it.
+  const holds = (await git(['rev-parse', '-q', '--verify', ref]).catch(() => '')).trim();
+  if (holds !== head) await git(['update-ref', '-m', `graphyard checkout-restore: HEAD ${head.slice(0, 12)} moved off ${loaded.slice(0, 12)}, the commit the loop runs: ${reason.slice(0, 160)}`, ref, head, '']);
+  await git(['checkout', '-q', '--detach', loaded]);
+  const now = (await git(['rev-parse', 'HEAD'])).trim();
+  if (now !== loaded) throw new Error(`the coordinator checkout at ${root} is at ${now.slice(0, 12)}, not ${loaded.slice(0, 12)}, after its moved HEAD ${head.slice(0, 12)} was kept under ${ref}${after}`);
+  return { from: head, ref, to: loaded };
+}
+async function savePaths(root: string, reason: string, run: ChildRun, at: Date, git: (args: string[], env?: NodeJS.ProcessEnv) => Promise<string>, head: string, paths: string[], status: () => Promise<string>) {
   // Only a nested repository is still named as a directory; its history is not the checkout's to save.
   const nested = paths.filter(path => path.endsWith('/'));
   if (nested.length) throw new Error(`the coordinator checkout at ${root} holds untracked nested repositories (${nested.slice(0, 8).join(', ')}), which a restore cannot save, so nothing was restored`);
@@ -172,11 +218,13 @@ async function restoreQuiesced(root: string, reason: string, run: ChildRun, at: 
   if (tracked.length) await git(['checkout', head, '--', ...tracked]);
   const after = statusPaths(await status());
   if (after.length) throw new Error(`the coordinator checkout at ${root} is still dirty after its paths were saved under ${ref} (${commit.slice(0, 12)}): ${after.slice(0, 8).join(', ')}`);
-  return { ref, commit, paths };
+  return { ref, commit };
 }
 
 /** What the loop's serving of a request needs: `restart` re-executes the loop through its unit; `settle` lets the guard record a restored checkout clean first. */
 export interface LoopRequestDeps { restart: () => Promise<unknown>; settle?: () => Promise<unknown>; report?: (outcome: CheckoutRestoreOutcome) => void; run?: ChildRun; now?: () => Date; pid?: number; quiesce?: CheckoutQuiesce;
+  /** The commit the loop runs and the base ref (GY-1692): a HEAD moved off that commit, and not merged on the base, is kept under a ref and returned. */
+  target?: () => CheckoutRestoreTarget;
   /** Runs `master executors ARGS` on the host — the loop's own view of its processes and systemd — and returns what it prints. */
   executors?: (args: string[]) => Promise<unknown> }
 
@@ -215,10 +263,10 @@ export async function serveCheckoutRestore(file: string, root: string, deps: Loo
   if (request.act === 'restart') {
     outcome = { at: now().toISOString(), state: 'restart', ref: null, commit: null, paths: [], detail: `the loop restarts through its supervising unit, as ${request.requestedBy} asked: ${request.reason}`, restart: null };
   } else try {
-    const restored = await restoreCoordinatorCheckout(root, `${request.reason} (requested by ${request.requestedBy})`, deps.run, now(), deps.quiesce);
+    const restored = await restoreCoordinatorCheckout(root, `${request.reason} (requested by ${request.requestedBy})`, deps.run, now(), deps.quiesce, deps.target?.() ?? {});
     outcome = restored
-      ? { at: now().toISOString(), state: 'restored', ref: restored.ref, commit: restored.commit, paths: restored.paths, detail: `${restored.paths.length} dirty path(s) saved under ${restored.ref} (${restored.commit.slice(0, 12)}; its second parent holds the index) and returned to HEAD; the loop restarts through its supervising unit${skippedDetail(restored.skipped)}`.slice(0, 4000), restart: null }
-      : { at: now().toISOString(), state: 'clean', ref: null, commit: null, paths: [], detail: `the coordinator checkout at ${root} held no dirty path; nothing was restored and the loop was not restarted`, restart: null };
+      ? { at: now().toISOString(), state: 'restored', ref: restored.ref, commit: restored.commit, paths: restored.paths, head: restored.head, detail: `${restoredDetail(restored)}; the loop restarts through its supervising unit${skippedDetail(restored.skipped)}`.slice(0, 4000), restart: null }
+      : { at: now().toISOString(), state: 'clean', ref: null, commit: null, paths: [], detail: `the coordinator checkout at ${root} held no dirty path and its HEAD is the commit the loop runs; nothing was restored and the loop was not restarted`, restart: null };
   } catch (error) {
     outcome = { at: now().toISOString(), state: 'failed', ref: null, commit: null, paths: [], detail: (error instanceof Error ? error.message : String(error)).slice(0, 4000), restart: null };
   }
@@ -229,6 +277,12 @@ export async function serveCheckoutRestore(file: string, root: string, deps: Loo
   if (outcome.state !== 'restored' && outcome.state !== 'restart') return write(file, request, outcome, deps);
   return restartOwed(file, request, outcome, deps, pid, now);
 }
+/** What a restore did, in the order it did it: the dirty paths, then the moved HEAD. */
+const restoredDetail = (restored: CheckoutRestored) => [
+  ...(restored.ref && restored.commit ? [`${restored.paths.length} dirty path(s) saved under ${restored.ref} (${restored.commit.slice(0, 12)}; its second parent holds the index) and returned to HEAD`] : []),
+  ...(restored.head?.ref ? [`HEAD ${restored.head.from.slice(0, 12)}, moved off ${restored.head.to.slice(0, 12)} the loop runs, kept under ${restored.head.ref} and the checkout returned to ${restored.head.to.slice(0, 12)}`]
+    : restored.head ? [`HEAD ${restored.head.from.slice(0, 12)}, merged code moved forward of the commit the loop runs, left in place for the restart to adopt`] : []),
+].join('; ');
 const skippedDetail = (skipped: UnverifiableProcess[]) => skipped.length
   ? `; skipped, their cwd unreadable: ${skipped.slice(0, 8).map(entry => `pid ${entry.pid} (${entry.error})`).join(', ')}${skipped.length > 8 ? ` and ${skipped.length - 8} more` : ''}`
   : '';
