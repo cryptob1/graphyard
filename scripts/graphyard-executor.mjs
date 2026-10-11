@@ -34,9 +34,9 @@
 // service is accepted); `graphyard master executors restart` restarts every registered executor
 // through that unit, and no claim starts while its fence stands.
 import { randomUUID } from 'node:crypto';
-import { realpathSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { heldRelease } from '../bin/held-release-hooks.mjs';
 
@@ -111,10 +111,24 @@ export async function load(held = heldRelease(new URL('../', import.meta.url))) 
 }
 
 /**
+ * The checkout whose script this process was started with: the managed repository's own when the
+ * unit's ExecStart names its script, and the Graphyard package's when the unit fell back to the
+ * package's (renderExecutorUnit). It is read from the invoked path, as the unit spells it, not from
+ * the resolved module URL: a checkout that links the shipped scripts in is still the checkout whose
+ * commit this executor runs. The unit's WorkingDirectory names the managed repository either way,
+ * and that one is only where the configuration is read.
+ */
+export const executorModuleRoot = (script = process.argv[1]) => resolve(dirname(script), '..');
+
+/**
  * The release this process loaded and the checkout commit it is compared against before every claim
- * (GY-126). A slot loaded from a held snapshot (GY-1585) runs the pinned commit, and while a pin
- * stands the checkout's commit is the pin's: the hold moving the checkout to a tip production does
- * not serve yet stands no slot down onto that tip, and the lift (or a newer pin) does.
+ * (GY-126), both read from `root`, the checkout the modules load from (executorModuleRoot), never
+ * from the managed repository the unit runs in: a fallback executor registers the package's commit,
+ * which is what the coordinator CLI's checkout commit is reconciled against, so a restart or an
+ * upgrade of the package observes it on the requested release instead of a split fleet. A slot
+ * loaded from a held snapshot (GY-1585) runs the pinned commit, and while a pin stands the
+ * checkout's commit is the pin's: the hold moving the checkout to a tip production does not serve
+ * yet stands no slot down onto that tip, and the lift (or a newer pin) does.
  */
 export function executorRelease(root, held, fleet) {
   return {
@@ -175,7 +189,10 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
     // enables would fail on start and be restarted every ten seconds.
     await m.loadMasterConfig(root);
     const installed = await s.installExecutorSupervision(root, { ...(options.count !== null ? { count: options.count } : {}), ...(options.kinds ? { kinds: options.kinds } : {}), ...(options.intervalSeconds !== null ? { intervalSeconds: options.intervalSeconds } : {}) });
-    return installCheck(installed, x, path => readFile(path, 'utf8'), resolve(root, 'examples/master', s.executorUnitTemplate));
+    const templatePath = existsSync(resolve(root, 'examples/master', s.executorUnitTemplate))
+      ? resolve(root, 'examples/master', s.executorUnitTemplate)
+      : resolve(new URL('../examples/master', import.meta.url).pathname, s.executorUnitTemplate);
+    return installCheck(installed, x, path => readFile(path, 'utf8'), templatePath);
   }
   // A supervised slot is configured by the host's declaration, not by its command line, so every
   // slot on a host serves the same kinds and a change to the declaration reaches all of them.
@@ -240,8 +257,10 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
   // rather than a new one appearing beside a ghost; the pid says which incarnation is speaking.
   const identity = { id: options.name ?? (options.slot !== null ? `${status.actor.id}@${config.hostId}/${options.slot}` : `${status.actor.id}@${config.hostId}:${process.pid}`), host: config.hostId };
   // The release these modules were loaded from, recorded on this host before the first claim and
-  // refreshed on every claim; the commit is re-read from the checkout in front of each claim.
-  const { release, current: checkoutCommit } = executorRelease(root, modules.held, f);
+  // refreshed on every claim; the commit is re-read in front of each claim from the checkout the
+  // modules load from, which is the package's when the unit runs its script for a repository without one.
+  const moduleRoot = executorModuleRoot();
+  const { release, current: checkoutCommit } = executorRelease(moduleRoot, modules.held, f);
   const registrar = f.executorRegistrar(config, { name: identity.id, host: identity.host, pid: process.pid, principal: status.actor.id, kinds: a.executorKinds(effects.handlers),
     intervalSeconds: options.intervalSeconds, root, release, supervisor: f.detectSupervisorUnit({ named: options.unit }) });
   await registrar.started();
@@ -275,7 +294,7 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
     },
     resumed: () => { console.error(`[graphyard-executor] ${identity.id} claims again: its checkout is back on ${release.commit.slice(0, 12)}`); return registrar.resumed(); },
   });
-  console.error(`[graphyard-executor] ${identity.id} runs ${release.commit ? release.commit.slice(0, 12) : 'an unknown commit'}${release.dirty ? ' (dirty)' : ''} from ${root}${registrar.registration.supervisor ? ` under ${registrar.registration.supervisor.unit}` : ' with no supervisor unit'}; registered at ${registrar.file}`);
+  console.error(`[graphyard-executor] ${identity.id} runs ${release.commit ? release.commit.slice(0, 12) : 'an unknown commit'}${release.dirty ? ' (dirty)' : ''} from ${moduleRoot}${moduleRoot !== root ? ` for ${root}` : ''}${registrar.registration.supervisor ? ` under ${registrar.registration.supervisor.unit}` : ' with no supervisor unit'}; registered at ${registrar.file}`);
   for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, stop);
   notify?.('ready');
   console.error(`[graphyard-executor] ${identity.id} (pid ${process.pid}) serving ${a.executorKinds(effects.handlers).join(', ')} every ${options.intervalSeconds}s${options.slot !== null ? ` as slot ${options.slot}` : ''}${notify ? ' under systemd supervision' : ''}`);

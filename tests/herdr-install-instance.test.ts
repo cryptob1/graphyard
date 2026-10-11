@@ -89,7 +89,9 @@ test('unit:herdr-install-instance-created — a host whose default Herdr plugin 
   const applies = elsewhere.calls.filter(args => args[0] === 'install' && args.includes('--apply'));
   assert.ok(applies.length && applies.every(args => args.includes('--herdr-instance')), 'the install links the plugin in its own instance');
   assert.ok(!elsewhere.calls.flat().some(arg => arg === '--herdr-rebind' || arg === '--no-herdr'), 'the default instance is never rebound and Herdr is never skipped');
-  assert.deepEqual(host.log.filter(entry => entry.step !== 'binary'), [{ step: 'server', instance: own }, { step: 'record', instance: own, workspace: 'w9' }]);
+  // The instance is recorded as soon as its server answers, before the control-plane step and master init read it, and again
+  // once the install has written master.json (recordHerdrInstance changes nothing when the record already stands).
+  assert.deepEqual(host.log.filter(entry => entry.step !== 'binary'), [{ step: 'server', instance: own }, { step: 'record', instance: own, workspace: 'w9' }, { step: 'record', instance: own, workspace: 'w9' }]);
   assert.ok(events.some(event => event.kind === 'note' && event.text.includes(`own Herdr instance (session ${own.session})`)));
   assert.equal(JSON.parse(await readFile(join(root, '.graphyard/up.json'), 'utf8')).herdrInstance, true, 'the choice is kept for reruns');
 
@@ -112,7 +114,10 @@ test('unit:herdr-install-instance-created — a host whose default Herdr plugin 
     await chmod(join(bin, 'herdr'), 0o755);
     process.env.PATH = `${bin}${delimiter}${process.env.PATH}`; process.env.HERDR_LOG = log;
     execFileSync('git', ['init', '-q', repo]); execFileSync('git', ['remote', 'add', 'origin', 'git@github.com:acme/shop.git'], { cwd: repo });
-    const scoped = installHerdrInstance('acme-shop', home);
+    // This home sits under the test's temporary directory, under which no session name fits a Unix socket's 107 bytes
+    // (unit:land-coordinator-commits proves the limit refuses such a home); the fake herdr binds nothing, so the
+    // instance is spelled out as installHerdrInstance computes it under a short home.
+    const scoped = { configHome: join(home, '.config', 'graphyard', 'acme-shop', 'herdr'), session: 'graphyard-acme-shop' };
     const fetcher = (async () => new Response(JSON.stringify({ actor: { id: 'worker-a', role: 'worker' }, repository: 'acme/shop' }))) as unknown as typeof fetch;
     const linked = await setupRepository(repo, { url: 'https://new.example', cliPath: launcher, hostId: 'host', token: 'worker-token-0123456789abcdef0123456789' }, { herdr: true, herdrInstance: scoped, fetcher, executors: false });
     assert.equal(linked.pluginConfigured, true);
@@ -165,7 +170,7 @@ test('unit:herdr-install-instance-created — a self-contained host whose defaul
     const files = bound.fixture.hostFiles, lines = bound.lines();
     const unit = files.get('/home/graphyard/.config/systemd/user/graphyard-herdr-owner-project.service')!;
     assert.match(unit.content, new RegExp(`^Environment=XDG_CONFIG_HOME=${own.configHome}$`, 'm'));
-    assert.match(unit.content, /^ExecStart=\/home\/graphyard\/\.local\/bin\/herdr --session graphyard-owner-project server$/m);
+    assert.match(unit.content, new RegExp(`^ExecStart=\\/home\\/graphyard\\/\\.local\\/bin\\/herdr --session ${own.session} server$`, 'm'));
     assert.ok(lines.some(line => line.endsWith('systemctl --user enable --now graphyard-herdr-owner-project.service')), 'its server is started');
     for (const step of ['plugin link /home/graphyard/graphyard --disabled', 'plugin enable graphyard', 'workspace create --cwd /home/graphyard/code/owner-project --label graphyard-owner-project --no-focus'])
       assert.ok(lines.some(line => line.endsWith(`herdr --session ${own.session} ${step}`)), step);
@@ -177,7 +182,7 @@ test('unit:herdr-install-instance-created — a self-contained host whose defaul
     assert.deepEqual(master.herdrInstance, own); assert.equal(master.herdrWorkspace, 'w1');
     assert.equal(bound.summary.host!.herdr!.instance!.session, own.session);
     assert.ok(bound.summary.host!.units.some(entry => entry.name === 'graphyard-herdr-owner-project.service'), 'the instance\'s unit is reported');
-    assert.match(bound.summary.profiles!.repository.detail, /own Herdr instance \(session graphyard-owner-project\)/);
+    assert.match(bound.summary.profiles!.repository.detail, new RegExp(`own Herdr instance \\(session ${own.session}\\)`));
   } finally { await bound.fixture.cleanup(); }
 
   // A free default: linked and enabled there for this install's server, no instance and no unit of its own.
@@ -212,7 +217,7 @@ test('unit:up-sets-up-herdr-from-scratch — a self-contained host is set up aga
     const failed = await installHerdrOnly(session);
     assert.equal(failed.herdr, null);
     assert.equal(failed.herdrFailure!.step, 'plugin');
-    assert.match(failed.herdrFailure!.message, /^Herdr plugin failed: herdr plugin enable in session graphyard-owner-project on graphyard-host exited 1: plugin graphyard failed to load/);
+    assert.match(failed.herdrFailure!.message, new RegExp(`^Herdr plugin failed: herdr plugin enable in session ${own.session} on graphyard-host exited 1: plugin graphyard failed to load`));
     const lines = () => [...rerun.remotes.values()][0].commands.map(command => [command.program, ...command.args].join(' '));
     assert.ok(lines().some(line => line.endsWith('systemctl --user enable --now graphyard-herdr-owner-project.service')), 'the stopped server is started again');
     // Fixed: the same command sets it up, the recorded instance kept (the default's plugin is still another install's).
@@ -440,6 +445,8 @@ test('unit:herdr-calls-target-install-instance — a self-contained host runs ev
   const hostFiles = new Map([[configFile, { content: JSON.stringify({ url: 'https://other.example', token: 'other-token' }), mode: 0o600 }]]);
   const fixture = await harness({ provider: 'host', serverUrl: 'https://graphyard.example.test', hostFiles });
   try {
+    const { installHerdrInstance } = await herdr();
+    const own = installHerdrInstance('owner-project', '/home/graphyard');
     const session = await prepareInstall(fixture.root, { repository: 'owner/project', provider: 'host', selfContained: true, sshHost: '203.0.113.20', sshUser: 'root', domain: 'graphyard.example.test' }, fixture.deps);
     await applyInstall(session, await buildPlan(session));
     const lines = [...fixture.remotes.values()][0].commands.map(command => [command.program, ...command.args].join(' '));
@@ -448,7 +455,7 @@ test('unit:herdr-calls-target-install-instance — a self-contained host runs ev
     for (const line of herdrLines) {
       // Only the read of the default's binding reaches the default instance; every other call carries the instance.
       if (/\/herdr plugin config-dir graphyard$/.test(line)) continue;
-      assert.match(line, / env -u HERDR_SOCKET_PATH XDG_CONFIG_HOME=\/home\/graphyard\/\.config\/graphyard\/owner-project\/herdr GRAPHYARD_HERDR_CONFIG_HOME=\S+ GRAPHYARD_HERDR_SESSION=graphyard-owner-project \/home\/graphyard\/\.local\/bin\/herdr --session graphyard-owner-project /, line);
+      assert.match(line, new RegExp(` env -u HERDR_SOCKET_PATH XDG_CONFIG_HOME=\\/home\\/graphyard\\/\\.config\\/graphyard\\/owner-project\\/herdr GRAPHYARD_HERDR_CONFIG_HOME=\\S+ GRAPHYARD_HERDR_SESSION=${own.session} \\/home\\/graphyard\\/\\.local\\/bin\\/herdr --session ${own.session} `), line);
     }
     assert.ok(herdrLines.filter(line => !line.includes('--session')).every(line => /plugin config-dir graphyard$/.test(line)), 'the default instance is only read');
   } finally { await fixture.cleanup(); }

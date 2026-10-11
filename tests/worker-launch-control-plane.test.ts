@@ -158,10 +158,12 @@ test('unit:worker-launch-credential-free — a launch whose merger read fails is
 /** The github-mode tab arguments with this host's paths, name, PATH and verification-slot settings replaced, so the record is stable across hosts. */
 const normalized = (tabArgs: string[], fixture: { main: string; credentialDirectory: string; minted: { directory: string }[] }) =>
   tabArgs.map(arg => arg.split(fixture.minted[0]?.directory ?? '\u0000').join('<session-credential>').split(fixture.credentialDirectory).join('<credentials>').split(fixture.main).join('<root>').split(`GRAPHYARD_HOST_ID=${hostname()}`).join('GRAPHYARD_HOST_ID=<host>')
-    .replace(/^(PATH|GRAPHYARD_VERIFICATION_SLOTS_DIR|GRAPHYARD_VERIFICATION_SLOTS)=.*$/s, '$1=<host>'));
+    .replace(/^(PATH|GRAPHYARD_VERIFICATION_SLOTS_DIR|GRAPHYARD_VERIFICATION_SLOTS|XDG_RUNTIME_DIR|DBUS_SESSION_BUS_ADDRESS)=.*$/s, '$1=<host>'));
 /** Recorded from a github-mode launch before GY-1523 changed the control-plane launch: the tab is created in the worktree, named for the item and agent, and carries the Graphyard variables, the verification environment and the minted push credential's gh and git environment. */
 const githubSnapshot = ['tab', 'create', '--cwd', '<root>/.graphyard/worktrees/GY-7-1', '--label', 'GY-7 · eng-a',
   '--env', 'GRAPHYARD_URL=https://graphyard.example', '--env', 'GRAPHYARD_TOKEN_FILE=<credentials>/worker.token', '--env', 'GRAPHYARD_HOST_ID=<host>', '--env', 'GRAPHYARD_HERDR_AGENT_KIND=codex',
+  // The host's user runtime directory and session bus reach the tab, so a worker can reach the user's systemd manager.
+  '--env', 'XDG_RUNTIME_DIR=<host>', '--env', 'DBUS_SESSION_BUS_ADDRESS=<host>',
   '--env', 'GRAPHYARD_VERIFICATION_SLOTS_DIR=<host>', '--env', 'GRAPHYARD_VERIFICATION_SLOTS=<host>', '--env', 'PATH=<host>',
   '--env', 'GH_CONFIG_DIR=<session-credential>', '--env', 'GH_TOKEN=', '--env', 'GITHUB_TOKEN=', '--env', 'GH_PROMPT_DISABLED=1', '--env', 'GIT_TERMINAL_PROMPT=0', '--env', 'GIT_CONFIG_COUNT=4',
   '--env', 'GIT_CONFIG_KEY_0=credential.helper', '--env', 'GIT_CONFIG_VALUE_0=',
@@ -171,7 +173,9 @@ const githubSnapshot = ['tab', 'create', '--cwd', '<root>/.graphyard/worktrees/G
 
 test('unit:worker-launch-github-snapshot — a github-mode launch mints the attempt\'s push credential, sets GH_CONFIG_DIR to it, confines the session with its own credential and types the Herdr tab arguments the recorded snapshot holds', async () => {
   const fixture = await dispatchFixture();
+  const saved = { XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR, DBUS_SESSION_BUS_ADDRESS: process.env.DBUS_SESSION_BUS_ADDRESS };
   try {
+    process.env.XDG_RUNTIME_DIR = '/run/user/1000'; process.env.DBUS_SESSION_BUS_ADDRESS = 'unix:path=/run/user/1000/bus';
     const started = await fixture.dispatch('github');
     assert.equal(started.mergeWriter, 'github'); assert.equal(started.pushCredential, 'minted');
     assert.equal(fixture.minted.length, 1); assert.deepEqual([fixture.minted[0].key, fixture.minted[0].epoch], ['GY-7', 3]);
@@ -180,5 +184,9 @@ test('unit:worker-launch-github-snapshot — a github-mode launch mints the atte
     assert.ok(environment.includes('GH_TOKEN=') && environment.includes('GITHUB_TOKEN='), 'the host tokens are cleared for the session');
     const recorded = normalized(fixture.tabArgs(), fixture);
     assert.deepEqual(recorded, githubSnapshot, `record: ${JSON.stringify(recorded)}`);
-  } finally { await fixture.cleanup(); }
+    assert.ok(environment.includes('XDG_RUNTIME_DIR=/run/user/1000') && environment.includes('DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus'), 'the host\'s values, not a substitute');
+  } finally {
+    for (const [name, value] of Object.entries(saved)) if (value === undefined) delete process.env[name]; else process.env[name] = value;
+    await fixture.cleanup();
+  }
 });

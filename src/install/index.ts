@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import { existsSync, statSync } from 'node:fs';
 import { chmod, readdir, readFile, writeFile } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import { hostname } from 'node:os';
@@ -337,6 +338,34 @@ function pageReuse(session: InstallSession, role: AppRole, url: string): AppPage
   return slugs.length ? { slugs, adopt: async slug => (await reuseApp(session, slug, role, role === 'control-plane' ? webhookUrlFor(url) : null, true)).app } : undefined;
 }
 
+/**
+ * The base branch an install without `--base-branch` uses: `master` when the checkout's remote has
+ * `origin/master` and no `origin/main`, else null for the `main` default. `remoteBranches` is
+ * `git branch -r` output, read as whole names: `origin/main-old` is not `origin/main`, and the
+ * `origin/HEAD -> origin/main` line names its target.
+ */
+export function detectedBaseBranch(remoteBranches: string): 'master' | null {
+  const names = new Set(remoteBranches.split('\n').flatMap(line => line.trim().split(/\s+->\s+/)).map(name => name.trim()).filter(Boolean));
+  return !names.has('origin/main') && names.has('origin/master') ? 'master' : null;
+}
+/**
+ * What a compose install mounts for the server to read submitted heads from (GY-1675): the checkout at
+ * `/repo`, and, when the checkout is a linked worktree or a submodule, whose `.git` is a file naming a
+ * directory outside it, that Git directory's common directory at its own host path too, so git inside
+ * the container follows the pointer to the object store and refs. Mounting the worktree alone left
+ * `/repo/.git` pointing at a path the container does not have. A checkout with no `.git` mounts nothing.
+ */
+export function composeCheckoutMounts(root: string): { repoCheckout: string | null; repoGitDir: string | null } {
+  const dotGit = resolve(root, '.git');
+  if (!existsSync(dotGit)) return { repoCheckout: null, repoGitDir: null };
+  if (statSync(dotGit).isDirectory()) return { repoCheckout: root, repoGitDir: null };
+  let common: string;
+  try { common = execFileSync('git', ['-C', root, 'rev-parse', '--path-format=absolute', '--git-common-dir'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); }
+  catch (error: any) { throw new Error(`${root} is a linked worktree whose main repository could not be read (${error?.message ?? 'git rev-parse failed'}); run the compose install from a checkout whose Git directory is reachable`); }
+  // A worktree's own gitdir lives under the common directory's worktrees/, so that one mount covers both.
+  return { repoCheckout: root, repoGitDir: resolve(common) };
+}
+
 export async function prepareInstall(cwd: string, rawInputs: InstallRequest & ReuseChoice & GitHubAppChoice, dependencies: InstallDependencies = {}, mode: 'plan' | 'apply' = 'apply'): Promise<InstallSession> {
   const provider = rawInputs.provider;
   if (!provider) throw new Error('Use --provider railway|hetzner|docker-host|compose|local, or --target host|hetzner');
@@ -364,7 +393,13 @@ export async function prepareInstall(cwd: string, rawInputs: InstallRequest & Re
   catch (error: any) { generatedFiles = { assignment: null, error: error.message }; }
   const reviewPolicy = rawInputs.reviewPolicy ?? 'github';
   const delivery = await repositoryDelivery(root);
-  const inputs = { ...rawInputs, provider, baseBranch: rawInputs.baseBranch ?? 'main' };
+  let detectedBase = rawInputs.baseBranch;
+  if (!detectedBase && existsSync(resolve(root, '.git'))) {
+    try { detectedBase = detectedBaseBranch(execFileSync('git', ['-C', root, 'branch', '-r'], { encoding: 'utf8' })) ?? undefined; } catch {}
+  }
+  const inputs = { ...rawInputs, provider, baseBranch: detectedBase ?? 'main' };
+  // A compose server observes submitted heads from the operator's checkout, mounted at /repo; no other provider can mount it.
+  const { repoCheckout, repoGitDir } = provider === 'compose' ? composeCheckoutMounts(root) : { repoCheckout: null, repoGitDir: null };
   const transport = dependencies.transport ?? localTransport();
   const ssh = dependencies.ssh ?? ((host: string, user = inputs.sshUser ?? 'root') => sshTransport(host, user, transport));
   // A self-hosted database password is generated once and reused, so re-apply never
@@ -385,6 +420,7 @@ export async function prepareInstall(cwd: string, rawInputs: InstallRequest & Re
     image: inputs.image ?? (provider === 'compose' ? `graphyard-local:${installId}` : DEFAULT_IMAGE),
     workdir,
     sourceRoot: dependencies.sourceRoot ?? fileURLToPath(new URL('../..', import.meta.url)),
+    repoCheckout, repoGitDir,
     sshHost: inputs.sshHost ?? null, sshUser: inputs.sshUser ?? 'root',
     sshKey: inputs.sshKey ?? null,
     workspace: inputs.workspace ?? null,
@@ -508,6 +544,7 @@ export function coreEnv(session: InstallSession): EnvValue[] {
     // a regenerated docs index instead of refusing it as an out-of-scope rewrite. A repository
     // that declares none leaves the variable unset, which is its correct deployment state.
     ...(session.generatedFiles.assignment ? [{ name: session.generatedFiles.assignment.variable, value: session.generatedFiles.assignment.value, secret: false }] : []),
+    ...(context.repoCheckout ? [{ name: 'GRAPHYARD_REPOSITORY_ROOT', value: '/repo', secret: false }] : []),
   ];
 }
 

@@ -383,17 +383,43 @@ export async function runTrial(input: RunTrialInput): Promise<TrialRun> {
     try {
       await run('git', ['-C', input.root, 'worktree', 'add', '--detach', worktree, input.mergeSha], { timeoutMs: remaining() });
       // The merge builds against its own dependencies: the coordinator's install when its lockfile is byte-identical to the merge's, else an `npm ci` of the merge's lockfile.
-      const lockfile = (dir: string) => readFile(join(dir, 'package-lock.json'), 'utf8').catch(() => null);
-      const [own, merged] = await Promise.all([lockfile(input.root), lockfile(worktree)]);
-      if (existsSync(join(input.root, 'node_modules')) && own !== null && own === merged) await symlink(join(input.root, 'node_modules'), join(worktree, 'node_modules'));
-      else {
-        const installed = await child('install', 'npm', npmCiArgs, { env: npmCiEnvironment(env) });
-        if (hostEnded(installed)) throw runnerFailure('install', installed);
-        if (!installed.ok) return finish('fail', { passed: 0, failed: [], files: 0 });
+      // A repository the merge does not make a Node package installs and builds nothing, and one without
+      // scripts/ci-tests.mjs selects no tests. Each is read from the merge commit itself, never from the
+      // trial checkout, so an unreadable checkout file never skips a phase the merge carries. Only a
+      // listing that answers and names no such path is absence: a probe git could not answer (a timeout,
+      // an unreadable object store) is a runner failure, never a passing trial that skipped its checks.
+      const holds = async (path: string) => {
+        try { await run('git', ['-C', input.root, 'cat-file', '-e', `${input.mergeSha}:${path}`], { timeoutMs: remaining() }); return true; }
+        catch { /* absent, or unreadable: the listing below tells them apart */ }
+        let listing: string;
+        try { listing = String(await run('git', ['-C', input.root, 'ls-tree', '--name-only', input.mergeSha, '--', path], { timeoutMs: remaining() })); }
+        catch (error) {
+          const out = output(error);
+          log.push(`$ git ls-tree --name-only ${input.mergeSha} -- ${path}\n${out}\n${ending(error)}`);
+          if ((error as { timedOut?: boolean }).timedOut || now() >= deadline) throw new TrialTimeoutError('install', Math.max(0, now() - startedAt), tail());
+          const ended = endedOf(error, out);
+          throw runnerFailure('install', { ...ended, cause: ended.cause ?? `could not read ${path} from ${input.mergeSha.slice(0, 12)}` });
+        }
+        return listing.split('\n').some(line => line.trim() === path);
+      };
+      if (await holds('package.json')) {
+        const lockfile = (dir: string) => readFile(join(dir, 'package-lock.json'), 'utf8').catch(() => null);
+        const [own, merged] = await Promise.all([lockfile(input.root), lockfile(worktree)]);
+        if (existsSync(join(input.root, 'node_modules')) && own !== null && own === merged) await symlink(join(input.root, 'node_modules'), join(worktree, 'node_modules'));
+        else if (await holds('package-lock.json')) {
+          const installed = await child('install', 'npm', npmCiArgs, { env: npmCiEnvironment(env) });
+          if (hostEnded(installed)) throw runnerFailure('install', installed);
+          if (!installed.ok) return finish('fail', { passed: 0, failed: [], files: 0 });
+        }
+        const scripts = await readFile(join(worktree, 'package.json'), 'utf8').then(text => JSON.parse(text)?.scripts, () => undefined);
+        // An unreadable package.json builds as before; only one that declares no build script skips it.
+        if (scripts === undefined || scripts?.build) {
+          const built = await child('build', 'npm', ['run', 'build']);
+          if (hostEnded(built)) throw runnerFailure('build', built);
+          if (!built.ok) return finish('fail', { passed: 0, failed: [], files: 0 });
+        }
       }
-      const built = await child('build', 'npm', ['run', 'build']);
-      if (hostEnded(built)) throw runnerFailure('build', built);
-      if (!built.ok) return finish('fail', { passed: 0, failed: [], files: 0 });
+      if (!await holds('scripts/ci-tests.mjs')) return finish('pass', { passed: 0, failed: [], files: 0 });
       const selection = await child('selection', 'node', ['scripts/ci-tests.mjs', 'affected', ...input.changedFiles]);
       if (!selection.ok) return finish('pass', { passed: 0, failed: ['scripts/ci-tests.mjs affected'], files: 0 });
       let files = listed(selection.out);

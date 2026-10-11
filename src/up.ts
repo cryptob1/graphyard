@@ -170,7 +170,7 @@ export interface UpDependencies {
    * the base branch already holds them. WORKFLOWS are the workflow files the apply reported writing:
    * a publish missing any of them, or AGENTS.md or graphyard.json, refuses naming the file (GY-1480).
    */
-  publishOnboarding(workflows: string[]): Promise<{ pullRequest: string } | null>;
+  publishOnboarding(workflows: string[]): Promise<{ pullRequest: string, commit: string } | null>;
   /** Whether the onboarding pull request at URL has merged, so the base branch carries the delivery workflows. */
   onboardingMerged(url: string): Promise<boolean>;
   /**
@@ -179,7 +179,7 @@ export interface UpDependencies {
    * reruns, so it is filed once): the loop's reviewer reviews it and the control plane merges it
    * under the normal gates. Null when no admin credential is on this machine.
    */
-  fileOnboarding?(url: string, operatorTokenFile: string | null, requestId: string): Promise<{ key: string } | null>;
+  fileOnboarding?(url: string, commit: string, operatorTokenFile: string | null, requestId: string): Promise<{ key: string } | null>;
   /** The control plane's work items, as the master identity reads them; null while none answers. */
   work?(): Promise<any[] | null>;
   /**
@@ -636,6 +636,7 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
       try {
         const server = await herdrHost.server(herdrBinary, ownHerdr, installIdFor(request.repository));
         herdrWorkspace = server.workspace;
+        if (ownHerdr && herdrWorkspace) await herdrHost.record(ownHerdr, herdrWorkspace).catch(() => {});
         if (server.started) deps.emit({ kind: 'note', text: `The Herdr server${ownHerdr ? ` for session ${ownHerdr.session}` : ''} was not running; it now runs as the user unit ${server.unit}, which restarts it after a failure or a reboot.` });
       } catch (error) { await leaveHerdrOut(error); }
     }
@@ -830,7 +831,7 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
       // the checks run and it merges under the normal gates; branch protection never waits on a person.
       if (!state.onboardingWork) {
         if (!state.onboardingRequest) { state.onboardingRequest = randomUUID(); await writeState(deps.root, state); }
-        const filed = await (deps.fileOnboarding?.(published.pullRequest, state.operatorTokenFile ?? null, state.onboardingRequest) ?? Promise.resolve(null)).catch((error: any) => { throw new UpStop(`onboarding: filing ${published.pullRequest} as a work item failed: ${String(error?.message ?? error).split('\n')[0].slice(0, 400)}; rerun graphyard up to retry`, upExitCodes.failed); });
+        const filed = await (deps.fileOnboarding?.(published.pullRequest, published.commit, state.operatorTokenFile ?? null, state.onboardingRequest) ?? Promise.resolve(null)).catch((error: any) => { throw new UpStop(`onboarding: filing ${published.pullRequest} as a work item failed: ${String(error?.message ?? error).split('\n')[0].slice(0, 400)}; rerun graphyard up to retry`, upExitCodes.failed); });
         state.onboardingWork = filed?.key ?? null;
       }
       return `${carried} published in ${published.pullRequest}${state.onboardingWork ? `, filed as ${state.onboardingWork} for the loop to review and merge` : ''}`;
@@ -875,6 +876,7 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
           onboarding = onboardingWait(work, deps.now(), request.repository);
           if (onboarding.waitingFor.join() !== shown) { shown = onboarding.waitingFor.join(); deps.emit({ kind: 'onboarding', wait: onboarding }); }
           if (onboarding.closed) throw new UpStop(`onboarding: ${onboarding.key} (${pullRequest}) was closed without merging, so the base branch lacks Graphyard's delivery workflows; reopen and merge it, or publish them again, then rerun ${rerun()}`, upExitCodes.failed);
+          if (onboarding.merged || work.stage === 'done') break;
         }
         if (deps.now() >= deadline) throw new UpStop(`Still waiting for the onboarding pull request ${pullRequest} to merge${onboarding ? ` (${onboarding.key} waits for ${onboarding.waitingFor.join(' and ')}, ${waitedFor(onboarding.waitedMs)} so far)` : ''}; rerun ${rerun()} to resume`, upExitCodes.waiting);
         await deps.sleep(pollMs);
@@ -1364,7 +1366,7 @@ export const onboardingRequiredFiles = ['AGENTS.md', 'graphyard.json'] as const;
  * force-pushing its branch when it does not carry exactly these files; when the base branch already
  * holds them, nothing is published.
  */
-export async function publishOnboarding(root: string, repository: string, run: (program: string, args: string[], env?: Record<string, string>) => string, workflows: readonly string[] = []): Promise<{ pullRequest: string } | null> {
+export async function publishOnboarding(root: string, repository: string, run: (program: string, args: string[], env?: Record<string, string>) => string, workflows: readonly string[] = []): Promise<{ pullRequest: string, commit: string } | null> {
   // GY-1480: every file the publish means to carry must be on disk; one that is not is refused by
   // name, never skipped, so the pull request never claims a file it does not hold.
   const missing = [...onboardingRequiredFiles, ...workflows].filter(file => !existsSync(resolve(root, file)));
@@ -1375,6 +1377,7 @@ export async function publishOnboarding(root: string, repository: string, run: (
   const baseCommit = run('git', ['rev-parse', 'FETCH_HEAD']).trim();
   const index = resolve(root, '.graphyard', `onboarding-index.${process.pid}`);
   await mkdir(dirname(index), { recursive: true });
+  let headCommit: string | null = null;
   try {
     const env = { GIT_INDEX_FILE: index };
     run('git', ['read-tree', baseCommit], env);
@@ -1386,18 +1389,20 @@ export async function publishOnboarding(root: string, repository: string, run: (
     // earlier run or an older CLI opened without them (the delivery workflow above all) is replaced.
     if (open) {
       let branchTree: string | null = null;
-      try { run('git', ['fetch', '--quiet', 'origin', onboardingBranch]); branchTree = run('git', ['rev-parse', 'FETCH_HEAD^{tree}']).trim(); } catch { /* the branch is gone: push it again */ }
-      if (branchTree === tree) return { pullRequest: open };
+      let branchCommit: string | null = null;
+      try { run('git', ['fetch', '--quiet', 'origin', onboardingBranch]); branchTree = run('git', ['rev-parse', 'FETCH_HEAD^{tree}']).trim(); branchCommit = run('git', ['rev-parse', 'FETCH_HEAD']).trim(); } catch { /* the branch is gone: push it again */ }
+      if (branchTree === tree) return { pullRequest: open, commit: branchCommit! };
     }
     const commit = run('git', ['commit-tree', tree, '-p', baseCommit, '-m', 'Add Graphyard onboarding: coordination instructions, configuration and delivery workflows'], env).trim();
+    headCommit = commit;
     // The branch is this command's own: an earlier, interrupted publish is replaced, never merged into.
     run('git', ['push', '--force', 'origin', `${commit}:refs/heads/${onboardingBranch}`]);
   } finally { await rm(index, { force: true }); }
-  if (open) return { pullRequest: open };
+  if (open) return { pullRequest: open, commit: headCommit! };
   const carried = onboardingFiles.filter(file => existsSync(resolve(root, file)));
   const created = run('gh', ['pr', 'create', '--repo', repository, '--base', base, '--head', onboardingBranch, '--title', 'Add Graphyard onboarding',
     '--body', `The files graphyard up wrote while onboarding this repository: ${carried.join(', ')}.${workflows.length ? ` Merging it puts Graphyard's delivery workflows (${workflows.join(', ')}) on ${base}.` : ''}`]).trim();
-  return { pullRequest: created.split('\n').filter(Boolean).pop()! };
+  return { pullRequest: created.split('\n').filter(Boolean).pop()!, commit: headCommit! };
 }
 
 /**
@@ -1454,12 +1459,12 @@ export function upDependencies(root: string, cliPath: string, request: UpRequest
     cliCheckout: async () => { const checkout = await loopCheckout(); return { root: checkout.root, dirty: dirtyCheckoutPaths(checkout) }; },
     loopRefusal: async () => coordinatorCheckoutRefusal(await loopCheckout(), 'the master loop'),
     onboardingMerged: async url => execFileSync('gh', ['pr', 'view', url, '--json', 'state', '--jq', '.state'], { encoding: 'utf8', timeout: 60_000 }).trim() === 'MERGED',
-    fileOnboarding: async (url, operatorTokenFile, requestId) => {
+    fileOnboarding: async (url, commit, operatorTokenFile, requestId) => {
       const server = await serverUrl();
       let token = '';
       try { token = operatorTokenFile ? (await readFile(operatorTokenFile, 'utf8')).trim() : ''; } catch { /* no credential on this machine */ }
       if (!server || token.length < 32) return null;
-      return fileOnboardingWork({ server, token, url, checks: await onboardingChecks(root), host: hostname(), path: resolve(root, '.graphyard', 'onboarding'), requestId });
+      return fileOnboardingWork({ server, token, url, commit, checks: await onboardingChecks(root), host: hostname(), path: resolve(root, '.graphyard', 'onboarding'), requestId });
     },
     work: async () => {
       const url = await serverUrl(), token = await masterToken();

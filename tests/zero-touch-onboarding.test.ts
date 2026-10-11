@@ -230,11 +230,11 @@ test('unit:zero-touch-onboarding — `graphyard up --agent --goal FILE` on a fre
     return { state: 'done' };
   };
   const yieldTurn = () => new Promise<void>(accept => setImmediate(accept));
-  const fileOnboardingWork = async (pullRequest: string, file: string | null, requestId: string) => {
+  const fileOnboardingWork = async (pullRequest: string, commit: string, file: string | null, requestId: string) => {
     // GY-1478: up files the onboarding pull request as a work item the loop owns, with the operator's credential.
     const onboarding: any = await import('../src/onboarding.js');
     const token = file ? (await readFile(file, 'utf8')).trim() : '';
-    return onboarding.fileOnboardingWork({ server: url, token, url: pullRequest, checks: await onboarding.onboardingChecks(root), host: 'zero-touch', path: join(root, '.graphyard', 'onboarding'), requestId });
+    return onboarding.fileOnboardingWork({ server: url, token, url: pullRequest, commit, checks: await onboarding.onboardingChecks(root), host: 'zero-touch', path: join(root, '.graphyard', 'onboarding'), requestId });
   };
   const deps = {
     root, pollMs: 60_000, humanWaitMs: 6 * 60 * 60_000, machineWaitMs: 60 * 60_000,
@@ -249,12 +249,12 @@ test('unit:zero-touch-onboarding — `graphyard up --agent --goal FILE` on a fre
     work: async () => world.installed ? work() : null,
     publishOnboarding: async () => {
       const open = [...github.pulls.values()].find(pull => pull.state === 'open' && pull.head.ref === 'graphyard/onboarding');
-      if (open) return { pullRequest: `https://github.com/${repository}/pull/${open.number}` };
+      if (open) return { pullRequest: `https://github.com/${repository}/pull/${open.number}`, commit: open.head.sha };
       const files = Object.fromEntries(await Promise.all(['AGENTS.md', 'graphyard.json', '.github/workflows/graphyard.yml'].map(async path => [path, await readFile(join(root, path), 'utf8')] as const)));
       // `gh` and `git push` with the operator's stored login: a command acting, not a person.
-      github.push('graphyard/onboarding', files, 'Add Graphyard onboarding', 'cli:acme-owner');
+      const commit = github.push('graphyard/onboarding', files, 'Add Graphyard onboarding', 'cli:acme-owner');
       const pull = github.openPull({ head: 'graphyard/onboarding', title: 'Add Graphyard onboarding', body: 'The files graphyard up wrote while onboarding this repository' }, 'cli:acme-owner');
-      return { pullRequest: `https://github.com/${repository}/pull/${pull.number}` };
+      return { pullRequest: `https://github.com/${repository}/pull/${pull.number}`, commit };
     },
     onboardingMerged: async (pullRequest: string) => github.pull(Number(pullRequest.split('/').pop())).merged,
     fileOnboarding: fileOnboardingWork,

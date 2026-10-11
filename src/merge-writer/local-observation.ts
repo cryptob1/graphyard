@@ -50,8 +50,12 @@ export async function observeHead(git: GitRunner, input: HeadObservationInput): 
   const commit = await git(['rev-parse', '--verify', '--quiet', `${head}^{commit}`]);
   demand(commit.status === 0 && commit.stdout.trim() === head, absentHeadRefusal(head, branch), 422);
   const baseRef = `refs/remotes/origin/${base}`;
-  const tip = await git(['rev-parse', '--verify', '--quiet', baseRef]);
-  demand(tip.status === 0 && /^[0-9a-f]{40}$/.test(tip.stdout.trim()), `The control plane's checkout holds no ${baseRef} to observe ${head.slice(0, 12)} against`, 503);
+  let tip = await git(['rev-parse', '--verify', '--quiet', baseRef]);
+  if (tip.status !== 0 || !/^[0-9a-f]{40}$/.test(tip.stdout.trim())) {
+    tip = await git(['rev-parse', '--verify', '--quiet', `refs/heads/${base}`]);
+  }
+  // The checkout's own HEAD is never a stand-in: it may be any branch, so the scope and ancestry read against it would be false.
+  demand(tip.status === 0 && /^[0-9a-f]{40}$/.test(tip.stdout.trim()), `The control plane's checkout holds no ${baseRef} or refs/heads/${base} to observe ${head.slice(0, 12)} against`, 503);
   const baseTip = tip.stdout.trim();
   const baseTipContained = (await git(['merge-base', '--is-ancestor', baseTip, head])).status === 0;
   const raw = await git(['diff', '--raw', '-M', '-z', '--no-abbrev', baseTip, head]);

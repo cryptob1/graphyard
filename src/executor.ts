@@ -335,7 +335,8 @@ export function controlPlaneHandlers(config: () => MasterConfig, effects: Contro
       if (action.inputs.kind !== 'request-review') throw new Error('unreachable');
       const request = work.autoDispatch?.review;
       if (!request || request.state !== 'requested') throw new Error(`${work.key} has no open review request; the control plane raises one for each observed head`);
-      const { profile, reason } = selectReviewerProfile(config());
+      const mode = work.observation?.source === 'control-plane' || !config().githubAppId || (action.inputs as any).provider === 'control-plane' || (work.policy && work.policy.reviewProvider && work.policy.reviewProvider !== 'github') ? 'control-plane' : 'github';
+      const { profile, reason } = selectReviewerProfile(config(), mode);
       if (!profile) throw new Error(reason!);
       const agents = await herdr();
       // A name every session of the profile could take is held: the namespace is at its bound,
