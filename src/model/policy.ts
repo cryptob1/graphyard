@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { deploySmokeProof, proofSchema } from './proof.js';
-import { postDeployCriterionRefusal, postDeployProof, postMergeProofRefusal } from './post-merge-proofs.js';
+import { postDeployCriterionRefusal, postDeployOnlyRefusal, postDeployProof, postMergeProofRefusal } from './post-merge-proofs.js';
 import { distinct, reviewProviders, reviewerProfileSchema } from './review.js';
 
 // ---- Risk lanes (GY-883) -------------------------------------------------------------------------
@@ -136,6 +136,9 @@ export const criterionSchema = z.object({ id: z.string().regex(/^AC-\d+$/), text
   .superRefine((criterion, context) => { const refusal = postMergeProofRefusal(criterion); if (refusal) context.addIssue({ code: 'custom', message: refusal, path: ['proofs'] }); })
   // A live-install observation is accepted only when declared post-deploy (GY-1660), on every path a criterion is written by.
   .superRefine((criterion, context) => { const refusal = postDeployCriterionRefusal([criterion]); if (refusal) context.addIssue({ code: 'custom', message: refusal, path: ['proofs'] }); });
+/** An item's criteria, on every path they are written by: at least one must be a criterion a head can show before merge (GY-1685). */
+export const criteriaSchema = (max: number) => z.array(criterionSchema).min(1).max(max)
+  .superRefine((criteria, context) => { const refusal = postDeployOnlyRefusal(criteria); if (refusal) context.addIssue({ code: 'custom', message: refusal }); });
 /** Stored declaration. The audit fields are stamped by the control plane, never by the client. */
 export interface BootstrapMode extends BootstrapDeclaration { declaredBy: string; declaredAt: string; policyRevision: number }
 export interface Criterion { id: string; text: string; proofs: string[]; bootstrap?: BootstrapMode }
