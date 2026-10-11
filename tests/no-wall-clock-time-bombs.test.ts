@@ -45,6 +45,24 @@ const instantOf = (match: RegExpExecArray) => match[1] ? Date.UTC(Number(match[1
 /** Whether `name` is handed to the code under test as its clock somewhere in `text`: an argument, a `now`/`clock` property or a thunk. */
 const handedAsClock = (name: string, text: string) => new RegExp(`[(,]\\s*(?:\\(\\)\\s*=>\\s*)?${name}\\s*[,)+-]|=>\\s*${name}\\s*(?:[,;)\\]}]|$)|\\b(?:now|clock)\\s*:\\s*(?:\\(\\)\\s*=>\\s*)?${name}\\b`, 'm').test(text);
 
+/**
+ * The names a scope derives its clock from `names` under, transitively: `let clock = start`, `const now = () => clock`,
+ * `const end = start + 2 * day`. A declaration that embeds a name in an object literal or a call (`{ until: resetsAt }`,
+ * `new Date(start + offset).toISOString()`) is data built from the instant, not the clock, and is not followed.
+ */
+function clockNames(names: readonly string[], lines: readonly { text: string }[]): string[] {
+  const bound = new Set(names);
+  for (let pass = 0; pass < 4; pass++) for (const { text } of lines) {
+    if (!/^\s*(?:export\s+)?(?:const|let|var)\s/.test(text)) continue;
+    for (const declaration of text.split(/[,;](?![^(]*\))/)) {
+      const equals = declaration.indexOf('='); if (equals < 0) continue;
+      const name = /([A-Za-z_$][\w$]*)\s*$/.exec(declaration.slice(0, equals))?.[1], value = declaration.slice(equals + 1).trim();
+      if (name && [...bound].some(source => new RegExp(`^(?:\\(\\)\\s*=>\\s*)?${source}(?:\\s*[+-][^{}()]*)?$`).test(value))) bound.add(name);
+    }
+  }
+  return [...bound];
+}
+
 interface Scope { name: string; lines: { number: number; text: string }[]; stubbed: boolean }
 export interface TimeBomb { file: string; instant: number; wallClock: number; at: string; scope: string }
 
@@ -76,7 +94,7 @@ export function timeBombsIn(file: string, source: string, now: number): TimeBomb
       if (!(at > now)) continue;
       // A module-scope binding any test hands to the code under test is the file's fixed clock; a test's own binding counts within that test.
       const names = [...line.text.matchAll(declares)].map(entry => entry[1] ?? entry[2]), text = module.lines.includes(line) ? whole : lines.map(entry => entry.text).join('\n');
-      if (asClock.test(line.text.slice(0, match.index).replace(wrapper, '')) || names.some(name => handedAsClock(name, text))) continue;
+      if (asClock.test(line.text.slice(0, match.index).replace(wrapper, '')) || clockNames(names, lines).some(name => handedAsClock(name, text))) continue;
       bombs.push({ file, instant: line.number, wallClock: judging[0].number, at: new Date(at).toISOString(), scope: scope.name });
     }
   }
@@ -160,13 +178,24 @@ test('unit:no-wall-clock-time-bombs — a stubbed Date, a reset derived from the
     `  const result = cut(repo, { now: new Date('2030-06-01T12:00:00Z'), push: true });`,
     `  const report = executorReport([], registry, new Date());`,
     `});`);
+  // A soak's clock: the instant bound to `start`, the clock and its thunk derived from it and handed to the loop, the watchdog timed on the wall clock apart.
+  const derivedClock = sourceLines(
+    `import { test } from 'node:test';`,
+    `function effects(now: () => number, notifications: { at: number }[]) { return { notify: () => notifications.push({ at: Date.now() }), snapshot: async () => ({ now: new Date(now()).toISOString() }) }; }`,
+    `test('unit:soak', async () => {`,
+    `  const start = Date.parse('2030-01-01T00:00:00Z');`,
+    `  let clock = start;`,
+    `  const now = () => clock;`,
+    `  const end = start + 2 * day;`,
+    `  while (clock < end) { await runCycle(config, state, effects(now, notifications), now); clock += minute; }`,
+    `});`);
   const stamps = sourceLines(
     `import { test } from 'node:test';`,
     `const expiresAt = new Date(Date.UTC(2031, 0, 1)).toISOString();`,
     `test('unit:stamps-only', async () => {`,
     `  const row = { createdAt: new Date().toISOString(), updatedAt: new Date(Date.now() - 60_000).toISOString(), reset: Math.ceil(Date.now() / 1000) + 3000, expiresAt };`,
     `});`);
-  const { run } = await fixtures('safe', { 'tests/stubbed.test.ts': stubbed, 'tests/derived.test.ts': derived, 'tests/per-test.test.ts': perTest, 'tests/handed.test.ts': handed, 'tests/stamps.test.ts': stamps });
+  const { run } = await fixtures('safe', { 'tests/stubbed.test.ts': stubbed, 'tests/derived.test.ts': derived, 'tests/per-test.test.ts': perTest, 'tests/handed.test.ts': handed, 'tests/derived-clock.test.ts': derivedClock, 'tests/stamps.test.ts': stamps });
   assert.deepEqual((await run(fuse - 2 * day)).bombs.map(describeBomb), []);
 });
 
