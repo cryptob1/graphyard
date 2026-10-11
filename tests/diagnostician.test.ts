@@ -639,6 +639,7 @@ test('unit:diagnosis-release-stale-recurrence-reproduced — the loop moves the 
   const recurringItem = await ok(master.token, 'work', faultClassItem({ faultClass: 'stalled-gate', recent: instances }, policy, clock)) as Work;
   const diagnostician: DiagnosticianEffects = {
     settings, cwd: '/checkout/project',
+    tree: async () => ({ ref: filingTree.ref, files: new Set(filingTree.files) }),
     runner: async () => ({ runner: fakeRunner('pi', () => diagnosis(recurringItem.key, { fix: { ...fix, title: 'Re-request a stale diagnosis release' } }), []), runtime: 'pi', model: settings.model }),
     context: async () => ({ journal: [], serverLog: [], pullRequests: [] }),
     file: async input => ok(master.token, 'work', input),

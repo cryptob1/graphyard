@@ -1,14 +1,12 @@
 // Concern: the diagnostician (GY-439) — each recurring-fault item, and each invariant violation that
 // persists past its bound, gets one headless diagnosis, and the diagnosis becomes a closure or a fix
 // item through the normal two-party decision.
-import { access } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { createSchema, type Work } from '../model.js';
 import { providerLimit, type ExhaustionSignal } from '../model/capacity.js';
 import { isClosed } from '../model/closure.js';
 import { planeWideRefusal } from '../model/blocker-class.js';
 import { closesFaultClass, faultClassMeaning, openFaultClassItem, type FaultClass, type FaultInstance, type FaultKind } from '../model/fault-classes.js';
-import { namedPaths } from '../model/scope.js';
 import { deriveDiagnosisFixPlannedFiles } from '../model/work.js';
 import { guardBroadScope } from '../master/autonomy.js';
 import { baseTree } from '../cli/planned-files-intent.js';
@@ -88,9 +86,8 @@ export interface DiagnosticianEffects {
   cwd: string;
   /**
    * The base branch's tree the fix item's plannedFiles resolve against before filing (GY-1707).
-   * Absent, the loop reads `cwd` the way `master create` does (`baseTree`); a nonexistent `cwd`
-   * (test fixtures that omit this effect) derives against the diagnosis's own named paths instead
-   * of failing the Git read before filing.
+   * Absent, the loop reads `cwd` the way `master create` does (`baseTree`); an unreadable checkout
+   * fails the same way. Fix-producing fixtures supply this effect rather than inventing a tree.
    */
   tree?: (baseBranch: string) => Promise<{ ref: string; files: Set<string> }>;
   /** The primary run's runner (the registry's role, else Pi on `model`), or the fallback's (Pi on `fallbackModel`). */
@@ -282,29 +279,12 @@ export const diagnosisLostGraceMs = 5 * 60_000;
 
 /**
  * The base tree a fix filing resolves against (GY-1707): the diagnostician's `tree` effect when
- * supplied, else a real `baseTree` read of `cwd`. A fixture that omits `tree` and points `cwd` at a
- * path that is not on disk gets a synthetic tree from the diagnosis's own named paths so release
- * and fault assertions still reach filing without real Git I/O; a real checkout that fails to read
- * still throws.
+ * supplied, else a real `baseTree` read of `cwd` — the same read `master create` uses. An
+ * unreadable checkout throws; there is no synthetic tree from the diagnosis's own paths.
  */
-async function filingTree(diagnostician: DiagnosticianEffects, baseBranch: string, diagnosis: DiagnosisPayload) {
+async function filingTree(diagnostician: DiagnosticianEffects, baseBranch: string) {
   if (diagnostician.tree) return diagnostician.tree(baseBranch);
-  try { return await baseTree(diagnostician.cwd, baseBranch); }
-  catch (error) {
-    try { await access(diagnostician.cwd); }
-    catch {
-      const fix = diagnosis.fix!;
-      const files = new Set([
-        ...fix.plannedFiles,
-        ...fix.criteria.flatMap(criterion => namedPaths(criterion.text)),
-        ...namedPaths(diagnosis.cause),
-        'tests/helpers/timing-baseline.json',
-        'tests/docs-budget.test.ts',
-      ]);
-      return { ref: baseBranch, files };
-    }
-    throw error;
-  }
+  return baseTree(diagnostician.cwd, baseBranch);
 }
 
 /** The fix item as `master create` would file it (GY-1707): schema, broad-scope guard, and plannedFiles derived against the base tree — never the diagnostician's list verbatim. */
@@ -450,7 +430,7 @@ async function advance(cycle: Cycle, diagnostician: DiagnosticianEffects, entry:
     }
     let input: FixInput;
     try {
-      const tree = await filingTree(diagnostician, cycle.config.baseBranch, diagnosis);
+      const tree = await filingTree(diagnostician, cycle.config.baseBranch);
       input = fixItem(entry, diagnosis, tree);
     }
     catch (error) { entry.state = 'failed'; await note(entry, 'failed', `The diagnostician's fix item for ${entry.subject} fails the checks master create applies: ${message(error)}`, 'fix-item'); return; }

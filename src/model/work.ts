@@ -301,22 +301,25 @@ function existingProofVehicle(named: string, tree: ReadonlySet<string>): string 
  * GY-1707: plannedFiles for a fix item the loop files from a diagnosis — the same derivation
  * `master create` applies (base-tree resolution, criteria-named tree files, planned companions),
  * plus the paths the diagnosis cause names that resolve in the tree when the subject is a
- * recurring-fault item (the cause is that item's own requirement, not prose). When the proof
+ * recurring-fault item (the cause is that item's own requirement, not prose). When a proof
  * companion invents a longer stem than a test the base already holds, that existing vehicle is
- * planned instead (GY-1700). A path the tree does not hold and no criterion describes creating is
- * refused with `plannedFilesRefusal`.
+ * planned instead (GY-1700) — except a path the diagnosis itself planned stays as filed, so a
+ * criterion that creates a longer new test is not rewritten to the shorter neighbour. A path the
+ * tree does not hold and no criterion describes creating is refused with `plannedFilesRefusal`.
  */
 export function deriveDiagnosisFixPlannedFiles(
   input: { plannedFiles?: readonly string[]; criteria: readonly { id: string; text: string; proofs?: readonly string[] }[]; cause?: string; kind?: 'recurring' | 'invariant' },
   tree: ReadonlySet<string>,
   base: string,
 ): PlannedFilesDerivation {
+  const explicit = new Set(input.plannedFiles ?? []);
   const causeNamed = input.kind === 'recurring' && input.cause
     ? namedPaths(input.cause).filter(path => scopeExists(path, tree))
     : [];
-  const derived = derivePlannedFiles({ plannedFiles: [...new Set([...(input.plannedFiles ?? []), ...causeNamed])], criteria: input.criteria }, tree);
+  const derived = derivePlannedFiles({ plannedFiles: [...new Set([...explicit, ...causeNamed])], criteria: input.criteria }, tree);
   if (derived.missing.length) throw new Error(plannedFilesRefusal(derived.missing, base, derived.misnamed));
-  const plannedFiles = [...new Set(derived.plannedFiles.map(path => existingProofVehicle(path, tree) ?? path))];
+  const plannedFiles = [...new Set(derived.plannedFiles.map(path =>
+    explicit.has(path) ? path : (existingProofVehicle(path, tree) ?? path)))];
   return { ...derived, plannedFiles };
 }
 

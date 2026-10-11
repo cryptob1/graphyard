@@ -119,6 +119,17 @@ test('integration:replay-fault-class-filing-carries-asked-files — GY-1700, GY-
     'GY-1700 carries the AC-0 test vehicle its worker asked for');
   assert.equal(gy1700.plannedFiles.includes('tests/webhook-soft-accept-no-5xx.test.ts'), false,
     'the longer proof-id stem is not planned beside the existing short vehicle');
+  // An explicit plan that creates the longer stem beside a shorter neighbour keeps the new path
+  // (Codex thread PRRT_kwDOUZby-s6rRY9H): the vehicle preference applies only to invented companions.
+  const gy1700Creates = deriveDiagnosisFixPlannedFiles({
+    plannedFiles: ['src/server/routes/github.ts', 'src/server/main.ts', 'docs/protocol/github-webhook.md',
+      'tests/webhook-soft-accept-no-5xx.test.ts'],
+    criteria: [{ id: 'AC-0', text: 'Soft-accept does not 5xx; add tests/webhook-soft-accept-no-5xx.test.ts for the proof.', proofs: ['unit:webhook-soft-accept-no-5xx'] }],
+    kind: 'recurring',
+    cause: 'receiver endpoint erroring in src/server/routes/github.ts mounted from src/server/main.ts',
+  }, baseTree, 'main');
+  assert.ok(gy1700Creates.plannedFiles.includes('tests/webhook-soft-accept-no-5xx.test.ts'),
+    'an explicitly planned new test the criterion creates is kept');
 
   // GY-1701: cause named the three daemon files; filed plannedFiles held none of them.
   const gy1701 = deriveDiagnosisFixPlannedFiles({

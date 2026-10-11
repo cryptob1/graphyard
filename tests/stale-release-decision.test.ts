@@ -78,6 +78,8 @@ function world() {
   const find = (key: string) => work.find(entry => entry.key === key)!;
   const diagnostician: DiagnosticianEffects = {
     settings, cwd: '/checkout/project',
+    // GY-1707: fix filing derives against this tree; a nonexistent cwd must not invent one.
+    tree: async () => ({ ref: 'main', files: new Set(['src/merge-queue.ts', 'tests/refresh.test.ts', 'tests/helpers/timing-baseline.json', 'tests/docs-budget.test.ts']) }),
     runner: async () => ({ runner: runner(() => ({ subject: 'GY-101', cause: 'The merge queue never re-reads a CLEAN pull request after its base moves',
       evidence: { logLines: ['merge GY-1 waiting'], commands: ['gh pr view 77'] }, faultClass: 'stalled-gate', fix })), runtime: 'pi', model: settings.model }),
     context: async () => ({ journal: [], serverLog: [], pullRequests: [] }),
