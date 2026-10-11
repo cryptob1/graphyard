@@ -245,6 +245,10 @@ export const undecidedScopeRequest = rule('undecided-scope-request', moment => m
  * pass's own of a live attempt's request (standingScopeRequest, GY-1085): one that has waited past
  * the bound, or that nothing will judge again — a non-additive or over-cap ask, an approver's
  * refusal — is somebody's to decide and stays a signal, as does one whose attempt has ended.
+ * The fold reads the record, not the daemon's effects, so it cannot know whether this deployment
+ * routes refused asks (cycle-scope.ts escalates one it cannot route); it relies on the loop's own
+ * promise instead: an ask left past the bound is counted from that instant with its original
+ * requestedAt, so on an unrouted deployment the instance is read late, never lost.
  */
 export const loopSettlingScopeRequest = rule('loop-settling-scope-request', moment => {
   if (moment.at !== 'open-ask' || moment.ask.kind !== 'scope-request' || moment.ask.trigger !== 'refused-by-loop') return false;

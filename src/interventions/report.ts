@@ -1,6 +1,6 @@
 // Concern: the interventions report — the window's counts, trend, costliest items and the recurring kind-at-stage patterns.
 import type { Stage, Work } from '../model.js';
-import { interventionKinds, interventionWindows, type Intervention, type InterventionKind, type InterventionPolicy, type InterventionReport, type InterventionWindow, type Judgement } from '../model/interventions.js';
+import { handFiledPattern, interventionKinds, interventionWindows, patternInstancesShown, type Intervention, type InterventionKind, type InterventionPolicy, type InterventionReport, type InterventionWindow, type Judgement, type PatternRow } from '../model/interventions.js';
 import type { Store } from '../store.js';
 import { boundedSnapshot } from '../store/bounded-snapshot.js';
 import { readInterventionLedger } from './ledger.js';
@@ -36,22 +36,26 @@ export function computeInterventionReport(folded: { interventions: Intervention[
     for (const entry of bucket.entries) kinds[entry.kind] = (kinds[entry.kind] ?? 0) + 1;
     return { key: item?.key ?? bucket.entries[0].work!.key, title: item?.title ?? bucket.entries[0].work!.title, stage: item?.stage ?? 'done', count: bucket.count, waitedMs: bucket.waitedMs, kinds };
   }).sort((a, b) => b.waitedMs - a.waitedMs || b.count - a.count);
-  // GY-1682: the row names the count the threshold is judged on and the items that account for the
-  // rest, so a reader of 20 counted and no crossing sees the delivered items that own 18 of them
-  // rather than a scan that failed its promise. The first item in fleet order accounts for an
-  // instance, as detectPatterns links it.
+  // GY-1682: the row names the count the threshold is judged on, the items that account for every
+  // counted instance and the instances themselves, so a reader of 20 counted and no crossing sees the
+  // delivered items that own 18 of them and the open item that stands for the other 2, rather than a
+  // scan that failed its promise. The first item in fleet order accounts for a linked instance, as
+  // detectPatterns links it; the standing item accounts for the unlinked ones.
   const accountedBy = new Map<string, Work>();
   for (const item of work) for (const instance of item.origin?.pattern?.instances ?? []) if (!accountedBy.has(instance.id)) accountedBy.set(instance.id, item);
-  const patterns = detectPatterns(folded.interventions, work, policy, to).map(pattern => {
+  const patterns: PatternRow[] = detectPatterns(folded.interventions, work, policy, to).map(pattern => {
     const accounted = new Map<string, { id: string; key: string; stage: Stage; count: number }>();
+    const owner = (entry: Intervention) => accountedBy.get(entry.id) ?? pattern.item ?? null;
     for (const entry of pattern.entries) {
-      const owner = accountedBy.get(entry.id);
-      if (!owner) continue;
-      const row = accounted.get(owner.id) ?? { id: owner.id, key: owner.key, stage: owner.stage, count: 0 };
-      row.count++; accounted.set(owner.id, row);
+      const item = owner(entry);
+      if (!item) continue;
+      const row = accounted.get(item.id) ?? { id: item.id, key: item.key, stage: item.stage, count: 0 };
+      row.count++; accounted.set(item.id, row);
     }
+    const instances = [...pattern.entries].sort((a, b) => b.requestedAt.localeCompare(a.requestedAt)).slice(0, patternInstancesShown)
+      .map(entry => ({ id: entry.id, work: entry.work ? { id: entry.work.id, key: entry.work.key } : null, requestedAt: entry.requestedAt, resolvedAt: entry.resolvedAt, trigger: entry.trigger ?? null, owner: owner(entry)?.key ?? null }));
     return { kind: pattern.kind, stage: stageKey(pattern.stage), count: pattern.count, unlinked: pattern.unlinked.length, threshold: policy.threshold, crossed: pattern.item !== null || pattern.unlinked.length >= policy.threshold,
-      work: pattern.item ? { id: pattern.item.id, key: pattern.item.key, stage: pattern.item.stage } : null, accounted: [...accounted.values()].sort((a, b) => b.count - a.count || a.key.localeCompare(b.key)) };
+      work: pattern.item ? { id: pattern.item.id, key: pattern.item.key, stage: pattern.item.stage } : null, accounted: [...accounted.values()].sort((a, b) => b.count - a.count || a.key.localeCompare(b.key)), instances };
   });
   return {
     window: { days: options.days, from, to }, policy, deliveries: deliveries.length,
@@ -70,14 +74,21 @@ export function computeInterventionReport(folded: { interventions: Intervention[
  * Every kind-at-stage pair with at least one instance needed inside the policy window, with the
  * item that stands for it. One pass over the instances groups them and one pass over the items
  * finds what they link and which open item stands for each pair (GY-1381), so the cost is linear
- * in what it reads: the scan runs every minute over a window of thousands of instances.
+ * in what it reads: the scan runs every minute over a window of thousands of instances. An open
+ * item the scan opened for the pair stands first; failing one, an open item filed by hand for the
+ * pair's fault (handFiledPattern, GY-1682), so the scan opens nothing beside it and the report
+ * names it.
  */
 export function detectPatterns(interventions: Intervention[], work: readonly Work[], policy: InterventionPolicy, now: string) {
   const from = new Date(Date.parse(now) - policy.windowDays * day).toISOString();
-  const linked = new Set<string>(), standing = new Map<string, Work>();
+  const linked = new Set<string>(), standing = new Map<string, Work>(), handFiled = new Map<string, Work>();
   for (const item of work) {
-    const pattern = item.origin?.pattern;
-    if (!pattern) continue;
+    const origin = item.origin, pattern = origin?.pattern; // one read of the origin per item (unit:intervention-detect-linear)
+    if (!pattern) {
+      const filed = item.stage !== 'done' && origin?.faultClass ? handFiledPattern({ origin, title: item.title, description: item.description }) : null;
+      if (filed) { const key = `${filed.kind}|${stageKey(filed.stage)}`; if (!handFiled.has(key)) handFiled.set(key, item); }
+      continue;
+    }
     for (const instance of pattern.instances) linked.add(instance.id);
     const key = `${pattern.kind}|${stageKey(pattern.stage)}`;
     // The first open item in fleet order stands for the pair, as it always has.
@@ -94,7 +105,7 @@ export function detectPatterns(interventions: Intervention[], work: readonly Wor
   }
   return [...groups].map(([key, { entries, unlinked }]) => {
     const [kind, stage] = key.split('|') as [InterventionKind, Stage | 'none'];
-    return { kind, stage: stage === 'none' ? null : stage, count: entries.length, entries, unlinked, item: standing.get(key) ?? null, from };
+    return { kind, stage: stage === 'none' ? null : stage, count: entries.length, entries, unlinked, item: standing.get(key) ?? handFiled.get(key) ?? null, from };
   }).sort((a, b) => b.count - a.count);
 }
 

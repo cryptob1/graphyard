@@ -142,6 +142,39 @@ export type WorkOrigin = z.infer<typeof workOriginSchema>;
 export const interventionWindows = [7, 30, 90] as const;
 export type InterventionWindow = typeof interventionWindows[number];
 
+/** One pattern row of the report: see InterventionReport.patterns. */
+export interface PatternRow {
+  kind: InterventionKind; stage: Stage | 'none'; count: number; unlinked: number; threshold: number; crossed: boolean;
+  work: { id: string; key: string; stage: Stage } | null;
+  accounted: { id: string; key: string; stage: Stage; count: number }[];
+  instances: PatternInstance[];
+}
+/** A counted instance as the pattern row names it: the intervention, its item, what triggered it and the item that owns it. */
+export interface PatternInstance { id: string; work: { id: string; key: string } | null; requestedAt: string; resolvedAt: string | null; trigger: string | null; owner: string | null }
+/** How many counted instances a pattern row names, newest first; `count` is the whole. */
+export const patternInstancesShown = 100;
+
+/**
+ * GY-1682: a pattern item filed by hand. The scan opens an item with `origin.pattern` for a pair that
+ * crossed the threshold, and only that origin stood for the pair; the master filed GY-1682 by hand
+ * for an `intervention-pattern` fault (a fault-class origin, which carries no kind or stage), so the
+ * report named no owner for a pattern an open item owned, and the scan would have opened a second
+ * item beside it at the next crossing. What a hand filing keeps of the fault is the control plane's
+ * own sentence (cli/intervention-status.ts): `N KIND interventions at the STAGE stage`. An open
+ * machine-filed fault item quoting it in its title or description stands for that pair while it is
+ * open; it links no instance — the unlinked ones are what it stands for — and an item the scan
+ * opened for the pair stands first. Read only from items the loop filed (`origin.faultClass`): an
+ * operator's own item that mentions a pattern is its author's, never the pattern's owner.
+ */
+export function handFiledPattern(work: { origin?: WorkOrigin | null; title: string; description?: string | null }): { kind: InterventionKind; stage: Stage | null } | null {
+  if (!work.origin?.faultClass || work.origin.pattern) return null;
+  const match = patternFaultLine().exec(`${work.title}\n${work.description ?? ''}`);
+  return match ? { kind: match[1] as InterventionKind, stage: match[2] && match[2] !== 'none' ? match[2] as Stage : null } : null;
+}
+let faultLine: RegExp | null = null;
+/** The fault's own line, built on first use: `stages` resolves after this module in the import cycle (see stageSchema). A pattern at no stage reads `at no stage` (the scan's item) or `at the none stage` (the fault). */
+const patternFaultLine = () => faultLine ??= new RegExp(`\\b\\d+ (${interventionKinds.join('|')}) interventions at (?:the (${stages.join('|')}|none) stage|no stage)\\b`);
+
 /** Aggregation over the signals inside a window: the answer to "what is this product making people do by hand, and where". */
 export interface InterventionReport {
   window: { days: number; from: string; to: string };
@@ -160,12 +193,16 @@ export interface InterventionReport {
   /** The items that cost the most attention, most first. */
   costliest: { key: string; title: string; stage: Stage; count: number; waitedMs: number; kinds: Partial<Record<InterventionKind, number>> }[];
   /**
-   * Every kind-at-stage pair against the recurrence rule, and the item it opened when it crossed it.
+   * Every kind-at-stage pair against the recurrence rule, and the item that stands for it: the one the
+   * scan opened when it crossed, or an open item filed by hand for the pattern's fault (handFiledPattern).
    * `count` is every instance in the window; `unlinked` is what the threshold judges — the instances no
-   * item links — and `accounted` names the items whose pattern links the rest, with each one's stage
-   * and share (GY-1682), so a count past the threshold with no crossing reads as owned, not unfiled.
+   * delivered or open pattern item links — and `accounted` names the items that own the instances, with
+   * each one's stage and share: the items whose pattern links them, and the standing item for the
+   * unlinked rest (GY-1682), so a count past the threshold with no crossing reads as owned, not unfiled.
+   * `instances` names the counted instances themselves (the newest `patternInstancesShown` of them),
+   * each with its item, trigger and owner, so the board shows the fold the row was judged on.
    */
-  patterns: { kind: InterventionKind; stage: Stage | 'none'; count: number; unlinked: number; threshold: number; crossed: boolean; work: { id: string; key: string; stage: Stage } | null; accounted: { id: string; key: string; stage: Stage; count: number }[] }[];
+  patterns: PatternRow[];
   judgements: Judgement[];
   /** The signals themselves, newest first. */
   interventions: Intervention[];
