@@ -68,7 +68,14 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       }
       // A request whose response was lost is already standing on the item, and the server refuses a
       // second one; adopting it is what keeps a retry from leaving a decision nobody will judge.
-      let standing = history.find(entry => entry.action === decision.action && (entry.state === 'requested' || entry.state === 'approved'));
+      let standing = history.find(entry => entry.action === decision.action && (entry.state === 'requested' || entry.state === 'approved' || entry.state === 'held'));
+      // GY-1687: a held decision is approved and waits only for the item's attempt to end, when the control plane applies it;
+      // no approver is launched for it and nothing is requested in its place.
+      if (standing?.state === 'held') {
+        state.approvals[key] = approvalWatchSchema.parse({ work: item.key, action: decision.action, decision: standing.id, requestedAt: stamp, settledAt: stamp, approvedAt: standing.approvedAt ?? null, approvedBy: standing.approvedBy ?? null });
+        performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `${item.key}'s ${decision.action} decision ${standing.id} is approved by ${standing.approvedBy ?? 'its approver'} and held (${boundDetail(standing.outcome ?? 'the item holds a live attempt', 300)}); the control plane applies it when the attempt ends, so nothing is requested`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
+        return;
+      }
       // An approved decision is already judged (GY-1300): it is never adopted for an approver session. The control plane is asked to
       // apply what was approved, and only one that settled failed, stale or superseded is asked for again, below, within the same
       // bound. A loop without the resume settles it through the withdrawal below (GY-1297).
