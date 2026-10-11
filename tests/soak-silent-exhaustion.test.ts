@@ -151,11 +151,12 @@ test('unit:soak-invariants-hold — over a simulated hour silent ended failover 
   const doctorReport = { findings: [], actions: [], filed: [] };
   const doctor: DoctorEffects = {
     settings: doctorSettings, cwd: '/tmp', env: {},
+    // Live wiring: registry primary names the account; Pi fallback always returns account: null.
+    // Both timeout with a readable limit — the named primary must stay held (AC-2/AC-3).
     runner: async attempt => ({
-      runtime: 'pi', model: attempt, account: 'zai-doctor', release: async () => {},
-      // Primary carries the limit once; after the hold, a short report so the next interval is not a second spend.
+      runtime: 'pi', model: attempt, account: attempt === 'primary' ? 'zai-doctor' : null, release: async () => {},
       runner: doctorPhase === 'limit'
-        ? limitedTimeoutRunner(attempt === 'primary' ? [retry] : [])
+        ? limitedTimeoutRunner([retry])
         : { name: 'pi', start<T>(_p: string, options: { validate: (payload: unknown) => T; tool?: string }) {
             const parsed = options.validate(doctorReport);
             return { id: randomUUID(), events: [], onEvent: () => () => {}, cancel() {}, result: async () => ({ ok: true as const, tool: options.tool ?? 'doctor', payload: parsed, payloads: [parsed] }) };
@@ -170,7 +171,7 @@ test('unit:soak-invariants-hold — over a simulated hour silent ended failover 
   const diagnostician: DiagnosticianEffects = {
     settings: diagnosticianSettings({ diagnostician: {} }), cwd: '/checkout',
     runner: async attempt => diagnosisPhase === 'limit'
-      ? { runner: limitedTimeoutRunner(attempt === 'primary' ? [retry] : []), runtime: 'pi', model: attempt === 'primary' ? 'zai/glm-5.3-flash' : 'zai/glm-5.3', account: 'zai-diag' }
+      ? { runner: limitedTimeoutRunner([retry]), runtime: 'pi', model: attempt === 'primary' ? 'zai/glm-5.3-flash' : 'zai/glm-5.3', account: attempt === 'primary' ? 'zai-diag' : null }
       : { runner: successDiagnosisRunner(successPayload), runtime: 'pi', model: 'zai/glm-5.3-flash', account: 'zai-diag' },
     context: async () => ({ journal: [], serverLog: [], pullRequests: [] }),
     file: async () => { throw new Error('no fix'); },
@@ -318,18 +319,20 @@ test('unit:soak-invariants-hold — over a simulated hour silent ended failover 
   assert.equal(silentWork.key, silentWork.key); // keep the filed work referenced for the typechecker
 
   assert.ok(state.doctor.runs.length >= 1, 'the doctor ran');
-  assert.ok(heldAccounts.some(entry => entry.account === 'zai-doctor'), `doctor account held: ${JSON.stringify(heldAccounts)}`);
+  assert.ok(heldAccounts.some(entry => entry.account === 'zai-doctor' && entry.role === 'doctor'), `doctor primary held despite null-account fallback: ${JSON.stringify(heldAccounts)}`);
   const limitWaits = state.doctor.runs.filter(run => run.detail.includes(doctorLimitUntilMarker));
   assert.equal(limitWaits.length, 1, 'one limit-wait doctor round, not a second spend');
   const heldUntil = limitWaits[0]!.detail.slice(limitWaits[0]!.detail.indexOf(doctorLimitUntilMarker) + doctorLimitUntilMarker.length).split(/[\s;]/)[0];
   assert.ok(Date.parse(heldUntil) > soakStart + 10 * minute, 'the limit wait covered the ten-minute mark');
   assert.equal(doctorDue({ ...state, doctor: { ...state.doctor, runs: limitWaits } }, soakStart + 10 * minute, doctorSettings), false, 'doctorDue waits out the limit hold');
+  // After the wait, the held primary is still observed spent — selection cannot hand it back mid-hold.
+  assert.ok((await observedExhaustions(config, soakStart + 10 * minute))['zai-doctor'], 'doctor primary stays held through the wait');
 
   assert.ok(state.diagnoses['GY-1682'], 'GY-1682 was diagnosed');
   assert.notEqual(state.diagnoses['GY-1682'].state, 'waiting', state.diagnoses['GY-1682'].detail);
   assert.ok(['closing', 'answered', 'releasing', 'diagnosed'].includes(state.diagnoses['GY-1682'].state), state.diagnoses['GY-1682'].state);
   assert.equal(state.faults.instances.filter(entry => entry.kind === 'overlong-session').length, 0);
-  assert.ok(heldAccounts.some(entry => entry.account === 'zai-diag' && entry.role === 'diagnostician'));
+  assert.ok(heldAccounts.some(entry => entry.account === 'zai-diag' && entry.role === 'diagnostician'), `diag primary held despite null-account fallback: ${JSON.stringify(heldAccounts)}`);
 
   // Multi-cycle reviewer selection: two spent sessions sharing one request id re-hold before selectAccount.
   const reviewBase = soakStart + 55 * minute;

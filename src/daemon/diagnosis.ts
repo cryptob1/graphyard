@@ -136,7 +136,7 @@ export const diagnosticianEffects = (config: MasterConfig, root: string, post: D
 };
 
 /** `limit`: every run ended on its provider's quota or rate limit — the earliest known reset among them. `account`: the registry account the round spent (GY-1705). */
-interface Outcome { runs: DiagnosisRecord['runs']; diagnosis: DiagnosisPayload | null; limit?: ExhaustionSignal | null; account?: string | null }
+interface Outcome { runs: DiagnosisRecord['runs']; diagnosis: DiagnosisPayload | null; limit?: ExhaustionSignal | null; account?: string | null; holds?: { account: string; limit: ExhaustionSignal }[] }
 /** How long a diagnosis refused by a provider naming no readable reset waits before it is run again. */
 export const diagnosisLimitHoldMs = 60 * 60_000;
 /** The least a provider-limited diagnosis waits, whatever reset the provider named: never a retry every cycle. */
@@ -305,7 +305,8 @@ async function runDiagnosis(diagnostician: DiagnosticianEffects, subject: Diagno
   const fromTimeout = headlessTimeoutLimitCharge(timed, now());
   const limited = fromTimeout ? null : (limits.length > 0 && limits.every(Boolean) ? limits as ExhaustionSignal[] : null);
   const signal = fromTimeout?.limit ?? (limited ? { reason: limited.at(-1)!.reason, resetsAt: limited.map(entry => entry.resetsAt).filter((at): at is string => !!at).sort()[0] ?? null } : null);
-  return { runs, diagnosis: null, limit: signal, account: fromTimeout?.account ?? (limited ? limitedAccount : null) };
+  const holds = fromTimeout?.holds ?? (limited && limitedAccount ? [{ account: limitedAccount, limit: signal! }] : []);
+  return { runs, diagnosis: null, limit: signal, account: fromTimeout?.account ?? (limited ? limitedAccount : null), holds };
 }
 
 const iso = (at: number) => new Date(at).toISOString();
@@ -427,8 +428,8 @@ async function advance(cycle: Cycle, diagnostician: DiagnosticianEffects, entry:
       entry.state = 'waiting';
       entry.retryAt = iso(Number.isFinite(named) && named > settledAt ? Math.max(named, settledAt + diagnosisLimitMinimumMs) : settledAt + diagnosisLimitHoldMs);
       entry.refusedAt = iso(settledAt);
-      // Charge the hold to the account the round launched on (GY-1705), never a nominal profile.
-      if (outcome.account) await effects.holdAccount?.(outcome.account, { at: iso(settledAt), resetsAt: outcome.limit.resetsAt, reason: outcome.limit.reason, role: 'diagnostician', profile: diagnosticianRole, work: entry.work });
+      // Hold every named account whose own attempt reported the limit (GY-1705), never a nominal profile.
+      for (const hold of outcome.holds ?? []) await effects.holdAccount?.(hold.account, { at: iso(settledAt), resetsAt: hold.limit.resetsAt, reason: hold.limit.reason, role: 'diagnostician', profile: diagnosticianRole, work: entry.work });
       // The provider's capacity, not the loop's failure: no fault kind, so no loop fault instance.
       await note(entry, 'waiting', `The diagnostician's provider refused the diagnosis of ${entry.subject} for its quota or rate limit (${outcome.limit.reason}); it is diagnosed again at ${entry.retryAt}, and no other diagnosis is launched before then`, null);
       return;

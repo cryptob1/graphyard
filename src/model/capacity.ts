@@ -201,19 +201,28 @@ export function headlessTimeoutLimit(
   if (!signals.length) return null;
   return { reason: signals.at(-1)!.reason, resetsAt: signals.map(e => e.resetsAt).filter((at): at is string => !!at).sort()[0] ?? null };
 }
-/** Charge the last attempt that printed a notice — that attempt's own account and resetsAt. */
+/**
+ * GY-1705. Round wait uses the last readable reason and earliest reset; every named account whose
+ * own attempt printed a limit is held with that attempt's own signal. A later null-account Pi
+ * fallback must not clear a registry primary that reported its own limit.
+ */
 export function headlessTimeoutLimitCharge(
   attempts: readonly { result: string; detail: string; events?: readonly LimitRunEvent[] | readonly { kind: string; error?: string | null; text?: string }[]; account?: string | null }[],
   now: number,
-): { limit: ExhaustionSignal; account: string | null } | null {
+): { limit: ExhaustionSignal; account: string | null; holds: { account: string; limit: ExhaustionSignal }[] } | null {
   const started = attempts.filter(attempt => attempt.result !== 'spawn' && attempt.result !== 'cancelled');
   if (!started.length || !started.every(attempt => attempt.result === 'timeout')) return null;
-  let charged: { limit: ExhaustionSignal; account: string | null } | null = null;
+  const holds: { account: string; limit: ExhaustionSignal }[] = [];
+  const signals: ExhaustionSignal[] = [];
   for (const attempt of started) {
     const signal = runTimeoutLimit(attempt.events ?? [], attempt.detail, now);
-    if (signal) charged = { limit: signal, account: attempt.account ?? null };
+    if (!signal) continue;
+    signals.push(signal);
+    if (attempt.account) holds.push({ account: attempt.account, limit: signal });
   }
-  return charged;
+  if (!signals.length) return null;
+  const limit = { reason: signals.at(-1)!.reason, resetsAt: signals.map(entry => entry.resetsAt).filter((at): at is string => !!at).sort()[0] ?? null };
+  return { limit, account: holds.at(-1)?.account ?? null, holds };
 }
 export const doctorLimitUntilMarker = 'provider limit until ';
 export function doctorLimitRetryAt(runs: readonly { state: string; detail: string }[], clock: number): string | null {

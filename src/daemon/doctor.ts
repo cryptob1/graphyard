@@ -194,7 +194,7 @@ export function boundedInput(input: DoctorInput, limit = 100_000): DoctorInput &
 }
 
 /** Run the primary attempt, and the fallback once when the primary returns no valid report. */
-async function runDoctor(effects: DoctorEffects, prompt: string): Promise<{ runs: DoctorRunRecord['runs']; report: DoctorReportPayload | null; limit?: ExhaustionSignal | null; account?: string | null }> {
+async function runDoctor(effects: DoctorEffects, prompt: string): Promise<{ runs: DoctorRunRecord['runs']; report: DoctorReportPayload | null; limit?: ExhaustionSignal | null; account?: string | null; holds?: { account: string; limit: ExhaustionSignal }[] }> {
   const runs: DoctorRunRecord['runs'] = [], timed: { result: string; detail: string; events: LimitRunEvent[]; account: string | null }[] = [];
   const timeoutMs = effects.settings.timeoutMinutes * 60_000;
   for (const attempt of ['primary', 'fallback'] as const) {
@@ -223,7 +223,7 @@ async function runDoctor(effects: DoctorEffects, prompt: string): Promise<{ runs
     }
   }
   const charged = headlessTimeoutLimitCharge(timed, Date.now());
-  return { runs, report: null, limit: charged?.limit ?? null, account: charged?.account ?? null };
+  return { runs, report: null, limit: charged?.limit ?? null, account: charged?.account ?? null, holds: charged?.holds ?? [] };
 }
 
 /** One doctor run this process has in flight, settled: a test's way to wait for it. */
@@ -513,7 +513,7 @@ export async function doctorStep(cycle: Cycle) {
     faults: state.faults.instances.slice(-40).reverse().map(instance => `${instance.at} ${instance.kind} on ${instance.subject}: ${instance.text}`),
   };
   const prompt = doctorPrompt(cycle.config, input);
-  live = runDoctor(doctor, prompt).catch(error => ({ runs: [{ runtime: 'none', model: 'none', result: 'exit', detail: message(error).slice(0, 500) }], report: null as DoctorReportPayload | null, limit: null, account: null }))
+  live = runDoctor(doctor, prompt).catch(error => ({ runs: [{ runtime: 'none', model: 'none', result: 'exit', detail: message(error).slice(0, 500) }], report: null as DoctorReportPayload | null, limit: null, account: null, holds: [] as { account: string; limit: ExhaustionSignal }[] }))
     .then(async outcome => {
       const current = state.doctor.runs.find(entry => entry.at === run.at);
       if (!current || current.state !== 'running') return;
@@ -526,7 +526,7 @@ export async function doctorStep(cycle: Cycle) {
         const settledAt = now();
         const named = outcome.limit.resetsAt ? Date.parse(outcome.limit.resetsAt) : Number.NaN;
         const until = new Date(Number.isFinite(named) && named > settledAt ? named : settledAt + 3_600_000).toISOString();
-        if (outcome.account) await effects.holdAccount?.(outcome.account, { at: new Date(settledAt).toISOString(), resetsAt: outcome.limit.resetsAt, reason: outcome.limit.reason, role: 'doctor', profile: doctorRole, work: null });
+        for (const hold of outcome.holds ?? []) await effects.holdAccount?.(hold.account, { at: new Date(settledAt).toISOString(), resetsAt: hold.limit.resetsAt, reason: hold.limit.reason, role: 'doctor', profile: doctorRole, work: null });
         current.state = 'failed';
         current.detail = `no report: ${outcome.runs.map(entry => `${entry.model} ${entry.result}`).join('; ')}; ${doctorLimitUntilMarker}${until}`.slice(0, 1000);
         state.doctor.unposted = [...new Set([...state.doctor.unposted, current.at])].slice(-40);

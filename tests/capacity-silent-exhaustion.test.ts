@@ -339,18 +339,19 @@ function recurring(key: string, faultClass: FaultClass, at: number) {
   return diagnosisItem(key, at, { title: input.title, description: input.description, origin: input.origin } as Partial<Work>);
 }
 
-async function diagnosisRound(account: string, held: { account: string; role: string; at?: number }[], eventsFor: (attempt: 'primary' | 'fallback') => RunEvent[] = () => [{ kind: 'retry', at: new Date(limitNow).toISOString(), attempt: 1, error: limitError }],
-  options: { elapseAttemptMs?: number } = {}) {
+async function diagnosisRound(account: string | null, held: { account: string; role: string; at?: number }[], eventsFor: (attempt: 'primary' | 'fallback') => RunEvent[] = () => [{ kind: 'retry', at: new Date(limitNow).toISOString(), attempt: 1, error: limitError }],
+  options: { elapseAttemptMs?: number; accountFor?: (attempt: 'primary' | 'fallback') => string | null } = {}) {
   const settings = diagnosticianSettings({ diagnostician: {} });
   /** 2030-01-01T12:00:00Z as a millisecond epoch — the diagnosis step's fixed clock. */
   let at = 1_893_499_200_000;
   const launchAt = at;
   const elapse = options.elapseAttemptMs ?? 0;
+  const accountFor = options.accountFor ?? (() => account);
   const diagnostician: DiagnosticianEffects = {
     settings, cwd: '/checkout',
     runner: async attempt => {
       if (elapse) at += elapse;
-      return { runner: limitedTimeoutRunner(eventsFor(attempt)), runtime: 'pi', model: attempt === 'primary' ? 'zai/glm-5.3-flash' : 'zai/glm-5.3', account };
+      return { runner: limitedTimeoutRunner(eventsFor(attempt)), runtime: 'pi', model: attempt === 'primary' ? 'zai/glm-5.3-flash' : 'zai/glm-5.3', account: accountFor(attempt) };
     },
     context: async () => ({ journal: [], serverLog: [], pullRequests: [] }),
     file: async () => { throw new Error('no fix'); },
@@ -386,6 +387,17 @@ test('integration:diagnostician-timeout-limit-wait — a primary limit notice wi
   const { state } = await diagnosisRound('zai-one-notice', held, attempt => attempt === 'primary' ? [retry] : []);
   assert.equal(state.diagnoses['GY-1682'].state, 'waiting', state.diagnoses['GY-1682'].detail);
   assert.equal(held[0]?.account, 'zai-one-notice');
+  assert.equal(state.faults.instances.filter(entry => entry.kind === 'overlong-session').length, 0);
+});
+
+test('integration:diagnostician-timeout-limit-wait — a named primary limit survives a null-account Pi fallback that also reports a limit', async () => {
+  const held: { account: string; role: string; at?: number }[] = [];
+  const retry: RunEvent = { kind: 'retry', at: new Date(limitNow).toISOString(), attempt: 1, error: limitError };
+  const { state } = await diagnosisRound('zai-primary', held, () => [retry], {
+    accountFor: attempt => attempt === 'primary' ? 'zai-primary' : null,
+  });
+  assert.equal(state.diagnoses['GY-1682'].state, 'waiting', state.diagnoses['GY-1682'].detail);
+  assert.deepEqual(held.map(entry => entry.account), ['zai-primary']);
   assert.equal(state.faults.instances.filter(entry => entry.kind === 'overlong-session').length, 0);
 });
 
@@ -464,33 +476,47 @@ test('integration:replay-diagnostician-timeouts — GY-1682 waits for its provid
   assert.equal(state.faults.instances.filter(entry => entry.kind === 'overlong-session').length, 0);
 });
 
-test('unit:run-timeout-limit-signal — headlessTimeoutLimitCharge attributes the hold to the attempt that printed the notice', () => {
+test('unit:run-timeout-limit-signal — headlessTimeoutLimitCharge holds every named limit attempt with its own reset', () => {
   const retry: RunEvent = { kind: 'retry', at: new Date(limitNow).toISOString(), attempt: 1, error: limitError };
+  // Fallback-only notice on an unnamed Pi login: do not charge the silent registry primary.
   const charged = headlessTimeoutLimitCharge([
     { result: 'timeout', detail: 'no terminal event within 1200s; the run was stopped', events: [], account: 'registry-a' },
     { result: 'timeout', detail: 'no terminal event within 1200s; the run was stopped', events: [retry], account: null },
   ], limitNow);
   assert.ok(charged);
   assert.equal(charged.account, null, 'a fallback notice with no named account does not keep the primary registry account');
+  assert.deepEqual(charged.holds, []);
   const primaryNotice = headlessTimeoutLimitCharge([
     { result: 'timeout', detail: 'stopped', events: [retry], account: 'registry-a' },
     { result: 'timeout', detail: 'stopped', events: [], account: null },
   ], limitNow);
   assert.equal(primaryNotice?.account, 'registry-a');
-  // Charged account keeps its own resetsAt — never an earlier attempt's reset paired with a later account.
+  assert.deepEqual(primaryNotice?.holds.map(entry => entry.account), ['registry-a']);
+  // Both attempts print a limit: keep the named primary even when the Pi fallback is account: null.
+  const both = headlessTimeoutLimitCharge([
+    { result: 'timeout', detail: 'stopped', events: [retry], account: 'registry-a' },
+    { result: 'timeout', detail: 'stopped', events: [retry], account: null },
+  ], limitNow);
+  assert.equal(both?.account, 'registry-a');
+  assert.deepEqual(both?.holds.map(entry => entry.account), ['registry-a']);
+  // Each named hold keeps its own resetsAt; the round wait still uses the earliest reset.
   const earlyReset = new Date(limitNow + 86_400_000).toISOString();
   const early = `Weekly/Monthly Limit Exhausted. Your limit will reset at ${earlyReset.replace('T', ' ').replace(/\.\d+Z$/, '')} UTC`;
-  const late = limitError;
+  const lateRetry: RunEvent = { kind: 'retry', at: new Date(limitNow).toISOString(), attempt: 1, error: limitError };
+  const earlyRetry: RunEvent = { kind: 'retry', at: new Date(limitNow).toISOString(), attempt: 1, error: early };
   const paired = headlessTimeoutLimitCharge([
-    { result: 'timeout', detail: 'stopped', events: [{ kind: 'retry', at: new Date(limitNow).toISOString(), attempt: 1, error: late }], account: 'registry-a' },
-    { result: 'timeout', detail: 'stopped', events: [{ kind: 'retry', at: new Date(limitNow).toISOString(), attempt: 1, error: early }], account: null },
+    { result: 'timeout', detail: 'stopped', events: [lateRetry], account: 'registry-a' },
+    { result: 'timeout', detail: 'stopped', events: [earlyRetry], account: null },
   ], limitNow);
-  assert.equal(paired?.account, null);
+  assert.equal(paired?.account, 'registry-a');
+  assert.equal(paired?.holds.length, 1);
+  assert.equal(paired?.holds[0]!.account, 'registry-a');
+  assert.equal(paired?.holds[0]!.limit.resetsAt, limitReset, 'named hold keeps registry-a\'s own reset');
   assert.ok(paired?.limit.resetsAt);
-  assert.ok(Date.parse(paired!.limit.resetsAt!) < Date.parse(limitReset), 'charged signal keeps the earlier fallback reset, not registry-a\'s later one');
+  assert.ok(Date.parse(paired!.limit.resetsAt!) < Date.parse(limitReset), 'round wait still uses the earlier fallback reset');
   const round = headlessTimeoutLimit([
-    { result: 'timeout', detail: 'stopped', events: [{ kind: 'retry', at: new Date(limitNow).toISOString(), attempt: 1, error: late }] },
-    { result: 'timeout', detail: 'stopped', events: [{ kind: 'retry', at: new Date(limitNow).toISOString(), attempt: 1, error: early }] },
+    { result: 'timeout', detail: 'stopped', events: [lateRetry] },
+    { result: 'timeout', detail: 'stopped', events: [earlyRetry] },
   ], limitNow);
   assert.equal(round?.resetsAt, paired?.limit.resetsAt, 'round retry still uses the earliest reset');
 });
@@ -501,7 +527,8 @@ test('integration:doctor-timeout-account-hold — a no-report timeout round with
   const retry: RunEvent = { kind: 'retry', at: new Date(limitNow).toISOString(), attempt: 1, error: limitError };
   const doctor: DoctorEffects = {
     settings, cwd: '/tmp', env: {},
-    runner: async attempt => ({ runtime: 'pi', model: attempt, account: 'zai-doctor', release: async () => {}, runner: limitedTimeoutRunner([retry]) }),
+    // Registry primary + null Pi fallback, both with a limit — hold the named primary (AC-2/AC-3).
+    runner: async attempt => ({ runtime: 'pi', model: attempt, account: attempt === 'primary' ? 'zai-doctor' : null, release: async () => {}, runner: limitedTimeoutRunner([retry]) }),
     file: async () => { throw new Error('nothing filed'); },
     recordRun: async () => {},
   };
