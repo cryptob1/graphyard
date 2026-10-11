@@ -2,14 +2,15 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { mkdtemp, readFile, rm, symlink, unlink } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { constants as osConstants, tmpdir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import { z } from 'zod';
 import { ChildProcessError, type ChildRun, defaultChildRun } from '../child-runner.js';
 import { daemonStatePath } from '../daemon/state.js';
 import { atomicPrivateWrite, loadStoredMasterConfig, readCredentialFile } from '../master/config.js';
 import { coordinatorCheckoutRoot, type MasterConfig } from '../master/profiles.js';
-import { type CheckoutQuiesce, type RestoreAct, type RestoreActOutcome, checkoutRestoreGrantPath, checkoutRestoreRequestPath, readCheckoutRestoreRequest, restoreInProcess } from './master-checkout-restore.js';
+import { continueFrozenWriters, freezeCheckoutWriters, type WriterFreezeDeps } from './checkout-writers.js';
+import { type CheckoutQuiesce, type RestoreAct, type RestoreActOutcome, checkoutRestoreFreezeLedgerPath, checkoutRestoreGrantPath, checkoutRestoreRequestPath, readCheckoutRestoreRequest, restoreInProcess } from './master-checkout-restore.js';
 
 // GY-1679: the loop served `master checkout-restore` from the code it had loaded, so a fix to the
 // serve path (GY-1672's unreadable-cwd skip) reached no installation whose loop could not restart —
@@ -48,6 +49,14 @@ import { type CheckoutQuiesce, type RestoreAct, type RestoreActOutcome, checkout
 // The act can outlast the supervisor's watchdog window (the shipped unit's is 180 s; a fetch, a
 // clone and a freeze-and-restore each wait on their own), so the loop's keep-alive is fed on an
 // interval for as long as the act runs (review of GY-1680): a long restore is not a hung loop.
+//
+// The entry stops the checkout's writers (SIGSTOP) and continues them in a `finally` — which a process
+// ended by a signal never reaches: the loop's timeout on the snapshot's CLI sends SIGTERM, then
+// SIGKILL, and a thaw left undone leaves those writers stopped indefinitely, a retry treating them as
+// quiet (review of GY-1680). So the entry records every pid in a freeze ledger beside the cursor
+// before it signals it (checkoutRestoreFreezeLedgerPath), continues them itself on SIGTERM or SIGINT,
+// and the loop — whichever way the entry ended — continues whatever the ledger still names stopped
+// before it records the outcome (continueFrozenWriters).
 
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
 const short = (commit: string) => commit.slice(0, 12);
@@ -189,8 +198,16 @@ export interface ReleaseRestoreDeps {
   env?: NodeJS.ProcessEnv;
   /** The supervisor's keep-alive, fed every `keepAliveEveryMs` (checkoutRestoreKeepAliveEveryMs) for as long as the act runs. */
   keepAlive?: () => Promise<void>; keepAliveEveryMs?: number;
+  /** The entry's freeze ledger (checkoutRestoreFreezeLedgerPath): the writers it stopped, continued by the loop once the entry has ended however it ended; `signal` and `state` as continueFrozenWriters takes them. */
+  ledger?: { file: string } & Pick<WriterFreezeDeps, 'signal' | 'state'>;
   now?: () => number;
 }
+/** What the loop found in the entry's freeze ledger once the entry ended, in words; empty when the ledger named nothing. */
+const thawedDetail = (thawed: ReturnType<typeof continueFrozenWriters>) => {
+  if (!thawed || !thawed.continued.length && !thawed.left.length) return '';
+  const list = (pids: number[]) => pids.slice(0, 8).join(', ') + (pids.length > 8 ? ` and ${pids.length - 8} more` : '');
+  return `; the entry ended before its own thaw, so the loop ${thawed.continued.length ? `continued the writer(s) it had stopped, pid ${list(thawed.continued)}` : 'continued nothing'}${thawed.left.length ? ` (pid ${list(thawed.left)} no longer stopped, left alone)` : ''}`;
+};
 /**
  * The loop's restore act (GY-1680): the quiesce-and-restore run by a sanctioned release's own CLI in
  * a detached shared-clone snapshot of it, under a single-use grant signed with the coordinator
@@ -219,12 +236,16 @@ export function releasePinnedRestore(deps: ReleaseRestoreDeps): RestoreAct {
         const payload: CheckoutRestoreGrantPayload = { kind: checkoutRestoreGrantKind, root, reason, request: { id: request.id }, loop: { pid: deps.grant.pid }, issuedAt: new Date(issued).toISOString(), expiresAt: new Date(issued + checkoutRestoreGrantTtlMs).toISOString(), nonce: randomBytes(16).toString('hex') };
         const grant: CheckoutRestoreGrant = { ...payload, signature: signCheckoutRestoreGrant(payload, credential) };
         await atomicPrivateWrite(deps.grant.file, grant);
-        let output: string;
+        let output = '', failure: unknown = null;
         try {
           output = String(await run(entry.command, [...entry.args, 'master', 'checkout-restore', checkoutRestoreServeFlag],
             { cwd: snapshot.directory, timeoutMs: deps.timeoutMs ?? 10 * 60_000, env: { ...(deps.env ?? process.env), [checkoutRestoreGrantVariable]: deps.grant.file } }));
-        } catch (error) { throw new Error(`${served}: ${error instanceof ChildProcessError && error.stderr.trim() ? error.stderr.trim() : message(error)}`.slice(0, 4000)); }
+        } catch (error) { failure = error; }
         finally { await unlink(deps.grant.file).catch(() => {}); }
+        // The entry has ended, however it ended: whatever its freeze ledger still names stopped is continued
+        // here, before the outcome is recorded — the thaw a signalled entry never reached (review of GY-1680).
+        const thawed = deps.ledger ? continueFrozenWriters(deps.ledger.file, deps.ledger) : null;
+        if (failure) throw new Error(`${served}: ${failure instanceof ChildProcessError && failure.stderr.trim() ? failure.stderr.trim() : message(failure)}${thawedDetail(thawed)}`.slice(0, 4000));
         let parsed: ServeOutput;
         try { parsed = serveOutputSchema.parse(JSON.parse(output)); }
         catch (error) { throw new Error(`${served}, whose outcome could not be read (${message(error).split('\n')[0]}): ${output.trim().slice(0, 500)}`); }
@@ -256,8 +277,30 @@ export function ancestorPids(proc = '/proc', self = process.pid, limit = 8): num
   return chain;
 }
 
+type SignalHost = Pick<NodeJS.EventEmitter, 'on' | 'removeListener'>;
+/** What continuing the frozen writers on the entry's own stop needs: the signal host (this process), how it exits, and how writers are signalled and read (continueFrozenWriters). */
+export interface StopThawDeps extends Pick<WriterFreezeDeps, 'signal' | 'state'> { host?: SignalHost; exit?: (code: number) => void; log?: (line: string) => void }
+/**
+ * While the entry acts, a SIGTERM or SIGINT — the loop's timeout, a hand's interrupt — continues the
+ * writers the freeze ledger at `file` names stopped before the process exits with the signal's
+ * conventional status (review of GY-1680): the freeze's `finally` never runs after a signal. Returns
+ * what removes the listeners once the act has ended on its own.
+ */
+export function thawFrozenWritersOnStop(file: string, deps: StopThawDeps = {}): () => void {
+  const host = deps.host ?? process, exit = deps.exit ?? (code => process.exit(code)), log = deps.log ?? (line => console.error(line));
+  const listeners = (['SIGTERM', 'SIGINT'] as const).map(signal => [signal, () => {
+    const thawed = continueFrozenWriters(file, deps);
+    log(`master checkout-restore ${checkoutRestoreServeFlag} was ended by ${signal} before its thaw: ${thawed?.continued.length ? `continued the writer(s) it had stopped, pid ${thawed.continued.join(', ')}` : 'it had stopped nothing still stopped'}; nothing more was touched`);
+    exit(128 + (osConstants.signals[signal] ?? 0));
+  }] as const);
+  for (const [signal, listener] of listeners) host.on(signal, listener);
+  return () => { for (const [signal, listener] of listeners) host.removeListener(signal, listener); };
+}
+
 export interface ServeEntryOptions {
   run?: ChildRun; quiesce?: CheckoutQuiesce; now?: Date;
+  /** How the entry continues its frozen writers when it is stopped mid-act (thawFrozenWritersOnStop); defaults to this process and its signals. */
+  stop?: StopThawDeps;
   /** The environment the grant is read from; defaults to this process's. */
   env?: NodeJS.ProcessEnv;
   /** The pids the issuing loop may be: this process and its ancestors, by default. */
@@ -324,11 +367,18 @@ export async function verifyCheckoutRestoreGrant(options: ServeEntryOptions = {}
  * loop's grant names, run by whichever release's CLI the loop started, printing what it restored and
  * the checkout's HEAD after. Without a grant that verifies there is no act. A refusal (an unverifiable
  * writer, a path a restore cannot save) is an error on stderr and a failed exit, which the loop
- * records as the request's outcome.
+ * records as the request's outcome. The writers it stops are recorded in the installation's freeze
+ * ledger before each SIGSTOP and continued on SIGTERM or SIGINT (review of GY-1680); the loop
+ * continues whatever the ledger still names once the entry has ended.
  */
 export async function serveCheckoutRestoreAct(args: readonly string[], options: ServeEntryOptions = {}): Promise<ServeOutput> {
   if (args.length) throw new Error(`master checkout-restore ${checkoutRestoreServeFlag} takes no arguments: the checkout and the reason are in the loop's grant. ${checkoutRestoreServeUsage}`);
   const { grant, config } = await verifyCheckoutRestoreGrant(options);
-  const { restored, head } = await restoreInProcess(options.run ?? defaultChildRun, options.quiesce)(grant.root, grant.reason, options.now ?? new Date(), { file: checkoutRestoreRequestPath(config), id: grant.request.id });
-  return { restored, head };
+  const ledger = checkoutRestoreFreezeLedgerPath(config);
+  const quiesce = options.quiesce ?? ((root: string) => freezeCheckoutWriters(root, { ledger }));
+  const release = thawFrozenWritersOnStop(ledger, options.stop);
+  try {
+    const { restored, head } = await restoreInProcess(options.run ?? defaultChildRun, quiesce)(grant.root, grant.reason, options.now ?? new Date(), { file: checkoutRestoreRequestPath(config), id: grant.request.id });
+    return { restored, head };
+  } finally { release(); }
 }

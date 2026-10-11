@@ -1,5 +1,6 @@
 // Concern: the coordinator checkout's standing writers (GY-1658) — finding the processes working in it and freezing them, fail-closed, for `master checkout-restore`.
-import { existsSync, readdirSync, readFileSync, readlinkSync, realpathSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { dirname } from 'node:path';
 import { join, resolve, sep } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 
@@ -168,6 +169,48 @@ export interface WriterFreezeDeps {
   scan?: (root: string) => number[] | { writers: number[]; skipped: UnverifiableProcess[] };
   /** How long a stopped writer may take to show stopped, and how often it is read. */
   settleMs?: number; pollMs?: number;
+  /** The freeze ledger (frozenWritersLedger): where each writer this freeze stops is recorded before its SIGSTOP, so a process that ends this one continues them (continueFrozenWriters). */
+  ledger?: string;
+}
+/** The freeze ledger's kind; a ledger of another kind is not read. */
+export const frozenWritersLedgerKind = 'graphyard-checkout-restore-frozen/1';
+/** What a freeze records of the writers it stopped: the checkout, the freezing process, and every pid it sent SIGSTOP, each recorded before the signal. */
+export interface FrozenWritersLedger { kind: typeof frozenWritersLedgerKind; root: string; pid: number; at: string; stopped: number[] }
+/** Writes the ledger whole (a temporary file renamed over it), private to this user. */
+function writeFrozenWritersLedger(file: string, ledger: FrozenWritersLedger) {
+  mkdirSync(dirname(file), { recursive: true });
+  const temporary = `${file}.${process.pid}.tmp`;
+  writeFileSync(temporary, JSON.stringify(ledger), { mode: 0o600 });
+  renameSync(temporary, file);
+}
+/** The ledger at `file`, or null when there is none or it is not a ledger. */
+export function readFrozenWritersLedger(file: string): FrozenWritersLedger | null {
+  try {
+    const parsed = JSON.parse(readFileSync(file, 'utf8')) as Partial<FrozenWritersLedger>;
+    if (parsed.kind !== frozenWritersLedgerKind || typeof parsed.root !== 'string' || typeof parsed.pid !== 'number' || !Array.isArray(parsed.stopped)) return null;
+    return { kind: frozenWritersLedgerKind, root: parsed.root, pid: parsed.pid, at: typeof parsed.at === 'string' ? parsed.at : '', stopped: parsed.stopped.filter((pid): pid is number => Number.isInteger(pid) && pid > 0) };
+  } catch { return null; }
+}
+/**
+ * Continue (SIGCONT) the writers a freeze ledger names that still show stopped, and remove the ledger
+ * (GY-1680 review): the freeze's own thaw runs in a `finally`, which a process ended by a signal — the
+ * loop's timeout on the snapshot's CLI, a SIGKILL — never reaches, and a retry would find those writers
+ * already stopped and treat them as quiet, never continuing them. The ledger is written before each
+ * SIGSTOP, so whoever outlives the freezer can finish its thaw: a pid that no longer shows stopped
+ * (gone, or already continued) is left alone. Null when there is no ledger; otherwise the pids
+ * continued and the pids left alone.
+ */
+export function continueFrozenWriters(file: string, deps: Pick<WriterFreezeDeps, 'signal' | 'state'> = {}): { root: string; pid: number; continued: number[]; left: number[] } | null {
+  const ledger = readFrozenWritersLedger(file);
+  if (!ledger) { try { unlinkSync(file); } catch { /* none */ } return null; }
+  const signal = deps.signal ?? ((pid, name) => process.kill(pid, name)), state = deps.state ?? (pid => processStateOf(pid));
+  const continued: number[] = [], left: number[] = [];
+  for (const pid of [...new Set(ledger.stopped)]) {
+    if (!stoppedState(state(pid))) { left.push(pid); continue; }
+    try { signal(pid, 'SIGCONT'); continued.push(pid); } catch { left.push(pid); }
+  }
+  try { unlinkSync(file); } catch { /* already removed */ }
+  return { root: ledger.root, pid: ledger.pid, continued, left };
 }
 /**
  * Stop the checkout's standing writers (SIGSTOP), verify each one stopped, and return what continues
@@ -178,6 +221,8 @@ export interface WriterFreezeDeps {
  * one forked during the freeze is stopped too. A writer already stopped (by job control or a
  * debugger) is quiescent as it stands: it is neither signalled nor continued after. The processes the
  * scans skipped (their cwd read refused EACCES, GY-1672) are returned in `skipped`, neither stopped nor continued.
+ * With `ledger`, every pid is recorded there before its SIGSTOP and the ledger removed by the thaw, so
+ * a process that ends this one mid-freeze leaves what it stopped for continueFrozenWriters (GY-1680 review).
  */
 export async function freezeCheckoutWriters(root: string, deps: WriterFreezeDeps = {}): Promise<{ pids: number[]; stopped: number[]; skipped: UnverifiableProcess[]; thaw: () => void }> {
   const signal = deps.signal ?? ((pid, name) => process.kill(pid, name)), state = deps.state ?? (pid => processStateOf(pid)), scanned = deps.scan ?? (directory => checkoutWriterScan(directory));
@@ -190,7 +235,11 @@ export async function freezeCheckoutWriters(root: string, deps: WriterFreezeDeps
   };
   const settleMs = deps.settleMs ?? 5_000, pollMs = deps.pollMs ?? 20;
   const stopped: number[] = [], quiet = new Set<number>(), seen = new Set<number>();
-  const thaw = () => { for (const pid of stopped) { try { signal(pid, 'SIGCONT'); } catch { /* gone */ } } };
+  const record = () => { if (deps.ledger) writeFrozenWritersLedger(deps.ledger, { kind: frozenWritersLedgerKind, root, pid: process.pid, at: new Date().toISOString(), stopped: [...stopped] }); };
+  const thaw = () => {
+    for (const pid of stopped) { try { signal(pid, 'SIGCONT'); } catch { /* gone */ } }
+    if (deps.ledger) { try { unlinkSync(deps.ledger); } catch { /* never written, or already removed */ } }
+  };
   try {
     for (let round = 0; ; round++) {
       const fresh = scan(root).filter(pid => !seen.has(pid));
@@ -202,12 +251,16 @@ export async function freezeCheckoutWriters(root: string, deps: WriterFreezeDeps
         const before = state(pid);
         if (gone(before)) continue;
         if (stoppedState(before)) { quiet.add(pid); continue; }
+        // Recorded before it is signalled: a freezer ended between the two leaves a running pid in the
+        // ledger, which continueFrozenWriters leaves alone; the other order would leave a stopped one unrecorded.
+        stopped.push(pid); record();
         try { signal(pid, 'SIGSTOP'); }
         catch (error) {
+          stopped.pop(); record();
           if (gone(state(pid))) continue;
           throw new Error(`the checkout's writer pid ${pid} could not be stopped (${error instanceof Error ? error.message : String(error)}), so nothing was restored`);
         }
-        stopped.push(pid); signalled.push(pid);
+        signalled.push(pid);
       }
       for (const deadline = Date.now() + settleMs; ;) {
         const running = signalled.filter(pid => !gone(state(pid)) && !stoppedState(state(pid)));

@@ -20,7 +20,7 @@ import { Launcher, defaultLaunchConcurrency, runCycle } from './cycle.js';
 import { holdBoundWait } from './cycle-decisions.js';
 import { detailChanged } from './decisions.js';
 import { awaitSupervisorRestart, describeSelfUpgrade, detectLoopSupervisorUnit, restartEndedBySupervisorStop, type SelfUpgradeOutcome } from './upgrade.js';
-import { checkoutRestoreGrantPath, checkoutRestoreRequestPath, loopExecutorsRequestPath, loopRestartRequestPath, serveCheckoutRestore, type CheckoutRestoreOutcome } from '../cli/master-checkout-restore.js';
+import { checkoutRestoreFreezeLedgerPath, checkoutRestoreGrantPath, checkoutRestoreRequestPath, loopExecutorsRequestPath, loopRestartRequestPath, serveCheckoutRestore, type CheckoutRestoreOutcome } from '../cli/master-checkout-restore.js';
 import { releasePinnedRestore } from '../cli/checkout-restore-release.js';
 import { describeTimings } from '../master/timings.js';
 import { stopDoctorRuns, doctorReport } from './doctor.js';
@@ -218,8 +218,8 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
   process?: Pick<NodeJS.Process, 'on' | 'off'>;
   /** Reads how the coordinator checkout stands; defaults to reading it from the configured CLI launcher's root. */
   checkout?: () => CoordinatorCheckout | Promise<CoordinatorCheckout>;
-  /** Carries out the standing `master checkout-restore` and confined `master restart` requests (GY-1658), `settle` recording the checkout clean before the loop restarts; defaults to the requests beside the cursor, served by serveLoopRequests. */
-  checkoutRestore?: (settle: (adopt: string | null) => Promise<unknown>, keepAlive?: () => Promise<void>) => Promise<unknown>;
+  /** Carries out the standing `master checkout-restore` and confined `master restart` requests (GY-1658), `settle` recording the checkout clean before the loop restarts and `unadopt` reverting an adoption whose restart failed (GY-1680); defaults to the requests beside the cursor, served by serveLoopRequests. */
+  checkoutRestore?: (settle: (adopt: string | null) => Promise<unknown>, keepAlive?: () => Promise<void>, unadopt?: (loaded: string) => Promise<unknown>) => Promise<unknown>;
   /** Runs `master executors ARGS` on the host for a confined master's request (GY-1658), feeding `keepAlive` while a restart waits; without it such a request is answered failed. */
   executors?: (args: string[], keepAlive?: () => Promise<void>) => Promise<unknown>;
   /** Re-executes this loop through its supervising unit when a served request owes a restart (GY-1658); defaults to `systemctl --user --no-block restart` of the unit this process runs under. */
@@ -300,17 +300,19 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
     // escalation settled, and the loop restarted through its supervising unit onto the clean checkout.
     // GY-1680: the quiesce-and-restore runs from the verified serving release's own snapshot, never
     // this process's loaded code, under a grant signed with the coordinator credential, and a clean
-    // checkout at a HEAD the loop did not load is adopted. The act can outlast the watchdog window,
-    // so the keep-alive is fed on a quarter of it for as long as the act runs.
+    // checkout at a HEAD the loop did not load is adopted — around the restart onto it, reverted when
+    // that restart cannot be asked, so the drift escalation stands until one lands. The act can outlast
+    // the watchdog window, so the keep-alive is fed on a quarter of it for as long as the act runs; the
+    // writers the snapshot's entry stopped are continued here should it end before its own thaw.
     const executorsAct = options.executors;
     const keepAliveEveryMs = watchdog.windowMs ? Math.max(250, Math.floor(watchdog.windowMs / 4)) : undefined;
-    const restoreCheckout = options.checkoutRestore ?? ((settle: (adopt: string | null) => Promise<unknown>, keepAlive?: () => Promise<void>) => serveLoopRequests(config, coordinatorCheckoutRoot(config.cliPath), {
-      settle, report: outcome => log(`[graphyard-master] ${outcome.state === 'restart' ? 'loop-restart request' : outcome.state === 'executors' ? 'master executors request' : `checkout-restore ${outcome.state}`}: ${outcome.detail}${outcome.restart ? `; restart ${outcome.restart.state}: ${outcome.restart.detail}` : ''}`),
+    const restoreCheckout = options.checkoutRestore ?? ((settle: (adopt: string | null) => Promise<unknown>, keepAlive?: () => Promise<void>, unadopt?: (loaded: string) => Promise<unknown>) => serveLoopRequests(config, coordinatorCheckoutRoot(config.cliPath), {
+      settle, unadopt, report: outcome => log(`[graphyard-master] ${outcome.state === 'restart' ? 'loop-restart request' : outcome.state === 'executors' ? 'master executors request' : `checkout-restore ${outcome.state}`}: ${outcome.detail}${outcome.restart ? `; restart ${outcome.restart.state}: ${outcome.restart.detail}` : ''}`),
       restart: options.restartLoop ?? restartThroughUnit, pid: options.identity.pid, loaded: () => guard.expected(),
-      restore: releasePinnedRestore({ release: () => ({ deployment: state.deployment, baseBranch: config.baseBranch }), grant: { file: checkoutRestoreGrantPath(config), credentialFile: config.credentialFile, pid: options.identity.pid }, keepAlive, keepAliveEveryMs }),
+      restore: releasePinnedRestore({ release: () => ({ deployment: state.deployment, baseBranch: config.baseBranch }), grant: { file: checkoutRestoreGrantPath(config), credentialFile: config.credentialFile, pid: options.identity.pid }, ledger: { file: checkoutRestoreFreezeLedgerPath(config) }, keepAlive, keepAliveEveryMs }),
       ...(executorsAct ? { executors: (args: string[]) => executorsAct(args, keepAlive) } : {}) }));
     const serveRestore = async (keepAlive?: () => Promise<void>) => {
-      try { await restoreCheckout(adopt => guard.settle({ adopt }), keepAlive); }
+      try { await restoreCheckout(adopt => guard.settle({ adopt }), keepAlive, loaded => guard.settle({ revert: loaded })); }
       catch (error) { log(`[graphyard-master] checkout-restore could not be served: ${message(error)}`); }
     };
     try {
@@ -603,11 +605,14 @@ export function coordinatorCheckoutGuard(deps: {
      * escalation at once. `adopt` (GY-1680): the HEAD a clean checkout holds that the loop is about to
      * restart onto — the commit it runs from here, so the drift it raised settles before the restart,
      * as the stopping loop adopts a moved HEAD (GY-1531). A dirty checkout, or one no longer at that
-     * HEAD, adopts nothing and reports what it finds.
+     * HEAD, adopts nothing and reports what it finds. `revert` (review of GY-1680): the restart onto
+     * an adopted HEAD could not be asked, so the commit this loop still runs is the expectation again,
+     * and the drift the checkout holds against it is raised again, standing until a restart lands.
      */
-    async settle(options: { adopt?: string | null } = {}) {
+    async settle(options: { adopt?: string | null; revert?: string | null } = {}) {
       const checkout = await deps.read();
-      if (options.adopt && checkout.commit === options.adopt && applies(checkout.root) && !coordinatorCheckoutRefusal(checkout, 'the master loop')) expectedHead = checkout.commit;
+      if (options.revert) expectedHead = options.revert;
+      else if (options.adopt && checkout.commit === options.adopt && applies(checkout.root) && !coordinatorCheckoutRefusal(checkout, 'the master loop')) expectedHead = checkout.commit;
       return escalate(checkout);
     },
   };

@@ -8,8 +8,10 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { defaultChildRun, type ChildRun } from '../src/child-runner.js';
 import { z } from 'zod';
-import { ancestorPids, type CheckoutRestoreGrant, type CheckoutRestoreGrantPayload, checkoutRestoreGrantKind, checkoutRestoreGrantVariable, checkoutRestoreServeFlag, commitServes, lockedLoop, releasePinnedRestore, releaseServes, serveCheckoutRestoreAct, servingReleases, signCheckoutRestoreGrant, snapshotRelease, staleServingLoop } from '../src/cli/checkout-restore-release.js';
-import { checkoutRestoreCommand, checkoutRestoreGrantPath, checkoutRestoreRefPrefix, checkoutRestoreRequestPath, fileCheckoutRestoreRequest, loopRestartRequestPath, readCheckoutRestoreRequest, serveCheckoutRestore } from '../src/cli/master-checkout-restore.js';
+import { EventEmitter } from 'node:events';
+import { ancestorPids, type CheckoutRestoreGrant, type CheckoutRestoreGrantPayload, checkoutRestoreGrantKind, checkoutRestoreGrantVariable, checkoutRestoreServeFlag, commitServes, lockedLoop, releasePinnedRestore, releaseServes, serveCheckoutRestoreAct, servingReleases, signCheckoutRestoreGrant, snapshotRelease, staleServingLoop, thawFrozenWritersOnStop } from '../src/cli/checkout-restore-release.js';
+import { continueFrozenWriters, freezeCheckoutWriters, frozenWritersLedgerKind, readFrozenWritersLedger } from '../src/cli/checkout-writers.js';
+import { checkoutRestoreCommand, checkoutRestoreFreezeLedgerPath, checkoutRestoreGrantPath, checkoutRestoreRefPrefix, checkoutRestoreRequestPath, fileCheckoutRestoreRequest, loopRestartRequestPath, readCheckoutRestoreRequest, serveCheckoutRestore } from '../src/cli/master-checkout-restore.js';
 import { atomicPrivateWrite } from '../src/master/config.js';
 import { checkoutRestoreDriftRemedy, coordinatorCheckoutGuard } from '../src/daemon/run.js';
 import { daemonStatePath, emptyDaemonState } from '../src/master-daemon.js';
@@ -40,6 +42,8 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 const fixtureDirectory = (label: string) => temporaryDirectory(`graphyard-${label}`, tmpdir());
 const worktree = fileURLToPath(new URL('..', import.meta.url));
 const helper = fileURLToPath(new URL('./helpers/checkout-restore-serve-child.ts', import.meta.url));
+/** The entry that freezes and never thaws (review of GY-1680), run with tsx resolved from here: the act's cwd is the snapshot, where nothing resolves. */
+const hangHelper = fileURLToPath(new URL('./helpers/checkout-restore-freeze-hang.ts', import.meta.url)), tsx = import.meta.resolve('tsx');
 
 /** A fake /proc entry: its stat line, its cwd (a symlink to the directory, or a plain file readlink refuses), its cgroup. */
 function processEntry(proc: string, pid: number, options: { ppid?: number; state?: string; cwd?: string | null; cgroup?: string }) {
@@ -248,6 +252,80 @@ test('integration:freeze-fail-closed-preserved — served from the release snaps
   assert.deepEqual(served.sent.filter(entry => entry.startsWith('SIGSTOP')).sort(), ['SIGSTOP:1380', 'SIGSTOP:500'], 'the live thread-identified writer is stopped, not skipped on its leader\'s refusal');
   assert.deepEqual(served.sent.filter(entry => entry.startsWith('SIGCONT')).sort(), ['SIGCONT:1380', 'SIGCONT:500']);
   untouched(served);
+});
+
+test('unit:serve-timeout-thaws-frozen-writers — an entry the loop\'s timeout ends after it stopped the checkout\'s writers never reaches its own thaw, so the loop finishes it: the freeze ledger the entry wrote beside the cursor before each SIGSTOP names them, the loop continues every one still stopped, leaves alone the ones gone or already running, removes the ledger and records the failure naming what it continued; nothing was restored', { timeout: 60_000 }, async () => {
+  const { root, release, loaded, file, grant } = await fixture('checkout-restore-timeout-thaw');
+  writeFileSync(join(root, 'src', 'loop.ts'), 'export const loop = 2; // hotfix\n');
+  await fileCheckoutRestoreRequest(file, 'escalation:dirty-checkout', 'graphyard-doctor');
+  const ledger = checkoutRestoreFreezeLedgerPath({ credentialFile: grant.credentialFile }), record = join(root, '..', 'hang-record.json');
+  // The loop's view of the writers once the entry is gone: 4242 still stopped by it, 4343 running again (continued by a hand), 4444 gone.
+  const states: Record<number, string | null> = { 4242: 'T', 4343: 'S', 4444: null };
+  const continued: string[] = [], settled: (string | null)[] = []; let restarts = 0;
+  const restore = withEnv({ GRAPHYARD_TEST_FREEZE_LEDGER: ledger, GRAPHYARD_TEST_SERVE_RECORD: record, GRAPHYARD_TEST_HANG_WRITERS: '4242,4343,4444', GRAPHYARD_TEST_HANG_ROOT: root });
+  let outcome;
+  try {
+    outcome = await serveCheckoutRestore(file, root, {
+      pid: 100, restart: async () => { restarts++; }, settle: async adopt => { settled.push(adopt); }, loaded: () => loaded,
+      restore: releasePinnedRestore({ release: () => ({ deployment: { source: 'endpoint', sha: release }, baseBranch: 'main' }), grant, timeoutMs: 1_500,
+        command: () => ({ command: process.execPath, args: ['--import', tsx, hangHelper] }),
+        ledger: { file: ledger, signal: (pid, name) => { continued.push(`${name}:${pid}`); }, state: pid => states[pid] ?? null } }),
+    });
+  } finally { restore(); }
+  assert.equal(outcome?.state, 'failed', outcome?.detail);
+  assert.match(outcome!.detail, /served from the verified serving release .* did not finish within 1500ms and was killed.*; the entry ended before its own thaw, so the loop continued the writer\(s\) it had stopped, pid 4242 \(pid 4343, 4444 no longer stopped, left alone\)/s);
+  assert.deepEqual(continued, ['SIGCONT:4242'], 'only the writer still stopped is continued');
+  assert.ok(!existsSync(ledger), 'the ledger is removed once read');
+  assert.ok(!existsSync(grant.file), 'the grant is removed');
+  // The entry wrote the ledger before it stopped anything — a SIGKILL between the two leaves nothing unrecorded — naming the checkout, itself and every pid.
+  const hang = JSON.parse(readFileSync(record, 'utf8')) as { pid: number; sent: string[]; stopped: number[]; ledger: { kind: string; root: string; pid: number; stopped: number[] } };
+  assert.deepEqual(hang.sent, ['SIGSTOP:4242', 'SIGSTOP:4343', 'SIGSTOP:4444'], 'the entry stopped its writers and was ended before any SIGCONT');
+  assert.equal(hang.ledger.kind, frozenWritersLedgerKind); assert.equal(hang.ledger.root, root); assert.equal(hang.ledger.pid, hang.pid);
+  assert.deepEqual(hang.ledger.stopped, [4242, 4343, 4444]);
+  // Nothing was restored, settled or restarted: the dirty path stands for the next request.
+  assert.equal(readFileSync(join(root, 'src', 'loop.ts'), 'utf8'), 'export const loop = 2; // hotfix\n');
+  assert.deepEqual(settled, []); assert.equal(restarts, 0);
+  assert.equal((await readCheckoutRestoreRequest(file))?.outcome?.state, 'failed');
+});
+
+test('unit:freeze-ledger-and-stop-thaw — the freeze records each writer in its ledger before the SIGSTOP and removes the ledger with its thaw, a refused freeze included; continueFrozenWriters continues the pids a ledger names that still show stopped, leaves alone the gone and the running, and removes the ledger — none, or one of another kind, is null; the entry\'s own stop (SIGTERM, SIGINT) continues them and exits with the signal\'s status, and listeners are removed once the act ends', async () => {
+  const base = await fixtureDirectory('freeze-ledger');
+  const ledger = join(base, 'state', 'graphyard-master.checkout-restore-frozen.json');
+  // Recorded before signalled: at each SIGSTOP the ledger already names the pid.
+  const sent: string[] = [], seenAtStop: number[][] = [];
+  const signal = (pid: number, name: NodeJS.Signals) => { if (name === 'SIGSTOP') seenAtStop.push(readFrozenWritersLedger(ledger)?.stopped ?? []); sent.push(`${name}:${pid}`); };
+  const frozen = await freezeCheckoutWriters(base, { ledger, scan: () => [11, 12], signal, state: pid => sent.includes(`SIGSTOP:${pid}`) ? 'T' : 'S', settleMs: 50, pollMs: 1 });
+  assert.deepEqual(seenAtStop, [[11], [11, 12]]);
+  assert.deepEqual(readFrozenWritersLedger(ledger), { kind: frozenWritersLedgerKind, root: base, pid: process.pid, at: readFrozenWritersLedger(ledger)!.at, stopped: [11, 12] });
+  frozen.thaw();
+  assert.deepEqual(sent, ['SIGSTOP:11', 'SIGSTOP:12', 'SIGCONT:11', 'SIGCONT:12']);
+  assert.ok(!existsSync(ledger), 'the thaw removes the ledger');
+  // A freeze that refuses continues what it stopped and leaves no ledger.
+  sent.length = 0;
+  await assert.rejects(freezeCheckoutWriters(base, { ledger, scan: () => [13, 14], signal: (pid, name) => { if (pid === 14 && name === 'SIGSTOP') throw new Error('EPERM'); signal(pid, name); }, state: pid => sent.includes(`SIGSTOP:${pid}`) ? 'T' : 'S', settleMs: 50, pollMs: 1 }), /writer pid 14 could not be stopped/);
+  assert.deepEqual(sent, ['SIGSTOP:13', 'SIGCONT:13']); assert.ok(!existsSync(ledger));
+  // continueFrozenWriters: what a process that outlived the freezer does with its ledger.
+  assert.equal(continueFrozenWriters(ledger), null, 'no ledger');
+  mkdirSync(join(base, 'state'), { recursive: true });
+  writeFileSync(ledger, JSON.stringify({ kind: 'something-else/1', stopped: [21] }));
+  assert.equal(continueFrozenWriters(ledger, { signal: () => { throw new Error('never'); } }), null, 'another kind is not read'); assert.ok(!existsSync(ledger), 'and is removed');
+  writeFileSync(ledger, JSON.stringify({ kind: frozenWritersLedgerKind, root: base, pid: 4321, at: '2030-01-01T00:00:00Z', stopped: [21, 22, 23, 21] }));
+  const states: Record<number, string | null> = { 21: 'T', 22: 'S', 23: null };
+  sent.length = 0;
+  assert.deepEqual(continueFrozenWriters(ledger, { signal: (pid, name) => { sent.push(`${name}:${pid}`); }, state: pid => states[pid] ?? null }), { root: base, pid: 4321, continued: [21], left: [22, 23] });
+  assert.deepEqual(sent, ['SIGCONT:21']); assert.ok(!existsSync(ledger));
+  // The entry's own stop: the loop's SIGTERM at its timeout reaches it before any `finally`.
+  writeFileSync(ledger, JSON.stringify({ kind: frozenWritersLedgerKind, root: base, pid: process.pid, at: '2030-01-01T00:00:00Z', stopped: [31, 32] }));
+  const host = new EventEmitter(), exits: number[] = [], log: string[] = [];
+  sent.length = 0;
+  const release = thawFrozenWritersOnStop(ledger, { host, exit: code => { exits.push(code); }, log: line => { log.push(line); }, signal: (pid, name) => { sent.push(`${name}:${pid}`); }, state: pid => pid === 31 ? 'T' : 'R' });
+  assert.equal(host.listenerCount('SIGTERM'), 1); assert.equal(host.listenerCount('SIGINT'), 1);
+  host.emit('SIGTERM');
+  assert.deepEqual(sent, ['SIGCONT:31']); assert.deepEqual(exits, [143]);
+  assert.match(log[0], /was ended by SIGTERM before its thaw: continued the writer\(s\) it had stopped, pid 31; nothing more was touched/);
+  assert.ok(!existsSync(ledger));
+  release();
+  assert.equal(host.listenerCount('SIGTERM'), 0); assert.equal(host.listenerCount('SIGINT'), 0);
 });
 
 test('unit:serve-uses-verified-release — the sanctioned releases are the deployment step\'s verified sha when the store holds it, then the fetched base-branch tip at origin; the act is the first that snapshots with the serve entry, its own CLI run with `--serve` and the loop\'s signed grant in its environment, the supervisor\'s keep-alive fed throughout; when neither serves, or the credential cannot sign, the act fails naming why, and the loop\'s own code never runs', async () => {
@@ -570,6 +648,64 @@ test('unit:clean-drift-settles-and-restarts — a request that finds no dirty pa
   assert.equal(await guard.settle({ adopt: loaded }), null);
   assert.equal(guard.expected(), loaded, 'the HEAD the checkout holds is adopted');
   assert.equal(state.actions['escalation:dirty-checkout']?.state, 'done');
+});
+
+test('unit:adoption-reverts-when-restart-fails — an adopted HEAD whose restart through the unit cannot be asked (no user bus, no unit) is un-adopted: the guard\'s expectation returns to the commit the loop still runs and the drift escalation is raised again, the failed restart saying so; the next pass adopts and asks again, and when the restart lands the escalation is settled onto the adopted HEAD before it', async () => {
+  const base = await fixtureDirectory('adoption-reverts');
+  const root = join(base, 'coordinator');
+  const git = (...args: string[]) => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+  mkdirSync(join(root, 'src'), { recursive: true });
+  writeFileSync(join(root, 'src', 'loop.ts'), 'export const loop = 1;\n');
+  execFileSync('git', ['init', '-q', '-b', 'main', root]);
+  git('add', '-A'); git('-c', 'user.name=x', '-c', 'user.email=x@x', 'commit', '-q', '-m', 'loaded');
+  const loaded = git('rev-parse', 'HEAD');
+  git('checkout', '-q', '--detach');
+  writeFileSync(join(root, 'src', 'loop.ts'), 'export const loop = 2;\n');
+  git('-c', 'user.name=x', '-c', 'user.email=x@x', 'commit', '-q', '-am', 'moved');
+  const moved = git('rev-parse', 'HEAD');
+  const file = join(base, 'state', 'graphyard-master.checkout-restore.json');
+  mkdirSync(join(base, 'state'), { recursive: true });
+  const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: join(base, 'state', 'graphyard-master.token'), cliPath: join(root, 'bin', 'graphyard.mjs'),
+    repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [] });
+  const state = emptyDaemonState(config);
+  const journal: string[] = [];
+  let clock = Date.parse('2030-01-01T00:00:00Z');
+  const guard = coordinatorCheckoutGuard({ state: () => state, read: () => readCoordinatorCheckout(root), agents: async () => [], snapshot: async () => ({ work: [], now: new Date(clock).toISOString() }), persist: async () => {}, now: () => clock, log: line => journal.push(line), applies: () => true });
+  git('checkout', '-q', '--detach', loaded);
+  assert.equal(await guard.start(loaded), null);
+  git('checkout', '-q', '--detach', moved);
+  assert.ok((await guard.betweenCycles()).refusal?.includes(`its HEAD moved from ${loaded.slice(0, 12)} to ${moved.slice(0, 12)}`));
+  assert.equal(state.actions['escalation:dirty-checkout']?.state, 'failed');
+
+  await fileCheckoutRestoreRequest(file, 'escalation:dirty-checkout', 'graphyard-doctor');
+  const settled: (string | null)[] = [], unadopted: string[] = [], asked: string[] = [];
+  let restartFails = true;
+  const deps = { pid: 100, loaded: () => guard.expected(),
+    restart: async () => { asked.push(guard.expected() ?? ''); if (restartFails) throw new Error('Failed to connect to bus: No medium found'); },
+    settle: async (adopt: string | null) => { settled.push(adopt); await guard.settle({ adopt }); },
+    unadopt: async (previous: string) => { unadopted.push(previous); await guard.settle({ revert: previous }); } };
+  // The restart cannot be asked: the adoption, made just before the ask, is reverted and the drift stands.
+  const outcome = await serveCheckoutRestore(file, root, deps);
+  assert.equal(outcome?.state, 'adopted', outcome?.detail); assert.equal(outcome!.commit, moved);
+  assert.deepEqual(settled, [moved], 'adopted before the ask'); assert.deepEqual(asked, [moved], 'the restart was asked with the HEAD adopted');
+  assert.deepEqual(unadopted, [loaded], 'reverted to the commit the loop runs when the ask failed');
+  assert.equal(guard.expected(), loaded);
+  assert.equal(state.actions['escalation:dirty-checkout']?.state, 'failed', 'the drift escalation stands again');
+  assert.match(state.actions['escalation:dirty-checkout']!.detail, new RegExp(`its HEAD moved from ${loaded.slice(0, 12)} to ${moved.slice(0, 12)} while the loop was running`));
+  assert.equal(outcome!.restart?.state, 'failed');
+  assert.match(outcome!.restart!.detail, /No medium found; the adoption of \w{12} is reverted and the drift escalation stands until a restart lands$/);
+  const done = journal.findIndex(line => line.includes('escalation done:')), raised = journal.findIndex((line, index) => index > done && line.includes('escalation failed:'));
+  assert.ok(done >= 0 && raised > done, `settled then raised again: ${journal.join('\n')}`);
+  assert.ok((await guard.betweenCycles()).refusal, 'the next cycle still reports the drift');
+  // The next pass: adopted again, asked again, and this time the restart lands with the escalation settled onto the HEAD before it.
+  restartFails = false; settled.length = 0; unadopted.length = 0; asked.length = 0;
+  const retried = await serveCheckoutRestore(file, root, deps);
+  assert.equal(retried?.state, 'adopted'); assert.equal(retried!.restart?.state, 'requested'); assert.equal(retried!.restart?.pid, 100);
+  assert.deepEqual(settled, [moved]); assert.deepEqual(asked, [moved]); assert.deepEqual(unadopted, []);
+  assert.equal(guard.expected(), moved);
+  assert.equal(state.actions['escalation:dirty-checkout']?.state, 'done');
+  assert.equal((await readCheckoutRestoreRequest(file))?.outcome?.restart?.state, 'requested');
+  assert.equal((await guard.betweenCycles()).refusal, null);
 });
 
 /**

@@ -39,7 +39,10 @@ import type { MasterConfig } from '../master/profiles.js';
 // only a loop holding the serve path reads — every release since GY-1658 parses requests strictly and
 // leaves an unknown field's request standing, unread — and a loop-restart request is filed beside
 // it, the act every such loop serves; the restarted loop, running the checkout's HEAD, serves the
-// standing request from the serving release.
+// standing request from the serving release. An adoption is settled only around the restart it is
+// for (review of GY-1680): the guard adopts the HEAD just before the unit is asked, and when the ask
+// fails the expectation reverts, so the drift escalation stands — explaining the loop still running
+// the old commit — until a restart lands.
 //
 // The confined master's `master restart` is the same kind of act: the systemd user manager is one of
 // the process-launch channels its confinement hides, so it files a restart request the loop serves.
@@ -93,6 +96,8 @@ export const loopRestartRequestPath = (config: Pick<MasterConfig, 'credentialFil
 export const loopExecutorsRequestPath = (config: Pick<MasterConfig, 'credentialFile'>) => besideCursor(config, 'loop-executors');
 /** The single-use grant the loop signs for one serve of a checkout-restore request (GY-1680), beside the cursor like the request it names; the entry accepts it nowhere else. */
 export const checkoutRestoreGrantPath = (config: Pick<MasterConfig, 'credentialFile'>) => besideCursor(config, 'checkout-restore-grant');
+/** The freeze ledger of a serve (GY-1680 review): the writers the entry stopped, recorded before each SIGSTOP beside the cursor, which the loop continues when the entry is ended before its own thaw (continueFrozenWriters). */
+export const checkoutRestoreFreezeLedgerPath = (config: Pick<MasterConfig, 'credentialFile'>) => besideCursor(config, 'checkout-restore-frozen');
 export const loopRequestPath = (config: Pick<MasterConfig, 'credentialFile'>, act: LoopRequestAct) =>
   act === 'restart' ? loopRestartRequestPath(config) : act === 'executors' ? loopExecutorsRequestPath(config) : checkoutRestoreRequestPath(config);
 export async function readCheckoutRestoreRequest(file: string): Promise<CheckoutRestoreRequest | null> {
@@ -218,11 +223,13 @@ export const restoreInProcess = (run: ChildRun = defaultChildRun, quiesce?: Chec
 /**
  * What the loop's serving of a request needs: `restart` re-executes the loop through its unit;
  * `settle` lets the guard record a restored checkout clean first, or adopt the HEAD a clean drifted
- * checkout holds (GY-1680) before the restart onto it; `loaded` is the commit the loop runs, which
- * a clean checkout's HEAD is judged against; `restore` is the act itself (the serving release's,
- * for the loop), defaulting to this process's own code with `quiesce`.
+ * checkout holds (GY-1680) just before the restart onto it; `unadopt` reverts that adoption to the
+ * commit the loop still runs when the restart could not be asked (review of GY-1680), so the drift
+ * escalation stands until one lands; `loaded` is the commit the loop runs, which a clean checkout's
+ * HEAD is judged against; `restore` is the act itself (the serving release's, for the loop),
+ * defaulting to this process's own code with `quiesce`.
  */
-export interface LoopRequestDeps { restart: () => Promise<unknown>; settle?: (adopt: string | null) => Promise<unknown>; report?: (outcome: CheckoutRestoreOutcome) => void; run?: ChildRun; now?: () => Date; pid?: number; quiesce?: CheckoutQuiesce;
+export interface LoopRequestDeps { restart: () => Promise<unknown>; settle?: (adopt: string | null) => Promise<unknown>; unadopt?: (loaded: string) => Promise<unknown>; report?: (outcome: CheckoutRestoreOutcome) => void; run?: ChildRun; now?: () => Date; pid?: number; quiesce?: CheckoutQuiesce;
   loaded?: () => string | null; restore?: RestoreAct;
   /** Runs `master executors ARGS` on the host — the loop's own view of its processes and systemd — and returns what it prints. */
   executors?: (args: string[]) => Promise<unknown> }
@@ -277,8 +284,10 @@ export async function serveCheckoutRestore(file: string, root: string, deps: Loo
   } catch (error) {
     outcome = { at: now().toISOString(), state: 'failed', ref: null, commit: null, paths: [], detail: (error instanceof Error ? error.message : String(error)).slice(0, 4000), restart: null };
   }
-  if (outcome.state === 'restored' || outcome.state === 'adopted') {
-    try { await deps.settle?.(outcome.state === 'adopted' ? outcome.commit : null); } catch { /* the restarted loop reads the checkout afresh */ }
+  // A restored checkout is clean whatever the restart does, so it settles here; an adoption settles
+  // only around its restart (restartOwed), and reverts when the restart cannot be asked.
+  if (outcome.state === 'restored') {
+    try { await deps.settle?.(null); } catch { /* the restarted loop reads the checkout afresh */ }
   }
   deps.report?.(outcome);
   if (outcome.state !== 'restored' && outcome.state !== 'adopted' && outcome.state !== 'restart') return write(file, request, outcome, deps);
@@ -292,12 +301,28 @@ async function write(file: string, request: CheckoutRestoreRequest, outcome: Che
   if (outcome.restart && outcome.restart.state !== 'requested') deps.report?.(outcome);
   return outcome;
 }
+/**
+ * The restart an outcome owes, asked now and recorded `requested` first; `failed` when the ask fails,
+ * to be asked again next pass. An `adopted` outcome's HEAD is adopted by the guard just before the ask
+ * (GY-1680) — the commit the loop runs from the restart on — and, when the ask fails, reverted to the
+ * commit the loop still runs (`unadopt`, review of GY-1680): a guard that kept the adopted HEAD would
+ * report no drift under a loop running the old commit, and the escalation that explains the stale
+ * runtime would be gone with its remedy unfinished. Each retry adopts and asks again.
+ */
 async function restartOwed(file: string, request: CheckoutRestoreRequest, outcome: CheckoutRestoreOutcome, deps: LoopRequestDeps, pid: number, now: () => Date) {
+  const adopt = outcome.state === 'adopted' ? outcome.commit : null;
+  const loaded = adopt ? deps.loaded?.() ?? null : null;
+  if (adopt) { try { await deps.settle?.(adopt); } catch { /* the guard reports what it finds */ } }
   const asked = { ...outcome, restart: { state: 'requested' as const, pid, at: now().toISOString(), detail: 'the loop asked its supervising unit to restart it' } };
   await write(file, request, asked, deps);
   try { await deps.restart(); return asked; }
   catch (error) {
-    return write(file, request, { ...outcome, restart: { state: 'failed', pid, at: now().toISOString(), detail: `the restart failed and is asked again on the loop's next pass: ${(error instanceof Error ? error.message : String(error)).slice(0, 3000)}` } }, deps);
+    let reverted = '';
+    if (adopt && loaded && loaded !== adopt) {
+      try { await deps.unadopt?.(loaded); reverted = deps.unadopt ? `; the adoption of ${adopt.slice(0, 12)} is reverted and the drift escalation stands until a restart lands` : ''; }
+      catch { /* the guard reports what it finds */ }
+    }
+    return write(file, request, { ...outcome, restart: { state: 'failed', pid, at: now().toISOString(), detail: `the restart failed and is asked again on the loop's next pass: ${(error instanceof Error ? error.message : String(error)).slice(0, 3000)}${reverted}`.slice(0, 4000) } }, deps);
   }
 }
 
