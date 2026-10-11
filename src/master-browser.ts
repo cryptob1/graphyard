@@ -20,8 +20,12 @@ import { controlPlanePermissions as declaredPermissions, requiredPermissions } f
  *
  * The profile is the operator's identity. Nothing here saves, exports, or copies its cookies or
  * storage, and the session is used for the enumerated flows only.
+ *
+ * The capture flow (GY-1686) administers nothing: it opens the sudo-protected App permissions page
+ * only to keep the Confirm-access views GitHub shows there as redacted fixtures, through the same
+ * keep logic the administrative flows run, and stops without submitting, typing or sending anything.
  */
-export const browserFlows = ['app-permissions', 'installation-accept', 'protection'] as const;
+export const browserFlows = ['app-permissions', 'installation-accept', 'protection', 'capture'] as const;
 export type BrowserFlow = typeof browserFlows[number];
 
 // What the control-plane App must hold for every path Graphyard exercises, read from the one
@@ -864,6 +868,54 @@ export async function runBrowserFlow(root: string, config: MasterConfig, flow: B
           reason = verified ? `Installation ${installation.id} now grants ${missing.join(', ')}` : `Installation still lacks ${still.join(', ')} after acceptance`;
         }
       }
+    } else if (flow === 'capture') {
+      // GY-1686: reach a Confirm-access page on purpose and keep its views as fixtures. The pass that
+      // confirms access (passSudo) is never entered, so nothing is submitted, typed or sent and no
+      // GitHub Mobile prompt is issued: the capture follows each view's own link and stops.
+      const installation = await observeInstallation(dependencies.installation, config.githubAppId);
+      entry.target = { ...entry.target, slug: installation.slug, installationId: installation.id };
+      const url = `https://github.com/settings/apps/${encodeURIComponent(installation.slug)}/permissions`;
+      before = { url, views: [] as string[] };
+      if (dependencies.dryRun) {
+        outcome = 'unchanged'; reason = `Dry run; would open ${url} in browser profile ${config.browser.profile} and keep each Confirm-access view it offers (landing, passkey, authenticator, email) as redacted markup under ${entry.record}/${confirmAccessDirectory}, submitting nothing`;
+        page.note?.('capture', ['dry-run', reason]);
+      } else {
+        page.open(url);
+        browserLogin ??= page.meta('user-login');
+        if (!browserLogin && /github\.com\/login\b/.test(page.url())) throw new Error(`The browser profile ${config.browser.profile} is not signed in to GitHub; sign in once in that profile, then rerun master browser capture`);
+        const current = page.url(), text = page.text();
+        if (!detectSudo(current, text).sudo) {
+          // No Confirm access proves sudo is held only when the page asked for actually loaded: a
+          // profile that cannot administer the App lands on a not-found or access-denied page instead.
+          if (current.split(/[?#]/)[0] !== url || !/\bpermissions\b/i.test(text)) throw new Error(`GitHub showed neither Confirm access nor the App permissions page at ${current}; the browser profile ${config.browser.profile} may not administer the App ${installation.slug}, and the recorded page shows what it offered instead`);
+          outcome = 'unchanged'; verified = true; reason = `GitHub showed no Confirm access at ${current}: the profile's session already holds sudo mode, so there is no view to keep`;
+          page.note?.('capture', ['none', reason]);
+        } else {
+          // The views the page offers are judged exactly as captureSudoForms chooses which to keep:
+          // the passkey view falls back to the landing form, so the landing alone keeps it, while
+          // the authenticator and email views are kept only through a view link of their own. A
+          // method the page advertises by prose alone, as GitHub's landing offers email only through
+          // "Send a code via email", is no view the capture can keep without sending a code, so it is
+          // never expected; the keep logic records why it was not followed.
+          const offered = offeredSudoMethods(text);
+          const linked = (view: keyof typeof sudoViewLinks) => sudoViewLinks[view].some(label => text.toLowerCase().includes(label.toLowerCase()));
+          const expected = ['landing', ...(['passkey', 'authenticator', 'email'] as const).filter(view => linked(view) || view === 'passkey' && offered.passkey)];
+          const sendOnly = offered.email && !linked('email');
+          sudoForms.push(...await captureSudoForms(page, directory, { now, onCapture: saved }));
+          const kept: string[] = [];
+          for (const capture of confirmAccess) { try { await stat(resolve(directory, capture.file)); kept.push(capture.view); } catch { /* its capture step records the failure */ } }
+          const missed = expected.filter(view => !kept.includes(view));
+          after = { url: current, views: kept, missed };
+          // A view the page offered but the capture could not keep is a failed capture, never a
+          // success a worker is sent to: the fixture it needs may be the one that is absent.
+          verified = !missed.length; outcome = verified ? 'applied' : 'refused';
+          reason = verified ? `Kept ${kept.length} Confirm-access view(s) as redacted markup: ${kept.join(', ')}`
+            : kept.length ? `Kept ${kept.join(', ')} but not the offered ${missed.join(', ')} view(s); the recorded steps name each failure, so rerun until every offered view is kept`
+              : 'The Confirm-access page offered no view the capture could keep; its recorded steps name each failure';
+          if (sendOnly) reason += '; the email method is offered only by a control that sends a code, which the capture never follows, so no email view is expected';
+          page.note?.('capture', [outcome, reason]);
+        }
+      }
     } else {
       const work = dependencies.work ?? [];
       const plan = protectionPlan(readProtection(config, api), config, work);
@@ -900,6 +952,8 @@ export async function runBrowserFlow(root: string, config: MasterConfig, flow: B
     }
   } catch (error) {
     outcome = 'refused'; verified = false; reason = error instanceof Error ? error.message : String(error);
+    // A capture that could not reach or read its page records that outcome, with the reason, as a step.
+    if (flow === 'capture') page.note?.('capture', ['refused', reason]);
   } finally {
     // The session exists for this flow alone; a page that was never opened has nothing to close.
     if (steps.some(step => step.action === 'open')) try { page.close(); } catch { /* recorded on the step */ }
@@ -909,5 +963,10 @@ export async function runBrowserFlow(root: string, config: MasterConfig, flow: B
   await writeFile(resolve(directory, 'record.json'), `${JSON.stringify(record, null, 2)}\n`, { mode: 0o600 });
   const { steps: _steps, sudoForms: _sudoForms, confirmAccess: _confirmAccess, ...ledgerEntry } = record;
   await appendAdministrationEntry(root, ledgerEntry);
-  return { ...ledgerEntry, steps: steps.length, next: outcome === 'refused' ? `Inspect ${entry.record}/record.json and its screenshots, then rerun master browser ${flow}` : flow === 'app-permissions' && outcome === 'applied' ? 'Run master browser installation-accept' : 'Run master status' };
+  const next = outcome === 'refused' ? `Inspect ${entry.record}/record.json and its screenshots, then rerun master browser ${flow}`
+    : flow === 'capture' ? dependencies.dryRun ? 'Rerun master browser capture without --dry-run to open the page and keep its Confirm-access views'
+      : outcome === 'applied' ? 'Run master browser fixtures; a worker whose criterion needs a live Confirm-access fixture takes the latest file of that view'
+      : 'Rerun master browser capture once GitHub asks the profile to confirm access again: sudo mode lapses about two hours after it was granted'
+    : flow === 'app-permissions' && outcome === 'applied' ? 'Run master browser installation-accept' : 'Run master status';
+  return { ...ledgerEntry, steps: steps.length, next };
 }
