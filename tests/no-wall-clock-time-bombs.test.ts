@@ -21,11 +21,15 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 //   2. the file also calls Date.now() or new Date() where no stubbed clock covers the call;
 //   3. a stubbed clock is clock.install (tests/helpers/soak-world.ts), node:test's mock.timers.enable
 //      with 'Date' among its apis, or an assignment to globalThis.Date, and it covers exactly the code
-//      that runs after it: installed at module scope, or in a before/beforeEach hook, it covers the
-//      block the hook belongs to (the whole file for a top-level hook); installed inside any other
-//      block, a test body above all, it covers that block from the stub to its closing brace, and no
-//      other test in the file. A reading in another test body, in a helper, or earlier in the same
-//      body ran on the real clock, however many stubs the file holds elsewhere.
+//      that runs after it. Installed at module scope, it covers the file from the stub on: a reading
+//      above it at module scope ran at load, before the stub. Installed in a before/beforeEach hook, it
+//      covers the braced blocks nested in the block the hook belongs to (the test bodies of the file
+//      for a top-level hook, of the describe for a hook in one), and the hook's own body from the stub
+//      on, but not the code written directly in that block: that code ran at load or at collection,
+//      before any hook. Installed inside any other block, a test body above all, it covers that block
+//      from the stub to its closing brace, and no other test in the file. A reading in another test
+//      body, in a helper, at module scope, or earlier in the same body ran on the real clock, however
+//      many stubs the file holds elsewhere.
 // A file that meets the rule fails this test, named with its first instant line and its first
 // uncovered wall-clock line. The way out is to derive the instant from the test's fixed now, to stub
 // Date where the reading happens (or for the file), or to list the file in `allowances` by the comment
@@ -38,7 +42,8 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 const self = relative(process.cwd(), fileURLToPath(import.meta.url)).split('\\').join('/');
 
-const instant = /\bDate\.UTC\(\s*(?:19|20)\d\d\b|\bnew Date\(\s*['"`](?:19|20)\d\d-\d\d-\d\d|\bDate\.parse\(\s*['"`](?:19|20)\d\d-\d\d-\d\d|['"`](?:19|20)\d\d-\d\d-\d\dT\d\d:\d\d/;
+/** Any four-digit calendar year: 2100 is as absolute as 2026, and 1970 as 2000. */
+const instant = /\bDate\.UTC\(\s*\d{4}\b|\bnew Date\(\s*['"`]\d{4}-\d\d-\d\d|\bDate\.parse\(\s*['"`]\d{4}-\d\d-\d\d|['"`]\d{4}-\d\d-\d\dT\d\d:\d\d/;
 const wallClock = /\bDate\.now\(\)|\bnew Date\(\s*\)/g;
 const stubsDate = /\bclock\.install\(|\bmock\.timers\.enable\(\s*\{[^}]*apis:\s*\[[^\]]*'Date'|\b(?:globalThis|global)\.Date\s*=[^=]/g;
 /** The code before a block's `{` ends in a before/beforeEach call whose callback the block is: `before(async () => {`. */
@@ -82,7 +87,12 @@ const start: Position = { line: 1, column: 0 };
 /** The innermost block holding `at`. */
 const enclosing = (blocks: Block[], at: Position) => blocks.filter(block => within(at, block.open, block.close) && !(at.line === block.open.line && at.column === block.open.column)).sort((a, b) => before(a.open, b.open) ? 1 : -1)[0] ?? null;
 
-/** The stretches of code a stubbed clock covers: each from a stub to the end of what it governs. */
+/**
+ * The stretches of code a stubbed clock covers, each from a stub to the end of what it governs: code that runs after
+ * the stub, read off the text. A module-scope stub covers the rest of the file; a hook's stub covers the blocks nested
+ * in the hook's block's parent (the bodies that run once the hook has) and the hook's own body from the stub on, never
+ * the parent's own code, which ran before any hook; a stub in any other block covers that block from the stub on.
+ */
 export function stubbedRanges(lines: string[], blocks: Block[]): Array<{ from: Position; to: Position }> {
   const end: Position = { line: lines.length, column: lines[lines.length - 1].length };
   const ranges: Array<{ from: Position; to: Position }> = [];
@@ -90,9 +100,9 @@ export function stubbedRanges(lines: string[], blocks: Block[]): Array<{ from: P
     for (const match of text.matchAll(stubsDate)) {
       const at: Position = { line: index + 1, column: match.index };
       const block = enclosing(blocks, at);
-      if (!block) { ranges.push({ from: start, to: end }); continue; } // module scope: the file's clock
+      if (!block) { ranges.push({ from: at, to: end }); continue; } // module scope: the file's clock from here on; a reading above ran at load
       const opener = lines[block.open.line - 1].slice(0, block.open.column);
-      if (hookOpener.test(opener)) ranges.push(block.parent ? { from: block.parent.open, to: block.parent.close } : { from: start, to: end }); // a hook stubs the block its tests run in
+      if (hookOpener.test(opener)) for (const nested of blocks) { if (nested.parent === block.parent) ranges.push(nested === block ? { from: at, to: block.close } : { from: nested.open, to: nested.close }); } // a hook stubs the bodies its block runs, not the block's own code
       else ranges.push({ from: at, to: block.close }); // a test body: this test, from here on
     }
   }
@@ -133,7 +143,7 @@ export async function timeBombs(root: string, allowed: Record<string, string>) {
 }
 
 const count = (n: number, noun: string) => n === 1 ? `` : ` (and ${n - 1} more ${noun}${n > 2 ? 's' : ''})`;
-export const describeBomb = (bomb: TimeBomb) => `${bomb.file}:${bomb.instant} constructs an absolute calendar instant${count(bomb.instants, 'instant')} and ${bomb.file}:${bomb.wallClock} reads the wall clock${count(bomb.wallClocks, 'reading')} where no stubbed clock covers it; derive the instant from the test's fixed now, stub Date where the reading runs (a module-scope stub or a before hook covers the file), or document in the file why its absolute date is safe and list that comment in allowances`;
+export const describeBomb = (bomb: TimeBomb) => `${bomb.file}:${bomb.instant} constructs an absolute calendar instant${count(bomb.instants, 'instant')} and ${bomb.file}:${bomb.wallClock} reads the wall clock${count(bomb.wallClocks, 'reading')} where no stubbed clock covers it; derive the instant from the test's fixed now, stub Date where the reading runs (a module-scope stub covers the file from the stub on, a top-level before hook its test bodies), or document in the file why its absolute date is safe and list that comment in allowances`;
 
 test('unit:no-wall-clock-time-bombs — no test file under tests/ constructs an absolute calendar instant and calls Date.now() or new Date() without a stubbed clock, beyond the fixtures whose allowance quotes their own comment on why their date is safe', async () => {
   const { bombs, refused } = await timeBombs(join(process.cwd(), 'tests'), allowances);
@@ -170,6 +180,18 @@ test('unit:no-wall-clock-time-bombs — GY-1694\'s file is named with its instan
   const past = gy1694.replace('Date.UTC(2026, 9, 11, 5)', 'Date.UTC(2000, 0, 1)');
   const { run: runPast } = await fixtures('gy-1694-past', { 'tests/followups.test.ts': past });
   assert.equal((await runPast()).bombs.length, 1, 'an instant already behind the clock is reported just the same');
+  // The reviewer's case on 650074a22ee2: a year outside 19xx/20xx is an absolute calendar instant like any other.
+  const century = sourceLines(
+    `import { test } from 'node:test';`,
+    `const expiresAt = Date.UTC(2100, 0, 1), windowOpens = new Date('2100-01-01T01:00:00Z'), start = Date.parse('1969-12-31T23:59:59Z');`,
+    `const window = { since: '2103-01-01T00:00:00.000Z' };`,
+    `test('unit:century', () => { assert.ok(expiresAt > Date.now()); });`);
+  const { run: runCentury, file: centuryFile } = await fixtures('century', { 'tests/century.test.ts': century });
+  assert.deepEqual((await runCentury()).bombs, [{ file: centuryFile('tests/century.test.ts'), instant: 2, wallClock: 4, instants: 2, wallClocks: 1 }], 'Date.UTC(2100, …), a 2100 ISO string and a 1969 one are instants; so is a 2103 literal');
+  for (const form of [`Date.UTC(2100, 0, 1)`, `new Date('2100-01-01T01:00:00Z')`, `Date.parse('1969-12-31T23:59:59Z')`, `'2103-01-01T00:00:00.000Z'`]) {
+    const only = sourceLines(`const value = ${form};`, `const observed = Date.now();`);
+    assert.equal(timeBombIn('only.ts', only)?.instant, 1, `${form} alone is an absolute calendar instant`);
+  }
 });
 
 test('unit:no-wall-clock-time-bombs — a file that stubs Date, one without an absolute instant, or one that never reads the wall clock is no time bomb', async () => {
@@ -188,7 +210,7 @@ test('unit:no-wall-clock-time-bombs — a file that stubs Date, one without an a
   assert.deepEqual((await run()).bombs.map(bomb => bomb.file), [file('tests/timers-only.test.ts')], 'mocking setTimeout alone stubs no clock; every other file is safe');
 });
 
-test('unit:no-wall-clock-time-bombs — a stub installed in one test covers that test from the stub on, not the file: a reading in another test, in a helper or before the stub is named, while a module-scope stub or a before hook covers the file', async () => {
+test('unit:no-wall-clock-time-bombs — a stub covers only the code that runs after it: in one test, that test from the stub on; at module scope, the file from the stub on; in a before hook, the bodies of its block, never the block\'s own code; a reading in another test, in a helper, before the stub or at load is named', async () => {
   // The reviewer's case on 1b52f78fadff: one test stubs Date, another compares a fixed 2030 expiry with the real clock.
   const mixed = sourceLines(
     `import { mock, test } from 'node:test';`,
@@ -225,25 +247,61 @@ test('unit:no-wall-clock-time-bombs — a stub installed in one test covers that
   const topHook = sourceLines(
     `import { beforeEach, test } from 'node:test';`,
     `const start = Date.parse('2031-06-02T08:00:00Z');`,
+    `test('unit:registered-first', () => { assert.ok(Date.now() >= start); });`,
     `beforeEach(async () => {`,
     `  mock.timers.enable({ apis: ['setTimeout', 'Date'], now: start });`,
+    `  assert.equal(Date.now(), start);`,
     `});`,
-    `const stamp = () => new Date().toISOString();`,
     `test('unit:a', () => { assert.ok(Date.now() >= start); });`,
-    `test('unit:b', () => { assert.equal(stamp(), new Date(start).toISOString()); });`);
+    `test('unit:b', () => { assert.equal(new Date().toISOString(), new Date(start).toISOString()); });`);
+  // The reviewer's cases on 650074a22ee2: a module-scope stub or a top-level hook covered the file from line 1, so a
+  // reading that ran at load, before the stub was installed, passed as covered. Module-scope code above a module-scope
+  // stub, and module-scope code anywhere beside a hook (a hook runs after the module has loaded), read the real clock.
+  const loadBeforeStub = sourceLines(
+    `import { test } from 'node:test';`,
+    `import { clock } from './helpers/soak-world.js';`,
+    `const expiry = Date.UTC(2030, 0, 1);`,
+    `const observed = Date.now();`,
+    `clock.install(expiry);`,
+    `test('unit:stubbed', () => { assert.ok(observed < Date.now()); });`);
+  const loadBesideHook = sourceLines(
+    `import { before, test } from 'node:test';`,
+    `const expiry = Date.UTC(2030, 0, 1);`,
+    `before(() => { mock.timers.enable({ apis: ['Date'], now: expiry - 60_000 }); });`,
+    `const observed = Date.now();`,
+    `const stamp = () => new Date().toISOString();`,
+    `test('unit:stubbed', () => { assert.ok(observed < Date.now()); assert.equal(stamp(), new Date(Date.now()).toISOString()); });`);
+  const hookBeforeStub = sourceLines(
+    `import { before, test } from 'node:test';`,
+    `const expiry = Date.UTC(2030, 0, 1);`,
+    `before(() => { const entered = Date.now(); mock.timers.enable({ apis: ['Date'], now: expiry - 60_000 }); assert.ok(entered < Date.now()); });`,
+    `test('unit:stubbed', () => { assert.ok(expiry > Date.now()); });`);
+  const loadInsideDescribe = sourceLines(
+    `import { before, describe, test } from 'node:test';`,
+    `const expiry = Date.UTC(2030, 0, 1);`,
+    `describe('held', () => {`,
+    `  before(() => { mock.timers.enable({ apis: ['Date'], now: expiry - 60_000 }); });`,
+    `  const collected = Date.now();`,
+    `  test('unit:in-describe', () => { assert.ok(collected < Date.now()); });`,
+    `});`);
   const oneLiners = sourceLines(
     `import { mock, test } from 'node:test';`,
     `const start = Date.parse('2031-06-02T08:00:00Z');`,
     `test('unit:a', () => { mock.timers.enable({ apis: ['Date'], now: start }); assert.equal(Date.now(), start); });`,
     `test('unit:b', () => { assert.ok(Date.now() < start); });`);
-  const { run, file } = await fixtures('scoped', { 'tests/mixed.test.ts': mixed, 'tests/helper.test.ts': helper, 'tests/late.test.ts': late, 'tests/describe-hook.test.ts': describeHook, 'tests/top-hook.test.ts': topHook, 'tests/one-liners.test.ts': oneLiners });
+  const { run, file } = await fixtures('scoped', { 'tests/mixed.test.ts': mixed, 'tests/helper.test.ts': helper, 'tests/late.test.ts': late, 'tests/describe-hook.test.ts': describeHook, 'tests/top-hook.test.ts': topHook, 'tests/one-liners.test.ts': oneLiners,
+    'tests/load-before-stub.test.ts': loadBeforeStub, 'tests/load-beside-hook.test.ts': loadBesideHook, 'tests/hook-before-stub.test.ts': hookBeforeStub, 'tests/load-inside-describe.test.ts': loadInsideDescribe });
   assert.deepEqual((await run()).bombs.map(bomb => [bomb.file, bomb.instant, bomb.wallClock, bomb.wallClocks]), [
     [file('tests/describe-hook.test.ts'), 2, 7, 1],
     [file('tests/helper.test.ts'), 2, 3, 1],
+    [file('tests/hook-before-stub.test.ts'), 2, 3, 1],
     [file('tests/late.test.ts'), 3, 5, 1],
+    [file('tests/load-before-stub.test.ts'), 3, 4, 1],
+    [file('tests/load-beside-hook.test.ts'), 2, 4, 2],
+    [file('tests/load-inside-describe.test.ts'), 2, 5, 1],
     [file('tests/mixed.test.ts'), 2, 5, 1],
     [file('tests/one-liners.test.ts'), 2, 4, 1],
-  ], 'the uncovered reading is the one named: the other test (mixed, one-liners), the helper, the line before the stub, the test outside the describe; a top-level hook covers the file');
+  ], 'the uncovered reading is the one named: the other test (mixed, one-liners), the helper, the line before the stub, the test outside the describe, the module-scope reading above a module-scope stub, the module-scope reading and helper beside a top-level hook, the hook\'s own reading before its stub, the describe body\'s own reading; a top-level hook covers every test body, registered before or after it, and its own body from the stub on');
 });
 
 test('unit:no-wall-clock-time-bombs — a wall-clock stamp, an elapsed-time measurement or an instant handed to the code under test as its clock is not told apart from a judgement: the file is named, and its allowance documents why', async () => {
@@ -463,6 +521,7 @@ export const allowances: Record<string, string> = {
   'tests/test-case-repository.test.ts': 'artifact createdAt 2026-09-01 is provenance fixture nothing dates against the clock; new Date()/Date.now() sta',
   'tests/test-isolation.test.ts': 'the 2026-09-24 pause resets are judged against the injected now () => clock of that test; the live command\'s r',
   'tests/throughput-admission.test.ts': 'the 2026-10-07 base and the 2026-09-28 GY-468 span are past and every measurement takes an explicit now or clo',
+  'tests/throughput-ledger.test.ts': 'the 2100 delivery and deployment instants are the measurement tests\' own clock, handed in as now: () => clock; the loop-cycle tests stub measureThroughput, so runCycle\'s Date.now() never meets them',
   'tests/throughput-owner-standing.test.ts': 'the 2026-10-07 base is past and every measurement takes an explicit now/clock; the Date.now() cycles drive a s',
   'tests/timeline-backfill.test.ts': 'the 2026-09-01 attempt instants are pure mergeTimeline inputs no clock judges; Date.now() stamps live DB deliv',
   'tests/timing-baseline-companion.test.ts': 'the 2026-09-30 and 2026-10-04 scope-request ats are past refusal fixtures judged on plannedFiles, not the cloc',
