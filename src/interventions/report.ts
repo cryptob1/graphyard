@@ -36,7 +36,23 @@ export function computeInterventionReport(folded: { interventions: Intervention[
     for (const entry of bucket.entries) kinds[entry.kind] = (kinds[entry.kind] ?? 0) + 1;
     return { key: item?.key ?? bucket.entries[0].work!.key, title: item?.title ?? bucket.entries[0].work!.title, stage: item?.stage ?? 'done', count: bucket.count, waitedMs: bucket.waitedMs, kinds };
   }).sort((a, b) => b.waitedMs - a.waitedMs || b.count - a.count);
-  const patterns = detectPatterns(folded.interventions, work, policy, to).map(pattern => ({ kind: pattern.kind, stage: stageKey(pattern.stage), count: pattern.count, threshold: policy.threshold, crossed: pattern.item !== null || pattern.unlinked.length >= policy.threshold, work: pattern.item ? { id: pattern.item.id, key: pattern.item.key, stage: pattern.item.stage } : null }));
+  // GY-1682: the row names the count the threshold is judged on and the items that account for the
+  // rest, so a reader of 20 counted and no crossing sees the delivered items that own 18 of them
+  // rather than a scan that failed its promise. The first item in fleet order accounts for an
+  // instance, as detectPatterns links it.
+  const accountedBy = new Map<string, Work>();
+  for (const item of work) for (const instance of item.origin?.pattern?.instances ?? []) if (!accountedBy.has(instance.id)) accountedBy.set(instance.id, item);
+  const patterns = detectPatterns(folded.interventions, work, policy, to).map(pattern => {
+    const accounted = new Map<string, { id: string; key: string; stage: Stage; count: number }>();
+    for (const entry of pattern.entries) {
+      const owner = accountedBy.get(entry.id);
+      if (!owner) continue;
+      const row = accounted.get(owner.id) ?? { id: owner.id, key: owner.key, stage: owner.stage, count: 0 };
+      row.count++; accounted.set(owner.id, row);
+    }
+    return { kind: pattern.kind, stage: stageKey(pattern.stage), count: pattern.count, unlinked: pattern.unlinked.length, threshold: policy.threshold, crossed: pattern.item !== null || pattern.unlinked.length >= policy.threshold,
+      work: pattern.item ? { id: pattern.item.id, key: pattern.item.key, stage: pattern.item.stage } : null, accounted: [...accounted.values()].sort((a, b) => b.count - a.count || a.key.localeCompare(b.key)) };
+  });
   return {
     window: { days: options.days, from, to }, policy, deliveries: deliveries.length,
     total: filtered.length, open: filtered.filter(entry => entry.resolvedAt === null).length, waitedMs: sum(filtered),

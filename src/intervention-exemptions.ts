@@ -1,6 +1,7 @@
 import type pg from 'pg';
 import { endedLeaseLoss, leaseLossSettleMs, type Escalation, type Stage, type Work } from './model.js';
 import { containmentGraceMs, containmentSettleWaitBoundMs } from './model/containment.js';
+import { standingScopeRequest } from './model/fault-classes.js';
 import { laneApprover, mergeWriterApprover } from './model/rework-ground.js';
 import { routedWideningDecision, wideningSettlement } from './model/scope-provenance.js';
 import { reworkGroundFields, routineReworkGround as routineGround, type ReworkGroundsWork } from './rework-grounds.js';
@@ -31,8 +32,8 @@ export type ExemptionMoment =
   | { at: 'merge'; details: Record<string, any> }
   /** An `autosettle` or `recover` row lowering the item's containment fence. */
   | { at: 'settlement'; kind: string; details: Record<string, any>; when: string }
-  /** An ask still open past the last row, on the item as the current record holds it. */
-  | { at: 'open-ask'; ask: Ask; item: Work }
+  /** An ask still open past the last row, on the item as the current record holds it, judged at the fold's own instant. */
+  | { at: 'open-ask'; ask: Ask; item: Work; now: string }
   /** An escalation still standing on the item past the last row. */
   | { at: 'open-escalation'; item: Work; escalation: Escalation; now: string }
   /** An `escalation.resolved` row: the trigger, the escalation it resolved and the decision that resolved it. */
@@ -233,6 +234,24 @@ export const loopAutosettleInBound = rule('loop-autosettle-in-bound', moment => 
 export const answeredOffLedger = rule('answered-off-ledger', moment => moment.at === 'open-ask' && !moment.item.blocker && !moment.item.scopeRequest);
 /** An undecided scope request is the loop's to answer within minutes; only one the loop refused waits on a person. */
 export const undecidedScopeRequest = rule('undecided-scope-request', moment => moment.at === 'open-ask' && moment.ask.kind === 'scope-request' && !moment.ask.trigger);
+/**
+ * GY-1682: a live attempt's scope request the rule refused is still the loop's while the loop will
+ * settle it itself — widened on its audited grounds at its next scope step, or put to the independent
+ * approver — inside the bound it promises (scopeBlockedBudgetMs). The fold counted such an ask as a
+ * waiting scope widening from the refusal's instant: GY-1675's ask of 2026-10-10T23:12:58 stood
+ * refused for 21 seconds before the loop's own widening answered it, and in those seconds master
+ * status read 21 build-stage scope widenings, crossed, with no item, while the minutely scan read
+ * 20 and opened nothing; the master then filed the pattern by hand. The judgement is the fault
+ * pass's own of a live attempt's request (standingScopeRequest, GY-1085): one that has waited past
+ * the bound, or that nothing will judge again — a non-additive or over-cap ask, an approver's
+ * refusal — is somebody's to decide and stays a signal, as does one whose attempt has ended.
+ */
+export const loopSettlingScopeRequest = rule('loop-settling-scope-request', moment => {
+  if (moment.at !== 'open-ask' || moment.ask.kind !== 'scope-request' || moment.ask.trigger !== 'refused-by-loop') return false;
+  const { item } = moment, request = item.scopeRequest, now = Date.parse(moment.now);
+  if (!request || !item.lease || item.lease.epoch !== request.epoch || Date.parse(item.lease.expiresAt) <= now) return false;
+  return request.decision?.state === 'refused' && request.decision.decidedBy === 'graphyard' && !standingScopeRequest(item, now);
+});
 /** A lease-loss reconciliation will settle on the record once its bound passes waits on nobody (GY-1393). */
 export const leaseLossResolve = rule('lease-loss-resolve', moment => moment.at === 'open-escalation' && !!endedLeaseLoss(moment.item, moment.escalation)
   && Date.parse(moment.now) - Date.parse(moment.escalation.at) < leaseLossSettleMs);
@@ -251,7 +270,7 @@ export const approvedDecisionWeakening = rule('approved-decision-weakening', mom
 export const interventionExemptions: readonly InterventionExemption[] = [
   approvedAutoscope, successorReplan, auditedScopeWidening, routedScopeWidening, unstartedReplan,
   routineReworkGround, laneReworkGround, failedCheckRound, loopReworkRound,
-  directMergeWindow, loopAutosettleInBound, answeredOffLedger, undecidedScopeRequest, leaseLossResolve, approvedDecisionWeakening,
+  directMergeWindow, loopAutosettleInBound, answeredOffLedger, undecidedScopeRequest, loopSettlingScopeRequest, leaseLossResolve, approvedDecisionWeakening,
 ];
 
 /** The name of the first rule that exempts the moment, or null when it is a signal. */

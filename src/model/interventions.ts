@@ -159,8 +159,13 @@ export interface InterventionReport {
   trend: { from: string; to: string; interventions: number; deliveries: number; waitedMs: number }[];
   /** The items that cost the most attention, most first. */
   costliest: { key: string; title: string; stage: Stage; count: number; waitedMs: number; kinds: Partial<Record<InterventionKind, number>> }[];
-  /** Every kind-at-stage pair against the recurrence rule, and the item it opened when it crossed it. */
-  patterns: { kind: InterventionKind; stage: Stage | 'none'; count: number; threshold: number; crossed: boolean; work: { id: string; key: string; stage: Stage } | null }[];
+  /**
+   * Every kind-at-stage pair against the recurrence rule, and the item it opened when it crossed it.
+   * `count` is every instance in the window; `unlinked` is what the threshold judges — the instances no
+   * item links — and `accounted` names the items whose pattern links the rest, with each one's stage
+   * and share (GY-1682), so a count past the threshold with no crossing reads as owned, not unfiled.
+   */
+  patterns: { kind: InterventionKind; stage: Stage | 'none'; count: number; unlinked: number; threshold: number; crossed: boolean; work: { id: string; key: string; stage: Stage } | null; accounted: { id: string; key: string; stage: Stage; count: number }[] }[];
   judgements: Judgement[];
   /** The signals themselves, newest first. */
   interventions: Intervention[];
