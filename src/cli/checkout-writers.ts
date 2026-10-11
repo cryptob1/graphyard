@@ -108,11 +108,15 @@ export function checkoutProcessScan(root: string, self = process.pid, proc = '/p
  * whose main thread called pthread_exit still writes through such a thread (GY-1663), and a live
  * leader whose own link is refused may still show one — and any thread whose cwd is inside the
  * checkout (`inside`) makes the process a writer, never skipped, even when an earlier readable
- * thread lies outside. No live thread: a zombie leader (`leaderGone`) is gone, a live one stands on
- * its own read — skipped when that was refused EACCES (GY-1672), unverifiable otherwise. Live threads
- * none of whose cwd reads: a live leader is skipped only when every read, its own and theirs, was
- * refused EACCES, the non-dumpable daemon GY-1672 names; a zombie leader's, or any other failure, or
- * a task list that cannot be read, is unverifiable, and the restore refuses.
+ * thread lies outside. The process is outside the checkout only when fully judged: every live
+ * thread's cwd read, none inside. A live thread whose cwd cannot be read beside one that reads
+ * outside leaves the process unverifiable (GY-1680 review), never outside and never skipped: that
+ * thread may be inside, and the restore refuses. No live thread: a zombie leader (`leaderGone`) is
+ * gone, a live one stands on its own read — skipped when that was refused EACCES (GY-1672),
+ * unverifiable otherwise. Live threads none of whose cwd reads: a live leader is skipped only when
+ * every read, its own and theirs, was refused EACCES, the non-dumpable daemon GY-1672 names; a
+ * zombie leader's, or any other failure, or a task list that cannot be read, is unverifiable, and
+ * the restore refuses.
  */
 function judgeByThreads(proc: string, name: string, failure: unknown, leaderGone: boolean, inside: (cwd: string) => boolean): { cwd: string | null; error: string | null; denied: boolean } {
   const describe = (error: unknown) => error instanceof Error ? error.message : String(error);
@@ -126,7 +130,7 @@ function judgeByThreads(proc: string, name: string, failure: unknown, leaderGone
     if ((listing as NodeJS.ErrnoException).code === 'ENOENT') return leaderGone || !existsSync(join(proc, name)) ? gone : own;
     return { cwd: null, error: `${reason}; its threads cannot be listed (${describe(listing)})`, denied: false };
   }
-  let error: string | null = null, denied = refused(failure), live = false, outside: string | null = null;
+  let error: string | null = null, denied = refused(failure), live = false, outside: { tid: string; cwd: string } | null = null;
   for (const tid of tasks) {
     let stat: string; try { stat = readFileSync(join(proc, name, 'task', tid, 'stat'), 'utf8'); } catch { continue; /* exited */ }
     const state = stat.slice(stat.lastIndexOf(')') + 2).split(' ')[0];
@@ -135,11 +139,15 @@ function judgeByThreads(proc: string, name: string, failure: unknown, leaderGone
     try {
       const cwd = readlinkSync(join(proc, name, 'task', tid, 'cwd'));
       if (inside(cwd)) return { cwd, error: null, denied: false };
-      outside ??= cwd;
+      outside ??= { tid, cwd };
     } catch (thread) { error ??= `${reason}; its live thread ${tid}'s cwd cannot be read either (${describe(thread)})`; if (!refused(thread)) denied = false; }
   }
-  if (outside) return { cwd: outside, error: null, denied: false };
   if (!live) return leaderGone ? gone : own;
+  // Outside only when fully judged: every live thread's cwd read and none inside. One that could not be
+  // read beside an outside one may be inside, so the process is unverifiable — EACCES or not, never the
+  // skip GY-1672 delivers for a process every read of which was refused (GY-1680 review).
+  if (outside && error === null) return { cwd: outside.cwd, error: null, denied: false };
+  if (outside) return { cwd: null, error: `${error}, while its live thread ${outside.tid}'s reads outside the checkout`, denied: false };
   return { cwd: null, error, denied: denied && !leaderGone };
 }
 const gone = (state: string | null) => state === null || state === 'Z' || state === 'X';

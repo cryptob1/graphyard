@@ -13,7 +13,8 @@ import { openMasterSession, unhandled } from './master/session.js';
 import { intentCommand } from './master/intent.js';
 import { fleetCommand } from './master/fleet.js';
 import { confinedMaster, operationsCommand } from './master/operations.js';
-import { checkoutRestoreServeFlag, serveCheckoutRestoreAct } from './checkout-restore-release.js';
+import { checkoutRestoreServeFlag } from './checkout-restore-release.js';
+import { serveCheckoutRestoreAct } from './checkout-restore-serve.js';
 import { loopCommand } from './master/loop.js';
 import { mergerCommand } from './merger.js';
 

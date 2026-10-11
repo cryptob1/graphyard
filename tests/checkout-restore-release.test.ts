@@ -9,7 +9,8 @@ import { fileURLToPath } from 'node:url';
 import { defaultChildRun, type ChildRun } from '../src/child-runner.js';
 import { z } from 'zod';
 import { EventEmitter } from 'node:events';
-import { ancestorPids, type CheckoutRestoreGrant, type CheckoutRestoreGrantPayload, checkoutRestoreGrantKind, checkoutRestoreGrantVariable, checkoutRestoreServeFlag, commitServes, lockedLoop, releasePinnedRestore, releaseServes, serveCheckoutRestoreAct, servingReleases, signCheckoutRestoreGrant, snapshotRelease, staleServingLoop, thawFrozenWritersOnStop } from '../src/cli/checkout-restore-release.js';
+import { type CheckoutRestoreGrant, type CheckoutRestoreGrantPayload, checkoutRestoreGrantKind, checkoutRestoreGrantVariable, checkoutRestoreServeFlag, commitServes, lockedLoop, releasePinnedRestore, releaseServes, servingReleases, signCheckoutRestoreGrant, snapshotRelease, staleServingLoop } from '../src/cli/checkout-restore-release.js';
+import { ancestorPids, serveCheckoutRestoreAct, thawFrozenWritersOnStop } from '../src/cli/checkout-restore-serve.js';
 import { continueFrozenWriters, freezeCheckoutWriters, frozenWritersLedgerKind, readFrozenWritersLedger } from '../src/cli/checkout-writers.js';
 import { checkoutRestoreCommand, checkoutRestoreFreezeLedgerPath, checkoutRestoreGrantPath, checkoutRestoreRefPrefix, checkoutRestoreRequestPath, fileCheckoutRestoreRequest, loopRestartRequestPath, readCheckoutRestoreRequest, serveCheckoutRestore } from '../src/cli/master-checkout-restore.js';
 import { atomicPrivateWrite } from '../src/master/config.js';
@@ -928,4 +929,57 @@ test('integration:checkout-restore-stale-loop-old-head-handoff — a dirty check
   const payload = { kind: checkoutRestoreGrantKind, root, reason: 'forge', request: { id: 'x' }, loop: { pid: process.pid }, handoff: { head: before }, issuedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 60_000).toISOString(), nonce: 'a'.repeat(32) } as const;
   await atomicPrivateWrite(forged, { ...payload, signature: signCheckoutRestoreGrant(payload, credentialValue) });
   await assert.rejects(serveCheckoutRestoreAct([], { env: { [checkoutRestoreGrantVariable]: forged }, ancestors: () => [process.pid] }), /already holds the serve entry|old-HEAD handoff does not apply|HEAD is/);
+});
+
+test('unit:old-head-handoff-timeout-thaws-frozen-writers — the command\'s old-HEAD handoff serves with the installation\'s freeze ledger as the loop-served path does (review of GY-1680): an entry the act\'s timeout ends after it stopped the checkout\'s writers never reaches its own thaw, so the command continues every writer the ledger still names stopped, leaves alone the ones gone or running, removes the ledger, records the failure naming what it continued and files no restart; the checkout stands dirty at the old HEAD', { timeout: 60_000 }, async () => {
+  const base = await fixtureDirectory('checkout-restore-old-head-timeout-thaw');
+  const root = join(base, 'coordinator');
+  const git = (...args: string[]) => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+  mkdirSync(join(root, 'src', 'cli'), { recursive: true }); mkdirSync(join(root, 'bin'), { recursive: true });
+  writeFileSync(join(root, 'src', 'loop.ts'), 'export const loop = 1;\n');
+  writeFileSync(join(root, 'bin', 'graphyard.mjs'), loadedEntry);
+  writeFileSync(join(root, '.gitignore'), '.graphyard/\nnode_modules/\n');
+  execFileSync('git', ['init', '-q', '-b', 'main', root]);
+  git('add', '-A'); git('-c', 'user.name=x', '-c', 'user.email=x@x', 'commit', '-q', '-m', 'before the serve path');
+  const before = git('rev-parse', 'HEAD');
+  writeFileSync(join(root, 'src', 'cli', 'checkout-restore-release.ts'), serveMarker);
+  git('add', '-A'); git('-c', 'user.name=x', '-c', 'user.email=x@x', 'commit', '-q', '-m', 'the serving release');
+  const release = git('rev-parse', 'HEAD');
+  git('checkout', '-q', '--detach', before);
+  const { config, credentialFile, cursor, file, grantFile } = installation(root, join(base, 'state'));
+  const restartFile = loopRestartRequestPath(config), ledger = checkoutRestoreFreezeLedgerPath({ credentialFile }), record = join(base, 'hang-record.json');
+  writeFileSync(cursor, JSON.stringify({ lock: { id: 'lock', pid: 100, host: 'machine-a' }, release: { commit: before, dirty: false }, deployment: { source: 'endpoint', sha: release } }));
+  assert.deepEqual(await staleServingLoop(cursor, root), { pid: 100, loaded: before, head: before, headServes: false });
+  writeFileSync(join(root, 'src', 'loop.ts'), 'export const loop = 2; // hotfix\n');
+  // The command's view of the writers once the entry is gone: 4242 still stopped by it, 4343 running again, 4444 gone.
+  const states: Record<number, string | null> = { 4242: 'T', 4343: 'S', 4444: null };
+  const continued: string[] = [];
+  const restoreEnv = withEnv({ GRAPHYARD_TEST_FREEZE_LEDGER: ledger, GRAPHYARD_TEST_SERVE_RECORD: record, GRAPHYARD_TEST_HANG_WRITERS: '4242,4343,4444', GRAPHYARD_TEST_HANG_ROOT: root });
+  let result: Awaited<ReturnType<typeof checkoutRestoreCommand>>;
+  try {
+    result = await checkoutRestoreCommand(config, ['escalation:dirty-checkout', 'old-HEAD timeout'], 'graphyard-doctor', {
+      waitMs: 10_000, pollMs: 20,
+      release: () => ({ deployment: { source: 'endpoint', sha: release }, baseBranch: 'main' }),
+      serve: { timeoutMs: 1_500, command: () => ({ command: process.execPath, args: ['--import', tsx, hangHelper] }), ledger: { signal: (pid, name) => { continued.push(`${name}:${pid}`); }, state: pid => states[pid] ?? null } },
+    });
+  } finally { restoreEnv(); }
+  assert.equal(process.exitCode, 1); process.exitCode = 0;
+  assert.equal(result!.state, 'failed', result!.detail);
+  assert.match(result!.detail!, /served from the verified serving release .* did not finish within 1500ms and was killed.*; the entry ended before its own thaw, so the loop continued the writer\(s\) it had stopped, pid 4242 \(pid 4343, 4444 no longer stopped, left alone\)/s);
+  assert.deepEqual(continued, ['SIGCONT:4242'], 'only the writer still stopped is continued');
+  assert.ok(!existsSync(ledger), 'the ledger is removed once read');
+  assert.ok(!existsSync(grantFile), 'the handoff grant is removed');
+  assert.ok(!existsSync(restartFile), 'no restart is filed for a serve that failed');
+  // The entry wrote the installation's ledger — the path the loop-served entry writes — before it stopped anything.
+  const hang = JSON.parse(readFileSync(record, 'utf8')) as { pid: number; sent: string[]; ledger: { kind: string; root: string; pid: number; stopped: number[] } };
+  assert.deepEqual(hang.sent, ['SIGSTOP:4242', 'SIGSTOP:4343', 'SIGSTOP:4444'], 'the entry stopped its writers and was ended before any SIGCONT');
+  assert.equal(hang.ledger.kind, frozenWritersLedgerKind); assert.equal(hang.ledger.root, root); assert.equal(hang.ledger.pid, hang.pid);
+  assert.deepEqual(hang.ledger.stopped, [4242, 4343, 4444]);
+  // Nothing was restored or advanced: the dirty path stands at the old HEAD for the next request, the failure recorded with the handoff.
+  assert.equal(git('rev-parse', 'HEAD'), before, 'HEAD was not advanced');
+  assert.equal(readFileSync(join(root, 'src', 'loop.ts'), 'utf8'), 'export const loop = 2; // hotfix\n');
+  const stored = await readCheckoutRestoreRequest(file);
+  assert.equal(stored?.outcome?.state, 'failed'); assert.equal(stored?.outcome?.restart, null);
+  assert.deepEqual(stored?.handoff, { loaded: before, restart: result!.handoff!.restart });
+  assert.equal(result!.handoff!.pid, 100);
 });

@@ -15,7 +15,8 @@ import fs, { existsSync, writeFileSync } from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { ancestorPids, checkoutRestoreGrantVariable, serveCheckoutRestoreAct } from '../../src/cli/checkout-restore-release.js';
+import { checkoutRestoreGrantVariable } from '../../src/cli/checkout-restore-release.js';
+import { ancestorPids, serveCheckoutRestoreAct } from '../../src/cli/checkout-restore-serve.js';
 import { checkoutWriterScan, freezeCheckoutWriters } from '../../src/cli/checkout-writers.js';
 
 const proc = process.env.GRAPHYARD_TEST_FAKE_PROC!, record = process.env.GRAPHYARD_TEST_SERVE_RECORD!, snapshot = process.env.GRAPHYARD_TEST_SNAPSHOT ?? null;
