@@ -26,7 +26,11 @@ import type { MasterConfig } from '../master/profiles.js';
 // supervising unit (graphyard-master.service). Nothing is discarded: the ref's first parent is HEAD,
 // its second the index as it stood, and its tree the working files, so `git diff HEAD REF` and
 // `git diff HEAD REF^2` show every byte. No stash entry is used: the stash stack is shared with every
-// worktree of the repository.
+// worktree of the repository. The quiesce-and-restore itself runs from the verified serving
+// release's own CLI, in a detached shared-clone snapshot of it (GY-1680, checkout-restore-release.ts),
+// so a fix to it reaches an installation whose loop cannot restart; a request that finds the
+// checkout clean but at a HEAD other than the commit the loop runs restarts the loop onto that HEAD
+// (the drift GY-1531 lets a restart adopt) instead of ending `clean` with the escalation standing.
 //
 // The confined master's `master restart` is the same kind of act: the systemd user manager is one of
 // the process-launch channels its confinement hides, so it files a restart request the loop serves.
@@ -45,8 +49,9 @@ export const checkoutRestoreWaitMs = 120_000;
 export const loopExecutorsWaitMs = 1_200_000;
 
 const restartSchema = z.object({ state: z.enum(['requested', 'failed', 'done']), pid: z.number().int(), at: z.string(), detail: z.string().max(4000) }).strict();
+/** `adopted` (GY-1680): no dirty path, but HEAD is not the commit the loop loaded; the loop restarts onto it (`commit`). */
 const outcomeSchema = z.object({
-  at: z.string(), state: z.enum(['restored', 'clean', 'failed', 'restart', 'executors']), detail: z.string().max(4000),
+  at: z.string(), state: z.enum(['restored', 'adopted', 'clean', 'failed', 'restart', 'executors']), detail: z.string().max(4000),
   ref: z.string().nullable(), commit: z.string().nullable(), paths: z.array(z.string()).max(10_000),
   restart: restartSchema.nullable().default(null),
   /** What `master executors` printed when the loop ran it for a confined master. */
@@ -175,8 +180,26 @@ async function restoreQuiesced(root: string, reason: string, run: ChildRun, at: 
   return { ref, commit, paths };
 }
 
-/** What the loop's serving of a request needs: `restart` re-executes the loop through its unit; `settle` lets the guard record a restored checkout clean first. */
-export interface LoopRequestDeps { restart: () => Promise<unknown>; settle?: () => Promise<unknown>; report?: (outcome: CheckoutRestoreOutcome) => void; run?: ChildRun; now?: () => Date; pid?: number; quiesce?: CheckoutQuiesce;
+/** What a restore act returns: the restore (null when nothing was dirty), the checkout's HEAD after, and which code served it. */
+export interface RestoreActOutcome { restored: { ref: string; commit: string; paths: string[]; skipped: UnverifiableProcess[] } | null; head: string | null; served?: string }
+/** The quiesce-and-restore of a checkout-restore request (GY-1680): the loop's runs it from the serving release (checkout-restore-release.ts). */
+export type RestoreAct = (root: string, reason: string, at: Date) => Promise<RestoreActOutcome>;
+/** The restore act run by this process's own code: what the serve entry runs, and what the loop falls back to. */
+export const restoreInProcess = (run: ChildRun = defaultChildRun, quiesce?: CheckoutQuiesce): RestoreAct => async (root, reason, at) => {
+  const restored = await restoreCoordinatorCheckout(root, reason, run, at, quiesce);
+  const head = String(await run('git', ['-C', root, 'rev-parse', 'HEAD'])).trim() || null;
+  return { restored, head };
+};
+
+/**
+ * What the loop's serving of a request needs: `restart` re-executes the loop through its unit;
+ * `settle` lets the guard record a restored checkout clean first, or adopt the HEAD a clean drifted
+ * checkout holds (GY-1680) before the restart onto it; `loaded` is the commit the loop runs, which
+ * a clean checkout's HEAD is judged against; `restore` is the act itself (the serving release's,
+ * for the loop), defaulting to this process's own code with `quiesce`.
+ */
+export interface LoopRequestDeps { restart: () => Promise<unknown>; settle?: (adopt: string | null) => Promise<unknown>; report?: (outcome: CheckoutRestoreOutcome) => void; run?: ChildRun; now?: () => Date; pid?: number; quiesce?: CheckoutQuiesce;
+  loaded?: () => string | null; restore?: RestoreAct;
   /** Runs `master executors ARGS` on the host — the loop's own view of its processes and systemd — and returns what it prints. */
   executors?: (args: string[]) => Promise<unknown> }
 
@@ -215,18 +238,26 @@ export async function serveCheckoutRestore(file: string, root: string, deps: Loo
   if (request.act === 'restart') {
     outcome = { at: now().toISOString(), state: 'restart', ref: null, commit: null, paths: [], detail: `the loop restarts through its supervising unit, as ${request.requestedBy} asked: ${request.reason}`, restart: null };
   } else try {
-    const restored = await restoreCoordinatorCheckout(root, `${request.reason} (requested by ${request.requestedBy})`, deps.run, now(), deps.quiesce);
+    const act = deps.restore ?? restoreInProcess(deps.run, deps.quiesce);
+    const { restored, head, served } = await act(root, `${request.reason} (requested by ${request.requestedBy})`, now());
+    const by = served ? `; ${served}` : '';
+    // GY-1680: a clean checkout whose HEAD is not the commit the loop runs is the drift GY-1531 lets a
+    // restart adopt — the restart this request exists to make — never a `clean` outcome that leaves
+    // the escalation standing.
+    const loaded = deps.loaded?.() ?? null, adopt = !restored && head && loaded && head !== loaded ? head : null;
     outcome = restored
-      ? { at: now().toISOString(), state: 'restored', ref: restored.ref, commit: restored.commit, paths: restored.paths, detail: `${restored.paths.length} dirty path(s) saved under ${restored.ref} (${restored.commit.slice(0, 12)}; its second parent holds the index) and returned to HEAD; the loop restarts through its supervising unit${skippedDetail(restored.skipped)}`.slice(0, 4000), restart: null }
-      : { at: now().toISOString(), state: 'clean', ref: null, commit: null, paths: [], detail: `the coordinator checkout at ${root} held no dirty path; nothing was restored and the loop was not restarted`, restart: null };
+      ? { at: now().toISOString(), state: 'restored', ref: restored.ref, commit: restored.commit, paths: restored.paths, detail: `${restored.paths.length} dirty path(s) saved under ${restored.ref} (${restored.commit.slice(0, 12)}; its second parent holds the index) and returned to HEAD; the loop restarts through its supervising unit${skippedDetail(restored.skipped)}${by}`.slice(0, 4000), restart: null }
+      : adopt
+        ? { at: now().toISOString(), state: 'adopted', ref: null, commit: adopt, paths: [], detail: `the coordinator checkout at ${root} held no dirty path, but its HEAD ${adopt.slice(0, 12)} is not ${loaded!.slice(0, 12)}, the commit the loop runs; the loop adopts it (GY-1531) and restarts through its supervising unit onto it${by}`.slice(0, 4000), restart: null }
+        : { at: now().toISOString(), state: 'clean', ref: null, commit: null, paths: [], detail: `the coordinator checkout at ${root} held no dirty path${head && loaded ? ` and its HEAD ${head.slice(0, 12)} is the commit the loop runs` : ''}; nothing was restored and the loop was not restarted${by}`.slice(0, 4000), restart: null };
   } catch (error) {
     outcome = { at: now().toISOString(), state: 'failed', ref: null, commit: null, paths: [], detail: (error instanceof Error ? error.message : String(error)).slice(0, 4000), restart: null };
   }
-  if (outcome.state === 'restored') {
-    try { await deps.settle?.(); } catch { /* the restarted loop reads the checkout afresh */ }
+  if (outcome.state === 'restored' || outcome.state === 'adopted') {
+    try { await deps.settle?.(outcome.state === 'adopted' ? outcome.commit : null); } catch { /* the restarted loop reads the checkout afresh */ }
   }
   deps.report?.(outcome);
-  if (outcome.state !== 'restored' && outcome.state !== 'restart') return write(file, request, outcome, deps);
+  if (outcome.state !== 'restored' && outcome.state !== 'adopted' && outcome.state !== 'restart') return write(file, request, outcome, deps);
   return restartOwed(file, request, outcome, deps, pid, now);
 }
 const skippedDetail = (skipped: UnverifiableProcess[]) => skipped.length

@@ -147,3 +147,72 @@ test('unit:soak-checkout-restore-served-once — over two simulated days of the 
     `the last restarted loop serves nothing again: ${journal.filter(entry => entry.at > restarts.at(-1)!.at && /checkout-restore|loop-restart/.test(entry.line)).map(entry => entry.line).join(' | ')}`);
   assert.ok(new Set(reads.map(entry => entry.pid)).size >= 4, 'the days ran four loop processes');
 });
+
+test('integration:soak-checkout-restore-drift — over two simulated days of the real loop, a checkout-restore request against a clean checkout whose HEAD moved under the loop is adopted: the drift escalation settles, the loop restarts through its unit onto that HEAD, the restarted loop runs it, and nothing is served, restarted or raised again', { timeout: 600_000 }, async () => {
+  const { main, config } = await installation();
+  git(main, 'checkout', '-q', '--detach');
+  const loaded = git(main, 'rev-parse', 'HEAD');
+  const start = Date.parse('2030-01-01T00:00:00Z');
+  let clock = start;
+  const now = () => clock;
+  const state = emptyDaemonState(config);
+  const journal: { at: number; pid: number; line: string }[] = [];
+  const restarts: { at: number; pid: number }[] = [];
+  const reads: { at: number; pid: number; head: string | null; escalation: string | null; attempts: number | null; detail: string | null }[] = [];
+  let moved: string | null = null;
+  const request = (file: string, act: string, reason: string, requestedBy: string) => () => writeFileSync(file, JSON.stringify({ id: `r-${clock}`, act, reason, requestedAt: new Date(clock).toISOString(), requestedBy, args: [], outcome: null }));
+  const plan = [
+    // A hand checkout moves HEAD forward onto a new commit, clean: the drift the guard refuses.
+    { at: 1 * hour, act: () => { writeFileSync(join(main, 'src', 'next.ts'), 'export const next = 1;\n'); git(main, 'add', 'src/next.ts'); git(main, 'commit', '-q', '-m', 'moved under the loop'); moved = git(main, 'rev-parse', 'HEAD'); } },
+    { at: 3 * hour, act: request(checkoutRestoreRequestPath(config), 'checkout-restore', 'escalation:dirty-checkout standing: HEAD moved while the loop ran', 'graphyard-doctor') },
+  ];
+  let pid = 2000;
+  const end = start + 2 * day;
+  while (clock < end) {
+    const host = new EventEmitter(), own = ++pid;
+    const intervalMs = () => {
+      clock += 10 * minute;
+      for (const step of plan.filter(entry => start + entry.at <= clock)) { step.act(); plan.splice(plan.indexOf(step), 1); }
+      if (clock >= end) host.emit('SIGTERM');
+      return 1;
+    };
+    const checkout = async () => {
+      const read = await readCoordinatorCheckout(main);
+      const escalation = state.actions['escalation:dirty-checkout'];
+      reads.push({ at: clock, pid: own, head: read.commit, escalation: escalation?.state ?? null, attempts: escalation?.attempts ?? null, detail: escalation?.detail ?? null });
+      return read;
+    };
+    const restartLoop = async () => { restarts.push({ at: clock, pid: own }); host.emit('SIGTERM'); };
+    await runDaemon(config, state, effects(now), { intervalMs, identity: { pid: own, host: 'machine-a' }, signals: ['SIGTERM'], process: host as never, now, checkout, restartLoop,
+      log: line => journal.push({ at: clock, pid: own, line }) });
+  }
+  const adopted = git(main, 'rev-parse', 'HEAD'), movedTo = moved as string | null;
+  assert.ok(movedTo === adopted && adopted !== loaded, 'HEAD moved');
+  // Before the request: the drift stood as a failed escalation naming the remedy the installation runs itself.
+  const standing = reads.filter(entry => entry.at >= start + 1 * hour + 20 * minute && entry.at < start + 3 * hour);
+  assert.ok(standing.length >= 5 && standing.every(entry => entry.escalation === 'failed'), `the drift escalation stood before the request: ${JSON.stringify(standing.slice(0, 3))}`);
+  assert.ok(standing.every(entry => entry.detail?.includes(`its HEAD moved from ${loaded.slice(0, 12)} to ${adopted.slice(0, 12)}`) && entry.detail.includes('graphyard master checkout-restore REASON')), `the refusal names the drift and the remedy: ${standing[0].detail}`);
+  // The request was served once, as an adoption: no dirty path, HEAD adopted, settled, restarted — by the loop that found it.
+  const served = journal.filter(entry => /\] checkout-restore (restored|adopted|clean|failed)/.test(entry.line) && !/restart (done|failed):/.test(entry.line));
+  assert.equal(served.length, 1, `one request served once: ${served.map(entry => entry.line).join(' | ')}`);
+  assert.match(served[0].line, new RegExp(`checkout-restore adopted: the coordinator checkout at ${main} held no dirty path, but its HEAD ${adopted.slice(0, 12)} is not ${loaded.slice(0, 12)}, the commit the loop runs; the loop adopts it \\(GY-1531\\) and restarts through its supervising unit onto it; served by the loop's own code: no serving release could be materialized`));
+  assert.ok(served[0].at - start - 3 * hour <= 10 * minute, 'on the next pass after it was filed');
+  assert.deepEqual(restarts.map(entry => entry.pid), [served[0].pid], 'exactly one restart, asked by the loop that served the request');
+  const stored = await readCheckoutRestoreRequest(checkoutRestoreRequestPath(config));
+  assert.equal(stored?.outcome?.state, 'adopted'); assert.equal(stored?.outcome?.commit, adopted);
+  assert.equal(stored?.outcome?.restart?.state, 'done', 'the restarted loop recorded its restart done');
+  // Nothing was saved or moved: the checkout stands clean at the adopted HEAD, with no restore ref.
+  assert.equal(git(main, 'rev-parse', 'HEAD'), adopted);
+  assert.equal(git(main, 'status', '--porcelain'), '');
+  assert.equal(git(main, 'for-each-ref', '--format=%(refname)', checkoutRestoreRefPrefix), '');
+  // The escalation settled with the adoption, before the restart, and stayed settled for the rest of the days under the restarted loop.
+  const after = reads.filter(entry => entry.at > restarts[0].at);
+  assert.ok(after.length >= 100 && after.at(-1)!.at - restarts[0].at >= day, `the days ran on ${(after.at(-1)!.at - restarts[0].at) / hour} hours past the restart`);
+  assert.ok(after.every(entry => entry.escalation === 'done' && entry.pid !== restarts[0].pid), 'the escalation stays settled under a new loop process');
+  assert.equal(new Set(after.map(entry => entry.attempts)).size, 1, 'no further failed attempt is recorded');
+  assert.equal(Object.keys(state.actions).filter(key => key.startsWith('escalation:dirty-checkout')).length, 1, 'one escalation row all days');
+  assert.ok(!journal.some(entry => entry.at > restarts[0].at && /checkout-restore|escalation failed|loop-restart/.test(entry.line) && !/restart done/.test(entry.line)),
+    `the restarted loop serves nothing again: ${journal.filter(entry => entry.at > restarts[0].at && /checkout-restore|escalation failed/.test(entry.line)).map(entry => entry.line).join(' | ')}`);
+  const settledLine = journal.find(entry => entry.pid === served[0].pid && entry.line.includes('escalation done:'));
+  assert.ok(settledLine && settledLine.at <= restarts[0].at && settledLine.line.includes(`is clean again at ${adopted.slice(0, 12)}, the commit the loop runs`), `the serving loop settled the drift onto the adopted HEAD before restarting: ${settledLine?.line}`);
+});

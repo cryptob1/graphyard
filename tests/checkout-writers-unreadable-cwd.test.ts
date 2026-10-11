@@ -217,3 +217,69 @@ test('integration:checkout-restore-completes-unreadable-writer — checkout-rest
   assert.equal(stored?.outcome?.restart?.state, 'requested');
   assert.equal(stored?.outcome?.restart?.pid, 100);
 });
+
+test('unit:unreadable-cwd-still-refuses-in-checkout — GY-1680 leaves the quiescence as GY-1672 delivered it: a same-user process whose cwd read is refused EACCES is skipped only while it is live and provably unjudgeable; one whose live thread shows it inside the checkout is a writer the freeze must stop, one whose state cannot be judged (its thread cwd unreadable too) or whose read fails any other way is unverifiable, and the restore refuses before anything is touched', async () => {
+  const { base, root, git, checkout, elsewhere } = await coordinator('unreadable-cwd-still-refuses');
+  const proc = join(base, 'proc'), uid = process.getuid!();
+  processEntry(proc, 1, { cwd: '/' });
+  processEntry(proc, 100, { cwd: elsewhere });                 // the loop
+  processEntry(proc, 500, { cwd: checkout });                  // a standing writer
+  processEntry(proc, 1372, { cwd: checkout });                 // a live non-dumpable daemon: EACCES, skipped (GY-1672)
+  // pid 410: EACCES on its cwd, its leader a zombie, its live thread 411 inside the checkout — a writer, never skipped.
+  processEntry(proc, 410, { cwd: checkout, state: 'Z' }); threadEntry(proc, 410, 410, { state: 'Z', cwd: null }); threadEntry(proc, 410, 411, { cwd: checkout });
+  const restore = denyCwd(proc, [1372, 410]);
+  try {
+    const scan = writers.checkoutProcessScan(root, 100, proc, uid);
+    assert.deepEqual(scan.writers, [410, 500], 'the thread-identified process is a writer');
+    assert.deepEqual(scan.skipped.map(entry => entry.pid), [1372], 'only the live, unjudgeable EACCES process is skipped');
+    assert.deepEqual(scan.unverifiable, []);
+    // The freeze stops the thread-identified writer like any other, and refuses when it never shows stopped, continuing what it stopped.
+    const sent: string[] = [];
+    const freeze = (never: number[]) => (directory: string) => freezeCheckoutWriters(directory, { scan: at => checkoutWriterScan(at, 100, proc, uid), signal: (pid, name) => { sent.push(`${name}:${pid}`); }, state: pid => !never.includes(pid) && sent.includes(`SIGSTOP:${pid}`) && !sent.includes(`SIGCONT:${pid}`) ? 'T' : 'S', settleMs: 20, pollMs: 1 });
+    writeFileSync(join(root, 'src', 'loop.ts'), 'export const loop = 2; // hotfix\n');
+    writeFileSync(join(root, 'scratchpad.mjs'), '// scratch\n');
+    const untouched = () => {
+      assert.equal(readFileSync(join(root, 'src', 'loop.ts'), 'utf8'), 'export const loop = 2; // hotfix\n', 'the tracked change stands');
+      assert.ok(existsSync(join(root, 'scratchpad.mjs')), 'the untracked file stands');
+      assert.equal(git('for-each-ref', checkoutRestoreRefPrefix), '', 'no ref was written');
+    };
+    await assert.rejects(restoreCoordinatorCheckout(root, 'restore', undefined, new Date(), freeze([410])), /writer\(s\) 410 did not stop within 20ms of SIGSTOP, so nothing was restored/);
+    assert.deepEqual(sent.filter(entry => entry.startsWith('SIGSTOP')).sort(), ['SIGSTOP:410', 'SIGSTOP:500']);
+    assert.deepEqual(sent.filter(entry => entry.startsWith('SIGCONT')).sort(), ['SIGCONT:410', 'SIGCONT:500'], 'everything stopped is continued');
+    untouched();
+    // Its live thread's cwd unreadable too: the process cannot be judged, so it is unverifiable, not skipped, and nothing is signalled.
+    restore();
+    const again = denyCwd(proc, [1372, 410]);
+    fs.readlinkSync = ((readlink: typeof fs.readlinkSync) => ((path: string, ...rest: unknown[]) => {
+      if (String(path) === join(proc, '410', 'task', '411', 'cwd')) throw Object.assign(new Error(`EACCES: permission denied, readlink '${String(path)}'`), { code: 'EACCES' });
+      return (readlink as (...args: unknown[]) => unknown)(path, ...rest);
+    }) as typeof fs.readlinkSync)(fs.readlinkSync);
+    syncBuiltinESMExports();
+    try {
+      const judged = writers.checkoutProcessScan(root, 100, proc, uid);
+      assert.deepEqual(judged.unverifiable.map(entry => entry.pid), [410]);
+      assert.match(judged.unverifiable[0].error, /EACCES.*live thread 411's cwd cannot be read either \(EACCES/);
+      assert.deepEqual(judged.skipped.map(entry => entry.pid), [1372]);
+      sent.length = 0;
+      await assert.rejects(restoreCoordinatorCheckout(root, 'restore', undefined, new Date(), freeze([])), /pid 410 \(EACCES.*live thread 411's cwd cannot be read either.*cannot be verified and nothing was restored/s);
+      assert.deepEqual(sent, [], 'nothing was signalled');
+      untouched();
+    } finally { again(); }
+    // Any other read failure beside the EACCES ones is still unverifiable (GY-1663), and the restore still refuses.
+    const other = denyCwd(proc, [1372]);
+    try {
+      rmSync(join(proc, '410'), { recursive: true, force: true });
+      processEntry(proc, 200, { cwd: null });
+      sent.length = 0;
+      await assert.rejects(restoreCoordinatorCheckout(root, 'restore', undefined, new Date(), freeze([])), /pid 200 \(EINVAL[^)]*\).*nothing was restored/);
+      assert.deepEqual(sent, []);
+      untouched();
+      // With only the provably-outside skip left, the restore proceeds: the writer stopped and continued, the daemon skipped.
+      rmSync(join(proc, '200'), { recursive: true, force: true });
+      const restored = await restoreCoordinatorCheckout(root, 'restore', undefined, new Date(), freeze([]));
+      assert.deepEqual(restored?.paths.sort(), ['scratchpad.mjs', 'src/loop.ts']);
+      assert.deepEqual(restored?.skipped.map(entry => entry.pid), [1372]);
+      assert.deepEqual(sent, ['SIGSTOP:500', 'SIGCONT:500']);
+    } finally { other(); }
+  } finally { restore(); }
+});
