@@ -7,7 +7,7 @@ Criterion: `{"id":"AC-1","text":"OUTCOME","proofs":["integration:NAME"]}`. `unit
 
 ## Dispatch optimistically, smallest scope first
 
-`plannedFiles` (paths, `/`-ending prefixes) scope, never lock: `sync` and GitHub's [merges](delivery.md#one-delivery-path) integrate overlaps (`master status`: `overlap.concurrent`, `git merge-tree` failures). Root-level directories (`highConflict`) need `--allow-broad-scope`; only `exclusiveResources` (claim-reserved) hold dispatch. Asks fold past 20 new files/directory or the cap; asked files and fold directories need no creating criterion, even quarantined; misspelt planned tests are refused naming the existing one.
+`plannedFiles` (paths, `/`-ending prefixes) scope, never lock: `sync` and GitHub's [merges](delivery.md#one-delivery-path) integrate overlaps (`master status`: `overlap.concurrent`, `git merge-tree` failures). Root-level directories (`highConflict`) need `--allow-broad-scope`; only `exclusiveResources` (claim-reserved) hold dispatch. Asks fold past 20 new files/directory or the cap; asked files and fold directories need no creating criterion, even quarantined; misspelt planned/proof-named tests are refused naming the existing one.
 
 `worktree GY-N EPOCH` detaches earlier worktrees (`workspace.preserved`), removes abandoned (`reclaimed`); failing, releases the claim. Unacknowledged reviewer/producer launches fail at start bound+120s. Lease-less idle/done Herdr sessions launch. **3** single-cause failures, fleet-idle excluded: `dispatchblock` blocker until `graphyard unblock GY-N REASON`; older fleet-idle ones (`dispatch-failure`) clear once launchable.
 

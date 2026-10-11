@@ -143,6 +143,30 @@ test('manual:intervention-pattern-scope-widening-build — GY-1617 against the c
   assert.deepEqual(derivePlannedFiles({ plannedFiles: gy1617.planned, criteria: [...gy1617.criteria, { id: 'AC-3', text: 'A new tests/orphan-supervisors.test.ts drives the two-observation snapshot.', proofs: ['unit:x'] }] }, gy1617.tree).missing, [], 'a criterion naming the new path beside a creation word still plans it');
 });
 
+/** GY-1617's plan naming only its module (a planned path under tests/, the baseline included, keeps the proofs' file off the plan) with its one proof (both criteria carried the same) named a letter from the base's test: the route the review of 3908fbed93 named, which reaches the same plural through the companion rule. */
+const gy1617ByProof = { plannedFiles: ['src/cli/orphan-supervisors.ts'], criteria: gy1617.criteria.map(criterion => ({ ...criterion, proofs: ['unit:orphan-supervisors'] })) };
+const baseline = 'tests/helpers/timing-baseline.json';
+test('manual:intervention-pattern-scope-widening-build — GY-1617 by the companion route: with no test planned, 4c8f455765 names the proofs\' file from the proof\'s words after the missing paths are judged, so the same plural is planned unrefused; the candidate refuses it naming the criterion and the file the base holds, and accepts each plan that answers it', async () => {
+  const work = await base['GY-1617']('model/work.ts');
+  const onBase = work.derivePlannedFiles(gy1617ByProof, gy1617.tree);
+  assert.deepEqual({ missing: onBase.missing, planned: onBase.plannedFiles }, { missing: [], planned: [...gy1617ByProof.plannedFiles, 'tests/orphan-supervisors.test.ts', baseline] }, 'the base plans the plural as the file AC-1\'s proofs live in: the widening to the real file has to follow');
+  // The candidate judges the proof-named test as a planned one: refused, with the criterion whose proofs named it and the remedy that fits a path the author never wrote.
+  const derived = derivePlannedFiles(gy1617ByProof, gy1617.tree);
+  assert.deepEqual({ missing: derived.missing, misnamed: derived.misnamed, planned: derived.plannedFiles },
+    { missing: ['tests/orphan-supervisors.test.ts'], misnamed: [{ path: 'tests/orphan-supervisors.test.ts', existing: 'tests/orphan-supervisor.test.ts', criterion: 'AC-1' }], planned: [...gy1617ByProof.plannedFiles, baseline] });
+  assert.equal(plannedFilesRefusal(derived.missing, 'origin/main', derived.misnamed),
+    'plannedFiles names a path that origin/main does not hold and no criterion describes creating: tests/orphan-supervisors.test.ts (the test file AC-1\'s proofs name; origin/main holds tests/orphan-supervisor.test.ts). Plan the existing test, or name the new one in plannedFiles beside a criterion that creates it');
+  // Planning the existing test covers the companion; naming the new test in plannedFiles beside a creating criterion plans it; an open ask naming it grounds it (GY-1676).
+  assert.deepEqual(derivePlannedFiles({ ...gy1617ByProof, plannedFiles: [...gy1617ByProof.plannedFiles, 'tests/orphan-supervisor.test.ts'] }, gy1617.tree).missing, []);
+  assert.deepEqual(derivePlannedFiles({ plannedFiles: [...gy1617ByProof.plannedFiles, 'tests/orphan-supervisors.test.ts'], criteria: [...gy1617ByProof.criteria, { id: 'AC-3', text: 'A new tests/orphan-supervisors.test.ts drives the two-observation snapshot.', proofs: [] }] }, gy1617.tree).missing, []);
+  assert.deepEqual(derivePlannedFiles(gy1617ByProof, gy1617.tree, ['tests/orphan-supervisors.test.ts']).missing, []);
+  // A proof whose words name no near test still plans its own file, as on the base.
+  assert.deepEqual(derivePlannedFiles({ ...gy1617ByProof, criteria: gy1617.criteria }, gy1617.tree).plannedFiles, [...gy1617ByProof.plannedFiles, 'tests/orphan-status-two-observations.test.ts', baseline]);
+  // Spelt `./tests/…`, a plan is judged by the path the tree lists: the base accepts the plural so spelt, the candidate refuses it.
+  assert.deepEqual(work.derivePlannedFiles({ plannedFiles: ['./tests/orphan-supervisors.test.ts'], criteria: gy1617.criteria }, gy1617.tree).missing, []);
+  assert.deepEqual(derivePlannedFiles({ plannedFiles: ['./tests/orphan-supervisors.test.ts'], criteria: gy1617.criteria }, gy1617.tree).misnamed, [{ path: './tests/orphan-supervisors.test.ts', existing: 'tests/orphan-supervisor.test.ts' }]);
+});
+
 test('manual:intervention-pattern-scope-widening-build — a planned test misnames an existing one within an edit or two of its stem, same directory and suffix, the closest first; anything farther, elsewhere or of another suffix is a new test', () => {
   const tree = ['tests/scope-request.test.ts', 'tests/scope-requests-carry.test.ts', 'tests/held-decisions.test.ts', 'tests/helpers/timing-baseline.json', 'browser-tests/board.spec.ts', 'tests/db.test.ts', 'tests/scope-request.spec.ts'];
   assert.equal(misnamedTest('tests/scope-requests.test.ts', tree), 'tests/scope-request.test.ts', 'a plural');
@@ -157,6 +181,8 @@ test('manual:intervention-pattern-scope-widening-build — a planned test misnam
   assert.equal(misnamedTest('tests/unit/scope-request.test.ts', tree), null, 'another directory is another file');
   assert.equal(misnamedTest('tests/dbs.test.ts', tree), null, 'a stem too short to misspell is a name of its own');
   assert.equal(misnamedTest('tests/scope-request.test.ts', tree), null, 'a path the tree holds misnames nothing');
+  assert.equal(misnamedTest('./tests/scope-requests.test.ts', tree), 'tests/scope-request.test.ts', 'the ./ spelling a plan may use is judged by the path the tree lists');
+  assert.equal(misnamedTest('./tests/scope-request.test.ts', tree), null);
   assert.equal(misnamedTest('src/scope-request.ts', tree), null, 'only test files are judged');
   assert.equal(misnamedTest('browser-tests/boards.spec.ts', tree), 'browser-tests/board.spec.ts');
 });
@@ -169,6 +195,11 @@ test('manual:intervention-pattern-scope-widening-build — GY-1617 end to end: `
   await assert.rejects(derivedIntent(root, { baseBranch: 'main' }, 'create', [file, 'Three false orphan-supervisor attentions this session for live, freshly dispatched workers'], deps),
     /plannedFiles names a path that main does not hold and no criterion describes creating: tests\/orphan-supervisors\.test\.ts \(main holds tests\/orphan-supervisor\.test\.ts\)\. Correct the path, or state in a criterion that the item creates it/);
   assert.equal(sent.length, 0, 'nothing is recorded for a refused item: no release, no claim, no widening to make');
+  // The same item planning no test, with AC-1's proof a letter from the base's test, is refused by the companion route with its own remedy.
+  await writeFile(file, JSON.stringify({ type: 'bug', title: gy1617.title, priority: 3, criteria: gy1617ByProof.criteria, plannedFiles: gy1617ByProof.plannedFiles, policy: { checks: ['test', 'typecheck'], review: true } }));
+  await assert.rejects(derivedIntent(root, { baseBranch: 'main' }, 'create', [file, 'Three false orphan-supervisor attentions this session'], deps),
+    /creating: tests\/orphan-supervisors\.test\.ts \(the test file AC-1's proofs name; main holds tests\/orphan-supervisor\.test\.ts\)\. Plan the existing test, or name the new one in plannedFiles beside a criterion that creates it$/);
+  assert.equal(sent.length, 0);
 });
 
 // ---- GY-1675 ----------------------------------------------------------------------------------------
