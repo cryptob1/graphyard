@@ -25,11 +25,10 @@ import type { Principal, Work } from '../src/model.js';
 import type { RunEvent, RunResult, Runner } from '../src/runner/types.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
-// GY-1705: a pane-role session that ends silent (listed, never working, ended with no outcome or
-// notice past its start bound — `done`, or idle with a still untouched screen) and a headless round
-// stopped at its bound with a readable provider limit (on any attempt of the round) both hold the
-// account the launch actually spent and fail the role over — never re-select the spent one. Bare
-// idle is not enough: Herdr reports a long or silent command as idle while it still runs.
+// GY-1705: a pane-role session that ends silent (Herdr `done`, never working, no outcome or notice
+// past its start bound, still untouched screen) and a headless round stopped at its bound with a
+// readable provider limit both hold the account the launch spent and fail the role over. Idle is
+// not silent spend: Herdr reports a long or silent command as idle while it still runs.
 // Fixed clocks are numeric epochs (no Date.parse/Date.UTC of a calendar day); Date.now() only
 // drives the live approver-loop fixtures and relative holds.
 
@@ -478,6 +477,22 @@ test('unit:run-timeout-limit-signal — headlessTimeoutLimitCharge attributes th
     { result: 'timeout', detail: 'stopped', events: [], account: null },
   ], limitNow);
   assert.equal(primaryNotice?.account, 'registry-a');
+  // Charged account keeps its own resetsAt — never an earlier attempt's reset paired with a later account.
+  const earlyReset = new Date(limitNow + 86_400_000).toISOString();
+  const early = `Weekly/Monthly Limit Exhausted. Your limit will reset at ${earlyReset.replace('T', ' ').replace(/\.\d+Z$/, '')} UTC`;
+  const late = limitError;
+  const paired = headlessTimeoutLimitCharge([
+    { result: 'timeout', detail: 'stopped', events: [{ kind: 'retry', at: new Date(limitNow).toISOString(), attempt: 1, error: late }], account: 'registry-a' },
+    { result: 'timeout', detail: 'stopped', events: [{ kind: 'retry', at: new Date(limitNow).toISOString(), attempt: 1, error: early }], account: null },
+  ], limitNow);
+  assert.equal(paired?.account, null);
+  assert.ok(paired?.limit.resetsAt);
+  assert.ok(Date.parse(paired!.limit.resetsAt!) < Date.parse(limitReset), 'charged signal keeps the earlier fallback reset, not registry-a\'s later one');
+  const round = headlessTimeoutLimit([
+    { result: 'timeout', detail: 'stopped', events: [{ kind: 'retry', at: new Date(limitNow).toISOString(), attempt: 1, error: late }] },
+    { result: 'timeout', detail: 'stopped', events: [{ kind: 'retry', at: new Date(limitNow).toISOString(), attempt: 1, error: early }] },
+  ], limitNow);
+  assert.equal(round?.resetsAt, paired?.limit.resetsAt, 'round retry still uses the earliest reset');
 });
 
 test('integration:doctor-timeout-account-hold — a no-report timeout round with a readable limit holds the account and doctorDue waits it out', async () => {

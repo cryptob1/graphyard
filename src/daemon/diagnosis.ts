@@ -10,14 +10,13 @@ import { closesFaultClass, faultClassMeaning, openFaultClassItem, type FaultClas
 import { guardBroadScope } from '../master/autonomy.js';
 import { decisionInput } from '../master/autonomy.js';
 import type { MasterConfig } from '../master/profiles.js';
-import { heldAwareProbe, recordEnvironmentLog, selectionKey } from '../master/environments.js';
-import { selectFleetSession } from '../fleet.js';
+import { recordEnvironmentLog, selectionKey } from '../master/environments.js';
 import { diagnosisPayloadSchema, diagnosisSettled, diagnosticianSettings, graphyardTools, type DiagnosisPayload, type DiagnosisRecord, type DiagnosticianSettings } from '../runner/payloads.js';
 import { piRunner } from '../runner/pi.js';
 import { registryHeadlessLaunch, registryRunner } from '../runner/roles.js';
 import type { Runner } from '../runner/types.js';
 import { type DaemonAction, type DaemonState, message } from './state.js';
-import { record } from './effects.js';
+import { record, selectDiagnosticianFleet } from './effects.js';
 import { createRefused } from './doctor.js';
 import { maxDecisionRequests } from './decisions.js';
 import type { Cycle } from './cycle.js';
@@ -114,7 +113,7 @@ export const diagnosticianEffects = (config: MasterConfig, root: string, post: D
     settings, cwd: root,
     runner: async (attempt, subject) => {
       if (attempt === 'primary') {
-        const fleet = await selectFleetSession(config, diagnosticianRole, { name: diagnosticianRole, principal: config.operatorAgent!.id }, await heldAwareProbe(config, { work: subject.work?.key }));
+        const fleet = await selectDiagnosticianFleet(config, subject.work?.key);
         if (fleet) {
           const launch = registryHeadlessLaunch(fleet.account);
           await recordEnvironmentLog(config, fleet.health ? [fleet.health] : [], fleet.skipped, { key: selectionKey('diagnostician', diagnosticianRole), environment: fleet.account.name, kind: fleet.account.kind, at: new Date().toISOString(), work: subject.work?.key ?? null }).catch(() => {});

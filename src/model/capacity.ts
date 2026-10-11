@@ -1,45 +1,26 @@
 import { z } from 'zod';
 
-// ---------------------------------------------------------------------------
-// Provider capacity as the control plane records it (GY-89).
-//
-// GY-68 checks an account's quota before a launch. A session that exhausts its account while it
-// works simply stops: the runtime prints its provider's limit notice and waits for a person. The
-// master loop reads that notice from the session's own output, ends the attempt on the record
-// with the account and the reset time, and launches the same action on another account or
-// runtime. When no account of a role is left, that is one capacity escalation on the item —
-// naming each account and when it resets — and the role is not launched again until the first
-// of them does. Neither case is a launch failure, and neither delays an item that needs a
-// different role.
-//
-// Every launched role is a capacity role (GY-182): an approver or an escalation handler that runs
-// out of credits stops on the same notice as a worker, and a decision nobody judges stalls the
-// item just as surely as an unreviewed head. An account is spent for the whole fleet, not for the
-// role that found out: every role's launch skips it until its reset.
-// ---------------------------------------------------------------------------
+// Provider capacity (GY-89/68/182): pre-launch quota checks, mid-session limit notices, fleet-wide
+// holds, and per-role escalations when every account is spent. Neither delays a different role.
 
-/** The roles launched into session slots: a worker's lease, a reviewer's or producer's ledger record. */
+/** Roles launched into session slots. */
 export const capacityRoles = ['worker', 'reviewer', 'producer'] as const;
-/** The roles that judge or request decisions; their sessions hold no slot, but spend quota the same way. */
+/** Roles that judge or request decisions (no slot; same quota). */
 export const decisionRoles = ['approver', 'escalation-handler'] as const;
-/** Headless loop roles that spend the same provider accounts through the agent registry (GY-1705). No item waits on them. */
+/** Headless registry roles that spend the same accounts (GY-1705); no item waits on them. */
 export const headlessQuotaRoles = ['doctor', 'diagnostician'] as const;
-/** Every role whose session can run out of provider quota: each fails over, and each skips an account any of them saw spent. The master role rides the same holds (GY-898). Doctor and diagnostician holds validate the same way (GY-1705). */
+/** Every role that can exhaust provider quota (GY-898, GY-1705). */
 export const quotaRoles = [...capacityRoles, ...decisionRoles, 'master', ...headlessQuotaRoles] as const;
 export type CapacityRole = typeof quotaRoles[number];
 
 /** What a session's own output says about its provider quota. */
 export interface ExhaustionSignal {
-  /** The provider's notice, as the session printed it. */
   reason: string;
-  /** When the provider says the quota returns; null when the notice names no time Graphyard can read. */
+  /** Reset instant, or null when the notice names no time Graphyard can read. */
   resetsAt: string | null;
 }
 
-// The notices the supported runtimes print when an account has nothing left. They are matched
-// against single short lines of a session that has stopped working, or of one still working whose
-// runtime prints its retry marker beside the notice: a worker that discusses a usage limit in its
-// own prose is working, and a long paragraph is never a provider banner.
+// Short-line provider banners only — not agent prose about limits.
 const exhaustionNotices: readonly RegExp[] = [
   /\b(?:you(?:'|’)?ve|you have) (?:hit|reached) your (?:\w+[- ]){0,3}limit\b/i,
   /\b(?:usage|weekly|daily|monthly|hourly|5[- ]hour|session|spend(?:ing)?|rate|token|request|plan) limit (?:has been |was |is )?(?:reached|exceeded|hit|exhausted)\b/i,
@@ -50,28 +31,13 @@ const exhaustionNotices: readonly RegExp[] = [
   /\bexceeded your (?:current )?(?:quota|usage|plan)\b/i,
 ];
 export const exhaustionTailLines = 40, exhaustionNoticeMaxLength = 240;
-/**
- * How much may stand in front of the notice on its line. Every runtime prints its banner at the
- * start, behind at most a short label — `Error: Weekly usage limit reached`, `Claude AI usage
- * limit reached|…` — while an agent writing about a limit reaches the phrase through a sentence:
- * `Added a test for the rate limit reached path`, `Tests pass; the token limit reached branch is
- * covered.` Two words of label admits every banner the runtimes print and no sentence. Without it
- * the last summary line of a worker that had just finished this very item would end its lease,
- * commit its work as interrupted and hold its account for an hour.
- */
+/** Label words before a banner on its line (2 admits runtime labels, not agent sentences). */
 export const exhaustionNoticeLabelWords = 2;
 
 const months = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
 const unitMs: Record<string, number> = { d: 86_400_000, h: 3_600_000, m: 60_000, s: 1_000 };
 
-/**
- * The reset time a limit notice names, as an instant. Providers say it four ways: an absolute
- * timestamp, a Unix time after a separator, a wait ("try again in 3 days 4 hours"), or a wall
- * clock the account's own host reads ("resets 3pm", "resets Sep 26, 9am", "on 10/8"). A wall
- * clock is read in the zone the notice names in parentheses (Claude's `resets Oct 10, 10pm
- * (America/Los_Angeles)`, GY-1566) and otherwise in the host's, and a time of day already past
- * means tomorrow's. Anything else is unknown, and an unknown reset is recorded as unknown rather than guessed.
- */
+/** Reset instant from a notice (ISO, unix, wait, or wall clock; zone in parentheses — GY-1566). */
 export function parseResetTime(text: string, now: number): string | null {
   const iso = /\b(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)\s*(Z|UTC|[+-]\d{2}:?\d{2})?/i.exec(text);
   if (iso) {
@@ -201,38 +167,19 @@ export function providerLimit(error: string, now: number): ExhaustionSignal | nu
   return { reason: text.slice(0, 300), resetsAt: parseResetTime(text, now) };
 }
 
-/**
- * GY-1705. A pane-role session (approver, reviewer or producer) Herdr still lists that never reported
- * working, ended with no outcome and no readable provider notice past its role's start bound: the
- * account is treated as spent with an assumed reset (the unknown-reset hold), so selection fails
- * over instead of handing the same spent account back. `ended` is evidence the session finished —
- * Herdr `done`, or an idle pane whose still screen shows it never ran — never a bare idle status:
- * Herdr reports a long or silent command as idle while it still runs, and that must not hold the
- * account or close the pane. A session that worked, that still has an outcome, that printed a
- * notice, that has not ended, or that has not yet passed its start bound is not this signal.
- */
+/** GY-1705 silent `done` pane (still untouched / no reader): assumed-reset hold. Idle is not this. */
 export const silentPaneExhaustionReason =
   'session ended without working, without an outcome and without a readable provider limit notice; account treated as spent until an assumed reset';
 export function silentPaneExhaustion(input: {
-  listed: boolean;
-  everWorking: boolean;
-  hasOutcome: boolean;
-  notice: ExhaustionSignal | null;
-  pastStartBound: boolean;
-  /** True only when a still, untouched screen (or a no-screen loop's bare `done`) shows the pane ended with no request trace. */
-  ended: boolean;
+  listed: boolean; everWorking: boolean; hasOutcome: boolean; notice: ExhaustionSignal | null;
+  pastStartBound: boolean; ended: boolean;
 }): ExhaustionSignal | null {
   if (!input.listed || !input.ended || input.everWorking || input.hasOutcome || input.notice || !input.pastStartBound) return null;
   return { reason: silentPaneExhaustionReason, resetsAt: null };
 }
 
-/** One structured event a headless run keeps, as far as limit detection reads it (GY-1705). `error` may be a boolean on tool-end events; only string errors are limit text. */
+/** Headless run event for limit detection (GY-1705); only string errors are limit text. */
 export type LimitRunEvent = { kind: string; error?: string | boolean | null; text?: string };
-/**
- * GY-1705. Whether a run stopped at its terminal-event bound carried its provider's own limit
- * signal in its retry markers, stream/message errors, stderr, or the timeout detail. The text is
- * the provider's — never the agent's prose — so `providerLimit` may match anywhere in it.
- */
 export function runTimeoutLimit(events: readonly LimitRunEvent[], detail: string, now: number): ExhaustionSignal | null {
   const texts: string[] = [];
   for (const event of events) {
@@ -240,20 +187,10 @@ export function runTimeoutLimit(events: readonly LimitRunEvent[], detail: string
     if (event.kind === 'stderr' && event.text) texts.push(event.text);
   }
   if (detail) texts.push(detail);
-  for (const text of texts) {
-    const signal = providerLimit(text, now);
-    if (signal) return signal;
-  }
+  for (const text of texts) { const signal = providerLimit(text, now); if (signal) return signal; }
   return null;
 }
-/**
- * GY-1705. When every started attempt of a headless round stopped at its bound and any attempt's
- * provider events carry a readable limit, the round is a provider limit (the last signal, with the
- * earliest known reset). A primary that prints the notice and a fallback that times out without a
- * second copy still counts: the criterion needs every attempt stopped at the bound and a limit
- * readable from the round, not the same notice on every attempt. An all-timeout round with no
- * readable limit stays a session-liveness failure for the caller.
- */
+/** All-timeout round with any readable limit (last reason, earliest reset for round retry). */
 export function headlessTimeoutLimit(
   attempts: readonly { result: string; detail: string; events?: readonly LimitRunEvent[] | readonly { kind: string; error?: string | null; text?: string }[] }[],
   now: number,
@@ -262,37 +199,28 @@ export function headlessTimeoutLimit(
   if (!started.length || !started.every(attempt => attempt.result === 'timeout')) return null;
   const signals = started.map(attempt => runTimeoutLimit(attempt.events ?? [], attempt.detail, now)).filter((entry): entry is ExhaustionSignal => !!entry);
   if (!signals.length) return null;
-  const resets = signals.map(entry => entry.resetsAt).filter((at): at is string => !!at).sort();
-  return { reason: signals.at(-1)!.reason, resetsAt: resets[0] ?? null };
+  return { reason: signals.at(-1)!.reason, resetsAt: signals.map(e => e.resetsAt).filter((at): at is string => !!at).sort()[0] ?? null };
 }
-/**
- * GY-1705. The all-timeout limit together with the account of the attempt that emitted a readable
- * notice (last such attempt). A primary on registry account A that times out without a notice, then
- * a fallback on another login that prints the limit, must charge the fallback — never retain A's
- * selection across attempts that did not carry the signal.
- */
+/** Charge the last attempt that printed a notice — that attempt's own account and resetsAt. */
 export function headlessTimeoutLimitCharge(
   attempts: readonly { result: string; detail: string; events?: readonly LimitRunEvent[] | readonly { kind: string; error?: string | null; text?: string }[]; account?: string | null }[],
   now: number,
 ): { limit: ExhaustionSignal; account: string | null } | null {
-  const limit = headlessTimeoutLimit(attempts, now);
-  if (!limit) return null;
-  let account: string | null = null;
-  for (const attempt of attempts) {
-    if (attempt.result !== 'timeout') continue;
-    if (runTimeoutLimit(attempt.events ?? [], attempt.detail, now) && attempt.account) account = attempt.account;
+  const started = attempts.filter(attempt => attempt.result !== 'spawn' && attempt.result !== 'cancelled');
+  if (!started.length || !started.every(attempt => attempt.result === 'timeout')) return null;
+  let charged: { limit: ExhaustionSignal; account: string | null } | null = null;
+  for (const attempt of started) {
+    const signal = runTimeoutLimit(attempt.events ?? [], attempt.detail, now);
+    if (signal) charged = { limit: signal, account: attempt.account ?? null };
   }
-  return { limit, account };
+  return charged;
 }
-/** Marker the doctor run detail carries so the next interval waits out a provider-limit hold (GY-1705). */
 export const doctorLimitUntilMarker = 'provider limit until ';
-/** When the latest doctor run is waiting out a provider-limit hold, that instant; otherwise null. */
 export function doctorLimitRetryAt(runs: readonly { state: string; detail: string }[], clock: number): string | null {
   const last = runs.at(-1);
   if (!last || last.state === 'running') return null;
   const until = last.detail.includes(doctorLimitUntilMarker)
-    ? last.detail.slice(last.detail.indexOf(doctorLimitUntilMarker) + doctorLimitUntilMarker.length).split(/[\s;]/)[0]
-    : null;
+    ? last.detail.slice(last.detail.indexOf(doctorLimitUntilMarker) + doctorLimitUntilMarker.length).split(/[\s;]/)[0] : null;
   return until && Date.parse(until) > clock ? until : null;
 }
 

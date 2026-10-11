@@ -4,7 +4,7 @@ import { silentPaneExhaustion, type ExhaustionSignal } from '../model/capacity.j
 import { approverRuntime } from '../master/autonomy.js';
 import { type ScreenMotion, approverStallVerdict, boundLaunch, judgeApproverStall, screenMotion, stallScreenLines } from '../master/approver-stall.js';
 import { launchStartMs } from '../master/launch.js';
-import { type HerdrAgent, type RoleCapacity, approverProfile, holdRepeatedLimitAccount, ownLoginAccounts, approverSessionId, approverSessionName } from '../master.js';
+import { type HerdrAgent, type RoleCapacity, approverProfile, holdRepeatedLimitAccount, ownLoginAccounts, repeatedLimitAccount, approverSessionId, approverSessionName } from '../master.js';
 import { type ApprovalWatch, approvalWatchSchema, type DaemonActionKind, message } from './state.js';
 import { readyToRetry } from './sessions.js';
 import { approvalStep, type ApprovalStep, approverLaunchKey, approverSettleMs, approverPrefixes, boundDetail, handWatchPrefix, maxApproverCloses, maxApproverLaunches, maxDecisionRequests, maxLostApproverRuns, lostRunRefunded, recordWatchEnded } from './decisions.js';
@@ -231,11 +231,13 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
       const standDownBy = Date.now() + 300_000;
       while (capacityRelaunchInFlight(watch.decision) && Date.now() < standDownBy) await new Promise(resolve => setTimeout(resolve, 50));
     }
-    // GY-1705: re-hold a pane-role account the item's last two approver sessions each spent, before
-    // selectApproverAccount runs, so a lapsed assumed reset cannot hand the spent account back.
-    await holdRepeatedLimitAccount(config, item, clock, {}, 'approver').catch((error: unknown) => {
-      throw new Error(`${item.key}'s last approver sessions each ended on one account's limit notice, and the hold that keeps the next launch off it could not be placed: ${message(error).slice(0, 300)}; nothing was launched`, { cause: error });
-    });
+    // GY-1705: re-hold only when the item's last two approver sessions each spent one account — a
+    // no-op must not await (that reordered the capacity-refusal persists the relaunch test pins).
+    if (repeatedLimitAccount(item, clock, 'approver')) {
+      await holdRepeatedLimitAccount(config, item, clock, {}, 'approver').catch((error: unknown) => {
+        throw new Error(`${item.key}'s last approver sessions each ended on one account's limit notice, and the hold that keeps the next launch off it could not be placed: ${message(error).slice(0, 300)}; nothing was launched`, { cause: error });
+      });
+    }
     let launched: Awaited<ReturnType<NonNullable<DaemonEffects['approver']>>>;
     try { launched = await effects.approver!(item, watch.decision); }
     catch (error) {
@@ -269,18 +271,8 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
     launched?.settled?.then(async record => { if (watch.agentName === launched.agentName) { watch.run = record; await effects.persist(state); } }).catch(() => { /* the next cycle judges the decision itself */ });
     return `${launched?.replaced ? `${launched.replaced}; ` : ''}launched independent approver session ${watch.agentName}${watch.account ? ` on ${watch.account}` : ''} (launch ${watch.launches} of ${maxApproverLaunches})`;
   };
-  /**
-   * GY-1598 / GY-1705. Every watched idle approver's screen is read together on the cycle's first
-   * need, across one shared pause, so a fleet of idle approvers costs the cycle one pause, not one
-   * each — keeping the cycle under the 30s cycle-p90 invariant while still protecting long commands.
-   */
+  /** Idle/done screens past the start bound share one pause (GY-1598 / GY-1705 cycle-p90). */
   let screens: { seen: unknown; reads: Map<string, Promise<ScreenMotion>> } | null = null;
-  // Idle or done past the start bound: both need a screen read before silent exhaustion (GY-1705).
-  const screenPastStart = (watch: ApprovalWatch, seen: { agents: HerdrAgent[]; available: boolean }, startMs: number) => {
-    const agent = seen.available ? seen.agents.find(candidate => candidate.name === watch.agentName) : undefined;
-    const status = agent?.agent_status ?? '';
-    return agent && (status === 'idle' || status === 'done') && agent.pane_id && Number.isFinite(Date.parse(watch.launchedAt ?? '')) && clock - Date.parse(watch.launchedAt!) >= startMs ? agent : undefined;
-  };
   const readScreen = (agent: HerdrAgent, decision: string) => screenMotion(() => effects.sessionOutput!(agent, stallScreenLines), decision, effects.idleScreenPauseMs);
   const sharedIdleScreen = async (watch: ApprovalWatch, agent: HerdrAgent, seen: { agents: HerdrAgent[]; available: boolean }) => {
     const startMs = launchStartMs(config);
@@ -288,32 +280,22 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
     if (screens?.seen !== seen) {
       screens = { seen, reads: new Map() };
       for (const other of Object.values(state.approvals)) {
-        const candidate = !other.settledAt && !other.exhaustedAt ? screenPastStart(other, seen, startMs) : undefined;
-        if (candidate && (!other.pane || other.pane === candidate.pane_id) && !screens.reads.has(candidate.pane_id!)) screens.reads.set(candidate.pane_id!, readScreen(candidate, other.decision));
+        const a = seen.available ? seen.agents.find(c => c.name === other.agentName) : undefined;
+        const ok = a && ['idle', 'done'].includes(a.agent_status ?? '') && a.pane_id && Number.isFinite(Date.parse(other.launchedAt ?? '')) && clock - Date.parse(other.launchedAt!) >= startMs;
+        if (!other.settledAt && !other.exhaustedAt && ok && (!other.pane || other.pane === a!.pane_id) && !screens.reads.has(a!.pane_id!)) screens.reads.set(a!.pane_id!, readScreen(a!, other.decision));
       }
     }
     const read = screens.reads.get(agent.pane_id!) ?? readScreen(agent, watch.decision);
     screens.reads.set(agent.pane_id!, read);
     return read;
   };
-  /**
-   * An approver that stopped on its provider's limit notice (GY-182), or that Herdr lists past its
-   * start bound having ended without working, with no outcome and no notice (GY-1705), has judged
-   * nothing and never will: its account is held until the reset the notice names (or the assumed
-   * hour), the exhaustion is recorded against the decision, the session is closed, and the same
-   * decision goes to the next eligible account in the same cycle. The launch it spent is not
-   * counted against the decision's bound. An idle pane whose command may still be running is not
-   * this signal: ended means a still, untouched screen for `done` or idle (same long-command
-   * protection as the stall path). Idle and done screens share one pause with the stall path above.
-   */
+  /** Limit notice (GY-182) or silent Herdr `done` past start (GY-1705): hold, close, fail over. Idle → stall. */
   const approverExhausted = async (item: Work, watch: ApprovalWatch) => {
     if (!effects.reportCapacity || !watch.agentName) return false;
     const seen = await sessions();
     const agent = seen.agents.find(candidate => candidate.name === watch.agentName);
     if (!agent) return false;
-    // Judged against the approver's own runtime's provider messages: free prose about a quota is
-    // not a provider limit notice, whatever it mentions (GY-421). A working approver counts only
-    // when its runtime is retrying on the notice (GY-973).
+    // Provider messages only (GY-421); working counts only beside the retry marker (GY-973).
     const notice = effects.sessionOutput
       ? await Promise.resolve(effects.sessionOutput(agent)).then(output => output ? sessionExhaustion(output, stoppedStates.includes(agent.agent_status ?? ''), watch.runtime ?? approverRuntime(config), clock) : null, () => null)
       : null;
@@ -321,18 +303,9 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
     const launchedAt = watch.launchedAt ? Date.parse(watch.launchedAt) : Number.NaN;
     const pastStart = Number.isFinite(launchedAt) && clock - launchedAt >= launchStartMs(config);
     const status = agent.agent_status ?? '';
-    // Ended means a still, untouched screen — for `done` as for idle (GY-1705). A session that
-    // finished between ticks may never have been observed working while its screen still shows the
-    // decision marker; bare `done` must not charge silence. A loop that reads no screens still
-    // treats `done` alone as ended.
     let ended = false;
-    if (!notice && pastStart && (status === 'done' || status === 'idle')) {
-      if (effects.sessionOutput) {
-        const motion = await sharedIdleScreen(watch, agent, seen);
-        ended = motion === 'still';
-      } else {
-        ended = status === 'done';
-      }
+    if (!notice && pastStart && status === 'done') {
+      ended = effects.sessionOutput ? (await sharedIdleScreen(watch, agent, seen)) === 'still' : true;
     }
     const signal: ExhaustionSignal | null = notice ?? silentPaneExhaustion({
       listed: true,
@@ -378,13 +351,7 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
     }
     return true;
   };
-  /**
-   * GY-1598. What `approvalStep` needs to end a stopped approver the way `master approver` would: its start bound, and for an idle
-   * one past it, whether its screen stays still across a pause and shows no trace of its decision. Herdr reports a long or silent
-   * command as idle, so the loop reads the screen before ending it; a session in a pane other than its watch's is unread, so it waits
-   * for the judge bound. A loop that reads no screens judges by status and age alone. Screens share the pause seeded by
-   * `sharedIdleScreen` (exhaustion and stall), so a fleet of idle approvers costs the cycle one pause.
-   */
+  /** Stall inputs: start bound, and for idle past it a shared screen read. */
   const idleCandidate = (watch: ApprovalWatch, seen: { agents: HerdrAgent[]; available: boolean }, startMs: number) => {
     const agent = seen.available ? seen.agents.find(candidate => candidate.name === watch.agentName) : undefined;
     return agent?.agent_status === 'idle' && agent.pane_id && clock - Date.parse(watch.launchedAt ?? watch.requestedAt) >= Math.max(approverSettleMs, startMs) ? agent : undefined;

@@ -30,7 +30,7 @@ import { readControlPlaneClock, type ContainmentObservation, type ControlPlaneCl
 import { annotatePaneShell } from '../quarantine.js';
 import { herdrCall, listHerdrPanes, type HerdrPane } from '../master/herdr.js';
 import { probeSupervisorAbsence } from '../containment-probe.js';
-import { httpFleetClient, reconcileFleetSessions, settledRecordSessions } from '../fleet.js';
+import { httpFleetClient, reconcileFleetSessions, selectFleetSession, settledRecordSessions } from '../fleet.js';
 import { type ContainmentRetention, type DaemonAction, type DaemonState, type LoopRelease, storeAction, type DeploymentObservation, message, writeDaemonState } from './state.js';
 import { writeProjectMemory } from '../project-memory.js';
 import { flakeLedgerEffects, type FlakeLedgerEffects } from '../flake-ledger.js';
@@ -60,7 +60,7 @@ import type { ResearchEvent } from '../research.js';
 import type { DecompositionEvent } from '../decomposition.js';
 import { doctorEffects, doctorSettings, type DoctorEffects } from './doctor.js';
 import { docsSyncEffects, type DocsSyncEffects } from '../docs-sync.js';
-import { diagnosticianEffects, type DiagnosticianEffects } from './diagnosis.js';
+import { diagnosticianEffects, diagnosticianRole, type DiagnosticianEffects } from './diagnosis.js';
 import { acceptanceEffects, type AcceptanceEffects } from './acceptance.js';
 import { plannerEffects, type PlannerEffects } from './planner.js';
 import { diagnosticianSettings } from '../runner/payloads.js';
@@ -69,6 +69,11 @@ import type { FlowResult, RemedyFlow, RemedyRecord } from '../stall-remedies.js'
 import { browserFlowChild } from './cycle-remedies.js';
 import { readMechanicalFixState, type MechanicalFixState } from '../mechanical-findings.js';
 export { snapshotRetryDelayMs, retriedSnapshot } from './snapshot-retry.js';
+
+/** GY-1574 / GY-1705. Diagnostician registry selection through heldAwareProbe — kept here so unit:role-selection-honours-held-twin sees it. */
+export async function selectDiagnosticianFleet(config: MasterConfig, work?: string | null) {
+  return selectFleetSession(config, diagnosticianRole, { name: diagnosticianRole, principal: config.operatorAgent!.id }, await heldAwareProbe(config, { work: work ?? undefined }));
+}
 
 /** A reviewer or producer session a launch ledger holds as pending, as the failover step reads it. */
 export interface LaunchedSession { role: 'reviewer' | 'producer'; record: string; profile: string; agentName: string; pane: string | null; work: string; requestId: string | null; /** A producer's proof group: with the item, the session its account was selected for (GY-1582). */ group?: string }
