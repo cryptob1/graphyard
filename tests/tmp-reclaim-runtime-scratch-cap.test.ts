@@ -75,6 +75,22 @@ test('unit:runtime-scratch-cap-oldest-first — with the root below its inode he
   assert.equal(report.escalated?.length, 1, 'the cap ran in the escalated step, which cleared the bound');
   assert.equal(report.boundStands, false, 'the root is back above its headroom');
   assert.equal(describeTmpClasses(report.classes!), '0 test temp, 0 tsx cache, 0 agent worktree, 4 runtime scratch', 'the record names the classes that took the entries');
+  assert.deepEqual(report.pressure?.map(entry => ({ root: entry.root, below: entry.below, consumers: entry.consumers })), [{ root: tmp, below: false, consumers: undefined }], 'the pass reports the root above its headroom (below=false) and names no consumers');
+  assert.ok((report.pressure![0]!.freeInodes) >= tmpInodeHeadroom(report.pressure![0]!.totalInodes), 'the free inodes reported are at or above the headroom');
+
+  // The pass's entry bound takes the oldest of every entry beyond the cap, never the first in directory
+  // order: with a cap of one, five entries beyond it created oldest first (so a reverse-creation-order
+  // directory lists the newest first) and a bound of two, the two oldest go and the three others wait.
+  const boundedBase = await temporaryDirectory('scratch-cap-bounded'), boundedTmp = join(boundedBase, 'tmp'), boundedScratch = join(boundedTmp, 'opencode');
+  await mkdir(boundedScratch, { recursive: true });
+  const byAge: string[] = [];
+  for (const [index, name] of ['oldest', 'older', 'old', 'young', 'younger', 'newest'].entries()) byAge.push(await checkout(boundedScratch, `session-${name}`, (7 - index) * hour, now));
+  await backdate(boundedScratch, hour, now);
+  const bounded = await reclaimTmpDirectories({ tmpRoot: boundedTmp, now, held: new Set(), volume: async () => ({ files: 1_048_576, ffree: 1_000 }), runtimeScratchCap: 1, escalation: [{ limit: 2, cacheAgeMs: hour, workMs: 5_000 }] });
+  assert.deepEqual(bounded.errors, []);
+  assert.deepEqual(bounded.removed.map(entry => entry.path), [byAge[0], byAge[1]], 'the bound takes the two oldest of the five entries beyond the cap');
+  for (const path of byAge.slice(2)) assert.equal(existsSync(path), true, `${path} waits for the next pass`);
+  assert.ok(bounded.kept >= 3, `the entries beyond the bound are counted as kept (${bounded.kept})`);
 
   // Another user's entries are theirs: with this user's uid elsewhere nothing in the root is touched.
   const getuid = process.getuid!, realUid = getuid();

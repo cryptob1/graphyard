@@ -669,14 +669,21 @@ async function reclaimRoot(root: string, real: string, pass: PassState, report: 
 
 /** The name of this user's tsx compile cache directory in a temporary directory, or null where there are no uids. */
 export const tsxCacheName = (uid = process.getuid?.()) => uid === undefined ? null : `tsx-${uid}`;
-/** The regular files under `directory`, recursively, following no symlink: what a cache sweep may take. */
-async function cacheFiles(directory: string): Promise<string[]> {
+/**
+ * The regular files under `directory`, recursively, following no symlink and never leaving
+ * `device`: a directory mounted inside the walk is another filesystem's inodes, so a sweep that
+ * promises the scanned volume alone stops at its boundary. What a cache or store sweep may take.
+ */
+async function cacheFiles(directory: string, device: number): Promise<string[]> {
   const files: string[] = [];
   const entries = await readdir(directory, { withFileTypes: true }).catch(() => [] as Dirent[]);
   for (const entry of entries) {
     const path = join(directory, entry.name);
     if (entry.isFile()) files.push(path);
-    else if (entry.isDirectory()) files.push(...await cacheFiles(path));
+    else if (entry.isDirectory()) {
+      const info = await lstat(path).catch(() => null);
+      if (info?.dev === device) files.push(...await cacheFiles(path, device));
+    }
   }
   return files;
 }
@@ -714,8 +721,9 @@ async function reclaimPackageStores(root: string, real: string, pass: PassState,
 /**
  * This user's regular files under each of `names` (directories directly under `root`) that this
  * user owns, older than `maxAgeMs`, oldest first, within what the pass's entry and work bounds have
- * left; a file a live process holds open, a socket, a directory and the named directory itself are
- * never removed. The tsx cache and package store sweeps are this rule with their own bounds.
+ * left; a file a live process holds open, a socket, a directory, the named directory itself and
+ * anything under a filesystem mounted inside it are never removed. The tsx cache and package store
+ * sweeps are this rule with their own bounds.
  */
 async function reclaimAgedFiles(root: string, real: string, names: readonly string[], maxAgeMs: number, kind: TmpReclaimClass, pass: PassState, report: TmpReclaimReport) {
   const limit = pass.limit - report.removed.length;
@@ -724,7 +732,7 @@ async function reclaimAgedFiles(root: string, real: string, names: readonly stri
   for (const name of names) {
     const own = await lstat(join(root, name)).catch(() => null);
     if (!own?.isDirectory() || (pass.uid !== undefined && own.uid !== pass.uid)) continue;
-    for (const path of await cacheFiles(join(root, name))) {
+    for (const path of await cacheFiles(join(root, name), own.dev)) {
       let info;
       try { info = await lstat(path); } catch { continue; }
       if (!info.isFile() || (pass.uid !== undefined && info.uid !== pass.uid) || pass.now - info.mtimeMs < maxAgeMs) continue;
@@ -796,6 +804,8 @@ async function reclaimCompileCaches(root: string, real: string, pass: PassState,
  * its next packet there. Below headroom (`pass.cap` set, GY-1683) the root is also capped: this
  * user's entries are ranked by their newest tree write, the cap's newest are kept, and the rest are
  * due whatever their age — still never one a live process holds or names, which is kept and counted.
+ * Every due entry is ranked before the pass's entry bound applies: the bound takes the oldest of
+ * them all, never the first in directory order, and counts the rest as kept for the next pass.
  */
 async function reclaimRuntimeScratch(root: string, real: string, pass: PassState, report: TmpReclaimReport) {
   const maxAgeMs = pass.agentAge;
@@ -831,7 +841,6 @@ async function reclaimRuntimeScratch(root: string, real: string, pass: PassState
     const old: { path: string; mtime: number }[] = [];
     let held: Set<string> | null = null;
     for (const entry of entries) {
-      if (old.length >= limit) { report.kept++; continue; }
       const { path } = entry;
       report.scanned++;
       const capped = due.has(path);
@@ -844,7 +853,8 @@ async function reclaimRuntimeScratch(root: string, real: string, pass: PassState
       old.push({ path, mtime: time });
     }
     old.sort((first, second) => first.mtime - second.mtime);
-    for (const { path } of old) {
+    report.kept += Math.max(0, old.length - limit);
+    for (const { path } of old.slice(0, limit)) {
       const at = Date.now();
       pass.started ??= at;
       if (at > pass.started + pass.workMs) { report.kept++; continue; }
