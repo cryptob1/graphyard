@@ -8,7 +8,9 @@ import { wakeFromWebhook } from '../../src/store.js';
 import { GitHub, idleObservationSeconds, processJob } from '../../src/github.js';
 import { GitHubCacheStore } from '../../src/github-cache.js';
 import { GitHubChargeLedger } from '../../src/github-charges.js';
-import { type Principal, Refusal, type Work } from '../../src/model.js';
+import { type Principal, Refusal, type Work, observationWindowHold } from '../../src/model.js';
+import { filePostDeployFollowUps } from '../../src/master-verification.js';
+import { plainStatus } from '../../src/model/plain-status.js';
 import { conflictReworkBoundMs } from '../../src/model/approval.js';
 import * as deploymentStep from '../../src/daemon/deployment.js';
 import { DispatchReservedError, type HerdrAgent, type MasterConfig, type WorkerProfile, approverSessionName, assessContainment, containmentPhase, containmentQuarantines, decisionInput, dispatchWork, masterConfigSchema, reclaimableAgent } from '../../src/master.js';
@@ -172,6 +174,8 @@ export interface MainWatchLanding { sha: string; at: number; subject: string; au
 /** The reviewer App of the capped day (GY-1575): its change requests are the loop's to withdraw. */
 const cappedReviewerApp = { appId: 77_001, installationId: 77_002, slug: 'graphyard-reviewer', credentialFile: '/outside/reviewer.pem', boundAt: '2026-09-24T00:00:00Z' };
 export const supervisedAbsentEffects = ['decide', 'approver', 'docsSync', 'withdraw', 'resume', 'decisions', 'decisionChanges', 'replan', 'widenScope', 'withdrawReview', 'diagnostician', 'acceptance', 'planner', 'fileFaultClass', 'unblock', 'doctor'] as const;
+/** GY-1698: the intervention-pattern proof the windowed post-deploy criterion declares, as interventions/patterns.ts files it. */
+const windowedPatternProof = 'manual:post-deploy/intervention-pattern-escalation-build';
 export async function simulateDay(options: { hours: number; backlog?: boolean; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number; working?: { from: number; retryAt: number } }; regression?: ('approvers-left-open' | 'docs-syncs-left-open')[]; headless?: boolean; handApprovers?: boolean; stranded?: boolean | 'resume'; staleRework?: boolean; staleMerge?: number; capacityWait?: { from: number; to: number }; diagnosisLimit?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; workspaceFailure?: { item: number; until: number }; credentialBlocked?: { recovers: number; never: number }; blockers?: boolean; retrying?: { worker: number; approver: number }; limitMenu?: { worker: number; prose: number; twinLogin?: boolean }; unbounded?: { stuck: number; progressing: number; pushedOnce: number; rework: number }; starved?: { items: number[]; dropFirst: number }; docs?: { budget: { total: number; perPage: number } }; dispatchFailing?: { constant: number; changing: number; refuseBlocks: number; unblockAfterMs: number }; mainGuard?: MainGuardDay; containment?: { failUntil: number; slowUntil: number; refuseSettle?: number }; mechanical?: { applied: number; rejected: number }; slowDecisions?: { from: number; to: number; ms: number }; slowAnswers?: { from: number; to: number; ms: number }; slowObservation?: { from: number; to: number; attentionMs: number }; lateReading?: boolean; slowDeployment?: { from: number; to: number; observationMs: number }; selfProvision?: { redeployFails: { from: number; to: number } }; plan?: Partial<typeof basePlan>; github806?: boolean; remedies?: boolean;
   decomposition?: { broadItems: number[]; concurrency?: number };
   /** GY-1294: the loop's own write moves a diagnosed item's revision before its approver reads the diagnosis decision, so the decision settles stale. */
@@ -285,7 +289,15 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
    * pin's lift fails (performSelfUpgrade swallows it), so the pointer outlives the hold and the
    * executors restart through the stale launcher onto the pinned release.
    */
-  releaseLag?: { cutAgoMs: number; fleet?: { refuse?: { from: number; to: number }; strandAt?: number; stalePinAt?: number } } }) {
+  releaseLag?: { cutAgoMs: number; fleet?: { refuse?: { from: number; to: number }; strandAt?: number; stalePinAt?: number } };
+  /**
+   * GY-1698: item `item` declares a post-deploy verification whose reading is a rate per `windowDays`
+   * days (its proof an intervention pattern). `filedAfterMs` after its merge, and on every cycle after,
+   * the day files its follow-up exactly as master verify-deployment does (filePostDeployFollowUps over
+   * the day's items, the report's projection read for the pattern), releases the one it files at once,
+   * and samples the loop's view of it after every cycle (observationWindowDay).
+   */
+  observationWindow?: { item: number; windowDays: number; filedAfterMs: number } }) {
   const dayStart = clock.now();
   // A day may restage the shared scenario: the day-scoped view of the plan is what every fault
   // below arms from, while each test's own assertions still read the shared base plan.
@@ -492,13 +504,21 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
       plannedFiles: ['src/', 'tests/', 'docs/'],
     } : {};
     const criteria = [{ id: 'AC-1', text: plan.scoped.has(n) || (options.remedies && n === remedyItem) ? `Item ${n} behaves, with its fixture ${fixture(n)}` : `Item ${n} behaves`, proofs: [PROOF] },
-      ...(n === plan.attested ? [{ id: 'AC-2', text: `Item ${n} is attested`, proofs: [MANUAL] }] : [])];
+      ...(n === plan.attested ? [{ id: 'AC-2', text: `Item ${n} is attested`, proofs: [MANUAL] }] : []),
+      // GY-1698: the windowed post-deploy verification whose follow-up the day files and releases, as GY-1685 AC-1 declared it.
+      ...(options.observationWindow?.item === n ? [{ id: 'AC-2', text: `The cause of the recurring escalation interventions at the build stage is found and removed: the intervention report shows the escalation rate at the build stage below 3 per ${options.observationWindow.windowDays} days after item ${n} ships`, proofs: [windowedPatternProof] }] : [])];
     const smokeIntake = options.slowDeployment ? { policy: { checks: ['test', 'typecheck'], review: true, deploySmoke: true } } : {};
     let work = await engine.execute(principals.operator, 'create', null, { title: `Soak item ${n}`, plannedFiles: files(n), criteria, ...scopeIntake, ...docsIntake, ...broadIntake, ...smokeIntake }, id());
     if (n === plan.exhaustedReviewer) work = await engine.execute(principals.operator, 'reviewpolicy', work.id, { provider: 'agent', expectedPolicyRevision: work.policyRevision, reason: 'Reviewed by the reviewer bots',
       reviewerProfiles: [{ name: 'claude-reviewer', runtime: 'claude', reviewerApp: 'claude-reviewer' }, { name: 'cursor-reviewer', runtime: 'cursor', reviewerApp: 'cursor-reviewer' }] }, id());
     items.push(work);
   }
+  // ---- GY-1698: the windowed post-deploy follow-up the day files as master verify-deployment does, releases at once, and watches. ----
+  const windowDay = options.observationWindow ? {
+    parent: items[options.observationWindow.item - 1], windowDays: options.observationWindow.windowDays, proof: windowedPatternProof,
+    followUp: null as Work | null, filedAt: null as number | null, releasedAt: null as number | null, filings: 0, created: [] as string[],
+    samples: [] as { elapsed: number; at: string; stage: string; waiting: boolean | null; attention: string | null; attentionRows: number; sentence: string; dispatches: { requestedBy: string; at: string }[]; lease: string | null; sessions: number; masterLive: boolean; faults: string[]; escalations: string[] }[],
+  } : null;
   // GY-1315: the unreleased backlog the stale-release step reads every cold cycle, beside the day's items.
   const staleReleaseDay = { hand: [] as { key: string; decision: string; outcome: string }[], races: [] as { key: string; decision: string; outcome: string; at: number }[], handReleased: [] as { key: string; elapsed: number }[],
     backlog: [] as Work[], backlogReads: 0, steps: [] as { elapsed: number; ms: number; backlogReads: number }[] };
@@ -3103,8 +3123,41 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
         else lanesSeen.add(item.lane);
       }
     }
-    const open = (await store.list()).filter(item => item.stage !== 'done').length;
-    const step = loopWakeDay ? loopWakeDay.tickMs : open ? minute : 10 * minute;
+    // GY-1698: once the parent has merged and the filing delay has run, every cycle files the follow-up
+    // as master verify-deployment does after each deploy observation — the real filing over the day's
+    // items, idempotent on the follow-up's request id — and the loop's view of the follow-up is sampled.
+    if (windowDay) {
+      const listed = await store.list(), parent = listed.find(item => item.id === windowDay.parent.id)!, at = clock.now();
+      if (parent.delivery && at >= Date.parse(parent.delivery.mergedAt) + options.observationWindow!.filedAfterMs) {
+        // The report's projection for the pattern: a streak not yet begun, projected half a day before the merge bound, as GY-1689's was.
+        const projected = new Date(Date.parse(parent.delivery.mergedAt) + windowDay.windowDays * 24 * hour - 12 * hour).toISOString();
+        const checks = await filePostDeployFollowUps(parent, parent.delivery.mergeSha, listed,
+          async (input, key) => { const filed = await api(principals.operatorAgent, 'POST', 'work', input, key) as Work; windowDay.created.push(filed.key); return filed; }, new Date(at), async () => ({ since: null, projected }));
+        windowDay.filings += 1;
+        const key = checks.find(check => check.proof === windowDay.proof)?.followUp ?? null;
+        if (key && !windowDay.followUp) {
+          const filed = (await store.list()).find(item => item.key === key)!;
+          windowDay.followUp = filed; windowDay.filedAt = at;
+          // Released at once, days before its instant: GY-1689 was released three hours after its filing.
+          await engine.execute(principals.operator, 'ready', filed.id, {}, id()); windowDay.releasedAt = clock.now();
+        }
+      }
+      if (windowDay.followUp) {
+        const all = await store.list(), current = all.find(item => item.id === windowDay.followUp!.id)!, status = buildMasterStatus({ work: all, now: new Date(at).toISOString() }, [], []);
+        const row = status.work.find(entry => entry.key === current.key)!;
+        windowDay.samples.push({ elapsed, at: new Date(at).toISOString(), stage: current.stage, waiting: row.observationWindow?.waiting ?? null, attention: row.attention ?? null,
+          attentionRows: status.attentionItems.filter(entry => entry.subject === current.key).length, sentence: plainStatus(current, at).sentence,
+          dispatches: [...(current.actionQueue?.actions ?? []), ...(current.actionQueue?.history ?? [])].filter(action => action.kind === 'dispatch').map(action => ({ requestedBy: action.requestedBy, at: action.requestedAt })),
+          lease: current.lease?.owner ?? null, sessions: sessions.filter(session => session.key === current.key).length, masterLive: !!herdr.byName(config.masterAgentName!) || !!state.master.session,
+          faults: state.faults.instances.filter(instance => instance.subject === current.key).map(instance => instance.kind),
+          escalations: Object.values(state.actions).filter(action => action.kind === 'escalation' && action.work === current.key).map(action => action.detail) });
+        windowDay.followUp = current;
+      }
+    }
+    const opened = (await store.list()).filter(item => item.stage !== 'done');
+    // GY-1698: a day whose every open item is held on its observation window is as idle as one with nothing open.
+    const idle = !opened.length || (!!windowDay && opened.every(item => observationWindowHold(item, new Date(clock.now())) !== null));
+    const step = loopWakeDay ? loopWakeDay.tickMs : idle ? 10 * minute : minute;
     // The containment day's slow reads moved the clock inside the cycle; the day keeps one cycle a minute.
     elapsed += step; await moveClock(Math.max(0, step - fenced.drift)); fenced.drift = 0;
   }
@@ -3149,6 +3202,16 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     if (owner) await engine.execute(owner, 'release', leftover.id, { epoch: leftover.lease!.epoch }, id()).catch(() => {});
     await api(principals.operator, 'POST', `work/${leftover.key}/close`, { kind: 'obsolete', reason: 'soak: the day ended with this item unfinished; a later day must not dispatch it' }).catch(() => {});
   }
+  // GY-1698: the follow-up's final state is the day's record; left open, it is taken out of the plane like any leftover.
+  if (windowDay?.followUp) {
+    const leftover = (await store.list()).find(item => item.id === windowDay.followUp!.id)!;
+    windowDay.followUp = leftover;
+    if (leftover.stage !== 'done' && !leftover.closure) {
+      const owner = leftover.lease && everyone.find(principal => principal.id === leftover.lease!.owner);
+      if (owner) await engine.execute(owner, 'release', leftover.id, { epoch: leftover.lease!.epoch }, id()).catch(() => {});
+      await api(principals.operator, 'POST', `work/${leftover.key}/close`, { kind: 'obsolete', reason: 'soak: the day ended with its windowed follow-up unfinished; a later day must not dispatch it' }).catch(() => {});
+    }
+  }
   if (options.decomposition) {
     decompositionHistory.deliveredParents = (await store.list()).filter(item => item.children?.length && item.stage === 'done').map(item => item.key);
   }
@@ -3156,7 +3219,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   const tmp = { root: tmpRoot, backlog, deadOwned, cache, heldDirectory, liveOwned, hourly, passes: tmpPasses, peak: tmpPeak, reports: await readReclaimReports(reclaimRoot), left: readdirSync(tmpRoot) };
   if (process.env.SOAK_TRACE) console.error(`landing: ${github.landingChecks} checks over ${github.landingBases.size} bases, ${github.ancestorCompares} ancestor compares, ${github.blindCompares} blind compares; false landing refusals: ${landingRefusals.map(entry => `${entry.key}@+${Math.round(entry.elapsed / minute)}min ${entry.sha.slice(0, 12)}`).join(', ') || 'none'}`);
   engine.execute = executeAll;
-  return { unmatchedRefusals, capAnswers, readinessDay, supervisedDay, stuck, unboundedDay, provisionDay, promotion, throughput, reconciled, outside, items, final, github, sessions, docsSyncRuns, docsSyncRoot, lost, launches, violations, faulted, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, headless, herdr, hand, stranded, withdrawals, resumes, strandedLaunches, escalations, spent, attestations, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, guardReads, checkout, landingRefusals, foreignPane, previousWorktrees, closedLeased,
+  return { observationWindowDay: windowDay, unmatchedRefusals, capAnswers, readinessDay, supervisedDay, stuck, unboundedDay, provisionDay, promotion, throughput, reconciled, outside, items, final, github, sessions, docsSyncRuns, docsSyncRoot, lost, launches, violations, faulted, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, headless, herdr, hand, stranded, withdrawals, resumes, strandedLaunches, escalations, spent, attestations, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, guardReads, checkout, landingRefusals, foreignPane, previousWorktrees, closedLeased,
     mergeQueuePosts, config, refused, decideCalls, restarted, approverPanes, failing, herdrClosed: herdr.closed, diagnosisModel: settings.model, diagnosisRuns: diagnosed, baseBreak, capacityRefused, capacityLaunched, capacityWaiters,
     decided, misreads, prompts, screens, heldAccounts, approverAccounts, retryReset, limitMenuDay, menuReset, menuNotice, exitedLive, exitedClosed, exitedRowsSeen, reassign, workspaceFailures, workspaceCooled, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, fenced, mergeStallSightings, master, baseFailure,
     blockerEvents, blockerProbes, githubStatusReads, credentialReads, blockerRecords, blockerDecisions, blockerActions, blockerKeysPeak, attempts, lanesSeen, laneApplications, approverWorks, approverDecisions, failover, webhook, remedies, observeRequests, starvation, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size }, mechanical: { ledger, botRounds, misclassified, reviewHolds }, shared, charges: { ...charged, b: charged.b.length, instancesSeen: [...charged.instancesSeen], restarts: chargeRestarts },
