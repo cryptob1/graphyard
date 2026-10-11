@@ -7,6 +7,13 @@ import { testSummary, type CaseSummary } from './test-runs.js';
 import { caseRunner } from './e2e/case.js';
 import type { Store } from './store.js';
 
+/**
+ * GY-1708: scenario id the capacity fault-class filing cites as `e2e:capacity-limit-redispatch`.
+ * Registered as a revision from `e2e/cases/capacity-limit-redispatch.json` via `graphyard e2e sync`
+ * (or an admin's defineScenario); create refuses filings that cite it before that revision exists.
+ */
+export const capacityLimitRedispatchScenario = 'capacity-limit-redispatch';
+
 export const scenarioSchema = z.object({
   id: z.string().regex(/^[a-z0-9][a-z0-9._-]*$/).max(100),
   title: z.string().min(1).max(200),

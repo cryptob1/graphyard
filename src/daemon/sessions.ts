@@ -97,6 +97,16 @@ function agentReason(profile: WorkerProfile, agent: HerdrAgent, work: readonly W
   return `Herdr agent ${profile.agentName} is ${status} with no pane to close; remedy: relaunch the session or restart Herdr on the host`;
 }
 
+/**
+ * GY-1708: whether a profile's agent still consumes the role's machine bound. A finished agent no
+ * live lease owns is reclaimable, so the mid-attempt exhaustion redispatch may take the name; an
+ * agent that still owns a live lease (or is not finished) blocks a second session of the same role.
+ */
+export function occupiesRoleBound(profile: WorkerProfile, agent: HerdrAgent | undefined, work: readonly Work[], now: number): boolean {
+  if (!agent) return false;
+  return !reclaimableAgent(profile, agent, work, now);
+}
+
 /** Retry a refused action on a widening cycle interval rather than on every pass. */
 export function readyToRetry(previous: DaemonAction | undefined, cycle: number, maxBackoffCycles = 30) {
   if (!previous) return true;

@@ -1,0 +1,40 @@
+{
+  "id": "capacity-limit-redispatch",
+  "title": "Mid-attempt provider limit exhaustion redispatches without losing work",
+  "description": "When an approver, reviewer or worker session hits a model-account limit mid-attempt, the control plane records capacity.exhausted, holds the spent account, and redispatches the in-flight attempt so its work and any recorded judgement survive. This optional case registers the capacity-limit-redispatch scenario so fault-class filings may cite e2e:capacity-limit-redispatch.",
+  "tags": ["capacity", "api"],
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "http",
+      "name": "create an item the registered scenario may pin",
+      "method": "POST",
+      "path": "/api/work",
+      "body": {
+        "title": "Capacity redispatch pin {{case}} {{run}}",
+        "description": "Created by the capacity-limit-redispatch E2E case to prove the scenario revision is registered.",
+        "type": "chore",
+        "priority": 3,
+        "criteria": [{ "id": "AC-1", "text": "The capacity-limit-redispatch scenario is registered", "proofs": ["manual:capacity-limit-redispatch-registered"] }],
+        "plannedFiles": ["src/scenarios.ts"],
+        "policy": { "checks": ["test"], "review": false }
+      },
+      "status": 200,
+      "expect": [
+        { "path": "stage", "equals": "backlog" },
+        { "path": "key", "type": "string" },
+        { "path": "title", "equals": "Capacity redispatch pin {{case}} {{run}}" }
+      ],
+      "save": { "id": "id", "key": "key" }
+    },
+    {
+      "kind": "http",
+      "name": "list the created item",
+      "method": "GET",
+      "path": "/api/work",
+      "status": 200,
+      "expect": [{ "path": "", "includes": { "id": "{{id}}", "key": "{{key}}" } }]
+    }
+  ]
+}

@@ -316,3 +316,69 @@ export function describeCapacity(role: CapacityRole, accounts: readonly Capacity
 export function standingCapacity(work: { capacity?: CapacityState | null }, role?: CapacityRole): CapacityEscalation[] {
   return (work.capacity?.escalations ?? []).filter(entry => !role || entry.role === role);
 }
+
+/**
+ * GY-1708: how one worker epoch sits on the capacity and pipeline ledgers after a mid-attempt
+ * exhaustion — one exhaustion, one attempt row, released once. A double-counted lease or attempt
+ * shows up as two rows or an open attempt that should have ended.
+ */
+export function workerAttemptLedger(
+  work: {
+    capacity?: CapacityState | null;
+    pipeline?: { attempts?: readonly { epoch: number; end: string | null }[] } | null;
+  },
+  epoch: number,
+) {
+  const exhaustions = (work.capacity?.exhaustions ?? []).filter(entry => entry.role === 'worker' && entry.epoch === epoch);
+  const attempts = (work.pipeline?.attempts ?? []).filter(entry => entry.epoch === epoch);
+  return {
+    exhaustions: exhaustions.length,
+    attempts: attempts.length,
+    released: attempts.filter(entry => entry.end === 'released').length,
+    open: attempts.filter(entry => entry.end === null).length,
+    preservedCommit: exhaustions.find(entry => entry.partialWork.state === 'committed')?.partialWork.commit ?? null,
+  };
+}
+
+/**
+ * GY-1708: whether a mid-attempt exhaustion left the spent epoch ended once with its partial work
+ * on the record, so the redispatch claims the next epoch without losing that work.
+ */
+export function redispatchPreservesAttempt(
+  work: {
+    capacity?: CapacityState | null;
+    pipeline?: { attempts?: readonly { epoch: number; end: string | null }[] } | null;
+  },
+  spentEpoch: number,
+): { ok: boolean; detail: string } {
+  const ledger = workerAttemptLedger(work, spentEpoch);
+  if (ledger.exhaustions !== 1) return { ok: false, detail: `expected one exhaustion for epoch ${spentEpoch}, found ${ledger.exhaustions}` };
+  if (ledger.attempts !== 1) return { ok: false, detail: `expected one attempt row for epoch ${spentEpoch}, found ${ledger.attempts}` };
+  if (ledger.released !== 1 || ledger.open !== 0) return { ok: false, detail: `epoch ${spentEpoch} must be released once, not left open or double-ended` };
+  const exhaustion = (work.capacity?.exhaustions ?? []).find(entry => entry.role === 'worker' && entry.epoch === spentEpoch)!;
+  if (exhaustion.partialWork.state === 'committed' && !exhaustion.partialWork.commit) {
+    return { ok: false, detail: 'committed partial work must name its commit' };
+  }
+  return {
+    ok: true,
+    detail: exhaustion.partialWork.state === 'committed'
+      ? `epoch ${spentEpoch} ended once; work kept at ${exhaustion.partialWork.commit}`
+      : `epoch ${spentEpoch} ended once; partial work ${exhaustion.partialWork.state}`,
+  };
+}
+
+/**
+ * GY-1708: a held account must not be chosen for another launch of the same role while its hold
+ * stands (unknown reset = still held). Selection and dispatch read the same rule.
+ */
+export function accountHeldForRole(
+  held: Record<string, { until?: string; resetsAt?: string | null }>,
+  account: string,
+  now: number,
+): boolean {
+  const entry = held[account];
+  if (!entry) return false;
+  const until = entry.until ?? entry.resetsAt;
+  if (!until) return true;
+  return Date.parse(until) > now;
+}
