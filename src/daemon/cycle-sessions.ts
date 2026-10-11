@@ -181,7 +181,29 @@ export async function closeStep(cycle: Cycle) {
         performed.push(await record(state, key, { kind: 'failover', work: item.key, principal: profile.principal, epoch, state: 'failed', detail: `${item.key} epoch ${epoch} exhausted its account (${signal.reason}) but could not be failed over: ${message(error)}`, attempts, cycle: state.cycle }, now(), effects.persist));
       }
     });
-    for (const session of await effects.launchedSessions?.().catch(() => [] as LaunchedSession[]) ?? []) await isolate('failover', open.find(candidate => candidate.key === session.work) ?? null, session.agentName, async () => {
+    // GY-1705: idle reviewer/producer screens past the start bound share one pause — start every
+    // motion read before awaiting any, so twenty idle panes cost ~one pause, not twenty, keeping
+    // the cycle under the 30s cycle-p90 invariant. Marker is the work key (in every launch prompt),
+    // never the request id (reviewer/producer prompts do not include it).
+    const launched = await effects.launchedSessions?.().catch(() => [] as LaunchedSession[]) ?? [];
+    const idleMotions = new Map<string, Promise<'still' | 'started' | 'moving' | 'unreadable'>>();
+    if (effects.sessionOutput) {
+      for (const session of launched) {
+        const agent = listed(session.agentName), item = open.find(candidate => candidate.key === session.work);
+        if (!agent || !item) continue;
+        const key = failoverKey(session.role, item, session.record), previous = state.actions[key];
+        if (cycle.launcher.busy(key) || previous?.state === 'done' || !readyToRetry(previous, state.cycle)) continue;
+        const running = item.sessions?.filter(entry => entry.state === 'running' && (entry.kind === 'review' || entry.kind === 'proof')) ?? [];
+        const handle = session.requestId ? running.find(entry => entry.id === session.requestId)
+          : running.find(entry => entry.agentName === session.agentName || (!!session.pane && entry.pane === session.pane));
+        const startedAt = handle?.startedAt ? Date.parse(handle.startedAt) : Number.NaN;
+        const pastStart = Number.isFinite(startedAt) && clock - startedAt >= launchStartMs(config);
+        if ((agent.agent_status ?? '') === 'idle' && pastStart && !idleMotions.has(session.record)) {
+          idleMotions.set(session.record, screenMotion(() => effects.sessionOutput!(agent, stallScreenLines), session.work, effects.idleScreenPauseMs));
+        }
+      }
+    }
+    for (const session of launched) await isolate('failover', open.find(candidate => candidate.key === session.work) ?? null, session.agentName, async () => {
       const agent = listed(session.agentName), item = open.find(candidate => candidate.key === session.work);
       if (!agent || !item) return;
       const key = failoverKey(session.role, item, session.record), previous = state.actions[key];
@@ -198,8 +220,7 @@ export async function closeStep(cycle: Cycle) {
       // not enough — Herdr reports a long or silent command as idle while it still runs (GY-1705).
       let ended = status === 'done';
       if (!ended && !noticeSignal && status === 'idle' && pastStart && effects.sessionOutput) {
-        const marker = session.requestId ?? session.agentName;
-        const motion = await screenMotion(() => effects.sessionOutput!(agent, stallScreenLines), marker, effects.idleScreenPauseMs);
+        const motion = await (idleMotions.get(session.record) ?? screenMotion(() => effects.sessionOutput!(agent, stallScreenLines), session.work, effects.idleScreenPauseMs));
         ended = motion === 'still';
       }
       const signal = noticeSignal ?? silentPaneExhaustion({

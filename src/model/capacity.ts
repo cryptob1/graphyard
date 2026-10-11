@@ -265,6 +265,25 @@ export function headlessTimeoutLimit(
   const resets = signals.map(entry => entry.resetsAt).filter((at): at is string => !!at).sort();
   return { reason: signals.at(-1)!.reason, resetsAt: resets[0] ?? null };
 }
+/**
+ * GY-1705. The all-timeout limit together with the account of the attempt that emitted a readable
+ * notice (last such attempt). A primary on registry account A that times out without a notice, then
+ * a fallback on another login that prints the limit, must charge the fallback — never retain A's
+ * selection across attempts that did not carry the signal.
+ */
+export function headlessTimeoutLimitCharge(
+  attempts: readonly { result: string; detail: string; events?: readonly LimitRunEvent[] | readonly { kind: string; error?: string | null; text?: string }[]; account?: string | null }[],
+  now: number,
+): { limit: ExhaustionSignal; account: string | null } | null {
+  const limit = headlessTimeoutLimit(attempts, now);
+  if (!limit) return null;
+  let account: string | null = null;
+  for (const attempt of attempts) {
+    if (attempt.result !== 'timeout') continue;
+    if (runTimeoutLimit(attempt.events ?? [], attempt.detail, now) && attempt.account) account = attempt.account;
+  }
+  return { limit, account };
+}
 /** Marker the doctor run detail carries so the next interval waits out a provider-limit hold (GY-1705). */
 export const doctorLimitUntilMarker = 'provider limit until ';
 /** When the latest doctor run is waiting out a provider-limit hold, that instant; otherwise null. */

@@ -3,7 +3,7 @@
 // item through the normal two-party decision.
 import { createHash } from 'node:crypto';
 import { createSchema, type Work } from '../model.js';
-import { headlessTimeoutLimit, providerLimit, type ExhaustionSignal, type LimitRunEvent } from '../model/capacity.js';
+import { headlessTimeoutLimitCharge, providerLimit, type ExhaustionSignal, type LimitRunEvent } from '../model/capacity.js';
 import { isClosed } from '../model/closure.js';
 import { planeWideRefusal } from '../model/blocker-class.js';
 import { closesFaultClass, faultClassMeaning, openFaultClassItem, type FaultClass, type FaultInstance, type FaultKind } from '../model/fault-classes.js';
@@ -268,15 +268,15 @@ export const diagnosisEvidenceMax = 100_000;
 
 /** Run the primary attempt, and the fallback once when the primary returns no valid diagnosis. */
 async function runDiagnosis(diagnostician: DiagnosticianEffects, subject: DiagnosisSubject, prompt: string): Promise<Outcome> {
-  const runs: DiagnosisRecord['runs'] = [], limits: (ExhaustionSignal | null)[] = [], timed: { result: string; detail: string; events: LimitRunEvent[] }[] = [];
-  let account: string | null = null;
+  const runs: DiagnosisRecord['runs'] = [], limits: (ExhaustionSignal | null)[] = [], timed: { result: string; detail: string; events: LimitRunEvent[]; account: string | null }[] = [];
+  let limitedAccount: string | null = null;
   const timeoutMs = diagnostician.settings.timeoutMinutes * 60_000, now = () => Date.now();
   for (const attempt of ['primary', 'fallback'] as const) {
     const startedAt = new Date().toISOString();
     let chosen: DiagnosticianRun;
     try { chosen = await diagnostician.runner(attempt, subject); }
     catch (error) { runs.push({ runtime: 'none', model: attempt, startedAt, endedAt: new Date().toISOString(), result: 'spawn', detail: clip(`No ${attempt} runner: ${message(error)}`, 500) }); limits.push(null); continue; }
-    if (chosen.account) account = chosen.account;
+    const attemptAccount = chosen.account ?? null;
     const run = chosen.runner.start(prompt, { cwd: diagnostician.cwd, env: { GRAPHYARD_PI_ROLE: diagnosticianRole }, tool: graphyardTools.diagnose, timeoutMs,
       validate: payload => {
         const parsed = diagnosisPayloadSchema.parse(payload);
@@ -288,23 +288,25 @@ async function runDiagnosis(diagnostician: DiagnosticianEffects, subject: Diagno
     const detail = clip(result.ok ? `Diagnosed as ${result.payload.faultClass}: ${result.payload.cause}` : result.failure.detail, 500);
     const outcome = result.ok ? 'diagnosed' : result.failure.reason;
     runs.push({ runtime: chosen.runtime, model: chosen.model, startedAt, endedAt: new Date().toISOString(), result: outcome, detail });
-    if (result.ok) return { runs, diagnosis: result.payload, account };
+    if (result.ok) return { runs, diagnosis: result.payload, account: attemptAccount };
     // Only the provider's own error is read — the last error a run that made no call ended on, or
     // (GY-1705) the retry/stream errors of a run stopped at its terminal-event bound. An invalid
     // payload's detail is the agent's submission, and an exit's carries stderr, which can mix in
     // the agent's output: a limit phrase there must not turn a real failure into a wait.
-    timed.push({ result: outcome, detail, events: [...run.events] });
+    timed.push({ result: outcome, detail, events: [...run.events], account: attemptAccount });
     if (result.failure.reason === 'timeout') limits.push(null); // resolved from `timed` below
     else {
       const providerError = result.failure.reason === 'no-payload' ? /\(last error: ([\s\S]*)\)$/.exec(result.failure.detail)?.[1] : undefined;
-      limits.push(providerError ? providerLimit(providerError, now()) : null);
+      const signal = providerError ? providerLimit(providerError, now()) : null;
+      limits.push(signal);
+      if (signal && attemptAccount) limitedAccount = attemptAccount;
     }
     if (result.failure.reason === 'cancelled') break;
   }
-  const fromTimeout = headlessTimeoutLimit(timed, now());
+  const fromTimeout = headlessTimeoutLimitCharge(timed, now());
   const limited = fromTimeout ? null : (limits.length > 0 && limits.every(Boolean) ? limits as ExhaustionSignal[] : null);
-  const signal = fromTimeout ?? (limited ? { reason: limited.at(-1)!.reason, resetsAt: limited.map(entry => entry.resetsAt).filter((at): at is string => !!at).sort()[0] ?? null } : null);
-  return { runs, diagnosis: null, limit: signal, account };
+  const signal = fromTimeout?.limit ?? (limited ? { reason: limited.at(-1)!.reason, resetsAt: limited.map(entry => entry.resetsAt).filter((at): at is string => !!at).sort()[0] ?? null } : null);
+  return { runs, diagnosis: null, limit: signal, account: fromTimeout?.account ?? (limited ? limitedAccount : null) };
 }
 
 const iso = (at: number) => new Date(at).toISOString();

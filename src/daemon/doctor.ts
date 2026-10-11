@@ -5,7 +5,7 @@ import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { Work } from '../model.js';
 import { createSchema } from '../model.js';
-import { doctorLimitRetryAt, doctorLimitUntilMarker, headlessTimeoutLimit, type ExhaustionSignal, type LimitRunEvent } from '../model/capacity.js';
+import { doctorLimitRetryAt, doctorLimitUntilMarker, headlessTimeoutLimitCharge, type ExhaustionSignal, type LimitRunEvent } from '../model/capacity.js';
 import { isClosed } from '../model/closure.js';
 import { planeWideRefusal } from '../model/blocker-class.js';
 import { RefusedResponse } from '../model/refusal.js';
@@ -195,15 +195,14 @@ export function boundedInput(input: DoctorInput, limit = 100_000): DoctorInput &
 
 /** Run the primary attempt, and the fallback once when the primary returns no valid report. */
 async function runDoctor(effects: DoctorEffects, prompt: string): Promise<{ runs: DoctorRunRecord['runs']; report: DoctorReportPayload | null; limit?: ExhaustionSignal | null; account?: string | null }> {
-  const runs: DoctorRunRecord['runs'] = [], timed: { result: string; detail: string; events: LimitRunEvent[] }[] = [];
-  let account: string | null = null;
+  const runs: DoctorRunRecord['runs'] = [], timed: { result: string; detail: string; events: LimitRunEvent[]; account: string | null }[] = [];
   const timeoutMs = effects.settings.timeoutMinutes * 60_000;
   for (const attempt of ['primary', 'fallback'] as const) {
     if (stopping) { runs.push({ runtime: 'none', model: attempt, result: 'cancelled', detail: stopping.slice(0, 500) }); break; }
     let chosen: Awaited<ReturnType<DoctorEffects['runner']>>;
     try { chosen = await effects.runner(attempt); }
     catch (error) { runs.push({ runtime: 'none', model: attempt, result: 'spawn', detail: `No ${attempt} runner: ${message(error)}`.slice(0, 500) }); continue; }
-    if (chosen.account) account = chosen.account;
+    const attemptAccount = chosen.account ?? null;
     try {
       if (stopping) { runs.push({ runtime: chosen.runtime, model: chosen.model, result: 'cancelled', detail: stopping.slice(0, 500) }); break; }
       const run = chosen.runner.start(prompt, { cwd: effects.cwd, env: { ...effects.env, GRAPHYARD_PI_ROLE: doctorRole }, tool: doctorTool, timeoutMs,
@@ -213,8 +212,8 @@ async function runDoctor(effects: DoctorEffects, prompt: string): Promise<{ runs
       const detail = (result.ok ? `${result.payload.findings.length} finding(s), ${result.payload.actions.length} action(s), ${result.payload.filed.length} to file` : result.failure.detail).slice(0, 500);
       const outcome = result.ok ? 'reported' : result.failure.reason;
       runs.push({ runtime: chosen.runtime, model: chosen.model, result: outcome, detail });
-      if (!result.ok) timed.push({ result: outcome, detail, events: [...run.events] });
-      if (result.ok) return { runs, report: result.payload, account };
+      if (!result.ok) timed.push({ result: outcome, detail, events: [...run.events], account: attemptAccount });
+      if (result.ok) return { runs, report: result.payload, account: attemptAccount };
       if (result.failure.reason === 'cancelled') break;
     } catch (error) {
       runs.push({ runtime: chosen.runtime, model: chosen.model, result: 'spawn', detail: `The ${attempt} run failed to start: ${message(error)}`.slice(0, 500) });
@@ -223,7 +222,8 @@ async function runDoctor(effects: DoctorEffects, prompt: string): Promise<{ runs
       await Promise.resolve().then(() => chosen.release?.(`the ${attempt} doctor run ended`)).catch(() => {});
     }
   }
-  return { runs, report: null, limit: headlessTimeoutLimit(timed, Date.now()), account };
+  const charged = headlessTimeoutLimitCharge(timed, Date.now());
+  return { runs, report: null, limit: charged?.limit ?? null, account: charged?.account ?? null };
 }
 
 /** One doctor run this process has in flight, settled: a test's way to wait for it. */
@@ -521,9 +521,12 @@ export async function doctorStep(cycle: Cycle) {
       current.findings = (outcome.report?.findings ?? []).slice(-50);
       current.actions = (outcome.report?.actions ?? []).slice(-50);
       if (!outcome.report && outcome.limit) {
+        // Settlement time, not the launch clock: the round can run for two timeouts after doctorStep
+        // snapped `clock`, and the hold / named-reset comparison must start when the limit is known.
+        const settledAt = now();
         const named = outcome.limit.resetsAt ? Date.parse(outcome.limit.resetsAt) : Number.NaN;
-        const until = new Date(Number.isFinite(named) && named > clock ? named : clock + 3_600_000).toISOString();
-        if (outcome.account) await effects.holdAccount?.(outcome.account, { at: new Date(clock).toISOString(), resetsAt: outcome.limit.resetsAt, reason: outcome.limit.reason, role: 'doctor', profile: doctorRole, work: null });
+        const until = new Date(Number.isFinite(named) && named > settledAt ? named : settledAt + 3_600_000).toISOString();
+        if (outcome.account) await effects.holdAccount?.(outcome.account, { at: new Date(settledAt).toISOString(), resetsAt: outcome.limit.resetsAt, reason: outcome.limit.reason, role: 'doctor', profile: doctorRole, work: null });
         current.state = 'failed';
         current.detail = `no report: ${outcome.runs.map(entry => `${entry.model} ${entry.result}`).join('; ')}; ${doctorLimitUntilMarker}${until}`.slice(0, 1000);
         state.doctor.unposted = [...new Set([...state.doctor.unposted, current.at])].slice(-40);

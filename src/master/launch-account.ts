@@ -91,11 +91,14 @@ export function repeatedLimitAccount(work: Pick<Work, 'capacity'> & Partial<Pick
 }
 
 /**
- * Before a worker launch of `work` (GY-1582): an account the item's consecutive launches each ended
- * on with its limit notice is not chosen a third time. Each notice holds its account as it is read,
- * but a hold that was charged elsewhere, or lapsed on an assumed reset, would let selection hand the
- * spent account back; here it is held again, until the last notice's reset or the assumed hour, so
- * the attempt is routed to an eligible account. Returns the hold placed, or null when none was needed.
+ * Before a launch of `work` for `role` (GY-1582, GY-1705): an account the item's consecutive
+ * launches of that role each ended on with its limit notice is not chosen again. Each notice holds
+ * its account as it is read, but a hold that was charged elsewhere, or lapsed on an assumed reset,
+ * would let selection hand the spent account back; here it is held again, until the last notice's
+ * reset or the assumed hour, so the attempt is routed to an eligible account. Workers call this from
+ * dispatch; approvers from the loop's approver launch; reviewers and producers from the failover
+ * relaunch that runs before their next `selectAccount`. Returns the hold placed, or null when none
+ * was needed.
  */
 export async function holdRepeatedLimitAccount(config: Pick<MasterConfig, 'credentialFile'> & Partial<Pick<MasterConfig, 'environments' | 'url' | 'hostId'>>, work: Pick<Work, 'key' | 'capacity'> & Partial<Pick<Work, 'epoch'>>, now = Date.now(), report?: Parameters<typeof recordObservedExhaustion>[4], role: CapacityRole = 'worker'): Promise<{ account: string; hold: ObservedExhaustion } | null> {
   const repeated = repeatedLimitAccount(work, now, role);
