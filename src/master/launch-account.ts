@@ -16,8 +16,8 @@ export const sessionSelectionKey = (role: LaunchRole, profile: string, work: str
 export interface SessionIdentity { work: string; epoch?: number; group?: string | null }
 
 /**
- * The account a role's session spent, for the hold its limit notice places (GY-1582). A worker
- * attempt is charged to the account its own launch record names — the account and runtime the
+ * The account a role's session spent, for the hold its limit notice places (GY-1582, GY-1705). A
+ * worker attempt is charged to the account its own launch record names — the account and runtime the
  * dispatch actually started it on — never to the profile's nominal account or to a selection the
  * environment log kept from an earlier launch: a profile named for one runtime can run on another
  * account entirely when its own are spent. Only a launch record of another attempt (or none) falls
@@ -25,6 +25,8 @@ export interface SessionIdentity { work: string; epoch?: number; group?: string 
  * by its own identity — its item and proof group, of which only one session is pending at a time —
  * never from the profile's latest selection, which a later concurrent session on another account
  * overwrites; a selection recorded before sessions were kept is used only when it was for this item.
+ * An approver, doctor or diagnostician is charged to the registry selection recorded for that role
+ * and profile (and, for an approver, the item), never to a nominal profile account (GY-1705).
  */
 export async function sessionAccount(root: string, config: Pick<MasterConfig, 'credentialFile'>, role: CapacityRole, profile: string, session?: SessionIdentity): Promise<{ environment: string | null; kind: string | null } | null> {
   if (role === 'worker' && session?.epoch !== undefined) {
@@ -51,26 +53,39 @@ export const repeatedLimitWindowMs = 2 * 3_600_000;
 export const repeatedLimitLaunches = 2;
 
 /**
- * The account an item's latest worker launches each ended on, when the last `repeatedLimitLaunches`
- * of its quota exhaustions all name it, were recorded by consecutive launch epochs ending at the item's
- * latest launch, and the latest is within `repeatedLimitWindowMs`. An attempt interrupted for another
- * cause, or one that ended without a limit notice (a gap in the epochs), ends the run, as does one on
- * no named account. A repeat whose last notice named a reset that has since passed is over: the
- * account has recovered, and only a new notice after that reset starts another.
+ * The account an item's latest launches of `role` each ended on (GY-1582, GY-1705), when the last
+ * `repeatedLimitLaunches` of its quota exhaustions all name it, were recorded by consecutive launch
+ * epochs (workers) or consecutive request ids (pane roles) ending at the item's latest, and the
+ * latest is within `repeatedLimitWindowMs`. An attempt interrupted for another cause, or one that
+ * ended without a limit notice (a gap), ends the run, as does one on no named account. A repeat
+ * whose last notice named a reset that has since passed is over: the account has recovered, and
+ * only a new notice after that reset starts another. Defaults to worker — the dispatch path.
  */
-export function repeatedLimitAccount(work: Pick<Work, 'capacity'> & Partial<Pick<Work, 'epoch'>>, now = Date.now()): { account: string; records: ExhaustionRecord[] } | null {
-  const worker = (work.capacity?.exhaustions ?? []).filter(entry => entry.role === 'worker');
-  const last = worker.at(-1);
-  if (!last?.account || (last.cause ?? 'quota') !== 'quota' || typeof last.epoch !== 'number' || now - Date.parse(last.at) > repeatedLimitWindowMs) return null;
-  // The item was launched again after its last notice, and that launch ended some other way.
-  if (typeof work.epoch === 'number' && work.epoch !== last.epoch) return null;
+export function repeatedLimitAccount(work: Pick<Work, 'capacity'> & Partial<Pick<Work, 'epoch'>>, now = Date.now(), role: CapacityRole = 'worker'): { account: string; records: ExhaustionRecord[] } | null {
+  const ofRole = (work.capacity?.exhaustions ?? []).filter(entry => entry.role === role);
+  const last = ofRole.at(-1);
+  if (!last?.account || (last.cause ?? 'quota') !== 'quota' || now - Date.parse(last.at) > repeatedLimitWindowMs) return null;
   if (last.resetsAt && Date.parse(last.resetsAt) <= now) return null;
+  if (role === 'worker') {
+    if (typeof last.epoch !== 'number') return null;
+    // The item was launched again after its last notice, and that launch ended some other way.
+    if (typeof work.epoch === 'number' && work.epoch !== last.epoch) return null;
+    const records: ExhaustionRecord[] = [];
+    for (const entry of [...ofRole].reverse()) {
+      const next = records[0]?.epoch ?? last.epoch + 1;
+      if (entry.epoch === next && records.length) continue; // one launch's notice reported twice is one launch
+      if (entry.account !== last.account || (entry.cause ?? 'quota') !== 'quota' || entry.epoch !== next - 1) break;
+      records.unshift(entry);
+    }
+    return records.length >= repeatedLimitLaunches ? { account: last.account, records } : null;
+  }
+  // Pane roles: consecutive quota exhaustions on the same account within the window, newest last.
   const records: ExhaustionRecord[] = [];
-  for (const entry of [...worker].reverse()) {
-    const next = records[0]?.epoch ?? last.epoch + 1;
-    if (entry.epoch === next && records.length) continue; // one launch's notice reported twice is one launch
-    if (entry.account !== last.account || (entry.cause ?? 'quota') !== 'quota' || entry.epoch !== next - 1) break;
+  for (const entry of [...ofRole].reverse()) {
+    if (entry.account !== last.account || (entry.cause ?? 'quota') !== 'quota') break;
+    if (records.some(prior => prior.requestId && prior.requestId === entry.requestId)) continue;
     records.unshift(entry);
+    if (records.length >= repeatedLimitLaunches) break;
   }
   return records.length >= repeatedLimitLaunches ? { account: last.account, records } : null;
 }
@@ -82,11 +97,14 @@ export function repeatedLimitAccount(work: Pick<Work, 'capacity'> & Partial<Pick
  * spent account back; here it is held again, until the last notice's reset or the assumed hour, so
  * the attempt is routed to an eligible account. Returns the hold placed, or null when none was needed.
  */
-export async function holdRepeatedLimitAccount(config: Pick<MasterConfig, 'credentialFile'> & Partial<Pick<MasterConfig, 'environments' | 'url' | 'hostId'>>, work: Pick<Work, 'key' | 'capacity'> & Partial<Pick<Work, 'epoch'>>, now = Date.now(), report?: Parameters<typeof recordObservedExhaustion>[4]): Promise<{ account: string; hold: ObservedExhaustion } | null> {
-  const repeated = repeatedLimitAccount(work, now);
+export async function holdRepeatedLimitAccount(config: Pick<MasterConfig, 'credentialFile'> & Partial<Pick<MasterConfig, 'environments' | 'url' | 'hostId'>>, work: Pick<Work, 'key' | 'capacity'> & Partial<Pick<Work, 'epoch'>>, now = Date.now(), report?: Parameters<typeof recordObservedExhaustion>[4], role: CapacityRole = 'worker'): Promise<{ account: string; hold: ObservedExhaustion } | null> {
+  const repeated = repeatedLimitAccount(work, now, role);
   if (!repeated || (await observedExhaustions(config, now))[repeated.account]) return null;
   const last = repeated.records.at(-1)!;
-  const hold = await recordObservedExhaustion(config, repeated.account, { at: new Date(now).toISOString(), resetsAt: last.resetsAt, role: 'worker', profile: last.profile, work: work.key,
-    reason: `${work.key}'s last ${repeated.records.length} worker launches (epochs ${repeated.records.map(entry => entry.epoch ?? '?').join(', ')}) each ended on ${repeated.account}'s limit notice: ${last.reason}` }, now, report);
+  const launches = role === 'worker'
+    ? `worker launches (epochs ${repeated.records.map(entry => entry.epoch ?? '?').join(', ')})`
+    : `${role} sessions (${repeated.records.map(entry => entry.requestId ?? entry.at).join(', ')})`;
+  const hold = await recordObservedExhaustion(config, repeated.account, { at: new Date(now).toISOString(), resetsAt: last.resetsAt, role, profile: last.profile, work: work.key,
+    reason: `${work.key}'s last ${repeated.records.length} ${launches} each ended on ${repeated.account}'s limit notice: ${last.reason}` }, now, report);
   return { account: repeated.account, hold };
 }

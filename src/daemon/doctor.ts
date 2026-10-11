@@ -5,6 +5,7 @@ import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { Work } from '../model.js';
 import { createSchema } from '../model.js';
+import { doctorLimitRetryAt, doctorLimitUntilMarker, headlessTimeoutLimit, type ExhaustionSignal, type LimitRunEvent } from '../model/capacity.js';
 import { isClosed } from '../model/closure.js';
 import { planeWideRefusal } from '../model/blocker-class.js';
 import { RefusedResponse } from '../model/refusal.js';
@@ -18,7 +19,7 @@ import { installUnitsFile } from '../install/units.js';
 import { coordinatorCheckoutRoot } from '../master/profiles.js';
 import { harnessDrift, writeHarnessPermissions } from '../harness.js';
 import { selectFleetSession } from '../fleet.js';
-import { heldAwareProbe } from '../master/environments.js';
+import { heldAwareProbe, recordEnvironmentLog, selectionKey } from '../master/environments.js';
 import { registryHeadlessLaunch, registryRunner, runConfinement } from '../runner/roles.js';
 import { piRunner } from '../runner/pi.js';
 import { doctorActionSchema, doctorFindingsSchema, doctorFiledSchema, doctorRunRecordSchema, type DoctorAction, type DoctorFinding, type DoctorFiled, type DoctorPendingFile, type DoctorRunRecord } from './state.js';
@@ -96,16 +97,18 @@ export const doctorEffects = (config: MasterConfig, root: string, post: Operator
     env: { GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: config.operatorAgent!.credentialFile, GRAPHYARD_HOST_ID: config.hostId, GRAPHYARD_DOCTOR_CLI: config.cliPath },
     runner: async attempt => {
       if (attempt === 'primary') {
-        const fleet = await selectFleetSession(config, doctorRole, { name: doctorRole, principal: config.operatorAgent!.id }, await heldAwareProbe(config)); // an account held here, or its twin, is spent (GY-1574)
+        const fleet = await selectFleetSession(config, doctorRole, { name: doctorRole, principal: config.operatorAgent!.id }, await heldAwareProbe(config)); // held accounts and twins are spent (GY-1574)
         if (fleet) {
           const launch = registryHeadlessLaunch(fleet.account);
-          // The doctor's command allowlist is the Pi extension's: a registry doctor role on any other runtime would run unguarded, so it is not used.
-          if (launch.command === 'pi') return { runner: registryRunner(fleet.account, [...doctorSessionArgs]), runtime: launch.command, model: launch.model, release: fleet.release };
+          if (launch.command === 'pi') {
+            await recordEnvironmentLog(config, fleet.health ? [fleet.health] : [], fleet.skipped, { key: selectionKey('doctor', doctorRole), environment: fleet.account.name, kind: fleet.account.kind, at: new Date().toISOString(), work: null }).catch(() => {});
+            return { runner: registryRunner(fleet.account, [...doctorSessionArgs]), runtime: launch.command, model: launch.model, account: fleet.account.name, release: fleet.release };
+          }
           await fleet.release(`the registry doctor role names runtime ${launch.command}; the doctor runs only on Pi, where its command allowlist applies`);
         }
       }
       const model = attempt === 'primary' ? settings.model : settings.fallbackModel;
-      return { runner: piRunner({ command: settings.command, model, args: [...doctorSessionArgs], confine: runConfinement() }), runtime: 'pi', model };
+      return { runner: piRunner({ command: settings.command, model, args: [...doctorSessionArgs], confine: runConfinement() }), runtime: 'pi', model, account: null };
     },
     file: (input, key) => post('POST', 'work', input, key) as Promise<Work>,
     recordRun: run => post('POST', 'doctor', run),
@@ -127,8 +130,8 @@ export interface DoctorEffects {
   cwd: string;
   /** The session's environment: the control plane URL and the operator-agent credential by path, never the token itself. */
   env: Record<string, string>;
-  /** The primary run's runner (the registry's doctor role, else Pi on `model`), or the fallback's (Pi on `fallbackModel`). */
-  runner: (attempt: 'primary' | 'fallback') => Promise<{ runner: Runner; runtime: string; model: string; release?: (reason: string) => Promise<unknown> }>;
+  /** The primary run's runner (the registry's doctor role, else Pi on `model`), or the fallback's (Pi on `fallbackModel`). `account` is the registry selection the hold charges (GY-1705). */
+  runner: (attempt: 'primary' | 'fallback') => Promise<{ runner: Runner; runtime: string; model: string; account?: string | null; release?: (reason: string) => Promise<unknown> }>;
   /** Files the fault item, as the master's operator-agent identity on `master create`'s route. */
   file: (input: DoctorFileInput, key: string) => Promise<Work>;
   /** Posts one run summary to the control plane, so the dashboard's Doctor panel and `master status` show it. */
@@ -145,10 +148,11 @@ export interface DoctorInput {
 
 /** The interval one doctor run waits for, from the settings in force. */
 export const doctorIntervalMs = (settings: Pick<DoctorSettings, 'intervalMinutes'>) => settings.intervalMinutes * 60_000;
-/** Whether a doctor run is due: none is in flight and the last one started past the interval. */
+/** Whether a doctor run is due: none is in flight, no provider-limit hold stands (GY-1705), and the last one started past the interval. */
 export function doctorDue(state: { doctor: { runs: DoctorRunRecord[] } }, clock: number, settings: Pick<DoctorSettings, 'intervalMinutes' | 'enabled'>) {
   if (!settings.enabled) return false;
   if (state.doctor.runs.some(entry => entry.state === 'running')) return false;
+  if (doctorLimitRetryAt(state.doctor.runs, clock)) return false;
   const last = state.doctor.runs.at(-1);
   return !last || clock - Date.parse(last.at) >= doctorIntervalMs(settings);
 }
@@ -190,30 +194,27 @@ export function boundedInput(input: DoctorInput, limit = 100_000): DoctorInput &
 }
 
 /** Run the primary attempt, and the fallback once when the primary returns no valid report. */
-async function runDoctor(effects: DoctorEffects, prompt: string) {
-  const runs: DoctorRunRecord['runs'] = [], timeoutMs = effects.settings.timeoutMinutes * 60_000;
+async function runDoctor(effects: DoctorEffects, prompt: string): Promise<{ runs: DoctorRunRecord['runs']; report: DoctorReportPayload | null; limit?: ExhaustionSignal | null; account?: string | null }> {
+  const runs: DoctorRunRecord['runs'] = [], timed: { result: string; detail: string; events: LimitRunEvent[] }[] = [];
+  let account: string | null = null;
+  const timeoutMs = effects.settings.timeoutMinutes * 60_000;
   for (const attempt of ['primary', 'fallback'] as const) {
     if (stopping) { runs.push({ runtime: 'none', model: attempt, result: 'cancelled', detail: stopping.slice(0, 500) }); break; }
     let chosen: Awaited<ReturnType<DoctorEffects['runner']>>;
     try { chosen = await effects.runner(attempt); }
     catch (error) { runs.push({ runtime: 'none', model: attempt, result: 'spawn', detail: `No ${attempt} runner: ${message(error)}`.slice(0, 500) }); continue; }
-    // The selected runner is released however its run ends, and a start that throws is a failed
-    // attempt the fallback follows, never a leaked registry session.
+    if (chosen.account) account = chosen.account;
     try {
-      // Shutdown may begin while selection was awaited — before the run is the cancellable one
-      // (`active`) — so recheck here: a stopping loop starts no doctor, and the finally below
-      // releases the selected session without starting it.
-      if (stopping) {
-        runs.push({ runtime: chosen.runtime, model: chosen.model, result: 'cancelled', detail: stopping.slice(0, 500) });
-        break;
-      }
+      if (stopping) { runs.push({ runtime: chosen.runtime, model: chosen.model, result: 'cancelled', detail: stopping.slice(0, 500) }); break; }
       const run = chosen.runner.start(prompt, { cwd: effects.cwd, env: { ...effects.env, GRAPHYARD_PI_ROLE: doctorRole }, tool: doctorTool, timeoutMs,
         validate: payload => doctorReportPayloadSchema.parse(payload) });
       active = run;
       const result = await run.result();
-      runs.push({ runtime: chosen.runtime, model: chosen.model, result: result.ok ? 'reported' : result.failure.reason,
-        detail: (result.ok ? `${result.payload.findings.length} finding(s), ${result.payload.actions.length} action(s), ${result.payload.filed.length} to file` : result.failure.detail).slice(0, 500) });
-      if (result.ok) return { runs, report: result.payload };
+      const detail = (result.ok ? `${result.payload.findings.length} finding(s), ${result.payload.actions.length} action(s), ${result.payload.filed.length} to file` : result.failure.detail).slice(0, 500);
+      const outcome = result.ok ? 'reported' : result.failure.reason;
+      runs.push({ runtime: chosen.runtime, model: chosen.model, result: outcome, detail });
+      if (!result.ok) timed.push({ result: outcome, detail, events: [...run.events] });
+      if (result.ok) return { runs, report: result.payload, account };
       if (result.failure.reason === 'cancelled') break;
     } catch (error) {
       runs.push({ runtime: chosen.runtime, model: chosen.model, result: 'spawn', detail: `The ${attempt} run failed to start: ${message(error)}`.slice(0, 500) });
@@ -222,7 +223,7 @@ async function runDoctor(effects: DoctorEffects, prompt: string) {
       await Promise.resolve().then(() => chosen.release?.(`the ${attempt} doctor run ended`)).catch(() => {});
     }
   }
-  return { runs, report: null };
+  return { runs, report: null, limit: headlessTimeoutLimit(timed, Date.now()), account };
 }
 
 /** One doctor run this process has in flight, settled: a test's way to wait for it. */
@@ -512,22 +513,28 @@ export async function doctorStep(cycle: Cycle) {
     faults: state.faults.instances.slice(-40).reverse().map(instance => `${instance.at} ${instance.kind} on ${instance.subject}: ${instance.text}`),
   };
   const prompt = doctorPrompt(cycle.config, input);
-  live = runDoctor(doctor, prompt).catch(error => ({ runs: [{ runtime: 'none', model: 'none', result: 'exit', detail: message(error).slice(0, 500) }], report: null }))
+  live = runDoctor(doctor, prompt).catch(error => ({ runs: [{ runtime: 'none', model: 'none', result: 'exit', detail: message(error).slice(0, 500) }], report: null as DoctorReportPayload | null, limit: null, account: null }))
     .then(async outcome => {
       const current = state.doctor.runs.find(entry => entry.at === run.at);
       if (!current || current.state !== 'running') return;
       current.runs = outcome.runs;
       current.findings = (outcome.report?.findings ?? []).slice(-50);
       current.actions = (outcome.report?.actions ?? []).slice(-50);
+      if (!outcome.report && outcome.limit) {
+        const named = outcome.limit.resetsAt ? Date.parse(outcome.limit.resetsAt) : Number.NaN;
+        const until = new Date(Number.isFinite(named) && named > clock ? named : clock + 3_600_000).toISOString();
+        if (outcome.account) await effects.holdAccount?.(outcome.account, { at: new Date(clock).toISOString(), resetsAt: outcome.limit.resetsAt, reason: outcome.limit.reason, role: 'doctor', profile: doctorRole, work: null });
+        current.state = 'failed';
+        current.detail = `no report: ${outcome.runs.map(entry => `${entry.model} ${entry.result}`).join('; ')}; ${doctorLimitUntilMarker}${until}`.slice(0, 1000);
+        state.doctor.unposted = [...new Set([...state.doctor.unposted, current.at])].slice(-40);
+        await record(state, `doctor:${current.at}`, { kind: 'fault', work: null, principal: null, state: 'failed', detail: `The doctor run hit a provider limit (${outcome.limit.reason}); next run waits until ${until}`, attempts: 1, cycle: state.cycle }, now(), effects.persist, null);
+        await postRun(cycle, doctor, current, now);
+        return;
+      }
       current.detail = outcome.report ? 'reported' : `no report: ${outcome.runs.map(entry => `${entry.model} ${entry.result}`).join('; ')}`.slice(0, 1000);
       if (!outcome.report) {
         current.state = 'failed';
-        // Queued for posting before the fallible record, as the apply-failure path below does: a
-        // failed run is never reaped as lost, so the marker is what keeps it retryable.
         state.doctor.unposted = [...new Set([...state.doctor.unposted, current.at])].slice(-40);
-        // GY-1318: its models died or the loop's own shutdown cancelled it — the run is still failed,
-        // posted and retried, and the next interval's run re-covers, but the loop did not fail to
-        // cycle: no fault kind, so no loop fault instance (as GY-1295 did for allowlist refusals).
         await record(state, `doctor:${current.at}`, { kind: 'fault', work: null, principal: null, state: 'failed', detail: `The doctor run returned no report: ${current.detail}`, attempts: 1, cycle: state.cycle }, now(), effects.persist, null);
         await postRun(cycle, doctor, current, now);
         return;

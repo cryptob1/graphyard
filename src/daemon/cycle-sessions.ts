@@ -1,7 +1,8 @@
 // Concern: cycle steps 1–1d and 1g — close finished sessions, fail over exhausted ones, answer blocked prompts, recover dead workers and exited sessions; the resume waits they hand to live in cycle-resume.ts.
 import type { Work } from '../model.js';
-import { detectRetryingExhaustion, type CapacityRole, type ExhaustionSignal } from '../model/capacity.js';
+import { detectRetryingExhaustion, silentPaneExhaustion, type CapacityRole, type ExhaustionSignal } from '../model/capacity.js';
 import { detectRuntimeExhaustion } from '../master/environments.js';
+import { launchStartMs } from '../master/launch.js';
 import { classifyRuntimePrompt, containmentQuarantines, continueAfterDecline, type EscalationSession, escalationProfile, type HerdrAgent, isProfileSession, ownLoginAccounts, profileAccount, type RuntimePrompt, type SessionIdentity, type WorkerProfile } from '../master.js';
 import { containmentPhase } from '../model/containment.js';
 import { standingEscalations } from '../model/escalation.js';
@@ -185,10 +186,21 @@ export async function closeStep(cycle: Cycle) {
       const key = failoverKey(session.role, item, session.record), previous = state.actions[key];
       // Its relaunch is still on the launcher: the failover is in flight, not due again.
       if (cycle.launcher.busy(key) || previous?.state === 'done' || !readyToRetry(previous, state.cycle)) return;
-      const signal = await notice(agent, profileRuntime(session.role, session.profile));
+      const noticeSignal = await notice(agent, profileRuntime(session.role, session.profile));
+      const running = item.sessions?.filter(entry => entry.state === 'running' && (entry.kind === 'review' || entry.kind === 'proof')) ?? [];
+      const handle = session.requestId ? running.find(entry => entry.id === session.requestId)
+        : running.find(entry => entry.agentName === session.agentName || (!!session.pane && entry.pane === session.pane));
+      const startedAt = handle?.startedAt ? Date.parse(handle.startedAt) : Number.NaN;
+      const signal = noticeSignal ?? silentPaneExhaustion({
+        listed: true,
+        everWorking: agent.agent_status === 'working' || handle?.observed === 'working',
+        hasOutcome: !!handle?.outcome,
+        notice: null,
+        pastStartBound: Number.isFinite(startedAt) && clock - startedAt >= launchStartMs(config),
+      });
       if (!signal) return;
       const attempts = (previous?.attempts ?? 0) + 1, resets = signal.resetsAt ? `resets ${signal.resetsAt}` : 'reset time unknown';
-      await record(state, key, { kind: 'failover', work: item.key, principal: null, state: 'started', detail: `${session.role} session ${session.agentName} for ${item.key} ${onNotice(agent)} its provider's limit notice: ${signal.reason}`, attempts, cycle: state.cycle }, now(), effects.persist);
+      await record(state, key, { kind: 'failover', work: item.key, principal: null, state: 'started', detail: `${session.role} session ${session.agentName} for ${item.key} ${noticeSignal ? `${onNotice(agent)} its provider's limit notice` : 'ended without working'}: ${signal.reason}`, attempts, cycle: state.cycle }, now(), effects.persist);
       try {
         const { account, runtime } = await held(session.role, session.profile, item, signal, { work: item.key, group: session.group });
         await effects.reportCapacity!(item, { event: 'exhausted', role: session.role, ...(session.requestId ? { requestId: session.requestId } : {}), profile: session.profile, account, runtime, reason: signal.reason, resetsAt: signal.resetsAt,

@@ -1,5 +1,6 @@
 // Concern: approver sessions — launch, supervise, fail over, close and record how they ended, for the loop's own and hand-launched approvers.
 import type { Work } from '../model.js';
+import { silentPaneExhaustion, type ExhaustionSignal } from '../model/capacity.js';
 import { approverRuntime } from '../master/autonomy.js';
 import { type ScreenMotion, approverStallVerdict, boundLaunch, judgeApproverStall, screenMotion, stallScreenLines } from '../master/approver-stall.js';
 import { launchStartMs } from '../master/launch.js';
@@ -264,19 +265,33 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
     return `${launched?.replaced ? `${launched.replaced}; ` : ''}launched independent approver session ${watch.agentName}${watch.account ? ` on ${watch.account}` : ''} (launch ${watch.launches} of ${maxApproverLaunches})`;
   };
   /**
-   * An approver that stopped on its provider's limit notice (GY-182) has judged nothing and never
-   * will: its account is held until the reset the notice names, the exhaustion is recorded against
-   * the decision, the session is closed, and the same decision goes to the next eligible account
-   * in the same cycle. The launch it spent is not counted against the decision's bound.
+   * An approver that stopped on its provider's limit notice (GY-182), or that Herdr lists past its
+   * start bound never having reported working, with no outcome and no notice (GY-1705), has judged
+   * nothing and never will: its account is held until the reset the notice names (or the assumed
+   * hour), the exhaustion is recorded against the decision, the session is closed, and the same
+   * decision goes to the next eligible account in the same cycle. The launch it spent is not
+   * counted against the decision's bound.
    */
   const approverExhausted = async (item: Work, watch: ApprovalWatch) => {
-    if (!effects.sessionOutput || !effects.reportCapacity || !watch.agentName) return false;
+    if (!effects.reportCapacity || !watch.agentName) return false;
     const agent = (await sessions()).agents.find(candidate => candidate.name === watch.agentName);
     if (!agent) return false;
     // Judged against the approver's own runtime's provider messages: free prose about a quota is
     // not a provider limit notice, whatever it mentions (GY-421). A working approver counts only
     // when its runtime is retrying on the notice (GY-973).
-    const signal = await Promise.resolve(effects.sessionOutput(agent)).then(output => output ? sessionExhaustion(output, stoppedStates.includes(agent.agent_status ?? ''), watch.runtime ?? approverRuntime(config), clock) : null, () => null);
+    const notice = effects.sessionOutput
+      ? await Promise.resolve(effects.sessionOutput(agent)).then(output => output ? sessionExhaustion(output, stoppedStates.includes(agent.agent_status ?? ''), watch.runtime ?? approverRuntime(config), clock) : null, () => null)
+      : null;
+    const handle = (item.sessions ?? []).find(entry => entry.id === approverSessionId(watch.decision) && entry.state === 'running');
+    const launchedAt = watch.launchedAt ? Date.parse(watch.launchedAt) : Number.NaN;
+    const pastStart = Number.isFinite(launchedAt) && clock - launchedAt >= launchStartMs(config);
+    const signal: ExhaustionSignal | null = notice ?? silentPaneExhaustion({
+      listed: true,
+      everWorking: agent.agent_status === 'working' || handle?.observed === 'working',
+      hasOutcome: !!handle?.outcome || !!watch.settledAt,
+      notice: null,
+      pastStartBound: pastStart,
+    });
     if (!signal) return false;
     const session = `${watch.decision}:${watch.launchedAt ?? watch.launches}`;
     const key = failoverKey('approver', item, session), previous = state.actions[key];

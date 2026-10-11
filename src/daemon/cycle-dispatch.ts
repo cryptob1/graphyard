@@ -147,6 +147,9 @@ export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profi
       'escalation-handler': open.filter(item => waitingEscalations.has(item.key)),
       // No item waits on the master role: its capacity is the loop's own wait, not an item's (GY-898).
       master: [],
+      // Doctor and diagnostician spend quota but no item waits on them (GY-1705).
+      doctor: [],
+      diagnostician: [],
     };
     for (const capacity of capacities) {
       const key = capacityKey(capacity.role), previous = state.actions[key];

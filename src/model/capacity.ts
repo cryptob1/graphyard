@@ -22,8 +22,10 @@ import { z } from 'zod';
 export const capacityRoles = ['worker', 'reviewer', 'producer'] as const;
 /** The roles that judge or request decisions; their sessions hold no slot, but spend quota the same way. */
 export const decisionRoles = ['approver', 'escalation-handler'] as const;
-/** Every role whose session can run out of provider quota: each fails over, and each skips an account any of them saw spent. The master role rides the same holds (GY-898). */
-export const quotaRoles = [...capacityRoles, ...decisionRoles, 'master'] as const;
+/** Headless loop roles that spend the same provider accounts through the agent registry (GY-1705). No item waits on them. */
+export const headlessQuotaRoles = ['doctor', 'diagnostician'] as const;
+/** Every role whose session can run out of provider quota: each fails over, and each skips an account any of them saw spent. The master role rides the same holds (GY-898). Doctor and diagnostician holds validate the same way (GY-1705). */
+export const quotaRoles = [...capacityRoles, ...decisionRoles, 'master', ...headlessQuotaRoles] as const;
 export type CapacityRole = typeof quotaRoles[number];
 
 /** What a session's own output says about its provider quota. */
@@ -197,6 +199,75 @@ export function providerLimit(error: string, now: number): ExhaustionSignal | nu
   const text = error.replace(/\s+/g, ' ').trim();
   if (!text || !(providerStatus429.test(text) || /\btoo many requests\b/i.test(text) || exhaustionNotices.some(notice => notice.test(text)))) return null;
   return { reason: text.slice(0, 300), resetsAt: parseResetTime(text, now) };
+}
+
+/**
+ * GY-1705. A pane-role session (approver, reviewer or producer) Herdr still lists that never reported
+ * working, ended with no outcome and no readable provider notice past its role's start bound: the
+ * account is treated as spent with an assumed reset (the unknown-reset hold), so selection fails
+ * over instead of handing the same spent account back. A session that worked, that still has an
+ * outcome, that printed a notice, or that has not yet passed its start bound is not this signal.
+ */
+export const silentPaneExhaustionReason =
+  'session ended without working, without an outcome and without a readable provider limit notice; account treated as spent until an assumed reset';
+export function silentPaneExhaustion(input: {
+  listed: boolean;
+  everWorking: boolean;
+  hasOutcome: boolean;
+  notice: ExhaustionSignal | null;
+  pastStartBound: boolean;
+}): ExhaustionSignal | null {
+  if (!input.listed || input.everWorking || input.hasOutcome || input.notice || !input.pastStartBound) return null;
+  return { reason: silentPaneExhaustionReason, resetsAt: null };
+}
+
+/** One structured event a headless run keeps, as far as limit detection reads it (GY-1705). `error` may be a boolean on tool-end events; only string errors are limit text. */
+export type LimitRunEvent = { kind: string; error?: string | boolean | null; text?: string };
+/**
+ * GY-1705. Whether a run stopped at its terminal-event bound carried its provider's own limit
+ * signal in its retry markers, stream/message errors, stderr, or the timeout detail. The text is
+ * the provider's — never the agent's prose — so `providerLimit` may match anywhere in it.
+ */
+export function runTimeoutLimit(events: readonly LimitRunEvent[], detail: string, now: number): ExhaustionSignal | null {
+  const texts: string[] = [];
+  for (const event of events) {
+    if ((event.kind === 'retry' || event.kind === 'message') && typeof event.error === 'string') texts.push(event.error);
+    if (event.kind === 'stderr' && event.text) texts.push(event.text);
+  }
+  if (detail) texts.push(detail);
+  for (const text of texts) {
+    const signal = providerLimit(text, now);
+    if (signal) return signal;
+  }
+  return null;
+}
+/**
+ * GY-1705. When every started attempt of a headless round stopped at its bound and each carries a
+ * readable limit, the round is a provider limit (the last signal, with the earliest known reset).
+ * An all-timeout round with no readable limit stays a session-liveness failure for the caller.
+ */
+export function headlessTimeoutLimit(
+  attempts: readonly { result: string; detail: string; events?: readonly LimitRunEvent[] | readonly { kind: string; error?: string | null; text?: string }[] }[],
+  now: number,
+): ExhaustionSignal | null {
+  const started = attempts.filter(attempt => attempt.result !== 'spawn' && attempt.result !== 'cancelled');
+  if (!started.length || !started.every(attempt => attempt.result === 'timeout')) return null;
+  const limits = started.map(attempt => runTimeoutLimit(attempt.events ?? [], attempt.detail, now));
+  if (!limits.every(Boolean)) return null;
+  const signals = limits as ExhaustionSignal[];
+  const resets = signals.map(entry => entry.resetsAt).filter((at): at is string => !!at).sort();
+  return { reason: signals.at(-1)!.reason, resetsAt: resets[0] ?? null };
+}
+/** Marker the doctor run detail carries so the next interval waits out a provider-limit hold (GY-1705). */
+export const doctorLimitUntilMarker = 'provider limit until ';
+/** When the latest doctor run is waiting out a provider-limit hold, that instant; otherwise null. */
+export function doctorLimitRetryAt(runs: readonly { state: string; detail: string }[], clock: number): string | null {
+  const last = runs.at(-1);
+  if (!last || last.state === 'running') return null;
+  const until = last.detail.includes(doctorLimitUntilMarker)
+    ? last.detail.slice(last.detail.indexOf(doctorLimitUntilMarker) + doctorLimitUntilMarker.length).split(/[\s;]/)[0]
+    : null;
+  return until && Date.parse(until) > clock ? until : null;
 }
 
 /** How an interrupted attempt's uncommitted work was kept, or that there was none to keep. */
