@@ -24,7 +24,7 @@ The uat environment's `GRAPHYARD_TOKEN` (`GRAPHYARD_RELEASE_TOKEN`) files holds 
 
 Required: `typecheck`, `test` (`ci.yml`), under ten minutes; soak/timing files (`releaseCandidateTests`), container and chart checks per candidate. UAT's `zero-touch` suite (`up --agent --goal` against a fake GitHub) must merge a first item; any human step but App approval blocks promotion.
 
-`deploy/helm/exercise.sh` waits for the upgrade's rollout, forwards to the new ReplicaSet's Ready pod before backing up and retries transient API failures; an API staying unreachable ends the job's log with `api METHOD /api/PATH failed after 15 attempts: status STATUS, body: BODY`.
+`deploy/helm/exercise.sh` waits for the upgrade's rollout, forwards to the new ReplicaSet's Ready pod before backing up and retries transient API failures (an empty reply, a reset connection, a non-2xx status or a 2xx with no body); an API staying unreachable ends the job's log with `api METHOD /api/PATH failed after 15 attempts: status STATUS, body: BODY`.
 
 ### One delivery path
 

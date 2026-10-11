@@ -107,7 +107,7 @@ const retryBounds = () => {
   return { attempts: Number(settings![1]), wait: Number(settings![2]) };
 };
 
-/** A server whose replies follow a script: 'empty' closes the socket, 'reset' resets it, a number is that status with a body. */
+/** A server whose replies follow a script: 'empty' closes the socket, 'reset' resets it, 'blank' is a 200 with a zero-byte body, a number is that status with a body. */
 async function scriptedServer(replies: (string | number)[]) {
   const seen: { method: string; url: string; key: string | undefined }[] = [];
   const server: Server = createServer((request, response) => {
@@ -115,16 +115,18 @@ async function scriptedServer(replies: (string | number)[]) {
     const reply = replies.length > 1 ? replies.shift()! : replies[0];
     if (reply === 'empty') request.socket.destroy();
     else if (reply === 'reset') request.socket.resetAndDestroy();
+    else if (reply === 'blank') { response.writeHead(200, { 'Content-Type': 'application/json' }); response.end(); }
     else { response.writeHead(reply as number, { 'Content-Type': 'application/json' }); response.end(reply === 200 ? '[{"id":"w1","key":"GY-1"}]' : 'rolling'); }
   });
   await new Promise<void>(done => server.listen(0, '127.0.0.1', done));
   return { seen, port: (server.address() as AddressInfo).port, close: () => new Promise<void>(done => server.close(() => done())) };
 }
 
-test('unit:exercise-api-retries-and-names-failure — the exercise\'s api helper retries an empty reply, a reset connection and a non-2xx status under one Idempotency-Key a bounded number of times, hands a 2xx body on unchanged, and when the bound is exhausted ends on a last line naming the request, the status and the body it received instead of feeding a JSON projection', { skip: curl ? false : 'curl is not installed' }, async () => {
+test('unit:exercise-api-retries-and-names-failure — the exercise\'s api helper retries an empty reply, a reset connection, a non-2xx status and a 2xx carrying no body under one Idempotency-Key a bounded number of times, hands a 2xx body on unchanged, and when the bound is exhausted ends on a last line naming the request, the status and the body it received instead of feeding a JSON projection', { skip: curl ? false : 'curl is not installed' }, async () => {
   const api = shellFunction('api');
   assert.ok(!api.includes('curl -fsS'), 'the helper reads the status itself instead of letting -f discard the reply');
   assert.match(api, /-w '%\{http_code\}'/, 'the status is read from curl');
+  assert.match(api, /2\[0-9\]\[0-9\]\) if \[ -s "\$reply" \]; then cat "\$reply"/, 'a 2xx reply is handed on only when it carries a body; a zero-byte 2xx is a failed attempt');
   assert.match(api, /for attempt in \$\(seq 1 "\$API_ATTEMPTS"\)/, 'attempts are bounded by API_ATTEMPTS');
   assert.match(api, /sleep "\$API_RETRY_WAIT"/, 'failed attempts wait API_RETRY_WAIT seconds');
   assert.ok(api.indexOf('diagnose') < api.indexOf('failed after $API_ATTEMPTS attempts'), 'the diagnosis precedes the failure line, which is the last thing printed');
@@ -140,15 +142,16 @@ test('unit:exercise-api-retries-and-names-failure — the exercise\'s api helper
       return { ...result, seen: server.seen };
     } finally { await server.close(); }
   };
-  const recovered = await run(['empty', 'reset', 503, 200], '6');
+  const recovered = await run(['empty', 'reset', 503, 'blank', 200], '6');
   assert.equal(recovered.status, 0, recovered.stderr);
   assert.equal(recovered.stdout, '[{"id":"w1","key":"GY-1"}]', 'the 2xx body is printed unchanged');
-  assert.equal(recovered.seen.length, 4, 'one request per attempt until a 2xx');
+  assert.equal(recovered.seen.length, 5, 'one request per attempt until a 2xx with a body');
   assert.ok(recovered.seen.every(r => r.method === 'GET' && r.url === '/api/work' && r.key && r.key === recovered.seen[0].key), 'retries repeat the request under one Idempotency-Key');
-  assert.deepEqual(recovered.stderr.trim().split('\n').map(line => line.replace(/got status .*/, 'got status …')), ['api GET /api/work: attempt 1 of 6 got status …', 'api GET /api/work: attempt 2 of 6 got status …', 'api GET /api/work: attempt 3 of 6 got status …']);
+  assert.deepEqual(recovered.stderr.trim().split('\n').map(line => line.replace(/got status .*/, 'got status …')), ['api GET /api/work: attempt 1 of 6 got status …', 'api GET /api/work: attempt 2 of 6 got status …', 'api GET /api/work: attempt 3 of 6 got status …', 'api GET /api/work: attempt 4 of 6 got status …']);
   assert.match(recovered.stderr, /attempt 1 of 6 got status 000, curl: \(52\) Empty reply from server/);
   assert.match(recovered.stderr, /attempt 2 of 6 got status 000, curl: \(56\)/);
   assert.match(recovered.stderr, /attempt 3 of 6 got status 503$/m);
+  assert.match(recovered.stderr, /attempt 4 of 6 got status 200 with an empty body$/m, 'an HTTP 200 with a zero-byte body is a failed attempt, named as such');
   const unreachable = await run(['empty'], '3');
   assert.equal(unreachable.status, 1); assert.equal(unreachable.stdout, '', 'no body reaches stdout when the bound is exhausted');
   assert.equal(unreachable.seen.length, 3, 'the bound holds');
@@ -158,6 +161,11 @@ test('unit:exercise-api-retries-and-names-failure — the exercise\'s api helper
   const refused = await run([503], '2');
   assert.equal(refused.status, 1);
   assert.equal(refused.stderr.trim().split('\n').at(-1), 'api GET /api/work failed after 2 attempts: status 503, body: rolling');
+  // The reply this item was filed on: the upgraded release answering 200 with nothing in it. It never reaches stdout, so nothing downstream parses it.
+  const blank = await run(['blank'], '2');
+  assert.equal(blank.status, 1); assert.equal(blank.stdout, '', 'an empty 2xx body never reaches a projection');
+  assert.equal(blank.seen.length, 2, 'a persistently empty 2xx exhausts the same bound');
+  assert.equal(blank.stderr.trim().split('\n').at(-1), 'api GET /api/work failed after 2 attempts: status 200 with an empty body, body: (empty)');
 });
 
 /** A `kubectl get rs,pods -o json` list: an old ReplicaSet scaled to zero whose long-ready pod is terminating, and the upgraded one. */

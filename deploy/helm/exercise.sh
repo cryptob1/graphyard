@@ -92,13 +92,14 @@ forward() {
   done
   diagnose; echo 'port-forward never became reachable' >&2; exit 1
 }
-# api METHOD PATH TOKEN [BODY] — one request to the forwarded release, printing the body of a 2xx
-# reply. An empty reply, a reset connection or a non-2xx status is a failed request, never a body:
-# while the release rolls, the forward can reach a pod that is terminating or not yet serving, so
-# the request is retried under the same Idempotency-Key, API_ATTEMPTS times API_RETRY_WAIT seconds
-# apart, and when the bound is exhausted the exercise prints its diagnosis and exits on a last
-# line naming the request, the status and the body it received, instead of handing an empty body
-# to a JSON projection (GY-1690).
+# api METHOD PATH TOKEN [BODY] — one request to the forwarded release, printing the non-empty body
+# of a 2xx reply. An empty reply, a reset connection, a non-2xx status or a 2xx carrying no body at
+# all is a failed request, never a body: every route the exercise calls answers with the engine's
+# JSON, and while the release rolls the forward can reach a pod that is terminating or not yet
+# serving, so the request is retried under the same Idempotency-Key, API_ATTEMPTS times
+# API_RETRY_WAIT seconds apart, and when the bound is exhausted the exercise prints its diagnosis
+# and exits on a last line naming the request, the status and the body it received, instead of
+# handing an empty body to a JSON projection (GY-1690).
 api() {
   local method="$1" path="$2" token="$3" body="${4:-}" key reply status attempt rc received
   key="$(node -p "require('node:crypto').randomUUID()")"; reply="$(mktemp)"
@@ -106,7 +107,9 @@ api() {
     rc=0
     status="$(curl -sS -o "$reply" -w '%{http_code}' -X "$method" "http://127.0.0.1:$LOCAL_PORT/api/$path" -H "Authorization: Bearer $token" -H 'Content-Type: application/json' -H "Idempotency-Key: $key" ${body:+--data "$body"} 2>"$reply.err")" || rc=$?
     if [ "$rc" -ne 0 ]; then status="$status, $(tr -d '\n' <"$reply.err")"; fi
-    case "$status" in 2[0-9][0-9]) cat "$reply"; rm -f "$reply" "$reply.err"; return 0;; esac
+    case "$status" in
+      2[0-9][0-9]) if [ -s "$reply" ]; then cat "$reply"; rm -f "$reply" "$reply.err"; return 0; fi; status="$status with an empty body";;
+    esac
     echo "api $method /api/$path: attempt $attempt of $API_ATTEMPTS got status $status" >&2
     if [ "$attempt" -lt "$API_ATTEMPTS" ]; then sleep "$API_RETRY_WAIT"; fi
   done
