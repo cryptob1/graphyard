@@ -38,6 +38,7 @@ import { submittedBranchMoved } from './model/assignment.js';
 import { reconcileReviewConflict, type ReviewConflictTransition } from './model/review-conflict.js';
 import { nextAction, nextActionKinds, sameAction } from './model/next-action.js';
 import { recordScenarioRun } from './test-runs.js';
+import { resolveScenario } from './scenarios.js';
 import { sameObservationInputs } from './model/observation-save.js';
 import type { ObservationJobState } from './model/action-kinds.js';
 import { claimCandidatesParams, claimCandidatesSql } from './model/action-candidates.js';
@@ -1098,7 +1099,9 @@ export class Engine {
         const scenarioRequirements: Work['scenarioRequirements'] = [];
         const proofNames: string[] = [...new Set<string>(data.criteria.flatMap((ac: { proofs: string[] }) => ac.proofs))];
         for (const proof of proofNames.filter(p => p.startsWith('e2e:'))) {
-          const scenario = (await db.query('SELECT document FROM scenarios WHERE id=$1 ORDER BY revision DESC LIMIT 1', [proof.slice(4)])).rows[0]?.document;
+          // GY-1708: resolveScenario persists a shipped revision (capacity-limit-redispatch) so create
+          // accepts e2e: proofs without a separate e2e sync.
+          const scenario = await resolveScenario(db, proof.slice(4), { at: now, by: actor.id });
           demand(scenario, `Register E2E scenario ${proof.slice(4)} before creating work that requires it`);
           scenarioRequirements.push({ proof, revision: scenario.revision, environment: scenario.environment, hash: scenario.hash });
         }
@@ -1823,7 +1826,7 @@ export class Engine {
     for (const proof of proofs.filter(p => p.startsWith('e2e:'))) {
       const pinned = work.scenarioRequirements.find(s => s.proof === proof);
       if (pinned) { pins.push(pinned); continue; }
-      const scenario = (await db.query('SELECT document FROM scenarios WHERE id=$1 ORDER BY revision DESC LIMIT 1', [proof.slice(4)])).rows[0]?.document;
+      const scenario = await resolveScenario(db, proof.slice(4), { at: now, by: actor.id });
       demand(scenario, `Register E2E scenario ${proof.slice(4)} first`);
       pins.push({ proof, revision: scenario.revision, environment: scenario.environment, hash: scenario.hash });
     }
