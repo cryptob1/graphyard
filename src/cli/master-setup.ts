@@ -11,7 +11,7 @@ import type { CliContext } from './context.js';
 import { deploymentTarget, derivedFrom, derivedVariables, installIdFor, prepareInstall, providers, revertApproverFromFile, selfProvision, type DerivedVariable, type PendingRedeploy, type PendingSetup, type Provider, type SelfProvisionAudit } from '../install/index.js';
 import type { AdapterContext, ProviderAdapter } from '../install/adapters.js';
 import { installDirectory, readInstallRecord } from '../install/secrets.js';
-import { provisionReleaseFiling, type ReleaseFilingAudit, type ReleaseFilingDeps, type ReleaseFilingStep, releaseFilingSetupNext } from '../master/release-filing.js';
+import { provisionReleaseFiling, type ReleaseFilingAudit, type ReleaseFilingDeps, type ReleaseFilingHandoff, type ReleaseFilingStep, releaseFilingSetupNext } from '../master/release-filing.js';
 
 /**
  * The `setup` section of master status: installation state that silently stops every launch or
@@ -53,18 +53,21 @@ export async function setupHealth(root: string, master: MasterConfig, supervisor
   const supervisorAttention = loopSupervisionAttention(supervisor, supervisor.unreachable ? await evidence(root, master).catch(() => null) : null);
   const herdrWorkspace = await herdrWorkspaceHealth(master);
   const mainGuard = coordinator?.mainGuard ?? null, revertApprover = mainGuard?.attention ?? null;
+  // The loop's own setup step: a failed run, and (GY-1692, GY-1691) the release filing credential it keeps current, which only a host
+  // holding no admin credential leaves to the administrator — named here, never in a park. Both belong to the setup section too.
+  const selfProvisionFailed = selfProvisioned?.failed ? `The loop's master setup --apply ${selfProvisioned.outcome} (${selfProvisioned.at})` : null;
+  const filing = selfProvisioned?.releaseFiling;
+  const filingItem: AttentionItem | null = filing?.state === 'unavailable' ? { subject: 'setup', text: `The release filing credential cannot be issued from this host: ${filing.detail}`, ...humanOwner('issuing credentials to people', filing.next ?? releaseFilingSetupNext) }
+    : filing?.state === 'failed' || filing?.state === 'planned' ? { subject: 'setup', text: `The loop's master setup --apply left the release filing credential ${filing.state}: ${filing.detail}`, ...agentOwner('master', setupApplyNext) } : null;
   const setup = { reviewer, supervisor, herdrWorkspace, mainGuard, selfProvision: selfProvisioned,
-    attention: [...reviewer.attention, ...supervisorAttention.map(item => item.text), ...(herdrWorkspace.exists === false ? [herdrWorkspace.reason!] : []), ...(revertApprover ? [revertApprover] : [])] };
+    attention: [...reviewer.attention, ...supervisorAttention.map(item => item.text), ...(herdrWorkspace.exists === false ? [herdrWorkspace.reason!] : []), ...(revertApprover ? [revertApprover] : []), ...(selfProvisionFailed ? [selfProvisionFailed] : []), ...(filingItem ? [filingItem.text] : [])] };
   // An unsupervised loop stays stopped; each supervisor state names its own repair.
   const attention: AttentionItem[] = supervisorAttention.map(item => ({ subject: 'setup', text: item.text, ...agentOwner('master', item.next) }));
   for (const text of reviewer.attention) attention.push({ subject: 'setup', text, ...agentOwner('master', 'graphyard master reviewer setup (or graphyard master reviewer bind FILE --key-stdin) to bind the reviewer App') });
   if (herdrWorkspace.exists === false) attention.push({ subject: 'setup', text: herdrWorkspace.reason!, ...agentOwner('master', 'Set herdrWorkspace in .graphyard/master.json to a workspace herdr workspace list shows; master run adopts it on its next tick') });
   if (revertApprover) attention.push({ subject: 'setup', text: revertApprover, ...agentOwner('master', setupApplyNext) });
-  if (selfProvisioned?.failed) attention.push({ subject: 'setup', text: `The loop's master setup --apply ${selfProvisioned.outcome} (${selfProvisioned.at})`, ...agentOwner('master', setupApplyNext) });
-  // GY-1692 (GY-1691): the release filing credential is the master's to keep current; only a host holding no admin credential names the administrator's step, here, never in a park.
-  const filing = selfProvisioned?.releaseFiling;
-  if (filing?.state === 'unavailable') attention.push({ subject: 'setup', text: `The release filing credential cannot be issued from this host: ${filing.detail}`, ...humanOwner('issuing credentials to people', filing.next ?? releaseFilingSetupNext) });
-  else if (filing?.state === 'failed' || filing?.state === 'planned') attention.push({ subject: 'setup', text: `The loop's master setup --apply left the release filing credential ${filing.state}: ${filing.detail}`, ...agentOwner('master', setupApplyNext) });
+  if (selfProvisionFailed) attention.push({ subject: 'setup', text: selfProvisionFailed, ...agentOwner('master', setupApplyNext) });
+  if (filingItem) attention.push(filingItem);
   if (!master.browser) attention.push({ subject: 'setup', text: browserProfileMissing, ...humanOwner('issuing credentials to people', browserProfileNext(master.cliPath)) });
   return { setup, attention };
 }
@@ -125,6 +128,12 @@ async function writeAtomically(file: string, value: unknown) {
 
 /** Where `master setup --apply` appends one audit line per variable it set: name, source and fingerprint, never a value. */
 export const setupAuditFile = (root: string) => resolve(root, '.graphyard', 'setup-audit.jsonl');
+/** Where the master keeps its last release filing handoff (GY-1692): the credential it stored, by fingerprint, and the store GitHub reported; never a token. */
+export const releaseFilingHandoffFile = (root: string) => resolve(root, '.graphyard', 'release-filing-handoff.json');
+const releaseFilingHandoff = (root: string): NonNullable<ReleaseFilingDeps['handoff']> => ({
+  read: () => readFile(releaseFilingHandoffFile(root), 'utf8').then(text => JSON.parse(text) as ReleaseFilingHandoff, () => null),
+  write: handoff => writeAtomically(releaseFilingHandoffFile(root), handoff),
+});
 export interface MasterSetupOptions { apply: boolean; provider?: Provider; service?: string; linkDirectory?: string; workspace?: string }
 export interface MasterSetupDependencies {
   /** The deployment and the variables its install record derives; the install record's by default (`recordedDeployment`). */
@@ -158,7 +167,7 @@ export async function recordedDeployment(root: string, master: Pick<MasterConfig
 export async function masterSetup(root: string, master: Pick<MasterConfig, 'repository' | 'reviewer' | 'url'>, options: MasterSetupOptions, deps: MasterSetupDependencies = {}) {
   const audit = async (entry: SelfProvisionAudit | ReleaseFilingAudit) => { await mkdir(resolve(root, '.graphyard'), { recursive: true }); await appendFile(setupAuditFile(root), `${JSON.stringify(entry)}\n`, { mode: 0o600 }); };
   // GY-1692 (GY-1691): the release filing credential needs no deployment record, only the install's admin credential and the host's gh login.
-  const releaseFiling = await provisionReleaseFiling(master, { apply: options.apply }, { ...deps.releaseFiling, audit: deps.releaseFiling?.audit ?? audit, ...(deps.releaseFiling?.now ? {} : deps.now ? { now: deps.now } : {}) });
+  const releaseFiling = await provisionReleaseFiling(master, { apply: options.apply }, { ...deps.releaseFiling, audit: deps.releaseFiling?.audit ?? audit, handoff: deps.releaseFiling?.handoff ?? releaseFilingHandoff(root), ...(deps.releaseFiling?.now ? {} : deps.now ? { now: deps.now } : {}) });
   const located = await (deps.locate ?? recordedDeployment)(root, master, options);
   if (!located) return { mode: options.apply ? 'apply' as const : 'plan' as const, target: null, observed: false, canApply: false, missing: [], set: [], redeployed: [] as string[], pendingRedeploy: [] as string[], audit: [], releaseFiling,
     next: `No deployment is recorded for ${master.repository} on this host (no graphyard install record): name it with graphyard master setup --provider railway --service NAME --link-dir DIR${options.apply ? ' --apply' : ''}` };

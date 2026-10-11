@@ -747,10 +747,23 @@ test('scoped operator-agent credentials are deny-by-default, auditable, rotation
   assert.equal(rotated.lastMutation.kind, 'rotate'); assert.equal(rotated.credentialIssuedAt, rotated.lastMutation.at, 'rotate moves the credential issue time to the rotation');
   assert.ok(Date.parse(rotated.credentialIssuedAt) >= Date.parse(configured.credentialIssuedAt)); assert.equal((await fetch(`${url}/api/status`, { headers: { Authorization: `Bearer ${firstToken}` } })).status, 401); assert.equal((await fetch(`${url}/api/status`, { headers: { Authorization: `Bearer ${secondToken}` } })).status, 200);
   const capturedActor = await new OperatorAgents(store, 'owner/project').authenticate(secondToken); assert.ok(capturedActor);
+  assert.equal((await post('operator-agents', { ...setup, token: `operator-third-${'z'.repeat(32)}` })).status, 409, 'a live identity is never set up twice');
   assert.equal((await post(`operator-agents/${setup.id}/revoke`, { reason: 'Automation disabled by human' })).status, 200);
   assert.equal((await fetch(`${url}/api/status`, { headers: { Authorization: `Bearer ${secondToken}` } })).status, 401);
   await assert.rejects(engine.execute(capturedActor, 'ready', created.id, { expectedRevision: created.revision + 1, reason: 'Delayed request' }, randomUUID()), /revoked or expired/, 'credential is revalidated inside the mutation transaction');
+  // GY-1692: setup of a revoked identity reinstates it under a fresh credential; every credential it held stays revoked, none is issued twice.
+  assert.equal((await post('operator-agents', { ...setup, token: secondToken, reason: 'Reinstated with the leaked token' })).status, 409, 'a revoked credential is never reissued');
+  const thirdToken = `operator-third-${'z'.repeat(32)}`;
+  const reinstateResponse = await post('operator-agents', { ...setup, token: thirdToken, reason: 'Reinstated after the leak was contained' });
+  assert.equal(reinstateResponse.status, 200, 'setup reinstates a revoked identity');
+  const reinstated: any = await reinstateResponse.json();
+  assert.deepEqual([reinstated.revokedAt, reinstated.revision, reinstated.lastMutation.kind, reinstated.lastMutation.reinstatedAfter, reinstated.credentialIssuedAt], [null, rotated.revision + 2, 'setup', (await (await fetch(`${url}/api/operator-agents`, { headers: adminHeaders })).json() as any[]).find(entry => entry.id === setup.id).lastMutation.reinstatedAfter, reinstated.lastMutation.at]);
+  assert.deepEqual(reinstated.fingerprints, [firstToken, secondToken, thirdToken].map(value => createHash('sha256').update(value).digest('hex').slice(0, 16)), 'the revoked credentials stay in its history');
+  assert.equal(reinstated.createdAt, configured.createdAt, 'the identity is the same one, not a new document');
+  for (const [token, status] of [[firstToken, 401], [secondToken, 401], [thirdToken, 200]] as const) assert.equal((await fetch(`${url}/api/status`, { headers: { Authorization: `Bearer ${token}` } })).status, status, `after reinstatement a token of this identity reads ${status}`);
+  assert.equal((await post('operator-agents', { ...setup, token: `operator-fourth-${'q'.repeat(32)}` })).status, 409, 'the reinstated identity is live: never set up twice');
   const history = await store.events(); assert.ok(history.some(event => event.kind === 'operator-agent.setup' && event.actor === operator.id)); assert.ok(history.some(event => event.kind === 'operator-agent.revoke'));
+  assert.equal(history.filter(event => event.kind === 'operator-agent.setup' && event.payload.target === setup.id).length, 2, 'the reinstatement is its own setup event, after the revocation');
   const createEvent = history.find(event => event.kind === 'create' && event.actor === setup.id);
   assert.equal(createEvent.payload.details.reason, 'Create bounded implementation intent'); assert.equal(createEvent.payload.work.policy.review, true);
 });

@@ -121,14 +121,17 @@ const hostDoable: (HostDoableAsk & { test: RegExp })[] = [
   { class: 'host-credential', what: 'a credential the host already holds for this purpose', test: /\b(?:paste|provide|give|send|share|supply)\b[^.;]{0,80}\b(?:github|gh|admin|app|railway)\b[^.;]{0,40}\b(?:token|private key|pem|credential)s?\b/i,
     route: 'the master supplies it from the host: the gh login (gh auth token), the App registration saved under the install directory, or the provider CLI\'s own login', command: 'gh auth token (or the saved App registration) in the master\'s session, then graphyard master unblock GY-N REASON' },
   // GY-1692 (GY-1470): a recording of GitHub's Confirm-access view, which renders only in a signed-in
-  // session — the browser profile the operator lent the master (master init --browser-profile).
-  { class: 'browser-capture', what: 'a recording of a GitHub Confirm-access view made in the operator\'s signed-in browser', test: /\b(?:recording|capture|markup|outerHTML)\b[^.;]{0,160}\b(?:confirm[- ]access|sudo|authenticator)\b|\b(?:confirm[- ]access|sudo)\b[^.;]{0,120}\b(?:recording|capture|markup|outerHTML)\b/i,
+  // session — the browser profile the operator lent the master (master init --browser-profile). Only
+  // that view: a recording of an authenticator screen with no Confirm-access or GitHub sudo context
+  // (a person's enrolment, say) is not the master's to make.
+  { class: 'browser-capture', what: 'a recording of a GitHub Confirm-access view made in the operator\'s signed-in browser', test: /\b(?:recording|capture|markup|outerHTML)\b[^.;]{0,160}\b(?:confirm[- ]access|sudo)\b|\b(?:confirm[- ]access|sudo)\b[^.;]{0,120}\b(?:recording|capture|markup|outerHTML)\b|\bgithub\b[^.;]{0,80}\bauthenticator\b[^.;]{0,80}\b(?:recording|capture|markup|outerHTML)\b/i,
     route: 'the master records every Confirm-access view the page offers through the browser profile lent to it, redacted, submitting nothing (GY-1686)', command: 'graphyard master browser capture, then graphyard master unblock GY-N REASON' },
   // GY-1692 (GY-1666): the coordinator checkout's HEAD moved onto commits the loop does not run, and
   // the install's unit record. The loop's checkout-restore saves every dirty path under a ref and
   // restarts onto a clean moved HEAD (GY-1680, the adoption GY-1531 sanctions); it records its own
-  // units from the unit serving it.
-  { class: 'coordinator-checkout', what: 'the coordinator checkout\'s HEAD or its unpushed commits, or this install\'s unit record', test: /\bcoordinator checkout\b|\bunpushed\b[^.;]{0,60}\bcommits?\b|\bdetached (?:HEAD|at)\b|\bgraphyard master init\b|\bunits\.json\b/i,
+  // units from the unit serving it. `master init` names this only for the unit record: run for a
+  // browser profile (--browser-profile) it lends the operator's session, which stays theirs.
+  { class: 'coordinator-checkout', what: 'the coordinator checkout\'s HEAD or its unpushed commits, or this install\'s unit record', test: /\bcoordinator checkout\b|\bunpushed\b[^.;]{0,60}\bcommits?\b|\bdetached (?:HEAD|at)\b|\bmaster init\b[^.;]{0,100}\bunits?\b|\bunits\.json\b/i,
     route: 'the loop saves every dirty path under refs/graphyard/checkout-restore/ and restarts onto a clean moved HEAD, discarding nothing (GY-1680); it records its own units from the unit serving it', command: 'graphyard master checkout-restore REASON' },
   // GY-1692 (GY-1691): an identity issued to an agent, not a person, whose token is a repository or
   // environment secret the host's gh login sets; the install's admin credential is saved on the host.
@@ -137,7 +140,7 @@ const hostDoable: (HostDoableAsk & { test: RegExp })[] = [
 ];
 /** Who a credential is issued to, when it is a person: that stays the human's (`credentials-for-people`). */
 const personRecipient = /\b(?:teammate|contractor|colleague|employee|engineer|person|people|developer|new hire)s?\b/i;
-/** An identity or token a person is to receive (GY-1692): `agent-identity` never claims it, whatever agent it also names. */
+/** An identity, token or sign-in a person is to receive (GY-1692): `agent-identity` and `browser-capture` never claim it, whatever agent or view it also names. */
 const personIssued = /\b(?:to|for|give|gives|issue[sd]?|provide[sd]?|hand)\b[^.;]{0,40}\b(?:teammate|contractor|colleague|employee|engineer|person|people|developer|new hire)s?\b|\b(?:teammate|contractor|colleague|employee|engineer|person|people|developer|new hire)s?\b[^.;]{0,30}\b(?:identity|identities|token|sign-in|credential)s?\b/i;
 /** A credential asked under `credentials-for-people` is the host's only when an agent's work is its stated purpose. */
 const agentPurpose = /\b(?:pilot|worker|agent|master|loop|host|install(?:er|ation)?|deployment|control plane|CI|webhooks?)\b/i;
@@ -147,7 +150,7 @@ export function hostDoableAsk(needed: string, kind?: string): HostDoableAsk | nu
   if (humanStep.test(needed)) return null;
   const found = hostDoable.find(entry => entry.test.test(needed)
     && !(entry.class === 'host-credential' && (personRecipient.test(needed) || (kind === 'credentials-for-people' && !agentPurpose.test(needed))))
-    && !(entry.class === 'agent-identity' && personIssued.test(needed)));
+    && !((entry.class === 'agent-identity' || entry.class === 'browser-capture') && personIssued.test(needed)));
   return found ? { class: found.class, what: found.what, route: found.route, command: found.command } : null;
 }
 export const hostDoableRefusal = (ask: HostDoableAsk) => `Not a human-only decision: NEEDED asks for ${ask.what}, which an agent identity on the host can do; it is the master's owed action, not the human's. Agent route: ${ask.route} — ${ask.command}`;

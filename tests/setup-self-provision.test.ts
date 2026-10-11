@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { generateKeyPairSync } from 'node:crypto';
+import { createHash, generateKeyPairSync } from 'node:crypto';
 import { deploymentTarget, REDACTED } from '../src/install/index.js';
 import { fingerprint } from '../src/install/secrets.js';
 import type { Transport } from '../src/install/transport.js';
@@ -268,12 +268,17 @@ test('unit:setup-attention-owner — a missing derivable deployment variable is 
 // secret — was parked on the human as a credential decision. The identity is an agent's, the install's admin
 // credential is saved on the host, and the host's gh login administers the repository: `master setup --apply`
 // keeps the credential current, and the loop runs it itself.
-import { credentialIssuedAt, provisionReleaseFiling, releaseFilingAdministratorStep, releaseFilingTransitionSeconds, secretPredatesCredential, type ReleaseFilingDeps } from '../src/master/release-filing.js';
+import { credentialIssuedAt, handoffProvesSecret, provisionReleaseFiling, releaseFilingAdministratorStep, releaseFilingTransitionSeconds, secretPredatesCredential, type ReleaseFilingDeps, type ReleaseFilingHandoff } from '../src/master/release-filing.js';
 
-/** A control plane's operator-agent API as the admin sees it, and GitHub's uat secret as gh reads and sets it. */
-function releaseFilingHost(options: { agents?: any[]; secretUpdatedAt?: string | null; admin?: string | null; setFails?: boolean } = {}) {
+const fingerprintOf = (token: string) => createHash('sha256').update(token).digest('hex').slice(0, 16);
+/**
+ * A control plane's operator-agent API as the admin sees it, GitHub's uat secret as gh reads and sets it (a store lands
+ * at `storeUpdatedAt`, to the second), and the master's handoff record on this host (`handoff`, none by default).
+ */
+function releaseFilingHost(options: { agents?: any[]; secretUpdatedAt?: string | null; admin?: string | null; setFails?: boolean; storeUpdatedAt?: string; handoff?: ReleaseFilingHandoff | null } = {}) {
   const agents: any[] = options.agents ?? [];
   let secret = options.secretUpdatedAt === undefined ? '2026-10-05T04:08:40Z' : options.secretUpdatedAt;
+  let handoff: ReleaseFilingHandoff | null = options.handoff ?? null;
   const planeCalls: { path: string; method: string; body: any; token: string | null }[] = [], ghCalls: { args: string[]; input?: string }[] = [];
   /** The plane's rotate route refuses while set (a mutation that fails after an earlier one in the same run succeeded). */
   const faults = { rotateFails: false };
@@ -284,12 +289,21 @@ function releaseFilingHost(options: { agents?: any[]; secretUpdatedAt?: string |
     if (planeCalls.at(-1)!.token !== 'admin-token-' + 'a'.repeat(32)) return json(403, { error: 'Administrator permission required' });
     if (path === 'operator-agents' && init.method === 'GET') return json(200, agents);
     // The document as src/operator-agent.ts keeps it: credentialIssuedAt set by setup and rotate, kept through configure (GY-1692).
-    if (path === 'operator-agents') { agents.push({ id: body.id, displayName: body.displayName, role: 'operator-agent', capabilities: body.capabilities, scope: body.scope, revision: 1, createdAt: '2026-10-11T06:00:00.000Z', lastMutation: { kind: 'setup', at: '2026-10-11T06:00:00.000Z' }, credentialIssuedAt: '2026-10-11T06:00:00.000Z' }); return json(200, agents.at(-1)); }
+    if (path === 'operator-agents') {
+      const existing = agents.find(entry => entry.id === body.id);
+      if (existing && !existing.revokedAt) return json(409, { error: 'Operator agent already exists' });
+      // Setup of a revoked identity reinstates it under the new credential, its fingerprints kept (GY-1692).
+      const document = { ...(existing ?? { createdAt: '2026-10-11T06:00:00.000Z', fingerprints: [], revision: 0 }), id: body.id, displayName: body.displayName, role: 'operator-agent', capabilities: body.capabilities, scope: body.scope, revision: (existing?.revision ?? 0) + 1, revokedAt: null,
+        lastMutation: { kind: 'setup', at: '2026-10-11T06:00:00.000Z', reason: body.reason, ...(existing ? { reinstatedAfter: existing.revokedAt } : {}) }, credentialIssuedAt: '2026-10-11T06:00:00.000Z' };
+      document.fingerprints = [...(existing?.fingerprints ?? []), fingerprintOf(body.token)];
+      if (existing) agents.splice(agents.indexOf(existing), 1, document); else agents.push(document);
+      return json(200, document);
+    }
     const match = /^operator-agents\/([^/]+)\/(configure|rotate)$/.exec(path);
     if (match) {
       const agent = agents.find(entry => entry.id === decodeURIComponent(match[1]));
       if (match[2] === 'configure') { if (body.expectedRevision !== agent.revision) return json(409, { error: 'Operator-agent revision changed' }); agent.capabilities = body.capabilities; agent.scope = body.scope; }
-      if (match[2] === 'rotate') { if (faults.rotateFails) return json(503, { error: 'the credential store is unavailable' }); agent.credentialIssuedAt = '2026-10-11T06:30:00.000Z'; }
+      if (match[2] === 'rotate') { if (faults.rotateFails) return json(503, { error: 'the credential store is unavailable' }); agent.credentialIssuedAt = '2026-10-11T06:30:00.000Z'; agent.fingerprints = [...(agent.fingerprints ?? []), fingerprintOf(body.token)]; }
       agent.revision++; agent.lastMutation = { kind: match[2], at: '2026-10-11T06:30:00.000Z', ...(match[2] === 'rotate' ? { transitionEndsAt: 'later' } : {}) };
       return json(200, agent);
     }
@@ -298,12 +312,13 @@ function releaseFilingHost(options: { agents?: any[]; secretUpdatedAt?: string |
   const gh: NonNullable<ReleaseFilingDeps['gh']> = async (args, input) => {
     ghCalls.push({ args, ...(input === undefined ? {} : { input }) });
     if (args[0] === 'api') return secret ? { code: 0, stdout: JSON.stringify({ name: 'GRAPHYARD_RELEASE_TOKEN', created_at: secret, updated_at: secret }), stderr: '' } : { code: 1, stdout: '', stderr: 'gh: Not Found (HTTP 404)' };
-    if (args[0] === 'secret' && args[1] === 'set') { if (options.setFails) return { code: 1, stdout: '', stderr: 'HTTP 403: Resource not accessible by personal access token' }; secret = '2026-10-11T06:31:00.000Z'; return { code: 0, stdout: '', stderr: '' }; }
+    if (args[0] === 'secret' && args[1] === 'set') { if (options.setFails) return { code: 1, stdout: '', stderr: 'HTTP 403: Resource not accessible by personal access token' }; secret = options.storeUpdatedAt ?? '2026-10-11T06:31:00.000Z'; return { code: 0, stdout: '', stderr: '' }; }
     return { code: 1, stdout: '', stderr: `unexpected gh ${args.join(' ')}` };
   };
   const audits: any[] = [];
-  const deps: ReleaseFilingDeps = { adminToken: async () => options.admin === undefined ? 'admin-token-' + 'a'.repeat(32) : options.admin, fetch: fetcher, gh, token: () => 'b'.repeat(64), now: () => Date.parse('2026-10-11T06:30:00.000Z'), audit: async entry => { audits.push(entry); } };
-  return { agents, deps, planeCalls, ghCalls, audits, faults, secretUpdatedAt: () => secret };
+  const deps: ReleaseFilingDeps = { adminToken: async () => options.admin === undefined ? 'admin-token-' + 'a'.repeat(32) : options.admin, fetch: fetcher, gh, token: () => 'b'.repeat(64), now: () => Date.parse('2026-10-11T06:30:00.000Z'), audit: async entry => { audits.push(entry); },
+    handoff: { read: async () => handoff, write: async record => { handoff = record; } } };
+  return { agents, deps, planeCalls, ghCalls, audits, faults, secretUpdatedAt: () => secret, handoff: () => handoff };
 }
 const filingMaster = { url: 'https://graphyard.example', repository: 'cryptob1/graphyard' };
 const filingScope = { repositories: ['cryptob1/graphyard'], workItems: ['*'] };
@@ -327,9 +342,12 @@ test('manual:intervention-pattern-human-only-decision-build — GY-1691 (GY-1692
   assert.equal(stored.input, 'b'.repeat(64), 'the token goes to gh over standard input, never as an argument');
   assert.ok(!JSON.stringify(applied).includes('b'.repeat(64)) && !JSON.stringify(host.audits).includes('b'.repeat(64)), 'neither the report nor the audit carries the token');
   assert.deepEqual(host.audits.map(entry => [entry.variable, entry.secret, entry.provider, entry.service, entry.at, entry.fingerprint.length]), [['GRAPHYARD_RELEASE_TOKEN', true, 'github', 'cryptob1/graphyard/environments/uat', '2026-10-11T06:30:00.000Z', 16]]);
-  // Current afterwards: the secret stored now is as new as the credential.
+  // The store is read back and recorded as the master's handoff: the credential by fingerprint and the store as GitHub reports it, never the token.
+  assert.deepEqual(host.handoff(), { at: '2026-10-11T06:30:00.000Z', fingerprint: fingerprintOf('b'.repeat(64)), secretUpdatedAt: '2026-10-11T06:31:00.000Z' });
+  // Current afterwards: the secret stored is the credential the master stored.
   const current = await provisionReleaseFiling(filingMaster, { apply: true }, host.deps);
   assert.equal(current.state, 'current', current.detail);
+  assert.match(current.detail, /is the credential the master stored/);
   assert.equal(host.ghCalls.filter(call => call.args[0] === 'secret').length, 1, 'nothing is stored again');
 });
 
@@ -362,9 +380,20 @@ test('manual:intervention-pattern-human-only-decision-build — GY-1691 (GY-1692
   assert.match(failedStore.detail, /rotated but storing GRAPHYARD_RELEASE_TOKEN in the uat environment of cryptob1\/graphyard failed \(gh exited 1\): HTTP 403.*the next run rotates it again/);
   assert.deepEqual(refusedStore.audits, [], 'nothing stored, nothing audited');
   assert.equal((await provisionReleaseFiling(filingMaster, { apply: false }, refusedStore.deps)).state, 'planned', 'the next run plans the rotation again');
-  // A revoked identity, and a credential the plane refuses, are failures the master owns.
-  const revoked = releaseFilingHost({ agents: [{ id: 'graphyard-release-follow-up', role: 'operator-agent', capabilities: ['intent:create'], scope: filingScope, revision: 1, createdAt: '2026-10-09T00:00:00.000Z', revokedAt: '2026-10-10T00:00:00.000Z' }] });
-  assert.match((await provisionReleaseFiling(filingMaster, { apply: true }, revoked.deps)).detail, /was revoked at 2026-10-10T00:00:00.000Z; restore it/);
+  // A revoked identity is reinstated through setup under a fresh credential, which is stored: every credential it held stays revoked, nothing is rotated.
+  const revoked = releaseFilingHost({ agents: [{ id: 'graphyard-release-follow-up', role: 'operator-agent', capabilities: ['intent:create'], scope: filingScope, revision: 3, createdAt: '2026-10-09T00:00:00.000Z', revokedAt: '2026-10-10T00:00:00.000Z', fingerprints: ['old1old1old1old1', 'old2old2old2old2'], lastMutation: { kind: 'revoke', at: '2026-10-10T00:00:00.000Z', reason: 'token leaked in a workflow log' } }] });
+  const reinstatePlan = await provisionReleaseFiling(filingMaster, { apply: false }, revoked.deps);
+  assert.match(reinstatePlan.detail, /would reinstate graphyard-release-follow-up, revoked 2026-10-10T00:00:00.000Z \(token leaked in a workflow log\), under a fresh credential holding only intent:create over cryptob1\/graphyard and store its token as the uat GRAPHYARD_RELEASE_TOKEN \(the one stored 2026-10-05T04:08:40Z predates the credential\)/);
+  const reinstated = await provisionReleaseFiling(filingMaster, { apply: true }, revoked.deps);
+  assert.equal(reinstated.state, 'reinstated', reinstated.detail);
+  assert.match(reinstated.detail, /^reinstated graphyard-release-follow-up .*every credential revoked 2026-10-10T00:00:00.000Z stays revoked$/);
+  const reinstate = revoked.planeCalls.find(call => call.method === 'POST')!;
+  assert.deepEqual([reinstate.path, reinstate.body.id, reinstate.body.capabilities, reinstate.body.scope], ['operator-agents', 'graphyard-release-follow-up', ['intent:create'], filingScope], 'reissued through setup, never rotated');
+  assert.match(reinstate.body.reason, /reinstated after the revocation of 2026-10-10T00:00:00.000Z: token leaked in a workflow log/);
+  assert.deepEqual([revoked.agents[0].revokedAt, revoked.agents[0].revision, revoked.agents[0].fingerprints], [null, 4, ['old1old1old1old1', 'old2old2old2old2', fingerprintOf('b'.repeat(64))]]);
+  assert.equal(revoked.ghCalls.filter(call => call.args[0] === 'secret').length, 1);
+  assert.equal((await provisionReleaseFiling(filingMaster, { apply: true }, revoked.deps)).state, 'current');
+  // A credential the plane refuses is a failure the master owns.
   const notAdmin = releaseFilingHost({ admin: 'worker-token-' + 'w'.repeat(32) });
   assert.match((await provisionReleaseFiling(filingMaster, { apply: true }, notAdmin.deps)).detail, /Graphyard refused operator-agents \(403\): Administrator permission required/);
   // No admin credential on this host: the one case a person is needed, named as a setup step with the exact commands, and nothing is called.
@@ -372,7 +401,9 @@ test('manual:intervention-pattern-human-only-decision-build — GY-1691 (GY-1692
   const unavailable = await provisionReleaseFiling(filingMaster, { apply: true }, absent.deps);
   assert.equal(unavailable.state, 'unavailable');
   assert.equal(unavailable.next, releaseFilingAdministratorStep('cryptob1/graphyard'));
-  assert.match(unavailable.next!, /graphyard operator-agent setup FILE --token-stdin .*gh secret set GRAPHYARD_RELEASE_TOKEN --repo cryptob1\/graphyard --env uat$/);
+  // One token, minted first and handed to both commands: setup reads it from standard input and prints the document, never the token.
+  assert.match(unavailable.next!, /TOKEN=\$\(openssl rand -hex 32\); printf %s "\$TOKEN" \| graphyard operator-agent setup FILE --token-stdin; printf %s "\$TOKEN" \| gh secret set GRAPHYARD_RELEASE_TOKEN --repo cryptob1\/graphyard --env uat; unset TOKEN/);
+  assert.ok(!/printed token/.test(unavailable.next!), 'the step never says the token is printed');
   assert.deepEqual([absent.planeCalls, absent.ghCalls], [[], []]);
 
   // Through master setup and the loop's own run: the report and the kept outcome carry the step, and the setup attention owns it.
@@ -396,16 +427,18 @@ test('manual:intervention-pattern-human-only-decision-build — GY-1691 (GY-1692
       const settled = await loopSelfProvision(join(root, step.state), master, { now: now + 1000, setup: setupStub });
       assert.deepEqual(settled.releaseFiling, step, 'the loop keeps what the step did');
       assert.ok(settled.outcome.includes(`release filing ${step.state}: `), settled.outcome);
-      const item = (await setupHealth(join(root, step.state), master, host, null, async () => null)).attention.find(entry => text.test(entry.text))!;
+      const health = await setupHealth(join(root, step.state), master, host, null, async () => null);
+      const item = health.attention.find(entry => text.test(entry.text))!;
       assert.ok(item, `${step.state} is attention`);
       assert.deepEqual([item.human, item.role, item.next], [expectHuman, expectHuman ? 'human' : 'master', expectHuman ? step.next : setupApplyNext]);
       if (expectHuman) assert.equal(item.humanOnly, 'issuing credentials to people');
+      assert.ok(health.setup.attention.includes(item.text), `${step.state} is in the setup section too, so setup health never reads clear while filing is blocked`);
     }
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 
-test('manual:intervention-pattern-human-only-decision-build — GY-1691 (GY-1692): the credential issue time survives a later configure, so a narrowing that succeeds before its rotation fails leaves the stale secret stale for the next run; an unrecorded issue is bounded by the last mutation; a store landing in the rotation\'s second is current', async () => {
+test('manual:intervention-pattern-human-only-decision-build — GY-1691 (GY-1692): the credential issue time survives a later configure, so a narrowing that succeeds before its rotation fails leaves the stale secret stale for the next run; an unrecorded issue is bounded by the last mutation; a store within the rotation\'s second is current only through the master\'s own handoff record, and one the master did not make is rotated', async () => {
   // Rotated out of band at T1 (the secret, stored T0 < T1, was never updated) and since widened: this run narrows,
   // then the plane refuses the rotation. lastMutation now reads configure, but credentialIssuedAt still reads T1.
   const wide = { repositories: ['cryptob1/graphyard', 'cryptob1/other'], workItems: ['*'] };
@@ -420,7 +453,7 @@ test('manual:intervention-pattern-human-only-decision-build — GY-1691 (GY-1692
   // The next run still finds the secret stale: it plans the rotation alone (nothing left to narrow), and with the plane back it rotates and stores.
   const planned = await provisionReleaseFiling(filingMaster, { apply: false }, host.deps);
   assert.equal(planned.state, 'planned', planned.detail);
-  assert.match(planned.detail, /would rotate graphyard-release-follow-up's credential .*the one stored 2026-10-09T12:00:00.000Z predates the credential issued 2026-10-10T00:00:00.000Z/);
+  assert.match(planned.detail, /would rotate graphyard-release-follow-up's credential .*the one stored 2026-10-09T12:00:00.000Z is not proven newer than the credential issued 2026-10-10T00:00:00.000Z/);
   assert.ok(!planned.detail.includes('narrow'), planned.detail);
   const stillRefused = await provisionReleaseFiling(filingMaster, { apply: true }, host.deps);
   assert.equal(stillRefused.state, 'failed', 'a run while the plane still refuses never reads the secret as current');
@@ -439,10 +472,40 @@ test('manual:intervention-pattern-human-only-decision-build — GY-1691 (GY-1692
   assert.equal((await provisionReleaseFiling(filingMaster, { apply: true }, releaseFilingHost({ secretUpdatedAt: '2026-10-10T03:00:00.000Z', agents: [{ ...legacy }] }).deps)).state, 'rotated', 'a secret older than the last mutation is rotated');
   assert.equal((await provisionReleaseFiling(filingMaster, { apply: true }, releaseFilingHost({ secretUpdatedAt: '2026-10-10T07:00:00.000Z', agents: [{ ...legacy }] }).deps)).state, 'current', 'a secret newer than every mutation is current');
 
-  // GitHub records the store to the second: one landing in the rotation's second is as new as the credential; one a second earlier is not.
-  assert.equal(secretPredatesCredential('2026-10-11T06:30:00Z', '2026-10-11T06:30:00.700Z'), false);
+  // GitHub records the store to the second: a store is proven newer than the credential only when its second begins after the
+  // issue's instant. One within the issue's second may have landed before the rotation (stored 06:30:00.100, rotated 06:30:00.700,
+  // both read 06:30:00): not proven, so it is stale unless the master's own handoff record proves it stored this credential.
+  assert.equal(secretPredatesCredential('2026-10-11T06:30:01Z', '2026-10-11T06:30:00.700Z'), false);
+  assert.equal(secretPredatesCredential('2026-10-11T06:30:00Z', '2026-10-11T06:30:00.700Z'), true, 'a store within the rotation\'s second is not proven newer');
+  assert.equal(secretPredatesCredential('2026-10-11T06:30:00Z', '2026-10-11T06:30:00.000Z'), true, 'nor one in the second a rotation on the second begins');
   assert.equal(secretPredatesCredential('2026-10-11T06:29:59Z', '2026-10-11T06:30:00.700Z'), true);
-  const sameSecond = releaseFilingHost({ secretUpdatedAt: '2026-10-11T06:30:00Z', agents: [{ id: 'graphyard-release-follow-up', role: 'operator-agent', capabilities: ['intent:create'], scope: filingScope, revision: 2, createdAt: '2026-10-09T00:00:00.000Z', credentialIssuedAt: '2026-10-11T06:30:00.700Z', lastMutation: { kind: 'rotate', at: '2026-10-11T06:30:00.700Z' } }] });
-  assert.equal((await provisionReleaseFiling(filingMaster, { apply: true }, sameSecond.deps)).state, 'current');
-  assert.deepEqual(sameSecond.planeCalls.map(call => call.method), ['GET'], 'nothing is rotated for a store within the rotation\'s second');
+  const newest = fingerprintOf('oob'.repeat(22)), rotatedDocument = { id: 'graphyard-release-follow-up', role: 'operator-agent', capabilities: ['intent:create'], scope: filingScope, revision: 2, createdAt: '2026-10-09T00:00:00.000Z', fingerprints: [fingerprintOf('t0'.repeat(32)), newest], credentialIssuedAt: '2026-10-11T06:30:00.700Z', lastMutation: { kind: 'rotate', at: '2026-10-11T06:30:00.700Z' } };
+  // The administrator stored the old token at 06:30:00.100 and rotated at 06:30:00.700: GitHub reports 06:30:00, and no handoff record
+  // names that store, so the expired token is not read as current — the master rotates, stores, and records the handoff.
+  const storedBeforeRotation = releaseFilingHost({ secretUpdatedAt: '2026-10-11T06:30:00Z', storeUpdatedAt: '2026-10-11T06:30:00Z', agents: [{ ...rotatedDocument, fingerprints: [...rotatedDocument.fingerprints] }] });
+  const planned2 = await provisionReleaseFiling(filingMaster, { apply: false }, storedBeforeRotation.deps);
+  assert.equal(planned2.state, 'planned', planned2.detail);
+  assert.match(planned2.detail, /would rotate .*the one stored 2026-10-11T06:30:00Z is not proven newer than the credential issued 2026-10-11T06:30:00.700Z/);
+  const rotatedAgain = await provisionReleaseFiling(filingMaster, { apply: true }, storedBeforeRotation.deps);
+  assert.equal(rotatedAgain.state, 'rotated', rotatedAgain.detail);
+  assert.deepEqual(storedBeforeRotation.planeCalls.filter(call => call.method === 'POST').map(call => call.path.split('/').at(-1)), ['rotate']);
+  assert.deepEqual(storedBeforeRotation.handoff(), { at: '2026-10-11T06:30:00.000Z', fingerprint: fingerprintOf('b'.repeat(64)), secretUpdatedAt: '2026-10-11T06:30:00Z' }, 'the handoff records the master\'s own store, within the rotation\'s second');
+  // The master's own store landed in its rotation's second too (GitHub still reads 06:30:00): the record proves it, so the next run is current and nothing is rotated again.
+  const afterwards = await provisionReleaseFiling(filingMaster, { apply: true }, storedBeforeRotation.deps);
+  assert.equal(afterwards.state, 'current', afterwards.detail);
+  assert.match(afterwards.detail, /is the credential the master stored \(issued 2026-10-11T06:30:00.000Z\)/);
+  assert.equal(storedBeforeRotation.planeCalls.filter(call => call.method === 'POST').length, 1, 'one rotation, not one per run');
+  // The record proves only the credential it names at the store it saw: a rotation since, or a store since, falls back to time.
+  const record = { at: '2026-10-11T06:30:00.700Z', fingerprint: newest, secretUpdatedAt: '2026-10-11T06:30:00Z' };
+  assert.equal(handoffProvesSecret(record, rotatedDocument, { updatedAt: '2026-10-11T06:30:00Z' }), true);
+  assert.equal(handoffProvesSecret(record, { ...rotatedDocument, fingerprints: [...rotatedDocument.fingerprints, fingerprintOf('later'.repeat(13))] }, { updatedAt: '2026-10-11T06:30:00Z' }), false, 'a later rotation is not the credential the record stored');
+  assert.equal(handoffProvesSecret(record, rotatedDocument, { updatedAt: '2026-10-11T06:30:05Z' }), false, 'a store since is not the one the record saw');
+  assert.equal(handoffProvesSecret(record, rotatedDocument, null), false);
+  assert.equal(handoffProvesSecret(null, rotatedDocument, { updatedAt: '2026-10-11T06:30:00Z' }), false);
+  const proven = releaseFilingHost({ secretUpdatedAt: '2026-10-11T06:30:00Z', handoff: record, agents: [{ ...rotatedDocument, fingerprints: [...rotatedDocument.fingerprints] }] });
+  assert.equal((await provisionReleaseFiling(filingMaster, { apply: true }, proven.deps)).state, 'current');
+  assert.deepEqual(proven.planeCalls.map(call => call.method), ['GET'], 'nothing is rotated for a store the master\'s record proves');
+  // Without the record (another host, or a lost file) the same store is rotated once more — never read as current.
+  const unrecorded = releaseFilingHost({ secretUpdatedAt: '2026-10-11T06:30:00Z', agents: [{ ...rotatedDocument, fingerprints: [...rotatedDocument.fingerprints] }] });
+  assert.equal((await provisionReleaseFiling(filingMaster, { apply: true }, unrecorded.deps)).state, 'rotated');
 });

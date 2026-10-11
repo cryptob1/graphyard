@@ -19,16 +19,18 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
  * identity out of band and never stores the secret; the identity is widened and rotated out of band
  * while the plane refuses rotations, so a narrowing succeeds before its rotation fails (the sequence
  * the credential issue time must survive); the secret is deleted while gh refuses to store one; the
- * install's admin credential is missing from the host; the plane is down; and the day ends current.
+ * install's admin credential is missing from the host; the plane is down; an administrator stores the
+ * old token and rotates the identity within the same GitHub second (the ordering the second cannot
+ * tell: only the master's own handoff record proves a store); and the day ends current.
  * After every cycle and at the end: the step runs once an hour and never more often however it fails
- * (bounded retries), no run ever reports the credential current while the secret GitHub holds
- * predates the credential the plane holds, every mutation the plane and gh see is one the window
+ * (bounded retries), no run ever reports the credential current while the secret GitHub holds is not
+ * the credential the plane holds newest, every mutation the plane and gh see is one the window
  * called for, no token or admin credential ever reaches an outcome, an audit line, an argument or
  * the kept status file, nothing reaches an isolation record or a failing fault run, and every system
  * invariant the loop checks holds.
  */
 const minute = 60_000, hour = 60 * minute, day = 24 * hour;
-/** The clock starts off the second, so a store landing in a rotation's second is only current through second-granular comparison. */
+/** The clock starts off the second, so every store the master makes lands in its rotation's second: current only through its handoff record. */
 const start = Date.parse('2026-10-12T06:00:00.400Z');
 const iso = (at: number) => new Date(at).toISOString();
 const identity = releaseFilingIdentity.id, repository = 'owner/project';
@@ -41,13 +43,14 @@ const windows = {
   secretDeletedWhileStoreRefused: { from: 20 * 60, to: 22 * 60 + 30 },
   adminMissing: { from: 30 * 60, to: 33 * 60 },
   planeDown: { from: 40 * 60, to: 42 * 60 },
+  storedThenRotatedWithinSecond: 45 * 60,
 };
 const within = (at: number, window: { from: number; to: number }) => at >= window.from && at < window.to;
 
 const config = (root: string): MasterConfig => masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: join(root, '.graphyard-credentials/master/token'), cliPath: join(root, 'bin/graphyard.mjs'),
   repository, baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', workers: [], run: { intervalSeconds: 60 } });
 
-test('unit:soak-release-filing-invariants — over two simulated days the loop keeps the release filing credential current once an hour: an out-of-band rotation, a narrowing whose rotation fails, a deleted secret gh refuses to store, a missing admin credential and a plane outage are each repaired on the first run after they lift, no run reads a stale secret as current, retries stay hourly, no token leaks, and every system invariant holds', { timeout: 300_000 }, async () => {
+test('unit:soak-release-filing-invariants — over two simulated days the loop keeps the release filing credential current once an hour: an out-of-band rotation, a narrowing whose rotation fails, a deleted secret gh refuses to store, a missing admin credential, a plane outage and a token stored by hand within the second of a rotation are each repaired on the first run after they lift, no run reads a stale secret as current, retries stay hourly, no token leaks, and every system invariant holds', { timeout: 300_000 }, async () => {
   const root = await temporaryDirectory('soak-release-filing');
   try {
     const master = config(root);
@@ -109,8 +112,8 @@ test('unit:soak-release-filing-invariants — over two simulated days the loop k
 
     const state = emptyDaemonState(master);
     const violations: string[] = [], misread: string[] = [];
-    /** Whether GitHub's secret predates the credential the plane holds, read off the scripted world itself. */
-    const stale = () => !github.secret || Date.parse(github.secret.updatedAt) < Math.floor(Date.parse(document.credentialIssuedAt) / 1000) * 1000 || github.secret.fingerprint !== document.fingerprints.at(-1);
+    /** Whether GitHub's secret is not the credential the plane holds newest, read off the scripted world itself, which knows what each store held. */
+    const stale = () => !github.secret || github.secret.fingerprint !== document.fingerprints.at(-1);
     for (let cycle = 0; now < start + 2 * day; cycle++, now += minute) {
       const at = (now - start) / minute;
       // The world as this minute finds it.
@@ -124,6 +127,13 @@ test('unit:soak-release-filing-invariants — over two simulated days the loop k
       github.storeFails = within(at, windows.secretDeletedWhileStoreRefused);
       host.adminMissing = within(at, windows.adminMissing);
       plane.down = within(at, windows.planeDown);
+      if (at === windows.storedThenRotatedWithinSecond) {
+        // An administrator stores the token the identity holds now (0.9 s ago) and rotates it by hand (0.5 s ago): GitHub reports the store's
+        // second, which is the rotation's second. The secret holds a credential the rotation replaced; no handoff record names that store.
+        github.secret = { updatedAt: new Date(Math.floor((now - 900) / 1000) * 1000).toISOString(), fingerprint: document.fingerprints.at(-1)! };
+        document.fingerprints.push(fingerprint('oob3'.repeat(16))); document.credentialIssuedAt = iso(now - 500); document.revision++; document.lastMutation = { kind: 'rotate', actor: 'operator', at: iso(now - 500), reason: 'rotated by hand' };
+        assert.equal(Math.floor(Date.parse(github.secret.updatedAt) / 1000), Math.floor(Date.parse(document.credentialIssuedAt) / 1000), 'the store and the rotation share a GitHub second');
+      }
 
       const result = await runCycle(master, state, effects, () => now);
       // The step runs beside the cycle; its outcome lands before the next minute, as a real minute lets it.
@@ -173,7 +183,7 @@ test('unit:soak-release-filing-invariants — over two simulated days the loop k
     const attempts = github.sets.filter(set => set.at >= deleted.from && set.at <= deleted.to + 30);
     assert.deepEqual(attempts.map(set => [set.at, set.stored]), [[deleted.from, false], [deleted.from + 60, false], [deleted.from + 120, false], [deleted.from + 180, true]], 'one store attempt per hourly run, never per cycle');
     for (const run of runs.filter(run => within(run.at, deleted))) assert.match(run.step.detail, /rotated but storing GRAPHYARD_RELEASE_TOKEN .* failed \(gh exited 1\): HTTP 403.*the next run rotates it again/);
-    assert.equal(attempts.at(-1)!.fingerprint, document.fingerprints.at(-1), 'the secret stored is the credential the plane holds newest');
+    assert.equal(attempts.at(-1)!.fingerprint, plane.posts.find(post => post.at === attempts.at(-1)!.at && post.action === 'rotate')!.body.token, 'the secret stored is the credential that run rotated to');
     // No admin credential on the host: unavailable, naming the administrator's step, and nothing is called; current again once it is back.
     const missing = windows.adminMissing;
     assert.deepEqual(states(missing.from, windows.planeDown.from), ['unavailable', 'unavailable', 'unavailable', 'current', 'current', 'current', 'current', 'current', 'current', 'current']);
@@ -181,20 +191,34 @@ test('unit:soak-release-filing-invariants — over two simulated days the loop k
     assert.equal(plane.posts.filter(post => within(post.at, missing)).length + github.sets.filter(set => within(set.at, missing)).length, 0, 'nothing is mutated without the admin credential');
     // The plane down: failed, nothing rotated or stored; current on the first run after it is back.
     const down = windows.planeDown;
-    assert.deepEqual(states(down.from, 48 * 60), ['failed', 'failed', 'current', 'current', 'current', 'current', 'current', 'current']);
+    assert.deepEqual(states(down.from, windows.storedThenRotatedWithinSecond), ['failed', 'failed', 'current', 'current', 'current']);
     for (const run of runs.filter(run => within(run.at, down))) assert.match(run.step.detail, /Graphyard refused operator-agents \(503\)/);
-    assert.deepEqual(plane.posts.filter(post => post.at >= down.from), [], 'nothing is mutated after the outage: the credential was already current');
-    // Every run reads the identity and the secret once each, but the three with no admin credential (nothing is called) and the two with no plane (the secret is not read for an identity that could not be).
-    assert.deepEqual([plane.gets, github.reads], [48 - 3 - 2, 48 - 3 - 2], 'one roster read and one secret read per run that could make them');
+    assert.deepEqual(plane.posts.filter(post => post.at >= down.from && post.at < windows.storedThenRotatedWithinSecond), [], 'nothing is mutated after the outage: the credential was already current');
+    // A token stored by hand within the second of a rotation by hand: GitHub's second cannot order them and no handoff record names the
+    // store, so the run is never read as current — it rotates and stores, its own store landing in its rotation's second, which the
+    // handoff record it writes proves to the next run: current, nothing rotated again.
+    const byHand = windows.storedThenRotatedWithinSecond;
+    assert.deepEqual(states(byHand, 48 * 60), ['rotated', 'current', 'current']);
+    assert.match(runs.find(run => run.at === byHand)!.step.detail, /^rotated /);
+    assert.deepEqual(plane.posts.filter(post => post.at >= byHand).map(post => [post.at, post.action]), [[byHand, 'rotate']], 'one rotation, not one per run');
+    assert.deepEqual(github.sets.filter(set => set.at >= byHand).map(set => [set.at, set.stored]), [[byHand, true]]);
+    assert.equal(Math.floor(Date.parse(github.secret!.updatedAt) / 1000), Math.floor(Date.parse(document.credentialIssuedAt) / 1000), 'the master\'s own store landed in its rotation\'s second');
+    assert.match(runs.find(run => run.at === byHand + 60)!.step.detail, /is the credential the master stored/);
+    const handoff = JSON.parse(await readFile(join(root, '.graphyard', 'release-filing-handoff.json'), 'utf8'));
+    assert.deepEqual(handoff, { at: iso(start + byHand * minute), fingerprint: document.fingerprints.at(-1), secretUpdatedAt: github.secret!.updatedAt }, 'the handoff record names the credential stored and the store GitHub reported');
+    // Every run reads the identity once, but the three with no admin credential (nothing is called) and the two with no plane; the secret is read once
+    // per such run and once more after each store, to record the handoff.
+    const storedCount = github.sets.filter(set => set.stored).length;
+    assert.deepEqual([plane.gets, github.reads], [48 - 3 - 2, 48 - 3 - 2 + storedCount], 'one roster read per run that could make it, one secret read per such run and one per store');
 
     // The whole two days: every mutation was one a window called for, every store carried a credential the plane issued, and the audit names each stored token by fingerprint only.
-    assert.deepEqual(plane.posts.map(post => post.action), ['rotate', 'configure', 'rotate', 'rotate', 'rotate', 'rotate', 'rotate'], 'seven mutations in two days');
-    assert.deepEqual(github.sets.map(set => set.stored), [true, true, false, false, false, true], 'six store attempts, three stored');
+    assert.deepEqual(plane.posts.map(post => post.action), ['rotate', 'configure', 'rotate', 'rotate', 'rotate', 'rotate', 'rotate', 'rotate'], 'eight mutations in two days');
+    assert.deepEqual(github.sets.map(set => set.stored), [true, true, false, false, false, true, true], 'seven store attempts, four stored');
     for (const set of github.sets) assert.ok(document.fingerprints.includes(set.fingerprint), 'every token stored was issued by the plane');
     const audit = (await readFile(setupAuditFile(root), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
     assert.deepEqual(audit.map(entry => [entry.variable, entry.secret, entry.fingerprint]), github.sets.filter(set => set.stored).map(set => [releaseFilingSecret, true, set.fingerprint]), 'one audit line per token stored, by fingerprint');
     const status = await readFile(join(root, '.graphyard', 'setup-self-provision.json'), 'utf8');
-    for (const text of [status, await readFile(setupAuditFile(root), 'utf8')]) assert.ok(!text.includes(admin) && !host.minted.some(token => text.includes(token)), 'no credential reaches a file the loop keeps');
+    for (const text of [status, await readFile(setupAuditFile(root), 'utf8'), JSON.stringify(handoff)]) assert.ok(!text.includes(admin) && !host.minted.some(token => text.includes(token)), 'no credential reaches a file the loop keeps');
     assert.equal(runs.at(-1)!.step.state, 'current', 'the two days end current');
     assert.equal(stale(), false, 'the secret GitHub holds is the credential the plane holds newest');
   } finally {

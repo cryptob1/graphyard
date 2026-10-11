@@ -94,7 +94,7 @@ Ungated merges: permanent violations (never backfilled): repair access, file fol
 
 ## Credentials
 
-Rotate [`GRAPHYARD_PRINCIPALS`](deployment.md#variables), redeploy. Operator agents hold only listed capabilities (`graphyard operator-agent setup|list|rotate|revoke`).
+Rotate [`GRAPHYARD_PRINCIPALS`](deployment.md#variables), redeploy. Operator agents hold only listed capabilities (`graphyard operator-agent setup|list|rotate|revoke`); `setup` of a revoked ID reinstates it under the new credential (revoked credentials stay revoked, none reissued; `lastMutation.reinstatedAfter`).
 
 ## Proof authority grants
 

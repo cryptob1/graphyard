@@ -148,11 +148,20 @@ test('manual:intervention-pattern-human-only-decision-build — GY-1470, GY-1666
     assert.equal(parkedOnHuman(after), false, `${subject} never reaches the human`);
     assert.equal(after.lease?.owner, worker.id, 'the attempt continues');
   }
-  // What the three classes must never claim: a person's identity or sign-in, a goal about the same commits, a paid account beside a capture.
+  // What the three classes must never claim: a person's identity or sign-in, a goal about the same commits, a paid account beside a capture,
+  // the operator's own browser profile (master init --browser-profile lends their signed-in session, which checkout-restore cannot provide),
+  // and a recording of a person's authenticator enrolment, which is no GitHub Confirm-access view.
   for (const [kind, needed] of [
     ['credentials-for-people', 'Give the new teammate an operator-agent identity so they can file tickets'],
     ['credentials-for-people', 'Issue a dashboard sign-in for the new contractor who reviews releases'],
     ['goals-and-priorities', 'Decide whether the operator-wip commits in the coordinator checkout are still a goal for this quarter'],
     ['money-or-accounts', 'Open a paid GitHub Team account, then capture the Confirm-access markup there'],
+    ['credentials-for-people', 'Lend the master your signed-in Chrome profile: run graphyard master init --token-stdin --browser-profile PROFILE on vishrog, naming the profile GitHub is signed into'],
+    ['credentials-for-people', 'Record the authenticator enrollment screen for the new teammate and save the recording as enrolment.html so their sign-in can be set up'],
+    ['credentials-for-people', 'A recording of the authenticator app pairing screen on the operator\'s phone, as markup'],
   ] as const) assert.equal(parkRefusal({ needed, kind }), null, `${needed} stays the human's`);
+  // The unit record alone is the loop's; a GitHub Confirm-access authenticator view recorded in its session is the master's.
+  assert.equal(hostDoableAsk('Run graphyard master init in the coordinator directory so this install\'s units are recorded there')?.class, 'coordinator-checkout');
+  assert.equal(hostDoableAsk('A capture of the GitHub Confirm access page after choosing Use your authenticator app, as outerHTML')?.class, 'browser-capture');
+  assert.equal(hostDoableAsk('In the GitHub sudo prompt pick the authenticator option and save the page markup')?.class, 'browser-capture');
 });
