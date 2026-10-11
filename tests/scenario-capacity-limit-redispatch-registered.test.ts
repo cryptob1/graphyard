@@ -200,7 +200,8 @@ test('unit:scenario-capacity-limit-redispatch-registered — recordCaseRun mater
 
 test('unit:scenario-capacity-limit-redispatch-registered — listing materializes through one transaction: a failed scenario.defined rolls the revision back', async () => {
   const id = capacityLimitRedispatchScenario;
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 177;
+  // Offset 16: free in the reserved 200-port window (177 collides with event-ledger-delta).
+  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 16;
   const database = new EmbeddedPostgres({
     databaseDir: await temporaryDirectory('scenario-capacity-redispatch-tx'),
     user: 'graphyard', password: 'testing-only', port, persistent: false,

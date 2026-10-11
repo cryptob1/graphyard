@@ -100,12 +100,7 @@ function wallOffset(instant: number, zone: string): number {
   return Date.UTC(fields.year, fields.month - 1, fields.day, fields.hour, fields.minute, fields.second) - Math.floor(instant / 1000) * 1000;
 }
 
-/**
- * A runtime's own retry marker beside a limit notice (GY-973): OpenCode 1.18 does not stop on a
- * spent account, it prints `Weekly/Monthly Limit Exhausted. … [retrying in 4s attempt #5]` and
- * retries forever, so its host keeps reporting the session as working. The marker is the runtime
- * speaking, not the agent: an agent's prose never carries an attempt counter in brackets.
- */
+/** Runtime retry marker beside a limit notice (GY-973); agent prose never carries this. */
 const retryMarker = /\[\s*retrying\b[^\]]*\]|\bretrying in \d+(?:\.\d+)?\s*(?:ms|s|m|h)?\b[^\n]*?\battempt\s*#?\d+/i;
 
 function findExhaustion(output: string, now: number, retrying: boolean): ExhaustionSignal | null {
@@ -125,42 +120,17 @@ function findExhaustion(output: string, now: number, retrying: boolean): Exhaust
   return null;
 }
 
-/**
- * Whether the tail of a stopped session's output is its provider saying the account is spent.
- * Only the last lines are read — a notice the session has long since worked past is history —
- * the notice must lead its line rather than sit inside a sentence the session wrote, and the
- * reset time is looked for on the notice and the two lines after it, where the runtimes that
- * split the sentence put it.
- */
+/** Tail of a stopped session: provider says the account is spent (lead-of-line, last lines only). */
 export function detectExhaustion(output: string, now: number): ExhaustionSignal | null {
   return findExhaustion(output, now, false);
 }
-
-/**
- * Whether a session its host still reports as working is in fact stuck on a spent account: its
- * screen tail carries a limit notice together with its runtime's retry marker. A working
- * session's notice without that marker is only text it printed, and is left alone. The notices are
- * the generic ones, not the session's runtime catalog (GY-1223 kept this deliberately): a profile's
- * `kind` need not be the runtime its selected account runs — a claude-kind profile may launch an
- * OpenCode account — so a per-runtime catalog would miss the very banner this path exists for. The
- * bracketed attempt counter, the tail, and the lead-of-line rule are the guards against agent prose.
- */
+/** Working session stuck on a spent account: limit notice plus runtime retry marker (GY-1223). */
 export function detectRetryingExhaustion(output: string, now: number): ExhaustionSignal | null {
   return findExhaustion(output, now, true);
 }
-
-/**
- * A 429 the provider answered with: leading the error (`429: {…}`, `429 Too Many Requests`, `API Error: 429 {…}`) or
- * named as its status (`HTTP 429`, `status 429`, `status code: 429`, `"code":429`). A 429 inside an
- * id or an echoed body is not the provider's answer, and a real failure must not become a wait (GY-1245).
- */
+/** Leading or status-named 429; not a 429 inside an id or echoed body (GY-1245). */
 const providerStatus429 = /^(?:(?:\w+\s+)?error:?\s*)?429\b(?![\d.])|\b(?:http(?:\/[\d.]+)?|status(?:\s*code)?|code)["']?\s*[:=]?\s*["']?429\b(?![\d.])/i;
-/**
- * Whether the error a headless run ended on is its provider refusing for quota or rate (GY-1092):
- * an HTTP 429, or any of the limit notices above. The text is the provider's own error — Pi's last
- * `errorMessage` or a runtime's stderr, never the agent's prose — so the notice may sit anywhere in
- * it (`429: {"message":"Weekly/Monthly Limit Exhausted. Your limit will reset at …"}`).
- */
+/** Provider quota/rate refusal in a headless error (GY-1092); never agent prose. */
 export function providerLimit(error: string, now: number): ExhaustionSignal | null {
   const text = error.replace(/\s+/g, ' ').trim();
   if (!text || !(providerStatus429.test(text) || /\btoo many requests\b/i.test(text) || exhaustionNotices.some(notice => notice.test(text)))) return null;
@@ -244,11 +214,7 @@ export type PartialWork = z.infer<typeof partialWorkSchema>;
 export const blockedAttemptMarker = 'blocked on epoch ';
 
 const instant = z.iso.datetime();
-/**
- * Why an attempt ended early. `quota` (the default) is the provider limit notice the record was
- * made for; `interrupted` is a worker killed outright or gone without submitting (GY-105), which
- * keeps its partial work the same way and is written to history as `capacity.interrupted`.
- */
+/** Early end: `quota` (default) or `interrupted` (killed/gone without submit; GY-105). */
 export const attemptEndCauses = ['quota', 'interrupted'] as const;
 export const exhaustionReportSchema = z.object({
   event: z.literal('exhausted'),
@@ -317,48 +283,26 @@ export function standingCapacity(work: { capacity?: CapacityState | null }, role
   return (work.capacity?.escalations ?? []).filter(entry => !role || entry.role === role);
 }
 
-/**
- * GY-1708: how one worker epoch sits on the capacity and pipeline ledgers after a mid-attempt
- * exhaustion — one exhaustion, one attempt row, released once. A double-counted lease or attempt
- * shows up as two rows or an open attempt that should have ended.
- */
-export function workerAttemptLedger(
-  work: {
-    capacity?: CapacityState | null;
-    pipeline?: { attempts?: readonly { epoch: number; end: string | null }[] } | null;
-  },
-  epoch: number,
-) {
-  const exhaustions = (work.capacity?.exhaustions ?? []).filter(entry => entry.role === 'worker' && entry.epoch === epoch);
-  const attempts = (work.pipeline?.attempts ?? []).filter(entry => entry.epoch === epoch);
+type AttemptWork = { capacity?: CapacityState | null; pipeline?: { attempts?: readonly { epoch: number; end: string | null }[] } | null };
+/** GY-1708: one epoch's exhaustion/attempt counts after mid-attempt limit (double-count shows as two rows). */
+export function workerAttemptLedger(work: AttemptWork, epoch: number) {
+  const exhaustions = (work.capacity?.exhaustions ?? []).filter(e => e.role === 'worker' && e.epoch === epoch);
+  const attempts = (work.pipeline?.attempts ?? []).filter(e => e.epoch === epoch);
   return {
-    exhaustions: exhaustions.length,
-    attempts: attempts.length,
-    released: attempts.filter(entry => entry.end === 'released').length,
-    open: attempts.filter(entry => entry.end === null).length,
-    preservedCommit: exhaustions.find(entry => entry.partialWork.state === 'committed')?.partialWork.commit ?? null,
+    exhaustions: exhaustions.length, attempts: attempts.length,
+    released: attempts.filter(e => e.end === 'released').length,
+    open: attempts.filter(e => e.end === null).length,
+    preservedCommit: exhaustions.find(e => e.partialWork.state === 'committed')?.partialWork.commit ?? null,
   };
 }
-
-/**
- * GY-1708: whether a mid-attempt exhaustion left the spent epoch ended once with its partial work
- * on the record, so the redispatch claims the next epoch without losing that work.
- */
-export function redispatchPreservesAttempt(
-  work: {
-    capacity?: CapacityState | null;
-    pipeline?: { attempts?: readonly { epoch: number; end: string | null }[] } | null;
-  },
-  spentEpoch: number,
-): { ok: boolean; detail: string } {
+/** GY-1708: spent epoch ended once with partial work kept for the redispatch's next epoch. */
+export function redispatchPreservesAttempt(work: AttemptWork, spentEpoch: number): { ok: boolean; detail: string } {
   const ledger = workerAttemptLedger(work, spentEpoch);
   if (ledger.exhaustions !== 1) return { ok: false, detail: `expected one exhaustion for epoch ${spentEpoch}, found ${ledger.exhaustions}` };
   if (ledger.attempts !== 1) return { ok: false, detail: `expected one attempt row for epoch ${spentEpoch}, found ${ledger.attempts}` };
   if (ledger.released !== 1 || ledger.open !== 0) return { ok: false, detail: `epoch ${spentEpoch} must be released once, not left open or double-ended` };
-  const exhaustion = (work.capacity?.exhaustions ?? []).find(entry => entry.role === 'worker' && entry.epoch === spentEpoch)!;
-  if (exhaustion.partialWork.state === 'committed' && !exhaustion.partialWork.commit) {
-    return { ok: false, detail: 'committed partial work must name its commit' };
-  }
+  const exhaustion = (work.capacity?.exhaustions ?? []).find(e => e.role === 'worker' && e.epoch === spentEpoch)!;
+  if (exhaustion.partialWork.state === 'committed' && !exhaustion.partialWork.commit) return { ok: false, detail: 'committed partial work must name its commit' };
   return {
     ok: true,
     detail: exhaustion.partialWork.state === 'committed'
@@ -366,19 +310,10 @@ export function redispatchPreservesAttempt(
       : `epoch ${spentEpoch} ended once; partial work ${exhaustion.partialWork.state}`,
   };
 }
-
-/**
- * GY-1708: a held account must not be chosen for another launch of the same role while its hold
- * stands (unknown reset = still held). Selection and dispatch read the same rule.
- */
-export function accountHeldForRole(
-  held: Record<string, { until?: string; resetsAt?: string | null }>,
-  account: string,
-  now: number,
-): boolean {
+/** GY-1708: held account is not selectable for the same role until reset (null reset = still held). */
+export function accountHeldForRole(held: Record<string, { until?: string; resetsAt?: string | null }>, account: string, now: number): boolean {
   const entry = held[account];
   if (!entry) return false;
   const until = entry.until ?? entry.resetsAt;
-  if (!until) return true;
-  return Date.parse(until) > now;
+  return !until || Date.parse(until) > now;
 }
