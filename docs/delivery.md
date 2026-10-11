@@ -22,7 +22,7 @@ UAT's `GRAPHYARD_TOKEN` (`GRAPHYARD_RELEASE_TOKEN`) files holds and follow-ups a
 
 ### Pre-merge gate and release-candidate validation
 
-Required: `typecheck`, `test` (`ci.yml`) under ten minutes; per candidate `releaseCandidateTests`, container, chart, soak/timing (advisory); UAT's `zero-touch` suite (`up --agent --goal`, fake GitHub) must merge a first item, any human step but App approval blocking promotion.
+Required: `typecheck`, `test` (`ci.yml`) under ten minutes; per candidate `releaseCandidateTests`, container, chart, soak/timing (advisory); UAT's `zero-touch` suite (`up --agent --goal`, fake GitHub) must merge a first item, any human step but App approval blocks promotion.
 
 `deploy/helm/exercise.sh` waits for the upgrade's rollout and the new ReplicaSet's Ready pod before backing up, retrying transient API failures (empty reply, reset, stall, non-2xx, bodiless 2xx); an API staying unreachable ends the job's log with `api METHOD /api/PATH failed after 15 attempts: status STATUS, body: BODY`.
 
