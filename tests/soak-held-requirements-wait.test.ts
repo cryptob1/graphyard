@@ -9,19 +9,21 @@ import { scopeBlockedBudgetMs, type ScopeRequestState } from '../src/model/scope
 import { coveringStandingScopeWatch, syncHeldScopeAskMarks } from '../src/daemon/metrics.js';
 
 /**
- * GY-1702 (review of 668c66d81763 / 535ff9680874). Standing or held requirements decisions must be
+ * GY-1702 (review of 668c66d81763 / 417929e25578). Standing or held requirements decisions must be
  * waits, not per-cycle faults: matching scope asks ride the hold, the scope-blocked bound pauses
  * only for an ask the quarantined held decision answers, and when the hold fails the recorded wait
  * can breach again. A still-approved resume race keeps a live watch and retries each cycle with no
- * decision fault. These paths run every cycle for every open item, so the real loop runs here for
- * three simulated days over eight held items plus a separate approved-resume soak: four matching
- * widenings held under quarantine (two apply when the attempt ends, two fail mid-hold), two covering
- * no-answers holds that fail while decide throws (watch must clear so the bound resumes), one
- * non-matching held revision that must not bind its ask, and one quarantined ask with no held
- * decision (must still breach). After every cycle every system invariant holds. At the end: no
- * resume or decide while a matching hold stands, no decision fault for a hold, the non-matching
- * ask is requested once its hold settles, failed holds resume their breach clock, applied holds
- * leave no open ask, and approved-resume races retry across days without faults.
+ * decision fault. Cold start: the first cycle's scope step must discover a history-held match before
+ * measuring the bound (approvals are empty until the later decisions step). These paths run every
+ * cycle for every open item, so the real loop runs here for three simulated days over eight held
+ * items plus a separate approved-resume soak: four matching widenings held under quarantine (two
+ * apply when the attempt ends, two fail mid-hold), two covering no-answers holds that fail while
+ * decide throws (watch must clear so the bound resumes), one non-matching held revision that must
+ * not bind its ask, and one quarantined ask with no held decision (must still breach). After every
+ * cycle every system invariant holds. At the end: no resume or decide while a matching hold stands,
+ * no decision fault for a hold, the non-matching ask is requested once its hold settles, failed
+ * holds resume their breach clock, applied holds leave no open ask, and approved-resume races retry
+ * across days without faults.
  */
 const minute = 60_000, hour = 60 * minute, day = 24 * hour, cycleMs = 2 * minute, start = Date.parse('2026-10-11T00:00:00.000Z');
 const iso = (at: number) => new Date(at).toISOString();
@@ -142,6 +144,14 @@ test('unit:soak-held-requirements-wait — over three simulated days matching qu
 
     const { actions } = await runCycle(config, state, effects, () => now);
     for (const check of state.invariants.report as InvariantCheck[]) if (!check.holds) violations.push(`cycle ${cycle}: ${check.line}`);
+
+    // Cold start (cycle 0): scope measured before decisions adopted watches — no false scope-budget fault.
+    if (cycle === 0) {
+      const cold = Object.entries(state.actions).filter(([key, action]) =>
+        key.startsWith('escalation:scope-budget:blocked:') && action.state === 'failed'
+        && /GY-1702|GY-1703|GY-1704|GY-1705|GY-1706|GY-1707/.test(key));
+      assert.deepEqual(cold, [], `cold-start cycle must not breach matching/covering held asks: ${cold.map(([key]) => key).join(',')}`);
+    }
 
     // While matching/covering holds stand under quarantine past the bound, the budget must not breach those asks.
     if (now < failAt) {

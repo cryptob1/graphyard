@@ -11,7 +11,7 @@ import { emptyDaemonState, runCycle, scopeBudget, type DaemonEffects, type Daemo
 import { scopeRoutineDecision } from '../src/daemon/decisions.js';
 import {
   approvedResumePendingDetail, clearCoveringAdoptIfGone, coveringPlannedFiles, coveringStandingScopeWatch,
-  heldDecisionNamedIn, heldDecisionRefusal, markHeldScopeAsk, samePlannedFiles,
+  discoverHeldScopeAskMarks, heldAdoptWatch, heldDecisionNamedIn, heldDecisionRefusal, markHeldScopeAsk, samePlannedFiles,
   staleRevisionDecideNote, staleRevisionDecideRefusal, standingRequirementsAnswersAsk, syncHeldScopeAskMarks,
 } from '../src/daemon/metrics.js';
 import { approvalWatchSchema } from '../src/daemon/state.js';
@@ -180,6 +180,55 @@ test('unit:scope-budget-holds-during-quarantine-held-decision — a routed ask a
   const resumed = scopeBudget([free], measured, later, true);
   assert.equal(resumed.breaches.length, 1, 'once the hold ends without settling the ask, the recorded wait can breach');
   assert.match(resumed.breaches[0].detail, /with the independent approver/);
+});
+
+test('unit:scope-budget-holds-during-quarantine-held-decision — cold start discovers a history-held match before the budget measures, so an empty approvals map does not breach', async () => {
+  const askedAt = '2026-10-11T14:47:50.740Z';
+  const later = Date.parse(askedAt) + scopeBlockedBudgetMs + 60_000;
+  const request = { epoch: 4, at: askedAt, paths: [helper], reason: 'needed', requestedBy: 'worker',
+    decision: { state: 'refused' as const, reason: 'No rule', at: askedAt, decidedBy: 'graphyard' as const } };
+  const item = {
+    id: 'work-1700-cold', key: 'GY-1700', stage: 'build' as const, plannedFiles: [layout],
+    criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:layout'] }],
+    lease: { owner: 'worker', epoch: 4, expiresAt: new Date(later + 60_000).toISOString() },
+    scopeRequest: request,
+    containmentQuarantine: { owner: 'worker', epoch: 4, at: askedAt, settlementHash: 'a'.repeat(64), leaseExpiresAt: new Date(later + 60_000).toISOString() },
+  } as unknown as Work;
+  const measured: [] = [];
+  // Empty approvals (daemon restart): sync alone leaves the ask unmarked.
+  syncHeldScopeAskMarks(measured, []);
+  assert.equal(scopeBudget([item], measured, later, true, {}).breaches.length, 1, 'without discovery an old routed ask breaches');
+  await discoverHeldScopeAskMarks(measured, [item], later, true, async () => ({
+    decisions: [{ action: 'requirements', state: 'held', input: { plannedFiles: [layout, helper] } }],
+  }));
+  assert.equal(scopeBudget([item], measured, later, true, {}).breaches.length, 0, 'discovery marks the ask before measuring');
+  // A non-covering hold must not pause the bound.
+  const other: [] = [];
+  await discoverHeldScopeAskMarks(other, [item], later, true, async () => ({
+    decisions: [{ action: 'requirements', state: 'held', input: { plannedFiles: [layout] } }],
+  }));
+  assert.equal(scopeBudget([item], other, later, true, {}).breaches.length, 1, 'a hold that does not answer the ask still breaches');
+});
+
+test('unit:standing-requirements-adopted-no-fault — held adoption preserves a carried registry session until close succeeds', () => {
+  const askedAt = '2026-10-11T14:47:50.740Z';
+  const item = { key: 'GY-1700', scopeRequest: { epoch: 4, at: askedAt, paths: [helper], reason: 'needed', requestedBy: 'worker' } };
+  const decision = {
+    action: 'requirements' as const, binding: 'scope:4', input: { plannedFiles: [layout, helper] },
+    scope: { epoch: 4, at: askedAt, paths: [helper], requestedBy: 'worker' }, reason: 'widen',
+  };
+  const carried = approvalWatchSchema.parse({
+    work: 'GY-1700', action: 'requirements', decision: '9a6095d9-c3e5-4357-93d6-48b8ccc61e5e',
+    requestedAt: askedAt, settledAt: null, session: 'approver:orphan-session', agentName: 'gy-approver-gy-1700',
+    closeAttempts: 1, launches: 1,
+  });
+  const { watch, bound } = heldAdoptWatch(item, {
+    id: '9a6095d9-c3e5-4357-93d6-48b8ccc61e5e', approvedBy: 'graphyard-approver',
+    outcome: 'Task is quarantined', input: { plannedFiles: [layout, helper] },
+  }, decision, carried, askedAt);
+  assert.ok(bound);
+  assert.equal(watch.session, 'approver:orphan-session');
+  assert.equal(watch.agentName, 'gy-approver-gy-1700');
 });
 
 test('unit:stale-revision-decide-classified-transient — the decisions-step classifier matches the plane\'s decide refuse and not the requirements revise wording', () => {

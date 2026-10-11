@@ -306,6 +306,10 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     }
     if (step.step === 'settled') {
       await closeApprover(item, watch, 'its decision is applied');
+      // GY-1702: ledger can show applied before this cycle's work snapshot reflects the held application.
+      if (watch.scope && judged?.state === 'applied' && item.scopeRequest
+        && item.scopeRequest.at === watch.scope.at && item.scopeRequest.epoch === watch.scope.epoch
+        && scopeOutcomeAnswered(item, watch.scope, judged, clock) !== 'answered') return;
       if (watch.scope) clearHeldScopeAsk(state.scope, item.key, watch.scope.epoch, watch.scope.at);
       if (!watch.scope && decision.scope && !watch.coveringAdopt) { // GY-1702: free the ask after a non-matching hold settles
         delete state.approvals[key];

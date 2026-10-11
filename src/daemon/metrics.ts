@@ -6,7 +6,7 @@ import { pendingBaseRefresh } from '../merge-queue.js';
 import { standingCapacity } from '../model/capacity.js';
 import { stalledItems } from '../model/action-account.js';
 import { type MasterConfig, type ContainmentAssessment, assertDispatchable, containmentPhase } from '../master.js';
-import { approvalWatchSchema, type ApprovalWatch, type DaemonAction, type DaemonActionKind, type DaemonState, type CycleMetrics, type ScopeMeasurement } from './state.js';
+import { approvalWatchSchema, type ApprovalWatch, type DaemonAction, type DaemonActionKind, type DaemonState, type CycleMetrics, type ScopeMeasurement, carriedSession } from './state.js';
 import { type ItemClock, itemClockSchema, type LatencySample, latencySampleSchema } from './latency-clock.js';
 import { decisionKey, scopeOutcomeAnswered } from './reconcile.js';
 import { docsSyncHolding } from '../model/docs-sync.js';
@@ -46,6 +46,30 @@ export function syncHeldScopeAskMarks(scopeMeasurements: object, approvals: Iter
 }
 export const isHeldScopeAsk = (scopeMeasurements: object, key: string, epoch: number, at: string) =>
   heldScopeAskMarks.get(scopeMeasurements)?.has(heldScopeAskId(key, epoch, at)) ?? false;
+/**
+ * GY-1702: before `scopeBudget`, mark a quarantined routed ask that a history-held requirements
+ * decision already answers. On a cold start `state.approvals` is empty and the decisions step has
+ * not run yet, so sync from watches alone would leave the ask unmarked and falsely breach.
+ */
+export async function discoverHeldScopeAskMarks(
+  scopeMeasurements: object,
+  items: readonly Work[],
+  now: number,
+  routes: boolean,
+  readDecisions: ((item: Work) => Promise<{ decisions: Array<{ action: string; state: string; input?: { plannedFiles?: unknown } | null }> }>) | undefined,
+): Promise<void> {
+  if (!routes || !readDecisions) return;
+  await Promise.all(items.map(async item => {
+    const request = item.scopeRequest;
+    if (!request || request.decision?.decidedBy !== 'graphyard' || !item.containmentQuarantine) return;
+    if (!routableScopeRequest(item, now) || isHeldScopeAsk(scopeMeasurements, item.key, request.epoch, request.at)) return;
+    let history: Array<{ action: string; state: string; input?: { plannedFiles?: unknown } | null }>;
+    try { history = (await readDecisions(item)).decisions; } catch { return; }
+    const held = history.find(entry => entry.action === 'requirements' && entry.state === 'held');
+    if (!held || unplannedPaths((held.input?.plannedFiles as string[] | null) ?? [], request.paths).length) return;
+    markHeldScopeAsk(scopeMeasurements, item.key, request.epoch, request.at);
+  }));
+}
 type RequirementsAsk = { action: string; scope?: unknown; input?: { plannedFiles?: unknown } | null };
 /** A covering standing/held requirements revision is the ask's pending answer (no-answers ok). */
 export const standingRequirementsAnswersAsk = (standing: { input?: { plannedFiles?: unknown } | null }, decision: RequirementsAsk) =>
@@ -155,7 +179,9 @@ export function heldAdoptWatch(
   const base = cover
     ? approvalWatchSchema.parse({ ...cover, ended: bound ? [heldWaitMarker] : cover.ended })
     : approvalWatchSchema.parse(heldWaitWatch(item.key, decision.action, held, carried?.requestedAt ?? stamp, scope));
-  return { watch: approvalWatchSchema.parse({ ...base, settledAt: null }), bound, unmatched, clearPrevious };
+  // Keep the carried registry session (and closeAttempts) until close succeeds — approver concurrency is one.
+  const kept = carried ? { ...carriedSession(carried), closeAttempts: carried.closeAttempts } : {};
+  return { watch: approvalWatchSchema.parse({ ...base, ...kept, settledAt: null }), bound, unmatched, clearPrevious };
 }
 /** GY-1702: bind a race-discovered matching ask onto a live held watch; returns the wait detail and whether to mark the bound. */
 export function bindHeldSupervisedAsk(watch: ApprovalWatch, judged: HeldDecisionLike & { outcome?: string | null }, decision: Pick<RoutineDecision, 'action' | 'scope' | 'input'>, item: Pick<Work, 'key' | 'scopeRequest'>): { detail: string; mark: boolean } {
