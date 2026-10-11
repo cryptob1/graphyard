@@ -145,8 +145,14 @@ test('unit:planned-files-carry-companions — authoring carries the test file th
   ];
   const gy883 = derivePlannedFiles({ plannedFiles: ['tests/risk-lanes.test.ts', 'docs/how-graphyard-works.md'], criteria: lanes }, tree);
   assert.deepEqual(gy883.plannedFiles, ['tests/risk-lanes.test.ts', 'docs/how-graphyard-works.md', 'src/model/policy.ts', 'src/model/gates.ts', 'tests/docs-budget.test.ts'], 'a planned test file holds the proofs; the gate rides beside documentation');
-  // No documentation and no test proof: nothing is carried.
+  // No documentation and no test proof: nothing is carried. A plain manual: proof still plans nothing;
+  // a fault-class manual proof (GY-1706) plans its test file the way unit:/integration: proofs do.
   assert.deepEqual(derivePlannedFiles({ plannedFiles: ['src/model/gates.ts'], criteria: [{ id: 'AC-1', text: 'Gates change.', proofs: ['manual:x'] }] }, tree).added, []);
+  const faultTree = new Set([...tree, 'tests/fault-class-scope.test.ts', 'tests/helpers/timing-baseline.json', 'tests/no-wall-clock-time-bombs.test.ts']);
+  const faultClass = derivePlannedFiles({ plannedFiles: [], criteria: [{ id: 'AC-1', text: 'The shared cause is removed.', proofs: ['manual:fault-class-scope'] }] }, faultTree);
+  assert.ok(faultClass.plannedFiles.includes('tests/fault-class-scope.test.ts'), 'manual:fault-class-* plans its proof test');
+  assert.ok(faultClass.plannedFiles.includes('tests/helpers/timing-baseline.json'));
+  assert.ok(faultClass.plannedFiles.includes('tests/no-wall-clock-time-bombs.test.ts'), 'the wall-clock gate rides beside the proof test');
 
   // The measure (GY-140 AC-3): authored as before, the worker asked for the companions and each
   // ask counted; authored with them carried in, the same worker never needs to ask.
