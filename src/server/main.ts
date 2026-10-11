@@ -93,7 +93,8 @@ export async function main(options: MainOptions = {}) {
   // opens first; until startup validation completes, /healthz reports `readiness: false`, every
   // mutation that could act on unvalidated state is refused with a retryable 503, and the
   // observation workers and production watch are not started. A failed attempt is logged and the
-  // reconciliation tick retries it.
+  // reconciliation tick retries it. Webhook deliveries still reach the route (below) but soft-accept
+  // while readiness is false so a deploy burst never answers 5xx (GY-1700).
   let ready = false, validating = false, prepared = false, closing = false;
   let watching: ReturnType<typeof startProductionWatch> | null = null;
   let scanning: ReturnType<typeof startPatternScan> | null = null;
@@ -191,6 +192,9 @@ export async function main(options: MainOptions = {}) {
 
   const close = async () => {
     closing = true;
+    // Soft-accept further webhook deliveries before the pool closes (GY-1700): a wake against a
+    // draining pool was the other half of the deploy-burst 500s GitHub recorded.
+    services.readiness = false;
     reconciliation.stop(); watching?.stop(); watching = null; await observing?.stop(); observing = null; await scanning?.stop(); scanning = null; retroIndex.stop();
     process.off('SIGTERM', shutdown); process.off('SIGINT', shutdown);
     await new Promise<void>(resolve => http.close(() => resolve()));
@@ -207,6 +211,11 @@ export async function main(options: MainOptions = {}) {
  * except a GitHub webhook delivery, which only wakes durable jobs, and a work lease heartbeat,
  * which reads no validation state and would otherwise lapse leases for the whole startup window.
  * Reads stay open, and /healthz answers liveness throughout.
+ *
+ * The webhook route itself soft-accepts (202 with a logged ignore) while readiness is false and on
+ * wake failure (GY-1700), so a deploy burst never marks deliveries failed with 5xx in GitHub's
+ * delivery log; safety-net polling covers the gap. This gate stays open for the route so HMAC
+ * verification still runs — it must not answer 503 for webhooks.
  */
 export function refusedBeforeReady(method = 'GET', url = '/'): boolean {
   if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS') return false;

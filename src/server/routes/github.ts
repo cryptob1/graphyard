@@ -1,6 +1,6 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
-import { demand } from '../../model.js';
-import { defineRoutes } from '../routes.js';
+import { Refusal, demand } from '../../model.js';
+import { defineRoutes, requestFailure } from '../routes.js';
 import { observationEvents } from '../../github.js';
 import { wakeFromWebhook } from '../../store/store.js';
 import { baseChangeFiles, baseMoveWakes, type BaseMoveItem } from '../../observation-priority.js';
@@ -11,6 +11,11 @@ import { baseChangeFiles, baseMoveWakes, type BaseMoveItem } from '../../observa
  * jobs' webhook wake, so any replica claims them ahead of polled jobs, and base-branch pushes and
  * protection events end the receiving adapter's shared reads (GY-806). A base-branch push wakes only
  * the open items it can affect (GY-1231, `baseMoveWakes`); the rest keep their cadence.
+ *
+ * A verified delivery never answers 5xx (GY-1700): while startup validation has not completed, or
+ * when the wake transaction fails, the route soft-accepts with 202 and a logged ignore reason so
+ * GitHub's delivery log stays clean; safety-net polling covers the gap. Auth and repository
+ * refusals stay 4xx/503 as before.
  */
 export const githubRoutes = defineRoutes('github', [
   {
@@ -23,30 +28,48 @@ export const githubRoutes = defineRoutes('github', [
       const actual = Buffer.from(String(req.headers['x-hub-signature-256'] ?? ''));
       demand(expected.length === actual.length && timingSafeEqual(expected, actual), 'Invalid webhook signature', 401);
       const payload = JSON.parse(raw.toString());
-      demand(payload.repository?.full_name?.toLowerCase() === github?.config.repository.toLowerCase(), 'Repository is not managed', 403);
+      // Optional-chain the whole managed-repo path: an unset App block must refuse with 403, not throw
+      // TypeError into the server's 500 handler (GY-1700).
+      const managed = github?.config.repository?.toLowerCase();
+      demand(managed && payload?.repository?.full_name?.toLowerCase() === managed, 'Repository is not managed', 403);
       // Our own check publications must not create an endless webhook/publish loop.
       if (payload.check_run?.app?.id === github?.config.appId) return context.send(202, { accepted: true, ignored: 'own check' });
       const delivery = String(req.headers['x-github-delivery'] ?? ''); demand(delivery && delivery.length < 200, 'Missing delivery ID', 400);
       const event = String(req.headers['x-github-event'] ?? '');
-      const delivered = await engine.store.transaction(async db => {
-        const result = await db.query('INSERT INTO webhook_receipts(id) VALUES($1) ON CONFLICT DO NOTHING RETURNING id', [delivery]);
-        if (!result.rowCount) return null;
-        // Wake only the items the event is about; a move of the base branch or a queue ref touches them all.
-        let subjects = webhookSubjects(payload, github?.config.base ?? 'main');
-        if (subjects.all && payload?.ref === `refs/heads/${github?.config.base ?? 'main'}`) {
-          // Only what the selection reads, of the open items the work index names: never every document whole.
-          const open = (await db.query(`SELECT w.id::text AS id, i.stage, w.document->'submission' AS submission,
-            jsonb_build_object('files', w.document->'observation'->'files', 'mergeableState', w.document->'observation'->'mergeableState',
-              'conflicting', w.document->'observation'->'conflicting', 'mergeabilityUnknown', w.document->'observation'->'mergeabilityUnknown') AS observation,
-            jsonb_typeof(w.document->'observation') = 'object' AS observed
-            FROM work_items w JOIN work_index i ON i.id = w.id WHERE i.stage <> 'done' AND w.document->'submission'->'pr' IS NOT NULL`)).rows
-            .map(row => ({ id: row.id, stage: row.stage, submission: row.submission, observation: row.observed ? { ...row.observation, files: row.observation.files ?? [] } : null }) as BaseMoveItem);
-          subjects = baseMoveSubjects(subjects, open, baseChangeFiles(payload));
-        }
-        if (!subjects.all && !subjects.prs.length && !subjects.shas.length && !subjects.branches.length) return [];
-        // An observation event also stamps the job's webhook wake (GY-806), which every replica's claim puts first.
-        return wakeFromWebhook(db, subjects, (observationEvents as readonly string[]).includes(event));
-      });
+      // Startup / shutdown: accept without waking so a deploy burst never 500s (GY-1700, GY-1127).
+      // No receipt is written, so a later redelivery after ready can still wake; polling covers the gap.
+      if ((context.services as { readiness?: boolean }).readiness === false) {
+        console.error(`webhook delivery ${delivery} (${event || 'unknown'}) accepted without wake: startup validation has not completed; polling covers the gap`);
+        return context.send(202, { accepted: true, ignored: 'startup validation' });
+      }
+      let delivered: string[] | null;
+      try {
+        delivered = await engine.store.transaction(async db => {
+          const result = await db.query('INSERT INTO webhook_receipts(id) VALUES($1) ON CONFLICT DO NOTHING RETURNING id', [delivery]);
+          if (!result.rowCount) return null;
+          // Wake only the items the event is about; a move of the base branch or a queue ref touches them all.
+          let subjects = webhookSubjects(payload, github?.config.base ?? 'main');
+          if (subjects.all && payload?.ref === `refs/heads/${github?.config.base ?? 'main'}`) {
+            // Only what the selection reads, of the open items the work index names: never every document whole.
+            const open = (await db.query(`SELECT w.id::text AS id, i.stage, w.document->'submission' AS submission,
+              jsonb_build_object('files', w.document->'observation'->'files', 'mergeableState', w.document->'observation'->'mergeableState',
+                'conflicting', w.document->'observation'->'conflicting', 'mergeabilityUnknown', w.document->'observation'->'mergeabilityUnknown') AS observation,
+              jsonb_typeof(w.document->'observation') = 'object' AS observed
+              FROM work_items w JOIN work_index i ON i.id = w.id WHERE i.stage <> 'done' AND w.document->'submission'->'pr' IS NOT NULL`)).rows
+              .map(row => ({ id: row.id, stage: row.stage, submission: row.submission, observation: row.observed ? { ...row.observation, files: row.observation.files ?? [] } : null }) as BaseMoveItem);
+            subjects = baseMoveSubjects(subjects, open, baseChangeFiles(payload));
+          }
+          if (!subjects.all && !subjects.prs.length && !subjects.shas.length && !subjects.branches.length) return [];
+          // An observation event also stamps the job's webhook wake (GY-806), which every replica's claim puts first.
+          return wakeFromWebhook(db, subjects, (observationEvents as readonly string[]).includes(event));
+        });
+      } catch (error) {
+        if (error instanceof Refusal) throw error;
+        // Soft-accept: a 5xx here is what GitHub recorded during the GY-1700 deploy burst.
+        console.error(requestFailure(req.method, req.url, error));
+        console.error(`webhook delivery ${delivery} (${event || 'unknown'}) accepted without wake: wake failed; polling covers the gap`);
+        return context.send(202, { accepted: true, ignored: 'wake failed' });
+      }
       // Only after the wake committed, and once per delivery: the receiving adapter's shared reads end here.
       if (delivered) github?.noteWebhook?.(event, payload);
       return context.send(202, { accepted: true });
@@ -89,4 +112,3 @@ export function webhookSubjects(payload: any, base: string): { all: boolean; prs
   if (branches.length) sha(payload.after);
   return { all, prs: [...prs], shas: [...shas], branches };
 }
-
