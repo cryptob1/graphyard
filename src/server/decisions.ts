@@ -5,6 +5,7 @@ import { Refusal, demand, resolveEscalation, standingEscalations, type Principal
 import { save, wakeJob } from '../store.js';
 import { approvalConflict, approveCapability, assertDecisionAuthority, decisionApprovalSchema, decisionInputs, decisionPrecondition, decisionRequestSchema, foldDecisions, judgedSame, requiredDecisionCapabilities, standingRefusal, approvalApplyGraceMs, type Decision, type DecisionState } from '../model/approval.js';
 import { lapsedReauthorization, reworkSituation, standingRequest } from './held-rework.js';
+import { applicationOf, applyApprovedDecision } from './held-decisions.js';
 import { canonical, decisionRace, readDecisions, resolvePin, samePin, type DecisionRecord, type StaleRace } from './decision-ledger.js';
 import type { Services } from './routes.js';
 import { revisionRebase } from '../engine.js';
@@ -138,6 +139,8 @@ async function recordRequest(services: Services, caller: Principal, id: string, 
     // An approved one here is still inside the grace its approval has to apply it, or the lane's whose resumption faulted (GY-1300).
     demand(!pending, pending?.state === 'approved'
       ? `Decision ${pending.id} (${data.action}) on ${work!.key} was approved by ${pending.approvedBy} at ${pending.approvedAt} and its application has recorded no outcome yet; a request after ${Math.round(approvalApplyGraceMs / 1000)}s resumes it, and { "action": "resume", "decision": "${pending.id}" } resumes it now`
+      // GY-1687: a held decision needs no second request; the control plane applies it when the attempt ends.
+      : pending?.state === 'held' ? `Decision ${pending.id} (${data.action}) on ${work!.key} was approved by ${pending.approvedBy} at ${pending.approvedAt} and is held (${pending.outcome}); the control plane applies it in the transaction that ends the attempt, so it need not be requested again`
       : `Decision ${pending?.id} (${data.action}) is already ${pending?.state} on ${work!.key}; wait for it before requesting another`, 409);
     const decisionId = randomUUID();
     await record(db, work!, actor.id, 'decision.requested', { id: decisionId, action: data.action, input, reason: data.reason, requester: { id: actor.id, role: actor.role }, capabilities: requiredDecisionCapabilities(data.action, input, work!),
@@ -241,15 +244,9 @@ export async function approveDecision(services: Services, caller: Principal, id:
     throw error;
   }
   const { decision, work, approver } = approved!;
-  let outcome: { kind: string; details: object };
-  try { outcome = { kind: 'decision.applied', details: { outcome: await applyThroughEngine(services, decision, approver, data.reason) } }; }
-  catch (error) {
-    // A server fault is retried by repeating the approval; only a refusal settles the decision.
-    if (!(error instanceof Refusal) && !(error instanceof z.ZodError)) throw error;
-    outcome = { kind: 'decision.failed', details: { error: error.message } };
-  }
-  // The item is locked first, so a resumption racing this approval serializes with it (GY-1300).
-  return services.engine.store.transaction(async db => { await findWork(db, work.id); return finish(db, work, approver, decision.id, outcome.kind, outcome.details, key, fingerprint); });
+  // GY-1687: a requirements decision refused only by a live attempt is held under the item's lock and applied when the attempt ends (held-decisions.ts).
+  return applyApprovedDecision(services, work, decision, approver, data.reason, () => applyThroughEngine(services, decision, approver, data.reason),
+    (db, kind, details) => finish(db, work, approver, decision.id, kind, details, key, fingerprint));
 }
 
 async function finish(db: Db, work: Work, approver: Principal, decisionId: string, kind: string, details: object, key: string, fingerprint: string) {
@@ -283,8 +280,7 @@ async function resolveInTransaction(services: Services, db: Db, now: Date, work:
 
 export async function applyThroughEngine(services: Services, decision: DecisionRecord, approver: Principal, approvalReason: string) {
   // The requester acts, with the authority the two-party decision grants for this one input.
-  const actor: Principal = { id: decision.requestedBy, role: 'admin', sessionKind: 'ai', displayName: `${decision.requestedBy} (decision ${decision.id} approved by ${approver.id})` };
-  const reason = `${decision.reason} [decision ${decision.id}, requested by ${decision.requestedBy}, approved by ${approver.id}: ${approvalReason}]`.slice(0, 2000);
+  const { actor, reason } = applicationOf(decision, approver, approvalReason);
   const key = `decision:${decision.id}`, input = decision.input, engine = services.engine;
   switch (decision.action) {
     case 'release': await engine.execute(actor, 'ready', decision.workId, { expectedRevision: input.expectedRevision, reason }, key); return 'Released to ready';

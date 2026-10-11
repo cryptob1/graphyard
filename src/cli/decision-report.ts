@@ -170,6 +170,8 @@ export async function terminalDecisions(masterApi: (path: string) => Promise<any
           ...agentOwner('master', `Answer the refusal: graphyard master decide ${item.key} ${decision.action} [JSON|@FILE] REASON citing ${decision.id} and what it lacked, then graphyard master approver ${item.key} DECISION — or act on the refusal instead`, 'approver') });
         continue;
       }
+      // GY-1687: a held decision is listed with why it waits; nothing is asked of the master, since the control plane applies it when the attempt ends.
+      if (decision.state === 'held') { listed.push({ work: item.key, id: decision.id, action: decision.action, state: 'held', reason: decision.outcome ?? null }); continue; }
       if (decision.state !== 'stale' && decision.state !== 'withdrawn') continue;
       listed.push({ work: item.key, id: decision.id, action: decision.action, state: decision.state, reason: decision.outcome ?? null, ...(decision.race ? { race: decision.race } : {}) });
       if (decision.state !== 'stale' || latest.get(decision.action) !== decision.id) continue;

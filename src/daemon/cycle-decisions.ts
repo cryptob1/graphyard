@@ -33,18 +33,15 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
   // The items this step writes, which the stale-close step leaves to the next cycle's read (GY-1439).
   const written = new Set<string>();
   const effects = recordingWrites(await decisionReads(cycle.effects, cycle.heldDecisions, snapshot.work, Object.values(state.approvals), clock, cycle.effects.decisionReadDeadlineMs), written);
-  // 4c. The routine decisions. A standing verdict, a base the control plane could not merge in, and
-  //     a delivered item still fenced by a dead supervisor each have one correct answer, and each
-  //     used to wait for a master session to notice. The loop requests the decision with the
-  //     master's own operator-agent identity and launches the independent approver session for it;
-  //     it never approves its own request, so the separation the server enforces is unchanged.
-  //     Automatic merging turned off is the fourth: the merge itself then waits for that approval.
-  //     A request is not the end of it. The approver is a launched session like any other, so every
-  //     cycle reads the decision back and looks at its session again (see `approvalStep`): a
-  //     finished session is closed, a dead, stalled or hung one is replaced within a bound, a
-  //     refused one is left to the master to answer, a decision the server settled some other way
-  //     is requested again, and one no session will judge is escalated and left standing on the
-  //     silence measure.
+  // 4c. The routine decisions. A standing verdict, a base the control plane could not merge in, and a delivered item
+  //     still fenced by a dead supervisor each have one correct answer, and each used to wait for a master session to
+  //     notice. The loop requests the decision with the master's own operator-agent identity and launches the independent
+  //     approver session for it; it never approves its own request, so the separation the server enforces is unchanged.
+  //     Automatic merging turned off is the fourth: the merge itself then waits for that approval. A request is not the
+  //     end of it. The approver is a launched session like any other, so every cycle reads the decision back and looks at
+  //     its session again (see `approvalStep`): a finished session is closed, a dead, stalled or hung one is replaced within
+  //     a bound, a refused one is left to the master to answer, a decision the server settled some other way is requested
+  //     again, and one no session will judge is escalated and left standing on the silence measure.
   const stamp = new Date(clock).toISOString(), bounds = holdBounds.get(state) ?? new Map<string, number>(); holdBounds.set(state, bounds); for (const id of bounds.keys()) if (!snapshot.work.some(work => work.id === id)) bounds.delete(id);
   const note = async (key: string, item: Work, kind: DaemonActionKind, outcome: 'done' | 'failed', detail: string, at = now(), faultKind?: FaultKind | null) =>
     performed.push(await record(state, key, { kind, work: item.key, principal: null, state: outcome, detail, attempts: (state.actions[key]?.attempts ?? 0) + 1, epoch: item.epoch, cycle: state.cycle }, at, effects.persist, faultKind));
@@ -66,12 +63,15 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
         performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `${item.key} already holds an applied merge decision for candidate ${decision.binding.slice(0, 12)}; nothing to request`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
         return;
       }
-      // A request whose response was lost is already standing on the item, and the server refuses a
-      // second one; adopting it is what keeps a retry from leaving a decision nobody will judge.
-      let standing = history.find(entry => entry.action === decision.action && (entry.state === 'requested' || entry.state === 'approved'));
-      // An approved decision is already judged (GY-1300): it is never adopted for an approver session. The control plane is asked to
-      // apply what was approved, and only one that settled failed, stale or superseded is asked for again, below, within the same
-      // bound. A loop without the resume settles it through the withdrawal below (GY-1297).
+      // A request whose response was lost is already standing on the item, and the server refuses a second one; adopting it is what keeps a retry from leaving a decision nobody will judge.
+      let standing = history.find(entry => entry.action === decision.action && (entry.state === 'requested' || entry.state === 'approved' || entry.state === 'held'));
+      // GY-1687: a held decision is approved and waits only for the item's attempt to end, when the control plane applies it; no approver is launched for it and nothing is requested in its place.
+      if (standing?.state === 'held') {
+        state.approvals[key] = approvalWatchSchema.parse({ work: item.key, action: decision.action, decision: standing.id, requestedAt: stamp, settledAt: stamp, approvedAt: standing.approvedAt ?? null, approvedBy: standing.approvedBy ?? null });
+        performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `${item.key}'s ${decision.action} decision ${standing.id} is approved by ${standing.approvedBy ?? 'its approver'} and held (${boundDetail(standing.outcome ?? 'the item holds a live attempt', 300)}); the control plane applies it when the attempt ends, so nothing is requested`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist)); return;
+      }
+      // An approved decision is already judged (GY-1300): it is never adopted for an approver session. The control plane is asked to apply what was approved,
+      // and only one that settled failed, stale or superseded is asked for again, below, within the same bound. A loop without the resume settles it through the withdrawal below (GY-1297).
       if (standing?.state === 'approved' && effects.resume) {
         const resumed = await effects.resume(item, standing.id);
         if (resumed.state === 'approved') throw new Error(`${decision.action} decision ${standing.id} was approved by ${standing.approvedBy ?? 'its approver'} but the control plane could not apply it yet; it is resumed again on the next try`);

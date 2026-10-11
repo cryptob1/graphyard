@@ -50,11 +50,18 @@ async function commit(services: Services, db: Db, now: Date, work: Work, all: Wo
  * the item's blocker: left standing, that refusal held the released item at the ready gate with
  * no request for the loop or the approver to answer, until a coordinator widened it by hand (GY-1396).
  */
-async function endLease(db: Db, work: Work, epoch: number, now: Date, by: string) {
+async function endLease(services: Services, db: Db, work: Work, all: Work[], epoch: number, now: Date, by: string) {
+  const held = { lease: work.lease, containmentQuarantine: work.containmentQuarantine, plannedFiles: work.plannedFiles };
   endAttempt(work, epoch, 'released', now);
   work.lease = null;
   const closed = closeEndedScopeRequest(work, now, by);
   if (closed) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'scope.closed', JSON.stringify({ details: closed })]);
+  // GY-1687: this transaction ends the attempt without entering the engine's command path, so the requirements
+  // decision held for the attempt is applied here, as the engine's own attempt-ending commands apply it, before
+  // `commit` evaluates the freed item and derives any dispatch from it (Codex review of 086e327d7695). The method
+  // is internal to the engine's own transactions, and this is one of them (see `commit`).
+  const engine = services.engine as unknown as { applyHeldDecisions(db: Db, work: Work, all: Work[], before: typeof held, now: Date, ended: { command: string | null; submitted: boolean }): Promise<((db: Db) => Promise<void>)[]> };
+  for (const write of await engine.applyHeldDecisions(db, work, all, held, now, { command: by, submitted: false })) await write(db);
 }
 
 /** Whether the item's latest `blocked` report was written by `owner` during attempt `epoch`. */
@@ -95,7 +102,7 @@ export async function requestHumanDecision(services: Services, actor: Principal,
     work!.humanRequest = request;
     work!.blocker = describeHumanRequest(request);
     recordIntervention(work!, 'blocked');
-    await endLease(db, work!, data.epoch, now, 'human.requested');
+    await endLease(services, db, work!, all, data.epoch, now, 'human.requested');
     return commit(services, db, now, work!, all, actor, 'human.requested', { request, decision: humanDecisionLabel[request.kind], leaseEnded: { owner: actor.id, epoch: data.epoch } }, key, fingerprint);
   });
 }
@@ -208,7 +215,7 @@ export async function recordCapacity(services: Services, actor: Principal, id: s
           endedBlocker = work!.blocker;
           work!.blocker = null;
         }
-        if (work!.lease?.epoch === report.epoch) await endLease(db, work!, report.epoch, now, report.cause === 'interrupted' ? 'capacity.interrupted' : 'capacity.exhausted');
+        if (work!.lease?.epoch === report.epoch) await endLease(services, db, work!, all, report.epoch, now, report.cause === 'interrupted' ? 'capacity.interrupted' : 'capacity.exhausted');
       }
       const record: ExhaustionRecord = { ...report, at: now.toISOString(), owner, recordedBy: actor.id };
       work!.capacity = { ...capacity, exhaustions: [...capacity.exhaustions, record].slice(-retainedExhaustions) };
