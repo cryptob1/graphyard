@@ -55,10 +55,12 @@ export async function setupHealth(root: string, master: MasterConfig, supervisor
   const mainGuard = coordinator?.mainGuard ?? null, revertApprover = mainGuard?.attention ?? null;
   // The loop's own setup step: a failed run, and (GY-1692, GY-1691) the release filing credential it keeps current, which only a host
   // holding no admin credential leaves to the administrator — named here, never in a park. Both belong to the setup section too.
-  const selfProvisionFailed = selfProvisioned?.failed ? `The loop's master setup --apply ${selfProvisioned.outcome} (${selfProvisioned.at})` : null;
   const filing = selfProvisioned?.releaseFiling;
+  // A run the filing step failed is reported by the filing item below, which names the step's own diagnostic and the backed-off retry.
+  const selfProvisionFailed = selfProvisioned?.failed && filing?.state !== 'failed' ? `The loop's master setup --apply ${selfProvisioned.outcome} (${selfProvisioned.at})` : null;
   const filingItem: AttentionItem | null = filing?.state === 'unavailable' ? { subject: 'setup', text: `The release filing credential cannot be issued from this host: ${filing.detail}`, ...humanOwner('issuing credentials to people', filing.next ?? releaseFilingSetupNext) }
-    : filing?.state === 'failed' || filing?.state === 'planned' ? { subject: 'setup', text: `The loop's master setup --apply left the release filing credential ${filing.state}: ${filing.detail}`, ...agentOwner('master', setupApplyNext) } : null;
+    : filing?.state === 'failed' ? { subject: 'setup', text: `The loop's master setup --apply left the release filing credential failed (${selfProvisioned!.at}; the failed run is retried from ten minutes on, backing off): ${filing.detail}`, ...agentOwner('master', setupApplyNext) }
+    : filing?.state === 'planned' ? { subject: 'setup', text: `The loop's master setup --apply left the release filing credential planned: ${filing.detail}`, ...agentOwner('master', setupApplyNext) } : null;
   const setup = { reviewer, supervisor, herdrWorkspace, mainGuard, selfProvision: selfProvisioned,
     attention: [...reviewer.attention, ...supervisorAttention.map(item => item.text), ...(herdrWorkspace.exists === false ? [herdrWorkspace.reason!] : []), ...(revertApprover ? [revertApprover] : []), ...(selfProvisionFailed ? [selfProvisionFailed] : []), ...(filingItem ? [filingItem.text] : [])] };
   // An unsupervised loop stays stopped; each supervisor state names its own repair.
@@ -87,8 +89,9 @@ export const loopProvisionFile = (root: string) => resolve(root, '.graphyard', '
  * the cycle (a redeploy outlasts a cycle) at most once an hour; after failures in a row it backs off
  * from ten minutes, doubling to at most a day (`loopProvisionDelay`). It sets
  * variables only where the provider adapter applies them in place; elsewhere it plans, and the setup
- * attention keeps naming the command. A failed run is thrown on the next step, so the cycle records
- * the failed config action, and its outcome is kept for `master status`, which never runs it.
+ * attention keeps naming the command. A failed run — the setup threw, or its release filing step
+ * failed (GY-1692) — is thrown on the next step, so the cycle records the failed config action, and
+ * its outcome is kept for `master status`, which never runs it.
  */
 export async function loopSelfProvision(root: string, master: Pick<MasterConfig, 'repository' | 'reviewer' | 'url'>, options: { now?: number; setup?: typeof masterSetup } = {}): Promise<LoopSelfProvision> {
   const now = options.now ?? Date.now(), last = loopProvisionRuns.get(root);
@@ -100,8 +103,13 @@ export async function loopSelfProvision(root: string, master: Pick<MasterConfig,
     loopProvisionRuns.set(root, entry);
     void (options.setup ?? masterSetup)(root, master, { apply: true })
       .then(report => {
-        entry.failures = 0; entry.outcome = report.set.length ? `set ${report.set.join(', ')}` : report.redeployed.length ? `redeployed ${report.redeployed.join(', ')}` : report.next ?? 'every derived variable is present';
-        if (report.releaseFiling) { entry.releaseFiling = report.releaseFiling; if (report.releaseFiling.state !== 'current') entry.outcome += `; release filing ${report.releaseFiling.state}: ${report.releaseFiling.detail}`; }
+        const variables = report.set.length ? `set ${report.set.join(', ')}` : report.redeployed.length ? `redeployed ${report.redeployed.join(', ')}` : report.next ?? 'every derived variable is present';
+        if (report.releaseFiling) entry.releaseFiling = report.releaseFiling;
+        // GY-1692: a filing step that failed (the plane refused, gh could not store the token, the admin credential could not be read) is a
+        // failed run — the cycle records it and the retry backs off from ten minutes, never the hour a success earns, so a failed candidate's
+        // filing is not left broken for an hour (GY-1691). `unavailable` is the host's standing condition, named in the setup section instead.
+        if (report.releaseFiling?.state === 'failed') { entry.failed = true; entry.failures++; entry.outcome = `failed: release filing failed: ${report.releaseFiling.detail} (derived variables: ${variables})`; }
+        else { entry.failures = 0; entry.outcome = report.releaseFiling && report.releaseFiling.state !== 'current' ? `${variables}; release filing ${report.releaseFiling.state}: ${report.releaseFiling.detail}` : variables; }
       },
         error => { entry.outcome = `failed: ${error instanceof Error ? error.message : String(error)}`; entry.failed = true; entry.failures++; })
       .finally(async () => {

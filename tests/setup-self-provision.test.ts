@@ -419,20 +419,32 @@ test('manual:intervention-pattern-human-only-decision-build — GY-1691 (GY-1692
     assert.ok(!(await readFile(setupAuditFile(root), 'utf8')).includes('b'.repeat(64)));
     const host = { platform: 'linux' as NodeJS.Platform, temporaryDirectories: [] as string[], home: root, run: () => '' };
     const now = Date.parse('2026-10-11T07:00:00.000Z');
-    for (const [step, expectHuman, text] of [[unavailable, true, /cannot be issued from this host: no installation admin credential/], [failedStore, false, /left the release filing credential failed/]] as const) {
-      const setupStub = (async () => ({ set: [], redeployed: [], next: null, releaseFiling: step })) as unknown as typeof masterSetup;
+    for (const [step, expectHuman, text] of [[unavailable, true, /cannot be issued from this host: no installation admin credential/], [failedStore, false, /left the release filing credential failed \(.*retried from ten minutes on, backing off\)/]] as const) {
+      const stubRuns: number[] = [];
+      const setupStub = (async () => { stubRuns.push(1); return { set: [], redeployed: [], next: null, releaseFiling: step }; }) as unknown as typeof masterSetup;
       const kept = await loopSelfProvision(join(root, step.state), master, { now, setup: setupStub });
       assert.equal(kept.outcome, 'running');
       await new Promise(resolve => setTimeout(resolve, 20));
+      // A step that failed is a failed run (GY-1692): the cycle records it on the next step, and it is retried ten minutes on, not an hour; an
+      // unavailable step is the host's standing condition, a success that waits the hour.
+      if (step.state === 'failed') await assert.rejects(loopSelfProvision(join(root, step.state), master, { now: now + 1000, setup: setupStub }), /setup self-provision failed: release filing failed: .*gh exited 1/);
       const settled = await loopSelfProvision(join(root, step.state), master, { now: now + 1000, setup: setupStub });
       assert.deepEqual(settled.releaseFiling, step, 'the loop keeps what the step did');
       assert.ok(settled.outcome.includes(`release filing ${step.state}: `), settled.outcome);
+      assert.equal(settled.failed, step.state === 'failed', `a ${step.state} step ${step.state === 'failed' ? 'is' : 'is not'} a failed run`);
+      assert.deepEqual(JSON.parse(await readFile(join(root, step.state, '.graphyard', 'setup-self-provision.json'), 'utf8')).failed, step.state === 'failed', 'master status in another process reads the same');
+      await loopSelfProvision(join(root, step.state), master, { now: now + 599_000, setup: setupStub });
+      assert.equal(stubRuns.length, 1, 'not retried before ten minutes');
+      await loopSelfProvision(join(root, step.state), master, { now: now + 600_000, setup: setupStub });
+      assert.equal(stubRuns.length, step.state === 'failed' ? 2 : 1, step.state === 'failed' ? 'a failed filing step is retried ten minutes on' : 'an unavailable step waits the hour');
+      await new Promise(resolve => setTimeout(resolve, 20));
       const health = await setupHealth(join(root, step.state), master, host, null, async () => null);
       const item = health.attention.find(entry => text.test(entry.text))!;
-      assert.ok(item, `${step.state} is attention`);
+      assert.ok(item, `${step.state} is attention: ${JSON.stringify(health.attention)}`);
       assert.deepEqual([item.human, item.role, item.next], [expectHuman, expectHuman ? 'human' : 'master', expectHuman ? step.next : setupApplyNext]);
       if (expectHuman) assert.equal(item.humanOnly, 'issuing credentials to people');
       assert.ok(health.setup.attention.includes(item.text), `${step.state} is in the setup section too, so setup health never reads clear while filing is blocked`);
+      assert.equal(health.attention.filter(entry => entry.subject === 'setup' && /release filing credential|master setup --apply failed/.test(entry.text)).length, 1, 'the filing diagnostic is the run\'s one item, not doubled by a generic failed-run item');
     }
   } finally { await rm(root, { recursive: true, force: true }); }
 });
