@@ -3,6 +3,7 @@ import type { Work } from '../model.js';
 import { detectRetryingExhaustion, silentPaneExhaustion, type CapacityRole, type ExhaustionSignal } from '../model/capacity.js';
 import { detectRuntimeExhaustion } from '../master/environments.js';
 import { launchStartMs } from '../master/launch.js';
+import { screenMotion, stallScreenLines } from '../master/approver-stall.js';
 import { classifyRuntimePrompt, containmentQuarantines, continueAfterDecline, type EscalationSession, escalationProfile, type HerdrAgent, isProfileSession, ownLoginAccounts, profileAccount, type RuntimePrompt, type SessionIdentity, type WorkerProfile } from '../master.js';
 import { containmentPhase } from '../model/containment.js';
 import { standingEscalations } from '../model/escalation.js';
@@ -191,12 +192,23 @@ export async function closeStep(cycle: Cycle) {
       const handle = session.requestId ? running.find(entry => entry.id === session.requestId)
         : running.find(entry => entry.agentName === session.agentName || (!!session.pane && entry.pane === session.pane));
       const startedAt = handle?.startedAt ? Date.parse(handle.startedAt) : Number.NaN;
+      const pastStart = Number.isFinite(startedAt) && clock - startedAt >= launchStartMs(config);
+      const status = agent.agent_status ?? '';
+      // Ended means the pane finished: `done`, or idle with a still, untouched screen. Bare idle is
+      // not enough — Herdr reports a long or silent command as idle while it still runs (GY-1705).
+      let ended = status === 'done';
+      if (!ended && !noticeSignal && status === 'idle' && pastStart && effects.sessionOutput) {
+        const marker = session.requestId ?? session.agentName;
+        const motion = await screenMotion(() => effects.sessionOutput!(agent, stallScreenLines), marker, effects.idleScreenPauseMs);
+        ended = motion === 'still';
+      }
       const signal = noticeSignal ?? silentPaneExhaustion({
         listed: true,
-        everWorking: agent.agent_status === 'working' || handle?.observed === 'working',
+        everWorking: status === 'working' || handle?.observed === 'working',
         hasOutcome: !!handle?.outcome,
         notice: null,
-        pastStartBound: Number.isFinite(startedAt) && clock - startedAt >= launchStartMs(config),
+        pastStartBound: pastStart,
+        ended,
       });
       if (!signal) return;
       const attempts = (previous?.attempts ?? 0) + 1, resets = signal.resetsAt ? `resets ${signal.resetsAt}` : 'reset time unknown';

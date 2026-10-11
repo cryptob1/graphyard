@@ -25,9 +25,11 @@ import type { Principal, Work } from '../src/model.js';
 import type { RunEvent, RunResult, Runner } from '../src/runner/types.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
-// GY-1705: a pane-role session that dies silent (listed, never working, no outcome, no notice past
-// its start bound) and a headless round stopped at its bound with a readable provider limit both
-// hold the account the launch actually spent and fail the role over — never re-select the spent one.
+// GY-1705: a pane-role session that ends silent (listed, never working, ended with no outcome or
+// notice past its start bound — `done`, or idle with a still untouched screen) and a headless round
+// stopped at its bound with a readable provider limit (on any attempt of the round) both hold the
+// account the launch actually spent and fail the role over — never re-select the spent one. Bare
+// idle is not enough: Herdr reports a long or silent command as idle while it still runs.
 // Fixed clocks are numeric epochs (no Date.parse/Date.UTC of a calendar day); Date.now() only
 // drives the live approver-loop fixtures and relative holds.
 
@@ -75,15 +77,16 @@ const limitError = '429: {"code":"1310","message":"Weekly/Monthly Limit Exhauste
 const limitNow = 1_790_893_353_900;
 const limitReset = new Date(2026, 9, 3, 8, 27, 35).toISOString();
 
-test('unit:silent-pane-exhaustion-signal — only a listed, never-working, outcomeless pane past its start bound with no notice is spent', () => {
-  const spent = silentPaneExhaustion({ listed: true, everWorking: false, hasOutcome: false, notice: null, pastStartBound: true });
+test('unit:silent-pane-exhaustion-signal — only a listed, ended, never-working, outcomeless pane past its start bound with no notice is spent', () => {
+  const spent = silentPaneExhaustion({ listed: true, everWorking: false, hasOutcome: false, notice: null, pastStartBound: true, ended: true });
   assert.deepEqual(spent, { reason: silentPaneExhaustionReason, resetsAt: null });
   for (const [label, input] of [
-    ['not listed', { listed: false, everWorking: false, hasOutcome: false, notice: null, pastStartBound: true }],
-    ['worked', { listed: true, everWorking: true, hasOutcome: false, notice: null, pastStartBound: true }],
-    ['has outcome', { listed: true, everWorking: false, hasOutcome: true, notice: null, pastStartBound: true }],
-    ['has notice', { listed: true, everWorking: false, hasOutcome: false, notice: { reason: 'limit', resetsAt: null }, pastStartBound: true }],
-    ['inside start bound', { listed: true, everWorking: false, hasOutcome: false, notice: null, pastStartBound: false }],
+    ['not listed', { listed: false, everWorking: false, hasOutcome: false, notice: null, pastStartBound: true, ended: true }],
+    ['not ended', { listed: true, everWorking: false, hasOutcome: false, notice: null, pastStartBound: true, ended: false }],
+    ['worked', { listed: true, everWorking: true, hasOutcome: false, notice: null, pastStartBound: true, ended: true }],
+    ['has outcome', { listed: true, everWorking: false, hasOutcome: true, notice: null, pastStartBound: true, ended: true }],
+    ['has notice', { listed: true, everWorking: false, hasOutcome: false, notice: { reason: 'limit', resetsAt: null }, pastStartBound: true, ended: true }],
+    ['inside start bound', { listed: true, everWorking: false, hasOutcome: false, notice: null, pastStartBound: false, ended: true }],
   ] as const) {
     assert.equal(silentPaneExhaustion(input), null, label);
   }
@@ -100,6 +103,12 @@ test('unit:run-timeout-limit-signal — a timeout round carries its provider lim
     { result: 'timeout', detail: 'no terminal event within 1200s; the run was stopped', events: [{ kind: 'message', error: limitError }] },
   ], limitNow);
   assert.ok(round); assert.equal(round.resetsAt, limitReset);
+  // One readable limit in an all-timeout round is enough: the fallback need not repeat the notice.
+  const oneNotice = headlessTimeoutLimit([
+    { result: 'timeout', detail: 'no terminal event within 1200s; the run was stopped', events: [retry] },
+    { result: 'timeout', detail: 'no terminal event within 1200s; the run was stopped', events: [] },
+  ], limitNow);
+  assert.ok(oneNotice); assert.equal(oneNotice.resetsAt, limitReset);
   assert.equal(headlessTimeoutLimit([{ result: 'timeout', detail: 'stopped', events: [] }, { result: 'timeout', detail: 'stopped', events: [] }], limitNow), null);
   assert.equal(headlessTimeoutLimit([{ result: 'timeout', detail: 'stopped', events: [retry] }, { result: 'exit', detail: 'gone', events: [] }], limitNow), null);
 });
@@ -169,20 +178,29 @@ async function silentApproverLoop(label: string) {
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date().toISOString(), reason: 'none', deployed: [], pending: [] }),
     recordDeployment: async () => {},
     requestSmoke: () => {},
+    idleScreenPauseMs: 0,
   } as unknown as DaemonEffects;
   const filed = await ok(operator, 'POST', 'work', definition(`silent ${label}`)) as Work;
   const work = await ok(coordinator, 'POST', `work/${filed.id}/triage`, { judgement: { outcome: 'close', reason: 'Not worth doing' } }) as Work;
   return { config, herdr, clock, decisions, launches, work, now, cycle: (state: DaemonState) => runCycle(config, state, effects, now) };
 }
 
-test('integration:approver-silent-exhaustion-failover — a silent idle approver past its start bound holds its launch account and the decision continues on another', async () => {
+/** Mark the live approver pane as ended (`done`) with an empty screen — the silent-death shape. */
+function endSilent(herdr: Herdr, name: string) {
+  const agent = herdr.agents.find(entry => entry.name === name);
+  assert.ok(agent, name);
+  agent.agent_status = 'done';
+  herdr.output[name] = '';
+}
+
+test('integration:approver-silent-exhaustion-failover — a silent ended approver past its start bound holds its launch account and the decision continues on another', async () => {
   const { config, herdr, clock, decisions, launches, work, cycle } = await silentApproverLoop('failover');
   const state = emptyDaemonState(config);
   await cycle(state);
   assert.deepEqual(launches, ['env-a']);
   assert.equal(Object.values(state.approvals)[0].account, 'env-a');
   const name = approverSessionName(work, decisions[0].id);
-  herdr.output[name] = '';
+  endSilent(herdr, name);
   clock.skewMs += 61_000;
   const detection = await cycle(state);
   const failover = detection.actions.find(action => action.kind === 'failover');
@@ -197,11 +215,25 @@ test('integration:approver-silent-exhaustion-failover — a silent idle approver
   assert.equal(Object.values(state.approvals)[0].account, 'env-b');
 });
 
+test('integration:approver-silent-exhaustion-failover — an idle pane whose screen still moves is not spent (long-command protection)', async () => {
+  const { config, herdr, clock, decisions, launches, work, cycle } = await silentApproverLoop('idle-busy');
+  const state = emptyDaemonState(config);
+  await cycle(state);
+  const name = approverSessionName(work, decisions[0].id);
+  let ticks = 0;
+  Object.defineProperty(herdr.output, name, { configurable: true, enumerable: true, get: () => `⏺ Bash(npm test)\n  ⎿ running ${++ticks}` });
+  clock.skewMs += 61_000;
+  const detection = await cycle(state);
+  assert.equal(detection.actions.find(action => action.kind === 'failover'), undefined, JSON.stringify(detection.actions));
+  assert.deepEqual(launches, ['env-a'], 'no replacement while the idle command may still be running');
+  assert.equal((await observedExhaustions(config, Date.now() + clock.skewMs))['env-a'], undefined);
+});
+
 test('integration:no-repeat-launch-into-silent-account — after a silent death selection skips the held account', async () => {
   const { config, herdr, clock, decisions, launches, work, cycle, now } = await silentApproverLoop('no-repeat');
   const state = emptyDaemonState(config);
   await cycle(state);
-  herdr.output[approverSessionName(work, decisions[0].id)] = '';
+  endSilent(herdr, approverSessionName(work, decisions[0].id));
   clock.skewMs += 61_000;
   await cycle(state);
   assert.deepEqual(launches, ['env-a', 'env-b']);
@@ -214,7 +246,7 @@ test('integration:replay-approver-silent-deaths — GY-1701\'s silent claude-c d
   const { config, herdr, clock, decisions, launches, work, cycle } = await silentApproverLoop('replay-1701');
   const state = emptyDaemonState(config);
   await cycle(state);
-  herdr.output[approverSessionName(work, decisions[0].id)] = '';
+  endSilent(herdr, approverSessionName(work, decisions[0].id));
   clock.skewMs += 61_000;
   await cycle(state);
   assert.ok((await observedExhaustions(config, Date.now() + clock.skewMs))['env-a']);
@@ -247,12 +279,11 @@ function recurring(key: string, faultClass: FaultClass, at: number) {
   return diagnosisItem(key, at, { title: input.title, description: input.description, origin: input.origin } as Partial<Work>);
 }
 
-async function diagnosisRound(account: string, held: { account: string; role: string }[]) {
+async function diagnosisRound(account: string, held: { account: string; role: string }[], eventsFor: (attempt: 'primary' | 'fallback') => RunEvent[] = () => [{ kind: 'retry', at: new Date(limitNow).toISOString(), attempt: 1, error: limitError }]) {
   const settings = diagnosticianSettings({ diagnostician: {} });
-  const retry: RunEvent = { kind: 'retry', at: new Date(limitNow).toISOString(), attempt: 1, error: limitError };
   const diagnostician: DiagnosticianEffects = {
     settings, cwd: '/checkout',
-    runner: async attempt => ({ runner: limitedTimeoutRunner([retry]), runtime: 'pi', model: attempt === 'primary' ? 'zai/glm-5.3-flash' : 'zai/glm-5.3', account }),
+    runner: async attempt => ({ runner: limitedTimeoutRunner(eventsFor(attempt)), runtime: 'pi', model: attempt === 'primary' ? 'zai/glm-5.3-flash' : 'zai/glm-5.3', account }),
     context: async () => ({ journal: [], serverLog: [], pullRequests: [] }),
     file: async () => { throw new Error('no fix'); },
     decide: async () => ({ id: randomUUID() }),
@@ -279,6 +310,15 @@ test('integration:diagnostician-timeout-limit-wait — an all-timeout round whos
   assert.equal(entry.state, 'waiting', entry.detail);
   assert.ok(entry.retryAt);
   assert.deepEqual(held, [{ account: 'zai-diag', role: 'diagnostician' }]);
+  assert.equal(state.faults.instances.filter(entry => entry.kind === 'overlong-session').length, 0);
+});
+
+test('integration:diagnostician-timeout-limit-wait — a primary limit notice with a bare-timeout fallback still waits, never overlong-session', async () => {
+  const held: { account: string; role: string }[] = [];
+  const retry: RunEvent = { kind: 'retry', at: new Date(limitNow).toISOString(), attempt: 1, error: limitError };
+  const state = await diagnosisRound('zai-one-notice', held, attempt => attempt === 'primary' ? [retry] : []);
+  assert.equal(state.diagnoses['GY-1682'].state, 'waiting', state.diagnoses['GY-1682'].detail);
+  assert.deepEqual(held, [{ account: 'zai-one-notice', role: 'diagnostician' }]);
   assert.equal(state.faults.instances.filter(entry => entry.kind === 'overlong-session').length, 0);
 });
 

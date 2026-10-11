@@ -205,8 +205,11 @@ export function providerLimit(error: string, now: number): ExhaustionSignal | nu
  * GY-1705. A pane-role session (approver, reviewer or producer) Herdr still lists that never reported
  * working, ended with no outcome and no readable provider notice past its role's start bound: the
  * account is treated as spent with an assumed reset (the unknown-reset hold), so selection fails
- * over instead of handing the same spent account back. A session that worked, that still has an
- * outcome, that printed a notice, or that has not yet passed its start bound is not this signal.
+ * over instead of handing the same spent account back. `ended` is evidence the session finished —
+ * Herdr `done`, or an idle pane whose still screen shows it never ran — never a bare idle status:
+ * Herdr reports a long or silent command as idle while it still runs, and that must not hold the
+ * account or close the pane. A session that worked, that still has an outcome, that printed a
+ * notice, that has not ended, or that has not yet passed its start bound is not this signal.
  */
 export const silentPaneExhaustionReason =
   'session ended without working, without an outcome and without a readable provider limit notice; account treated as spent until an assumed reset';
@@ -216,8 +219,10 @@ export function silentPaneExhaustion(input: {
   hasOutcome: boolean;
   notice: ExhaustionSignal | null;
   pastStartBound: boolean;
+  /** True only when the pane finished (`done`) or an idle screen stayed still with no request trace. */
+  ended: boolean;
 }): ExhaustionSignal | null {
-  if (!input.listed || input.everWorking || input.hasOutcome || input.notice || !input.pastStartBound) return null;
+  if (!input.listed || !input.ended || input.everWorking || input.hasOutcome || input.notice || !input.pastStartBound) return null;
   return { reason: silentPaneExhaustionReason, resetsAt: null };
 }
 
@@ -242,9 +247,12 @@ export function runTimeoutLimit(events: readonly LimitRunEvent[], detail: string
   return null;
 }
 /**
- * GY-1705. When every started attempt of a headless round stopped at its bound and each carries a
- * readable limit, the round is a provider limit (the last signal, with the earliest known reset).
- * An all-timeout round with no readable limit stays a session-liveness failure for the caller.
+ * GY-1705. When every started attempt of a headless round stopped at its bound and any attempt's
+ * provider events carry a readable limit, the round is a provider limit (the last signal, with the
+ * earliest known reset). A primary that prints the notice and a fallback that times out without a
+ * second copy still counts: the criterion needs every attempt stopped at the bound and a limit
+ * readable from the round, not the same notice on every attempt. An all-timeout round with no
+ * readable limit stays a session-liveness failure for the caller.
  */
 export function headlessTimeoutLimit(
   attempts: readonly { result: string; detail: string; events?: readonly LimitRunEvent[] | readonly { kind: string; error?: string | null; text?: string }[] }[],
@@ -252,9 +260,8 @@ export function headlessTimeoutLimit(
 ): ExhaustionSignal | null {
   const started = attempts.filter(attempt => attempt.result !== 'spawn' && attempt.result !== 'cancelled');
   if (!started.length || !started.every(attempt => attempt.result === 'timeout')) return null;
-  const limits = started.map(attempt => runTimeoutLimit(attempt.events ?? [], attempt.detail, now));
-  if (!limits.every(Boolean)) return null;
-  const signals = limits as ExhaustionSignal[];
+  const signals = started.map(attempt => runTimeoutLimit(attempt.events ?? [], attempt.detail, now)).filter((entry): entry is ExhaustionSignal => !!entry);
+  if (!signals.length) return null;
   const resets = signals.map(entry => entry.resetsAt).filter((at): at is string => !!at).sort();
   return { reason: signals.at(-1)!.reason, resetsAt: resets[0] ?? null };
 }

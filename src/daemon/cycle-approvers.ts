@@ -266,11 +266,13 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
   };
   /**
    * An approver that stopped on its provider's limit notice (GY-182), or that Herdr lists past its
-   * start bound never having reported working, with no outcome and no notice (GY-1705), has judged
+   * start bound having ended without working, with no outcome and no notice (GY-1705), has judged
    * nothing and never will: its account is held until the reset the notice names (or the assumed
    * hour), the exhaustion is recorded against the decision, the session is closed, and the same
    * decision goes to the next eligible account in the same cycle. The launch it spent is not
-   * counted against the decision's bound.
+   * counted against the decision's bound. An idle pane whose command may still be running is not
+   * this signal: ended means `done`, or idle with a still, untouched screen (same long-command
+   * protection as the stall path).
    */
   const approverExhausted = async (item: Work, watch: ApprovalWatch) => {
     if (!effects.reportCapacity || !watch.agentName) return false;
@@ -285,12 +287,19 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
     const handle = (item.sessions ?? []).find(entry => entry.id === approverSessionId(watch.decision) && entry.state === 'running');
     const launchedAt = watch.launchedAt ? Date.parse(watch.launchedAt) : Number.NaN;
     const pastStart = Number.isFinite(launchedAt) && clock - launchedAt >= launchStartMs(config);
+    const status = agent.agent_status ?? '';
+    let ended = status === 'done';
+    if (!ended && !notice && status === 'idle' && pastStart && effects.sessionOutput) {
+      const motion = await screenMotion(() => effects.sessionOutput!(agent, stallScreenLines), watch.decision, effects.idleScreenPauseMs);
+      ended = motion === 'still';
+    }
     const signal: ExhaustionSignal | null = notice ?? silentPaneExhaustion({
       listed: true,
-      everWorking: agent.agent_status === 'working' || handle?.observed === 'working',
+      everWorking: status === 'working' || handle?.observed === 'working',
       hasOutcome: !!handle?.outcome || !!watch.settledAt,
       notice: null,
       pastStartBound: pastStart,
+      ended,
     });
     if (!signal) return false;
     const session = `${watch.decision}:${watch.launchedAt ?? watch.launches}`;
