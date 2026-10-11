@@ -117,7 +117,7 @@ async function start() {
 
 // ---- AC-1: held, not failed ---------------------------------------------------------------------
 test('unit:requirements-decision-held-on-live-attempt — an approved revision refused only by the live lease is recorded held with that reason, keeps its approval, is listed for master status, and a second request names it', { timeout: 120_000 }, async () => {
-  const { engine, implementer, master, approver, send, decisions, current, claimed, revision, decided, masterApi } = await plane();
+  const { engine, implementer, master, approver, send, decisions, current, claimed, revision, decided, masterApi, ledger } = await plane();
   const work = await claimed('held-on-lease');
   const settled = await decided(work);
   assert.equal(settled.state, 'held', 'the approval settles held, not failed');
@@ -138,6 +138,34 @@ test('unit:requirements-decision-held-on-live-attempt — an approved revision r
   assert.equal(repeated.status, 409);
   assert.match(repeated.body.error ?? JSON.stringify(repeated.body), new RegExp(`Decision ${held.id} \\(requirements\\) on ${work.key} was approved by graphyard-approver-graphyard at .* and is held \\(.*\\); the control plane applies it in the transaction that ends the attempt, so it need not be requested again`));
   // The containment fence holds a revision the same way once the lease is gone.
+  // The attempt ends between the engine's refusal and the hold's recording: the hold is judged under the item's
+  // lock, so it is never recorded on an item nothing holds (one no attempt-ending transaction would ever apply it
+  // on) and the approval is applied at once instead.
+  const racing = await claimed('held-freed-under-refusal');
+  const execute = engine.execute.bind(engine);
+  let interleaved = 0;
+  engine.execute = (async (...args: Parameters<typeof execute>) => {
+    const [, command, id, , key] = args;
+    if (command === 'requirements' && id === racing.id && key.startsWith('decision:') && !interleaved) {
+      // The engine's own refusal, then the worker's release before the server can record the hold.
+      try { await execute(...args); assert.fail('the live lease refuses the revision'); }
+      catch (error) {
+        if (!(error instanceof Error) || !heldByLiveAttempt(error.message)) throw error;
+        interleaved++;
+        await execute(implementer, 'release', racing.id, { epoch: racing.epoch }, randomUUID());
+        throw error;
+      }
+    }
+    return execute(...args);
+  }) as typeof engine.execute;
+  try {
+    const applied = await decided(racing);
+    assert.equal(interleaved, 1, 'the attempt ended under the refusal');
+    assert.equal(applied.state, 'applied', `applied by a repeated application once the item is free: ${JSON.stringify(applied)}`);
+    assert.match(applied.outcome, /^Requirements revised to policy revision 2$/);
+    assert.equal((await current(racing)).policyRevision, 2);
+    assert.ok(!(await ledger(racing)).some(row => row.kind === 'decision.held'), 'no hold is recorded on an item nothing holds');
+  } finally { engine.execute = execute; }
   const fenced = await claimed('held-on-fence');
   const token = 'f'.repeat(64), settlementHash = createHash('sha256').update(token).digest('hex');
   await engine.execute(implementer, 'quarantine', fenced.id, { epoch: fenced.epoch, settlementHash }, randomUUID());

@@ -243,24 +243,32 @@ export async function approveDecision(services: Services, caller: Principal, id:
     throw error;
   }
   const { decision, work, approver } = approved!;
-  let outcome: { kind: string; details: object } | undefined;
   // GY-1687: a requirements decision the engine refuses only because the item holds a live lease or an
   // unverified containment fence is held, not failed: the engine applies it in the transaction that ends
-  // the attempt. The item is judged under its lock before the hold is recorded; one freed between the
-  // refusal and that read is applied again at once, since nothing would end its attempt later.
-  for (let attempt = 0; !outcome; attempt++) {
+  // the attempt. The hold is recorded under the item's lock, the lock every attempt-ending command takes
+  // before it reads the held decisions, and only while the attempt still holds the item: an item freed
+  // between the refusal and that locked read would never end an attempt again, so its hold is not
+  // recorded and the application is repeated at once instead (Codex review of 140ab6d61910).
+  for (let attempt = 0; ; attempt++) {
+    let outcome: { kind: string; details: object };
     try { outcome = { kind: 'decision.applied', details: { outcome: await applyThroughEngine(services, decision, approver, data.reason) } }; }
     catch (error) {
       // A server fault is retried by repeating the approval; only a refusal settles the decision.
       if (!(error instanceof Refusal) && !(error instanceof z.ZodError)) throw error;
-      const hold = heldOutcome(decision, approver, data.reason, error);
-      if (!hold) { outcome = { kind: 'decision.failed', details: { error: error.message } }; break; }
-      const freed = attempt < 2 && await services.engine.store.transaction(async (db, now) => { const item = await findWork(db, work.id); return !!item && !attemptHolds(item, now); });
-      if (!freed) outcome = hold;
+      outcome = heldOutcome(decision, approver, data.reason, error) ?? { kind: 'decision.failed', details: { error: error.message } };
     }
+    // The item is locked first, so a resumption racing this approval serializes with it (GY-1300).
+    const settled = await services.engine.store.transaction(async (db, now) => {
+      const item = await findWork(db, work.id);
+      if (outcome.kind === 'decision.held' && item && !attemptHolds(item, now)) {
+        // A bounded repeat: an item freed and claimed again under every application is not held for ever either.
+        if (attempt < 3) return null;
+        outcome = { kind: 'decision.failed', details: { error: `${(outcome.details as { reason: string }).reason.split(';')[0]}; the item was freed and claimed again under each of ${attempt + 1} applications, so the decision was not applied` } };
+      }
+      return finish(db, work, approver, decision.id, outcome.kind, outcome.details, key, fingerprint);
+    });
+    if (settled) return settled;
   }
-  // The item is locked first, so a resumption racing this approval serializes with it (GY-1300).
-  return services.engine.store.transaction(async db => { await findWork(db, work.id); return finish(db, work, approver, decision.id, outcome!.kind, outcome!.details, key, fingerprint); });
 }
 
 /** Whether the item holds a live attempt a non-widening requirements revision must wait for: a live lease or an unverified containment fence (GY-1687). */
