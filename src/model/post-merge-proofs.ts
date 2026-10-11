@@ -39,7 +39,7 @@ export function postMergeProofRefusal(criterion: { id: string; text: string; pro
   const what = byName.length ? `${offending.join(', ')} ${offending.length === 1 ? 'is a post-merge proof' : 'are post-merge proofs'}`
     : `${criterion.id} is a post-merge criterion, so ${offending.join(', ')} can only pass after merge`;
   return `${criterion.id}: ${what}, and a pre-merge gate cannot hold it — it can never pass before the merge it gates, so it would hold the item at Prove until removed by hand. `
-    + `Require it as a delivery obligation instead: policy.deploySmoke for ${deploySmokeProof}, checked against the deployment that serves the merge, or a follow-up work item that depends on this one and proves it after delivery.`;
+    + `Require it as a delivery obligation instead: policy.deploySmoke for ${deploySmokeProof}, checked against the deployment that serves the merge, or declare it a post-deploy verification of this item (${postDeployProofPrefix}NAME): the reviewer judges it on pre-merge evidence and master verify-deployment checks it on the serving release. A follow-up item of its own would only wait for that release (GY-1666).`;
 }
 
 /**
@@ -56,13 +56,24 @@ export function postMergeProofRefusal(criterion: { id: string; text: string; pro
  * Detection reads the text whatever the proof family, so a unit-proven wording of a live outcome
  * is caught too; only a criterion anchored to the head ("from this head against the live install",
  * "before merge") or to a stub is a pre-merge observation.
+ *
+ * GY-1685: the rule as first shipped read "live install" but not "live host", "on this installation"
+ * but not "on the installation", and no "release serving X's merge" or "cycle after the fix", so
+ * GY-1683 AC-5 and GY-1666 AC-1 entered undeclared and each blocked for a requirements decision no
+ * worker may make. Those wordings are live observations here. And the verification is declared on
+ * the item that ships the change: an item whose every criterion is a declared post-deploy
+ * verification has nothing a head can build, so its worker could only wait for the serving release
+ * (GY-1666 did, filed as GY-1662 AC-3's follow-up); `postDeployOnlyRefusal` refuses it on every path.
  */
 export const postDeployProofPrefix = 'manual:post-deploy/';
 const liveObservation = new RegExp([
-  /\blive\s+(?:install(?:ation)?|loop|daemon|server|service|deployment|system|environment|release|traffic)\b/, /\bon\s+this\s+installation\b/,
+  /\blive\s+(?:install(?:ation)?|host|machine|loop|daemon|server|service|deployment|system|environment|release|traffic)\b/, /\bon\s+(?:this|the)\s+install(?:ation)?\b/,
   /\brestarted\s+(?:master\s+)?loop\b/, /\bthe\s+master\s+loop\s+restarts\b/,
-  // The release that serves the merge, however it is named: deployed, serving, running, production.
+  // The release that serves the merge, however it is named: deployed, serving, running, production, "the release serving GY-N's merge".
   /\b(?:on|in|against|from|by)\s+the\s+(?:deployed|serving|running|live)\s+(?:release|install(?:ation)?|loop|daemon|server|service|control\s+plane|system|deployment)\b/,
+  /\b(?:on|in|against|from|by)\s+the\s+(?:release|deployment|install(?:ation)?)\s+(?:that\s+)?serv(?:es|ing)\b/,
+  // A loop cycle, run or pass "after the fix" is the served loop's, not a test's.
+  /\b(?:cycle|run|pass)\s+after\s+the\s+(?:change|fix|merge)\b/,
   /(?<![\/\w-])production\b(?!\s+(?:code|paths?|branch(?:es)?|builds?|bundles?|dependenc(?:y|ies)|modules?|sources?|files?)\b)/,
   /\b(?:after|once)\s+(?:the\s+(?:change|fix|merge)\s+(?:is\s+|has\s+)?)?(?:deploy(?:ed|ment)?|merged\s+and\s+deployed|ships|shipped|is\s+shipped|goes\s+live)\b/,
   /\bpost[-\s]?ship(?:ping|ped)?\b/, /\bonce\s+the\s+fix\s+is\s+running\b/, /\bobservation\s+after\s+deploy/,
@@ -90,5 +101,17 @@ export function postDeployCriterionRefusal(criteria: readonly CriterionProofs[])
   const undeclared = criteria.flatMap(criterion => { const phrase = !declaredPostDeploy(criterion) && liveObservationPhrase(criterion); return phrase ? [`${criterion.id} ("${phrase}")`] : []; });
   if (!undeclared.length) return null;
   return `${undeclared.join(', ')} ${undeclared.length === 1 ? 'is a live-install or post-deploy observation' : 'are live-install or post-deploy observations'} that no head can show before the merge it gates, so the reviewer would hold the merge on it while no worker can make it. `
-    + `Declare it a post-deploy verification by naming its proof ${postDeployProofPrefix}NAME — the reviewer judges it on the head's pre-merge evidence and master verify-deployment checks it on the serving release, filing a follow-up when it is not observed there — or reword it to an observation this head can show before merge (from this head against the live install)`;
+    + `Declare it a post-deploy verification by naming its proof ${postDeployProofPrefix}NAME on the item that ships the change — the reviewer judges it on the head's pre-merge evidence and master verify-deployment checks it on the serving release, filing a follow-up when it is not observed there — or reword it to an observation this head can show before merge (from this head against the live install)`;
+}
+/**
+ * Why an item whose every criterion is a declared post-deploy verification cannot be recorded (GY-1685),
+ * or null. Such an item has nothing a head can build or a review can judge before merge: its worker
+ * can only wait for the release that serves another item's change, as GY-1666 did. The declaration
+ * belongs on the item that ships the change; verify-deployment files the observed follow-up itself.
+ */
+export function postDeployOnlyRefusal(criteria: readonly CriterionProofs[]): string | null {
+  if (!criteria.length || !criteria.every(declaredPostDeploy)) return null;
+  const ids = criteria.map(criterion => criterion.id).join(', ');
+  return `${ids} ${criteria.length === 1 ? 'is a declared post-deploy verification' : 'are all declared post-deploy verifications'}, so no head can build anything this item's review judges before merge and its worker could only wait for the serving release. `
+    + `Declare the verification on the item that ships the change it observes (its ${postDeployProofPrefix}NAME proof is checked by master verify-deployment on the serving release, which files the follow-up when it is not observed there), or add the criterion this head can show before merge.`;
 }
