@@ -2,9 +2,9 @@ import { z } from 'zod';
 import { Refusal, demand, itemLane, reworkNeedsApprover, type Principal, type Work } from '../model.js';
 import type pg from 'pg';
 import { idempotencyMismatch } from '../engine.js';
-import { assertDecisionAuthority, decisionPrecondition, requiredDecisionCapabilities, situationLabel, stalledApproval, supersededSituation, type HeldApplication } from '../model/approval.js';
+import { assertDecisionAuthority, decisionPrecondition, requiredDecisionCapabilities, situationLabel, stalledApproval, supersededSituation, type HeldApplication, type HeldAttempt } from '../model/approval.js';
 import { decisionRace, readDecisions, type DecisionRecord, type StaleRace } from './decision-ledger.js';
-import { applyThroughEngine, attemptHolds, authenticated, bookkeepingRebase, findWork, heldOutcome, receipt, record, requesterAuthority, staleEvent } from './decisions.js';
+import { applyThroughEngine, authenticated, bookkeepingRebase, findWork, heldOutcome, holdingAttempt, receipt, record, requesterAuthority, sameHoldingAttempt, staleEvent } from './decisions.js';
 import { withdrawDecision } from './decision-refusal.js';
 import { laneApprover, mergeWriterApprover, mergeWriterTrialGround, reworkGround, trialFailedGround } from '../model/rework-ground.js';
 import type { Services } from './routes.js';
@@ -139,17 +139,19 @@ export async function applyLaneRework(services: Services, requested: DecisionRec
 export async function resumeApproved(services: Services, stranded: DecisionRecord, resumed = false): Promise<DecisionRecord> {
   const approver = { id: stranded.approvedBy!, role: 'admin' } as Principal;
   const failure = (message: string) => resumed ? `Approved by ${stranded.approvedBy} at ${stranded.approvedAt} but its application was never recorded; resuming it was refused: ${message}`.slice(0, 2000) : message;
-  let outcome: { kind: string; details: { outcome?: string; error?: string; resumed?: boolean; reason?: string; application?: HeldApplication } }, race: StaleRace | null = null, judged = stranded;
+  let outcome: { kind: string; details: { outcome?: string; error?: string; resumed?: boolean; reason?: string; application?: HeldApplication; attempt?: HeldAttempt | null } }, race: StaleRace | null = null, judged = stranded;
+  let refusedBy: HeldAttempt | null = null;
   try {
     // The requester's authority is re-read, as the approval's own resumption reads it. An engine call that never ran is
     // judged against the situation the decision was pinned to: one the item has moved past settles stale, never applies.
     // One that ran (its decision-keyed receipt stands) moved that situation itself, and is only replayed.
-    const found = await services.engine.store.transaction(async db => {
+    const found = await services.engine.store.transaction(async (db, now) => {
       const work = await findWork(db, stranded.workId); demand(work, 'Work item not found', 404);
       await requesterAuthority(services, db, stranded, work!);
       judged = await bookkeepingRebase(db, stranded, work!);
       const ran = !!(await db.query('SELECT 1 FROM receipts WHERE actor=$1 AND key=$2', [stranded.requestedBy, `decision:${stranded.id}`])).rowCount;
       const pinned = ran ? null : decisionRace(judged, work!);
+      refusedBy = holdingAttempt(work!, now);
       return { ran, moved: pinned && { race: pinned, error: decisionPrecondition(judged.action, judged.input, work!) ?? `${work!.key} moved past the situation the decision was pinned to` } };
     });
     race = found.moved?.race ?? null;
@@ -164,14 +166,14 @@ export async function resumeApproved(services: Services, stranded: DecisionRecor
   } catch (error) {
     if (!(error instanceof Refusal) && !(error instanceof z.ZodError)) throw error;
     // GY-1687: a requirements decision refused only for the item's live attempt is held, never failed.
-    outcome = heldOutcome(stranded, approver, stranded.approvalReason ?? '', error) ?? { kind: 'decision.failed', details: { error: failure(error.message), ...(resumed ? { resumed } : {}) } };
+    outcome = heldOutcome(stranded, approver, stranded.approvalReason ?? '', error, refusedBy) ?? { kind: 'decision.failed', details: { error: failure(error.message), ...(resumed ? { resumed } : {}) } };
   }
   return services.engine.store.transaction(async (db, now) => {
     const work = await findWork(db, stranded.workId); demand(work, 'Work item not found', 404);
     const current = (await readDecisions(db, work!)).find(entry => entry.id === stranded.id)!;
     if (current.state !== 'approved') return current;
-    // A hold recorded on an item nothing holds any more would never apply: the next resume applies it.
-    if (outcome.kind === 'decision.held' && !attemptHolds(work!, now)) return current;
+    // A hold recorded on an item the refusing attempt no longer holds would never apply: the next resume applies it.
+    if (outcome.kind === 'decision.held' && !sameHoldingAttempt(holdingAttempt(work!, now), outcome.details.attempt ?? null)) return current;
     // A refusal from a revision race settles stale too: the item moved while the call was being made.
     race = outcome.kind === 'decision.applied' ? null : race ?? decisionRace(judged, work!);
     if (race) await staleEvent(db, { actor: approver, workId: work!.id, decision: current, reason: `${outcome.details.error}; the decision was not applied`, ...race });

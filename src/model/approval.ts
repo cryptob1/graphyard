@@ -101,6 +101,12 @@ export const quarantinedRevisionRefusal = (epoch: number | undefined) => `Task i
 export const heldByLiveAttempt = (message: string) => message === liveLeaseRevisionRefusal || /^Task is quarantined by unverified containment from epoch \d+; requirements remain immutable until settlement or stopped-worker recovery$/.test(message);
 /** How a held decision is applied when the attempt ends: the engine call its approval made, replayed as its requester. */
 export interface HeldApplication { actor: Principal; reason: string }
+/**
+ * GY-1687: the live attempt that refused the approved revision — a lease epoch, or an unverified
+ * containment fence's epoch. The hold is bound to this attempt so a replacement claim between the
+ * engine refusal and the held outcome does not strand the decision on the new worker.
+ */
+export type HeldAttempt = { kind: 'lease'; epoch: number } | { kind: 'quarantine'; epoch: number };
 export interface Decision {
   id: string; workId: string; action: DecisionAction; input: any; reason: string;
   requestedBy: string; requestedAt: string; state: DecisionState;
@@ -118,7 +124,7 @@ export interface Decision {
   situation?: DecisionSituation | null;
   superseded?: { bound: DecisionSituation; current: DecisionSituation } | null; // GY-1297: the situation it was bound to, and the item's
   /** GY-1687: why the approved decision waits for the attempt to end, since when, and the engine call that applies it then. */
-  held?: { reason: string | null; at: string; application: HeldApplication | null } | null;
+  held?: { reason: string | null; at: string; application: HeldApplication | null; attempt?: HeldAttempt | null } | null;
 }
 // GY-1297. An approved decision left without an outcome refused its action forever (GY-949): one bound to a head
 // and base the item has left is `superseded`, naming both; one whose situation holds is resumed past the grace.
@@ -146,7 +152,7 @@ export function foldDecisions(workId: string, events: DecisionEvent[]): Decision
     if (event.kind === 'decision.approved') Object.assign(decision, { state: 'approved', approvedBy: event.actor, approvedAt: event.at, approvalReason: details.reason });
     if (event.kind === 'decision.applied') Object.assign(decision, { state: 'applied', outcome: details.outcome ?? null });
     if (event.kind === 'decision.failed') Object.assign(decision, { state: 'failed', outcome: details.error ?? null });
-    if (event.kind === 'decision.held') Object.assign(decision, { state: 'held', outcome: details.reason ?? null, held: { reason: details.reason ?? null, at: event.at, application: details.application ?? null } });
+    if (event.kind === 'decision.held') Object.assign(decision, { state: 'held', outcome: details.reason ?? null, held: { reason: details.reason ?? null, at: event.at, application: details.application ?? null, ...(details.attempt ? { attempt: details.attempt } : {}) } });
     if (event.kind === 'decision.superseded') Object.assign(decision, { state: 'superseded', outcome: details.reason ?? null, superseded: { bound: details.bound ?? null, current: details.current ?? null } });
   }
   return [...decisions.values()];

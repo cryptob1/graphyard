@@ -284,6 +284,73 @@ test('unit:held-requirements-decision-applies-at-attempt-end — a replacement c
   assert.ok(!(await current(exhausted)).lease, 'the item is claimable on another account');
 });
 
+// ---- AC-2: claim eligibility sees the revised requirements --------------------------------------
+test('unit:held-requirements-decision-applies-at-attempt-end — a replacement claim whose held decision adds an unfinished dependency applies the revision before eligibility and refuses the claim', { timeout: 120_000 }, async () => {
+  const { engine, operator, implementer, master, approver, decisions, current, claimed, later, call, paths } = await plane();
+  // An unfinished dependency the held revision will add: claimable items must wait for it.
+  let dependency = await call(master.token, 'work', { title: 'held-claim-dep', plannedFiles: paths, criteria: [{ id: 'AC-1', text: 'Dep', proofs: ['unit:dep'] }], reason: 'Unfinished dependency for the held revision' }) as Work;
+  dependency = await engine.execute(operator, 'ready', dependency.id, {}, randomUUID());
+  assert.notEqual(dependency.stage, 'done');
+  // The item under a live attempt: its held revision will name that dependency.
+  const work = await claimed('held-claim-precondition');
+  const requested = await call(master.token, `work/${work.key}/decide`, {
+    action: 'requirements',
+    input: { expectedPolicyRevision: work.policyRevision, criteria: [{ id: 'AC-1', text: 'Works, as the deploy shows', proofs: ['unit:works'] }], dependencies: [dependency.id], plannedFiles: paths, exclusiveResources: [] },
+    reason: 'AC-1 waits on the unfinished dependency the held revision adds',
+  });
+  const held = await call(approver.token, `work/${work.key}/approve`, { decision: requested.id, reason: 'The criterion names the dependency' });
+  assert.equal(held.state, 'held', JSON.stringify(held));
+  assert.equal((await current(work)).policyRevision, 1, 'the live attempt still holds the old requirements');
+  // Before the fix, eligibility ran against the old requirements (no dependency), so the claim installed
+  // epoch 2 and left the held revision for that attempt. Applying the revision first refuses the claim
+  // for the unfinished dependency instead of dispatching from stale requirements.
+  await assert.rejects(
+    () => later(130_000, () => engine.execute(implementer, 'claim', work.id, {}, randomUUID())),
+    (error: Error) => /Unfinished dependencies/.test(error.message),
+    'the claim sees the revised dependencies',
+  );
+  const afterRefuse = await current(work);
+  assert.equal(afterRefuse.lease?.epoch, 1, 'no replacement lease was installed');
+  assert.equal(afterRefuse.epoch, 1, 'the claim did not open a new attempt under the stale requirements');
+  assert.equal(afterRefuse.policyRevision, 1, 'the refused claim rolled back; reconciliation closes the lapse and applies the hold');
+  // Reconciliation ends the lapsed attempt and applies the held revision before any later dispatch.
+  await later(130_000, () => engine.reconcile());
+  const item = await current(work);
+  assert.equal(item.policyRevision, 2, 'reconciliation applied the held decision at the revision it was approved against');
+  assert.deepEqual(item.dependencies, [dependency.id]);
+  assert.equal(item.lease, null, 'the lapsed attempt ended with no replacement lease');
+  const [decision] = await decisions(work.key);
+  assert.equal(decision.state, 'applied', JSON.stringify(decision));
+  assert.match(decision.outcome, /Requirements revised to policy revision 2 when attempt 1's lease lapsed/);
+  // A later claim still sees the unfinished dependency on the revised item.
+  await assert.rejects(
+    () => engine.execute(implementer, 'claim', work.id, {}, randomUUID()),
+    (error: Error) => /Unfinished dependencies/.test(error.message),
+  );
+});
+
+// ---- AC-2: close ends a live attempt and must not leave a hold stranded --------------------------
+test('unit:held-requirements-decision-applies-at-attempt-end — an approved close that ends a live lease applies the held requirements decision before the item is done', { timeout: 120_000 }, async () => {
+  const { master, approver, decisions, current, claimed, decided, call } = await plane();
+  const work = await claimed('held-then-closed');
+  const held = await decided(work);
+  assert.equal(held.state, 'held');
+  assert.equal((await current(work)).policyRevision, 1);
+  // An approved close ends the live lease outside Engine.execute (closeWork). Without applying the hold
+  // there, the item would go to done with the requirements decision still held forever.
+  const close = await call(master.token, `work/${work.key}/decide`, { action: 'close', input: { kind: 'obsolete', expectedRevision: (await current(work)).revision }, reason: 'Nothing left to deliver on this attempt' });
+  const closed = await call(approver.token, `work/${work.key}/approve`, { decision: close.id, reason: 'The follow-up owns the work' }) as { state: string; outcome: string };
+  assert.equal(closed.state, 'applied', JSON.stringify(closed));
+  const item = await current(work);
+  assert.equal(item.stage, 'done');
+  assert.equal(item.lease, null);
+  assert.equal(item.policyRevision, 2, 'the held revision applied before the item was terminalized');
+  assert.equal(item.criteria[0].text, 'Works, as the deploy shows');
+  const [requirements] = (await decisions(work.key)).filter(entry => entry.action === 'requirements');
+  assert.equal(requirements.state, 'applied', JSON.stringify(requirements));
+  assert.match(requirements.outcome, /^Requirements revised to policy revision 2 when work\.closed ended attempt 1$/);
+});
+
 // ---- AC-2: the submitted head is re-reviewed on the new revision --------------------------------
 test('integration:held-decision-rereviews-submitted-head — a decision held through a rework attempt applies as that attempt completes, so the submitted head is re-reviewed on the new revision instead of being reworked on the stale verdict', { timeout: 120_000 }, async () => {
   const { engine, operator, implementer, decisions, current, claimed, decided, ledger } = await plane();

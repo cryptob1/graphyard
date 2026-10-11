@@ -52,7 +52,7 @@ import { blockedAttemptMarker, partialWorkSchema, retainedExhaustions, type Exha
 import { credentialBlockedReason, credentialFailure } from './worker-credential.js';
 import { beginAttempt, endAttempt, endLapsedAttempt, pipelineTimeline, recordAssignmentStart, recordIntervention, recordRework, recordSubmission } from './pipeline-speed.js';
 import { dispatchFailureBlockAfter } from './daemon/dispatch-failures.js';
-import { foldDecisions, liveLeaseRevisionRefusal, quarantinedRevisionRefusal, type Decision, type HeldApplication } from './model/approval.js';
+import { assertDecisionAuthority, foldDecisions, liveLeaseRevisionRefusal, quarantinedRevisionRefusal, requiredDecisionCapabilities, type Decision, type HeldApplication } from './model/approval.js';
 import { coveringWindow, directMergeAuthorization, directMergeFromEnv, directMergeWindows, sweepDirectMerges, type DirectMergeWindow } from './direct-merge.js';
 import { deliverSplitParent, splitChildRevisionRefusal } from './decomposition.js';
 import { defaultRerunFailedChecks, maxRerunFailedChecks } from './master/profiles.js';
@@ -1255,21 +1255,8 @@ export class Engine {
       if (command === 'claim') {
         demand(actor.role === 'worker' || actor.role === 'admin', 'Worker permission required', 403);
         demand(!work.children?.length, `${work.key} was split into ${work.children?.join(', ')} before dispatch; it is delivered when they are and is never claimed directly`);
-        demand(work.ready && !work.blocker, 'Task is not ready or has a blocker');
-        demand(!work.containmentQuarantine, `Task is quarantined by unverified containment from epoch ${work.containmentQuarantine?.epoch}`);
-        demand(work.dependencies.every(dep => all.find(w => w.id === dep)?.stage === 'done'), 'Unfinished dependencies');
         demand(!work.lease || Date.parse(work.lease.expiresAt) <= now.getTime(), 'Task already has an active owner');
         demand(!work.submission || work.reworkRequested, 'Implementation is submitted; an operator must request rework before reassignment');
-        const resources = resourceConflicts(work, all, now.getTime());
-        demand(!resources.length, `Exclusive resources held: ${resources.map(r => `${r.resource} by ${r.key}`).join(', ')}`);
-        if (work.slice) {
-          // Capacity is a count of engineers, not of leases: one engineer holding
-          // two items in the slice still occupies one of the lead's seats.
-          const engineers = activeEngineers(all.filter(item => item.id !== work!.id), work.slice, now.getTime());
-          engineers.delete(actor.id);
-          const limit = delegationLimits().maxEngineersPerLead;
-          demand(engineers.size < limit, `Engineer limit for ${work.slice} exceeded: ${engineers.size}/${limit}`);
-        }
         // A replacement claim over a lapsed lease is the last chance to record how that
         // assignment ended, exactly as reconciliation would have: explained lapses are
         // history, a silently vanished worker is an escalation the overwrite cannot erase.
@@ -1280,10 +1267,27 @@ export class Engine {
           else raiseEscalation(work, { trigger: 'lease-loss', reason: leaseLossReason(work.lease), at: now.toISOString(), actor: 'graphyard' });
           endLapsedAttempt(work, work.lease, now);
           // GY-1687: the lapse this claim records is the end of the previous attempt, so the requirements decision
-          // held for it is applied here, before the replacement lease is installed: the new worker starts on the
-          // revised requirements, and the hold is not carried through a second attempt (Codex review of 086e327d7695).
+          // held for it is applied here, before claim eligibility is derived and before the replacement lease is
+          // installed. A held revision can add an unfinished dependency or an exclusive resource another item
+          // holds; those checks must see the revised item, or the new attempt would be dispatched from stale
+          // requirements (review of fe3b4e08db8e).
           const lapsed = work.lease; work.lease = null;
           for (const write of await this.applyHeldDecisions(db, work, all, { lease: lapsed, containmentQuarantine: work.containmentQuarantine, plannedFiles: work.plannedFiles }, now, { command: null, submitted: false })) await write(db);
+        }
+        // Eligibility against the (possibly just-revised) requirements: ready, dependencies, exclusive
+        // resources and slice capacity are all derived from the document the new attempt will hold.
+        demand(work.ready && !work.blocker, 'Task is not ready or has a blocker');
+        demand(!work.containmentQuarantine, `Task is quarantined by unverified containment from epoch ${work.containmentQuarantine?.epoch}`);
+        demand(work.dependencies.every(dep => all.find(w => w.id === dep)?.stage === 'done'), 'Unfinished dependencies');
+        const resources = resourceConflicts(work, all, now.getTime());
+        demand(!resources.length, `Exclusive resources held: ${resources.map(r => `${r.resource} by ${r.key}`).join(', ')}`);
+        if (work.slice) {
+          // Capacity is a count of engineers, not of leases: one engineer holding
+          // two items in the slice still occupies one of the lead's seats.
+          const engineers = activeEngineers(all.filter(item => item.id !== work!.id), work.slice, now.getTime());
+          engineers.delete(actor.id);
+          const limit = delegationLimits().maxEngineersPerLead;
+          demand(engineers.size < limit, `Engineer limit for ${work.slice} exceeded: ${engineers.size}/${limit}`);
         }
         work.epoch++;
         // A fresh attempt asks afresh: the previous attempt's scope request belongs to a lease that no longer exists.
@@ -1916,6 +1920,10 @@ export class Engine {
       const trial = structuredClone(work);
       let data: any;
       try {
+        // Codex review of fe3b4e08db8e: the delayed path must re-authorize the requester. The serialized
+        // HeldApplication.actor is an admin stand-in for the engine call; a requester revoked or stripped
+        // of policy:requirements while the attempt ran must not still mutate requirements here.
+        await this.authorizeHeldRequester(db, decision, trial);
         data = commands.requirements.parse({ ...decision.input, reason: application.reason });
         await this.reviseRequirements(db, application.actor, trial, all.map(item => item === work ? trial : item), data, `decision:${decision.id}`, now, before, resume);
       } catch (error) {
@@ -1939,6 +1947,22 @@ export class Engine {
       event(decision.approvedBy ?? 'graphyard', 'decision.applied', { id: decision.id, outcome, held: { since: decision.held?.at ?? null, appliedWhen: ending, resume } });
     }
     return writes;
+  }
+
+  /**
+   * GY-1687: re-resolve the held decision's requester in the attempt-ending transaction, as
+   * approveDecision and resumeApproved do before their engine call. A revoked operator agent, or one
+   * that lost `policy:requirements` or the item's scope while the attempt ran, fails the decision
+   * instead of mutating requirements under the admin stand-in HeldApplication.actor carries.
+   */
+  private async authorizeHeldRequester(db: PoolClient, decision: Pick<Decision, 'requestedBy' | 'action' | 'input'>, work: Work) {
+    let requester = this.principals.find(entry => entry.id === decision.requestedBy);
+    if (!requester) {
+      const agent = (await db.query('SELECT document FROM operator_agents WHERE id=$1', [decision.requestedBy])).rows[0]?.document as { id: string; revokedAt?: string | null; capabilities?: string[]; scope?: Principal['scope'] } | undefined;
+      demand(agent && !agent.revokedAt, `Requester ${decision.requestedBy} is no longer a live agent identity; the held decision was not applied`, 409);
+      requester = { id: agent!.id, role: 'operator-agent', capabilities: agent!.capabilities as Principal['capabilities'], scope: agent!.scope, sessionKind: 'ai' };
+    }
+    for (const capability of requiredDecisionCapabilities(decision.action, decision.input, work)) assertDecisionAuthority(requester!, capability, work, this.repository);
   }
 
   /**

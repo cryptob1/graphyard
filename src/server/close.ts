@@ -6,6 +6,7 @@ import { humanRequestBlocker, retainedHumanRequests, type HumanRequest } from '.
 import { decisionGroundsMovedSince } from '../engine.js';
 import { endAttempt } from '../pipeline-speed.js';
 import { save } from '../store.js';
+import { foldDecisions } from '../model/approval.js';
 import { authenticated, digest, receipt, record } from './decisions.js';
 import type { Services } from './routes.js';
 import { lockedWork } from '../store/locked-read.js';
@@ -52,7 +53,13 @@ export async function closeWork(services: Services, caller: Principal, id: strin
     const closure: Closure = { kind: data.kind, reason: data.reason, ref, by: actor.id, at: now.toISOString(), from: work!.stage };
     const settled = settleOpenRequests(work!, closure, now);
     // A lapsed lease reconciliation never reached ends here, as released; so does a live one an approved close decision ends.
+    // GY-1687: apply held requirements decisions before terminalizing — applyHeldDecisions refuses done items, and
+    // close never enters Engine.execute, so without this the approval would stay held forever (Codex review of fe3b4e08db8e).
+    const heldBefore = { lease: work!.lease, containmentQuarantine: work!.containmentQuarantine, plannedFiles: work!.plannedFiles };
     if (work!.lease) { endAttempt(work!, work!.lease.epoch, 'released', now); work!.lease = null; }
+    const engine = services.engine as unknown as { applyHeldDecisions(db: Db, work: Work, all: Work[], before: typeof heldBefore, now: Date, ended: { command: string | null; submitted: boolean }): Promise<((db: Db) => Promise<void>)[]> };
+    for (const write of await engine.applyHeldDecisions(db, work!, all, heldBefore, now, { command: 'work.closed', submitted: false })) await write(db);
+    await settleHeldOnClose(db, work!, now, closure);
     Object.assign(work!, { closure, stage: 'done', stageEnteredAt: now.toISOString(), reviewRequest: null, scopeRequest: null, blocker: null });
     services.engine.evaluate(work!, all, now);
     // Nothing closed may be merged, whatever its last gates said.
@@ -64,6 +71,20 @@ export async function closeWork(services: Services, caller: Principal, id: strin
     await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(work)]);
     return work!;
   });
+}
+
+/**
+ * GY-1687: a held requirements decision that did not apply when the close ended the attempt (none was live,
+ * or the revision moved) must not remain `held` on a done item — nothing will end an attempt again. Settle
+ * each remaining hold as failed, naming the closure.
+ */
+async function settleHeldOnClose(db: Db, work: Work, now: Date, closure: Closure) {
+  const rows = (await db.query("SELECT actor, kind, payload, created_at FROM events WHERE work_id=$1 AND kind LIKE 'decision.%' ORDER BY seq", [work.id])).rows as { actor: string; kind: string; payload: any; created_at: Date | string }[];
+  const held = foldDecisions(work.id, rows.map(row => ({ kind: row.kind, actor: row.actor, at: new Date(row.created_at).toISOString(), payload: row.payload }))).filter(decision => decision.state === 'held' && decision.action === 'requirements');
+  for (const decision of held) {
+    await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, decision.approvedBy ?? 'graphyard', 'decision.failed',
+      JSON.stringify({ id: decision.id, error: `Item closed as ${closure.kind}: ${closure.reason}; the held decision was not applied` })]);
+  }
 }
 
 /** Cancel the item's open dispatch requests, withdraw its human-only request and resolve its agent requests. */
