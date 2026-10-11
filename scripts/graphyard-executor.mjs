@@ -150,10 +150,12 @@ class SlotUndeclared extends Error { constructor(message, exitCode) { super(mess
  * executor would claim every dispatch row and then report no agents at all, failing each one.
  */
 export function controlPlaneEffects(modules, context) {
-  const { master: m, daemon: d, reviewer: r, producer: pr } = modules;
-  const { root, current, run, snapshot, mutate } = context;
+  const { master: m, daemon: d, reviewer: r, producer: pr, executor: x } = modules;
+  const { root, current, run, snapshot, mutate, read } = context;
   return {
     snapshot, mutate,
+    // GY-1698: a windowed post-deploy follow-up takes its observation instant from the intervention report's projection.
+    ...(read ? { readPattern: x.patternReader(read) } : {}),
     agents: async () => { const runtime = await m.observeHerdrAgents(run); return runtime.available ? runtime.agents : null; },
     workerCredentials: profiles => m.inspectWorkerCredentials(root, profiles),
     producerCredentials: profiles => m.inspectProducerCredentials(root, profiles),
@@ -227,7 +229,7 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
 
   const live = m.liveMasterConfig(root, config), current = () => live.current;
   const snapshot = () => request('work-snapshot', {}, { [v.coordinationViewHeader]: 'coordination' });
-  const handlers = x.controlPlaneHandlers(current, controlPlaneEffects(modules, { root, current, run, snapshot, mutate }));
+  const handlers = x.controlPlaneHandlers(current, controlPlaneEffects(modules, { root, current, run, snapshot, mutate, read: path => request(path) }));
   // The rule, not the prose: a kind whose judgment happens in the step itself may never have a
   // handler here, so no way of configuring this process puts one inside the loop.
   const judgment = x.judgmentInExecutorLoop(handlers);

@@ -1,4 +1,4 @@
-import { deliveryState, type Gate, type Work } from '../model.js';
+import { deliveryState, observationWindowHold, type Gate, type Work } from '../model.js';
 import type { PipelineTimeline } from '../pipeline-speed.js';
 import { assignment } from './assignment.js';
 import { ciCheckRefusalPattern } from './ci-refusal.js';
@@ -151,6 +151,9 @@ export function plainStatus(work: Work, now: number): PlainStatus {
   if (phase === 'needs-worker') {
     const dependency = reasons(ready).find(r => r.raw.startsWith('Dependency '));
     if (dependency) return make(dependency.text, 'waiting', dependency.text);
+    // GY-1698: a follow-up waiting for its observation window is not waiting for a worker.
+    const window = observationWindowHold(work, new Date(now));
+    if (window) return make(`Waiting for its observation window — the reading it owes can first exist at ${window.notBefore}`, 'waiting', `Nothing can be observed before ${window.notBefore}`);
     if (work.reworkRequested) return make('Sent back for changes — waiting for someone to pick it up', 'waiting', 'Nobody is working on it');
     return make(who.name ? `Waiting for someone to pick this up — ${who.name} stopped working on it` : 'Waiting for someone to pick this up', 'waiting', 'Nobody is working on it');
   }

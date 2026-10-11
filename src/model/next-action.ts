@@ -6,7 +6,7 @@ import { deliveryState } from './delivery.js';
 import { isDelivered } from './closure.js';
 import { openAgentRequests } from './agent-requests.js';
 import { refusalAction, reviewStandstill } from './refusal-mapping.js';
-import type { Work } from './work.js';
+import { observationWindowHold, type Work } from './work.js';
 import { nextActionLlmRoles, type NextAction, type NextActionInputs, type NextActionKind } from './action-kinds.js';
 import type { ActionAccount, ActionWait } from './action-account.js';
 import { carriedAction, type OpenAction } from './concerns.js';
@@ -232,6 +232,10 @@ function computeAccount(work: Work, all: Work[], now: Date): Computed {
         const inputs = proof.inputs;
         return make('dispatch', `${key} needs ${inputs.kind === 'dispatch' && inputs.target === 'proof' ? inputs.proofs.join(', ') : refusal} on ${short(work.candidate?.sha)}`, inputs, binding, failing.name, refusal);
       }
+      // GY-1698: a released follow-up whose reading cannot exist yet is not offered to a worker; the
+      // wait is due at the recorded instant, and this same computation names the dispatch past it.
+      const window = observationWindowHold(work, now);
+      if (window) return waits({ kind: 'window', on: null, detail: `${key} waits for its observation window: the reading it owes can first exist at ${window.notBefore} (${window.detail}); the loop dispatches it then` }, failing.name, refusal);
       return make('dispatch', `${key} is ready and unassigned: ${refusal}`, dispatchInputs(work), `dispatch:${work.epoch}`, failing.name, refusal);
     }
     // A review refusal the reviewer's own reading already answered says "approval is required"
