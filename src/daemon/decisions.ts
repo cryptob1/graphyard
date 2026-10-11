@@ -236,27 +236,43 @@ export const isHeldScopeAsk = (scopeMeasurements: object, key: string, epoch: nu
  */
 export const standingRequirementsAnswersAsk = (standing: { input?: { answers?: unknown; plannedFiles?: unknown } | null }, decision: Pick<RoutineDecision, 'action' | 'scope' | 'input'>) =>
   decision.action === 'requirements' && !!decision.scope && samePlannedFiles(standing.input?.plannedFiles, decision.input?.plannedFiles);
+/** A held (or about-to-be-held) decision as the wait helpers read it (GY-1702). */
+export type HeldDecisionLike = { id: string; approvedAt?: string | null; approvedBy?: string | null; outcome?: string | null; input?: { plannedFiles?: unknown } | null };
+/** Bind the ask only when this held revision widens for it (GY-1702). */
+export function heldWaitScope(held: HeldDecisionLike, decision: Pick<RoutineDecision, 'action' | 'scope' | 'input'>, candidate: NonNullable<ApprovalWatch['scope']> | null) {
+  const scope = candidate && standingRequirementsAnswersAsk(held, { ...decision, scope: candidate }) ? candidate : null;
+  return { scope, unmatched: !!candidate && !scope };
+}
+/** Done-detail for a live held wait (GY-1702). */
+export function heldWaitDetail(itemKey: string, action: string, held: HeldDecisionLike, why: string, unmatched: boolean) {
+  const hold = boundDetail(held.outcome ?? why, 300), by = held.approvedBy ?? 'its approver';
+  return unmatched
+    ? `${itemKey}'s ${action} decision ${held.id} is approved by ${by} and held (${hold}); it does not widen for this scope ask, so the ask waits until the hold settles and nothing is requested`
+    : `${itemKey}'s ${action} decision ${held.id} is approved by ${by} and held (${hold}); the control plane applies it when the attempt ends, so nothing is requested`;
+}
+/** Watch fields for a live held wait; matching asks carry the hold marker the budget pause keys on (GY-1702). */
+export const heldWaitWatch = (itemKey: string, action: string, held: HeldDecisionLike, requestedAt: string, scope: NonNullable<ApprovalWatch['scope']> | null) => ({
+  work: itemKey, action, decision: held.id, requestedAt, settledAt: null as null,
+  approvedAt: held.approvedAt ?? null, approvedBy: held.approvedBy ?? null, scope, ended: scope ? [heldWaitMarker] : [] as string[],
+});
 /**
- * GY-1702. A decide refused because a requirements decision is already approved and held for the live
- * attempt: the control plane applies it when the attempt ends, so the loop waits — it does not re-request
- * or resume, and the refusal is no decision fault.
+ * Detail when resume returns still-`approved` because the holding attempt ended or was replaced between
+ * its application attempt and the final transaction (GY-1702 / lane-rework). Not a decision fault: the
+ * watch stays live and the next cycle resumes from a fresh read.
  */
+export const approvedResumePendingDetail = (itemKey: string, action: string, decisionId: string, approvedBy: string | null | undefined) =>
+  `${itemKey}'s ${action} decision ${decisionId} was approved by ${approvedBy ?? 'its approver'} but the control plane could not apply it yet; the watch stays live and resume is tried again next cycle`;
+/** GY-1702. A decide refused because a requirements decision is already approved and held. */
 export const heldDecisionRefusal = (error: unknown) =>
   / was approved by .+ and is held \(/.test(error instanceof Error ? error.message : String(error));
 /** The held decision id a decide-refusal names, or null (GY-1702). */
 export function heldDecisionNamedIn(error: unknown): string | null {
   return /Decision ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}) \([^)]+\) on \S+ was approved by .+ and is held \(/.exec(error instanceof Error ? error.message : String(error))?.[1] ?? null;
 }
-/**
- * GY-1702. A decide refused because the item moved past the policy revision the loop read ("Policy
- * revision changed (now N); reload and request again"): the next attempt re-reads and re-computes, so
- * the refusal is the moved-past-revision transient the scope step already handles, not a decision fault.
- */
+/** GY-1702. A decide refused because the item moved past the policy revision the loop read. */
 export const staleRevisionDecideRefusal = (error: unknown) =>
   /Policy revision changed(?: \(now \d+\))?; reload and request again/.test(error instanceof Error ? error.message : String(error));
-/** The detail suffix a stale-revision decide refusal records, so a retry can tell it from a real fault. */
 export const staleRevisionDecideNote = 'the item moved past the revision the loop read';
-/** Whether a prior decision action failed only for a stale-revision refuse the next cycle re-computes (GY-1702). */
 export const staleRevisionDecideDetail = (detail: string) => detail.includes(staleRevisionDecideNote);
 /**
  * The input a rework or recover request carries: the routine input plus the grounds binding, so

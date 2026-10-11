@@ -9,8 +9,8 @@ import { server } from '../src/server.js';
 import { Store } from '../src/store.js';
 import { emptyDaemonState, runCycle, scopeBudget, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import {
-  heldDecisionNamedIn, heldDecisionRefusal, markHeldScopeAsk, samePlannedFiles, scopeRoutineDecision,
-  staleRevisionDecideNote, staleRevisionDecideRefusal, standingRequirementsAnswersAsk,
+  approvedResumePendingDetail, heldDecisionNamedIn, heldDecisionRefusal, markHeldScopeAsk, samePlannedFiles,
+  scopeRoutineDecision, staleRevisionDecideNote, staleRevisionDecideRefusal, standingRequirementsAnswersAsk,
 } from '../src/daemon/decisions.js';
 import { decisionInput, masterConfigSchema, type HerdrAgent, type MasterConfig } from '../src/master.js';
 import { liveLeaseRevisionRefusal } from '../src/model/approval.js';
@@ -175,6 +175,48 @@ test('unit:stale-revision-decide-classified-transient — the decisions-step cla
   assert.equal(staleRevisionDecideRefusal(new Error('Policy revision changed (now 3); reload and request again')), true);
   assert.equal(staleRevisionDecideRefusal(new Error('Policy revision changed; reload before revising')), false);
   assert.equal(heldDecisionNamedIn(new Error('nope')), null);
+  assert.match(approvedResumePendingDetail('GY-1702', 'requirements', '9a6095d9-c3e5-4357-93d6-48b8ccc61e5e', 'graphyard-approver'), /watch stays live and resume is tried again next cycle/);
+});
+
+test('integration:approved-resume-race-no-decision-fault — resume returning still-approved keeps a live watch and records done, then resumes again', { timeout: 120_000 }, async () => {
+  let work = await claimed('approved resume race');
+  const requested = await ok(master.token, 'POST', `work/${work.id}/decide`, {
+    action: 'requirements',
+    input: decisionInput('requirements', work, { plannedFiles: [layout, helper] }),
+    reason: 'Pending requirements decision adds the helper the criterion needs',
+  });
+  await ok(token(implementer), 'POST', `work/${work.id}/scope`, { epoch: work.epoch, paths: [helper], reason: 'AC-1 needs the measuring helper' });
+  await ok(token(coordinator), 'POST', `work/${work.id}/autoscope`, { epoch: work.epoch });
+  work = await reload(work.id);
+  let resumes = 0;
+  const loop = harness({
+    resume: async (_target, decision) => {
+      resumes += 1;
+      return { id: decision, state: 'approved', approvedBy: 'graphyard-approver-graphyard', approvedAt: '2026-10-11T16:00:00.000Z', outcome: null };
+    },
+  });
+  // History reports the standing decision as approved so the loop resumes it; the stub keeps returning approved (lane-rework race).
+  const realDecisions = loop.effects.decisions!;
+  loop.effects.decisions = async (item) => {
+    const body = await realDecisions(item);
+    return {
+      decisions: body.decisions.map((entry: any) => entry.id === requested.id
+        ? { ...entry, state: 'approved', approvedBy: 'graphyard-approver-graphyard', approvedAt: '2026-10-11T16:00:00.000Z' }
+        : entry),
+    };
+  };
+  const state = emptyDaemonState(loopConfig());
+  await loop.cycle(state);
+  const pending = Object.values(state.actions).filter(action => action.work === work.key && action.kind === 'decision' && /watch stays live and resume is tried again next cycle/.test(action.detail ?? ''));
+  assert.ok(pending.length >= 1, `expected approved-resume pending detail, got: ${Object.values(state.actions).filter(a => a.work === work.key).map(a => `${a.state}:${a.detail}`).join(' | ')}`);
+  assert.ok(pending.every(action => action.state === 'done'), 'the race is recorded done, not failed');
+  assert.equal(Object.values(state.actions).filter(action => action.work === work.key && action.kind === 'decision' && action.state === 'failed').length, 0);
+  const watch = Object.values(state.approvals).find(entry => entry.decision === requested.id);
+  assert.ok(watch && !watch.settledAt, 'the watch stays live');
+  const before = resumes;
+  assert.ok(before >= 1, 'resume was attempted');
+  await loop.cycle(state);
+  assert.ok(resumes > before, 'the next cycle resumes again from the live watch');
 });
 
 // ---- Integration: held resume / standing adopt / ask settlement / post-apply revision ----------
