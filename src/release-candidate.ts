@@ -67,6 +67,34 @@ export function followUpFilingExcess(actor: { id?: string; role?: string; capabi
   const otherRepositories = repository ? (actor.scope?.repositories ?? []).filter(other => other !== repository) : [];
   return otherRepositories.length ? `operator agent ${actor.id} can also create work in ${otherRepositories.join(', ')}; the filing credential is scoped to ${repository} alone` : null;
 }
+/** GY-1691: the uat environment secret the release workflow presents as `GRAPHYARD_TOKEN` when it files. */
+export const releaseFilingSecret = 'GRAPHYARD_RELEASE_TOKEN';
+/** The `operator-agent setup` FILE that issues the filing identity over `repository` (docs/delivery.md#release-filing-credential). */
+export const releaseFilingSetupFile = (repository: string) => JSON.stringify({ id: releaseFilingIdentity.id, displayName: 'Release follow-up', capabilities: [...releaseFilingIdentity.capabilities], scope: { repositories: [repository], workItems: ['*'] }, reason: filingReason });
+/**
+ * GY-1691: the doctor line a refused filing is fixed by. `graphyard doctor` prints `FAIL
+ * release-filing` while the secret names a principal the create path refuses (one issued before
+ * GY-1614's identity, say); an administrator issues the identity and rotates the secret, and it
+ * prints `PASS release-filing` once the served release accepts the new token.
+ */
+export const releaseFilingRepair = (repository: string) => `graphyard doctor prints FAIL release-filing until an administrator issues ${releaseFilingIdentity.id} with \`graphyard operator-agent setup FILE --token-stdin\` (FILE: ${releaseFilingSetupFile(repository)}) and stores the printed token as the uat environment secret ${releaseFilingSecret}; it prints PASS release-filing once the served release accepts that token`;
+/** A failed candidate whose filing was refused and that nothing filed since (GY-1691): no follow-up stands for its failure. */
+export interface RefusedFiling { id: string; sha: string; run: string | null; refusal: string }
+/** Pure: the refusal a UAT record carries, or null when the candidate passed, filed its follow-up, or recorded no filing error. */
+export function refusedFiling(uat: Pick<UatRecord, 'id' | 'sha' | 'result' | 'followUp'> & { run?: string | null; filingError?: string | null } | null | undefined): RefusedFiling | null {
+  if (!uat || uat.result !== 'failed' || !uat.filingError || uat.followUp) return null;
+  return { id: uat.id, sha: uat.sha, run: uat.run ?? null, refusal: uat.filingError };
+}
+/**
+ * The fault a refused filing raises (GY-1691): `text` names the candidate, its run and the refusal;
+ * `next` is the doctor line that fixes the credential and the retry that files the missed follow-up.
+ */
+export function refusedFilingFault(refused: RefusedFiling, repository: string) {
+  return { text: `Release candidate ${refused.id} (${refused.sha.slice(0, 12)}) failed validation${refused.run ? ` in ${refused.run}` : ''} and its filing was refused, so no follow-up or hold exists for the failure: ${refused.refusal}`,
+    next: `${releaseFilingRepair(repository)}; then graphyard release follow-up ${refused.id} files the missed follow-up` };
+}
+/** The run a validation runs in, as GitHub Actions names it in the environment; null outside one. */
+export const runUrlFromEnv = (env: NodeJS.ProcessEnv) => env.GITHUB_SERVER_URL && env.GITHUB_REPOSITORY && env.GITHUB_RUN_ID ? `${env.GITHUB_SERVER_URL}/${env.GITHUB_REPOSITORY}/actions/runs/${env.GITHUB_RUN_ID}` : null;
 
 export type CutTrigger = 'schedule' | 'manual';
 export interface CandidateItem { key: string; mergeSha: string; pr: number | null }
@@ -99,6 +127,10 @@ export interface UatRecord {
   e2e?: E2eRecord | null;
   /** The release holds the validation opened, attached to or cleared (src/release-holds.ts). */
   holds?: { kind: 'open' | 'attach' | 'clear'; outcome: string; hold: string; item: string | null }[];
+  /** GY-1691: the workflow run that validated the candidate, when one did. */
+  run?: string | null;
+  /** GY-1691: why the failed candidate's filing was refused, recorded with the verdict so the refusal is never silent. */
+  filingError?: string | null;
 }
 /** An applied evidence decision (GY-1378): one flaky case of one run accepted at one exact SHA. */
 export interface FlakyAcceptance { case: string; runId: string; sha: string; decision: string }
@@ -687,7 +719,9 @@ export interface HoldOutcome { e2e: E2eRecord | null; holds: NonNullable<UatReco
  */
 export async function validateAndRecord(sourceGit: AnyGit, id: string, url: string, suites: readonly Suite[], options: { base: string; push: boolean; timeoutMs: number;
   file?: (item: ReturnType<typeof followUpItem>, requestId: string) => Promise<string>; now?: () => Date; fetcher?: typeof fetch; sleep?: (ms: number) => Promise<void>;
-  holds?: (candidate: ReleaseCandidate, record: UatRecord) => Promise<HoldOutcome> }) {
+  holds?: (candidate: ReleaseCandidate, record: UatRecord) => Promise<HoldOutcome>;
+  /** GY-1691: the run validating the candidate, kept on the record; the GitHub Actions environment names it when absent. */
+  run?: string | null }) {
   const git = awaited(sourceGit);
   await syncLedgerAsync(git, options.base);
   const ledger = await readLedgerAsync(git);
@@ -702,6 +736,10 @@ export async function validateAndRecord(sourceGit: AnyGit, id: string, url: stri
     try { record.followUp = await options.file(followUpItem(candidate, record, holds?.covered), followUpRequestId(candidate.id)); }
     catch (error) { filingError = error instanceof Error ? error.message : String(error); }
   }
+  // GY-1691: the refusal is part of the verdict. A failed candidate nothing filed for is a fault the loop raises, not a silent 'did not promote it'.
+  const run = options.run === undefined ? runUrlFromEnv(process.env) : options.run;
+  if (run) record.run = run;
+  if (record.result === 'failed') record.filingError = filingError;
   await writeRecordAsync(git, `${uatTagPrefix}${candidate.id}`, candidate.sha, record, options.push);
   await holds?.write();
   return { record, followUp: record.result === 'failed' ? record.followUp ?? null : null, filingError };
@@ -754,7 +792,8 @@ export const ledgerStatus = (ledger: Ledger) => ledger.candidates.map(candidate 
   const uat = ledger.uat.find(record => record.id === candidate.id) ?? null, soak = ledger.soak.find(record => record.id === candidate.id) ?? null;
   return { id: candidate.id, sha: candidate.sha, cutAt: candidate.cutAt, trigger: candidate.trigger, prs: candidate.prs ?? null, queued: candidate.queued ?? null, items: candidate.items.map(item => item.key),
     uat: uat ? { result: uat.result, at: uat.at, failing: failingSuites(uat).map(suite => suite.name), followUp: uat.followUp,
-      ...(uat.e2e ? { blocking: uat.e2e.blocking, unrun: uat.e2e.cases.filter(entry => entry.verdict === 'unrun').map(entry => entry.case) } : {}), ...(uat.holds?.length ? { holds: uat.holds } : {}) } : null,
+      ...(uat.e2e ? { blocking: uat.e2e.blocking, unrun: uat.e2e.cases.filter(entry => entry.verdict === 'unrun').map(entry => entry.case) } : {}), ...(uat.holds?.length ? { holds: uat.holds } : {}),
+      ...(uat.run ? { run: uat.run } : {}), ...(uat.filingError ? { filingError: uat.filingError } : {}) } : null,
     soak: soak ? { result: soak.result, at: soak.at, run: soak.run, report: soak.report } : null,
     production: ledger.production.find(record => record.id === candidate.id)?.at ?? null };
 });

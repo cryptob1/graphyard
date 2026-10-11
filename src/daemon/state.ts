@@ -179,6 +179,8 @@ export const promotionStateSchema = z.object({
     queued: z.number().int().min(0).nullable(),
     /** GY-1513: the advisory soak's verdict as the candidate's record (rc-soak/ID) keeps it, once its run recorded one. */
     soak: z.object({ result: z.string().max(32), at: z.string().max(64), run: z.string().max(500).nullable() }).strict().nullable().optional(),
+    /** GY-1691: the UAT verdict (rc-uat/ID): its result, run, the follow-up it filed and the refusal a filing met, so a failed candidate nothing filed for is a fault. */
+    uat: z.object({ result: z.string().max(32), at: z.string().max(64), run: z.string().max(500).nullable(), followUp: z.string().max(100).nullable(), filingError: z.string().max(500).nullable() }).strict().nullable().optional(),
   }).strict()).max(5).optional(),
   /** GY-1513: the newest advisory soak runs (release-candidate-soak.yml), by the SHA each soaks; never holds promotion back. */
   soaks: z.array(z.object({

@@ -603,6 +603,7 @@
     "tests/registry-drives-launch.test.ts": 1901,
     "tests/registry-slot-followups.test.ts": 1167,
     "tests/regression-guard.test.ts": 391,
+    "tests/release-candidate-filing.test.ts": 1500,
     "tests/release-candidate.test.ts": 6100,
     "tests/release-project.test.ts": 1500,
     "tests/release-revert.test.ts": 4000,

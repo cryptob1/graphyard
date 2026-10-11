@@ -96,6 +96,10 @@ const REQUIRED_STATEMENTS: [string, RegExp][] = [
   // GY-1686 AC-3: both master-agent pages name master browser capture as the remedy for a criterion needing a live Confirm-access fixture, never a human.
   ['docs/master-agent.md', /Live Confirm-access fixtures: \[`master browser capture`\]\(master-agent-reference\.md#github-administration-through-the-browser\), never a human/],
   ['docs/master-agent-reference.md', /a criterion needing a live one runs `master browser capture \[--dry-run\]` on the sudo-protected App permissions page, submitting nothing, never a human/],
+  // GY-1691 AC-3: a candidate whose filing was refused appears in master status with its refusal, and rotating the release token after an identity change is part of the release-filing setup, naming the doctor line.
+  ['docs/delivery.md', /a refused filing \(`rc-uat\/ID` `filingError`\) is a `deployment` fault under `master status` attention: run URL, refusal, `doctor` line/],
+  ['docs/delivery.md', /`doctor` prints `FAIL release-filing` if refused or broader \(rotate uat secret `GRAPHYARD_RELEASE_TOKEN` after an identity change\), `PASS release-filing` once accepted/],
+  ['docs/master-agent-reference.md', /`deployment`: a candidate whose filing was refused, with run URL, refusal, `doctor` `release-filing` line; rotate `GRAPHYARD_RELEASE_TOKEN` after identity changes \(\[setup\]\(delivery\.md#release-filing-credential\)\)/],
 ];
 
 test('unit:docs-word-budget — the pages graphyard.json budgets (README.md and every docs page) keep every page within its per-page budget and 200 words under it, counted as wc -w counts them; a total within 3% of the budget fails a change that adds to it and warns otherwise', () => {

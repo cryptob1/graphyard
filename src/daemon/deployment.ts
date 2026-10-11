@@ -8,6 +8,7 @@ import type { Work } from '../model.js';
 import type { MasterConfig } from '../master.js';
 import type { MergerMode } from '../merger-mode.js';
 import { localPromotionCycle, type LocalReleasePorts, type LocalRunOutcome } from './promotion-local.js';
+import { refusedFiling, type RefusedFiling } from '../release-candidate.js';
 import { actionableIntervalMs } from './liveness.js';
 import { pinningVerify, retryPendingPin } from '../master/known-good.js';
 import { installDirectory } from '../install/secrets.js';
@@ -428,8 +429,10 @@ const runningStates = new Set(['queued', 'in_progress', 'waiting', 'pending', 'r
 
 /** GY-1513: a candidate's recorded soak verdict (`rc-soak/ID`): passed, failed or cancelled, when, and the soak run that recorded it. */
 export interface CandidateSoak { result: string; at: string; run: string | null }
-/** GY-1491: one release candidate as the loop reads it: the merges it carries, those on main behind it now and its recorded soak verdict, if any (GY-1513). */
-export interface PromotionCandidate { id: string; sha: string; cutAt: string; prs: number | null; queued: number | null; soak?: CandidateSoak | null }
+/** GY-1691: a candidate's UAT verdict as its record (`rc-uat/ID`) keeps it: the result, the run, what it filed and why a filing was refused. */
+export interface CandidateUat { result: string; at: string; run: string | null; followUp: string | null; filingError: string | null }
+/** GY-1491: one release candidate as the loop reads it: the merges it carries, those on main behind it now, its recorded soak verdict, if any (GY-1513), and its UAT verdict (GY-1691). */
+export interface PromotionCandidate { id: string; sha: string; cutAt: string; prs: number | null; queued: number | null; soak?: CandidateSoak | null; uat?: CandidateUat | null }
 /** How many of the newest candidates the loop reads and `master status` lists. */
 export const promotionCandidatesListed = 5;
 export interface PromotionLedger { mainSha: string | null; promotedSha: string | null; promotedAt: string | null; behind: number | null; candidates?: PromotionCandidate[] }
@@ -577,10 +580,20 @@ export async function promotionCycle(previous: PromotionState | null, reads: Pro
  * run's conclusion; null when no soak run of that SHA has been read.
  */
 export function promotionStatus(state: PromotionState | null | undefined) {
-  if (!state) return { lastPromotedSha: null, promotedAt: null, behind: null, nextDueAt: null, inFlight: false, checkedAt: null, candidates: [], reason: 'The loop has not checked promotion yet' };
+  if (!state) return { lastPromotedSha: null, promotedAt: null, behind: null, nextDueAt: null, inFlight: false, checkedAt: null, candidates: [], refusedFilings: [], reason: 'The loop has not checked promotion yet' };
   return { lastPromotedSha: state.promotedSha, promotedAt: state.promotedAt, behind: state.behind, nextDueAt: state.nextDueAt, inFlight: state.inFlight, checkedAt: state.checkedAt,
-    candidates: (state.candidates ?? []).map(candidate => ({ id: candidate.id, sha: candidate.sha, prs: candidate.prs, queued: candidate.queued, soak: soakOf(state.soaks, candidate) })), reason: state.reason };
+    candidates: (state.candidates ?? []).map(candidate => ({ id: candidate.id, sha: candidate.sha, prs: candidate.prs, queued: candidate.queued, soak: soakOf(state.soaks, candidate), ...(candidate.uat ? { uat: candidate.uat } : {}) })),
+    // GY-1691: the listed candidates that failed validation and could not file, each with its run URL and the refusal, so a failed release is never silent.
+    refusedFilings: refusedFilings(state), reason: state.reason };
 }
+
+/** GY-1691: every listed candidate whose UAT record carries a refused filing nothing has filed since, newest first. */
+export function refusedFilings(state: Pick<PromotionState, 'candidates'> | null | undefined): RefusedFiling[] {
+  return (state?.candidates ?? []).flatMap(candidate => { const refused = candidate.uat ? refusedFiling({ id: candidate.id, sha: candidate.sha, result: candidate.uat.result as 'passed' | 'failed', followUp: candidate.uat.followUp, run: candidate.uat.run, filingError: candidate.uat.filingError }) : null; return refused ? [refused] : []; });
+}
+/** The daemon action key the deployment step records a candidate's refused filing under (`promotion:filing:ID`). */
+export const refusedFilingKeyPrefix = 'promotion:filing:';
+export const refusedFilingKey = (id: string) => `${refusedFilingKeyPrefix}${id}`;
 
 /**
  * GY-1513: the soak runs, re-read once a run-read window while one is running or the newest
@@ -624,7 +637,7 @@ export function promotionReads(config: MasterConfig, root: string, run: ChildRun
   return {
     ...(options.merger ? { merger: options.merger } : {}), ...(local !== undefined ? { local } : {}),
     ledger: async () => {
-      await git('fetch', '--quiet', '--no-tags', 'origin', `+refs/heads/${config.baseBranch}:refs/remotes/origin/${config.baseBranch}`, '+refs/tags/rc-production/*:refs/tags/rc-production/*', '+refs/tags/rc/*:refs/tags/rc/*', '+refs/tags/rc-soak/*:refs/tags/rc-soak/*');
+      await git('fetch', '--quiet', '--no-tags', 'origin', `+refs/heads/${config.baseBranch}:refs/remotes/origin/${config.baseBranch}`, '+refs/tags/rc-production/*:refs/tags/rc-production/*', '+refs/tags/rc/*:refs/tags/rc/*', '+refs/tags/rc-soak/*:refs/tags/rc-soak/*', '+refs/tags/rc-uat/*:refs/tags/rc-uat/*');
       const mainSha = (await git('rev-parse', `refs/remotes/origin/${config.baseBranch}^{commit}`)).trim().toLowerCase() || null;
       let promotedSha: string | null = null, promotedAt: string | null = null;
       try {
@@ -644,12 +657,17 @@ export function promotionReads(config: MasterConfig, root: string, run: ChildRun
       const soaked = new Map<string, CandidateSoak>();
       for (const record of await tagRecords(git, 'refs/tags/rc-soak/', 2 * promotionCandidatesListed))
         if (typeof record?.id === 'string' && typeof record?.result === 'string') soaked.set(record.id, { result: record.result, at: typeof record.at === 'string' ? record.at : '', run: typeof record.run === 'string' ? record.run : null });
+      // GY-1691: the UAT verdicts, by candidate, with the refusal a failed one's filing met, so the loop raises it rather than reading 'did not promote it'.
+      const validated = new Map<string, CandidateUat>();
+      for (const record of await tagRecords(git, 'refs/tags/rc-uat/', 2 * promotionCandidatesListed))
+        if (typeof record?.id === 'string' && typeof record?.result === 'string') validated.set(record.id, { result: record.result, at: typeof record.at === 'string' ? record.at : '', run: typeof record.run === 'string' ? record.run : null,
+          followUp: typeof record.followUp === 'string' ? record.followUp : null, filingError: typeof record.filingError === 'string' && record.filingError ? record.filingError.slice(0, 500) : null });
       for (const record of await tagRecords(git, 'refs/tags/rc/', promotionCandidatesListed)) {
         if (typeof record?.id !== 'string' || typeof record?.sha !== 'string' || typeof record?.cutAt !== 'string') continue;
         const sha = record.sha.toLowerCase();
         let queued: number | null = null;
         if (mainSha) try { queued = Number((await git('rev-list', '--first-parent', '--count', `${sha}..${mainSha}`)).trim()); } catch { queued = null; }
-        candidates.push({ id: record.id, sha, cutAt: record.cutAt, prs: Number.isInteger(record.prs) ? record.prs : null, queued: Number.isInteger(queued) ? queued : null, soak: soaked.get(record.id) ?? null });
+        candidates.push({ id: record.id, sha, cutAt: record.cutAt, prs: Number.isInteger(record.prs) ? record.prs : null, queued: Number.isInteger(queued) ? queued : null, soak: soaked.get(record.id) ?? null, uat: validated.get(record.id) ?? null });
       }
       return { mainSha, promotedSha, promotedAt, behind, candidates };
     },

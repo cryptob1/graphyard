@@ -9,9 +9,10 @@ import { canonicalJson } from '../onboarding.js';
 import { decisionInput } from '../master.js';
 import { readyToRetry } from './sessions.js';
 import { detailChanged, exhaustedProofEscalation, exhaustedProofKey, githubPause, observationWakeDue, standingVerdict, type RoutineDecision } from './decisions.js';
-import { record } from './effects.js';
+import { record, type DaemonEffects } from './effects.js';
 import type { Cycle } from './cycle.js';
-import { defaultDeploymentReuseMinutes, defaultPromoteEveryMinutes, deploymentDetail, deploymentStepBudgetMs, promotionCycle, promotionWorkflow, reusableDeployment, stillVerifying, withinDeploymentBudget } from './deployment.js';
+import { defaultDeploymentReuseMinutes, defaultPromoteEveryMinutes, deploymentDetail, deploymentStepBudgetMs, promotionCycle, promotionWorkflow, refusedFilingKey, refusedFilingKeyPrefix, refusedFilings, reusableDeployment, stillVerifying, withinDeploymentBudget } from './deployment.js';
+import { refusedFilingFault } from '../release-candidate.js';
 import { mainGuardAttention } from '../main-guard.js';
 import { promotionFreeze } from './main-watch.js';
 import { openThroughputOwner, throughputAnsweredAt, throughputClaim, throughputDecisionCause, throughputDecisionRelease, throughputHandAsked, throughputOwnerAnsweredBy, throughputOwnerClosure, throughputOwnerItem, throughputRemeasureAt, throughputSelfAsked, throughputStallText, type ThroughputStall } from '../throughput.js';
@@ -155,6 +156,8 @@ export async function deploymentStep(cycle: Cycle) {
       if (!checked.ok) throw checked.error;
       const result = checked.value;
       state.promotion = result.state;
+      // GY-1691: a failed candidate whose filing was refused is a deployment fault naming the candidate, its run, the refusal and the doctor line, never a silent 'did not promote it'.
+      performed.push(...await recordRefusedFilings(state, config.repository, now, effects.persist));
       if (result.failure) {
         const detail = `Promotion could not be checked or dispatched: ${result.failure}`;
         performed.push(await record(state, promotionFailure, { kind: 'deployment', work: null, principal: null, state: 'failed', detail, attempts: (state.actions[promotionFailure]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
@@ -261,6 +264,28 @@ export async function deploymentStep(cycle: Cycle) {
  * answer naming its re-measure time (`throughputRemeasureAt`) is asked as soon as that time comes,
  * whatever the backoff has grown to: thirty cycles of backoff outlast the hour the loop promises.
  */
+/**
+ * GY-1691: one failed daemon action per listed candidate whose UAT record carries a refused filing
+ * (`promotion:filing:ID`), recorded once per distinct detail rather than every cycle, and settled
+ * `done` once the candidate filed its follow-up or left the listed candidates. Nothing is judged
+ * until a ledger has been read: an unread cursor lists no candidates and settles nothing.
+ */
+export async function recordRefusedFilings(state: DaemonState, repository: string, now: () => number, persist: DaemonEffects['persist']) {
+  const performed: DaemonAction[] = [];
+  if (!state.promotion?.candidates) return performed;
+  const refused = refusedFilings(state.promotion), standing = new Set(refused.map(entry => refusedFilingKey(entry.id)));
+  for (const entry of refused) {
+    const key = refusedFilingKey(entry.id), previous = state.actions[key], fault = refusedFilingFault(entry, repository), detail = `${fault.text}. ${fault.next}`;
+    if (previous?.state === 'failed' && !detailChanged(previous, detail)) continue;
+    performed.push(await record(state, key, { kind: 'deployment', work: null, principal: null, state: 'failed', detail, attempts: (previous?.attempts ?? 0) + 1, cycle: state.cycle }, now(), persist));
+  }
+  for (const [key, action] of Object.entries(state.actions)) {
+    if (!key.startsWith(refusedFilingKeyPrefix) || standing.has(key) || action.state !== 'failed') continue;
+    performed.push(await record(state, key, { kind: 'deployment', work: null, principal: null, state: 'done', detail: `Release candidate ${key.slice(refusedFilingKeyPrefix.length)} filed its follow-up or is no longer among the listed candidates`, attempts: action.attempts, cycle: state.cycle }, now(), persist));
+  }
+  return performed;
+}
+
 export function throughputAskDue(previous: DaemonAction | undefined, cycle: number, now: number) {
   const remeasureAt = previous?.state === 'waiting' && answeredVerdict(previous) === 'unverified' ? throughputRemeasureAt(previous.detail) : null;
   if (remeasureAt !== null && now >= remeasureAt) return true;

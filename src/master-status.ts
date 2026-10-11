@@ -1,4 +1,6 @@
-import { readDaemonState } from './daemon/state.js';
+import { readDaemonState, type PromotionState } from './daemon/state.js';
+import { refusedFilings } from './daemon/deployment.js';
+import { refusedFilingFault } from './release-candidate.js';
 import { agentOwner, buildMasterStatus, concurrencyAttention, inventoryWorktrees, roleConcurrency, type AttentionItem, type HerdrAgent, type MasterConfig } from './master.js';
 import type { ActionRow } from './model/actions.js';
 import { classified, classifyAttention, groupFaults } from './model/fault-classes.js';
@@ -191,7 +193,9 @@ export function faulted(items: AttentionItem[]) {
  * the setup and the dispatcher, which the report reads before everything else.
  */
 export async function derivedAttention(root: string, master: MasterConfig, masterApi: (path: string) => Promise<any>, coordinator: any, snapshot: { work: Work[]; now: string },
-  observed: { reviews: ReviewRecord[]; producers: ProducerRecord[]; runtime: { available: boolean; agents: HerdrAgent[] }; rows?: ReturnType<typeof buildMasterStatus>['work']; trees?: (string | { path: string })[]; standalone?: boolean; approvals?: Parameters<typeof scopeRequestAttention>[1] }) {
+  observed: { reviews: ReviewRecord[]; producers: ProducerRecord[]; runtime: { available: boolean; agents: HerdrAgent[] }; rows?: ReturnType<typeof buildMasterStatus>['work']; trees?: (string | { path: string })[]; standalone?: boolean; approvals?: Parameters<typeof scopeRequestAttention>[1];
+    /** GY-1691: the loop's promotion cursor, whose listed candidates carry their UAT verdicts; absent or null, no refused filing is reported. */
+    promotion?: Pick<PromotionState, 'candidates'> | null }) {
   const reviews = summarizeReviews(observed.reviews), now = Date.parse(snapshot.now);
   const rows = observed.rows ?? buildMasterStatus(snapshot, master.workers, observed.runtime.available ? observed.runtime.agents : [], {}, {}, reviews, master.baseBranch, coordinator ?? undefined,
     // The retry schedule of every settled session (GY-533): without it a failed session whose next
@@ -224,6 +228,8 @@ export async function derivedAttention(root: string, master: MasterConfig, maste
   const stoppedRetries = stoppedFollowUpAttention(observed.reviews);
   // A settled reviewer whose pane would not close still holds its name (GY-1072): a fault naming the pane, never a silent bound.
   const heldNames = heldNameAttention(observed.reviews).map(({ next, ...item }) => ({ ...item, ...agentOwner('master', next) }));
+  // A release candidate that failed validation and could not file its follow-up (GY-1691): named with its run and refusal, never only 'did not promote it'.
+  const refusedFilings = refusedFilingAttention(observed.promotion, master.repository);
   const host: AttentionItem[] = [];
   if (observed.standalone) {
     const cursor = await readDispatchCursor(root, master, () => {}).catch(error => ({ error: error instanceof Error ? error.message : 'Master dispatch cursor is unreadable' }));
@@ -234,6 +240,17 @@ export async function derivedAttention(root: string, master: MasterConfig, maste
     host.push(...concurrencyAttention([roleConcurrency('reviewer', master.reviewers, snapshot.work, observed.runtime.agents, reviews, sessions, now), roleConcurrency('producer', master.producers, snapshot.work, observed.runtime.agents, sessions.producers, sessions, now)])
       .map(item => ({ ...item, ...classified('concurrency-starved') })));
   }
-  return { scopeRequests, unobtainable, unanswered, stalledItems, actorless, executors, conflicted, stalled, owed, budget, overlong, triage, backlog,
-    items: [...host, ...executors.attention, ...scopeRequests, ...unanswered, ...unobtainable, ...conflicted, ...stuck, ...heldNames, ...stoppedRetries, ...stalledItems, ...actorless, ...stalled, ...overlong, ...budget, ...triage, ...owed.items] };
+  return { scopeRequests, unobtainable, unanswered, stalledItems, actorless, executors, conflicted, stalled, owed, budget, overlong, triage, backlog, refusedFilings,
+    items: [...host, ...executors.attention, ...scopeRequests, ...unanswered, ...unobtainable, ...conflicted, ...stuck, ...heldNames, ...stoppedRetries, ...stalledItems, ...actorless, ...stalled, ...overlong, ...budget, ...triage, ...owed.items, ...refusedFilings] };
+}
+
+/**
+ * GY-1691: one attention line per listed release candidate that failed validation and whose
+ * filing was refused, naming the candidate, its run URL and the refusal, owned by the master with
+ * the doctor line that fixes the credential as its next step. A deployment fault, as the loop
+ * records it (`promotion:filing:ID`), so `master status` lists the failed candidate under
+ * attention rather than only a promotion line reading 'did not promote it'.
+ */
+export function refusedFilingAttention(promotion: Pick<PromotionState, 'candidates'> | null | undefined, repository: string): AttentionItem[] {
+  return refusedFilings(promotion).map(refused => { const fault = refusedFilingFault(refused, repository); return { subject: 'release', text: fault.text, ...agentOwner('master', fault.next), ...classified('action:deployment') }; });
 }
