@@ -60,7 +60,8 @@ export function postMergeProofRefusal(criterion: { id: string; text: string; pro
  * GY-1685: the rule as first shipped read "live install" but not "live host", "on this installation"
  * but not "on the installation", and no "release serving X's merge" or "cycle after the fix", so
  * GY-1683 AC-5 and GY-1666 AC-1 entered undeclared and each blocked for a requirements decision no
- * worker may make. Those wordings are live observations here. And the verification is declared on
+ * worker may make. Those wordings are live observations here, read narrowly: a master, loop or daemon
+ * cycle after the fix is the served loop's, a unit-test run after the fix is not. And the verification is declared on
  * the item that ships the change: an item whose every criterion is a declared post-deploy
  * verification has nothing a head can build, so its worker could only wait for the serving release
  * (GY-1666 did, filed as GY-1662 AC-3's follow-up); `postDeployOnlyRefusal` refuses it on every path.
@@ -72,8 +73,9 @@ const liveObservation = new RegExp([
   // The release that serves the merge, however it is named: deployed, serving, running, production, "the release serving GY-N's merge".
   /\b(?:on|in|against|from|by)\s+the\s+(?:deployed|serving|running|live)\s+(?:release|install(?:ation)?|loop|daemon|server|service|control\s+plane|system|deployment)\b/,
   /\b(?:on|in|against|from|by)\s+the\s+(?:release|deployment|install(?:ation)?)\s+(?:that\s+)?serv(?:es|ing)\b/,
-  // A loop cycle, run or pass "after the fix" is the served loop's, not a test's.
-  /\b(?:cycle|run|pass)\s+after\s+the\s+(?:change|fix|merge)\b/,
+  // A master, loop or daemon cycle, run or pass "after the fix" is the served loop's ("a master reclaim cycle after the
+  // fix"); a unit-test run after the fix is a test's, and stays pre-merge.
+  /\b(?:master|loop|daemon)(?:\s+\w+)?\s+(?:cycle|run|pass)\s+after\s+the\s+(?:change|fix|merge)\b/,
   /(?<![\/\w-])production\b(?!\s+(?:code|paths?|branch(?:es)?|builds?|bundles?|dependenc(?:y|ies)|modules?|sources?|files?)\b)/,
   /\b(?:after|once)\s+(?:the\s+(?:change|fix|merge)\s+(?:is\s+|has\s+)?)?(?:deploy(?:ed|ment)?|merged\s+and\s+deployed|ships|shipped|is\s+shipped|goes\s+live)\b/,
   /\bpost[-\s]?ship(?:ping|ped)?\b/, /\bonce\s+the\s+fix\s+is\s+running\b/, /\bobservation\s+after\s+deploy/,

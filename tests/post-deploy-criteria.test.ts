@@ -308,44 +308,111 @@ test('unit:post-deploy-criteria — the loop\'s verify-deployment files an owed 
   assert.match(String(result), /AC-3 owes its post-deploy observation \(GY-43\)/);
 });
 
-// The linked instances of GY-1685's pattern, as their criteria were written when each item blocked. GY-1660's
-// rule read none of these wordings as a live observation: GY-1683 AC-5 (filed after it shipped) and GY-1666 AC-1
-// entered undeclared and each blocked for a requirements decision no worker may make. GY-1662 AC-3 (filed before
-// it) blocked the same way, and its remedy — moving the criterion to follow-up GY-1666, the follow-up item the
-// GY-188 refusal recommended — blocked again: a worker cannot observe a release that does not yet serve the fix.
+// The linked instances of GY-1685's pattern, as their criteria were written when each item blocked, each run below
+// against the live-observation rule as the base ships it and against the candidate's. GY-1662 was filed at 17:45Z on
+// 2026-10-10, before GY-1660's rule merged at 18:42Z: it blocked at 18:02Z on the reviewer's demand for AC-3's served
+// observation, and the remedy the GY-188 refusal recommended, a follow-up item, filed GY-1666 at 18:08Z, whose worker
+// could only wait for the serving release and blocked at 19:57Z. GY-1683 was filed at 01:45Z the next day, after the
+// rule: AC-5 passed it undeclared and blocked at 02:06Z for a requirements decision no worker may make. `base` is
+// what the base rule reads in each text, `phrase` what the candidate reads.
 const escalated = {
-  'GY-1683 AC-5': { id: 'AC-5', text: 'On the live host at the bound, a master reclaim cycle after the fix reports the /tmp volume above its inode headroom (pressure below=false) while the opencode sessions stay running, and the reclaim record names the classes that took it back.', proofs: ['manual:reclaim-pressure-below-false'], phrase: 'live host' },
-  'GY-1666 AC-1': { id: 'AC-1', text: "On the release serving GY-1662's merge, one master cycle on the installation applies the Claude harness contract without an action:config fault on remedy:harness:claude, and the following master status reports no harness attention row for it", proofs: ['manual:harness-contract-applied-on-install'], phrase: 'On the release serving' },
-  'GY-1662 AC-3': { id: 'AC-3', text: 'After the fix ships and is served, one master cycle on the installation applies the Claude harness contract without an action:config fault on remedy:harness:claude and the following master status reports no harness attention row for it', proofs: ['manual:harness-contract-applied-on-install'], phrase: 'After the fix ships' },
+  'GY-1683 AC-5': { id: 'AC-5', text: 'On the live host at the bound, a master reclaim cycle after the fix reports the /tmp volume above its inode headroom (pressure below=false) while the opencode sessions stay running, and the reclaim record names the classes that took it back.', proofs: ['manual:reclaim-pressure-below-false'], base: null, phrase: 'live host' },
+  'GY-1666 AC-1': { id: 'AC-1', text: "On the release serving GY-1662's merge, one master cycle on the installation applies the Claude harness contract without an action:config fault on remedy:harness:claude, and the following master status reports no harness attention row for it", proofs: ['manual:harness-contract-applied-on-install'], base: null, phrase: 'On the release serving' },
+  'GY-1662 AC-3': { id: 'AC-3', text: 'After the fix ships and is served, one master cycle on the installation applies the Claude harness contract without an action:config fault on remedy:harness:claude and the following master status reports no harness attention row for it', proofs: ['manual:harness-contract-applied-on-install'], base: 'After the fix ships', phrase: 'After the fix ships' },
 };
+// GY-1662 AC-1 as filed: what its head could show before merge, beside which AC-3 belonged declared.
+const gy1662ac1 = { id: 'AC-1', text: "The loop's remedy:harness:claude apply resolves a checkout that records units (.graphyard/units.json present) and applies the Claude harness contract from the loop's own process without raising the action:config failure; when the resolved checkout records no units the act refuses naming that checkout and the 'graphyard master init' remedy instead of failing opaquely, and the failure does not repeat on the next cycle", proofs: ['unit:harness-apply-checkout-resolution'] };
+
+// The live-observation rule as the base ships it (c531a1d7 src/model/post-merge-proofs.ts, GY-1660 as merged at
+// ccc0a314), pinned verbatim so each instance runs against the base rule and the candidate's in one case. GY-1685
+// widens the phrases only; the clause split and the head anchor are the base's, unchanged.
+const baseLiveObservation = new RegExp([
+  /\blive\s+(?:install(?:ation)?|loop|daemon|server|service|deployment|system|environment|release|traffic)\b/, /\bon\s+this\s+installation\b/,
+  /\brestarted\s+(?:master\s+)?loop\b/, /\bthe\s+master\s+loop\s+restarts\b/,
+  /\b(?:on|in|against|from|by)\s+the\s+(?:deployed|serving|running|live)\s+(?:release|install(?:ation)?|loop|daemon|server|service|control\s+plane|system|deployment)\b/,
+  /(?<![\/\w-])production\b(?!\s+(?:code|paths?|branch(?:es)?|builds?|bundles?|dependenc(?:y|ies)|modules?|sources?|files?)\b)/,
+  /\b(?:after|once)\s+(?:the\s+(?:change|fix|merge)\s+(?:is\s+|has\s+)?)?(?:deploy(?:ed|ment)?|merged\s+and\s+deployed|ships|shipped|is\s+shipped|goes\s+live)\b/,
+  /\bpost[-\s]?ship(?:ping|ped)?\b/, /\bonce\s+the\s+fix\s+is\s+running\b/, /\bobservation\s+after\s+deploy/,
+  /(?:^|\s|`)\/home\//,
+].map(part => part.source).join('|'), 'i');
+const baseHeadAnchored = /\b(?:from|on|at)\s+(?:this|the)\s+(?:pull\s+request's\s+)?head\b|\bthis\s+head(?:'s)?\b|\bthe\s+candidate(?:'s)?\s+head\b|\bbefore\s+merge\b|\bstub(?:bed)?\b/i;
+/** `liveObservationPhrase` as the base computes it: the base rule over the base's clause split and anchor. */
+function basePhrase(text: string): string | null {
+  for (const clause of text.split(/[;\n]|\.\s+/)) {
+    const phrase = !baseHeadAnchored.test(clause) && baseLiveObservation.exec(clause)?.[0].trim();
+    if (phrase) return phrase;
+  }
+  return null;
+}
+const revision = (criteria: { id: string; text: string; proofs: string[] }[]) => ({ expectedPolicyRevision: 1, criteria, dependencies: [], plannedFiles: [], exclusiveResources: [], producerProofs: [] });
 
 test('manual:intervention-pattern-escalation-build — GY-1685: each linked build-stage escalation is reproduced against the base rule and cannot recur on the candidate', async () => {
-  const { createSchema, criterionSchema, decisionInputs, liveObservationPhrase, postMergeProofRefusal, postDeployReviewSection } = await modules();
-  for (const [instance, { phrase, ...criterion }] of Object.entries(escalated)) {
-    // Base: the GY-188 rule accepted it, and the shipped live-observation rule found no phrase in GY-1683 AC-5 or
-    // GY-1666 AC-1 — the phrase pinned here is what the base's rule lacks, so this case fails against the base.
-    assert.equal(postMergeProofRefusal(criterion), null, `${instance} passed the base's post-merge rule`);
-    assert.equal(liveObservationPhrase(criterion), phrase, `${instance} is a live observation`);
-    // Candidate: undeclared, no create, requirements revision or requirements decision can record it…
+  const { createSchema, criterionSchema, decisionInputs, liveObservationPhrase, postDeployOnlyRefusal, postMergeProofRefusal, postDeployReviewSection } = await modules();
+  // The pinned base rule is GY-1660's: it reads GY-1660's own linked instances as the candidate still does, and reads
+  // every wording GY-1660's tests pinned (above) the same way, so a divergence between the two below is GY-1685's.
+  for (const criterion of [gy1652, gy1657, restarted]) assert.equal(basePhrase(criterion.text), liveObservationPhrase(criterion), criterion.text);
+  for (const text of ['Production reports an escalation rate below 3 per 7 days', 'On the serving release the loop reports no harness drift', 'The post-ship rate stays below 3 per 7 days', 'From this head against the live install, master status reports harnessDrift null', 'release/production moves to the promoted candidate'])
+    assert.equal(basePhrase(text), liveObservationPhrase({ text }), text);
+  for (const [instance, { base, phrase, ...criterion }] of Object.entries(escalated)) {
+    // Base: GY-188's rule (its matching unchanged by GY-1685) accepted every instance, and the base's live-observation
+    // rule read what the fixture says. Null is the base's create accepting the criterion undeclared: the shared criterion
+    // schema refuses on a phrase alone, so GY-1683 AC-5 and GY-1666 AC-1 entered as pre-merge gates no worker could meet.
+    assert.equal(postMergeProofRefusal(criterion), null, `${instance} passed the post-merge rule`);
+    assert.equal(basePhrase(criterion.text), base, `${instance} against the base rule`);
+    // Candidate: the wording is a live observation…
+    assert.equal(liveObservationPhrase(criterion), phrase, `${instance} against the candidate`);
+    // …so undeclared, no create, requirements revision or requirements decision can record it…
     assert.equal(criterionSchema.safeParse(criterion).success, false, `${instance} is refused undeclared`);
     assert.equal(createSchema.safeParse(intent([buildable, criterion])).success, false, instance);
-    assert.equal(decisionInputs.requirements.safeParse({ expectedPolicyRevision: 1, criteria: [buildable, criterion], dependencies: [], plannedFiles: [], exclusiveResources: [], producerProofs: [] }).success, false, instance);
+    assert.equal(decisionInputs.requirements.safeParse(revision([buildable, criterion])).success, false, instance);
     // …declared beside what the head can show, it is recorded on the item that ships the change and gates no merge…
     const declared = { ...criterion, proofs: [`manual:post-deploy/${criterion.proofs[0].split(':')[1]}`] };
     assert.equal(createSchema.safeParse(intent([buildable, declared])).success, true, `${instance} is accepted declared beside a buildable criterion`);
     assert.match(postDeployReviewSection([declared]), /never request changes or hold the merge/);
-    // …and declared alone, as the follow-up item GY-1666 would have carried it, it is refused: its worker could only wait.
+    // …and declared alone, as a follow-up item of its own would carry it, it is refused: its worker could only wait.
+    assert.match(postDeployOnlyRefusal([declared])!, new RegExp(`^${declared.id} is a declared post-deploy verification`), instance);
     const alone = createSchema.safeParse(intent([declared]));
     assert.equal(alone.success, false, `${instance} alone is no item`);
     assert.match(alone.error!.issues.map(issue => issue.message).join('\n'), new RegExp(`^${declared.id} is a declared post-deploy verification, so no head can build anything this item's review judges before merge`));
   }
+  // GY-1662's path. The base reads its AC-3 wording ("After the fix ships") as the candidate does: filed before GY-1660's
+  // rule, the criterion was never run through it, and what recurred on the base was the remedy. The GY-188 refusal sent
+  // the proof to "a follow-up work item that depends on this one"; the decision that moved AC-3 off GY-1662 passes on
+  // both, and the item it produced, GY-1666 as filed, the base read as no observation (null above) and recorded as a
+  // worker's build. Declared alone, the base recorded it too: its own test pinned a requirements decision carrying one
+  // declared criterion and nothing else as accepted (tests/post-deploy-criteria.test.ts at c531a1d7, line 44), which
+  // this change moves beside a buildable criterion.
+  const gy1662ac3 = escalated['GY-1662 AC-3'];
+  assert.equal(liveObservationPhrase(gy1662ac1), null, 'GY-1662 AC-1 is what its head could show');
+  assert.equal(decisionInputs.requirements.safeParse(revision([gy1662ac1])).success, true, 'moving AC-3 off GY-1662 passes on base and candidate alike');
+  // Candidate: the decision that keeps AC-3 on GY-1662, declared beside AC-1, is the one path open, and review never holds on it.
+  const kept = { id: 'AC-3', text: gy1662ac3.text, proofs: ['manual:post-deploy/harness-contract-applied-on-install'] };
+  assert.equal(decisionInputs.requirements.safeParse(revision([gy1662ac1, kept])).success, true, 'AC-3 declared beside AC-1 stays on the item that ships the change');
+  assert.equal(decisionInputs.requirements.safeParse(revision([kept])).success, false, 'the follow-up GY-1666 would have carried, declared, is refused');
+  assert.equal(createSchema.safeParse(intent([kept])).success, false);
   // The GY-188 refusal no longer sends a post-merge proof to a follow-up item of its own: that is how GY-1666 came to be.
   const message = postMergeProofRefusal({ id: 'AC-1', text: 'The rate is met', proofs: ['manual:rate-met-postmerge'] })!;
   assert.match(message, /declare it a post-deploy verification of this item \(manual:post-deploy\/NAME\)/);
   assert.ok(!message.includes('follow-up work item'), message);
-  // The widened wordings catch no ordinary criterion: a test's loop cycle, a running test and a path named production stay pre-merge.
-  for (const text of ['The loop cycle in the test records the remedy', 'The install step writes units.json', 'After the fix, the function returns the cap', 'A host of fixtures covers it', 'The release serving table lists candidates'])
+});
+
+test('unit:post-deploy-criteria — the widened wordings read a served loop\'s cycle after the fix as live and a test run after the fix as pre-merge', async () => {
+  const { createSchema, liveObservationPhrase } = await modules();
+  // The review of 712e79c2: "A unit-test run after the fix passes" was read as live and would have been refused undeclared,
+  // another build-stage requirements intervention. Only a master, loop or daemon cycle, run or pass after the fix is the
+  // served loop's; a test's run, a test's loop cycle, an install step and a path or table named for the release stay pre-merge.
+  for (const text of ['A unit-test run after the fix passes', 'The test run after the change is green', 'The integration pass after the merge records the remedy against the stub', 'Every run after the fix of tests/reclaim.test.ts reports pressure below=false',
+    'The loop cycle in the test records the remedy', 'The install step writes units.json', 'After the fix, the function returns the cap', 'A host of fixtures covers it', 'The release serving table lists candidates']) {
     assert.equal(liveObservationPhrase({ text }), null, text);
+    assert.equal(createSchema.safeParse(intent([{ id: 'AC-1', text, proofs: ['unit:run'] }])).success, true, text);
+  }
+  for (const [text, phrase] of [['A master reclaim cycle after the fix reports pressure below=false', 'master reclaim cycle after the fix'], ['One loop cycle after the fix journals the remedy', 'loop cycle after the fix'],
+    ['The daemon run after the merge applies the contract', 'daemon run after the merge'], ['A master pass after the change takes the scratch roots back', 'master pass after the change'],
+    ['On the release that serves the merge, no harness attention row stands', 'On the release that serves'], ['One master cycle on the installation applies the contract', 'on the installation'], ['The reclaim runs on the live machine', 'live machine']]) {
+    assert.equal(liveObservationPhrase({ text }), phrase, text);
+    assert.equal(createSchema.safeParse(intent([{ id: 'AC-1', text, proofs: ['manual:observed'] }])).success, false, text);
+    assert.equal(createSchema.safeParse(intent([buildable, { id: 'AC-1', text, proofs: ['manual:post-deploy/observed'] }])).success, true, text);
+  }
 });
 
 test('unit:post-deploy-criteria — an item of nothing but declared post-deploy verifications is refused on every path, naming the item that ships the change', async () => {
