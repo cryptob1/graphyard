@@ -66,8 +66,9 @@ export interface ServeEntryOptions {
  * coordinator credential's; it has not expired; the one issuing pid it names is among this
  * process's ancestors; for a loop grant, that pid is also the pid the installation's cursor lock
  * names; for the command's old-HEAD handoff grant (`handoff`), the checkout's HEAD still matches the
- * named pre-serve HEAD and still predates the serve entry, and the cursor lock is not required
- * (the stale loop still holds it); and the installation's request file holds the request it names,
+ * named pre-serve HEAD and still predates the serve entry, the release it advances onto holds the
+ * serve entry in the checkout's object store, and the cursor lock is not required (the stale loop
+ * still holds it); and the installation's request file holds the request it names,
  * unanswered. Consumed — the file removed — once verified, so it serves exactly once. Anything short
  * of that, a cursor that cannot be read included (loop grants), is a refusal naming what is missing,
  * before anything is touched.
@@ -107,6 +108,9 @@ export async function verifyCheckoutRestoreGrant(options: ServeEntryOptions = {}
     catch (error) { throw refuse(`the checkout's HEAD cannot be read (${message(error).split('\n')[0]}), so the old-HEAD handoff cannot be verified`); }
     if (head !== grant.handoff.head) throw refuse(`the checkout's HEAD is ${short(head)}, not ${short(grant.handoff.head)} the old-HEAD handoff names`);
     if (await commitServes(grant.root, head, run)) throw refuse(`the checkout's HEAD ${short(head)} already holds the serve entry, so the old-HEAD handoff does not apply`);
+    // The release the entry advances the clean checkout onto, under its freeze: one the loop's unit
+    // restarts onto and serves from, so it must hold the serve entry in this checkout's object store.
+    if (!await commitServes(grant.root, grant.handoff.advance, run)) throw refuse(`the release ${short(grant.handoff.advance)} the old-HEAD handoff advances onto does not hold the serve entry in the checkout's object store, so a restart onto it could not serve`);
   } else {
     // The installation's cursor: the loop's daemon state, locked by the loop that serves — the one issuing pid the grant names,
     // so a credential holder cannot name its own wrapper as the issuer beside the real lock (review of GY-1680). Unreadable or
@@ -130,7 +134,9 @@ export async function verifyCheckoutRestoreGrant(options: ServeEntryOptions = {}
 /**
  * The serve entry (`master checkout-restore --serve`): the quiesce-and-restore of the checkout the
  * loop's grant names, run by whichever release's CLI the loop started, printing what it restored and
- * the checkout's HEAD after. Without a grant that verifies there is no act. A refusal (an unverifiable
+ * the checkout's HEAD after — for an old-HEAD handoff, the grant's release, which the entry moves the
+ * clean checkout onto while its writers still stand frozen (review of GY-1680), so no writer resumes
+ * between the restore and the HEAD advance. Without a grant that verifies there is no act. A refusal (an unverifiable
  * writer, a path a restore cannot save) is an error on stderr and a failed exit, which the loop
  * records as the request's outcome. The writers it stops are recorded in the installation's freeze
  * ledger before each SIGSTOP and continued on SIGTERM or SIGINT (review of GY-1680); the loop
@@ -143,7 +149,8 @@ export async function serveCheckoutRestoreAct(args: readonly string[], options: 
   const quiesce = options.quiesce ?? ((root: string) => freezeCheckoutWriters(root, { ledger }));
   const release = thawFrozenWritersOnStop(ledger, options.stop);
   try {
-    const { restored, head } = await restoreInProcess(options.run ?? defaultChildRun, quiesce)(grant.root, grant.reason, options.now ?? new Date(), { file: checkoutRestoreRequestPath(config), id: grant.request.id });
+    // An old-HEAD handoff's checkout is advanced onto the grant's release inside the same freeze (review of GY-1680).
+    const { restored, head } = await restoreInProcess(options.run ?? defaultChildRun, quiesce, grant.handoff?.advance ?? null)(grant.root, grant.reason, options.now ?? new Date(), { file: checkoutRestoreRequestPath(config), id: grant.request.id });
     return { restored, head };
   } finally { release(); }
 }

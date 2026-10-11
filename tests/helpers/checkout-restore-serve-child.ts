@@ -9,7 +9,9 @@
 // it would send instead of sending them, holding the freeze for GRAPHYARD_TEST_SERVE_DELAY_MS when
 // the test names one (a restore outlasting the supervisor's watchdog window), and writes what it saw
 // — the snapshot it ran from, that snapshot's HEAD and object store, the grant it was handed, the
-// signals, when the freeze began and ended — to GRAPHYARD_TEST_SERVE_RECORD for the test to assert on.
+// signals, when the freeze began and ended, and where the checkout's HEAD stood and whether it was
+// clean at the moment of the thaw (before any SIGCONT: an old-HEAD handoff's advance must already
+// have landed, review of GY-1680) — to GRAPHYARD_TEST_SERVE_RECORD for the test to assert on.
 import { execFileSync } from 'node:child_process';
 import fs, { existsSync, writeFileSync } from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
@@ -27,7 +29,7 @@ const neverStops = new Set((process.env.GRAPHYARD_TEST_NEVER_STOPS ?? '').split(
 const holdMs = Number(process.env.GRAPHYARD_TEST_SERVE_DELAY_MS ?? 0) || 0;
 /** The soak's simulated loop pid (GRAPHYARD_TEST_LOOP_PID): the real loop run under a fake identity by the test process, counted as an issuer beside this process's real ancestry; absent, the real ancestry alone decides. */
 const loopPid = Number(process.env.GRAPHYARD_TEST_LOOP_PID ?? '') || null;
-let frozenAt: number | null = null, thawedAt: number | null = null;
+let frozenAt: number | null = null, thawedAt: number | null = null, headAtThaw: string | null = null, statusAtThaw: string | null = null;
 const readlink = fs.readlinkSync;
 fs.readlinkSync = ((path: string, ...rest: unknown[]) => {
   if (denied.has(String(path))) throw Object.assign(new Error(`EACCES: permission denied, readlink '${String(path)}'`), { code: 'EACCES', errno: -13, syscall: 'readlink', path: String(path) });
@@ -36,13 +38,14 @@ fs.readlinkSync = ((path: string, ...rest: unknown[]) => {
 syncBuiltinESMExports();
 
 const sent: string[] = [];
-const git = (...args: string[]) => { try { return execFileSync('git', ['-C', snapshot!, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch { return null; } };
+const git = (...args: string[]) => gitIn(snapshot!, ...args);
+const gitIn = (directory: string, ...args: string[]) => { try { return execFileSync('git', ['-C', directory, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch { return null; } };
 const grantFile = process.env[checkoutRestoreGrantVariable] ?? null;
 const grant = (() => { try { return grantFile ? JSON.parse(fs.readFileSync(grantFile, 'utf8')) : null; } catch { return null; } })();
 const write = (outcome: unknown) => writeFileSync(record, JSON.stringify({
   entry: process.argv[1], args: process.argv.slice(2), snapshot, sent, outcome,
   grant: { file: grantFile, content: grant, consumed: grantFile ? !existsSync(grantFile) : null },
-  pid: process.pid, ppid: process.ppid, frozenAt, thawedAt, holdMs,
+  pid: process.pid, ppid: process.ppid, frozenAt, thawedAt, headAtThaw, statusAtThaw, holdMs,
   snapshotHead: snapshot ? git('rev-parse', 'HEAD') : null, snapshotBranch: snapshot ? git('symbolic-ref', '-q', 'HEAD') : null,
   snapshotShared: snapshot ? existsSync(join(snapshot, '.git', 'objects', 'info', 'alternates')) : null,
   snapshotModules: snapshot ? existsSync(join(snapshot, 'node_modules')) : null,
@@ -57,7 +60,8 @@ try {
       frozenAt = Date.now();
       const frozen = await freezeCheckoutWriters(directory, { scan: at => checkoutWriterScan(at, 100, proc, uid), signal: (pid, name) => { sent.push(`${name}:${pid}`); }, state: pid => !neverStops.has(pid) && sent.includes(`SIGSTOP:${pid}`) && !sent.includes(`SIGCONT:${pid}`) ? 'T' : 'S', settleMs: 50, pollMs: 1 });
       if (holdMs) await delay(holdMs);
-      return { ...frozen, thaw: () => { thawedAt = Date.now(); frozen.thaw(); } };
+      // The checkout as it stands when the writers are about to be continued: HEAD and its cleanliness, read before any SIGCONT.
+      return { ...frozen, thaw: () => { thawedAt = Date.now(); headAtThaw = gitIn(directory, 'rev-parse', 'HEAD'); statusAtThaw = gitIn(directory, 'status', '--porcelain', '--untracked-files=all'); frozen.thaw(); } };
     },
   });
   write(output);

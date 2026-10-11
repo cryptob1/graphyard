@@ -117,16 +117,32 @@ const refStamp = (at: Date) => at.toISOString().replace(/[-:]/g, '').replace(/\.
  * paths to HEAD: tracked ones checked out from it, ones HEAD lacks removed. Null when nothing is
  * dirty. Throws, with the ref named when it was already written, when the checkout is still dirty
  * after; the writers this attempt stopped are continued whatever happens. `skipped` names the
- * processes the freeze skipped because their cwd could not be read (EACCES).
+ * processes the freeze skipped because their cwd could not be read (EACCES). With `advance` (the
+ * command's old-HEAD handoff, review of GY-1680), the clean checkout is then moved onto that commit —
+ * `git checkout --detach` — while the writers still stand frozen: a HEAD advance after the thaw would
+ * let a writer resume and change the checkout while HEAD and the tracked files move under it. A
+ * restore that saved its paths but whose advance fails throws naming the ref, the paths standing at
+ * HEAD as returned.
  */
 type Quiesced = { thaw: () => void; skipped?: UnverifiableProcess[] };
 export type CheckoutQuiesce = (root: string) => Quiesced | Promise<Quiesced>;
-export async function restoreCoordinatorCheckout(root: string, reason: string, run: ChildRun = defaultChildRun, at = new Date(), quiesce: CheckoutQuiesce = freezeCheckoutWriters): Promise<{ ref: string; commit: string; paths: string[]; skipped: UnverifiableProcess[] } | null> {
+export async function restoreCoordinatorCheckout(root: string, reason: string, run: ChildRun = defaultChildRun, at = new Date(), quiesce: CheckoutQuiesce = freezeCheckoutWriters, advance: string | null = null): Promise<{ ref: string; commit: string; paths: string[]; skipped: UnverifiableProcess[] } | null> {
   const frozen = await quiesce(root);
   try {
     const restored = await restoreQuiesced(root, reason, run, at);
+    if (advance) await advanceQuiesced(root, advance, run, restored);
     return restored && { ...restored, skipped: frozen.skipped ?? [] };
   } finally { frozen.thaw(); }
+}
+/** The clean, still-quiesced checkout moved onto `commit`, detached, and read back as standing there. */
+async function advanceQuiesced(root: string, commit: string, run: ChildRun, restored: { ref: string; commit: string; paths: string[] } | null) {
+  const saved = restored ? `${restored.paths.length} dirty path(s) were saved under ${restored.ref} (${restored.commit.slice(0, 12)}) and returned to HEAD, but ` : '';
+  let head: string;
+  try {
+    await run('git', ['-C', root, 'checkout', '-q', '--detach', commit]);
+    head = String(await run('git', ['-C', root, 'rev-parse', 'HEAD'])).trim();
+  } catch (error) { throw new Error(`${saved}the coordinator checkout at ${root} could not be advanced onto ${commit.slice(0, 12)} while its writers stood frozen (${(error instanceof Error ? error.message : String(error)).split('\n')[0]})`); }
+  if (head !== commit) throw new Error(`${saved}the coordinator checkout at ${root} stands at ${head.slice(0, 12)} after being advanced onto ${commit.slice(0, 12)} while its writers stood frozen`);
 }
 async function restoreQuiesced(root: string, reason: string, run: ChildRun, at: Date) {
   const git = async (args: string[], env?: NodeJS.ProcessEnv) => String(await run('git', ['-C', root, '--literal-pathspecs', ...args], env ? { env } : undefined));
@@ -188,13 +204,13 @@ async function restoreQuiesced(root: string, reason: string, run: ChildRun, at: 
   return { ref, commit, paths };
 }
 
-/** What a restore act returns: the restore (null when nothing was dirty), the checkout's HEAD after, which code served it, and — when the command's old-HEAD handoff served — the release commit to advance the checkout onto. */
+/** What a restore act returns: the restore (null when nothing was dirty), the checkout's HEAD after, which code served it, and — when the command's old-HEAD handoff served — the release commit the entry advanced the checkout onto under its freeze, which `head` then is. */
 export interface RestoreActOutcome { restored: { ref: string; commit: string; paths: string[]; skipped: UnverifiableProcess[] } | null; head: string | null; served?: string; release?: string }
 /** The quiesce-and-restore of a checkout-restore request (GY-1680), told which standing request it serves: the loop's runs it from the serving release under a grant naming that request (checkout-restore-release.ts). */
 export type RestoreAct = (root: string, reason: string, at: Date, request: { file: string; id: string }) => Promise<RestoreActOutcome>;
-/** The restore act run by this process's own code: what the serve entry runs in the release snapshot. The loop never runs it on its loaded code (GY-1680). */
-export const restoreInProcess = (run: ChildRun = defaultChildRun, quiesce?: CheckoutQuiesce): RestoreAct => async (root, reason, at) => {
-  const restored = await restoreCoordinatorCheckout(root, reason, run, at, quiesce);
+/** The restore act run by this process's own code: what the serve entry runs in the release snapshot. The loop never runs it on its loaded code (GY-1680). With `advance` (the old-HEAD handoff's grant), the checkout is moved onto that commit under the same freeze, and `head` reports it. */
+export const restoreInProcess = (run: ChildRun = defaultChildRun, quiesce?: CheckoutQuiesce, advance: string | null = null): RestoreAct => async (root, reason, at) => {
+  const restored = await restoreCoordinatorCheckout(root, reason, run, at, quiesce, advance);
   const head = String(await run('git', ['-C', root, 'rev-parse', 'HEAD'])).trim() || null;
   return { restored, head };
 };

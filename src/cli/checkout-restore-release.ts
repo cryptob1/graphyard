@@ -45,8 +45,10 @@ import type { CheckoutQuiesce, RestoreAct, RestoreActOutcome } from './master-ch
 // the standing request from the serving release. When that HEAD itself predates the serve entry
 // (GY-1680 review), a restart onto it still cannot read the handoff or execute the verified release:
 // the command — already holding this release's code — serves the request itself from a snapshot under
-// a grant that names the old HEAD (`handoff`), advances the checkout onto the release that served,
-// and only then files the restart so the unit loads that release.
+// a grant that names the old HEAD and the release to advance onto (`handoff`); the entry moves the
+// clean checkout onto that release while its writers still stand frozen (a HEAD advance after the
+// thaw would let a writer resume under it), and only then does the command file the restart so the
+// unit loads that release.
 //
 // The act can outlast the supervisor's watchdog window (the shipped unit's is 180 s; a fetch, a
 // clone and a freeze-and-restore each wait on their own), so the loop's keep-alive is fed on an
@@ -176,9 +178,11 @@ const grantPayloadSchema = z.object({
   /**
    * Present only for the command's old-HEAD handoff (GY-1680 review): the checkout's HEAD that
    * predates the serve entry, so a restart onto it cannot serve and this command — not the lock
-   * holder — issues the grant. Absent on every loop-issued grant.
+   * holder — issues the grant, and `advance`, the release the entry moves the checkout onto once it
+   * is clean, under the same freeze — the release that serves, whose snapshot runs the entry — so no
+   * writer resumes between the restore and the HEAD advance. Absent on every loop-issued grant.
    */
-  handoff: z.object({ head: z.string().min(1) }).strict().optional(),
+  handoff: z.object({ head: z.string().min(1), advance: z.string().min(1) }).strict().optional(),
   issuedAt: z.string(), expiresAt: z.string(), nonce: z.string().length(32),
 }).strict();
 /** The grant the loop (or the command's old-HEAD handoff) writes beside its cursor for one serve, read back by the snapshot's CLI: the payload and its HMAC-SHA256 under the coordinator credential. */
@@ -207,8 +211,9 @@ export interface ReleaseRestoreDeps {
   grant: { file: string; credentialFile: string; pid: number };
   /**
    * When set, this is the command's old-HEAD handoff (GY-1680 review): the grant carries `handoff`
-   * naming that HEAD, the cursor lock is not required (the stale loop still holds it), and the
-   * issuer pid is this command's. Absent for every loop-served request.
+   * naming that HEAD and, as `advance`, the release being served from — which the entry moves the
+   * checkout onto under its freeze — the cursor lock is not required (the stale loop still holds it),
+   * and the issuer pid is this command's. Absent for every loop-served request.
    */
   handoff?: { head: string };
   run?: ChildRun; quiesce?: CheckoutQuiesce;
@@ -255,7 +260,8 @@ export function releasePinnedRestore(deps: ReleaseRestoreDeps): RestoreAct {
         const served = `served from ${named}, a detached shared-clone snapshot of it`;
         const entry = deps.command?.(snapshot.directory) ?? { command: process.execPath, args: [join(snapshot.directory, 'bin', 'graphyard.mjs')] };
         const issued = now();
-        const payload: CheckoutRestoreGrantPayload = { kind: checkoutRestoreGrantKind, root, reason, request: { id: request.id }, loop: { pid: deps.grant.pid }, ...(deps.handoff ? { handoff: deps.handoff } : {}), issuedAt: new Date(issued).toISOString(), expiresAt: new Date(issued + checkoutRestoreGrantTtlMs).toISOString(), nonce: randomBytes(16).toString('hex') };
+        // An old-HEAD handoff's entry advances the checkout onto the release it runs from, under its own freeze.
+        const payload: CheckoutRestoreGrantPayload = { kind: checkoutRestoreGrantKind, root, reason, request: { id: request.id }, loop: { pid: deps.grant.pid }, ...(deps.handoff ? { handoff: { head: deps.handoff.head, advance: release.commit } } : {}), issuedAt: new Date(issued).toISOString(), expiresAt: new Date(issued + checkoutRestoreGrantTtlMs).toISOString(), nonce: randomBytes(16).toString('hex') };
         const grant: CheckoutRestoreGrant = { ...payload, signature: signCheckoutRestoreGrant(payload, credential) };
         await atomicPrivateWrite(deps.grant.file, grant);
         let output = '', failure: unknown = null;

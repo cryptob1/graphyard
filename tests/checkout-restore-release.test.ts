@@ -12,7 +12,7 @@ import { EventEmitter } from 'node:events';
 import { type CheckoutRestoreGrant, type CheckoutRestoreGrantPayload, checkoutRestoreGrantKind, checkoutRestoreGrantVariable, checkoutRestoreServeFlag, commitServes, lockedLoop, releasePinnedRestore, releaseServes, servingReleases, signCheckoutRestoreGrant, snapshotRelease, staleServingLoop } from '../src/cli/checkout-restore-release.js';
 import { ancestorPids, serveCheckoutRestoreAct, thawFrozenWritersOnStop } from '../src/cli/checkout-restore-serve.js';
 import { continueFrozenWriters, freezeCheckoutWriters, frozenWritersLedgerKind, readFrozenWritersLedger } from '../src/cli/checkout-writers.js';
-import { checkoutRestoreCommand, checkoutRestoreFreezeLedgerPath, checkoutRestoreGrantPath, checkoutRestoreRefPrefix, checkoutRestoreRequestPath, fileCheckoutRestoreRequest, loopRestartRequestPath, readCheckoutRestoreRequest, serveCheckoutRestore } from '../src/cli/master-checkout-restore.js';
+import { checkoutRestoreCommand, checkoutRestoreFreezeLedgerPath, checkoutRestoreGrantPath, checkoutRestoreRefPrefix, checkoutRestoreRequestPath, fileCheckoutRestoreRequest, loopRestartRequestPath, readCheckoutRestoreRequest, restoreInProcess, serveCheckoutRestore } from '../src/cli/master-checkout-restore.js';
 import { atomicPrivateWrite } from '../src/master/config.js';
 import { checkoutRestoreDriftRemedy, coordinatorCheckoutGuard } from '../src/daemon/run.js';
 import { daemonStatePath, emptyDaemonState } from '../src/master-daemon.js';
@@ -134,7 +134,7 @@ function withEnv(env: Record<string, string>) {
   return () => { for (const [key, value] of Object.entries(before)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; } };
 }
 const serveRecord = (record: string) => JSON.parse(readFileSync(record, 'utf8')) as { entry: string; args: string[]; snapshot: string; sent: string[]; snapshotHead: string | null; snapshotBranch: string | null; snapshotShared: boolean; snapshotModules: boolean; outcome: unknown;
-  grant: { file: string | null; content: CheckoutRestoreGrant | null; consumed: boolean | null }; pid: number; ppid: number };
+  grant: { file: string | null; content: CheckoutRestoreGrant | null; consumed: boolean | null }; pid: number; ppid: number; frozenAt: number | null; thawedAt: number | null; headAtThaw: string | null; statusAtThaw: string | null };
 /** The payload a grant carries, for re-signing it under a credential. */
 const payloadOf = ({ signature: _signature, ...payload }: CheckoutRestoreGrant): CheckoutRestoreGrantPayload => payload;
 
@@ -857,7 +857,7 @@ test('integration:checkout-restore-stale-loop-handoff — a checkout-restore fil
   assert.deepEqual(standing?.handoff, { loaded: before, restart: failed.handoff!.restart });
 });
 
-test('integration:checkout-restore-stale-loop-old-head-handoff — a dirty checkout whose HEAD still predates the serve entry is handed off end to end: the command serves from the verified serving release\'s snapshot under a handoff grant (the stale loop still holds the cursor), advances the checkout onto that release, and files a loop-restart the stale loop serves so the unit loads it — a restart onto the old HEAD alone would leave the request unread', { timeout: 120_000 }, async () => {
+test('integration:checkout-restore-stale-loop-old-head-handoff — a dirty checkout whose HEAD still predates the serve entry is handed off end to end: the command serves from the verified serving release\'s snapshot under a handoff grant (the stale loop still holds the cursor) whose entry advances the checkout onto that release while a live writer still stands frozen (review of GY-1680: the writer is continued only once HEAD is the release and the checkout clean), and files a loop-restart the stale loop serves so the unit loads it — a restart onto the old HEAD alone would leave the request unread', { timeout: 120_000 }, async () => {
   const base = await fixtureDirectory('checkout-restore-stale-loop-old-head');
   const root = join(base, 'coordinator');
   const git = (...args: string[]) => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
@@ -918,15 +918,20 @@ test('integration:checkout-restore-stale-loop-old-head-handoff — a dirty check
   assert.deepEqual(stored?.handoff, { loaded: before, restart: result!.handoff!.restart });
   const served = serveRecord(record);
   assert.equal(served.snapshotHead, release); assert.equal(served.grant.consumed, true);
-  assert.deepEqual(served.grant.content!.handoff, { head: before }, 'the grant names the old HEAD');
+  assert.deepEqual(served.grant.content!.handoff, { head: before, advance: release }, 'the grant names the old HEAD and the release the entry advances onto');
   assert.deepEqual(served.grant.content!.loop, { pid: process.pid }, 'the command issued the grant, not the stale loop');
+  // The live writer (pid 500, its cwd the checkout) was stopped before the restore and continued only after the
+  // HEAD advance: at the thaw — before its SIGCONT — the checkout already stood clean at the release (review of GY-1680).
   assert.deepEqual(served.sent, ['SIGSTOP:500', 'SIGCONT:500']);
+  assert.equal(served.headAtThaw, release, 'HEAD was advanced onto the release while the writer still stood frozen');
+  assert.equal(served.statusAtThaw, '', 'the checkout was clean at the release before the writer was continued');
+  assert.ok(served.frozenAt! <= served.thawedAt!, 'the freeze preceded the thaw');
   assert.equal(git('rev-parse', 'HEAD'), release);
   assert.equal(git('show', `${stored!.outcome!.ref}:src/loop.ts`), 'export const loop = 2; // hotfix');
   assert.ok(!readFileSync(record, 'utf8').includes('own tree served'), 'the checkout\'s own entry never ran');
   // A forged handoff grant is refused once HEAD already holds the serve entry (or no longer matches the named head).
   const forged = checkoutRestoreGrantPath(config);
-  const payload = { kind: checkoutRestoreGrantKind, root, reason: 'forge', request: { id: 'x' }, loop: { pid: process.pid }, handoff: { head: before }, issuedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 60_000).toISOString(), nonce: 'a'.repeat(32) } as const;
+  const payload = { kind: checkoutRestoreGrantKind, root, reason: 'forge', request: { id: 'x' }, loop: { pid: process.pid }, handoff: { head: before, advance: release }, issuedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 60_000).toISOString(), nonce: 'a'.repeat(32) } as const;
   await atomicPrivateWrite(forged, { ...payload, signature: signCheckoutRestoreGrant(payload, credentialValue) });
   await assert.rejects(serveCheckoutRestoreAct([], { env: { [checkoutRestoreGrantVariable]: forged }, ancestors: () => [process.pid] }), /already holds the serve entry|old-HEAD handoff does not apply|HEAD is/);
 });
@@ -982,4 +987,54 @@ test('unit:old-head-handoff-timeout-thaws-frozen-writers — the command\'s old-
   assert.equal(stored?.outcome?.state, 'failed'); assert.equal(stored?.outcome?.restart, null);
   assert.deepEqual(stored?.handoff, { loaded: before, restart: result!.handoff!.restart });
   assert.equal(result!.handoff!.pid, 100);
+  // A handoff grant whose release to advance onto does not hold the serve entry is refused before anything is
+  // touched (review of GY-1680): a restart onto it could not serve, so the entry never freezes or moves HEAD for it.
+  const standing = await fileCheckoutRestoreRequest(file, 'escalation:dirty-checkout again', 'graphyard-doctor');
+  const payload = { kind: checkoutRestoreGrantKind, root, reason: 'advance onto a pre-serve commit', request: { id: standing.id }, loop: { pid: process.pid }, handoff: { head: before, advance: before }, issuedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 60_000).toISOString(), nonce: 'b'.repeat(32) } as const;
+  await atomicPrivateWrite(grantFile, { ...payload, signature: signCheckoutRestoreGrant(payload, credentialValue) });
+  let quiesced = 0;
+  await assert.rejects(serveCheckoutRestoreAct([], { env: { [checkoutRestoreGrantVariable]: grantFile }, ancestors: () => [process.pid], quiesce: () => { quiesced++; return { thaw: () => {} }; } }), new RegExp(`the release ${before.slice(0, 12)} the old-HEAD handoff advances onto does not hold the serve entry in the checkout's object store, so a restart onto it could not serve; nothing was restored`));
+  assert.equal(quiesced, 0, 'nothing was frozen for a refused grant');
+  assert.equal(git('rev-parse', 'HEAD'), before); assert.equal(readFileSync(join(root, 'src', 'loop.ts'), 'utf8'), 'export const loop = 2; // hotfix\n');
+});
+
+test('unit:old-head-handoff-advances-under-freeze — the restore act moves the checkout onto the handoff\'s release while the writers it froze still stand frozen (review of GY-1680): the thaw finds HEAD already at the release, dirty or clean; an advance that cannot land after a restore throws naming the ref the paths were saved under, with HEAD unmoved and the writers continued', { timeout: 60_000 }, async () => {
+  const base = await fixtureDirectory('checkout-restore-advance-under-freeze');
+  const root = join(base, 'coordinator');
+  const git = (...args: string[]) => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+  mkdirSync(join(root, 'src'), { recursive: true });
+  writeFileSync(join(root, 'src', 'loop.ts'), 'export const loop = 1;\n');
+  writeFileSync(join(root, '.gitignore'), '.graphyard/\nnode_modules/\n');
+  execFileSync('git', ['init', '-q', '-b', 'main', root]);
+  git('add', '-A'); git('-c', 'user.name=x', '-c', 'user.email=x@x', 'commit', '-q', '-m', 'before the serve path');
+  const before = git('rev-parse', 'HEAD');
+  writeFileSync(join(root, 'src', 'serve.ts'), 'export const serve = 1;\n');
+  git('add', '-A'); git('-c', 'user.name=x', '-c', 'user.email=x@x', 'commit', '-q', '-m', 'the serving release');
+  const release = git('rev-parse', 'HEAD');
+  git('checkout', '-q', '--detach', before);
+  // The freeze as the act sees it: what the checkout looked like at the moment the writers were about to be continued.
+  const thaws: { head: string; status: string }[] = []; let frozen = 0;
+  const quiesce = () => { frozen++; return { thaw: () => { thaws.push({ head: git('rev-parse', 'HEAD'), status: git('status', '--porcelain', '--untracked-files=all') }); }, skipped: [] }; };
+  const request = { file: join(base, 'request.json'), id: 'r1' };
+  // Dirty at the old HEAD: saved, returned to HEAD, then advanced — all before the thaw.
+  writeFileSync(join(root, 'src', 'loop.ts'), 'export const loop = 2; // hotfix\n');
+  const dirty = await restoreInProcess(defaultChildRun, quiesce, release)(root, 'advance test', new Date(), request);
+  assert.equal(frozen, 1); assert.deepEqual(thaws, [{ head: release, status: '' }], 'the thaw found the checkout clean at the release');
+  assert.equal(dirty.head, release); assert.equal(dirty.restored?.paths.join(), 'src/loop.ts');
+  assert.equal(git('show', `${dirty.restored!.ref}:src/loop.ts`), 'export const loop = 2; // hotfix');
+  assert.equal(readFileSync(join(root, 'src', 'serve.ts'), 'utf8'), 'export const serve = 1;\n', 'the release\'s tree is checked out');
+  // Clean at the old HEAD: nothing restored, still advanced under the freeze.
+  git('checkout', '-q', '--detach', before); thaws.length = 0;
+  const clean = await restoreInProcess(defaultChildRun, quiesce, release)(root, 'advance test', new Date(), request);
+  assert.equal(frozen, 2); assert.deepEqual(thaws, [{ head: release, status: '' }]);
+  assert.equal(clean.restored, null); assert.equal(clean.head, release);
+  // Without an advance (every loop-served request), HEAD is left where it stood.
+  git('checkout', '-q', '--detach', before); thaws.length = 0;
+  const plain = await restoreInProcess(defaultChildRun, quiesce)(root, 'no advance', new Date(), request);
+  assert.deepEqual(thaws, [{ head: before, status: '' }]); assert.equal(plain.head, before);
+  // An advance that cannot land after a restore: the ref is named, HEAD stands, the writers are continued.
+  writeFileSync(join(root, 'src', 'loop.ts'), 'export const loop = 3; // hotfix\n'); thaws.length = 0;
+  await assert.rejects(restoreInProcess(defaultChildRun, quiesce, 'f'.repeat(40))(root, 'advance test', new Date(), request), new RegExp(`1 dirty path\\(s\\) were saved under ${checkoutRestoreRefPrefix}\\S+ \\([0-9a-f]{12}\\) and returned to HEAD, but the coordinator checkout at .* could not be advanced onto ${'f'.repeat(12)} while its writers stood frozen \\(`));
+  assert.equal(thaws.length, 1, 'the writers were continued'); assert.equal(thaws[0].head, before); assert.equal(thaws[0].status, '', 'the restore itself landed');
+  assert.equal(git('rev-parse', 'HEAD'), before);
 });

@@ -15,8 +15,10 @@ import { besideCursor, type CheckoutRestoreOutcome, checkoutRestoreFreezeLedgerP
 // it, the act every such loop serves; the restarted loop, running the checkout's HEAD, serves the
 // standing request from the serving release. When that HEAD itself predates the serve entry, a
 // restart onto it still cannot serve: the command — already holding this release's code — serves
-// from a snapshot under a handoff grant, advances the checkout onto the release that served, and
-// only then files the restart so the unit loads it. An adoption is settled only around the restart
+// from a snapshot under a handoff grant naming that HEAD and the release to advance onto; the entry
+// moves the clean checkout onto that release while its writers still stand frozen (review of
+// GY-1680: a `git checkout` after the thaw would move HEAD under a resumed writer), and only then
+// does the command file the restart so the unit loads it. An adoption is settled only around the restart
 // it is for (review of GY-1680): the guard adopts the HEAD just before the unit is asked, and when
 // the ask fails the expectation reverts, so the drift escalation stands — explaining the loop still
 // running the old commit — until a restart lands.
@@ -52,8 +54,9 @@ function handoffReleaseInputs(config: Pick<MasterConfig, 'credentialFile' | 'bas
  * request is filed beside it, which every such loop serves; the loop its unit restarts, running the
  * checkout's HEAD, serves the standing request from the serving release. When that HEAD itself
  * predates the serve entry (GY-1680 review), the command serves from the verified serving release's
- * snapshot under a handoff grant, advances the checkout onto that release, then files the restart so
- * the unit loads it — a restart onto the old HEAD would still leave the request unread. That serve
+ * snapshot under a handoff grant whose entry advances the checkout onto that release under its own
+ * freeze, then files the restart so the unit loads it — a restart onto the old HEAD would still
+ * leave the request unread, and an advance after the thaw would run under a resumed writer. That serve
  * carries the installation's freeze ledger as the loop-served path does (review of GY-1680): the
  * entry records each writer it stops there, and once the entry has ended however it ended — the
  * act's timeout kills it after its SIGSTOPs, say — the command continues every writer the ledger
@@ -75,12 +78,12 @@ export async function checkoutRestoreCommand(config: Pick<MasterConfig, 'credent
   const restartFile = loopRestartRequestPath(config);
   // Old-HEAD handoff: the checkout's HEAD predates the serve entry, so a restart onto it cannot
   // serve. This command — holding the serve path — restores from the verified release's snapshot,
-  // advances HEAD onto that release, then files the restart the stale loop serves.
+  // whose entry advances HEAD onto that release under its freeze, then files the restart the stale loop serves.
   if (stale && !stale.headServes) {
     if (!root || !stale.head) throw new Error(`the loop (pid ${stale.pid}) runs ${stale.loaded ? stale.loaded.slice(0, 12) : 'code it did not record'}, from before the serve path, and the checkout's HEAD ${stale.head ? `${stale.head.slice(0, 12)} predates the serve entry` : 'cannot be read'}, so a restart onto it cannot serve the request from the serving release; the command could not read the checkout's HEAD to bind the old-HEAD handoff, so nothing was restored`);
-    const restart = newLoopRequest(`GY-1680 handoff for checkout-restore: the loop (pid ${stale.pid}) runs ${stale.loaded ? stale.loaded.slice(0, 12) : 'code it did not record'}, from before the serve path, and the checkout's HEAD ${stale.head.slice(0, 12)} predates the serve entry too, so a restart onto it cannot serve; the command served from the verified serving release's snapshot, advanced the checkout onto that release, and this restart loads it`, requestedBy, now, 'restart');
+    const restart = newLoopRequest(`GY-1680 handoff for checkout-restore: the loop (pid ${stale.pid}) runs ${stale.loaded ? stale.loaded.slice(0, 12) : 'code it did not record'}, from before the serve path, and the checkout's HEAD ${stale.head.slice(0, 12)} predates the serve entry too, so a restart onto it cannot serve; the command served from the verified serving release's snapshot, whose entry advanced the checkout onto that release under its freeze, and this restart loads it`, requestedBy, now, 'restart');
     const request = await fileCheckoutRestoreRequest(file, reason, requestedBy, now, act, [], { loaded: stale.loaded, restart: restart.id });
-    const handoff = { pid: stale.pid, loaded: stale.loaded, restart: restart.id, detail: `the loop (pid ${stale.pid}) runs ${stale.loaded ? stale.loaded.slice(0, 12) : 'code it did not record'}, from before the serve path, and the checkout's HEAD ${stale.head.slice(0, 12)} predates the serve entry too, so this command served from the verified serving release's snapshot, advanced the checkout onto that release, and loop-restart request ${restart.id} was filed at ${restartFile} so the unit loads it` };
+    const handoff = { pid: stale.pid, loaded: stale.loaded, restart: restart.id, detail: `the loop (pid ${stale.pid}) runs ${stale.loaded ? stale.loaded.slice(0, 12) : 'code it did not record'}, from before the serve path, and the checkout's HEAD ${stale.head.slice(0, 12)} predates the serve entry too, so this command served from the verified serving release's snapshot, whose entry advanced the checkout onto that release under its freeze, and loop-restart request ${restart.id} was filed at ${restartFile} so the unit loads it` };
     const skippedDetail = (skipped: { pid: number; error: string }[]) => skipped.length
       ? `; skipped, their cwd unreadable: ${skipped.slice(0, 8).map(entry => `pid ${entry.pid} (${entry.error})`).join(', ')}${skipped.length > 8 ? ` and ${skipped.length - 8} more` : ''}`
       : '';
@@ -96,13 +99,15 @@ export async function checkoutRestoreCommand(config: Pick<MasterConfig, 'credent
         ...(options.serve?.command ? { command: options.serve.command } : {}),
       });
       const { restored, head, served, release } = await restore(root, `${reason} (requested by ${requestedBy})`, now, { file, id: request.id });
-      if (release) await run('git', ['-C', root, 'checkout', '-q', '--detach', release]);
-      const by = (served ? `; ${served}` : '') + `; handed off by loop-restart request ${restart.id} from the loop that ran ${stale.loaded ? stale.loaded.slice(0, 12) : 'code it did not record'}, from before the serve path, with checkout HEAD ${stale.head.slice(0, 12)} predating the serve entry so the command served and advanced onto the release`;
+      // The entry advanced the checkout onto the release under its own freeze (review of GY-1680): a
+      // `git checkout` here, after the thaw, would move HEAD and the tracked files under a resumed
+      // writer. The command only checks that the checkout stands where the entry says it left it.
+      if (!release || head !== release) throw new Error(`the coordinator checkout at ${root} stands at ${head ? head.slice(0, 12) : 'a HEAD the entry did not report'}${release ? `, not the release ${release.slice(0, 12)} the entry was to advance it onto under its freeze` : ', and no release served'}${restored ? `; ${restored.paths.length} dirty path(s) were saved under ${restored.ref} (${restored.commit.slice(0, 12)}) and returned to HEAD` : ''}; no restart was filed${served ? ` (${served})` : ''}`);
+      const by = (served ? `; ${served}` : '') + `; handed off by loop-restart request ${restart.id} from the loop that ran ${stale.loaded ? stale.loaded.slice(0, 12) : 'code it did not record'}, from before the serve path, with checkout HEAD ${stale.head.slice(0, 12)} predating the serve entry so the command served and the entry advanced the checkout onto the release while its writers stood frozen`;
+      // Advanced onto the release — a commit the loop, running code from before the serve entry, has not loaded — the checkout is the drift the restart adopts.
       const outcome: CheckoutRestoreOutcome = restored
-        ? { at: now.toISOString(), state: 'restored', ref: restored.ref, commit: restored.commit, paths: restored.paths, detail: `${restored.paths.length} dirty path(s) saved under ${restored.ref} (${restored.commit.slice(0, 12)}; its second parent holds the index) and returned to HEAD; the loop restarts through its supervising unit onto the verified serving release${skippedDetail(restored.skipped)}${by}`.slice(0, 4000), restart: null }
-        : { at: now.toISOString(), state: head && stale.loaded && head !== stale.loaded ? 'adopted' : 'clean', ref: null, commit: head && stale.loaded && head !== stale.loaded ? head : null, paths: [], detail: (head && stale.loaded && head !== stale.loaded
-          ? `the coordinator checkout at ${root} held no dirty path, but its HEAD ${head.slice(0, 12)} is not ${stale.loaded.slice(0, 12)}, the commit the loop runs; the loop adopts the verified serving release and restarts through its supervising unit onto it${by}`
-          : `the coordinator checkout at ${root} held no dirty path; nothing was restored and the loop restarts through its supervising unit onto the verified serving release${by}`).slice(0, 4000), restart: null };
+        ? { at: now.toISOString(), state: 'restored', ref: restored.ref, commit: restored.commit, paths: restored.paths, detail: `${restored.paths.length} dirty path(s) saved under ${restored.ref} (${restored.commit.slice(0, 12)}; its second parent holds the index) and returned to HEAD; the loop restarts through its supervising unit onto the verified serving release ${release.slice(0, 12)}${skippedDetail(restored.skipped)}${by}`.slice(0, 4000), restart: null }
+        : { at: now.toISOString(), state: 'adopted', ref: null, commit: release, paths: [], detail: `the coordinator checkout at ${root} held no dirty path at ${stale.head.slice(0, 12)}${stale.loaded && stale.head !== stale.loaded ? `, which is not ${stale.loaded.slice(0, 12)}, the commit the loop runs` : ''}; the loop adopts the verified serving release ${release.slice(0, 12)} the entry advanced it onto and restarts through its supervising unit onto it${by}`.slice(0, 4000), restart: null };
       await atomicPrivateWrite(file, { ...request, outcome });
       await atomicPrivateWrite(restartFile, restart);
     } catch (error) {
