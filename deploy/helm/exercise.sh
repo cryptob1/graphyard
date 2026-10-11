@@ -21,8 +21,11 @@ RELEASE="${RELEASE:-gy}"; NAMESPACE="${NAMESPACE:-graphyard-exercise}"
 CHART="$(cd "$(dirname "$0")" && pwd)/graphyard"
 HELM_TIMEOUT="${HELM_TIMEOUT:-5m}"
 LOCAL_PORT="${LOCAL_PORT:-14310}"
-# How long one API request may keep failing while the release rolls: 15 attempts 2 s apart.
+# How long one API request may keep failing while the release rolls: 15 attempts 2 s apart, each
+# attempt given up after API_TIMEOUT seconds (curl --max-time), so a connection the forward accepts
+# but never answers is a failed attempt too, not a stall until the job's own timeout.
 API_ATTEMPTS="${API_ATTEMPTS:-15}"; API_RETRY_WAIT="${API_RETRY_WAIT:-2}"
+API_TIMEOUT="${API_TIMEOUT:-10}"
 OPERATOR_TOKEN="$(node -p "require('node:crypto').randomBytes(32).toString('hex')")"
 WORKER_TOKEN="$(node -p "require('node:crypto').randomBytes(32).toString('hex')")"
 VALUES="$(mktemp)"
@@ -86,18 +89,19 @@ forward() {
   k port-forward --address 127.0.0.1 "pod/${target% *}" "$LOCAL_PORT:${target#* }" >"$FORWARD_LOG" 2>&1 &
   FORWARD_PID=$!
   for _ in $(seq 1 30); do
-    if curl -fsS "http://127.0.0.1:$LOCAL_PORT/healthz" >/dev/null 2>&1; then return; fi
+    if curl -fsS "http://127.0.0.1:$LOCAL_PORT/healthz" --max-time "$API_TIMEOUT" >/dev/null 2>&1; then return; fi
     if ! kill -0 "$FORWARD_PID" 2>/dev/null; then break; fi
     sleep 1
   done
   diagnose; echo 'port-forward never became reachable' >&2; exit 1
 }
 # api METHOD PATH TOKEN [BODY] — one request to the forwarded release, printing the non-empty body
-# of a 2xx reply. An empty reply, a reset connection, a non-2xx status or a 2xx carrying no body at
-# all is a failed request, never a body: every route the exercise calls answers with the engine's
-# JSON, and while the release rolls the forward can reach a pod that is terminating or not yet
-# serving, so the request is retried under the same Idempotency-Key, API_ATTEMPTS times
-# API_RETRY_WAIT seconds apart, and when the bound is exhausted the exercise prints its diagnosis
+# of a 2xx reply. An empty reply, a reset connection, a transfer still unanswered after API_TIMEOUT
+# seconds, a non-2xx status or a 2xx carrying no body at all is a failed request, never a body: every
+# route the exercise calls answers with the engine's JSON, and while the release rolls the forward
+# can reach a pod that is terminating or not yet serving, so the request is retried under the same
+# Idempotency-Key, API_ATTEMPTS times API_RETRY_WAIT seconds apart, and when the bound is exhausted
+# (every attempt bounded, so the loop always reaches it) the exercise prints its diagnosis
 # and exits on a last line naming the request, the status and the body it received, instead of
 # handing an empty body to a JSON projection (GY-1690).
 api() {
@@ -105,7 +109,7 @@ api() {
   key="$(node -p "require('node:crypto').randomUUID()")"; reply="$(mktemp)"
   for attempt in $(seq 1 "$API_ATTEMPTS"); do
     rc=0
-    status="$(curl -sS -o "$reply" -w '%{http_code}' -X "$method" "http://127.0.0.1:$LOCAL_PORT/api/$path" -H "Authorization: Bearer $token" -H 'Content-Type: application/json' -H "Idempotency-Key: $key" ${body:+--data "$body"} 2>"$reply.err")" || rc=$?
+    status="$(curl -sS --max-time "$API_TIMEOUT" -o "$reply" -w '%{http_code}' -X "$method" "http://127.0.0.1:$LOCAL_PORT/api/$path" -H "Authorization: Bearer $token" -H 'Content-Type: application/json' -H "Idempotency-Key: $key" ${body:+--data "$body"} 2>"$reply.err")" || rc=$?
     if [ "$rc" -ne 0 ]; then status="$status, $(tr -d '\n' <"$reply.err")"; fi
     case "$status" in
       2[0-9][0-9]) if [ -s "$reply" ]; then cat "$reply"; rm -f "$reply" "$reply.err"; return 0; fi; status="$status with an empty body";;

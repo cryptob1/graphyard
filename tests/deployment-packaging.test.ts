@@ -100,58 +100,63 @@ const bash = (script: string, env: Record<string, string>) => new Promise<{ stat
   child.on('close', status => done({ status, stdout, stderr }));
 });
 const curl = spawnSync('curl', ['--version'], { encoding: 'utf8' }).status === 0;
-/** The settings line of the exercise: how many times one request is retried and how long between. */
+/** The settings lines of the exercise: how many times one request is retried, how long between, and how long one attempt may take. */
 const retryBounds = () => {
-  const settings = /^API_ATTEMPTS="\$\{API_ATTEMPTS:-(\d+)\}"; API_RETRY_WAIT="\$\{API_RETRY_WAIT:-(\d+)\}"$/m.exec(exercise);
-  assert.ok(settings, 'the exercise sets API_ATTEMPTS and API_RETRY_WAIT on one line, overridable from the environment');
-  return { attempts: Number(settings![1]), wait: Number(settings![2]) };
+  const settings = /^API_ATTEMPTS="\$\{API_ATTEMPTS:-(\d+)\}"; API_RETRY_WAIT="\$\{API_RETRY_WAIT:-(\d+)\}"\nAPI_TIMEOUT="\$\{API_TIMEOUT:-(\d+)\}"$/m.exec(exercise);
+  assert.ok(settings, 'the exercise sets API_ATTEMPTS and API_RETRY_WAIT on one line and API_TIMEOUT on the next, overridable from the environment');
+  return { attempts: Number(settings![1]), wait: Number(settings![2]), timeout: Number(settings![3]) };
 };
 
-/** A server whose replies follow a script: 'empty' closes the socket, 'reset' resets it, 'blank' is a 200 with a zero-byte body, a number is that status with a body. */
+/** A server whose replies follow a script: 'empty' closes the socket, 'reset' resets it, 'stall' accepts the request and never answers, 'blank' is a 200 with a zero-byte body, a number is that status with a body. */
 async function scriptedServer(replies: (string | number)[]) {
   const seen: { method: string; url: string; key: string | undefined }[] = [];
+  const stalled = new Set<import('node:net').Socket>();
   const server: Server = createServer((request, response) => {
     seen.push({ method: request.method!, url: request.url!, key: request.headers['idempotency-key'] as string | undefined });
     const reply = replies.length > 1 ? replies.shift()! : replies[0];
     if (reply === 'empty') request.socket.destroy();
     else if (reply === 'reset') request.socket.resetAndDestroy();
+    else if (reply === 'stall') stalled.add(request.socket);
     else if (reply === 'blank') { response.writeHead(200, { 'Content-Type': 'application/json' }); response.end(); }
     else { response.writeHead(reply as number, { 'Content-Type': 'application/json' }); response.end(reply === 200 ? '[{"id":"w1","key":"GY-1"}]' : 'rolling'); }
   });
   await new Promise<void>(done => server.listen(0, '127.0.0.1', done));
-  return { seen, port: (server.address() as AddressInfo).port, close: () => new Promise<void>(done => server.close(() => done())) };
+  return { seen, port: (server.address() as AddressInfo).port, close: () => new Promise<void>(done => { for (const socket of stalled) socket.destroy(); server.close(() => done()); }) };
 }
 
-test('unit:exercise-api-retries-and-names-failure — the exercise\'s api helper retries an empty reply, a reset connection, a non-2xx status and a 2xx carrying no body under one Idempotency-Key a bounded number of times, hands a 2xx body on unchanged, and when the bound is exhausted ends on a last line naming the request, the status and the body it received instead of feeding a JSON projection', { skip: curl ? false : 'curl is not installed' }, async () => {
+test('unit:exercise-api-retries-and-names-failure — the exercise\'s api helper retries an empty reply, a reset connection, a stalled transfer, a non-2xx status and a 2xx carrying no body under one Idempotency-Key a bounded number of times, each attempt bounded, hands a 2xx body on unchanged, and when the bound is exhausted ends on a last line naming the request, the status and the body it received instead of feeding a JSON projection', { skip: curl ? false : 'curl is not installed' }, async () => {
   const api = shellFunction('api');
   assert.ok(!api.includes('curl -fsS'), 'the helper reads the status itself instead of letting -f discard the reply');
   assert.match(api, /-w '%\{http_code\}'/, 'the status is read from curl');
   assert.match(api, /2\[0-9\]\[0-9\]\) if \[ -s "\$reply" \]; then cat "\$reply"/, 'a 2xx reply is handed on only when it carries a body; a zero-byte 2xx is a failed attempt');
   assert.match(api, /for attempt in \$\(seq 1 "\$API_ATTEMPTS"\)/, 'attempts are bounded by API_ATTEMPTS');
   assert.match(api, /sleep "\$API_RETRY_WAIT"/, 'failed attempts wait API_RETRY_WAIT seconds');
+  assert.match(api, /curl -sS --max-time "\$API_TIMEOUT" -o "\$reply"/, 'every attempt is bounded by API_TIMEOUT, so a connection the forward accepts but never answers cannot stall the loop past its bound');
   assert.ok(api.indexOf('diagnose') < api.indexOf('failed after $API_ATTEMPTS attempts'), 'the diagnosis precedes the failure line, which is the last thing printed');
-  const { attempts, wait } = retryBounds();
+  const { attempts, wait, timeout } = retryBounds();
   assert.ok(attempts >= 5 && attempts <= 60 && wait >= 1 && wait <= 5 && attempts * wait <= 120, `a request keeps retrying for a bounded while a rollout settles in: ${attempts} × ${wait}s`);
+  assert.ok(timeout >= 5 && timeout <= 30 && attempts * (wait + timeout) <= 600, `one request, every attempt stalled, still fails well inside the chart job's 30-minute timeout: ${attempts} × (${wait} + ${timeout})s`);
   // No call site pipes the helper straight into a projection: an exhausted request ends the exercise on api's own last line.
   assert.ok(!/\$\(api [^\n)]*\| (projection|node)/.test(exercise), 'every projected reply is read into a variable first');
   assert.match(exercise, /^ledger\(\) \{ local body; body="\$\(api GET work "\$OPERATOR_TOKEN"\)" \|\| return 1; printf '%s' "\$body" \| projection; \}$/m);
   const run = async (replies: (string | number)[], attemptsEnv: string) => {
     const server = await scriptedServer(replies);
     try {
-      const result = await bash(`set -euo pipefail\ndiagnose() { echo '--- diagnosis' >&2; }\n${api}\napi GET work secret-token`, { LOCAL_PORT: String(server.port), API_ATTEMPTS: attemptsEnv, API_RETRY_WAIT: '0' });
+      const result = await bash(`set -euo pipefail\ndiagnose() { echo '--- diagnosis' >&2; }\n${api}\napi GET work secret-token`, { LOCAL_PORT: String(server.port), API_ATTEMPTS: attemptsEnv, API_RETRY_WAIT: '0', API_TIMEOUT: '1' });
       return { ...result, seen: server.seen };
     } finally { await server.close(); }
   };
-  const recovered = await run(['empty', 'reset', 503, 'blank', 200], '6');
+  const recovered = await run(['empty', 'reset', 503, 'blank', 'stall', 200], '7');
   assert.equal(recovered.status, 0, recovered.stderr);
   assert.equal(recovered.stdout, '[{"id":"w1","key":"GY-1"}]', 'the 2xx body is printed unchanged');
-  assert.equal(recovered.seen.length, 5, 'one request per attempt until a 2xx with a body');
+  assert.equal(recovered.seen.length, 6, 'one request per attempt until a 2xx with a body');
   assert.ok(recovered.seen.every(r => r.method === 'GET' && r.url === '/api/work' && r.key && r.key === recovered.seen[0].key), 'retries repeat the request under one Idempotency-Key');
-  assert.deepEqual(recovered.stderr.trim().split('\n').map(line => line.replace(/got status .*/, 'got status …')), ['api GET /api/work: attempt 1 of 6 got status …', 'api GET /api/work: attempt 2 of 6 got status …', 'api GET /api/work: attempt 3 of 6 got status …', 'api GET /api/work: attempt 4 of 6 got status …']);
-  assert.match(recovered.stderr, /attempt 1 of 6 got status 000, curl: \(52\) Empty reply from server/);
-  assert.match(recovered.stderr, /attempt 2 of 6 got status 000, curl: \(56\)/);
-  assert.match(recovered.stderr, /attempt 3 of 6 got status 503$/m);
-  assert.match(recovered.stderr, /attempt 4 of 6 got status 200 with an empty body$/m, 'an HTTP 200 with a zero-byte body is a failed attempt, named as such');
+  assert.deepEqual(recovered.stderr.trim().split('\n').map(line => line.replace(/got status .*/, 'got status …')), ['api GET /api/work: attempt 1 of 7 got status …', 'api GET /api/work: attempt 2 of 7 got status …', 'api GET /api/work: attempt 3 of 7 got status …', 'api GET /api/work: attempt 4 of 7 got status …', 'api GET /api/work: attempt 5 of 7 got status …']);
+  assert.match(recovered.stderr, /attempt 1 of 7 got status 000, curl: \(52\) Empty reply from server/);
+  assert.match(recovered.stderr, /attempt 2 of 7 got status 000, curl: \(56\)/);
+  assert.match(recovered.stderr, /attempt 3 of 7 got status 503$/m);
+  assert.match(recovered.stderr, /attempt 4 of 7 got status 200 with an empty body$/m, 'an HTTP 200 with a zero-byte body is a failed attempt, named as such');
+  assert.match(recovered.stderr, /attempt 5 of 7 got status 000, curl: \(28\) Operation timed out after 1\d{3} milliseconds with 0 bytes received/, 'a connection that is accepted but never answered is given up after API_TIMEOUT and retried');
   const unreachable = await run(['empty'], '3');
   assert.equal(unreachable.status, 1); assert.equal(unreachable.stdout, '', 'no body reaches stdout when the bound is exhausted');
   assert.equal(unreachable.seen.length, 3, 'the bound holds');
@@ -166,6 +171,11 @@ test('unit:exercise-api-retries-and-names-failure — the exercise\'s api helper
   assert.equal(blank.status, 1); assert.equal(blank.stdout, '', 'an empty 2xx body never reaches a projection');
   assert.equal(blank.seen.length, 2, 'a persistently empty 2xx exhausts the same bound');
   assert.equal(blank.stderr.trim().split('\n').at(-1), 'api GET /api/work failed after 2 attempts: status 200 with an empty body, body: (empty)');
+  // A release that accepts every connection and answers none: without a per-attempt bound this loop never advanced and the chart job ran into its own 30-minute timeout with no diagnosis.
+  const stalled = await run(['stall'], '2');
+  assert.equal(stalled.status, 1); assert.equal(stalled.stdout, '');
+  assert.equal(stalled.seen.length, 2, 'each stalled attempt is given up and the bound holds');
+  assert.match(stalled.stderr.trim().split('\n').at(-1)!, /^api GET \/api\/work failed after 2 attempts: status 000, curl: \(28\) Operation timed out after 1\d{3} milliseconds with 0 bytes received, body: \(empty\)$/);
 });
 
 /** A `kubectl get rs,pods -o json` list: an old ReplicaSet scaled to zero whose long-ready pod is terminating, and the upgraded one. */

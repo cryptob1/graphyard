@@ -7,7 +7,7 @@ Records each environment's intended release, verified by service-scoped observer
 
 Main → candidate → uat → production; `.railway/railway.ts` deploys `release/uat`, `release/production`, moved only by `graphyard release` to candidate's exact SHA.
 
-- `release cut [--trigger schedule|manual] [--max-prs N]` tags `rc/ID` with ≤N first-parent merges after the last candidate (`GRAPHYARD_RC_MAX_PRS`, 10), the rest queued; a failed candidate's successor follows it. `.github/workflows/release-candidate.yml` cuts on loop dispatch (cron a fallback; [long suites](#pre-merge-gate-and-release-candidate-validation)).
+- `release cut [--trigger schedule|manual] [--max-prs N]` tags `rc/ID` with ≤N first-parent merges after the last candidate (`GRAPHYARD_RC_MAX_PRS`, 10), the rest queued; a failed candidate's successor follows. `.github/workflows/release-candidate.yml` cuts on loop dispatch (cron a fallback; [long suites](#pre-merge-gate-and-release-candidate-validation)).
 - `release uat ID` deploys `uat` (own Postgres, no `GITHUB_*` credentials), refused while UAT serves unjudged candidate <4 h old.
 - `release validate ID --url UAT_URL [--api] [--suite NAME=COMMAND]...` awaits `/healthz`; runs endpoint, API (`GRAPHYARD_UAT_TOKEN`), `browser`, suites (container, chart, `zero-touch` gate; soak, timing advisory; `GRAPHYARD_UAT_URL`, never `GRAPHYARD_TOKEN`); records `rc-uat/ID`.
 - `release promote ID` needs that (or [accepted flakes](validation.md#release-verdicts)), deploys production as `rc-production/ID`; `release verify --url URL` confirms.
@@ -24,7 +24,7 @@ UAT's `GRAPHYARD_TOKEN` (`GRAPHYARD_RELEASE_TOKEN`) files holds and follow-ups a
 
 Required: `typecheck`, `test` (`ci.yml`), under ten minutes; soak/timing (`releaseCandidateTests`), container and chart checks per candidate. UAT's `zero-touch` suite (`up --agent --goal` against a fake GitHub) must merge a first item; any human step but App approval blocks promotion.
 
-`deploy/helm/exercise.sh` waits for the upgrade's rollout and the new ReplicaSet's Ready pod before backing up, retrying transient API failures (empty reply, reset, non-2xx, bodiless 2xx); an API staying unreachable ends the job's log with `api METHOD /api/PATH failed after 15 attempts: status STATUS, body: BODY`.
+`deploy/helm/exercise.sh` waits for the upgrade's rollout and the new ReplicaSet's Ready pod before backing up, retrying transient API failures (empty reply, reset, stall, non-2xx, bodiless 2xx); an API staying unreachable ends the job's log with `api METHOD /api/PATH failed after 15 attempts: status STATUS, body: BODY`.
 
 ### One delivery path
 
