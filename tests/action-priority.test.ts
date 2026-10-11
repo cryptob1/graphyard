@@ -14,6 +14,7 @@ import { controlPlaneHandlers } from '../src/executor.js';
 import { masterConfigSchema } from '../src/master.js';
 import { humanNeededAttention, needsHumanActions, scopeRequestAttention } from '../src/cli/master-status.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2000-01-01 lease expiry forces a lapse that stays lapsed, 2026-09-22 resetsAt is a past record the note quotes, and 2026-09-21 `at` is the fixed now handed to nextAction.
 
 /**
  * GY-104: an item stops only for a judgement it actually needs.

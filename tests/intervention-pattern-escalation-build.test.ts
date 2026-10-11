@@ -15,6 +15,7 @@ import { docsHeadroom, docsTrimItem, docsTrimLatitude, docsWordBudgetOf } from '
 import { workerPushPermissions } from '../src/worker-credential.js';
 import { foldInterventions, type InterventionLedgerRow } from '../src/interventions.js';
 import type { Work } from '../src/model.js';
+// Time-bomb allowance (GY-1694): the 2026-10-07..09 instants are fixture clocks handed to foldInterventions, probeBlocker and sharedGithubStatus; Date.now() only clocks lease-less probes and anchors codex holds relative to itself.
 
 // GY-1406 names this file for its proof: manual:intervention-pattern-escalation-build. Four
 // escalation interventions were needed at the build stage between 2026-09-30 and 2026-10-07, each a

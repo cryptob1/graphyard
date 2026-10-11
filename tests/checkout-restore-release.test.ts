@@ -20,6 +20,7 @@ import { masterConfigSchema } from '../src/master.js';
 import { readCoordinatorCheckout } from '../src/master/profiles.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
+// Time-bomb allowance (GY-1694): the 2030-01-01 ledger `at` is a stored string nothing dates; the 2026-10-11 grants are judged by the explicit now/clock handed to the act; Date.now() bounds waits and real-clock grants.
 // GY-1680 (instance GY-1679): the loop served `master checkout-restore` from the code it had loaded,
 // so GY-1672's unreadable-cwd skip, merged and deployed, reached no installation whose loop could
 // not restart — the loop the request exists to restart — and a request that found the checkout

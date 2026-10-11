@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { GitHub, ObservationPacer, TokenBudgets, mergePathReserve, observationPace, observationThroughputStatus, tokenIdentity } from '../src/github.js';
 import { githubBudgetAttention } from '../src/cli/github-budget-attention.js';
+// Time-bomb allowance (GY-1694): the 2026-09-26 15:xx reading series is reported against its own `now = at('15:28:00')`; Date.now() only seeds the separate per-token test, whose resets are offsets from it.
 
 // GY-690. Each test is named for the proof it produces: unit:pacer-holds-reserve-per-token,
 // unit:per-token-budget-projection.

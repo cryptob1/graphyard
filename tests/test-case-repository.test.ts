@@ -10,6 +10,7 @@ import { Validation } from '../src/validation.js';
 import { server } from '../src/server.js';
 import type { Observation, Principal, Work } from '../src/model.js';
 import { caseResult, flakiness, scenarioOf, type ScenarioRun } from '../src/model/test-cases.js';
+// Time-bomb allowance (GY-1694): artifact createdAt 2026-09-01 is provenance fixture nothing dates against the clock; new Date()/Date.now() stamp live observations and set request deadlines relative to the wall clock.
 
 // GY-162: the test-case repository. A case is a versioned scenario; each trusted run of it is
 // appended to its history, bound to the commit and the run that produced it; a builder cannot

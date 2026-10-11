@@ -17,6 +17,7 @@ import { installUnitsFile, legacyInstallUnits, legacyLoopUnit, perInstallUnits }
 import { loopScratchCheckout } from '../src/producer.js';
 import { worktreeRoot } from '../src/install/worktree-root.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2026-10-10T18:00Z observedAt is the clock handed to each cycle (now: () => clock, later = clock + 1h); the runDaemon case stamps an empty snapshot and deployment with new Date() and judges no time.
 
 // GY-1662: the loop applied the Claude harness contract against the checkout its research effect
 // names, which runDaemon rewrites to the research scratch worktree. That worktree records no units,

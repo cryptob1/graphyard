@@ -52,6 +52,7 @@ import * as upgradeModule from '../src/daemon/upgrade.js';
 //
 // Each instance is replayed below against what the loop does; each test fails on the base.
 
+// The 2026-09/10 instants are recorded ledger instances and explicit nows handed to the folds, upgrades and checkout guards; slowPlane's Date.now() runs under the cycle tests' mock.timers clock, and the checkout guards' snapshots hold no work, so the Date.now() stamping their now meets no lease.
 const silenceInstance = { id: 'loop-silence|GY-727|2026-10-01T16:02:06.353Z', kind: 'loop-silence', subject: 'GY-727', at: '2026-10-01T16:02:06.353Z' };
 const diagnosisInstances = ([['GY-1083', 'review-convergence', '33.924'], ['GY-1084', 'decision', '33.940'], ['GY-1085', 'scope', '33.953'], ['GY-1086', 'configuration', '33.965'],
   ['GY-1087', 'merge', '33.979'], ['GY-1088', 'proof', '33.993'], ['GY-1089', 'resources', '34.006'], ['GY-1090', 'stalled-gate', '34.019'], ['GY-1091', 'unclassified', '34.031']] as const)

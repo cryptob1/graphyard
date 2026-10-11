@@ -20,6 +20,7 @@ import { accountLaunch, registryLaunchArgs } from '../src/master/environments.js
 import { knownRuntimes } from '../src/install/runtimes.js';
 import { connectProvider, type FleetLaunchAccount } from '../src/fleet.js';
 import { proposedRuntimes } from '../src/model/registry-proposal.js';
+// Time-bomb allowance (GY-1694): 2026-09-22 and 2026-09-30 are virtual pane clocks the launcher's bounds read; the real new Date() only stamps snapshot/observation times on an item whose 2026-09-22 createdAt is already past.
 
 // GY-121: a session launch types a short, constant-size command line that references the
 // request and role files in the session's own checkout; the start bound reads the pane and tells

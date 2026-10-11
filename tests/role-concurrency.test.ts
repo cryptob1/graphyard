@@ -15,6 +15,7 @@ import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, saveRev
 import { launchProducer, reconcileProducers, summarizeProducers } from '../src/producer.js';
 import { emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2026-09-21 `clock` is handed explicitly to roleConcurrency and to the requested() fixtures of that test; the other tests stamp items, verdicts and mint expiry from the real clock alone.
 
 // GY-107: one review and one proof run at a time fleet-wide, because each role had a single fixed
 // session name. Each test is named for the proof it produces: integration:concurrent-reviews,

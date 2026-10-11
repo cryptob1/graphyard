@@ -7,6 +7,7 @@ import type { InstallDependencies } from '../src/install/index.js';
 import type { Provider } from '../src/install/types.js';
 import { installUnitsFile, legacyInstallUnits, perInstallUnits } from '../src/install/units.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2024-01-01 deprecation announcement is Hetzner server-type fixture data the pricing reads for presence only; Date.now() is the install's handed clock and stamps tokens and deliveries nothing ages.
 
 export const REPOSITORY = 'owner/project';
 export const GRAPHYARD_APP_ID = 200_001;

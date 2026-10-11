@@ -9,6 +9,7 @@ import { loadMasterConfig, setupMaster } from '../src/master.js';
 import type { BrowserPage, Located, RecordedStep } from '../src/master-browser.js';
 import type { InstallationState } from '../src/github.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2026-10-07 tick clock is handed explicitly as now to the browser flow; Date.now() only fakes a form timestamp value and new Date() stamps recorded steps in the throwing-capture case.
 
 /**
  * GY-1461: a master browser flow that reaches GitHub's Confirm access keeps the redacted markup of

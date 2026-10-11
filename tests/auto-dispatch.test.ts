@@ -19,6 +19,7 @@ import { attributePersistFailure, bounded, capacityReasonLimit, cursorTextLimit,
 import { exhaustionReportSchema } from '../src/model/capacity.js';
 import { readMasterGuide } from './helpers/master-guide.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2026-09-19 `at`/clock stamps fixture items and dispatch cursors judged at that clock; Date.now()/new Date() stamp live observations and measure launch latency only.
 
 // Each test is named for the proof it produces, so acceptance evidence maps to one executed
 // case per required proof: unit:auto-dispatch-binding, integration:auto-dispatch-review,

@@ -61,6 +61,7 @@ export const soakConfig: MasterConfig = masterConfigSchema.parse({ version: 1, u
   operatorAgent: { id: principals.operatorAgent.id, credentialFile: '/outside/operator.token' }, approver: { id: principals.approver.id, credentialFile: '/outside/approver.token' },
   run: { proofWorkflow: 'acceptance.yml', intervalSeconds: 60 } });
 
+// start is the simulated day's clock, installed by soakControlPlanes' before hook; failoverInstalled's Date.now() runs inside a soak test, after that hook, so its credential expires five simulated hours in.
 /** The day, in simulated time from the start. */
 export const start = Date.parse('2031-06-02T08:00:00Z');
 /** Where the day's worker worktrees stand, as the launcher lays them out (…/.graphyard/worktrees/KEY-EPOCH, GY-980). */

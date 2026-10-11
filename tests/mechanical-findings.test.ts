@@ -19,6 +19,7 @@ import { interventionKinds, interventionPolicyDefaults, interventionRecordSchema
 import type { Observation, Work } from '../src/model.js';
 import { expandTypedCommand, requestOf, startedAtOnce } from './helpers/launch-shell.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2026-09-30 commit and verdict instants are already past their 60-minute mechanical bound and only recorded; the holds asserted come from approvals stamped new Date() and judged at Date.now().
 
 // GY-971. A review finding is mechanical (typo, docs placement, formatting, naming) or substantive
 // (behaviour, criteria, scope). An approved head's mechanical findings become one worker-class bot

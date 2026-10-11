@@ -10,6 +10,7 @@ import * as deliveryStep from '../src/daemon/cycle-delivery.js';
 import { throughputEscalatedAt, throughputEscalationKey } from '../src/daemon/cycle-delivery.js';
 import { openThroughputOwner, throughputAnsweredAt, throughputClaimVisibility, throughputDecision, throughputOwnerAnswered, throughputOwnerItem, verifyThroughput, type ThroughputReport } from '../src/throughput.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2026-10-07 base instants are throughput fixtures judged by verifyThroughput against the explicit `now` derived from base; Date.now() only stamps closures and steps cycles.
 
 // GY-1609: a throughput owner stays open across releases, so the escalated miss it answers is on the
 // release serving when the loop closes it, not the one in its title. The loop and master status

@@ -9,6 +9,7 @@ import { Engine } from '../src/engine.js';
 import { CHECK_NAME, GitHub } from '../src/github.js';
 import { regressionRefusals } from '../src/regression-guard.js';
 import { Refusal, type Observation, type Principal, type Work } from '../src/model.js';
+// Time-bomb allowance (GY-1694): the 2026-01-01 direct-merge window (no until) and the 2026-09-26 PR created/merged fixtures are already past; new Date() only stamps the observation, so nothing crosses the clock.
 
 /**
  * GY-744. The landing-regression guard asks git before naming a pull request unlanded: a peer whose

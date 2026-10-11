@@ -28,6 +28,7 @@ import { agentRequestAttention, agentRequestReport, actionReport, sessionReport 
 import { pipelineBackfillState, resetPipelineBackfillState } from '../src/pipeline-backfill.js';
 import { coordinationViewHeader } from '../src/server/work-view.js';
 import WorkDetails from '../web/pages/work-details.js';
+// Time-bomb allowance (GY-1694): the 2026-09-01 boundAt is reviewer config and the 2026-09-20 `at`/clock is the fixed now handed to reconcileActions and evaluate; Date.now() serves only the live engine tests.
 
 /**
  * GY-87: coordination inverted. The control plane computes a typed next action per item; durable

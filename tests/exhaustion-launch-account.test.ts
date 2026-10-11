@@ -14,6 +14,7 @@ import { profileLaunchedFile } from '../src/master/dispatch-reservation.js';
 import type { Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { limitHost, limitLoop, type LimitPlane } from './helpers/limit-loop.js';
+// Time-bomb allowance (GY-1694): the 2026-10-09T09:40Z selection entry is a profile-keyed log row nothing ages or prunes (only '|' session keys are pruned); the reset and every hold are built from and judged on Date.now().
 
 // GY-1582, 2026-10-09 09:57-10:00Z: worker profile opencode-secondary fell back to Claude account
 // claude-b because its OpenCode accounts were spent. Its launch record named claude-b, but the

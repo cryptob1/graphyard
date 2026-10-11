@@ -18,6 +18,7 @@ import { nativeReviewRequired, type Work } from '../src/model.js';
 import { parseResolvedThreads, readUnresolvedThreads } from '../src/review-threads.js';
 import { readMasterGuide } from './helpers/master-guide.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2026-09-23 thread createdAt and 2026-09-18 submittedAt are parsed fixture fields passed through unchanged; the real clock only bounds observation age and token expiry via offsets from Date.now().
 
 const execFile = promisify(execFileCallback);
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));

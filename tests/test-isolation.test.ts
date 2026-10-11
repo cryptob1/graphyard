@@ -16,6 +16,7 @@ import { installUnderLease } from '../src/cli/workspace.js';
 import { runTests } from './helpers/run-tests.js';
 import { hostMemoryVariable } from '../src/master-resources.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2026-09-24 pause resets are judged against the injected now () => clock of that test; the live command's reset is Date.now()+300, so it moves with the wall clock.
 
 const repository = new URL('..', import.meta.url);
 const scratch = (prefix: string) => temporaryDirectory(`isolation-${prefix}`);

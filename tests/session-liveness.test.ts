@@ -21,6 +21,7 @@ import { sessionReport } from '../src/cli/master-status.js';
 import { overlongSessionAttention } from '../src/cli/overlong-sessions.js';
 import { lostAfterReports, sessionLaunchGraceMs } from '../src/model/session-state.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): boundAt 2026-09-01 is config fixture and the 2026-09-21 instants are explicit past now/at arguments; the Date.now()-relative offsets (tomorrow, over) move with the wall clock.
 
 /**
  * GY-113: a session was recorded as running until something ended it, so a session that crashed,

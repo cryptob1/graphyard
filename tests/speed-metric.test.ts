@@ -12,6 +12,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { pipelineSpeedSummary, type PipelineTimeline, type StoredTimeline, type TimelineBackfill } from '../src/pipeline-speed.js';
 // A namespace import, so a proof run against code without the timeline read fails in its test case, not at load.
 import * as pipelineSpeed from '../src/pipeline-speed.js';
+// Time-bomb allowance (GY-1694): the 2026-10-07 delivery and timeline fixtures are measured against the explicit now constant; pipelineSpeedSummary(work, Date.now()) measures only the live store's wall-clock-stamped item.
 
 // GY-1489: master status reads the coordination view, which drops every document's `pipeline`,
 // so its speed report measured 0 of 737 deliveries. The timelines are now read on their own

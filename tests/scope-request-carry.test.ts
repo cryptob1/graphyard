@@ -14,6 +14,7 @@ import { scopeBlockedBudgetMs, scopeDecisionBinding, scopeRequestOutcome } from 
 import { scopeAskCommand } from '../src/model/scope-provenance.js';
 import type { Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2026-10-07 start is past and handed explicitly to scopeRequestOutcome (Date.now is mocked to it for the wait); the other Date.now() calls judge wall-clock-stamped DB items.
 
 // GY-1484: a scope request stays open until its escalation decision settles. The worker's `--wait`
 // lasts as long as the approver path takes, and a request whose waiting attempt ends is carried to

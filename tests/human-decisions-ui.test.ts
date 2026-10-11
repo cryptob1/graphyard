@@ -24,6 +24,7 @@ import { principalSchema } from '../src/server/principals.js';
 import { previewPrincipalRotation, readProposedRoster } from '../src/master/autonomy.js';
 import { harness } from './install-harness.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2026-09-26 and 2026-10-02 instants are clocks handed to HumanSignIn; Date.now() stamps the page's observedAt, bounds the server-issued link's ttl and ages a lock file relative to itself.
 
 /**
  * GY-738: the decisions only a human may make are the easiest thing in the product. The operator

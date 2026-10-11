@@ -13,6 +13,7 @@ import { withRetroStanding } from '../src/cli/work.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { advisoryLocks } from '../src/store/locks.js';
 import { events } from '../src/store/tables/work.js';
+// Time-bomb allowance (GY-1694): the 2026-09-30 signals are judged against `now = at(0)` handed explicitly to detectRecurringCauses and stamped into events; Date.now() only bounds the test's own waits and stamps failures.
 
 // GY-970: repeated refusal and rework causes are drafted into prevention artefacts for independent
 // approval, and an approved artefact applies through its governed registry, recording what it closes.

@@ -7,6 +7,7 @@ import { agentOwner, buildMasterStatus } from '../src/master.js';
 import { nameUnresolvedThreads } from '../src/merge-queue.js';
 import { unansweredRefusal, uncitedRefusals } from '../src/model/approval.js';
 import { botThreadReworkRounds, decisionReasonMax, fitDecisionReason, observedFrom, reworkDecisionReason, reworkGroundsMin, routineDecision, threadResolutionGraceMs } from '../src/master-daemon.js';
+// Time-bomb allowance (GY-1694): the 2026-09-23/24 instants are past PR fixtures and explicit now values for evaluate/routineDecision; the new Date() tests use their own now; blockedUntil is Date.now()-relative.
 
 // The review gate is the configured reviewer's verdict on the exact head plus required CI. Unresolved
 // review threads (a bot's findings above all) are that reviewer's inputs, not merge blockers: they are

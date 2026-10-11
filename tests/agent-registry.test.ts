@@ -24,6 +24,7 @@ import { FleetOverview, pastesCredential } from '../web/pages/fleet.js';
 import { views, visibleViews } from '../web/pages/index.js';
 import { expandTypedCommand, requestOf, startedAtOnce } from './helpers/launch-shell.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2026-09-20 at/now/resetsAt trio is the fixed clock handed to fleetView, chooseSession and sessionEnded; Date.now() only builds relative expiries and reset times.
 
 const operator: Principal = { id: 'operator', role: 'admin' };
 const coordinator: Principal = { id: 'master', role: 'coordinator' };

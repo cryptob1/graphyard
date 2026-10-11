@@ -7,6 +7,7 @@ import { foldInterventions, type InterventionLedgerRow } from '../src/interventi
 import type { Work } from '../src/model.js';
 import type { SessionHandle } from '../src/model/sessions.js';
 import { fenced as fencedItem, host, iso, loop, minute, running as runningHandle, scopeOf, world as fleet } from './helpers/containment-settlement-world.js';
+// Time-bomb allowance (GY-1694): the Date.UTC(2026, 9, 10, 3, m) rows are a ledger judged on at(30) handed to foldInterventions; Date.now() judges fences the world helper builds relative to Date.now() itself.
 
 // GY-1633 names this file for its proof: manual:intervention-pattern-containment-settlement-build.
 // Three containment settlements were needed at the build stage between 2026-10-03 and 2026-10-10,

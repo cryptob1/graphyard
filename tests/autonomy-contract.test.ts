@@ -18,6 +18,7 @@ import { launchProducer } from '../src/producer.js';
 import type { EscalationContext } from '../src/model/escalation-context.js';
 import { expandTypedCommand, requestOf, roleOf, startedAtOnce } from './helpers/launch-shell.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2026-09-24 `at` is a past createdAt/updatedAt stamp and the fixed now handed to reconcileAutoDispatch; new Date() readings stamp observations and launches, which nothing compares with it.
 
 // GY-184: autonomy is a product contract. Every session Graphyard launches carries one autonomy
 // contract (src/autonomy.ts), every accepted runtime launches in its no-approval mode or is

@@ -14,6 +14,7 @@ import { baseFailureEffects } from '../src/daemon/base-failure-effects.js';
 import { type BaseCheck, judgeFailedCheck, parseFailedTests } from '../src/model/base-failure.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import type { Observation, Principal, Work } from '../src/model.js';
+// Time-bomb allowance (GY-1694): the 2030-01-01 clock drives the pure runCycle tests through `() => unobserved.now` over fixtures derived from it; the one new Date() stamps the engine tests' observations.
 
 // GY-528. 2026-09-26 07:00-07:40Z: integration:instant-exit-classified held a fixed reset time
 // against the real clock, so after 07:00Z it failed on main and on every candidate. The loop

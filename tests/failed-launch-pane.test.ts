@@ -13,6 +13,7 @@ import { probeSupervisorAbsence } from '../src/containment-probe.js';
 import { annotatePaneShell, closablePane, containmentSettlementRefusals, herdrServerPid, isHerdrServer, type ContainmentVerification } from '../src/quarantine.js';
 import type { Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2030-01-01T12:00Z observedAt is the clock handed to runCycle, containmentSettlementRefusals and assessContainment; Date.now() only stamps work records and the failed-dispatch snapshot.
 
 // GY-413: dispatching GY-393 failed with 'the claude runtime never started within 30 s … (command
 // still echoing)'. The pane it created stayed open, its bash shell idled in the worktree, and

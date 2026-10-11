@@ -10,6 +10,7 @@ import { Engine } from '../src/engine.js';
 import { bootstrapObligations, criterionSchema, deliveredProof, evaluate, inheritedObligations, pathScopeContains, pathScopesOverlap, requiredProofs, type Observation, type Principal, type Work } from '../src/model.js';
 import { diagnose, obligationLedger, proofPreview } from '../src/coordination.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2026-09-18 declaredAt is a past fixture field of an operator declaration that evaluate and diagnose carry through unchanged; new Date()/Date.now() are the explicit now they are handed.
 
 const operator: Principal = { id: 'operator', role: 'admin' };
 const worker: Principal = { id: 'implementer', role: 'worker' };

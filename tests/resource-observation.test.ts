@@ -23,6 +23,7 @@ import { dispatchRefusal, loadedRevision, owedUpgrade, selfUpgradeBoundMs, plane
 import { classifyAttention } from '../src/model/fault-classes.js';
 import { reclaimTmpDirectories } from '../src/tmp-reclaim.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): 2026-09-23 and 2026-10-07 are explicit clocks handed to reconcile/claim/settle, reclaimResources and readResources; Date.now() only stamps records and clocks the live-ledger tests on the real clock.
 
 /**
  * GY-132: Graphyard observes its own resources.

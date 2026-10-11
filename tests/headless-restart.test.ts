@@ -17,6 +17,7 @@ import { maxLostApproverRuns } from '../src/daemon/decisions.js';
 import { EventEmitter } from 'node:events';
 import type { RunResult } from '../src/runner/types.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2030-01-01 records are sessionRetry fixtures judged on the now handed beside them; Date.now() belongs to the approver-run case, whose watch is stamped a minute before it and judged on that clock.
 
 /** The coordinator checkout the loop reads at its start (GY-857), clean: this test is not about it. */
 const cleanCheckout = () => ({ root: '/', commit: null, modified: [], untracked: [] });

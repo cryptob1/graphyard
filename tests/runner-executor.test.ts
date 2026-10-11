@@ -9,6 +9,7 @@ import { oracleBundleDigest } from '../src/runner-setup.js';
 import { attestable } from './helpers/attestor-ancestry.js';
 import { accountFileDigest, acknowledgeAttempt, acknowledgementRetry, approvedAccountDigest, assertAncestryFixed, assertIsolation, assertRunnerCredentialScope, attemptBoundaryPath, authorityWatch, boundaryIdentity, containerEnvironment, containerNames, executeAttempt, executionCommand, executionPlanSchema, observeContainers, preflightAttempt, type ExecutionPlan, type Runner, type Settler } from '../src/runner-executor.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2026-09-16 clock is handed explicitly to executeAttempt and lies before the Date.now()+10 min grant deadline on any day; the expiry case uses a Date.now()-1 s deadline instead.
 
 const image = `sha256:${'1'.repeat(64)}`;
 const runAsUser = `${process.getuid!()}:${process.getgid!()}`;

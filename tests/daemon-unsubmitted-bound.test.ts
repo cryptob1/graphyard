@@ -17,6 +17,7 @@ import { preserveInterruptedAttempt } from '../src/daemon/effects.js';
 import { preservePartialWork } from '../src/master/launch.js';
 import { childRunner } from '../src/child-runner.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2026-10-07 clock is the explicit now handed to workFaults, cycleFaults and unsubmittedAttempt over fixtures derived from it; the DB tests build stamps relative to Date.now().
 
 // GY-1462: the 60-minute worker no-submission bound, enforced. An attempt that holds its lease past
 // the bound with no submission for its epoch is a stalled-gate fault however its lease renews (the

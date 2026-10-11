@@ -12,6 +12,7 @@ import type { SessionHandle } from '../src/model/sessions.js';
 import type { Work } from '../src/model.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2026-10-05 instants are past and every judgement of them takes that test's explicit clock; the Date.now()-relative leases and stamps belong to the live dispatchWork tests.
 
 // GY-1287: four session-liveness faults in 24 hours on 5 October 2026 shared one cause — the
 // launch window between a worker launch's lease claim and its watch supervisor's first heartbeat

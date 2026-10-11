@@ -12,6 +12,7 @@ import { producerLedgerSpec, readProducerLedger, saveProducerLedger, sessionRetr
 import { ledgerRefusalAttention } from '../src/master-status.js';
 import type { Observation, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2026-09-23 `at()` ledger instants are past, so those records already read settled or expired on the real clock and stay so; records that must be live get tokenExpiresAt from Date.now().
 
 // Each test is named for the proof it produces (GY-131): unit:terminal-reviews-reaped,
 // integration:full-ledger-still-launches, unit:ledgers-share-one-bound and

@@ -15,6 +15,7 @@ import { Launcher } from '../src/daemon/cycle.js';
 import { assertDispatchable, masterConfigSchema, type HerdrAgent, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import { approvalApplyGraceMs } from '../src/model/approval.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2026-10-03/10-05 instants are the explicit now handed to approvalStep, routineDecision and actionableSubjects over same-day watches; new Date() only stamps live records.
 
 const { approverWait, approverWaitWording } = metrics;
 

@@ -10,6 +10,7 @@ import { nameOrphanSupervisors, supervisorReclaimCommand } from '../src/cli/mast
 import { buildMasterStatus, masterConfigSchema, type HerdrAgent, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import type { Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2030-01-01 observedAt is the snapshot `now` and the clock of every runCycle/nameOrphanSupervisors call; Date.now() only builds the supervise tests' lease renewals relative to itself.
 
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 const leaseMs = 120_000;
