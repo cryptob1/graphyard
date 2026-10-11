@@ -91,21 +91,15 @@ export const decisionRefusalSchema = z.object({ action: z.literal('refuse'), dec
  */
 export type DecisionState = 'requested' | 'approved' | 'applied' | 'failed' | 'refused' | 'superseded' | 'held' | 'stale';
 /**
- * GY-1687: the two engine refusals that mean only "the item has a live attempt", never that the revision
- * is wrong: a requirements revision under a live lease, and one under an unverified containment fence.
- * An approved requirements decision refused for exactly one of these is `held` (`decision.held`), and
- * the transaction that ends the attempt applies it (engine.ts applyHeldDecisions).
+ * GY-1687: the two engine refusals that mean only "the item has a live attempt" (a live lease, an unverified containment
+ * fence), never that the revision is wrong. A requirements decision refused for one is `held`; the attempt's end applies it.
  */
 export const liveLeaseRevisionRefusal = 'Stop and release the active worker before revising requirements';
 export const quarantinedRevisionRefusal = (epoch: number | undefined) => `Task is quarantined by unverified containment from epoch ${epoch}; requirements remain immutable until settlement or stopped-worker recovery`;
 export const heldByLiveAttempt = (message: string) => message === liveLeaseRevisionRefusal || /^Task is quarantined by unverified containment from epoch \d+; requirements remain immutable until settlement or stopped-worker recovery$/.test(message);
 /** How a held decision is applied when the attempt ends: the engine call its approval made, replayed as its requester. */
 export interface HeldApplication { actor: Principal; reason: string }
-/**
- * GY-1687: the live attempt that refused the approved revision — a lease epoch, or an unverified
- * containment fence's epoch. The hold is bound to this attempt so a replacement claim between the
- * engine refusal and the held outcome does not strand the decision on the new worker.
- */
+/** GY-1687: the attempt that refused the approved revision; the hold is bound to it so a replacement claim racing the held outcome does not strand the decision on the new worker. */
 export type HeldAttempt = { kind: 'lease'; epoch: number } | { kind: 'quarantine'; epoch: number };
 export interface Decision {
   id: string; workId: string; action: DecisionAction; input: any; reason: string;

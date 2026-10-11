@@ -232,6 +232,18 @@ test('unit:held-requirements-decision-applies-at-attempt-end — a blocked repor
   await engine.execute(implementer, 'settle', settleable.id, { epoch: settleable.epoch, settlementToken: token }, randomUUID());
   const { item: settledItem } = await appliedOn(settleable, /^Requirements revised to policy revision 2 when settle ended attempt 1$/);
   assert.equal(settledItem.containmentQuarantine ?? null, null);
+  // A contained attempt that submits keeps its fence until settlement (Codex review of 24a0211d59b8): the settlement that
+  // frees the item applies the decision as a re-review of the submitted head, never as a rework of it.
+  const contained = await claimed('held-then-submitted-then-settled');
+  const containedToken = 'f'.repeat(64), containedHash = createHash('sha256').update(containedToken).digest('hex');
+  await engine.execute(implementer, 'quarantine', contained.id, { epoch: contained.epoch, settlementHash: containedHash }, randomUUID());
+  await engine.execute(implementer, 'workspace', contained.id, { epoch: contained.epoch, host: 'held-host', path: `/tmp/held-contained/${contained.id}`, branch: `graphyard/${contained.key.toLowerCase()}-1` }, randomUUID());
+  await engine.execute(implementer, 'submit', contained.id, { epoch: contained.epoch, pr: 1688 }, randomUUID());
+  assert.equal((await decided(await current(contained))).state, 'held', 'the fence of the submitted attempt holds the decision');
+  await engine.execute(implementer, 'settle', contained.id, { epoch: contained.epoch, settlementToken: containedToken }, randomUUID());
+  const { item: containedItem } = await appliedOn(contained, /^Requirements revised to policy revision 2 when settle ended attempt 1; the submitted head is re-reviewed on revision 2$/);
+  assert.deepEqual([containedItem.submission, containedItem.reworkRequested, containedItem.formalReviewResetRequired], [{ epoch: 1, pr: 1688 }, false, true], 'the submitted head stands for re-review; it is not sent back');
+  assert.equal((await ledger(contained)).find(row => row.kind === 'requirements')!.payload.details.heldDecision.resume, 'rereview');
   // A held decision whose policy revision moved first (a live widening) settles stale with the race recorded, as today.
   const widened = await claimed('held-then-widened');
   await decided(widened);

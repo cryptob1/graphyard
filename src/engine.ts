@@ -1255,6 +1255,8 @@ export class Engine {
       if (command === 'claim') {
         demand(actor.role === 'worker' || actor.role === 'admin', 'Worker permission required', 403);
         demand(!work.children?.length, `${work.key} was split into ${work.children?.join(', ')} before dispatch; it is delivered when they are and is never claimed directly`);
+        // A supervised item refuses on its containment fence before ownership (the recovery contract reads the fence first).
+        demand(!work.containmentQuarantine, `Task is quarantined by unverified containment from epoch ${work.containmentQuarantine?.epoch}`);
         demand(!work.lease || Date.parse(work.lease.expiresAt) <= now.getTime(), 'Task already has an active owner');
         demand(!work.submission || work.reworkRequested, 'Implementation is submitted; an operator must request rework before reassignment');
         // A replacement claim over a lapsed lease is the last chance to record how that
@@ -1277,7 +1279,6 @@ export class Engine {
         // Eligibility against the (possibly just-revised) requirements: ready, dependencies, exclusive
         // resources and slice capacity are all derived from the document the new attempt will hold.
         demand(work.ready && !work.blocker, 'Task is not ready or has a blocker');
-        demand(!work.containmentQuarantine, `Task is quarantined by unverified containment from epoch ${work.containmentQuarantine?.epoch}`);
         demand(work.dependencies.every(dep => all.find(w => w.id === dep)?.stage === 'done'), 'Unfinished dependencies');
         const resources = resourceConflicts(work, all, now.getTime());
         demand(!resources.length, `Exclusive resources held: ${resources.map(r => `${r.resource} by ${r.key}`).join(', ')}`);
@@ -1915,7 +1916,11 @@ export class Engine {
         continue;
       }
       const application: HeldApplication = decision.held?.application ?? { actor: { id: decision.requestedBy, role: 'admin', sessionKind: 'ai' }, reason: decision.reason };
-      const resume = ended.submitted ? 'rereview' : 'rework';
+      // The attempt that ended is a submitted one when the command says so or when its submission still stands unreworked:
+      // a contained attempt submits and keeps its fence until settlement, so the settlement that frees the item
+      // re-reviews that head instead of sending it back (Codex review of 24a0211d59b8).
+      const submitted = ended.submitted || work.submission?.epoch === epoch && !work.reworkRequested;
+      const resume = submitted ? 'rereview' : 'rework';
       // Applied to a copy: a refusal leaves the document as the ending command left it.
       const trial = structuredClone(work);
       let data: any;
