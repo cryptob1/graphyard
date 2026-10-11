@@ -264,25 +264,38 @@ export function criterionWindowDays(text: string): number | null {
   return days.length ? Math.max(...days) : null;
 }
 /**
+ * The consecutive-day hold a criterion names, or null when it names none: "for 14 consecutive days".
+ * Distinct from a rate window ("per 7 days"): `underThreshold.projected` is the streak's start, so a
+ * hold's reading cannot exist until this many days after that start (GY-1698 AC-1).
+ */
+export function criterionHoldDays(text: string): number | null {
+  const days = [...text.matchAll(/\b(\d{1,3})\s+consecutive\s+days?\b/gi)].map(match => Number(match[1])).filter(value => value > 0);
+  return days.length ? Math.max(...days) : null;
+}
+/**
  * GY-1698 AC-1: the earliest instant the follow-up's reading can exist, or undefined for a follow-up
  * whose criterion names no window and whose proof the report holds no row for. From the report's
  * reading for the pattern: `since` plus the criterion's window where the streak has begun, else the
- * instant the report projects the streak to begin; and never before the delivered item's merge
+ * instant the report projects the streak to begin plus any consecutive-day hold the criterion names
+ * (`projected` is that start, not the hold's end); and never before the delivered item's merge
  * plus the window the criterion names, the later of the two where both exist.
  */
 export function observationWindowFor(work: Pick<Work, 'key' | 'delivery'>, criterion: { id: string; text: string }, proof: string, projection: PatternProjection | null | undefined): ObservationWindow | undefined {
-  const windowDays = criterionWindowDays(criterion.text), mergedAt = work.delivery ? Date.parse(work.delivery.mergedAt) : NaN;
+  const windowDays = criterionWindowDays(criterion.text), holdDays = criterionHoldDays(criterion.text), mergedAt = work.delivery ? Date.parse(work.delivery.mergedAt) : NaN;
   const iso = (ms: number) => new Date(ms).toISOString();
   const fromMerge = windowDays !== null && Number.isFinite(mergedAt) ? mergedAt + windowDays * day : null;
   const pattern = patternOfProof(proof);
   const since = projection?.since ? Date.parse(projection.since) : null, projected = projection?.projected ? Date.parse(projection.projected) : null;
-  const fromReport = since !== null ? since + (windowDays ?? 0) * day : projected;
+  // `projected` is the streak's start (UnderThreshold); a consecutive-day hold is satisfied only that many days later.
+  const fromReport = since !== null ? since + (windowDays ?? 0) * day : projected !== null ? projected + (holdDays ?? 0) * day : null;
   const reading = pattern ? `the ${pattern.kind} reading at ${pattern.stage === 'none' ? 'no stage' : `the ${pattern.stage} stage`}` : `the reading ${proof} names`;
   const window = windowDays !== null ? `${criterion.id} names a ${windowDays}-day window` : `${criterion.id} names no window`;
   if (fromReport !== null && (fromMerge === null || fromReport >= fromMerge)) {
     const detail = since !== null
       ? `the intervention report reads ${reading} under its threshold since ${iso(since)}, and ${window}, so the reading can first exist at ${iso(fromReport)}`
-      : `the intervention report reads ${reading} not yet under its threshold (since null) and projects the streak to begin at ${iso(projected!)}, so the reading can first exist then`;
+      : holdDays !== null
+        ? `the intervention report reads ${reading} not yet under its threshold (since null) and projects the streak to begin at ${iso(projected!)}, and ${criterion.id} names a ${holdDays}-consecutive-day hold, so the reading can first exist at ${iso(fromReport)}`
+        : `the intervention report reads ${reading} not yet under its threshold (since null) and projects the streak to begin at ${iso(projected!)}, so the reading can first exist then`;
     return { notBefore: iso(fromReport), basis: 'intervention-report', detail: `${detail}${fromMerge !== null ? `; ${work.key} merged at ${iso(mergedAt)}, ${windowDays} days after which is no later` : ''}`.slice(0, 2000) };
   }
   if (fromMerge === null) return undefined;

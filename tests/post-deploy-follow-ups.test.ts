@@ -38,7 +38,7 @@ const projection = { since: null, projected: '2026-10-17T14:31:37.000Z' };
 const iso = (ms: number) => new Date(ms).toISOString();
 
 test('unit:post-deploy-follow-up-observation-window — a windowed follow-up records the earliest instant its reading can exist, from the report\'s projection or the merge plus the criterion\'s window, readable on the item and in master status', async () => {
-  const { buildMasterStatus, createSchema, criterionWindowDays, filePostDeployFollowUps, observationWindowFor, observationWindowHold, patternOfProof, patternReader, postDeployChecks, verifyDeployment } = await modules();
+  const { buildMasterStatus, createSchema, criterionHoldDays, criterionWindowDays, filePostDeployFollowUps, observationWindowFor, observationWindowHold, patternOfProof, patternReader, postDeployChecks, verifyDeployment } = await modules();
   // The declared proof names the report's pattern; the kinds carry hyphens of their own.
   assert.deepEqual(patternOfProof(patternProof), { kind: 'escalation', stage: 'build' });
   assert.deepEqual(patternOfProof('manual:post-deploy/intervention-pattern-scope-widening-build'), { kind: 'scope-widening', stage: 'build' });
@@ -50,6 +50,10 @@ test('unit:post-deploy-follow-up-observation-window — a windowed follow-up rec
   assert.equal(criterionWindowDays(hold.text), 14);
   assert.equal(criterionWindowDays(regression.text), null);
   assert.equal(criterionWindowDays("'master status' on the live install reports harnessDrift null after a loop cycle"), null);
+  // A consecutive-day hold is distinct from a rate window: only the hold adds days after a projected streak start.
+  assert.equal(criterionHoldDays(rate.text), null);
+  assert.equal(criterionHoldDays(hold.text), 14);
+  assert.equal(criterionHoldDays(regression.text), null);
 
   // AC-1's rule. GY-1689 as filed: since null, the streak projected to 2026-10-17T14:31Z — earlier than the
   // merge plus the 7-day window the criterion names, so the reading can first exist at the merge bound.
@@ -58,10 +62,18 @@ test('unit:post-deploy-follow-up-observation-window — a windowed follow-up rec
   assert.equal(filed.notBefore, iso(merge7));
   assert.equal(filed.basis, 'criterion-window');
   assert.match(filed.detail, /GY-1685 merged at 2026-10-11T03:11:02.000Z and AC-1 names a 7-day window, so the reading can first exist at 2026-10-18T03:11:02.000Z \(the intervention report's projection for the escalation reading at the build stage, 2026-10-17T14:31:37.000Z, is earlier\)/);
-  // A projection past the merge bound is the instant: the report says the reading cannot exist before it.
+  // A rate's projection past the merge bound is the instant: the report says the rate reading cannot exist before the streak begins.
   const later = observationWindowFor(delivered(), rate, patternProof, { since: null, projected: '2026-10-20T00:00:00.000Z' })!;
   assert.deepEqual([later.notBefore, later.basis], ['2026-10-20T00:00:00.000Z', 'intervention-report']);
   assert.match(later.detail, /not yet under its threshold \(since null\) and projects the streak to begin at 2026-10-20T00:00:00.000Z/);
+  // A consecutive-day hold: `projected` is the streak's start, so the reading exists only hold-days later
+  // (review of 3717dcd8cb0b): merge Oct 11, streak projected Oct 30 → Nov 13, not Oct 30.
+  const holdProjected = '2026-10-30T00:00:00.000Z';
+  const holdReady = iso(Date.parse(holdProjected) + 14 * day);
+  const held = observationWindowFor(delivered({ criteria: [hold] }), hold, hold.proofs[0], { since: null, projected: holdProjected })!;
+  assert.deepEqual([held.notBefore, held.basis], [holdReady, 'intervention-report']);
+  assert.equal(held.notBefore, '2026-11-13T00:00:00.000Z');
+  assert.match(held.detail, /projects the streak to begin at 2026-10-30T00:00:00.000Z, and AC-2 names a 14-consecutive-day hold, so the reading can first exist at 2026-11-13T00:00:00.000Z/);
   // A streak already begun: since plus the criterion's window, when that is the later bound.
   const since = observationWindowFor(delivered(), rate, patternProof, { since: '2026-10-12T00:00:00.000Z', projected: null })!;
   assert.deepEqual([since.notBefore, since.basis], ['2026-10-19T00:00:00.000Z', 'intervention-report']);
