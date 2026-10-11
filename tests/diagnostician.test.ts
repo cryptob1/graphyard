@@ -15,7 +15,8 @@ import { registryRoles, roleSchema, fleetRoles } from '../src/model/registry.js'
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { decisionInput } from '../src/master/autonomy.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
-import { standingFaultClassItem, clearDiagnoses, diagnosesSettled, diagnosisStep, diagnosisSubjects, type DiagnosticianEffects, type DiagnosisContext, type DiagnosisSubject } from '../src/daemon/diagnosis.js';
+import { standingFaultClassItem, clearDiagnoses, diagnosesSettled, diagnosisStep, diagnosisSubjects, fixItem, type DiagnosticianEffects, type DiagnosisContext, type DiagnosisSubject } from '../src/daemon/diagnosis.js';
+import { deriveDiagnosisFixPlannedFiles } from '../src/daemon/diagnosis.js';
 import { clearDoctorRuns, doctorStep, type DoctorEffects } from '../src/daemon/doctor.js';
 import { doctorSettingsSchema } from '../src/master/doctor-settings.js';
 import { overtakenClosure } from '../src/triage.js';
@@ -82,6 +83,12 @@ const diagnosis = (subject: string, answer: Partial<DiagnosisPayload>): unknown 
 const fix = { title: 'Refresh the observation of a CLEAN candidate after its base moves', description: 'The merge gate waits on a stale observation.', type: 'bug' as const, priority: 1,
   criteria: [{ id: 'AC-1', text: 'A CLEAN candidate whose base moved is observed again within one cycle, by a test', proofs: ['unit:clean-candidate-refreshed'] }],
   plannedFiles: ['src/merge-queue.ts', 'tests/clean-refresh.test.ts'] };
+/** Base tree the filing path resolves plannedFiles against in this suite (GY-1707). */
+const filingTree = {
+  ref: 'main',
+  files: new Set(['src/merge-queue.ts', 'tests/clean-refresh.test.ts', 'tests/helpers/timing-baseline.json', 'tests/docs-budget.test.ts',
+    'tests/clean-candidate-refreshed.test.ts', 'src/supervisor.ts', 'docs/master-agent.md']),
+};
 
 interface Harness {
   diagnostician: DiagnosticianEffects; seen: { runner: string; prompt: string; options: RunOptions<unknown> }[]; contexts: { subject: DiagnosisSubject; pullRequests: number[] }[];
@@ -96,6 +103,7 @@ function harness(primary: (prompt: string) => unknown, fallback: (prompt: string
   const h: Harness = { seen: [], contexts: [], filed: [], requested: [], approvers: [], outcomes: new Map(), diagnostician: undefined as unknown as DiagnosticianEffects };
   h.diagnostician = {
     settings, cwd: '/checkout/project',
+    tree: async () => ({ ref: filingTree.ref, files: new Set(filingTree.files) }),
     runner: async attempt => attempt === 'primary' ? { runner: fakeRunner('pi', primary, h.seen), runtime: 'pi', model: settings.model } : { runner: fakeRunner('pi-fallback', fallback, h.seen), runtime: 'pi', model: settings.fallbackModel },
     context: async (subject, pullRequests) => { h.contexts.push({ subject, pullRequests }); return context; },
     file: async (input, key) => { h.filed.push({ input, key }); return item(`GY-${200 + h.filed.length}`, { title: input.title, priority: input.priority, criteria: input.criteria, plannedFiles: input.plannedFiles } as unknown as Partial<Work>); },
@@ -281,7 +289,12 @@ test('unit:diagnosis-files-fix — a fix diagnosis files the item, releases it a
   assert.equal(input.title, fix.title);
   assert.equal(input.priority, 1);
   assert.deepEqual(input.criteria.map((criterion: { proofs: string[] }) => criterion.proofs), [['unit:clean-candidate-refreshed']]);
-  assert.deepEqual(input.plannedFiles, fix.plannedFiles);
+  // GY-1707: filed plannedFiles are derived against the base tree, not the diagnostician's list verbatim.
+  const cause = 'The merge queue never re-reads a CLEAN pull request after its base moves, so the gate waits on an observation nobody refreshes';
+  assert.deepEqual(input.plannedFiles, deriveDiagnosisFixPlannedFiles(
+    { plannedFiles: fix.plannedFiles, criteria: fix.criteria, cause, kind: 'recurring' }, filingTree.files, filingTree.ref).plannedFiles);
+  assert.deepEqual(input.plannedFiles, fixItem({ subject: 'GY-101', kind: 'recurring', work: 'GY-101' },
+    diagnosis('GY-101', { fix }) as DiagnosisPayload, filingTree).plannedFiles);
   assert.match(input.description, /Cause: The merge queue never re-reads/);
   assert.match(input.description, /log: 2030-01-01T11:40:00Z merge GY-1 waiting/);
   assert.match(key, /^diagnosis:[0-9a-f]{24}:fix$/, 'a retried filing returns the same item');
@@ -626,6 +639,7 @@ test('unit:diagnosis-release-stale-recurrence-reproduced — the loop moves the 
   const recurringItem = await ok(master.token, 'work', faultClassItem({ faultClass: 'stalled-gate', recent: instances }, policy, clock)) as Work;
   const diagnostician: DiagnosticianEffects = {
     settings, cwd: '/checkout/project',
+    tree: async () => ({ ref: filingTree.ref, files: new Set(filingTree.files) }),
     runner: async () => ({ runner: fakeRunner('pi', () => diagnosis(recurringItem.key, { fix: { ...fix, title: 'Re-request a stale diagnosis release' } }), []), runtime: 'pi', model: settings.model }),
     context: async () => ({ journal: [], serverLog: [], pullRequests: [] }),
     file: async input => ok(master.token, 'work', input),

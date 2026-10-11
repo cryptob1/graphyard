@@ -360,6 +360,7 @@
     "tests/deployment-packaging.test.ts": 2845,
     "tests/deployment-verification.test.ts": 300,
     "tests/diagnosis-hold.test.ts": 943,
+    "tests/diagnosis-fix-item-planned-files.test.ts": 500,
     "tests/diagnostician.test.ts": 2224,
     "tests/diff-bound-carry.test.ts": 617,
     "tests/direct-merge-mode.test.ts": 2718,
