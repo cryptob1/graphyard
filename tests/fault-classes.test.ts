@@ -371,7 +371,15 @@ test('unit:recurring-class-item — a class past the threshold files one item as
 test('unit:recurring-class-item — the loop files through the master operator-agent identity', async () => {
   const root = await temporaryDirectory('fault-root'), secrets = await temporaryDirectory('fault-secrets');
   try {
-    execFileSync('git', ['init', '-q', root]);
+    execFileSync('git', ['init', '-q', '-b', 'main', root]);
+    for (const [key, value] of [['user.email', 'fault@example.invalid'], ['user.name', 'Fault Test'], ['commit.gpgsign', 'false']] as const)
+      execFileSync('git', ['config', key, value], { cwd: root });
+    await mkdir(join(root, 'tests/helpers'), { recursive: true });
+    await writeFile(join(root, 'tests/fault-class-scope.test.ts'), 'test("manual:fault-class-scope", () => {});\n');
+    await writeFile(join(root, 'tests/helpers/timing-baseline.json'), '{}\n');
+    await writeFile(join(root, 'tests/no-wall-clock-time-bombs.test.ts'), 'test("wall", () => {});\n');
+    execFileSync('git', ['add', '-A'], { cwd: root });
+    execFileSync('git', ['commit', '-qm', 'base'], { cwd: root });
     const token = join(secrets, 'operator.token');
     await writeFile(token, 'operator-token-'.padEnd(48, 'x'), { mode: 0o600 });
     const posted: { url: string; auth: string | null; key: string | null; body: any }[] = [];
@@ -392,6 +400,10 @@ test('unit:recurring-class-item — the loop files through the master operator-a
     assert.equal(posted[0].key, 'fault-class:scope:abc');
     assert.equal(posted[0].body.origin.faultClass.class, 'scope');
     assert.ok(posted[0].body.reason.length > 0, 'operator-agent mutations carry a reason');
+    // GY-1706: filing derives plannedFiles the way master create does — the proof test and its companions, not [].
+    assert.deepEqual([...posted[0].body.plannedFiles].sort(), [
+      'tests/fault-class-scope.test.ts', 'tests/helpers/timing-baseline.json', 'tests/no-wall-clock-time-bombs.test.ts',
+    ].sort());
   } finally {
     await rm(root, { recursive: true, force: true }); await rm(secrets, { recursive: true, force: true });
   }

@@ -794,6 +794,7 @@
     "tests/uat-follow-up-filing.test.ts": 3000,
     "tests/checkout-writers-unreadable-cwd.test.ts": 800,
     "tests/standing-held-requirements-wait.test.ts": 3200,
-    "tests/soak-held-requirements-wait.test.ts": 3500
+    "tests/soak-held-requirements-wait.test.ts": 3500,
+    "tests/soak-fault-class-filing.test.ts": 2000
   }
 }
