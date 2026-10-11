@@ -91,7 +91,7 @@ function dependencies(w: World, root: string, events: UpEvent[], extra: Partial<
     // install keeps it on the host, so its path names no file here.
     operatorToken: async file => file && !w.host ? ADMIN : null,
     status: async () => status(w),
-    publishOnboarding: async () => { w.calls.push(['publish-onboarding']); w.onboardingPullRequest ??= 'https://github.com/acme/shop/pull/1'; return w.onboardingMerged ? null : { pullRequest: w.onboardingPullRequest }; },
+    publishOnboarding: async () => { w.calls.push(['publish-onboarding']); w.onboardingPullRequest ??= 'https://github.com/acme/shop/pull/1'; return w.onboardingMerged ? null : { pullRequest: w.onboardingPullRequest, commit: 'c1' }; },
     // The person merges the onboarding pull request while up waits on it: the first read finds it open.
     onboardingMerged: async url => { assert.equal(url, w.onboardingPullRequest); w.calls.push(['onboarding-merged?']); const merged = w.onboardingMerged; w.onboardingMerged = true; return merged; },
     async cli(args, options = {}) {
@@ -257,14 +257,16 @@ test('unit:graphyard-up-resumable — a fresh run walks every step in order; an 
     if (args[0] === 'repo') return 'main\n';
     return 'https://github.com/acme/shop/pull/1\n';
   };
-  assert.deepEqual(await publishOnboarding(checkout, 'acme/shop', runner(() => '\n')), { pullRequest: 'https://github.com/acme/shop/pull/1' });
+  // The publish names the commit it pushed, so the onboarding item can be submitted by head where a pull request number is refused.
+  const published = await publishOnboarding(checkout, 'acme/shop', runner(() => '\n'));
+  assert.deepEqual(published, { pullRequest: 'https://github.com/acme/shop/pull/1', commit: git(origin, ['rev-parse', 'graphyard/onboarding']).trim() });
   assert.deepEqual(git(origin, ['ls-tree', '-r', '--name-only', 'graphyard/onboarding']).trim().split('\n'), ['.github/workflows/graphyard.yml', 'AGENTS.md', 'README.md', 'graphyard.json'], 'only the onboarding files, on the base tip');
   assert.equal(git(origin, ['rev-parse', 'graphyard/onboarding^']).trim(), git(origin, ['rev-parse', 'main']).trim());
   assert.deepEqual(gh.find(args => args[1] === 'create')!.slice(0, 8), ['pr', 'create', '--repo', 'acme/shop', '--base', 'main', '--head', 'graphyard/onboarding']);
   assert.equal(git(checkout, ['status', '--porcelain', '--', 'AGENTS.md']).trim(), '?? AGENTS.md', 'the operator\'s index is untouched');
   // Rerun with the pull request open and its branch carrying these files: it is reused, nothing is pushed again.
   const before = gh.length, pushed = git(origin, ['rev-parse', 'graphyard/onboarding']).trim();
-  assert.deepEqual(await publishOnboarding(checkout, 'acme/shop', runner(() => 'https://github.com/acme/shop/pull/1\n')), { pullRequest: 'https://github.com/acme/shop/pull/1' });
+  assert.deepEqual(await publishOnboarding(checkout, 'acme/shop', runner(() => 'https://github.com/acme/shop/pull/1\n')), { pullRequest: 'https://github.com/acme/shop/pull/1', commit: pushed }, 'a reused branch names its own tip');
   assert.ok(!gh.slice(before).some(args => args[1] === 'create'));
   assert.equal(git(origin, ['rev-parse', 'graphyard/onboarding']).trim(), pushed);
   // Once merged into the base, there is nothing left to publish.
@@ -856,7 +858,8 @@ function onboardingLoop(w: World) {
   const gates = (test: boolean, review: boolean) => [{ name: 'build', passed: true }, { name: 'review', passed: review }, { name: 'test', passed: test }, { name: 'merge', passed: false }];
   return {
     filings, item: () => item,
-    fileOnboarding: async (url: string, operatorTokenFile: string | null, requestId: string) => {
+    fileOnboarding: async (url: string, commit: string, operatorTokenFile: string | null, requestId: string) => {
+      assert.equal(commit, 'c1', 'the published head is handed to the filing');
       filings.push({ url, operatorTokenFile, requestId });
       item ??= { key: 'GY-7', title: 'Add Graphyard onboarding', description: `${url}\n\nFiled by graphyard up.`, createdAt: new Date(0).toISOString(), stage: 'build',
         workspaces: [{ epoch: 1, branch: 'graphyard/onboarding' }], submission: { epoch: 1, pr: 1 }, gates: gates(false, false) };
@@ -934,7 +937,7 @@ test('unit:onboarding-pr-self-merges — up files the onboarding pull request as
     return new Response(JSON.stringify(answer), { status: 200, headers: { 'Content-Type': 'application/json' } });
   }) as typeof fetch;
   const token = 'a'.repeat(40), clock = Date.parse('2026-10-07T10:00:00Z');
-  const fileWith = () => fileOnboardingWork({ server: SERVER, token, url: 'https://github.com/acme/shop/pull/1', checks, host: 'laptop', path: '/repo/.graphyard/onboarding', requestId: 'r-1' }, fetcher, () => clock);
+  const fileWith = () => fileOnboardingWork({ server: SERVER, token, url: 'https://github.com/acme/shop/pull/1', commit: 'c1', checks, host: 'laptop', path: '/repo/.graphyard/onboarding', requestId: 'r-1' }, fetcher, () => clock);
   const filed = await fileWith();
   assert.deepEqual(filed, { key: 'GY-7', id: 'w-1' });
   assert.deepEqual(posted.map(entry => `${entry.method} ${entry.path}`), ['POST /api/work', 'POST /api/work/w-1/ready', 'GET /api/work/w-1', 'POST /api/work/w-1/claim', 'POST /api/work/w-1/workspace', 'POST /api/work/w-1/submit']);
@@ -1087,7 +1090,7 @@ test('unit:onboarding-generates-workflow — onboarding a repository with no CI 
     if (args[0] === 'repo') return 'main\n';
     return 'https://github.com/acme/game/pull/1\n';
   };
-  assert.deepEqual(await publishOnboarding(checkout, 'acme/game', runner, [deliveryWorkflowFile]), { pullRequest: 'https://github.com/acme/game/pull/1' });
+  assert.deepEqual(await publishOnboarding(checkout, 'acme/game', runner, [deliveryWorkflowFile]), { pullRequest: 'https://github.com/acme/game/pull/1', commit: git(origin, ['rev-parse', 'graphyard/onboarding']).trim() });
   const tree = git(origin, ['ls-tree', '-r', '--name-only', 'graphyard/onboarding']).trim().split('\n');
   assert.ok(tree.includes(deliveryWorkflowFile) && tree.includes('AGENTS.md') && tree.includes('graphyard.json') && tree.includes('.gitignore'), tree.join(', '));
   assert.match(gh.find(args => args[1] === 'create')!.at(-1)!, new RegExp(`delivery workflows \\(${deliveryWorkflowFile.replace(/[./]/g, '\\$&')}\\)`));
@@ -1097,7 +1100,9 @@ test('unit:onboarding-generates-workflow — onboarding a repository with no CI 
   git(origin, ['update-ref', 'refs/heads/graphyard/onboarding', stale]);
   const reopened = (program: string, args: string[], env?: Record<string, string>) => program === 'gh' && args[0] === 'pr' && args[1] === 'list' ? 'https://github.com/acme/game/pull/1\n' : runner(program, args, env);
   const created = gh.filter(args => args[1] === 'create').length;
-  assert.deepEqual(await publishOnboarding(checkout, 'acme/game', reopened, [deliveryWorkflowFile]), { pullRequest: 'https://github.com/acme/game/pull/1' });
+  const rebuilt = await publishOnboarding(checkout, 'acme/game', reopened, [deliveryWorkflowFile]);
+  assert.deepEqual(rebuilt, { pullRequest: 'https://github.com/acme/game/pull/1', commit: git(origin, ['rev-parse', 'graphyard/onboarding']).trim() }, 'the rebuilt branch\'s new tip is named');
+  assert.notEqual(rebuilt!.commit, stale);
   assert.ok(git(origin, ['ls-tree', '-r', '--name-only', 'graphyard/onboarding']).includes(deliveryWorkflowFile), 'the open pull request now carries the workflow it is reported with');
   assert.equal(gh.filter(args => args[1] === 'create').length, created, 'the open pull request is reused, not duplicated');
 
@@ -1143,7 +1148,7 @@ test('unit:onboarding-generates-workflow — onboarding a repository with no CI 
     const cli = deps.cli;
     const result = await runUp(request(), { ...deps,
       cli: async (args, options) => args.join(' ').startsWith('init --scan --apply') ? (w.calls.push(args), { code: 0, stdout: JSON.stringify({ delivery: { workflows } }) }) : cli(args, options),
-      publishOnboarding: async files => { published.push(files); w.onboardingPullRequest = 'https://github.com/acme/shop/pull/1'; return { pullRequest: w.onboardingPullRequest }; } });
+      publishOnboarding: async files => { published.push(files); w.onboardingPullRequest = 'https://github.com/acme/shop/pull/1'; return { pullRequest: w.onboardingPullRequest, commit: 'c1' }; } });
     assert.equal(result.exitCode, 0, result.next);
     assert.deepEqual(published, [workflows]);
     const detail = events.find((event): event is Extract<UpEvent, { kind: 'step' }> => event.kind === 'step' && event.step === 'onboarding' && event.state === 'done')!.detail!;
@@ -1720,4 +1725,109 @@ process.exit(answer.code);
   } finally {
     for (const [name, value] of Object.entries(saved)) if (value === undefined) delete process.env[name]; else process.env[name] = value;
   }
+});
+
+test('unit:land-coordinator-commits — the operator commits landed from the coordinator checkout (GY-1675) keep their behaviour: a Herdr session whose socket path would pass 107 characters is shortened, the executor unit falls back to the package\'s own script, onboarding submits by head where the control plane refuses a pull request number, and the up and Herdr-instance coverage they touched still stands', async () => {
+  const { installHerdrInstance } = await import('../src/master/herdr.js');
+  const { renderExecutorUnit } = await import('../src/repository-setup.js');
+  const { fileOnboardingWork } = await import('../src/onboarding.js');
+  const socket = (instance: { configHome: string; session: string }) => join(instance.configHome, 'herdr', 'sessions', instance.session, 'herdr-client.sock');
+  // A short install keeps its readable session name.
+  assert.deepEqual(installHerdrInstance('owner-project', '/h'), { configHome: '/h/.config/graphyard/owner-project/herdr', session: 'graphyard-owner-project' });
+  // A longer home (the self-contained host's): the session becomes a stable hashed name whose socket path fits a Unix socket's 107 characters.
+  const long = installHerdrInstance('owner-project', '/home/graphyard');
+  assert.match(long.session, /^gy-[0-9a-f]{6}$/);
+  assert.ok(Buffer.byteLength(socket(long)) <= 107, socket(long));
+  assert.deepEqual(installHerdrInstance('owner-project', '/home/graphyard'), long, 'the shortened name is deterministic');
+  // The limit is sun_path's 107 bytes, measured encoded (review of 355a8b88): a multibyte home whose full path counts 105 characters but 109 bytes is shortened too.
+  const multibyte = installHerdrInstance('owner-project', '/home/\u00e9\u00e9\u00e9\u00e9');
+  const fullMultibyte = socket({ configHome: multibyte.configHome, session: 'graphyard-owner-project' });
+  assert.deepEqual([fullMultibyte.length, Buffer.byteLength(fullMultibyte)], [105, 109], 'a character count would have kept the full name');
+  assert.match(multibyte.session, /^gy-[0-9a-f]{6}$/); assert.ok(Buffer.byteLength(socket(multibyte)) <= 107);
+  // One whose config home alone leaves no room for a hashed name falls back to the shortest, measured as well.
+  const shortest = installHerdrInstance('owner-project', `/${'x'.repeat(30)}`);
+  assert.deepEqual([shortest.session, Buffer.byteLength(socket(shortest))], ['gy', 105]);
+  // A long install id (the self-contained host's, under /home/graphyard) leaves no room beside its own directory: the
+  // config home moves to a hashed directory, whose socket path fits, instead of a name Herdr could not bind.
+  const longId = 'an-organization-with-a-very-long-name-and-an-equally-long-repository-name-for-testing';
+  const relocated = installHerdrInstance(longId, '/home/graphyard');
+  assert.match(relocated.configHome, /^\/home\/graphyard\/\.config\/graphyard\/gy-[0-9a-f]{6}\/herdr$/);
+  assert.equal(relocated.session, relocated.configHome.split('/')[5]); assert.ok(Buffer.byteLength(socket(relocated)) <= 107, socket(relocated));
+  assert.deepEqual(installHerdrInstance(longId, '/home/graphyard'), relocated, 'the relocation is deterministic');
+  // A home even the relocated `gy` cannot fit under is refused by name.
+  assert.throws(() => installHerdrInstance('owner-project', `/home/${'x'.repeat(60)}`), /gy-[0-9a-f]{6}\/herdr\/herdr\/sessions\/gy\/herdr-client\.sock is 136 bytes and a Unix socket path holds 107; install from a home directory with a shorter path/);
+
+  // The executor unit runs the checkout's script when it has one, else the package's own.
+  const template = 'WorkingDirectory=/x\nExecStart=/bin/false';
+  const withScript = renderExecutorUnit(template, { root: resolve(import.meta.dirname, '..'), node: '/usr/bin/node' });
+  assert.match(withScript, new RegExp(`^ExecStart=/usr/bin/node ${resolve(import.meta.dirname, '../scripts/graphyard-executor.mjs').replace(/[.]/g, '\\.')} --slot %i$`, 'm'));
+  const bare = await temporaryDirectory('land-coordinator-commits-unit');
+  const fallback = renderExecutorUnit(template, { root: bare, node: '/usr/bin/node' });
+  assert.match(fallback, new RegExp(`^WorkingDirectory=${bare.replace(/[.]/g, '\\.')}$`, 'm'));
+  assert.match(fallback, new RegExp(`^ExecStart=/usr/bin/node ${resolve(import.meta.dirname, '../scripts/graphyard-executor.mjs').replace(/[.]/g, '\\.')} --slot %i$`, 'm'), 'a target repository without the script runs the package\'s');
+  assert.match(renderExecutorUnit(template, { root: bare, node: '/usr/bin/node', script: '/opt/run.mjs' }), /^ExecStart=\/usr\/bin\/node \/opt\/run\.mjs --slot %i$/m);
+  // That unit is the repository's own, so its next install rewrites it rather than refusing it as another install's; another checkout's stays refused.
+  const { foreignUnitText } = await import('../src/install/units.js');
+  assert.equal(foreignUnitText(fallback, bare), null);
+  assert.equal(foreignUnitText(withScript, bare), resolve(import.meta.dirname, '..'));
+  // The release a fallback executor registers is the package checkout's, whose script and modules it runs, never the
+  // managed repository's the unit runs in (review of 355a8b88): the coordinator CLI's checkout commit is what the fleet is
+  // reconciled against, so a restart or an upgrade of the package finds the executor on the release it asked for.
+  // @ts-expect-error The standalone executor is a dependency-free entry point script.
+  const { executorModuleRoot, executorRelease } = await import('../scripts/graphyard-executor.mjs');
+  const { readCommit, readRelease } = await import('../src/executor-fleet.js');
+  const packageRoot = resolve(import.meta.dirname, '..');
+  assert.equal(executorModuleRoot(resolve(packageRoot, 'scripts/graphyard-executor.mjs')), packageRoot, 'the module root is the checkout whose script the unit names');
+  assert.equal(executorModuleRoot('scripts/graphyard-executor.mjs'), resolve('scripts', '..'), 'a relative spelling resolves against the working directory the unit runs in');
+  assert.equal(readCommit(bare), null, 'the repository without the script names no commit of its own');
+  const fallbackRelease = executorRelease(executorModuleRoot(), null, { readRelease, readCommit });
+  assert.equal(fallbackRelease.release.commit, readCommit(packageRoot), 'the registered release is the package checkout\'s commit');
+  assert.equal(fallbackRelease.current(), readCommit(packageRoot), 'and so is the commit compared before every claim');
+
+  // Onboarding: a control plane that refuses a pull-request submission (no GitHub App) is answered with the published head.
+  const submitted: any[] = [];
+  const refusing = (headRefusal: boolean) => (async (input: any, init: any) => {
+    const path = new URL(String(input)).pathname;
+    const body = init.body ? JSON.parse(init.body) : null;
+    if (path.endsWith('/submit')) {
+      submitted.push({ key: (init.headers as Record<string, string>)['Idempotency-Key'], body });
+      if (body.pr !== undefined) return new Response(JSON.stringify({ error: headRefusal ? 'This install observes no pull requests; submit with --head instead' : 'refused for another reason' }), { status: 409 });
+    }
+    const answer = path === '/api/work' ? { id: 'w-1', key: 'GY-7' } : path === '/api/work/w-1' ? { id: 'w-1', key: 'GY-7', epoch: 0, lease: null, submission: null }
+      : path.endsWith('/claim') ? { lease: { epoch: 1 } } : { id: 'w-1', key: 'GY-7' };
+    return new Response(JSON.stringify(answer), { status: 200 });
+  }) as typeof fetch;
+  const filing = { server: SERVER, token: 'a'.repeat(40), url: 'https://github.com/acme/shop/pull/1', commit: 'c'.repeat(40), checks: null, host: 'laptop', path: '/repo/.graphyard/onboarding', requestId: 'r-1' };
+  assert.deepEqual(await fileOnboardingWork(filing, refusing(true), () => 0), { key: 'GY-7', id: 'w-1' });
+  assert.deepEqual(submitted, [{ key: 'r-1-submit-1', body: { epoch: 1, pr: 1 } }, { key: 'r-1-submit-1-head', body: { epoch: 1, head: 'c'.repeat(40) } }]);
+  submitted.length = 0;
+  await assert.rejects(fileOnboardingWork(filing, refusing(false), () => 0), /refused for another reason/, 'any other refusal is not answered by head');
+  assert.equal(submitted.length, 1);
+
+  // The install's base-branch detection reads `git branch -r` as whole names: origin/main-old is not origin/main (review of 10cb17d2).
+  const { detectedBaseBranch, composeCheckoutMounts } = await import('../src/install/index.js');
+  assert.equal(detectedBaseBranch('  origin/HEAD -> origin/main\n  origin/main\n  origin/master\n'), null, 'main present: the default stands');
+  assert.equal(detectedBaseBranch('  origin/master\n  origin/main-old\n'), 'master', 'only master, beside a main-old branch');
+  assert.equal(detectedBaseBranch('  origin/master-old\n  origin/feature\n'), null, 'master-old is not master');
+  assert.equal(detectedBaseBranch('  origin/HEAD -> origin/master\n  origin/master\n'), 'master');
+  assert.equal(detectedBaseBranch(''), null);
+  // A compose install mounts a plain checkout alone; a linked worktree's common Git directory goes with it, at its own host path.
+  const plain = await temporaryDirectory('land-coordinator-commits-checkout');
+  execFileSync('git', ['init', '-q', plain]);
+  execFileSync('git', ['-C', plain, 'commit', '-q', '--allow-empty', '-m', 'base'], { env: { ...process.env, GIT_AUTHOR_NAME: 'T', GIT_AUTHOR_EMAIL: 't@example.com', GIT_COMMITTER_NAME: 'T', GIT_COMMITTER_EMAIL: 't@example.com' } });
+  assert.deepEqual(composeCheckoutMounts(plain), { repoCheckout: plain, repoGitDir: null });
+  const linked = join(plain, '.graphyard', 'worktrees', 'GY-1-1');
+  execFileSync('git', ['-C', plain, 'worktree', 'add', '-q', linked]);
+  const mounts = composeCheckoutMounts(linked);
+  assert.equal(mounts.repoCheckout, linked);
+  assert.equal(mounts.repoGitDir, execFileSync('git', ['-C', plain, 'rev-parse', '--path-format=absolute', '--git-common-dir'], { encoding: 'utf8' }).trim(), 'the worktree points into the main checkout\'s .git, which is what the container needs');
+  assert.deepEqual(composeCheckoutMounts(bare), { repoCheckout: null, repoGitDir: null }, 'no .git, nothing to mount');
+
+  // AC-2: the coverage of graphyard up and of the install's own Herdr instance that these commits touched is kept, not dropped.
+  const upTests = await readFile(resolve(import.meta.dirname, 'graphyard-up.test.ts'), 'utf8');
+  for (const name of ['unit:up-child-url-propagation', 'integration:up-control-plane-nondefault-port', 'unit:onboarding-pr-self-merges', 'unit:onboarding-pr-visible', 'unit:onboarding-generates-workflow'])
+    assert.ok(upTests.includes(`test('${name} `), `${name} still stands`);
+  const herdrTests = await readFile(resolve(import.meta.dirname, 'herdr-install-instance.test.ts'), 'utf8');
+  for (const name of ['unit:herdr-install-instance-created', 'unit:up-sets-up-herdr-from-scratch', 'unit:herdr-calls-target-install-instance'])
+    assert.ok(herdrTests.includes(`test('${name} `), `${name} still stands`);
 });

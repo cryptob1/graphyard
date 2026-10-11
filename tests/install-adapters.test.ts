@@ -3,13 +3,14 @@ import assert from 'node:assert/strict';
 import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { parseEnv } from 'node:util';
+import { execFileSync } from 'node:child_process';
 import { applyInstall, buildPlan, coreEnv, prepareInstall } from '../src/install/index.js';
 import { PRIVATE_KEY_CONTAINER_PATH, composeAdapter, type AdapterContext } from '../src/install/adapters.js';
 import { fakeTransport, localTransport, sshTransport, type Transport } from '../src/install/transport.js';
 import { Vault } from '../src/install/secrets.js';
 import { CHECK_NAME } from '../src/install/github.js';
 import type { Provider } from '../src/install/types.js';
-import { harness, satisfiedProtection, GRAPHYARD_APP_ID, CI_APP_ID, RAILWAY_WORKSPACES, appKey, type Harness } from './install-harness.js';
+import { harness, satisfiedProtection, temporaryRepository, GRAPHYARD_APP_ID, CI_APP_ID, RAILWAY_WORKSPACES, appKey, type Harness } from './install-harness.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 const skipWithoutDocker = await (async () => {
@@ -257,8 +258,26 @@ test('the multi-line App private key is written beside the bundle and mounted, n
     // must be given to the container user at write time: anything else crash-loops the server.
     assert.equal(key.owner, '1000:1000');
     assert.equal(key.content, appKey);
-    assert.match(bundle(fixture, 'compose.yaml')!.content, new RegExp(`volumes: \\["\\./github-private-key\\.pem:${PRIVATE_KEY_CONTAINER_PATH}:ro"\\]`));
+    // The key is mounted read-only, beside the operator's checkout the server observes heads from.
+    assert.match(bundle(fixture, 'compose.yaml')!.content, new RegExp(`volumes: \\["\\./github-private-key\\.pem:${PRIVATE_KEY_CONTAINER_PATH}:ro", "${fixture.root.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}:/repo"\\]`));
   } finally { await fixture.cleanup(); }
+});
+
+test('a compose install run from a linked worktree mounts the worktree at /repo and its common Git directory at its own host path, so /repo/.git resolves inside the container (GY-1675)', async () => {
+  const main = await temporaryRepository();
+  execFileSync('git', ['-C', main, 'commit', '-q', '--allow-empty', '-m', 'base'], { env: { ...process.env, GIT_AUTHOR_NAME: 'T', GIT_AUTHOR_EMAIL: 't@example.com', GIT_COMMITTER_NAME: 'T', GIT_COMMITTER_EMAIL: 't@example.com' } });
+  const worktree = join(main, '.graphyard', 'worktrees', 'GY-1-1');
+  execFileSync('git', ['-C', main, 'worktree', 'add', '-q', worktree]);
+  await writeFile(join(worktree, 'package.json'), await readFile(join(main, 'package.json')));
+  const common = execFileSync('git', ['-C', worktree, 'rev-parse', '--path-format=absolute', '--git-common-dir'], { encoding: 'utf8' }).trim();
+  assert.ok((await stat(join(worktree, '.git'))).isFile(), 'a linked worktree keeps its .git as a pointer file');
+  const fixture = await harness({ provider: 'compose', root: worktree });
+  try {
+    await apply(fixture, 'compose');
+    const escape = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    assert.match(bundle(fixture, 'compose.yaml')!.content, new RegExp(`"${escape(worktree)}:/repo", "${escape(common)}:${escape(common)}"\\]`), 'the common Git directory is mounted beside the checkout');
+    assert.ok(parseEnv(bundle(fixture, 'server.env')!.content).GRAPHYARD_REPOSITORY_ROOT === '/repo');
+  } finally { await fixture.cleanup(); await rm(main, { recursive: true, force: true }); }
 });
 
 test('the SSH transport ends the key write with chown and refuses a remote user that cannot give it to the container', async () => {

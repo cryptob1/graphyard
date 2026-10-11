@@ -161,6 +161,9 @@ test('unit:local-observation-fields — observeHead builds the control-plane obs
   await assert.rejects(observeHead(silent, { head, base: 'main', branch: 'graphyard/gy-1-1', author: 'implementer' }), new RegExp(absentHeadRefusal(head, 'graphyard/gy-1-1').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   const noBase: GitRunner = async args => args[0] === 'rev-parse' && args[3] === `${head}^{commit}` ? { status: 0, stdout: `${head}\n`, stderr: '' } : { status: 128, stdout: '', stderr: '' };
   await assert.rejects(observeHead(noBase, { head, base: 'main', branch: 'graphyard/gy-1-1', author: 'implementer' }), /holds no refs\/remotes\/origin\/main/);
+  // The checkout's own HEAD is never the base: with neither base ref present, a resolvable HEAD still refuses (GY-1675).
+  const onlyHead: GitRunner = async args => args[0] === 'rev-parse' && (args[3] === `${head}^{commit}` || args[3] === 'HEAD') ? { status: 0, stdout: `${head}\n`, stderr: '' } : { status: 128, stdout: '', stderr: '' };
+  await assert.rejects(observeHead(onlyHead, { head, base: 'main', branch: 'graphyard/gy-1-1', author: 'implementer' }), (error: any) => /holds no refs\/remotes\/origin\/main or refs\/heads\/main/.test(error.message) && error.status === 503);
 });
 
 test('integration:submit-head-observed-locally — the submit transaction stores the control-plane observation as the candidate\'s, bound to the allocated number; the gates then wait on the merge writer, and a GitHub reading of the pull request bearing that number never replaces it', async () => {

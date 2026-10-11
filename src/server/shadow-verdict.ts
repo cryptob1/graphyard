@@ -49,7 +49,10 @@ const pairKey = (entry: { key: string; head: string; baseTip: string }) =>
 export async function recordShadowVerdict(services: Services, actor: Principal, id: string, body: unknown, key: string) {
   demand(actor.role === 'coordinator', 'Only the loop\'s coordinator identity records a shadow verdict', 403);
   const data = shadowVerdictBodySchema.parse(body);
-  const fingerprint = digest({ id, data });
+  const fingerprintData = typeof data === 'object' && data !== null
+    ? Object.fromEntries(Object.entries(data).filter(([k]) => k !== 'durationMs'))
+    : data;
+  const fingerprint = digest({ id, data: fingerprintData });
   return services.engine.store.transaction(async (db: pg.PoolClient) => {
     demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
     const replay = (await db.query('SELECT * FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];

@@ -593,7 +593,7 @@ export interface OnboardingFiling {
   /** The control plane's address and the operator's admin credential: only an operator may create, claim and submit for an item it files. */
   server: string; token: string;
   /** The onboarding pull request, and the checks its item requires (null: the control plane's default). */
-  url: string; checks: string[] | null;
+  url: string; commit: string; checks: string[] | null;
   /** Where the workspace is registered: this machine, and a path under the checkout no worktree uses. */
   host: string; path: string;
   /** Fixed before the first try: each step's idempotency key derives from it, so a rerun replays the filing instead of filing twice. */
@@ -631,6 +631,12 @@ export async function fileOnboardingWork(filing: OnboardingFiling, fetcher: type
   const epoch = Number(claimed);
   if (!Number.isSafeInteger(epoch) || epoch <= 0) throw new Error(`claiming ${key} named no epoch`);
   await call(`work/${id}/workspace`, `workspace-${epoch}`, { epoch, host: filing.host, path: filing.path, branch: onboardingBranch });
-  await call(`work/${id}/submit`, `submit-${epoch}`, { epoch, pr });
+  try {
+    await call(`work/${id}/submit`, `submit-${epoch}`, { epoch, pr });
+  } catch (error: any) {
+    if (String(error?.message ?? '').includes('--head instead')) {
+      await call(`work/${id}/submit`, `submit-${epoch}-head`, { epoch, head: filing.commit });
+    } else throw error;
+  }
   return { key, id };
 }

@@ -838,6 +838,29 @@ export class Engine {
     return observeLocalHead(this.gitRunner, { head: data.head, base: this.baseBranch, branch: workspace.branch, author: actor.id });
   }
   /**
+   * Observe a candidate head from the local Git repository checkout in control-plane mode.
+   */
+  async observeControlPlaneCandidate(work: Work): Promise<Observation | null> {
+    if (!work.candidate) return null;
+    if (this.gitRunner === undefined) this.gitRunner = gitRunnerFor(process.env.GRAPHYARD_REPOSITORY_ROOT ?? process.cwd());
+    if (!this.gitRunner) return null;
+    const observation = await observeLocalHead(this.gitRunner, {
+      head: work.candidate.sha,
+      base: this.baseBranch,
+      branch: work.candidate.branch,
+      author: work.candidate.author,
+    });
+    if (work.observation?.reviews) {
+      observation.reviews = [...work.observation.reviews];
+      observation.reviewIds = observation.reviews.map(r => r.id).filter((id): id is number => typeof id === 'number' && Number.isSafeInteger(id) && id > 0);
+    } else {
+      observation.reviews = [];
+      observation.reviewIds = [];
+    }
+    if (work.candidate.pr) observation.candidate.pr = work.candidate.pr;
+    return observation;
+  }
+  /**
    * GY-744. Reconcile at once the merge of every peer an observation's landing check found already
    * on the base branch tip while its item still records it unlanded: the peer's pull request is
    * observed and that observation saved, so the ordinary delivery path records it merged, with its
@@ -2037,7 +2060,19 @@ export class Engine {
     // The observation job only exists for an item with a candidate to observe; waking it for one
     // without a submission would schedule a read of nothing.
     // `prioritized` claims the job ahead of the polled backlog, as a webhook wake is (GY-1099).
-    if (wake && before!.submission) await this.store.transaction(async db => { await wakeJob(db, before!.id, data.prioritized === true); });
+    const merger = (await recordedMergerMode(this.store.leasePool)).merger;
+    if (wake && (merger === 'control-plane' || before!.observation?.source === 'control-plane') && before!.submission && before!.candidate) {
+      try {
+        const observation = await this.observeControlPlaneCandidate(before!);
+        if (observation) {
+          await this.observe(before!.id, before!.revision, observation);
+        }
+      } catch (error) {
+        console.warn(`control-plane observation during resync of ${before!.key} failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    } else if (wake && before!.submission) {
+      await this.store.transaction(async db => { await wakeJob(db, before!.id, data.prioritized === true); });
+    }
     // A resync waits for the running tick and then the trailing one that serves it (GY-1115), at most two
     // bounded ticks; reconciling only its own item instead would run a second writer against the tick's
     // batches, the contention GY-1115 removed (GY-1212). A failed tick is a server fault, not this item's:

@@ -464,7 +464,10 @@ test('integration:shadow-verdict-route-coordinator-only — POST /api/work/:id/s
   assert.deepEqual([event.work_id, event.actor, event.payload.mergeSha, event.payload.durationMs, event.payload.key, 'logTail' in event.payload], [id, coordinator.id, sha('merge'), 4200, 'GY-9001', false]);
   assert.equal((await request(token(coordinator), `work/${id}/shadow-verdict`, body, key)).status, 200);
   assert.equal(await count(), 1, 'a retried key replays');
-  assert.equal((await request(token(coordinator), `work/${id}/shadow-verdict`, { ...body, durationMs: 1 }, key)).status, 409, 'a key reused with other input is refused');
+  // A retry measures its own duration: that alone is not other input, so it replays (GY-1675).
+  assert.equal((await request(token(coordinator), `work/${id}/shadow-verdict`, { ...body, durationMs: 1 }, key)).status, 200, 'a retry with another duration replays');
+  assert.equal(await count(), 1);
+  assert.equal((await request(token(coordinator), `work/${id}/shadow-verdict`, { ...body, build: 'fail' }, key)).status, 409, 'a key reused with other input is refused');
   assert.ok([400, 422].includes((await request(token(coordinator), `work/${id}/shadow-verdict`, { ...body, head: 'main' })).status));
   assert.equal((await request(token(coordinator), `work/${randomUUID()}/shadow-verdict`, body)).status, 404);
   assert.equal(await count(), 1);
