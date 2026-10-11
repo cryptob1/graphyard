@@ -1737,10 +1737,17 @@ test('unit:land-coordinator-commits — the operator commits landed from the coo
   // A longer home (the self-contained host's): the session becomes a stable hashed name whose socket path fits a Unix socket's 107 characters.
   const long = installHerdrInstance('owner-project', '/home/graphyard');
   assert.match(long.session, /^gy-[0-9a-f]{6}$/);
-  assert.ok(socket(long).length <= 107, socket(long));
+  assert.ok(Buffer.byteLength(socket(long)) <= 107, socket(long));
   assert.deepEqual(installHerdrInstance('owner-project', '/home/graphyard'), long, 'the shortened name is deterministic');
-  // One whose config home alone leaves no room for a hashed name falls back to the shortest.
-  assert.equal(installHerdrInstance('owner-project', `/home/${'x'.repeat(60)}`).session, 'gy');
+  // The limit is sun_path's 107 bytes, measured encoded (review of 355a8b88): a multibyte home whose full path counts 105 characters but 109 bytes is shortened too.
+  const multibyte = installHerdrInstance('owner-project', '/home/\u00e9\u00e9\u00e9\u00e9');
+  const fullMultibyte = socket({ configHome: multibyte.configHome, session: 'graphyard-owner-project' });
+  assert.deepEqual([fullMultibyte.length, Buffer.byteLength(fullMultibyte)], [105, 109], 'a character count would have kept the full name');
+  assert.match(multibyte.session, /^gy-[0-9a-f]{6}$/); assert.ok(Buffer.byteLength(socket(multibyte)) <= 107);
+  // One whose config home alone leaves no room for a hashed name falls back to the shortest, measured as well; a home even `gy` cannot fit under is refused by name.
+  const shortest = installHerdrInstance('owner-project', `/${'x'.repeat(30)}`);
+  assert.deepEqual([shortest.session, Buffer.byteLength(socket(shortest))], ['gy', 105]);
+  assert.throws(() => installHerdrInstance('owner-project', `/home/${'x'.repeat(60)}`), /herdr-client\.sock is 140 bytes and a Unix socket path holds 107; install from a home directory with a shorter path/);
 
   // The executor unit runs the checkout's script when it has one, else the package's own.
   const template = 'WorkingDirectory=/x\nExecStart=/bin/false';
@@ -1755,6 +1762,19 @@ test('unit:land-coordinator-commits — the operator commits landed from the coo
   const { foreignUnitText } = await import('../src/install/units.js');
   assert.equal(foreignUnitText(fallback, bare), null);
   assert.equal(foreignUnitText(withScript, bare), resolve(import.meta.dirname, '..'));
+  // The release a fallback executor registers is the package checkout's, whose script and modules it runs, never the
+  // managed repository's the unit runs in (review of 355a8b88): the coordinator CLI's checkout commit is what the fleet is
+  // reconciled against, so a restart or an upgrade of the package finds the executor on the release it asked for.
+  // @ts-expect-error The standalone executor is a dependency-free entry point script.
+  const { executorModuleRoot, executorRelease } = await import('../scripts/graphyard-executor.mjs');
+  const { readCommit, readRelease } = await import('../src/executor-fleet.js');
+  const packageRoot = resolve(import.meta.dirname, '..');
+  assert.equal(executorModuleRoot(resolve(packageRoot, 'scripts/graphyard-executor.mjs')), packageRoot, 'the module root is the checkout whose script the unit names');
+  assert.equal(executorModuleRoot('scripts/graphyard-executor.mjs'), resolve('scripts', '..'), 'a relative spelling resolves against the working directory the unit runs in');
+  assert.equal(readCommit(bare), null, 'the repository without the script names no commit of its own');
+  const fallbackRelease = executorRelease(executorModuleRoot(), null, { readRelease, readCommit });
+  assert.equal(fallbackRelease.release.commit, readCommit(packageRoot), 'the registered release is the package checkout\'s commit');
+  assert.equal(fallbackRelease.current(), readCommit(packageRoot), 'and so is the commit compared before every claim');
 
   // Onboarding: a control plane that refuses a pull-request submission (no GitHub App) is answered with the published head.
   const submitted: any[] = [];

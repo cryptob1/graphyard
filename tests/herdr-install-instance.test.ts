@@ -114,7 +114,10 @@ test('unit:herdr-install-instance-created — a host whose default Herdr plugin 
     await chmod(join(bin, 'herdr'), 0o755);
     process.env.PATH = `${bin}${delimiter}${process.env.PATH}`; process.env.HERDR_LOG = log;
     execFileSync('git', ['init', '-q', repo]); execFileSync('git', ['remote', 'add', 'origin', 'git@github.com:acme/shop.git'], { cwd: repo });
-    const scoped = installHerdrInstance('acme-shop', home);
+    // This home sits under the test's temporary directory, under which no session name fits a Unix socket's 107 bytes
+    // (unit:land-coordinator-commits proves the limit refuses such a home); the fake herdr binds nothing, so the
+    // instance is spelled out as installHerdrInstance computes it under a short home.
+    const scoped = { configHome: join(home, '.config', 'graphyard', 'acme-shop', 'herdr'), session: 'graphyard-acme-shop' };
     const fetcher = (async () => new Response(JSON.stringify({ actor: { id: 'worker-a', role: 'worker' }, repository: 'acme/shop' }))) as unknown as typeof fetch;
     const linked = await setupRepository(repo, { url: 'https://new.example', cliPath: launcher, hostId: 'host', token: 'worker-token-0123456789abcdef0123456789' }, { herdr: true, herdrInstance: scoped, fetcher, executors: false });
     assert.equal(linked.pluginConfigured, true);
