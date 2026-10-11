@@ -4,9 +4,10 @@ import { execFileSync } from 'node:child_process';
 import fs, { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { syncBuiltinESMExports } from 'node:module';
+import { fileURLToPath } from 'node:url';
 import * as writers from '../src/cli/checkout-writers.js';
 import { checkoutWriterProcesses, checkoutWriterScan, freezeCheckoutWriters, processStateOf } from '../src/cli/checkout-writers.js';
-import { checkoutRestoreRefPrefix, fileCheckoutRestoreRequest, readCheckoutRestoreRequest, restoreCoordinatorCheckout, serveCheckoutRestore } from '../src/cli/master-checkout-restore.js';
+import { type CheckoutRestoreOutcome, checkoutRestoreCommand, checkoutRestoreRefPrefix, checkoutRestoreRequestPath, directRestoreRefusal, fileCheckoutRestoreRequest, loopRestartRequestPath, readCheckoutRestoreRequest, restoreCoordinatorCheckout, serveCheckoutRestore } from '../src/cli/master-checkout-restore.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-1663: writer discovery read an unreadable /proc/PID/cwd as "not in the checkout", so a live
@@ -16,6 +17,9 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 // GY-1672: a read refused EACCES (a non-dumpable process denying this user its /proc links — sd-pam,
 // a password manager) is recorded as skipped instead, since such processes stand permanently and
 // refusing on them left checkout-restore no way to complete.
+// GY-1679: that rule reached no executor of the remedy — the loop serving the request ran code from
+// before it, and could not upgrade past the escalation the remedy clears — so `master checkout-restore`
+// run by an unconfined process now restores from the revision it runs and files the restart the loop serves.
 
 /** A fake /proc entry: its stat line, its cwd (a symlink to the directory, or a plain file readlink refuses), its cgroup. */
 function processEntry(proc: string, pid: number, options: { ppid?: number; state?: string; flags?: number; cwd?: string | null; cgroup?: string }) {
@@ -196,7 +200,7 @@ test('integration:checkout-restore-completes-unreadable-writer — checkout-rest
   } finally { restore(); }
   assert.equal(outcome?.state, 'restored', outcome?.detail);
   assert.deepEqual([...outcome!.paths].sort(), ['notes/deep/plan.md', 'scratchpad.mjs', 'src/loop.ts']);
-  assert.match(outcome!.detail, /skipped, their cwd unreadable: pid 1372 \(EACCES/);
+  assert.match(outcome!.detail, /skipped as unattributable, their cwd unreadable: pid 1372 \(EACCES/);
   assert.ok(outcome!.ref?.startsWith(checkoutRestoreRefPrefix));
   assert.equal(git('for-each-ref', '--format=%(refname)', checkoutRestoreRefPrefix), outcome!.ref);
   // Nothing is discarded: the ref's tree holds every dirty byte on top of HEAD.
@@ -216,4 +220,85 @@ test('integration:checkout-restore-completes-unreadable-writer — checkout-rest
   assert.equal(stored?.outcome?.state, 'restored');
   assert.equal(stored?.outcome?.restart?.state, 'requested');
   assert.equal(stored?.outcome?.restart?.pid, 100);
+});
+
+test('integration:checkout-restore-completes-unreadable-writer — executed by master checkout-restore itself, from the revision it runs rather than the loop\'s loaded code (GY-1679): every dirty path saved, the checkout clean at HEAD, the EACCES process skipped, the restart request the loop serves written', async () => {
+  const { base, root, git, checkout, elsewhere } = await coordinator('checkout-restore-direct');
+  const proc = join(base, 'proc'), uid = process.getuid!();
+  processEntry(proc, 1, { cwd: '/' });
+  processEntry(proc, 100, { cwd: elsewhere });                 // this command
+  processEntry(proc, 500, { cwd: checkout });                  // a standing writer
+  processEntry(proc, 1372, { cwd: checkout });                 // sd-pam: cwd read refused EACCES
+  const head = git('rev-parse', 'HEAD');
+  writeFileSync(join(root, 'src', 'loop.ts'), 'export const loop = 2; // hotfix\n');
+  writeFileSync(join(root, 'scratchpad.mjs'), '// scratch\n');
+  mkdirSync(join(base, 'state'), { recursive: true });
+  const config = { credentialFile: join(base, 'state', 'graphyard-master.token'), cliPath: join(root, 'bin', 'graphyard.mjs') };
+  const sent: string[] = [];
+  const quiesce = (directory: string) => freezeCheckoutWriters(directory, { scan: at => checkoutWriterScan(at, 100, proc, uid), signal: (pid, name) => { sent.push(`${name}:${pid}`); }, state: pid => sent.includes(`SIGSTOP:${pid}`) && !sent.includes(`SIGCONT:${pid}`) ? 'T' : 'S' });
+  const restore = denyCwd(proc, [1372]);
+  let result;
+  try { result = await checkoutRestoreCommand(config, ['escalation:dirty-checkout'], 'graphyard-operator-agent', { probe: { env: {}, proc, self: 100 }, quiesce, waitMs: 30, pollMs: 5 }); }
+  finally { restore(); }
+  assert.equal(result.state, 'restored', result.detail);
+  const direct = result as unknown as CheckoutRestoreOutcome & { request: string; executor: { root: string; commit: string | null }; loopRestart: { request: string; state: string } };
+  assert.match(direct.detail, /returned to HEAD by master checkout-restore running [0-9a-f]{12} at /);
+  assert.match(direct.detail, /skipped as unattributable, their cwd unreadable: pid 1372 \(EACCES/);
+  assert.equal(direct.executor.root, fileURLToPath(new URL('..', import.meta.url)), 'the executor is the revision this test runs');
+  assert.deepEqual([...direct.paths].sort(), ['scratchpad.mjs', 'src/loop.ts']);
+  assert.ok(direct.ref?.startsWith(checkoutRestoreRefPrefix));
+  assert.equal(git('for-each-ref', '--format=%(refname)', checkoutRestoreRefPrefix), direct.ref);
+  assert.equal(git('rev-parse', `${direct.ref}^1`), head);
+  assert.equal(git('show', `${direct.ref}:src/loop.ts`), 'export const loop = 2; // hotfix');
+  assert.equal(git('show', `${direct.ref}:scratchpad.mjs`), '// scratch');
+  assert.equal(git('status', '--porcelain', '--untracked-files=all'), '', 'the checkout is clean');
+  assert.equal(git('rev-parse', 'HEAD'), head);
+  assert.deepEqual(sent, ['SIGSTOP:500', 'SIGCONT:500'], 'the writer was stopped and continued; the skipped process was never signalled');
+  // The restore is the request's own record, owing the loop nothing: a loop serving it restores nothing again.
+  const record = await readCheckoutRestoreRequest(checkoutRestoreRequestPath(config));
+  assert.equal(record?.id, direct.request); assert.equal(record?.outcome?.state, 'restored'); assert.equal(record?.outcome?.restart, null);
+  let restarts = 0;
+  assert.equal(await serveCheckoutRestore(checkoutRestoreRequestPath(config), root, { pid: 100, restart: async () => { restarts++; } }), null);
+  // The restart request the loop serves is written, and reported filed when no loop answered within the wait.
+  assert.equal(direct.loopRestart.state, 'requested');
+  const pending = await readCheckoutRestoreRequest(loopRestartRequestPath(config));
+  assert.equal(pending?.id, direct.loopRestart.request); assert.equal(pending?.act, 'restart'); assert.equal(pending?.outcome, null);
+  assert.match(pending!.reason, new RegExp(`restored under ${direct.ref} by master checkout-restore running`));
+  // A loop from before the skip rule serves that restart as it always has: its own restart through its unit.
+  const served = await serveCheckoutRestore(loopRestartRequestPath(config), root, { pid: 100, restart: async () => { restarts++; } });
+  assert.equal(served?.state, 'restart'); assert.equal(restarts, 1);
+  assert.equal((await readCheckoutRestoreRequest(loopRestartRequestPath(config)))?.outcome?.restart?.state, 'requested');
+  // A clean checkout restores nothing and asks for no restart; its writers are still frozen for the read.
+  sent.length = 0;
+  const again = denyCwd(proc, [1372]);
+  let clean;
+  try { clean = await checkoutRestoreCommand(config, ['again'], 'graphyard-operator-agent', { probe: { env: {}, proc, self: 100 }, quiesce, waitMs: 10, pollMs: 5 }); }
+  finally { again(); }
+  assert.equal(clean.state, 'clean', clean.detail); assert.ok(!('loopRestart' in clean));
+  assert.deepEqual(sent, ['SIGSTOP:500', 'SIGCONT:500']);
+  assert.equal(git('for-each-ref', '--format=%(refname)', checkoutRestoreRefPrefix), direct.ref, 'no second ref');
+  assert.equal((await readCheckoutRestoreRequest(loopRestartRequestPath(config)))?.id, direct.loopRestart.request, 'the restart request stands as the loop left it');
+});
+
+test('unit:checkout-restore-direct-refusals — a confined master session, a session the loop launched, a read-only checkout and a checkout the guard exempts file the request for the loop instead of restoring themselves', async () => {
+  const { base, root, checkout, elsewhere } = await coordinator('checkout-restore-direct-refusals');
+  const proc = join(base, 'proc');
+  processEntry(proc, 100, { cwd: elsewhere });
+  processEntry(proc, 300, { cwd: elsewhere, cgroup: '/user.slice/user-1000.slice/user@1000.service/app.slice/graphyard-watch-42-abc.scope' });
+  assert.match(directRestoreRefusal(root, { env: { GRAPHYARD_CONFINEMENT: 'master' }, proc, self: 100 })!, /confined master session \(GRAPHYARD_CONFINEMENT=master\)/);
+  assert.match(directRestoreRefusal(root, { env: {}, proc, self: 300 })!, /a session the loop launched \(graphyard-watch-42-abc\.scope\)/);
+  assert.match(directRestoreRefusal(root, { env: {}, proc, self: 100, writable: () => { throw Object.assign(new Error('EROFS: read-only file system'), { code: 'EROFS' }); } })!, /not writable by this command \(EROFS/);
+  assert.equal(directRestoreRefusal(root, { env: {}, proc, self: 100 }), null, 'an unconfined process with the checkout writable restores itself');
+  assert.equal(directRestoreRefusal(root, { env: {}, proc: join(base, 'no-proc'), self: 100 }), null, 'no cgroup to read is no managed session');
+  // Each refusal files the request as before, naming why; the guard's exemption (a checkout outside the test runner's temporary directories) likewise.
+  mkdirSync(join(base, 'state'), { recursive: true });
+  const config = { credentialFile: join(base, 'state', 'graphyard-master.token'), cliPath: join(root, 'bin', 'graphyard.mjs') };
+  writeFileSync(join(root, 'scratchpad.mjs'), '// scratch\n');
+  const filed = await checkoutRestoreCommand(config, ['from the master session'], 'graphyard-master', { probe: { env: { GRAPHYARD_CONFINEMENT: 'master' }, proc, self: 100 }, waitMs: 10, pollMs: 5 });
+  assert.equal(filed.state, 'requested'); assert.match((filed as { filed?: string }).filed ?? '', /confined master session/);
+  assert.equal((await readCheckoutRestoreRequest(checkoutRestoreRequestPath(config)))?.outcome, null, 'the loop owns the restore');
+  assert.ok(existsSync(join(root, 'scratchpad.mjs')), 'nothing was touched');
+  const exempt = await checkoutRestoreCommand(config, ['elsewhere'], 'graphyard-master', { root: join('/', 'nowhere', 'coordinator'), probe: { env: {}, proc, self: 100 }, waitMs: 10, pollMs: 5 });
+  assert.equal(exempt.state, 'requested'); assert.match((exempt as { filed?: string }).filed ?? '', /checkout guard does not apply/);
+  assert.ok(checkout.length);
 });
