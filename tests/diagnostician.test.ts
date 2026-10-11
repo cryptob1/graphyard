@@ -16,7 +16,7 @@ import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { decisionInput } from '../src/master/autonomy.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { standingFaultClassItem, clearDiagnoses, diagnosesSettled, diagnosisStep, diagnosisSubjects, fixItem, type DiagnosticianEffects, type DiagnosisContext, type DiagnosisSubject } from '../src/daemon/diagnosis.js';
-import { deriveDiagnosisFixPlannedFiles } from '../src/model/work.js';
+import { deriveDiagnosisFixPlannedFiles } from '../src/daemon/diagnosis.js';
 import { clearDoctorRuns, doctorStep, type DoctorEffects } from '../src/daemon/doctor.js';
 import { doctorSettingsSchema } from '../src/master/doctor-settings.js';
 import { overtakenClosure } from '../src/triage.js';

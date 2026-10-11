@@ -11,7 +11,6 @@ import type { ActionQueue } from './actions.js';
 import type { AgentRequest } from './agent-requests.js';
 import type { SessionHandle } from './sessions.js';
 import { companionGround, itemDocumentationPaths, namedPaths, pathScopeContains, plannedFilesMax, type ItemDocumentation, type ScopeDecision, type ScopeRequestState } from './scope.js';
-import { derivePlannedFiles, plannedFilesRefusal, scopeExists, type PlannedFilesDerivation } from './planned-files.js';
 import type { CapacityState } from './capacity.js';
 import type { HumanRequest } from './human-request.js';
 import type { ResearchRecord } from '../research.js';
@@ -273,55 +272,6 @@ export function activeLease(work: Work, actor: Principal, epoch: number, now: Da
 }
 
 export { derivePlannedFiles, describedAsNew, plannedFilesRefusal, scopeExists, type PlannedFilesDerivation } from './planned-files.js';
-
-/** A test path's directory, stem and suffix, or null. */
-const testStemParts = (path: string) => {
-  const match = /^((?:[^/]+\/)*)([^/]+?)(\.(?:test|spec)\.[cm]?[jt]sx?)$/.exec(path);
-  return match ? { directory: match[1], stem: match[2], suffix: match[3] } : null;
-};
-/**
- * The base-tree test whose stem is a hyphenated prefix of a proof-named companion (GY-1700's
- * `tests/webhook-soft-accept.test.ts` beside `unit:webhook-soft-accept-no-5xx`), or null when the
- * named path already resolves or no shorter vehicle exists on the base.
- */
-function existingProofVehicle(named: string, tree: ReadonlySet<string>): string | null {
-  if (tree.has(named)) return null;
-  const parts = testStemParts(named);
-  if (!parts) return null;
-  let best: string | null = null;
-  for (const file of tree) {
-    const candidate = testStemParts(file);
-    if (!candidate || candidate.directory !== parts.directory || candidate.suffix !== parts.suffix) continue;
-    if (parts.stem.startsWith(`${candidate.stem}-`) && (!best || file < best)) best = file;
-  }
-  return best;
-}
-
-/**
- * GY-1707: plannedFiles for a fix item the loop files from a diagnosis — the same derivation
- * `master create` applies (base-tree resolution, criteria-named tree files, planned companions),
- * plus the paths the diagnosis cause names that resolve in the tree when the subject is a
- * recurring-fault item (the cause is that item's own requirement, not prose). When a proof
- * companion invents a longer stem than a test the base already holds, that existing vehicle is
- * planned instead (GY-1700) — except a path the diagnosis itself planned stays as filed, so a
- * criterion that creates a longer new test is not rewritten to the shorter neighbour. A path the
- * tree does not hold and no criterion describes creating is refused with `plannedFilesRefusal`.
- */
-export function deriveDiagnosisFixPlannedFiles(
-  input: { plannedFiles?: readonly string[]; criteria: readonly { id: string; text: string; proofs?: readonly string[] }[]; cause?: string; kind?: 'recurring' | 'invariant' },
-  tree: ReadonlySet<string>,
-  base: string,
-): PlannedFilesDerivation {
-  const explicit = new Set(input.plannedFiles ?? []);
-  const causeNamed = input.kind === 'recurring' && input.cause
-    ? namedPaths(input.cause).filter(path => scopeExists(path, tree))
-    : [];
-  const derived = derivePlannedFiles({ plannedFiles: [...new Set([...explicit, ...causeNamed])], criteria: input.criteria }, tree);
-  if (derived.missing.length) throw new Error(plannedFilesRefusal(derived.missing, base, derived.misnamed));
-  const plannedFiles = [...new Set(derived.plannedFiles.map(path =>
-    explicit.has(path) ? path : (existingProofVehicle(path, tree) ?? path)))];
-  return { ...derived, plannedFiles };
-}
 
 /**
  * GY-140 AC-3: per open item, every scope request — open, or the last one decided — whose paths a

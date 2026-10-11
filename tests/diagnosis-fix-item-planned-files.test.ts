@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { fixItem } from '../src/daemon/diagnosis.js';
-import { deriveDiagnosisFixPlannedFiles, plannedFilesRefusal } from '../src/model/work.js';
+import { deriveDiagnosisFixPlannedFiles, fixItem } from '../src/daemon/diagnosis.js';
+import { plannedFilesRefusal } from '../src/model/work.js';
 import type { DiagnosisPayload } from '../src/runner/payloads.js';
 
 // GY-1707: a fix item the loop files from a diagnosis derives plannedFiles the way master create
@@ -130,6 +130,17 @@ test('integration:replay-fault-class-filing-carries-asked-files — GY-1700, GY-
   }, baseTree, 'main');
   assert.ok(gy1700Creates.plannedFiles.includes('tests/webhook-soft-accept-no-5xx.test.ts'),
     'an explicitly planned new test the criterion creates is kept');
+  // Short-suffix proof companion that derivePlannedFiles marks misnamed (edit distance ≤2) must
+  // remap to the existing vehicle before refusal — not throw (Codex thread on work.ts:320).
+  const shortSuffixTree = new Set([...baseTree, 'tests/orphan-supervisor.test.ts']);
+  const shortSuffix = deriveDiagnosisFixPlannedFiles({
+    plannedFiles: ['src/merge-queue.ts'],
+    criteria: [{ id: 'AC-1', text: 'Orphan supervisors are reaped.', proofs: ['unit:orphan-supervisor-x'] }],
+    kind: 'invariant',
+  }, shortSuffixTree, 'main');
+  assert.ok(shortSuffix.plannedFiles.includes('tests/orphan-supervisor.test.ts'),
+    'short-suffix proof companion remaps to the existing vehicle before refusal');
+  assert.equal(shortSuffix.plannedFiles.includes('tests/orphan-supervisor-x.test.ts'), false);
 
   // GY-1701: cause named the three daemon files; filed plannedFiles held none of them.
   const gy1701 = deriveDiagnosisFixPlannedFiles({

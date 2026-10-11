@@ -7,7 +7,8 @@ import { providerLimit, type ExhaustionSignal } from '../model/capacity.js';
 import { isClosed } from '../model/closure.js';
 import { planeWideRefusal } from '../model/blocker-class.js';
 import { closesFaultClass, faultClassMeaning, openFaultClassItem, type FaultClass, type FaultInstance, type FaultKind } from '../model/fault-classes.js';
-import { deriveDiagnosisFixPlannedFiles } from '../model/work.js';
+import { derivePlannedFiles, plannedFilesRefusal, scopeExists, type PlannedFilesDerivation } from '../model/planned-files.js';
+import { namedPaths } from '../model/scope.js';
 import { guardBroadScope } from '../master/autonomy.js';
 import { baseTree } from '../cli/planned-files-intent.js';
 import { diagnosisPayloadSchema, diagnosisSettled, graphyardTools, type DiagnosisPayload, type DiagnosisRecord, type DiagnosticianSettings } from '../runner/payloads.js';
@@ -285,6 +286,70 @@ export const diagnosisLostGraceMs = 5 * 60_000;
 async function filingTree(diagnostician: DiagnosticianEffects, baseBranch: string) {
   if (diagnostician.tree) return diagnostician.tree(baseBranch);
   return baseTree(diagnostician.cwd, baseBranch);
+}
+
+/** A test path's directory, stem and suffix, or null. */
+const testStemParts = (path: string) => {
+  const match = /^((?:[^/]+\/)*)([^/]+?)(\.(?:test|spec)\.[cm]?[jt]sx?)$/.exec(path);
+  return match ? { directory: match[1], stem: match[2], suffix: match[3] } : null;
+};
+/**
+ * The base-tree test whose stem is a hyphenated prefix of a proof-named companion (GY-1700's
+ * `tests/webhook-soft-accept.test.ts` beside `unit:webhook-soft-accept-no-5xx`), or null when the
+ * named path already resolves or no shorter vehicle exists on the base.
+ */
+function existingProofVehicle(named: string, tree: ReadonlySet<string>): string | null {
+  if (tree.has(named)) return null;
+  const parts = testStemParts(named);
+  if (!parts) return null;
+  let best: string | null = null;
+  for (const file of tree) {
+    const candidate = testStemParts(file);
+    if (!candidate || candidate.directory !== parts.directory || candidate.suffix !== parts.suffix) continue;
+    if (parts.stem.startsWith(`${candidate.stem}-`) && (!best || file < best)) best = file;
+  }
+  return best;
+}
+
+/**
+ * GY-1707: plannedFiles for a fix item the loop files from a diagnosis — the same derivation
+ * `master create` applies (base-tree resolution, criteria-named tree files, planned companions),
+ * plus the paths the diagnosis cause names that resolve in the tree when the subject is a
+ * recurring-fault item (the cause is that item's own requirement, not prose). When a proof
+ * companion invents a longer stem than a test the base already holds, that existing vehicle is
+ * planned instead (GY-1700) — except a path the diagnosis itself planned stays as filed, so a
+ * criterion that creates a longer new test is not rewritten to the shorter neighbour. Short-suffix
+ * proof companions that `derivePlannedFiles` would refuse as misnamed (e.g. `unit:orphan-supervisor-x`
+ * beside `tests/orphan-supervisor.test.ts`) are remapped to that vehicle before the refusal runs.
+ * A path the tree does not hold and no criterion describes creating is refused with
+ * `plannedFilesRefusal`.
+ */
+export function deriveDiagnosisFixPlannedFiles(
+  input: { plannedFiles?: readonly string[]; criteria: readonly { id: string; text: string; proofs?: readonly string[] }[]; cause?: string; kind?: 'recurring' | 'invariant' },
+  tree: ReadonlySet<string>,
+  base: string,
+): PlannedFilesDerivation {
+  const explicit = new Set(input.plannedFiles ?? []);
+  const causeNamed = input.kind === 'recurring' && input.cause
+    ? namedPaths(input.cause).filter(path => scopeExists(path, tree))
+    : [];
+  const derived = derivePlannedFiles({ plannedFiles: [...new Set([...explicit, ...causeNamed])], criteria: input.criteria }, tree);
+  const vehicleFor = (path: string) => (explicit.has(path) ? null : existingProofVehicle(path, tree));
+  // Remap before refusing: a short-suffix proof companion lands in `missing` as misnamed, and must
+  // become its existing vehicle rather than permanently failing the diagnosis (Codex PRRT on work.ts).
+  const rescued = new Map<string, string>();
+  for (const path of [...derived.plannedFiles, ...derived.missing]) {
+    const vehicle = vehicleFor(path);
+    if (vehicle) rescued.set(path, vehicle);
+  }
+  const missing = derived.missing.filter(path => !rescued.has(path));
+  const misnamed = derived.misnamed.filter(entry => missing.includes(entry.path));
+  if (missing.length) throw new Error(plannedFilesRefusal(missing, base, misnamed));
+  const plannedFiles = [...new Set([
+    ...derived.plannedFiles.map(path => rescued.get(path) ?? path),
+    ...[...rescued.values()],
+  ])];
+  return { ...derived, plannedFiles, missing, misnamed };
 }
 
 /** The fix item as `master create` would file it (GY-1707): schema, broad-scope guard, and plannedFiles derived against the base tree — never the diagnostician's list verbatim. */
