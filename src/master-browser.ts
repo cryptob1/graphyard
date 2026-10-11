@@ -891,10 +891,16 @@ export async function runBrowserFlow(root: string, config: MasterConfig, flow: B
           outcome = 'unchanged'; verified = true; reason = `GitHub showed no Confirm access at ${current}: the profile's session already holds sudo mode, so there is no view to keep`;
           page.note?.('capture', ['none', reason]);
         } else {
-          // The views the page offers are judged exactly as captureSudoForms chooses which to follow;
-          // the passkey view falls back to the landing form, so the landing alone keeps it.
+          // The views the page offers are judged exactly as captureSudoForms chooses which to keep:
+          // the passkey view falls back to the landing form, so the landing alone keeps it, while
+          // the authenticator and email views are kept only through a view link of their own. A
+          // method the page advertises by prose alone, as GitHub's landing offers email only through
+          // "Send a code via email", is no view the capture can keep without sending a code, so it is
+          // never expected; the keep logic records why it was not followed.
           const offered = offeredSudoMethods(text);
-          const expected = ['landing', ...(['passkey', 'authenticator', 'email'] as const).filter(view => offered[view] || sudoViewLinks[view].some(label => text.toLowerCase().includes(label.toLowerCase())))];
+          const linked = (view: keyof typeof sudoViewLinks) => sudoViewLinks[view].some(label => text.toLowerCase().includes(label.toLowerCase()));
+          const expected = ['landing', ...(['passkey', 'authenticator', 'email'] as const).filter(view => linked(view) || view === 'passkey' && offered.passkey)];
+          const sendOnly = offered.email && !linked('email');
           sudoForms.push(...await captureSudoForms(page, directory, { now, onCapture: saved }));
           const kept: string[] = [];
           for (const capture of confirmAccess) { try { await stat(resolve(directory, capture.file)); kept.push(capture.view); } catch { /* its capture step records the failure */ } }
@@ -906,6 +912,7 @@ export async function runBrowserFlow(root: string, config: MasterConfig, flow: B
           reason = verified ? `Kept ${kept.length} Confirm-access view(s) as redacted markup: ${kept.join(', ')}`
             : kept.length ? `Kept ${kept.join(', ')} but not the offered ${missed.join(', ')} view(s); the recorded steps name each failure, so rerun until every offered view is kept`
               : 'The Confirm-access page offered no view the capture could keep; its recorded steps name each failure';
+          if (sendOnly) reason += '; the email method is offered only by a control that sends a code, which the capture never follows, so no email view is expected';
           page.note?.('capture', [outcome, reason]);
         }
       }
