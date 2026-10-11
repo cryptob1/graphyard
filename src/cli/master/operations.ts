@@ -164,7 +164,8 @@ export async function operationsCommand(session: MasterSession, effects: Recover
     if (!work) throw new Error(`Unknown work item ${args[0]}`);
     // An owed post-deploy verification's follow-up is filed as the master's operator agent: the coordinator credential cannot create work (GY-1660).
     const file = async (input: unknown, requestId: string) => masterMutation('work', input, requestId, await agentToken(root, master, 'operatorAgent'));
-    const result = await verifyDeployment(work, verificationEffects(master, { root, snapshot: () => masterApi('work-snapshot'), mutate: masterMutation, file }));
+    // GY-1698: the intervention report's projection gives a windowed follow-up its observation instant.
+    const result = await verifyDeployment(work, verificationEffects(master, { root, snapshot: () => masterApi('work-snapshot'), mutate: masterMutation, file, read: path => masterApi(path) }));
     if (result.result === 'refused') process.exitCode = 1;
     return print(result);
   }

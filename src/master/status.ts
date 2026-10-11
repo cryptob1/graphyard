@@ -5,7 +5,7 @@ import { hotFileSet } from '../daemon/hotspots.js';
 import type { ConflictReport } from '../conflicts.js';
 import { standingCapacity, describeCapacity, quotaRoles } from '../model/capacity.js';
 import { parkedOnHuman, humanDecisionLabel, answerCommand, openHumanRequests } from '../model/human-request.js';
-import { type Work, carriedBindings, describeGround, reviewProviderOf, reviewerProfileFor, exhaustedReviewerProfiles, implementerIdentities, deploySmokeRequired, isClosed, closedHistory, deliveryState, postDeployMs, productionLatencyMs, rollbackGuidance } from '../model.js';
+import { type Work, carriedBindings, describeGround, observationWindowHold, reviewProviderOf, reviewerProfileFor, exhaustedReviewerProfiles, implementerIdentities, deploySmokeRequired, isClosed, closedHistory, deliveryState, postDeployMs, productionLatencyMs, rollbackGuidance } from '../model.js';
 import { containmentAttestation, containmentGraceMs } from '../quarantine.js';
 import { pendingBaseRefresh, baseRefreshConflict, currentBaseRefreshCarry, restoredApproval, refusedReconciliation, blockedPastProbe } from '../merge-queue.js';
 import { MERGE_PROTOCOL } from '../protocol-version.js';
@@ -179,6 +179,8 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
     // GitHub's to merge: every gate passes on the candidate (GY-1235); the observation's age is not read.
     const mergeable = mergeAuthorized(work);
     const dwellMs = now - Date.parse(work.stageEnteredAt);
+    // The earliest instant the item's reading can exist (GY-1698), and whether it still holds the dispatch.
+    const observationWindow = work.observationWindow ? { ...work.observationWindow, waiting: !!observationWindowHold(work, new Date(now)) } : null;
     const review = reviewState(work);
     const assessed = containment[work.id];
     const phase = containmentPhase(work, now);
@@ -266,6 +268,8 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       // never left as a silent wait (every merge once stalled on a refused auto-merge).
       : mergeRefusal ? [`GitHub refused the merge request for ${work.key} at ${mergeRefusal.head.slice(0, 12)} since ${mergeRefusal.at}: ${mergeRefusal.reason}`, 'merge-refused']
       : baseRefresh && !work.blocker ? [null, null]
+      // A follow-up held on its observation window (GY-1698) is waiting for the instant, not stalled at its gate.
+      : observationWindow?.waiting && !work.blocker && !active ? [null, null]
       : work.blocker || dwellMs > 3_600_000 ? [first?.reasons[0] ?? `Work has remained at ${work.stage} for more than one hour`, 'gate'] : [null, null];
     const attentionOwner = cause ? workAttentionOwner(work, cause, now) : null;
     if (cause) causes.set(work.key, cause);
@@ -273,6 +277,8 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       // The risk lane the item rides and its speed target (GY-883), stamped by the last evaluation
       // and shown per row: the lane names the ceremony the item's change is asked for.
       lane: work.lane ?? null, speedTarget: work.speedTarget ?? null,
+      // The observation window a windowed post-deploy follow-up carries (GY-1698): `waiting` while it holds the dispatch.
+      observationWindow,
       // Set only for an item GitHub merged though its gates had not passed: the merge, the violation and
       // the last refused reconciliation, so the row reads as stuck rather than as a candidate.
       merged,

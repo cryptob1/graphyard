@@ -32,6 +32,25 @@ export type EscalationTrigger = typeof escalationTriggers[number];
 /** The shipped setting: every new item is system-driven unless its intent says `"systemDriven": false`. */
 export const systemDrivenDefault = true;
 export { declaredPostDeploy, liveObservationPhrase, postDeployCriterionRefusal, postDeployOnlyRefusal, postDeployProof, postDeployProofPrefix, postDeployProofs } from './post-merge-proofs.js';
+/**
+ * GY-1698: a post-deploy follow-up whose criterion is a rolling-window reading — an intervention
+ * rate below a threshold per N days, a hold for N consecutive days — can produce nothing before
+ * the window has run: GY-1689, filed at 03:36Z for a 03:11Z merge, was released at 06:39Z and
+ * spent two worker attempts, a review and two approver sessions on a reading the intervention
+ * report itself projected no earlier than 2026-10-17T14:31Z. The product computes that instant
+ * already; the follow-up now carries it, as one fact in one place: `notBefore` is the earliest
+ * instant the reading can exist, taken from the report's projection for the pattern
+ * (`intervention-report`) or from the delivered item's merge time plus the window the criterion
+ * states (`criterion-window`), whichever is later. A master release before it stays operator
+ * intent — the item may be released — but `nextAction` holds the dispatch on the instant and the
+ * loop dispatches it once the instant passes, without a master session.
+ */
+export const observationWindowSchema = z.object({
+  notBefore: z.string().datetime({ offset: true }),
+  basis: z.enum(['intervention-report', 'criterion-window']),
+  detail: z.string().max(2000),
+}).strict();
+export type ObservationWindow = z.infer<typeof observationWindowSchema>;
 export const createSchema = z.object({
   title: z.string().min(1).max(200), description: z.string().max(20000).default(''),
   type: z.enum(['feature', 'bug', 'chore']).default('feature'),
@@ -60,8 +79,16 @@ export const createSchema = z.object({
   systemDriven: z.preprocess(value => value === undefined ? systemDrivenDefault : value, z.boolean().optional()),
   // `research` (GY-259, src/research.ts): false skips a feature's research, true researches any item. `split` (GY-1126, src/decomposition.ts): false never splits it before first dispatch, true splits it even within the size bounds.
   research: z.boolean().optional(), split: z.boolean().optional(),
+  // The earliest instant the observation this item owes can exist (GY-1698): a post-deploy
+  // follow-up for a windowed reading carries it; released, the item is not dispatched before it.
+  observationWindow: observationWindowSchema.optional(),
 }).strict();
 export type Create = z.infer<typeof createSchema>;
+/** The item's observation window while it still holds: `notBefore` is after `now`. Null for an item without one, or past it. */
+export function observationWindowHold(work: { observationWindow?: ObservationWindow | null }, now: Date): ObservationWindow | null {
+  const window = work.observationWindow;
+  return window && Date.parse(window.notBefore) > now.getTime() ? window : null;
+}
 // The `decision:*` capabilities request a two-party decision (see model/approval.ts); an agent
 // holding one still needs a second, independent agent holding `decision:approve` to apply it.
 // `e2e:record` (GY-1614) admits only the scenario registry and its run route: a candidate's UAT case runs.
