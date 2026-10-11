@@ -104,8 +104,8 @@ export function recommendedChoice(request: { kind: HumanDecisionKind; choices?: 
  * such asks, each parked once at the build stage in the week to 2026-10-11: a Confirm-access view
  * recorded in the operator's signed-in browser (GY-1470; `master browser capture` records it through
  * the profile lent to the master), the coordinator checkout's moved HEAD and unit record (GY-1666;
- * `master checkout-restore` keeps the HEAD under a ref and returns the checkout, and the loop records
- * its own units from the unit serving it), and an operator-agent identity issued to an agent whose
+ * `master checkout-restore` restarts the loop onto a clean moved HEAD, and the loop records its own
+ * units from the unit serving it), and an operator-agent identity issued to an agent whose
  * token is a repository secret (GY-1691; `master setup --apply` issues it with the install's admin
  * credential and stores it through the host's gh login). Goals and priorities, money or paid
  * accounts, and credentials issued to people still park.
@@ -125,10 +125,11 @@ const hostDoable: (HostDoableAsk & { test: RegExp })[] = [
   { class: 'browser-capture', what: 'a recording of a GitHub Confirm-access view made in the operator\'s signed-in browser', test: /\b(?:recording|capture|markup|outerHTML)\b[^.;]{0,160}\b(?:confirm[- ]access|sudo|authenticator)\b|\b(?:confirm[- ]access|sudo)\b[^.;]{0,120}\b(?:recording|capture|markup|outerHTML)\b/i,
     route: 'the master records every Confirm-access view the page offers through the browser profile lent to it, redacted, submitting nothing (GY-1686)', command: 'graphyard master browser capture, then graphyard master unblock GY-N REASON' },
   // GY-1692 (GY-1666): the coordinator checkout's HEAD moved onto commits the loop does not run, and
-  // the install's unit record. The loop keeps the moved HEAD under a ref, returns the checkout to the
-  // commit it runs and restarts; it records its own units from the unit serving it.
+  // the install's unit record. The loop's checkout-restore saves every dirty path under a ref and
+  // restarts onto a clean moved HEAD (GY-1680, the adoption GY-1531 sanctions); it records its own
+  // units from the unit serving it.
   { class: 'coordinator-checkout', what: 'the coordinator checkout\'s HEAD or its unpushed commits, or this install\'s unit record', test: /\bcoordinator checkout\b|\bunpushed\b[^.;]{0,60}\bcommits?\b|\bdetached (?:HEAD|at)\b|\bgraphyard master init\b|\bunits\.json\b/i,
-    route: 'the loop saves the moved HEAD and every dirty path under refs/graphyard/checkout-restore/, discarding nothing, returns the checkout to the commit it runs and restarts; it records its own units from the unit serving it', command: 'graphyard master checkout-restore REASON' },
+    route: 'the loop saves every dirty path under refs/graphyard/checkout-restore/ and restarts onto a clean moved HEAD, discarding nothing (GY-1680); it records its own units from the unit serving it', command: 'graphyard master checkout-restore REASON' },
   // GY-1692 (GY-1691): an identity issued to an agent, not a person, whose token is a repository or
   // environment secret the host's gh login sets; the install's admin credential is saved on the host.
   { class: 'agent-identity', what: 'an operator-agent identity issued to an agent, with its token stored as a repository or environment secret', test: /\boperator-agent setup\b|\bgraphyard-release-follow-up\b|\bGRAPHYARD_RELEASE_TOKEN\b|\bgh secret set\b|\b(?:operator[- ]agent|agent) identit(?:y|ies)\b/i,

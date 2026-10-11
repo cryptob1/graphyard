@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { masterConfinementVariable, masterSessionConfinement, startAgentSession } from '../src/master/launch.js';
 import { dirtyCheckoutPaths, hostProcessLaunchTargets, readCoordinatorCheckout, sessionMountNamespaceWorks } from '../src/master/profiles.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
-import { checkoutRestoreRemedy, coordinatorCheckoutGuard, serveLoopRequests } from '../src/daemon/run.js';
+import { checkoutRestoreDriftRemedy, checkoutRestoreRemedy, coordinatorCheckoutGuard, serveLoopRequests } from '../src/daemon/run.js';
 import { emptyDaemonState } from '../src/master-daemon.js';
 import { checkoutProcessScan } from '../src/cli/checkout-writers.js';
 import { checkoutRestoreCommand, checkoutRestoreRefPrefix, checkoutRestoreRequestPath, checkoutWriterProcesses, fileCheckoutRestoreRequest, freezeCheckoutWriters, loopExecutorsRequestPath, loopRestartRequestPath, readCheckoutRestoreRequest, restoreCoordinatorCheckout, serveCheckoutRestore, statusPaths } from '../src/cli/master-checkout-restore.js';
@@ -365,73 +365,39 @@ test('unit:confined-master-executors-through-loop — a confined master\'s maste
 });
 
 // GY-1692 (GY-1666): the coordinator checkout stood detached on fifteen unpushed operator commits, so the
-// loop refused to self-upgrade or restart (escalation:dirty-checkout, moved HEAD), and the only remedy
-// the refusal named was a person's git. That was parked on the human as a goals-and-priorities decision.
-// The restore now keeps a moved HEAD under a ref and returns the checkout to the commit the loop runs.
-test('manual:intervention-pattern-human-only-decision-build — GY-1666: a HEAD moved onto unpushed commits is kept under refs/graphyard/checkout-restore/ and returned to the commit the loop runs, settling the escalation that named the remedy; merged code moved forward is left for the restart to adopt', async () => {
-  const base = await temporaryDirectory('moved-head-restore');
+// loop refused to self-upgrade or restart (escalation:dirty-checkout, moved HEAD), and the only remedy the
+// refusal named was a person's git; that was parked on the human as a goals-and-priorities decision, with
+// `master init` for the install's unit record (tests/harness-apply-checkout.test.ts: the loop records it).
+// GY-1680 made the drift refusal name `master checkout-restore`, which restarts the loop onto a clean moved
+// HEAD: the case as recorded, replayed against that route.
+test('manual:intervention-pattern-human-only-decision-build — GY-1666: a HEAD moved onto unpushed commits is refused naming the remedy the installation runs itself, and checkout-restore adopts it, settles the escalation and restarts the loop, with every commit still in place', async () => {
+  const base = await temporaryDirectory('moved-head-adopted');
   const { root, git } = coordinator(base);
   const loaded = git('rev-parse', 'HEAD');
   const state = emptyDaemonState(config(base));
   const guard = guardFor(root, state);
   assert.equal(await guard.start(null), null);
-  assert.equal(guard.expected(), loaded);
-  // The operator's unpushed commits, on no branch, as GY-1666 found them: based on the commit the loop runs.
+  // The operator's unpushed commits, on no branch, based on the commit the loop runs, as GY-1666 found them.
   git('checkout', '-q', '--detach');
   writeFileSync(join(root, 'src', 'loop.ts'), 'export const loop = 2; // operator wip\n');
   git('commit', '-q', '-am', 'operator wip 1');
   writeFileSync(join(root, 'src', 'loop.ts'), 'export const loop = 3; // operator wip\n');
   git('commit', '-q', '-am', 'operator wip 2');
   const moved = git('rev-parse', 'HEAD');
-  git('update-ref', 'refs/remotes/origin/main', loaded);
-  const drift = await guard.betweenCycles();
-  assert.match(drift.refusal ?? '', /moved from/);
-  const escalation = state.actions['escalation:dirty-checkout'];
-  assert.equal(escalation?.state, 'failed');
-  assert.ok(escalation!.detail.includes(checkoutRestoreRemedy), 'a moved HEAD names the remedy the installation runs itself, not only a person\'s git');
-  // Against the base rule a clean moved checkout was "nothing to restore": the request returned clean and the loop stayed refused.
+  const drift = (await guard.betweenCycles()).refusal;
+  assert.match(drift ?? '', /moved from/);
+  assert.ok(drift!.endsWith(checkoutRestoreDriftRemedy), 'the refusal names the remedy the installation runs itself, never only a person\'s git');
+  assert.equal(state.actions['escalation:dirty-checkout']?.state, 'failed');
   const file = checkoutRestoreRequestPath(config(base));
   await fileCheckoutRestoreRequest(file, 'the coordinator HEAD moved onto unpushed commits', 'graphyard-master');
   const restarts: number[] = [];
-  const outcome = await serveCheckoutRestore(file, root, { restart: async () => { restarts.push(1); }, pid: 51, quiesce: hostQuiesce, settle: () => guard.settle(), target: () => ({ loaded: guard.expected(), base: 'origin/main' }) });
-  assert.equal(outcome?.state, 'restored', outcome?.detail);
-  assert.deepEqual(outcome!.paths, []);
-  assert.equal(outcome!.head?.from, moved);
-  assert.equal(outcome!.head?.to, loaded);
-  assert.ok(outcome!.head?.ref?.startsWith(checkoutRestoreRefPrefix), outcome!.head?.ref ?? undefined);
-  assert.equal(git('rev-parse', 'HEAD'), loaded, 'the checkout is back on the commit the loop runs');
-  assert.equal(git('rev-parse', outcome!.head!.ref!), moved, 'the moved HEAD is kept under the ref');
-  assert.equal(git('log', '--format=%s', `${loaded}..${outcome!.head!.ref}`), 'operator wip 2\noperator wip 1', 'every unpushed commit stays reachable: nothing is discarded');
-  assert.equal(readFileSync(join(root, 'src', 'loop.ts'), 'utf8'), 'export const loop = 1;\n');
-  assert.match(outcome!.detail, /HEAD [0-9a-f]{12}, moved off [0-9a-f]{12} the loop runs, kept under refs\/graphyard\/checkout-restore\/.* and the checkout returned to/);
-  assert.equal(outcome!.restart?.state, 'requested');
-  assert.deepEqual(restarts, [1], 'the loop restarts onto the clean checkout');
-  assert.equal(state.actions['escalation:dirty-checkout']?.state, 'done', 'the escalation settles before the restart');
-  assert.equal((await readCheckoutRestoreRequest(file))?.outcome?.head?.from, moved, 'the outcome written back carries the moved HEAD');
-
-  // Dirty paths and a moved HEAD together: both are kept, the paths first.
-  git('checkout', '-q', '--detach', moved);
-  writeFileSync(join(root, 'src', 'loop.ts'), 'export const loop = 4; // hotfix on wip\n');
-  const both = await restoreCoordinatorCheckout(root, 'both', undefined, new Date(), hostQuiesce, { loaded, base: 'origin/main' });
-  assert.ok(both?.ref && both.commit && both.head?.ref, JSON.stringify(both));
-  assert.deepEqual(both!.paths, ['src/loop.ts']);
-  assert.equal(git('rev-parse', 'HEAD'), loaded);
-  assert.equal(git('show', `${both!.ref}:src/loop.ts`), 'export const loop = 4; // hotfix on wip');
-  assert.equal(git('rev-parse', `${both!.ref}^`), moved, 'the dirty paths are saved onto the HEAD they were written on');
-  assert.equal(git('rev-parse', both!.head!.ref!), moved);
-
-  // Merged code moved forward (GY-1359) is never rolled back: the restart adopts it, and the ref keeps nothing it need not.
-  writeFileSync(join(root, 'src', 'loop.ts'), 'export const loop = 5; // merged\n');
-  git('commit', '-q', '-am', 'merged release');
-  const merged = git('rev-parse', 'HEAD');
-  git('update-ref', 'refs/remotes/origin/main', merged);
-  const forward = await restoreCoordinatorCheckout(root, 'forward', undefined, new Date(), hostQuiesce, { loaded, base: 'origin/main' });
-  assert.deepEqual(forward && { ref: forward.ref, paths: forward.paths, head: forward.head }, { ref: null, paths: [], head: { from: merged, ref: null, to: merged } });
-  assert.equal(git('rev-parse', 'HEAD'), merged, 'merged code stays in place');
-  // The commit the loop runs must be in the repository; otherwise HEAD is not touched and the refusal says so.
-  git('checkout', '-q', '--detach', moved);
-  await assert.rejects(restoreCoordinatorCheckout(root, 'unknown', undefined, new Date(), hostQuiesce, { loaded: 'f'.repeat(40) }), /the commit the loop runs, ffffffffffff, is not in the coordinator checkout .* so its HEAD [0-9a-f]{12} was not moved/);
-  assert.equal(git('rev-parse', 'HEAD'), moved);
-  // With no commit named, a clean checkout is clean: the request restores and restarts nothing (the pre-GY-1692 reading).
-  assert.equal(await restoreCoordinatorCheckout(root, 'none', undefined, new Date(), hostQuiesce), null);
+  const outcome = await serveCheckoutRestore(file, root, { restart: async () => { restarts.push(1); }, pid: 51, quiesce: hostQuiesce, settle: adopt => guard.settle({ adopt }), loaded: () => guard.expected() });
+  assert.equal(outcome?.state, 'adopted', outcome?.detail);
+  assert.equal(outcome!.commit, moved);
+  assert.deepEqual(restarts, [1], 'the loop restarts onto the HEAD');
+  assert.equal(state.actions['escalation:dirty-checkout']?.state, 'done', 'the escalation settles around the restart');
+  assert.equal(guard.expected(), moved);
+  assert.equal(git('rev-parse', 'HEAD'), moved, 'nothing is rolled back');
+  assert.equal(git('log', '--format=%s', `${loaded}..HEAD`), 'operator wip 2\noperator wip 1', 'every unpushed commit is still in place: nothing is discarded');
+  assert.equal(readFileSync(join(root, 'src', 'loop.ts'), 'utf8'), 'export const loop = 3; // operator wip\n');
 });
