@@ -29,6 +29,7 @@ import OverviewPage from '../web/pages/overview.js';
 import { boardFromStatus } from '../src/model/board.js';
 import WorkDetails from '../web/pages/work-details.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2026-09-21T10:00Z t0 is handed to registry.observe and registry.live as their clock; Date.now() elsewhere measures elapsed time, skews a fake clock or builds instants relative to itself.
 
 /**
  * GY-105: nothing brought executors back. The fleet stopped at a reboot or a crash until a person

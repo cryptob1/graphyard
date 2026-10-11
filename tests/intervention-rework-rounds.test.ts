@@ -14,6 +14,7 @@ import { loopBaseFailed, loopRework, type HandReworkLoop } from '../src/cli/hand
 import type { ExhaustedProof } from '../src/daemon/decisions.js';
 import { dropRetiredQueueFields, retiredQueueFields } from '../src/model/retired-queue.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2026-09-24..10-06 fixtures are folded at explicit nows (at(5), 2026-10-02T06:00); the Postgres half stamps observations and the report window from the real clock on items it creates itself.
 
 // GY-1389: 386 rework "interventions" at the review stage in seven days, every one of them the
 // loop's own review round — a rework it requested on a recorded ground (a standing change request,

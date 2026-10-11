@@ -11,6 +11,7 @@ import { foldDecisions, heldByLiveAttempt, liveLeaseRevisionRefusal, quarantined
 import { approvalStep, approvalWatchSchema } from '../src/master-daemon.js';
 import { terminalDecisions } from '../src/cli/decision-report.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2026-10-11 base only yields relative event stamps that foldDecisions and approvalStep read with an explicit now from the same base; Date.now() serves the live DB tests.
 
 // GY-1687. A non-widening requirements revision must not change the document under a worker's feet, so
 // the engine refuses it while the item holds a live lease or an unverified containment fence. Until now an

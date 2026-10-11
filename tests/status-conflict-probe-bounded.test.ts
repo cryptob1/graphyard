@@ -7,6 +7,7 @@ import { execFileSync } from 'node:child_process';
 import { BUDGET_EXHAUSTED_REASON, PROBE_FAILED_REASON, candidateConflicts, openCandidates, probeCandidateConflictsWithBudget } from '../src/conflicts.js';
 import { buildMasterStatus } from '../src/master.js';
 import type { Work } from '../src/model.js';
+// Time-bomb allowance (GY-1694): the 2030-01-01 stamps are work/cache fixture fields and the explicit status now; nothing dates them against the clock (the probe cache has no TTL) and Date.now() measures elapsed budget.
 
 function workWithFiles(key: string, files: string[], sha: string): Work {
   return {

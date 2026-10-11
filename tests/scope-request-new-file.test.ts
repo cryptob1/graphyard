@@ -16,6 +16,7 @@ import { plannedFilesMax } from '../src/model/scope.js';
 import { askedScopes, collapseArea, collapsePlannedFiles } from '../src/model/scope-collapse.js';
 import { derivePlannedFiles } from '../src/model/work.js';
 import type { Principal, Work } from '../src/model.js';
+// Time-bomb allowance (GY-1694): the 2031-03-01 lease and refusal instants meet only the explicit now Date.parse('2031-03-01T10:00:00Z') given to scopeRoutineDecision; new Date() just stamps the stub deployment.
 
 // GY-1676: a worker under a live lease and containment quarantine asked for one new file beside the
 // 21 source files its item already planned. The loop folded the ask into a root-level `src/` (the

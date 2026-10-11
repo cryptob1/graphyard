@@ -17,6 +17,7 @@ import { approverSessionName } from '../src/master.js';
 import { approvalStep, approvalWatchSchema } from '../src/master-daemon.js';
 import { terminalDecisions, unansweredDecisions } from '../src/cli/decision-report.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2026-09-23 instants are the explicit now/at handed to unansweredDecisions, terminalDecisions and approvalStep; new Date()/Date.now() only stamp the stubbed master's records.
 
 // GY-141: an approver's refusal is a recorded outcome, not a session that ended without
 // approving. A refused decision is reported with its reason and cannot be retried unchanged, and a

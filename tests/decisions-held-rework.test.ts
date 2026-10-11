@@ -18,6 +18,7 @@ import { nextAction } from '../src/model/next-action.js';
 import { humanNeeded } from '../src/model/concerns.js';
 import { terminalDecisions } from '../src/cli/decision-report.js';
 import { refusedOnOtherGrounds } from '../src/daemon/rework-grounds.js';
+// Time-bomb allowance (GY-1694): the 2030-01-01 clock drives the pure loop tests through `() => clock` over fixtures derived from it; the new Date() readings stamp observations for the engine-backed tests on the real clock.
 
 // GY-1579, observed on GY-1522 at 2026-10-08T11:38:06Z: the master requested rework bd40dc45 by hand,
 // input { previousWorkerStopped: true } with no binding, on an item that already held applied rework

@@ -20,6 +20,7 @@ import { environmentBlocker } from '../src/worker-sandbox.js';
 import { attemptRetryHold, maxFailedAttempts, retryBackoffMs } from '../src/daemon/reblocked-attempts.js';
 import { expandTypedCommand, startedAtOnce } from './helpers/launch-shell.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2030-01-01 clock is the loop's injected now and the snapshot's now iso(0), so held() leases are judged against it; Date.now() mints token expiries and credentials swept with new Date().
 
 // GY-999: on 2026-09-30 eleven finished items blocked on "could not read Username for
 // 'https://github.com'" and held every worker slot for hours: workers run confined with the session

@@ -15,6 +15,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { controlPlaneEffects } from '../scripts/graphyard-executor.mjs';
 import type { DispatchRequest } from '../src/model/dispatch.js';
 import type { Work } from '../src/model.js';
+// Time-bomb allowance (GY-1694): the 2030-01-01 clock is handed to runCycle, loopLiveness and daemonSummary as their explicit now over fixtures derived from it; Date.now() only measures elapsed time and child deadlines.
 
 // GY-125. Each test is named for the proof it produces: unit:no-sync-child-processes,
 // integration:snapshot-read-unblocked-by-launch and unit:child-wait-attributed.

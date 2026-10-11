@@ -15,6 +15,7 @@ import { runtimeEndedStates } from '../src/harness.js';
 import { masterConfigSchema } from '../src/master.js';
 import { sessionReport } from '../src/cli/master-status.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2026-09-24 and 2026-10-08 fixture instants are past and handed explicitly as now to observeSessions/sessionView; Date.now()/new Date() only feed the DB-backed tests' own observations.
 
 /**
  * GY-172 AC-1: one session state. The loop reports, on every dispatch tick, what it observes of

@@ -17,6 +17,7 @@ import { controlPlaneHandlers } from '../src/executor.js';
 import { relaunchSession } from '../src/master-daemon.js';
 import { expandTypedCommand, requestOf } from './helpers/launch-shell.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2026-09-01 boundAt is reviewer-binding fixture data nothing ages; the ticks run on a clock seeded from Date.now() and new Date() stamps snapshots and requests on that clock.
 
 /**
  * GY-172 AC-2: every path that starts a session registers the same session record before its

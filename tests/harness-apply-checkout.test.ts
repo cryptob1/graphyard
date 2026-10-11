@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { masterConfigSchema, masterHarness, type MasterConfig } from '../src/master.js';
 import { emptyDaemonState, runDaemon, type DaemonEffects } from '../src/master-daemon.js';
@@ -13,10 +13,11 @@ import { Timings } from '../src/master/timings.js';
 import * as harness from '../src/master/harness.js';
 import { routineRemedies } from '../src/daemon/doctor.js';
 import { harnessDrift } from '../src/harness.js';
-import { installUnitsFile, legacyLoopUnit, perInstallUnits } from '../src/install/units.js';
+import { installUnitsFile, legacyInstallUnits, legacyLoopUnit, perInstallUnits } from '../src/install/units.js';
 import { loopScratchCheckout } from '../src/producer.js';
 import { worktreeRoot } from '../src/install/worktree-root.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2026-10-10T18:00Z observedAt is the clock handed to each cycle (now: () => clock, later = clock + 1h); the runDaemon case stamps an empty snapshot and deployment with new Date() and judges no time.
 
 // GY-1662: the loop applied the Claude harness contract against the checkout its research effect
 // names, which runDaemon rewrites to the research scratch worktree. That worktree records no units,
@@ -96,12 +97,20 @@ test('unit:harness-apply-checkout-resolution — the loop applies the harness co
   await routineRemedies(unitless);
   assert.equal(unitless.state.actions[key]?.state, 'done', unitless.state.actions[key]?.detail);
 
-  // Every units-less checkout is refused, not only one beside a foreign legacy unit: the legacy alias, and a separate
-  // launcher checkout with no serving unit detected and no legacy unit at all, wait naming the checkout and master init.
+  // Every units-less checkout is refused, not only one beside a foreign legacy unit: the legacy alias with no serving unit
+  // detected, and a separate launcher checkout with no serving unit detected and no legacy unit at all, wait naming the
+  // checkout and master init. (GY-1692: with the serving unit detected and running the checkout, the loop records the units itself, below.)
   const aliased = await checkout('harness-alias', false), aliasUnits = await temporaryDirectory('harness-alias-units');
   await writeFile(join(aliasUnits, legacyLoopUnit), unitText(aliased.root));
   const launcher = await checkout('harness-launcher', false), noUnits = await temporaryDirectory('harness-no-units');
-  for (const [root, wired] of [[aliased.root, { unitDirectory: aliasUnits, servingUnit: legacyLoopUnit }], [aliased.root, { unitDirectory: aliasUnits }], [launcher.root, { unitDirectory: noUnits }]] as const) {
+  // A serving unit that runs another checkout records nothing for this one: the foreign legacy unit refusal stands (scratch, beside `units`).
+  const foreignServing = cycle(config(scratch.root), { harness: { unitDirectory: units, servingUnit: legacyLoopUnit } });
+  await rm(join(scratch.root, installUnitsFile), { force: true });
+  await routineRemedies(foreignServing);
+  assert.equal(foreignServing.state.actions[key]?.state, 'waiting', foreignServing.state.actions[key]?.detail);
+  assert.ok(foreignServing.state.actions[key]!.detail.includes(`legacy unit ${join(units, legacyLoopUnit)} runs another checkout (${elsewhere})`), foreignServing.state.actions[key]!.detail);
+  assert.equal(existsSync(join(scratch.root, installUnitsFile)), false, 'a serving unit running elsewhere records no units for this checkout');
+  for (const [root, wired] of [[aliased.root, { unitDirectory: aliasUnits }], [launcher.root, { unitDirectory: noUnits }]] as const) {
     const unrecorded = await readFile(settingsFile(root), 'utf8');
     const refusedCycle = cycle(config(root), { harness: wired });
     await routineRemedies(refusedCycle);
@@ -113,6 +122,25 @@ test('unit:harness-apply-checkout-resolution — the loop applies the harness co
     assert.equal(await readFile(settingsFile(root), 'utf8'), unrecorded, 'nothing is applied against a units-less checkout');
     assert.throws(() => harness.harnessApplyCheckout(root, wired), (error: unknown) => error instanceof harness.HarnessCheckoutRefusal && error.root === root && error.unit === null);
   }
+
+  // GY-1692 (GY-1666): the same units-less legacy alias, with the unit serving the loop detected and running it, is the
+  // evidence the refusal asked for: the loop records its own units and applies, instead of waiting on a person's master init.
+  const recording = cycle(config(aliased.root), { harness: { unitDirectory: aliasUnits, servingUnit: legacyLoopUnit } });
+  await routineRemedies(recording);
+  const recordedRow = recording.state.actions[key]!;
+  assert.equal(recordedRow.state, 'done', recordedRow.detail);
+  assert.ok(recordedRow.detail.startsWith(`Recorded this install's units (${legacyLoopUnit}, ${legacyInstallUnits.executorTemplate}) in ${aliased.root}/${installUnitsFile} from ${legacyLoopUnit}, the unit serving the loop, which runs it. `), recordedRow.detail);
+  assert.deepEqual(JSON.parse(await readFile(join(aliased.root, installUnitsFile), 'utf8')), legacyInstallUnits, 'the legacy alias is what the checkout records, as master init would');
+  assert.equal(await harnessDrift(aliased.root, masterHarness(aliased.root, config(aliased.root), 'claude')), null, 'and the contract is applied in the same cycle');
+  assert.equal(await harness.recordServingUnits(aliased.root, 'owner/project', { unitDirectory: aliasUnits, servingUnit: legacyLoopUnit }), null, 'a recorded checkout records nothing again');
+  // A per-install serving unit that runs the checkout records the per-install names; one whose name is not what the checkout would record, nothing.
+  const perInstall = await checkout('harness-per-install', false), perInstallUnitsDir = await temporaryDirectory('harness-per-install-units');
+  const perInstallMaster = perInstallUnits('owner/project').master;
+  assert.equal(await harness.recordServingUnits(perInstall.root, 'owner/project', { unitDirectory: perInstallUnitsDir, servingUnit: perInstallMaster }), null, 'a unit file that cannot be read proves nothing');
+  await writeFile(join(perInstallUnitsDir, 'graphyard-master-someone-else.service'), unitText(perInstall.root));
+  assert.equal(await harness.recordServingUnits(perInstall.root, 'owner/project', { unitDirectory: perInstallUnitsDir, servingUnit: 'graphyard-master-someone-else.service' }), null, 'a unit name the checkout would not record proves nothing');
+  await writeFile(join(perInstallUnitsDir, perInstallMaster), unitText(perInstall.root));
+  assert.deepEqual(await harness.recordServingUnits(perInstall.root, 'owner/project', { unitDirectory: perInstallUnitsDir, servingUnit: perInstallMaster }), perInstallUnits('owner/project'));
 
   // A units-less checkout that installed no Claude settings is refused all the same, naming it and master init; nothing is written.
   const bare = await temporaryDirectory('harness-bare');

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { GitHub, LANDABLE_CHECK, CHECK_NAME, processJob } from '../src/github.js';
 import { applyProtection, protectionPlan, requiredStatusChecks, conversationPayload } from '../src/protection.js';
 import type { Evidence, Observation, Work } from '../src/model.js';
+// Time-bomb allowance (GY-1694): the 2026-09-30T12:00Z at/now stamp the work, evidence and observation fixtures the GitHub harness reads; the one new Date() is the fake pool's clock for processJob, which judges the moved head.
 
 const at = '2026-09-30T12:00:00.000Z';
 const now = new Date(at);

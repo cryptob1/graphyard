@@ -21,6 +21,7 @@ import { defaultPromoteEveryMinutes, promotionCycle, promotionReads, promotionRe
 import type { MasterConfig } from '../src/master.js';
 import { promotionStateSchema, type PromotionState } from '../src/daemon/state.js';
 import { defaultDeliverySpeedTargets, deliverySpeed, deliverySpeedBreaches } from '../src/flow-analytics.js';
+// Time-bomb allowance (GY-1694): the 2026-10-01 instants are explicit `now` arguments to cut/promote/validate, already more than the 4 h UAT window in the past, so deployToUat's default new Date() never reads them as pending.
 
 const run = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 

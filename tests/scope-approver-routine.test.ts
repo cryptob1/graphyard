@@ -16,6 +16,7 @@ import { awaitScopeOutcome } from '../src/cli/session-commands.js';
 import { approveScopeRequest } from '../src/cli/master-status.js';
 import type { Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2031-03-01 instants are judged only by the pure scopeRoutineDecision against its explicit `now` of the same minute; Date.now() clocks the DB-backed items the engine stamped itself.
 
 // GY-176: an additive scope request the implication rule refuses and no review finding grounds
 // used to wait for a master to run `master scope`. The loop now requests a `requirements`

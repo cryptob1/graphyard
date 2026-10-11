@@ -10,7 +10,7 @@ import type { NextAction } from './next-action.js';
 import type { ActionQueue } from './actions.js';
 import type { AgentRequest } from './agent-requests.js';
 import type { SessionHandle } from './sessions.js';
-import { companionGround, itemDocumentationPaths, namedPaths, pathScope, pathScopeContains, plannedCompanions, plannedFilesMax, type ItemDocumentation, type ScopeDecision, type ScopeRequestState } from './scope.js';
+import { companionGround, itemDocumentationPaths, namedPaths, pathScopeContains, plannedFilesMax, type ItemDocumentation, type ScopeDecision, type ScopeRequestState } from './scope.js';
 import type { CapacityState } from './capacity.js';
 import type { HumanRequest } from './human-request.js';
 import type { ResearchRecord } from '../research.js';
@@ -21,7 +21,6 @@ import { proofSchema } from './proof.js';
 import { closedQuestionsSchema } from './closed-question.js';
 import { workOriginSchema, type WorkOrigin } from './interventions.js';
 import { demand } from './refusal.js';
-import { askGrounds } from './scope-collapse.js';
 
 export const CHECK_NAME = 'Graphyard / merge', LANDABLE_CHECK = 'graphyard/landable'; // GY-887: both are Graphyard's own, never CI inputs to the verdict
 export const stages = ['backlog', 'ready', 'build', 'review', 'test', 'acceptance', 'merge', 'done'] as const;
@@ -272,56 +271,7 @@ export function activeLease(work: Work, actor: Principal, epoch: number, now: Da
   demand(work.lease && work.lease.owner === actor.id && work.lease.epoch === epoch && Date.parse(work.lease.expiresAt) > now.getTime(), 'Lease missing, expired, or superseded; claim the task again');
 }
 
-// ---- plannedFiles derived from the criteria (GY-140) ---------------------------------------------
-
-interface CriterionText { id: string; text: string; proofs?: readonly string[] }
-const creationWords = /\b(new|creat\w*|add(?:s|ed|ing)?|introduc\w*)\b/i, testPath = /(^|\/)tests?\/|\.test\.[A-Za-z]+$/, sentences = (text: string) => text.split(/(?<=[.!?;])\s+/);
-/** True when the tree holds the planned scope: the file itself, or any file under a directory scope. */
-export function scopeExists(path: string, tree: ReadonlySet<string>) {
-  const scope = pathScope(path);
-  if (!scope.prefix && tree.has(scope.path)) return true;
-  const directory = scope.path.endsWith('/') ? scope.path : `${scope.path}/`;
-  for (const file of tree) if (file.startsWith(directory)) return true;
-  return false;
-}
-/**
- * The criterion that describes creating `path`, or null: a sentence naming the path beside a
- * creation word (new, create, add, introduce), or — for a test file — a criterion that requires a
- * test, since "a test asserts …" is a criterion describing the test it will be written in.
- */
-export function describedAsNew(path: string, criteria: readonly CriterionText[]) {
-  return criteria.find(c => sentences(c.text).some(s => creationWords.test(s) && namedPaths(s).some(n => pathScopeContains(n, path))) || testPath.test(path) && /\btests?\b/i.test(c.text))?.id ?? null;
-}
-export interface PlannedFilesDerivation {
-  plannedFiles: string[];
-  /** Files a criterion names that resolve in the tree and were not planned, with the criterion that named each. */
-  added: { path: string; criterion: string }[];
-  /** Planned paths the tree does not hold and no criterion describes creating: the item is refused naming them. */
-  missing: string[];
-}
-/**
- * plannedFiles as `master create` and `master requirements` record it: every planned path is
- * resolved against the tree of the base branch the item will be worked on, and every file a
- * criterion names that the tree holds is carried in. Only criteria are read — a path the description mentions in prose is not a requirement and adds nothing — and only exact files
- * are carried: a criterion naming a directory widens nothing on its own. So are a change's inevitable companions (GY-955, model/scope-companions.ts).
- */
-export function derivePlannedFiles(
-  item: { plannedFiles?: readonly string[]; criteria: readonly CriterionText[]; documentation?: ItemDocumentation | null; origin?: WorkOrigin | null; description?: string | null },
-  tree: ReadonlySet<string>, asked: readonly string[] = [], // the scopes an open ask grounds (askedScopes, GY-1676): planned though the tree lacks them
-): PlannedFilesDerivation {
-  const planned = [...new Set(item.plannedFiles ?? [])], added: PlannedFilesDerivation['added'] = [];
-  const missing = planned.filter(path => !scopeExists(path, tree) && !describedAsNew(path, item.criteria) && !askGrounds(path, asked));
-  for (const criterion of item.criteria) for (const path of namedPaths(criterion.text)) {
-    if (tree.has(path) && !planned.some(entry => pathScopeContains(entry, path)) && !added.some(entry => entry.path === path)) added.push({ path, criterion: criterion.id });
-  }
-  for (const entry of plannedCompanions({ plannedFiles: [...planned, ...added.map(entry => entry.path)], criteria: item.criteria, origin: item.origin, description: item.description }, tree, itemDocumentationPaths(item))) {
-    if (!added.some(entry2 => entry2.path === entry.path) && !planned.some(entry2 => pathScopeContains(entry2, entry.path))) added.push({ path: entry.path, criterion: entry.criterion ?? 'DOCS' });
-  }
-  return { plannedFiles: [...planned, ...added.map(entry => entry.path)], added, missing };
-}
-export function plannedFilesRefusal(missing: readonly string[], base: string) {
-  return `plannedFiles names ${missing.length === 1 ? 'a path' : 'paths'} that ${base} does not hold and no criterion describes creating: ${missing.join(', ')}. Correct the path, or state in a criterion that the item creates it`;
-}
+export { derivePlannedFiles, describedAsNew, plannedFilesRefusal, scopeExists, type PlannedFilesDerivation } from './planned-files.js';
 
 /**
  * GY-140 AC-3: per open item, every scope request — open, or the last one decided — whose paths a

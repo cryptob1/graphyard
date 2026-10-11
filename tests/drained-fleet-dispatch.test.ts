@@ -18,6 +18,7 @@ import type { ActionRow } from '../src/model/actions.js';
 import type { Work } from '../src/model.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2030-01-01T12:00Z observedAt is the clock handed to reclaimableAgent and runCycle; the new Date() dispatchWork calls stamp their own snapshot and a lease built from that same Date.now().
 
 // GY-1322: once every worker session had finished, each launch profile's name was still held by a
 // Herdr session reporting idle or done, profileHealth read every profile as unlaunchable, and both

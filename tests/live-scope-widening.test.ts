@@ -21,6 +21,7 @@ import { approveScopeRequest, scopeRequestAttention } from '../src/cli/master-st
 import { Store } from '../src/store.js';
 import { foldInterventions, readInterventionLedger } from '../src/interventions.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2030-01-03 clock is handed to every runCycle (() => at) over a 2030 snapshot; the Postgres half judges real-clock-stamped rows with Date.now(), and the 2026-10-05 row is folded at its own at.
 
 // GY-76: a purely additive plannedFiles widening applies to an item under an active lease
 // without ending the attempt, a worker asks for it through a scope request the master approves

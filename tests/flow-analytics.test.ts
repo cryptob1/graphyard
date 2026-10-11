@@ -24,6 +24,7 @@ import { groupOf } from '../web/groups.js';
 import type { Dashboard } from '../web/pages/dashboard.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { masterConfigSchema } from '../src/master/profiles.js';
+// Time-bomb allowance (GY-1694): the 2026-09/10 instants are calendar fixtures judged on the `to`, deliveryNow or now each case hands in; Date.now() drives only the database-backed cases, whose facts and windows are relative to it.
 
 const operator: Principal = { id: 'operator', role: 'admin' };
 const worker: Principal = { id: 'worker-a', role: 'worker' };

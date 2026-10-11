@@ -14,6 +14,7 @@ import { currentEvidence } from '../src/model.js';
 import { evidenceProves } from '../src/model/mechanical-proofs.js';
 import type { Principal, ScopeFile, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2000-01-01 attempt expiry is written to force a lapse that stays lapsed; Date.now() only sets request deadlines and evidence ages relative to the run.
 
 /**
  * D6 acceptance checks of the turnkey delivery roadmap, one test per check, named

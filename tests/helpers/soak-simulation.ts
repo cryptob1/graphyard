@@ -2295,7 +2295,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
       // The variables vanish from the deployment as the failing window opens (a service recreated by hand).
       if (!vanished && at() >= window.from) { vanished = true; for (const value of derived) delete deployed[value.name]; }
       provisionDay.actions.push({ at: at(), keys: Object.keys(state.actions).filter(key => key.includes('self-provision')) });
-      return loopSelfProvision(provisionRoot, { repository: config.repository }, { now: clock.now(), setup });
+      return loopSelfProvision(provisionRoot, { repository: config.repository, url: config.url }, { now: clock.now(), setup });
     };
   }
   if (options.staleRelease) {

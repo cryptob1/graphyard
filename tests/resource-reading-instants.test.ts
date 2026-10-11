@@ -9,6 +9,7 @@ import { resourceStatus } from '../src/master-status.js';
 import { classifyAttention } from '../src/model/fault-classes.js';
 import type { Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2026-10-08 snapshot, session and reflog instants are replayed against the explicit `now`/`clock` of the same snapshot; the one Date.now() case builds its own relative start and reflog.
 
 /**
  * GY-1547 (manual:fault-class-resources): three resources faults on 8 October 2026, none of them a

@@ -1,6 +1,7 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {GitHub, GitHubPermissionRefusal} from '../src/github.js';
+// Time-bomb allowance (GY-1694): the 2026-09-18 suspended_at is installation fixture data preflight reads for truthiness only; Date.now() sets token expiry and rate-limit resets relative to itself and checks blockedUntil on that clock.
 function client() {
   const github = new GitHub({ repository: 'fixture/repo', base: 'main', appId: 1, installationId: 2, privateKey: 'not-used' });
   Object.assign(github, { token: 'fixture-token', expires: Date.now() + 3600000 });

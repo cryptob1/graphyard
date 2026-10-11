@@ -13,6 +13,7 @@ import { mergeTimeline, pipelineSpeed, pipelineSpeedSummary, type PipelineTimeli
 import { backfillLimits, backfillPipelineTimelines, catchUpPipelineTimelines, pipelineBackfillState, resetPipelineBackfillState } from '../src/pipeline-backfill.js';
 import { readFlow } from '../src/flow-analytics.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2026-09-01 attempt instants are pure mergeTimeline inputs no clock judges; Date.now() stamps live DB deliveries and reads the summary/backfill at wall-clock-relative instants.
 
 const operator: Principal = { id: 'operator', role: 'admin' };
 const worker: Principal = { id: 'worker-a', role: 'worker' };

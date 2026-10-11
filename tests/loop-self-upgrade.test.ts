@@ -17,6 +17,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { releaseGuardedEffects, staleReleaseReason, type ReleaseGuard } from '../src/executor.js';
 import type { ActionRow } from '../src/model/actions.js';
 import type { ExecutorEffects } from '../src/auto-dispatch.js';
+// Time-bomb allowance (GY-1694): the 2030-01-01 clock is passed as now: () => clock to performSelfUpgrade/readResources and 2026-10-07 is releaseLag's explicit now; the Date.now() tests build their own relative fixtures.
 
 /**
  * GY-437: the loop and the executors upgrade themselves to the merged release. After every merge

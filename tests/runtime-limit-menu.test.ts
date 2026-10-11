@@ -14,6 +14,7 @@ import { detectRuntimeExhaustion } from '../src/master/environments.js';
 import { parseResetTime } from '../src/model/capacity.js';
 import type { Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2026-10-09 `now` is explicit and the Oct 10/12 resets carry no year, so parseResetTime rolls them forward past any real Date.now(); the integration cycle clocks from Date.now()+skew.
 
 // GY-1566: a Claude worker launched onto a spent account printed its limit notice and then its
 // usage-limit menu, and sat blocked on it for 32 minutes: Herdr reported the pane blocked, the

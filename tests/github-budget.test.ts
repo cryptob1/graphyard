@@ -10,6 +10,7 @@ import { server } from '../src/server/index.js';
 import { CHECK_NAME, GitHub, baseRefCycleMs, billableBudgetShare, observationThroughputStatus, processJob, protectionShareMs } from '../src/github.js';
 import type { Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2026-09-26 instants are the clock handed to github.clock and the charge ledger, plus PR created_at fixtures; Date.now() sets token expiry and rate-limit reset ahead of that clock and stamps rows.
 
 // GY-806: GitHub API use fits the rate limit. Each test is named for the proof it produces:
 // unit:github-immutable-cache, unit:github-shared-cycle-reads, unit:webhook-driven-observation,

@@ -8,6 +8,7 @@ import { observationThroughputStatus } from '../src/cli/master-status.js';
 import { observationClaim, observationFreshnessBounds, reviewCadenceCapMs, reviewObservationFreshnessMs } from '../src/observation-priority.js';
 import { simulateObservationScheduler } from '../src/observation-simulation.js';
 import { defaultDatabasePoolSize, defaultObservationConcurrency, observationCapacity, observationConcurrency } from '../src/server/main.js';
+// Time-bomb allowance (GY-1694): 2026-10-02T12:00 is the explicit `now` of the fleet fixtures and observationClaim, and the PR created_at is never aged; Date.now() seeds the github clock and rate-limit reset relative to itself.
 
 // GY-1114: unit:observation-priority-keeps-merge-and-review-fresh.
 

@@ -10,6 +10,7 @@ import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { evaluate, retiredQueueFields, type Principal, type Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2026-10-05 instant is the explicit `now` of evaluate() over a legacy queued item; new Date() only stamps queue rows the Postgres half writes and reads back.
 
 // GY-1236. GitHub merges each passing candidate directly, so Graphyard's own merge queue — its
 // speculative tips, batches, parallel-tip window, ejections and branch restores — is gone. An item

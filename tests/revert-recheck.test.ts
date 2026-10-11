@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { CHECK_NAME, GitHub } from '../src/github.js';
 import { evaluate, Refusal, type Observation, type Work } from '../src/model.js';
 import { buildMasterStatus } from '../src/master.js';
+// Time-bomb allowance (GY-1694): the 2026-09-20/21 instants are past PR, review and landing timestamps plus the fixed status `now`; evaluate's new Date() only judges gates of items whose timestamps all lie behind it.
 
 // GY-97. Each test is named for the proof it produces, so acceptance evidence maps to one
 // executed case per required proof: integration:deletion-by-stale-base,

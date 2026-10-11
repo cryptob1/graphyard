@@ -14,6 +14,7 @@ import { sessionRetry, sessionRetryBaseMs, sessionRetryLimit } from '../src/prod
 import { emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
 import { unansweredRequestAttention, unansweredRequestOwner } from '../src/cli/master-status.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2026-09-21 clock is the explicit now handed to reconcileReviews, runDispatchTick and sessionRetry; Date.now()-stamped ledger records are judged by attempt counts, not age.
 
 // Each test is named for the proof it produces: integration:dismissed-review-relaunches,
 // integration:dismissal-without-head-change, unit:unsatisfied-settled-request-visible and

@@ -15,6 +15,7 @@ import { dirtyCheckoutPaths, readCoordinatorCheckout } from '../src/master/profi
 import { checkoutRestoreGrantPath, checkoutRestoreRefPrefix, checkoutRestoreRequestPath, loopExecutorsRequestPath, loopRestartRequestPath, readCheckoutRestoreRequest } from '../src/cli/master-checkout-restore.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
+// Time-bomb allowance (GY-1694): the 2030-01-01 simulated clock is the loop's injected now and every request/journal instant derives from it; Date.now() only stamps watchdog notifications compared with each other for gaps.
 /**
  * GY-1658 under the real loop for two simulated days. The loop serves the host acts a confined
  * master identity requests — `master checkout-restore`, and the confined master's `master restart`

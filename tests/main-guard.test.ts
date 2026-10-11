@@ -9,6 +9,7 @@ import { mergeStep } from '../src/daemon/cycle-delivery.js';
 import { emptyDaemonState, pruneDaemonState, retainedActions } from '../src/daemon/state.js';
 import type { Cycle } from '../src/daemon/cycle.js';
 import type { MasterConfig } from '../src/master.js';
+// Time-bomb allowance (GY-1694): 2026-10-05T08:00 is the guard's explicit `now` in every runMainGuard/applyMainGuardRevert call; Date.now() only sets the stub installation token's expiry relative to itself.
 
 // GY-1250: under GitHub delivery a merge that breaks main is reverted through a revert pull request
 // the App merges, and its item is reopened; a revert that cannot merge is given up after one attempt.

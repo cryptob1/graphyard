@@ -15,6 +15,7 @@ import type { Cycle } from '../src/daemon/cycle.js';
 import type { RunOptions, RunResult, Runner } from '../src/runner/types.js';
 import type { Principal } from '../src/model.js';
 import { ChildProcessError } from '../src/child-runner.js';
+// Time-bomb allowance (GY-1694): the 2026-10-10T00:00Z daemon clock lies behind every goal stamped with new Date(), so no acceptanceStuckMs bound is crossed; the steps judge their own retries on that handed clock alone.
 
 // GY-1661 AC-1: a plan release or an acceptance draft the control plane (or GitHub) refuses outright,
 // for authority (401, 403), the current state (409) or the input (422), is never asked again every ten
