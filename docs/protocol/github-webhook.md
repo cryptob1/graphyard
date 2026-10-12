@@ -1,7 +1,7 @@
 <!-- page: Agent protocol | 5 | webhook, dispatch. -->
 # GitHub webhook
 
-`POST /api/github/webhook` verifies HMAC, deduplicates deliveries, wakes durable jobs for [observation](#reads-that-are-not-repeated); payloads never pass gates. Verified deliveries never 5xx: while readiness is false (startup/shutdown) or wake fails, return 202 with `ignored` (`startup validation` / `wake failed`), log why, write no receipt, leave polling/redelivery to cover the gap; auth/repository refusals stay 4xx/503.
+`POST /api/github/webhook` verifies HMAC, deduplicates deliveries, wakes durable jobs for [observation](#reads-that-are-not-repeated); payloads never pass gates. Verified deliveries never 5xx: those waking nothing return 202, logging `ignored` with delivery ID, event: `startup validation`/`wake failed` (no receipt; polling covers), `duplicate delivery`, `no subject`, `no open job`. Auth/repository refusals: 4xx/503.
 
 `POST /api/work/:id/reviewpolicy` (`admin`; `policy:review-provider`): `{"provider":"codex"|"github"|"agent","expectedPolicyRevision":1,"reason":…}`; `agent` needs ordered `reviewerProfiles` (`name`, `runtime`, `reviewerApp`; optional `mention`, `timeoutSeconds`).
 
