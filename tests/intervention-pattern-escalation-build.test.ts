@@ -15,7 +15,7 @@ import { docsHeadroom, docsTrimItem, docsTrimLatitude, docsWordBudgetOf } from '
 import { workerPushPermissions } from '../src/worker-credential.js';
 import { foldInterventions, readInterventionLedger, type InterventionLedgerRow } from '../src/interventions.js';
 import type { Principal, Work } from '../src/model.js';
-import { randomUUID } from 'node:crypto';
+import { createHmac, randomUUID } from 'node:crypto';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Engine } from '../src/engine.js';
 import { Store } from '../src/store.js';
@@ -24,7 +24,7 @@ import { postDeployChecks } from '../src/master-verification.js';
 import { server } from '../src/server.js';
 import { importAt } from './helpers/base-tree.js';
 // Time-bomb allowance (GY-1694): the 2026-10-07..09 instants are fixture clocks handed to foldInterventions, probeBlocker and sharedGithubStatus; Date.now() only clocks lease-less probes and anchors codex holds relative to itself.
-// GY-1726's 2026-10-11..13 and 2026-10-18 instants are fixture clocks handed to postDeployChecks and their expected windows; its defer cases read the database clock.
+// GY-1726's 2026-10-11..13 and 2026-10-18 instants are fixture clocks handed to postDeployChecks and their expected windows; its defer cases read the database clock; the report case projects its reading from Date.now() + 10 days, 4 days past the database-clocked criterion bound.
 
 // GY-1406 names this file for its proof: manual:intervention-pattern-escalation-build. Four
 // escalation interventions were needed at the build stage between 2026-09-30 and 2026-10-07, each a
@@ -399,15 +399,19 @@ async function candidateEngine() {
     work = await engine.execute(operator, 'ready', work.id, {}, randomUUID());
     return engine.execute(implementer, 'claim', work.id, {}, randomUUID());
   };
-  return { engine, now, claimed };
+  return { engine, store, now, claimed };
 }
 
 test('manual:intervention-pattern-escalation-build — a later defer never shortens the window; defer is refused for work owing no post-deploy observation, for a past instant and past its 30-day bound', async () => {
-  const { engine, now, claimed } = await candidateEngine();
+  const { engine, store, now, claimed } = await candidateEngine();
   const work = await claimed([followUpCriterion]), notBefore = new Date(await now() + 5 * day).toISOString();
   await engine.execute(implementer, 'defer', work.id, { epoch: work.epoch, notBefore, reason: 'the window has not elapsed' }, randomUUID());
-  const again = await engine.execute(implementer, 'claim', work.id, {}, randomUUID());
-  const shorter = await engine.execute(implementer, 'defer', work.id, { epoch: again.epoch, notBefore: new Date(await now() + day).toISOString(), reason: 'an earlier guess' }, randomUUID());
+  // GY-1735: the deferred window holds the claim itself, not only the loop's dispatch.
+  await assert.rejects(engine.execute(implementer, 'claim', work.id, {}, randomUUID()), /waits for its observation window/);
+  // A window recorded while an attempt holds the item (a filing's, say) is never shortened by that attempt's defer.
+  const again = await claimed([followUpCriterion]);
+  await store.pool.query(`UPDATE work_items SET document = jsonb_set(document, '{observationWindow}', $2::jsonb) WHERE id=$1`, [again.id, JSON.stringify({ notBefore, basis: 'criterion-window', detail: 'filed' })]);
+  const shorter = await engine.execute(implementer, 'defer', again.id, { epoch: again.epoch, notBefore: new Date(await now() + day).toISOString(), reason: 'an earlier guess' }, randomUUID());
   assert.equal(shorter.observationWindow?.notBefore, notBefore);
   const ordinary = await claimed([{ id: 'AC-1', text: 'Behaves', proofs: ['integration:behaves'] }]);
   await assert.rejects(engine.execute(implementer, 'defer', ordinary.id, { epoch: ordinary.epoch, notBefore: new Date(await now() + day).toISOString(), reason: 'not a follow-up' }, randomUUID()), /owes no post-deploy observation/);
@@ -534,4 +538,176 @@ test('manual:intervention-pattern-escalation-build — GY-1700 on the candidate:
   assert.match(refusal.error, /is held/, 'a second requirements decision is refused while the grounding one is held');
   const { settled } = await replay.submit();
   assert.deepEqual(settled, ['decision.applied']);
+});
+
+// GY-1735: three more escalations at the build stage between 2026-10-05 and 2026-10-12, each a worker's
+// `blocked` report. GY-1722 and GY-1725 are post-deploy follow-ups filed by the coordinator at 98070f3538,
+// a filer older than GY-1698 and GY-1727, so they carry no observation window. The loop at ccc0a31494
+// also predates the window hold and the defer prompt (GY-1726), so it dispatched each before its reading
+// could exist (07:35Z, then again at 15:58Z once each blocker was cleared), and each worker could only
+// block. The control plane is the one component a release keeps current, so it now derives the window
+// the filing owed from the delivered item the follow-up names, at create, ready and unblock, and refuses
+// the claim inside it. GY-1723 found GY-1700 AC-1 unobservable: a redelivered webhook that woke no job
+// answered a bare `accepted` with no logged reason. GY-1731 (85e22811b7, whose parent is `base`) removed
+// that by naming and logging the reason.
+//
+// The windows are taken relative to the database clock, as the engine reads it, so they hold whenever the suite runs.
+const base1735 = 'f793ad5ca171c395d5d2b68a223cf24529f43a37';
+const release1735 = 'ba607f8a809ed20fea15387e1934425cacbfef9f';
+const instances1735: Record<'GY-1722' | 'GY-1725', { parent: string; criterion: Work['criteria'][number]; mergedAgo: number; servedAgo: number | null; window: number; blocker: string }> = {
+  // GY-1692 AC-1: a rate per 7 days, counted from the merge.
+  'GY-1722': { parent: 'GY-1692', criterion: { id: 'AC-1', text: 'The cause of the recurring human-only decision interventions at the build stage is found and removed: the intervention report shows the human-only-decision rate at the build stage below 3 per 7 days after the change ships, and the linked instances could not recur', proofs: ['manual:post-deploy/intervention-pattern-human-only-decision-build'] },
+    mergedAgo: day, servedAgo: null, window: 7 * day,
+    blocker: 'AC-1 cannot be observed yet: it asks for the build-stage human-only-decision rate below 3 per 7 days after GY-1692 ships, and that window has not run.' },
+  // GY-1700 AC-3: 24 hours of live activity on the serving release, from its first observation.
+  'GY-1725': { parent: 'GY-1700', criterion: { id: 'AC-3', text: 'The github-budget attention row in graphyard master status clears when a delivery arrives and does not re-fire during 24h of live repository activity while at least one pull request is open.', proofs: ['manual:post-deploy/github-budget-attention-row-clears'] },
+    mergedAgo: 17 * 3_600_000, servedAgo: 8 * 3_600_000, window: 24 * 3_600_000,
+    blocker: 'The 24-hour observation window AC-1 requires cannot exist yet: release ba607f8a809e (carrying GY-1700\'s merge a14965e4ad9a) was recorded deployed and this item was dispatched minutes later.' },
+};
+/** The follow-up as 98070f3538's filer filed it: its marker naming the parent, criterion, proof and release, and no window. */
+function staleFiling(parent: Work, criterion: Work['criteria'][number]) {
+  const proof = criterion.proofs[0]!, name = proof.slice('manual:post-deploy/'.length);
+  return { title: `Post-deploy verification of ${parent.key} ${criterion.id} (${name}) on release ${release1735.slice(0, 12)}`, type: 'chore', priority: 1, dependencies: [parent.id],
+    description: `Post-deploy follow-up: post-deploy:${parent.id}:${criterion.id}:${proof}:${release1735}\n\n${parent.key} was delivered with ${criterion.id} declared a post-deploy verification (${proof}).\n\n${parent.key} ${criterion.id}: ${criterion.text}`,
+    criteria: [{ id: 'AC-1', text: `From this head against the serving release ${release1735.slice(0, 12)}: ${criterion.text}`, proofs: [`manual:${name}-on-serving-release`] }] };
+}
+/** One instance on one tree: the delivered parent as recorded, its follow-up filed as the stale filer filed it, released, and dispatched at once as the stale loop dispatched it. */
+async function replayFollowUp(tree: string | null, name: string, key: keyof typeof instances1735, configure?: (engine: Engine) => void) {
+  const instance = instances1735[key], { Engine, Store, interventions, dispatchable } = await plane(tree);
+  const store = await databaseFor(name, Store);
+  const engine = new Engine(store, [15368], 120, 'owner/escalation-build'); engine.submissionObserver = null; configure?.(engine);
+  const now = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).getTime(), iso = (ms: number) => new Date(ms).toISOString();
+  const parent = deliveredItem(instance.parent, instance.criterion, iso(now - instance.mergedAgo));
+  if (instance.servedAgo !== null) (parent.delivery as any).deployment = { sha: release1735, at: iso(now - instance.servedAgo), observedAt: iso(now - instance.servedAgo), covers: 'descendant', source: 'endpoint', mergeSha: parent.delivery!.mergeSha, observer: 'graphyard-master' };
+  await store.pool.query('INSERT INTO work_items(id,document) VALUES($1,$2)', [parent.id, JSON.stringify(parent)]);
+  let work = await engine.execute(operator, 'create', null, staleFiling(parent, instance.criterion), randomUUID()) as Work;
+  const filed = work.observationWindow ?? null;
+  work = await engine.execute(operator, 'ready', work.id, {}, randomUUID());
+  let refusal: string | null = null;
+  try {
+    work = await engine.execute(implementer, 'claim', work.id, {}, randomUUID());
+    // Claimed before its reading can exist, the worker the stale loop prompted could only block.
+    work = await engine.execute(implementer, 'blocked', work.id, { epoch: work.epoch, reason: instance.blocker }, randomUUID());
+  } catch (error) { refusal = error instanceof Error ? error.message : String(error); }
+  work = (await store.list()).find((item: Work) => item.id === work.id)! as Work;
+  const folded = interventions.foldInterventions((await interventions.readInterventionLedger(store.pool, { workId: work.id })).rows, [work], iso(now)).interventions;
+  return { store, engine, refusal, filed, work, notBefore: now - (instance.servedAgo ?? instance.mergedAgo) + instance.window, now,
+    escalations: folded.filter((entry: { kind: string }) => entry.kind === 'escalation').length, dispatchable: (at: number) => dispatchable(work, at) as boolean };
+}
+
+for (const key of ['GY-1722', 'GY-1725'] as const) {
+  test(`manual:intervention-pattern-escalation-build — ${key} against the base and the candidate: the base lets the stale loop claim an unwindowed follow-up whose reading cannot exist, so its worker escalates; the candidate derives the window the filing owed, refuses the claim inside it and escalates nothing`, { timeout: 300_000 }, async () => {
+    const onBase = await replayFollowUp(base1735, `${key.replace('-', '').toLowerCase()}_base`, key);
+    assert.equal(onBase.filed, null, 'the base keeps the filing window-less');
+    assert.equal(onBase.refusal, null, 'the base accepts the claim inside the window');
+    assert.equal(onBase.work.blocker, instances1735[key].blocker, 'so the worker blocks');
+    assert.equal(onBase.escalations, 1, 'and the blocker is an escalation: the instance reproduces');
+
+    const onCandidate = await replayFollowUp(null, `${key.replace('-', '').toLowerCase()}_candidate`, key), held = onCandidate.work;
+    assert.deepEqual([onCandidate.filed?.notBefore, onCandidate.filed?.basis], [new Date(onCandidate.notBefore).toISOString(), 'criterion-window'], 'create derives the window from the delivered parent');
+    assert.match(onCandidate.refusal ?? '', new RegExp(`waits for its observation window: the reading it owes can first exist at ${new Date(onCandidate.notBefore).toISOString()}`));
+    assert.deepEqual([held.blocker, held.lease, held.epoch], [null, null, 0], 'no attempt started and nothing was recorded against it');
+    assert.equal(onCandidate.escalations, 0, 'nothing escalates: the instance does not recur');
+    assert.equal(onCandidate.dispatchable(onCandidate.now), false, 'the loop holds it until the reading can exist');
+    assert.equal(onCandidate.dispatchable(onCandidate.notBefore + 60_000), true, 'and dispatches it once the instant passes');
+  });
+}
+
+test('manual:intervention-pattern-escalation-build — GY-1722 and GY-1725 as they stand: a follow-up already blocked without its window takes it when its blocker is cleared, so the next claim waits instead of starting an attempt that can only block again', { timeout: 300_000 }, async () => {
+  const { store, engine, work: filed, notBefore } = await replayFollowUp(null, 'gy1722_standing', 'GY-1722');
+  // As 98070f3538 left it after the first attempt: no window, and the worker's blocker.
+  await store.pool.query(`UPDATE work_items SET document = (document - 'observationWindow') || jsonb_build_object('blocker', $2::text) WHERE id=$1`, [filed.id, instances1735['GY-1722'].blocker]);
+  const unblocked = await engine.execute(operator, 'unblock', filed.id, { reason: 'the blocker names only the window' }, randomUUID()) as Work;
+  assert.equal(unblocked.blocker, null);
+  assert.equal(unblocked.observationWindow?.notBefore, new Date(notBefore).toISOString(), 'the unblock attaches the window the filing owed');
+  await assert.rejects(engine.execute(implementer, 'claim', filed.id, {}, randomUUID()), /waits for its observation window/);
+  // A window already recorded stands: a worker's later reading is never replaced by the derived one.
+  const later = new Date(notBefore + 2 * day).toISOString();
+  await store.pool.query(`UPDATE work_items SET document = jsonb_set(document, '{observationWindow}', $2::jsonb) WHERE id=$1`, [filed.id, JSON.stringify({ notBefore: later, basis: 'worker-reading', detail: 'later' })]);
+  await assert.rejects(engine.execute(implementer, 'claim', filed.id, {}, randomUUID()), new RegExp(`can first exist at ${later}`));
+  // Any other item is untouched: an ordinary chore is claimed at once.
+  let ordinary = await engine.execute(operator, 'create', null, { title: 'Ordinary chore', type: 'chore', criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:behaves'] }] }, randomUUID()) as Work;
+  ordinary = await engine.execute(operator, 'ready', ordinary.id, {}, randomUUID());
+  assert.equal(ordinary.observationWindow, undefined);
+  assert.equal((await engine.execute(implementer, 'claim', ordinary.id, {}, randomUUID()) as Work).epoch, 1);
+});
+
+test('manual:intervention-pattern-escalation-build — GY-1725 as it stands, already ready without its window: the refused claim still records the derived window, so the loop holds the item instead of dispatching refused claims through the whole window', { timeout: 300_000 }, async () => {
+  const { store, engine, work: filed, notBefore, now } = await replayFollowUp(null, 'gy1725_ready', 'GY-1725');
+  const { dispatchable } = await plane(null);
+  // As 98070f3538 left it: ready, unblocked and window-less, so no ready or unblock command will derive the window.
+  await store.pool.query(`UPDATE work_items SET document = document - 'observationWindow' WHERE id=$1`, [filed.id]);
+  const stripped = (await store.list()).find((item: Work) => item.id === filed.id)! as Work;
+  assert.deepEqual([stripped.ready, stripped.blocker, stripped.observationWindow], [true, null, undefined]);
+  assert.equal(dispatchable(stripped, now), true, 'the stale document reads as dispatchable');
+  // A claim the control plane rejects before judging it writes nothing: neither a caller without claim
+  // authority nor a key already answered for another command may record the window or its history.
+  const history = async () => (await store.pool.query('SELECT count(*)::int AS n FROM events WHERE work_id=$1', [filed.id])).rows[0].n as number;
+  const events = await history();
+  await assert.rejects(engine.execute({ id: 'reader', role: 'reader', sessionKind: 'ai' }, 'claim', filed.id, {}, randomUUID()), /Worker permission required/);
+  const reused = randomUUID();
+  await store.pool.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [implementer.id, reused, 'another-command', JSON.stringify(stripped)]);
+  await assert.rejects(engine.execute(implementer, 'claim', filed.id, {}, reused), /Idempotency key reused with different input/);
+  const untouched = (await store.list()).find((item: Work) => item.id === filed.id)! as Work;
+  assert.deepEqual([untouched.observationWindow, await history()], [undefined, events], 'a rejected claim leaves the item and its history unchanged');
+  await assert.rejects(engine.execute(implementer, 'claim', filed.id, {}, randomUUID()), /waits for its observation window/);
+  const held = (await store.list()).find((item: Work) => item.id === filed.id)! as Work;
+  assert.equal(held.observationWindow?.notBefore, new Date(notBefore).toISOString(), 'the refused claim persisted the window it derived');
+  assert.deepEqual([held.lease, held.epoch], [null, 0], 'and started no attempt');
+  assert.equal(dispatchable(held, now), false, 'so the loop holds it inside the window');
+  assert.equal(dispatchable(held, notBefore + 60_000), true, 'and dispatches it once the reading can exist');
+});
+
+test('manual:intervention-pattern-escalation-build — GY-1722 when the intervention report projects its reading later than the merge-based bound: the derived window is the report\'s, so the follow-up is held until the reading can exist, not released at merge plus 7 days', { timeout: 300_000 }, async () => {
+  // The report projects the build-stage human-only-decision streak to begin 10 days from now; the criterion's own bound is the merge plus 7 days, 6 days from now.
+  const asked: unknown[] = [];
+  let projected = '';
+  const { store, engine, work: filed, filed: window, refusal, notBefore, now } = await replayFollowUp(null, 'gy1722_report', 'GY-1722', engine => {
+    engine.followUpPatterns = async pattern => { asked.push(pattern); return { since: null, projected }; };
+    projected = new Date(Date.now() + 10 * day).toISOString();
+  });
+  const { dispatchable } = await plane(null);
+  assert.deepEqual(asked[0], { kind: 'human-only-decision', stage: 'build' }, 'the report is read for the proof\'s pattern');
+  assert.ok(Date.parse(projected) > notBefore, 'the report bound is the later one');
+  assert.deepEqual([window?.notBefore, window?.basis], [projected, 'intervention-report'], 'create persists the report\'s bound, not the criterion\'s');
+  assert.match(refusal ?? '', new RegExp(`can first exist at ${projected}`));
+  assert.equal(dispatchable(filed, notBefore + 60_000), false, 'past the criterion bound the follow-up is still held');
+  assert.equal(dispatchable(filed, Date.parse(projected) + 60_000), true, 'and is dispatched once the report bound passes');
+  // A follow-up already ready without its window: the refused claim records the report's bound too.
+  await store.pool.query(`UPDATE work_items SET document = document - 'observationWindow' WHERE id=$1`, [filed.id]);
+  await assert.rejects(engine.execute(implementer, 'claim', filed.id, {}, randomUUID()), new RegExp(`can first exist at ${projected}`));
+  const held = (await store.list()).find((item: Work) => item.id === filed.id)! as Work;
+  assert.deepEqual([held.observationWindow?.notBefore, held.lease, dispatchable(held, notBefore + 60_000), dispatchable(held, now)], [projected, null, false, false]);
+});
+
+/** GY-1723's redelivery as recorded: a check_run naming only a delivered item's pull request, whose job is gone. */
+async function replay1723(tree: string | null, name: string) {
+  const { Engine, Store, server: serve } = await plane(tree);
+  const store = await databaseFor(name, Store);
+  const engine = new Engine(store, [15368], 120, 'owner/project'); engine.submissionObserver = null;
+  const secret = 'gy1723-webhook-secret';
+  process.env.GITHUB_WEBHOOK_SECRET = secret;
+  const http = serve(engine, [{ ...operator, token: 'o'.repeat(32) }], { config: { repository: 'owner/project', appId: 1234, installationId: 1, base: 'main' } } as never); servers.push(http);
+  await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
+  const raw = JSON.stringify({ repository: { full_name: 'owner/project' }, check_run: { head_sha: 'e'.repeat(40), pull_requests: [{ number: 1146 }], app: { id: -1 } } });
+  const delivery = randomUUID(), logged: string[] = [], original = console.error;
+  console.error = (...args: unknown[]) => { logged.push(args.map(String).join(' ')); };
+  try {
+    const response = await fetch(`http://127.0.0.1:${(http.address() as { port: number }).port}/api/github/webhook`, { method: 'POST', body: raw,
+      headers: { 'Content-Type': 'application/json', 'X-GitHub-Delivery': delivery, 'X-GitHub-Event': 'check_run', 'X-Hub-Signature-256': `sha256=${createHmac('sha256', secret).update(raw).digest('hex')}` } });
+    return { status: response.status, body: await response.json() as { accepted: boolean; ignored?: string }, logged: logged.filter(line => line.includes(delivery)) };
+  } finally { console.error = original; }
+}
+
+test('manual:intervention-pattern-escalation-build — GY-1723 against the base and the candidate: the base answers a redelivery that wakes no job with a bare accepted and logs nothing, so AC-1 could not be observed; the candidate names and logs why it was ignored', { timeout: 300_000 }, async () => {
+  const onBase = await replay1723(base, 'gy1723_base');
+  assert.equal(onBase.status, 202);
+  assert.deepEqual(onBase.body, { accepted: true }, 'no ignored reason is returned');
+  assert.deepEqual(onBase.logged, [], 'and none is logged: the instance reproduces');
+
+  const onCandidate = await replay1723(null, 'gy1723_candidate');
+  assert.equal(onCandidate.status, 202);
+  assert.deepEqual(onCandidate.body, { accepted: true, ignored: 'no open job' });
+  assert.equal(onCandidate.logged.length, 1, 'the reason is logged with the delivery ID');
+  assert.match(onCandidate.logged[0]!, /\(check_run\) accepted without wake: no open job$/);
 });

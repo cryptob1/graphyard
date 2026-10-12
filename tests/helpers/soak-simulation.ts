@@ -304,8 +304,9 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
    * the day files its follow-up exactly as master verify-deployment does (filePostDeployFollowUps over
    * the day's items, the report's projection read for the pattern), releases the one it files at once,
    * and samples the loop's view of it after every cycle (observationWindowDay). GY-1726: `unwindowed`
-   * files it without its window, as releases before GY-1698 did (GY-1689, GY-1721, GY-1724), and the
-   * worker of its first attempt finds the reading cannot exist yet and defers it to that instant.
+   * files it without its window, as releases before GY-1698 did (GY-1689, GY-1721, GY-1724); since
+   * GY-1735 the control plane derives the window the filing owed it at create, and a worker dispatched
+   * to it without one would find the reading cannot exist yet and defer it to that instant.
    * GY-1732: `staleCoordinator` files through verifyDeployment itself, from a coordinator checkout behind
    * the serving release whose own filer predates observation windows (it files window-less, as
    * 98070f3538 filed GY-1721..GY-1725); the served release's isolated checkout carries the current filer.
@@ -3200,7 +3201,8 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
           // GY-1726: an older release's filing carried no window.
           const { observationWindow: _window, ...unwindowed } = input as Work;
           const filed = await engine.execute(principals.operator, 'create', null, options.observationWindow!.unwindowed ? unwindowed as typeof input : input, key) as Work;
-          assert.ok(options.observationWindow!.unwindowed ? !filed.observationWindow : filed.observationWindow, `create must persist what was filed: ${JSON.stringify(filed.observationWindow)}`);
+          // GY-1735: a filing without its window takes the one the control plane derives from the parent's own criterion.
+          assert.ok(options.observationWindow!.unwindowed ? filed.observationWindow?.basis === 'criterion-window' : filed.observationWindow, `create must persist what was filed, or derive what it owed: ${JSON.stringify(filed.observationWindow)}`);
           windowDay.created.push(filed.key); return filed;
         };
         const patterns = async () => ({ since: null, projected });
