@@ -31,7 +31,7 @@ Node 24, `OWNER/REPO` checkout, `export GRAPHYARD_CLI=/abs/path/graphyard/bin/gr
 node "$GRAPHYARD_CLI" install --provider PROVIDER --repo OWNER/REPO --plan
 ```
 
-`--workers N`, `--producer-proof NAME`, `--required-check NAME` ([`init --scan`](operations-reference.md#setup-proposals-and-drift)); `delivery`, `release.*` plan [candidates](delivery.md#managed-repositories). **Verify** `secretsRedacted`, `preflight[].ok` (else `fix`; `fix` starting `HUMAN:` is the human's); human approves plan, `drift`. `Branch protection` fails on free-plan private repositories. A `graphyard` plugin bound elsewhere fails `Herdr plugin` until `--herdr-instance`, `--herdr-rebind` or `--no-herdr`. `--no-github-app` (not with `--target`, `--github-app`, `--reuse-app`, `--reviewer`): no App, `GITHUB_APP_*` unset, `/api/status.github` false; a bound App or Railway/local leftovers refuse. `up --merger control-plane` runs `install --no-github-app`, then deploy-key, `POST /api/merger`. `up` prints Herdr's attach command (`XDG_CONFIG_HOME=DIR herdr session attach NAME`). Own-instance session `graphyard-INSTALL` (`gy-HASH` session, then directory, within 107 socket-path bytes; else refused). No `--base-branch`: `master` if only `origin/master` exists. `compose` mounts the checkout at `/repo` (`GRAPHYARD_REPOSITORY_ROOT`) plus a worktree's Git directory; merger `control-plane` (App or not) observes heads there, reviews control-plane.
+`--workers N`, `--producer-proof NAME`, `--required-check NAME` ([`init --scan`](operations-reference.md#setup-proposals-and-drift)); `delivery`, `release.*` plan [candidates](delivery.md#managed-repositories). **Verify** `secretsRedacted`, `preflight[].ok` (else `fix`; `fix` starting `HUMAN:` is the human's); human approves plan, `drift`. `Branch protection` fails on free-plan private repositories. A `graphyard` plugin bound elsewhere fails `Herdr plugin` until `--herdr-instance`, `--herdr-rebind` or `--no-herdr`. `--no-github-app` (not with `--target`, `--github-app`, `--reuse-app`, `--reviewer`): no App, `GITHUB_APP_*` unset, `/api/status.github` false; a bound App or Railway/local leftovers refuse. `up --merger control-plane` runs `install --no-github-app`, then deploy-key (each-run ruleset: key-only pushes; other read-write keys refuse; prior protection kept, reported), `POST /api/merger`. `up` prints Herdr's attach command (`XDG_CONFIG_HOME=DIR herdr session attach NAME`). Own-instance session `graphyard-INSTALL` (`gy-HASH` session, then directory, within 107 socket-path bytes; else refused). No `--base-branch`: `master` if only `origin/master` exists. `compose` mounts the checkout at `/repo` (`GRAPHYARD_REPOSITORY_ROOT`) plus a worktree's Git directory; merger `control-plane` (App or not) observes heads there, reviews control-plane.
 
 ## Step 2: apply
 
@@ -39,11 +39,11 @@ node "$GRAPHYARD_CLI" install --provider PROVIDER --repo OWNER/REPO --plan
 node "$GRAPHYARD_CLI" install --provider PROVIDER --repo OWNER/REPO --apply
 ```
 
-Writes credentials, [variables](deployment.md#variables); deploys; [protects](github.md#require-the-check) branch (not with `--no-github-app`). **Verify** `GET /healthz`.
+Writes credentials, [variables](deployment.md#variables); deploys; [protects](github.md#require-the-check) branch (not with `--no-github-app`). **Verify** `/healthz`.
 
 ## Step 3: App confirmation
 
-Skip with `--no-github-app`. Else `--apply` serves `http://127.0.0.1:4311` (no browser) 900 s; the human installs the App (one installed elsewhere counts). **Verify** *App registered and installation verified*. Unconfirmed: exit 1; rerun `resume`.
+Skip with `--no-github-app`; else `--apply` serves `http://127.0.0.1:4311` (no browser) 900 s; the human installs the App (any existing install counts). **Verify** *App registered and installation verified*; unconfirmed: exit 1, rerun `resume`.
 
 ## Step 4: summary
 
@@ -55,9 +55,9 @@ Skip with `--no-github-app` until an App binds; else dispatch a [small item](onb
 
 ## Self-contained host
 
-`--target host --ssh-host HOST` (or `--target hetzner`): server, Postgres, loop, executors, Herdr, runtimes on one systemd machine; credentials in `~graphyard/.config/graphyard/<install>/`. Public IPv4 serves `<ip>.sslip.io`; private/`--local` needs `--domain`. Unpullable images build there at the installer's commit. Workers push and open PRs as the App (one-hour tokens).
+`--target host --ssh-host HOST` (or `--target hetzner`): server, Postgres, loop, executors, Herdr, runtimes on one systemd machine; credentials in `~graphyard/.config/graphyard/<install>/`. Public IPv4 serves `<ip>.sslip.io`; else `--domain`. Unpullable images build there at the installer's commit. Workers push, open PRs as the App (one-hour tokens).
 
-Price consent: `--confirm-price`, `--max-monthly`. Saved Apps (`--github-app FILE`, this install's, `.graphyard/github-app.json`) are reused once they mint a token; `--reuse-app SLUG` (or the App page) reuses the account's host-saved App. `--migrate` stops the loop, fences `GRAPHYARD_MIGRATE_DATABASE_URL` (`db fence`), restores; logins move.
+Price: `--confirm-price`, `--max-monthly`. Saved Apps (`--github-app FILE`, this install's, `.graphyard/github-app.json`) are reused if they mint a token; `--reuse-app SLUG` (or the App page) reuses the account's host-saved App. `--migrate` stops the loop, fences `GRAPHYARD_MIGRATE_DATABASE_URL` (`db fence`), restores; logins move.
 
 ## Upgrading an existing installation
 
@@ -71,10 +71,10 @@ Price consent: `--confirm-price`, `--max-monthly`. Saved Apps (`--github-app FIL
 | `Railway workspace` `false` | a listed `--workspace`
 | `did not become healthy` | `install --provider PROVIDER --repo OWNER/REPO --logs`
 | `was not confirmed within 900 s` | summary's `resume` once confirmed
-| `already serves a GitHub App setup page` | finish or stop it
-| `webhook.delivered` `false`, 401 | rerun (rewrites secrets)
+| `already serves a GitHub App setup page` | finish/stop it
+| `webhook.delivered` `false`, 401 | rerun
 | `Branch protection could not be applied` | admin `gh auth login`
-| `already binds` / `still holds GITHUB_APP_` / `could not be read` | remove the binding or variables, or drop `--no-github-app`
+| `already binds` / `still holds GITHUB_APP_` / `could not be read` | remove binding or variables, or drop `--no-github-app`
 | `Refusing to store installation credentials inside the managed repository` | `GRAPHYARD_CONFIG_HOME` outside worktrees
 
 ## Agent execution contract
