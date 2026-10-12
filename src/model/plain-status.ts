@@ -87,16 +87,33 @@ const routineCause: Partial<Record<BlockerClass, string>> = {
 const instant = /\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})/g;
 const notBeforeWords = /not[- ]before|until|window|first exist|can(?:not|'t)? (?:yet )?exist|earliest|too early|wait/i;
 const itemWait = /\b(?:[Ww]ait(?:s|ing)?\s+(?:on|for)|[Dd]epends\s+on|[Bb]locked\s+(?:on|by)|[Uu]ntil|[Aa]fter)\s+(?:\w+\s+){0,2}?((?!AC-)[A-Z][A-Z0-9]*-\d+)\b/;
-/** A local date and time, as the reader's browser writes it. */
-export const localInstant = (at: number) => new Date(at).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
-export function blockerSummary(text: string, now: number, work?: Pick<Work, 'key' | 'blocker' | 'humanRequest' | 'blockerProbe' | 'plannedFiles' | 'criteria' | 'observationWindow'>): { sentence: string; kind: BlockerKind } {
+/**
+ * The not-before instants a reason names: only an instant its own clause introduces with a wait word
+ * (`not before X`, `window opens … X`), never every timestamp in the text — a recorded retry or
+ * observation time is not the deadline. A reason naming several reads as its latest.
+ */
+export function notBeforeInstants(text: string): number[] {
+  let from = 0;
+  return [...text.matchAll(instant)].flatMap(m => {
+    // The words since the previous instant and the last clause break, at most 48 characters back.
+    const clause = text.slice(Math.max(from, m.index! - 48), m.index).split(/[;,!?]|\.\s/).pop()!;
+    from = m.index! + m[0].length;
+    return notBeforeWords.test(clause) ? [Date.parse(m[0])] : [];
+  });
+}
+/**
+ * A date and time with its zone, so the words identify the instant wherever they are read: the
+ * browser writes it in the reader's own zone; a server answer (`GET /api/board`) passes `UTC`.
+ */
+export const localInstant = (at: number, timeZone?: string) => new Date(at).toLocaleString(undefined, { year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short', ...(timeZone ? { timeZone } : {}) });
+export function blockerSummary(text: string, now: number, work?: Pick<Work, 'key' | 'blocker' | 'humanRequest' | 'blockerProbe' | 'plannedFiles' | 'criteria' | 'observationWindow'>, timeZone?: string): { sentence: string; kind: BlockerKind; until?: string } {
   const human = !!work?.humanRequest && !work.humanRequest.answer;
   const classified = classifyBlocker(text, { humanRequest: human });
   const named = (pattern: RegExp) => text.match(pattern)?.[1];
   if (classified.class === 'human-only') { const on = named(/\b((?!AC-)[A-Z][A-Z0-9]*-\d+)\b/); return { sentence: `Waiting on a human answer${on && on !== work?.key ? ` to ${on}` : ''}; only you can clear it.`, kind: 'human' }; }
   const window = work ? observationWindowHold(work as Work, new Date(now)) : null;
-  const future = [...(notBeforeWords.test(text) ? text.match(instant) ?? [] : []), ...(window ? [window.notBefore] : [])].map(at => Date.parse(at)).filter(at => at > now);
-  if (future.length) return { sentence: `Waiting until ${localInstant(Math.min(...future))}; nothing is broken, and the master agent lifts the hold once that time passes.`, kind: 'waiting-until' };
+  const future = [...notBeforeInstants(text), ...(window ? [Date.parse(window.notBefore)] : [])].filter(at => at > now);
+  if (future.length) { const until = Math.max(...future); return { sentence: `Waiting until ${localInstant(until, timeZone)}; nothing is broken, and the master agent lifts the hold once that time passes.`, kind: 'waiting-until', until: new Date(until).toISOString() }; }
   const other = named(itemWait);
   if (other && other !== work?.key) return { sentence: `Waiting on ${other}; the master agent clears it once that item is done.`, kind: 'item' };
   const view = work?.blocker === text ? blockerView(work) : null;

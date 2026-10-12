@@ -313,21 +313,33 @@ test('unit:board-blocked-row-waiting-until — a blocker naming a future not-bef
   const { work, item } = blockedScenario(blocker);
   const board = await served(work);
   const summary = entry(board, item.key).blocker!.summary;
-  assert.equal(summary, `Waiting until ${plain.localInstant(Date.parse(notBefore))}; nothing is broken, and the master agent lifts the hold once that time passes.`);
+  // The server writes the time in UTC, naming the zone, and serves the instant itself for a reader in another zone.
+  assert.equal(summary, `Waiting until ${plain.localInstant(Date.parse(notBefore), 'UTC')}; nothing is broken, and the master agent lifts the hold once that time passes.`);
+  assert.match(summary, /UTC/);
+  assert.equal(entry(board, item.key).blocker!.until, notBefore);
   assert.ok(summary.split(/\s+/).length <= 25, summary);
   assert.doesNotMatch(summary, /fault|problem|fix/i);
   // The recorded blocker stays until the master lifts it, so the sentence names the same clearer the board's actor does.
   assert.equal(entry(board, item.key).who, 'Master agent');
-  assert.ok(visible(rowOf(page(work, board), item.key)).includes(summary));
+  // The browser writes the same instant in the reader's own zone, with the zone named.
+  const local = `Waiting until ${plain.localInstant(Date.parse(notBefore))}; nothing is broken, and the master agent lifts the hold once that time passes.`;
+  assert.equal(plain.blockerSummary(blocker, NOW).sentence, local);
+  for (const timeZone of ['America/Los_Angeles', 'Asia/Kolkata']) assert.notEqual(plain.localInstant(Date.parse(notBefore), timeZone), plain.localInstant(Date.parse(notBefore), 'UTC'), timeZone);
+  assert.ok(visible(rowOf(page(work, board), item.key)).includes(local));
   // With no next action the item is otherwise a stalled card: the wait still reads as the row's only sentence, never as a fault.
   const idle = work.map(entry => entry.id === item.id ? { ...entry, nextAction: null } as Work : entry);
   const idleBoard = await served(idle);
   const line = visible(rowOf(page(idle, idleBoard), item.key));
-  assert.ok(line.includes(entry(idleBoard, item.key).blocker!.summary), line);
+  assert.ok(line.includes(local), line);
   assert.doesNotMatch(line, /Nothing is happening|stuck at|nothing to do next/, line);
   // An instant already past is no wait: the block reads as the fault it is.
   const past = plain.blockerSummary(blocker.replace(notBefore, at(-60 * minute)), NOW).sentence;
   assert.doesNotMatch(past, /^Waiting until/);
+  // Only the instant a wait word introduces is the deadline: an earlier retry or observation time in the same reason is not.
+  const retry = at(30 * minute), observed = at(-30 * minute), later = at(9 * 60 * minute);
+  const noisy = `Waiting for the 24h window: last observed ${observed}, next retry at ${retry}; not before ${notBefore}. Rechecked ${later}.`;
+  assert.equal(plain.blockerSummary(noisy, NOW).until, notBefore, plain.blockerSummary(noisy, NOW).sentence);
+  assert.equal(plain.blockerSummary(`Retry at ${retry}; the build failed`, NOW).kind === 'waiting-until', false);
   // The item's own observation window counts the same way.
   assert.match(plain.blockerSummary('Deferred.', NOW, { ...item, blocker: 'Deferred.', observationWindow: { notBefore, detail: '24h after deploy' } as Work['observationWindow'] }).sentence, /^Waiting until /);
 });
