@@ -13,7 +13,7 @@ Keep cycling: `master status`; `master run` dispatches (`schedule.order`); merge
 
 ### System-driven items
 
-Unless created `"systemDriven": false`, items refuse hand `dispatch`, `merge`, `review`, `decide attest|merge`, loop-owned `decide rework` (`--precedent` answers refusals), except stopped-loop recovery, unproduced `manual:` attestations, `decide merge` unauthorized or operator-agent-less. The loop attests unproduced `manual:` proofs via an independent approver once per head, base, policy revision (`loopDecisions.attestations`). Refused review (or other-check) reworks never hold back a same-head failed-check rework.
+Unless created `"systemDriven": false`, items refuse hand `dispatch`, `merge`, `review`, `decide attest|merge`, loop-owned `decide rework` (`--precedent` answers refusals), except stopped-loop recovery, unproduced `manual:` attestations, `decide merge` unauthorized or operator-agent-less. The loop attests unproduced `manual:` proofs via an independent approver once per head, base, policy revision (`loopDecisions.attestations`). Refused review (or other-check) reworks never hold a same-head failed-check rework.
 
 ### Session liveness is reconciled, not trusted
 
@@ -29,7 +29,7 @@ Per cycle (`daemon.invariants.lines`): `follow-ups-per-parent` (1 open), `linger
 
 ## Research and diagnosis
 
-`Recurring <class>` and `invariant:` faults past `invariantBoundMinutes` get a diagnostician (`run.diagnostician`; none for parks); fix `plannedFiles` as `master create`; quota refusals wait until `retryAt` (`daemon.diagnoses`); `stale`/`withdrawn` decisions, stale backlog releases: re-requested ≤3×, then escalated (`decision-stale`); raced, delivered, [plane-wide](operations.md#incident-decision-tree) requests retry faultless; refused create 400; standing close 409 settles (GY-1713); overlong/`limit-wait` (GY-1705); no `loop` fault for restart-lost diagnoses, approver refusals, nor `merge` for base conflicts <30m.
+`Recurring <class>` and `invariant:` faults past `invariantBoundMinutes` get diagnostician (`run.diagnostician`; none for parks); fix `plannedFiles` as `master create`; quota refusals wait `retryAt` (`daemon.diagnoses`); `stale`/`withdrawn` decisions, stale backlog releases: re-requested ≤3×, then escalated (`decision-stale`); raced/delivered, [plane-wide](operations.md#incident-decision-tree) requests retry faultless; refused `create` 409/400 is `fix-item`; matching close 409 adopted, mismatched held (GY-1713); overlong/`limit-wait` (GY-1705); no `loop` fault for restart-lost diagnoses, approver refusals, nor `merge` for base conflicts <30m.
 
 ## Machine-filed backlog
 
