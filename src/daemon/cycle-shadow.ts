@@ -217,18 +217,20 @@ export async function shadowStep(cycle: Cycle) {
   // GY-1748: under the control-plane merger a disagreement is history, recorded in the cursor and raising no line.
   const previousMode = knownMerger.get(state);
   let controlPlane = previousMode === 'control-plane';
-  try { const mode = await effects.mergeWriter?.merger(); if (mode) { knownMerger.set(state, mode); controlPlane = mode === 'control-plane'; } } catch { /* keeps the mode last read */ }
+  // A state that has never read the merger successfully (a restart whose first read fails) raises no line: the mode is unknown, and a line under the control-plane merger is the defect.
+  let modeKnown = previousMode !== undefined;
+  try { const mode = await effects.mergeWriter?.merger(); if (mode) { knownMerger.set(state, mode); modeKnown = true; controlPlane = mode === 'control-plane'; } } catch { /* keeps the mode last read */ }
   // The cycle the merger returns to github re-examines every disagreement, so one first recorded under the control-plane merger gains its line.
   // A freshly loaded state (a daemon restart) owes the same examination: its persisted verdicts are unchanged and no action stands for them.
   if (controlPlane) reexamined.delete(state);
-  const returned = !controlPlane && !reexamined.has(state);
+  const returned = modeKnown && !controlPlane && !reexamined.has(state);
   for (const [index, verdict] of judged.entries()) {
     const current = state.shadow[index]!;
     const moved = verdict.outcome !== current.outcome;
     if (moved || verdict.delivered?.mergeSha !== current.delivered?.mergeSha) { state.shadow[index] = verdict; changed = true; }
     if (!moved && !returned) continue;
     const key = shadowAttentionKey(verdict.key);
-    if (!controlPlane && shadowDisagreement(verdict.outcome) && !shadowPairExplained(verdict, explanations) && !state.actions[key]) {
+    if (modeKnown && !controlPlane && shadowDisagreement(verdict.outcome) && !shadowPairExplained(verdict, explanations) && !state.actions[key]) {
       performed.push(storeAction(state, key, { kind: 'escalation', work: verdict.key, principal: null, state: 'done', detail: shadowDisagreementDetail(verdict), attempts: 1, epoch: null, cycle: state.cycle, at: new Date(now()).toISOString() }, null));
     }
   }

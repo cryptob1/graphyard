@@ -40,7 +40,7 @@ const git = ((command: string, args: string[]) => {
 }) as never;
 
 test('unit:soak-shadow-attention-switches — shadow attention stays bounded and is cleared and re-raised correctly through merger mode changes and explanation-read failures', { timeout: 120_000 }, async () => {
-  let mode: MergerMode = 'github', explainRead: 'fails' | 'none' | 'all' = 'none', merged = false;
+  let mode: MergerMode = 'github', explainRead: 'fails' | 'none' | 'all' = 'none', merged = false, mergerDown = false;
   const reads = shadowReads(config, '/coordinator', git, { base: '/w', record: async () => {},
     explanations: async pairs => {
       if (explainRead === 'fails') throw new Error('explanations endpoint down');
@@ -52,7 +52,7 @@ test('unit:soak-shadow-attention-switches — shadow attention stays bounded and
     closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at, reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async () => {}, requestSmoke: () => {}, decisions: async () => ({ decisions: [] }), persist: async () => {},
-    github: githubDouble, merge: githubDouble, shadow: reads, mergeWriter: { merger: async () => mode } } as unknown as DaemonEffects;
+    github: githubDouble, merge: githubDouble, shadow: reads, mergeWriter: { merger: async () => { if (mergerDown) throw new Error('merger read down'); return mode; } } } as unknown as DaemonEffects;
   let state = emptyDaemonState(config);
   const lines = () => Object.keys(state.actions).filter(name => /^shadow:GY-\d+$/.test(name));
   const phase = async (cycles: number, check: () => void) => {
@@ -95,4 +95,14 @@ test('unit:soak-shadow-attention-switches — shadow attention stays bounded and
   assert.deepEqual(lines(), [], 'the restarted state holds no line');
   await phase(3, () => {});
   assert.equal(lines().length, items, 'a restart in github mode raises every standing disagreement');
+  // A restart under the control-plane merger whose first merger read fails: the mode is unknown, so no line is raised; once a read succeeds the mode governs.
+  mode = 'control-plane'; mergerDown = true;
+  state = emptyDaemonState(config);
+  state.shadow = persisted.map(verdict => ({ ...verdict }));
+  await phase(5, () => assert.deepEqual(lines(), [], 'an unknown mode raises no line'));
+  mergerDown = false;
+  await phase(3, () => assert.deepEqual(lines(), [], 'the control-plane merger raises none'));
+  mode = 'github';
+  await phase(3, () => {});
+  assert.equal(lines().length, items, 'github mode raises every standing disagreement once the mode is known');
 });
