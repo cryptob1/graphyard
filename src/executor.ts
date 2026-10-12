@@ -12,7 +12,7 @@ import { registeredLaunch } from './model/session-state.js';
 import { answeredByPendingSession, independentProducerProfiles } from './producer.js';
 import { answeredByPendingReview } from './reviewer.js';
 import { daemonSummary, profileHealth, readDaemonState, type DaemonState, type DeploymentObservation } from './master-daemon.js';
-import { filePostDeployFollowUps, patternReader, type PatternReader } from './master-verification.js';
+import { deferPostDeployFollowUps, filePostDeployFollowUps, patternReader, releasePostDeployFiler, type PatternReader } from './master-verification.js';
 export { patternReader };
 import { withLaunchedRuntime } from './master/launch.js';
 import { launchedSessionHandle, selectReviewerProfile, type ExecutorEffects, type ExecutorHandler } from './auto-dispatch.js';
@@ -62,6 +62,8 @@ export interface ControlPlaneEffects {
   fileWork?: (input: unknown, requestId: string) => Promise<{ key?: string }>;
   /** The intervention report's reading for a pattern (GY-1698): a windowed follow-up's observation instant is taken from it; absent or failing, the merge time plus the criterion's window stands. */
   readPattern?: PatternReader;
+  /** The observed release's post-deploy filer, or why it cannot be had (GY-1732); `releasePostDeployFiler` over the executor's config by default. */
+  postDeployFiler?: (sha: string) => ReturnType<typeof releasePostDeployFiler>;
   /** Records a launched session's durable handle on the item (AC-8). */
   recordSession?: (work: Work, handle: SessionHandleInput) => Promise<unknown>;
   /** The clock and the wait a fenced worker start retries on (GY-1431); real time when absent. */
@@ -420,7 +422,16 @@ export function controlPlaneHandlers(config: () => MasterConfig, effects: Contro
       // GY-1660: the release just observed checks the item's declared post-deploy verifications, and an
       // owed one files its follow-up before the observation is recorded: a filing that fails fails the
       // action, which retries it, where a recorded observation would refuse every retry.
-      const checks = await filePostDeployFollowUps(work, observation.sha, all, effects.fileWork, new Date(effects.now?.() ?? Date.now()), effects.readPattern, new Date(observation.at));
+      // GY-1732: the follow-ups are filed by the observed release's own code, never by an executor checkout at another commit;
+      // where that code cannot be had or run, each is deferred under its request id and the observation waits for a retry.
+      // That code also decides whether anything is owed: this checkout may not recognise a proof the release does.
+      const sha = observation.sha, source = await (effects.postDeployFiler ?? (release => releasePostDeployFiler(config(), release)))(sha);
+      if ('reason' in source && !deferPostDeployFollowUps(work, sha, all, source.reason).some(check => check.deferred))
+        throw new Error(`${work.key}: whether the release ${sha.slice(0, 12)} owes post-deploy follow-ups is its own code's to decide, and ${source.reason}; the deployment observation waits for it`);
+      const checks = 'reason' in source ? deferPostDeployFollowUps(work, sha, all, source.reason)
+        : await filePostDeployFollowUps(work, sha, all, effects.fileWork, new Date(effects.now?.() ?? Date.now()), effects.readPattern, new Date(observation.at), source.filer).finally(source.dispose);
+      const deferred = checks.filter(check => check.deferred);
+      if (deferred.length) throw new Error(`${work.key}: ${deferred.map(check => `${check.criterion} (${check.proof}) owes its post-deploy follow-up ${check.requestId}, whose filing is deferred: ${check.deferred}`).join('; ')}; the deployment observation waits for it`);
       const owed = checks.filter(check => check.result === 'owed');
       const unfiled = owed.filter(check => !check.followUp);
       if (unfiled.length) throw new Error(`${work.key}: ${unfiled.map(check => `${check.criterion} (${check.proof})`).join(', ')} owes its post-deploy follow-up, and ${effects.fileWork ? 'filing it returned no item' : 'this executor has no operator-agent identity to file it with; run graphyard master autonomy --admin-token-stdin --apply'}; the deployment observation waits for it`);

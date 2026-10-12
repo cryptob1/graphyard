@@ -294,9 +294,10 @@ test('unit:deployment-verification-exact-release — a coordinator checkout ahea
   const ahead = git('rev-parse', 'HEAD');
   await writeFile(join(release.checkout, 'src/master.ts'), '// local edit\n', { flag: 'a' });
   const scratches: string[] = [];
-  const run = (command: string, args: string[], options?: { cwd?: string; env?: NodeJS.ProcessEnv }) => {
-    if (command === 'git' && args[0] === 'clone') scratches.push(args.at(-1)!);
-    return execFileSync(command, args, { ...options, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  const run = (command: string, args: string[], options?: { cwd?: string; env?: NodeJS.ProcessEnv; input?: string }) => {
+    if (command === 'git' && args[0] === 'init' && args.at(-1)!.endsWith('/release')) scratches.push(args.at(-1)!);
+    // The release's filer reads its input on stdin.
+    return execFileSync(command, args, { ...options, encoding: 'utf8', stdio: [options?.input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'] });
   };
   try {
     const master = config(release.cliPath, url);
@@ -339,8 +340,8 @@ test('unit:deployment-verification-exact-release — a coordinator checkout ahea
   assert.equal(unserved.result, 'refused'); assert.match(unserved.refusals[0], /does not serve GY-42 merge commit a{40} yet/);
   const absent = await verifyDeployment(item, { ...base, observe: async () => observation, isolate: async requested => ({ reason: `Deployed release ${requested} is missing from the coordinator checkout; fetch it and verify again` }) });
   assert.equal(absent.result, 'refused'); assert.deepEqual(absent.refusals, [`Deployed release ${sha} is missing from the coordinator checkout; fetch it and verify again`]);
-  // Served, clean and exact: verified from the isolated release with the coordinator ahead.
+  // Served, clean and exact: verified from the isolated release, whose own filer owes nothing, with the coordinator ahead.
   const recorded: unknown[] = [];
-  const exact = await verifyDeployment(item, { ...base, observe: async () => observation, isolate: isolatedAt(true), record: async (_work, data) => { recorded.push(data); } });
+  const exact = await verifyDeployment(item, { ...base, observe: async () => observation, isolate: async requested => ({ ...(await isolatedAt(true)(requested)), checks: async () => [] }), record: async (_work, data) => { recorded.push(data); } });
   assert.equal(exact.result, 'verified'); assert.deepEqual(exact.emittedFrom, { sha, clean: true, isolated: true }); assert.deepEqual(recorded, [{ sha, mergeSha: sha, source: 'endpoint', observedAt: observation.at }]);
 });

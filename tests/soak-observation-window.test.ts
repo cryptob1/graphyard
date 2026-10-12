@@ -135,3 +135,36 @@ test('unit:soak-invariants-hold — over three simulated days of the real loop, 
   assert.equal(followUp.epoch, 2, 'at its second attempt');
   assert.ok(followUp.delivery && Date.parse(followUp.delivery.mergedAt) > notBefore, 'merged after the instant');
 });
+
+/**
+ * GY-1732 under the real loop: the coordinator checkout is behind the serving release, and its own
+ * filer predates observation windows (it files window-less, as 98070f3538 filed GY-1721..GY-1725). The
+ * day files item 1's follow-up through master verify-deployment on every cycle, its criterion a live
+ * window "over 24 hours". The serving release's own filer files it, with the instant the release was first
+ * observed serving plus 24 hours; the loop dispatches nothing for it before then.
+ */
+test('integration:soak-stale-coordinator-no-early-dispatch — with the coordinator checkout behind the serving release, verify-deployment files the 24-hour follow-up with its window and the loop dispatches it only once its reading can exist', { timeout: 600_000 }, async () => {
+  const windowHours = 24;
+  const day = await simulateDay({ hours: windowHours + 5, plan, observationWindow: { item: 1, windowDays: 1, filedAfterMs, staleCoordinator: true, windowHours } });
+  const window = day.observationWindowDay!, iso = (ms: number) => new Date(ms).toISOString();
+  assert.deepEqual(day.violations, [], 'every system invariant holds after every cycle');
+  assert.deepEqual(day.failures, [], 'no cycle failed');
+  const parent = day.final[0], followUp = window.followUp!;
+  assert.ok(window.filedAt !== null && window.releasedAt !== null, 'the follow-up was filed and released');
+  assert.ok(window.staleFilings > 50 && window.staleFilings === window.filings, `every filing went through verify-deployment behind the release: ${window.staleFilings}`);
+  assert.deepEqual(window.created, [followUp.key], 'one follow-up was created for the parent');
+  // Filed by the release's own filer: first observed serving at the filing, plus 24 hours.
+  const notBefore = window.filedAt! + windowHours * hour;
+  assert.deepEqual([followUp.observationWindow?.notBefore, followUp.observationWindow?.basis], [iso(notBefore), 'criterion-window']);
+  assert.match(followUp.observationWindow!.detail, new RegExp(`^${parent.key}'s serving release was first observed at ${iso(window.filedAt!)} and AC-2 names a 24-hour live window`));
+  assert.match(followUp.description ?? '', /\n\nObservation window: the reading can first exist at /);
+  const before = window.samples.filter(sample => Date.parse(sample.at) < notBefore), after = window.samples.filter(sample => Date.parse(sample.at) >= notBefore);
+  assert.ok(before.length >= 100, `the loop cycled across the held window: ${before.length} cycles`);
+  for (const sample of before) {
+    assert.deepEqual(sample.dispatches, [], `${sample.at}: no dispatch before the reading can exist`);
+    assert.deepEqual([sample.lease, sample.sessions, sample.waiting], [null, 0, true], `${sample.at}: held on its window`);
+  }
+  assert.ok(after.length > 0, 'the day ran past the instant');
+  assert.deepEqual(after[0]!.dispatches.map(action => action.requestedBy), ['graphyard'], 'the first cycle past the instant requests its dispatch');
+  assert.ok(after.flatMap(sample => sample.dispatches).every(action => Date.parse(action.at) >= notBefore), 'no dispatch is dated before the instant');
+});
