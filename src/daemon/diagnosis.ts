@@ -652,24 +652,36 @@ const closeInputMatches = (standing: unknown, requested: Record<string, unknown>
   const held = standing && typeof standing === 'object' ? standing as Record<string, unknown> : null;
   return !!held && held.kind === requested.kind && (held.ref ?? null) === (requested.ref ?? null);
 };
+/** GY-1713: a ledger read of one named close — unread (transient/missing effect), absent, or the row. */
+type StandingCloseRead =
+  | { status: 'unread' }
+  | { status: 'absent' }
+  | { status: 'row'; entry: { id: string; action: string; state: string; input: unknown } };
 /**
- * GY-1713: read the named standing close from the ledger. Null when decisions cannot be read or the
- * id is absent; otherwise the ledger row (action/state/input) used to adopt or hold.
+ * GY-1713: read the named standing close from the ledger. Distinguishes an unread ledger (effect
+ * missing or rejected) from a successful read where the id is absent, so a hold is never cleared
+ * on a transient failure as if the close were gone.
  */
-async function standingCloseOn(cycle: Cycle, work: Work, held: string) {
-  if (!cycle.effects.decisions) return null;
-  return cycle.effects.decisions(work).then(result => result.decisions.find(entry => entry.id === held) ?? null, () => null);
+async function standingCloseOn(cycle: Cycle, work: Work, held: string): Promise<StandingCloseRead> {
+  if (!cycle.effects.decisions) return { status: 'unread' };
+  try {
+    const result = await cycle.effects.decisions(work);
+    const entry = result.decisions.find(candidate => candidate.id === held);
+    return entry ? { status: 'row', entry } : { status: 'absent' };
+  } catch {
+    return { status: 'unread' };
+  }
 }
 /**
  * GY-1713: adopt the named standing close only when the ledger shows it asks for the same closure.
  * A confirmed mismatch is held (standingHolds) until that decision leaves `requested` or its input
- * matches; the loop does not re-POST meanwhile. An unread ledger leaves the entry alone without a
- * hold, so a later cycle can read and decide.
+ * matches; the loop does not re-POST meanwhile. An unread ledger on first contact leaves the entry
+ * alone without a hold; a prior hold is preserved until a successful read shows the row gone or changed.
  */
 async function adoptStandingClose(cycle: Cycle, work: Work, input: Record<string, unknown>, held: string): Promise<'adopt' | 'hold' | 'unread'> {
-  const standing = await standingCloseOn(cycle, work, held);
-  if (!standing || standing.action !== 'close' || standing.state !== 'requested') return 'unread';
-  return closeInputMatches(standing.input, input) ? 'adopt' : 'hold';
+  const read = await standingCloseOn(cycle, work, held);
+  if (read.status !== 'row' || read.entry.action !== 'close' || read.entry.state !== 'requested') return 'unread';
+  return closeInputMatches(read.entry.input, input) ? 'adopt' : 'hold';
 }
 /**
  * GY-1318: the request names the item's revision from the cycle's snapshot, and the loop's own next
@@ -691,7 +703,9 @@ async function adoptStandingClose(cycle: Cycle, work: Work, input: Record<string
  * action (GY-1374); without the match check a concurrent obsolete/duplicate close would be claimed
  * as the diagnosis answer. A standing close that does not match is held until its ledger state
  * changes, then the diagnosis closure is requested (or adopted) afresh — never rethrown, never
- * re-POSTed every cycle while that decision still stands mismatched.
+ * re-POSTed every cycle while that decision still stands mismatched. A transient unread of the
+ * ledger while held keeps the hold; only a successful read that shows the row absent or no longer
+ * `requested` clears it and asks again.
  */
 async function decideFresh(cycle: Cycle, diagnostician: DiagnosticianEffects, entry: DiagnosisRecord, work: Work, action: 'release' | 'close', input: Record<string, unknown>, reason: string, note: Note): Promise<{ decision: { id: string }; target: Work; adopted?: boolean } | null> {
   const adoptHeld = async (held: string, target: Work) => {
@@ -711,18 +725,20 @@ async function decideFresh(cycle: Cycle, diagnostician: DiagnosticianEffects, en
     return { decision: { id: held }, target, adopted: true as const };
   };
   // GY-1713: a prior cycle held a mismatched standing close — consult the ledger, do not re-POST.
+  // An unread ledger keeps the hold: never treat a transient decisions failure as "gone".
   const prior = action === 'close' ? standingHolds.get(entry.subject) : undefined;
   if (prior) {
-    const standing = await standingCloseOn(cycle, work, prior.id);
-    if (standing && standing.state === 'requested' && standing.action === 'close') {
-      if (closeInputMatches(standing.input, input)) {
+    const read = await standingCloseOn(cycle, work, prior.id);
+    if (read.status === 'unread') return null;
+    if (read.status === 'row' && read.entry.state === 'requested' && read.entry.action === 'close') {
+      if (closeInputMatches(read.entry.input, input)) {
         standingHolds.delete(entry.subject);
         return { decision: { id: prior.id }, target: work, adopted: true as const };
       }
       return null;
     }
     standingHolds.delete(entry.subject);
-    await note(entry, 'done', `Standing close ${prior.id} on ${prior.work} no longer blocks the diagnosis of ${entry.subject} (${standing ? `now ${standing.state}` : 'gone from the ledger'}); requesting the diagnosis closure afresh`, null);
+    await note(entry, 'done', `Standing close ${prior.id} on ${prior.work} no longer blocks the diagnosis of ${entry.subject} (${read.status === 'row' ? `now ${read.entry.state}` : 'gone from the ledger'}); requesting the diagnosis closure afresh`, null);
   }
   try { return { decision: await diagnostician.decide(work, action, reason, input), target: work }; }
   catch (error) {

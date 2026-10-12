@@ -19,7 +19,8 @@ import type { RunOptions, RunResult, Runner } from '../src/runner/types.js';
  * way for one recurring item, and for another asks a close that already stands with a matching
  * duplicate-of covering (GY-1710's shape). A third recurring item meets a standing obsolete close
  * that does not match: the diagnosis holds that decision (one decide POST) until its ledger state
- * changes, then asks its own closure once. After every cycle and at the end: each refused content
+ * changes, then asks its own closure once. While that hold stands, a stretch of transient ledger
+ * read failures must not clear it or re-POST. After every cycle and at the end: each refused content
  * reaches create once, the matching standing close is adopted once and its approver launched once,
  * the mismatched close is never adopted while it stands and is not re-POSTed every cycle, nothing
  * reaches an isolation record or an unclassified fault, and every system invariant holds.
@@ -162,6 +163,10 @@ test('unit:soak-invariants-hold — over a simulated day create-400 refusals set
     },
   };
 
+  let withdrawnMismatched = false;
+  let failMismatchedLedger = false;
+  let mismatchedLedgerFailures = 0;
+  let mismatchedHoldSeen = false;
   const effects = {
     agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
     snapshot: async () => ({ work: work.map(entry => structuredClone(entry)), now: iso(now) }),
@@ -178,23 +183,34 @@ test('unit:soak-invariants-hold — over a simulated day create-400 refusals set
       }
       return { agentName: `gy-approver-${decision.slice(0, 8)}`, pane: null };
     },
-    decisions: async (target: Work) => ({ decisions: ledger.filter(row => row.work === target.key).map(row => structuredClone(row)) }),
+    decisions: async (target: Work) => {
+      // After the mismatched hold is established, refuse ledger reads for a stretch so a transient
+      // unread cannot be mistaken for "gone" and clear the hold (review of 0505f846840d).
+      if (failMismatchedLedger && target.key === mismatchedClose.key) {
+        mismatchedLedgerFailures += 1;
+        throw new Error(`transient ledger unread for ${target.key}`);
+      }
+      return { decisions: ledger.filter(row => row.work === target.key).map(row => structuredClone(row)) };
+    },
   } as unknown as DaemonEffects;
 
   const violations: string[] = [];
   const isolated = () => Object.keys(state.actions).filter(key => key.startsWith('isolated:'));
   const dayInstances = () => state.faults.instances.filter(entry => Date.parse(entry.at) >= start);
-
-  let withdrawnMismatched = false;
   for (let cycle = 0; now < start + 6 * hour; cycle++, now += minute) {
+    // Once the first 409 established the hold, fail ledger reads until shortly before withdraw.
+    if (mismatchedHoldSeen && !withdrawnMismatched && now < start + 3 * hour - 5 * minute) failMismatchedLedger = true;
+    else failMismatchedLedger = false;
     // Mid-soak: the mismatched obsolete standing close settles; the diagnosis may then ask its own closure once.
     if (!withdrawnMismatched && now >= start + 3 * hour) {
       const row = ledger.find(entry => entry.id === mismatchedStandingId)!;
       Object.assign(row, { state: 'withdrawn', outcome: 'taken back' });
       withdrawnMismatched = true;
+      failMismatchedLedger = false;
     }
     const result = await runCycle(config(), state, effects, () => now);
     await doctorRunsSettled(); await diagnosesSettled();
+    if (decides.some(entry => entry.work === mismatchedClose.key && entry.outcome === '409-mismatched')) mismatchedHoldSeen = true;
     for (const check of state.invariants.report) if (!check.holds) violations.push(`cycle ${cycle} (+${(now - start) / minute} min): ${check.invariant} — ${check.reading}`);
     assert.deepEqual(isolated(), [], `cycle ${cycle}: a failure was thrown on to the step's isolation record`);
     assert.deepEqual(dayInstances().filter(entry => entry.faultClass === 'unclassified'), [], `cycle ${cycle}: an unclassified instance opened`);
@@ -208,6 +224,7 @@ test('unit:soak-invariants-hold — over a simulated day create-400 refusals set
       assert.ok(decides.filter(entry => entry.work === mismatchedClose.key).length <= 1, `cycle ${cycle}: mismatched close must not be re-POSTed while held`);
     }
   }
+  assert.ok(mismatchedLedgerFailures >= 10, `ledger was unread while held (${mismatchedLedgerFailures} failures)`);
   assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
 
   // (a) Each refused content reaches create exactly once; re-reports of the doctor filing do not re-send.

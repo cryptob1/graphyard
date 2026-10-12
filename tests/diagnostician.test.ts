@@ -981,9 +981,27 @@ test('unit:diagnosis-waits-mismatched-standing-close — a decide 409 naming a s
   assert.equal(entry.decision, null);
   assert.equal(decides, 1, 'does not re-POST while the mismatched close still stands');
   assert.deepEqual(isolated, []);
+  // A transient ledger unread while held must not clear the hold or re-POST (review of 0505f846840d).
+  const fx = effects(h, () => work, () => clock + 4 * minute);
+  const decisions = fx.decisions!;
+  let unread = 0;
+  fx.decisions = async (target) => {
+    unread += 1;
+    throw new Error(`transient ledger unread (${unread}) for ${target.key}`);
+  };
+  const unreadCycle = (at: number) => ({ config: config(), state, effects: fx, now: () => at, snapshot: { work, now: new Date(at).toISOString() }, clock: at, performed: [],
+    isolate: async (_kind: string, _item: unknown, name: string, body: () => Promise<unknown>) => { try { return await body(); } catch (error) { isolated.push(`${name}: ${String(error)}`); return undefined; } } } as unknown as Cycle);
+  await diagnosisStep(unreadCycle(clock + 4 * minute)); await diagnosesSettled();
+  await diagnosisStep(unreadCycle(clock + 5 * minute)); await diagnosesSettled();
+  assert.ok(unread >= 2, 'ledger was unread while the hold stood');
+  assert.equal(decides, 1, 'does not re-POST when the held close cannot be read');
+  assert.equal(entry.state, 'diagnosed');
+  assert.equal(entry.decision, null);
+  assert.deepEqual(isolated, []);
+  fx.decisions = decisions;
   // Once the standing close leaves requested, the diagnosis closure is asked afresh.
   h.outcomes.set(standingCloseId, { state: 'withdrawn' });
-  await diagnosisStep(cycleOf(clock + 4 * minute)); await diagnosesSettled();
+  await diagnosisStep(cycleOf(clock + 6 * minute)); await diagnosesSettled();
   assert.equal(decides, 2, 'one fresh decide after the standing close settles');
   assert.equal(entry.state, 'closing');
   assert.ok(entry.decision && entry.decision.id !== standingCloseId, 'a new diagnosis close, not the withdrawn obsolete');
