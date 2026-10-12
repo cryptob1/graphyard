@@ -48,6 +48,12 @@ test('unit:post-deploy-follow-up-released-when-served — the cycle that observe
   assert.ok(!failing.log.includes('record deployment'), 'a failed release retries the action rather than recording the observation');
 });
 
+test('unit:post-deploy-follow-up-release-authority — a filed follow-up with no release authority leaves the deployment unrecorded', async () => {
+  const none = await verify(true);
+  assert.match(none.outcome, /no operator-agent identity to release it/);
+  assert.ok(!none.log.includes('record deployment'), 'the observation waits, so the verification action does not disappear with the follow-up in backlog');
+});
+
 test('unit:clock-wait-is-not-a-block — a released follow-up holding only a window has no blocker and no attention row, waits until its time, and is dispatched once it passes', async () => {
   const { actionAccount, assertDispatchable, buildMasterStatus, dispatchable, groupOf, observationWindowHold, plainStatus } = await modules();
   const notBefore = new Date(Date.parse(at) + day).toISOString();

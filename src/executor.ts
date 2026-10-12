@@ -442,7 +442,9 @@ export function controlPlaneHandlers(config: () => MasterConfig, effects: Contro
       if (unfiled.length) throw new Error(`${work.key}: ${unfiled.map(check => `${check.criterion} (${check.proof})`).join(', ')} owes its post-deploy follow-up, and ${effects.fileWork ? 'filing it returned no item' : 'this executor has no operator-agent identity to file it with; run graphyard master autonomy --admin-token-stdin --apply'}; the deployment observation waits for it`);
       // GY-1747: the observation that the release serves the delivery is the follow-up's release from backlog; a failed release
       // fails the action, which retries it, before the observation is recorded.
-      if (effects.releaseWork) for (const check of checks) if (check.followUp) await effects.releaseWork(check.followUp);
+      const filed = checks.filter(check => check.followUp);
+      if (filed.length && !effects.releaseWork) throw new Error(`${work.key}: ${filed.map(check => `${check.criterion} (${check.proof})`).join(', ')} has a filed post-deploy follow-up, and this executor has no operator-agent identity to release it from backlog with; run graphyard master autonomy --admin-token-stdin --apply; the deployment observation waits for it`);
+      for (const check of filed) await effects.releaseWork!(check.followUp!);
       await effects.mutate(`work/${work.id}/deployment`, { sha: observation.sha, mergeSha: action.inputs.mergeSha, source: observation.source, observedAt: observation.at }, randomUUID());
       return `observed the release serving ${observation.sha.slice(0, 12)} for ${work.key}${owed.length ? `; ${owed.map(check => `${check.criterion} owes its post-deploy observation${check.followUp ? ` (${check.followUp})` : ''}`).join(', ')}` : ''}`;
     },

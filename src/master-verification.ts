@@ -266,7 +266,10 @@ export async function verifyDeployment(work: Work, effects: VerificationEffects,
     // A deferred filing leaves the delivery unobserved for the same reason: the attempt that can run the release's filer files it.
     if (deferred.length) return result({ ...assessment, verifiable: false, refusals: deferred.map(check => `${check.criterion} (${check.proof}) owes its post-deploy follow-up ${check.requestId}, whose filing is deferred: ${check.deferred}`) }, null, postDeploy);
     // GY-1747: the serving release being observed releases its follow-ups from backlog, before the record, so a failed release retries.
-    if (effects.releaseWork) for (const check of postDeploy) if (check.followUp) await effects.releaseWork(check.followUp);
+    const filed = postDeploy.filter(check => check.followUp);
+    // Without release authority a filed follow-up would stay in backlog once this action is recorded away, so the delivery stays unobserved.
+    if (filed.length && !effects.releaseWork) return result({ ...assessment, verifiable: false, refusals: filed.map(check => `${check.criterion} (${check.proof}) has a filed post-deploy follow-up, and this master has no operator-agent identity to release it from backlog with`) }, null, postDeploy);
+    for (const check of filed) await effects.releaseWork!(check.followUp!);
     const existing = current.delivery!.deployment?.sha === assessment.record!.sha;
     if (!existing) await effects.record(current, assessment.record!);
     return result(assessment, existing ? 'existing' : 'now', postDeploy);
