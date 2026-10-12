@@ -1,0 +1,162 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
+import { createServer, type Server } from 'node:http';
+import type { AddressInfo } from 'node:net';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
+
+// The chart exercise (deploy/helm/exercise.sh) runs on a real cluster only in release-candidate
+// validation. Release candidate 38218787546 failed its chart job because kubectl could not bind the
+// exercise's fixed local port 14310, and 38213256650 lost the forward mid-run (GY-1729). Here its
+// forward, its re-establishment and its request helper are cut out of the script by name and run
+// against a fake kubectl whose port-forward really binds a local port and proxies to a local "pod".
+const exercise = readFileSync(resolve('deploy/helm/exercise.sh'), 'utf8');
+const shellFunction = (name: string) => {
+  const start = exercise.indexOf(`\n${name}() {`);
+  assert.ok(start >= 0, `${name}() is defined in the exercise`);
+  return exercise.slice(start + 1, exercise.indexOf('\n}\n', start) + 3);
+};
+const curl = spawnSync('curl', ['--version'], { encoding: 'utf8' }).status === 0;
+
+/** A port-forward the fake kubectl performs: refuse to bind, or bind a port of its own choosing, drop its first `drop` connections, proxy to the pod (or the decoy), and exit once `dieAfter` connections have been proxied. */
+type Forward = { refuse?: true; drop?: number; dieAfter?: number; to?: 'pod' | 'decoy' };
+
+const fakeKubectl = `#!/usr/bin/env node
+const fs = require('node:fs'), net = require('node:net');
+const args = process.argv.slice(2).filter((arg, i, all) => arg !== '--namespace' && all[i - 1] !== '--namespace');
+const env = process.env;
+if (args[0] === 'rollout') { console.log('deployment "gy-graphyard" successfully rolled out'); process.exit(0); }
+if (args[0] === 'get' && args[1] === 'rs,pods') { process.stdout.write(env.FAKE_ROLLOUT); process.exit(0); }
+if (args[0] === 'get') { console.log('pod/gy-graphyard-new-bbbbb 1/1 Running'); process.exit(0); }
+if (args[0] === 'logs') { console.log('server log line'); process.exit(0); }
+if (args[0] !== 'port-forward') { console.error('unexpected kubectl ' + args.join(' ')); process.exit(2); }
+const plan = JSON.parse(env.FAKE_PLAN);
+const counter = env.FAKE_DIR + '/count';
+const n = Number(fs.existsSync(counter) ? fs.readFileSync(counter, 'utf8') : 0);
+fs.writeFileSync(counter, String(n + 1));
+const step = plan[Math.min(n, plan.length - 1)];
+const [local, remote] = args.at(-1).split(':');
+fs.appendFileSync(env.FAKE_DIR + '/invocations', JSON.stringify({ args, pid: process.pid }) + '\\n');
+const unable = () => { console.error('Unable to listen on port ' + (local || '14310') + ': Listeners failed to create with the following errors: [unable to create listener: Error listen tcp4 127.0.0.1:' + (local || '14310') + ': bind: address already in use]'); console.error('error: unable to listen on any of the requested ports: [{' + (local || '14310') + ' ' + remote + '}]'); process.exit(1); };
+if (step.refuse) unable();
+let seen = 0, proxied = 0;
+const target = Number(step.to === 'decoy' ? env.FAKE_DECOY_PORT : env.FAKE_POD_PORT);
+const server = net.createServer(client => {
+  if (seen++ < (step.drop ?? 0)) { console.error('E1012 portforward.go: "Unhandled Error" err="an error occurred forwarding ' + local + ' -> ' + remote + ': dial tcp4 127.0.0.1:' + remote + ': connect: connection refused"'); client.destroy(); return; }
+  const upstream = net.connect(target, '127.0.0.1');
+  client.pipe(upstream).pipe(client);
+  const done = () => { client.destroy(); upstream.destroy(); };
+  client.on('error', done); upstream.on('error', done);
+  if (step.dieAfter !== undefined && ++proxied >= step.dieAfter) { server.close(); client.on('close', () => { console.error('lost connection to pod'); process.exit(1); }); }
+});
+server.on('error', unable);
+server.listen(local ? Number(local) : 0, '127.0.0.1', () => console.log('Forwarding from 127.0.0.1:' + server.address().port + ' -> ' + remote));
+`;
+
+const rollout = JSON.stringify({ kind: 'List', items: [
+  { kind: 'ReplicaSet', metadata: { name: 'gy-graphyard-new', labels: { 'pod-template-hash': 'new2' } }, spec: { replicas: 1 } },
+  { kind: 'Pod', metadata: { name: 'gy-graphyard-new-bbbbb', labels: { 'pod-template-hash': 'new2' } }, spec: { containers: [{ ports: [{ name: 'http', containerPort: 4310 }] }] }, status: { conditions: [{ type: 'Ready', status: 'True' }] } },
+] });
+
+/** An HTTP server standing in for a release: /healthz reports `version`, /api/work answers `work`. */
+async function release(version: string, work: string, port = 0) {
+  const hits: string[] = [];
+  const server: Server = createServer((request, response) => {
+    hits.push(request.url!);
+    response.writeHead(200, { 'Content-Type': 'application/json' });
+    response.end(request.url === '/healthz' ? JSON.stringify({ version }) : work);
+  });
+  const listening = await new Promise<boolean>(done => { server.once('error', () => done(false)); server.listen(port, '127.0.0.1', () => done(true)); });
+  return { hits, listening, port: listening ? (server.address() as AddressInfo).port : port, close: () => new Promise<void>(done => listening ? server.close(() => done()) : done()) };
+}
+
+/** The exercise's forward and request helpers, cut out when a run needs them. */
+const functions = () => ['select_pod', 'stop_forward', 'forward', 'ensure_forward', 'api'].map(shellFunction).join('\n');
+
+/** Runs `body` with the exercise's forward and request helpers against the fake kubectl and `plan`. */
+async function run(plan: Forward[], body: string, ports: { pod: number; decoy: number }) {
+  const dir = mkdtempSync(join(tmpdir(), 'chart-exercise-forward-'));
+  const bin = join(dir, 'bin');
+  mkdirSync(bin);
+  writeFileSync(join(bin, 'kubectl'), fakeKubectl); chmodSync(join(bin, 'kubectl'), 0o755);
+  const forwardDir = join(dir, 'forward'); mkdirSync(forwardDir);
+  const script = `set -euo pipefail
+RELEASE=gy; NAMESPACE=exercise; TAG=1.2.3; HELM_TIMEOUT=5m; LOCAL_PORT=""; FORWARD_PID=""
+k() { kubectl --namespace "$NAMESPACE" "$@"; }
+diagnose() { echo "--- port-forward output, every attempt" >&2; cat "$FORWARD_DIR"/forward-*.log >&2 2>/dev/null || true; echo "--- pods" >&2; k get pods,svc,endpoints >&2; }
+${functions()}
+${body}`;
+  const result = await new Promise<{ status: number | null; stdout: string; stderr: string }>(done => {
+    const child = spawn('bash', ['-c', script], { env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, FORWARD_DIR: forwardDir, FAKE_DIR: dir, FAKE_PLAN: JSON.stringify(plan), FAKE_ROLLOUT: rollout, FAKE_POD_PORT: String(ports.pod), FAKE_DECOY_PORT: String(ports.decoy), FORWARD_ATTEMPTS: '3', FORWARD_RETRY_WAIT: '0', API_ATTEMPTS: '6', API_RETRY_WAIT: '0', API_TIMEOUT: '2' } });
+    let stdout = '', stderr = '';
+    child.stdout.setEncoding('utf8').on('data', chunk => { stdout += chunk; });
+    child.stderr.setEncoding('utf8').on('data', chunk => { stderr += chunk; });
+    child.on('close', status => done({ status, stdout, stderr }));
+  });
+  let invocations: { args: string[]; pid: number }[] = [];
+  try { invocations = readFileSync(join(dir, 'invocations'), 'utf8').trim().split('\n').map(line => JSON.parse(line)); } catch { /* no forward was started */ }
+  // A stopped forward is given two seconds to exit; an exited one reparented to a non-reaping init stays a zombie.
+  const alive = (pid: number) => { try { return !/^\d+ \(.*\) Z/.test(readFileSync(`/proc/${pid}/stat`, 'utf8')); } catch { try { process.kill(pid, 0); return true; } catch { return false; } } };
+  for (let waited = 0; waited < 2000 && invocations.some(({ pid }) => alive(pid)); waited += 50) await new Promise(done => setTimeout(done, 50));
+  const leftover = invocations.filter(({ pid }) => alive(pid));
+  for (const { pid } of leftover) process.kill(pid, 'SIGKILL');
+  rmSync(dir, { recursive: true, force: true });
+  return { ...result, invocations, leftover };
+}
+
+test('integration:chart-exercise-port-forward — the chart exercise forwards a free local port kubectl binds itself, never the fixed 14310 a leftover or concurrent listener holds, uses a forward only once /healthz through it reports this release, and re-establishes a forward that exits or a pod not yet listening within a bounded number of attempts before exercising the API; a persistent loss fails with the forward\'s own output and a last line naming it', { skip: curl ? false : 'curl is not installed' }, async () => {
+  assert.ok(!exercise.includes('14310'), 'no fixed local port remains in the exercise');
+  assert.match(exercise, /^LOCAL_PORT=""$/m, 'the local port starts empty, so kubectl chooses a free one');
+  assert.match(exercise, /^FORWARD_ATTEMPTS="\$\{FORWARD_ATTEMPTS:-(\d+)\}"; FORWARD_RETRY_WAIT="\$\{FORWARD_RETRY_WAIT:-(\d+)\}"$/m, 'the forward\'s retry bound is stated and overridable');
+  const [, attempts, wait] = /^FORWARD_ATTEMPTS="\$\{FORWARD_ATTEMPTS:-(\d+)\}"; FORWARD_RETRY_WAIT="\$\{FORWARD_RETRY_WAIT:-(\d+)\}"$/m.exec(exercise)!;
+  assert.ok(Number(attempts) >= 2 && Number(attempts) * (30 + Number(wait)) <= 300, `the forward is retried a bounded while: ${attempts} × (30 + ${wait})s`);
+  assert.ok(exercise.includes('ensure_forward\nif curl -fsS -o /dev/null -X POST'), 'the superseded-epoch check runs through a live forward, so a lost forward cannot pass it vacuously');
+
+  const pod = await release('1.2.3', '[{"id":"w1","key":"GY-1"}]');
+  const decoy = await release('0.0.1-leftover', '[{"id":"decoy"}]', 14310);
+  const ports = { pod: pod.port, decoy: decoy.port };
+  try {
+    // Ownership: 14310 is held by a leftover listener answering as another service. The forward
+    // binds a port of kubectl's choosing, and a forward that reaches the wrong service is not used.
+    const owned = await run([{ to: 'decoy' }, {}], 'forward\necho "port=$LOCAL_PORT"\napi GET work secret-token\necho\nensure_forward\necho "same=$LOCAL_PORT"\nstop_forward', ports);
+    assert.equal(owned.status, 0, owned.stderr);
+    const port = /^port=(\d+)$/m.exec(owned.stdout)![1];
+    assert.notEqual(port, '14310', 'the forward never binds the fixed port');
+    assert.equal(/^same=(\d+)$/m.exec(owned.stdout)![1], port, 'a live forward is kept and its port used consistently');
+    assert.ok(owned.stdout.includes('[{"id":"w1","key":"GY-1"}]'), 'the API answer comes from the release');
+    assert.ok(!owned.stdout.includes('decoy'));
+    assert.equal(owned.invocations.length, 2, 'the forward reaching the wrong service is replaced once');
+    for (const { args } of owned.invocations) assert.deepEqual(args.slice(-4), ['--address', '127.0.0.1', 'pod/gy-graphyard-new-bbbbb', ':4310'], 'kubectl is asked for a free local port');
+    assert.match(owned.stderr, /attempt 1 of 3 to pod\/gy-graphyard-new-bbbbb did not answer \/healthz as release 1\.2\.3 \(local port \d+, healthz version 0\.0\.1-leftover\)/);
+    if (decoy.listening) assert.deepEqual(decoy.hits, ['/healthz'], 'the listener on 14310 is never reached; only the rejected forward\'s health check reached the decoy');
+    assert.deepEqual(owned.leftover, [], 'stop_forward ends the forward');
+
+    // Transient loss: a refused bind, a pod not yet listening, then a forward that dies after one
+    // request. The exercise recovers each within its bounds and every request reaches the release.
+    pod.hits.length = 0;
+    const recovered = await run([{ refuse: true }, { drop: 2, dieAfter: 2 }, {}], 'forward\nfor i in 1 2 3; do api GET work secret-token; echo; done\nstop_forward', ports);
+    assert.equal(recovered.status, 0, recovered.stderr);
+    assert.deepEqual(recovered.stdout.trim().split('\n'), Array(3).fill('[{"id":"w1","key":"GY-1"}]'));
+    assert.equal(recovered.invocations.length, 3, 'one forward per attempt: refused, lost, kept');
+    assert.match(recovered.stderr, /attempt 1 of 3 .*: error: unable to listen on any of the requested ports/, 'the refused bind is named');
+    assert.match(recovered.stderr, /the port-forward \(pid \d+\) is gone; re-establishing it/, 'the lost forward is re-established');
+    assert.equal(pod.hits.filter(url => url === '/api/work').length, 3, 'every request reached the release');
+    assert.deepEqual(recovered.leftover, []);
+
+    // Persistent loss: every forward is refused. The forward fails after its bound with the
+    // forward's own output, the pods, and a last line naming it, and so does a request that
+    // needs the forward re-established.
+    const lost = await run([{ refuse: true }], 'forward', ports);
+    assert.equal(lost.status, 1);
+    assert.equal(lost.invocations.length, 3, 'the bound holds');
+    const lines = lost.stderr.trim().split('\n');
+    assert.equal(lines.at(-1), 'port-forward to release gy never became reachable after 3 attempts');
+    assert.ok(lost.stderr.includes('--- port-forward output, every attempt') && lost.stderr.includes('bind: address already in use') && lost.stderr.includes('--- pods'), 'the diagnosis carries the forward\'s output and the pods');
+    const dropped = await run([{ dieAfter: 1 }, { refuse: true }], 'forward\napi GET work secret-token', ports);
+    assert.equal(dropped.status, 1); assert.equal(dropped.stdout, '', 'no body reaches a projection');
+    assert.equal(dropped.stderr.trim().split('\n').at(-1), 'port-forward to release gy never became reachable after 3 attempts');
+    assert.deepEqual(dropped.leftover, []);
+  } finally { await pod.close(); await decoy.close(); }
+});

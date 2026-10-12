@@ -96,8 +96,8 @@ const REQUIRED_STATEMENTS: [string, RegExp][] = [
   // GY-1686 AC-3: both master-agent pages name master browser capture as the remedy for a criterion needing a live Confirm-access fixture, never a human.
   ['docs/master-agent.md', /Live Confirm-access fixtures: \[`master browser capture`\]\(master-agent-reference\.md#github-administration-through-the-browser\), never a human/],
   ['docs/master-agent-reference.md', /a criterion needing a live one runs `master browser capture \[--dry-run\]` on the sudo-protected App permissions page, submitting nothing, never a human/],
-  // GY-1690 AC-3: the release-candidate section says the chart exercise waits for the rollout, retries transient API failures and names the last line a failed job ends on.
-  ['docs/delivery.md', /`deploy\/helm\/exercise\.sh` waits for the upgrade's rollout and the new ReplicaSet's Ready pod before backing up, retrying transient API failures \(empty reply, reset, stall, non-2xx, bodiless 2xx\); an API staying unreachable ends the job's log with `api METHOD \/api\/PATH failed after 15 attempts: status STATUS, body: BODY`/],
+  // GY-1690 AC-3 and GY-1729: the release-candidate section says the chart exercise forwards a free port it re-establishes, waits for the rollout, retries transient API failures and names the last line a failed job ends on.
+  ['docs/delivery.md', /`deploy\/helm\/exercise\.sh` forwards a kubectl-chosen free port, re-forwarding a lost or foreign one; waits for the upgrade's rollout and new ReplicaSet's Ready pod, retrying transient API failures \(empty reply, reset, stall, non-2xx, bodiless 2xx\), else ending `api METHOD \/api\/PATH failed after 15 attempts: status STATUS, body: BODY`/],
 ];
 
 test('unit:docs-word-budget — the pages graphyard.json budgets (README.md and every docs page) keep every page within its per-page budget and 200 words under it, counted as wc -w counts them; a total within 3% of the budget fails a change that adds to it and warns otherwise', () => {
