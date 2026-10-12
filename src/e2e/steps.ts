@@ -33,18 +33,22 @@ export function stepEnvironment(url: string, secrets: Record<string, string>, ho
 }
 
 export interface ProcessResult { code: number | null; output: string; timedOut: boolean }
-export type ProcessRunner = (command: string, args: string[], options: { cwd: string; env: Record<string, string>; timeoutMs: number; shell: boolean }) => Promise<ProcessResult>;
+/** `signal` cancels the process (GY-1718: a merge preview past its budget), killing it as its timeout does. */
+export type ProcessRunner = (command: string, args: string[], options: { cwd: string; env: Record<string, string>; timeoutMs: number; shell: boolean; signal?: AbortSignal }) => Promise<ProcessResult>;
 
-/** Run one process, both streams interleaved, killed outright at its timeout; only the last ~4 MB of output is kept. */
+/** Run one process, both streams interleaved, its process group killed outright at its timeout or on `signal`; only the last ~4 MB of output is kept. */
 export const runProcess: ProcessRunner = (command, args, options) => new Promise(resolve => {
   const child = spawn(command, args, { cwd: options.cwd, env: options.env, shell: options.shell, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
   const chunks: Buffer[] = [];
   let timedOut = false, size = 0;
   const keep = (chunk: Buffer) => { chunks.push(chunk); size += chunk.length; while (size - chunks[0].length >= 4_000_000) size -= chunks.shift()!.length; };
   child.stdout.on('data', keep); child.stderr.on('data', keep);
-  const timer = setTimeout(() => { timedOut = true; try { process.kill(-child.pid!, 'SIGKILL'); } catch { child.kill('SIGKILL'); } }, options.timeoutMs);
-  child.on('error', error => { clearTimeout(timer); resolve({ code: null, output: `${Buffer.concat(chunks).toString('utf8')}${error.message}`, timedOut }); });
-  child.on('close', code => { clearTimeout(timer); resolve({ code, output: Buffer.concat(chunks).toString('utf8'), timedOut }); });
+  const kill = () => { try { process.kill(-child.pid!, 'SIGKILL'); } catch { child.kill('SIGKILL'); } };
+  const timer = setTimeout(() => { timedOut = true; kill(); }, options.timeoutMs);
+  const settle = () => { clearTimeout(timer); options.signal?.removeEventListener('abort', kill); };
+  if (options.signal?.aborted) kill(); else options.signal?.addEventListener('abort', kill, { once: true });
+  child.on('error', error => { settle(); resolve({ code: null, output: `${Buffer.concat(chunks).toString('utf8')}${error.message}`, timedOut }); });
+  child.on('close', code => { settle(); resolve({ code, output: Buffer.concat(chunks).toString('utf8'), timedOut }); });
 });
 
 /** The last `keptOutputLines` lines of a process's output. */
@@ -85,11 +89,11 @@ export function agentPrompt(step: Extract<E2eStep, { kind: 'agent' }>, url: stri
     'Work in the browser until the goal is achieved or you are sure it cannot be. Then end your answer with exactly one final line, either `VERDICT: PASS` or `VERDICT: FAIL - <reason>`, and nothing after it.'].join('\n');
 }
 
-export interface GeneralStepContext { url: string; root: string; env: Record<string, string>; secrets: Record<string, string>; run: ProcessRunner; artifacts: string; session: string }
+export interface GeneralStepContext { url: string; root: string; env: Record<string, string>; secrets: Record<string, string>; run: ProcessRunner; artifacts: string; session: string; signal?: AbortSignal }
 
 /** A command step: pass on exit 0, fail otherwise, with the last lines of output kept. */
 export async function runCommandStep(step: Extract<E2eStep, { kind: 'command' }>, context: GeneralStepContext): Promise<{ record: Omit<StepRecord, 'index' | 'name'>; reason: string | null }> {
-  const result = await context.run(step.run, [], { cwd: context.root, env: context.env, timeoutMs: step.timeoutSeconds * 1000, shell: true });
+  const result = await context.run(step.run, [], { cwd: context.root, env: context.env, timeoutMs: step.timeoutSeconds * 1000, shell: true, signal: context.signal });
   const output = lastLines(redact(result.output, context.secrets));
   const reason = result.timedOut ? `the command did not finish within ${step.timeoutSeconds} s` : result.code === 0 ? null : `the command exited ${result.code ?? 'by signal'}${output.length ? `: ${output.at(-1)!.slice(0, 500)}` : ''}`;
   return { record: { kind: 'command', outcome: reason ? 'fail' : 'pass', output }, reason };
@@ -99,7 +103,8 @@ export async function runCommandStep(step: Extract<E2eStep, { kind: 'command' }>
 export async function runAgentStep(step: Extract<E2eStep, { kind: 'agent' }>, context: GeneralStepContext): Promise<{ record: Omit<StepRecord, 'index' | 'name'>; reason: string | null }> {
   const target = new URL(step.path ?? '/', context.url).toString();
   const prefix = ['--session', context.session];
-  const invoke = (args: string[], timeoutMs: number) => context.run('agent-browser', [...prefix, ...args], { cwd: context.root, env: context.env, timeoutMs, shell: false });
+  // A cancelled run kills the step's invocations; only the session's own close still runs, bounded by its timeout.
+  const invoke = (args: string[], timeoutMs: number, cancellable = true) => context.run('agent-browser', [...prefix, ...args], { cwd: context.root, env: context.env, timeoutMs, shell: false, signal: cancellable ? context.signal : undefined });
   const deadline = Date.now() + step.timeoutSeconds * 1000;
   const remaining = () => Math.max(1, deadline - Date.now());
   const transcript: string[] = [];
@@ -123,7 +128,7 @@ export async function runAgentStep(step: Extract<E2eStep, { kind: 'agent' }>, co
       const shot = await invoke(['screenshot', file], Math.min(remaining(), 60_000));
       if (!shot.timedOut && shot.code === 0) screenshots.push(file); else transcript.push(shot.output);
     }
-  } finally { await invoke(['close'], 30_000).catch(() => {}); }
+  } finally { await invoke(['close'], 30_000, false).catch(() => {}); }
   const output = lastLines(redact(transcript.join('\n'), context.secrets));
   return { record: { kind: 'agent', outcome: reason ? 'fail' : 'pass', output, ...(verdict ? { verdict: redact(verdict, context.secrets) } : {}), screenshots }, reason: reason && redact(reason, context.secrets) };
 }

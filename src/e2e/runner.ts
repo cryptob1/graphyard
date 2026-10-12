@@ -79,11 +79,27 @@ export interface RunOptions {
   root?: string;
   /** Where `e2e-secrets.<target>.env` is read from: the checkout's install directory by default. */
   secretsDirectory?: string;
+  /**
+   * Never read the install's secrets (GY-1718: a merge preview runs cases the candidate wrote): a
+   * case declaring any fails at its declared secrets, and no secrets file is opened.
+   */
+  withholdSecrets?: boolean;
   /** Where agent steps' screenshots go: a run-named directory under the temp directory by default. */
   artifactsDirectory?: string;
   /** The host environment a step's process draws its basics from, and how it is spawned; tests substitute both. */
   hostEnvironment?: NodeJS.ProcessEnv; processRunner?: ProcessRunner;
+  /**
+   * Cancels the run (GY-1718: a merge preview past its budget): no further case, attempt or step
+   * starts, in-flight requests are aborted and an open browser closed, so the run settles within
+   * the step it is in; a case not yet started is unrun, `stoppedBy` naming `cancelledRun`.
+   */
+  signal?: AbortSignal;
 }
+/** What a case a cancelled run never started names in `stoppedBy`. */
+export const cancelledRun = 'cancelled';
+/** `fetcher` with `signal` added to every request, beside the request's own. */
+const cancellable = (fetcher: typeof fetch, signal: AbortSignal): typeof fetch =>
+  (input, init) => fetcher(input, { ...init, signal: init?.signal ? AbortSignal.any([init.signal, signal]) : signal });
 
 /** The commit the target's /healthz reports serving, or null when it reports none in time. */
 async function readServed(url: string, fetcher: typeof fetch, timeoutMs: number) {
@@ -131,13 +147,20 @@ export function checkAnswer(step: Extract<E2eStep, { kind: 'http' }>, status: nu
   return null;
 }
 
+/** `path` resolved on the target, refused when it leaves the target's origin (a `//host/…` path would carry the case's token elsewhere, GY-1718). */
+const onTarget = (path: string, url: string) => {
+  const resolved = new URL(path, url);
+  if (resolved.origin !== new URL(url).origin) throw new Error(`the path ${path} leaves the target ${new URL(url).origin}`);
+  return resolved;
+};
+
 const withTimeout = <T>(work: Promise<T>, ms: number, what: string) => {
   let timer: NodeJS.Timeout | undefined;
   return Promise.race([work, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`${what} did not finish within ${ms} ms`)), ms); })]).finally(() => clearTimeout(timer));
 };
 
 interface CaseContext { url: string; vars: Record<string, string>; timeoutMs: number; fetcher: typeof fetch; page: () => Promise<E2ePage>; pageErrors: string[]; idempotency: (index: number) => string;
-  secrets: Record<string, string>; general: { root: string; env: Record<string, string>; run: ProcessRunner; artifacts: string; session: (index: number) => string } }
+  secrets: Record<string, string>; general: { root: string; env: Record<string, string>; run: ProcessRunner; artifacts: string; session: (index: number) => string; signal?: AbortSignal } }
 
 /** A step's own timeout: a command or agent step declares one; the request and browser steps share the run's. */
 const timeoutOf = (step: E2eStep, context: Pick<CaseContext, 'timeoutMs'>) => step.kind === 'command' || step.kind === 'agent' ? step.timeoutSeconds * 1000 : context.timeoutMs;
@@ -152,7 +175,7 @@ async function runStep(step: E2eStep, index: number, context: CaseContext): Prom
   if (step.kind === 'http') {
     const path = substitute(step.path, context.vars);
     const body = step.body === undefined ? undefined : JSON.stringify(substitute(step.body, context.vars));
-    const response = await context.fetcher(new URL(path, context.url), { method: step.method, signal: AbortSignal.timeout(context.timeoutMs),
+    const response = await context.fetcher(onTarget(path, context.url), { method: step.method, signal: AbortSignal.timeout(context.timeoutMs),
       headers: { Authorization: `Bearer ${context.vars.token}`, 'Content-Type': 'application/json', ...(step.method === 'POST' ? { 'Idempotency-Key': context.idempotency(index) } : {}) }, body });
     const text = await response.text();
     let parsed: unknown = undefined;
@@ -172,7 +195,7 @@ async function runStep(step: E2eStep, index: number, context: CaseContext): Prom
   const text = step.text === undefined ? '' : substitute(step.text, context.vars);
   const exact = step.exact ?? true;
   const target = () => step.role ? page.getByRole(step.role, { name: text, exact }).first() : page.getByText(text, { exact }).first();
-  if (step.action === 'open') await page.goto(new URL(substitute(step.path!, context.vars), context.url).toString(), { waitUntil: 'load', timeout });
+  if (step.action === 'open') await page.goto(onTarget(substitute(step.path!, context.vars), context.url).toString(), { waitUntil: 'load', timeout });
   else if (step.action === 'fill') await page.getByLabel(substitute(step.label!, context.vars)).first().fill(substitute(step.value!, context.vars), { timeout });
   else if (step.action === 'click') await target().click({ timeout });
   else await target().waitFor({ state: 'visible', timeout });
@@ -180,21 +203,25 @@ async function runStep(step: E2eStep, index: number, context: CaseContext): Prom
 }
 
 /** Run one case once: its declared secrets resolved first, then its steps in order, stopping at the first that fails. */
-async function attemptCase(entry: CaseFile, options: Required<Pick<RunOptions, 'url' | 'token' | 'stepTimeoutMs' | 'root' | 'artifactsDirectory' | 'hostEnvironment' | 'processRunner'>> & { runId: string; attempt: number; fetcher: typeof fetch; launcher: () => Promise<E2eLauncher>; secretsDirectory: () => string }) {
+async function attemptCase(entry: CaseFile, options: Required<Pick<RunOptions, 'url' | 'token' | 'stepTimeoutMs' | 'root' | 'artifactsDirectory' | 'hostEnvironment' | 'processRunner'>> & { runId: string; attempt: number; fetcher: typeof fetch; launcher: () => Promise<E2eLauncher>; secretsDirectory: () => string; signal?: AbortSignal; withholdSecrets?: boolean }) {
   const { definition } = entry;
   const steps: StepRecord[] = [];
   let secrets: Record<string, string>;
-  try { secrets = await loadSecrets(definition.secrets, definition.target, options.secretsDirectory); }
+  try {
+    if (options.withholdSecrets && definition.secrets.length) throw new Error(`declared secret ${definition.secrets[0]} is withheld: this run never reads the install's secrets`);
+    secrets = await loadSecrets(definition.secrets, definition.target, options.secretsDirectory);
+  }
   catch (error) { return { executed: 0, failingStep: { index: 0, name: 'declared secrets', reason: message(error) }, steps }; }
   const vars: Record<string, string> = { token: options.token, run: `${options.runId}-${options.attempt}`, case: definition.id, ...Object.fromEntries(Object.entries(secrets).map(([name, value]) => [`secret:${name}`, value])) };
   const pageErrors: string[] = [];
   let browser: E2eBrowser | null = null, page: E2ePage | null = null;
   const session = (index: number) => `graphyard-e2e-${options.runId}-${definition.id}-${options.attempt}-${index + 1}`.replace(/[^a-zA-Z0-9_.-]/g, '-').slice(0, 120);
   const context: CaseContext = { url: options.url, vars, timeoutMs: options.stepTimeoutMs, fetcher: options.fetcher, pageErrors, secrets,
-    general: { root: options.root, env: stepEnvironment(options.url, secrets, options.hostEnvironment), run: options.processRunner, artifacts: options.artifactsDirectory, session },
+    general: { root: options.root, env: stepEnvironment(options.url, secrets, options.hostEnvironment), run: options.processRunner, artifacts: options.artifactsDirectory, session, signal: options.signal },
     idempotency: index => `e2e:${definition.id}:${options.runId}:${options.attempt}:${index}`,
     page: async () => {
       if (!page) {
+        if (options.signal?.aborted) throw new Error('the run was cancelled');
         browser = await (await options.launcher()).launch({ headless: true });
         page = await browser.newPage();
         page.on('pageerror', error => pageErrors.push(message(error)));
@@ -204,8 +231,12 @@ async function attemptCase(entry: CaseFile, options: Required<Pick<RunOptions, '
   let executed = 0, failingStep: FailingStep | null = null;
   // The step as it ran, values substituted then redacted, and only then shortened; a step whose value names nothing substitutable is described as written.
   const name = (step: E2eStep) => { let ran = step; try { ran = substitute(step, vars); } catch { /* the failure names the missing value */ } return describeStep(redactValues(ran, secrets)); };
+  // A cancelled run closes the case's browser at once, so a step waiting on its page settles.
+  const closeOnCancel = () => { if (browser) (browser as E2eBrowser).close().catch(() => {}); };
+  options.signal?.addEventListener('abort', closeOnCancel, { once: true });
   try {
     for (const [index, step] of definition.steps.entries()) {
+      if (options.signal?.aborted) { failingStep = { index, name: name(step), reason: 'the run was cancelled' }; break; }
       executed++;
       try {
         const record = await withTimeout(runStep(step, index, context), timeoutOf(step, context) + 1_000, `step ${index + 1}`);
@@ -216,7 +247,10 @@ async function attemptCase(entry: CaseFile, options: Required<Pick<RunOptions, '
         failingStep = { index, name: name(step), reason: redactedMessage(error, secrets) }; break;
       }
     }
-  } finally { if (browser) await (browser as E2eBrowser).close().catch(() => {}); }
+  } finally {
+    options.signal?.removeEventListener('abort', closeOnCancel);
+    if (browser) await (browser as E2eBrowser).close().catch(() => {});
+  }
   return { executed, failingStep, steps };
 }
 
@@ -225,7 +259,7 @@ async function attemptCase(entry: CaseFile, options: Required<Pick<RunOptions, '
  * steps never race each other on the same target; a case's browser steps share one page.
  */
 export async function runCases(cases: readonly CaseFile[], options: RunOptions): Promise<E2eReport> {
-  const now = options.now ?? Date.now, fetcher = options.fetcher ?? fetch;
+  const now = options.now ?? Date.now, signal = options.signal, fetcher = signal ? cancellable(options.fetcher ?? fetch, signal) : options.fetcher ?? fetch;
   const runId = options.runId ?? randomUUID();
   const retries = options.retries ?? 0, stepTimeoutMs = options.stepTimeoutMs ?? defaultStepTimeoutMs;
   const root = options.root ?? process.cwd();
@@ -240,14 +274,15 @@ export async function runCases(cases: readonly CaseFile[], options: RunOptions):
   let stoppedBy: string | null = null;
   for (const entry of cases) {
     const { id, title, required } = entry.definition;
+    if (!stoppedBy && signal?.aborted) stoppedBy = cancelledRun;
     if (stoppedBy) { outcomes.push({ id, title, file: entry.file, outcome: null, verdict: 'unrun', required, stoppedBy, durationMs: 0, attempts: 0, attemptResults: [], executed: 0, failingStep: null }); continue; }
     const started = now();
     const attemptResults: AttemptResult[] = [];
     do {
       const began = now();
-      const result = await attemptCase(entry, { url: options.url, token: options.token, stepTimeoutMs, runId, attempt: attemptResults.length + 1, fetcher, launcher: launch, ...general });
+      const result = await attemptCase(entry, { url: options.url, token: options.token, stepTimeoutMs, runId, attempt: attemptResults.length + 1, fetcher, launcher: launch, signal, withholdSecrets: options.withholdSecrets, ...general });
       attemptResults.push({ attempt: attemptResults.length + 1, outcome: result.failingStep ? 'fail' : 'pass', durationMs: Math.max(0, now() - began), ...result });
-    } while (attemptResults.at(-1)!.outcome === 'fail' && attemptResults.length <= retries);
+    } while (attemptResults.at(-1)!.outcome === 'fail' && attemptResults.length <= retries && !signal?.aborted);
     const last = attemptResults.at(-1)!;
     // A pass after a failure is flaky only when both attempts are bound to one served commit; at an unreported commit it is a failure.
     const verdict: CaseVerdict = last.outcome === 'fail' || (attemptResults.length > 1 && !sha) ? 'failed' : attemptResults.length > 1 ? 'flaky' : 'passed';
@@ -358,13 +393,13 @@ export const e2eSuite = (cases: readonly CaseFile[], token: string, options: { f
   /** Which cases run: those targeting uat by default; a managed repository's candidate (GY-1535) runs every required case too. */
   select?: (entry: CaseFile) => boolean;
   /** Run every selected case even after a required one fails, so each records its own result (GY-1535). */
-  runAll?: boolean } = {}) => ({
+  runAll?: boolean; signal?: AbortSignal; withholdSecrets?: boolean; hostEnvironment?: NodeJS.ProcessEnv } = {}) => ({
   name: 'e2e',
   run: async (url: string, candidate: { id: string } | null) => {
     const selected = cases.filter(options.select ?? (entry => entry.definition.target === 'uat'));
     if (!selected.length) return { name: 'e2e', passed: false, detail: options.select ? 'no required or uat E2E case is in the checkout, so the suite exercised nothing' : 'no E2E case targets uat, so the suite exercised nothing' };
     const report = await runCases(selected, { url, token, environment: 'uat', runId: candidate ? `rc-${candidate.id}` : undefined, fetcher: options.fetcher, launcher: options.launcher, stepTimeoutMs: options.stepTimeoutMs,
-      root: options.root, retries: releaseRetries, stopOnRequiredFailure: !options.runAll });
+      root: options.root, retries: releaseRetries, stopOnRequiredFailure: !options.runAll, signal: options.signal, withholdSecrets: options.withholdSecrets, hostEnvironment: options.hostEnvironment });
     await options.report?.(report);
     const verdict = releaseVerdict(report), detail = failureDetail(report);
     const executed = report.cases.length - verdict.unrun.length;

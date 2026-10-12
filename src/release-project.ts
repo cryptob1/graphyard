@@ -1,8 +1,8 @@
 // Concern: a managed repository's own E2E cases on every release candidate (GY-1535) — the candidate's UAT step runs every required case of its checkout through src/e2e/runner.ts, against its UAT deployment or a static site's loopback server.
-import { execFile } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { contractFile, loadCases, loadContract } from './e2e/case.js';
+import { contractFile, loadCases, loadContract, type CaseFile } from './e2e/case.js';
 import { e2eSuite, type E2eLauncher, type E2eReport } from './e2e/runner.js';
 import { holdTagPrefix, releaseHolds } from './release-holds.js';
 import { findCandidate, readLedgerAsync, recordsArguments, serveStaticSite, syncLedgerAsync, validateAndRecord, type AnyGit, type AsyncGit, type Git, type HoldOutcome, type ReleaseCandidate, type StaticUat, type Suite, type UatRecord } from './release-candidate.js';
@@ -16,12 +16,14 @@ import { findCandidate, readLedgerAsync, recordsArguments, serveStaticSite, sync
  * candidate record names each case's result.
  */
 export function projectCaseSuite(root: string, token: string, options: { fetcher?: typeof fetch; launcher?: E2eLauncher; stepTimeoutMs?: number;
-  report?: (report: E2eReport) => void | Promise<void> } = {}): Suite {
+  report?: (report: E2eReport) => void | Promise<void>; signal?: AbortSignal; select?: (entry: CaseFile) => boolean; withholdSecrets?: boolean; hostEnvironment?: NodeJS.ProcessEnv;
+  /** The cases to run, loaded beforehand; when absent they are loaded from `root` at run time. */
+  cases?: readonly CaseFile[] } = {}): Suite {
   return {
     name: 'e2e',
     run: async (url, candidate) => {
-      const suite = e2eSuite(await loadCases(root), token, { fetcher: options.fetcher, launcher: options.launcher, stepTimeoutMs: options.stepTimeoutMs, root, report: options.report,
-        select: entry => entry.definition.required || entry.definition.target === 'uat', runAll: true });
+      const suite = e2eSuite(options.cases ? [...options.cases] : await loadCases(root), token, { fetcher: options.fetcher, launcher: options.launcher, stepTimeoutMs: options.stepTimeoutMs, root, report: options.report, signal: options.signal,
+        select: options.select ?? (entry => entry.definition.required || entry.definition.target === 'uat'), runAll: true, withholdSecrets: options.withholdSecrets, hostEnvironment: options.hostEnvironment });
       return suite.run(url, candidate);
     },
   };
@@ -44,6 +46,47 @@ const asyncHolds = (git: AsyncGit, options: Parameters<typeof releaseHolds>[1]) 
   return { ...outcome, write: async () => { outcome.write(); for (const args of writes) await git(args); } };
 };
 
+/** Runs a shell command in a checkout, in `env` when named: whether it exited zero, and what it printed. */
+export type StaticBuildShell = (command: string, cwd: string, signal?: AbortSignal, env?: NodeJS.ProcessEnv) => Promise<{ ok: boolean; output: string }>;
+/**
+ * The default `StaticBuildShell`: `sh -c command` in its own process group, both streams kept (the
+ * last ~4 MB). At `timeoutMs`, on `signal`, and once the shell itself has exited, the whole group is
+ * killed — an `npm run build`'s descendants with it — and the answer waits until every process
+ * holding its output has ended, so no build process outlives the call (GY-1718).
+ */
+export const groupBuildShell = (timeoutMs: number): StaticBuildShell => (command, cwd, signal, env) => new Promise(accept => {
+  const child = spawn('sh', ['-c', command], { cwd, env: env ?? process.env, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
+  const chunks: Buffer[] = [];
+  let size = 0, ended: string | null = null;
+  const keep = (chunk: Buffer) => { chunks.push(chunk); size += chunk.length; while (size - chunks[0].length >= 4_000_000) size -= chunks.shift()!.length; };
+  child.stdout.on('data', keep); child.stderr.on('data', keep);
+  const killGroup = () => { try { process.kill(-child.pid!, 'SIGKILL'); } catch { /* the group has already ended */ } };
+  const stop = (why: string) => { ended ??= why; killGroup(); };
+  const timer = setTimeout(() => stop(`the build did not finish within ${timeoutMs} ms`), timeoutMs);
+  const cancel = () => stop('the build was cancelled');
+  if (signal?.aborted) cancel(); else signal?.addEventListener('abort', cancel, { once: true });
+  child.on('exit', killGroup);
+  const settle = (code: number | null, error?: Error) => {
+    clearTimeout(timer); signal?.removeEventListener('abort', cancel);
+    const output = Buffer.concat(chunks).toString('utf8');
+    accept({ ok: code === 0 && !ended && !error, output: `${output}${error ? error.message : ended && !output ? ended : code !== 0 && !output ? `exited ${code ?? 'by signal'}` : ''}` });
+  };
+  child.on('error', error => settle(null, error));
+  child.on('close', code => settle(code));
+});
+/**
+ * Build a static site's output in `checkout` with its `build` shell command (`GRAPHYARD_UAT_BUILD`):
+ * null when the build passed, else the failure's detail naming the command and its last output
+ * lines. The release candidate (GY-1535) and the merge preview (GY-1718) build the same way, in
+ * `groupBuildShell`; `signal` cancels the build, killing its process group; `env`, when named, is
+ * the build's whole environment (the merge preview's holds no coordinator credential), else it
+ * inherits this process's.
+ */
+export async function buildStaticSite(build: string, checkout: string, timeoutMs: number, shell?: StaticBuildShell, signal?: AbortSignal, env?: NodeJS.ProcessEnv): Promise<string | null> {
+  const built = await (shell ?? groupBuildShell(timeoutMs))(build, checkout, signal, env);
+  return built.ok ? null : `the static site's build \`${build}\` failed: ${built.output.trim().split('\n').slice(-5).join(' | ').slice(0, 900)}`;
+}
+
 /** The UAT a managed repository's candidate is validated on: a deployment's URL, or a static site's build output served on loopback (optionally built first by `build`, a shell command run in the checkout). */
 export type ProjectUat = { url: string } | { static: { directory: string; build?: string | null } };
 
@@ -57,7 +100,7 @@ export type ProjectUat = { url: string } | { static: { directory: string; build?
  */
 export async function validateProjectCandidate(sourceGit: AnyGit, id: string, options: { checkout: string; uat: ProjectUat; token: string; base: string; push: boolean; timeoutMs: number;
   file?: (item: object, requestId: string) => Promise<string>; fetcher?: typeof fetch; launcher?: E2eLauncher; stepTimeoutMs?: number; now?: () => Date;
-  shell?: (command: string, cwd: string) => Promise<{ ok: boolean; output: string }> }) {
+  shell?: StaticBuildShell }) {
   const git = async (args: string[]) => await sourceGit(args);
   await syncLedgerAsync(git, options.base);
   const candidate = findCandidate(await readLedgerAsync(git), id);
@@ -68,11 +111,8 @@ export async function validateProjectCandidate(sourceGit: AnyGit, id: string, op
   else {
     const { directory, build } = options.uat.static;
     if (build) {
-      const shell = options.shell ?? ((command: string, cwd: string) => new Promise<{ ok: boolean; output: string }>(accept => {
-        execFile('sh', ['-c', command], { cwd, encoding: 'utf8', timeout: options.timeoutMs, maxBuffer: 64 * 1024 * 1024 }, (error, stdout, stderr) => accept({ ok: !error, output: `${stdout ?? ''}${stderr ?? ''}${error && !stderr ? error.message : ''}` }));
-      }));
-      const built = await shell(build, options.checkout);
-      if (!built.ok) suites.push({ name: 'build', run: async () => ({ name: 'build', passed: false, detail: `the static site's build \`${build}\` failed: ${built.output.trim().split('\n').slice(-5).join(' | ').slice(0, 900)}` }) });
+      const failed = await buildStaticSite(build, options.checkout, options.timeoutMs, options.shell);
+      if (failed) suites.push({ name: 'build', run: async () => ({ name: 'build', passed: false, detail: failed }) });
     }
     served = await serveStaticSite(join(options.checkout, directory), candidate.sha);
     url = served.url;
