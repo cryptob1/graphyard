@@ -162,12 +162,22 @@ export async function staleServingLoop(cursor: string, root: string | null, run:
 }
 
 const serveOutputSchema = z.object({
-  restored: z.object({ ref: z.string(), commit: z.string(), paths: z.array(z.string()), skipped: z.array(z.object({ pid: z.number().int(), error: z.string() })).default([]) }).nullable(),
+  // GY-1745: a diverged heal rides inside `restored` (an object a loop loaded before it strips unknown keys of), never as a new top-level key its strict schema rejects: with no dirty path the entry reports the diverged ref as an empty restore, so an older loop still asks its restart.
+  restored: z.object({ ref: z.string(), commit: z.string(), paths: z.array(z.string()), skipped: z.array(z.object({ pid: z.number().int(), error: z.string() })).default([]), diverged: z.object({ ref: z.string(), from: z.string(), to: z.string() }).optional() }).nullable(),
   head: z.string().nullable(),
-  /** GY-1745: the diverged HEAD saved under `ref` and the release the checkout was moved onto; absent from a release that predates it. */
-  diverged: z.object({ ref: z.string(), from: z.string(), to: z.string() }).strict().optional(),
 }).strict();
 export type ServeOutput = z.infer<typeof serveOutputSchema>;
+type Restored = NonNullable<ServeOutput['restored']>;
+/** The serve entry's printed output: the diverged heal carried inside `restored`, as an older loop's schema still reads. */
+export const encodeServeOutput = (out: { restored: Omit<Restored, 'diverged'> | null; head: string | null; diverged?: Restored['diverged'] | null }): ServeOutput =>
+  ({ restored: out.diverged ? { ...(out.restored ?? { ref: out.diverged.ref, commit: out.diverged.from, paths: [], skipped: [] }), diverged: out.diverged } : out.restored, head: out.head });
+/** What a serve output holds: the dirty restore (none for the empty one that only carries a heal) and the diverged heal. */
+const decodeServeOutput = (out: ServeOutput) => {
+  const { diverged, ...restored } = out.restored ?? {};
+  // Only a heal that also saved dirty paths has a restore of its own.
+  const dirty = out.restored && (restored as Restored).paths.length > 0 ? restored as Omit<Restored, 'diverged'> : diverged ? null : (out.restored as Omit<Restored, 'diverged'> | null);
+  return { restored: dirty, head: out.head, ...(diverged ? { diverged } : {}) };
+};
 
 /** What the loop (or the command's old-HEAD handoff) signs: the grant without its signature. */
 const grantPayloadSchema = z.object({
@@ -279,7 +289,7 @@ export function releasePinnedRestore(deps: ReleaseRestoreDeps): RestoreAct {
         let parsed: ServeOutput;
         try { parsed = serveOutputSchema.parse(JSON.parse(output)); }
         catch (error) { throw new Error(`${served}, whose outcome could not be read (${message(error).split('\n')[0]}): ${output.trim().slice(0, 500)}`); }
-        return { ...parsed, served, release: release.commit };
+        return { ...decodeServeOutput(parsed), served, release: release.commit };
       } finally { await snapshot.dispose(); }
     }
     throw new Error(`no sanctioned release can serve this request, and the loop's own loaded code is not run (GY-1680): ${reasons.join('; ')}. Once a release holding the serve entry is observed serving or reaches origin, file master checkout-restore REASON again`.slice(0, 4000));

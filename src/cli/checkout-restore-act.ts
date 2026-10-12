@@ -31,7 +31,7 @@ async function isAncestor(root: string, ancestor: string, descendant: string, ru
 }
 /**
  * GY-1745: what a diverged HEAD is judged against: `base`, the base branch's ref at origin; `loaded`,
- * the commit the loop runs (null when none is known); `serving`, the release the checkout moves onto
+ * the commit the loop runs (null when none is known: nothing is then diverged); `serving`, the release the checkout moves onto
  * (the verified serving release, else the base tip).
  */
 export interface DivergeInputs { base: string; loaded: string | null; serving: string }
@@ -47,7 +47,8 @@ export async function divergedHead(root: string, inputs: Pick<DivergeInputs, 'ba
   let head: string;
   try { head = String(await run('git', ['-C', root, 'rev-parse', 'HEAD'])).trim(); } catch { return null; }
   if (!head || await isAncestor(root, head, inputs.base, run) !== false) return null;
-  if (inputs.loaded && await isAncestor(root, inputs.loaded, head, run) === true) return null;
+  // Without the commit the loop runs there is nothing to call a forward move, so nothing is judged diverged.
+  if (!inputs.loaded || await isAncestor(root, inputs.loaded, head, run) !== false) return null;
   return head;
 }
 const refStamp = (at: Date) => at.toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z');

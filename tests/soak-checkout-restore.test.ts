@@ -1,4 +1,5 @@
 import { test } from 'node:test';
+import { z } from 'zod';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
@@ -103,9 +104,10 @@ const serveRecord = (record: string) => JSON.parse(readFileSync(record, 'utf8'))
  * and `notify` records each supervisor notification with the wall clock it was sent at: the watchdog
  * it feeds runs on the wall clock, not the simulated one.
  */
-function effects(now: () => number, persist: (state: DaemonState) => Promise<void>, notifications?: { at: number; state: string }[]): DaemonEffects {
+function effects(now: () => number, persist: (state: DaemonState) => Promise<void>, notifications?: { at: number; state: string }[], loadedRelease?: string): DaemonEffects {
   const iso = () => new Date(now()).toISOString();
   return {
+    ...(loadedRelease ? { loadedRelease: { commit: loadedRelease, dirty: false } } : {}),
     ...(notifications ? { notify: (state: 'ready' | 'alive') => { notifications.push({ at: Date.now(), state }); } } : {}),
     agents: () => [] as never[],
     credentials: async (profiles: { name: string }[]) => Object.fromEntries(profiles.map(item => [item.name, { available: true, reason: null }])),
@@ -316,4 +318,71 @@ test('integration:soak-checkout-restore-drift — over two simulated days of the
     `the restarted loop serves nothing again: ${journal.filter(entry => entry.at > restarts[0].at && /checkout-restore|escalation failed/.test(entry.line)).map(entry => entry.line).join(' | ')}`);
   const settledLine = journal.find(entry => entry.pid === served[0].pid && entry.line.includes('escalation done:'));
   assert.ok(settledLine && settledLine.at <= restarts[0].at && settledLine.line.includes(`is clean again at ${adopted.slice(0, 12)}, the commit the loop runs`), `the serving loop settled the drift onto the adopted HEAD before restarting: ${settledLine?.line}`);
+});
+
+test('integration:soak-checkout-restore-diverged — over two simulated days of the real loop, a checkout-restore request against a clean checkout whose HEAD is detached at an orphan commit (neither on the base branch nor above the commit the loop runs) saves that HEAD under refs/graphyard/checkout-restore/diverged-*, detaches the checkout at the serving release and restarts the loop through its unit once; the restore stays settled for the rest of the days, and the serve entry\'s output still parses under the strict schema of a loop loaded before GY-1745', async () => {
+  const { main, config, release, record, env } = await installation();
+  git(main, 'fetch', '-q', 'origin'); // the base ref the diverged judgement reads
+  git(main, 'checkout', '-q', '--detach');
+  const loaded = git(main, 'rev-parse', 'HEAD');
+  const start = Date.parse('2030-01-01T00:00:00Z');
+  let clock = start;
+  const now = () => clock;
+  const state = emptyDaemonState(config);
+  const persist = (current: DaemonState) => writeDaemonState(config, current);
+  const journal: { at: number; pid: number; line: string }[] = [];
+  const restarts: { at: number; pid: number }[] = [];
+  const reads: { at: number; pid: number; escalation: string | null; attempts: number | null }[] = [];
+  let diverged: string | null = null;
+  const request = (file: string, act: string, reason: string, requestedBy: string) => () => writeFileSync(file, JSON.stringify({ id: `r-${clock}`, act, reason, requestedAt: new Date(clock).toISOString(), requestedBy, args: [], outcome: null }));
+  const plan = [
+    // A hand checkout moves HEAD onto an orphan commit, clean: neither merged nor forward of the loaded commit.
+    { at: 1 * hour, act: () => { git(main, 'checkout', '-q', '--orphan', 'side'); writeFileSync(join(main, 'side.ts'), 'export const side = 1;\n'); git(main, 'add', 'side.ts'); git(main, 'commit', '-q', '-m', 'orphan'); diverged = git(main, 'rev-parse', 'HEAD'); git(main, 'checkout', '-q', '--detach'); git(main, 'branch', '-q', '-D', 'side'); } },
+    { at: 3 * hour, act: request(checkoutRestoreRequestPath(config), 'checkout-restore', 'escalation:dirty-checkout standing: HEAD diverged', 'graphyard-doctor') },
+  ];
+  let pid = 3000;
+  const end = start + 2 * day;
+  const restoreEnv = withEnv(env);
+  try { while (clock < end) {
+    const host = new EventEmitter(), own = ++pid;
+    process.env.GRAPHYARD_TEST_LOOP_PID = String(own);
+    const intervalMs = () => {
+      clock += 10 * minute;
+      for (const step of plan.filter(entry => start + entry.at <= clock)) { step.act(); plan.splice(plan.indexOf(step), 1); }
+      if (clock >= end) host.emit('SIGTERM');
+      return 1;
+    };
+    const checkout = async () => {
+      const read = await readCoordinatorCheckout(main);
+      const escalation = state.actions['escalation:dirty-checkout'];
+      reads.push({ at: clock, pid: own, escalation: escalation?.state ?? null, attempts: escalation?.attempts ?? null });
+      return read;
+    };
+    const restartLoop = async () => { restarts.push({ at: clock, pid: own }); host.emit('SIGTERM'); };
+    await runDaemon(config, state, effects(now, persist, undefined, loaded), { intervalMs, identity: { pid: own, host: 'machine-a' }, signals: ['SIGTERM'], process: host as never, now, checkout, restartLoop,
+      log: line => journal.push({ at: clock, pid: own, line }) });
+  } } finally { restoreEnv(); }
+  assert.ok(diverged, 'the orphan HEAD was made');
+  const served = journal.filter(entry => /\] checkout-restore (restored|adopted|clean|failed)/.test(entry.line) && !/restart (done|failed):/.test(entry.line));
+  assert.equal(served.length, 1, `one request served once: ${served.map(entry => entry.line).join(' | ')}`);
+  assert.match(served[0].line, /checkout-restore adopted: .*neither on the base branch nor a descendant of the commit the loop runs/);
+  const refs = git(main, 'for-each-ref', '--format=%(refname)', checkoutRestoreRefPrefix).split('\n').filter(Boolean);
+  assert.equal(refs.length, 1, `one saved ref: ${refs.join(', ')}`);
+  assert.ok(refs[0].startsWith(`${checkoutRestoreRefPrefix}diverged-`), refs[0]);
+  assert.equal(git(main, 'rev-parse', refs[0]), diverged, 'the diverged HEAD is kept under the ref');
+  assert.equal(git(main, 'rev-parse', 'HEAD'), release, 'the checkout stands at the serving release');
+  assert.equal(release, loaded); assert.equal(git(main, 'status', '--porcelain'), '');
+  // The older-loaded-loop boundary: the entry's printed output parses under the strict schema a loop loaded before GY-1745 holds, and reads as a restore that owes the restart.
+  const oldSchema = z.object({ restored: z.object({ ref: z.string(), commit: z.string(), paths: z.array(z.string()), skipped: z.array(z.object({ pid: z.number().int(), error: z.string() })).default([]) }).nullable(), head: z.string().nullable() }).strict();
+  const printed = oldSchema.parse((serveRecord(record) as unknown as { outcome: unknown }).outcome);
+  assert.equal(printed.restored?.ref, refs[0]); assert.equal(printed.head, release);
+  assert.deepEqual(restarts.map(entry => entry.pid), [served[0].pid], 'exactly one restart, asked by the loop that served the request');
+  const stored = await readCheckoutRestoreRequest(checkoutRestoreRequestPath(config));
+  assert.equal(stored?.outcome?.state, 'adopted'); assert.equal(stored?.outcome?.ref, refs[0]); assert.equal(stored?.outcome?.restart?.state, 'done');
+  const after = reads.filter(entry => entry.at > restarts[0].at);
+  assert.ok(after.length >= 100 && after.at(-1)!.at - restarts[0].at >= day, 'the days ran on past the restart');
+  assert.ok(after.every(entry => entry.escalation === 'done' && entry.pid !== restarts[0].pid), 'the escalation stays settled under a new loop process');
+  assert.equal(new Set(after.map(entry => entry.attempts)).size, 1, 'no further failed attempt is recorded');
+  assert.equal(git(main, 'for-each-ref', '--format=%(refname)', checkoutRestoreRefPrefix).split('\n').filter(Boolean).length, 1, 'no later cycle saved another ref');
+  assert.ok(!journal.some(entry => entry.at > restarts[0].at && /checkout-restore|escalation failed|loop-restart/.test(entry.line) && !/restart done/.test(entry.line)), 'the restarted loop serves nothing again');
 });

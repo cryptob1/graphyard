@@ -11,7 +11,7 @@ import { daemonStatePath } from '../daemon/state.js';
 import { loadStoredMasterConfig, readCredentialFile } from '../master/config.js';
 import { coordinatorCheckoutRoot, type MasterConfig } from '../master/profiles.js';
 import { continueFrozenWriters, freezeCheckoutWriters, type WriterFreezeDeps } from './checkout-writers.js';
-import { type CheckoutRestoreGrant, checkoutRestoreGrantSigned, checkoutRestoreGrantVariable, checkoutRestoreServeFlag, checkoutRestoreServeUsage, commitServes, grantSchema, lockedLoop, type ServeOutput } from './checkout-restore-release.js';
+import { type CheckoutRestoreGrant, checkoutRestoreGrantSigned, checkoutRestoreGrantVariable, checkoutRestoreServeFlag, checkoutRestoreServeUsage, commitServes, encodeServeOutput, grantSchema, lockedLoop, type ServeOutput } from './checkout-restore-release.js';
 import { type CheckoutQuiesce, type DivergeInputs, checkoutRestoreFreezeLedgerPath, checkoutRestoreGrantPath, checkoutRestoreRequestPath, readCheckoutRestoreRequest, restoreInProcess } from './master-checkout-restore.js';
 
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
@@ -243,6 +243,6 @@ export async function serveCheckoutRestoreAct(args: readonly string[], options: 
   try {
     // An old-HEAD handoff's checkout is advanced onto the grant's release inside the same freeze (review of GY-1680).
     const { restored, head, diverged } = await restoreInProcess(run, quiesce, grant.handoff?.advance ?? null, () => (options.diverge ?? divergeInputs)(config, grant.root, run))(grant.root, grant.reason, options.now ?? new Date(), { file: checkoutRestoreRequestPath(config), id: grant.request.id });
-    return { restored, head, ...(diverged ? { diverged } : {}) };
+    return encodeServeOutput({ restored, head, diverged });
   } finally { release(); }
 }
