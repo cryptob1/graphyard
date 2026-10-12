@@ -1113,7 +1113,8 @@ export class Engine {
       this.evaluate(work, all, now);
       await this.recordDispatch(db, work, now);
       await save(db, work, 'graphyard', 'observation-window', now, { observationWindow: work.observationWindow });
-    });
+    // It is part of the claim, so it takes the claim's lease pool (GY-274): a busy request pool never stalls a claim.
+    }, { lane: 'lease', itemLock: id });
     // The transaction reruns this closure on a stale write: each run authorizes the principal as the
     // caller presented it, never the one an earlier run already resolved (GY-1276).
     const caller = actor;
