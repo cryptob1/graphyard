@@ -18,10 +18,11 @@ import type { RunOptions, RunResult, Runner } from '../src/runner/types.js';
  * filing the create route refuses with 400 Invalid input; the diagnostician files a fix the same
  * way for one recurring item, and for another asks a close that already stands with a matching
  * duplicate-of covering (GY-1710's shape). A third recurring item meets a standing obsolete close
- * that does not match. After every cycle and at the end: each refused content reaches create once,
- * the matching standing close is adopted once and its approver launched once, the mismatched close
- * is never adopted, nothing reaches an isolation record or an unclassified fault, and every system
- * invariant holds.
+ * that does not match: the diagnosis holds that decision (one decide POST) until its ledger state
+ * changes, then asks its own closure once. After every cycle and at the end: each refused content
+ * reaches create once, the matching standing close is adopted once and its approver launched once,
+ * the mismatched close is never adopted while it stands and is not re-POSTed every cycle, nothing
+ * reaches an isolation record or an unclassified fault, and every system invariant holds.
  */
 const minute = 60_000, hour = 60 * minute, start = Date.parse('2026-10-11T00:00:00Z');
 const iso = (at: number) => new Date(at).toISOString();
@@ -60,7 +61,7 @@ const filing = (faultClass: FaultClass, title: string): DoctorFile => ({
   criteria: [{ id: 'AC-1', text: 'A spent account is held until its reset', proofs: ['unit:capacity-hold'] }],
 });
 
-test('unit:soak-invariants-hold — over a simulated day create-400 refusals settle once, a matching standing close is adopted once, a mismatched standing close is waited out, and every system invariant holds', { timeout: 300_000 }, async () => {
+test('unit:soak-invariants-hold — over a simulated day create-400 refusals settle once, a matching standing close is adopted once, a mismatched standing close is held until its ledger changes, and every system invariant holds', { timeout: 300_000 }, async () => {
   clearDoctorRuns(); clearDiagnoses();
   let now = start;
   const state = emptyDaemonState(config());
@@ -146,10 +147,13 @@ test('unit:soak-invariants-hold — over a simulated day create-400 refusals set
           409, { error: `Decision ${matchingStandingId} (close) is already requested on ${target.key}; wait for it` });
       }
       if (action === 'close' && target.key === mismatchedClose.key) {
-        decides[decides.length - 1]!.outcome = '409-mismatched';
-        throw new RefusedResponse(
-          `Graphyard refused work/${target.id}/decide (409): Decision ${mismatchedStandingId} (close) is already requested on ${target.key}; wait for it`,
-          409, { error: `Decision ${mismatchedStandingId} (close) is already requested on ${target.key}; wait for it` });
+        const standing = ledger.find(row => row.id === mismatchedStandingId);
+        if (standing?.state === 'requested') {
+          decides[decides.length - 1]!.outcome = '409-mismatched';
+          throw new RefusedResponse(
+            `Graphyard refused work/${target.id}/decide (409): Decision ${mismatchedStandingId} (close) is already requested on ${target.key}; wait for it`,
+            409, { error: `Decision ${mismatchedStandingId} (close) is already requested on ${target.key}; wait for it` });
+        }
       }
       const id = `decision-${ledger.length + 1}`;
       ledger.push({ id, work: target.key, action, state: 'requested', input, approvedBy: null, refusal: null, outcome: null });
@@ -181,17 +185,28 @@ test('unit:soak-invariants-hold — over a simulated day create-400 refusals set
   const isolated = () => Object.keys(state.actions).filter(key => key.startsWith('isolated:'));
   const dayInstances = () => state.faults.instances.filter(entry => Date.parse(entry.at) >= start);
 
+  let withdrawnMismatched = false;
   for (let cycle = 0; now < start + 6 * hour; cycle++, now += minute) {
+    // Mid-soak: the mismatched obsolete standing close settles; the diagnosis may then ask its own closure once.
+    if (!withdrawnMismatched && now >= start + 3 * hour) {
+      const row = ledger.find(entry => entry.id === mismatchedStandingId)!;
+      Object.assign(row, { state: 'withdrawn', outcome: 'taken back' });
+      withdrawnMismatched = true;
+    }
     const result = await runCycle(config(), state, effects, () => now);
     await doctorRunsSettled(); await diagnosesSettled();
     for (const check of state.invariants.report) if (!check.holds) violations.push(`cycle ${cycle} (+${(now - start) / minute} min): ${check.invariant} — ${check.reading}`);
     assert.deepEqual(isolated(), [], `cycle ${cycle}: a failure was thrown on to the step's isolation record`);
     assert.deepEqual(dayInstances().filter(entry => entry.faultClass === 'unclassified'), [], `cycle ${cycle}: an unclassified instance opened`);
-    // Matching close: adopted at most once; mismatched: never claimed as the diagnosis decision.
+    // Matching close: adopted at most once; mismatched standing id is never claimed as the diagnosis decision.
     const matching = state.diagnoses[matchingClose.key];
     if (matching?.decision) assert.equal(matching.decision.id, matchingStandingId, `cycle ${cycle}: only the matching standing close is adopted`);
     const mismatched = state.diagnoses[mismatchedClose.key];
-    if (mismatched) assert.ok(!mismatched.decision, `cycle ${cycle}: mismatched standing close must not be the diagnosis decision`);
+    if (mismatched?.decision) assert.notEqual(mismatched.decision.id, mismatchedStandingId, `cycle ${cycle}: mismatched standing close must not be the diagnosis decision`);
+    // While the mismatched close still stands, decide is posted at most once for that item.
+    if (!withdrawnMismatched) {
+      assert.ok(decides.filter(entry => entry.work === mismatchedClose.key).length <= 1, `cycle ${cycle}: mismatched close must not be re-POSTed while held`);
+    }
   }
   assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
 
@@ -214,13 +229,17 @@ test('unit:soak-invariants-hold — over a simulated day create-400 refusals set
   assert.equal(approvers.filter(entry => entry.decision === matchingStandingId).length, 1, 'approver launched once for the adopted close');
   assert.equal(approvers.filter(entry => entry.work === matchingClose.key).length, 1);
 
-  // (c) Mismatched standing close: re-asked across cycles, never adopted, never thrown, never put to an approver for that diagnosis.
-  assert.ok(decides.filter(entry => entry.work === mismatchedClose.key && entry.outcome === '409-mismatched').length >= 2, 'mismatched close is re-asked while it stands');
-  assert.equal(state.diagnoses[mismatchedClose.key].state, 'diagnosed');
-  assert.ok(!state.diagnoses[mismatchedClose.key].decision);
-  assert.match(state.diagnoses[mismatchedClose.key].detail, /its closure does not match/);
-  assert.deepEqual(approvers.filter(entry => entry.work === mismatchedClose.key), [], 'no approver for the mismatched close');
-  assert.equal(mismatchedClose.stage, 'backlog', 'the item is still open under the unmatched standing close');
+  // (c) Mismatched standing close: one decide while it stands (held, not re-POSTed), never adopted; after withdraw, one fresh diagnosis close.
+  assert.deepEqual(decides.filter(entry => entry.work === mismatchedClose.key && entry.outcome === '409-mismatched').map(entry => entry.outcome), ['409-mismatched'], 'exactly one refuse while mismatched close stands');
+  assert.equal(decides.filter(entry => entry.work === mismatchedClose.key && entry.outcome === 'created').length, 1, 'one fresh close after the standing decision settles');
+  assert.equal(state.diagnoses[mismatchedClose.key].state, 'answered');
+  assert.ok(state.diagnoses[mismatchedClose.key].decision);
+  assert.notEqual(state.diagnoses[mismatchedClose.key].decision!.id, mismatchedStandingId);
+  assert.equal(mismatchedClose.stage, 'done');
+  assert.equal(mismatchedClose.closure?.kind, 'duplicate');
+  assert.equal(mismatchedClose.closure?.ref, covering.key);
+  assert.equal(approvers.filter(entry => entry.work === mismatchedClose.key).length, 1, 'approver for the diagnosis close after the hold lifts');
+  assert.deepEqual(approvers.filter(entry => entry.decision === mismatchedStandingId), [], 'the mismatched standing close is never put to an approver');
 
   // (d) Sessions bounded: one diagnostician run per subject that needed one; doctor once per interval.
   assert.deepEqual([...new Set(launched.map(entry => entry.subject))].sort(), [mismatchedClose.key, matchingClose.key, refusedFix.key].sort());

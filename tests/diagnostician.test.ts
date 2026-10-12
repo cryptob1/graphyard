@@ -945,16 +945,18 @@ test('unit:diagnosis-adopts-standing-decision — a decide 409 naming a standing
   assert.deepEqual(diagnosisInstances(state), [], 'no diagnosis fault');
 });
 
-test('unit:diagnosis-waits-mismatched-standing-close — a decide 409 naming a standing close whose kind/ref differ is not adopted, does not throw, and leaves the diagnosis without that decision', async () => {
+test('unit:diagnosis-waits-mismatched-standing-close — a decide 409 naming a standing close whose kind/ref differ is held until its ledger state changes, not re-POSTed every cycle', async () => {
   const h = harness(() => diagnosis('GY-101', { covering: 'GY-50' }));
   // Concurrent triage close (obsolete) already stands; the diagnosis will ask duplicate-of-GY-50.
   h.requested.push({ work: 'GY-101', action: 'close', reason: 'triage obsolete', input: { kind: 'obsolete', ref: null }, id: standingCloseId, revision: 1 });
   h.outcomes.set(standingCloseId, { state: 'requested' });
   let decides = 0;
-  h.diagnostician.decide = async (work, action) => {
+  const defaultDecide = h.diagnostician.decide;
+  h.diagnostician.decide = async (work, action, reason, input) => {
     decides += 1;
     assert.equal(action, 'close');
-    throw standingCloseRefusal(work.key);
+    if (h.outcomes.get(standingCloseId)?.state === 'requested') throw standingCloseRefusal(work.key);
+    return defaultDecide(work, action, reason, input);
   };
   const state = emptyDaemonState(config()), work = [recurring(state), item('GY-50', { stage: 'build' } as Partial<Work>)];
   const isolated: string[] = [];
@@ -967,15 +969,25 @@ test('unit:diagnosis-waits-mismatched-standing-close — a decide 409 naming a s
   assert.equal(entry.decision, null, 'the obsolete standing close is not the diagnosis decision');
   assert.match(entry.detail, /Close decision 65bf0fef-d9c1-4cd2-8467-9f1866b0fd41 already stands on GY-101, but its closure does not match/);
   assert.match(entry.detail, /asked duplicate of GY-50/);
+  assert.match(entry.detail, /holding 65bf0fef-d9c1-4cd2-8467-9f1866b0fd41 until its ledger state changes/);
   assert.equal(decides, 1);
   assert.deepEqual(isolated, [], 'the mismatched 409 did not throw to isolate');
   assert.deepEqual(h.approvers, [], 'no approver for a close the diagnosis did not adopt');
   assert.deepEqual(diagnosisInstances(state), [], 'no diagnosis fault');
-  // Later cycles keep waiting without rethrowing or adopting.
+  // Later cycles hold without re-POSTing, rethrowing or adopting.
   await diagnosisStep(cycleOf(clock + 2 * minute)); await diagnosesSettled();
+  await diagnosisStep(cycleOf(clock + 3 * minute)); await diagnosesSettled();
   assert.equal(entry.state, 'diagnosed');
   assert.equal(entry.decision, null);
-  assert.equal(decides, 2, 're-asks each cycle while the mismatched close stands');
+  assert.equal(decides, 1, 'does not re-POST while the mismatched close still stands');
+  assert.deepEqual(isolated, []);
+  // Once the standing close leaves requested, the diagnosis closure is asked afresh.
+  h.outcomes.set(standingCloseId, { state: 'withdrawn' });
+  await diagnosisStep(cycleOf(clock + 4 * minute)); await diagnosesSettled();
+  assert.equal(decides, 2, 'one fresh decide after the standing close settles');
+  assert.equal(entry.state, 'closing');
+  assert.ok(entry.decision && entry.decision.id !== standingCloseId, 'a new diagnosis close, not the withdrawn obsolete');
+  assert.match(entry.detail, /no longer blocks the diagnosis|Requested close decision|Launched approver/);
   assert.deepEqual(isolated, []);
 });
 

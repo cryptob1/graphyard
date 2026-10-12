@@ -188,10 +188,17 @@ export function probeSubject<T extends { id: string }>(state: Pick<DaemonState, 
 const retryDue = (entry: DiagnosisRecord | undefined, clock: number) => entry?.state === 'waiting' && (!entry.retryAt || Date.parse(entry.retryAt) <= clock);
 const live = new Map<string, Promise<void>>();
 const outcomes = new Map<string, Outcome>();
+/**
+ * GY-1713: a decide 409 that named a standing close whose kind/ref do not match this diagnosis's
+ * closure. Held until that decision's ledger state changes, so the loop does not re-POST the same
+ * refused decide every cycle (a minute's interval is 1,440 redundant refusals per day per item).
+ * Process-local like `live`/`outcomes`: a restart learns the hold again from one 409.
+ */
+const standingHolds = new Map<string, { id: string; work: string }>();
 /** Every diagnostician run this process has in flight, settled: a test's way to wait for them. */
 export async function diagnosesSettled() { await Promise.all([...live.values()]); }
-/** Test seam: forget every run and outcome. */
-export function clearDiagnoses() { live.clear(); outcomes.clear(); }
+/** Test seam: forget every run, outcome and mismatched-standing hold. */
+export function clearDiagnoses() { live.clear(); outcomes.clear(); standingHolds.clear(); }
 
 const clip = (text: string, limit: number) => text.length > limit ? `${text.slice(0, limit - 1)}…` : text;
 /** The last lines of an excerpt that fit `budget` characters, each clipped. */
@@ -479,6 +486,7 @@ type Note = (entry: DiagnosisRecord, outcome: DaemonAction['state'], detail: str
 
 async function launch(cycle: Cycle, diagnostician: DiagnosticianEffects, subject: DiagnosisSubject, note: Note) {
   const { config, state, snapshot, clock } = cycle;
+  standingHolds.delete(subject.id);
   const entry: DiagnosisRecord = { subject: subject.id, kind: subject.kind, faultClass: subject.faultClass, work: subject.work?.key ?? null, state: 'running',
     startedAt: iso(clock), updatedAt: iso(clock), runs: [], diagnosis: null, fix: null, decision: null, answeredBy: null, retryAt: null, refusedAt: null, detail: '' };
   state.diagnoses[subject.id] = entry;
@@ -645,13 +653,23 @@ const closeInputMatches = (standing: unknown, requested: Record<string, unknown>
   return !!held && held.kind === requested.kind && (held.ref ?? null) === (requested.ref ?? null);
 };
 /**
- * GY-1713: adopt the named standing close only when the ledger shows it asks for the same closure.
- * An unread or mismatched standing request is left alone — wait, do not throw, do not claim it.
+ * GY-1713: read the named standing close from the ledger. Null when decisions cannot be read or the
+ * id is absent; otherwise the ledger row (action/state/input) used to adopt or hold.
  */
-async function adoptStandingClose(cycle: Cycle, work: Work, input: Record<string, unknown>, held: string): Promise<boolean> {
-  if (!cycle.effects.decisions) return false;
-  const standing = await cycle.effects.decisions(work).then(result => result.decisions.find(entry => entry.id === held), () => undefined);
-  return !!standing && standing.action === 'close' && closeInputMatches(standing.input, input);
+async function standingCloseOn(cycle: Cycle, work: Work, held: string) {
+  if (!cycle.effects.decisions) return null;
+  return cycle.effects.decisions(work).then(result => result.decisions.find(entry => entry.id === held) ?? null, () => null);
+}
+/**
+ * GY-1713: adopt the named standing close only when the ledger shows it asks for the same closure.
+ * A confirmed mismatch is held (standingHolds) until that decision leaves `requested` or its input
+ * matches; the loop does not re-POST meanwhile. An unread ledger leaves the entry alone without a
+ * hold, so a later cycle can read and decide.
+ */
+async function adoptStandingClose(cycle: Cycle, work: Work, input: Record<string, unknown>, held: string): Promise<'adopt' | 'hold' | 'unread'> {
+  const standing = await standingCloseOn(cycle, work, held);
+  if (!standing || standing.action !== 'close' || standing.state !== 'requested') return 'unread';
+  return closeInputMatches(standing.input, input) ? 'adopt' : 'hold';
 }
 /**
  * GY-1318: the request names the item's revision from the cycle's snapshot, and the loop's own next
@@ -671,16 +689,41 @@ async function adoptStandingClose(cycle: Cycle, work: Work, input: Record<string
  * GY-1713: a 409 naming a standing close whose ledger input matches this diagnosis's closure is
  * adopted (entry.decision := that id) rather than thrown — the decisions step already adopts by
  * action (GY-1374); without the match check a concurrent obsolete/duplicate close would be claimed
- * as the diagnosis answer. A standing close that does not match is waited out, not rethrown.
+ * as the diagnosis answer. A standing close that does not match is held until its ledger state
+ * changes, then the diagnosis closure is requested (or adopted) afresh — never rethrown, never
+ * re-POSTed every cycle while that decision still stands mismatched.
  */
 async function decideFresh(cycle: Cycle, diagnostician: DiagnosticianEffects, entry: DiagnosisRecord, work: Work, action: 'release' | 'close', input: Record<string, unknown>, reason: string, note: Note): Promise<{ decision: { id: string }; target: Work; adopted?: boolean } | null> {
   const adoptHeld = async (held: string, target: Work) => {
-    if (action === 'close' && !(await adoptStandingClose(cycle, target, input, held))) {
-      await note(entry, 'done', `Close decision ${held} already stands on ${target.key}, but its closure does not match the diagnosis of ${entry.subject} (asked ${input.kind}${input.ref ? ` of ${input.ref}` : ''}); waiting for it rather than adopting or rethrowing`, null);
-      return null;
+    if (action === 'close') {
+      const verdict = await adoptStandingClose(cycle, target, input, held);
+      if (verdict === 'hold') {
+        standingHolds.set(entry.subject, { id: held, work: target.key });
+        await note(entry, 'done', `Close decision ${held} already stands on ${target.key}, but its closure does not match the diagnosis of ${entry.subject} (asked ${input.kind}${input.ref ? ` of ${input.ref}` : ''}); holding ${held} until its ledger state changes rather than adopting or re-asking`, null);
+        return null;
+      }
+      if (verdict === 'unread') {
+        await note(entry, 'done', `Close decision ${held} already stands on ${target.key}, but its ledger input could not be read for the diagnosis of ${entry.subject}; waiting rather than adopting or rethrowing`, null);
+        return null;
+      }
     }
+    standingHolds.delete(entry.subject);
     return { decision: { id: held }, target, adopted: true as const };
   };
+  // GY-1713: a prior cycle held a mismatched standing close — consult the ledger, do not re-POST.
+  const prior = action === 'close' ? standingHolds.get(entry.subject) : undefined;
+  if (prior) {
+    const standing = await standingCloseOn(cycle, work, prior.id);
+    if (standing && standing.state === 'requested' && standing.action === 'close') {
+      if (closeInputMatches(standing.input, input)) {
+        standingHolds.delete(entry.subject);
+        return { decision: { id: prior.id }, target: work, adopted: true as const };
+      }
+      return null;
+    }
+    standingHolds.delete(entry.subject);
+    await note(entry, 'done', `Standing close ${prior.id} on ${prior.work} no longer blocks the diagnosis of ${entry.subject} (${standing ? `now ${standing.state}` : 'gone from the ledger'}); requesting the diagnosis closure afresh`, null);
+  }
   try { return { decision: await diagnostician.decide(work, action, reason, input), target: work }; }
   catch (error) {
     const held = standingAdopted(error, action);
@@ -692,6 +735,7 @@ async function decideFresh(cycle: Cycle, diagnostician: DiagnosticianEffects, en
     if (!applicable) {
       // GY-1371: an entry already releasing or closing settles here; left in its state, the next cycle
       // read its decisions and asked again, refused again, for every such entry.
+      standingHolds.delete(entry.subject);
       if (entry.state === 'releasing' || entry.state === 'closing') { await settleNoLongerOpen(cycle.state, entry, fresh ?? null, `${why}; ${work.key} no longer needs the ${action}`, note, action); return null; }
       await note(entry, 'done', `${why}; ${work.key} no longer needs the ${action}, so it is not asked again and the next cycle decides afresh`, null); return null;
     }
@@ -766,6 +810,7 @@ async function launchApprover(cycle: Cycle, entry: DiagnosisRecord, work: Work, 
 /** The subject is answered by `by`: an invariant violation's instance is linked to it; a recurring item's closure already names it. */
 async function answer(state: DaemonState, entry: DiagnosisRecord, by: string, note: Note, detail?: string) {
   if (entry.kind === 'invariant') { const instance = state.faults.instances.find(candidate => candidate.id === entry.subject); if (instance) instance.linkedTo = by; }
+  standingHolds.delete(entry.subject);
   entry.answeredBy = by; entry.state = 'answered';
   await note(entry, 'done', detail ?? `${entry.subject} is answered by ${by}`);
 }
