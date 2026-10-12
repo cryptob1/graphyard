@@ -677,12 +677,21 @@ export const clampCount = (value: number, max: number) => Math.min(max, Math.max
  */
 export function storeAction(state: DaemonState, key: string, action: Omit<DaemonAction, 'faultClass'> & { faultClass?: unknown }, faultKind: FaultKind | null = daemonActionFaultKind(action.kind)): DaemonAction {
   const { faultClass: _, ...rest } = action;
+  if (restatesUnanswered(state, key)) faultKind = null;
   const failed = faultKind !== null && (rest.state === 'failed' || rest.state === 'indeterminate');
   const fault = faultKind === null ? null : classified(faultKind);
   const entry = daemonActionSchema.parse({ ...rest, detail: boundDetail(rest.detail), attempts: clampCount(rest.attempts, 1000), ...(failed && fault ? { faultClass: fault.faultClass } : {}) });
   if (fault) { dispatchRun(state.faults.failing, key, entry.state); noteActionOutcome(state.faults, key, entry.state, { ...fault, subject: entry.work ?? key, text: entry.detail }, entry.at); }
   state.actions[key] = entry;
   return entry;
+}
+/**
+ * GY-1751: an approver-exhaustion escalation (`escalation:decision-unjudged:ID`) restates the stall of the same decision
+ * that `decision-unanswered` already stands for (10 s apart on GY-1710's close decision): one stall is one instance.
+ */
+function restatesUnanswered(state: DaemonState, key: string) {
+  const id = /^escalation:decision-unjudged:(.+)$/.exec(key)?.[1];
+  return !!id && Object.values(state.faults.open).some(open => state.faults.instances.some(entry => entry.id === open && entry.kind === 'decision-unanswered' && entry.text.startsWith(`Decision ${id} `)));
 }
 /**
  * GY-1287: an item's dispatch row is keyed by the epoch it was offered at (`dispatch:ID:EPOCH`), and

@@ -24,6 +24,7 @@ import { ChildProcessError, type ChildRun } from '../child-runner.js';
 import { type DaemonAction, message } from './state.js';
 import { record } from './effects.js';
 import { detailChanged } from './decisions.js';
+import { planeWideFailure } from '../model/blocker-class.js';
 import type { Cycle } from './cycle.js';
 
 export const acceptanceRole = 'acceptance';
@@ -216,7 +217,9 @@ export async function acceptanceStep(cycle: Cycle) {
   const note: Note = async (goal, outcome, detail) => {
     const key = `acceptance:${goal.id}`;
     if (!detailChanged(state.actions[key], clip(detail, 1000))) return;
-    performed.push(await record(state, key, { kind: 'decision', work: goal.key, principal: null, state: outcome, detail: clip(detail, 1000), attempts: (state.actions[key]?.attempts ?? 0) + (outcome === 'failed' ? 1 : 0), cycle: state.cycle }, now(), effects.persist));
+    performed.push(await record(state, key, { kind: 'decision', work: goal.key, principal: null, state: outcome, detail: clip(detail, 1000), attempts: (state.actions[key]?.attempts ?? 0) + (outcome === 'failed' ? 1 : 0), cycle: state.cycle }, now(), effects.persist,
+      // GY-1751: a step that met the plane's own outage or startup-readiness 503 asks again at its interval (GY-1375): the plane's, no decision fault.
+      outcome === 'failed' && planeWideFailure(detail) ? null : undefined));
   };
   const goals = await cycle.isolate('decision', null, 'the open goals', () => acceptance.goals());
   for (const goal of goals ?? []) {

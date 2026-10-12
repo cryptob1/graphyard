@@ -4,6 +4,8 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import type { Work } from '../src/model.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
+import { storeAction } from '../src/daemon/state.js';
+import { trackFaults } from '../src/model/fault-record.js';
 import { containmentInMotion, containmentSettleWaitBoundMs, cycleFaults, emptyDaemonState, reworkDecisionInMotion, reworkDecisionWaitBoundMs } from '../src/master-daemon.js';
 // GY-1337's own exports are read through namespaces, so the base exercise runs these replays and each fails on its assertion.
 import * as daemon from '../src/master-daemon.js';
@@ -366,4 +368,41 @@ test('manual:fault-class-decision — a carried escalation past the master\'s tu
   carried[0].trigger = 'containment';
   const line = "GY-1373 carries a standing containment escalation while it is worked — no executor may run it; resolving GY-1373's containment escalation has been owed for 25s";
   assert.equal(daemon.owedEscalationInMotion(fenced, line, Date.parse('2026-10-06T14:03:39.561Z')), false, 'a containment concern is counted as its fence is');
+});
+
+// GY-1751, three instances in 24 hours. (1) action:decision on GOAL-1, 2026-10-12T23:43:05.011Z: the acceptance land step met the
+// plane's startup-readiness 503 and recorded a decision fault though it asks again in five minutes. (2) decision-unanswered and
+// action:escalation on GY-1710, ten seconds apart: one stuck close decision, counted as two instances.
+const goalAccepted = (id: string) => ({ id, key: 'GOAL-1', stage: 'accepted', revision: 3, acceptance: { pr: 1153, outcomes: [] } }) as never;
+async function landFailure(failure: Error, id: string) {
+  const { acceptanceStep } = await import('../src/daemon/acceptance.js');
+  const state = emptyDaemonState(config());
+  const effects = { settings: { enabled: true }, goals: async () => [goalAccepted(id)], land: async () => { throw failure; } };
+  const clock = Date.parse('2026-10-12T23:43:05.011Z');
+  await acceptanceStep({ config: config(), state, effects: { acceptance: effects, persist: async () => {} }, now: () => clock, clock, performed: [],
+    isolate: async (_k: string, _i: unknown, _n: string, body: () => Promise<unknown>) => body() } as never);
+  return state;
+}
+
+test('manual:fault-class-decision — action:decision|GOAL-1|2026-10-12T23:43:05.011Z: a land step that met the plane\'s startup-readiness 503 is no decision fault', async () => {
+  const state = await landFailure(new Error('Graphyard refused goals/GOAL-1/land (503): Startup validation has not completed; retry shortly'), 'goal-503');
+  assert.equal(state.actions['acceptance:goal-503']?.state, 'failed', 'the step still records that it will ask again');
+  assert.deepEqual(state.faults.instances, []);
+  assert.deepEqual(state.faults.failing, {});
+});
+
+test('manual:fault-class-decision — a land step the goal itself was refused still counts as a decision fault', async () => {
+  const state = await landFailure(new Error('Graphyard refused goals/GOAL-1/land (409): the approved head moved'), 'goal-409');
+  assert.deepEqual(state.faults.instances.map(entry => entry.kind), ['action:decision']);
+});
+
+test('manual:fault-class-decision — decision-unanswered|GY-1710 and action:escalation|GY-1710 are one stuck decision, one instance', () => {
+  const id = '65bf0fef-d9c1-4cd2-8467-9f1866b0fd41', state = emptyDaemonState(config());
+  const unanswered = `Decision ${id} (close) is unanswered after 41m: approver session gy-approver-gy-1710-65bf0fef is not running and recorded no outcome — a stall, not a refusal`;
+  trackFaults(state.faults, [{ kind: 'decision-unanswered', faultClass: 'decision', subject: 'GY-1710', text: unanswered }], '2026-10-12T02:16:40.081Z');
+  storeAction(state, `escalation:decision-unjudged:${id}`, { kind: 'escalation', work: 'GY-1710', principal: null, state: 'failed', detail: `close decision ${id} on GY-1710: approver session has not judged it for 10 minutes`, attempts: 1, cycle: 1, at: '2026-10-12T02:16:50.965Z', epoch: null }, undefined);
+  assert.deepEqual(state.faults.instances.map(entry => entry.kind), ['decision-unanswered'], 'the exhaustion escalation restates the stall');
+  // An exhaustion escalation for a decision with no unanswered line standing is its own fault.
+  storeAction(state, 'escalation:decision-unjudged:other', { kind: 'escalation', work: 'GY-9', principal: null, state: 'failed', detail: 'close decision other on GY-9: x', attempts: 1, cycle: 1, at: '2026-10-12T02:17:00.000Z', epoch: null }, undefined);
+  assert.deepEqual(state.faults.instances.map(entry => entry.kind), ['decision-unanswered', 'action:escalation']);
 });
