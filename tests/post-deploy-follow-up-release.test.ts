@@ -60,11 +60,32 @@ test('unit:clock-wait-is-not-a-block — a released follow-up holding only a win
   assert.equal(groupOf(item, before), 'up-next', 'Up next, not Blocked');
   const row = buildMasterStatus({ work: [item], now: new Date(before).toISOString() }, [], []).work[0];
   assert.deepEqual([row.attention, row.attentionOwner, row.observationWindow?.waiting], [null, null, true], 'no attention row');
-  assert.match(JSON.stringify(plainStatus(item, [item], before)), /[Ww]aiting/);
+  assert.match(JSON.stringify(plainStatus(item, before)), /[Ww]aiting/);
   assert.equal(dispatchable(item, before), false);
   assert.throws(() => assertDispatchable(item, [item], new Date(before).toISOString()), /observation window/);
   const after = Date.parse(notBefore);
   assert.equal(observationWindowHold(item, new Date(after)), null);
   assert.equal(actionAccount(item, [item], new Date(after)).action?.kind, 'dispatch', 'the loop dispatches it when the time passes');
   assert.equal(dispatchable(item, after), true);
+});
+
+test('unit:post-deploy-follow-up-released-when-served — master verify-deployment (the supported CLI path) releases the filed follow-up before it records the deployment', async () => {
+  const { verifyDeployment } = await modules();
+  const run = async (releaseWork: (key: string) => Promise<void>) => {
+    const log: string[] = [], now = Date.parse(at) + 2_000;
+    const attempt = await verifyDeployment(delivered, {
+      snapshot: async () => ({ work: [delivered], now: new Date(now).toISOString() }),
+      observe: async () => ({ source: 'endpoint' as const, sha: serving, at, reason: null, deployed: [delivered.key], pending: [] }),
+      release: () => ({ sha: 'f'.repeat(40), clean: true, repository: 'other/repo', reason: null }),
+      emit: async () => assert.fail('nothing is emitted'), repository: 'owner/project', now: () => now,
+      record: async () => { log.push('record'); }, file: async () => { log.push('file'); return { key: 'GY-1724' }; },
+      releaseWork: async key => { log.push(`release ${key}`); return releaseWork(key); },
+    }).then(result => result.result, (error: Error) => error.message);
+    return { log, attempt };
+  };
+  const served = await run(async () => {});
+  assert.deepEqual([served.attempt, served.log], ['verified', ['file', 'release GY-1724', 'record']]);
+  const failing = await run(async () => { throw new Error('release refused'); });
+  assert.equal(failing.attempt, 'release refused');
+  assert.ok(!failing.log.includes('record'), 'a failed release leaves the delivery unobserved so the retry releases it');
 });

@@ -177,8 +177,14 @@ export async function operationsCommand(session: MasterSession, effects: Recover
     if (!work) throw new Error(`Unknown work item ${args[0]}`);
     // An owed post-deploy verification's follow-up is filed as the master's operator agent: the coordinator credential cannot create work (GY-1660).
     const file = async (input: unknown, requestId: string) => masterMutation('work', input, requestId, await agentToken(root, master, 'operatorAgent'));
+    // GY-1747: the observed release releases its follow-ups from backlog, as the same identity.
+    const releaseWork = async (key: string) => {
+      const item = (await masterApi('work-snapshot')).work.find((entry: any) => entry.key === key);
+      if (!item || item.stage !== 'backlog' || item.ready) return;
+      await masterMutation(`work/${item.id}/ready`, { expectedRevision: item.revision, reason: 'the release serving the delivery is observed deployed' }, `release-${item.id}-${item.revision}`, await agentToken(root, master, 'operatorAgent'));
+    };
     // GY-1698: the intervention report's projection gives a windowed follow-up its observation instant.
-    const result = await verifyDeployment(work, verificationEffects(master, { root, snapshot: () => masterApi('work-snapshot'), mutate: masterMutation, file, read: path => masterApi(path) }));
+    const result = await verifyDeployment(work, verificationEffects(master, { root, snapshot: () => masterApi('work-snapshot'), mutate: masterMutation, file, releaseWork, read: path => masterApi(path) }));
     if (result.result === 'refused') process.exitCode = 1;
     return print(result);
   }

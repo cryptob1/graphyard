@@ -198,6 +198,8 @@ export interface VerificationEffects {
    * agent, never the coordinator: files the follow-up an owed post-deploy verification needs (GY-1660), returning the created item.
    */
   file?: (input: NonNullable<PostDeployCheck['followUp']>['input'], requestId: string) => Promise<{ key?: string } | unknown>;
+  /** Releases a filed follow-up from backlog as the same operator agent (GY-1747): the observation that the release serves the delivery is its release. */
+  releaseWork?: (key: string) => Promise<void>;
   /** The intervention report's under-threshold reading for a pattern (GY-1698): the follow-up's observation window is taken from it. */
   patterns?: PatternReader;
   /** The coordinator checkout's own filer, used only when it is at the observed release's commit (or has none to compare); `postDeployChecks` by default. */
@@ -263,6 +265,8 @@ export async function verifyDeployment(work: Work, effects: VerificationEffects,
     const deferred = postDeploy.filter(check => check.deferred);
     // A deferred filing leaves the delivery unobserved for the same reason: the attempt that can run the release's filer files it.
     if (deferred.length) return result({ ...assessment, verifiable: false, refusals: deferred.map(check => `${check.criterion} (${check.proof}) owes its post-deploy follow-up ${check.requestId}, whose filing is deferred: ${check.deferred}`) }, null, postDeploy);
+    // GY-1747: the serving release being observed releases its follow-ups from backlog, before the record, so a failed release retries.
+    if (effects.releaseWork) for (const check of postDeploy) if (check.followUp) await effects.releaseWork(check.followUp);
     const existing = current.delivery!.deployment?.sha === assessment.record!.sha;
     if (!existing) await effects.record(current, assessment.record!);
     return result(assessment, existing ? 'existing' : 'now', postDeploy);
@@ -417,7 +421,7 @@ export function patternReader(read: (path: string) => Promise<unknown>): Pattern
 }
 
 /** Effects bound to the real coordinator process, mirroring the daemon's. */
-export function verificationEffects(config: MasterConfig, deps: { root: string; snapshot: () => Promise<{ work: Work[]; now: string }>; mutate: (path: string, data: unknown, requestId?: string) => Promise<any>; file?: VerificationEffects['file']; read?: (path: string) => Promise<unknown>; run?: Run }): VerificationEffects {
+export function verificationEffects(config: MasterConfig, deps: { root: string; snapshot: () => Promise<{ work: Work[]; now: string }>; mutate: (path: string, data: unknown, requestId?: string) => Promise<any>; file?: VerificationEffects['file']; releaseWork?: VerificationEffects['releaseWork']; read?: (path: string) => Promise<unknown>; run?: Run }): VerificationEffects {
   const run = deps.run ?? defaultRun;
   return {
     snapshot: deps.snapshot, repository: config.repository,
@@ -430,5 +434,6 @@ export function verificationEffects(config: MasterConfig, deps: { root: string; 
     record: (work, data) => deps.mutate(`work/${work.id}/deployment`, data),
     checks: localPostDeployChecks,
     ...(deps.file ? { file: deps.file } : {}),
+    ...(deps.releaseWork ? { releaseWork: deps.releaseWork } : {}),
   };
 }
