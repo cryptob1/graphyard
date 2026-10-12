@@ -162,7 +162,7 @@ export function hostAccounts(layout: HostLayout, registry: Pick<AgentRegistry, '
 /**
  * The registry change that places the accounts on this host: runtimes and models the registry lacks,
  * every account at its new login home, and — for a registry with no roles yet — the proposed roles.
- * Pi is proposed for the approver and producer roles only, as everywhere else (GY-169).
+ * Pi is proposed for the worker, approver and producer roles (GY-169, GY-1746).
  */
 export function hostRegistryChange(current: Pick<AgentRegistry, 'runtimes' | 'models' | 'accounts' | 'roles'>, accounts: (HostAccount & { login?: HostLogin })[], host: string, workers: number) {
   const kinds = [...new Set(accounts.map(account => account.runtime))];
@@ -181,7 +181,7 @@ export function hostRegistryChange(current: Pick<AgentRegistry, 'runtimes' | 'mo
     const note = reconnect ? `Moved to ${host}; its login was not on the installing machine — connect it again in ${CONNECT_PATH}` : before?.note;
     return { name: account.name, runtime: account.runtime, model: modelFor(account), credential: { host, home: account.home }, enabled: reconnect ? false : before?.enabled ?? true, maxSessions: before?.maxSessions ?? null, ...(note ? { note: note.slice(0, 500) } : {}) };
   });
-  const narrow: Partial<Record<string, readonly FleetRoleName[]>> = { pi: ['approver', 'producer'] };
+  const narrow: Partial<Record<string, readonly FleetRoleName[]>> = { pi: ['worker', 'approver', 'producer'] };
   const roles: FleetRole[] = current.roles.length ? [] : (['worker', 'reviewer', 'producer', 'approver', 'escalation-handler'] as FleetRoleName[]).map(role => ({
     name: role,
     accounts: accounts.filter(account => !narrow[account.runtime] || narrow[account.runtime]!.includes(role)).map(account => account.name),
@@ -898,7 +898,7 @@ export async function installHostFleet(ctx: AdapterContext, request: HostFleetRe
 
   // One worker profile per worker principal, each with its own credential file on the host.
   const workers: ProfileRegistration['workers'] = [];
-  const launchable = hostRuntimes.filter(runtime => runtime.kind !== 'pi');
+  const launchable = hostRuntimes;
   for (const [index, principal] of workerPrincipals(host.principals).entries()) {
     const runtime = launchable[index % launchable.length];
     const profile = { name: `${runtime.kind}-${index + 1}`, principal: principal.id, agentName: suffixedSessionName(ctx.installId, runtime.kind, String(index + 1)), mode: 'launch', kind: runtime.kind, credentialFile: hostTokenFile(layout, principal.id), agentArgs: [], environment: runtime.kind === 'opencode' ? { OPENCODE_PERMISSION: OPENCODE_WORKER_PERMISSION } : {} };

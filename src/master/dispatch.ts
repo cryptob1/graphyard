@@ -7,7 +7,7 @@ import { researchWorkerSection } from '../research.js';
 import { appliedMechanicalRework, mechanicalWorkerSection, readMechanicalFixRequests, type MechanicalFixRequest } from '../mechanical-findings.js';
 import { discover, assertRepository } from '../onboarding.js';
 import { concurrentOverlap, resourceConflicts } from '../coordination.js';
-import { type SandboxExec, verifyWorkerSandbox, workerPaths, writablePaths, grantWorkerPaths } from '../worker-sandbox.js';
+import { type SandboxExec, WorkerSandboxError, verifyWorkerSandbox, workerPaths, writablePaths, grantWorkerPaths } from '../worker-sandbox.js';
 import { sweepExpiredWorkerCredentials, withdrawWorkerCredential, workerCredentialDirectory, workerCredentialEnvironment, workerCredentialRoot } from '../worker-credential.js';
 import { assertNoApprovalOptOut } from '../harness.js';
 import { parkedOnHuman, humanDecisionLabel, answerCommand } from '../model/human-request.js';
@@ -309,7 +309,9 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
           // The chosen account's runtime never came up — refused at the bound as never started, or
           // still starting at the ceiling: its pane is closed and its claim released, so the
           // profile's next account takes the launch rather than the dispatch dying silently (GY-417).
-          if (!(error instanceof SessionStartError) || !chosen.account || !['never started', 'still starting'].includes(error.startCase)) throw error;
+          // GY-1746: a Pi launch refused before its session started — the sandbox probe failing, or the host unable to confine it — likewise moves the same dispatch to the next account.
+          const piRefused = launch.kind === 'pi' && (error instanceof WorkerSandboxError || /never starts a session unconfined|cannot be launched/.test(failureText(error)));
+          if (!chosen.account || !(piRefused || error instanceof SessionStartError && ['never started', 'still starting'].includes(error.startCase))) throw error;
           startError = error;
           const failure: AccountStartFailure = { account: chosen.account.name, kind: launch.kind ?? 'unknown', reason: failureText(error).slice(0, 500), at: new Date().toISOString() };
           await recordAccountStartFailure(config, failure.account, failure.kind, failure.reason).catch(() => {});

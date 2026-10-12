@@ -86,7 +86,7 @@ import { type MechanicalFixRequest, appliedMechanicalRework, freshReadFor, mecha
 import { mechanicalHoldPattern } from '../../src/model/refusal-catalogue.js';
 import { type InterventionRecordInput } from '../../src/model/interventions.js';
 import { RefusedResponse } from '../../src/model/refusal.js';
-import { type DiagnosisRun, type Failover, MANUAL, type MainGuardDay, PROOF, api, basePlan, blockerPlan, bulk18, coordinatorRoot, diagnosisRunner, engine, everyone, extraFile, extraWorkers, file, files, fixture, id, loopAgent, padded, principals, remedyItem, repository, reviewerApps, scopePlan, sideDayLeftovers, soakConfig, soakSessionDirectory, soakWorktreeRoot, store, token, url, workers } from './soak-plane.js';
+import { type DiagnosisRun, type Failover, type RegistryFailover, MANUAL, type MainGuardDay, PROOF, api, basePlan, blockerPlan, bulk18, coordinatorRoot, diagnosisRunner, engine, everyone, extraFile, extraWorkers, file, files, fixture, id, loopAgent, padded, principals, remedyItem, repository, reviewerApps, scopePlan, sideDayLeftovers, soakConfig, soakSessionDirectory, soakWorktreeRoot, store, token, url, workers } from './soak-plane.js';
 
 /**
  * GY-404: per-item gates cannot catch faults that emerge from interaction over time, so this runs
@@ -206,7 +206,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   /** GY-1329: item `item`'s flaky workflow run keeps running its other jobs for `ms` after its `test` check failed. */
   unfinishedRun?: { item: number; ms: number };
   /** GY-417: dispatch through the real `dispatchWork` on a real master root with a two-account launch profile. */
-  failover?: Failover;
+  failover?: RegistryFailover;
   /**
    * GY-1322: every profile's agent name starts held by a session no item owns, working until
    * `finishAt` and then finished (idle or done), while the day's items wait ready; each attempt's
@@ -900,7 +900,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     // GY-1523: the launcher reads the merger through the world (counted, refused on schedule) and
     // mints through it (recorded), so the day asserts one read per dispatch and no push credential
     // under the control-plane merger; a launch refused before any claim is kept with its words.
-    const result = await dispatchWork(failover.root, work, profile, free, world.run, snapshot.work,
+    const result = await dispatchWork(failover.root, failover.lane ? { ...work, lane: failover.lane } : work, profile, free, world.run, snapshot.work,
       async () => {
         const claimed = await engine.execute(principal, 'claim', work.id, {}, id());
         // A rework round re-registers the standing submission's branch, as the simulated dispatch does (GY-1569).
@@ -910,7 +910,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
         return { epoch, path, base: github.tip };
       },
       async (_root, _key, claimedEpoch) => { await engine.execute(principal, 'release', work.id, { epoch: claimedEpoch }, id()); },
-      5_000, snapshot.now, { start: world.bounds(), agents: () => herdr.list(), supervisor: () => false, stopSupervisor: () => true, readMergeWriter: world.readMergeWriter, credential: world.mint })
+      5_000, snapshot.now, { start: world.bounds(), agents: () => herdr.list(), supervisor: () => false, stopSupervisor: () => true, readMergeWriter: world.readMergeWriter, credential: world.mint, ...failover.probe ? { probe: failover.probe } : {} })
       .catch((error: unknown) => { failover.refused?.push({ key: work.key, at: clock.now() - dayStart, error: error instanceof Error ? error.message : String(error) }); throw error; });
     failover.dispatches.push(result);
     failover.samples.push({ key: work.key, failures: await readAccountStartFailures(failover.master), attention: await workerLaunchStatus(failover.root, failover.master) });

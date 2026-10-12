@@ -3,6 +3,7 @@ import { fleetRoles, rolePolicy } from './registry.js';
 import { exhaustedTwin, foldObservation } from './account-quota.js';
 import type { AccountSmoke, AgentRegistry, FleetAccount, FleetModel, FleetRefusal, FleetRole, FleetRoleName, FleetRuntime, FleetSession, ObservedQuota, RolePolicy, RunOutcome, SelectionRequest, SessionSkip } from './registry.js';
 import { accountProvider, busyDifferentProvider, sameProviderFallback, sharedProviderSkip, type ReviewDiversity } from './review-diversity.js';
+import { workerOrder } from './worker-preference.js';
 import { deriveAccountPlan, groupAccountsByPlan, type FleetPlanView } from '../provider-usage.js';
 
 /**
@@ -197,25 +198,6 @@ export function foldObservations(registry: AgentRegistry, request: Pick<Selectio
   return changed;
 }
 
-/**
- * The order a role's accounts are tried in (GY-1746). Only the worker role has a preference: `fast`
- * moves the Pi accounts ahead of the others and `strong` moves them behind, each group keeping the
- * role's own order, so Pi serves the cheap first attempts and a high-risk or repeatedly reworked
- * item goes to the strong runtimes first. A role with no preference is tried in its stored order.
- */
-export function workerOrder(registry: AgentRegistry, role: Pick<FleetRole, 'name' | 'accounts'>, prefer: 'fast' | 'strong' | null): string[] {
-  if (role.name !== 'worker' || !prefer) return role.accounts;
-  const isPi = (name: string) => { const account = registry.accounts.find(entry => entry.name === name); return registry.runtimes.find(entry => entry.name === account?.runtime)?.launch.kind === 'pi'; };
-  const pi = role.accounts.filter(isPi), rest = role.accounts.filter(name => !pi.includes(name));
-  return prefer === 'fast' ? [...pi, ...rest] : [...rest, ...pi];
-}
-
-/** The attempts an item gets on Pi before the strong runtimes take it: its first two. */
-export const piAttempts = 2;
-/** Which runtimes dispatch tries a worker on first (GY-1746): Pi for a low or medium risk item on its first attempts, the strong runtimes for a high risk item and from the third attempt on. */
-export const workerPreference = (work: { lane?: string | null; pipeline?: { reworkRounds?: number } | null; reworkRounds?: number }): 'fast' | 'strong' =>
-  work.lane === 'high' || (work.pipeline?.reworkRounds ?? work.reworkRounds ?? 0) >= piAttempts ? 'strong' : 'fast';
-
 export interface SessionChoice { account: FleetAccount; runtime: FleetRuntime; model: FleetModel; policy: RolePolicy; reason: string; skipped: SessionSkip[] }
 export interface SessionRefusal { account: null; reason: string; skipped: SessionSkip[] }
 /**
@@ -335,4 +317,4 @@ function roleAttention(role: FleetRoleView, live: FleetSession[]): string[] {
   const idle = role.role === 'master' ? [] : live.filter(session => session.role === role.role && !session.work);
   return idle.length ? [`role ${role.role} is at its concurrency limit (${role.live} of ${role.concurrency} live) with ${idle.length} session${idle.length === 1 ? '' : 's'} carrying no work: ${idle.map(session => `${session.id} (${session.account})`).join(', ')}`] : [];
 }
-
+export { piAttempts, workerOrder, workerPreference } from './worker-preference.js';
