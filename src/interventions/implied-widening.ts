@@ -1,6 +1,7 @@
 // Concern: the paths a requirements revision adds that its own revised record already implies (GY-1719).
 import type { Work } from '../model.js';
 import { decideScopeRequest, pathScopeContains, type ItemDocumentation } from '../model/scope.js';
+import type { FollowUpSource } from '../model/scope-companions.js';
 
 /**
  * GY-1719: a requirements revision that widens plannedFiles only by what the revised record itself
@@ -17,16 +18,17 @@ import { decideScopeRequest, pathScopeContains, type ItemDocumentation } from '.
  * `absorbed` is the plan of every item the record closes as a duplicate of this one: that scope was
  * resolved against the base when the duplicate was created, so carrying it in decides nothing new.
  * The judgement is the engine's rule over the revised criteria and the plan as it stood: true only
- * when the row carries those criteria and every added path is implied or absorbed.
+ * when the row carries those criteria and every added path is implied or absorbed. A review follow-up
+ * carries its `origin` and `description`, so a path its findings name is implied here as the engine implies it.
  */
 export function impliedWidening(revision: {
   added: readonly string[]; before: readonly string[]; criteria: unknown;
   documentation?: ItemDocumentation | null; absorbed?: readonly string[];
-}): boolean {
+} & FollowUpSource): boolean {
   const { added, before, criteria, absorbed = [] } = revision;
   if (!added.length || !Array.isArray(criteria) || !criteria.every(entry => entry && typeof entry.id === 'string' && typeof entry.text === 'string')) return false;
   const rest = added.filter(path => !absorbed.some(planned => pathScopeContains(planned, path)));
   if (!rest.length) return true;
-  const item = { plannedFiles: [...before, ...added.filter(path => !rest.includes(path))], criteria: criteria as Work['criteria'], documentation: revision.documentation ?? null };
+  const item = { plannedFiles: [...before, ...added.filter(path => !rest.includes(path))], criteria: criteria as Work['criteria'], documentation: revision.documentation ?? null, origin: revision.origin ?? null, description: revision.description ?? null };
   return decideScopeRequest(item, { paths: [...rest] }).state === 'approved';
 }

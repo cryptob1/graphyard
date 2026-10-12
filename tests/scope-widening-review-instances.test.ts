@@ -238,6 +238,19 @@ test('manual:intervention-pattern-scope-widening-review — a revision adding a 
   assert.equal(impliedWidening({ added: [], before: gy1717.before, criteria: gy1717.criteria, documentation: docs }), false);
 });
 
+test('manual:intervention-pattern-scope-widening-review — a path only a review follow-up\'s finding or description names is implied as the engine implies it, from the record\'s origin', () => {
+  const wider = rows1717.map(row => ({ ...row, work: { ...row.work, plannedFiles: [...gy1717.after, 'src/launch.ts'] } }));
+  const followUp = (origin: unknown, description: string | null) => ({ id: gy1717.id, key: 'GY-1717', stage: 'review', title: gy1717.title, criteria: gy1717.criteria, plannedFiles: gy1717.after, documentation: docs, origin, description });
+  const finding = { reviewFollowUps: { parent: 'GY-1600', findings: [{ path: 'src/launch.ts', text: 'the launch refuses nothing', ref: 'abc123' }] } };
+  const described = { reviewFollowUps: { parent: 'GY-1600', findings: [{ text: 'the launch refuses nothing', ref: 'abc123' }] } };
+  assert.deepEqual(widenings(foldInterventions, wider, [followUp(finding, null)]), []);
+  assert.deepEqual(widenings(foldInterventions, wider, [followUp(described, 'Fix the refusal in src/launch.ts.')]), []);
+  // The same description on an item that is no review follow-up implies nothing.
+  assert.equal(widenings(foldInterventions, wider, [followUp(null, 'Fix the refusal in src/launch.ts.')]).length, 1);
+  assert.equal(impliedWidening({ added: ['src/launch.ts'], before: gy1717.after, criteria: gy1717.criteria, documentation: docs, origin: finding as Work['origin'] }), true);
+  assert.equal(impliedWidening({ added: ['src/launch.ts'], before: gy1717.after, criteria: gy1717.criteria, documentation: docs }), false);
+});
+
 test('manual:intervention-pattern-scope-widening-review — an implied widening that answers a worker\'s ask is judged as that ask\'s answer, not exempted', () => {
   const moment = { at: 'requirements' as const, details: {}, reason: 'r', widened: true, implied: true, routed: [], stage: 'review' as const, work: null, blockerBefore: null };
   assert.equal(exemption({ ...moment, asked: false }), 'criteria-implied-widening');

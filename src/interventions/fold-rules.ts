@@ -40,8 +40,8 @@ export interface FoldStep {
   source: { seq: number; kind: string };
   /** The planned scope and blocker as the previous row left them. */
   plannedBefore: string[] | null; blockerBefore: string | null | undefined;
-  /** The item as the current snapshot holds it (its documentation rule), and the plan of every item closed as its duplicate (GY-1719). */
-  record?: { documentation?: Work['documentation'] } | null; absorbed?: () => string[];
+  /** The item as the current snapshot holds it (its documentation rule and review follow-up provenance), and the plan of every item closed as its duplicate (GY-1719). */
+  record?: { documentation?: Work['documentation']; origin?: Work['origin']; description?: Work['description'] } | null; absorbed?: () => string[];
   emit: Emit;
 }
 export type FoldRule = (step: FoldStep) => void;
@@ -86,7 +86,7 @@ const requirements: FoldRule = ({ row, entry, details, stage, source, plannedBef
   // A widening the control plane settled on its own answers the asks it covers, and nothing is a signal.
   const added = after && before ? after.filter(path => !before.includes(path)) : [];
   const documentation = details.before?.documentation ?? record?.documentation ?? null;
-  const implied = widened && !!before && impliedWidening({ added, before, criteria: details.intent?.criteria ?? details.criteria, documentation, absorbed: absorbed?.() ?? [] });
+  const implied = widened && !!before && impliedWidening({ added, before, criteria: details.intent?.criteria ?? details.criteria, documentation, origin: record?.origin ?? null, description: details.before?.description ?? record?.description ?? null, absorbed: absorbed?.() ?? [] });
   const exempt = exemption({ at: 'requirements', details, reason, widened, implied, asked: entry.asks.length > 0 && (widened || cleared), routed: entry.routed, stage, work: row.work ?? null, blockerBefore });
   if (exempt) {
     entry.asks = entry.asks.filter(ask => !(ask.kind === 'scope-request' && ask.paths.length > 0 && ask.paths.every(covers)) && !(exempt === 'routed-scope-widening' && ask.kind === 'blocked-report'));
