@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, readFile, rm, symlink } from 'node:fs/promises';
+import { copyFile, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative } from 'node:path';
@@ -167,11 +167,16 @@ export async function isolateRelease(config: MasterConfig, sha: string, run: Run
   const dispose = () => rm(scratch, { recursive: true, force: true });
   try {
     const checkout = join(scratch, 'release');
-    run('git', ['clone', '-q', '--shared', '--no-checkout', top, checkout]);
+    // Borrow the coordinator's object store, and its shallow boundary when it has one: a clone of
+    // a shallow checkout ignores --shared and copies only its refs, so a fetched release is lost.
+    const [objects, shallow] = run('git', ['-C', top, 'rev-parse', '--path-format=absolute', '--git-path', 'objects', '--git-path', 'shallow']).trim().split('\n');
+    run('git', ['init', '-q', checkout]);
+    await writeFile(join(checkout, '.git/objects/info/alternates'), `${objects}\n`);
+    await copyFile(shallow, join(checkout, '.git/shallow')).catch((error: NodeJS.ErrnoException) => { if (error.code !== 'ENOENT') throw error; });
     run('git', ['-C', checkout, 'checkout', '-q', '--detach', sha]);
     await symlink(modules, join(checkout, 'node_modules'), 'dir');
     const cliPath = join(checkout, relative(top, config.cliPath));
-    // The clone's origin is the coordinator checkout, so the repository is the coordinator's.
+    // The scratch checkout has no origin, so the repository is the coordinator's.
     const release = { ...checkoutRelease(cliPath, run), repository: checkoutRelease(config.cliPath, run).repository };
     return { release, emit: () => emitInstructions({ ...config, cliPath }, run), checks: releaseChecks(cliPath, run), dispose };
   } catch (error) { await dispose(); return { reason: `Could not check out deployed release ${sha} in isolation: ${message(error)}` }; }

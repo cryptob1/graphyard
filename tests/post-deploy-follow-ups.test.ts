@@ -520,13 +520,15 @@ async function cloneCheckout(directory: string, name: string) {
   const git = (...args: string[]) => execFileSync('git', ['-C', checkout, '-c', 'user.name=t', '-c', 'user.email=t@example.com', ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
   return { checkout, cliPath: join(checkout, 'bin/graphyard.mjs'), git, sha: git('rev-parse', 'HEAD') };
 }
+/** The fixed now of the real-effects cases: the observation, the snapshot and the parent's merge an hour before it. */
+const liveNow = '2026-10-12T08:00:00.000Z';
 /** verify-deployment through the real effects, the deployment observation and the control plane's writes stubbed. */
 async function verifyReal(coordinator: { checkout: string; cliPath: string }, item: Work, served: string) {
   const { masterConfigSchema } = await import('../src/master.js');
   const { releaseChecks, verificationEffects, verifyDeployment } = await modules();
   const master = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/private/master.token', cliPath: coordinator.cliPath, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'coordinator-host', masterAgentName: 'graphyard-master-project', run: { deploymentUrl: 'https://graphyard.example/healthz', deploymentShaField: 'commit' } });
-  const at = new Date().toISOString(), filed: { input: any; requestId: string }[] = [], recorded: unknown[] = [];
-  const effects = verificationEffects(master, { root: coordinator.checkout, snapshot: async () => ({ work: [item], now: new Date().toISOString() }), mutate: async (_path, data) => { recorded.push(data); return data; },
+  const at = liveNow, filed: { input: any; requestId: string }[] = [], recorded: unknown[] = [];
+  const effects = verificationEffects(master, { root: coordinator.checkout, snapshot: async () => ({ work: [item], now: liveNow }), mutate: async (_path, data) => { recorded.push(data); return data; },
     file: async (input: any, requestId: string) => { filed.push({ input, requestId }); return { key: `GY-${1720 + filed.length}` }; } });
   // The coordinator's own filer is its checkout's CLI: the stale code, were it ever asked.
   const own = releaseChecks(coordinator.cliPath);
@@ -536,7 +538,7 @@ async function verifyReal(coordinator: { checkout: string; cliPath: string }, it
 }
 const liveCriterion = { id: 'AC-2', text: 'Zero failed webhook deliveries over 24 hours of live activity on the serving release', proofs: ['manual:post-deploy/webhook-deliveries-clean-24h'] };
 const windowedParent = (served: string) => delivered({ id: 'e03bc94f-82f4-481d-a443-4b4e6abe9eb6', key: 'GY-1700', criteria: [liveCriterion],
-  delivery: { mergeSha: served, mergedAt: new Date(Date.now() - 3_600_000).toISOString(), evidenceAsOf: new Date(Date.now() - 3_600_000).toISOString(), authorizationRevision: 1 } as never });
+  delivery: { mergeSha: served, mergedAt: iso(Date.parse(liveNow) - 3_600_000), evidenceAsOf: iso(Date.parse(liveNow) - 3_600_000), authorizationRevision: 1 } as never });
 
 test('integration:stale-coordinator-files-windowed-followup — a coordinator checkout whose filer predates observation windows, at another commit than the served release, files the follow-up through the served release\'s own CLI in an isolated checkout, with its window', { timeout: 300_000 }, async () => {
   const directory = await temporaryDirectory('stale-coordinator');
