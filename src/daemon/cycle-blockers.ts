@@ -35,11 +35,15 @@ const episodeKeys = (state: { actions: Record<string, unknown> }, item: Pick<Wor
  * GY-1740: the not-before instant an unleased post-deploy follow-up's recorded blocker names, when the
  * blocker is only a wait for a reading that cannot exist yet (GY-1689, GY-1721, GY-1724): the latest
  * future instant its wait words introduce (`notBeforeInstants`), within the defer bound. Null for any
- * other blocker, a leased or parked item, or an instant too far off to be a wait.
+ * other blocker, a leased or parked item, or an instant too far off to be a wait. A blocker any routine
+ * class explains (an account's quota reset, say) is that class's to clear, and one that never speaks of
+ * the owed observation is not a wait for it: neither is held.
  */
+const observationWait = /\b(?:reading|observ\w*|soak\w*|window|serving release|post-deploy|deploy\w*|ships?|elapse[sd]?)\b/i;
 export function timeBoundHold(item: Work, now: number): number | null {
   if (!item.blocker || (item.lease && Date.parse(item.lease.expiresAt) > now) || (item.humanRequest && !item.humanRequest.answer)) return null;
   if (!item.criteria.some(criterion => criterion.proofs.some(servingReleaseProof))) return null;
+  if (itemBlockerClass(item)?.class !== 'genuine' || !observationWait.test(item.blocker)) return null;
   const future = notBeforeInstants(item.blocker).filter(at => at > now);
   const at = future.length ? Math.max(...future) : null;
   return at !== null && at - now <= deferBoundMs ? at : null;
@@ -79,7 +83,8 @@ export async function blockerStep(cycle: Cycle) {
     if (at === null) return;
     const notBefore = new Date(at).toISOString();
     try {
-      await effects.deferWindow!(item, { notBefore, reason: `its recorded blocker waits for a reading that cannot exist before ${notBefore}: ${item.blocker}`.slice(0, 2000) });
+      // Bound to the revision read here: a blocker cleared (or changed) since is never followed by a hold.
+      await effects.deferWindow!(item, { expectedRevision: item.revision, notBefore, reason: `its recorded blocker waits for a reading that cannot exist before ${notBefore}: ${item.blocker}`.slice(0, 2000) });
       held.add(item.id);
       for (const entry of episodeKeys(state, item)) delete state.actions[entry];
       performed.push(await note(blockerKey(item), item, 'done', `Held ${item.key} until ${notBefore}, when the reading it owes can first exist, and cleared its blocker: ${item.blocker}`));

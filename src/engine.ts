@@ -93,7 +93,7 @@ const commands = {
   requirements: z.object({ expectedPolicyRevision: z.number().int().positive(), reason: z.string().trim().min(1).max(2000), criteria: criteriaSchema(50), dependencies: z.array(z.string().uuid()).max(50), plannedFiles: createSchema.shape.plannedFiles, exclusiveResources: resourcesSchema, producerProofs: createSchema.shape.producerProofs, split: createSchema.shape.split,
     answers: z.object({ epoch: z.number().int().positive(), at: z.string().datetime(), sha: z.string().regex(/^[0-9a-f]{40}$/).nullable().optional() }).strict().optional(), rule: z.literal('successor').optional() }).strict(),
   reviewpolicy: z.object({ provider: z.enum(reviewProviders), reviewerProfiles: z.array(reviewerProfileSchema).min(1).max(10).optional(), expectedPolicyRevision: z.number().int().positive(), reason: z.string().trim().min(1).max(2000) }).strict(),
-  unblock: z.object({ reason: z.string().trim().min(1).max(2000), expectedRevision: z.number().int().positive().optional() }).strict(),
+  unblock: z.object({ reason: z.string().trim().min(1).max(2000), expectedRevision: z.number().int().positive() }).strict(),
   rework: z.object({ reason: z.string().min(1).max(2000), previousWorkerStopped: z.literal(true) }).strict(),
   // Only a human operator resolves an escalation, and only the one it has read:
   // the trigger names which standing concern is cleared, and the revision binds
@@ -141,7 +141,7 @@ const commands = {
   defer: z.object({ epoch, notBefore: z.string().datetime({ offset: true }), reason: z.string().trim().min(1).max(2000) }).strict(),
   // GY-1740: the master's (or the loop's) hold of an unleased post-deploy follow-up on the instant its
   // reading can first exist: the observation window `defer` sets, with no lease, and the recorded blocker cleared.
-  window: z.object({ notBefore: z.string().datetime({ offset: true }), reason: z.string().trim().min(1).max(2000), expectedRevision: z.number().int().positive().optional() }).strict(),
+  window: z.object({ notBefore: z.string().datetime({ offset: true }), reason: z.string().trim().min(1).max(2000), expectedRevision: z.number().int().positive() }).strict(),
   // An empty request clears this attempt's open one; otherwise it must ask for something the
   // planned scope does not already carry. `paths` widens, and the two fields the loop never
   // decides are stated as plainly as the widening is: `remove` drops planned containment and
@@ -1153,7 +1153,6 @@ export class Engine {
         if (command === 'ready' || command === 'unblock') demand(data.expectedRevision === work.revision, 'Task revision changed; reload before mutating');
         if (command === 'ready') demand(work.stage === 'backlog' && !work.ready, 'Only unreleased backlog work can be released');
         if (command === 'unblock') demand(work.blocker, 'Task has no blocker to clear');
-        if (command === 'window' && data.expectedRevision !== undefined) demand(data.expectedRevision === work.revision, 'Task revision changed; reload before mutating');
       }
       // The only commands a delivered item still accepts: containment cleanup, and the two
       // post-deployment facts that extend the delivery snapshot without reopening the merge.
@@ -1185,6 +1184,8 @@ export class Engine {
       }
       if (command === 'refresh') {
         if (actor.role !== 'operator-agent') demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
+        // Every writer names the revision it read: a hold derived from a blocker since cleared or changed is refused.
+        demand(data.expectedRevision === work.revision, 'Task revision changed; reload before mutating');
         demand(work.submission && !work.observation?.merged && work.stage !== 'done' && !work.reworkRequested, 'Open submitted work is required');
         const candidate = work.candidate, observation = work.observation;
         demand(candidate && observation?.candidate.sha === candidate.sha && observation.prState === 'open' && observation.draft === false, 'An open pull request observed at the current head is required');
@@ -1423,6 +1424,8 @@ export class Engine {
         // GY-1740: a post-deploy follow-up blocked for a reading that cannot exist yet (GY-1689, GY-1721,
         // GY-1724) is moved to its wait without a worker launch spent only to call `defer`.
         if (actor.role !== 'operator-agent') demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
+        // Every writer names the revision it read: a hold derived from a blocker since cleared or changed is refused.
+        demand(data.expectedRevision === work.revision, 'Task revision changed; reload before mutating');
         demand(!work.lease || Date.parse(work.lease.expiresAt) <= now.getTime(), `${work.key} is held by ${work.lease?.owner} under epoch ${work.lease?.epoch}; its worker defers it with defer GY-N EPOCH NOT-BEFORE REASON`, 409);
         observationHold(work, data.notBefore, now, 'operator-hold', `${actor.id} held it until then: ${data.reason}`);
         work.blocker = null;

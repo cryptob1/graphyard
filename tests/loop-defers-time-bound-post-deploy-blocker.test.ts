@@ -32,7 +32,7 @@ const config = () => masterConfigSchema.parse({ version: 1, url: 'http://127.0.0
   repository, baseBranch: 'main', githubAppId: 1, hostId: 'host', masterAgentName: 'master', workers: [] }) as MasterConfig;
 function cycleOf(open: Work[], effects: Record<string, unknown>, clock: number) {
   const performed: { detail: string; state: string }[] = [];
-  const cycle = { config: config(), state: emptyDaemonState(config()), effects: { persist: async () => {}, ...effects }, now: () => clock, clock, performed, open, agents: [],
+  const cycle = { config: config(), state: emptyDaemonState(config()), effects: { persist: async () => {}, ...effects }, now: () => clock, clock, performed, open, agents: [], credentials: {}, snapshot: { work: open },
     isolate: async (_kind: string, _item: unknown, _name: string, body: () => Promise<unknown>) => body(), launcher: { busy: () => false } } as unknown as Cycle;
   return { cycle, performed };
 }
@@ -57,14 +57,18 @@ test('integration:loop-defers-time-bound-post-deploy-blocker — the loop holds 
   const notFollowUp = await blocked([ordinary], `Cannot run the proof; not before ${until} can it be observed`);
   const passed = await blocked([followUp], `The observation cannot exist before ${new Date(start - day).toISOString()}`);
   const farOff = await blocked([followUp], `The observation cannot exist before ${new Date(start + 40 * day).toISOString()}`);
+  // An operational fault that names an instant is its class's to clear (the quota probe may find another
+  // account at once), and a genuine blocker that never speaks of the owed observation is not a wait for it.
+  const quota = await blocked([followUp], `worker account quota is exhausted until ${until}`);
+  const unrelated = await blocked([followUp], `The vendor sandbox is offline until ${until}`);
   // A leased item is its worker's to defer (`defer GY-N EPOCH …`), never the loop's.
   const leased = { ...waiting, key: 'GY-leased', lease: { owner: 'implementer', epoch: 2, expiresAt: new Date(start + day).toISOString() } } as Work;
-  const open = [waiting, notFollowUp, passed, farOff, leased];
+  const open = [waiting, notFollowUp, passed, farOff, quota, unrelated, leased];
   assert.equal(groupOf(waiting, start), 'blocked', 'the row the operator saw: Blocked');
 
   const held: string[] = [], launched: string[] = [];
   const { cycle, performed } = cycleOf(open, {
-    deferWindow: async (item: Work, body: { notBefore: string; reason: string }) => { held.push(item.key); return engine.execute(loop, 'window', item.id, body, randomUUID()); },
+    deferWindow: async (item: Work, body: { expectedRevision: number; notBefore: string; reason: string }) => { held.push(item.key); return engine.execute(loop, 'window', item.id, body, randomUUID()); },
     recordBlockerProbe: async (item: Work) => item, probeBlocker: async () => null,
     dispatch: async (item: Work) => { launched.push(item.key); }, approver: async (item: Work) => { launched.push(item.key); return { agentName: 'approver' }; },
   }, start);
@@ -75,7 +79,7 @@ test('integration:loop-defers-time-bound-post-deploy-blocker — the loop holds 
   assert.deepEqual([after.blocker, after.lease, after.observationWindow?.notBefore, after.observationWindow?.basis], [null, null, until, 'operator-hold']);
   assert.ok(performed.some(entry => entry.state === 'done' && entry.detail.startsWith(`Held ${waiting.key} until ${until}`)), 'the cycle reports what it did');
   assert.deepEqual(launched, [], 'no worker launch was spent to call defer');
-  for (const untouched of [notFollowUp, passed, farOff]) assert.ok((await store.workDocument(untouched.id))!.blocker, `${untouched.key} keeps its blocker`);
+  for (const untouched of [notFollowUp, passed, farOff, quota, unrelated]) assert.ok((await store.workDocument(untouched.id))!.blocker, `${untouched.key} keeps its blocker`);
 
   assert.equal(dispatchable(after, start), false, 'not dispatched before the instant');
   assert.equal(dispatchable(after, Date.parse(until) + 1), true, 'dispatched once it passes');
@@ -85,4 +89,14 @@ test('integration:loop-defers-time-bound-post-deploy-blocker — the loop holds 
   const again = cycleOf([after], { deferWindow: async (item: Work) => { held.push(item.key); return item; }, recordBlockerProbe: async (item: Work) => item }, start + 60_000);
   await blockerStep(again.cycle);
   assert.deepEqual(held, [waiting.key]);
+
+  // A blocker the master clears after the loop read it is never followed by a hold: the write names the revision read.
+  const raced = await blocked([followUp], `AC-1's reading cannot exist yet: the 24h window on the serving release ends; not before ${until} can it be observed`);
+  await engine.execute(admin, 'unblock', raced.id, { expectedRevision: raced.revision, reason: 'the master took the reading another way' }, randomUUID());
+  const stale = cycleOf([raced], { deferWindow: async (item: Work, body: { expectedRevision: number; notBefore: string; reason: string }) => engine.execute(loop, 'window', item.id, body, randomUUID()),
+    recordBlockerProbe: async (item: Work) => item, probeBlocker: async () => null }, start);
+  await blockerStep(stale.cycle);
+  const unblocked = (await store.workDocument(raced.id))!;
+  assert.deepEqual([unblocked.blocker, unblocked.observationWindow], [null, undefined], 'the cleared item is not put back on hold');
+  assert.ok(stale.performed.some(entry => entry.state === 'failed' && /Task revision changed/.test(entry.detail)), 'the refused hold is reported');
 });

@@ -73,22 +73,24 @@ test('integration:master-defer-sets-observation-window — master defer sets the
   assert.equal(entry.payload.details?.reason ?? entry.payload.reason, 'the 7-day window has not elapsed');
 
   // A later instant extends the window; an earlier one never shortens it.
-  const shorter = await engine.execute(operatorAgent, 'window', item.id, { notBefore: new Date(await now() + day).toISOString(), reason: 'an earlier guess' }, randomUUID());
+  const shorter = await engine.execute(operatorAgent, 'window', item.id, { expectedRevision: deferred.revision, notBefore: new Date(await now() + day).toISOString(), reason: 'an earlier guess' }, randomUUID());
   assert.equal(shorter.observationWindow?.notBefore, notBefore);
 
   // Refused while a worker holds the item: its worker defers it under its own lease.
   const leased = await claimed();
-  const leaseRefusal = await engine.execute(operatorAgent, 'window', leased.id, { notBefore, reason: 'held' }, randomUUID()).then(() => null, (error: Error) => error.message);
+  const leaseRefusal = await engine.execute(operatorAgent, 'window', leased.id, { expectedRevision: leased.revision, notBefore, reason: 'held' }, randomUUID()).then(() => null, (error: Error) => error.message);
   assert.match(leaseRefusal ?? '', /is held by implementer under epoch 1/);
   assert.equal((await store.workDocument(leased.id))?.observationWindow, undefined, 'nothing was written');
 
   const fresh = await blocked();
-  await assert.rejects(engine.execute(operatorAgent, 'window', fresh.id, { notBefore: new Date(await now() - day).toISOString(), reason: 'past' }, randomUUID()), /already passed/);
-  await assert.rejects(engine.execute(operatorAgent, 'window', fresh.id, { notBefore: new Date(await now() + 31 * day).toISOString(), reason: 'far' }, randomUUID()), /more than 30 days/);
+  await assert.rejects(engine.execute(operatorAgent, 'window', fresh.id, { expectedRevision: fresh.revision, notBefore: new Date(await now() - day).toISOString(), reason: 'past' }, randomUUID()), /already passed/);
+  await assert.rejects(engine.execute(operatorAgent, 'window', fresh.id, { expectedRevision: fresh.revision, notBefore: new Date(await now() + 31 * day).toISOString(), reason: 'far' }, randomUUID()), /more than 30 days/);
   const ordinary = await blocked([{ id: 'AC-1', text: 'Behaves', proofs: ['integration:behaves'] }]);
-  await assert.rejects(engine.execute(operatorAgent, 'window', ordinary.id, { notBefore, reason: 'not a follow-up' }, randomUUID()), /owes no post-deploy observation/);
+  await assert.rejects(engine.execute(operatorAgent, 'window', ordinary.id, { expectedRevision: ordinary.revision, notBefore, reason: 'not a follow-up' }, randomUUID()), /owes no post-deploy observation/);
   // The operator agent needs the unblock capability, and a worker may never set a window this way.
-  await assert.rejects(engine.execute({ ...operatorAgent, capabilities: ['intent:create'] } as Principal, 'window', fresh.id, { notBefore, reason: 'no capability' }, randomUUID()), /Capability intent:unblock is required/);
-  await assert.rejects(engine.execute(worker, 'window', fresh.id, { notBefore, reason: 'a worker' }, randomUUID()), /Coordinator permission required/);
+  await assert.rejects(engine.execute({ ...operatorAgent, capabilities: ['intent:create'] } as Principal, 'window', fresh.id, { expectedRevision: fresh.revision, notBefore, reason: 'no capability' }, randomUUID()), /Capability intent:unblock is required/);
+  await assert.rejects(engine.execute(worker, 'window', fresh.id, { expectedRevision: fresh.revision, notBefore, reason: 'a worker' }, randomUUID()), /Coordinator permission required/);
+  // A window read against an older revision is refused: what it was derived from has since changed.
+  await assert.rejects(engine.execute(operatorAgent, 'window', fresh.id, { expectedRevision: fresh.revision - 1, notBefore, reason: 'stale' }, randomUUID()), /Task revision changed/);
   assert.ok((await store.workDocument(fresh.id))?.blocker, 'every refusal leaves the blocker standing');
 });

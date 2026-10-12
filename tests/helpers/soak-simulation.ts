@@ -2001,7 +2001,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     } : {}),
     promptSession,
     // GY-1740: the loop holds a time-bound post-deploy follow-up on its instant through the real route, as production does.
-    deferWindow: async (work: Work, body: { notBefore: string; reason: string }) => {
+    deferWindow: async (work: Work, body: { expectedRevision: number; notBefore: string; reason: string }) => {
       holdDay?.windows.push({ key: work.key, at: clock.now(), notBefore: body.notBefore });
       return api(principals.coordinator, 'POST', `work/${work.id}/window`, body) as Promise<Work>;
     },
