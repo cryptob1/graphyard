@@ -635,6 +635,25 @@ const deliveredMeanwhile = (error: unknown) => /Delivered work is immutable/.tes
 const standingAdopted = (error: unknown, action: 'release' | 'close') =>
   action !== 'release' && adoptedOnRefusal.includes(action) ? standingNamedIn(error, action) : null;
 /**
+ * Whether a standing close's ledger input is the same closure this diagnosis asked for (kind + ref).
+ * Close decisions encode different outcomes (obsolete vs duplicate of another item); adopting a
+ * concurrent triage or manual close without this check would corrupt the diagnosis answer.
+ * `expectedRevision` is the binding, not the closure, so it is ignored.
+ */
+const closeInputMatches = (standing: unknown, requested: Record<string, unknown>) => {
+  const held = standing && typeof standing === 'object' ? standing as Record<string, unknown> : null;
+  return !!held && held.kind === requested.kind && (held.ref ?? null) === (requested.ref ?? null);
+};
+/**
+ * GY-1713: adopt the named standing close only when the ledger shows it asks for the same closure.
+ * An unread or mismatched standing request is left alone — wait, do not throw, do not claim it.
+ */
+async function adoptStandingClose(cycle: Cycle, work: Work, input: Record<string, unknown>, held: string): Promise<boolean> {
+  if (!cycle.effects.decisions) return false;
+  const standing = await cycle.effects.decisions(work).then(result => result.decisions.find(entry => entry.id === held), () => undefined);
+  return !!standing && standing.action === 'close' && closeInputMatches(standing.input, input);
+}
+/**
  * GY-1318: the request names the item's revision from the cycle's snapshot, and the loop's own next
  * write can move the item before the request lands — the server refuses it "Task revision changed
  * (now N); reload and request again" (GY-1304's instance). That is the request-time leg of the race
@@ -649,15 +668,23 @@ const standingAdopted = (error: unknown, action: 'release' | 'close') =>
  * no longer applicable, and recorded with no fault; the next cycle's snapshot shows it done, and
  * the diagnosis is answered as for any item closed while it was diagnosed (GY-1266).
  *
- * GY-1713: a 409 naming a standing request of the same action is adopted (entry.decision := that id)
- * rather than thrown — the decisions step already does this (GY-1374); without it the diagnosis
- * re-requested a close that already stood and threw every cycle (GY-1710).
+ * GY-1713: a 409 naming a standing close whose ledger input matches this diagnosis's closure is
+ * adopted (entry.decision := that id) rather than thrown — the decisions step already adopts by
+ * action (GY-1374); without the match check a concurrent obsolete/duplicate close would be claimed
+ * as the diagnosis answer. A standing close that does not match is waited out, not rethrown.
  */
 async function decideFresh(cycle: Cycle, diagnostician: DiagnosticianEffects, entry: DiagnosisRecord, work: Work, action: 'release' | 'close', input: Record<string, unknown>, reason: string, note: Note): Promise<{ decision: { id: string }; target: Work; adopted?: boolean } | null> {
+  const adoptHeld = async (held: string, target: Work) => {
+    if (action === 'close' && !(await adoptStandingClose(cycle, target, input, held))) {
+      await note(entry, 'done', `Close decision ${held} already stands on ${target.key}, but its closure does not match the diagnosis of ${entry.subject} (asked ${input.kind}${input.ref ? ` of ${input.ref}` : ''}); waiting for it rather than adopting or rethrowing`, null);
+      return null;
+    }
+    return { decision: { id: held }, target, adopted: true as const };
+  };
   try { return { decision: await diagnostician.decide(work, action, reason, input), target: work }; }
   catch (error) {
     const held = standingAdopted(error, action);
-    if (held) return { decision: { id: held }, target: work, adopted: true };
+    if (held) return adoptHeld(held, work);
     if (!revisionRaced(error) && !deliveredMeanwhile(error)) throw error;
     const why = `The ${action} request on ${work.key} for the diagnosis of ${entry.subject} was refused: ${message(error)}`;
     const fresh = (await cycle.effects.snapshot()).work.find(candidate => candidate.id === work.id);
@@ -674,7 +701,7 @@ async function decideFresh(cycle: Cycle, diagnostician: DiagnosticianEffects, en
     try { return { decision: await diagnostician.decide(fresh, action, reason, input), target: fresh }; }
     catch (again) {
       const adopted = standingAdopted(again, action);
-      if (adopted) return { decision: { id: adopted }, target: fresh, adopted: true };
+      if (adopted) return adoptHeld(adopted, fresh);
       if (!revisionRaced(again) && !deliveredMeanwhile(again)) throw again;
       await note(entry, 'done', `${why}; asked again against revision ${fresh.revision} and refused again (${message(again)}), so the next cycle decides afresh`, null);
       return null;

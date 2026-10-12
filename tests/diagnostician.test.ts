@@ -920,6 +920,9 @@ test('integration:doctor-retry-400-stops-refile — a pending doctor filing the 
 
 test('unit:diagnosis-adopts-standing-decision — a decide 409 naming a standing close is adopted as the entry\'s decision with an adoption note, and the approver is launched', async () => {
   const h = harness(() => diagnosis('GY-101', { covering: 'GY-50' }));
+  // The standing close already on the ledger asks for the same duplicate-of-GY-50 the diagnosis will.
+  h.requested.push({ work: 'GY-101', action: 'close', reason: 'already standing', input: { kind: 'duplicate', ref: 'GY-50' }, id: standingCloseId, revision: 1 });
+  h.outcomes.set(standingCloseId, { state: 'requested' });
   let decides = 0;
   h.diagnostician.decide = async (work, action) => {
     decides += 1;
@@ -940,6 +943,40 @@ test('unit:diagnosis-adopts-standing-decision — a decide 409 naming a standing
   assert.deepEqual(isolated, [], 'the standing 409 did not throw to isolate');
   assert.deepEqual(h.approvers, [{ work: 'GY-101', decision: standingCloseId }]);
   assert.deepEqual(diagnosisInstances(state), [], 'no diagnosis fault');
+});
+
+test('unit:diagnosis-waits-mismatched-standing-close — a decide 409 naming a standing close whose kind/ref differ is not adopted, does not throw, and leaves the diagnosis without that decision', async () => {
+  const h = harness(() => diagnosis('GY-101', { covering: 'GY-50' }));
+  // Concurrent triage close (obsolete) already stands; the diagnosis will ask duplicate-of-GY-50.
+  h.requested.push({ work: 'GY-101', action: 'close', reason: 'triage obsolete', input: { kind: 'obsolete', ref: null }, id: standingCloseId, revision: 1 });
+  h.outcomes.set(standingCloseId, { state: 'requested' });
+  let decides = 0;
+  h.diagnostician.decide = async (work, action) => {
+    decides += 1;
+    assert.equal(action, 'close');
+    throw standingCloseRefusal(work.key);
+  };
+  const state = emptyDaemonState(config()), work = [recurring(state), item('GY-50', { stage: 'build' } as Partial<Work>)];
+  const isolated: string[] = [];
+  const cycleOf = (at: number) => ({ config: config(), state, effects: effects(h, () => work, () => at), now: () => at, snapshot: { work, now: new Date(at).toISOString() }, clock: at, performed: [],
+    isolate: async (_kind: string, _item: unknown, name: string, body: () => Promise<unknown>) => { try { return await body(); } catch (error) { isolated.push(`${name}: ${String(error)}`); return undefined; } } } as unknown as Cycle);
+  await diagnosisStep(cycleOf(clock)); await diagnosesSettled();
+  await diagnosisStep(cycleOf(clock + minute)); await diagnosesSettled();
+  const entry = state.diagnoses['GY-101'];
+  assert.equal(entry.state, 'diagnosed', 'still diagnosed; the mismatched close was not claimed');
+  assert.equal(entry.decision, null, 'the obsolete standing close is not the diagnosis decision');
+  assert.match(entry.detail, /Close decision 65bf0fef-d9c1-4cd2-8467-9f1866b0fd41 already stands on GY-101, but its closure does not match/);
+  assert.match(entry.detail, /asked duplicate of GY-50/);
+  assert.equal(decides, 1);
+  assert.deepEqual(isolated, [], 'the mismatched 409 did not throw to isolate');
+  assert.deepEqual(h.approvers, [], 'no approver for a close the diagnosis did not adopt');
+  assert.deepEqual(diagnosisInstances(state), [], 'no diagnosis fault');
+  // Later cycles keep waiting without rethrowing or adopting.
+  await diagnosisStep(cycleOf(clock + 2 * minute)); await diagnosesSettled();
+  assert.equal(entry.state, 'diagnosed');
+  assert.equal(entry.decision, null);
+  assert.equal(decides, 2, 're-asks each cycle while the mismatched close stands');
+  assert.deepEqual(isolated, []);
 });
 
 test('integration:diagnosis-close-409-adopts-standing — replaying the GY-1710 shape (close already standing) adopts against the candidate instead of throwing every cycle', async () => {
