@@ -22,6 +22,7 @@ import { detailChanged } from './decisions.js';
 import { awaitSupervisorRestart, describeSelfUpgrade, detectLoopSupervisorUnit, restartEndedBySupervisorStop, type SelfUpgradeOutcome } from './upgrade.js';
 import { checkoutRestoreFreezeLedgerPath, checkoutRestoreGrantPath, checkoutRestoreRequestPath, loopExecutorsRequestPath, loopRestartRequestPath, serveCheckoutRestore, type CheckoutRestoreOutcome } from '../cli/master-checkout-restore.js';
 import { releasePinnedRestore } from '../cli/checkout-restore-release.js';
+import { divergedHead } from '../cli/checkout-restore-act.js';
 import { describeTimings } from '../master/timings.js';
 import { stopDoctorRuns, doctorReport } from './doctor.js';
 import { mainWatchSummary } from './main-watch.js';
@@ -293,7 +294,8 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
     // files they match: those matches are the checkout's writes attributed to the attempts most
     // likely to have made them.
     const checkoutOf = async () => options.checkout?.() ?? await readCoordinatorCheckout(coordinatorCheckoutRoot(config.cliPath));
-    const guard = coordinatorCheckoutGuard({ state: () => state, read: checkoutOf, agents: raw.agents, snapshot: raw.snapshot, persist: effects.persist, now, log, recover: effects.recoverHead });
+    const guard = coordinatorCheckoutGuard({ state: () => state, read: checkoutOf, agents: raw.agents, snapshot: raw.snapshot, persist: effects.persist, now, log, recover: effects.recoverHead,
+      diverged: (checkout, loaded) => divergedHead(checkout.root, { base: `refs/remotes/origin/${config.baseBranch}`, loaded }).then(head => head === checkout.commit) });
     // GY-1658: the installation's own remedy for a dirty checkout. A `master checkout-restore` request
     // (any master identity, the doctor's included, files it beside the cursor) is carried out here, by
     // the one unconfined process: every dirty path saved under a named ref and returned to HEAD, the
@@ -440,6 +442,8 @@ const escalationKey = 'escalation:dirty-checkout';
 export const checkoutRestoreRemedy = 'Remedy the installation runs itself: graphyard master checkout-restore REASON (sanctioned for the doctor) saves every dirty path under refs/graphyard/checkout-restore/, returns them to HEAD and restarts the loop through graphyard-master.service.';
 /** The same remedy for a clean checkout whose HEAD moved (GY-1680): the request restarts the loop onto that HEAD, the adoption GY-1531 sanctions. */
 export const checkoutRestoreDriftRemedy = 'The installation runs that restart itself: graphyard master checkout-restore REASON (sanctioned for the doctor) finds no dirty path, settles this escalation and restarts the loop through graphyard-master.service onto the checkout\'s HEAD.';
+/** The remedy a diverged HEAD's escalation names (GY-1745): the installation moves the checkout itself, so no human answers it and no worker parks it. */
+export const checkoutRestoreDivergedRemedy = 'This HEAD is diverged: neither on the base branch nor a descendant of the commit the loop runs. Nothing is lost by moving it, so it needs no human answer and no worker parks it: graphyard master checkout-restore REASON (sanctioned for the doctor) saves the HEAD under refs/graphyard/checkout-restore/diverged-STAMP-COMMIT, detaches the checkout at the verified serving release (the base tip when none is verified) and restarts the loop through graphyard-master.service onto it.';
 /**
  * GY-857/GY-866: the coordinator checkout guard the loop runs at startup and after every cycle.
  * A tree holding uncommitted work, or a HEAD that moved away from the commit the loop runs, is
@@ -456,6 +460,8 @@ export function coordinatorCheckoutGuard(deps: {
   state: () => DaemonState; read: () => Promise<CoordinatorCheckout>; agents: DaemonEffects['agents']; snapshot: DaemonEffects['snapshot'];
   persist: DaemonEffects['persist']; now: () => number; log: (line: string) => void; applies?: (root: string) => boolean; enrichMs?: number;
   recover?: DaemonEffects['recoverHead'];
+  /** Whether the checkout's HEAD is diverged from the base branch and the loaded commit (GY-1745); the escalation then names the restore that moves it. */
+  diverged?: (checkout: CoordinatorCheckout, loaded: string | null) => Promise<boolean>;
 }) {
   const applies = deps.applies ?? checkoutGuardApplies, enrichMs = deps.enrichMs ?? 10 * 60_000;
   let expectedHead: string | null = null, enriched: { refusal: string; detail: string; at: number } | null = null;
@@ -540,6 +546,7 @@ export function coordinatorCheckoutGuard(deps: {
       // session sees it read-only, the master's included — and the installation's own remedy is named.
       else if (pointing.length) detail += ` Suspected ${pointing.length === 1 ? 'writer — one standing session\'s pane still points at it' : `writers — ${pointing.length} standing sessions' panes still point at it`}: ${pointing.slice(0, 8).join('; ')}${pointing.length > 8 ? `; and ${pointing.length - 8} more` : ''}.`;
       if (coordinatorCheckoutRefusal(checkout, 'the master loop')) detail += ` ${checkoutRestoreRemedy}`;
+      else if (headDrift(checkout)) { try { if (await deps.diverged?.(checkout, expectedHead)) detail += ` ${checkoutRestoreDivergedRemedy}`; } catch { /* the refusal stands without it */ } }
       enriched = { refusal, detail, at: deps.now() };
     }
     const state = deps.state(), existing = state.actions[escalationKey];

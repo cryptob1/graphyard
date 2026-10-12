@@ -190,7 +190,11 @@ export async function resolveInstallUnits(root: string, repository: string, unit
   let text: string | null;
   try { text = await readFile(file, 'utf8'); } catch (error) { if (!absent(error)) throw error; text = null; }
   if (text !== null) return parseInstallUnits(text, file, () => legacyInstallUnits);
-  const units = proposedInstallUnits(root, repository, unitDirectory, home);
+  return recordInstallUnits(root, proposedInstallUnits(root, repository, unitDirectory, home));
+}
+/** Writes `units` as the record ROOT keeps (installUnitsFile), atomically; the caller has decided they are ROOT's. */
+export async function recordInstallUnits(root: string, units: InstallUnits): Promise<InstallUnits> {
+  const file = resolve(root, installUnitsFile);
   await mkdir(dirname(file), { recursive: true });
   const temporary = `${file}.${randomUUID()}.tmp`;
   await writeFile(temporary, `${JSON.stringify(units, null, 2)}\n`, { mode: 0o600, flag: 'wx' });

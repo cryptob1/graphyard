@@ -164,6 +164,8 @@ export async function staleServingLoop(cursor: string, root: string | null, run:
 const serveOutputSchema = z.object({
   restored: z.object({ ref: z.string(), commit: z.string(), paths: z.array(z.string()), skipped: z.array(z.object({ pid: z.number().int(), error: z.string() })).default([]) }).nullable(),
   head: z.string().nullable(),
+  /** GY-1745: the diverged HEAD saved under `ref` and the release the checkout was moved onto; absent from a release that predates it. */
+  diverged: z.object({ ref: z.string(), from: z.string(), to: z.string() }).strict().optional(),
 }).strict();
 export type ServeOutput = z.infer<typeof serveOutputSchema>;
 

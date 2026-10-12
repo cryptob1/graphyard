@@ -4,14 +4,15 @@ import { readFileSync } from 'node:fs';
 import { readFile, unlink } from 'node:fs/promises';
 import { constants as osConstants } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { ChildProcessError, type ChildRun, childKillGraceMs, defaultChildRun, defaultChildTimeoutMs } from '../child-runner.js';
 import { daemonStatePath } from '../daemon/state.js';
 import { loadStoredMasterConfig, readCredentialFile } from '../master/config.js';
 import { coordinatorCheckoutRoot, type MasterConfig } from '../master/profiles.js';
 import { continueFrozenWriters, freezeCheckoutWriters, type WriterFreezeDeps } from './checkout-writers.js';
-import { type CheckoutRestoreGrant, checkoutRestoreGrantSigned, checkoutRestoreGrantVariable, checkoutRestoreServeFlag, checkoutRestoreServeUsage, commitServes, grantSchema, type ServeOutput } from './checkout-restore-release.js';
-import { type CheckoutQuiesce, checkoutRestoreFreezeLedgerPath, checkoutRestoreGrantPath, checkoutRestoreRequestPath, readCheckoutRestoreRequest, restoreInProcess } from './master-checkout-restore.js';
+import { type CheckoutRestoreGrant, checkoutRestoreGrantSigned, checkoutRestoreGrantVariable, checkoutRestoreServeFlag, checkoutRestoreServeUsage, commitServes, grantSchema, lockedLoop, type ServeOutput } from './checkout-restore-release.js';
+import { type CheckoutQuiesce, type DivergeInputs, checkoutRestoreFreezeLedgerPath, checkoutRestoreGrantPath, checkoutRestoreRequestPath, readCheckoutRestoreRequest, restoreInProcess } from './master-checkout-restore.js';
 
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
 const short = (commit: string) => commit.slice(0, 12);
@@ -129,6 +130,22 @@ export interface ServeEntryOptions {
   ancestors?: () => number[];
   /** Reads the installation whose coordinator checkout is `root` (its .graphyard/master.json); defaults to loadStoredMasterConfig. */
   installation?: (root: string) => Promise<MasterConfig>;
+  /** GY-1745: what a diverged HEAD is judged against and moved onto, given the installation; defaults to origin's base branch ref, the commit the locked loop loaded, and the HEAD of the release this entry runs from. */
+  diverge?: (config: MasterConfig, root: string, run: ChildRun) => Promise<DivergeInputs | null>;
+}
+/** The release snapshot this entry runs from: the root of its own code. */
+const ownRoot = fileURLToPath(new URL('../../', import.meta.url));
+/**
+ * GY-1745: the inputs for healing a diverged HEAD. The release the checkout moves onto is the one
+ * the loop snapshotted for this serve (the verified serving release, else the base tip), which is this
+ * entry's own HEAD; null when it cannot be read or the checkout's object store lacks it.
+ */
+async function divergeInputs(config: MasterConfig, root: string, run: ChildRun): Promise<DivergeInputs | null> {
+  let serving: string;
+  try { serving = String(await run('git', ['-C', ownRoot, 'rev-parse', 'HEAD'])).trim(); await run('git', ['-C', root, 'cat-file', '-e', `${serving}^{commit}`]); }
+  catch { return null; }
+  if (!serving) return null;
+  return { base: `refs/remotes/origin/${config.baseBranch}`, loaded: (await lockedLoop(daemonStatePath(config)))?.loaded ?? null, serving };
 }
 /**
  * The grant the environment names, verified against the installation it names and nothing a caller
@@ -225,7 +242,7 @@ export async function serveCheckoutRestoreAct(args: readonly string[], options: 
   const release = thawFrozenWritersOnStop(ledger, { ...options.stop, halt: options.stop?.halt ?? children?.halt });
   try {
     // An old-HEAD handoff's checkout is advanced onto the grant's release inside the same freeze (review of GY-1680).
-    const { restored, head } = await restoreInProcess(run, quiesce, grant.handoff?.advance ?? null)(grant.root, grant.reason, options.now ?? new Date(), { file: checkoutRestoreRequestPath(config), id: grant.request.id });
-    return { restored, head };
+    const { restored, head, diverged } = await restoreInProcess(run, quiesce, grant.handoff?.advance ?? null, () => (options.diverge ?? divergeInputs)(config, grant.root, run))(grant.root, grant.reason, options.now ?? new Date(), { file: checkoutRestoreRequestPath(config), id: grant.request.id });
+    return { restored, head, ...(diverged ? { diverged } : {}) };
   } finally { release(); }
 }

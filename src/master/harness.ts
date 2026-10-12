@@ -7,7 +7,7 @@ import { type ChildRun, defaultChildRun } from '../child-runner.js';
 import { nameForLaunch } from '../session-name.js';
 import { executorUnitDirectory, launchAuthorization } from '../repository-setup.js';
 import { type HarnessHook, type HarnessPlan, type HarnessRule, writeHarnessPermissions, mergeHarnessHooks, masterHarnessPlan, harnessDecision, claudeRuleProblem, bashRuleMatches } from '../harness.js';
-import { executorInstance, foreignUnitText, initialiseUnitsCommand, installUnitsFile, type InstallUnits, LegacyUnitRefusal, legacyLoopUnit, proposedInstallUnits, readInstallUnits, resolveInstallUnits, unitCheckout } from '../install/units.js';
+import { executorInstance, foreignUnitText, initialiseUnitsCommand, installUnitsFile, type InstallUnits, LegacyUnitRefusal, legacyLoopUnit, perInstallUnits, proposedInstallUnits, readInstallUnits, recordInstallUnits, resolveInstallUnits, unitCheckout } from '../install/units.js';
 import type { Work } from '../model.js';
 import type { MasterConfig, WorkerProfile } from './profiles.js';
 import { coordinatorCheckoutRoot, promotionCommand, workerConfinementRefusal } from './profiles.js';
@@ -410,7 +410,11 @@ export async function recordServingUnits(root: string, repository: string, optio
   let text: string;
   try { text = readFileSync(resolve(unitDirectory, options.servingUnit), 'utf8'); } catch { return null; }
   if (foreignUnitText(text, root, home) ?? launchedCheckout(text, root, home)) return null;
-  if (proposedInstallUnits(root, repository, unitDirectory, home).master !== options.servingUnit) return null;
+  if (proposedInstallUnits(root, repository, unitDirectory, home).master !== options.servingUnit) {
+    // GY-1745: a leftover legacy-named unit that also runs ROOT makes the proposal the legacy alias, though the unit serving the loop, which runs ROOT, is this install's own per-install unit: that name is what the install records.
+    const own = perInstallUnits(repository);
+    return own.master === options.servingUnit ? recordInstallUnits(root, own) : null;
+  }
   return resolveInstallUnits(root, repository, unitDirectory, home);
 }
 export function harnessApplyCheckout(root: string, options: { servingUnit?: string | null; unitDirectory?: string; home?: string } = {}) {
