@@ -420,7 +420,7 @@ export function controlPlaneHandlers(config: () => MasterConfig, effects: Contro
       // GY-1660: the release just observed checks the item's declared post-deploy verifications, and an
       // owed one files its follow-up before the observation is recorded: a filing that fails fails the
       // action, which retries it, where a recorded observation would refuse every retry.
-      const checks = await filePostDeployFollowUps(work, observation.sha, all, effects.fileWork, new Date(effects.now?.() ?? Date.now()), effects.readPattern);
+      const checks = await filePostDeployFollowUps(work, observation.sha, all, effects.fileWork, new Date(effects.now?.() ?? Date.now()), effects.readPattern, new Date(observation.at));
       const owed = checks.filter(check => check.result === 'owed');
       const unfiled = owed.filter(check => !check.followUp);
       if (unfiled.length) throw new Error(`${work.key}: ${unfiled.map(check => `${check.criterion} (${check.proof})`).join(', ')} owes its post-deploy follow-up, and ${effects.fileWork ? 'filing it returned no item' : 'this executor has no operator-agent identity to file it with; run graphyard master autonomy --admin-token-stdin --apply'}; the deployment observation waits for it`);
