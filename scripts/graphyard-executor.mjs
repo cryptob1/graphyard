@@ -173,6 +173,14 @@ export function controlPlaneEffects(modules, context) {
       const body = await response.json();
       if (!response.ok) throw new Error(typeof body?.error === 'string' ? body.error : JSON.stringify(body));
       return body;
+    },
+    // GY-1747: a follow-up is released from backlog by the loop once the release serving its delivery is observed.
+    releaseWork: async key => {
+      const config = current(), operator = await m.agentToken(root, config, 'operatorAgent');
+      const item = (await snapshot()).work.find(entry => entry.key === key);
+      if (!item || item.stage !== 'backlog' || item.ready) return;
+      const response = await fetch(`${config.url}/api/work/${item.id}/ready`, { method: 'POST', body: JSON.stringify({ expectedRevision: item.revision, reason: 'the release serving the delivery is observed deployed' }), headers: { Authorization: `Bearer ${operator}`, 'Content-Type': 'application/json', 'Idempotency-Key': `release-${item.id}-${item.revision}` }, signal: AbortSignal.timeout(30_000) });
+      if (!response.ok) { const body = await response.json().catch(() => null); throw new Error(typeof body?.error === 'string' ? body.error : `releasing ${key} returned ${response.status}`); }
     } } : {}),
   };
 }

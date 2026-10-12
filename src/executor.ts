@@ -60,6 +60,11 @@ export interface ControlPlaneEffects {
    * credential `mutate` carries cannot create work.
    */
   fileWork?: (input: unknown, requestId: string) => Promise<{ key?: string }>;
+  /**
+   * Releases a filed follow-up from backlog as the same operator-agent identity (GY-1747): the release serving its delivery
+   * has just been observed, so nothing remains for a person to decide. An item already released is left as it is.
+   */
+  releaseWork?: (key: string) => Promise<void>;
   /** The intervention report's reading for a pattern (GY-1698): a windowed follow-up's observation instant is taken from it; absent or failing, the merge time plus the criterion's window stands. */
   readPattern?: PatternReader;
   /** The observed release's post-deploy filer, or why it cannot be had (GY-1732); `releasePostDeployFiler` over the executor's config by default. */
@@ -435,6 +440,9 @@ export function controlPlaneHandlers(config: () => MasterConfig, effects: Contro
       const owed = checks.filter(check => check.result === 'owed');
       const unfiled = owed.filter(check => !check.followUp);
       if (unfiled.length) throw new Error(`${work.key}: ${unfiled.map(check => `${check.criterion} (${check.proof})`).join(', ')} owes its post-deploy follow-up, and ${effects.fileWork ? 'filing it returned no item' : 'this executor has no operator-agent identity to file it with; run graphyard master autonomy --admin-token-stdin --apply'}; the deployment observation waits for it`);
+      // GY-1747: the observation that the release serves the delivery is the follow-up's release from backlog; a failed release
+      // fails the action, which retries it, before the observation is recorded.
+      if (effects.releaseWork) for (const check of checks) if (check.followUp) await effects.releaseWork(check.followUp);
       await effects.mutate(`work/${work.id}/deployment`, { sha: observation.sha, mergeSha: action.inputs.mergeSha, source: observation.source, observedAt: observation.at }, randomUUID());
       return `observed the release serving ${observation.sha.slice(0, 12)} for ${work.key}${owed.length ? `; ${owed.map(check => `${check.criterion} owes its post-deploy observation${check.followUp ? ` (${check.followUp})` : ''}`).join(', ')}` : ''}`;
     },
