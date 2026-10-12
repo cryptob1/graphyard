@@ -1,4 +1,4 @@
-import { test } from 'node:test';
+import { mock, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { readFile, rm, symlink, writeFile } from 'node:fs/promises';
@@ -520,7 +520,7 @@ async function cloneCheckout(directory: string, name: string) {
   const git = (...args: string[]) => execFileSync('git', ['-C', checkout, '-c', 'user.name=t', '-c', 'user.email=t@example.com', ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
   return { checkout, cliPath: join(checkout, 'bin/graphyard.mjs'), git, sha: git('rev-parse', 'HEAD') };
 }
-/** The fixed now of the real-effects cases: the observation, the snapshot and the parent's merge an hour before it. */
+/** The fixed now of the real-effects cases, which stub Date at it: the observation, the snapshot and the parent's merge an hour before it. */
 const liveNow = '2026-10-12T08:00:00.000Z';
 /** verify-deployment through the real effects, the deployment observation and the control plane's writes stubbed. */
 async function verifyReal(coordinator: { checkout: string; cliPath: string }, item: Work, served: string) {
@@ -542,6 +542,7 @@ const windowedParent = (served: string) => delivered({ id: 'e03bc94f-82f4-481d-a
 
 test('integration:stale-coordinator-files-windowed-followup — a coordinator checkout whose filer predates observation windows, at another commit than the served release, files the follow-up through the served release\'s own CLI in an isolated checkout, with its window', { timeout: 300_000 }, async () => {
   const directory = await temporaryDirectory('stale-coordinator');
+  mock.timers.enable({ apis: ['Date'], now: Date.parse(liveNow) });
   try {
     const coordinator = await cloneCheckout(directory, 'coordinator'), served = coordinator.sha;
     // The coordinator moves to code that files no window, as 98070f3538's did; the served release is the commit it left.
@@ -569,11 +570,12 @@ test('integration:stale-coordinator-files-windowed-followup — a coordinator ch
     await executor.run;
     assert.deepEqual(executor.filed.map(entry => [entry.requestId, entry.input.observationWindow?.notBefore]), [[filed[0].requestId, new Date(Date.parse(at) + day).toISOString()]]);
     assert.equal(executor.recorded.length, 1);
-  } finally { await rm(directory, { recursive: true, force: true }); }
+  } finally { mock.timers.reset(); await rm(directory, { recursive: true, force: true }); }
 });
 
 test('integration:deferred-post-deploy-filing-retries-windowed — a served release missing from the coordinator\'s store defers the follow-up (owed, unfiled, unrecorded, request id kept); once the commit is fetched the retry files it with its window', { timeout: 300_000 }, async () => {
   const directory = await temporaryDirectory('deferred-filing');
+  mock.timers.enable({ apis: ['Date'], now: Date.parse(liveNow) });
   try {
     const coordinator = await cloneCheckout(directory, 'coordinator'), upstream = await cloneCheckout(directory, 'upstream');
     // Production serves a commit the coordinator has not fetched.
@@ -591,5 +593,5 @@ test('integration:deferred-post-deploy-filing-retries-windowed — a served rele
     assert.equal(retried.verified.result, 'verified', retried.verified.refusals.join('; '));
     assert.deepEqual(retried.filed.map(entry => [entry.requestId, entry.input.observationWindow.notBefore]), [[requestId, new Date(Date.parse(retried.at) + day).toISOString()]]);
     assert.deepEqual([retried.ownAsked, retried.recorded.length], [0, 1]);
-  } finally { await rm(directory, { recursive: true, force: true }); }
+  } finally { mock.timers.reset(); await rm(directory, { recursive: true, force: true }); }
 });

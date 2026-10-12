@@ -295,7 +295,7 @@ test('unit:deployment-verification-exact-release — a coordinator checkout ahea
   await writeFile(join(release.checkout, 'src/master.ts'), '// local edit\n', { flag: 'a' });
   const scratches: string[] = [];
   const run = (command: string, args: string[], options?: { cwd?: string; env?: NodeJS.ProcessEnv }) => {
-    if (command === 'git' && args[0] === 'clone') scratches.push(args.at(-1)!);
+    if (command === 'git' && args[0] === 'init' && args.at(-1)!.endsWith('/release')) scratches.push(args.at(-1)!);
     return execFileSync(command, args, { ...options, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
   };
   try {
