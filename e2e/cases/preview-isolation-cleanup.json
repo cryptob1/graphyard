@@ -1,0 +1,225 @@
+{
+  "id": "preview-isolation-cleanup",
+  "title": "Two previews run isolated and the settled one cleans up",
+  "description": "Two changes of the Compose-backed fixture app preview at the same time; each preview page reports its own state and database identity and that it received no production credentials, both identities also sit on the items, and settling one change cleans its preview automatically — recorded on the item, its link stops serving, the other preview keeps running.",
+  "tags": [
+    "api",
+    "dashboard",
+    "preview"
+  ],
+  "target": "uat",
+  "required": true,
+  "secrets": [],
+  "steps": [
+    {
+      "kind": "http",
+      "name": "create the first change",
+      "method": "POST",
+      "path": "/api/work",
+      "body": {
+        "criteria": [
+          {
+            "id": "AC-1",
+            "proofs": [
+              "e2e:fixture-compose-app"
+            ],
+            "text": "The compose app's page shows this change"
+          }
+        ],
+        "description": "First of two changes previewed at the same time.",
+        "policy": {
+          "checks": [
+            "test"
+          ],
+          "review": true
+        },
+        "priority": 3,
+        "title": "E2E case {{case}} run {{run}} first",
+        "type": "feature"
+      },
+      "status": 200,
+      "expect": [],
+      "save": {
+        "id": "idA",
+        "key": "keyA"
+      }
+    },
+    {
+      "kind": "http",
+      "name": "create the second change",
+      "method": "POST",
+      "path": "/api/work",
+      "body": {
+        "criteria": [
+          {
+            "id": "AC-1",
+            "proofs": [
+              "e2e:fixture-compose-app"
+            ],
+            "text": "The compose app's page shows this change"
+          }
+        ],
+        "description": "Second of two changes previewed at the same time.",
+        "policy": {
+          "checks": [
+            "test"
+          ],
+          "review": true
+        },
+        "priority": 3,
+        "title": "E2E case {{case}} run {{run}} second",
+        "type": "feature"
+      },
+      "status": 200,
+      "expect": [],
+      "save": {
+        "id": "idB",
+        "key": "keyB"
+      }
+    },
+    {
+      "kind": "http",
+      "name": "the first item records its preview's own state and database",
+      "method": "GET",
+      "path": "/api/work/{{idA}}",
+      "status": 200,
+      "expect": [
+        {
+          "path": "preview.path",
+          "equals": "/preview/{{keyA}}"
+        },
+        {
+          "path": "preview.state",
+          "equals": "running"
+        },
+        {
+          "path": "preview.instance",
+          "equals": "preview-{{keyA}}"
+        },
+        {
+          "path": "preview.database",
+          "equals": "preview-{{keyA}}-db"
+        },
+        {
+          "path": "preview.secrets",
+          "equals": []
+        }
+      ]
+    },
+    {
+      "kind": "http",
+      "name": "the second item records a different state and database",
+      "method": "GET",
+      "path": "/api/work/{{idB}}",
+      "status": 200,
+      "expect": [
+        {
+          "path": "preview.path",
+          "equals": "/preview/{{keyB}}"
+        },
+        {
+          "path": "preview.state",
+          "equals": "running"
+        },
+        {
+          "path": "preview.instance",
+          "equals": "preview-{{keyB}}"
+        },
+        {
+          "path": "preview.database",
+          "equals": "preview-{{keyB}}-db"
+        }
+      ]
+    },
+    {
+      "kind": "browser",
+      "name": "open the first preview",
+      "action": "open",
+      "path": "/preview/{{keyA}}"
+    },
+    {
+      "kind": "browser",
+      "action": "expectText",
+      "text": "state preview-{{keyA}}",
+      "exact": false
+    },
+    {
+      "kind": "browser",
+      "action": "expectText",
+      "text": "database preview-{{keyA}}-db",
+      "exact": false
+    },
+    {
+      "kind": "browser",
+      "action": "expectText",
+      "text": "production credentials none",
+      "exact": false
+    },
+    {
+      "kind": "browser",
+      "name": "open the second preview",
+      "action": "open",
+      "path": "/preview/{{keyB}}"
+    },
+    {
+      "kind": "browser",
+      "action": "expectText",
+      "text": "state preview-{{keyB}}",
+      "exact": false
+    },
+    {
+      "kind": "browser",
+      "action": "expectText",
+      "text": "database preview-{{keyB}}-db",
+      "exact": false
+    },
+    {
+      "kind": "http",
+      "name": "settle the first change",
+      "method": "POST",
+      "path": "/api/work/{{idA}}/close",
+      "body": {
+        "reason": "The E2E case settles this change"
+      },
+      "status": 200,
+      "expect": []
+    },
+    {
+      "kind": "http",
+      "name": "the item records the automatic cleanup",
+      "method": "GET",
+      "path": "/api/work/{{idA}}",
+      "status": 200,
+      "expect": [
+        {
+          "path": "preview.state",
+          "equals": "cleaned"
+        },
+        {
+          "path": "preview.cleanedAt",
+          "type": "string"
+        },
+        {
+          "path": "preview.instance",
+          "equals": "preview-{{keyA}}"
+        }
+      ]
+    },
+    {
+      "kind": "http",
+      "name": "the cleaned preview no longer serves",
+      "method": "GET",
+      "path": "/preview/{{keyA}}",
+      "status": 404,
+      "expect": []
+    },
+    {
+      "kind": "http",
+      "name": "the other preview keeps running",
+      "method": "GET",
+      "path": "/preview/{{keyB}}",
+      "status": 200,
+      "expect": []
+    }
+  ]
+}

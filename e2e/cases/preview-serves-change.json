@@ -1,0 +1,93 @@
+{
+  "id": "preview-serves-change",
+  "title": "A change gets its own local preview and the team can open it",
+  "description": "A change whose declared application case needs a preview gets one: the item names the preview link and its state, the declared case's result from that preview sits on the item, and opening the link shows the change actually running.",
+  "tags": [
+    "api",
+    "dashboard",
+    "preview"
+  ],
+  "target": "uat",
+  "required": true,
+  "secrets": [],
+  "steps": [
+    {
+      "kind": "http",
+      "name": "create a change whose declared case needs a preview",
+      "method": "POST",
+      "path": "/api/work",
+      "body": {
+        "criteria": [
+          {
+            "id": "AC-1",
+            "proofs": [
+              "e2e:fixture-static-home"
+            ],
+            "text": "The fixture site's home heading shows this change"
+          }
+        ],
+        "description": "A change whose declared application case needs a local preview of the fixture site.",
+        "policy": {
+          "checks": [
+            "test"
+          ],
+          "review": true
+        },
+        "priority": 3,
+        "title": "E2E case {{case}} run {{run}}",
+        "type": "feature"
+      },
+      "status": 200,
+      "expect": [],
+      "save": {
+        "id": "id",
+        "key": "key"
+      }
+    },
+    {
+      "kind": "http",
+      "name": "read the item's preview",
+      "method": "GET",
+      "path": "/api/work/{{id}}",
+      "status": 200,
+      "expect": [
+        {
+          "path": "preview.path",
+          "equals": "/preview/{{key}}"
+        },
+        {
+          "path": "preview.state",
+          "equals": "running"
+        },
+        {
+          "path": "preview.cases",
+          "type": "array"
+        },
+        {
+          "path": "preview.cases.0.result",
+          "equals": "pass"
+        }
+      ]
+    },
+    {
+      "kind": "http",
+      "name": "the preview serves",
+      "method": "GET",
+      "path": "/preview/{{key}}",
+      "status": 200,
+      "expect": []
+    },
+    {
+      "kind": "browser",
+      "name": "open the preview link",
+      "action": "open",
+      "path": "/preview/{{key}}"
+    },
+    {
+      "kind": "browser",
+      "action": "expectText",
+      "text": "E2E case {{case}} run {{run}}",
+      "exact": false
+    }
+  ]
+}

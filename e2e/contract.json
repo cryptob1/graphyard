@@ -3,26 +3,128 @@
     {
       "id": "sign-in",
       "title": "An operator signs in and reaches the control plane",
-      "criteria": ["The dashboard accepts an access token and shows the primary navigation and the Work view"],
-      "cases": ["sign-in"]
+      "criteria": [
+        "The dashboard accepts an access token and shows the primary navigation and the Work view"
+      ],
+      "cases": [
+        "sign-in"
+      ]
     },
     {
       "id": "work-intake",
       "title": "An operator creates work and finds it where they look",
-      "criteria": ["A created work item is listed in the work list", "A created work item appears in the board's backlog group"],
-      "cases": ["create-work-item", "board"]
+      "criteria": [
+        "A created work item is listed in the work list",
+        "A created work item appears in the board's backlog group"
+      ],
+      "cases": [
+        "create-work-item",
+        "board"
+      ]
     },
     {
       "id": "work-detail",
       "title": "An operator reads an item's criteria and gates",
-      "criteria": ["An item's page shows its criteria, proofs and gates by id and by key"],
-      "cases": ["work-item-detail"]
+      "criteria": [
+        "An item's page shows its criteria, proofs and gates by id and by key"
+      ],
+      "cases": [
+        "work-item-detail"
+      ]
     },
     {
       "id": "test-visibility",
       "title": "An operator sees what is tested and whether it passes",
-      "criteria": ["The Tests page lists every case with its recent runs"],
-      "cases": ["tests-page"]
+      "criteria": [
+        "The Tests page lists every case with its recent runs"
+      ],
+      "cases": [
+        "tests-page"
+      ]
+    },
+    {
+      "id": "onboarding-default-path",
+      "title": "A repository onboarded the normal way gets the rapid delivery path by default",
+      "criteria": [
+        "After a normal install and init of a repository, the project's delivery settings show local previews, candidates of at most five changes, and required production verification, without any extra setup step",
+        "The project runs the local preview and candidate path with no GitHub Actions workflow and no Railway preview environment; GitHub remains an optional asynchronous mirror",
+        "The user and operator docs under docs/ describe these defaults, how a project declares its applications and cases, and what happens when a candidate fails"
+      ],
+      "cases": [
+        "onboarding-delivery-defaults"
+      ]
+    },
+    {
+      "id": "change-preview",
+      "title": "A proposed change gets its own local preview the team can open and judge",
+      "criteria": [
+        "A change whose declared application case needs a preview gets one without anyone asking for it",
+        "The item shows the preview link and its state, and the declared application case's result from running in that preview",
+        "Opening the preview link shows the change itself running — the site serves this change's content, not a placeholder"
+      ],
+      "cases": [
+        "preview-serves-change"
+      ]
+    },
+    {
+      "id": "preview-isolation",
+      "title": "Every preview runs alone — its own state and database, no production secrets — and cleans up after itself",
+      "criteria": [
+        "Two previews running at the same time each report their own state identity and their own database, both on the preview page the team opens and on the item's record",
+        "The previewed application receives no production credentials, and the item's preview record lists none",
+        "When a change is settled its preview is cleaned up automatically: the item records the cleanup with a time, the preview link stops serving, and other previews keep running"
+      ],
+      "cases": [
+        "preview-isolation-cleanup"
+      ]
+    },
+    {
+      "id": "declared-app-previews",
+      "title": "Both a declared static site and a declared Compose app get working local previews, with no Railway or GitHub Actions",
+      "criteria": [
+        "A change needing the static site gets a preview that serves the site with the change visible on it",
+        "A change needing the Compose-backed application gets a preview that serves the running application against its own database",
+        "Both previews are served by Graphyard locally — the item names the local runner — with no Railway preview environment and no GitHub Actions workflow involved"
+      ],
+      "cases": [
+        "previews-for-declared-apps"
+      ]
+    },
+    {
+      "id": "small-exact-candidates",
+      "title": "Ready changes batch into a small exact candidate — at most five — that names exactly what it contains",
+      "criteria": [
+        "A candidate names each change it contains by work item and by that change's merge commit, and carries one exact source identity for the whole batch",
+        "A batch never contains more than five changes",
+        "A change that becomes ready after a full batch waits for the next candidate and is the whole of it"
+      ],
+      "cases": [
+        "candidate-batches-five"
+      ]
+    },
+    {
+      "id": "candidate-gates-promotion",
+      "title": "Only a candidate whose combined required cases pass is promoted; a failed candidate never promotes and its failure stays on record",
+      "criteria": [
+        "A candidate whose combined required end-to-end cases pass is promoted, and the delivery view shows production expecting that candidate's release bound to its member's exact merge commit",
+        "A candidate whose combined required cases fail is not promoted, and the candidate record names the failed cases",
+        "Production keeps the previous passing candidate's release, and the failed candidate's record with its failure stays readable afterwards"
+      ],
+      "cases": [
+        "candidate-gates-promotion"
+      ]
+    },
+    {
+      "id": "production-verified-exact",
+      "title": "Production is verified to run exactly the promoted candidate, and drift is caught",
+      "criteria": [
+        "The delivery view shows the live production environment observed running the promoted candidate's release id and exact source, not just that some release is out there",
+        "Verification reads 'verified' only while the live environment runs that exact release",
+        "When the live environment serves something else, verification turns to a mismatch that says so, while the expected release still names the promoted candidate"
+      ],
+      "cases": [
+        "production-exact-verification"
+      ]
     }
   ]
 }
