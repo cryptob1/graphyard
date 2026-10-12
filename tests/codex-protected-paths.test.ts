@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { existsSync, readlinkSync, readFileSync, realpathSync } from 'node:fs';
 import { lstat, mkdir, readdir, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { launchPlan, nonInteractiveLaunch } from '../src/harness.js';
+import { LaunchRefusedError, launchPlan, nonInteractiveLaunch } from '../src/harness.js';
 import { startAgentSession } from '../src/master.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -14,7 +14,8 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
  * of a session started without them failed. A codex launch creates each missing one first.
  *
  * unit:codex-protected-paths-created — before a codex launch in a directory lacking `.agents` or
- * `.codex`, both exist afterwards; ones already present, including a file or symlink, are untouched.
+ * `.codex`, both exist afterwards; ones already present, including a file or symlink, are untouched
+ * (a symlink also refuses the launch, as Codex's bubblewrap sandbox rejects it).
  * unit:codex-protected-paths-codex-only — other runtimes' launches create nothing.
  */
 
@@ -44,20 +45,28 @@ test('unit:codex-protected-paths-created — a codex launch creates the missing 
   assert.deepEqual(await readdir(join(partial, '.agents')), ['skill.md']);
   assert.ok((await lstat(join(partial, '.codex'))).isDirectory());
 
-  // A file and a symlink (one dangling) in their places are left exactly as they are.
-  const occupied = await temporaryDirectory('codex-occupied'), target = await temporaryDirectory('codex-target');
-  await writeFile(join(occupied, '.agents'), 'a file\n');
-  await symlink(join(target, 'missing'), join(occupied, '.codex'));
-  await launch('codex', occupied);
-  assert.ok((await lstat(join(occupied, '.agents'))).isFile());
-  assert.equal(readFileSync(join(occupied, '.agents'), 'utf8'), 'a file\n');
-  assert.ok((await lstat(join(occupied, '.codex'))).isSymbolicLink());
-  assert.equal(readlinkSync(join(occupied, '.codex')), join(target, 'missing'));
+  // A file in its place is left exactly as it is, and the launch goes ahead.
+  const filed = await temporaryDirectory('codex-filed');
+  await writeFile(join(filed, '.agents'), 'a file\n');
+  await launch('codex', filed);
+  assert.ok((await lstat(join(filed, '.agents'))).isFile());
+  assert.equal(readFileSync(join(filed, '.agents'), 'utf8'), 'a file\n');
+  assert.ok((await lstat(join(filed, '.codex'))).isDirectory());
+
+  // A symlink, dangling or not, is left exactly as it is, but bubblewrap rejects a protected path
+  // through a symlink, so the launch is refused by name instead of starting a sandbox that fails.
+  const refused = (path: string) => (error: unknown) => error instanceof LaunchRefusedError && error.kind === 'codex' && error.message.includes(path) && /symlink/.test(error.message);
+  const dangling = await temporaryDirectory('codex-dangling'), target = await temporaryDirectory('codex-target');
+  await symlink(join(target, 'missing'), join(dangling, '.codex'));
+  await assert.rejects(launch('codex', dangling), refused(join(dangling, '.codex')));
+  assert.ok((await lstat(join(dangling, '.codex'))).isSymbolicLink());
+  assert.equal(readlinkSync(join(dangling, '.codex')), join(target, 'missing'));
   assert.ok(!existsSync(join(target, 'missing')), 'a dangling symlink is not followed to create its target');
+  assert.ok((await lstat(join(dangling, '.agents'))).isDirectory(), 'the missing one is still created');
 
   const linked = await temporaryDirectory('codex-linked'), real = await temporaryDirectory('codex-real');
   await symlink(real, join(linked, '.agents'));
-  await launch('codex', linked);
+  await assert.rejects(launch('codex', linked), refused(join(linked, '.agents')));
   assert.equal(realpathSync(join(linked, '.agents')), realpathSync(real));
   assert.deepEqual(await readdir(real), []);
   assert.ok((await lstat(join(linked, '.codex'))).isDirectory());

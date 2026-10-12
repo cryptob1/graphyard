@@ -230,25 +230,28 @@ export function codexProjects(text: string): CodexProject[] {
  * is absent failed every command with `bwrap: Can't create file …/.agents: Read-only file system`
  * (GY-1717). Each missing one is created empty before the launch; an entry already there, whether
  * a directory, a file or a symlink (dangling or not), is left as it is, and a folder that does not
- * exist yet is left for the launch itself to report. Under the test runner only a folder in a
- * temporary directory is touched.
+ * exist yet is left for the launch itself to report. Bubblewrap also rejects a protected path that
+ * is a symlink (a dangling one takes the missing-path route), so such an entry refuses the launch
+ * by name rather than starting a session whose every command fails. Under the test runner only a
+ * folder in a temporary directory is touched.
  */
 export const codexProtectedPaths = ['.agents', '.codex'] as const;
 export async function createCodexProtectedPaths(folder: string) {
   if (underTestRunner() && !temporaryDirectories().some(temporary => `${folder}${sep}`.startsWith(`${temporary}${sep}`))) return [];
   if (!(await stat(folder).then(entry => entry.isDirectory(), () => false))) return [];
-  const created: string[] = [];
+  const created: string[] = [], linked: string[] = [];
   for (const name of codexProtectedPaths) {
     const path = resolve(folder, name);
-    try { await lstat(path); continue; } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    try { if ((await lstat(path)).isSymbolicLink()) linked.push(path); continue; } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
     try { await mkdir(path); created.push(path); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
   }
+  if (linked.length) throw new LaunchRefusedError('codex', `Graphyard refuses to launch the codex runtime in ${folder}: ${linked.join(' and ')} ${linked.length > 1 ? 'are symlinks' : 'is a symlink'}, which Codex's bubblewrap sandbox rejects as a protected path, so every command in the session would fail in the sandbox; Graphyard leaves it untouched, so replace it with a directory, then launch again.`);
   return created;
 }
 export async function trustCodexFolder(directory: string, environment: Record<string, string> = {}): Promise<FolderTrust> {
   const file = codexConfigFile(environment), folder = canonicalPath(directory);
   try { await createCodexProtectedPaths(folder); }
-  catch (error) { throw new LaunchRefusedError('codex', `Graphyard refuses to launch the codex runtime in ${folder}: its sandbox-protected ${codexProtectedPaths.join(' and ')} could not be created (${error instanceof Error ? error.message : String(error)}), so every command in the session would fail in the sandbox.`); }
+  catch (error) { if (error instanceof LaunchRefusedError) throw error; throw new LaunchRefusedError('codex', `Graphyard refuses to launch the codex runtime in ${folder}: its sandbox-protected ${codexProtectedPaths.join(' and ')} could not be created (${error instanceof Error ? error.message : String(error)}), so every command in the session would fail in the sandbox.`); }
   if (underTestRunner() && !temporaryDirectories().some(temporary => canonicalPath(file).startsWith(`${temporary}${sep}`))) return { file, directory: folder, written: false };
   const refuse = (why: string) => new LaunchRefusedError('codex', `Graphyard refuses to launch the codex runtime in ${folder}: ${why}, so the session would stop at Codex's "Trust this folder?" dialog for a human.`);
   const read = async () => {
