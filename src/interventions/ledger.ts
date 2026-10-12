@@ -24,6 +24,8 @@ export interface InterventionLedgerRow {
   /** On a `rework` row only: the document fields its grounds are read from (`routineReworkGround`, GY-1386). */
   grounds?: ReworkGroundsWork | null;
   work?: { key?: string | null; stage?: string | null; title?: string | null; epoch?: number | null; blocker?: string | null; plannedFiles?: string[] | null; quarantine?: unknown; escalations?: { trigger: string; at: string; reason: string; actor: string }[] | null; candidate?: { sha: string; pr: number } | null; submission?: { epoch: number; pr: number } | null } | null;
+  /** On a `requirements` row only: the plan every item closed as a duplicate of this one held just before the row (`readAbsorbedPlans`, GY-1719). */
+  absorbed?: string[];
 }
 type Db = { query: pg.Pool['query'] };
 /** A provider or ledger instant in the one form the report compares: ISO with milliseconds. */
@@ -154,4 +156,25 @@ export async function readInterventionLedger(db: Db, options: { limit?: number; 
       work: row.whole || document ? workOf(document) : null, stageBefore, ...(row.kind === 'rework' ? { grounds: grounds as ReworkGroundsWork | null } : {}) };
   });
   return { rows, truncated, retainedFrom };
+}
+
+/**
+ * GY-1719: sets each `requirements` row's `absorbed` — the plan of every item the record closes as a
+ * duplicate of the row's item, as that duplicate's own newest document before the row held it. One
+ * set read reaching past the window and every kind, so a plan set at create or before the window is
+ * found; a plan the duplicate gained after the row, or a duplicate created after it, is not. Every
+ * reader that folds the ledger calls it after `readInterventionLedger`, whose own reads stay three.
+ */
+export async function readAbsorbedPlans(db: Db, rows: InterventionLedgerRow[]) {
+  const revisions = rows.filter(row => row.kind === 'requirements' && row.workId && row.work?.key);
+  if (!revisions.length) return;
+  const result = await db.query(`WITH duplicates AS (SELECT id, document->'closure'->>'ref' AS ref FROM work_items
+      WHERE document->'closure'->>'kind' = 'duplicate' AND document->'closure'->>'ref' = ANY($2::text[]))
+    SELECT r.seq, plan.planned FROM unnest($1::bigint[], $2::text[]) AS r(seq, key) JOIN duplicates d ON d.ref = r.key
+      CROSS JOIN LATERAL (SELECT graphyard_event_work(e.work_id, e.payload)->'plannedFiles' AS planned FROM events e
+        WHERE e.work_id = d.id AND e.seq < r.seq AND (e.payload ? 'work' OR e.payload ? 'delta') ORDER BY e.seq DESC LIMIT 1) plan`,
+  [revisions.map(row => row.seq), revisions.map(row => row.work!.key!)]);
+  const plans = new Map<number, string[]>();
+  for (const row of result.rows) if (Array.isArray(row.planned)) plans.set(Number(row.seq), [...plans.get(Number(row.seq)) ?? [], ...row.planned.filter((path: unknown): path is string => typeof path === 'string')]);
+  for (const row of revisions) row.absorbed = plans.get(row.seq) ?? [];
 }

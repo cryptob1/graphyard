@@ -4,7 +4,7 @@ import { handFiledPatterns, interventionKinds, interventionWindows, patternCause
 import type { PipelineTimeline } from '../pipeline-speed.js';
 import type { Store } from '../store.js';
 import { boundedSnapshot } from '../store/bounded-snapshot.js';
-import { readInterventionLedger } from './ledger.js';
+import { readAbsorbedPlans, readInterventionLedger } from './ledger.js';
 import { foldInterventions } from './fold.js';
 
 const day = 86_400_000;
@@ -208,6 +208,7 @@ export async function readInterventionReport(store: Store, policy: InterventionP
   const snapshot = await boundedSnapshot(store.reportPool);
   const since = windowStart(snapshot.now, Math.max(days, policy.windowDays));
   const { rows, truncated, retainedFrom } = await readInterventionLedger(store.reportPool, { limit: options.limit, since });
+  await readAbsorbedPlans(store.reportPool, rows);
   const reach = ledgerReach(retainedFrom, truncated, since, snapshot.now);
   const folded = foldInterventions(rows, snapshot.work, snapshot.now);
   const report = computeInterventionReport(folded, snapshot.work, policy, { days, now: snapshot.now, kind: options.kind, stage: options.stage, work: options.work, reach });

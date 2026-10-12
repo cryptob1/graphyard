@@ -5,6 +5,7 @@ import { approveCapability } from './model/approval.js';
 import type { InterventionPolicy } from './model/interventions.js';
 import { detectRecurringCauses, draftPrevention, foldRetroArtefacts, retroApprovalConflict, retroGovernedPath, retroLedgerKinds, retroStanding, type RetroArtefact, type RetroLedgerRow } from './model/retro-synthesis.js';
 import { controlPlaneActor, foldInterventions, readInterventionLedger } from './interventions.js';
+import { readAbsorbedPlans } from './interventions/ledger.js';
 import type { Store } from './store.js';
 import { boundedSnapshot } from './store/bounded-snapshot.js';
 import { advisoryLocks } from './store/locks.js';
@@ -166,6 +167,7 @@ export async function synthesizeRetro(store: Store, policy: InterventionPolicy, 
   const now = options.now ?? snapshot.now;
   const since = new Date(Date.parse(now) - policy.windowDays * 86_400_000).toISOString();
   const { rows, truncated } = await readInterventionLedger(store.reportPool, { limit: options.limit, since });
+  await readAbsorbedPlans(store.reportPool, rows);
   const { interventions } = foldInterventions(rows, snapshot.work, now);
   const actor = options.actor ?? controlPlaneActor;
   const drafted = await store.transaction(async db => {

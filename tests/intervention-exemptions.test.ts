@@ -151,7 +151,7 @@ test('unit:intervention-exemptions-fold-unchanged — the report over the interv
 
 test('unit:intervention-exemptions-module — the fold consults one ordered list of named exemption predicates from src/intervention-exemptions.ts, and src/interventions.ts is at least 150 lines shorter', () => {
   assert.deepEqual(interventionExemptions.map(entry => entry.name), [
-    'approved-autoscope', 'successor-replan', 'audited-scope-widening', 'routed-scope-widening', 'unstarted-replan',
+    'approved-autoscope', 'successor-replan', 'audited-scope-widening', 'routed-scope-widening', 'unstarted-replan', 'criteria-implied-widening',
     'routine-rework-ground', 'lane-rework-ground', 'failed-check-round', 'loop-rework-round',
     'direct-merge-window', 'loop-autosettle-in-bound', 'answered-off-ledger', 'undecided-scope-request', 'approver-holds-scope-request', 'lease-loss-resolve', 'approved-decision-weakening',
   ]);
