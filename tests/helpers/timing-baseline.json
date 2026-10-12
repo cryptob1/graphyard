@@ -676,7 +676,7 @@
     "tests/scope-rule-implied.test.ts": 1044,
     "tests/scope-widening-build-instances.test.ts": 3000,
     "tests/scope-widening-provenance.test.ts": 470,
-    "tests/scope-widening-review-instances.test.ts": 1500,
+    "tests/scope-widening-review-instances.test.ts": 2000,
     "tests/secrets-scan-scope.test.ts": 284,
     "tests/server-heap-bounded.test.ts": 15579,
     "tests/server-scale.test.ts": 10872,

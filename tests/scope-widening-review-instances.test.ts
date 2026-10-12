@@ -3,11 +3,16 @@ import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { symlink } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import test, { before } from 'node:test';
-import { foldInterventions, type InterventionLedgerRow } from '../src/interventions.js';
+import { randomUUID } from 'node:crypto';
+import test, { after, before } from 'node:test';
+import EmbeddedPostgres from 'embedded-postgres';
+import { Engine } from '../src/engine.js';
+import { Store } from '../src/store.js';
+import { foldInterventions, readInterventionLedger, type InterventionLedgerRow } from '../src/interventions.js';
+import { readAbsorbedPlans } from '../src/interventions/ledger.js';
 import { exemption } from '../src/intervention-exemptions.js';
 import { impliedWidening } from '../src/interventions/implied-widening.js';
-import type { Work } from '../src/model.js';
+import type { Principal, Work } from '../src/model.js';
 import type { Intervention } from '../src/model/interventions.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -173,6 +178,49 @@ test('manual:intervention-pattern-scope-widening-review — a duplicate\'s plan 
   const later = { ...rows1662[0], seq: 2485700, at: '2026-10-10T17:50:00.000Z' };
   const earlier = { ...rows1662[0], work: { ...rows1662[0].work, plannedFiles: ['src/daemon/doctor.ts'] }, details: { ...rows1662[0].details, before: { blocker: null, plannedFiles: ['src/daemon/doctor.ts'] } } };
   assert.deepEqual(widenings(foldInterventions, [earlier, rows1662[1], later], snapshot1662).map(asRecorded), [recorded1662]);
+});
+
+// ---- A duplicate's plan from before the window --------------------------------------------------------
+
+// The report reads only the window's rows of the kinds the fold reads, and a settled duplicate's
+// snapshot summary carries no plan: GY-1664's plan was set by its `create`, which no window holds.
+// The ledger read carries every closed duplicate's plan onto the revision, as the duplicate's own
+// newest document before the row held it, from the whole ledger.
+let database: EmbeddedPostgres | undefined, store: Store | undefined;
+after(async () => { if (store) await store.close(); if (database) await database.stop(); });
+
+test('manual:intervention-pattern-scope-widening-review — a duplicate planned before the report window, by its create alone, is read from the ledger at the revision, and a path it gained after the revision is not', async () => {
+  const port = Number(process.env.GRAPHYARD_SCOPE_WIDENING_REVIEW_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1719);
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('scope-widening-review'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  await database.initialise(); await database.start(); await database.createDatabase('scope_widening_review_test');
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/scope_widening_review_test`); await store.init();
+  const engine = new Engine(store, [15368], 120, 'owner/scope-widening-review'); engine.submissionObserver = null;
+  const master: Principal = { id: operator, role: 'admin', sessionKind: 'ai' };
+  const revise = (work: Work, plannedFiles: string[], criteria: { id: string; text: string; proofs: string[] }[], reason: string) =>
+    engine.execute(master, 'requirements', work.id, { expectedPolicyRevision: work.policyRevision, reason, criteria, dependencies: [], plannedFiles, exclusiveResources: [], producerProofs: [] }, randomUUID());
+
+  const duplicate = await engine.execute(master, 'create', null, { title: 'harness remedy resolves research scratch', plannedFiles: gy1664.planned, criteria: [{ id: 'AC-1', text: 'Resolves from managed state', proofs: ['integration:harness-remedy-ignores-research-scratch'] }] }, randomUUID());
+  const criteria = [{ id: 'AC-1', text: 'The harness apply resolves a checkout that records units', proofs: ['unit:harness-apply-checkout-resolution'] }];
+  let target = await engine.execute(master, 'create', null, { title: gy1662.title, plannedFiles: gy1662.before, criteria }, randomUUID());
+  // The window opens after both items were created.
+  const since = new Date((await store.pool.query('SELECT clock_timestamp() AS at')).rows[0].at).toISOString();
+  target = await revise(target, gy1662.after, [...criteria, gy1662.added], reason1662);
+  // After the revision the duplicate plans a path the revision never carried, then is closed into the target.
+  await revise(duplicate, [...gy1664.planned, 'tests/later.test.ts'], duplicate.criteria, 'a later plan');
+  await store.pool.query(`UPDATE work_items SET document = jsonb_set(document, '{closure}', $2::jsonb) WHERE id = $1`, [duplicate.id, JSON.stringify({ ...closed1664.closure, ref: target.key })]);
+
+  const { rows } = await readInterventionLedger(store.pool, { since });
+  await readAbsorbedPlans(store.pool, rows);
+  const revision = rows.find(row => row.kind === 'requirements' && row.workId === target.id)!;
+  assert.deepEqual(revision.absorbed, gy1664.planned, 'the duplicate\'s plan as its create set it, before the window and the revision; not the path it gained later');
+  assert.equal(rows.some(row => row.workId === duplicate.id && row.seq < revision.seq), false, 'no row of the duplicate before the revision is in the window');
+  assert.equal((await store.pool.query(`SELECT count(*)::int AS n FROM events WHERE work_id = $1 AND created_at < $2`, [duplicate.id, since])).rows[0].n > 0, true, 'its plan was set before the window');
+
+  // GY-1662's instance with no in-window duplicate row: the plan the ledger carries absorbs the test; without it the revision is a widening.
+  const replayed = { ...rows1662[1], absorbed: revision.absorbed };
+  assert.deepEqual(widenings(foldInterventions, [replayed], snapshot1662), []);
+  assert.deepEqual(widenings(foldInterventions, [rows1662[0], { ...replayed, absorbed: [] }], snapshot1662).map(asRecorded), [recorded1662], 'a ledger read that found no plan absorbs nothing, whatever the folded rows hold');
+  assert.deepEqual(widenings(baseFold, [replayed], snapshot1662).map(asRecorded), [recorded1662], 'the base counted it');
 });
 
 // ---- What still counts ------------------------------------------------------------------------------

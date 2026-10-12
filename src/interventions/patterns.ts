@@ -5,7 +5,7 @@ import type { Principal, Work } from '../model.js';
 import { postDeployProofPrefix } from '../model/post-merge-proofs.js';
 import { interventionKindLabel, type InterventionPattern, type InterventionPolicy } from '../model/interventions.js';
 import { boundedSnapshot } from '../store/bounded-snapshot.js';
-import { readInterventionLedger } from './ledger.js';
+import { readAbsorbedPlans, readInterventionLedger } from './ledger.js';
 import { foldInterventions } from './fold.js';
 import { detectPatterns, windowStart } from './report.js';
 
@@ -56,6 +56,7 @@ export async function openPatternItems(engine: Engine, policy: InterventionPolic
   const now = options.now ?? snapshot.now;
   // Detection reads the policy window of the ledger and nothing older (GY-422).
   const { rows, truncated } = await readInterventionLedger(engine.store.reportPool, { limit: options.limit, since: windowStart(now, policy.windowDays) });
+  await readAbsorbedPlans(engine.store.reportPool, rows);
   const folded = foldInterventions(rows, snapshot.work, now);
   const opened: Work[] = [];
   for (const pattern of detectPatterns(folded.interventions, snapshot.work, policy, now)) {
