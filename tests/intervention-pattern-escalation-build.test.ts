@@ -24,7 +24,7 @@ import { postDeployChecks } from '../src/master-verification.js';
 import { server } from '../src/server.js';
 import { importAt } from './helpers/base-tree.js';
 // Time-bomb allowance (GY-1694): the 2026-10-07..09 instants are fixture clocks handed to foldInterventions, probeBlocker and sharedGithubStatus; Date.now() only clocks lease-less probes and anchors codex holds relative to itself.
-// GY-1726's 2026-10-11..13 and 2026-10-18 instants are fixture clocks handed to postDeployChecks and their expected windows; its defer cases read the database clock.
+// GY-1726's 2026-10-11..13 and 2026-10-18 instants are fixture clocks handed to postDeployChecks and their expected windows; its defer cases read the database clock; the report case projects its reading from Date.now() + 10 days, 4 days past the database-clocked criterion bound.
 
 // GY-1406 names this file for its proof: manual:intervention-pattern-escalation-build. Four
 // escalation interventions were needed at the build stage between 2026-09-30 and 2026-10-07, each a
