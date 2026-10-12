@@ -9,7 +9,7 @@ import { doctorLimitRetryAt, doctorLimitUntilMarker, headlessTimeoutLimitCharge,
 import { isClosed } from '../model/closure.js';
 import { planeWideRefusal } from '../model/blocker-class.js';
 import { RefusedResponse } from '../model/refusal.js';
-import { openFaultClassItem } from '../model/fault-classes.js';
+import { doctorCoverNote, faultClassIsCovered, faultClassPolicyDefaults, faultClassPolicyFromEnv, type FaultClassPolicy, type FaultInstance } from '../model/fault-classes.js';
 import { workerSubmissionBoundMs } from '../model/attempt-bound.js';
 import { scopeRefusalBlocker, unplannedPaths } from '../model/scope.js';
 import { approverSessionName, guardBroadScope } from '../master/autonomy.js';
@@ -180,7 +180,7 @@ export function doctorPrompt(config: { repository: string; cliPath: string }, in
   ].join('\n');
   return `You are the Graphyard pipeline doctor for ${config.repository}. Find stuck and overdue work and fix it through your sanctioned commands, doing what the master would have done by hand. Read the evidence below and the control plane (${cli} status GY-N, ${cli} master status, ${cli} master decisions GY-N, gh pr view). `
     + `Act only where a check below has passed its fault bound; leave what is merely moving. Your sanctioned commands are ${doctorSanctionedCommands.map(name => `${cli} master ${name}`).join(', ')}, as the master's operator-agent identity; every other mutation is refused by your command allowlist — never merge, dispatch, submit evidence or touch a lease — and a refused command is recorded in your report, never retried. Run each command by its bare program name with literal arguments: no variables, command substitution, redirection, wrappers or node options, and read only paths inside this checkout. Put a free-text reason last, enclosed in one pair of quotes: the allowlist judges only the command's grammar, and the reason runs as one prose argument, never read as a command, whatever words, apostrophes or punctuation it holds. A refusal names the rule that denied the command and the word it denied. Never weaken a requirement; never approve a decision you requested yourself (request it, then ${cli} master approver GY-N DECISION for an independent approver). `
-    + `A finding you cannot act on — a human-only decision (goals and priorities, money or accounts, credentials for people), or a fault class with no item to act through — mark unactionable; for the latter name the fault item to file, which the loop files at P0/P1 only if no open item already covers it. `
+    + `A finding you cannot act on — a human-only decision (goals and priorities, money or accounts, credentials for people), or a fault class with no item to act through — mark unactionable; for the latter name the fault item to file, which the loop files at P0/P1 only if no open or delivered cover already accounts for it. `
     + `Then call the ${doctorTool} tool exactly once: one finding per stuck or overdue item under its check, one action entry per sanctioned command you ran and what it changed, and one filed entry per fault item you are asking the loop to file. Stop after the call.\n\nThe checks and their bounds:\n${checklist}\n\nThe evidence, as JSON:\n${JSON.stringify(boundedInput(input))}`;
 }
 
@@ -247,13 +247,15 @@ const subjectKey = (work: readonly Work[], subject: string) => work.find(item =>
 
 /**
  * What the loop keeps of a doctor payload: one event per item it found or acted on, and the run
- * summary. `filed` entries are deduplicated first: a fault class an open item already stands for
- * is recorded as covered, never filed twice.
+ * summary. `filed` entries are deduplicated first: a fault class a standing item (open or closed as
+ * answered by an undelivered diagnostician fix), a GY-1632 delivered cover, or a fallen cover still
+ * below the recurrence threshold stands for is recorded covered, never filed ahead of the loop's
+ * own sweep (GY-1711).
  */
-export function dedupDoctorFiles(filed: readonly DoctorFile[], work: readonly Work[]): { file: DoctorFile; covered: boolean }[] {
+export function dedupDoctorFiles(filed: readonly DoctorFile[], work: readonly Work[], instances: readonly FaultInstance[] = [], now = 0, policy: FaultClassPolicy = faultClassPolicyDefaults): { file: DoctorFile; covered: boolean }[] {
   const seen = new Set<string>();
   return filed.map(entry => {
-    const covered = seen.has(entry.faultClass) || !!openFaultClassItem(work, entry.faultClass);
+    const covered = seen.has(entry.faultClass) || faultClassIsCovered(work, entry.faultClass, instances, now, policy);
     seen.add(entry.faultClass);
     return { file: entry, covered };
   });
@@ -353,12 +355,17 @@ async function dropRefusedFiling(cycle: Pick<Cycle, 'state' | 'effects' | 'perfo
 export async function applyDoctorRun(cycle: Cycle, effects: DoctorEffects, run: DoctorRunRecord, payload: { findings: DoctorFinding[]; actions: DoctorAction[]; filed: DoctorFile[] }, now: () => number) {
   const { state, effects: daemon, performed } = cycle;
   const key = keyOf([run.at, ...payload.findings.map(finding => finding.subject)]);
-  // GY-1338: a run settles minutes after the cycle that launched it, and items filed meanwhile are
-  // not in that cycle's snapshot: a run started before GY-1332 existed filed GY-1333 for the same
-  // class. Its filings are deduplicated against a read taken now; without one, they wait for the
-  // retry, which deduplicates against its own cycle's snapshot, rather than file blind.
-  const fresh = payload.filed.length ? await daemon.snapshot().then(read => read.work, () => null) : cycle.snapshot.work;
-  const work = fresh ?? cycle.snapshot.work;
+  // GY-1338: settle against a fresh snapshot (items filed meanwhile); without one, wait for retry.
+  // Cover times use the plane clock (snapshot.now, else cycle.clock): host now() can lag the stamps.
+  let work = cycle.snapshot.work, coverNow = cycle.clock, fresh: typeof work | null = payload.filed.length ? null : work;
+  if (payload.filed.length) {
+    const read = await daemon.snapshot().then(entry => entry, () => null);
+    if (read) {
+      work = fresh = read.work;
+      const observed = Date.parse(read.now);
+      if (Number.isFinite(observed)) coverNow = observed;
+    }
+  }
   const note = async (subject: string, detail: string, outcome: DaemonAction['state'] = 'done', kind: DaemonAction['kind'] = 'fault') => {
     const itemKey = subjectKey(work, subject);
     performed.push(await record(state, `${key}:${subject}:${performed.length}`, { kind, work: itemKey, principal: null, state: outcome, detail, attempts: 1, cycle: state.cycle }, now(), daemon.persist));
@@ -372,25 +379,27 @@ export async function applyDoctorRun(cycle: Cycle, effects: DoctorEffects, run: 
   // tried five read-only forms filed "Recurring loop faults" for a loop that never stopped (GY-1295).
   for (const action of payload.actions)
     await note(action.subject, `${action.outcome === 'applied' ? 'Ran' : 'Was refused'} \`${action.command}\`: ${action.detail}`.slice(0, 2000));
-  const deduped = dedupDoctorFiles(payload.filed, work);
+  const policy = daemon.faultClassPolicy ?? faultClassPolicyFromEnv(process.env);
+  const instances = state.faults.instances;
+  const deduped = dedupDoctorFiles(payload.filed, work, instances, coverNow, policy);
   for (const { file, covered } of deduped) {
-    if (covered) { await note('installation', `Not filing "${file.title}": the ${file.faultClass} fault class is already covered by an open item`); continue; }
+    if (covered) { await note('installation', `Not filing "${file.title}": the ${file.faultClass} fault class is already covered by ${doctorCoverNote(work, file.faultClass, instances, coverNow, policy)}`); continue; }
     const filingKey = `${key}:file:${file.faultClass}`;
     if (isRefused(state.doctor.refusedFilings, filingDigest(file))) { state.doctor.refusedFilings = renewRefusal(state.doctor.refusedFilings, filingDigest(file), now()); await note('installation', `Not filing "${file.title}" again: master create refused this content earlier and the escalation for it stands; it is filed again only when the doctor corrects it`); continue; }
     if (!fresh) {
       state.doctor.pendingFiles = [...state.doctor.pendingFiles.filter(entry => entry.key !== filingKey), { key: filingKey, at: run.at, file }].slice(-40);
-      await note('installation', `Not filing "${file.title}" yet: the open items could not be read when the run settled, so it is filed on a later cycle if no open item covers the ${file.faultClass} fault class`);
+      await note('installation', `Not filing "${file.title}" yet: the open items could not be read when the run settled, so it is filed on a later cycle if no open or delivered cover accounts for the ${file.faultClass} fault class`);
       continue;
     }
     let input: DoctorFileInput;
-    try { input = doctorFileItem(file, `The pipeline doctor found a ${file.faultClass} fault no open item covers: ${file.description.slice(0, 1500)}`); }
+    try { input = doctorFileItem(file, `The pipeline doctor found a ${file.faultClass} fault no open or delivered cover accounts for: ${file.description.slice(0, 1500)}`); }
     catch (error) { await note('installation', invalidFiling(file, error), 'done', 'escalation'); continue; }
     try {
       const filedItem = await effects.file(input, filingKey);
       // Filed: any pending retry of the same filing is dropped before the cursor is persisted.
       state.doctor.pendingFiles = state.doctor.pendingFiles.filter(entry => entry.key !== filingKey);
       run.filed.push({ faultClass: file.faultClass, title: file.title, work: filedItem.key, deduplicated: false });
-      await note(filedItem.key, `Filed ${filedItem.key} (P${file.priority}) for the ${file.faultClass} fault no open item covered: ${file.title}`);
+      await note(filedItem.key, `Filed ${filedItem.key} (P${file.priority}) for the ${file.faultClass} fault no open or delivered cover accounted for: ${file.title}`);
     } catch (error) {
       // GY-1530: a refusal of the filing itself is never mended by a retry; it is dropped and classified.
       if (createRefused(error)) { await dropRefusedFiling(cycle, filingKey, file, error, (state.actions[filingKey]?.attempts ?? 0) + 1, now); continue; }
@@ -436,23 +445,26 @@ export async function postRun(cycle: Pick<Cycle, 'state' | 'effects'>, effects: 
 const retainedRuns = 20;
 
 /**
- * A filing the control plane did not accept when its run applied is filed again on a later cycle,
- * under the same stable key, until the control plane takes it, refuses it as written (GY-1530) or an
- * open item comes to cover the class. The cursor is updated before the outcome is recorded, so an
- * abrupt exit between the two leaves the filing pending rather than lost.
+ * Retry a filing the plane did not accept: until create takes it, refuses it (GY-1530), or a
+ * standing / delivered cover accounts for the class (GY-1711). Cursor updates before the outcome so
+ * an abrupt exit keeps it pending.
  */
 export async function retryDoctorFile(cycle: Cycle, effects: DoctorEffects, pending: DoctorPendingFile, now: () => number) {
-  const { state, effects: daemon, snapshot } = cycle;
+  const { state, effects: daemon, snapshot, clock } = cycle;
   const attempts = (state.actions[pending.key]?.attempts ?? 0) + 1;
   const drop = async (detail: string, work: string | null, outcome: DaemonAction['state']) => {
     state.doctor.pendingFiles = state.doctor.pendingFiles.filter(entry => entry.key !== pending.key);
     await record(state, pending.key, { kind: 'fault', work, principal: null, state: outcome, detail: detail.slice(0, 2000), attempts, cycle: state.cycle }, now(), daemon.persist);
   };
-  if (openFaultClassItem(snapshot.work, pending.file.faultClass)) return drop(`Not filing "${pending.file.title}" on retry: the ${pending.file.faultClass} fault class is now covered by an open item`, null, 'done');
+  const policy = daemon.faultClassPolicy ?? faultClassPolicyFromEnv(process.env);
+  if (faultClassIsCovered(snapshot.work, pending.file.faultClass, state.faults.instances, clock, policy)) {
+    const by = doctorCoverNote(snapshot.work, pending.file.faultClass, state.faults.instances, clock, policy);
+    return drop(`Not filing "${pending.file.title}" on retry: the ${pending.file.faultClass} fault class is now covered by ${by}`, null, 'done');
+  }
   // Queued through an outage beside another run's copy, the same content may already have been refused.
   if (isRefused(state.doctor.refusedFilings, filingDigest(pending.file))) { state.doctor.refusedFilings = renewRefusal(state.doctor.refusedFilings, filingDigest(pending.file), now()); return drop(`Not filing "${pending.file.title}" on retry: master create refused this content earlier and the escalation for it stands`, null, 'done'); }
   let input: DoctorFileInput;
-  try { input = doctorFileItem(pending.file, `The pipeline doctor found a ${pending.file.faultClass} fault no open item covers: ${pending.file.description.slice(0, 1500)}`); }
+  try { input = doctorFileItem(pending.file, `The pipeline doctor found a ${pending.file.faultClass} fault no open or delivered cover accounts for: ${pending.file.description.slice(0, 1500)}`); }
   catch (error) {
     // Refused by the checks themselves, the filing would be refused the same way on every retry.
     state.doctor.pendingFiles = state.doctor.pendingFiles.filter(entry => entry.key !== pending.key);
@@ -724,23 +736,11 @@ export async function relaunchUnansweredApprovers(cycle: Cycle) {
 export const decisionCheckMs = 2 * 60_000;
 
 /**
- * Remedy 4 (GY-1652): apply the Claude harness contract from the loop's own unconfined process.
- * The plan is derived live (second-install units on the host add denies, GY-1441), so the settings
- * the checkout's sessions load drift whenever the host changes. `master status` repairs drift in
- * place, but the only recurring automated reader is the doctor, whose checkout is bound read-only
- * (GY-888), so its repair always met EROFS and the row recurred every pass. The loop owns the file:
- * whenever the installed settings differ from the plan it makes the same idempotent write
- * `master harness claude --apply` makes — operator-added entries kept, only retired generated rules
- * removed — and journals one line. It runs on the loop's own checkout, the one its CLI runs from
- * (coordinatorCheckoutRoot, the doctor's checkout as fallback; GY-1662), never research's, which
- * runDaemon rewrites to the research scratch worktree: that worktree records no units, so on a host
- * whose legacy unit runs another checkout every cycle met the legacy unit refusal. A loop with no operator-agent identity or with the doctor off still owns
- * its checkout, and its own cycle is then the only recurring reader that would heal host-derived drift.
- * A checkout it may not apply against (harnessApplyCheckout) waits on the remedy it names, journaled once.
- * A failure is journaled once per distinct cause and retried every cycle; a repeat of the same cause
- * moves the standing row's time, so the failure stays open for as long as it lasts.
+ * Remedy 4 (GY-1652): apply the Claude harness contract from the loop's unconfined process — the
+ * doctor's checkout is read-only (GY-888), so only the loop can heal host-derived drift. Uses the
+ * CLI checkout (GY-1662), never research's scratch. Refusals wait; failures retry per distinct cause.
  */
-/** The settings file the Claude harness contract is written to, relative to the checkout (masterHarnessPlan's file). */
+/** Claude harness settings path relative to the checkout (masterHarnessPlan's file). */
 const claudeSettingsFile = '.claude/settings.local.json';
 
 export async function applyHarnessContract(cycle: Cycle) {

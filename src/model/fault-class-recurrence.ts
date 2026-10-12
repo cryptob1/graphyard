@@ -47,6 +47,82 @@ export function releaseOvertakenLinks(instances: readonly FaultInstance[], work:
 /** Whether every instance listed was first seen before `landing`: none of them postdates the delivered fix. */
 export const predateLanding = (instances: readonly { at: string }[], landing: number) => instances.every(entry => Date.parse(entry.at) < landing);
 
+/**
+ * Windowed unlinked instances of `faultClass` — the set GY-1632 compares to a delivered landing.
+ * Shared by recurringClasses and the doctor's filing dedup (GY-1711).
+ */
+export function windowedUnlinked(instances: readonly FaultInstance[], faultClass: FaultClass, now: number, policy: Pick<FaultClassPolicy, 'windowHours'>): FaultInstance[] {
+  const from = now - policy.windowHours * 3_600_000;
+  return instances.filter(entry => entry.faultClass === faultClass && Date.parse(entry.at) >= from && Date.parse(entry.at) <= now && !entry.linkedTo);
+}
+
+/**
+ * GY-1632: the delivered item that covers `faultClass` while every listed (windowed unlinked)
+ * instance predates its landing, else null. Empty listings stand covered (vacuous): a doctor
+ * re-offer of a class with only pre-landing evidence, or none in the ledger, must not re-file
+ * once the structural item has landed (GY-1711). Shared by recurringClasses and doctor dedup.
+ */
+export function deliveredClassCover(work: readonly Work[], faultClass: FaultClass, windowedUnlinkedInstances: readonly { at: string }[]): Work | null {
+  const cover = deliveredFaultClassCover(work, faultClass);
+  return cover && predateLanding(windowedUnlinkedInstances, cover.landedAt) ? cover.item : null;
+}
+
+/**
+ * The item standing for `faultClass` for doctor and recurrence (GY-439 / GY-1711): the open item
+ * naming it, else a recurring item closed as answered by a diagnostician fix that is not yet
+ * delivered. Same rule as `standingFaultClassItem` in the diagnosis step — kept here so the
+ * browser-safe cover gate matches `fileRecurringFaultClasses` without importing the daemon.
+ */
+export function standingFaultClassCover(work: readonly Work[], faultClass: FaultClass): Work | null {
+  const open = openFaultClassItem(work, faultClass);
+  if (open) return open;
+  return [...work].reverse().find(item => {
+    if (closesFaultClass(item) !== faultClass || item.stage !== 'done' || item.closure?.kind !== 'duplicate' || !item.closure.ref) return false;
+    const answer = work.find(other => other.key === item.closure!.ref);
+    return !answer || !isDelivered(answer);
+  }) ?? null;
+}
+
+/**
+ * Whether the doctor must not file `faultClass` (GY-1711): a standing class item (open, or closed
+ * as answered by an undelivered diagnostician fix), a delivered cover under the GY-1632 rule, or a
+ * fallen delivered cover whose post-landing instances are still below the recurrence threshold —
+ * the same filing eligibility as recurringClasses with standingFaultClassItem, so the doctor files
+ * a class exactly when the loop's own sweep would and no later.
+ */
+export function faultClassIsCovered(work: readonly Work[], faultClass: FaultClass, instances: readonly FaultInstance[], now: number, policy: FaultClassPolicy): boolean {
+  if (standingFaultClassCover(work, faultClass)) return true;
+  const recent = windowedUnlinked(instances, faultClass, now, policy);
+  if (deliveredClassCover(work, faultClass, recent) !== null) return true;
+  // Delivered cover fell (at least one post-landing instance): suppress until the loop would file.
+  return deliveredFaultClassCover(work, faultClass) !== null && recent.length < policy.threshold;
+}
+
+/**
+ * Why faultClassIsCovered suppresses a doctor filing, for the run note (GY-1711).
+ * Null when the class is free to file.
+ */
+export function doctorFaultClassSuppressReason(
+  work: readonly Work[], faultClass: FaultClass, instances: readonly FaultInstance[], now: number, policy: FaultClassPolicy,
+): 'open' | 'standing' | 'delivered' | 'below-threshold' | null {
+  const standing = standingFaultClassCover(work, faultClass);
+  if (standing) return standing.stage !== 'done' ? 'open' : 'standing';
+  const recent = windowedUnlinked(instances, faultClass, now, policy);
+  if (deliveredClassCover(work, faultClass, recent) !== null) return 'delivered';
+  if (deliveredFaultClassCover(work, faultClass) !== null && recent.length < policy.threshold) return 'below-threshold';
+  return null;
+}
+
+/** Human-readable reason the doctor skipped filing a fault class (GY-1711). */
+export function doctorCoverNote(work: readonly Work[], faultClass: FaultClass, instances: readonly FaultInstance[], now: number, policy: FaultClassPolicy): string {
+  const reason = doctorFaultClassSuppressReason(work, faultClass, instances, now, policy);
+  if (reason === 'open') return 'an open item';
+  if (reason === 'standing') return 'a diagnosed class item whose fix is still open';
+  if (reason === 'delivered') return 'a delivered item';
+  if (reason === 'below-threshold') return `post-landing instances below the recurrence threshold (${policy.threshold} in ${policy.windowHours} hours)`;
+  return standingFaultClassCover(work, faultClass) ? 'an open item' : 'a delivered item';
+}
+
 export interface ClassRecurrence { faultClass: FaultClass; count: number; recent: FaultInstance[]; unlinked: FaultInstance[]; item: Work | null; file: boolean }
 /**
  * Every class with an instance inside the window. A class files an item when the instances in the
@@ -57,13 +133,13 @@ export interface ClassRecurrence { faultClass: FaultClass; count: number; recent
  * Instances linked to an item that has since closed stay counted by it, never by a second one.
  */
 export function recurringClasses(instances: readonly FaultInstance[], work: readonly Work[], policy: FaultClassPolicy, now: number, standing = openFaultClassItem): ClassRecurrence[] {
-  const from = now - policy.windowHours * 3_600_000;
   return faultClasses.flatMap(faultClass => {
     const all = instances.filter(entry => entry.faultClass === faultClass);
-    const recent = all.filter(entry => Date.parse(entry.at) >= from && Date.parse(entry.at) <= now && !entry.linkedTo);
+    const recent = windowedUnlinked(instances, faultClass, now, policy);
     // GY-1632: with no item standing, a delivered item naming the class stands while every instance in the window predates its landing.
-    const open = standing(work, faultClass), cover = open || !recent.length ? null : deliveredFaultClassCover(work, faultClass);
-    const item = open ?? (cover && predateLanding(recent, cover.landedAt) ? cover.item : null);
+    // When the window is empty the recurrence step has nothing to file or link; the doctor's gate still asks deliveredClassCover (GY-1711).
+    const open = standing(work, faultClass);
+    const item = open ?? (recent.length ? deliveredClassCover(work, faultClass, recent) : null);
     const unlinked = item ? all.filter(entry => !entry.linkedTo) : recent;
     if (!unlinked.length) return [];
     return [{ faultClass, count: recent.length, recent, unlinked, item, file: !item && recent.length >= policy.threshold }];

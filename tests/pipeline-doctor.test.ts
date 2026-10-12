@@ -7,11 +7,11 @@ import { Launcher, type Cycle } from '../src/daemon/cycle.js';
 import { Timings } from '../src/master/timings.js';
 import { approverSessionName } from '../src/master/autonomy.js';
 import { workerSubmissionBoundMs } from '../src/model/attempt-bound.js';
-import { clearDoctorRuns, clearCoveredBlockers, coveredScopePaths, decisionCheckMs, doctorBounds, doctorDue, doctorIntervalMs, doctorPrompt, doctorReportPayloadSchema, doctorRunsSettled, doctorSanctionedCommands, doctorSessionArgs, doctorSessionTools, doctorStep, relaunchUnansweredApprovers, settleSubmittedContainment, stopDoctorRuns, unansweredDecisionMs, type DoctorEffects } from '../src/daemon/doctor.js';
+import { clearDoctorRuns, clearCoveredBlockers, coveredScopePaths, decisionCheckMs, dedupDoctorFiles, doctorBounds, doctorDue, doctorIntervalMs, doctorPrompt, doctorReportPayloadSchema, doctorRunsSettled, doctorSanctionedCommands, doctorSessionArgs, doctorSessionTools, doctorStep, relaunchUnansweredApprovers, settleSubmittedContainment, stopDoctorRuns, unansweredDecisionMs, type DoctorEffects, type DoctorFile } from '../src/daemon/doctor.js';
 import { applyDoctorRun, doctorTool, filingDigest } from '../src/daemon/doctor.js';
 import { loopAttention, type LoopLiveness } from '../src/daemon/liveness.js';
 import { silenceBudgetMs, type SilenceEntry } from '../src/daemon/metrics.js';
-import { faultClassOf } from '../src/model/fault-classes.js';
+import { faultClassOf, faultClassPolicyDefaults, recurringClasses, type FaultInstance } from '../src/model/fault-classes.js';
 import { doctorRunRecordSchema, type DoctorRunRecord } from '../src/daemon/state.js';
 import { doctorSettingsSchema } from '../src/master/doctor-settings.js';
 import graphyardExtension, { doctorSanctionedCommands as piSanctioned, doctorRedirects, doctorSegmentAllowed, graphyardTools as piTools } from '../integrations/pi/index.js';
@@ -1041,4 +1041,140 @@ test('unit:doctor-refusal-digest-is-normalised — reports whose create input is
   assert.equal(filingDigest(a), filingDigest(b), 'proof IDs that normalise alike');
   assert.equal(filingDigest(spelled(a, 'C1')), filingDigest(spelled(b, 'second')), 'criterion IDs create renumbers');
   assert.notEqual(filingDigest(a), filingDigest(selfUpgradeFiling(['e2e:another-scenario'])), 'different content is not conflated');
+});
+
+// ---- GY-1711: doctor filings gate on the delivered cover, not only open items -------------------
+const gy1711Landing = Date.parse(observedAt) - 118 * 60_000;
+const gy1711CapacityFile = (): DoctorFile => ({
+  faultClass: 'capacity', priority: 1,
+  title: 'Approver, reviewer and worker sessions exhaust their model-account limit mid-attempt, losing judgements and attempts and breaching machine bounds',
+  description: 'doctor re-offer after GY-1708 landed', plannedFiles: ['src/model/capacity.ts'],
+  criteria: [{ id: 'AC-1', text: 'Mid-attempt exhaustion redispatches within machine bounds', proofs: ['unit:capacity-redispatch'] }],
+});
+const gy1708Delivered = (): Work => item({
+  id: 'id-GY-1708', key: 'GY-1708', stage: 'done', title: gy1711CapacityFile().title,
+  origin: { faultClass: { class: 'capacity', threshold: 1, windowHours: 1, count: 1, detectedAt: at(-200 * 60_000), instances: [] } },
+  delivery: { mergedAt: new Date(gy1711Landing).toISOString(), mergeSha: 'b'.repeat(40), authorizationRevision: 1 },
+} as Partial<Work>);
+const capacityFault = (id: string, offsetMs: number, linkedTo: string | null = null): FaultInstance => ({
+  id, kind: 'concurrency-starved', faultClass: 'capacity', subject: 'producer concurrency',
+  text: 'mid-attempt exhaustion', at: at(offsetMs), lastSeenAt: at(offsetMs), linkedTo,
+});
+
+test('integration:doctor-refile-after-landing-covered — a doctor re-offer of GY-1710\'s shape after a delivered capacity landing is recorded covered and never submitted to master create', async () => {
+  clearDoctorRuns();
+  const filed: string[] = [];
+  const preLanding = [
+    capacityFault('approver|claude-c|pre', -200 * 60_000),
+    capacityFault('worker|claude-c|pre', -150 * 60_000),
+  ];
+  const doctor = filingDoctor([gy1711CapacityFile()], async input => { filed.push(input.title); return item({ id: 'id-GY-1710', key: 'GY-1710', title: input.title }); });
+  const work = [gy1708Delivered()];
+  const replay = cycle(work, { doctor });
+  replay.state.faults.instances = preLanding;
+  await doctorStep(replay);
+  await doctorRunsSettled();
+  assert.deepEqual(filed, [], 'master create is never called');
+  assert.match(replay.state.doctor.runs[0].detail, /0 filed, 1 deduplicated/);
+  assert.ok(Object.values(replay.state.actions).some(action => /already covered by a delivered item/.test(action.detail)), 'recorded covered against the delivered landing');
+  // Empty ledger (the live GY-1710 shape): still covered — nothing postdates the landing.
+  const empty = cycle(work, { doctor });
+  await doctorStep(empty);
+  await doctorRunsSettled();
+  assert.deepEqual(filed, [], 'empty ledger stays covered');
+  assert.ok(Object.values(empty.state.actions).some(action => /already covered by a delivered item/.test(action.detail)));
+  // A pending retry is dropped the same way once the delivered cover stands.
+  empty.state.doctor.pendingFiles = [{ key: 'doctor:retry:file:capacity', at: observedAt, file: gy1711CapacityFile() }];
+  empty.state.cycle += 1;
+  await doctorStep(cycle(work, { doctor, state: empty.state }));
+  assert.deepEqual(empty.state.doctor.pendingFiles, [], 'retry drops when a delivered item covers the class');
+  assert.match(empty.state.actions['doctor:retry:file:capacity']?.detail ?? '', /now covered by a delivered item/);
+  clearDoctorRuns();
+});
+
+test('integration:doctor-filing-after-new-instance — an instance first seen after the delivered cover\'s landing files afresh; the cover does not stand while any windowed unlinked instance postdates the landing', async () => {
+  clearDoctorRuns();
+  const filed: string[] = [];
+  const preLanding = [capacityFault('capacity|pre|gate', -200 * 60_000)];
+  const belowThreshold = [
+    capacityFault('capacity|post|1', -10 * 60_000),
+    capacityFault('capacity|post|2', -5 * 60_000),
+  ];
+  const atThreshold = [
+    ...belowThreshold,
+    capacityFault('capacity|post|3', -1 * 60_000),
+  ];
+  const doctor = filingDoctor([gy1711CapacityFile()], async input => { filed.push(input.title); return item({ id: 'id-GY-1712', key: 'GY-1712', title: input.title }); });
+  const work = [gy1708Delivered()];
+  // Pre-landing only: the delivered cover stands — doctor must not file (base open-item-only dedup would).
+  const held = cycle(work, { doctor });
+  held.state.faults.instances = preLanding;
+  await doctorStep(held);
+  await doctorRunsSettled();
+  assert.deepEqual(filed, [], 'pre-landing evidence alone does not file while the delivered cover stands');
+  clearDoctorRuns();
+  // Below the default recurrence threshold: cover has fallen, but the doctor matches the loop and waits.
+  const waiting = cycle(work, { doctor });
+  waiting.state.faults.instances = belowThreshold;
+  await doctorStep(waiting);
+  await doctorRunsSettled();
+  assert.deepEqual(filed, [], 'one or two post-landing instances stay suppressed under the default threshold of 3');
+  assert.equal(recurringClasses(belowThreshold, work, faultClassPolicyDefaults, Date.parse(observedAt)).find(entry => entry.faultClass === 'capacity')!.file, false);
+  assert.ok(Object.values(waiting.state.actions).some(action => /below the recurrence threshold/.test(action.detail)),
+    'the run notes the below-threshold suppress reason');
+  clearDoctorRuns();
+  // At threshold: the doctor files exactly when the recurrence sweep would.
+  const replay = cycle(work, { doctor });
+  replay.state.faults.instances = atThreshold;
+  await doctorStep(replay);
+  await doctorRunsSettled();
+  assert.deepEqual(filed, [gy1711CapacityFile().title], 'the doctor files once post-landing instances reach the recurrence threshold');
+  assert.deepEqual(replay.state.doctor.runs[0].filed.map(entry => entry.work), ['GY-1712']);
+  const sweep = recurringClasses(atThreshold, work, faultClassPolicyDefaults, Date.parse(observedAt)).find(entry => entry.faultClass === 'capacity')!;
+  assert.equal(sweep.file, true, 'the loop\'s recurrence sweep would file at the same moment');
+  assert.equal(sweep.item, null);
+  clearDoctorRuns();
+});
+
+test('integration:doctor-settlement-uses-plane-clock — applyDoctorRun compares fault times to the fresh snapshot clock, not a lagging coordinator now()', async () => {
+  // Plane ahead of the host: post-landing instances stamped on the plane clock look "in the future"
+  // against the coordinator's now(), and a host-clock comparison would keep the delivered cover.
+  const planeNow = Date.parse(observedAt);
+  const hostBehind = () => planeNow - 60 * 60_000;
+  const filed: string[] = [];
+  const atThreshold = [
+    capacityFault('capacity|skew|1', -10 * 60_000),
+    capacityFault('capacity|skew|2', -5 * 60_000),
+    capacityFault('capacity|skew|3', -1 * 60_000),
+  ];
+  const work = [gy1708Delivered()];
+  const effects = filingDoctor([gy1711CapacityFile()], async input => { filed.push(input.title); return item({ id: 'id-GY-1713', key: 'GY-1713', title: input.title }); });
+  const replay = cycle(work, { doctor: effects, now: hostBehind });
+  replay.state.faults.instances = atThreshold;
+  const run = summary(observedAt, 'running');
+  replay.state.doctor.runs = [run];
+  await applyDoctorRun(replay, effects, run, { findings: [], actions: [], filed: [gy1711CapacityFile()] }, hostBehind);
+  assert.deepEqual(filed, [gy1711CapacityFile().title], 'settlement against the plane clock files at threshold despite the lagging host clock');
+});
+
+test('integration:delivered-cover-through-duplicate-closure — with GY-1710 closed duplicate-of GY-1708, later capacity instances link to GY-1708 instead of producing a new filing', () => {
+  const gy1708 = gy1708Delivered();
+  const gy1710 = item({
+    id: 'id-GY-1710', key: 'GY-1710', stage: 'done', title: gy1711CapacityFile().title,
+    origin: { faultClass: { class: 'capacity', threshold: 1, windowHours: 1, count: 1, detectedAt: at(-30 * 60_000), instances: [] } },
+    closure: { kind: 'duplicate', ref: 'GY-1708', reason: 'duplicate of the landed capacity fix', by: 'master', at: at(-20 * 60_000), from: 'backlog' },
+  } as Partial<Work>);
+  const preLanding = [capacityFault('capacity|pre|dup', -200 * 60_000)];
+  // Doctor dedup resolves the cover through the duplicate ref.
+  assert.deepEqual(dedupDoctorFiles([gy1711CapacityFile()], [gy1710, gy1708], preLanding, Date.parse(observedAt), faultClassPolicyDefaults).map(entry => entry.covered), [true]);
+  // Instances recorded after the duplicate closure but still first-seen before the landing link to
+  // GY-1708 (the answer) rather than filing a third capacity item.
+  const linkable = [
+    capacityFault('capacity|link|1', -200 * 60_000),
+    capacityFault('capacity|link|2', -190 * 60_000),
+    capacityFault('capacity|link|3', -180 * 60_000),
+  ];
+  const recurrence = recurringClasses(linkable, [gy1710, gy1708], faultClassPolicyDefaults, Date.parse(observedAt)).find(entry => entry.faultClass === 'capacity')!;
+  assert.equal(recurrence.file, false, 'no new filing while every windowed instance predates the landing');
+  assert.equal(recurrence.item?.key, 'GY-1708', 'instances link to the delivered answer, not the closed duplicate');
 });
