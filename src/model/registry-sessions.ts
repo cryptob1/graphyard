@@ -1,7 +1,7 @@
 import type { Work } from './work.js';
 import { fleetRoles, rolePolicy } from './registry.js';
 import { exhaustedTwin, foldObservation } from './account-quota.js';
-import type { AccountSmoke, AgentRegistry, FleetAccount, FleetModel, FleetRefusal, FleetRoleName, FleetRuntime, FleetSession, ObservedQuota, RolePolicy, RunOutcome, SelectionRequest, SessionSkip } from './registry.js';
+import type { AccountSmoke, AgentRegistry, FleetAccount, FleetModel, FleetRefusal, FleetRole, FleetRoleName, FleetRuntime, FleetSession, ObservedQuota, RolePolicy, RunOutcome, SelectionRequest, SessionSkip } from './registry.js';
 import { accountProvider, busyDifferentProvider, sameProviderFallback, sharedProviderSkip, type ReviewDiversity } from './review-diversity.js';
 import { deriveAccountPlan, groupAccountsByPlan, type FleetPlanView } from '../provider-usage.js';
 
@@ -197,6 +197,25 @@ export function foldObservations(registry: AgentRegistry, request: Pick<Selectio
   return changed;
 }
 
+/**
+ * The order a role's accounts are tried in (GY-1746). Only the worker role has a preference: `fast`
+ * moves the Pi accounts ahead of the others and `strong` moves them behind, each group keeping the
+ * role's own order, so Pi serves the cheap first attempts and a high-risk or repeatedly reworked
+ * item goes to the strong runtimes first. A role with no preference is tried in its stored order.
+ */
+export function workerOrder(registry: AgentRegistry, role: Pick<FleetRole, 'name' | 'accounts'>, prefer: 'fast' | 'strong' | null): string[] {
+  if (role.name !== 'worker' || !prefer) return role.accounts;
+  const isPi = (name: string) => { const account = registry.accounts.find(entry => entry.name === name); return registry.runtimes.find(entry => entry.name === account?.runtime)?.launch.kind === 'pi'; };
+  const pi = role.accounts.filter(isPi), rest = role.accounts.filter(name => !pi.includes(name));
+  return prefer === 'fast' ? [...pi, ...rest] : [...rest, ...pi];
+}
+
+/** The attempts an item gets on Pi before the strong runtimes take it: its first two. */
+export const piAttempts = 2;
+/** Which runtimes dispatch tries a worker on first (GY-1746): Pi for a low or medium risk item on its first attempts, the strong runtimes for a high risk item and from the third attempt on. */
+export const workerPreference = (work: { lane?: string | null; pipeline?: { reworkRounds?: number } | null; reworkRounds?: number }): 'fast' | 'strong' =>
+  work.lane === 'high' || (work.pipeline?.reworkRounds ?? work.reworkRounds ?? 0) >= piAttempts ? 'strong' : 'fast';
+
 export interface SessionChoice { account: FleetAccount; runtime: FleetRuntime; model: FleetModel; policy: RolePolicy; reason: string; skipped: SessionSkip[] }
 export interface SessionRefusal { account: null; reason: string; skipped: SessionSkip[] }
 /**
@@ -207,7 +226,7 @@ export interface SessionRefusal { account: null; reason: string; skipped: Sessio
  * waited for, and with none the first same-provider account serves with the fallback recorded.
  * Pure: the registry passed in already carries the executor's fresh observations and only live sessions.
  */
-export function chooseSession(registry: AgentRegistry, request: Pick<SelectionRequest, 'role' | 'host'>, now: number, diversity: ReviewDiversity | null = null): SessionChoice | SessionRefusal {
+export function chooseSession(registry: AgentRegistry, request: Pick<SelectionRequest, 'role' | 'host'> & Partial<Pick<SelectionRequest, 'prefer' | 'exclude'>>, now: number, diversity: ReviewDiversity | null = null): SessionChoice | SessionRefusal {
   const role = registry.roles.find(entry => entry.name === request.role);
   if (!role) return { account: null, reason: `role ${request.role} is not configured in the agent registry`, skipped: [] };
   if (!role.accounts.length) return { account: null, reason: `role ${request.role} names no account`, skipped: [] };
@@ -223,9 +242,9 @@ export function chooseSession(registry: AgentRegistry, request: Pick<SelectionRe
     return { account, runtime, model, policy, skipped: passed,
       reason: `${account.name} is the first eligible account for ${role.name} (preference ${index + 1} of ${role.accounts.length}; ${running.length + 1} of ${role.concurrency} concurrent)${note}${passed.length ? ` — passed over ${passed.map(entry => entry.reason).join('; ')}` : ''}` };
   };
-  for (const [index, name] of role.accounts.entries()) {
+  for (const [index, name] of workerOrder(registry, role, request.prefer ?? null).entries()) {
     const account = registry.accounts.find(entry => entry.name === name);
-    const refusal = account ? accountIneligibility(registry, account, now, request.host) ?? roleIneligibility(account, role.name, now) : `${name} is not a registered account`;
+    const refusal = request.exclude?.includes(name) ? `${name} already failed to start a session under this dispatch` : account ? accountIneligibility(registry, account, now, request.host) ?? roleIneligibility(account, role.name, now) : `${name} is not a registered account`;
     const differs = !!diverse && !!account && accountProvider(registry, account) !== diverse.provider;
     if (refusal) {
       skipped.push({ account: name, reason: refusal });

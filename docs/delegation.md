@@ -9,6 +9,8 @@ An AI `slice-lead` (`product`, `infrastructure`, `docs-experience`) rules on pla
 
 The registry picks a `reviewer` account whose model provider (`provider`, else launch kind) differs from the item's newest `worker` session's; same-provider accounts are `skipped` (`shares the implementer's provider P on GY-N`), one at its session limit waited for; else the first eligible same-provider account serves (`no reviewer account outside provider P can serve GY-N`).
 
+For `worker`, low/medium-risk items' first two attempts try Pi first; high-risk and later attempts try other runtimes first. Pi runs in the bubblewrap mount.
+
 ## Escalation
 
 | Trigger | Raised when

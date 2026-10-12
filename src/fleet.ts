@@ -24,7 +24,7 @@ import { accountIneligibility, deriveAccountPlan, exhaustedTwin, fleetRoles, liv
  * role at a time.
  */
 export type FleetConfig = Pick<MasterConfig, 'credentialFile'> & Partial<Pick<MasterConfig, 'url' | 'hostId' | 'run'>>;
-export interface FleetProbe extends EnvironmentProbe { work?: string; principal?: string; /** The proof group a producer launch answers; one live session per group, not per item. */ group?: string; /** Replaces the HTTP client, for executors embedded beside the control plane and for tests. */ registry?: FleetClient;
+export interface FleetProbe extends EnvironmentProbe { work?: string; /** Which runtimes a worker is tried on first (GY-1746). */ prefer?: 'fast' | 'strong'; /** Accounts this dispatch already failed to start a session on. */ exclude?: string[]; principal?: string; /** The proof group a producer launch answers; one live session per group, not per item. */ group?: string; /** Replaces the HTTP client, for executors embedded beside the control plane and for tests. */ registry?: FleetClient;
   /** The runtime sessions Herdr lists on this host right now: a registry session whose runtime session is gone does not count toward its role (GY-190). */
   runtime?: RuntimeInventory;
   /** Runs the one-prompt smoke test of an account (GY-446); replaced by tests. */
@@ -35,7 +35,7 @@ export interface RuntimeInventory { agents: { name?: string | null }[]; availabl
 /** The three calls an executor makes. */
 export interface FleetClient {
   document(): Promise<AgentRegistry>;
-  select(request: { role: FleetRoleName; host: string; work: string | null; group: string | null; principal: string | null; observations: { account: string; quota: QuotaObservation; smoke?: SmokeObservation }[] }): Promise<FleetSelection>;
+  select(request: { role: FleetRoleName; host: string; work: string | null; group: string | null; principal: string | null; prefer?: 'fast' | 'strong'; exclude?: string[]; observations: { account: string; quota: QuotaObservation; smoke?: SmokeObservation }[] }): Promise<FleetSelection>;
   /** `outcome` is how a headless run on the session ended: with a result or without one (GY-446). */
   end(session: string, reason: string, outcome?: RunOutcome): Promise<void>;
   /** Report what the executor observed of its own host's accounts without asking for a session, as a hold is seen (GY-1573). */
@@ -269,7 +269,7 @@ export async function selectFleetSession(config: FleetConfig, role: FleetRoleNam
     const gone = runtimeSessionGone(session, probe.runtime, host, now);
     if (gone) await client.end(session.id, gone).catch(() => {});
   }
-  const chosen = await client.select({ role, host, work: probe.work ?? null, group: probe.group ?? null, principal: probe.principal ?? profile.principal ?? null, observations: observations.map(({ account, quota, smoke }) => ({ account, quota, ...(smoke ? { smoke } : {}) })) });
+  const chosen = await client.select({ role, host, work: probe.work ?? null, group: probe.group ?? null, principal: probe.principal ?? profile.principal ?? null, ...probe.prefer ? { prefer: probe.prefer } : {}, ...probe.exclude?.length ? { exclude: probe.exclude } : {}, observations: observations.map(({ account, quota, smoke }) => ({ account, quota, ...(smoke ? { smoke } : {}) })) });
   const at = new Date(now).toISOString();
   const skipped: AccountSkip[] = chosen.skipped.map(entry => ({ at, role: role as AccountSkip['role'], profile: profile.name, environment: entry.account, reason: entry.reason, work: probe.work ?? null, cause: skipCause(entry.reason) }));
   if (!chosen.selected || !chosen.account || !chosen.runtime || !chosen.model || !chosen.session)

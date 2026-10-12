@@ -12,6 +12,7 @@ import { sweepExpiredWorkerCredentials, withdrawWorkerCredential, workerCredenti
 import { assertNoApprovalOptOut } from '../harness.js';
 import { parkedOnHuman, humanDecisionLabel, answerCommand } from '../model/human-request.js';
 import { documentationWorkerSection } from '../model/documentation.js';
+import { workerPreference } from '../model/registry-sessions.js';
 import { observationWindowHold, servingReleaseProof, type Work } from '../model.js';
 import { type ConsentAnswer, type ConsentHold, consentHoldAttention, consentHoldMs, writeConsentHold } from '../consent-prompt.js';
 import type { MasterConfig, WorkerProfile } from './profiles.js';
@@ -259,7 +260,7 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
         if (accounts && !accounts.length)
           throw new Error(`${describeStartFailures(startFailures, null)}; no further account of profile ${profile.name} to fall back to`, { cause: startError });
         try {
-          selected = await selectAccount(config, 'worker', accounts && accounts.length < (profile.accounts?.length ?? 0) ? { ...profile, accounts } : profile, { ...clock, ...options.probe, work: work.key });
+          selected = await selectAccount(config, 'worker', accounts && accounts.length < (profile.accounts?.length ?? 0) ? { ...profile, accounts } : profile, { ...clock, ...options.probe, work: work.key, prefer: workerPreference(work), exclude: startFailures.map(failure => failure.account) });
         } catch (error) {
           if (!startFailures.length || !(error instanceof NoHealthyAccountError)) throw error;
           throw new Error(`${describeStartFailures(startFailures, null)}; no further account of profile ${profile.name} could be launched: ${failureText(error).slice(0, 300)}`, { cause: error });
