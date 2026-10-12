@@ -6,9 +6,9 @@ import { existsSync } from 'node:fs';
 import { mkdir, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { mergeOne, mergeRecordKey, mergeRecordKinds, type MergePorts, type MergeRecordEvent, type MergeTrialRun } from '../src/merge-writer/executor.js';
-import { previewCheckoutPrefix, previewConcurrency, previewFailureReason, previewSkip, previewSlots, runPreview, sweepPreviewCheckouts, type PreviewSite, type PreviewVerdict } from '../src/merge-writer/preview.js';
+import { previewCheckoutPrefix, previewConcurrency, previewFailureReason, previewReasonLimit, previewSkip, previewSlots, previewWithheld, runPreview, sweepPreviewCheckouts, type PreviewSite, type PreviewVerdict } from '../src/merge-writer/preview.js';
 import { mergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
-import { foldMergeLedger, mergeLedgerKinds, mergeTrialKind } from '../src/model/merge-ledger.js';
+import { foldMergeLedger, mergeLedgerKinds, mergeTrialKind, previewVerdictSchema } from '../src/model/merge-ledger.js';
 import { mergeRecordBodySchema, mergeRecordFingerprint } from '../src/server/merge-record.js';
 import { trialFailedGround, trialFailurePrefix } from '../src/model/rework-ground.js';
 import { masterConfigSchema } from '../src/master.js';
@@ -139,6 +139,13 @@ test('unit:preview-failing-case-refuses-merge — a static-site repository\'s pa
   assert.deepEqual(recordedUnrun && [recordedUnrun.verdict, recordedUnrun.required, recordedUnrun.reason?.includes('release candidate')], ['unrun', false, true]);
   assert.match(informational.detail, /not run on the preview.*receipt/);
 
+  // However many and however long the secret names a case declares, its withheld reason fits the recorded trial, naming as many as fit and counting the rest.
+  const manySecrets = Array.from({ length: 20 }, (_, index) => `SECRET_${String(index).padStart(2, '0')}_${'X'.repeat(90)}`);
+  const longReason = previewWithheld({ definition: { id: 'many', required: false, target: 'uat', secrets: manySecrets } } as unknown as Parameters<typeof previewWithheld>[0])!;
+  assert.ok(longReason.length <= previewReasonLimit, `${longReason.length} characters`);
+  assert.match(longReason, /^declares the install secrets SECRET_00_X+, .*and \d+ more, which the preview withholds/);
+  assert.doesNotThrow(() => previewVerdictSchema.parse({ result: 'pass', mergeSha, detail: '', durationMs: 0, failed: [], cases: [{ case: 'many', verdict: 'unrun', required: false, reason: longReason }] }));
+
   // The merge's own case file that does not load fails the preview, recorded and refused as a failed trial, never thrown past the record.
   const malformed = await repository('preview-malformed', 42);
   await writeFile(join(malformed.repo, 'e2e', 'cases', 'broken.json'), '{ not json');
@@ -153,6 +160,23 @@ test('unit:preview-failing-case-refuses-merge — a static-site repository\'s pa
   assert.equal(unloadableOutcome.outcome, 'refused');
   assert.match((unloadableOutcome as { reason: string }).reason, /^trial failed: preview: the merge's E2E cases do not load/);
   assert.deepEqual(refusedUnloadable.events.map(event => event.kind), ['intent', 'trial', 'refused']);
+  // A merge with no required or uat case left to run (here every case deleted) served and tested nothing, so it fails the preview and refuses the merge, as the E2E suite refuses an empty selection.
+  const emptied = await repository('preview-emptied', 42);
+  git(emptied.repo, 'rm', '-q', 'e2e/cases/scores.json', 'e2e/cases/home.json'); git(emptied.repo, 'commit', '-q', '-m', 'delete every case');
+  const vacuous = await runPreview({ root: emptied.repo, base: emptied.base, mergeSha: git(emptied.repo, 'rev-parse', 'HEAD'), site, timeoutMs: 30_000, stepTimeoutMs: 5_000 });
+  assert.equal(vacuous.result, 'fail', vacuous.detail);
+  assert.deepEqual(vacuous.failed, ['cases']);
+  assert.match(vacuous.detail, /exercised nothing/);
+  const refusedVacuous = await mergeOne(ports(async () => vacuous).value, work());
+  assert.equal(refusedVacuous.outcome, 'refused');
+  assert.match((refusedVacuous as { reason: string }).reason, /^trial failed: preview: no required or uat E2E case/);
+  // So does one whose only cases are uat-only ones withheld for declaring an install secret: none of them ran.
+  const onlyWithheld = await repository('preview-only-withheld', 42, [
+    { id: 'home', title: 'A receipt is mailed', tags: ['api'], target: 'uat', required: false, secrets: ['MAIL_KEY'], steps: [{ kind: 'http', method: 'GET', path: '/{{secret:MAIL_KEY}}', status: 200 }] }]);
+  git(onlyWithheld.repo, 'rm', '-q', 'e2e/cases/scores.json'); git(onlyWithheld.repo, 'commit', '-q', '-m', 'only a withheld case');
+  const nothingRan = await runPreview({ root: onlyWithheld.repo, base: onlyWithheld.base, mergeSha: git(onlyWithheld.repo, 'rev-parse', 'HEAD'), site, timeoutMs: 30_000, stepTimeoutMs: 5_000 });
+  assert.equal(nothingRan.result, 'fail', nothingRan.detail);
+  assert.deepEqual(nothingRan.cases.map(entry => [entry.case, entry.verdict]), [['home', 'unrun']]);
   // A preview port that throws is recorded as one that could not run and refused, the head left queued: no intent is left open.
   const throwing = ports(async () => { throw new Error('git worktree add failed: disk full'); });
   const thrown = await mergeOne(throwing.value, work());

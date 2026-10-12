@@ -116,6 +116,8 @@ export function previewEnvironment(home: string, host: NodeJS.ProcessEnv = proce
   return { ...env, HOME: home, XDG_CONFIG_HOME: join(home, '.config'), XDG_CACHE_HOME: join(home, '.cache'), XDG_DATA_HOME: join(home, '.local', 'share'), XDG_STATE_HOME: join(home, '.local', 'state'), TMPDIR: join(home, 'tmp') };
 }
 
+/** The longest reason a preview case records (src/model/merge-ledger.ts `previewVerdictSchema`). */
+export const previewReasonLimit = 500;
 /** The cases a preview judges: every required or uat case of the merge. */
 export const previewCase = (entry: CaseFile) => entry.definition.required || entry.definition.target === 'uat';
 /**
@@ -124,8 +126,16 @@ export const previewCase = (entry: CaseFile) => entry.definition.required || ent
  * `e2e-secrets.uat.env`; such a uat-only case is recorded `unrun` with this reason and runs on the
  * release candidate instead (GY-1535), while a required one fails the preview.
  */
-export const previewWithheld = (entry: CaseFile) =>
-  entry.definition.secrets.length ? `declares the install secret${entry.definition.secrets.length === 1 ? '' : 's'} ${entry.definition.secrets.join(', ')}, which the preview withholds; it runs on the release candidate` : null;
+export function previewWithheld(entry: CaseFile): string | null {
+  const secrets = entry.definition.secrets;
+  if (!secrets.length) return null;
+  // The reason is recorded on the trial (previewVerdictSchema caps it at `previewReasonLimit`), so a list of names too long for it names as many as fit and counts the rest.
+  const head = `declares the install secret${secrets.length === 1 ? '' : 's'} `, tail = ', which the preview withholds; it runs on the release candidate';
+  let named = secrets.join(', ');
+  for (let shown = secrets.length - 1; head.length + named.length + tail.length > previewReasonLimit && shown >= 0; shown--)
+    named = `${secrets.slice(0, shown).map(name => `${name}, `).join('')}and ${secrets.length - shown} more`;
+  return `${head}${named}${tail}`.slice(0, previewReasonLimit);
+}
 
 const cut = (text: string) => text.replace(/\s+/g, ' ').trim().slice(0, 900);
 
@@ -135,7 +145,7 @@ const cut = (text: string) => text.replace(/\s+/g, ' ').trim().slice(0, 900);
  * build, its output served on loopback (`serveStaticSite`, answering `mergeSha` on /healthz), and
  * every required and uat case of the checkout (`previewCase`), loaded before the build runs and kept, run against it (`projectCaseSuite`),
  * those declaring an install secret not run (`previewWithheld`): a required one fails the preview
- * naming it, a uat-only one is recorded unrun. The build and the cases'
+ * naming it, a uat-only one is recorded unrun; with no case left to run the preview fails, having exercised nothing. The build and the cases'
  * processes run in `previewEnvironment` (a throwaway HOME, no coordinator credential or socket) and
  * the cases with a throwaway token, since all come from the merge the preview exists to judge. When the budget
  * runs out the run is cancelled — the build's shell killed, the case runner's requests aborted and
@@ -170,6 +180,9 @@ export async function runPreview(input: PreviewInput): Promise<PreviewVerdict> {
       if (unrunRequired.length) return verdict('fail', `required E2E case${unrunRequired.length === 1 ? '' : 's'} ${unrunRequired.map(entry => entry.case).join(', ')} declare${unrunRequired.length === 1 ? 's' : ''} an install secret the preview withholds, so the preview cannot run ${unrunRequired.length === 1 ? 'it' : 'them'} and refuses the merge`,
         withheld.map(entry => entry.required ? { ...entry, verdict: 'failed' as const } : entry), unrunRequired.map(entry => entry.case));
       const runnable = selected.filter(entry => !previewWithheld(entry));
+      const unrun = withheld.length ? `; not run on the preview, each declaring an install secret it withholds: ${withheld.map(entry => entry.case).join(', ')}` : '';
+      // A preview that runs no case served and tested nothing, so it refuses the merge, as the E2E suite refuses an empty selection: deleting every case never lands a change unexercised.
+      if (!runnable.length) return verdict('fail', `no required or uat E2E case the preview can run is in the merge, so it exercised nothing${unrun}`, withheld, ['cases']);
       const home = join(directory!, 'home'), environment = previewEnvironment(home, input.hostEnvironment);
       await mkdir(environment.TMPDIR, { recursive: true });
       if (input.site.build) {
@@ -177,8 +190,6 @@ export async function runPreview(input: PreviewInput): Promise<PreviewVerdict> {
         cancelled();
         if (failed) return verdict('fail', failed, [], ['build']);
       }
-      const unrun = withheld.length ? `; not run on the preview, each declaring an install secret it withholds: ${withheld.map(entry => entry.case).join(', ')}` : '';
-      if (!runnable.length) return verdict('pass', `no required or uat E2E case the preview can run is in the merge, so it exercised nothing${unrun}`, withheld);
       cancelled();
       served = await serveStaticSite(join(checkout, input.site.directory), input.mergeSha);
       let report: E2eReport | null = null;
