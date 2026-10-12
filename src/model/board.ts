@@ -7,7 +7,7 @@ import { scopeRefusalBlocker } from './scope.js';
 import { scopeAskCommand, type RoutedScopeDecision } from './scope-provenance.js';
 import { shortShas } from './format.js';
 import { OVERDUE_MINUTES, statusDuration } from './duration.js';
-import { phaseOf, plainReason, plainStatus, statusSince } from './plain-status.js';
+import { blockerSummary, phaseOf, plainReason, plainStatus, statusSince } from './plain-status.js';
 import { prSteps, stepSince } from './pr-steps.js';
 import { leftFlowAt, noRelease, releaseView, servedFor, type ReleaseView } from './release.js';
 import { stalledCards } from './actionless.js';
@@ -248,7 +248,7 @@ export interface BoardItem {
   /** When the item entered the state its group reports: the step for timed groups, the request for Needs you. */
   since: string;
   /** Past the fault bound (`overdueAfterMs`) in a group that carries a clock. */
-  overdue: boolean; /** The standing blocker's class, whether it needs someone, and its last and next probe (GY-1008). */ blocker?: BlockerView;
+  overdue: boolean; /** The standing blocker's class, whether it needs someone, and its last and next probe (GY-1008); `summary` is the one plain sentence a Work page row shows for it (GY-1739). */ blocker?: BlockerView & { summary: string };
 }
 export interface Board {
   now: string;
@@ -271,7 +271,7 @@ export function buildBoard(work: Work[], now: number, humanRows?: HumanRequestRo
     const since = group === 'needs-you' ? entry.humanRequest?.at ?? rows.get(entry.id)?.request.at ?? statusSince(entry, now)
       : group === 'blocked' && stalls.has(entry.id) ? stalls.get(entry.id)!.heldSince
         : timed ? stepSince(entry, now, null, release) : statusSince(entry, now);
-    const blocker = blockerView(entry); return { id: entry.id, key: entry.key, title: entry.title, priority: entry.priority, group, stage: entry.stage, owner: entry.lease?.owner ?? entry.lastAssignment?.owner ?? null,
+    const view = blockerView(entry), blocker = view && { ...view, summary: blockerSummary(entry.blocker!, now, entry).sentence }; return { id: entry.id, key: entry.key, title: entry.title, priority: entry.priority, group, stage: entry.stage, owner: entry.lease?.owner ?? entry.lastAssignment?.owner ?? null,
       actor, who, does, command: nextCommand(entry, group, actor, rows.get(entry.id), now, scopeDecisions?.get(entry.id)), since, overdue: timed && statusDuration(since, now).overdue, ...(blocker ? { blocker } : {}) };
   };
   const board = Object.fromEntries(groups.map(group => [group, byGroup[group].map(entry => item(entry, group))])) as Record<OpenGroup, BoardItem[]>;

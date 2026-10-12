@@ -16,6 +16,9 @@ import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { classify } from '../web/groups.js';
 import { releaseView } from '../src/model/release.js';
 import OverviewPage from '../web/pages/overview.js';
+import WorkDetails from '../web/pages/work-details.js';
+// A namespace import, so the proofs fail as test cases, not as a missing export, on a tree without GY-1739.
+import * as plain from '../src/model/plain-status.js';
 import type { Dashboard } from '../web/pages/dashboard.js';
 import { NOW, boardStatus, boardWork } from '../browser-tests/ui-board.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -228,6 +231,87 @@ test('unit:dashboard-uses-board-api — the Work page renders the groups GET /ap
   assert.match(main, /api\('board'\)/, 'the refresh after an action fetches it too');
   assert.doesNotMatch(overview, /\bclassify\(|\bgroupOf\(|humanOnlyIds\(/, 'the Work page derives no group itself');
   assert.match(docs, /GET \/api\/board/, 'docs/dashboard.md documents the endpoint');
+});
+
+/**
+ * GY-1739: the operator's Work page showed each blocked row's recorded reason verbatim twice — under
+ * the title and again in the step column — 200 words of commands, paths and SHAs written for the
+ * next agent. A blocked row now reads one plain sentence; the recorded text is on the item page once.
+ */
+const agentReason = 'Blocked at src/master-verification.ts:447: `node bin/graphyard.mjs master verify-deployment GY-1459 --json` exits 3 because '
+  + "document.querySelector('[data-row=GY-1459] .row-steps') still renders the old label on 3b7de1dc18aa1f2e; see https://api.github.com/repos/cryptob1/graphyard/pulls/1152 "
+  + 'and tests/post-deploy-follow-ups.test.ts:212, then rebase onto 0acd3d4d0a and rerun npm test -- tests/board-api.test.ts before resubmitting; the JSON was {"state":"pending","sha":"14fb7da508"}.';
+function blockedScenario(blocker: string, key = 'GY-176') {
+  const work = scenario();
+  const template = work.find(item => item.key === 'GY-13')!;
+  const item = { ...template, id: '00000000-0000-4000-8000-000000000176', key, title: 'Blocked handed-in item', stage: 'build', stageEnteredAt: at(-30 * minute), blocker,
+    submission: { epoch: 1, pr: 76 }, candidate: { sha: sha('c'), baseSha: sha('b'), pr: 76, branch: 'graphyard/gy-176-1', author: 'worker', createdAt: at(-60 * minute) },
+    gates: refusing({ ready: [blocker] }) } as unknown as Work;
+  return { work: [...work, item], item };
+}
+const rowOf = (html: string, key: string) => { const start = html.indexOf(`data-row="${key}"`); return html.slice(start, html.indexOf('data-row="', start + 1) > 0 ? html.indexOf('data-row="', start + 1) : undefined); };
+const visible = (html: string) => html.replace(/<[^>]+>/g, ' ').replace(/&#x27;|&quot;|&amp;|&lt;|&gt;/g, ' ').replace(/\s+/g, ' ').trim();
+function details(work: Work[], item: Work) {
+  const noop = () => {};
+  const dashboard = { token: 'fixture', work, status: boardStatus('admin'), error: '', connected: true, lastUpdated: null, view: 'work', setView: noop, filter: null, setFilter: noop,
+    selected: item.id, setSelected: noop, creating: false, setCreating: noop, busy: false, setBusy: noop, observedAt: NOW, jobs: [], query: '', setQuery: noop, operatorAgents: [], operatorAgentsError: null,
+    features: {}, events: [], editingRequirements: false, setEditingRequirements: noop, codexAvailable: false, queue: [], sessionEpoch: { current: 0 }, api: async () => ({}),
+    refresh: async () => {}, action: async () => {}, setError: noop, signOut: noop, item } as unknown as Dashboard & { item: Work };
+  return renderToStaticMarkup(createElement(WorkDetails, dashboard));
+}
+const fragments = ['src/master-verification.ts:447', 'verify-deployment GY-1459', 'tests/post-deploy-follow-ups.test.ts:212', 'api.github.com', 'querySelector'];
+
+test('unit:board-blocked-row-plain-summary — a blocked row shows one plain sentence of at most 25 words naming the kind of block and who clears it; the recorded reason is on no Work page row and once on the item page', async () => {
+  const { work, item } = blockedScenario(agentReason);
+  const board = await served(work);
+  const row = entry(board, item.key);
+  assert.equal(row.group, 'blocked');
+  const summary = row.blocker!.summary;
+  assert.ok(summary.split(/\s+/).length <= 25, `at most 25 words: ${summary}`);
+  assert.match(summary, /master agent must clear it/, 'it names who clears it');
+  assert.doesNotMatch(summary, /\.ts:|GY-1459|3b7de1|https?:|`/, 'none of the agent-facing detail');
+  const html = page(work, board);
+  const line = visible(rowOf(html, item.key));
+  assert.ok(line.includes(summary), `the row reads the summary: ${line}`);
+  for (const fragment of fragments) assert.ok(!html.includes(fragment), `no Work page row carries ${fragment}`);
+  // The other kinds read their own block and who clears it.
+  assert.match(plain.blockerSummary('Waiting on GY-1689 to merge first: its migration renames the table', NOW).sentence, /^Waiting on GY-1689; the master agent clears it/);
+  assert.match(plain.blockerSummary('Waiting on a human-only decision (money or accounts): approve a cap for GY-1700', NOW).sentence, /^Waiting on a human answer to GY-1700; only you can clear it/);
+  // The item page carries the recorded text exactly once, under Technical details.
+  const view = details(work, item);
+  for (const fragment of fragments) assert.equal(view.split(fragment).length - 1, 1, `${fragment} once on the item page`);
+  assert.match(view, /Blocker as recorded/);
+});
+
+test('unit:board-blocked-row-no-duplicate-reason — a blocked row never says the same reason in two places', async () => {
+  for (const blocker of [agentReason, 'Waiting on GY-1689 to merge first', 'git push failed: could not read Username for https://github.com: terminal prompts disabled']) {
+    const { work, item } = blockedScenario(blocker);
+    const board = await served(work);
+    const html = page(work, board);
+    const line = visible(rowOf(html, item.key));
+    const summary = entry(board, item.key).blocker!.summary;
+    assert.equal(line.split(summary).length - 1, 1, `the summary once in the row: ${line}`);
+    // No clause of eight or more words appears twice in the row.
+    const clauses = line.split(/\s*[·;—]\s*|(?<=\.)\s+/).filter(clause => clause.split(/\s+/).length >= 8);
+    assert.equal(new Set(clauses).size, clauses.length, `no repeated clause: ${line}`);
+    assert.doesNotMatch(line, /blocked: /, 'the step column names the block, never restates it');
+  }
+});
+
+test('unit:board-blocked-row-waiting-until — a blocker naming a future not-before instant reads as waiting until that instant, not as a fault', async () => {
+  const notBefore = at(6 * 60 * minute);
+  const blocker = `The 24h observation for GY-1724 cannot exist yet: its window opens at deploy+24h, not before ${notBefore}; deferring per src/master-verification.ts:261.`;
+  const { work, item } = blockedScenario(blocker);
+  const board = await served(work);
+  const summary = entry(board, item.key).blocker!.summary;
+  assert.equal(summary, `Waiting until ${plain.localInstant(Date.parse(notBefore))}; Graphyard resumes it then, and nobody needs to act.`);
+  assert.doesNotMatch(summary, /master agent|fault|problem/i);
+  assert.ok(visible(rowOf(page(work, board), item.key)).includes(summary));
+  // An instant already past is no wait: the block reads as the fault it is.
+  const past = plain.blockerSummary(blocker.replace(notBefore, at(-60 * minute)), NOW).sentence;
+  assert.doesNotMatch(past, /^Waiting until/);
+  // The item's own observation window counts the same way.
+  assert.match(plain.blockerSummary('Deferred.', NOW, { ...item, blocker: 'Deferred.', observationWindow: { notBefore, detail: '24h after deploy' } as Work['observationWindow'] }).sentence, /^Waiting until /);
 });
 
 // Every way a module names another: `import … from`, `export … from`, a side-effect `import`, a

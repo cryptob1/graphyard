@@ -3,6 +3,7 @@ import type { PipelineTimeline } from '../pipeline-speed.js';
 import { assignment } from './assignment.js';
 import { ciCheckRefusalPattern } from './ci-refusal.js';
 import { formatAge, statusDuration, type StatusDuration } from './duration.js';
+import { blockerView, classifyBlocker, type BlockerClass } from './blocker-class.js';
 
 /**
  * Plain-English status for people who have never read the Graphyard docs. Every sentence is
@@ -32,7 +33,7 @@ const trigger: Record<string, string> = {
  * somebody has to decide or fix something. A reason nobody anticipated falls back to a
  * sentence about its gate, never to the raw internal text.
  */
-export function plainReason(reason: string, gate: string): { text: string; stuck: boolean; known: boolean } {
+export function plainReason(reason: string, gate: string, now = Date.now()): { text: string; stuck: boolean; known: boolean } {
   const rules: [RegExp, (m: RegExpMatchArray) => string, boolean?][] = [
     [/^Not released from backlog$/, () => 'Not released for work yet'],
     [/^Dependency (\S+) is unfinished$/, m => `Waiting for ${m[1]} to ship first`],
@@ -59,11 +60,56 @@ export function plainReason(reason: string, gate: string): { text: string; stuck
     [/^Slice lead (\S+) ruled \S+ under rule \S+; delivery is blocked until the authorized recovery: (.*)$/s, m => `Held by team lead ${m[1]}: ${m[2]}`, true],
   ];
   for (const [pattern, text, stuck] of rules) { const m = reason.match(pattern); if (m) return { text: text(m), stuck: !!stuck, known: true }; }
-  // The ready gate's only free-text reason is a recorded blocker: a person wrote it, so it is shown as written.
-  if (gate === 'ready') return { text: reason, stuck: true, known: true };
+  // The ready gate's only free-text reason is a recorded blocker, written for the next agent: it
+  // reads as its one-sentence summary, and the item page's technical details show it as written.
+  if (gate === 'ready') return { text: blockerSummary(reason, now).sentence, stuck: true, known: true };
   const fallback: Record<string, string> = { build: 'The work is not finished yet', review: 'Waiting for review', test: 'Waiting for automated checks', acceptance: 'Waiting for proof that it works', merge: 'Waiting to merge' };
   return { text: fallback[gate] ?? 'Waiting', stuck: false, known: false };
 }
+
+/**
+ * A recorded blocker as one plain sentence of at most 25 words (GY-1739): the kind of block and who
+ * clears it. The recorded text is written for the next agent — commands, file paths, SHAs — so it
+ * never reaches a Work page row; the item page shows it once, under Technical details. A blocker
+ * naming a future not-before instant waits for that instant: nothing is broken, and nobody acts.
+ */
+export type BlockerKind = 'waiting-until' | 'human' | 'item' | BlockerClass;
+const routineCause: Partial<Record<BlockerClass, string>> = {
+  'github-credential': 'GitHub sign-in failed for the builder', 'control-plane-error': 'The Graphyard server failed a command',
+  'sandbox-path': 'The builder could not write a file it needed', 'worktree-mismatch': 'The builder worked in the wrong copy of the code',
+  'outside-scope-test-failure': 'Tests failed outside the files this item changes', 'dispatch-failure': 'No builder could be launched for it',
+  'host-supervisor': "A host check failed inside the builder's sandbox", 'runtime-denial': "The builder's tools refused to push its work",
+  'runtime-exhaustion': "The builder's account ran out of usage", 'github-outage': 'GitHub is having an outage',
+};
+const instant = /\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})/g;
+const notBeforeWords = /not[- ]before|until|window|first exist|can(?:not|'t)? (?:yet )?exist|earliest|too early|wait/i;
+const itemWait = /\b(?:[Ww]ait(?:s|ing)?\s+(?:on|for)|[Dd]epends\s+on|[Bb]locked\s+(?:on|by)|[Uu]ntil|[Aa]fter)\s+(?:\w+\s+){0,2}?((?!AC-)[A-Z][A-Z0-9]*-\d+)\b/;
+/** A local date and time, as the reader's browser writes it. */
+export const localInstant = (at: number) => new Date(at).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+export function blockerSummary(text: string, now: number, work?: Pick<Work, 'key' | 'blocker' | 'humanRequest' | 'blockerProbe' | 'plannedFiles' | 'criteria' | 'observationWindow'>): { sentence: string; kind: BlockerKind } {
+  const human = !!work?.humanRequest && !work.humanRequest.answer;
+  const classified = classifyBlocker(text, { humanRequest: human });
+  const named = (pattern: RegExp) => text.match(pattern)?.[1];
+  if (classified.class === 'human-only') { const on = named(/\b((?!AC-)[A-Z][A-Z0-9]*-\d+)\b/); return { sentence: `Waiting on a human answer${on && on !== work?.key ? ` to ${on}` : ''}; only you can clear it.`, kind: 'human' }; }
+  const window = work ? observationWindowHold(work as Work, new Date(now)) : null;
+  const future = [...(notBeforeWords.test(text) ? text.match(instant) ?? [] : []), ...(window ? [window.notBefore] : [])].map(at => Date.parse(at)).filter(at => at > now);
+  if (future.length) return { sentence: `Waiting until ${localInstant(Math.min(...future))}; Graphyard resumes it then, and nobody needs to act.`, kind: 'waiting-until' };
+  const other = named(itemWait);
+  if (other && other !== work?.key) return { sentence: `Waiting on ${other}; the master agent clears it once that item is done.`, kind: 'item' };
+  const view = work?.blocker === text ? blockerView(work) : null;
+  const kind = view?.class ?? classified.class;
+  const spent = view?.needsSomeone ?? false;
+  if (kind === 'needs-decision') return { sentence: 'Waiting on an agent decision; an approver agent judges it, then Graphyard clears the block.', kind };
+  if (kind === 'planned-file-scope' && !spent) return { sentence: 'Needs files outside its plan; an approver agent decides whether to allow them.', kind };
+  const cause = routineCause[kind];
+  if (cause) return { sentence: spent ? `${cause}, again and again; the master agent must clear it.` : `${cause}; Graphyard re-checks it every cycle and clears it on its own.`, kind };
+  // A short blocker in plain words already says what blocks it: kept, with who clears it.
+  const plain = text.trim().replace(/[.;:\s]+$/, '');
+  if (plain && plain.split(/\s+/).length <= 15 && !agentDetail.test(plain)) return { sentence: `${plain}; master agent clears it.`, kind };
+  return { sentence: 'The builder hit a problem it could not get past; the master agent must clear it.', kind };
+}
+/** What marks text as written for an agent: code, paths, URLs, commit hashes, flags, line references. */
+const agentDetail = /[`{}[\]<>$=|\\/]|https?:|\b[0-9a-f]{7,40}\b|\s--?\w|\.\w+:\d+|[;:]/;
 
 /**
  * The step a stalled action is, in the words of somebody who has never read the docs. Every action
@@ -134,10 +180,10 @@ export function plainStatus(work: Work, now: number): PlainStatus {
   }
   if (work.violations.length) return make(`Stuck: ${work.violations[0]}`, 'stuck', work.violations[0]);
   const gate = work.gates.find(g => !g.passed);
-  const reasons = (g: Gate | undefined) => (g?.reasons ?? []).map(r => ({ raw: r, ...plainReason(r, g!.name) }));
+  const reasons = (g: Gate | undefined) => (g?.reasons ?? []).map(r => ({ raw: r, ...plainReason(r, g!.name, now) }));
   const ready = work.gates.find(g => g.name === 'ready');
   const blocker = work.blocker ?? null;
-  if (blocker) return make(`Stuck: ${blocker}`, 'stuck', blocker, who.active ? who.name : null);
+  if (blocker) { const summary = blockerSummary(blocker, now, work).sentence; return make(`Stuck: ${summary}`, 'stuck', summary, who.active ? who.name : null); }
   // A step that keeps failing for the same reason is a stall, not a retry, and it outranks the
   // gate it was going to clear: the gate's own sentence would say the item is waiting for a
   // review or a builder, when in truth something is asking for one every minute and being
