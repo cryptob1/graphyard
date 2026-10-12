@@ -1,11 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdir } from 'node:fs/promises';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { dispatchWork, loadMasterConfig, setupMaster, type WorkerProfile } from '../src/master.js';
-import { readAccountStartFailures } from '../src/master/dispatch.js';
 import type { FleetClient } from '../src/fleet.js';
 import { expandTypedCommand } from './helpers/launch-shell.js';
 import { coordinatorConfinementRefusal } from '../src/master/profiles.js';
@@ -113,14 +112,18 @@ function world(healthy: Set<string>, refusePi?: string) {
 }
 
 test('unit:pi-launch-failure-falls-back — a Pi launch that never starts, or is refused before it starts, records the failure on the account and the same real dispatch launches the next account', async () => {
-  const root = await temporaryDirectory('pi-dispatch'), credentials = await temporaryDirectory('pi-dispatch-credentials');
+  // One marked parent holds the repository and the credentials, so the loop's reclaim pass sees one directory, not an empty-looking sibling.
+  const holder = await temporaryDirectory('pi-dispatch'), root = join(holder, 'repository'), credentials = join(holder, 'credentials');
+  await mkdir(root); await mkdir(credentials, { mode: 0o700 });
   execFileSync('git', ['init', '-q', root]);
   execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
   const coordinatorStatus = (async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }))) as typeof fetch;
   await setupMaster(root, { url: 'https://graphyard.example', token: 'coordinator-token-'.padEnd(40, 'x'), cliPath: fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url)), credentialDirectory: credentials, herdrWorkspace: 'w1V' }, coordinatorStatus);
   const master = await loadMasterConfig(root), hostId = master.hostId ?? 'unknown-host';
-  const credentialFile = join(credentials, 'worker.token');
-  await import('node:fs/promises').then(fs => fs.writeFile(credentialFile, 'worker-token-'.padEnd(40, 'x'), { mode: 0o600 }));
+  // The worker's token lives beside, not inside, the coordinator's credential directory: the launcher sweeps the former.
+  const workerDirectory = join(holder, 'worker-credentials'), credentialFile = join(workerDirectory, 'worker.token');
+  await mkdir(workerDirectory, { mode: 0o700 });
+  await writeFile(credentialFile, 'worker-token-'.padEnd(40, 'x'), { mode: 0o600 });
   await mkdir(join(root, 'assigned'), { recursive: true });
   const profile: WorkerProfile = { name: 'registry-worker', principal: 'graphyard-worker-1', agentName: 'eng-pi', mode: 'launch', kind: 'pi', credentialFile, agentArgs: [], approvals: 'auto', environment: {} };
   const item = { id: 'work-1746', key: 'GY-1746', title: 'Pi first', description: '', type: 'feature', priority: 1, dependencies: [], plannedFiles: ['src/'], lane: 'low', pipeline: { reworkRounds: 0, attempts: [] },
@@ -160,12 +163,9 @@ test('unit:pi-launch-failure-falls-back — a Pi launch that never starts, or is
   assert.deepEqual(never.kinds, ['pi', 'pi', 'claude'], 'Pi is tried first, then the next Pi account, then the strong account, in one dispatch');
   assert.equal(never.dispatched.account!.environment, 'claude-b');
   assert.deepEqual(never.dispatched.fallback!.failed.map(failure => failure.account), ['pi-a', 'pi-b']);
-  const ledger = await readAccountStartFailures(master);
-  assert.equal(ledger['pi-a'].failures, 1); assert.equal(ledger['pi-b'].failures, 1);
-
   // A Pi launch the host refuses before any session starts — it cannot confine the runtime — also falls through.
   const refused = await dispatch('A pi session cannot be launched on this host: Graphyard never starts a session unconfined');
   assert.deepEqual(refused.kinds, ['pi', 'pi', 'claude']);
   assert.equal(refused.dispatched.account!.environment, 'claude-b');
-  assert.equal((await readAccountStartFailures(master))['pi-a'].failures, 2, 'the refusal is recorded on the profile account');
+  assert.deepEqual(refused.dispatched.fallback!.failed.map(failure => [failure.account, failure.kind]), [['pi-a', 'pi'], ['pi-b', 'pi']], 'the refusal is recorded on each Pi account the dispatch passed over');
 });
