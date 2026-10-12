@@ -10,7 +10,7 @@ import type { Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-1731: a verified webhook delivery that wakes no job answers 202 with a named `ignored` reason
-// and logs it with the delivery ID and event, so a deliberately ignored delivery is told from a lost one.
+// (our own check run included) and logs it with the delivery ID and event, so a deliberately ignored delivery is told from a lost one.
 
 const operator: Principal = { id: 'operator', role: 'admin', sessionKind: 'human' };
 const implementer: Principal = { id: 'implementer', role: 'worker' };
@@ -96,4 +96,12 @@ test('integration:webhook-ignored-reason — a delivery naming no subject, namin
   const done = randomUUID();
   assertIgnored(await deliver(done, 'check_run', { check_run: { head_sha: 'e'.repeat(40), pull_requests: [{ number: finished.submission!.pr }], app: { id: -1 } } }), done, 'check_run', 'no open job');
   assert.equal(Number((await job()).generation), before + 1, 'a delivery about another item wakes nothing here');
+
+  // Our own check run naming no pull request, commit or branch is suppressed, but still says why.
+  const own = randomUUID();
+  assertIgnored(await deliver(own, 'check_run', { action: 'completed', check_run: { app: { id: 1234 } } }), own, 'check_run', 'own check');
+  // Even when it names the item's pull request, our own check wakes nothing.
+  const ownNamed = randomUUID();
+  assertIgnored(await deliver(ownNamed, 'check_run', { check_run: { head_sha: 'f'.repeat(40), pull_requests: [{ number: item.submission!.pr }], app: { id: 1234 } } }), ownNamed, 'check_run', 'own check');
+  assert.equal(Number((await job()).generation), before + 1, 'our own check wakes nothing');
 });

@@ -16,8 +16,8 @@ import { baseChangeFiles, baseMoveWakes, type BaseMoveItem } from '../../observa
  * when the wake transaction fails, the route soft-accepts with 202 and a logged ignore reason so
  * GitHub's delivery log stays clean; safety-net polling covers the gap. Auth and repository
  * refusals stay 4xx/503 as before. A delivery that wakes no job also answers 202 with a named
- * `ignored` reason, logged with its delivery ID and event (GY-1731): a duplicate delivery ID, a
- * payload naming no subject, or subjects naming no open job; one that wakes a job carries none.
+ * `ignored` reason, logged with its delivery ID and event (GY-1731): our own check run, a duplicate
+ * delivery ID, a payload naming no subject, or subjects naming no open job; one that wakes a job carries none.
  */
 export const githubRoutes = defineRoutes('github', [
   {
@@ -34,10 +34,13 @@ export const githubRoutes = defineRoutes('github', [
       // TypeError into the server's 500 handler (GY-1700).
       const managed = github?.config.repository?.toLowerCase();
       demand(managed && payload?.repository?.full_name?.toLowerCase() === managed, 'Repository is not managed', 403);
-      // Our own check publications must not create an endless webhook/publish loop.
-      if (payload.check_run?.app?.id === github?.config.appId) return context.send(202, { accepted: true, ignored: 'own check' });
       const delivery = String(req.headers['x-github-delivery'] ?? ''); demand(delivery && delivery.length < 200, 'Missing delivery ID', 400);
       const event = String(req.headers['x-github-event'] ?? '');
+      // Our own check publications must not create an endless webhook/publish loop; like any unwoken delivery, say why.
+      if (payload.check_run?.app?.id === github?.config.appId) {
+        console.error(`webhook delivery ${delivery} (${event || 'unknown'}) accepted without wake: own check`);
+        return context.send(202, { accepted: true, ignored: 'own check' });
+      }
       // Startup / shutdown: accept without waking so a deploy burst never 500s (GY-1700, GY-1127).
       // No receipt is written, so a later redelivery after ready can still wake; polling covers the gap.
       if ((context.services as { readiness?: boolean }).readiness === false) {
