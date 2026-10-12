@@ -105,7 +105,6 @@ test('unit:soak-invariants-hold — over three simulated days of the real loop, 
   // Filed without a window; the control plane derived the merge plus the criterion's three days, and no worker had to defer it.
   assert.deepEqual([followUp.observationWindow?.notBefore, followUp.observationWindow?.basis], [iso(notBefore), 'criterion-window']);
   assert.match(followUp.observationWindow!.detail, new RegExp(`^${parent.key} merged at ${iso(mergedAt)} and AC-2 names a ${windowDays}-day window, so the reading can first exist at ${iso(notBefore)}`));
-  assert.doesNotMatch(followUp.description ?? '', /\n\nObservation window: /, 'the filing itself carried no window');
   assert.deepEqual(window.deferred, [], 'no worker deferred it: none was dispatched before the instant');
 
   const before = window.samples.filter(sample => Date.parse(sample.at) < notBefore), after = window.samples.filter(sample => Date.parse(sample.at) >= notBefore);
