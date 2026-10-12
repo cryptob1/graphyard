@@ -439,11 +439,12 @@ test('manual:intervention-pattern-escalation-build — GY-1724 and GY-1721 again
   // GY-1724: GY-1700 AC-2, a 24-hour live window; its release first observed serving at 07:33:40Z.
   const webhooks = deliveredItem('GY-1700', { id: 'AC-2', text: 'A 24-hour window of live GitHub activity shows zero failed webhook deliveries', proofs: ['manual:post-deploy/webhook-deliveries-clean-24h'] }, '2026-10-11T15:04:40Z');
   const served = new Date('2026-10-12T07:33:40Z');
-  assert.equal(await filedWindow('6037889d68^', webhooks, served), null, 'before GY-1727 the follow-up is filed unheld and dispatched at once: GY-1724 reproduces');
+  // 395c76846f8d is 6037889d68's parent (GY-1727's change); 4c8f45576554 below is 20a58c6a42's (GY-1698's).
+  assert.equal(await filedWindow('395c76846f8def6bdba317185f46ad1b6f513b69', webhooks, served), null, 'before GY-1727 the follow-up is filed unheld and dispatched at once: GY-1724 reproduces');
   for (const tree of [base, null]) assert.equal(await filedWindow(tree, webhooks, served), '2026-10-13T07:33:40.000Z', `${tree ?? 'the candidate'} files it held: it does not recur`);
   // GY-1721: GY-1684 AC-1, a rate per 7 days; merged at 07:43:35Z.
   const rate = deliveredItem('GY-1684', { id: 'AC-1', text: 'the intervention report shows the scope-widening rate at the build stage below 3 per 7 days after the change ships', proofs: ['manual:post-deploy/intervention-pattern-scope-widening-build'] }, '2026-10-11T07:43:35Z');
-  assert.equal(await filedWindow('20a58c6a42^', rate), null, 'before GY-1698 the follow-up is filed unheld: GY-1721 reproduces');
+  assert.equal(await filedWindow('4c8f455765549576b0879d92473223cf28ba38f1', rate), null, 'before GY-1698 the follow-up is filed unheld: GY-1721 reproduces');
   for (const tree of [base, null]) assert.equal(await filedWindow(tree, rate), '2026-10-18T07:43:35.000Z', `${tree ?? 'the candidate'} files it held: it does not recur`);
 });
 
@@ -485,7 +486,15 @@ async function replay1700(tree: string | null, name: string) {
   await engine.execute(implementer, 'scope', work.id, { epoch: work.epoch, paths: ['tests/webhook-soft-accept.test.ts'], reason: `Pending requirements decision ${requested.id} adds AC-0 unit:webhook-soft-accept-no-5xx naming this file` }, randomUUID());
   const refused = await engine.execute(coordinator, 'autoscope', work.id, { epoch: work.epoch }, randomUUID());
   const approved = await call(approver.token, `work/${work.key}/approve`, { decision: requested.id, reason: 'The buildable criterion is the item’s own' });
-  return { refused, held: approved.state as string, after: (await store.list()).find((item: Work) => item.id === work.id)! as Work };
+  const after = (await store.list()).find((item: Work) => item.id === work.id)! as Work;
+  /** The worker submits, ending the attempt: the held decision applies; returns the item and how the decision settled. */
+  const submit = async () => {
+    await engine.execute(implementer, 'workspace', work.id, { epoch: work.epoch, host: 'gy1700-host', path: `/srv/gy1700/${work.id}`, branch: `graphyard/${work.key.toLowerCase()}-1` }, randomUUID());
+    const submitted = await engine.execute(implementer, 'submit', work.id, { epoch: work.epoch, pr: 1700 }, randomUUID()) as Work;
+    const settled = (await store.pool.query("SELECT kind FROM events WHERE work_id=$1 AND kind IN ('decision.applied','decision.stale','decision.failed') AND payload->>'id'=$2", [work.id, requested.id])).rows.map(row => row.kind as string);
+    return { submitted, settled };
+  };
+  return { refused, held: approved.state as string, after, submit };
 }
 
 test('manual:intervention-pattern-escalation-build — GY-1700 against the base and the candidate: the refused ask stands on the base until someone clears it; on the candidate the held decision grounds it at once', { timeout: 300_000 }, async () => {
@@ -502,4 +511,12 @@ test('manual:intervention-pattern-escalation-build — GY-1700 against the base 
   assert.ok(onCandidate.after.plannedFiles.includes('tests/webhook-soft-accept.test.ts'));
   assert.equal(onCandidate.after.scopeDecision?.state, 'approved');
   assert.ok(onCandidate.after.lease, 'the attempt keeps its lease');
+  // Through the attempt's end (Codex review of f8eb2edf68f2): the widening the hold grounded leaves the decision current,
+  // so the submission applies it, and the approved file stays planned rather than being reset to the decision's own list.
+  const { submitted, settled } = await onCandidate.submit();
+  assert.deepEqual(settled, ['decision.applied'], 'the held decision applies, not stale');
+  assert.ok(submitted.criteria.some(criterion => criterion.id === 'AC-0'), 'its criterion is the item’s');
+  assert.ok(submitted.plannedFiles.includes('tests/webhook-soft-accept.test.ts'), 'the approved path survives the attempt ending');
+  assert.equal(submitted.blocker, null);
+  assert.ok(!submitted.heldGroundings, 'the grounding is spent once the decision settles');
 });

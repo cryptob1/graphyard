@@ -6,9 +6,10 @@ import { temporaryDirectory } from './temp-dirs.js';
 
 // GY-1726: run a module of another commit of this repository beside the candidate's own, so a test
 // can show an instance reproducing against the base and not recurring against the candidate in one
-// run. The commit's `src/` and `package.json` are extracted with `git archive` (CI checks out the
-// full history) into a temporary directory whose `node_modules` is the one this checkout resolves, and the
-// module is imported from there through the same tsx loader the suite runs under.
+// run. The commit's `src/` and `package.json` are extracted with `git archive` into a
+// temporary directory whose `node_modules` is the one this checkout resolves, and the module is
+// imported from there through the same tsx loader the suite runs under. CI's test shards check out
+// two commits, so a commit the clone lacks is fetched from origin first, which needs its full sha.
 
 /** The node_modules this checkout resolves packages from: its own, or the nearest ancestor's, as a worktree's is. */
 function modules(from: string): string {
@@ -20,12 +21,18 @@ function modules(from: string): string {
 
 const trees = new Map<string, Promise<string>>();
 
-/** The extracted tree of `commit` (a full or abbreviated sha), made once per test file. */
+/** The extracted tree of `commit` (a full sha), made once per test file. */
 export function sourceTree(commit: string): Promise<string> {
   let tree = trees.get(commit);
   if (!tree) trees.set(commit, tree = (async () => {
     const root = process.cwd();
-    const sha = execFileSync('git', ['-C', root, 'rev-parse', '--verify', `${commit}^{commit}`], { encoding: 'utf8' }).trim();
+    const resolve = () => execFileSync('git', ['-C', root, 'rev-parse', '--verify', '--quiet', `${commit}^{commit}`], { encoding: 'utf8' }).trim();
+    let sha: string;
+    try { sha = resolve(); }
+    catch {
+      execFileSync('git', ['-C', root, 'fetch', '--quiet', '--no-tags', '--depth=1', 'origin', commit], { stdio: 'ignore' });
+      sha = resolve();
+    }
     const directory = await temporaryDirectory(`tree-${sha.slice(0, 12)}`);
     const archive = execFileSync('git', ['-C', root, 'archive', '--format=tar', sha, 'src', 'package.json'], { maxBuffer: 256 * 1024 * 1024 });
     execFileSync('tar', ['-x', '-C', directory], { input: archive });

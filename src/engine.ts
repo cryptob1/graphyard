@@ -352,6 +352,11 @@ export function applyScopeDecision(work: Work, request: NonNullable<Work['scopeR
   return decision;
 }
 
+/** GY-1726: the policy revision a held requirements decision is current on: the one it was approved against, or the one a widening it grounded moved the item to. */
+function heldRevision(work: Pick<Work, 'heldGroundings'>, decision: string, expected: number | undefined) {
+  return work.heldGroundings?.find(entry => entry.decision === decision && entry.from === expected)?.to ?? expected;
+}
+
 /**
  * The lease a worker submitted under ended at that submission. A supervisor that keeps renewing it
  * (or releases it) is told so, rather than left to read the loss as a superseded epoch.
@@ -1455,11 +1460,21 @@ export class Engine {
         // GY-1726: an approved requirements decision held until this attempt ends already carries the
         // criteria it will apply, so they ground the ask now (GY-1700's held AC-0 named the test file
         // its worker asked for, and the refusal stood until an operator cleared it by hand).
-        const ground = { ...work, criteria: [...work.criteria, ...await this.heldRequirementsCriteria(db, work)] };
+        const held = await this.heldRequirements(db, work);
+        const ground = { ...work, criteria: [...work.criteria, ...held.flatMap(decision => decision.criteria)] };
         if (request!.decision && (request!.decision.state !== 'refused' || decideScopeRequest(ground, request!).state !== 'approved')) return work;
         demand(work.lease && work.lease.epoch === request!.epoch && Date.parse(work.lease.expiresAt) > now.getTime(),
           'The requesting attempt no longer holds the lease; a fresh attempt asks afresh');
+        const unaided = decideScopeRequest(work, request!).state === 'approved', planned = work.plannedFiles ?? [], revision = work.policyRevision;
         decision = applyScopeDecision(work, request!, now, ground);
+        // A widening only the held criteria grounded keeps those decisions current: each still applies when
+        // the attempt ends, on this revision, with the entries it added kept (Codex review of f8eb2edf68f2).
+        if (held.length && !unaided && work.policyRevision !== revision) {
+          const added = work.plannedFiles.filter(path => !planned.includes(path));
+          work.heldGroundings = [...(work.heldGroundings ?? []).filter(entry => !held.some(decision => decision.id === entry.decision)),
+            ...held.map(decision => ({ decision: decision.id, from: decision.from, to: work.policyRevision,
+              paths: [...new Set([...(work.heldGroundings?.find(entry => entry.decision === decision.id)?.paths ?? []), ...added])] }))];
+        }
       }
       if (command === 'session') {
         demand(['worker', 'producer', 'coordinator', 'admin'].includes(actor.role), 'Worker, producer or coordinator permission required', 403);
@@ -1922,12 +1937,13 @@ export class Engine {
    * (`rereview`) rather than being sent back on the stale verdict's rework. The document is changed in
    * place; the ledger writes come back as closures so a reconciliation dry run (GY-1290) records nothing.
    */
-  /** GY-1726: the criteria of the requirements decisions held for this item's live attempt, approved against its current policy revision. */
-  private async heldRequirementsCriteria(db: PoolClient, work: Work): Promise<{ id: string; text: string; proofs: string[] }[]> {
+  /** GY-1726: the requirements decisions held for this item's live attempt and still current on its policy revision, with the criteria each carries. */
+  private async heldRequirements(db: PoolClient, work: Work): Promise<{ id: string; from: number; criteria: { id: string; text: string; proofs: string[] }[] }[]> {
     const rows = (await db.query("SELECT actor, kind, payload, created_at FROM events WHERE work_id=$1 AND kind LIKE 'decision.%' ORDER BY seq", [work.id])).rows as { actor: string; kind: string; payload: any; created_at: Date | string }[];
     return foldDecisions(work.id, rows.map(row => ({ kind: row.kind, actor: row.actor, at: new Date(row.created_at).toISOString(), payload: row.payload })))
-      .filter(decision => decision.state === 'held' && decision.action === 'requirements' && decision.input?.expectedPolicyRevision === work.policyRevision)
-      .flatMap(decision => z.array(criterionSchema).safeParse(decision.input?.criteria).data?.map(({ id, text, proofs }) => ({ id, text, proofs })) ?? []);
+      .filter(decision => decision.state === 'held' && decision.action === 'requirements' && heldRevision(work, decision.id, decision.input?.expectedPolicyRevision) === work.policyRevision)
+      .map(decision => ({ id: decision.id, from: decision.input.expectedPolicyRevision as number,
+        criteria: z.array(criterionSchema).safeParse(decision.input?.criteria).data?.map(({ id, text, proofs }) => ({ id, text, proofs })) ?? [] }));
   }
 
   private async applyHeldDecisions(db: PoolClient, work: Work, all: Work[], before: Pick<Work, 'lease' | 'containmentQuarantine' | 'plannedFiles'> | null, now: Date, ended: { command: string | null; submitted: boolean }): Promise<((db: PoolClient) => Promise<void>)[]> {
@@ -1942,7 +1958,8 @@ export class Engine {
     const ending = ended.command ? `${ended.command} ended attempt ${epoch}` : `attempt ${epoch}'s lease lapsed`;
     for (const decision of held) {
       const expected = decision.input?.expectedPolicyRevision as number | undefined;
-      if (expected !== work.policyRevision) {
+      const grounded = work.heldGroundings?.find(entry => entry.decision === decision.id && entry.from === expected && entry.to === work.policyRevision);
+      if (heldRevision(work, decision.id, expected) !== work.policyRevision) {
         event('graphyard', 'decision.stale', { id: decision.id, action: decision.action, reason: `Policy revision changed (now ${work.policyRevision}); the held decision was approved against revision ${expected} and was not applied when ${ending}`,
           expected: { policyRevision: expected }, current: { policyRevision: work.policyRevision }, observedBy: { id: 'graphyard', role: 'coordinator' } });
         continue;
@@ -1961,7 +1978,10 @@ export class Engine {
         // HeldApplication.actor is an admin stand-in for the engine call; a requester revoked or stripped
         // of policy:requirements while the attempt ran must not still mutate requirements here.
         await this.authorizeHeldRequester(db, decision, trial);
-        data = commands.requirements.parse({ ...decision.input, reason: application.reason });
+        // A widening this decision grounded during the attempt (GY-1726) moved the revision and planned the
+        // entries it approved: the decision applies on that revision and keeps them.
+        data = commands.requirements.parse({ ...decision.input, reason: application.reason,
+          ...(grounded ? { expectedPolicyRevision: work.policyRevision, plannedFiles: [...new Set([...(decision.input?.plannedFiles ?? []), ...grounded.paths])] } : {}) });
         await this.reviseRequirements(db, application.actor, trial, all.map(item => item === work ? trial : item), data, `decision:${decision.id}`, now, before, resume);
       } catch (error) {
         if (!(error instanceof Refusal) && !(error instanceof z.ZodError)) throw error;
@@ -1982,6 +2002,11 @@ export class Engine {
       const detail = { ...data, liveScopeWidening: false, before: { plannedFiles: before.plannedFiles ?? [] }, heldDecision: { id: decision.id, approvedBy: decision.approvedBy, heldSince: decision.held?.at ?? null, appliedWhen: ending, resume } };
       writes.push(db => save(db, work, application.actor.id, 'requirements', now, detail));
       event(decision.approvedBy ?? 'graphyard', 'decision.applied', { id: decision.id, outcome, held: { since: decision.held?.at ?? null, appliedWhen: ending, resume } });
+    }
+    // Every held decision is settled now, so what they grounded is spent.
+    if (work.heldGroundings) {
+      const left = work.heldGroundings.filter(entry => !held.some(decision => decision.id === entry.decision));
+      work.heldGroundings = left.length ? left : null;
     }
     return writes;
   }

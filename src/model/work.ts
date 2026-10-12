@@ -195,6 +195,13 @@ export interface Work extends Create {
   /** An ask still with the approver when its attempt ended (GY-1484): the next claim adopts it; a widening covering it clears it. */
   carriedScopeRequest?: ScopeRequestState | null;
   /**
+   * GY-1726: each live widening a held requirements decision grounded (`autoscope` deciding the ask on
+   * its criteria), by decision: the policy revision it was approved against (`from`), the one the
+   * widening moved the item to (`to`) and the planned entries it added. The widening does not make
+   * that decision stale, and the decision applies when the attempt ends with those entries kept.
+   */
+  heldGroundings?: { decision: string; from: number; to: number; paths: string[] }[] | null;
+  /**
    * The last scope decision the control plane took for this item, applied or refused, with the
    * request it answered and how long that request waited. An approved request is applied and
    * cleared; a refused one stays open, carrying the same decision, for the operator to decide.
