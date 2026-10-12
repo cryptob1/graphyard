@@ -232,10 +232,10 @@ export async function runPreview(input: PreviewInput): Promise<PreviewVerdict> {
  */
 export function previewFailureReason(preview: PreviewVerdict | null | undefined, trialFailurePrefix: string): string | null {
   if (!preview || preview.result === 'pass') return null;
-  if (preview.result === 'timeout') return `preview of ${preview.mergeSha.slice(0, 12)} timed out: ${preview.detail}`;
+  if (preview.result === 'timeout') return `preview of ${preview.mergeSha.slice(0, 12)} timed out: ${preview.detail}`.slice(0, 2000);
   if (preview.result === 'error') return `preview of ${preview.mergeSha.slice(0, 12)} could not run: ${preview.detail}`.slice(0, 2000);
   const named = preview.failed.filter(name => name !== 'e2e' && name !== 'build' && name !== 'cases');
   if (preview.failed.includes('build')) return `${trialFailurePrefix}: preview build: ${preview.detail}`.slice(0, 2000);
   if (preview.failed.includes('cases')) return `${trialFailurePrefix}: preview: ${preview.detail}`.slice(0, 2000);
-  return `${trialFailurePrefix}: E2E ${named.length ? `case${named.length === 1 ? '' : 's'} ${named.slice(0, 20).join(', ')}` : 'cases'} failed on the preview of ${preview.mergeSha.slice(0, 12)}`;
+  return `${trialFailurePrefix}: E2E ${named.length ? `case${named.length === 1 ? '' : 's'} ${named.slice(0, 20).join(', ')}` : 'cases'} failed on the preview of ${preview.mergeSha.slice(0, 12)}`.slice(0, 2000);
 }

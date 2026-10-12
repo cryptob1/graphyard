@@ -109,6 +109,13 @@ test('unit:preview-failing-case-refuses-merge — a static-site repository\'s pa
   assert.equal((await mergeOne(failingTrial.value, work())).outcome, 'refused');
   assert.equal(previewed, 0, 'only a passing trial is previewed');
   assert.match(previewFailureReason({ ...failed, failed: ['build'], detail: 'the static site\'s build `x` failed' }, trialFailurePrefix)!, /^trial failed: preview build/);
+  // Twenty failing case IDs at their 100-character limit still give a refusal the merge record accepts, so the writer can always record it.
+  const longIds = Array.from({ length: 25 }, (_, index) => `${index}`.padStart(100, 'c'));
+  for (const reason of [previewFailureReason({ ...failed, failed: longIds }, trialFailurePrefix)!, previewFailureReason({ ...failed, result: 'timeout', detail: 'x'.repeat(2500) }, trialFailurePrefix)!]) {
+    assert.ok(reason.length <= 2000, `the refusal is bounded: ${reason.length}`);
+    assert.doesNotThrow(() => mergeRecordBodySchema.parse({ kind: 'refused', head: sha('long'), reason }));
+  }
+  assert.match(previewFailureReason({ ...failed, failed: longIds }, trialFailurePrefix)!, /^trial failed: E2E cases c+0, /);
 
   // A required case declaring an install secret cannot run on the preview, so it fails the preview naming the case and refuses the merge; nothing passes vacuously.
   const secretOnly = await repository('preview-secret-only', 42, [{ id: 'checkout', title: 'A player pays', tags: ['api'], target: 'any', required: true, secrets: ['STRIPE_KEY'],
