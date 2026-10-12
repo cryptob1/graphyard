@@ -1,0 +1,61 @@
+{
+  "id": "preview-isolation-cleanup",
+  "title": "The previewed change's record shows an isolated, cleaned-up preview",
+  "description": "The fixture's Compose pilot change's preview record answers that the preview ran isolated with its own database and was cleaned up afterwards, and the project's status names the standing rules: a database per preview, no production secrets, automatic cleanup, bounded resources.",
+  "tags": [
+    "api",
+    "delivery",
+    "preview"
+  ],
+  "target": "uat",
+  "required": true,
+  "secrets": [],
+  "steps": [
+    {
+      "kind": "http",
+      "name": "read the standing preview rules",
+      "method": "GET",
+      "path": "/api/status",
+      "status": 200,
+      "expect": [
+        {
+          "path": "delivery.preview.isolation.database",
+          "equals": "per-preview"
+        },
+        {
+          "path": "delivery.preview.isolation.secrets",
+          "equals": "none"
+        },
+        {
+          "path": "delivery.preview.isolation.cleanup",
+          "equals": "automatic"
+        },
+        {
+          "path": "delivery.preview.resourceLimits",
+          "type": "object"
+        }
+      ]
+    },
+    {
+      "kind": "http",
+      "name": "read the previewed change's isolation record",
+      "method": "GET",
+      "path": "/api/delivery/changes/fixture-compose-pilot",
+      "status": 200,
+      "expect": [
+        {
+          "path": "preview.isolated",
+          "equals": true
+        },
+        {
+          "path": "preview.cleanedUp",
+          "equals": true
+        },
+        {
+          "path": "preview.database",
+          "exists": true
+        }
+      ]
+    }
+  ]
+}

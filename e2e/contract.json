@@ -3,26 +3,140 @@
     {
       "id": "sign-in",
       "title": "An operator signs in and reaches the control plane",
-      "criteria": ["The dashboard accepts an access token and shows the primary navigation and the Work view"],
-      "cases": ["sign-in"]
+      "criteria": [
+        "The dashboard accepts an access token and shows the primary navigation and the Work view"
+      ],
+      "cases": [
+        "sign-in"
+      ]
     },
     {
       "id": "work-intake",
       "title": "An operator creates work and finds it where they look",
-      "criteria": ["A created work item is listed in the work list", "A created work item appears in the board's backlog group"],
-      "cases": ["create-work-item", "board"]
+      "criteria": [
+        "A created work item is listed in the work list",
+        "A created work item appears in the board's backlog group"
+      ],
+      "cases": [
+        "create-work-item",
+        "board"
+      ]
     },
     {
       "id": "work-detail",
       "title": "An operator reads an item's criteria and gates",
-      "criteria": ["An item's page shows its criteria, proofs and gates by id and by key"],
-      "cases": ["work-item-detail"]
+      "criteria": [
+        "An item's page shows its criteria, proofs and gates by id and by key"
+      ],
+      "cases": [
+        "work-item-detail"
+      ]
     },
     {
       "id": "test-visibility",
       "title": "An operator sees what is tested and whether it passes",
-      "criteria": ["The Tests page lists every case with its recent runs"],
-      "cases": ["tests-page"]
+      "criteria": [
+        "The Tests page lists every case with its recent runs"
+      ],
+      "cases": [
+        "tests-page"
+      ]
+    },
+    {
+      "id": "onboarding-rapid-path",
+      "title": "Onboarding gives our repository the fast delivery path with nothing extra to wire up",
+      "criteria": [
+        "After normal project onboarding, the project's status shows the fast path on by default: local preview enabled, candidates capped at five changes with a short configurable wait, promotion only for a passing candidate",
+        "The path works with GitHub as an optional mirror: no GitHub Actions workflow and no Railway environment is required for the local preview and candidate path",
+        "No permanent staging branch and no second test framework appear — the project's own required end-to-end cases are the test"
+      ],
+      "cases": [
+        "onboarding-rapid-path"
+      ]
+    },
+    {
+      "id": "compose-preview-verdict",
+      "title": "A change to our Compose application is tested in a preview before it lands",
+      "criteria": [
+        "Before the change's merge was recorded, its declared application cases ran against a preview of exactly that change",
+        "The landed change's record names the preview's result and each application case's verdict, and the merge commit that carried it",
+        "I can read this from the delivery API without logging into anything else"
+      ],
+      "cases": [
+        "compose-preview-verdict"
+      ]
+    },
+    {
+      "id": "preview-isolation-cleanup",
+      "title": "Previews keep to themselves and clean up after the run",
+      "criteria": [
+        "Each preview runs with its own application state and database, separate from every other preview, from UAT and from production",
+        "Preview resources are bounded and the preview is removed automatically when its run ends",
+        "A preview never receives production secrets",
+        "The record of a previewed change shows the isolation and the cleanup, so I can trust it rather than take it on faith"
+      ],
+      "cases": [
+        "preview-isolation-cleanup"
+      ]
+    },
+    {
+      "id": "static-preview-reuse",
+      "title": "Our static site keeps its preview without Compose",
+      "criteria": [
+        "A static-site change is previewed through the existing static preview path, with no Compose and no Railway required",
+        "Its preview verdict is recorded like any other change's",
+        "The existing static preview rules still hold unchanged — nothing about the current path was weakened to make this pass"
+      ],
+      "cases": [
+        "static-preview-reuse"
+      ]
+    },
+    {
+      "id": "candidate-batch-five",
+      "title": "Up to five passing changes ship together as one exact candidate",
+      "criteria": [
+        "A candidate names the exact changes it was assembled from — at most five — each with its exact source identity",
+        "The candidate ran the combined required end-to-end cases of all its changes and every one passed before it could promote",
+        "With fewer than five changes ready, the candidate still proceeds after the short configurable wait"
+      ],
+      "cases": [
+        "candidate-batch-five"
+      ]
+    },
+    {
+      "id": "failed-candidate-recorded",
+      "title": "A failed candidate never reaches production and its failure stays on the record",
+      "criteria": [
+        "The candidate that failed a required case shows as failed and was never promoted",
+        "Its record names the failing required case and its verdict",
+        "The failure remains visible later — in the candidate record and in the Tests history — not erased by the next candidate"
+      ],
+      "cases": [
+        "failed-candidate-recorded"
+      ]
+    },
+    {
+      "id": "production-release-verified",
+      "title": "Production serves exactly the release we promoted, and we can see it was verified",
+      "criteria": [
+        "The live production environment is observed serving the exact release identity the passing candidate promoted",
+        "The verification is on record — the observation names the served sha and that it was verified — not assumed",
+        "The expected release for production is the one the candidate promoted"
+      ],
+      "cases": [
+        "production-release-verified"
+      ]
+    },
+    {
+      "id": "rapid-path-docs",
+      "title": "The docs explain the fast path to users and operators",
+      "criteria": [
+        "User and operator docs cover the defaults, how a project declares its applications and cases, how previews are isolated, what happens after a failure, and how production is verified",
+        "The docs are reachable from the control plane itself, without asking the team or leaving for another tool"
+      ],
+      "cases": [
+        "rapid-path-docs"
+      ]
     }
   ]
 }

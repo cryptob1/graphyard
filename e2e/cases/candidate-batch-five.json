@@ -1,0 +1,76 @@
+{
+  "id": "candidate-batch-five",
+  "title": "The batched candidate names five exact changes and passed all required cases",
+  "description": "The fixture's pilot candidate fixture-c1 was assembled from five passing changes. Its record answers five changes each bound to an exact source sha, the combined required cases all passed, none failed, the candidate passed, and it promoted — while the wait that lets a smaller batch proceed stays configurable on the project.",
+  "tags": [
+    "api",
+    "delivery",
+    "candidate"
+  ],
+  "target": "uat",
+  "required": true,
+  "secrets": [],
+  "steps": [
+    {
+      "kind": "http",
+      "name": "read the batched candidate",
+      "method": "GET",
+      "path": "/api/delivery/candidates/fixture-c1",
+      "status": 200,
+      "expect": [
+        {
+          "path": "changeCount",
+          "equals": 5
+        },
+        {
+          "path": "changes",
+          "type": "array"
+        },
+        {
+          "path": "changes.0.sha",
+          "type": "string"
+        },
+        {
+          "path": "cases",
+          "type": "array"
+        },
+        {
+          "path": "cases",
+          "includes": {
+            "required": true,
+            "verdict": "passed"
+          }
+        },
+        {
+          "path": "failedRequiredCases",
+          "equals": 0
+        },
+        {
+          "path": "verdict",
+          "equals": "passed"
+        },
+        {
+          "path": "promoted",
+          "equals": true
+        },
+        {
+          "path": "sha",
+          "type": "string"
+        }
+      ]
+    },
+    {
+      "kind": "http",
+      "name": "read the configurable wait",
+      "method": "GET",
+      "path": "/api/status",
+      "status": 200,
+      "expect": [
+        {
+          "path": "delivery.candidate.idleWaitMinutes",
+          "type": "number"
+        }
+      ]
+    }
+  ]
+}

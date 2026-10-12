@@ -1,0 +1,62 @@
+{
+  "id": "production-release-verified",
+  "title": "Production is verified on the exact sha the candidate promoted",
+  "description": "Reading the fixture's passing candidate answers the exact sha it promoted; the production observations then include a verified observation at that same sha, and the delivery status names that sha as production's expected release — the live release is the promoted one, checked not presumed.",
+  "tags": [
+    "api",
+    "delivery",
+    "production"
+  ],
+  "target": "uat",
+  "required": true,
+  "secrets": [],
+  "steps": [
+    {
+      "kind": "http",
+      "name": "read the promoted sha",
+      "method": "GET",
+      "path": "/api/delivery/candidates/fixture-c1",
+      "status": 200,
+      "expect": [],
+      "save": {
+        "promotedSha": "sha"
+      }
+    },
+    {
+      "kind": "http",
+      "name": "read the production observations",
+      "method": "GET",
+      "path": "/api/delivery/observations?environment=production",
+      "status": 200,
+      "expect": [
+        {
+          "path": "observations",
+          "type": "array"
+        },
+        {
+          "path": "observations",
+          "includes": {
+            "sha": "{{promotedSha}}",
+            "verified": true
+          }
+        }
+      ]
+    },
+    {
+      "kind": "http",
+      "name": "read the expected production release",
+      "method": "GET",
+      "path": "/api/delivery",
+      "status": 200,
+      "expect": [
+        {
+          "path": "expected",
+          "includes": {
+            "environment": "production",
+            "sha": "{{promotedSha}}"
+          }
+        }
+      ]
+    }
+  ]
+}

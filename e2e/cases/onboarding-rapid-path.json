@@ -1,0 +1,85 @@
+{
+  "id": "onboarding-rapid-path",
+  "title": "An onboarded project shows the fast delivery path on by default",
+  "description": "After normal onboarding the control plane answers /api/status with the delivery fast path enabled — local preview, candidates of at most five changes with a configurable wait, promotion only for passing candidates — naming neither GitHub Actions nor Railway as required, and the dashboard's Delivery view shows the same.",
+  "tags": [
+    "api",
+    "delivery",
+    "onboarding"
+  ],
+  "target": "uat",
+  "required": true,
+  "secrets": [],
+  "steps": [
+    {
+      "kind": "http",
+      "name": "read the project's delivery settings",
+      "method": "GET",
+      "path": "/api/status",
+      "status": 200,
+      "expect": [
+        {
+          "path": "delivery.preview.enabled",
+          "equals": true
+        },
+        {
+          "path": "delivery.candidate.maxChanges",
+          "equals": 5
+        },
+        {
+          "path": "delivery.candidate.idleWaitMinutes",
+          "type": "number"
+        },
+        {
+          "path": "delivery.promotion.passingOnly",
+          "equals": true
+        },
+        {
+          "path": "delivery.github.required",
+          "equals": false
+        },
+        {
+          "path": "delivery.railway.required",
+          "equals": false
+        }
+      ]
+    },
+    {
+      "kind": "browser",
+      "action": "open",
+      "path": "/"
+    },
+    {
+      "kind": "browser",
+      "action": "fill",
+      "label": "Access token",
+      "value": "{{token}}"
+    },
+    {
+      "kind": "browser",
+      "action": "click",
+      "role": "button",
+      "text": "Open control plane",
+      "exact": false
+    },
+    {
+      "kind": "browser",
+      "action": "click",
+      "role": "button",
+      "text": "Delivery",
+      "exact": false
+    },
+    {
+      "kind": "browser",
+      "action": "expectText",
+      "role": "heading",
+      "text": "Delivery"
+    },
+    {
+      "kind": "browser",
+      "action": "expectText",
+      "text": "Local preview",
+      "exact": false
+    }
+  ]
+}

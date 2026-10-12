@@ -1,0 +1,64 @@
+{
+  "id": "static-preview-reuse",
+  "title": "The static site's landed change shows a passing static preview",
+  "description": "The fixture also carries a static-site pilot change. Its preview record answers kind static with a passing result — the existing static preview path, not a Compose stack — while the project's status continues to name no Railway requirement.",
+  "tags": [
+    "api",
+    "delivery",
+    "preview"
+  ],
+  "target": "uat",
+  "required": true,
+  "secrets": [],
+  "steps": [
+    {
+      "kind": "http",
+      "name": "list the landed changes",
+      "method": "GET",
+      "path": "/api/delivery",
+      "status": 200,
+      "expect": [
+        {
+          "path": "changes",
+          "includes": {
+            "title": "Fixture: static preview pilot"
+          }
+        }
+      ]
+    },
+    {
+      "kind": "http",
+      "name": "read the static pilot change's preview record",
+      "method": "GET",
+      "path": "/api/delivery/changes/fixture-static-pilot",
+      "status": 200,
+      "expect": [
+        {
+          "path": "preview.kind",
+          "equals": "static"
+        },
+        {
+          "path": "preview.result",
+          "equals": "pass"
+        },
+        {
+          "path": "preview.cases",
+          "type": "array"
+        }
+      ]
+    },
+    {
+      "kind": "http",
+      "name": "confirm no Railway requirement",
+      "method": "GET",
+      "path": "/api/status",
+      "status": 200,
+      "expect": [
+        {
+          "path": "delivery.railway.required",
+          "equals": false
+        }
+      ]
+    }
+  ]
+}

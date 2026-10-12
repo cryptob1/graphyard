@@ -1,0 +1,73 @@
+{
+  "id": "compose-preview-verdict",
+  "title": "A Compose application change shows a passing preview of its exact merge",
+  "description": "The uat environment's representative application fixture has landed its recorded delivery pilot. Reading the landed changes lists the fixture's Compose pilot change, and its detail answers a passing Compose preview bound to the exact merge commit with each application case's verdict and the candidate that carried it.",
+  "tags": [
+    "api",
+    "delivery",
+    "preview"
+  ],
+  "target": "uat",
+  "required": true,
+  "secrets": [],
+  "steps": [
+    {
+      "kind": "http",
+      "name": "list the landed changes",
+      "method": "GET",
+      "path": "/api/delivery",
+      "status": 200,
+      "expect": [
+        {
+          "path": "changes",
+          "type": "array"
+        },
+        {
+          "path": "changes",
+          "includes": {
+            "title": "Fixture: compose preview pilot"
+          }
+        }
+      ]
+    },
+    {
+      "kind": "http",
+      "name": "read the Compose pilot change's preview record",
+      "method": "GET",
+      "path": "/api/delivery/changes/fixture-compose-pilot",
+      "status": 200,
+      "expect": [
+        {
+          "path": "title",
+          "equals": "Fixture: compose preview pilot"
+        },
+        {
+          "path": "mergeSha",
+          "type": "string"
+        },
+        {
+          "path": "preview.kind",
+          "equals": "compose"
+        },
+        {
+          "path": "preview.result",
+          "equals": "pass"
+        },
+        {
+          "path": "preview.cases",
+          "type": "array"
+        },
+        {
+          "path": "preview.cases",
+          "includes": {
+            "verdict": "passed"
+          }
+        },
+        {
+          "path": "candidate",
+          "equals": "fixture-c1"
+        }
+      ]
+    }
+  ]
+}

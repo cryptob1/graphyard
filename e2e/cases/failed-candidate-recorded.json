@@ -1,0 +1,76 @@
+{
+  "id": "failed-candidate-recorded",
+  "title": "The failed candidate is still on record as failed and unpromoted",
+  "description": "The fixture's candidate fixture-c2 failed a required case. Its record answers failed with the failing case named, promoted false, and the dashboard's Tests page still shows that case's failed run — the failure stays on the record.",
+  "tags": [
+    "api",
+    "delivery",
+    "candidate",
+    "dashboard"
+  ],
+  "target": "uat",
+  "required": true,
+  "secrets": [],
+  "steps": [
+    {
+      "kind": "http",
+      "name": "read the failed candidate",
+      "method": "GET",
+      "path": "/api/delivery/candidates/fixture-c2",
+      "status": 200,
+      "expect": [
+        {
+          "path": "verdict",
+          "equals": "failed"
+        },
+        {
+          "path": "promoted",
+          "equals": false
+        },
+        {
+          "path": "failedCases",
+          "includes": {
+            "case": "fixture-required-broken",
+            "verdict": "failed"
+          }
+        }
+      ]
+    },
+    {
+      "kind": "browser",
+      "action": "open",
+      "path": "/"
+    },
+    {
+      "kind": "browser",
+      "action": "fill",
+      "label": "Access token",
+      "value": "{{token}}"
+    },
+    {
+      "kind": "browser",
+      "action": "click",
+      "role": "button",
+      "text": "Open control plane",
+      "exact": false
+    },
+    {
+      "kind": "browser",
+      "action": "click",
+      "role": "button",
+      "text": "Tests"
+    },
+    {
+      "kind": "browser",
+      "action": "expectText",
+      "text": "fixture-required-broken",
+      "exact": false
+    },
+    {
+      "kind": "browser",
+      "action": "expectText",
+      "text": "failed",
+      "exact": false
+    }
+  ]
+}

@@ -1,0 +1,56 @@
+{
+  "id": "rapid-path-docs",
+  "title": "The control plane serves delivery docs covering the fast path end to end",
+  "description": "Opening the control plane's delivery documentation shows the sections a user or operator needs: the defaults, project declarations, preview isolation, failure recovery and production verification — including how onboarding applies them.",
+  "tags": [
+    "docs",
+    "dashboard",
+    "delivery"
+  ],
+  "target": "uat",
+  "required": true,
+  "secrets": [],
+  "steps": [
+    {
+      "kind": "browser",
+      "action": "open",
+      "path": "/docs/delivery"
+    },
+    {
+      "kind": "browser",
+      "action": "expectText",
+      "text": "Local preview",
+      "exact": false
+    },
+    {
+      "kind": "browser",
+      "action": "expectText",
+      "text": "project declaration",
+      "exact": false
+    },
+    {
+      "kind": "browser",
+      "action": "expectText",
+      "text": "Isolation",
+      "exact": false
+    },
+    {
+      "kind": "browser",
+      "action": "expectText",
+      "text": "Failure recovery",
+      "exact": false
+    },
+    {
+      "kind": "browser",
+      "action": "expectText",
+      "text": "Verify the production release",
+      "exact": false
+    },
+    {
+      "kind": "browser",
+      "action": "expectText",
+      "text": "onboarding",
+      "exact": false
+    }
+  ]
+}
