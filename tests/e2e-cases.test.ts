@@ -82,7 +82,7 @@ test('unit:e2e-case-format — a case is a JSON file under e2e/cases/ with id, t
   for (const id of ['sign-in', 'tests-page', 'work-item-detail']) assert.ok(dashboardIds.includes(id), `the dashboard tag selects the ${id} case`);
   assert.ok(dashboard.every(entry => entry.definition.tags.includes('dashboard')), 'every case the dashboard tag selects carries the dashboard tag');
   assert.deepEqual(dashboardIds.sort(), shipped.filter(entry => entry.definition.tags.includes('dashboard')).map(entry => entry.definition.id).sort());
-  assert.ok(!dashboardIds.includes('board'), 'a case without the dashboard tag is not selected');
+  for (const entry of shipped) if (!entry.definition.tags.includes('dashboard')) assert.ok(!dashboardIds.includes(entry.definition.id), `the untagged ${entry.definition.id} case is not selected`);
   assert.equal(selectCases(shipped, { id: 'board' }).length, 1);
   assert.throws(() => selectCases(shipped, { id: 'missing' }), /No E2E case missing/);
 
