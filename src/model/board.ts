@@ -90,8 +90,7 @@ export function groupOf(work: Work, now: number, humanOnly: ReadonlySet<string> 
   if (humanOnly.has(work.id) || parkedOnHuman(work)) return 'needs-you';
   const phase = phaseOf(work, now);
   if (phase === 'not-started') return 'backlog';
-  // GY-1740: a follow-up held by its future observation window waits for that instant; no fault blocks it.
-  if (windowHeld(work, now)) return 'up-next';
+  if (windowHeld(work, now)) return 'up-next'; // GY-1740: it waits for the window's instant; no fault blocks it
   if (stalled.has(work.id) || plainStatus(work, now).tone === 'stuck') return 'blocked';
   return phase === 'needs-worker' ? 'up-next' : 'moving';
 }
@@ -159,19 +158,12 @@ export function nextActor(work: Work, group: Group | null, now: number, release:
   return { who: steps.who, does: steps.label };
 }
 
-/**
- * Why an item in Up next is not waiting for a worker at all (GY-172): it is held by a dependency
- * that has not shipped — "Waiting for GY-N to ship first" — or by an exclusive resource another
- * claimed item holds, which names that item and the resource. Null for an item a free builder takes
- * next. The resource hold is the dispatcher's own (`resourceConflicts`, as `dispatchHold` applies
- * it), so the page says what the loop does; planned-file overlap holds nothing (dispatch is
- * optimistic), so an overlapping item is described as waiting for a worker, which it is.
- */
+/** Why an Up next item waits for no worker (GY-172): an unshipped dependency, a future observation window (GY-1740), or an exclusive resource
+ * another claimed item holds, as the dispatcher's own `resourceConflicts` applies it; planned-file overlap holds nothing. Null: a free builder takes it. */
 export function upNextHold(work: Work, all: Work[], now: number): { kind: 'dependency' | 'resource' | 'window'; text: string } | null {
   const dependency = work.gates.find(gate => gate.name === 'ready')?.reasons.find(reason => reason.startsWith('Dependency '));
   if (dependency) return { kind: 'dependency', text: plainReason(dependency, 'ready').text };
-  const window = observationWindowHold(work, new Date(now));
-  if (window) return { kind: 'window', text: `Waiting for its observation window: the reading it owes can first exist at ${window.notBefore}` };
+  const window = observationWindowHold(work, new Date(now)); if (window) return { kind: 'window', text: `Waiting for its observation window: the reading it owes can first exist at ${window.notBefore}` };
   const held = resourceConflicts(work, all, now);
   if (!held.length) return null;
   return { kind: 'resource', text: `Waiting for ${[...new Set(held.map(entry => entry.key))].join(', ')} to release ${[...new Set(held.map(entry => entry.resource))].join(', ')}: an exclusive resource it needs` };
