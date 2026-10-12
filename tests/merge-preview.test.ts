@@ -163,6 +163,26 @@ test('unit:preview-failing-case-refuses-merge — a static-site repository\'s pa
   assert.deepEqual(throwing.pushes, []);
 });
 
+test('unit:preview-cases-kept-from-merge — the merge\'s required and uat cases are loaded before its build runs and that set is the one run: a build that erases or rewrites a case file cannot turn a failing required case into a passing preview', { timeout: 60_000 }, async () => {
+  const broken = await repository('preview-cases-erased', 'none');
+  // The build erases the failing required case and rewrites the other to one that passes trivially, then builds the site.
+  const tampering: StaticBuildShell = async (_command, cwd) => {
+    execFileSync('sh', ['-c', 'rm -f e2e/cases/scores.json && printf %s "$1" > e2e/cases/home.json && mkdir -p dist && cp -R site/. dist/', 'sh',
+      JSON.stringify({ id: 'home', title: 'Rewritten', tags: ['api'], target: 'uat', required: false, steps: [{ kind: 'http', method: 'GET', path: '/', status: 200 }] })], { cwd });
+    assert.equal(existsSync(join(cwd, 'e2e', 'cases', 'scores.json')), false);
+    return { ok: true, output: '' };
+  };
+  const verdict = await runPreview({ root: broken.repo, base: broken.base, mergeSha: broken.mergeSha, site, timeoutMs: 30_000, stepTimeoutMs: 5_000, shell: tampering });
+  assert.equal(verdict.result, 'fail', verdict.detail);
+  assert.deepEqual(verdict.failed, ['scores'], 'the required case the build erased still ran, and failed');
+  assert.deepEqual(verdict.cases.map(entry => [entry.case, entry.verdict, entry.required]).sort(), [['home', 'passed', false], ['scores', 'failed', true]], 'the merge\'s committed case set ran, not the build\'s');
+  // A build that only erases every case cannot make a vacuous pass either.
+  const erasing: StaticBuildShell = async (_command, cwd) => { execFileSync('sh', ['-c', 'rm -rf e2e && mkdir -p dist && cp -R site/. dist/'], { cwd }); return { ok: true, output: '' }; };
+  const erased = await runPreview({ root: broken.repo, base: broken.base, mergeSha: broken.mergeSha, site, timeoutMs: 30_000, stepTimeoutMs: 5_000, shell: erasing });
+  assert.equal(erased.result, 'fail', erased.detail);
+  assert.deepEqual(erased.failed, ['scores']);
+});
+
 test('unit:preview-skipped-when-not-applicable — a merge of only docs or tests, and a repository naming no static UAT, skip the preview and merge exactly as before', async () => {
   assert.equal(previewSkip(['src/game.ts'], null), 'the repository names no static UAT');
   assert.equal(previewSkip(['docs/play.md', 'README.md', 'tests/game.test.ts', 'src/game.spec.ts'], site), 'the merge changes only docs or tests');
@@ -224,7 +244,7 @@ test('unit:preview-capped-and-cleaned-up — at most two previews run at once; e
   // Timeout in the build: the build is cancelled, and its late continuation still holds the slot and the checkout until it ends.
   const timeoutSlots = previewSlots();
   let buildCancelled = false, buildEnded = false;
-  const lateBuild = runPreview({ root: fixture.repo, base: fixture.base, mergeSha: fixture.mergeSha, site, timeoutMs: 3_000, slots: timeoutSlots,
+  const lateBuild = runPreview({ root: fixture.repo, base: fixture.base, mergeSha: fixture.mergeSha, site, timeoutMs: 5_000, slots: timeoutSlots,
     shell: async (_command, cwd, signal) => {
       await new Promise<void>(accept => signal!.addEventListener('abort', () => accept(), { once: true }));
       buildCancelled = true;
