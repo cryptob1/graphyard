@@ -167,32 +167,39 @@ api() {
   echo "api $method /api/$path failed after $API_ATTEMPTS attempts: status $status, body: ${received:-(empty)}" >&2
   exit 1
 }
-# rejects METHOD PATH TOKEN BODY — a request the release must refuse: it returns once the release
-# answers with a 4xx status, and a 2xx ends the exercise. A failed transfer, a 5xx or no status at all
-# is no answer, so it is never taken for the refusal: it is retried under the same Idempotency-Key
-# within api()'s bound, through a forward re-established as api() does, and when the bound is
-# exhausted the exercise prints its diagnosis and exits on a last line naming the request (GY-1729).
+# rejects METHOD PATH TOKEN BODY STATUS ERROR — a request the release must refuse: it returns only
+# once the release answers STATUS with an `error` containing ERROR. A 2xx, or any other status or
+# error (a 401/403 from broken credentials, a 404 from a missing route), ends the exercise naming it,
+# since the refusal it checks never ran. A failed transfer, a 5xx or no status at all is no answer: it
+# is retried under the same Idempotency-Key within api()'s bound, through a forward re-established as
+# api() does, and when the bound is exhausted the exercise prints its diagnosis and exits (GY-1729).
 rejects() {
-  local method="$1" path="$2" token="$3" body="$4" key err status attempt rc lost=0
-  key="$(node -p "require('node:crypto').randomUUID()")"; err="$(mktemp)"
+  local method="$1" path="$2" token="$3" body="$4" expected="$5" error="$6" key err reply status attempt rc lost=0 received
+  key="$(node -p "require('node:crypto').randomUUID()")"; err="$(mktemp)"; reply="$(mktemp)"
   for attempt in $(seq 1 "$API_ATTEMPTS"); do
     if [ -n "${FORWARD_DIR:-}" ]; then ensure_forward; fi
     rc=0
-    status="$(curl -sS --max-time "$API_TIMEOUT" -o /dev/null -w '%{http_code}' -X "$method" "http://127.0.0.1:$LOCAL_PORT/api/$path" -H "Authorization: Bearer $token" -H 'Content-Type: application/json' -H "Idempotency-Key: $key" --data "$body" 2>"$err")" || rc=$?
+    status="$(curl -sS --max-time "$API_TIMEOUT" -o "$reply" -w '%{http_code}' -X "$method" "http://127.0.0.1:$LOCAL_PORT/api/$path" -H "Authorization: Bearer $token" -H 'Content-Type: application/json' -H "Idempotency-Key: $key" --data "$body" 2>"$err")" || rc=$?
     if [ "$rc" -ne 0 ]; then
       status="$status, $(tr -d '\n' <"$err")"; lost=$((lost + 1))
       if [ "$lost" -ge 3 ] && [ -n "${FORWARD_DIR:-}" ]; then lost=0; stop_forward; fi
     else
       lost=0
       case "$status" in
-        2[0-9][0-9]) rm -f "$err"; echo "api $method /api/$path was accepted with status $status; the release must refuse it" >&2; exit 1;;
-        4[0-9][0-9]) rm -f "$err"; echo "api $method /api/$path refused with status $status, as it must be" >&2; return 0;;
+        2[0-9][0-9]) rm -f "$err" "$reply"; echo "api $method /api/$path was accepted with status $status; the release must refuse it" >&2; exit 1;;
+        4[0-9][0-9])
+          received="$(node -e "try{const e=JSON.parse(require('fs').readFileSync(process.argv[1],'utf8')).error;process.stdout.write(typeof e==='string'?e:'')}catch{}" "$reply")"
+          if [ "$status" = "$expected" ] && [ -n "$received" ] && [[ "$received" == *"$error"* ]]; then
+            rm -f "$err" "$reply"; echo "api $method /api/$path refused with status $status ($received), as it must be" >&2; return 0
+          fi
+          received="$(cat "$reply")"; rm -f "$err" "$reply"
+          echo "api $method /api/$path was refused with status $status, body: ${received:-(empty)}; the release must refuse it with $expected naming '$error'" >&2; exit 1;;
       esac
     fi
     echo "api $method /api/$path: attempt $attempt of $API_ATTEMPTS got status $status, not a refusal" >&2
     if [ "$attempt" -lt "$API_ATTEMPTS" ]; then sleep "$API_RETRY_WAIT"; fi
   done
-  diagnose; rm -f "$err"
+  diagnose; rm -f "$err" "$reply"
   echo "api $method /api/$path received no refusal after $API_ATTEMPTS attempts: status $status" >&2
   exit 1
 }
@@ -245,7 +252,7 @@ forward
 AFTER="$(ledger)"
 same "$BEFORE" "$AFTER" 'the ledger changed across the upgrade'
 api POST "work/$WORK_ID/heartbeat" "$WORKER_TOKEN" '{"epoch":1}' >/dev/null
-rejects POST "work/$WORK_ID/heartbeat" "$WORKER_TOKEN" '{"epoch":2}'
+rejects POST "work/$WORK_ID/heartbeat" "$WORKER_TOKEN" '{"epoch":2}' 409 'superseded'
 
 step "4. Taking a logical backup with the chart's CronJob"
 BEFORE_BACKUP="$(ledger)"

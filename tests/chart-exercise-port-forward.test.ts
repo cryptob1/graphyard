@@ -65,15 +65,15 @@ const rollout = JSON.stringify({ kind: 'List', items: [
   { kind: 'Pod', metadata: { name: 'gy-graphyard-new-bbbbb', labels: { 'pod-template-hash': 'new2' } }, spec: { containers: [{ ports: [{ name: 'http', containerPort: 4310 }] }] }, status: { conditions: [{ type: 'Ready', status: 'True' }] } },
 ] });
 
-/** An HTTP server standing in for a release: /healthz reports `version`, a heartbeat answers `heartbeat` (409 refuses it), anything else answers `work`. */
+/** An HTTP server standing in for a release: /healthz reports `version`, a heartbeat answers `heartbeat` with `refusal` (409 with the engine's superseded-lease error refuses it), anything else answers `work`. */
 async function release(version: string, work: string, port = 0) {
   const hits: string[] = [];
-  const state = { heartbeat: 409 };
+  const state = { heartbeat: 409, refusal: '{"error":"Lease missing, expired, or superseded; claim the task again"}' };
   const server: Server = createServer((request, response) => {
     hits.push(request.url!);
     const heartbeat = request.url!.endsWith('/heartbeat');
     response.writeHead(heartbeat ? state.heartbeat : 200, { 'Content-Type': 'application/json' });
-    response.end(request.url === '/healthz' ? JSON.stringify({ version }) : heartbeat ? '{"error":"superseded epoch"}' : work);
+    response.end(request.url === '/healthz' ? JSON.stringify({ version }) : heartbeat ? state.refusal : work);
   });
   const listening = await new Promise<boolean>(done => { server.once('error', () => done(false)); server.listen(port, '127.0.0.1', () => done(true)); });
   return { hits, state, listening, port: listening ? (server.address() as AddressInfo).port : port, close: () => new Promise<void>(done => listening ? server.close(() => done()) : done()) };
@@ -118,7 +118,7 @@ test('integration:chart-exercise-port-forward — the chart exercise forwards a 
   assert.match(exercise, /^FORWARD_ATTEMPTS="\$\{FORWARD_ATTEMPTS:-(\d+)\}"; FORWARD_RETRY_WAIT="\$\{FORWARD_RETRY_WAIT:-(\d+)\}"$/m, 'the forward\'s retry bound is stated and overridable');
   const [, attempts, wait] = /^FORWARD_ATTEMPTS="\$\{FORWARD_ATTEMPTS:-(\d+)\}"; FORWARD_RETRY_WAIT="\$\{FORWARD_RETRY_WAIT:-(\d+)\}"$/m.exec(exercise)!;
   assert.ok(Number(attempts) >= 2 && Number(attempts) * (30 + Number(wait)) <= 300, `the forward is retried a bounded while: ${attempts} × (30 + ${wait})s`);
-  assert.ok(exercise.includes(`rejects POST "work/$WORK_ID/heartbeat" "$WORKER_TOKEN" '{"epoch":2}'`), 'the superseded-epoch check requires a refusal from the release, so a lost forward cannot pass it vacuously');
+  assert.ok(exercise.includes(`rejects POST "work/$WORK_ID/heartbeat" "$WORKER_TOKEN" '{"epoch":2}' 409 'superseded'`), 'the superseded-epoch check requires the heartbeat\'s own 409 superseded-lease refusal, so a lost forward or an unrelated 4xx cannot pass it vacuously');
   assert.ok(!/rollout status[^\n]*\|\| true/.test(exercise), 'a failed rollout is never discarded');
 
   const pod = await release('1.2.3', '[{"id":"w1","key":"GY-1"}]');
@@ -156,7 +156,7 @@ test('integration:chart-exercise-port-forward — the chart exercise forwards a 
     // forward's own output, the pods, and a last line naming it, and so does a request that
     // needs the forward re-established.
     const lost = await run([{ refuse: true }], 'forward', ports);
-    assert.equal(lost.status, 1);
+    assert.equal(lost.status, 1, lost.stderr);
     assert.equal(lost.invocations.length, 3, 'the bound holds');
     const lines = lost.stderr.trim().split('\n');
     assert.equal(lines.at(-1), 'port-forward to release gy never became reachable after 3 attempts');
@@ -178,15 +178,15 @@ test('integration:chart-exercise-port-forward — the chart exercise forwards a 
     assert.equal(stuck.invocations.length, 0, 'an incomplete rollout is never forwarded');
     assert.equal(stuck.stderr.trim().split('\n').at(-1), 'port-forward to release gy never became reachable after 3 attempts');
 
-    // Refusal: the superseded-epoch check passes only on the release's own 4xx. A forward lost around
-    // the request is a retried transport failure, never the refusal; an acceptance fails the gate, and
-    // so does a forward that never comes back.
-    const reject = 'forward\nrejects POST work/w1/heartbeat secret-token \'{"epoch":2}\'\necho refused\nstop_forward';
+    // Refusal: the superseded-epoch check passes only on the heartbeat's own 409 naming the superseded
+    // lease. A forward lost around the request is a retried transport failure, never the refusal; an
+    // acceptance fails the gate, and so does a forward that never comes back or an unrelated 4xx.
+    const reject = 'forward\nrejects POST work/w1/heartbeat secret-token \'{"epoch":2}\' 409 superseded\necho refused\nstop_forward';
     pod.hits.length = 0;
     const refused = await run([{ dieAfter: 1 }, {}], reject, ports);
     assert.equal(refused.status, 0, refused.stderr);
     assert.equal(refused.stdout.trim(), 'refused');
-    assert.match(refused.stderr, /api POST \/api\/work\/w1\/heartbeat refused with status 409, as it must be/);
+    assert.match(refused.stderr, /api POST \/api\/work\/w1\/heartbeat refused with status 409 \(Lease missing, expired, or superseded; claim the task again\), as it must be/);
     assert.equal(refused.invocations.length, 2, 'the lost forward is re-established before the refusal is read');
     assert.ok(pod.hits.includes('/api/work/w1/heartbeat'), 'the refusal came from the release');
     assert.deepEqual(refused.leftover, []);
@@ -197,6 +197,15 @@ test('integration:chart-exercise-port-forward — the chart exercise forwards a 
     const accepted = await run([{}], reject, ports);
     assert.equal(accepted.status, 1); assert.equal(accepted.stdout, '');
     assert.equal(accepted.stderr.trim().split('\n').at(-1), 'api POST /api/work/w1/heartbeat was accepted with status 200; the release must refuse it');
-    pod.state.heartbeat = 409;
+    // Unrelated refusals: broken credentials, a missing route, or a 409 for another reason never stand in
+    // for the stale-epoch refusal; each ends the exercise at once, naming the status and body it got.
+    for (const [status, refusal] of [[401, '{"error":"Invalid token"}'], [403, '{"error":"Operator permission required"}'], [404, '{"error":"Not found"}'], [409, '{"error":"Work item is not in progress"}'], [409, 'superseded, but not JSON']] as const) {
+      pod.state.heartbeat = status; pod.state.refusal = refusal; pod.hits.length = 0;
+      const unrelated = await run([{}], reject, ports);
+      assert.equal(unrelated.status, 1, `${status} ${refusal} must fail the check`); assert.equal(unrelated.stdout, '', `${status} ${refusal} never passes the check`);
+      assert.equal(unrelated.stderr.trim().split('\n').at(-1), `api POST /api/work/w1/heartbeat was refused with status ${status}, body: ${refusal}; the release must refuse it with 409 naming 'superseded'`);
+      assert.equal(pod.hits.filter(hit => hit.endsWith('/heartbeat')).length, 1, 'an unrelated refusal is an answer, not retried');
+    }
+    pod.state.heartbeat = 409; pod.state.refusal = '{"error":"Lease missing, expired, or superseded; claim the task again"}';
   } finally { await pod.close(); await decoy.close(); }
 });
