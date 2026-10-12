@@ -393,13 +393,13 @@ export const e2eSuite = (cases: readonly CaseFile[], token: string, options: { f
   /** Which cases run: those targeting uat by default; a managed repository's candidate (GY-1535) runs every required case too. */
   select?: (entry: CaseFile) => boolean;
   /** Run every selected case even after a required one fails, so each records its own result (GY-1535). */
-  runAll?: boolean; signal?: AbortSignal; withholdSecrets?: boolean } = {}) => ({
+  runAll?: boolean; signal?: AbortSignal; withholdSecrets?: boolean; hostEnvironment?: NodeJS.ProcessEnv } = {}) => ({
   name: 'e2e',
   run: async (url: string, candidate: { id: string } | null) => {
     const selected = cases.filter(options.select ?? (entry => entry.definition.target === 'uat'));
     if (!selected.length) return { name: 'e2e', passed: false, detail: options.select ? 'no required or uat E2E case is in the checkout, so the suite exercised nothing' : 'no E2E case targets uat, so the suite exercised nothing' };
     const report = await runCases(selected, { url, token, environment: 'uat', runId: candidate ? `rc-${candidate.id}` : undefined, fetcher: options.fetcher, launcher: options.launcher, stepTimeoutMs: options.stepTimeoutMs,
-      root: options.root, retries: releaseRetries, stopOnRequiredFailure: !options.runAll, signal: options.signal, withholdSecrets: options.withholdSecrets });
+      root: options.root, retries: releaseRetries, stopOnRequiredFailure: !options.runAll, signal: options.signal, withholdSecrets: options.withholdSecrets, hostEnvironment: options.hostEnvironment });
     await options.report?.(report);
     const verdict = releaseVerdict(report), detail = failureDetail(report);
     const executed = report.cases.length - verdict.unrun.length;

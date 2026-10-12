@@ -270,7 +270,8 @@ export type MergeOutcome =
  * one that stood still was rejected for another cause and is refused `unmovedTipReason`, queued
  * for a later cycle rather than re-trialled. A failed trial, a failing required case on the preview
  * or a conflict is refused naming what failed, and the rework that refusal grounds is the loop's to
- * request; a preview that timed out is refused leaving the head queued, as a trial timeout does.
+ * request; a preview that timed out or could not run is refused leaving the head queued, as a trial
+ * timeout does.
  */
 export async function mergeOne(ports: MergePorts, item: Work): Promise<MergeOutcome> {
   const candidate = item.candidate;
@@ -304,12 +305,14 @@ export async function mergeOne(ports: MergePorts, item: Work): Promise<MergeOutc
     await ports.record(item, { kind: 'intent', head, baseTip, mergeSha, risk: riskOf(item).risk, at: at() });
     const run = await ports.trial(mergeSha, merged.files, item);
     const trialFailure = trialFailureReason({ run });
-    const preview = !trialFailure && ports.preview ? await ports.preview(mergeSha, merged.files, item) : null;
+    // A preview that throws (a host failure, not the merge's) is recorded and refused as one that could not run, never left as an open intent.
+    const preview = !trialFailure && ports.preview ? await ports.preview(mergeSha, merged.files, item).catch((error: unknown): PreviewVerdict =>
+      ({ result: 'error', mergeSha, cases: [], failed: [], detail: (error instanceof Error ? error.message : String(error)).slice(0, 900), durationMs: 0 })) : null;
     await ports.record(item, { kind: 'trial', head, baseTip, mergeSha, build: run.build, tests: run.tests, files: run.files, proofs: run.proofs, durationMs: run.durationMs, ...(preview ? { preview } : {}) });
     const failure = trialFailure ?? previewFailureReason(preview, trialFailurePrefix);
     if (failure) {
       await ports.record(item, { kind: 'refused', head, reason: failure });
-      if (preview?.result === 'timeout') return { outcome: 'requeued', reason: failure, pushes };
+      if (preview?.result === 'timeout' || preview?.result === 'error') return { outcome: 'requeued', reason: failure, pushes };
       return { outcome: 'refused', reason: failure, trial: run, conflict: [], ...(preview ? { preview } : {}) };
     }
     pushes += 1;

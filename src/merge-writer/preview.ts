@@ -1,7 +1,7 @@
 // Concern: the merge preview (GY-1718) — a passing trial merge built and served as a throwaway static site, the repository's required and uat E2E cases run against it before the merge lands.
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { mkdtemp, readdir, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { defaultChildRun, type ChildRun } from '../child-runner.js';
 import { loadCases, type CaseFile } from '../e2e/case.js';
@@ -18,13 +18,14 @@ export interface PreviewSite { directory: string; build: string | null }
 export const previewSiteOf = (environment: NodeJS.ProcessEnv): PreviewSite | null =>
   environment.GRAPHYARD_UAT_STATIC ? { directory: environment.GRAPHYARD_UAT_STATIC, build: environment.GRAPHYARD_UAT_BUILD || null } : null;
 
-/** One case's result on the preview. */
-export interface PreviewCase { case: string; verdict: 'passed' | 'failed' | 'flaky' | 'unrun'; required: boolean }
+/** One case's result on the preview; an `unrun` case names why in `reason` (a declared install secret the preview withholds). */
+export interface PreviewCase { case: string; verdict: 'passed' | 'failed' | 'flaky' | 'unrun'; required: boolean; reason?: string }
 /**
  * The preview's verdict, recorded with the merge's `trial` record: `pass`, `fail` (a required case
- * failed or was flaky, or the static build failed; `failed` names them) or `timeout`.
+ * failed or was flaky, the merge's cases did not load, or the static build failed; `failed` names
+ * them), `timeout`, or `error` (the preview itself could not run: a host failure, not the merge's).
  */
-export interface PreviewVerdict { result: 'pass' | 'fail' | 'timeout'; mergeSha: string; cases: PreviewCase[]; failed: string[]; detail: string; durationMs: number }
+export interface PreviewVerdict { result: 'pass' | 'fail' | 'timeout' | 'error'; mergeSha: string; cases: PreviewCase[]; failed: string[]; detail: string; durationMs: number }
 
 /**
  * Why the merge of `files` needs no preview, or null when it does: the repository names no static
@@ -97,23 +98,34 @@ export interface PreviewInput {
   hostEnvironment?: NodeJS.ProcessEnv;
 }
 
+/** Host variables a preview's processes never get: the coordinator's runtime directory and display, whose sockets (a session bus, an agent, a keyring) answer as the coordinator. */
+const previewWithheldHost = new Set(['HOME', 'XDG_RUNTIME_DIR', 'DISPLAY']);
 /**
- * The environment the candidate's build runs in: the host basics a command needs (e2e/steps.ts's
- * `hostPassthrough`) and nothing else, so a build script the merge brings in reads no coordinator
- * credential (`GRAPHYARD_UAT_TOKEN`, GitHub or Graphyard tokens).
+ * The environment every process the merge brings in runs in — its build and its command and agent
+ * cases: the host basics a command needs (e2e/steps.ts's `hostPassthrough`) with `home`, a fresh
+ * empty directory of the preview, as HOME and every XDG base directory, and nothing else. So a
+ * script the merge brings in reads no coordinator credential: no token variable
+ * (`GRAPHYARD_UAT_TOKEN`, GitHub or Graphyard tokens), no file found through HOME or XDG (such as
+ * `~/.config/graphyard/`), and no socket under the coordinator's XDG_RUNTIME_DIR. Playwright's
+ * browsers are still found where the host keeps them.
  */
-export function previewBuildEnvironment(host: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = {};
-  for (const name of hostPassthrough) if (host[name] !== undefined) env[name] = host[name];
-  return env;
+export function previewEnvironment(home: string, host: NodeJS.ProcessEnv = process.env): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const name of hostPassthrough) if (host[name] !== undefined && !previewWithheldHost.has(name)) env[name] = host[name]!;
+  if (!env.PLAYWRIGHT_BROWSERS_PATH && host.HOME) env.PLAYWRIGHT_BROWSERS_PATH = join(host.HOME, '.cache', 'ms-playwright');
+  return { ...env, HOME: home, XDG_CONFIG_HOME: join(home, '.config'), XDG_CACHE_HOME: join(home, '.cache'), XDG_DATA_HOME: join(home, '.local', 'share'), XDG_STATE_HOME: join(home, '.local', 'state'), TMPDIR: join(home, 'tmp') };
 }
 
+/** The cases a preview judges: every required or uat case of the merge. */
+export const previewCase = (entry: CaseFile) => entry.definition.required || entry.definition.target === 'uat';
 /**
- * The cases a preview runs: every required or uat case of the merge that declares no secret. The
- * cases come from the merge the preview exists to judge, so none may read the install's
- * `e2e-secrets.uat.env`; a case that needs a secret runs on the release candidate instead (GY-1535).
+ * Why a selected case is not run on the preview, or null when it runs: it declares an install
+ * secret. The cases come from the merge the preview exists to judge, so none may read the install's
+ * `e2e-secrets.uat.env`; such a case is recorded `unrun` with this reason and runs on the release
+ * candidate instead (GY-1535).
  */
-export const previewCase = (entry: CaseFile) => (entry.definition.required || entry.definition.target === 'uat') && !entry.definition.secrets.length;
+export const previewWithheld = (entry: CaseFile) =>
+  entry.definition.secrets.length ? `declares the install secret${entry.definition.secrets.length === 1 ? '' : 's'} ${entry.definition.secrets.join(', ')}, which the preview withholds; it runs on the release candidate` : null;
 
 const cut = (text: string) => text.replace(/\s+/g, ' ').trim().slice(0, 900);
 
@@ -121,9 +133,10 @@ const cut = (text: string) => text.replace(/\s+/g, ' ').trim().slice(0, 900);
  * The preview of one passing trial merge: in a free slot (at most `previewConcurrency` at once), a
  * detached checkout of `mergeSha` under `base` marked with this process as its owner, the site's
  * build, its output served on loopback (`serveStaticSite`, answering `mergeSha` on /healthz), and
- * every required and uat case of the checkout that declares no secret (`previewCase`) run against
- * it (`projectCaseSuite`). The build runs with the host basics only and the cases with a throwaway
- * token and no install secret, since both come from the merge the preview exists to judge. When the budget
+ * every required and uat case of the checkout (`previewCase`) run against it (`projectCaseSuite`),
+ * those declaring an install secret recorded unrun (`previewWithheld`). The build and the cases'
+ * processes run in `previewEnvironment` (a throwaway HOME, no coordinator credential or socket) and
+ * the cases with a throwaway token, since all come from the merge the preview exists to judge. When the budget
  * runs out the run is cancelled — the build's shell killed, the case runner's requests aborted and
  * its browser and step processes killed, no further step started — and awaited until it has ended; only then, whatever
  * the outcome, is the server closed, the checkout removed and the slot freed, so no work of an
@@ -146,24 +159,32 @@ export async function runPreview(input: PreviewInput): Promise<PreviewVerdict> {
     const preview = async (): Promise<PreviewVerdict> => {
       await run('git', ['-C', input.root, 'worktree', 'add', '--detach', checkout, input.mergeSha], { timeoutMs: input.timeoutMs });
       cancelled();
+      const home = join(directory!, 'home'), environment = previewEnvironment(home, input.hostEnvironment);
+      await mkdir(environment.TMPDIR, { recursive: true });
       if (input.site.build) {
-        const failed = await buildStaticSite(input.site.build, checkout, input.timeoutMs, input.shell, signal, previewBuildEnvironment(input.hostEnvironment));
+        const failed = await buildStaticSite(input.site.build, checkout, input.timeoutMs, input.shell, signal, environment);
         cancelled();
         if (failed) return verdict('fail', failed, [], ['build']);
       }
-      const selected = existsSync(join(checkout, 'e2e')) ? (await loadCases(checkout)).filter(previewCase) : [];
-      if (!selected.length) return verdict('pass', 'no required or uat E2E case without a declared secret is in the merge, so the preview exercised nothing');
+      // The case files are the merge's own: one that does not load fails the preview as a failing case would, naming why.
+      let selected: CaseFile[] = [];
+      try { selected = existsSync(join(checkout, 'e2e')) ? (await loadCases(checkout)).filter(previewCase) : []; }
+      catch (error) { return verdict('fail', `the merge's E2E cases do not load: ${error instanceof Error ? error.message : String(error)}`, [], ['cases']); }
+      const withheld = selected.flatMap(entry => { const reason = previewWithheld(entry); return reason ? [{ case: entry.definition.id, verdict: 'unrun' as const, required: entry.definition.required, reason }] : []; });
+      const unrun = withheld.length ? `; not run on the preview, each declaring an install secret it withholds: ${withheld.map(entry => `${entry.case}${entry.required ? ' (required)' : ''}`).join(', ')}` : '';
+      if (selected.length === withheld.length) return verdict('pass', `no required or uat E2E case the preview can run is in the merge, so it exercised nothing${unrun}`, withheld);
       cancelled();
       served = await serveStaticSite(join(checkout, input.site.directory), input.mergeSha);
       let report: E2eReport | null = null;
       // The cases come from the merge itself, so they run with a token minted for this preview, never the UAT principal's, and never read the install's secrets; the runner keeps their requests on the served origin.
-      const suite = projectCaseSuite(checkout, `preview-${randomUUID()}`, { fetcher: input.fetcher, launcher: input.launcher, stepTimeoutMs: input.stepTimeoutMs, signal, select: previewCase, withholdSecrets: true, report: value => { report = value; } });
+      const suite = projectCaseSuite(checkout, `preview-${randomUUID()}`, { fetcher: input.fetcher, launcher: input.launcher, stepTimeoutMs: input.stepTimeoutMs, signal, hostEnvironment: environment,
+        select: entry => previewCase(entry) && !previewWithheld(entry), withholdSecrets: true, report: value => { report = value; } });
       const result = await suite.run(served.url, { id: `preview-${input.mergeSha.slice(0, 12)}` } as ReleaseCandidate);
       cancelled();
       const ran = report as E2eReport | null;
-      const cases = (ran?.cases ?? []).map(outcome => ({ case: outcome.id, verdict: outcome.verdict, required: outcome.required }));
+      const cases = [...(ran?.cases ?? []).map(outcome => ({ case: outcome.id, verdict: outcome.verdict, required: outcome.required })), ...withheld];
       const blocking = ran ? releaseVerdict(ran).blocking.map(outcome => outcome.id) : [];
-      return result.passed ? verdict('pass', result.detail, cases) : verdict('fail', result.detail, cases, blocking.length ? blocking : ['e2e']);
+      return result.passed ? verdict('pass', `${result.detail}${unrun}`, cases) : verdict('fail', `${result.detail}${unrun}`, cases, blocking.length ? blocking : ['e2e']);
     };
     const expired = new Promise<'expired'>(accept => { timer = setTimeout(() => accept('expired'), input.timeoutMs); });
     running = preview();
@@ -189,12 +210,15 @@ export async function runPreview(input: PreviewInput): Promise<PreviewVerdict> {
 /**
  * The refusal a preview's verdict records, or null when it passed. A failing required case refuses
  * the merge as a failed trial does (`trial failed: …`, which grounds the rework, GY-1524); a
- * timeout measures the host, not the merge, so its refusal leaves the head queued to be tried again.
+ * timeout or an error measures the host, not the merge, so its refusal leaves the head queued to be
+ * tried again.
  */
 export function previewFailureReason(preview: PreviewVerdict | null | undefined, trialFailurePrefix: string): string | null {
   if (!preview || preview.result === 'pass') return null;
   if (preview.result === 'timeout') return `preview of ${preview.mergeSha.slice(0, 12)} timed out: ${preview.detail}`;
-  const named = preview.failed.filter(name => name !== 'e2e' && name !== 'build');
+  if (preview.result === 'error') return `preview of ${preview.mergeSha.slice(0, 12)} could not run: ${preview.detail}`.slice(0, 2000);
+  const named = preview.failed.filter(name => name !== 'e2e' && name !== 'build' && name !== 'cases');
   if (preview.failed.includes('build')) return `${trialFailurePrefix}: preview build: ${preview.detail}`.slice(0, 2000);
+  if (preview.failed.includes('cases')) return `${trialFailurePrefix}: preview: ${preview.detail}`.slice(0, 2000);
   return `${trialFailurePrefix}: E2E ${named.length ? `case${named.length === 1 ? '' : 's'} ${named.slice(0, 20).join(', ')}` : 'cases'} failed on the preview of ${preview.mergeSha.slice(0, 12)}`;
 }

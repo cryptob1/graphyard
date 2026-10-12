@@ -40,8 +40,8 @@ export type MergeRefused = z.infer<typeof mergeRefusedSchema>;
 const proofCounts = z.record(z.string().max(200), z.object({ executed: z.number().int().min(0), failed: z.number().int().min(0) }).passthrough());
 /** GY-1718: the preview of a passing trial (merge-writer/preview.ts) — its result, each required and uat case's verdict, the failing ones named. */
 export const previewVerdictSchema = z.object({
-  result: z.enum(['pass', 'fail', 'timeout']), mergeSha: sha, detail: z.string().max(1000), durationMs: z.number().int().min(0),
-  cases: z.array(z.object({ case: z.string().min(1).max(200), verdict: z.enum(['passed', 'failed', 'flaky', 'unrun']), required: z.boolean() }).strict()).max(500),
+  result: z.enum(['pass', 'fail', 'timeout', 'error']), mergeSha: sha, detail: z.string().max(1000), durationMs: z.number().int().min(0),
+  cases: z.array(z.object({ case: z.string().min(1).max(200), verdict: z.enum(['passed', 'failed', 'flaky', 'unrun']), required: z.boolean(), reason: z.string().max(500).optional() }).strict()).max(500),
   failed: z.array(z.string().min(1).max(200)).max(500),
 }).strict();
 export type MergeLedgerPreview = z.infer<typeof previewVerdictSchema>;
