@@ -543,6 +543,7 @@
     "tests/merge-delegation-clean.test.ts": 2085,
     "tests/merge-executor-owner.test.ts": 1617,
     "tests/merge-executor.test.ts": 4000,
+    "tests/merge-preview.test.ts": 4500,
     "tests/merge-fault-class.test.ts": 1411,
     "tests/merge-ledger.test.ts": 600,
     "tests/merge-queue-removed.test.ts": 2500,
@@ -715,6 +716,7 @@
     "tests/soak-main-guard.test.ts": 31000,
     "tests/soak-main-watch.test.ts": 102000,
     "tests/soak-master-lock-refusal.test.ts": 30150,
+    "tests/soak-merge-preview.test.ts": 14000,
     "tests/soak-merge-writer.test.ts": 4000,
     "tests/soak-observation-window.test.ts": 45000,
     "tests/soak-orphan-supervisor.test.ts": 1500,
@@ -804,6 +806,7 @@
     "tests/capacity-redispatch-preserves-attempt.test.ts": 12000,
     "tests/capacity-hold-respects-machine-bounds.test.ts": 4000,
     "tests/scenario-capacity-limit-redispatch-registered.test.ts": 4500,
-    "tests/chart-exercise-port-forward.test.ts": 45000
+    "tests/chart-exercise-port-forward.test.ts": 45000,
+    "tests/webhook-ignored-reason.test.ts": 3000
   }
 }
