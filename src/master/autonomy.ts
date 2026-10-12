@@ -648,7 +648,7 @@ export function guardBroadScope(input: { plannedFiles?: string[]; title?: string
   if (!options.allow) throw new Error(`${options.command} refused a high-conflict scope: ${refusals.map(refusal => refusal.reason).join('; ')}. Pass ${broadScopeFlag} to record the exception in the audited reason instead`);
   return `Broad scope exception (${refusals.map(refusal => refusal.scope).join(', ')}) recorded with ${broadScopeFlag}: ${reason}`;
 }
-export const autonomySubcommands = ['autonomy', 'create', 'release', 'unblock', 'requirements', 'decide', 'decisions', 'approve', 'approver', 'principals', 'restart', 'environments', 'context', 'escalation'] as const;
+export const autonomySubcommands = ['autonomy', 'create', 'release', 'unblock', 'defer', 'requirements', 'decide', 'decisions', 'approve', 'approver', 'principals', 'restart', 'environments', 'context', 'escalation'] as const;
 export interface AutonomyDependencies {
   coordinator: (path: string) => Promise<any>;
   readSecret: () => Promise<string>;
@@ -712,6 +712,11 @@ export async function runAutonomyCommand(root: string, config: MasterConfig, id:
   if (id === 'release' || id === 'unblock') {
     const work = await item(args[0]), text = reason(args.slice(1)), write = async (work: Work, attempt = 1) => call(await operator(), `work/${work.id}/${id === 'release' ? 'ready' : 'unblock'}`, { expectedRevision: work.revision, reason: text }, attemptKey(attempt));
     return id === 'release' ? write(work) : unblockWithRetry(work, write, item);
+  }
+  if (id === 'defer') {
+    // GY-1740: an unleased post-deploy follow-up held on the instant its reading can first exist; its blocker cleared in the same write.
+    const work = await item(args[0]); if (!args[1]) throw new Error('Use master defer GY-N NOT-BEFORE REASON');
+    return call(await operator(), `work/${work.id}/window`, { notBefore: args[1], reason: reason(args.slice(2)), expectedRevision: work.revision });
   }
   if (id === 'requirements') {
     const work = await item(args[0]); if (!args[1]) throw new Error(`Use master requirements GY-N FILE [${broadScopeFlag}] REASON`);
