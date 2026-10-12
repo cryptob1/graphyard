@@ -17,10 +17,7 @@ import { type HostMemoryReading, type ResourceReclaimReport, reclaimResources, d
 import { healUserSupervision, type UserSupervisionAllowance, type UserSupervisionHeal } from '../user-manager.js';
 import { RefusedResponse } from '../model/refusal.js';
 
-/**
- * GY-1713: the refusal body's `error` and zod `issues`, so a recorded reason names which field the
- * plane refused — not the bare status. A body without `error` is stringified as before.
- */
+/** GY-1713: body `error` + zod `issues` so attention names the refused field; else stringify. */
 export function refusedBodyDetail(result: unknown): string {
   if (!result || typeof result !== 'object') return JSON.stringify(result);
   const body = result as { error?: unknown; issues?: unknown };

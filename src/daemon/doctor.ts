@@ -297,13 +297,9 @@ const invalidFiling = (file: DoctorFile, error: unknown) =>
   `The doctor asked to file "${file.title}" (${file.faultClass}, P${file.priority}), but the filing fails the checks master create applies, so it is not filed; file it by hand with master create: ${message(error)}`.slice(0, 2000);
 
 /**
- * GY-1530 / GY-1713: whether the control plane's create route refused the filing itself — a 409
- * (`demand` of create) or a 400 (zod "Invalid input", the served schema rejecting a body the loop's
- * local parse still accepted under skew) — rather than failing to answer. The content is what it
- * refused, so a retry of the same content is refused the same way, for ever: GY-1516's doctor re-filed
- * one dead filing every cycle for hours, and GY-1700 / doctor:file:capacity recurred as unclassified
- * step faults on every 400. Read structurally from the response, else from the text the
- * operator-agent post wraps the status in. The diagnosis step reads its fix item's refusal by the same rule.
+ * GY-1530 / GY-1713: create refused the filing (409 demand, or 400 Invalid input under schema skew)
+ * rather than failing to answer — same content stays refused forever (GY-1516 / GY-1700). Structural
+ * status else the operator-agent text; diagnosis reads fix-item refusals by the same rule.
  */
 export const createRefused = (error: unknown) => error instanceof RefusedResponse
   ? error.status === 409 || error.status === 400
