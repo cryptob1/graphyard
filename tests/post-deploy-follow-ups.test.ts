@@ -416,6 +416,13 @@ test('unit:post-deploy-filing-defers-when-release-unavailable — when the relea
   // One already filed under its request id is named, never deferred, even where the filer cannot run.
   const { verified: named } = await verifyBehind(gy1700, at, async () => ({ reason: missing }), { all: [gy1700, { ...gy1700, key: 'GY-1724', description: `Post-deploy follow-up: ${ids[0]}\n\n…` } as Work] });
   assert.deepEqual(named.postDeploy.map(check => [check.followUp, !!check.deferred]), [['GY-1724', false], [null, true]]);
+  // A release filer that throws where this checkout's code sees nothing owed still records nothing: the release may owe what this code cannot recognise.
+  const quiet = delivered({ key: 'GY-1701', criteria: [{ id: 'AC-1', text: 'The change ships', proofs: ['unit:ships'] }] });
+  for (const isolate of [releaseAt([], async () => { throw new Error('spawn ENOMEM'); }), releaseAt([], null)]) {
+    const thrown = await verifyBehind(quiet, at, isolate);
+    assert.deepEqual([thrown.verified.result, thrown.filed, thrown.recorded], ['refused', [], []]);
+    assert.match(thrown.verified.refusals.join('; '), /^GY-1701: whether the release ba607f8a809e owes post-deploy follow-ups is its own code's to decide, and the observed release ba607f8a809e's own filer could not run: .*; the deployment observation waits for it$/);
+  }
 });
 
 test('unit:post-deploy-followup-window-or-deferral — with the coordinator checkout behind the serving release, every windowed post-deploy follow-up verify-deployment produces is either filed with an instant no earlier than its reading can exist, or deferred unfiled: never filed window-less', async () => {
@@ -512,6 +519,11 @@ test('unit:post-deploy-filing-defers-when-release-unavailable — the executor\'
     assert.match(error, /the deployment observation waits for it$/);
     assert.deepEqual([filed, recorded], [[], []], `${label}: nothing is filed and nothing is recorded`);
   }
+  // A release filer that throws where this checkout's code sees nothing owed fails the action rather than recording the deployment.
+  const quiet = delivered({ key: 'GY-1701', criteria: [{ id: 'AC-1', text: 'The change ships', proofs: ['unit:ships'] }] });
+  const thrown = await executorVerify(quiet, at, filerAt([], async () => { throw new Error('spawn ENOMEM'); }));
+  assert.match(await thrown.run.then(() => assert.fail('the action fails'), (failure: Error) => failure.message), /^GY-1701: whether the release ba607f8a809e owes post-deploy follow-ups is its own code's to decide, and the observed release ba607f8a809e's own filer could not run: spawn ENOMEM; the deployment observation waits for it$/);
+  assert.deepEqual([thrown.filed, thrown.recorded], [[], []], 'nothing is recorded when the release\'s filer throws');
   // The retry that can run the release's filer files each follow-up with its window, under the same request id.
   const retried = await executorVerify(gy1700, '2026-10-12T07:43:40.939Z', filerAt([]));
   await retried.run;

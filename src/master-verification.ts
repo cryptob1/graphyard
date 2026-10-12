@@ -257,7 +257,9 @@ export async function verifyDeployment(work: Work, effects: VerificationEffects,
     if (!assessment.verifiable) return result(assessment, null);
     // Follow-ups are filed before the observation is recorded: a filing that fails leaves the delivery
     // unobserved, so the retry files it, where recording first would refuse every retry as already observed.
-    const postDeploy = await filePostDeployFollowUps(current, assessment.record!.sha, snapshot.work, effects.file, new Date(now()), effects.patterns, new Date(observation.at), checkout ? checkout.checks ?? noReleaseFiler : effects.checks);
+    let postDeploy: FiledPostDeployCheck[];
+    try { postDeploy = await filePostDeployFollowUps(current, assessment.record!.sha, snapshot.work, effects.file, new Date(now()), effects.patterns, new Date(observation.at), checkout ? checkout.checks ?? noReleaseFiler : effects.checks); }
+    catch (error) { if (error instanceof ReleaseFilerUnavailable) return result({ ...assessment, verifiable: false, refusals: [error.message] }, null); throw error; }
     const deferred = postDeploy.filter(check => check.deferred);
     // A deferred filing leaves the delivery unobserved for the same reason: the attempt that can run the release's filer files it.
     if (deferred.length) return result({ ...assessment, verifiable: false, refusals: deferred.map(check => `${check.criterion} (${check.proof}) owes its post-deploy follow-up ${check.requestId}, whose filing is deferred: ${check.deferred}`) }, null, postDeploy);
@@ -437,6 +439,8 @@ const followUpOf = (item: Pick<Work, 'description'>) => item.description?.starts
  * another so none is filed against a snapshot another has just changed — so the live observation
  * the merge never waited for is owned by an item rather than by nobody.
  */
+/** The release's filer failed where this checkout's code sees nothing to defer: what is owed cannot be known, so nothing is recorded (GY-1732). */
+export class ReleaseFilerUnavailable extends Error {}
 /** A check as filed: its follow-up's key, or — deferred (GY-1732) — the request id a later filing keeps and why it waits. */
 export type FiledPostDeployCheck = Omit<PostDeployCheck, 'followUp'> & { followUp: string | null; requestId?: string; deferred?: string };
 export async function filePostDeployFollowUps(work: Work, release: string, all: readonly Pick<Work, 'key' | 'description'>[], file?: VerificationEffects['file'], now = new Date(), patterns?: PatternReader, servedAt?: Date, filer: PostDeployFiler = localPostDeployChecks) {
@@ -444,7 +448,12 @@ export async function filePostDeployFollowUps(work: Work, release: string, all: 
   let checks: PostDeployCheck[];
   // GY-1732: the filer is the observed release's code; one that cannot run defers every owed follow-up rather than filing it without the release's window.
   try { checks = await filer({ work, release, now: now.toISOString(), projections: await patternProjections(work, patterns), ...(servedAt ? { servedAt: servedAt.toISOString() } : {}) }); }
-  catch (error) { return deferPostDeployFollowUps(work, release, all, `the observed release ${release.slice(0, 12)}'s own filer could not run: ${message(error)}`.slice(0, 2000)); }
+  catch (error) {
+    const reason = `the observed release ${release.slice(0, 12)}'s own filer could not run: ${message(error)}`.slice(0, 2000), deferred = deferPostDeployFollowUps(work, release, all, reason);
+    // What is owed is the release's code to decide: where this checkout's code sees nothing left to defer, the release may still owe one, so the filing fails rather than reading as nothing owed.
+    if (!deferred.some(check => check.deferred)) throw new ReleaseFilerUnavailable(`${work.key}: whether the release ${release.slice(0, 12)} owes post-deploy follow-ups is its own code's to decide, and ${reason}; the deployment observation waits for it`);
+    return deferred;
+  }
   for (const { followUp, ...rest } of checks) {
     if (!followUp) { results.push({ ...rest, followUp: null }); continue; }
     const filed = known.find(item => followUpOf(item) === followUp.requestId)?.key;
