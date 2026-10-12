@@ -10,7 +10,7 @@ import { leaseCommands } from './store/pools.js';
 import { compactHeartbeatReceipt } from './store/receipts.js';
 import { authorizedForProof, unauthorizedProofs } from './proof-grants.js';
 import { workspacePath, pathsOverlap, validBranch } from './workspace.js';
-import { activeLease, dropRetiredQueueFields, admin, assertReviewerProfiles, operatorCapability, escalationTriggers, raiseEscalation, releaseLeadHold, resolveEscalation, standingEscalations, attestationFor, attestationKinds, attestationsFromLedger, leaseLapseCause, leaseLossEpoch, leaseLossReason, settleableLeaseLoss, submittedEpoch, type Attestation, requireCurrent, createSchema, criteriaSchema, criterionSchema, bindingApproval, carriedApproval, currentCarry, refreshedCarriedApproval, currentEvidence, attachedCriteria, exerciseRefusal, proofExerciseSchema, decideCarry, exactApproval, type CarriedApproval, deploySmokeProof, deploySmokeRequired, inheritedObligations, pathScopeContains, requiredProofs, resourcesSchema, demand, evaluate, mergeabilityComputingRefusal, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Evidence, type EvidenceAttestation, type Lease, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability } from './model.js';
+import { activeLease, dropRetiredQueueFields, admin, assertReviewerProfiles, operatorCapability, escalationTriggers, raiseEscalation, releaseLeadHold, resolveEscalation, standingEscalations, attestationFor, attestationKinds, attestationsFromLedger, leaseLapseCause, leaseLossEpoch, leaseLossReason, settleableLeaseLoss, submittedEpoch, type Attestation, requireCurrent, createSchema, criteriaSchema, criterionSchema, bindingApproval, carriedApproval, currentCarry, refreshedCarriedApproval, currentEvidence, attachedCriteria, exerciseRefusal, proofExerciseSchema, decideCarry, exactApproval, type CarriedApproval, deploySmokeProof, deploySmokeRequired, inheritedObligations, pathScopeContains, requiredProofs, resourcesSchema, demand, evaluate, mergeabilityComputingRefusal, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Evidence, type EvidenceAttestation, type Lease, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability, deferBoundMs, servingReleaseProof } from './model.js';
 import { Refusal, demandWork } from './model/refusal.js';
 import { resourceConflicts } from './coordination.js';
 import { containmentAttestation, containmentSettlementRefusals, containmentVerificationSchema } from './quarantine.js';
@@ -136,6 +136,9 @@ const commands = {
   // `partialWork` is how the worker's CLI kept what the attempt had not committed before the
   // blocker ended it (GY-1008): the same record an interrupted attempt carries.
   blocked: z.object({ epoch, reason: z.string().max(2000).nullable(), partialWork: partialWorkSchema.optional() }).strict(),
+  // GY-1726: a post-deploy follow-up whose reading cannot exist before `notBefore` ends its attempt
+  // and waits for that instant, with no blocker and no intervention: the loop dispatches it then.
+  defer: z.object({ epoch, notBefore: z.string().datetime({ offset: true }), reason: z.string().trim().min(1).max(2000) }).strict(),
   // An empty request clears this attempt's open one; otherwise it must ask for something the
   // planned scope does not already carry. `paths` widens, and the two fields the loop never
   // decides are stated as plainly as the widening is: `remove` drops planned containment and
@@ -316,7 +319,7 @@ export function inheritedScopeRequest(work: Pick<Work, 'plannedFiles' | 'carried
 }
 /** The commands that end an attempt, or clear what an ended one left behind, and so close its scope request. */
 // A blocker ends its attempt (GY-1008); a cleared one (`blocked GY-N EPOCH -`) keeps the lease, so its request stays open.
-const attemptEndingCommands = new Set<string>(['submit', 'release', 'rework', 'requirements', 'unblock', 'blocked']);
+const attemptEndingCommands = new Set<string>(['submit', 'release', 'rework', 'requirements', 'unblock', 'blocked', 'defer']);
 export function applyScopeDecision(work: Work, request: NonNullable<Work['scopeRequest']>, now: Date): ScopeDecision {
   const verdict = decideScopeRequest(work, request);
   const decision: ScopeDecision = { state: verdict.state, reason: verdict.reason, at: now.toISOString(), decidedBy: 'graphyard',
@@ -1309,7 +1312,7 @@ export class Engine {
       if (command === 'heartbeat') this.renewLease(work, actor, data.epoch, now);
       else {
         if (command === 'release') endedBySubmission(work, data.epoch);
-        if (['release', 'workspace', 'submit', 'blocked', 'scope', 'quarantine', 'launch'].includes(command)) activeLease(work, actor, data.epoch, now);
+        if (['release', 'workspace', 'submit', 'blocked', 'defer', 'scope', 'quarantine', 'launch'].includes(command)) activeLease(work, actor, data.epoch, now);
       }
       if (command === 'quarantine') {
         demand(!work.containmentQuarantine || work.containmentQuarantine.owner === actor.id && work.containmentQuarantine.epoch === data.epoch
@@ -1384,6 +1387,19 @@ export class Engine {
           endAttempt(work, data.epoch, 'released', now);
           work.lease = null;
         }
+      }
+      if (command === 'defer') {
+        // GY-1726: a reading that cannot exist yet is a wait the product holds, not an escalation
+        // (GY-1689, GY-1721, GY-1724 each blocked for one). Only a post-deploy follow-up owes such a
+        // reading; anything else blocks as before. A later recorded window is never shortened.
+        demand(work.criteria.some(criterion => criterion.proofs.some(servingReleaseProof)), `${work.key} owes no post-deploy observation (no manual:…-on-serving-release proof); only a follow-up whose reading cannot exist yet is deferred — record a blocker instead`, 409);
+        const at = Date.parse(data.notBefore);
+        demand(at > now.getTime(), `notBefore ${data.notBefore} has already passed; the reading can be taken now`, 422);
+        demand(at - now.getTime() <= deferBoundMs, `notBefore ${data.notBefore} is more than ${deferBoundMs / 86_400_000} days away; a reading that far off is a requirements question — record a blocker instead`, 422);
+        if (!work.observationWindow || Date.parse(work.observationWindow.notBefore) < at)
+          work.observationWindow = { notBefore: new Date(at).toISOString(), basis: 'worker-reading', detail: `${actor.id} found the reading cannot exist before then: ${data.reason}`.slice(0, 2000) };
+        endAttempt(work, data.epoch, 'released', now);
+        work.lease = null;
       }
       if (command === 'scope') {
         const asks = data.paths.length || data.remove?.length || data.criteria?.length;

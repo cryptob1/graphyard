@@ -1,4 +1,4 @@
-import { test } from 'node:test';
+import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { blockerView, classifyBlocker, environmentalBlockerClasses, needsSomeone } from '../src/model/blocker-class.js';
 import { githubDegraded, githubStatusMs, probeBlocker, sharedGithubStatus } from '../src/daemon/blocker-probes.js';
@@ -13,9 +13,17 @@ import { branchRewriteGuidance, inspectProfileAccounts, selectAccount, workerPro
 import { loopUnitName } from '../src/supervisor.js';
 import { docsHeadroom, docsTrimItem, docsTrimLatitude, docsWordBudgetOf } from '../src/model/documentation.js';
 import { workerPushPermissions } from '../src/worker-credential.js';
-import { foldInterventions, type InterventionLedgerRow } from '../src/interventions.js';
-import type { Work } from '../src/model.js';
+import { foldInterventions, readInterventionLedger, type InterventionLedgerRow } from '../src/interventions.js';
+import type { Principal, Work } from '../src/model.js';
+import { randomUUID } from 'node:crypto';
+import EmbeddedPostgres from 'embedded-postgres';
+import { Engine } from '../src/engine.js';
+import { Store } from '../src/store.js';
+import { dispatchable } from '../src/coordination.js';
+import { postDeployChecks } from '../src/master-verification.js';
+import { decideScopeRequest } from '../src/model/scope.js';
 // Time-bomb allowance (GY-1694): the 2026-10-07..09 instants are fixture clocks handed to foldInterventions, probeBlocker and sharedGithubStatus; Date.now() only clocks lease-less probes and anchors codex holds relative to itself.
+// GY-1726's 2026-10-11..12 instants are fixture clocks handed to postDeployChecks; its defer cases read the database clock.
 
 // GY-1406 names this file for its proof: manual:intervention-pattern-escalation-build. Four
 // escalation interventions were needed at the build stage between 2026-09-30 and 2026-10-07, each a
@@ -298,4 +306,100 @@ test('manual:intervention-pattern-escalation-build — GY-1567 review: a spent r
   assert.equal(cleared.passed, true);
   assert.equal(cleared.detail, 'profile one is launchable on codex-ok');
   assert.equal(cleared.probe, 'a worker profile can take a launch on an eligible account');
+});
+
+// GY-1726: four more escalations at the build stage between 2026-10-05 and 2026-10-12. Three
+// (GY-1724, GY-1721, GY-1689) were post-deploy follow-ups dispatched before the reading they owe
+// could exist, so the worker's only move was `blocked`, an escalation. GY-1727 files a follow-up
+// holding its instant; `defer` lets a worker hold one that was filed without it. GY-1700 was a
+// refused scope ask for the test file its own unit proof lives in, which the companion rule grants.
+const day = 86_400_000;
+const operator: Principal = { id: 'human-operator', role: 'admin', sessionKind: 'human' };
+const implementer: Principal = { id: 'implementer', role: 'worker', sessionKind: 'ai' };
+let database: EmbeddedPostgres | undefined, store: Store | undefined, engine: Engine;
+after(async () => { if (store) await store.close(); if (database) await database.stop(); });
+async function ledger() {
+  if (store) return store;
+  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1726;
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('escalation-build'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  await database.initialise(); await database.start(); await database.createDatabase('escalation_build_test');
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/escalation_build_test`); await store.init();
+  engine = new Engine(store, [15368], 120, 'owner/escalation-build'); engine.submissionObserver = null;
+  return store;
+}
+const dbNow = async () => ((await (await ledger()).pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).getTime();
+/** GY-1689 as filed: a follow-up owing GY-1685 AC-1's rate reading on the serving release, with no window. */
+const followUpCriterion = { id: 'AC-1', text: 'From this head against the serving release f1984c118352: the intervention report shows the escalation rate at the build stage below 3 per 7 days after the change ships', proofs: ['manual:intervention-pattern-escalation-build-on-serving-release'] };
+async function claimed(criteria: unknown[]) {
+  await ledger();
+  let work = await engine.execute(operator, 'create', null, { title: `Follow-up ${randomUUID().slice(0, 8)}`, type: 'chore', criteria }, randomUUID());
+  work = await engine.execute(operator, 'ready', work.id, {}, randomUUID());
+  return engine.execute(implementer, 'claim', work.id, {}, randomUUID());
+}
+const ledgerEscalations = async (work: Work) => foldInterventions((await readInterventionLedger((await ledger()).pool, { workId: work.id })).rows, [work], new Date(await dbNow()).toISOString()).interventions
+  .filter(entry => entry.kind === 'escalation');
+
+test('manual:intervention-pattern-escalation-build — GY-1689 on the base: a follow-up whose reading cannot exist yet can only block, and the block is an escalation', async () => {
+  const work = await claimed([followUpCriterion]);
+  const reported = await engine.execute(implementer, 'blocked', work.id, { epoch: work.epoch, reason: 'The observation AC-1 requires cannot exist before 2026-10-17T14:31:37Z' }, randomUUID());
+  assert.ok(reported.blocker);
+  assert.equal((await ledgerEscalations(reported)).length, 1);
+});
+
+test('manual:intervention-pattern-escalation-build — GY-1689 on the candidate: defer ends the attempt, holds dispatch until the instant and escalates nothing', async () => {
+  const work = await claimed([followUpCriterion]);
+  const now = await dbNow(), notBefore = new Date(now + 5 * day).toISOString();
+  const deferred = await engine.execute(implementer, 'defer', work.id, { epoch: work.epoch, notBefore, reason: 'the 7-day window after the ship has not elapsed' }, randomUUID());
+  assert.equal(deferred.blocker, null);
+  assert.equal(deferred.lease, null);
+  assert.deepEqual([deferred.observationWindow?.notBefore, deferred.observationWindow?.basis], [notBefore, 'worker-reading']);
+  assert.deepEqual(await ledgerEscalations(deferred), []);
+  assert.equal(dispatchable(deferred, now), false, 'held until the reading can exist');
+  assert.equal(dispatchable(deferred, now + 6 * day), true, 'the loop dispatches it once the instant passes');
+  // A later attempt may move the window on; an earlier instant never shortens it.
+  const again = await engine.execute(implementer, 'claim', work.id, {}, randomUUID());
+  const shorter = await engine.execute(implementer, 'defer', work.id, { epoch: again.epoch, notBefore: new Date(now + day).toISOString(), reason: 'an earlier guess' }, randomUUID());
+  assert.equal(shorter.observationWindow?.notBefore, notBefore);
+});
+
+test('manual:intervention-pattern-escalation-build — defer is refused for work owing no post-deploy observation, for a past instant and past its 30-day bound', async () => {
+  const ordinary = await claimed([{ id: 'AC-1', text: 'Behaves', proofs: ['integration:behaves'] }]);
+  await assert.rejects(engine.execute(implementer, 'defer', ordinary.id, { epoch: ordinary.epoch, notBefore: new Date(await dbNow() + day).toISOString(), reason: 'not a follow-up' }, randomUUID()), /owes no post-deploy observation/);
+  const work = await claimed([followUpCriterion]);
+  await assert.rejects(engine.execute(implementer, 'defer', work.id, { epoch: work.epoch, notBefore: new Date(await dbNow() - day).toISOString(), reason: 'past' }, randomUUID()), /already passed/);
+  await assert.rejects(engine.execute(implementer, 'defer', work.id, { epoch: work.epoch, notBefore: new Date(await dbNow() + 31 * day).toISOString(), reason: 'far' }, randomUUID()), /more than 30 days/);
+});
+
+test('manual:intervention-pattern-escalation-build — GY-1689: a follow-up worker is told to defer an unready reading, not to block it', () => {
+  const config = { root: '/repo', cliPath: '/repo/bin/graphyard.mjs', repository: 'owner/repo' } as unknown as MasterConfig;
+  const profile = { name: 'claude-1', principal: 'graphyard-claude-1' } as unknown as WorkerProfile;
+  const prompt = (criteria: Work['criteria']) => workerPrompt(config, { key: 'GY-1689', title: 'Post-deploy verification', criteria } as Work, profile, 2);
+  assert.match(prompt([followUpCriterion]), /defer GY-1689 2 NOT-BEFORE REASON/);
+  assert.doesNotMatch(prompt([{ id: 'AC-1', text: 'Behaves', proofs: ['integration:behaves'] }]), / defer GY-1689/);
+});
+
+/** A delivered item as master verify-deployment reads it. */
+const deliveredItem = (key: string, criterion: Work['criteria'][number], mergedAt: string): Work => ({
+  id: randomUUID(), key, title: key, description: '', type: 'bug', priority: 1, dependencies: [], criteria: [criterion], policy: { checks: ['test'], review: true }, plannedFiles: [],
+  stage: 'done', revision: 1, policyRevision: 1, createdAt: mergedAt, updatedAt: mergedAt, stageEnteredAt: mergedAt, ready: true, epoch: 1, lease: null, workspaces: [], candidate: null,
+  submission: { epoch: 1, pr: 1 }, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null, gates: [], violations: [],
+  delivery: { mergeSha: 'a'.repeat(40), mergedAt, evidenceAsOf: mergedAt, authorizationRevision: 1 } as never,
+} as Work);
+
+test('manual:intervention-pattern-escalation-build — GY-1724 and GY-1721: their follow-ups are filed holding the instant the reading can first exist', () => {
+  const release = 'b'.repeat(40);
+  // GY-1700 AC-2, a 24-hour live window; its release first observed serving at 07:33:40Z.
+  const [webhooks] = postDeployChecks(deliveredItem('GY-1700', { id: 'AC-2', text: 'A 24-hour window of live GitHub activity shows zero failed webhook deliveries', proofs: ['manual:post-deploy/webhook-deliveries-clean-24h'] }, '2026-10-11T15:04:40Z'),
+    release, new Date('2026-10-12T07:35:00Z'), {}, new Date('2026-10-12T07:33:40Z'));
+  assert.equal(webhooks.followUp?.input.observationWindow?.notBefore, '2026-10-13T07:33:40.000Z');
+  // GY-1684 AC-1, a rate per 7 days; merged at 07:43:35Z.
+  const [rate] = postDeployChecks(deliveredItem('GY-1684', { id: 'AC-1', text: 'the intervention report shows the scope-widening rate at the build stage below 3 per 7 days after the change ships', proofs: ['manual:post-deploy/intervention-pattern-scope-widening-build'] }, '2026-10-11T07:43:35Z'),
+    release, new Date('2026-10-12T07:35:00Z'));
+  assert.equal(rate.followUp?.input.observationWindow?.notBefore, '2026-10-18T07:43:35.000Z');
+});
+
+test('manual:intervention-pattern-escalation-build — GY-1700: the test file its own unit proof lives in is granted by the loop, not escalated', () => {
+  const verdict = decideScopeRequest({ plannedFiles: ['src/server/routes/github.ts'], criteria: [{ id: 'AC-0', text: 'A verified webhook delivery soft-accepts with HTTP 202', proofs: ['unit:webhook-soft-accept-no-5xx'] }] },
+    { paths: ['tests/webhook-soft-accept.test.ts'] });
+  assert.equal(verdict.state, 'approved', verdict.reason);
 });
