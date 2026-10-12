@@ -129,7 +129,7 @@ export function mergeQueueRuleset(config: { baseBranch: string; githubAppId: num
 // Under the control-plane merger Graphyard's merge writer is the only executor, so setup protects the
 // base branch with a ruleset that refuses every push, force push and deletion from every actor —
 // administrators included, which classic protection cannot promise — and lets deploy keys alone
-// bypass it. The install registers exactly one read-write deploy key, the merge writer's.
+// bypass it. Setup applies it only while the merge writer's key is the repository's one read-write deploy key.
 export const mainWriteRulesetName = 'Graphyard merge writer only';
 /** GitHub's deploy-key bypass names no single key (its actor_id must be null); it covers every deploy key on the repository. */
 export const deployKeyBypassActor = { actor_id: null, actor_type: 'DeployKey' as const, bypass_mode: 'always' as const };

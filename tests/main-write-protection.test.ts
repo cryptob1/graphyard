@@ -50,12 +50,11 @@ function fakeGitHub(state: GitHubState) {
 }
 const fresh = (overrides: Partial<GitHubState> = {}): GitHubState => ({ defaultBranch: 'main', rulesets: [], classic: null, keys: [{ id: 1, key: WRITER, title: 'graphyard-merge-writer-box-1', readOnly: false }], ...overrides });
 
-test('unit:main-write-protection-ruleset — control-plane setup writes an active ruleset on the base branch that refuses updates, force pushes and deletions from every actor, administrators included, with deploy keys (the merge writer\'s alone is registered) as the only bypass', async () => {
+test('unit:main-write-protection-ruleset — control-plane setup writes an active ruleset on the base branch that refuses updates, force pushes and deletions from every actor, administrators included, with deploy keys as the only bypass, and refuses while any read-write deploy key other than the merge writer\'s would share that bypass', async () => {
   const github = fakeGitHub(fresh());
   const result = await ensureMainWriteProtection('owner/project', github.gh, { writerKey: WRITER });
   assert.equal(result.state, 'created');
   assert.equal(result.baseBranch, 'main', 'the base branch is the repository\'s default branch unless named');
-  assert.deepEqual(result.otherWriters, []);
   assert.equal(github.writes.length, 1);
   const [write] = github.writes;
   assert.equal(write!.method, 'POST');
@@ -75,11 +74,27 @@ test('unit:main-write-protection-ruleset — control-plane setup writes an activ
   assert.deepEqual(named.writes[0]!.body.conditions.ref_name.include, ['refs/heads/trunk']);
   assert.ok(!named.reads.includes('repos/owner/project'), 'a named base branch needs no repository read');
 
-  // Another read-write deploy key would share the bypass, so setup names it for removal; read-only keys cannot push.
-  const shared = fakeGitHub(fresh({ keys: [...fresh().keys, { id: 2, key: OTHER, title: 'ci-pusher', readOnly: false }, { id: 3, key: OTHER, title: 'mirror', readOnly: true }] }));
-  const sharedResult = await ensureMainWriteProtection('owner/project', shared.gh, { writerKey: WRITER });
-  assert.deepEqual(sharedResult.otherWriters, ['ci-pusher']);
-  assert.match(sharedResult.detail, /ci-pusher also bypass it, remove them/);
+  // GitHub's deploy-key bypass covers every deploy key, so another read-write key would push too:
+  // setup refuses, writing nothing and claiming nothing, until that key is removed. Read-only keys cannot push.
+  const sharedKeys = [...fresh().keys, { id: 2, key: OTHER, title: 'ci-pusher', readOnly: false }, { id: 3, key: OTHER, title: 'mirror', readOnly: true }];
+  const shared = fakeGitHub(fresh({ keys: sharedKeys }));
+  await assert.rejects(ensureMainWriteProtection('owner/project', shared.gh, { writerKey: WRITER }), /Read-write deploy keys ci-pusher on owner\/project would share the merge writer's bypass, so main was not protected/);
+  assert.deepEqual(shared.writes, []);
+  // The same refusal holds when Graphyard's ruleset already stands: it is not reported as protecting the branch.
+  const standing = fakeGitHub(fresh({ keys: sharedKeys, rulesets: [{ id: 9, ...mainWriteRuleset('main') }] }));
+  await assert.rejects(ensureMainWriteProtection('owner/project', standing.gh, { writerKey: WRITER }), /ci-pusher/);
+  assert.deepEqual(standing.writes, []);
+  // Removing the other key lets the same setup protect the branch; read-only keys never block it.
+  shared.state.keys = shared.state.keys.filter(key => key.title !== 'ci-pusher');
+  assert.equal((await ensureMainWriteProtection('owner/project', shared.gh, { writerKey: WRITER })).state, 'created');
+  // A merge-writer key that is not registered read-write, or a key list that cannot be read, also refuses without writing.
+  const unregistered = fakeGitHub(fresh({ keys: [{ id: 3, key: OTHER, title: 'mirror', readOnly: true }] }));
+  await assert.rejects(ensureMainWriteProtection('owner/project', unregistered.gh, { writerKey: WRITER }), /not registered read-write/);
+  assert.deepEqual(unregistered.writes, []);
+  const unreadable = fakeGitHub(fresh());
+  const failingList: GitHubCli = async (args, options) => args[1] === 'deploy-key' ? { stdout: '', stderr: 'HTTP 403', code: 1 } : unreadable.gh(args, options);
+  await assert.rejects(ensureMainWriteProtection('owner/project', failingList, { writerKey: WRITER }), /deploy keys of owner\/project could not be read/);
+  assert.deepEqual(unreadable.writes, []);
 });
 
 test('unit:main-write-protection-idempotent — applying the protection twice writes once; a drifted Graphyard ruleset is rewritten in place; a base branch the operator already protects (classic protection or another ruleset) is left untouched and reported', async () => {
