@@ -69,6 +69,25 @@ export function timeBoundHold(item: Work, now: number): number | null {
 export async function blockerStep(cycle: Cycle) {
   const { config, state, effects, now, clock, performed, isolate, open, launcher } = cycle;
   for (const item of open) await isolate('blocker', item, item.key, () => endCredentialBlockedSession(cycle, item));
+  const note = async (key: string, item: Work, outcome: DaemonAction['state'], detail: string, attempts = 1) =>
+    record(state, key, { kind: 'blocker', work: item.key, principal: null, epoch: item.epoch, state: outcome, detail: boundDetail(detail), attempts, cycle: state.cycle }, now(), effects.persist);
+
+  // GY-1740: a blocker that only waits for a post-deploy reading's instant becomes that wait, before anything probes it.
+  const held = new Set<string>();
+  if (effects.deferWindow) for (const item of open) await isolate('blocker', item, item.key, async () => {
+    const at = timeBoundHold(item, clock);
+    if (at === null) return;
+    const notBefore = new Date(at).toISOString();
+    try {
+      await effects.deferWindow!(item, { notBefore, reason: `its recorded blocker waits for a reading that cannot exist before ${notBefore}: ${item.blocker}`.slice(0, 2000) });
+      held.add(item.id);
+      for (const entry of episodeKeys(state, item)) delete state.actions[entry];
+      performed.push(await note(blockerKey(item), item, 'done', `Held ${item.key} until ${notBefore}, when the reading it owes can first exist, and cleared its blocker: ${item.blocker}`));
+    } catch (error) {
+      performed.push(await note(blockerKey(item), item, 'failed', `Could not hold ${item.key} until ${notBefore}: ${message(error)}`, (state.actions[blockerKey(item)]?.attempts ?? 0) + 1));
+    }
+  });
+
   if (!effects.recordBlockerProbe) return;
   // Rows of items no longer open (delivered, closed, gone from the snapshot) go with them.
   const orphaned = Object.keys(state.actions).filter(key => key.startsWith('blocker:') && !open.some(item => key === blockerKey(item) || episodeKey(item, key)));
@@ -93,24 +112,6 @@ export async function blockerStep(cycle: Cycle) {
     }
     return probes.get(memo)!;
   };
-  const note = async (key: string, item: Work, outcome: DaemonAction['state'], detail: string, attempts = 1) =>
-    record(state, key, { kind: 'blocker', work: item.key, principal: null, epoch: item.epoch, state: outcome, detail: boundDetail(detail), attempts, cycle: state.cycle }, now(), effects.persist);
-
-  // GY-1740: a blocker that only waits for a post-deploy reading's instant becomes that wait, before anything probes it.
-  const held = new Set<string>();
-  if (effects.deferWindow) for (const item of open) await isolate('blocker', item, item.key, async () => {
-    const at = timeBoundHold(item, clock);
-    if (at === null) return;
-    const notBefore = new Date(at).toISOString();
-    try {
-      await effects.deferWindow!(item, { notBefore, reason: `its recorded blocker waits for a reading that cannot exist before ${notBefore}: ${item.blocker}`.slice(0, 2000) });
-      held.add(item.id);
-      for (const entry of episodeKeys(state, item)) delete state.actions[entry];
-      performed.push(await note(blockerKey(item), item, 'done', `Held ${item.key} until ${notBefore}, when the reading it owes can first exist, and cleared its blocker: ${item.blocker}`));
-    } catch (error) {
-      performed.push(await note(blockerKey(item), item, 'failed', `Could not hold ${item.key} until ${notBefore}: ${message(error)}`, (state.actions[blockerKey(item)]?.attempts ?? 0) + 1));
-    }
-  });
 
   // Every environmental probe this cycle will await starts now, a bounded number at a time, so
   // independent probes in distinct worktrees run side by side rather than one after another.
