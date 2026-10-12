@@ -42,8 +42,8 @@ const asRecorded = (entry: Intervention) => ({ id: entry.id, work: entry.work?.k
 
 // ---- The base ---------------------------------------------------------------------------------------
 
-/** This change's base: main's tip when GY-1719 was claimed, whose fold produced all three instances. */
-const baseSha = '47220a5adbdc7486f362eda80d4f8eafee0face4';
+/** This change's stated base (main at 652be40, PR #1151's landing base), whose fold produced all three instances. */
+const baseSha = '652be40af8c48dc7a048467359d929a3d0ceabff';
 const git = (...args: string[]) => execFileSync('git', args, { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 256 * 1024 * 1024 });
 const nodeModules = (() => { for (let at = process.cwd(); ; at = dirname(at)) { if (existsSync(join(at, 'node_modules'))) return join(at, 'node_modules'); if (dirname(at) === at) throw new Error(`no node_modules above ${process.cwd()}`); } })();
 let baseFold: typeof foldInterventions;
@@ -164,8 +164,15 @@ test('manual:intervention-pattern-scope-widening-review — GY-1662 against the 
 
 test('manual:intervention-pattern-scope-widening-review — GY-1662 against the candidate: the duplicate\'s planned test and the companions beside the plan are the revised record\'s own scope, so nothing is counted', () => {
   assert.deepEqual(widenings(foldInterventions, rows1662, snapshot1662), []);
-  // The snapshot's whole document of the duplicate carries its plan as well as its own rows do.
-  assert.deepEqual(widenings(foldInterventions, rows1662.slice(1), [snapshot1662[0], { ...closed1664, summary: undefined, plannedFiles: gy1664.planned }]), []);
+});
+
+test('manual:intervention-pattern-scope-widening-review — a duplicate\'s plan is read as its rows held it at the revision, so a later plan or closure never erases an earlier widening', () => {
+  // A plan the snapshot holds but no row recorded before the revision was not yet absorbed.
+  assert.deepEqual(widenings(foldInterventions, rows1662.slice(1), [snapshot1662[0], { ...closed1664, summary: undefined, plannedFiles: gy1664.planned }]).map(asRecorded), [recorded1662]);
+  // The duplicate gaining the test only after the revision leaves the revision a widening.
+  const later = { ...rows1662[0], seq: 2485700, at: '2026-10-10T17:50:00.000Z' };
+  const earlier = { ...rows1662[0], work: { ...rows1662[0].work, plannedFiles: ['src/daemon/doctor.ts'] }, details: { ...rows1662[0].details, before: { blocker: null, plannedFiles: ['src/daemon/doctor.ts'] } } };
+  assert.deepEqual(widenings(foldInterventions, [earlier, rows1662[1], later], snapshot1662).map(asRecorded), [recorded1662]);
 });
 
 // ---- What still counts ------------------------------------------------------------------------------

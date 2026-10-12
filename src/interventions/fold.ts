@@ -73,8 +73,9 @@ export function foldInterventions(rows: InterventionLedgerRow[], work: readonly 
       for (const key of [...entry.escalations.keys()]) if (!standing.has(key) && row.kind !== 'escalation.resolved') entry.escalations.delete(key);
     }
     const record = items.get(row.workId);
-    // The plan of every item the record closes as a duplicate of this one (GY-1719), as the snapshot or that item's own rows hold it.
-    const absorbed = () => (entry.key ? duplicates.get(entry.key) ?? [] : []).flatMap(other => other.plannedFiles ?? states.get(other.id)?.plannedFiles ?? []);
+    // The plan of every item the record closes as a duplicate of this one (GY-1719), as that item's own
+    // rows held it by this row: a path it gained later, or a duplicate created later, was not yet absorbed.
+    const absorbed = () => (entry.key ? duplicates.get(entry.key) ?? [] : []).flatMap(other => states.get(other.id)?.plannedFiles ?? []);
     if (Object.hasOwn(foldRules, row.kind)) foldRules[row.kind]({ row, entry, details, stage, source, plannedBefore, blockerBefore, record, absorbed, emit });
   }
   // What is still open, settled against the current record so a need met by a command the fold
