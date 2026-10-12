@@ -804,6 +804,6 @@
     "tests/capacity-redispatch-preserves-attempt.test.ts": 12000,
     "tests/capacity-hold-respects-machine-bounds.test.ts": 4000,
     "tests/scenario-capacity-limit-redispatch-registered.test.ts": 4500,
-    "tests/chart-exercise-port-forward.test.ts": 15000
+    "tests/chart-exercise-port-forward.test.ts": 30000
   }
 }

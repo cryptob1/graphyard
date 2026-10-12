@@ -95,16 +95,21 @@ stop_forward() {
 # step 4 cannot follow step 3 onto a terminating pod), to a pod of its current ReplicaSet, and only
 # returning once /healthz through the forward reports this release's version; a forward that
 # reaches anything else is dropped at once. A forward that exits (a port it could not bind, a lost pod)
-# or that the pod never answers through is retried on a fresh port with the pod selected again.
+# or that the pod never answers through is retried on a fresh port with the pod selected again. A
+# rollout that fails or times out is a failed attempt too, never a forward: with maxUnavailable 0 the
+# previous ReplicaSet stays scaled up and Ready, and both images carry the same tag, so a forward to
+# its pod would pass /healthz and judge the old pod as the upgrade (GY-1729).
 # Every message goes to stderr: the forward may be re-established inside a `$(api …)`.
 forward() {
   local attempt target version
   for attempt in $(seq 1 "$FORWARD_ATTEMPTS"); do
     stop_forward
-    k rollout status "deploy/$RELEASE-graphyard" --timeout="$HELM_TIMEOUT" >&2 || true
-    if target="$(k get rs,pods -l "app.kubernetes.io/instance=$RELEASE,app.kubernetes.io/component=server" -o json | select_pod)"; then
+    if ! k rollout status "deploy/$RELEASE-graphyard" --timeout="$HELM_TIMEOUT" >&2; then
+      echo "port-forward attempt $attempt of $FORWARD_ATTEMPTS: the rollout of deploy/$RELEASE-graphyard has not completed, so no pod is forwarded" >&2
+    elif target="$(k get rs,pods -l "app.kubernetes.io/instance=$RELEASE,app.kubernetes.io/component=server" -o json | select_pod)"; then
       echo "forwarding a free local port to pod/${target% *} (attempt $attempt of $FORWARD_ATTEMPTS)" >&2
-      FORWARD_LOG="$FORWARD_DIR/forward-$attempt-$(date +%s%N).log"
+      # Created before kubectl starts: the backgrounded redirect may not have run when the port is first read.
+      FORWARD_LOG="$FORWARD_DIR/forward-$attempt-$(date +%s%N).log"; : >"$FORWARD_LOG"
       k port-forward --address 127.0.0.1 "pod/${target% *}" "$LOCAL_PORT:${target#* }" >"$FORWARD_LOG" 2>&1 &
       FORWARD_PID=$!; echo "$FORWARD_PID" >"$FORWARD_DIR/pid"
       for _ in $(seq 1 30); do
@@ -162,6 +167,35 @@ api() {
   echo "api $method /api/$path failed after $API_ATTEMPTS attempts: status $status, body: ${received:-(empty)}" >&2
   exit 1
 }
+# rejects METHOD PATH TOKEN BODY — a request the release must refuse: it returns once the release
+# answers with a 4xx status, and a 2xx ends the exercise. A failed transfer, a 5xx or no status at all
+# is no answer, so it is never taken for the refusal: it is retried under the same Idempotency-Key
+# within api()'s bound, through a forward re-established as api() does, and when the bound is
+# exhausted the exercise prints its diagnosis and exits on a last line naming the request (GY-1729).
+rejects() {
+  local method="$1" path="$2" token="$3" body="$4" key err status attempt rc lost=0
+  key="$(node -p "require('node:crypto').randomUUID()")"; err="$(mktemp)"
+  for attempt in $(seq 1 "$API_ATTEMPTS"); do
+    if [ -n "${FORWARD_DIR:-}" ]; then ensure_forward; fi
+    rc=0
+    status="$(curl -sS --max-time "$API_TIMEOUT" -o /dev/null -w '%{http_code}' -X "$method" "http://127.0.0.1:$LOCAL_PORT/api/$path" -H "Authorization: Bearer $token" -H 'Content-Type: application/json' -H "Idempotency-Key: $key" --data "$body" 2>"$err")" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+      status="$status, $(tr -d '\n' <"$err")"; lost=$((lost + 1))
+      if [ "$lost" -ge 3 ] && [ -n "${FORWARD_DIR:-}" ]; then lost=0; stop_forward; fi
+    else
+      lost=0
+      case "$status" in
+        2[0-9][0-9]) rm -f "$err"; echo "api $method /api/$path was accepted with status $status; the release must refuse it" >&2; exit 1;;
+        4[0-9][0-9]) rm -f "$err"; echo "api $method /api/$path refused with status $status, as it must be" >&2; return 0;;
+      esac
+    fi
+    echo "api $method /api/$path: attempt $attempt of $API_ATTEMPTS got status $status, not a refusal" >&2
+    if [ "$attempt" -lt "$API_ATTEMPTS" ]; then sleep "$API_RETRY_WAIT"; fi
+  done
+  diagnose; rm -f "$err"
+  echo "api $method /api/$path received no refusal after $API_ATTEMPTS attempts: status $status" >&2
+  exit 1
+}
 # The part of the ledger a restore and an upgrade must hand back unchanged.
 projection() { node -e "const w=JSON.parse(require('fs').readFileSync(0,'utf8'));console.log(JSON.stringify(w.map(x=>({id:x.id,key:x.key,title:x.title,stage:x.stage,epoch:x.epoch,revision:x.revision,workspaces:x.workspaces,lease:x.lease&&{owner:x.lease.owner,epoch:x.lease.epoch,expiresAt:x.lease.expiresAt}}))))"; }
 # The projected ledger, read in two steps so a failed request ends the exercise on api's own last
@@ -211,8 +245,7 @@ forward
 AFTER="$(ledger)"
 same "$BEFORE" "$AFTER" 'the ledger changed across the upgrade'
 api POST "work/$WORK_ID/heartbeat" "$WORKER_TOKEN" '{"epoch":1}' >/dev/null
-ensure_forward
-if curl -fsS -o /dev/null -X POST "http://127.0.0.1:$LOCAL_PORT/api/work/$WORK_ID/heartbeat" -H "Authorization: Bearer $WORKER_TOKEN" -H 'Content-Type: application/json' -H "Idempotency-Key: stale-$RANDOM" --data '{"epoch":2}' 2>/dev/null; then echo 'a superseded epoch was accepted after the upgrade' >&2; exit 1; fi
+rejects POST "work/$WORK_ID/heartbeat" "$WORKER_TOKEN" '{"epoch":2}'
 
 step "4. Taking a logical backup with the chart's CronJob"
 BEFORE_BACKUP="$(ledger)"

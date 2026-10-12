@@ -1,11 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { spawn, spawnSync } from 'node:child_process';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // The chart exercise (deploy/helm/exercise.sh) runs on a real cluster only in release-candidate
 // validation. Release candidate 38218787546 failed its chart job because kubectl could not bind the
@@ -27,7 +27,12 @@ const fakeKubectl = `#!/usr/bin/env node
 const fs = require('node:fs'), net = require('node:net');
 const args = process.argv.slice(2).filter((arg, i, all) => arg !== '--namespace' && all[i - 1] !== '--namespace');
 const env = process.env;
-if (args[0] === 'rollout') { console.log('deployment "gy-graphyard" successfully rolled out'); process.exit(0); }
+if (args[0] === 'rollout') {
+  const rollouts = env.FAKE_DIR + '/rollouts', n = Number(fs.existsSync(rollouts) ? fs.readFileSync(rollouts, 'utf8') : 0);
+  fs.writeFileSync(rollouts, String(n + 1));
+  if (n < Number(env.FAKE_ROLLOUT_FAILURES ?? 0)) { console.error('error: timed out waiting for the condition'); process.exit(1); }
+  console.log('deployment "gy-graphyard" successfully rolled out'); process.exit(0);
+}
 if (args[0] === 'get' && args[1] === 'rs,pods') { process.stdout.write(env.FAKE_ROLLOUT); process.exit(0); }
 if (args[0] === 'get') { console.log('pod/gy-graphyard-new-bbbbb 1/1 Running'); process.exit(0); }
 if (args[0] === 'logs') { console.log('server log line'); process.exit(0); }
@@ -60,24 +65,26 @@ const rollout = JSON.stringify({ kind: 'List', items: [
   { kind: 'Pod', metadata: { name: 'gy-graphyard-new-bbbbb', labels: { 'pod-template-hash': 'new2' } }, spec: { containers: [{ ports: [{ name: 'http', containerPort: 4310 }] }] }, status: { conditions: [{ type: 'Ready', status: 'True' }] } },
 ] });
 
-/** An HTTP server standing in for a release: /healthz reports `version`, /api/work answers `work`. */
+/** An HTTP server standing in for a release: /healthz reports `version`, a heartbeat answers `heartbeat` (409 refuses it), anything else answers `work`. */
 async function release(version: string, work: string, port = 0) {
   const hits: string[] = [];
+  const state = { heartbeat: 409 };
   const server: Server = createServer((request, response) => {
     hits.push(request.url!);
-    response.writeHead(200, { 'Content-Type': 'application/json' });
-    response.end(request.url === '/healthz' ? JSON.stringify({ version }) : work);
+    const heartbeat = request.url!.endsWith('/heartbeat');
+    response.writeHead(heartbeat ? state.heartbeat : 200, { 'Content-Type': 'application/json' });
+    response.end(request.url === '/healthz' ? JSON.stringify({ version }) : heartbeat ? '{"error":"superseded epoch"}' : work);
   });
   const listening = await new Promise<boolean>(done => { server.once('error', () => done(false)); server.listen(port, '127.0.0.1', () => done(true)); });
-  return { hits, listening, port: listening ? (server.address() as AddressInfo).port : port, close: () => new Promise<void>(done => listening ? server.close(() => done()) : done()) };
+  return { hits, state, listening, port: listening ? (server.address() as AddressInfo).port : port, close: () => new Promise<void>(done => listening ? server.close(() => done()) : done()) };
 }
 
 /** The exercise's forward and request helpers, cut out when a run needs them. */
-const functions = () => ['select_pod', 'stop_forward', 'forward', 'ensure_forward', 'api'].map(shellFunction).join('\n');
+const functions = () => ['select_pod', 'stop_forward', 'forward', 'ensure_forward', 'api', 'rejects'].map(shellFunction).join('\n');
 
 /** Runs `body` with the exercise's forward and request helpers against the fake kubectl and `plan`. */
-async function run(plan: Forward[], body: string, ports: { pod: number; decoy: number }) {
-  const dir = mkdtempSync(join(tmpdir(), 'chart-exercise-forward-'));
+async function run(plan: Forward[], body: string, ports: { pod: number; decoy: number }, rolloutFailures = 0) {
+  const dir = await temporaryDirectory('chart-exercise-forward');
   const bin = join(dir, 'bin');
   mkdirSync(bin);
   writeFileSync(join(bin, 'kubectl'), fakeKubectl); chmodSync(join(bin, 'kubectl'), 0o755);
@@ -89,7 +96,7 @@ diagnose() { echo "--- port-forward output, every attempt" >&2; cat "$FORWARD_DI
 ${functions()}
 ${body}`;
   const result = await new Promise<{ status: number | null; stdout: string; stderr: string }>(done => {
-    const child = spawn('bash', ['-c', script], { env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, FORWARD_DIR: forwardDir, FAKE_DIR: dir, FAKE_PLAN: JSON.stringify(plan), FAKE_ROLLOUT: rollout, FAKE_POD_PORT: String(ports.pod), FAKE_DECOY_PORT: String(ports.decoy), FORWARD_ATTEMPTS: '3', FORWARD_RETRY_WAIT: '0', API_ATTEMPTS: '6', API_RETRY_WAIT: '0', API_TIMEOUT: '2' } });
+    const child = spawn('bash', ['-c', script], { env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, FORWARD_DIR: forwardDir, FAKE_DIR: dir, FAKE_PLAN: JSON.stringify(plan), FAKE_ROLLOUT: rollout, FAKE_ROLLOUT_FAILURES: String(rolloutFailures), FAKE_POD_PORT: String(ports.pod), FAKE_DECOY_PORT: String(ports.decoy), FORWARD_ATTEMPTS: '3', FORWARD_RETRY_WAIT: '0', API_ATTEMPTS: '6', API_RETRY_WAIT: '0', API_TIMEOUT: '2' } });
     let stdout = '', stderr = '';
     child.stdout.setEncoding('utf8').on('data', chunk => { stdout += chunk; });
     child.stderr.setEncoding('utf8').on('data', chunk => { stderr += chunk; });
@@ -102,7 +109,6 @@ ${body}`;
   for (let waited = 0; waited < 2000 && invocations.some(({ pid }) => alive(pid)); waited += 50) await new Promise(done => setTimeout(done, 50));
   const leftover = invocations.filter(({ pid }) => alive(pid));
   for (const { pid } of leftover) process.kill(pid, 'SIGKILL');
-  rmSync(dir, { recursive: true, force: true });
   return { ...result, invocations, leftover };
 }
 
@@ -112,7 +118,8 @@ test('integration:chart-exercise-port-forward — the chart exercise forwards a 
   assert.match(exercise, /^FORWARD_ATTEMPTS="\$\{FORWARD_ATTEMPTS:-(\d+)\}"; FORWARD_RETRY_WAIT="\$\{FORWARD_RETRY_WAIT:-(\d+)\}"$/m, 'the forward\'s retry bound is stated and overridable');
   const [, attempts, wait] = /^FORWARD_ATTEMPTS="\$\{FORWARD_ATTEMPTS:-(\d+)\}"; FORWARD_RETRY_WAIT="\$\{FORWARD_RETRY_WAIT:-(\d+)\}"$/m.exec(exercise)!;
   assert.ok(Number(attempts) >= 2 && Number(attempts) * (30 + Number(wait)) <= 300, `the forward is retried a bounded while: ${attempts} × (30 + ${wait})s`);
-  assert.ok(exercise.includes('ensure_forward\nif curl -fsS -o /dev/null -X POST'), 'the superseded-epoch check runs through a live forward, so a lost forward cannot pass it vacuously');
+  assert.ok(exercise.includes(`rejects POST "work/$WORK_ID/heartbeat" "$WORKER_TOKEN" '{"epoch":2}'`), 'the superseded-epoch check requires a refusal from the release, so a lost forward cannot pass it vacuously');
+  assert.ok(!/rollout status[^\n]*\|\| true/.test(exercise), 'a failed rollout is never discarded');
 
   const pod = await release('1.2.3', '[{"id":"w1","key":"GY-1"}]');
   const decoy = await release('0.0.1-leftover', '[{"id":"decoy"}]', 14310);
@@ -158,5 +165,38 @@ test('integration:chart-exercise-port-forward — the chart exercise forwards a 
     assert.equal(dropped.status, 1); assert.equal(dropped.stdout, '', 'no body reaches a projection');
     assert.equal(dropped.stderr.trim().split('\n').at(-1), 'port-forward to release gy never became reachable after 3 attempts');
     assert.deepEqual(dropped.leftover, []);
+
+    // Rollout: a rollout that fails or times out is never forwarded, since the previous ReplicaSet's
+    // Ready pod would pass /healthz under the same tag. A transient failure is retried; a persistent
+    // one fails the gate without any forward.
+    const rolled = await run([{}], 'forward\napi GET work secret-token\nstop_forward', ports, 1);
+    assert.equal(rolled.status, 0, rolled.stderr);
+    assert.match(rolled.stderr, /attempt 1 of 3: the rollout of deploy\/gy-graphyard has not completed, so no pod is forwarded/);
+    assert.equal(rolled.invocations.length, 1, 'no forward is started before the rollout completes');
+    const stuck = await run([{}], 'forward', ports, 99);
+    assert.equal(stuck.status, 1);
+    assert.equal(stuck.invocations.length, 0, 'an incomplete rollout is never forwarded');
+    assert.equal(stuck.stderr.trim().split('\n').at(-1), 'port-forward to release gy never became reachable after 3 attempts');
+
+    // Refusal: the superseded-epoch check passes only on the release's own 4xx. A forward lost around
+    // the request is a retried transport failure, never the refusal; an acceptance fails the gate, and
+    // so does a forward that never comes back.
+    const reject = 'forward\nrejects POST work/w1/heartbeat secret-token \'{"epoch":2}\'\necho refused\nstop_forward';
+    pod.hits.length = 0;
+    const refused = await run([{ dieAfter: 1 }, {}], reject, ports);
+    assert.equal(refused.status, 0, refused.stderr);
+    assert.equal(refused.stdout.trim(), 'refused');
+    assert.match(refused.stderr, /api POST \/api\/work\/w1\/heartbeat refused with status 409, as it must be/);
+    assert.equal(refused.invocations.length, 2, 'the lost forward is re-established before the refusal is read');
+    assert.ok(pod.hits.includes('/api/work/w1/heartbeat'), 'the refusal came from the release');
+    assert.deepEqual(refused.leftover, []);
+    const unanswered = await run([{ dieAfter: 1 }, { refuse: true }], reject, ports);
+    assert.equal(unanswered.status, 1, unanswered.stderr); assert.equal(unanswered.stdout, '', 'a lost forward never passes the check');
+    assert.equal(unanswered.stderr.trim().split('\n').at(-1), 'port-forward to release gy never became reachable after 3 attempts');
+    pod.state.heartbeat = 200;
+    const accepted = await run([{}], reject, ports);
+    assert.equal(accepted.status, 1); assert.equal(accepted.stdout, '');
+    assert.equal(accepted.stderr.trim().split('\n').at(-1), 'api POST /api/work/w1/heartbeat was accepted with status 200; the release must refuse it');
+    pod.state.heartbeat = 409;
   } finally { await pod.close(); await decoy.close(); }
 });
