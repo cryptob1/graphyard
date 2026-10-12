@@ -83,7 +83,7 @@ async function release(version: string, work: string, port = 0) {
 const functions = () => ['select_pod', 'stop_forward', 'forward', 'ensure_forward', 'api', 'rejects'].map(shellFunction).join('\n');
 
 /** Runs `body` with the exercise's forward and request helpers against the fake kubectl and `plan`. */
-async function run(plan: Forward[], body: string, ports: { pod: number; decoy: number }, rolloutFailures = 0) {
+async function run(plan: Forward[], body: string, ports: { pod: number; decoy: number }, rolloutFailures = 0, budget = 180) {
   const dir = await temporaryDirectory('chart-exercise-forward');
   const bin = join(dir, 'bin');
   mkdirSync(bin);
@@ -96,7 +96,7 @@ diagnose() { echo "--- port-forward output, every attempt" >&2; cat "$FORWARD_DI
 ${functions()}
 ${body}`;
   const result = await new Promise<{ status: number | null; stdout: string; stderr: string }>(done => {
-    const child = spawn('bash', ['-c', script], { env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, FORWARD_DIR: forwardDir, FAKE_DIR: dir, FAKE_PLAN: JSON.stringify(plan), FAKE_ROLLOUT: rollout, FAKE_ROLLOUT_FAILURES: String(rolloutFailures), FAKE_POD_PORT: String(ports.pod), FAKE_DECOY_PORT: String(ports.decoy), FORWARD_ATTEMPTS: '3', FORWARD_RETRY_WAIT: '0', API_ATTEMPTS: '6', API_RETRY_WAIT: '0', API_TIMEOUT: '2' } });
+    const child = spawn('bash', ['-c', script], { env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, FORWARD_DIR: forwardDir, FAKE_DIR: dir, FAKE_PLAN: JSON.stringify(plan), FAKE_ROLLOUT: rollout, FAKE_ROLLOUT_FAILURES: String(rolloutFailures), FAKE_POD_PORT: String(ports.pod), FAKE_DECOY_PORT: String(ports.decoy), FORWARD_ATTEMPTS: '3', FORWARD_RETRY_WAIT: '0', FORWARD_BUDGET: String(budget), API_ATTEMPTS: '6', API_RETRY_WAIT: '0', API_TIMEOUT: '2' } });
     let stdout = '', stderr = '';
     child.stdout.setEncoding('utf8').on('data', chunk => { stdout += chunk; });
     child.stderr.setEncoding('utf8').on('data', chunk => { stderr += chunk; });
@@ -117,7 +117,10 @@ test('integration:chart-exercise-port-forward — the chart exercise forwards a 
   assert.match(exercise, /^LOCAL_PORT=""$/m, 'the local port starts empty, so kubectl chooses a free one');
   assert.match(exercise, /^FORWARD_ATTEMPTS="\$\{FORWARD_ATTEMPTS:-(\d+)\}"; FORWARD_RETRY_WAIT="\$\{FORWARD_RETRY_WAIT:-(\d+)\}"$/m, 'the forward\'s retry bound is stated and overridable');
   const [, attempts, wait] = /^FORWARD_ATTEMPTS="\$\{FORWARD_ATTEMPTS:-(\d+)\}"; FORWARD_RETRY_WAIT="\$\{FORWARD_RETRY_WAIT:-(\d+)\}"$/m.exec(exercise)!;
-  assert.ok(Number(attempts) >= 2 && Number(attempts) * (30 + Number(wait)) <= 300, `the forward is retried a bounded while: ${attempts} × (30 + ${wait})s`);
+  const budget = Number(/^FORWARD_BUDGET="\$\{FORWARD_BUDGET:-(\d+)\}"$/m.exec(exercise)?.[1]);
+  // The budget is wall clock across rollout waits, probes, probe timeouts and retry waits, so it alone bounds
+  // a forward() well inside the chart job's 30 minutes, whatever API_TIMEOUT is; it still fits every attempt.
+  assert.ok(Number(attempts) >= 2 && budget <= 300 && Number(attempts) * (30 + Number(wait)) <= budget, `the forward is retried a bounded while: ${attempts} × (30 + ${wait})s within ${budget}s`);
   assert.ok(exercise.includes(`rejects POST "work/$WORK_ID/heartbeat" "$WORKER_TOKEN" '{"epoch":2}' 409 'superseded'`), 'the superseded-epoch check requires the heartbeat\'s own 409 superseded-lease refusal, so a lost forward or an unrelated 4xx cannot pass it vacuously');
   assert.ok(!/rollout status[^\n]*\|\| true/.test(exercise), 'a failed rollout is never discarded');
 
@@ -157,14 +160,30 @@ test('integration:chart-exercise-port-forward — the chart exercise forwards a 
     // needs the forward re-established.
     const lost = await run([{ refuse: true }], 'forward', ports);
     assert.equal(lost.status, 1, lost.stderr);
-    assert.equal(lost.invocations.length, 3, 'the bound holds');
+    assert.equal(lost.invocations.length, 3, lost.stderr);
     const lines = lost.stderr.trim().split('\n');
-    assert.equal(lines.at(-1), 'port-forward to release gy never became reachable after 3 attempts');
+    assert.equal(lines.at(-1), 'port-forward to release gy never became reachable after 3 attempts within 180s');
     assert.ok(lost.stderr.includes('--- port-forward output, every attempt') && lost.stderr.includes('bind: address already in use') && lost.stderr.includes('--- pods'), 'the diagnosis carries the forward\'s output and the pods');
     const dropped = await run([{ dieAfter: 1 }, { refuse: true }], 'forward\napi GET work secret-token', ports);
-    assert.equal(dropped.status, 1); assert.equal(dropped.stdout, '', 'no body reaches a projection');
-    assert.equal(dropped.stderr.trim().split('\n').at(-1), 'port-forward to release gy never became reachable after 3 attempts');
+    assert.equal(dropped.status, 1, dropped.stderr); assert.equal(dropped.stdout, '', 'no body reaches a projection');
+    assert.equal(dropped.stderr.trim().split('\n').at(-1), 'port-forward to release gy never became reachable after 3 attempts within 180s');
     assert.deepEqual(dropped.leftover, []);
+
+    // Stall: a pod that accepts every connection and never answers /healthz. Each probe is a full curl
+    // timeout, so only the budget's wall clock bounds the forward: it fails within FORWARD_BUDGET, not after
+    // attempts × 30 probes × API_TIMEOUT, with the same diagnosis and last line.
+    const silent = createServer(() => { /* never answers */ });
+    await new Promise<void>(done => silent.listen(0, '127.0.0.1', () => done()));
+    try {
+      const started = Date.now();
+      const stalled = await run([{ to: 'decoy' }], 'forward', { pod: pod.port, decoy: (silent.address() as AddressInfo).port }, 0, 5);
+      const elapsed = (Date.now() - started) / 1000;
+      assert.equal(stalled.status, 1, stalled.stderr);
+      assert.ok(elapsed < 15, `the stalled forward fails within its 5 s budget, not after ${elapsed}s`);
+      assert.match(stalled.stderr, /attempt 1 of 3 to pod\/gy-graphyard-new-bbbbb did not answer \/healthz as release 1\.2\.3 \(local port \d+, healthz version none\)/);
+      assert.match(stalled.stderr.trim().split('\n').at(-1)!, /^port-forward to release gy never became reachable after [12] attempts within 5s$/);
+      assert.deepEqual(stalled.leftover, []);
+    } finally { silent.closeAllConnections(); await new Promise(done => silent.close(done)); }
 
     // Rollout: a rollout that fails or times out is never forwarded, since the previous ReplicaSet's
     // Ready pod would pass /healthz under the same tag. A transient failure is retried; a persistent
@@ -176,7 +195,7 @@ test('integration:chart-exercise-port-forward — the chart exercise forwards a 
     const stuck = await run([{}], 'forward', ports, 99);
     assert.equal(stuck.status, 1);
     assert.equal(stuck.invocations.length, 0, 'an incomplete rollout is never forwarded');
-    assert.equal(stuck.stderr.trim().split('\n').at(-1), 'port-forward to release gy never became reachable after 3 attempts');
+    assert.equal(stuck.stderr.trim().split('\n').at(-1), 'port-forward to release gy never became reachable after 3 attempts within 180s');
 
     // Refusal: the superseded-epoch check passes only on the heartbeat's own 409 naming the superseded
     // lease. A forward lost around the request is a retried transport failure, never the refusal; an
@@ -192,7 +211,7 @@ test('integration:chart-exercise-port-forward — the chart exercise forwards a 
     assert.deepEqual(refused.leftover, []);
     const unanswered = await run([{ dieAfter: 1 }, { refuse: true }], reject, ports);
     assert.equal(unanswered.status, 1, unanswered.stderr); assert.equal(unanswered.stdout, '', 'a lost forward never passes the check');
-    assert.equal(unanswered.stderr.trim().split('\n').at(-1), 'port-forward to release gy never became reachable after 3 attempts');
+    assert.equal(unanswered.stderr.trim().split('\n').at(-1), 'port-forward to release gy never became reachable after 3 attempts within 180s');
     pod.state.heartbeat = 200;
     const accepted = await run([{}], reject, ports);
     assert.equal(accepted.status, 1); assert.equal(accepted.stdout, '');

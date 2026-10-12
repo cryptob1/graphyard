@@ -28,6 +28,11 @@ LOCAL_PORT=""
 # A forward that exits, or never answers /healthz as this release, is started again on a fresh port,
 # FORWARD_ATTEMPTS times FORWARD_RETRY_WAIT seconds apart; then the exercise fails, naming why.
 FORWARD_ATTEMPTS="${FORWARD_ATTEMPTS:-4}"; FORWARD_RETRY_WAIT="${FORWARD_RETRY_WAIT:-3}"
+# Every attempt of one forward() shares FORWARD_BUDGET seconds of wall clock: the rollout wait, each
+# attempt's 30 s of /healthz probes and every probe's curl are cut to what is left of it, so a pod that
+# accepts connections and never answers fails the gate within the budget, long before the chart job's
+# own timeout, instead of after FORWARD_ATTEMPTS × 30 probes × API_TIMEOUT (GY-1729).
+FORWARD_BUDGET="${FORWARD_BUDGET:-180}"
 # How long one API request may keep failing while the release rolls: 15 attempts 2 s apart, each
 # attempt given up after API_TIMEOUT seconds (curl --max-time), so a connection the forward accepts
 # but never answers is a failed attempt too, not a stall until the job's own timeout.
@@ -101,10 +106,14 @@ stop_forward() {
 # its pod would pass /healthz and judge the old pod as the upgrade (GY-1729).
 # Every message goes to stderr: the forward may be re-established inside a `$(api …)`.
 forward() {
-  local attempt target version
+  local attempt made=0 target version deadline remaining probe_end now
+  deadline=$(( $(date +%s) + FORWARD_BUDGET ))
   for attempt in $(seq 1 "$FORWARD_ATTEMPTS"); do
+    remaining=$(( deadline - $(date +%s) ))
+    if [ "$remaining" -le 0 ]; then break; fi
+    made="$attempt"
     stop_forward
-    if ! k rollout status "deploy/$RELEASE-graphyard" --timeout="$HELM_TIMEOUT" >&2; then
+    if ! k rollout status "deploy/$RELEASE-graphyard" --timeout="${remaining}s" >&2; then
       echo "port-forward attempt $attempt of $FORWARD_ATTEMPTS: the rollout of deploy/$RELEASE-graphyard has not completed, so no pod is forwarded" >&2
     elif target="$(k get rs,pods -l "app.kubernetes.io/instance=$RELEASE,app.kubernetes.io/component=server" -o json | select_pod)"; then
       echo "forwarding a free local port to pod/${target% *} (attempt $attempt of $FORWARD_ATTEMPTS)" >&2
@@ -112,10 +121,11 @@ forward() {
       FORWARD_LOG="$FORWARD_DIR/forward-$attempt-$(date +%s%N).log"; : >"$FORWARD_LOG"
       k port-forward --address 127.0.0.1 "pod/${target% *}" "$LOCAL_PORT:${target#* }" >"$FORWARD_LOG" 2>&1 &
       FORWARD_PID=$!; echo "$FORWARD_PID" >"$FORWARD_DIR/pid"
-      for _ in $(seq 1 30); do
+      probe_end=$(( $(date +%s) + 30 )); if [ "$probe_end" -gt "$deadline" ]; then probe_end="$deadline"; fi
+      while now="$(date +%s)"; [ "$now" -lt "$probe_end" ]; do
         [ -n "$LOCAL_PORT" ] || LOCAL_PORT="$(sed -n 's/^Forwarding from 127\.0\.0\.1:\([0-9][0-9]*\) .*/\1/p' "$FORWARD_LOG" | head -1)"
         if [ -n "$LOCAL_PORT" ]; then
-          version="$(curl -fsS "http://127.0.0.1:$LOCAL_PORT/healthz" --max-time "$API_TIMEOUT" 2>/dev/null | node -e 'try { console.log(JSON.parse(require("fs").readFileSync(0, "utf8")).version ?? "") } catch {}' || true)"
+          version="$(curl -fsS "http://127.0.0.1:$LOCAL_PORT/healthz" --max-time "$(( probe_end - now < API_TIMEOUT ? probe_end - now : API_TIMEOUT ))" 2>/dev/null | node -e 'try { console.log(JSON.parse(require("fs").readFileSync(0, "utf8")).version ?? "") } catch {}' || true)"
           if [ "$version" = "$TAG" ]; then echo "$LOCAL_PORT" >"$FORWARD_DIR/port"; echo "forwarding 127.0.0.1:$LOCAL_PORT to pod/${target% *}" >&2; return 0; fi
           if [ -n "$version" ]; then break; fi
         fi
@@ -124,10 +134,10 @@ forward() {
       done
       echo "port-forward attempt $attempt of $FORWARD_ATTEMPTS to pod/${target% *} did not answer /healthz as release $TAG (local port ${LOCAL_PORT:-none bound}, healthz version ${version:-none}): $(tail -n 1 "$FORWARD_LOG")" >&2
     fi
-    if [ "$attempt" -lt "$FORWARD_ATTEMPTS" ]; then sleep "$FORWARD_RETRY_WAIT"; fi
+    if [ "$attempt" -lt "$FORWARD_ATTEMPTS" ] && [ $(( deadline - $(date +%s) )) -gt "$FORWARD_RETRY_WAIT" ]; then sleep "$FORWARD_RETRY_WAIT"; fi
   done
   diagnose; stop_forward
-  echo "port-forward to release $RELEASE never became reachable after $FORWARD_ATTEMPTS attempts" >&2
+  echo "port-forward to release $RELEASE never became reachable after $made attempts within ${FORWARD_BUDGET}s" >&2
   exit 1
 }
 # The exercise's own forward, re-established when it has exited, wherever it was started.

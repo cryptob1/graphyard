@@ -24,7 +24,7 @@ UAT's `GRAPHYARD_TOKEN` (`GRAPHYARD_RELEASE_TOKEN`) files holds and follow-ups a
 
 Required: `typecheck`, `test` (`ci.yml`) under ten minutes; per candidate `releaseCandidateTests`, container, chart, soak/timing (advisory); UAT's `zero-touch` suite (`up --agent --goal`, fake GitHub) must merge a first item, any human step but App approval blocks promotion.
 
-`deploy/helm/exercise.sh` forwards a kubectl-chosen free port, re-forwarding a lost or foreign one; waits for the upgrade's rollout and new ReplicaSet's Ready pod, retrying transient API failures (empty reply, reset, stall, non-2xx, bodiless 2xx), else ending `api METHOD /api/PATH failed after 15 attempts: status STATUS, body: BODY`.
+`deploy/helm/exercise.sh` forwards a kubectl-chosen free port, re-forwarding a lost or foreign one within `FORWARD_BUDGET` seconds; waits for the rollout's new Ready pod, retrying transient API failures (empty reply, reset, stall, non-2xx, bodiless 2xx), else ending `api METHOD /api/PATH failed after 15 attempts: status STATUS, body: BODY`.
 
 ### One delivery path
 
