@@ -127,7 +127,7 @@ export function mergeQueueRuleset(config: { baseBranch: string; githubAppId: num
 }
 // ---- Merge-writer-only base branch (GY-1715) ---------------------------------------------------
 // Under the control-plane merger Graphyard's merge writer is the only executor, so setup protects the
-// base branch with a ruleset that refuses every push, force push and deletion from every actor —
+// base branch with a ruleset that refuses every creation, push, force push and deletion of it from every actor —
 // administrators included, which classic protection cannot promise — and lets deploy keys alone
 // bypass it. Setup applies it only while the merge writer's key is the repository's one read-write deploy key.
 export const mainWriteRulesetName = 'Graphyard merge writer only';
@@ -138,7 +138,7 @@ export function mainWriteRuleset(baseBranch: string) {
     name: mainWriteRulesetName, target: 'branch', enforcement: 'active',
     bypass_actors: [deployKeyBypassActor],
     conditions: { ref_name: { include: [`refs/heads/${baseBranch}`], exclude: [] } },
-    rules: [{ type: 'update', parameters: { update_allows_fetch_and_merge: false } }, { type: 'non_fast_forward' }, { type: 'deletion' }],
+    rules: [{ type: 'creation' }, { type: 'update', parameters: { update_allows_fetch_and_merge: false } }, { type: 'non_fast_forward' }, { type: 'deletion' }],
   };
 }
 /** Whether a ruleset document (GET repos/OWNER/REPO/rulesets/ID) already enforces exactly `mainWriteRuleset(BASE)`, so applying it again would change nothing. */

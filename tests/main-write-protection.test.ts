@@ -73,7 +73,10 @@ test('unit:main-write-protection-ruleset — control-plane setup writes an activ
   assert.equal(write!.body.name, mainWriteRulesetName);
   assert.equal(write!.body.enforcement, 'active');
   assert.deepEqual(write!.body.conditions.ref_name.include, ['refs/heads/main']);
-  assert.deepEqual(write!.body.rules.map((rule: any) => rule.type).sort(), ['deletion', 'non_fast_forward', 'update']);
+  assert.deepEqual(write!.body.rules.map((rule: any) => rule.type).sort(), ['creation', 'deletion', 'non_fast_forward', 'update']);
+  // Creating the base branch is a push too: on a repository whose base branch does not exist yet, only a deploy key may create it.
+  assert.ok((write!.body.rules as any[]).some(rule => rule.type === 'creation'), 'creation of the base branch is restricted to the bypass');
+  assert.equal(mainWriteRulesetCurrent({ ...mainWriteRuleset('main'), rules: mainWriteRuleset('main').rules.filter(rule => rule.type !== 'creation') }, 'main'), false, 'a Graphyard ruleset without the creation rule is drift and is rewritten');
   assert.equal((write!.body.rules as any[]).find(rule => rule.type === 'update').parameters.update_allows_fetch_and_merge, false);
   // No role, team, App or organization admin may bypass: only deploy keys, and the install registers one read-write key.
   assert.deepEqual(write!.body.bypass_actors, [{ actor_id: null, actor_type: 'DeployKey', bypass_mode: 'always' }]);
