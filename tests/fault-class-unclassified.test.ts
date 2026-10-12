@@ -294,3 +294,53 @@ test('manual:fault-class-unclassified — GY-1516: the stopped diagnosis of GY-1
   assert.deepEqual(state.faults.instances.map(entry => [entry.subject, entry.faultClass]), gy1516.map(line => [line.key, line.expected]));
   assert.deepEqual(recurringClasses(state.faults.instances, [], { threshold: 3, windowHours: 24 }, gy1402Clock + day / 2).filter(entry => entry.faultClass === 'unclassified'), [], 'no unclassified recurrence is filed');
 });
+
+// GY-1712, 2026-10-12: three unclassified faults in 24 hours, each a control-plane write the loop's
+// own steps neither handled nor classified — so they filed as action:diagnosis / action:fault:
+// - diagnosis:GY-1700 — POST /api/work answered 400 Invalid input; createRefused matched 409 only, so
+//   the diagnostician's fix filing threw to cycle.isolate;
+// - doctor:…:file:capacity — the same 400 on a doctor filing, retried every cycle as "Still could not file";
+// - diagnosis:GY-1710 — decide answered 409 already-requested (close); decideFresh threw any refusal
+//   but revisionRaced/deliveredMeanwhile, though the decisions step already adopts that standing id.
+// The candidate settles a 400 create as fix-item (like 409), adopts a standing close/release in
+// decideFresh, and names the zod issues in the refusal text so the fault line is actionable.
+const invalidInputIssues = [{ path: ['criteria', 0, 'proofs', 0], message: 'Invalid string: must match pattern /^(unit|integration|e2e|manual):[a-zA-Z0-9._/-]+$/' }];
+const invalidInputBody = { error: 'Invalid input', issues: invalidInputIssues };
+const invalidInputText = 'Graphyard refused work (400): Invalid input';
+const invalidInputWithIssues = `Graphyard refused work (400): Invalid input: ${JSON.stringify(invalidInputIssues)}`;
+const standingCloseId = '65bf0fef-d9c1-4cd2-8467-9f1866b0fd41';
+const alreadyRequestedClose = `Graphyard refused work/${standingCloseId}/decide (409): Decision ${standingCloseId} (close) is already requested on GY-1710; wait for it before requesting another`;
+const gy1712 = [
+  { key: 'isolated:diagnosis:GY-1700', kind: 'diagnosis', expected: 'proof', site: 'fix-item',
+    detail: `Handling the diagnosis of GY-1700 in the diagnosis step threw, so only its own action failed and the cycle went on with every other item: ${invalidInputText}` },
+  { key: 'doctor:a0cdc186f65394498c5a7123:file:capacity', kind: 'fault', expected: 'proof', site: 'fix-item',
+    detail: `Still could not file "Approver, reviewer and worker sessions exhaust their model-account limit mid-attempt, losing judgements and attempts and breaching machine bounds": ${invalidInputText}` },
+  { key: 'isolated:diagnosis:GY-1710', kind: 'diagnosis', expected: 'decision', site: 'decision-stale',
+    detail: `Handling the diagnosis of GY-1710 in the diagnosis step threw, so only its own action failed and the cycle went on with every other item: ${alreadyRequestedClose}` },
+] as const;
+
+test('manual:fault-class-unclassified — GY-1712: a 400 create refusal is createRefused (fix-item), zod issues are named in the refusal text, and a standing already-requested close is adopted rather than thrown', async () => {
+  const { createRefused } = await import('../src/daemon/doctor.js');
+  const { standingNamedIn } = await import('../src/daemon/decisions.js');
+  const { refusedDetail } = await import('../src/model/refusal.js');
+  // Instance 1+2 base: createRefused matched 409 only, so a 400 escaped to isolate / "Still could not file".
+  assert.ok(createRefused(new RefusedResponse(invalidInputText, 400, invalidInputBody)), 'a 400 is the create route refusing the content');
+  assert.ok(createRefused(new Error(invalidInputText)), 'a 400 wrapped in plain text is the same');
+  assert.ok(createRefused(new RefusedResponse(invalidInputWithIssues, 400, invalidInputBody)), 'a 400 whose text names the issues is still createRefused');
+  assert.ok(!createRefused(new Error('Graphyard refused work (503): the control plane is unavailable')), 'a plane that did not answer is still no content refusal');
+  // The operator-agent post used to drop issues from the thrown text; refusedDetail keeps them.
+  assert.equal(refusedDetail(invalidInputBody), `Invalid input: ${JSON.stringify(invalidInputIssues)}`);
+  assert.equal(refusedDetail({ error: 'Invalid input' }), 'Invalid input');
+  assert.equal(refusedDetail({ error: 'Register E2E scenario x before creating work that requires it' }), 'Register E2E scenario x before creating work that requires it');
+  // Instance 3 base: decideFresh threw; standingNamedIn already recovered the id for the decisions step.
+  assert.equal(standingNamedIn(new Error(alreadyRequestedClose), 'close'), standingCloseId);
+  assert.equal(standingNamedIn(new RefusedResponse(alreadyRequestedClose, 409, { error: alreadyRequestedClose.slice(alreadyRequestedClose.indexOf(': ') + 2) }), 'close'), standingCloseId);
+  assert.equal(standingNamedIn(new Error(alreadyRequestedClose), 'release'), null, 'a close refusal is not adopted as a release');
+  // With the sites naming their causes, the three instance lines open proof (×2) — and the thrown
+  // already-requested line had no site kind on the base, so it stayed unclassified. The candidate's
+  // decideFresh adopts it before isolate, so that line never opens; the remaining two stay proof.
+  const state = emptyDaemonState(gy1402Config());
+  for (const [index, line] of gy1712.slice(0, 2).entries()) storeAction(state, line.key, { kind: line.kind, work: null, principal: null, state: 'failed', detail: line.detail, attempts: 1, epoch: null, cycle: index, at: iso(index * 60_000) }, line.site);
+  assert.deepEqual(state.faults.instances.map(entry => [entry.subject, entry.faultClass]), gy1712.slice(0, 2).map(line => [line.key, line.expected]));
+  assert.deepEqual(recurringClasses(state.faults.instances, [], { threshold: 3, windowHours: 24 }, gy1402Clock + day / 2).filter(entry => entry.faultClass === 'unclassified'), [], 'no unclassified recurrence is filed');
+});

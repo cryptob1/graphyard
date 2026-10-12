@@ -836,3 +836,139 @@ test('integration:doctor-pending-file-unregistered-scenario-escalates — the do
   assert.equal(state.faults.instances.length, 1, 'one refusal, one instance');
   assert.deepEqual((await store.list()).filter(candidate => candidate.title === title), [], 'nothing was created');
 });
+
+// ---- GY-1712: 400 create refusal and already-requested decide settle instead of isolating ---------
+//
+// Instance 1 (diagnosis:GY-1700): the create route answered 400 Invalid input; createRefused matched
+// 409 only, so the fix filing threw to cycle.isolate as unclassified action:diagnosis.
+// Instance 3 (diagnosis:GY-1710): decide answered 409 already-requested (close); decideFresh threw
+// any refusal but revisionRaced/deliveredMeanwhile, though the decisions step adopts that standing id.
+const zod400 = () => new RefusedResponse('Graphyard refused work (400): Invalid input: [{"path":["criteria",0,"proofs",0],"message":"Invalid string"}]', 400,
+  { error: 'Invalid input', issues: [{ path: ['criteria', 0, 'proofs', 0], message: 'Invalid string' }] });
+const standingClose = '65bf0fef-d9c1-4cd2-8467-9f1866b0fd41';
+const alreadyRequested = (action: 'close' | 'release', work = 'GY-101') =>
+  new RefusedResponse(`Graphyard refused work/${work}/decide (409): Decision ${standingClose} (${action}) is already requested on ${work}; wait for it before requesting another`, 409,
+    { error: `Decision ${standingClose} (${action}) is already requested on ${work}; wait for it before requesting another` });
+
+test('unit:diagnosis-fix-item-400-invalid-input — a fix item the create route refuses with 400 Invalid input settles the diagnosis failed under fix-item (proof) and is not rethrown to isolation', async () => {
+  const h = harness(() => diagnosis('GY-101', { fix }));
+  h.diagnostician.file = async () => { throw zod400(); };
+  const state = emptyDaemonState(config()), work = [recurring(state)];
+  const isolated: string[] = [];
+  const cycleOf = (at: number) => ({ config: config(), state, effects: effects(h, () => work, () => at), now: () => at, snapshot: { work, now: new Date(at).toISOString() }, clock: at, performed: [],
+    isolate: async (_kind: string, _item: unknown, name: string, body: () => Promise<unknown>) => { try { return await body(); } catch (error) { isolated.push(`${name}: ${String(error)}`); return undefined; } } } as unknown as Cycle);
+  await diagnosisStep(cycleOf(clock)); await diagnosesSettled();
+  await diagnosisStep(cycleOf(clock + minute)); await diagnosesSettled();
+  assert.equal(state.diagnoses['GY-101'].state, 'failed');
+  assert.match(state.diagnoses['GY-101'].detail!, /refused the diagnostician's fix item for GY-101 as written.*Invalid input/);
+  assert.deepEqual(isolated, [], 'nothing reached the diagnosis step\'s isolation record');
+  assert.deepEqual(diagnosisInstances(state).map(fault => fault.slice(0, 2)), [['fix-item', 'proof']]);
+  assert.equal(h.requested.length, 0, 'no release is requested of a refused filing');
+  await diagnosisStep(cycleOf(clock + 2 * minute)); await diagnosesSettled();
+  assert.equal(state.diagnoses['GY-101'].state, 'failed');
+  assert.equal(diagnosisInstances(state).length, 1, 'one refusal, one instance');
+});
+
+test('unit:decide-fresh-adopts-already-requested — a close (or release) the server names as already standing is adopted for its approver only when its recorded input matches, not thrown to isolation', async () => {
+  // Covering path: the diagnosis asks to close the recurring item as a duplicate of GY-50.
+  const h = harness(() => diagnosis('GY-101', { covering: 'GY-50' }));
+  // History records the standing close the 409 names, with the same duplicate ref the diagnosis asks for.
+  h.requested.push({ work: 'GY-101', action: 'close', reason: 'already standing', input: { kind: 'duplicate', ref: 'GY-50' }, id: standingClose, revision: 1 });
+  h.outcomes.set(standingClose, { state: 'requested' });
+  let decides = 0;
+  h.diagnostician.decide = async (work, action) => {
+    decides += 1;
+    throw alreadyRequested(action as 'close' | 'release', work.key);
+  };
+  const state = emptyDaemonState(config()), work = [recurring(state), item('GY-50', { stage: 'build' } as Partial<Work>)];
+  const isolated: string[] = [];
+  const cycleOf = (at: number) => ({ config: config(), state, effects: effects(h, () => work, () => at), now: () => at, snapshot: { work, now: new Date(at).toISOString() }, clock: at, performed: [],
+    isolate: async (_kind: string, _item: unknown, name: string, body: () => Promise<unknown>) => { try { return await body(); } catch (error) { isolated.push(`${name}: ${String(error)}`); return undefined; } } } as unknown as Cycle);
+  await diagnosisStep(cycleOf(clock)); await diagnosesSettled();
+  await diagnosisStep(cycleOf(clock + minute)); await diagnosesSettled();
+  assert.deepEqual(isolated, [], 'the already-requested close never reached isolation');
+  assert.equal(decides, 1, 'asked once');
+  const entry = state.diagnoses['GY-101'];
+  assert.equal(entry.state, 'closing', entry.detail);
+  assert.equal(entry.decision?.id, standingClose, 'the standing decision is adopted');
+  assert.equal(entry.decision?.action, 'close');
+  assert.equal(h.approvers.length, 1, 'its approver is launched against the adopted id');
+  assert.equal(h.approvers[0].decision, standingClose);
+  // A release of a filed fix adopts the same way when history records that release.
+  clearDiagnoses();
+  const release = harness(() => diagnosis('GY-101', { fix }));
+  let releaseDecides = 0;
+  const releaseIsolated: string[] = [];
+  release.diagnostician.decide = async (target, action) => {
+    releaseDecides += 1;
+    // Seed the standing release into history as the decide refusal names it.
+    if (!release.requested.some(row => row.id === standingClose)) {
+      release.requested.push({ work: target.key, action: 'release', reason: 'already standing', input: {}, id: standingClose, revision: target.revision });
+      release.outcomes.set(standingClose, { state: 'requested' });
+    }
+    throw alreadyRequested(action as 'close' | 'release', target.key);
+  };
+  const other = emptyDaemonState(config()), items = [recurring(other)];
+  const releaseCycle = (at: number) => ({ config: config(), state: other, effects: effects(release, () => items, () => at), now: () => at, snapshot: { work: items, now: new Date(at).toISOString() }, clock: at, performed: [],
+    isolate: async (_kind: string, _item: unknown, name: string, body: () => Promise<unknown>) => { try { return await body(); } catch (error) { releaseIsolated.push(`${name}: ${String(error)}`); return undefined; } } } as unknown as Cycle);
+  await diagnosisStep(releaseCycle(clock)); await diagnosesSettled();
+  await diagnosisStep(releaseCycle(clock + minute)); await diagnosesSettled();
+  assert.equal(releaseDecides, 1);
+  assert.equal(other.diagnoses['GY-101'].state, 'releasing');
+  assert.equal(other.diagnoses['GY-101'].decision?.id, standingClose);
+  assert.equal(other.diagnoses['GY-101'].decision?.action, 'release');
+  assert.deepEqual(releaseIsolated, [], 'the already-requested release never reached isolation either');
+});
+
+test('unit:decide-fresh-leaves-competing-close — a standing close whose kind or ref differs from the diagnosis is not adopted, not isolated, and left to its requester', async () => {
+  const competing = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+  const h = harness(() => diagnosis('GY-101', { covering: 'GY-50' }));
+  // Triage obsolete close (or a duplicate of another item) stands; the diagnosis wants duplicate of GY-50.
+  h.requested.push({ work: 'GY-101', action: 'close', reason: 'triage obsolete', input: { kind: 'obsolete', reason: 'the triage agent judged it should close' }, id: competing, revision: 1 });
+  h.outcomes.set(competing, { state: 'requested' });
+  let decides = 0;
+  h.diagnostician.decide = async (work, action) => {
+    decides += 1;
+    throw new RefusedResponse(
+      `Graphyard refused work/${work.key}/decide (409): Decision ${competing} (${action}) is already requested on ${work.key}; wait for it before requesting another`,
+      409,
+      { error: `Decision ${competing} (${action}) is already requested on ${work.key}; wait for it before requesting another` },
+    );
+  };
+  const state = emptyDaemonState(config()), work = [recurring(state), item('GY-50', { stage: 'build' } as Partial<Work>)];
+  const isolated: string[] = [];
+  const cycleOf = (at: number) => ({ config: config(), state, effects: effects(h, () => work, () => at), now: () => at, snapshot: { work, now: new Date(at).toISOString() }, clock: at, performed: [],
+    isolate: async (_kind: string, _item: unknown, name: string, body: () => Promise<unknown>) => { try { return await body(); } catch (error) { isolated.push(`${name}: ${String(error)}`); return undefined; } } } as unknown as Cycle);
+  await diagnosisStep(cycleOf(clock)); await diagnosesSettled();
+  await diagnosisStep(cycleOf(clock + minute)); await diagnosesSettled();
+  assert.deepEqual(isolated, [], 'a competing close never reached isolation');
+  assert.ok(decides >= 1, 'the diagnosis asked for its close');
+  const entry = state.diagnoses['GY-101'];
+  assert.equal(entry.state, 'diagnosed', entry.detail);
+  assert.equal(entry.decision, null, 'the competing close must not be adopted as this diagnosis\'s answer');
+  assert.equal(h.approvers.length, 0, 'no approver is launched for a close the diagnosis did not own');
+  assert.match(entry.detail, /does not match this diagnosis's duplicate of GY-50/);
+  // A different-ref duplicate is the same refusal: still not adopted.
+  clearDiagnoses();
+  const otherRef = harness(() => diagnosis('GY-101', { covering: 'GY-50' }));
+  const otherStanding = '11111111-2222-3333-4444-555555555555';
+  otherRef.requested.push({ work: 'GY-101', action: 'close', reason: 'other duplicate', input: { kind: 'duplicate', ref: 'GY-99' }, id: otherStanding, revision: 1 });
+  otherRef.outcomes.set(otherStanding, { state: 'requested' });
+  otherRef.diagnostician.decide = async (target, action) => {
+    throw new RefusedResponse(
+      `Graphyard refused work/${target.key}/decide (409): Decision ${otherStanding} (${action}) is already requested on ${target.key}; wait for it before requesting another`,
+      409,
+      { error: `Decision ${otherStanding} (${action}) is already requested on ${target.key}; wait for it before requesting another` },
+    );
+  };
+  const otherState = emptyDaemonState(config()), otherWork = [recurring(otherState), item('GY-50', { stage: 'build' } as Partial<Work>), item('GY-99', { stage: 'build' } as Partial<Work>)];
+  const otherIsolated: string[] = [];
+  const otherCycle = (at: number) => ({ config: config(), state: otherState, effects: effects(otherRef, () => otherWork, () => at), now: () => at, snapshot: { work: otherWork, now: new Date(at).toISOString() }, clock: at, performed: [],
+    isolate: async (_kind: string, _item: unknown, name: string, body: () => Promise<unknown>) => { try { return await body(); } catch (error) { otherIsolated.push(`${name}: ${String(error)}`); return undefined; } } } as unknown as Cycle);
+  await diagnosisStep(otherCycle(clock)); await diagnosesSettled();
+  await diagnosisStep(otherCycle(clock + minute)); await diagnosesSettled();
+  assert.deepEqual(otherIsolated, []);
+  assert.equal(otherState.diagnoses['GY-101'].state, 'diagnosed');
+  assert.equal(otherState.diagnoses['GY-101'].decision, null);
+  assert.equal(otherRef.approvers.length, 0);
+});

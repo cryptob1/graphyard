@@ -15,7 +15,7 @@ import type { SessionHandleInput } from '../model/sessions.js';
 import { paneAlreadyGone, withPaneGone } from '../request-settlement.js';
 import { type HostMemoryReading, type ResourceReclaimReport, reclaimResources, dispatchRefusal, readHostMemory } from '../master-resources.js';
 import { healUserSupervision, type UserSupervisionAllowance, type UserSupervisionHeal } from '../user-manager.js';
-import { RefusedResponse } from '../model/refusal.js';
+import { RefusedResponse, refusedDetail } from '../model/refusal.js';
 import { rerunFailedChecks } from '../master/profiles.js';
 import type { CapacityRole, PartialWork } from '../model/capacity.js';
 import { readProducerLedger, saveProducerLedger, launchProducer, reclaimCheckouts } from '../producer.js';
@@ -437,7 +437,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     const response = await fetcher(`${config.url}/api/${path}`, { method, headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': key }, ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(30_000) });
     const result = await response.json();
     // The body is kept on the error: a decision refusal names the standing refused decision as a field (GY-265).
-    if (!response.ok) throw new RefusedResponse(`Graphyard refused ${path} (${response.status}): ${result?.error ?? JSON.stringify(result)}`, response.status, result);
+    if (!response.ok) throw new RefusedResponse(`Graphyard refused ${path} (${response.status}): ${refusedDetail(result)}`, response.status, result);
     return result;
   };
   /**
@@ -451,7 +451,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     const config = current();
     const response = await fetcher(`${config.url}/api/${path}`, { headers: { Authorization: `Bearer ${await readCredentialFile(config.credentialFile)}` }, signal: AbortSignal.timeout(timeoutMs) });
     const result = await response.json();
-    if (!response.ok) throw new Error(`Graphyard refused ${path} (${response.status}): ${result?.error ?? JSON.stringify(result)}`);
+    if (!response.ok) throw new Error(`Graphyard refused ${path} (${response.status}): ${refusedDetail(result)}`);
     return result;
   };
   const coordinatorStatus = async () => await asCoordinator('status') as ControlPlaneStatus & Record<string, unknown>;

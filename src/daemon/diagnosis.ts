@@ -20,7 +20,7 @@ import type { Runner } from '../runner/types.js';
 import { type DaemonAction, type DaemonState, message } from './state.js';
 import { record, selectDiagnosticianFleet } from './effects.js';
 import { createRefused } from './doctor.js';
-import { maxDecisionRequests } from './decisions.js';
+import { maxDecisionRequests, standingNamedIn } from './decisions.js';
 import type { Cycle } from './cycle.js';
 
 // ---------------------------------------------------------------------------
@@ -560,11 +560,11 @@ async function advance(cycle: Cycle, diagnostician: DiagnosticianEffects, entry:
     let fix: Work;
     try { fix = await diagnostician.file(input, `${diagnosisKey(entry.subject)}:fix`); }
     catch (error) {
-      // GY-1530: the create route's own refusal (a 409: an e2e proof naming a scenario nothing
-      // registered, GY-1516's "Register E2E scenario … before creating work that requires it") is the
-      // same malformed fix as one the local checks refuse, and settles the entry the same way, under
-      // the proof class's fix-item; thrown on, it reached cycle.isolate as an unclassified
-      // action:diagnosis. A plane-wide failure still throws to ridePlane, and the next cycle files again.
+      // GY-1530 / GY-1712: the create route's own refusal (a 409: an e2e proof naming a scenario
+      // nothing registered; or a 400: the server's zod Invalid input) is the same malformed fix as
+      // one the local checks refuse, and settles the entry the same way, under the proof class's
+      // fix-item; thrown on, it reached cycle.isolate as an unclassified action:diagnosis. A
+      // plane-wide failure still throws to ridePlane, and the next cycle files again.
       if (!createRefused(error)) throw error;
       entry.state = 'failed';
       await note(entry, 'failed', `The control plane refused the diagnostician's fix item for ${entry.subject} as written, so it is not filed again; the diagnosis stands for the master to file by hand: ${message(error)}`, 'fix-item');
@@ -639,9 +639,42 @@ const deliveredMeanwhile = (error: unknown) => /Delivered work is immutable/.tes
  * no longer applicable, and recorded with no fault; the next cycle's snapshot shows it done, and
  * the diagnosis is answered as for any item closed while it was diagnosed (GY-1266).
  */
+/**
+ * GY-1712 rework: the server refuses any second close/release of the same action while one stands,
+ * regardless of input (src/server/decisions.ts). A triage obsolete close or a duplicate naming a
+ * different ref therefore collides with the diagnosis's duplicate close. Adopting the named id on
+ * the refusal text alone would let advance mark the diagnosis answered by covering/fix when the
+ * approved close closes for another reason. Adopt only when history records that standing decision
+ * with the same action and the same diagnosis input (close: kind + ref; release: any standing
+ * release). A competing or unread standing decision is left to its requester — noted, not thrown
+ * to isolate, not adopted — and the next cycle asks again once it settles (or answers as no longer
+ * open when a competing close applies).
+ */
+function standingMatchesDiagnosis(standing: { action: string; input?: Record<string, unknown> | null }, action: 'release' | 'close', input: Record<string, unknown>): boolean {
+  if (standing.action !== action) return false;
+  if (action === 'release') return true;
+  return standing.input?.kind === input.kind && (standing.input?.ref ?? null) === (input.ref ?? null);
+}
+
+async function adoptStandingNamed(cycle: Cycle, target: Work, action: 'release' | 'close', input: Record<string, unknown>, held: string): Promise<boolean> {
+  if (!cycle.effects.decisions) return false;
+  const standing = (await cycle.effects.decisions(target)).decisions.find(candidate => candidate.id === held);
+  return !!standing && standingMatchesDiagnosis(standing, action, input);
+}
+
 async function decideFresh(cycle: Cycle, diagnostician: DiagnosticianEffects, entry: DiagnosisRecord, work: Work, action: 'release' | 'close', input: Record<string, unknown>, reason: string, note: Note) {
   try { return { decision: await diagnostician.decide(work, action, reason, input), target: work }; }
   catch (error) {
+    // GY-1712: the server names a standing request of this action the history read missed. Thrown on,
+    // a close that already stood on GY-1710 reached cycle.isolate as unclassified action:diagnosis.
+    // Adopt only when that standing decision's recorded input matches this diagnosis's request.
+    const held = standingNamedIn(error, action);
+    if (held) {
+      if (await adoptStandingNamed(cycle, work, action, input, held)) return { decision: { id: held }, target: work };
+      const wanted = action === 'close' ? `${String(input.kind ?? 'close')}${input.ref ? ` of ${input.ref}` : ''}` : action;
+      await note(entry, 'done', `The ${action} request on ${work.key} for the diagnosis of ${entry.subject} was refused because decision ${held} (${action}) is already standing; its recorded input does not match this diagnosis's ${wanted}, so it is left to its requester and this one is asked once it settles`, null);
+      return null;
+    }
     if (!revisionRaced(error) && !deliveredMeanwhile(error)) throw error;
     const why = `The ${action} request on ${work.key} for the diagnosis of ${entry.subject} was refused: ${message(error)}`;
     const fresh = (await cycle.effects.snapshot()).work.find(candidate => candidate.id === work.id);
@@ -657,6 +690,13 @@ async function decideFresh(cycle: Cycle, diagnostician: DiagnosticianEffects, en
     if (spent >= maxDecisionRequests) { await note(entry, 'done', `${why}; ${spent} ${action} request(s) already settled without applying, so it is not asked again here and the next cycle decides afresh`, null); return null; }
     try { return { decision: await diagnostician.decide(fresh, action, reason, input), target: fresh }; }
     catch (again) {
+      const heldAgain = standingNamedIn(again, action);
+      if (heldAgain) {
+        if (await adoptStandingNamed(cycle, fresh, action, input, heldAgain)) return { decision: { id: heldAgain }, target: fresh };
+        const wanted = action === 'close' ? `${String(input.kind ?? 'close')}${input.ref ? ` of ${input.ref}` : ''}` : action;
+        await note(entry, 'done', `${why}; asked again against revision ${fresh.revision} and refused because decision ${heldAgain} (${action}) is already standing with a different input than this diagnosis's ${wanted}, so it is left to its requester and the next cycle decides afresh`, null);
+        return null;
+      }
       if (!revisionRaced(again) && !deliveredMeanwhile(again)) throw again;
       await note(entry, 'done', `${why}; asked again against revision ${fresh.revision} and refused again (${message(again)}), so the next cycle decides afresh`, null);
       return null;
