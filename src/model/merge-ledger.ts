@@ -38,10 +38,17 @@ export type MergePushed = z.infer<typeof mergePushedSchema>;
 export type MergeReconciled = z.infer<typeof mergeReconciledSchema>;
 export type MergeRefused = z.infer<typeof mergeRefusedSchema>;
 const proofCounts = z.record(z.string().max(200), z.object({ executed: z.number().int().min(0), failed: z.number().int().min(0) }).passthrough());
-/** `merge.trial`: the trial of `head` on `mergeSha`, with each `unit:`/`integration:` proof's executed and failed cases. */
+/** GY-1718: the preview of a passing trial (merge-writer/preview.ts) — its result, each required and uat case's verdict, the failing ones named. */
+export const previewVerdictSchema = z.object({
+  result: z.enum(['pass', 'fail', 'timeout', 'error']), mergeSha: sha, detail: z.string().max(1000), durationMs: z.number().int().min(0),
+  cases: z.array(z.object({ case: z.string().min(1).max(200), verdict: z.enum(['passed', 'failed', 'flaky', 'unrun']), required: z.boolean(), reason: z.string().max(500).optional() }).strict()).max(500),
+  failed: z.array(z.string().min(1).max(200)).max(500),
+}).strict();
+export type MergeLedgerPreview = z.infer<typeof previewVerdictSchema>;
+/** `merge.trial`: the trial of `head` on `mergeSha`, with each `unit:`/`integration:` proof's executed and failed cases, and its preview when it had one. */
 export const mergeTrialSchema = z.object({ head: sha, mergeSha: sha, proofs: proofCounts }).passthrough();
-/** The newest trial the fold kept: the head it tried, the merge commit and each proof's counts. */
-export interface MergeLedgerTrial { head: string; mergeSha: string; proofs: Record<string, { executed: number; failed: number }> }
+/** The newest trial the fold kept: the head it tried, the merge commit, each proof's counts and the preview's verdict (GY-1718). */
+export interface MergeLedgerTrial { head: string; mergeSha: string; proofs: Record<string, { executed: number; failed: number }>; preview?: MergeLedgerPreview | null }
 
 /** One ledger row as the fold reads it: its kind and payload, and the item key it was written under when it was. */
 export interface MergeLedgerEvent { kind: string; payload: unknown; work?: string | null; at?: string | null; seq?: string | number | null }
@@ -117,7 +124,8 @@ export function foldMergeLedger(events: readonly MergeLedgerEvent[]): Record<str
       const trial = parsed(mergeTrialSchema, event.payload);
       const state = trial && find(event, byHead, trial.head);
       if (!trial || !state) continue;
-      state.trial = { head: trial.head, mergeSha: trial.mergeSha, proofs: Object.fromEntries(Object.entries(trial.proofs).map(([proof, counts]) => [proof, { executed: counts.executed, failed: counts.failed }])) };
+      const preview = previewVerdictSchema.safeParse((event.payload as { preview?: unknown }).preview);
+      state.trial = { head: trial.head, mergeSha: trial.mergeSha, proofs: Object.fromEntries(Object.entries(trial.proofs).map(([proof, counts]) => [proof, { executed: counts.executed, failed: counts.failed }])), ...(preview.success ? { preview: preview.data } : {}) };
     }
   }
   return states;
