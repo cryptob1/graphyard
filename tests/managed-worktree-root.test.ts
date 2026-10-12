@@ -142,10 +142,10 @@ test('integration:managed-worktree-root — producer and reviewer checkouts are 
     // or inside a session's own registered checkout is refused before anything is created there.
     // GY-866: each session directory points at the repository's Git directory so the git fetch
     // and git worktree add its request runs from where it starts reach the repository; it is still
-    // outside every worktree, the coordinator checkout included, with nothing checked out.
+    // outside every worktree, the coordinator checkout included, with nothing checked out (a codex session's own empty .agents and .codex aside, GY-1717).
     for (const own of [produced.checkout, reviewed.checkout]) {
       await assertOutsideWorktrees(root, own, 'An ephemeral checkout');
-      assert.deepEqual(await readdir(own).then(entries => entries.filter(entry => entry !== '.git' && entry !== '.graphyard')), [], `${own} has nothing checked out`);
+      assert.deepEqual(await readdir(own).then(entries => entries.filter(entry => !['.git', '.graphyard', '.agents', '.codex'].includes(entry))), [], `${own} has nothing checked out`);
     }
     const assignment = join(root, '.graphyard/worktrees/GY-88-1');
     git('worktree', 'add', '-q', '-b', 'graphyard/gy-88-1', assignment, 'HEAD');
