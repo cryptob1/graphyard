@@ -229,7 +229,7 @@ test('unit:ui-item-first-screen — an item page says on its first screen what s
   }
   // The why and the next step in plain words for the three cases a newcomer meets most.
   assert.match(firstScreen(itemPage('GY-20')), /Waiting on your decision about spending money or opening third-party accounts/);
-  assert.match(firstScreen(itemPage('GY-17')), /Needs a second Postgres instance/);
+  assert.match(firstScreen(itemPage('GY-17')), /A fault blocks it; the master agent clears it/);
   assert.match(firstScreen(itemPage('GY-22')), /Testing · 1 of 2 checks done/);
   // GY-22 waits on CI and on review; the page shows Test as current, so what is left is the test step's, not the review's.
   const left = /aria-label="What is left"[\s\S]*?<\/section>/.exec(itemPage('GY-22'))?.[0] ?? '';
@@ -944,7 +944,7 @@ test('GY-161 review: a refusing ready gate keeps handed-in work at Build, in the
   const refuse = (reasons: string[]) => ({ ...handedIn, stage: 'build', gates: handedIn.gates.map(gate => gate.name === 'ready' ? { ...gate, passed: false, reasons } : gate) }) as Work;
   const blocked = prSteps(refuse(['Staging credentials expired']), NOW);
   assert.equal(blocked.current, 'build'); assert.ok(blocked.steps.slice(1).every(step => step.state === 'pending'));
-  assert.equal(blocked.label, 'Building · blocked: Staging credentials expired'); assert.equal(blocked.who, 'Master agent');
+  assert.equal(blocked.label, 'Building · held by a recorded blocker'); // the row's own line says which (GY-1739) assert.equal(blocked.who, 'Master agent');
   const waiting = prSteps(refuse(['Dependency GY-7 is unfinished']), NOW);
   assert.equal(waiting.current, 'build'); assert.equal(waiting.label, 'Building · waiting for GY-7 to ship first'); assert.equal(waiting.who, 'Graphyard (automatic)');
   assert.equal(stepSince(refuse(['Staging credentials expired']), NOW, [{ key: handedIn.key, at: new Date(NOW - hour).toISOString(), from: 'build', to: 'review' }]), stepSince(refuse(['Staging credentials expired']), NOW), 'Build keeps the builder\'s clock');
@@ -1061,13 +1061,16 @@ test('unit:ui-short-sha-text — commit SHAs render as 8 characters in the page 
   // All rendered text, folded sections included; attributes (a title, a link, a copy action) are not text.
   const text = (html: string) => html.replace(/<[^>]*>/g, ' ');
   // Every item page: no whole SHA, and no hex run longer than 8, in what a reader sees.
+  // The one exception is the recorded blocker under Technical details, shown exactly as its agent wrote it (GY-1739).
+  const recorded = /<p class="blocker-recorded">[\s\S]*?<\/p>/;
   for (const item of work) {
     const page = markup(createElement(WorkDetails, { ...d, item }));
-    assert.deepEqual(longHex(text(page)), [], `${item.key} item page text`);
+    assert.deepEqual(longHex(text(page.replace(recorded, ''))), [], `${item.key} item page text`);
+    if (item.blocker) assert.equal(text(recorded.exec(page)?.[0] ?? '').split(item.blocker).length - 1, 1, `${item.key} shows its recorded blocker as written`);
   }
   const askedText = text(markup(createElement(WorkDetails, { ...d, item: asked })));
   assert.ok(askedText.includes(`The live proof of ${head.slice(0, 8)} needs a paid plan`) && askedText.includes(`A cloud account for ${base.slice(0, 8)}`), 'the Needs-you card shows the request in 8 characters');
-  const itemText = text(markup(createElement(WorkDetails, { ...d, item: loaded })));
+  const itemText = text(markup(createElement(WorkDetails, { ...d, item: loaded })).replace(recorded, ''));
   for (const sha of [head, base]) assert.ok(itemText.includes(sha.slice(0, 8)), `${sha.slice(0, 8)} is shown`);
   assert.ok(itemText.includes(`Proof run against ${base.slice(0, 8)}, not ${head.slice(0, 8)}`), 'a revocation reason shows its commits in 8 characters');
   assert.ok(!itemText.includes(head) && !itemText.includes(base));

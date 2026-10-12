@@ -98,9 +98,10 @@ export function waitsOn(step: StepId, gate: Gate | undefined, work: Work, now: n
       // revision added): the control plane holds it at build, so it waits there on that, not on a builder.
       const ready = work.submission ? work.gates.find(gate => gate.name === 'ready' && !gate.passed)?.reasons[0] : undefined;
       if (ready !== undefined) {
-        // A dependency waits for the other item to ship; a blocker is shown as written, for the Master agent to clear.
+        // A dependency waits for the other item to ship; a blocker is named, never restated: the row's
+        // own line carries its one-sentence summary (GY-1739), the item page's details its text.
         if (/^Dependency /.test(ready)) return { detail: plainReason(ready, 'ready').text.replace(/^./, c => c.toLowerCase()), who: 'Graphyard (automatic)' };
-        return { detail: `blocked: ${ready}`, who: 'Master agent' };
+        return { detail: 'held by a recorded blocker', who: 'Master agent' };
       }
       if (work.reworkRequested || changesRequested(work)) return assignment(work, now).active ? { detail: 'the builder is making the requested changes', who: 'Builder agent' } : { detail: 'sent back for changes, waiting for a builder', who: 'Graphyard (assigns a builder)' };
       return assignment(work, now).active ? { detail: 'the builder is writing the code', who: 'Builder agent' } : { detail: 'waiting for a builder', who: 'Graphyard (assigns a builder)' };
