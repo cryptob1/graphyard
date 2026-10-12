@@ -3,6 +3,7 @@ import { z } from 'zod';
 import type { ChildRun } from '../child-runner.js';
 import type { MasterConfig } from '../master.js';
 import type { Work } from '../model.js';
+import type { MergerMode } from '../merger-mode.js';
 import { classifyRisk } from '../model/risk-class.js';
 import { shadowGateSettings } from '../master/merge-writer-settings.js';
 import { runTrial, trialMerge, trialNeedsLog, TrialCleanupError, TrialRunnerError, TrialTimeoutError, type TrialRun } from '../merge-writer/trial.js';
@@ -80,6 +81,8 @@ export function shadowReads(config: Pick<MasterConfig, 'baseBranch' | 'run'>, ro
 
 interface Flight { key: string; head: string; baseTip: string; settled: { error: unknown } | { verdict: Omit<ShadowVerdict, 'outcome'>; work: Work; leftover?: string } | null }
 const flights = new WeakMap<DaemonState, Flight>();
+/** The merger each loop state last read, so a failed read keeps the known mode; with none read, GitHub's behaviour stands. */
+const knownMerger = new WeakMap<DaemonState, MergerMode>();
 /** A settled trial whose verdict the coordinator has not yet recorded; at most one per loop, since one trial runs at a time. */
 const unrecorded = new WeakMap<DaemonState, { verdict: Omit<ShadowVerdict, 'outcome'>; work: Work }>();
 /** Resolves once the trial in flight for `state` has settled; for the step's tests. */
@@ -209,6 +212,9 @@ export async function shadowStep(cycle: Cycle) {
       for (let at = 0; at < asked.length; at += shadowExplanationPairsMax) explanations.push(...await reads.explanations(asked.slice(at, at + shadowExplanationPairsMax)));
     } catch { explanations = []; explanationsRead = false; }
   }
+  // GY-1748: under the control-plane merger a disagreement is history, recorded in the cursor and raising no line.
+  let controlPlane = knownMerger.get(state) === 'control-plane';
+  try { const mode = await effects.mergeWriter?.merger(); if (mode) { knownMerger.set(state, mode); controlPlane = mode === 'control-plane'; } } catch { /* keeps the mode last read */ }
   for (const [index, verdict] of judged.entries()) {
     const current = state.shadow[index]!;
     if (verdict.outcome === current.outcome && verdict.delivered?.mergeSha === current.delivered?.mergeSha) continue;
@@ -216,7 +222,7 @@ export async function shadowStep(cycle: Cycle) {
     changed = true;
     if (verdict.outcome === current.outcome) continue;
     const key = shadowAttentionKey(verdict.key);
-    if (shadowDisagreement(verdict.outcome) && !shadowPairExplained(verdict, explanations) && !state.actions[key]) {
+    if (!controlPlane && shadowDisagreement(verdict.outcome) && !shadowPairExplained(verdict, explanations) && !state.actions[key]) {
       performed.push(storeAction(state, key, { kind: 'escalation', work: verdict.key, principal: null, state: 'done', detail: shadowDisagreementDetail(verdict), attempts: 1, epoch: null, cycle: state.cycle, at: new Date(now()).toISOString() }, null));
     }
   }
@@ -233,7 +239,7 @@ export async function shadowStep(cycle: Cycle) {
   for (const workKey of explanationsRead ? attentionKeys : []) {
     const actionKey = shadowAttentionKey(workKey);
     if (!state.actions[actionKey]) continue;
-    const unexplained = judged.filter(verdict => verdict.key === workKey && shadowDisagreement(verdict.outcome) && !shadowPairExplained(verdict, explanations));
+    const unexplained = controlPlane ? [] : judged.filter(verdict => verdict.key === workKey && shadowDisagreement(verdict.outcome) && !shadowPairExplained(verdict, explanations));
     if (unexplained.length) continue;
     delete state.actions[actionKey];
     changed = true;
