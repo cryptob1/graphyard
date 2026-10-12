@@ -121,8 +121,8 @@ export const previewCase = (entry: CaseFile) => entry.definition.required || ent
 /**
  * Why a selected case is not run on the preview, or null when it runs: it declares an install
  * secret. The cases come from the merge the preview exists to judge, so none may read the install's
- * `e2e-secrets.uat.env`; such a case is recorded `unrun` with this reason and runs on the release
- * candidate instead (GY-1535).
+ * `e2e-secrets.uat.env`; such a uat-only case is recorded `unrun` with this reason and runs on the
+ * release candidate instead (GY-1535), while a required one fails the preview.
  */
 export const previewWithheld = (entry: CaseFile) =>
   entry.definition.secrets.length ? `declares the install secret${entry.definition.secrets.length === 1 ? '' : 's'} ${entry.definition.secrets.join(', ')}, which the preview withholds; it runs on the release candidate` : null;
@@ -134,7 +134,8 @@ const cut = (text: string) => text.replace(/\s+/g, ' ').trim().slice(0, 900);
  * detached checkout of `mergeSha` under `base` marked with this process as its owner, the site's
  * build, its output served on loopback (`serveStaticSite`, answering `mergeSha` on /healthz), and
  * every required and uat case of the checkout (`previewCase`) run against it (`projectCaseSuite`),
- * those declaring an install secret recorded unrun (`previewWithheld`). The build and the cases'
+ * those declaring an install secret not run (`previewWithheld`): a required one fails the preview
+ * naming it, a uat-only one is recorded unrun. The build and the cases'
  * processes run in `previewEnvironment` (a throwaway HOME, no coordinator credential or socket) and
  * the cases with a throwaway token, since all come from the merge the preview exists to judge. When the budget
  * runs out the run is cancelled — the build's shell killed, the case runner's requests aborted and
@@ -170,8 +171,12 @@ export async function runPreview(input: PreviewInput): Promise<PreviewVerdict> {
       let selected: CaseFile[] = [];
       try { selected = existsSync(join(checkout, 'e2e')) ? (await loadCases(checkout)).filter(previewCase) : []; }
       catch (error) { return verdict('fail', `the merge's E2E cases do not load: ${error instanceof Error ? error.message : String(error)}`, [], ['cases']); }
-      const withheld = selected.flatMap(entry => { const reason = previewWithheld(entry); return reason ? [{ case: entry.definition.id, verdict: 'unrun' as const, required: entry.definition.required, reason }] : []; });
-      const unrun = withheld.length ? `; not run on the preview, each declaring an install secret it withholds: ${withheld.map(entry => `${entry.case}${entry.required ? ' (required)' : ''}`).join(', ')}` : '';
+      const withheld = selected.flatMap(entry => { const reason = previewWithheld(entry); return reason ? [{ case: entry.definition.id, verdict: 'unrun' as PreviewCase['verdict'], required: entry.definition.required, reason }] : []; });
+      // A required case the preview cannot run fails it, naming the case: no merge lands without running every required case. A uat-only one stays informational.
+      const unrunRequired = withheld.filter(entry => entry.required);
+      if (unrunRequired.length) return verdict('fail', `required E2E case${unrunRequired.length === 1 ? '' : 's'} ${unrunRequired.map(entry => entry.case).join(', ')} declare${unrunRequired.length === 1 ? 's' : ''} an install secret the preview withholds, so the preview cannot run ${unrunRequired.length === 1 ? 'it' : 'them'} and refuses the merge`,
+        withheld.map(entry => entry.required ? { ...entry, verdict: 'failed' as const } : entry), unrunRequired.map(entry => entry.case));
+      const unrun = withheld.length ? `; not run on the preview, each declaring an install secret it withholds: ${withheld.map(entry => entry.case).join(', ')}` : '';
       if (selected.length === withheld.length) return verdict('pass', `no required or uat E2E case the preview can run is in the merge, so it exercised nothing${unrun}`, withheld);
       cancelled();
       served = await serveStaticSite(join(checkout, input.site.directory), input.mergeSha);

