@@ -94,6 +94,8 @@ RELEASE=gy; NAMESPACE=exercise; TAG=1.2.3; HELM_TIMEOUT=5m; LOCAL_PORT=""; FORWA
 k() { kubectl --namespace "$NAMESPACE" "$@"; }
 diagnose() { echo "--- port-forward output, every attempt" >&2; cat "$FORWARD_DIR"/forward-*.log >&2 2>/dev/null || true; echo "--- pods" >&2; k get pods,svc,endpoints >&2; }
 ${functions()}
+# As the exercise's own cleanup trap does: a run that exits on a failure still stops its forward.
+trap stop_forward EXIT
 ${body}`;
   const result = await new Promise<{ status: number | null; stdout: string; stderr: string }>(done => {
     const child = spawn('bash', ['-c', script], { env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, FORWARD_DIR: forwardDir, FAKE_DIR: dir, FAKE_PLAN: JSON.stringify(plan), FAKE_ROLLOUT: rollout, FAKE_ROLLOUT_FAILURES: String(rolloutFailures), FAKE_POD_PORT: String(ports.pod), FAKE_DECOY_PORT: String(ports.decoy), FORWARD_ATTEMPTS: '3', FORWARD_RETRY_WAIT: '0', FORWARD_BUDGET: String(budget), API_ATTEMPTS: '6', API_RETRY_WAIT: '0', API_TIMEOUT: '2' } });

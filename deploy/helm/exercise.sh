@@ -130,7 +130,7 @@ forward() {
           if [ -n "$version" ]; then break; fi
         fi
         if ! kill -0 "$FORWARD_PID" 2>/dev/null; then break; fi
-        sleep 1
+        sleep 0.2
       done
       echo "port-forward attempt $attempt of $FORWARD_ATTEMPTS to pod/${target% *} did not answer /healthz as release $TAG (local port ${LOCAL_PORT:-none bound}, healthz version ${version:-none}): $(tail -n 1 "$FORWARD_LOG")" >&2
     fi
@@ -238,9 +238,9 @@ EOF
 step "1. Installing $IMAGE with the bundled evaluation database"
 install_args install "$REPOSITORY"
 helm test "$RELEASE" --namespace "$NAMESPACE" --logs
+# forward() returns only once /healthz through it reports $TAG, so the deployed version is checked there;
+# a second, unretried probe would abort the exercise on a forward lost just after it (GY-1729).
 forward
-HEALTH="$(curl -fsS "http://127.0.0.1:$LOCAL_PORT/healthz")"
-same "$TAG" "$(printf '%s' "$HEALTH" | node -p "JSON.parse(require('fs').readFileSync(0,'utf8')).version")" '/healthz does not report the deployed version'
 
 step "2. Seeding a ledger: an assignment under lease with history, and a backlog item"
 WORK="$(api POST work "$OPERATOR_TOKEN" '{"title":"Chart exercise","criteria":[{"id":"AC-1","text":"Survives upgrade and restore","proofs":["integration:chart"]}]}')"
