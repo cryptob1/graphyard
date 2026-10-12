@@ -4,7 +4,7 @@ import { resourceConflicts } from '../../coordination.js';
 import { handSettlementRefusal } from '../../model/containment.js';
 import { agentToken, dispatchWork, listHerdrAgents, readWorkerCredential, snapshotWithClock, verifyContainmentDeath, withReviewerDefaults, withRoleDefaults } from '../../master.js';
 import { readDaemonState } from '../../master-daemon.js';
-import { verificationEffects, verifyDeployment } from '../../master-verification.js';
+import { localPostDeployChecks, verificationEffects, verifyDeployment, type PostDeployChecksInput } from '../../master-verification.js';
 import { cycleBudget, masterStatusReport } from '../master-status.js';
 import { masterHeartbeatMinutes, masterSessionMinutes } from '../../master/master-session.js';
 import { assertHandDispatch } from '../hand-actions.js';
@@ -40,6 +40,19 @@ export const githubMergesAnswer = 'GitHub merges: a pull request whose build, re
 /** What `master recover` does outside this process; a test hands in its own so no real unit is touched. */
 export interface RecoverEffects { run: ChildRun; host: LoopSupervisorHost; restart: (unit: string) => Promise<unknown> }
 const recoverEffects: RecoverEffects = { run: defaultChildRun, host: {}, restart: unit => defaultChildRun('systemctl', ['--user', 'restart', unit], { timeoutMs: 60_000 }) };
+
+/**
+ * `master post-deploy-checks` (GY-1732): this checkout's decision of a delivered item's post-deploy
+ * checks and the follow-ups they file, printed as JSON from a `PostDeployChecksInput` on stdin.
+ * verify-deployment runs it from the observed release's isolated checkout, so a follow-up's text and
+ * observation window are the serving release's, not those of a coordinator checkout behind it.
+ */
+export async function postDeployChecksCommand(stdin: AsyncIterable<string | Buffer> = process.stdin, write: (text: string) => void = text => process.stdout.write(text)) {
+  let raw = ''; for await (const chunk of stdin) { raw += chunk; if (raw.length > 4_000_000) throw new Error('post-deploy-checks input is too large'); }
+  const input = JSON.parse(raw) as PostDeployChecksInput;
+  if (!input?.work?.id || typeof input.release !== 'string' || typeof input.now !== 'string') throw new Error('Use master post-deploy-checks with {"work","release","now","projections","servedAt"} as JSON on stdin');
+  write(`${JSON.stringify(await localPostDeployChecks(input))}\n`);
+}
 
 /** Reading status and acting on one item: settle a quarantine, dispatch, merge, verify a deployment. */
 export async function operationsCommand(session: MasterSession, effects: RecoverEffects = recoverEffects): Promise<unknown> {

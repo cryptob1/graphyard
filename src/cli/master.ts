@@ -12,7 +12,7 @@ import { closeHelp } from './master-close.js';
 import { openMasterSession, unhandled } from './master/session.js';
 import { intentCommand } from './master/intent.js';
 import { fleetCommand } from './master/fleet.js';
-import { confinedMaster, operationsCommand } from './master/operations.js';
+import { confinedMaster, operationsCommand, postDeployChecksCommand } from './master/operations.js';
 import { checkoutRestoreServeFlag } from './checkout-restore-release.js';
 import { serveCheckoutRestoreAct } from './checkout-restore-serve.js';
 import { loopCommand } from './master/loop.js';
@@ -107,6 +107,9 @@ export const masterCommands = defineCommands([
     ],
     async run(context) {
       const { id } = context;
+      // GY-1732: the observed release's own post-deploy filer, run by verify-deployment from an isolated checkout of
+      // that release; it opens no session and takes no root — the delivered item and readings arrive on stdin.
+      if (id === 'post-deploy-checks') return postDeployChecksCommand();
       const root = context.repositoryRoot();
       // The master's role instructions lead the guide; the guide file's first line is its docs-index entry, not guide body.
       if (id === 'guide') return console.log(`${masterInstructions}\n` + (await readFile(fileURLToPath(new URL('../../docs/master-agent.md', import.meta.url)), 'utf8')).replace(/^<!-- page:[^\n]*\n/, ''));

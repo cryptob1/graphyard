@@ -9,7 +9,7 @@ import { GitHub, idleObservationSeconds, processJob } from '../../src/github.js'
 import { GitHubCacheStore } from '../../src/github-cache.js';
 import { GitHubChargeLedger } from '../../src/github-charges.js';
 import { type Principal, Refusal, type Work, observationWindowHold } from '../../src/model.js';
-import { filePostDeployFollowUps } from '../../src/master-verification.js';
+import { type PostDeployFiler, filePostDeployFollowUps, localPostDeployChecks, verifyDeployment } from '../../src/master-verification.js';
 import { plainStatus } from '../../src/model/plain-status.js';
 import { conflictReworkBoundMs } from '../../src/model/approval.js';
 import * as deploymentStep from '../../src/daemon/deployment.js';
@@ -176,6 +176,13 @@ const cappedReviewerApp = { appId: 77_001, installationId: 77_002, slug: 'graphy
 export const supervisedAbsentEffects = ['decide', 'approver', 'docsSync', 'withdraw', 'resume', 'decisions', 'decisionChanges', 'replan', 'widenScope', 'withdrawReview', 'diagnostician', 'acceptance', 'planner', 'fileFaultClass', 'unblock', 'doctor'] as const;
 /** GY-1698: the intervention-pattern proof the windowed post-deploy criterion declares, as interventions/patterns.ts files it. */
 const windowedPatternProof = 'manual:post-deploy/intervention-pattern-escalation-build';
+// GY-1732: the coordinator checkout behind the serving release, and its filer — code from before
+// observation windows existed, which files each follow-up without one (as 98070f3538 did).
+const staleCoordinatorSha = '98070f3538'.padEnd(40, '0');
+const staleFiler: PostDeployFiler = async input => (await localPostDeployChecks(input)).map(check => check.followUp
+  ? { ...check, followUp: { ...check.followUp, input: (({ observationWindow: _, ...rest }) => ({ ...rest, description: rest.description.replace(/\n\nObservation window: [^\n]*/, '') }))(check.followUp.input) } } : check);
+// What the served release's isolated checkout emits: every statement the verifier checks.
+const loopInstructions = (text => ({ guide: text, init: text }))('Keep cycling; deployment verification is a step of the cycle, against the exact deployed release. Stop only at a genuinely external blocker recorded in Graphyard. Ordinary review findings, rework, idle workers, and proof setup are not stopping conditions. Close finished agent sessions.');
 export async function simulateDay(options: { hours: number; backlog?: boolean; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number; working?: { from: number; retryAt: number } }; regression?: ('approvers-left-open' | 'docs-syncs-left-open')[]; headless?: boolean; handApprovers?: boolean; stranded?: boolean | 'resume'; staleRework?: boolean; staleMerge?: number; capacityWait?: { from: number; to: number }; diagnosisLimit?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; workspaceFailure?: { item: number; until: number }; credentialBlocked?: { recovers: number; never: number }; blockers?: boolean; retrying?: { worker: number; approver: number }; limitMenu?: { worker: number; prose: number; twinLogin?: boolean }; unbounded?: { stuck: number; progressing: number; pushedOnce: number; rework: number }; starved?: { items: number[]; dropFirst: number }; docs?: { budget: { total: number; perPage: number } }; dispatchFailing?: { constant: number; changing: number; refuseBlocks: number; unblockAfterMs: number }; mainGuard?: MainGuardDay; containment?: { failUntil: number; slowUntil: number; refuseSettle?: number }; mechanical?: { applied: number; rejected: number }; slowDecisions?: { from: number; to: number; ms: number }; slowAnswers?: { from: number; to: number; ms: number }; slowObservation?: { from: number; to: number; attentionMs: number }; lateReading?: boolean; slowDeployment?: { from: number; to: number; observationMs: number }; selfProvision?: { redeployFails: { from: number; to: number } }; plan?: Partial<typeof basePlan>; github806?: boolean; remedies?: boolean;
   decomposition?: { broadItems: number[]; concurrency?: number };
   /** GY-1294: the loop's own write moves a diagnosed item's revision before its approver reads the diagnosis decision, so the decision settles stale. */
@@ -296,8 +303,12 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
    * the day files its follow-up exactly as master verify-deployment does (filePostDeployFollowUps over
    * the day's items, the report's projection read for the pattern), releases the one it files at once,
    * and samples the loop's view of it after every cycle (observationWindowDay).
+   * GY-1732: `staleCoordinator` files through verifyDeployment itself, from a coordinator checkout behind
+   * the serving release whose own filer predates observation windows (it files window-less, as
+   * 98070f3538 filed GY-1721..GY-1725); the served release's isolated checkout carries the current filer.
+   * `windowHours` makes the criterion a live window of that many hours instead of a rate per `windowDays`.
    */
-  observationWindow?: { item: number; windowDays: number; filedAfterMs: number } }) {
+  observationWindow?: { item: number; windowDays: number; filedAfterMs: number; staleCoordinator?: boolean; windowHours?: number } }) {
   const dayStart = clock.now();
   // A day may restage the shared scenario: the day-scoped view of the plan is what every fault
   // below arms from, while each test's own assertions still read the shared base plan.
@@ -510,7 +521,9 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     const criteria = [{ id: 'AC-1', text: plan.scoped.has(n) || (options.remedies && n === remedyItem) ? `Item ${n} behaves, with its fixture ${fixture(n)}` : `Item ${n} behaves`, proofs: [PROOF] },
       ...(n === plan.attested ? [{ id: 'AC-2', text: `Item ${n} is attested`, proofs: [MANUAL] }] : []),
       // GY-1698: the windowed post-deploy verification whose follow-up the day files and releases, as GY-1685 AC-1 declared it.
-      ...(options.observationWindow?.item === n ? [{ id: 'AC-2', text: `The cause of the recurring escalation interventions at the build stage is found and removed: the intervention report shows the escalation rate at the build stage below 3 per ${options.observationWindow.windowDays} days after item ${n} ships`, proofs: [windowedPatternProof] }] : [])];
+      ...(options.observationWindow?.item === n ? [{ id: 'AC-2', text: options.observationWindow.windowHours
+        ? `The intervention report shows no escalation interventions at the build stage over ${options.observationWindow.windowHours} hours of live activity after item ${n} ships`
+        : `The cause of the recurring escalation interventions at the build stage is found and removed: the intervention report shows the escalation rate at the build stage below 3 per ${options.observationWindow.windowDays} days after item ${n} ships`, proofs: [windowedPatternProof] }] : [])];
     const smokeIntake = options.slowDeployment ? { policy: { checks: ['test', 'typecheck'], review: true, deploySmoke: true } } : {};
     let work = await engine.execute(principals.operator, 'create', null, { title: `Soak item ${n}`, plannedFiles: files(n), criteria, ...scopeIntake, ...docsIntake, ...broadIntake, ...smokeIntake }, id());
     if (n === plan.exhaustedReviewer) work = await engine.execute(principals.operator, 'reviewpolicy', work.id, { provider: 'agent', expectedPolicyRevision: work.policyRevision, reason: 'Reviewed by the reviewer bots',
@@ -520,7 +533,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   // ---- GY-1698: the windowed post-deploy follow-up the day files as master verify-deployment does, releases at once, and watches. ----
   const windowDay = options.observationWindow ? {
     parent: items[options.observationWindow.item - 1], windowDays: options.observationWindow.windowDays, proof: windowedPatternProof,
-    followUp: null as Work | null, filedAt: null as number | null, releasedAt: null as number | null, filings: 0, created: [] as string[],
+    followUp: null as Work | null, filedAt: null as number | null, releasedAt: null as number | null, filings: 0, staleFilings: 0, created: [] as string[],
     samples: [] as { elapsed: number; at: string; stage: string; waiting: boolean | null; attention: string | null; attentionRows: number; sentence: string; dispatches: { requestedBy: string; at: string }[]; lease: string | null; sessions: number; masterLive: boolean; faults: string[]; escalations: string[] }[],
   } : null;
   // GY-1315: the unreleased backlog the stale-release step reads every cold cycle, beside the day's items.
@@ -3137,15 +3150,30 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
       if (parent.delivery && at >= Date.parse(parent.delivery.mergedAt) + options.observationWindow!.filedAfterMs) {
         // The report's projection for the pattern: a streak not yet begun, projected half a day before the merge bound, as GY-1689's was.
         const projected = new Date(Date.parse(parent.delivery.mergedAt) + windowDay.windowDays * 24 * hour - 12 * hour).toISOString();
-        const checks = await filePostDeployFollowUps(parent, parent.delivery.mergeSha, listed,
-          async (input, key) => {
-            // File through the engine the same way the API create path does, so the window rides the
-            // create schema onto the item (a missing window would dispatch at once and is the bug).
-            assert.ok(input.observationWindow, `filePostDeployFollowUps must put observationWindow on the follow-up input: ${JSON.stringify(input)}`);
-            const filed = await engine.execute(principals.operator, 'create', null, input, key) as Work;
-            assert.ok(filed.observationWindow, `create must persist observationWindow: ${JSON.stringify(filed.observationWindow)}`);
-            windowDay.created.push(filed.key); return filed;
-          }, new Date(at), async () => ({ since: null, projected }));
+        const file = async (input: Parameters<typeof engine.execute>[3], key: string) => {
+          // File through the engine the same way the API create path does, so the window rides the
+          // create schema onto the item (a missing window would dispatch at once and is the bug).
+          assert.ok((input as Work).observationWindow, `filePostDeployFollowUps must put observationWindow on the follow-up input: ${JSON.stringify(input)}`);
+          const filed = await engine.execute(principals.operator, 'create', null, input, key) as Work;
+          assert.ok(filed.observationWindow, `create must persist observationWindow: ${JSON.stringify(filed.observationWindow)}`);
+          windowDay.created.push(filed.key); return filed;
+        };
+        const patterns = async () => ({ since: null, projected });
+        const checks = options.observationWindow!.staleCoordinator ? await (async () => {
+          // GY-1732: master verify-deployment with the coordinator checkout behind the serving release (the parent's merge).
+          const served = parent.delivery!.mergeSha, iso = new Date(at).toISOString();
+          const verified = await verifyDeployment(parent, {
+            snapshot: async () => ({ work: listed, now: iso }), now: () => at, repository: 'owner/project',
+            observe: async () => ({ source: 'endpoint' as const, sha: served, at: iso, reason: null, deployed: [parent.key], pending: [] }),
+            release: () => ({ sha: staleCoordinatorSha, clean: true, repository: 'owner/project', reason: null }),
+            emit: async () => assert.fail('the coordinator checkout behind the release emits nothing'),
+            isolate: async sha => ({ release: { sha, clean: true, repository: 'owner/project', reason: null }, emit: async () => loopInstructions, checks: localPostDeployChecks, dispose: async () => {} }),
+            checks: staleFiler, record: async () => {}, file: file as never, patterns,
+          });
+          assert.equal(verified.result, 'verified', verified.refusals.join('; '));
+          windowDay.staleFilings += 1;
+          return verified.postDeploy;
+        })() : await filePostDeployFollowUps(parent, parent.delivery.mergeSha, listed, file as never, new Date(at), patterns);
         windowDay.filings += 1;
         const key = checks.find(check => check.proof === windowDay.proof)?.followUp ?? null;
         if (key && !windowDay.followUp) {
