@@ -86,7 +86,7 @@ Installs share hosts: units named per repository (`graphyard-executor-OWNER-NAME
 
 ### The pipeline doctor (on by default)
 
-Every `run.doctor.intervalMinutes` (10) a Pi **doctor** fixes stuck work: `master scope`, `requirements`, `unblock`, `decide`+`approver`, `settle-containment`, `close`, `create`, `release`, `checkout-restore` (never merging, dispatching, evidencing; allowlist reads quoted final reasons as prose; refusals name rule, position); posts findings (`master status` `doctor`), escalates or files faults (deduped — standing/diagnosed or GY-1632 cover/threshold; check refusals and unregistered `e2e:` escalate; `create` 409 skips that content; GY-1705 holds). Off: `run.doctor.enabled=false`.
+Every `run.doctor.intervalMinutes` (10) a Pi **doctor** fixes stuck work: `master scope`, `requirements`, `unblock`, `decide`+`approver`, `settle-containment`, `close`, `create`, `release`, `checkout-restore` (never merging, dispatching, evidencing; allowlist reads quoted final reasons as prose; refusals name rule, position); posts findings (`master status` `doctor`), escalates or files faults (deduped — standing/diagnosed or GY-1632 cover/threshold; check refusals and unregistered `e2e:` escalate; `create` 409/400 skips; diagnosis adopts or holds standing close 409s (GY-1713); GY-1705 holds). Off: `run.doctor.enabled=false`.
 
 ### Supervised mode (up --local)
 

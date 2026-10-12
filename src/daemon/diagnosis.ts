@@ -20,7 +20,7 @@ import type { Runner } from '../runner/types.js';
 import { type DaemonAction, type DaemonState, message } from './state.js';
 import { record, selectDiagnosticianFleet } from './effects.js';
 import { createRefused } from './doctor.js';
-import { maxDecisionRequests } from './decisions.js';
+import { adoptedOnRefusal, maxDecisionRequests, standingNamedIn } from './decisions.js';
 import type { Cycle } from './cycle.js';
 
 // ---------------------------------------------------------------------------
@@ -188,10 +188,12 @@ export function probeSubject<T extends { id: string }>(state: Pick<DaemonState, 
 const retryDue = (entry: DiagnosisRecord | undefined, clock: number) => entry?.state === 'waiting' && (!entry.retryAt || Date.parse(entry.retryAt) <= clock);
 const live = new Map<string, Promise<void>>();
 const outcomes = new Map<string, Outcome>();
+/** GY-1713: mismatched standing-close 409s, held until the ledger changes (no re-POST every cycle). */
+const standingHolds = new Map<string, { id: string; work: string }>();
 /** Every diagnostician run this process has in flight, settled: a test's way to wait for them. */
 export async function diagnosesSettled() { await Promise.all([...live.values()]); }
-/** Test seam: forget every run and outcome. */
-export function clearDiagnoses() { live.clear(); outcomes.clear(); }
+/** Test seam: forget every run, outcome and mismatched-standing hold. */
+export function clearDiagnoses() { live.clear(); outcomes.clear(); standingHolds.clear(); }
 
 const clip = (text: string, limit: number) => text.length > limit ? `${text.slice(0, limit - 1)}…` : text;
 /** The last lines of an excerpt that fit `budget` characters, each clipped. */
@@ -479,6 +481,7 @@ type Note = (entry: DiagnosisRecord, outcome: DaemonAction['state'], detail: str
 
 async function launch(cycle: Cycle, diagnostician: DiagnosticianEffects, subject: DiagnosisSubject, note: Note) {
   const { config, state, snapshot, clock } = cycle;
+  standingHolds.delete(subject.id);
   const entry: DiagnosisRecord = { subject: subject.id, kind: subject.kind, faultClass: subject.faultClass, work: subject.work?.key ?? null, state: 'running',
     startedAt: iso(clock), updatedAt: iso(clock), runs: [], diagnosis: null, fix: null, decision: null, answeredBy: null, retryAt: null, refusedAt: null, detail: '' };
   state.diagnoses[subject.id] = entry;
@@ -560,11 +563,11 @@ async function advance(cycle: Cycle, diagnostician: DiagnosticianEffects, entry:
     let fix: Work;
     try { fix = await diagnostician.file(input, `${diagnosisKey(entry.subject)}:fix`); }
     catch (error) {
-      // GY-1530: the create route's own refusal (a 409: an e2e proof naming a scenario nothing
-      // registered, GY-1516's "Register E2E scenario … before creating work that requires it") is the
-      // same malformed fix as one the local checks refuse, and settles the entry the same way, under
-      // the proof class's fix-item; thrown on, it reached cycle.isolate as an unclassified
-      // action:diagnosis. A plane-wide failure still throws to ridePlane, and the next cycle files again.
+      // GY-1530 / GY-1713: the create route's own refusal (a 409: an e2e proof naming a scenario nothing
+      // registered; or a 400 zod "Invalid input" under schema skew) is the same malformed fix as one
+      // the local checks refuse, and settles the entry the same way, under the proof class's fix-item;
+      // thrown on, it reached cycle.isolate as an unclassified action:diagnosis. A plane-wide failure
+      // still throws to ridePlane, and the next cycle files again.
       if (!createRefused(error)) throw error;
       entry.state = 'failed';
       await note(entry, 'failed', `The control plane refused the diagnostician's fix item for ${entry.subject} as written, so it is not filed again; the diagnosis stands for the master to file by hand: ${message(error)}`, 'fix-item');
@@ -615,40 +618,87 @@ async function advance(cycle: Cycle, diagnostician: DiagnosticianEffects, entry:
 async function request(cycle: Cycle, diagnostician: DiagnosticianEffects, entry: DiagnosisRecord, work: Work, action: 'release' | 'close', input: Record<string, unknown>, reason: string, note: Note) {
   const requested = await decideFresh(cycle, diagnostician, entry, work, action, input, clip(reason, 2000), note);
   if (!requested) return;
-  const { decision, target } = requested;
+  const { decision, target, adopted } = requested;
   entry.decision = { id: decision.id, action, work: target.key, approver: null };
   entry.state = action === 'release' ? 'releasing' : 'closing';
-  await note(entry, 'done', `Requested ${action} decision ${decision.id} on ${target.key} for the diagnosis of ${entry.subject}`);
-  return launchApprover(cycle, entry, target, note);
+  await note(entry, 'done', adopted
+    ? `Adopted ${action} decision ${decision.id}, already standing on ${target.key}, for the diagnosis of ${entry.subject}`
+    : `Requested ${action} decision ${decision.id} on ${target.key} for the diagnosis of ${entry.subject}`);
+  return launchApprover(cycle, entry, target, note, adopted);
 }
 const revisionRaced = (error: unknown) => /Task revision changed/.test(message(error));
 /** GY-1336: the item was delivered after the cycle's snapshot, so the server refuses any decision on it. */
 const deliveredMeanwhile = (error: unknown) => /Delivered work is immutable/.test(message(error));
+/** GY-1713: standing-close 409 id via standingNamedIn + adoptedOnRefusal (GY-1374 / GY-1710). */
+const standingAdopted = (error: unknown, action: 'release' | 'close') =>
+  action !== 'release' && adoptedOnRefusal.includes(action) ? standingNamedIn(error, action) : null;
+/** Same close kind+ref (ignore expectedRevision); else a concurrent close would corrupt the answer. */
+const closeInputMatches = (standing: unknown, requested: Record<string, unknown>) => {
+  const held = standing && typeof standing === 'object' ? standing as Record<string, unknown> : null;
+  return !!held && held.kind === requested.kind && (held.ref ?? null) === (requested.ref ?? null);
+};
+type StandingCloseRead = { status: 'unread' } | { status: 'absent' } | { status: 'row'; entry: { id: string; action: string; state: string; input: unknown } };
+/** Ledger read of a named close: unread (missing/rejected effect) vs absent vs row — never clear a hold on unread. */
+async function standingCloseOn(cycle: Cycle, work: Work, held: string): Promise<StandingCloseRead> {
+  if (!cycle.effects.decisions) return { status: 'unread' };
+  try {
+    const entry = (await cycle.effects.decisions(work)).decisions.find(candidate => candidate.id === held);
+    return entry ? { status: 'row', entry } : { status: 'absent' };
+  } catch { return { status: 'unread' }; }
+}
+/** Adopt only when ledger kind/ref match; mismatch → hold; unread → wait (no throw). */
+async function adoptStandingClose(cycle: Cycle, work: Work, input: Record<string, unknown>, held: string): Promise<'adopt' | 'hold' | 'unread'> {
+  const read = await standingCloseOn(cycle, work, held);
+  if (read.status !== 'row' || read.entry.action !== 'close' || read.entry.state !== 'requested') return 'unread';
+  return closeInputMatches(read.entry.input, input) ? 'adopt' : 'hold';
+}
 /**
- * GY-1318: the request names the item's revision from the cycle's snapshot, and the loop's own next
- * write can move the item before the request lands — the server refuses it "Task revision changed
- * (now N); reload and request again" (GY-1304's instance). That is the request-time leg of the race
- * GY-1296's rerequest answers after settlement, so it is answered the same way: the item is reloaded
- * and asked again once against its current revision, bounded like rerequest (maxDecisionRequests,
- * counted from the item's own decision history). A retry spent, raced again or no longer applicable
- * is no failure of the loop: it records no fault, the entry keeps its state, and the next cycle
- * decides afresh from the fresh snapshot. Any other refusal still throws.
- *
- * GY-1336: the other leg of the same race is the item delivered after the snapshot — the server
- * refuses "Delivered work is immutable" (GY-1333's instance). It is reloaded the same way, found
- * no longer applicable, and recorded with no fault; the next cycle's snapshot shows it done, and
- * the diagnosis is answered as for any item closed while it was diagnosed (GY-1266).
+ * GY-1318/GY-1336: revision race or delivered-meanwhile → reload once (bounded like rerequest) or settle
+ * with no fault. GY-1713: matching standing-close 409 is adopted; mismatched is held until the ledger
+ * changes (no re-POST); unread while held keeps the hold.
  */
-async function decideFresh(cycle: Cycle, diagnostician: DiagnosticianEffects, entry: DiagnosisRecord, work: Work, action: 'release' | 'close', input: Record<string, unknown>, reason: string, note: Note) {
+async function decideFresh(cycle: Cycle, diagnostician: DiagnosticianEffects, entry: DiagnosisRecord, work: Work, action: 'release' | 'close', input: Record<string, unknown>, reason: string, note: Note): Promise<{ decision: { id: string }; target: Work; adopted?: boolean } | null> {
+  const adoptHeld = async (held: string, target: Work) => {
+    if (action === 'close') {
+      const verdict = await adoptStandingClose(cycle, target, input, held);
+      if (verdict === 'hold') {
+        standingHolds.set(entry.subject, { id: held, work: target.key });
+        await note(entry, 'done', `Close decision ${held} already stands on ${target.key}, but its closure does not match the diagnosis of ${entry.subject} (asked ${input.kind}${input.ref ? ` of ${input.ref}` : ''}); holding ${held} until its ledger state changes rather than adopting or re-asking`, null);
+        return null;
+      }
+      if (verdict === 'unread') {
+        await note(entry, 'done', `Close decision ${held} already stands on ${target.key}, but its ledger input could not be read for the diagnosis of ${entry.subject}; waiting rather than adopting or rethrowing`, null);
+        return null;
+      }
+    }
+    standingHolds.delete(entry.subject);
+    return { decision: { id: held }, target, adopted: true as const };
+  };
+  const prior = action === 'close' ? standingHolds.get(entry.subject) : undefined;
+  if (prior) {
+    const read = await standingCloseOn(cycle, work, prior.id);
+    if (read.status === 'unread') return null;
+    if (read.status === 'row' && read.entry.state === 'requested' && read.entry.action === 'close') {
+      if (closeInputMatches(read.entry.input, input)) {
+        standingHolds.delete(entry.subject);
+        return { decision: { id: prior.id }, target: work, adopted: true as const };
+      }
+      return null;
+    }
+    standingHolds.delete(entry.subject);
+    await note(entry, 'done', `Standing close ${prior.id} on ${prior.work} no longer blocks the diagnosis of ${entry.subject} (${read.status === 'row' ? `now ${read.entry.state}` : 'gone from the ledger'}); requesting the diagnosis closure afresh`, null);
+  }
   try { return { decision: await diagnostician.decide(work, action, reason, input), target: work }; }
   catch (error) {
+    const held = standingAdopted(error, action);
+    if (held) return adoptHeld(held, work);
     if (!revisionRaced(error) && !deliveredMeanwhile(error)) throw error;
     const why = `The ${action} request on ${work.key} for the diagnosis of ${entry.subject} was refused: ${message(error)}`;
     const fresh = (await cycle.effects.snapshot()).work.find(candidate => candidate.id === work.id);
     const applicable = !!fresh && !isClosed(fresh) && fresh.stage !== 'done' && (action === 'close' || (fresh.stage === 'backlog' && !fresh.ready));
     if (!applicable) {
-      // GY-1371: an entry already releasing or closing settles here; left in its state, the next cycle
-      // read its decisions and asked again, refused again, for every such entry.
+      // GY-1371: releasing/closing settles here; else next cycle re-asks forever.
+      standingHolds.delete(entry.subject);
       if (entry.state === 'releasing' || entry.state === 'closing') { await settleNoLongerOpen(cycle.state, entry, fresh ?? null, `${why}; ${work.key} no longer needs the ${action}`, note, action); return null; }
       await note(entry, 'done', `${why}; ${work.key} no longer needs the ${action}, so it is not asked again and the next cycle decides afresh`, null); return null;
     }
@@ -657,6 +707,8 @@ async function decideFresh(cycle: Cycle, diagnostician: DiagnosticianEffects, en
     if (spent >= maxDecisionRequests) { await note(entry, 'done', `${why}; ${spent} ${action} request(s) already settled without applying, so it is not asked again here and the next cycle decides afresh`, null); return null; }
     try { return { decision: await diagnostician.decide(fresh, action, reason, input), target: fresh }; }
     catch (again) {
+      const adopted = standingAdopted(again, action);
+      if (adopted) return adoptHeld(adopted, fresh);
       if (!revisionRaced(again) && !deliveredMeanwhile(again)) throw again;
       await note(entry, 'done', `${why}; asked again against revision ${fresh.revision} and refused again (${message(again)}), so the next cycle decides afresh`, null);
       return null;
@@ -704,20 +756,33 @@ async function settleNoLongerOpen(state: DaemonState, entry: DiagnosisRecord, ta
   await note(entry, 'done', `${why}, so the diagnosis of ${entry.subject} is answered as no longer open`, null);
 }
 
-/** The independent approver for the entry's decision; a launch that fails is tried again next cycle while the decision stands. */
-async function launchApprover(cycle: Cycle, entry: DiagnosisRecord, work: Work, note: Note) {
+/** Approver for the entry's decision; GY-1713 reuses an existing launch/watch on an adopted close. */
+async function launchApprover(cycle: Cycle, entry: DiagnosisRecord, work: Work, note: Note, adopted = false) {
   const decision = entry.decision!;
   if (!cycle.effects.approver) return;
   try {
+    if (adopted) {
+      const launches = await cycle.effects.approverLaunches?.().catch(() => []) ?? [];
+      const fromLaunch = [...launches].reverse().find(row => row.decision === decision.id)?.agentName ?? null;
+      const existing = fromLaunch ?? Object.values(cycle.state.approvals).find(watch => watch.decision === decision.id)?.agentName ?? null;
+      if (existing) {
+        decision.approver = existing;
+        await note(entry, 'done', `Adopted ${decision.action} decision ${decision.id}, already standing on ${work.key}, reusing approver ${existing}`);
+        return;
+      }
+    }
     const launched = await cycle.effects.approver(work, decision.id);
     decision.approver = launched.agentName;
-    await note(entry, 'done', `Launched approver ${launched.agentName} for ${decision.action} decision ${decision.id} on ${work.key}`);
+    await note(entry, 'done', adopted
+      ? `Adopted ${decision.action} decision ${decision.id}, already standing on ${work.key}, and launched approver ${launched.agentName}`
+      : `Launched approver ${launched.agentName} for ${decision.action} decision ${decision.id} on ${work.key}`);
   } catch (error) { await note(entry, 'failed', `Could not launch the approver for ${decision.action} decision ${decision.id} on ${work.key}: ${message(error)}; it is launched again next cycle`, planeWideRefusal(error) ? null : undefined); }
 }
 
 /** The subject is answered by `by`: an invariant violation's instance is linked to it; a recurring item's closure already names it. */
 async function answer(state: DaemonState, entry: DiagnosisRecord, by: string, note: Note, detail?: string) {
   if (entry.kind === 'invariant') { const instance = state.faults.instances.find(candidate => candidate.id === entry.subject); if (instance) instance.linkedTo = by; }
+  standingHolds.delete(entry.subject);
   entry.answeredBy = by; entry.state = 'answered';
   await note(entry, 'done', detail ?? `${entry.subject} is answered by ${by}`);
 }
