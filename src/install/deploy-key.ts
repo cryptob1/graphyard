@@ -5,7 +5,8 @@ import { createHash } from 'node:crypto';
 import { chmod, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { hostname as osHostname } from 'node:os';
 import { resolve } from 'node:path';
-import type { GitHubCli } from './github.js';
+import { mainWriteRuleset, mainWriteRulesetCurrent, mainWriteRulesetName } from '../protection.js';
+import { ghJson, type GitHubCli } from './github.js';
 import { commandFailure, type CommandResult } from './transport.js';
 
 /** The private key's name under the install directory; `merge-writer-settings.ts` reads it from the same place. */
@@ -78,4 +79,46 @@ export async function ensureDeployKey(installDir: string, repository: string, gh
   const known = keys.some((entry: any) => publicKeyFingerprint(String(entry?.key ?? '')) === fingerprint);
   if (!known) await gh(['repo', 'deploy-key', 'add', publicKeyFile, '-R', repository, '--allow-write', '--title', title]);
   return privateKeyFile;
+}
+
+export interface MainWriteProtection {
+  /** `created`/`updated`: Graphyard wrote its ruleset; `unchanged`: it already held; `operator-protected`: the operator's own protection was found and left as is. */
+  state: 'created' | 'updated' | 'unchanged' | 'operator-protected';
+  baseBranch: string;
+  /** Read-write deploy keys other than the merge writer's: the deploy-key bypass covers them too, so the operator should remove them. */
+  otherWriters: string[];
+  detail: string;
+}
+
+/**
+ * GY-1715: protect BASE (the repository's default branch unless named) so only the merge writer's
+ * deploy key may push to it, through the `Graphyard merge writer only` ruleset (`mainWriteRuleset`).
+ * Graphyard's own ruleset is rewritten only when it drifted, so a second run writes nothing; a
+ * branch the operator already protects (classic protection or another active ruleset) is left as
+ * is and reported. Github-mode installs never call this: GitHub executes their merges.
+ */
+export async function ensureMainWriteProtection(repository: string, gh: GitHubCli, options: { baseBranch?: string; writerKey?: string } = {}): Promise<MainWriteProtection> {
+  const repo = options.baseBranch ? null : await ghJson(gh, ['api', `repos/${repository}`]) as any;
+  const baseBranch = options.baseBranch ?? (typeof repo?.default_branch === 'string' ? repo.default_branch : null);
+  if (!baseBranch) throw new Error(`The default branch of ${repository} could not be read, so its merge-writer protection was not applied`);
+  const writer = options.writerKey ? publicKeyFingerprint(options.writerKey) : null;
+  const keys = await ghJson(gh, ['repo', 'deploy-key', 'list', '-R', repository, '--json', 'id,key,title,readOnly'], []) as any[];
+  const otherWriters = (Array.isArray(keys) ? keys : []).filter(entry => entry?.readOnly === false && publicKeyFingerprint(String(entry?.key ?? '')) !== writer).map(entry => String(entry?.title ?? entry?.id)).sort();
+  const others = otherWriters.length ? `; read-write deploy keys ${otherWriters.join(', ')} also bypass it, remove them` : '';
+  const done = (state: MainWriteProtection['state'], detail: string): MainWriteProtection => ({ state, baseBranch, otherWriters, detail: `${detail}${others}` });
+
+  const rulesets = await ghJson(gh, ['api', `repos/${repository}/rulesets?includes_parents=false`], []) as any[];
+  const ours = Array.isArray(rulesets) ? rulesets.find(ruleset => ruleset?.name === mainWriteRulesetName) : undefined;
+  const body = { input: JSON.stringify(mainWriteRuleset(baseBranch)) };
+  if (ours?.id) {
+    if (mainWriteRulesetCurrent(await ghJson(gh, ['api', `repos/${repository}/rulesets/${ours.id}`]), baseBranch)) return done('unchanged', `${baseBranch} already refuses pushes from everyone but the merge-writer deploy key`);
+    await gh(['api', '--method', 'PUT', `repos/${repository}/rulesets/${ours.id}`, '--input', '-'], body);
+    return done('updated', `${mainWriteRulesetName} on ${baseBranch} rewritten so only the merge-writer deploy key may push`);
+  }
+  const classic = await gh(['api', `repos/${repository}/branches/${baseBranch}/protection`], { allowFailure: true });
+  const rules = await ghJson(gh, ['api', `repos/${repository}/rules/branches/${baseBranch}`], []) as any[];
+  const active = Array.isArray(rules) && rules.length > 0;
+  if (classic.code === 0 || active) return done('operator-protected', `${baseBranch} already carries the operator's ${classic.code === 0 ? 'branch protection' : 'rulesets'}; left as is, so confirm it refuses pushes from everyone but the merge-writer deploy key`);
+  await gh(['api', '--method', 'POST', `repos/${repository}/rulesets`, '--input', '-'], body);
+  return done('created', `${mainWriteRulesetName} on ${baseBranch}: only the merge-writer deploy key may push`);
 }

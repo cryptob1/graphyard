@@ -17,7 +17,7 @@ import { recordSupervision } from './master/config.js';
 import { unitCheckout, userUnitDirectory } from './install/units.js';
 import { installIdFor } from './install/types.js';
 import { installDirectory, readInstallRecord } from './install/secrets.js';
-import { ensureDeployKey } from './install/deploy-key.js';
+import { ensureDeployKey, ensureMainWriteProtection } from './install/deploy-key.js';
 import type { GitHubCli } from './install/github.js';
 import { herdrAttachCommand, installHerdrInstance, type HerdrInstance } from './master/herdr.js';
 import { ensureHerdrBinary, ensureHerdrServer, ensureHerdrWorkspace, HerdrSetupFailure, herdrSync, hostHerdrDeps, prepareHerdrInstance, withLocalBin, type HerdrHostDeps } from './herdr-host.js';
@@ -206,7 +206,7 @@ export interface UpDependencies {
    * GY-1552: run `gh` with ARGS (repository view/create and deploy-key registration). Absent under
    * the github-mode path, which never creates a repository or deploy key here.
    */
-  gh?(args: string[]): Promise<{ code: number; stdout: string; stderr?: string }>;
+  gh?(args: string[], input?: string): Promise<{ code: number; stdout: string; stderr?: string }>;
   /** GY-1552: the install directory that holds the deploy key; defaults to `~/.config/graphyard/<installId>`. */
   installDirectory?(): string;
   /** GY-1552: ensure the install's deploy key on REPOSITORY; defaults to ensureDeployKey. */
@@ -770,17 +770,21 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
     if (controlPlaneMerger) {
       await step('deploy-key', async () => {
         const directory = deps.installDirectory?.() ?? installDirectory(installIdFor(request.repository));
+        let protection: string | null = null;
         const ensure = deps.ensureDeployKey ?? (async (installDir, repository) => {
           if (!deps.gh) throw new UpStop('deploy-key: control-plane merger needs gh on this machine to register the deploy key', upExitCodes.prerequisite);
           const gh: GitHubCli = async (args, options) => {
-            const result = await deps.gh!(args);
+            const result = await deps.gh!(args, options?.input);
             if (result.code !== 0 && !options?.allowFailure) throw new Error(`gh ${args.join(' ')} exited ${result.code}${result.stderr ? `: ${result.stderr.split('\n')[0].slice(0, 200)}` : ''}`);
             return { stdout: result.stdout, stderr: result.stderr ?? '', code: result.code };
           };
-          return ensureDeployKey(installDir, repository, gh);
+          const key = await ensureDeployKey(installDir, repository, gh);
+          // GY-1715: the base branch then refuses pushes from everyone but this key.
+          protection = (await ensureMainWriteProtection(repository, gh, { writerKey: await readFile(`${key}.pub`, 'utf8') })).detail;
+          return key;
         });
         await ensure(directory, request.repository);
-        return 'deploy key registered read-write for the merge writer';
+        return `deploy key registered read-write for the merge writer${protection ? `; ${protection}` : ''}`;
       });
       await step('merger-setting', async () => {
         const current = await deps.status().catch(() => null);
@@ -1524,11 +1528,12 @@ export function upDependencies(root: string, cliPath: string, request: UpRequest
     },
     // GY-1552: control-plane merger creates the repository and registers the deploy key through gh.
     ...(upMergerControlPlane(request) ? {
-      gh: (args: string[]) => new Promise<{ code: number; stdout: string; stderr?: string }>(accept => {
-        const child = spawn('gh', args, { cwd: root, stdio: ['ignore', 'pipe', 'pipe'] });
+      gh: (args: string[], input?: string) => new Promise<{ code: number; stdout: string; stderr?: string }>(accept => {
+        const child = spawn('gh', args, { cwd: root, stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'] });
+        if (input !== undefined) child.stdin!.end(input);
         let stdout = '', stderr = '';
-        child.stdout.on('data', chunk => { stdout += chunk; });
-        child.stderr.on('data', chunk => { stderr += chunk; });
+        child.stdout!.on('data', chunk => { stdout += chunk; });
+        child.stderr!.on('data', chunk => { stderr += chunk; });
         child.on('error', error => accept({ code: 1, stdout, stderr: String(error.message ?? error) }));
         child.on('close', code => accept({ code: code ?? 1, stdout, stderr }));
       }),
