@@ -37,6 +37,36 @@ const delivered = (overrides: Partial<Work> = {}): Work => ({
 const projection = { since: null, projected: '2026-10-17T14:31:37.000Z' };
 const iso = (ms: number) => new Date(ms).toISOString();
 
+// GY-1727: on 2026-10-12 master verify-deployment filed GY-1721 (GY-1684 AC-1, a rate per 7 days) and
+// GY-1724 (GY-1700 AC-2, a 24-hour window of live webhook deliveries) against the already serving
+// release ba607f8a809e with no window, and both were dispatched at once. The 7-day reading cannot exist
+// before GY-1684's merge plus 7 days; the 24-hour one before the release was first observed serving
+// GY-1700 plus 24 hours — "24-hour" and "24h" named no window the filer recognised.
+const serving = 'ba607f8a809ed20fea15387e1934425cacbfef9f';
+const gy1684 = delivered({ id: '418cda0c-6c23-401a-b38a-836521a30534', key: 'GY-1684', criteria: [
+  { id: 'AC-1', text: 'The cause of the recurring scope widening interventions at the build stage is found and removed: the intervention report shows the scope-widening rate at the build stage below 3 per 7 days after the change ships, and the linked instances could not recur', proofs: ['manual:post-deploy/intervention-pattern-scope-widening-build'] },
+  { id: 'AC-2', text: 'Each linked instance is reproduced against the base and shown not to recur against the candidate, by a test the change adds', proofs: ['manual:intervention-pattern-scope-widening-build'] }],
+  delivery: { mergeSha: '3ac8ada5fd51ec9c23b31318da2ee49e31b01b4c', mergedAt: '2026-10-11T07:43:36Z', evidenceAsOf: '2026-10-11T07:43:36Z', authorizationRevision: 1 } as never });
+const gy1700 = delivered({ id: 'e03bc94f-82f4-481d-a443-4b4e6abe9eb6', key: 'GY-1700', criteria: [
+  { id: 'AC-2', text: 'A 24-hour window of live GitHub activity on cryptob1/graphyard shows zero failed webhook deliveries (no 5xx, no connection failures) in the App\'s advanced delivery log at github.com/settings/apps/graphyard-cryptob1-graphyard/advanced.', proofs: ['manual:post-deploy/webhook-deliveries-clean-24h'] },
+  { id: 'AC-3', text: 'The github-budget attention row in graphyard master status clears when a delivery arrives and does not re-fire during 24h of live repository activity while at least one pull request is open.', proofs: ['manual:post-deploy/github-budget-attention-row-clears'] }],
+  delivery: { mergeSha: 'a14965e4ad9ad52069ce7dc0c5d5aabdbf4f8b43', mergedAt: '2026-10-11T15:08:24Z', evidenceAsOf: '2026-10-11T15:08:24Z', authorizationRevision: 1 } as never });
+/** master verify-deployment of one delivered item against the serving release, observed at `at`: the follow-up inputs it files. */
+const verifyServing = async (item: Work, at: string) => {
+  const { verifyDeployment } = await modules();
+  const now = Date.parse(at) + 2_000, filed: any[] = [];
+  const verified = await verifyDeployment(item, {
+    snapshot: async () => ({ work: [item], now: iso(now) }),
+    observe: async () => ({ source: 'endpoint' as const, sha: serving, at, reason: null, deployed: [item.key], pending: [] }),
+    release: () => ({ sha: 'f'.repeat(40), clean: true, repository: 'other/repo', reason: null }),
+    emit: async () => assert.fail('nothing is emitted'), repository: 'owner/project', now: () => now,
+    record: async () => {}, file: async (input: any) => { filed.push(input); return { key: `GY-${1720 + filed.length}` }; },
+    patterns: async () => ({ since: null, projected: '2026-10-15T10:32:39.000Z' }),
+  });
+  assert.equal(verified.result, 'verified', verified.refusals.join('; '));
+  return filed;
+};
+
 test('unit:post-deploy-follow-up-observation-window — a windowed follow-up records the earliest instant its reading can exist, from the report\'s projection or the merge plus the criterion\'s window, readable on the item and in master status', async () => {
   const { buildMasterStatus, createSchema, criterionHoldDays, criterionWindowDays, filePostDeployFollowUps, observationWindowFor, observationWindowHold, patternOfProof, patternReader, postDeployChecks, verifyDeployment } = await modules();
   // The declared proof names the report's pattern; the kinds carry hyphens of their own.
@@ -141,6 +171,27 @@ test('unit:post-deploy-follow-up-observation-window — a windowed follow-up rec
   assert.deepEqual(observationWindowHold(followUp, new Date('2026-10-11T06:40:00.000Z')), filed);
   assert.equal(observationWindowHold(followUp, new Date(filed.notBefore)), null, 'at the instant the window no longer holds');
   assert.equal(buildMasterStatus({ work: [delivered(), followUp], now: filed.notBefore }, [], []).work.find(entry => entry.key === 'GY-1689')!.observationWindow!.waiting, false);
+
+  // GY-1727, reproducing GY-1721 and GY-1724: the already serving release files both follow-ups with their instants.
+  const { criterionWindowHours } = await modules();
+  assert.equal(criterionWindowHours(gy1700.criteria[0].text), 24);
+  assert.equal(criterionWindowHours(gy1700.criteria[1].text), 24);
+  assert.equal(criterionWindowHours(gy1684.criteria[0].text), null);
+  assert.equal(criterionWindowHours('GY-1611 merged at 03:11Z; build 4567 hours of soak'), null, 'a number past three digits is no window');
+  const [gy1721] = await verifyServing(gy1684, '2026-10-12T07:32:35.697Z');
+  assert.deepEqual([gy1721.observationWindow.notBefore, gy1721.observationWindow.basis], ['2026-10-18T07:43:36.000Z', 'criterion-window'], 'merge plus the 7-day window: the report projects the streak earlier');
+  assert.match(gy1721.description, /Observation window: the reading can first exist at 2026-10-18T07:43:36.000Z/);
+  const [gy1724, gy1725] = await verifyServing(gy1700, '2026-10-12T07:33:40.939Z');
+  assert.deepEqual([gy1724.observationWindow.notBefore, gy1724.observationWindow.basis], ['2026-10-13T07:33:40.939Z', 'criterion-window'], 'first observed serving plus 24 hours, not the merge plus 24 hours');
+  assert.match(gy1724.observationWindow.detail, /GY-1700's serving release was first observed at 2026-10-12T07:33:40.939Z and AC-2 names a 24-hour live window, so the reading can first exist at 2026-10-13T07:33:40.939Z/);
+  assert.equal(gy1725.observationWindow.notBefore, '2026-10-13T07:33:40.939Z', '"24h" is the same live window');
+  assert.deepEqual(createSchema.parse((({ reason: _r, ...rest }) => rest)(gy1724)).observationWindow, gy1724.observationWindow);
+  // Already recorded as serving: a later re-run keeps the first observation, never restarting the window.
+  const recorded = { ...gy1700, delivery: { ...gy1700.delivery!, deployment: { sha: serving, mergeSha: gy1700.delivery!.mergeSha, source: 'endpoint', observedAt: '2026-10-12T07:33:40.939Z', at: '2026-10-12T07:33:47.795Z', observer: 'graphyard-master', covers: 'descendant' } } } as Work;
+  assert.equal(postDeployChecks(recorded, serving, new Date('2026-10-12T09:00:00.000Z'), {}, new Date('2026-10-12T08:59:58.000Z'))[0].followUp!.input.observationWindow!.notBefore, '2026-10-13T07:33:40.939Z');
+  // With no serving observation the merge anchors it; a day window past the hour window still decides.
+  assert.equal(observationWindowFor(gy1700, gy1700.criteria[0], gy1700.criteria[0].proofs[0], undefined)!.notBefore, '2026-10-12T15:08:24.000Z');
+  assert.equal(observationWindowFor(gy1700, { id: 'AC-9', text: 'per 7 days, in any 24-hour window' }, 'manual:post-deploy/x', undefined, Date.parse('2026-10-12T07:33:40.939Z'))!.notBefore, '2026-10-18T15:08:24.000Z');
 });
 
 test('unit:observation-window-holds-dispatch — a released follow-up is not dispatched before its recorded instant and is dispatched by the loop once it passes; before the fix GY-1689 was dispatched at once', async () => {
@@ -219,4 +270,31 @@ test('unit:observation-window-holds-dispatch — a released follow-up is not dis
   // A worker holding the item is the session the build gate waits for, window or none; the hold never offers it to a second worker.
   const leased = { ...item, epoch: 1, lease: { owner: 'graphyard-codex-1', epoch: 1, expiresAt: '2026-10-11T07:10:00.000Z' } } as Work;
   assert.deepEqual(actionAccount(leased, [gy1685, leased], new Date('2026-10-11T07:00:00.000Z')).wait?.kind, 'session');
+
+  // GY-1727: GY-1724 as master verify-deployment now files it, released at once, is held until the 24-hour
+  // live window has run and dispatched by the loop at the instant; master status names the wait and its timestamp.
+  const [filed24] = await verifyServing(gy1700, '2026-10-12T07:33:40.939Z');
+  const { reason: _why, ...input24 } = filed24;
+  const gy1724 = (() => {
+    const base = { ...gy1700, ...createSchema.parse(input24), id: 'c0ffee00-0000-4000-8000-000000001724', key: 'GY-1724', stage: 'ready', revision: 3, ready: true, delivery: undefined, submission: null, workspaces: [], lease: null, epoch: 0,
+      createdAt: '2026-10-12T07:33:47.000Z', updatedAt: '2026-10-12T07:34:00.000Z', stageEnteredAt: '2026-10-12T07:34:00.000Z', gates: [] } as unknown as Work;
+    const evaluated = evaluate(base, [gy1700, base], new Date('2026-10-12T07:36:00.000Z'), [15368]);
+    return { ...base, stage: evaluated.stage, gates: evaluated.gates, violations: evaluated.violations, nextAction: null } as Work;
+  })();
+  const live = '2026-10-13T07:33:40.939Z', pair = [gy1700, gy1724];
+  for (const at of ['2026-10-12T07:36:00.000Z', '2026-10-13T07:33:40.938Z']) {
+    assert.equal(actionAccount(gy1724, pair, new Date(at)).action, null, `GY-1724 is not dispatched at ${at}`);
+    assert.equal(actionAccount(gy1724, pair, new Date(at)).wait?.kind, 'window');
+    assert.equal(dispatchable(gy1724, Date.parse(at)), false);
+    assert.throws(() => assertDispatchable(gy1724, pair, at), new RegExp(`can first exist at ${live}`));
+    const entry = buildMasterStatus({ work: pair, now: at }, [], []).work.find(row => row.key === 'GY-1724')!;
+    assert.deepEqual([entry.observationWindow!.waiting, entry.observationWindow!.notBefore, entry.attention], [true, live, null]);
+    assert.equal(plainStatus(gy1724, Date.parse(at)).sentence, `Waiting for its observation window — the reading it owes can first exist at ${live}`);
+  }
+  for (const at of [live, '2026-10-13T08:00:00.000Z']) {
+    assert.equal(actionAccount(gy1724, pair, new Date(at)).action?.kind, 'dispatch', `GY-1724 is dispatched at ${at}`);
+    const queued = { ...gy1724, actionQueue: { actions: [], history: [] } } as Work;
+    assert.deepEqual(reconcileActions(queued, [gy1700, queued], new Date(at)).map(entry => [entry.event, entry.action.kind, entry.action.requestedBy]), [['requested', 'dispatch', 'graphyard']]);
+    assert.doesNotThrow(() => assertDispatchable(gy1724, pair, at));
+  }
 });
