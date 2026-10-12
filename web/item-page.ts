@@ -29,13 +29,14 @@ const stepOfGate = (gate: string, handedIn: boolean): StepId | undefined =>
 /**
  * One gate's reasons in plain words, each once: a proof still owed is named by the proof. A parked
  * request's blocker carries the whole agent detail; its card states the ask, so the line here only
- * points at it (GY-1408).
+ * points at it (GY-1408). Given the item, a recorded blocker reads as the same summary its status
+ * sentence gives, so both name one clearer (GY-1739).
  */
-export function plainLines(gate: Gate): string[] {
+export function plainLines(gate: Gate, work?: Work, now = Date.now()): string[] {
   return [...new Set(gate.reasons.map(reason => {
     if (reason.startsWith(humanRequestBlocker)) return 'Waiting on your answer to the request on this page';
     const proof = reason.match(/^AC-\d+: (\S+) needs trusted/)?.[1];
-    return proof ? `The proof ${proof} has not passed yet` : plainReason(reason, gate.name).text;
+    return proof ? `The proof ${proof} has not passed yet` : plainReason(reason, gate.name, now, work).text;
   }))];
 }
 
@@ -68,14 +69,14 @@ export function whatIsLeft(work: Work, now: number, release: ReleaseView = noRel
   const own = steps.current !== 'build' ? work.gates.find(gate => gate.name === stepGate[steps.current!] && !gate.passed) : undefined;
   const failing = own ?? unmet[0];
   const handedIn = steps.current !== 'build';
-  const groups: LeftGroup[] = [{ step: steps.current, label: stepLabel[steps.current], who: (failing?.name === 'ready' ? readyOwner(work, failing) : undefined) ?? steps.who, lines: failing ? plainLines(failing) : [], current: true }];
+  const groups: LeftGroup[] = [{ step: steps.current, label: stepLabel[steps.current], who: (failing?.name === 'ready' ? readyOwner(work, failing) : undefined) ?? steps.who, lines: failing ? plainLines(failing, work, now) : [], current: true }];
   for (const gate of unmet) {
     if (gate === failing) continue;
     const step = stepOfGate(gate.name, handedIn);
     if (!step) continue;
     const group = groups.find(entry => entry.step === step);
-    if (group) { group.lines = [...new Set([...group.lines, ...plainLines(gate)])]; continue; }
-    groups.push({ step, label: stepLabel[step], who: (gate.name === 'ready' ? readyOwner(work, gate) : undefined) ?? waitsOn(step, gate, work, now, release).who, lines: plainLines(gate), current: false });
+    if (group) { group.lines = [...new Set([...group.lines, ...plainLines(gate, work, now)])]; continue; }
+    groups.push({ step, label: stepLabel[step], who: (gate.name === 'ready' ? readyOwner(work, gate) : undefined) ?? waitsOn(step, gate, work, now, release).who, lines: plainLines(gate, work, now), current: false });
   }
   const [current, ...later] = groups;
   return [current, ...later.sort((a, b) => stepIds.indexOf(a.step) - stepIds.indexOf(b.step))].filter(group => group.lines.length > 0);

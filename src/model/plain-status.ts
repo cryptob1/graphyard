@@ -33,7 +33,7 @@ const trigger: Record<string, string> = {
  * somebody has to decide or fix something. A reason nobody anticipated falls back to a
  * sentence about its gate, never to the raw internal text.
  */
-export function plainReason(reason: string, gate: string, now = Date.now()): { text: string; stuck: boolean; known: boolean } {
+export function plainReason(reason: string, gate: string, now = Date.now(), work?: Work): { text: string; stuck: boolean; known: boolean } {
   const rules: [RegExp, (m: RegExpMatchArray) => string, boolean?][] = [
     [/^Not released from backlog$/, () => 'Not released for work yet'],
     [/^Dependency (\S+) is unfinished$/, m => `Waiting for ${m[1]} to ship first`],
@@ -62,7 +62,8 @@ export function plainReason(reason: string, gate: string, now = Date.now()): { t
   for (const [pattern, text, stuck] of rules) { const m = reason.match(pattern); if (m) return { text: text(m), stuck: !!stuck, known: true }; }
   // The ready gate's only free-text reason is a recorded blocker, written for the next agent: it
   // reads as its one-sentence summary, and the item page's technical details show it as written.
-  if (gate === 'ready') return { text: blockerSummary(reason, now).sentence, stuck: true, known: true };
+  // Given the item, the summary reads its probe and window the way the row's own sentence does.
+  if (gate === 'ready') return { text: blockerSummary(reason, now, work).sentence, stuck: true, known: true };
   const fallback: Record<string, string> = { build: 'The work is not finished yet', review: 'Waiting for review', test: 'Waiting for automated checks', acceptance: 'Waiting for proof that it works', merge: 'Waiting to merge' };
   return { text: fallback[gate] ?? 'Waiting', stuck: false, known: false };
 }
@@ -71,7 +72,8 @@ export function plainReason(reason: string, gate: string, now = Date.now()): { t
  * A recorded blocker as one plain sentence of at most 25 words (GY-1739): the kind of block and who
  * clears it. The recorded text is written for the next agent — commands, file paths, SHAs — so it
  * never reaches a Work page row; the item page shows it once, under Technical details. A blocker
- * naming a future not-before instant waits for that instant: nothing is broken, and nobody acts.
+ * naming a future not-before instant waits for that instant: nothing is broken, yet the block stays
+ * recorded until the master agent lifts it (`master unblock`), so the sentence names that clearer.
  */
 export type BlockerKind = 'waiting-until' | 'human' | 'item' | BlockerClass;
 const routineCause: Partial<Record<BlockerClass, string>> = {
@@ -93,7 +95,7 @@ export function blockerSummary(text: string, now: number, work?: Pick<Work, 'key
   if (classified.class === 'human-only') { const on = named(/\b((?!AC-)[A-Z][A-Z0-9]*-\d+)\b/); return { sentence: `Waiting on a human answer${on && on !== work?.key ? ` to ${on}` : ''}; only you can clear it.`, kind: 'human' }; }
   const window = work ? observationWindowHold(work as Work, new Date(now)) : null;
   const future = [...(notBeforeWords.test(text) ? text.match(instant) ?? [] : []), ...(window ? [window.notBefore] : [])].map(at => Date.parse(at)).filter(at => at > now);
-  if (future.length) return { sentence: `Waiting until ${localInstant(Math.min(...future))}; Graphyard resumes it then, and nobody needs to act.`, kind: 'waiting-until' };
+  if (future.length) return { sentence: `Waiting until ${localInstant(Math.min(...future))}; nothing is broken, and the master agent lifts the hold once that time passes.`, kind: 'waiting-until' };
   const other = named(itemWait);
   if (other && other !== work?.key) return { sentence: `Waiting on ${other}; the master agent clears it once that item is done.`, kind: 'item' };
   const view = work?.blocker === text ? blockerView(work) : null;
@@ -176,7 +178,7 @@ export function plainStatus(work: Work, now: number): PlainStatus {
   }
   if (work.violations.length) return make(`Stuck: ${work.violations[0]}`, 'stuck', work.violations[0]);
   const gate = work.gates.find(g => !g.passed);
-  const reasons = (g: Gate | undefined) => (g?.reasons ?? []).map(r => ({ raw: r, ...plainReason(r, g!.name, now) }));
+  const reasons = (g: Gate | undefined) => (g?.reasons ?? []).map(r => ({ raw: r, ...plainReason(r, g!.name, now, work) }));
   const ready = work.gates.find(g => g.name === 'ready');
   const blocker = work.blocker ?? null;
   if (blocker) { const summary = blockerSummary(blocker, now, work).sentence; return make(`Stuck: ${summary}`, 'stuck', summary, who.active ? who.name : null); }

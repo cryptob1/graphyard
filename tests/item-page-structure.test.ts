@@ -86,7 +86,7 @@ test('unit:item-page-sections — below the summary the item page shows What is 
   assert.deepEqual(groups.map(group => [group.label, group.who, group.current]), [['Review', 'Reviewer agent', true], ['Prove', 'Prover agent', false], ['Merge', 'Builder agent', false]]);
   for (const group of groups) {
     const gate = item.gates.find(entry => ({ Review: 'review', Prove: 'acceptance', Merge: 'merge' } as Record<string, string>)[group.label] === entry.name)!;
-    assert.deepEqual(group.lines, plainLines(gate), `${group.label}: every line is the gate reason's plain translation`);
+    assert.deepEqual(group.lines, plainLines(gate, item, NOW), `${group.label}: every line is the gate reason's plain translation`);
   }
   assert.deepEqual(groups.flatMap(group => group.lines), ['Waiting for someone else to approve the latest code', 'The proof unit:item-page-sections has not passed yet', 'The proof unit:item-page-technical-collapsed has not passed yet', 'Graphyard is re-checking GitHub', 'The pull request conflicts with the main branch']);
   const left = html.slice(html.indexOf('aria-label="What is left"'), html.indexOf('aria-label="Requirements"'));
