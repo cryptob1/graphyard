@@ -10,7 +10,8 @@ import { leaseCommands } from './store/pools.js';
 import { compactHeartbeatReceipt } from './store/receipts.js';
 import { authorizedForProof, unauthorizedProofs } from './proof-grants.js';
 import { workspacePath, pathsOverlap, validBranch } from './workspace.js';
-import { activeLease, dropRetiredQueueFields, admin, assertReviewerProfiles, operatorCapability, escalationTriggers, raiseEscalation, releaseLeadHold, resolveEscalation, standingEscalations, attestationFor, attestationKinds, attestationsFromLedger, leaseLapseCause, leaseLossEpoch, leaseLossReason, settleableLeaseLoss, submittedEpoch, type Attestation, requireCurrent, createSchema, criteriaSchema, criterionSchema, bindingApproval, carriedApproval, currentCarry, refreshedCarriedApproval, currentEvidence, attachedCriteria, exerciseRefusal, proofExerciseSchema, decideCarry, exactApproval, type CarriedApproval, deploySmokeProof, deploySmokeRequired, inheritedObligations, pathScopeContains, requiredProofs, resourcesSchema, demand, evaluate, mergeabilityComputingRefusal, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Evidence, type EvidenceAttestation, type Lease, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability, deferBoundMs, servingReleaseProof } from './model.js';
+import { activeLease, dropRetiredQueueFields, admin, assertReviewerProfiles, operatorCapability, escalationTriggers, raiseEscalation, releaseLeadHold, resolveEscalation, standingEscalations, attestationFor, attestationKinds, attestationsFromLedger, leaseLapseCause, leaseLossEpoch, leaseLossReason, settleableLeaseLoss, submittedEpoch, type Attestation, requireCurrent, createSchema, criteriaSchema, criterionSchema, bindingApproval, carriedApproval, currentCarry, refreshedCarriedApproval, currentEvidence, attachedCriteria, exerciseRefusal, proofExerciseSchema, decideCarry, exactApproval, type CarriedApproval, deploySmokeProof, deploySmokeRequired, inheritedObligations, pathScopeContains, requiredProofs, resourcesSchema, demand, evaluate, mergeabilityComputingRefusal, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Evidence, type EvidenceAttestation, type Lease, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability, deferBoundMs, observationWindowHold, servingReleaseProof } from './model.js';
+import { filedFollowUpWindow, followUpRequest } from './model/observation-window.js';
 import { Refusal, demandWork } from './model/refusal.js';
 import { resourceConflicts } from './coordination.js';
 import { containmentAttestation, containmentSettlementRefusals, containmentVerificationSchema } from './quarantine.js';
@@ -57,7 +58,7 @@ import { assertDecisionAuthority, foldDecisions, liveLeaseRevisionRefusal, quara
 import { coveringWindow, directMergeAuthorization, directMergeFromEnv, directMergeWindows, sweepDirectMerges, type DirectMergeWindow } from './direct-merge.js';
 import { deliverSplitParent, splitChildRevisionRefusal } from './decomposition.js';
 import { defaultRerunFailedChecks, maxRerunFailedChecks } from './master/profiles.js';
-import { isSettledSummary, isStandIn, lockedRows, lockedWork, rememberSaved, savedVersions, warmLockedReads, withWhole, workIdByRef, type SavedVersion } from './store/locked-read.js';
+import { isSettledSummary, isStandIn, lockedRows, lockedWork, rememberSaved, savedVersions, warmLockedReads, withWhole, workIdByRef, type Queryable, type SavedVersion } from './store/locked-read.js';
 
 /** When a containment fence's authority lapsed, read from the record before it was lowered; null while its lease is live or it records no deadline. */
 const fenceLapsedAt = (work: Work | null, now: number) => { const phase = work ? containmentPhase(work, now) : null; return phase && phase.state !== 'live' ? phase.lapsedAt : null; };
@@ -699,6 +700,17 @@ export function configuredReconcileFullMs(value = process.env.GRAPHYARD_RECONCIL
   return Number.isInteger(parsed) && parsed >= 2_000 && parsed <= 300_000 ? parsed : fallback;
 }
 
+/**
+ * GY-1735: a post-deploy follow-up filed without its observation window takes the one its filing owed
+ * it; one already recorded stands. The delivered item is read as its document: a settled stand-in
+ * need not carry its criteria or deployment.
+ */
+async function adoptFollowUpWindow(db: Queryable, work: Work) {
+  const request = work.observationWindow ? null : followUpRequest(work);
+  const delivered: Work | undefined = request ? (await db.query('SELECT document FROM work_items WHERE id=$1', [request.work])).rows[0]?.document : undefined;
+  const window = delivered ? filedFollowUpWindow(work, [delivered]) : undefined;
+  if (window) work.observationWindow = window;
+}
 export class Engine {
   operatorAuthorizer?: (db: any, now: Date, actor: Principal) => Promise<Principal>;
   /** The direct-merge window the deployment environment declares (direct-merge.ts), read once at construction. */
@@ -1124,6 +1136,7 @@ export class Engine {
         // repository configures (GY-215); nobody writes it into the ticket.
         const documentation = documentationObligation(data.type, this.documentation);
         if (documentation) work!.documentation = documentation;
+        await adoptFollowUpWindow(db, work!);
         const inserted = await db.query('INSERT INTO work_items(id,document) VALUES($1,$2) RETURNING number', [work!.id, JSON.stringify(work)]);
         work!.key = `GY-${inserted.rows[0].number}`;
         all.push(work!);
@@ -1200,8 +1213,8 @@ export class Engine {
         work.observation = null; work.mergeAuthorization = null; work.reviewRequest = null;
       }
       if (command === 'requirements') ({ widening, lateAnswer } = await this.reviseRequirements(db, actor, work, all, data, key, now, before));
-      if (command === 'ready') { if (actor.role !== 'operator-agent') admin(actor); work.ready = true; }
-      if (command === 'unblock') { if (actor.role !== 'operator-agent') admin(actor); work.blocker = null; }
+      if (command === 'ready') { if (actor.role !== 'operator-agent') admin(actor); work.ready = true; await adoptFollowUpWindow(db, work); }
+      if (command === 'unblock') { if (actor.role !== 'operator-agent') admin(actor); work.blocker = null; await adoptFollowUpWindow(db, work); }
       if (command === 'resolve') {
         // Resolution is a human judgement: no lead, worker, producer, or scoped
         // operator agent may clear the escalation that refuses its own delivery.
@@ -1291,6 +1304,10 @@ export class Engine {
         // Eligibility against the (possibly just-revised) requirements: ready, dependencies, exclusive
         // resources and slice capacity are all derived from the document the new attempt will hold.
         demand(work.ready && !work.blocker, 'Task is not ready or has a blocker');
+        // GY-1735: the observation window holds the claim itself, so no loop or launcher that predates it (GY-1722, GY-1725) can start an attempt that can only escalate.
+        await adoptFollowUpWindow(db, work);
+        const window = observationWindowHold(work, now);
+        demand(!window, `${work.key} waits for its observation window: the reading it owes can first exist at ${window?.notBefore} (${window?.detail})`, 409);
         demand(work.dependencies.every(dep => all.find(w => w.id === dep)?.stage === 'done'), 'Unfinished dependencies');
         const resources = resourceConflicts(work, all, now.getTime());
         demand(!resources.length, `Exclusive resources held: ${resources.map(r => `${r.resource} by ${r.key}`).join(', ')}`);
