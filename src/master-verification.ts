@@ -195,7 +195,7 @@ export interface VerificationEffects {
   file?: (input: NonNullable<PostDeployCheck['followUp']>['input'], requestId: string) => Promise<{ key?: string } | unknown>;
   /** The intervention report's under-threshold reading for a pattern (GY-1698): the follow-up's observation window is taken from it. */
   patterns?: PatternReader;
-  /** The coordinator checkout's own filer, used only when it is the observed release (or emits nothing about it); `postDeployChecks` by default. */
+  /** The coordinator checkout's own filer, used only when it is at the observed release's commit (or has none to compare); `postDeployChecks` by default. */
   checks?: PostDeployFiler;
   now?: () => number;
 }
@@ -221,7 +221,11 @@ export async function verifyDeployment(work: Work, effects: VerificationEffects,
   const observation = await effects.observe(current.stage === 'done' && current.delivery ? [current] : []);
   const coordinator = effects.release();
   const emits = emitsManagedInstructions(coordinator, effects.repository);
-  const isolate = emits && !!effects.isolate && !!observation.sha && !!coordinator.sha && coordinator.sha !== observation.sha;
+  const differs = !!observation.sha && !!coordinator.sha && coordinator.sha !== observation.sha;
+  // GY-1732 AC-1: a checkout at another commit than the observed release files nothing with its own code, whether or
+  // not it emits; one of another repository materializes the release only when it owes a follow-up to file.
+  const owes = differs && deferPostDeployFollowUps(current, observation.sha!, snapshot.work, 'owed').some(check => check.deferred);
+  const isolate = differs && (emits || owes);
   let release = coordinator, isolated: boolean = false;
   const result = (assessment: ReturnType<typeof assessDeploymentVerification>, recorded: 'now' | 'existing' | null, postDeploy: Awaited<ReturnType<typeof filePostDeployFollowUps>> = []) => ({
     key: current.key, result: assessment.verifiable ? 'verified' as const : 'refused' as const,
@@ -236,14 +240,15 @@ export async function verifyDeployment(work: Work, effects: VerificationEffects,
   if (preflight.refusals.length) return result(preflight, null);
   let checkout: IsolatedRelease | null = null;
   if (isolate) {
-    const materialized = await effects.isolate!(observation.sha!);
+    const materialized = effects.isolate ? await effects.isolate(observation.sha!) : { reason: 'no isolated checkout of the observed release can be made' };
     // GY-1732 AC-2: without the release's checkout its filer cannot run, so each owed follow-up is deferred, never filed by this checkout's code.
-    if ('reason' in materialized) return result({ ...preflight, refusals: [materialized.reason] }, null,
+    if ('reason' in materialized) return result({ ...preflight, verifiable: false, refusals: [materialized.reason] }, null,
       deferPostDeployFollowUps(current, observation.sha!, snapshot.work, `the observed release ${observation.sha!.slice(0, 12)} could not be checked out to file it at its own identity: ${materialized.reason}`));
-    checkout = materialized; release = checkout.release; isolated = true;
+    // The release's checkout is a clone of the coordinator's, so it is judged as the coordinator's repository.
+    checkout = materialized; release = { ...checkout.release, repository: coordinator.repository }; isolated = true;
   }
   try {
-    const emitted = checkout ? await checkout.emit() : emits ? await effects.emit() : undefined;
+    const emitted = !emits ? undefined : checkout ? await checkout.emit() : await effects.emit();
     const assessment = assessDeploymentVerification(current, { observation, release, emitted, now: now(), freshnessMs, repository: effects.repository });
     if (!assessment.verifiable) return result(assessment, null);
     // Follow-ups are filed before the observation is recorded: a filing that fails leaves the delivery
