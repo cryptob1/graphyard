@@ -217,8 +217,8 @@ export async function shadowStep(cycle: Cycle) {
   // GY-1748: under the control-plane merger a disagreement is history, recorded in the cursor and raising no line.
   const previousMode = knownMerger.get(state);
   let controlPlane = previousMode === 'control-plane';
-  // A state that has never read the merger successfully (a restart whose first read fails) raises no line: the mode is unknown, and a line under the control-plane merger is the defect.
-  let modeKnown = previousMode !== undefined;
+  // A state that has never read the merger successfully (a restart whose first read fails) raises no line, while effects with no merger to read keep GitHub's behaviour: the mode is unknown, and a line under the control-plane merger is the defect.
+  let modeKnown = previousMode !== undefined || !effects.mergeWriter;
   try { const mode = await effects.mergeWriter?.merger(); if (mode) { knownMerger.set(state, mode); modeKnown = true; controlPlane = mode === 'control-plane'; } } catch { /* keeps the mode last read */ }
   // The cycle the merger returns to github re-examines every disagreement, so one first recorded under the control-plane merger gains its line.
   // A freshly loaded state (a daemon restart) owes the same examination: its persisted verdicts are unchanged and no action stands for them.
