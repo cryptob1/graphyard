@@ -1466,13 +1466,18 @@ export class Engine {
         demand(work.lease && work.lease.epoch === request!.epoch && Date.parse(work.lease.expiresAt) > now.getTime(),
           'The requesting attempt no longer holds the lease; a fresh attempt asks afresh');
         const unaided = decideScopeRequest(work, request!).state === 'approved', planned = work.plannedFiles ?? [], revision = work.policyRevision;
+        // Only the decisions whose own criteria ground the ask are its grounds; an unrelated held decision
+        // never claims the widening, so it cannot apply first and stale the one that did (Codex review of
+        // f28c91076299). Decisions that ground it only together are all its grounds.
+        const alone = held.filter(entry => decideScopeRequest({ ...work, criteria: [...work.criteria, ...entry.criteria] }, request!).state === 'approved');
+        const grounds = alone.length ? alone : held;
         decision = applyScopeDecision(work, request!, now, ground);
         // A widening only the held criteria grounded keeps those decisions current: each still applies when
         // the attempt ends, on this revision, with the entries it added kept (Codex review of f8eb2edf68f2).
         if (held.length && !unaided && work.policyRevision !== revision) {
           const added = work.plannedFiles.filter(path => !planned.includes(path));
-          work.heldGroundings = [...(work.heldGroundings ?? []).filter(entry => !held.some(decision => decision.id === entry.decision)),
-            ...held.map(decision => ({ decision: decision.id, from: decision.from, to: work.policyRevision,
+          work.heldGroundings = [...(work.heldGroundings ?? []).filter(entry => !grounds.some(decision => decision.id === entry.decision)),
+            ...grounds.map(decision => ({ decision: decision.id, from: decision.from, to: work.policyRevision,
               paths: [...new Set([...(work.heldGroundings?.find(entry => entry.decision === decision.id)?.paths ?? []), ...added])] }))];
         }
       }

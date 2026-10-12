@@ -465,10 +465,10 @@ async function replay1700(tree: string | null, name: string) {
   const http = serve(engine, [admin]); servers.push(http);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   const url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
-  const call = async (token: string, path: string, body: unknown) => {
+  const call = async (token: string, path: string, body: unknown, status = 200) => {
     const response = await fetch(`${url}/api/${path}`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() }, body: JSON.stringify(body) });
     const answer = await response.json() as any;
-    assert.equal(response.status, 200, JSON.stringify(answer));
+    assert.equal(response.status, status, JSON.stringify(answer));
     return answer;
   };
   for (const agent of [master, approver])
@@ -491,10 +491,13 @@ async function replay1700(tree: string | null, name: string) {
   const submit = async () => {
     await engine.execute(implementer, 'workspace', work.id, { epoch: work.epoch, host: 'gy1700-host', path: `/srv/gy1700/${work.id}`, branch: `graphyard/${work.key.toLowerCase()}-1` }, randomUUID());
     const submitted = await engine.execute(implementer, 'submit', work.id, { epoch: work.epoch, pr: 1700 }, randomUUID()) as Work;
-    const settled = (await store.pool.query("SELECT kind FROM events WHERE work_id=$1 AND kind IN ('decision.applied','decision.stale','decision.failed') AND payload->>'id'=$2", [work.id, requested.id])).rows.map(row => row.kind as string);
-    return { submitted, settled };
+    const settle = async (id: string) => (await store.pool.query("SELECT kind FROM events WHERE work_id=$1 AND kind IN ('decision.applied','decision.stale','decision.failed') AND payload->>'id'=$2", [work.id, id])).rows.map(row => row.kind as string);
+    return { submitted, settled: await settle(requested.id) };
   };
-  return { refused, held: approved.state as string, after, submit };
+  /** A second requirements decision asked while this one is held, answered with the given status. */
+  const another = (status: number) => call(master.token, `work/${work.key}/decide`, { action: 'requirements', reason: 'AC-3 names the row it clears',
+    input: { ...revision, expectedPolicyRevision: after.policyRevision, criteria: [...live.slice(0, 2), { ...live[2], text: 'The github-budget attention row on the board clears' }] } }, status);
+  return { refused, held: approved.state as string, after, submit, another };
 }
 
 test('manual:intervention-pattern-escalation-build — GY-1700 against the base and the candidate: the refused ask stands on the base until someone clears it; on the candidate the held decision grounds it at once', { timeout: 300_000 }, async () => {
@@ -519,4 +522,16 @@ test('manual:intervention-pattern-escalation-build — GY-1700 against the base 
   assert.ok(submitted.plannedFiles.includes('tests/webhook-soft-accept.test.ts'), 'the approved path survives the attempt ending');
   assert.equal(submitted.blocker, null);
   assert.ok(!submitted.heldGroundings, 'the grounding is spent once the decision settles');
+});
+
+test('manual:intervention-pattern-escalation-build — GY-1700 on the candidate: the widening is grounded by the one held decision whose criterion names the path, and no second decision can be held beside it to stale it', { timeout: 300_000 }, async () => {
+  // Codex review of f28c91076299: a widening attributed to an unrelated held decision could let that one apply first
+  // and stale the decision that authorized it. The engine records only decisions whose own criteria ground the ask,
+  // and the control plane holds one requirements decision per item, so the grounding names exactly that decision.
+  const replay = await replay1700(null, 'gy1700_one_held');
+  assert.deepEqual(replay.after.heldGroundings?.map(entry => entry.paths), [['tests/webhook-soft-accept.test.ts']], 'one decision grounded the path it names');
+  const refusal = await replay.another(409);
+  assert.match(refusal.error, /is held/, 'a second requirements decision is refused while the grounding one is held');
+  const { settled } = await replay.submit();
+  assert.deepEqual(settled, ['decision.applied']);
 });
