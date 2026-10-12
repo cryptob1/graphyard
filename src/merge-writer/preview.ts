@@ -101,9 +101,11 @@ const cut = (text: string) => text.replace(/\s+/g, ' ').trim().slice(0, 900);
  * The preview of one passing trial merge: in a free slot (at most `previewConcurrency` at once), a
  * detached checkout of `mergeSha` under `base` marked with this process as its owner, the site's
  * build, its output served on loopback (`serveStaticSite`, answering `mergeSha` on /healthz), and
- * every required and uat case of the checkout run against it (`projectCaseSuite`). Whatever the
- * outcome — pass, fail or the budget running out — the server is closed and the checkout removed
- * before the slot is freed. The first preview of a process sweeps the leftovers of dead ones first.
+ * every required and uat case of the checkout run against it (`projectCaseSuite`). When the budget
+ * runs out the run is cancelled — the build's shell killed, the case runner's requests aborted and
+ * its browser closed, no further step started — and awaited until it has ended; only then, whatever
+ * the outcome, is the server closed, the checkout removed and the slot freed, so no work of an
+ * ended preview outlives its slot. The first preview of a process sweeps the leftovers of dead ones first.
  */
 export async function runPreview(input: PreviewInput): Promise<PreviewVerdict> {
   const now = input.now ?? Date.now, run = input.run ?? defaultChildRun;
@@ -112,38 +114,45 @@ export async function runPreview(input: PreviewInput): Promise<PreviewVerdict> {
   const startedAt = now();
   const verdict = (result: PreviewVerdict['result'], detail: string, cases: PreviewCase[] = [], failed: string[] = []): PreviewVerdict =>
     ({ result, mergeSha: input.mergeSha, cases, failed, detail: cut(detail), durationMs: Math.max(0, now() - startedAt) });
-  let directory: string | null = null, served: StaticUat | null = null, timer: NodeJS.Timeout | undefined, ended = false;
+  const cancel = new AbortController(), signal = cancel.signal;
+  const cancelled = () => { if (signal.aborted) throw new Error('the preview was cancelled'); };
+  let directory: string | null = null, served: StaticUat | null = null, timer: NodeJS.Timeout | undefined, running: Promise<PreviewVerdict> | null = null;
   try {
     directory = await mkdtemp(join(input.base, previewCheckoutPrefix));
     await writeTempOwner(directory);
     const checkout = join(directory, 'checkout');
     const preview = async (): Promise<PreviewVerdict> => {
       await run('git', ['-C', input.root, 'worktree', 'add', '--detach', checkout, input.mergeSha], { timeoutMs: input.timeoutMs });
+      cancelled();
       if (input.site.build) {
-        const failed = await buildStaticSite(input.site.build, checkout, input.timeoutMs, input.shell);
+        const failed = await buildStaticSite(input.site.build, checkout, input.timeoutMs, input.shell, signal);
+        cancelled();
         if (failed) return verdict('fail', failed, [], ['build']);
       }
       const selected = existsSync(join(checkout, 'e2e')) ? (await loadCases(checkout)).filter(entry => entry.definition.required || entry.definition.target === 'uat') : [];
       if (!selected.length) return verdict('pass', 'no required or uat E2E case is in the merge, so the preview exercised nothing');
+      cancelled();
       served = await serveStaticSite(join(checkout, input.site.directory), input.mergeSha);
-      // A server that came up after the budget ran out is closed at once: the cleanup already ran.
-      if (ended) { await served.close(); throw new Error('the preview ended before its site was served'); }
       let report: E2eReport | null = null;
-      const suite = projectCaseSuite(checkout, input.token, { fetcher: input.fetcher, launcher: input.launcher, stepTimeoutMs: input.stepTimeoutMs, report: value => { report = value; } });
+      const suite = projectCaseSuite(checkout, input.token, { fetcher: input.fetcher, launcher: input.launcher, stepTimeoutMs: input.stepTimeoutMs, signal, report: value => { report = value; } });
       const result = await suite.run(served.url, { id: `preview-${input.mergeSha.slice(0, 12)}` } as ReleaseCandidate);
+      cancelled();
       const ran = report as E2eReport | null;
       const cases = (ran?.cases ?? []).map(outcome => ({ case: outcome.id, verdict: outcome.verdict, required: outcome.required }));
       const blocking = ran ? releaseVerdict(ran).blocking.map(outcome => outcome.id) : [];
       return result.passed ? verdict('pass', result.detail, cases) : verdict('fail', result.detail, cases, blocking.length ? blocking : ['e2e']);
     };
-    const expired = new Promise<PreviewVerdict>(accept => { timer = setTimeout(() => accept(verdict('timeout', `the preview ran past its ${Math.round(input.timeoutMs / 60_000)}-minute budget`)), input.timeoutMs); });
-    const running = preview();
-    // Past the budget the run is abandoned; whatever it rejects with later is not the verdict.
-    running.catch(() => {});
-    return await Promise.race([running, expired]);
+    const expired = new Promise<'expired'>(accept => { timer = setTimeout(() => accept('expired'), input.timeoutMs); });
+    running = preview();
+    const first = await Promise.race([running, expired]);
+    if (first !== 'expired') return first;
+    // Past the budget: the run is cancelled, and its slot is not freed until it has ended (finally).
+    cancel.abort();
+    return verdict('timeout', `the preview ran past its ${Math.round(input.timeoutMs / 60_000)}-minute budget`);
   } finally {
-    ended = true;
     clearTimeout(timer);
+    cancel.abort();
+    if (running) await running.catch(() => null);
     try { await (served as StaticUat | null)?.close(); } catch { /* the server is gone either way */ }
     if (directory) {
       try { await run('git', ['-C', input.root, 'worktree', 'remove', '--force', join(directory, 'checkout')]); } catch { /* removed below; the next prune forgets it */ }

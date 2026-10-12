@@ -16,11 +16,11 @@ import { findCandidate, readLedgerAsync, recordsArguments, serveStaticSite, sync
  * candidate record names each case's result.
  */
 export function projectCaseSuite(root: string, token: string, options: { fetcher?: typeof fetch; launcher?: E2eLauncher; stepTimeoutMs?: number;
-  report?: (report: E2eReport) => void | Promise<void> } = {}): Suite {
+  report?: (report: E2eReport) => void | Promise<void>; signal?: AbortSignal } = {}): Suite {
   return {
     name: 'e2e',
     run: async (url, candidate) => {
-      const suite = e2eSuite(await loadCases(root), token, { fetcher: options.fetcher, launcher: options.launcher, stepTimeoutMs: options.stepTimeoutMs, root, report: options.report,
+      const suite = e2eSuite(await loadCases(root), token, { fetcher: options.fetcher, launcher: options.launcher, stepTimeoutMs: options.stepTimeoutMs, root, report: options.report, signal: options.signal,
         select: entry => entry.definition.required || entry.definition.target === 'uat', runAll: true });
       return suite.run(url, candidate);
     },
@@ -45,17 +45,18 @@ const asyncHolds = (git: AsyncGit, options: Parameters<typeof releaseHolds>[1]) 
 };
 
 /** Runs a shell command in a checkout: whether it exited zero, and what it printed. */
-export type StaticBuildShell = (command: string, cwd: string) => Promise<{ ok: boolean; output: string }>;
+export type StaticBuildShell = (command: string, cwd: string, signal?: AbortSignal) => Promise<{ ok: boolean; output: string }>;
 /**
  * Build a static site's output in `checkout` with its `build` shell command (`GRAPHYARD_UAT_BUILD`):
  * null when the build passed, else the failure's detail naming the command and its last output
- * lines. The release candidate (GY-1535) and the merge preview (GY-1718) build the same way.
+ * lines. The release candidate (GY-1535) and the merge preview (GY-1718) build the same way;
+ * `signal` cancels the build, killing its shell.
  */
-export async function buildStaticSite(build: string, checkout: string, timeoutMs: number, shell?: StaticBuildShell): Promise<string | null> {
-  const run = shell ?? ((command: string, cwd: string) => new Promise<{ ok: boolean; output: string }>(accept => {
-    execFile('sh', ['-c', command], { cwd, encoding: 'utf8', timeout: timeoutMs, maxBuffer: 64 * 1024 * 1024 }, (error, stdout, stderr) => accept({ ok: !error, output: `${stdout ?? ''}${stderr ?? ''}${error && !stderr ? error.message : ''}` }));
+export async function buildStaticSite(build: string, checkout: string, timeoutMs: number, shell?: StaticBuildShell, signal?: AbortSignal): Promise<string | null> {
+  const run = shell ?? ((command: string, cwd: string, cancel?: AbortSignal) => new Promise<{ ok: boolean; output: string }>(accept => {
+    execFile('sh', ['-c', command], { cwd, encoding: 'utf8', timeout: timeoutMs, maxBuffer: 64 * 1024 * 1024, signal: cancel }, (error, stdout, stderr) => accept({ ok: !error, output: `${stdout ?? ''}${stderr ?? ''}${error && !stderr ? error.message : ''}` }));
   }));
-  const built = await run(build, checkout);
+  const built = await run(build, checkout, signal);
   return built.ok ? null : `the static site's build \`${build}\` failed: ${built.output.trim().split('\n').slice(-5).join(' | ').slice(0, 900)}`;
 }
 
