@@ -18,7 +18,7 @@ import { withLaunchedRuntime } from './master/launch.js';
 import { herdrSubcommand, isHerdrCommand } from './master/herdr.js';
 import { boundedLaunch, launchBoundMs } from './master/launch-bound.js';
 import { capacityRefusal } from './fleet.js';
-import { answeredByPendingReview, postMergeFindingsMax, launchReview, reconcileReviews, reviewVerdictReminderMs, unpostedVerdict, updateReviewLedger, type ReviewRecord } from './reviewer.js';
+import { answeredByPendingReview, postMergeFindingsMax, launchReview, reconcileReviews, reviewVerdictReminderMs, unpostedVerdict, updateReviewLedger, vanishedSettledSession, type ReviewRecord } from './reviewer.js';
 import { owedPostMergeReviews, parseFinding, postMergeFollowUp, postMergeRequestId, wholeFindings } from './model/post-merge-review.js';
 import { riskOf } from './model/risk-class.js';
 import { blockingFindings, followUpFindingsOf } from './review-cap.js';
@@ -922,10 +922,13 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
    * as surely as a listed pane does, and the record outlives a restart of this loop. A session the
    * sweep above judged over holds nothing: that is what makes a name busy only while a live session
    * has it, rather than until somebody ends the record by hand (GY-113 AC-2). Nor does one on a pane
-   * the review reconcile closed this tick.
+   * the review reconcile closed this tick, nor one the runtime no longer lists whose ledger record
+   * settled (GY-1716): its request is still open, so no fact closes the handle, and only a
+   * replacement launched into the slot it held can answer that request.
    */
   const held = () => snapshot.work.flatMap(item => (item.sessions ?? [])
-    .filter(handle => handle.state === 'running' && !!handle.agentName && !settledHandles.has(sessionHandleKey(item.id, handle.id)) && !isReleased(handle.pane, handle.agentName))
+    .filter(handle => handle.state === 'running' && !!handle.agentName && !settledHandles.has(sessionHandleKey(item.id, handle.id)) && !isReleased(handle.pane, handle.agentName)
+      && !vanishedSettledSession(handle, handle.kind === 'review' ? reviews : handle.kind === 'proof' ? producers : [], herdr, config.hostId))
     .map(handle => ({ name: handle.agentName! })));
   // The launchers still see the runtime's own inventory unfiltered: a name the runtime lists at all
   // cannot be taken again, whatever state it is in, and that check is theirs to make.
