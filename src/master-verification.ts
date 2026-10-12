@@ -415,6 +415,7 @@ const followUpOf = (item: Pick<Work, 'description'>) => item.description?.starts
  * another so none is filed against a snapshot another has just changed — so the live observation
  * the merge never waited for is owned by an item rather than by nobody.
  */
+/** A check as filed: its follow-up's key, or — deferred (GY-1732) — the request id a later filing keeps and why it waits. */
 export type FiledPostDeployCheck = Omit<PostDeployCheck, 'followUp'> & { followUp: string | null; requestId?: string; deferred?: string };
 export async function filePostDeployFollowUps(work: Work, release: string, all: readonly Pick<Work, 'key' | 'description'>[], file?: VerificationEffects['file'], now = new Date(), patterns?: PatternReader, servedAt?: Date, filer: PostDeployFiler = localPostDeployChecks) {
   const known = [...all], results: FiledPostDeployCheck[] = [];
@@ -425,10 +426,10 @@ export async function filePostDeployFollowUps(work: Work, release: string, all: 
   for (const { followUp, ...rest } of checks) {
     if (!followUp) { results.push({ ...rest, followUp: null }); continue; }
     const filed = known.find(item => followUpOf(item) === followUp.requestId)?.key;
-    if (filed || !file) { results.push({ ...rest, followUp: filed ?? null, requestId: followUp.requestId }); continue; }
+    if (filed || !file) { results.push({ ...rest, followUp: filed ?? null }); continue; }
     const created = await file(followUp.input, followUp.requestId) as { key?: string } | undefined;
     if (created?.key) known.push({ key: created.key, description: followUp.input.description });
-    results.push({ ...rest, followUp: created?.key ?? null, requestId: followUp.requestId });
+    results.push({ ...rest, followUp: created?.key ?? null });
   }
   return results;
 }
@@ -443,7 +444,7 @@ export function deferPostDeployFollowUps(work: Work, release: string, all: reado
   return postDeployChecks(work, release).map(({ followUp, ...rest }) => {
     if (!followUp) return { ...rest, followUp: null };
     const filed = all.find(item => followUpOf(item) === followUp.requestId)?.key;
-    return filed ? { ...rest, followUp: filed, requestId: followUp.requestId } : { ...rest, followUp: null, requestId: followUp.requestId, deferred: reason };
+    return filed ? { ...rest, followUp: filed } : { ...rest, followUp: null, requestId: followUp.requestId, deferred: reason };
   });
 }
 

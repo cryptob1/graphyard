@@ -371,7 +371,7 @@ test('unit:post-deploy-filing-at-release-identity — with the coordinator check
     assert.deepEqual(filed.map(entry => entry.input.observationWindow?.notBefore), instants, `${item.key}: each follow-up carries the release's window`);
     for (const entry of filed) assert.match(entry.input.description, /\n\nObservation window: the reading can first exist at /);
     assert.deepEqual(filed.map(entry => entry.requestId), item.criteria.filter(criterion => criterion.proofs.some(proof => proof.startsWith('manual:post-deploy/'))).map(criterion => postDeployFollowUpId(item, criterion.id, criterion.proofs[0], serving)));
-    assert.deepEqual(verified.postDeploy.map(check => [check.result, check.followUp, check.requestId, check.deferred]), filed.map((entry, index) => ['owed', `GY-${1721 + index}`, entry.requestId, undefined]));
+    assert.deepEqual(verified.postDeploy.map(check => [check.result, check.followUp, check.deferred]), filed.map((_entry, index) => ['owed', `GY-${1721 + index}`, undefined]));
     assert.equal(recorded.length, 1, 'the observation is recorded once its follow-ups are filed');
   }
 });
@@ -416,7 +416,7 @@ test('unit:post-deploy-followup-window-or-deferral — with the coordinator chec
       }
       for (const check of verified.postDeploy) {
         assert.equal(check.result, 'owed');
-        assert.ok(check.followUp ? filed.some(entry => entry.requestId === check.requestId) : !!check.deferred, `${item.key} ${check.proof}: filed with its window or deferred`);
+        assert.ok(check.followUp ? filed.some(entry => entry.requestId.includes(`:${check.criterion}:${check.proof}:`)) : !!check.deferred && !!check.requestId, `${item.key} ${check.proof}: filed with its window or deferred`);
         outcomes.push(check.deferred ? 'deferred' : 'filed');
       }
     }
