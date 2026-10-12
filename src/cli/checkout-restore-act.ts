@@ -3,7 +3,7 @@ import { copyFileSync, existsSync, lstatSync, mkdtempSync, rmdirSync, rmSync } f
 import { rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { type ChildRun, defaultChildRun } from '../child-runner.js';
+import { ChildProcessError, type ChildRun, defaultChildRun } from '../child-runner.js';
 import { freezeCheckoutWriters, type UnverifiableProcess } from './checkout-writers.js';
 
 /** Where restored checkout contents are kept, one ref per restore. */
@@ -24,6 +24,33 @@ export function statusPaths(status: string): string[] {
   }
   return [...new Set(paths)];
 }
+/** Whether `ancestor` is an ancestor of `descendant` (a commit is its own); null when Git cannot say (a commit the store lacks). */
+async function isAncestor(root: string, ancestor: string, descendant: string, run: ChildRun): Promise<boolean | null> {
+  try { await run('git', ['-C', root, 'merge-base', '--is-ancestor', ancestor, descendant]); return true; }
+  catch (error) { return error instanceof ChildProcessError && error.status === 1 ? false : null; }
+}
+/**
+ * GY-1745: what a diverged HEAD is judged against: `base`, the base branch's ref at origin; `loaded`,
+ * the commit the loop runs (null when none is known: nothing is then diverged); `serving`, the release the checkout moves onto
+ * (the verified serving release, else the base tip).
+ */
+export interface DivergeInputs { base: string; loaded: string | null; serving: string }
+/**
+ * The detached HEAD of a checkout that is diverged (GY-1745): neither an ancestor of the base
+ * branch's tip (merged code, which the existing paths adopt) nor a descendant of the commit the loop
+ * loaded (a forward move the loop recovers onto). Null for a branch checkout, a HEAD Git cannot
+ * judge against the base ref, or a HEAD that takes the existing paths.
+ */
+export async function divergedHead(root: string, inputs: Pick<DivergeInputs, 'base' | 'loaded'>, run: ChildRun = defaultChildRun): Promise<string | null> {
+  try { await run('git', ['-C', root, 'symbolic-ref', '-q', 'HEAD']); return null; }
+  catch (error) { if (!(error instanceof ChildProcessError) || error.status !== 1) return null; }
+  let head: string;
+  try { head = String(await run('git', ['-C', root, 'rev-parse', 'HEAD'])).trim(); } catch { return null; }
+  if (!head || await isAncestor(root, head, inputs.base, run) !== false) return null;
+  // Without the commit the loop runs there is nothing to call a forward move, so nothing is judged diverged.
+  if (!inputs.loaded || await isAncestor(root, inputs.loaded, head, run) !== false) return null;
+  return head;
+}
 const refStamp = (at: Date) => at.toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z');
 
 /**
@@ -43,13 +70,33 @@ const refStamp = (at: Date) => at.toISOString().replace(/[-:]/g, '').replace(/\.
  */
 type Quiesced = { thaw: () => void; skipped?: UnverifiableProcess[] };
 export type CheckoutQuiesce = (root: string) => Quiesced | Promise<Quiesced>;
-export async function restoreCoordinatorCheckout(root: string, reason: string, run: ChildRun = defaultChildRun, at = new Date(), quiesce: CheckoutQuiesce = freezeCheckoutWriters, advance: string | null = null): Promise<{ ref: string; commit: string; paths: string[]; skipped: UnverifiableProcess[] } | null> {
+export async function restoreCoordinatorCheckout(root: string, reason: string, run: ChildRun = defaultChildRun, at = new Date(), quiesce: CheckoutQuiesce = freezeCheckoutWriters, advance: string | null = null, diverge: DivergeInputs | null = null): Promise<{ ref: string; commit: string; paths: string[]; skipped: UnverifiableProcess[] } | null> {
+  return (await restoreCheckoutFrozen(root, reason, run, at, quiesce, advance, diverge)).restored;
+}
+/**
+ * restoreCoordinatorCheckout and, with `diverge` (GY-1745), the diverged-HEAD heal under the same
+ * freeze: a detached HEAD that is neither on the base branch nor a descendant of the loaded commit
+ * is saved under refs/graphyard/checkout-restore/diverged-STAMP-COMMIT (a ref, so git gc keeps it)
+ * and the checkout is detached at `diverge.serving`. Judged after any dirty paths were saved and
+ * returned, so the checkout is clean when it moves; skipped for the old-HEAD handoff's `advance`.
+ */
+export async function restoreCheckoutFrozen(root: string, reason: string, run: ChildRun = defaultChildRun, at = new Date(), quiesce: CheckoutQuiesce = freezeCheckoutWriters, advance: string | null = null, diverge: DivergeInputs | null = null): Promise<{ restored: { ref: string; commit: string; paths: string[]; skipped: UnverifiableProcess[] } | null; diverged: { ref: string; from: string; to: string } | null }> {
   const frozen = await quiesce(root);
   try {
     const restored = await restoreQuiesced(root, reason, run, at);
     if (advance) await advanceQuiesced(root, advance, run, restored);
-    return restored && { ...restored, skipped: frozen.skipped ?? [] };
+    const diverged = !advance && diverge ? await healDiverged(root, reason, run, at, diverge, restored) : null;
+    return { restored: restored && { ...restored, skipped: frozen.skipped ?? [] }, diverged };
   } finally { frozen.thaw(); }
+}
+async function healDiverged(root: string, reason: string, run: ChildRun, at: Date, diverge: DivergeInputs, restored: { ref: string; commit: string; paths: string[] } | null) {
+  const from = await divergedHead(root, diverge, run);
+  if (!from) return null;
+  const ref = `${checkoutRestoreRefPrefix}diverged-${refStamp(at)}-${from.slice(0, 12)}`;
+  await run('git', ['-C', root, 'update-ref', '-m', `graphyard checkout-restore: diverged HEAD, ${reason.slice(0, 200)}`, ref, from, '']);
+  // Only once the ref holds the HEAD is the checkout moved off it.
+  await advanceQuiesced(root, diverge.serving, run, restored);
+  return { ref, from, to: diverge.serving };
 }
 /** The clean, still-quiesced checkout moved onto `commit`, detached, and read back as standing there. */
 async function advanceQuiesced(root: string, commit: string, run: ChildRun, restored: { ref: string; commit: string; paths: string[] } | null) {
@@ -122,12 +169,12 @@ async function restoreQuiesced(root: string, reason: string, run: ChildRun, at: 
 }
 
 /** What a restore act returns: the restore (null when nothing was dirty), the checkout's HEAD after, which code served it, and — when the command's old-HEAD handoff served — the release commit the entry advanced the checkout onto under its freeze, which `head` then is. */
-export interface RestoreActOutcome { restored: { ref: string; commit: string; paths: string[]; skipped: UnverifiableProcess[] } | null; head: string | null; served?: string; release?: string }
+export interface RestoreActOutcome { restored: { ref: string; commit: string; paths: string[]; skipped: UnverifiableProcess[] } | null; head: string | null; /** GY-1745: the diverged HEAD saved under `ref` and the release the checkout was moved onto (`to`). */ diverged?: { ref: string; from: string; to: string } | null; served?: string; release?: string }
 /** The quiesce-and-restore of a checkout-restore request (GY-1680), told which standing request it serves: the loop's runs it from the serving release under a grant naming that request (checkout-restore-release.ts). */
 export type RestoreAct = (root: string, reason: string, at: Date, request: { file: string; id: string }) => Promise<RestoreActOutcome>;
 /** The restore act run by this process's own code: what the serve entry runs in the release snapshot. The loop never runs it on its loaded code (GY-1680). With `advance` (the old-HEAD handoff's grant), the checkout is moved onto that commit under the same freeze, and `head` reports it. */
-export const restoreInProcess = (run: ChildRun = defaultChildRun, quiesce?: CheckoutQuiesce, advance: string | null = null): RestoreAct => async (root, reason, at) => {
-  const restored = await restoreCoordinatorCheckout(root, reason, run, at, quiesce, advance);
+export const restoreInProcess = (run: ChildRun = defaultChildRun, quiesce?: CheckoutQuiesce, advance: string | null = null, diverge: (() => Promise<DivergeInputs | null>) | null = null): RestoreAct => async (root, reason, at) => {
+  const { restored, diverged } = await restoreCheckoutFrozen(root, reason, run, at, quiesce, advance, await diverge?.() ?? null);
   const head = String(await run('git', ['-C', root, 'rev-parse', 'HEAD'])).trim() || null;
-  return { restored, head };
+  return { restored, head, ...(diverged ? { diverged } : {}) };
 };

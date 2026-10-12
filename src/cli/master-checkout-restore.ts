@@ -9,7 +9,7 @@ import { type CheckoutQuiesce, type RestoreAct, restoreInProcess } from './check
 
 export { checkoutWriterProcesses, checkoutWriterScan, freezeCheckoutWriters, processStateOf, type WriterFreezeDeps } from './checkout-writers.js';
 // The act itself — the quiesce-and-restore and the HEAD advance under the freeze — is checkout-restore-act.ts's, re-exported for its callers.
-export { type CheckoutQuiesce, checkoutRestoreRefPrefix, type RestoreAct, type RestoreActOutcome, restoreCoordinatorCheckout, restoreInProcess, statusPaths } from './checkout-restore-act.js';
+export { type CheckoutQuiesce, checkoutRestoreRefPrefix, type RestoreAct, type RestoreActOutcome, divergedHead, type DivergeInputs, restoreCheckoutFrozen, restoreCoordinatorCheckout, restoreInProcess, statusPaths } from './checkout-restore-act.js';
 // The command side, re-exported for its callers: checkout-restore-command.ts imports this module's requests and paths (functions and paths only, used inside its functions).
 export { checkoutRestoreCommand, checkoutRestoreWaitMs, loopExecutorsWaitMs } from './checkout-restore-command.js';
 import type { MasterConfig } from '../master/profiles.js';
@@ -141,13 +141,16 @@ export async function serveCheckoutRestore(file: string, root: string, deps: Loo
     outcome = { at: now().toISOString(), state: 'restart', ref: null, commit: null, paths: [], detail: `the loop restarts through its supervising unit, as ${request.requestedBy} asked: ${request.reason}`, restart: null };
   } else try {
     const act = deps.restore ?? restoreInProcess(deps.run, deps.quiesce);
-    const { restored, head, served } = await act(root, `${request.reason} (requested by ${request.requestedBy})`, now(), { file, id: request.id });
+    const { restored, head, served, diverged } = await act(root, `${request.reason} (requested by ${request.requestedBy})`, now(), { file, id: request.id });
     const by = (served ? `; ${served}` : '') + (request.handoff ? `; handed off by loop-restart request ${request.handoff.restart} from the loop that ran ${request.handoff.loaded ? request.handoff.loaded.slice(0, 12) : 'code it did not record'}, from before the serve path` : '');
     // GY-1680: a clean checkout whose HEAD is not the commit the loop runs is the drift GY-1531 lets a
     // restart adopt — the restart this request exists to make — never a `clean` outcome that leaves
     // the escalation standing.
-    const loaded = deps.loaded?.() ?? null, adopt = !restored && head && loaded && head !== loaded ? head : null;
-    outcome = restored
+    const loaded = deps.loaded?.() ?? null, adopt = diverged ? diverged.to : !restored && head && loaded && head !== loaded ? head : null;
+    outcome = diverged
+      // GY-1745: the checkout was moved off a HEAD that is neither merged nor forward of the loaded commit, which is kept under a ref; the loop adopts the release it moved onto and restarts onto it.
+      ? { at: now().toISOString(), state: 'adopted', ref: diverged.ref, commit: diverged.to, paths: restored?.paths ?? [], detail: `the coordinator checkout at ${root} stood detached at ${diverged.from.slice(0, 12)}, neither on the base branch nor a descendant of the commit the loop runs; that HEAD is saved under ${diverged.ref} and the checkout is detached at the serving release ${diverged.to.slice(0, 12)}; the loop adopts it and restarts through its supervising unit onto it${restored ? `; ${restored.paths.length} dirty path(s) were first saved under ${restored.ref} (${restored.commit.slice(0, 12)}) and returned to HEAD` : ''}${by}`.slice(0, 4000), restart: null }
+      : restored
       ? { at: now().toISOString(), state: 'restored', ref: restored.ref, commit: restored.commit, paths: restored.paths, detail: `${restored.paths.length} dirty path(s) saved under ${restored.ref} (${restored.commit.slice(0, 12)}; its second parent holds the index) and returned to HEAD; the loop restarts through its supervising unit${skippedDetail(restored.skipped)}${by}`.slice(0, 4000), restart: null }
       : adopt
         ? { at: now().toISOString(), state: 'adopted', ref: null, commit: adopt, paths: [], detail: `the coordinator checkout at ${root} held no dirty path, but its HEAD ${adopt.slice(0, 12)} is not ${loaded!.slice(0, 12)}, the commit the loop runs; the loop adopts it (GY-1531) and restarts through its supervising unit onto it${by}`.slice(0, 4000), restart: null }
