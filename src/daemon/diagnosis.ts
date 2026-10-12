@@ -639,14 +639,42 @@ const deliveredMeanwhile = (error: unknown) => /Delivered work is immutable/.tes
  * no longer applicable, and recorded with no fault; the next cycle's snapshot shows it done, and
  * the diagnosis is answered as for any item closed while it was diagnosed (GY-1266).
  */
+/**
+ * GY-1712 rework: the server refuses any second close/release of the same action while one stands,
+ * regardless of input (src/server/decisions.ts). A triage obsolete close or a duplicate naming a
+ * different ref therefore collides with the diagnosis's duplicate close. Adopting the named id on
+ * the refusal text alone would let advance mark the diagnosis answered by covering/fix when the
+ * approved close closes for another reason. Adopt only when history records that standing decision
+ * with the same action and the same diagnosis input (close: kind + ref; release: any standing
+ * release). A competing or unread standing decision is left to its requester — noted, not thrown
+ * to isolate, not adopted — and the next cycle asks again once it settles (or answers as no longer
+ * open when a competing close applies).
+ */
+function standingMatchesDiagnosis(standing: { action: string; input?: Record<string, unknown> | null }, action: 'release' | 'close', input: Record<string, unknown>): boolean {
+  if (standing.action !== action) return false;
+  if (action === 'release') return true;
+  return standing.input?.kind === input.kind && (standing.input?.ref ?? null) === (input.ref ?? null);
+}
+
+async function adoptStandingNamed(cycle: Cycle, target: Work, action: 'release' | 'close', input: Record<string, unknown>, held: string): Promise<boolean> {
+  if (!cycle.effects.decisions) return false;
+  const standing = (await cycle.effects.decisions(target)).decisions.find(candidate => candidate.id === held);
+  return !!standing && standingMatchesDiagnosis(standing, action, input);
+}
+
 async function decideFresh(cycle: Cycle, diagnostician: DiagnosticianEffects, entry: DiagnosisRecord, work: Work, action: 'release' | 'close', input: Record<string, unknown>, reason: string, note: Note) {
   try { return { decision: await diagnostician.decide(work, action, reason, input), target: work }; }
   catch (error) {
-    // GY-1712: the server names a standing request of this action the history read missed — adopt it
-    // for an approver like the decisions step (GY-1374 / standingNamedIn). Thrown on, a close that
-    // already stood on GY-1710 reached cycle.isolate as unclassified action:diagnosis.
+    // GY-1712: the server names a standing request of this action the history read missed. Thrown on,
+    // a close that already stood on GY-1710 reached cycle.isolate as unclassified action:diagnosis.
+    // Adopt only when that standing decision's recorded input matches this diagnosis's request.
     const held = standingNamedIn(error, action);
-    if (held) return { decision: { id: held }, target: work };
+    if (held) {
+      if (await adoptStandingNamed(cycle, work, action, input, held)) return { decision: { id: held }, target: work };
+      const wanted = action === 'close' ? `${String(input.kind ?? 'close')}${input.ref ? ` of ${input.ref}` : ''}` : action;
+      await note(entry, 'done', `The ${action} request on ${work.key} for the diagnosis of ${entry.subject} was refused because decision ${held} (${action}) is already standing; its recorded input does not match this diagnosis's ${wanted}, so it is left to its requester and this one is asked once it settles`, null);
+      return null;
+    }
     if (!revisionRaced(error) && !deliveredMeanwhile(error)) throw error;
     const why = `The ${action} request on ${work.key} for the diagnosis of ${entry.subject} was refused: ${message(error)}`;
     const fresh = (await cycle.effects.snapshot()).work.find(candidate => candidate.id === work.id);
@@ -663,7 +691,12 @@ async function decideFresh(cycle: Cycle, diagnostician: DiagnosticianEffects, en
     try { return { decision: await diagnostician.decide(fresh, action, reason, input), target: fresh }; }
     catch (again) {
       const heldAgain = standingNamedIn(again, action);
-      if (heldAgain) return { decision: { id: heldAgain }, target: fresh };
+      if (heldAgain) {
+        if (await adoptStandingNamed(cycle, fresh, action, input, heldAgain)) return { decision: { id: heldAgain }, target: fresh };
+        const wanted = action === 'close' ? `${String(input.kind ?? 'close')}${input.ref ? ` of ${input.ref}` : ''}` : action;
+        await note(entry, 'done', `${why}; asked again against revision ${fresh.revision} and refused because decision ${heldAgain} (${action}) is already standing with a different input than this diagnosis's ${wanted}, so it is left to its requester and the next cycle decides afresh`, null);
+        return null;
+      }
       if (!revisionRaced(again) && !deliveredMeanwhile(again)) throw again;
       await note(entry, 'done', `${why}; asked again against revision ${fresh.revision} and refused again (${message(again)}), so the next cycle decides afresh`, null);
       return null;
