@@ -17,12 +17,12 @@ const delivered = {
   delivery: { mergeSha: 'a14965e4ad9ad52069ce7dc0c5d5aabdbf4f8b43', mergedAt: '2026-10-11T15:08:24Z', evidenceAsOf: '2026-10-11T15:08:24Z', authorizationRevision: 1 },
 } as unknown as Work;
 
-const verify = async (deployed: boolean, releaseWork?: (key: string) => Promise<void>) => {
+const verify = async (deployed: boolean, releaseWork?: (key: string) => Promise<void>, others: Work[] = []) => {
   const { controlPlaneHandlers, localPostDeployChecks } = await modules();
   const unusable = async (): Promise<never> => { throw new Error('not reached'); };
   const log: string[] = [];
   const handlers = controlPlaneHandlers(() => ({}) as never, {
-    snapshot: async () => ({ work: [delivered], now: at }),
+    snapshot: async () => ({ work: [delivered, ...others], now: at }),
     mutate: async (path: string) => { log.push(`record ${path.split('/').pop()}`); return {}; },
     agents: () => [], workerCredentials: async () => ({}), producerCredentials: async () => ({}), dispatchWorker: unusable, launchReview: unusable, launchProducer: unusable,
     observeDeployment: async () => ({ source: 'endpoint' as const, sha: serving, at, reason: null, deployed: deployed ? [delivered.key] : [], pending: deployed ? [] : [delivered.key] }) as never,
@@ -101,4 +101,39 @@ test('unit:post-deploy-follow-up-released-when-served — the CLI\'s verificatio
   const deps = { root: '/nonexistent', snapshot: async () => ({ work: [], now: at }), mutate: async () => ({}) };
   assert.equal(typeof verificationEffects({ repository: 'o/r', cliPath: '' } as never, { ...deps, file: async () => ({}) }).releaseWork, 'function');
   assert.equal(verificationEffects({ repository: 'o/r', cliPath: '' } as never, deps).releaseWork, undefined);
+});
+
+// A retry after an attempt that released the follow-up but failed before recording has no release left to perform.
+const owedFollowUp = async (ready: boolean) => {
+  const { localPostDeployChecks } = await modules();
+  const [check] = await localPostDeployChecks({ work: delivered, release: serving, now: at, projections: {}, servedAt: at });
+  return { ...delivered, id: 'f0000000-0000-4000-8000-000000000001', key: 'GY-1724', description: check!.followUp!.input.description, stage: ready ? 'ready' : 'backlog', ready } as unknown as Work;
+};
+
+test('unit:post-deploy-follow-up-release-authority — a retry with no release authority records when the filed follow-up is already released, and still refuses while it is in backlog', async () => {
+  const released = await verify(true, undefined, [await owedFollowUp(true)]);
+  assert.equal(released.outcome, 'ok');
+  assert.deepEqual(released.log, ['record deployment'], 'nothing is filed or released again; the observation is recorded');
+  const backlog = await verify(true, undefined, [await owedFollowUp(false)]);
+  assert.match(backlog.outcome, /no operator-agent identity to release it/);
+  assert.ok(!backlog.log.includes('record deployment'));
+});
+
+test('unit:post-deploy-follow-up-release-authority — master verify-deployment with no release authority records when the filed follow-up is already released', async () => {
+  const { verifyDeployment } = await modules();
+  const run = async (ready: boolean) => {
+    const log: string[] = [], now = Date.parse(at) + 2_000, followUp = await owedFollowUp(ready);
+    const attempt = await verifyDeployment(delivered, {
+      snapshot: async () => ({ work: [delivered, followUp], now: new Date(now).toISOString() }),
+      observe: async () => ({ source: 'endpoint' as const, sha: serving, at, reason: null, deployed: [delivered.key], pending: [] }),
+      release: () => ({ sha: 'f'.repeat(40), clean: true, repository: 'other/repo', reason: null }),
+      emit: async () => assert.fail('nothing is emitted'), repository: 'owner/project', now: () => now,
+      record: async () => { log.push('record'); }, file: async () => { log.push('file'); return { key: 'GY-1724' }; },
+    }).then(result => result.result, (error: Error) => error.message);
+    return { log, attempt };
+  };
+  assert.deepEqual(await run(true).then(r => [r.attempt, r.log]), ['verified', ['record']]);
+  const backlog = await run(false);
+  assert.equal(backlog.attempt, 'refused');
+  assert.ok(!backlog.log.includes('record'));
 });
