@@ -9,7 +9,7 @@ import { doctorLimitRetryAt, doctorLimitUntilMarker, headlessTimeoutLimitCharge,
 import { isClosed } from '../model/closure.js';
 import { planeWideRefusal } from '../model/blocker-class.js';
 import { RefusedResponse } from '../model/refusal.js';
-import { openFaultClassItem } from '../model/fault-classes.js';
+import { faultClassIsCovered, faultClassPolicyDefaults, faultClassPolicyFromEnv, openFaultClassItem, type FaultClassPolicy, type FaultInstance } from '../model/fault-classes.js';
 import { workerSubmissionBoundMs } from '../model/attempt-bound.js';
 import { scopeRefusalBlocker, unplannedPaths } from '../model/scope.js';
 import { approverSessionName, guardBroadScope } from '../master/autonomy.js';
@@ -180,7 +180,7 @@ export function doctorPrompt(config: { repository: string; cliPath: string }, in
   ].join('\n');
   return `You are the Graphyard pipeline doctor for ${config.repository}. Find stuck and overdue work and fix it through your sanctioned commands, doing what the master would have done by hand. Read the evidence below and the control plane (${cli} status GY-N, ${cli} master status, ${cli} master decisions GY-N, gh pr view). `
     + `Act only where a check below has passed its fault bound; leave what is merely moving. Your sanctioned commands are ${doctorSanctionedCommands.map(name => `${cli} master ${name}`).join(', ')}, as the master's operator-agent identity; every other mutation is refused by your command allowlist — never merge, dispatch, submit evidence or touch a lease — and a refused command is recorded in your report, never retried. Run each command by its bare program name with literal arguments: no variables, command substitution, redirection, wrappers or node options, and read only paths inside this checkout. Put a free-text reason last, enclosed in one pair of quotes: the allowlist judges only the command's grammar, and the reason runs as one prose argument, never read as a command, whatever words, apostrophes or punctuation it holds. A refusal names the rule that denied the command and the word it denied. Never weaken a requirement; never approve a decision you requested yourself (request it, then ${cli} master approver GY-N DECISION for an independent approver). `
-    + `A finding you cannot act on — a human-only decision (goals and priorities, money or accounts, credentials for people), or a fault class with no item to act through — mark unactionable; for the latter name the fault item to file, which the loop files at P0/P1 only if no open item already covers it. `
+    + `A finding you cannot act on — a human-only decision (goals and priorities, money or accounts, credentials for people), or a fault class with no item to act through — mark unactionable; for the latter name the fault item to file, which the loop files at P0/P1 only if no open or delivered cover already accounts for it. `
     + `Then call the ${doctorTool} tool exactly once: one finding per stuck or overdue item under its check, one action entry per sanctioned command you ran and what it changed, and one filed entry per fault item you are asking the loop to file. Stop after the call.\n\nThe checks and their bounds:\n${checklist}\n\nThe evidence, as JSON:\n${JSON.stringify(boundedInput(input))}`;
 }
 
@@ -247,13 +247,20 @@ const subjectKey = (work: readonly Work[], subject: string) => work.find(item =>
 
 /**
  * What the loop keeps of a doctor payload: one event per item it found or acted on, and the run
- * summary. `filed` entries are deduplicated first: a fault class an open item already stands for
- * is recorded as covered, never filed twice.
+ * summary. `filed` entries are deduplicated first: a fault class an open item already stands for,
+ * or a delivered item covers under the GY-1632 rule (every windowed unlinked instance predates its
+ * landing), is recorded as covered, never filed twice (GY-1711).
  */
-export function dedupDoctorFiles(filed: readonly DoctorFile[], work: readonly Work[]): { file: DoctorFile; covered: boolean }[] {
+export function dedupDoctorFiles(
+  filed: readonly DoctorFile[],
+  work: readonly Work[],
+  instances: readonly FaultInstance[] = [],
+  now = 0,
+  policy: FaultClassPolicy = faultClassPolicyDefaults,
+): { file: DoctorFile; covered: boolean }[] {
   const seen = new Set<string>();
   return filed.map(entry => {
-    const covered = seen.has(entry.faultClass) || !!openFaultClassItem(work, entry.faultClass);
+    const covered = seen.has(entry.faultClass) || faultClassIsCovered(work, entry.faultClass, instances, now, policy);
     seen.add(entry.faultClass);
     return { file: entry, covered };
   });
@@ -372,25 +379,28 @@ export async function applyDoctorRun(cycle: Cycle, effects: DoctorEffects, run: 
   // tried five read-only forms filed "Recurring loop faults" for a loop that never stopped (GY-1295).
   for (const action of payload.actions)
     await note(action.subject, `${action.outcome === 'applied' ? 'Ran' : 'Was refused'} \`${action.command}\`: ${action.detail}`.slice(0, 2000));
-  const deduped = dedupDoctorFiles(payload.filed, work);
+  const policy = daemon.faultClassPolicy ?? faultClassPolicyFromEnv(process.env);
+  const instances = state.faults.instances;
+  const coveredBy = (faultClass: DoctorFile['faultClass']) => openFaultClassItem(work, faultClass) ? 'an open item' : 'a delivered item';
+  const deduped = dedupDoctorFiles(payload.filed, work, instances, now(), policy);
   for (const { file, covered } of deduped) {
-    if (covered) { await note('installation', `Not filing "${file.title}": the ${file.faultClass} fault class is already covered by an open item`); continue; }
+    if (covered) { await note('installation', `Not filing "${file.title}": the ${file.faultClass} fault class is already covered by ${coveredBy(file.faultClass)}`); continue; }
     const filingKey = `${key}:file:${file.faultClass}`;
     if (isRefused(state.doctor.refusedFilings, filingDigest(file))) { state.doctor.refusedFilings = renewRefusal(state.doctor.refusedFilings, filingDigest(file), now()); await note('installation', `Not filing "${file.title}" again: master create refused this content earlier and the escalation for it stands; it is filed again only when the doctor corrects it`); continue; }
     if (!fresh) {
       state.doctor.pendingFiles = [...state.doctor.pendingFiles.filter(entry => entry.key !== filingKey), { key: filingKey, at: run.at, file }].slice(-40);
-      await note('installation', `Not filing "${file.title}" yet: the open items could not be read when the run settled, so it is filed on a later cycle if no open item covers the ${file.faultClass} fault class`);
+      await note('installation', `Not filing "${file.title}" yet: the open items could not be read when the run settled, so it is filed on a later cycle if no open or delivered cover accounts for the ${file.faultClass} fault class`);
       continue;
     }
     let input: DoctorFileInput;
-    try { input = doctorFileItem(file, `The pipeline doctor found a ${file.faultClass} fault no open item covers: ${file.description.slice(0, 1500)}`); }
+    try { input = doctorFileItem(file, `The pipeline doctor found a ${file.faultClass} fault no open or delivered cover accounts for: ${file.description.slice(0, 1500)}`); }
     catch (error) { await note('installation', invalidFiling(file, error), 'done', 'escalation'); continue; }
     try {
       const filedItem = await effects.file(input, filingKey);
       // Filed: any pending retry of the same filing is dropped before the cursor is persisted.
       state.doctor.pendingFiles = state.doctor.pendingFiles.filter(entry => entry.key !== filingKey);
       run.filed.push({ faultClass: file.faultClass, title: file.title, work: filedItem.key, deduplicated: false });
-      await note(filedItem.key, `Filed ${filedItem.key} (P${file.priority}) for the ${file.faultClass} fault no open item covered: ${file.title}`);
+      await note(filedItem.key, `Filed ${filedItem.key} (P${file.priority}) for the ${file.faultClass} fault no open or delivered cover accounted for: ${file.title}`);
     } catch (error) {
       // GY-1530: a refusal of the filing itself is never mended by a retry; it is dropped and classified.
       if (createRefused(error)) { await dropRefusedFiling(cycle, filingKey, file, error, (state.actions[filingKey]?.attempts ?? 0) + 1, now); continue; }
@@ -438,21 +448,25 @@ const retainedRuns = 20;
 /**
  * A filing the control plane did not accept when its run applied is filed again on a later cycle,
  * under the same stable key, until the control plane takes it, refuses it as written (GY-1530) or an
- * open item comes to cover the class. The cursor is updated before the outcome is recorded, so an
- * abrupt exit between the two leaves the filing pending rather than lost.
+ * open or delivered cover comes to stand for the class (GY-1711). The cursor is updated before the
+ * outcome is recorded, so an abrupt exit between the two leaves the filing pending rather than lost.
  */
 export async function retryDoctorFile(cycle: Cycle, effects: DoctorEffects, pending: DoctorPendingFile, now: () => number) {
-  const { state, effects: daemon, snapshot } = cycle;
+  const { state, effects: daemon, snapshot, clock } = cycle;
   const attempts = (state.actions[pending.key]?.attempts ?? 0) + 1;
   const drop = async (detail: string, work: string | null, outcome: DaemonAction['state']) => {
     state.doctor.pendingFiles = state.doctor.pendingFiles.filter(entry => entry.key !== pending.key);
     await record(state, pending.key, { kind: 'fault', work, principal: null, state: outcome, detail: detail.slice(0, 2000), attempts, cycle: state.cycle }, now(), daemon.persist);
   };
-  if (openFaultClassItem(snapshot.work, pending.file.faultClass)) return drop(`Not filing "${pending.file.title}" on retry: the ${pending.file.faultClass} fault class is now covered by an open item`, null, 'done');
+  const policy = daemon.faultClassPolicy ?? faultClassPolicyFromEnv(process.env);
+  if (faultClassIsCovered(snapshot.work, pending.file.faultClass, state.faults.instances, clock, policy)) {
+    const by = openFaultClassItem(snapshot.work, pending.file.faultClass) ? 'an open item' : 'a delivered item';
+    return drop(`Not filing "${pending.file.title}" on retry: the ${pending.file.faultClass} fault class is now covered by ${by}`, null, 'done');
+  }
   // Queued through an outage beside another run's copy, the same content may already have been refused.
   if (isRefused(state.doctor.refusedFilings, filingDigest(pending.file))) { state.doctor.refusedFilings = renewRefusal(state.doctor.refusedFilings, filingDigest(pending.file), now()); return drop(`Not filing "${pending.file.title}" on retry: master create refused this content earlier and the escalation for it stands`, null, 'done'); }
   let input: DoctorFileInput;
-  try { input = doctorFileItem(pending.file, `The pipeline doctor found a ${pending.file.faultClass} fault no open item covers: ${pending.file.description.slice(0, 1500)}`); }
+  try { input = doctorFileItem(pending.file, `The pipeline doctor found a ${pending.file.faultClass} fault no open or delivered cover accounts for: ${pending.file.description.slice(0, 1500)}`); }
   catch (error) {
     // Refused by the checks themselves, the filing would be refused the same way on every retry.
     state.doctor.pendingFiles = state.doctor.pendingFiles.filter(entry => entry.key !== pending.key);

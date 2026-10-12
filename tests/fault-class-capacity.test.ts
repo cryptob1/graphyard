@@ -17,10 +17,18 @@ import {
 } from '../src/master.js';
 import {
   classified,
+  deliveredClassCover,
+  deliveredFaultClassCover,
+  faultClassIsCovered,
   faultClassOf,
+  faultClassPolicyDefaults,
+  recurringClasses,
   trackFaults,
+  type FaultInstance,
   type FaultRecord,
 } from '../src/model/fault-classes.js';
+import { dedupDoctorFiles, type DoctorFile } from '../src/daemon/doctor.js';
+import { isDelivered } from '../src/model/closure.js';
 
 // GY-1113 names this file for its proof: manual:fault-class-capacity. The master loop filed 3 capacity
 // faults in 24 hours on 2 October 2026. Every one was concurrency-starved attention on producer concurrency:
@@ -494,4 +502,85 @@ test('manual:fault-class-capacity — genuine starvation at candidate limit of 2
   assert.equal(opened.length, 1);
   assert.equal(opened[0].faultClass, 'capacity');
   assert.equal(opened[0].kind, 'concurrency-starved');
+});
+
+// ---- GY-1711: doctor filing gate shares the GY-1632 delivered-cover rule ----------------------
+//
+// GY-1710 restated capacity after GY-1708 landed: the doctor's open-item-only dedup let it through.
+// These unit proofs pin the shared cover helpers and dedupDoctorFiles against that shape.
+
+const gy1711Now = Date.parse('2030-06-15T12:00:00.000Z');
+const gy1711Iso = (offsetMs: number) => new Date(gy1711Now + offsetMs).toISOString();
+const hour = 3_600_000;
+const capacityOrigin = (detectedAt: string) => ({
+  faultClass: { class: 'capacity' as const, threshold: 1, windowHours: 1, count: 1, detectedAt, instances: [] },
+});
+const deliveredCapacity = (key: string, landedOffsetMs: number): Work => ({
+  id: `id-${key}`, key, title: 'Capacity mid-attempt exhaustion', description: '', type: 'bug', priority: 1,
+  dependencies: [], criteria: [{ id: 'AC-1', text: 'Redispatch preserves the attempt', proofs: ['unit:x'] }],
+  policy: { checks: ['test'], review: true }, plannedFiles: ['src/model/capacity.ts'], stage: 'done', revision: 1,
+  policyRevision: 1, createdAt: gy1711Iso(landedOffsetMs - hour), updatedAt: gy1711Iso(landedOffsetMs),
+  stageEnteredAt: gy1711Iso(landedOffsetMs - hour), ready: true, epoch: 1, lease: null, workspaces: [],
+  candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [],
+  observation: null, blocker: null, gates: [], violations: [],
+  origin: capacityOrigin(gy1711Iso(landedOffsetMs - hour)),
+  delivery: { mergedAt: gy1711Iso(landedOffsetMs), mergeSha: 'a'.repeat(40), authorizationRevision: 1 },
+} as Work);
+const capacityInstance = (id: string, atOffsetMs: number, linkedTo: string | null = null): FaultInstance => ({
+  id, kind: 'concurrency-starved', faultClass: 'capacity', subject: 'producer concurrency',
+  text: 'capacity exhausted mid-attempt', at: gy1711Iso(atOffsetMs), lastSeenAt: gy1711Iso(atOffsetMs), linkedTo,
+});
+const capacityFiling = (): DoctorFile => ({
+  faultClass: 'capacity', priority: 1, title: 'Approver, reviewer and worker sessions exhaust their model-account limit mid-attempt',
+  description: 'GY-1710-shaped doctor re-offer', plannedFiles: ['src/model/capacity.ts'],
+  criteria: [{ id: 'AC-1', text: 'Mid-attempt exhaustion redispatches within bounds', proofs: ['unit:capacity'] }],
+});
+
+test('unit:doctor-delivered-cover-dedup — a doctor re-offer of GY-1710\'s shape is recorded covered and never submitted once a delivered class item stands for every pre-landing instance', () => {
+  // Landing at -118 minutes relative to detection; every listed instance (and the empty ledger) predates it.
+  const gy1708 = deliveredCapacity('GY-1708', -118 * 60_000);
+  assert.equal(isDelivered(gy1708), true);
+  const preLanding = [
+    capacityInstance('approver|claude-c|pre', -200 * 60_000),
+    capacityInstance('worker|claude-c|pre', -150 * 60_000),
+  ];
+  assert.equal(faultClassIsCovered([gy1708], 'capacity', preLanding, gy1711Now, faultClassPolicyDefaults), true,
+    'delivered cover + pre-landing instances: covered under GY-1632');
+  assert.equal(faultClassIsCovered([gy1708], 'capacity', [], gy1711Now, faultClassPolicyDefaults), true,
+    'empty ledger (GY-1710\'s live shape): vacuous predate still covered');
+  const deduped = dedupDoctorFiles([capacityFiling()], [gy1708], preLanding, gy1711Now, faultClassPolicyDefaults);
+  assert.deepEqual(deduped.map(entry => entry.covered), [true], 'dedupDoctorFiles records the class covered');
+  assert.equal(deliveredClassCover([gy1708], 'capacity', preLanding)?.key, 'GY-1708');
+  // An open class item still covers the same way as before.
+  const open = { ...gy1708, key: 'GY-1710', id: 'id-GY-1710', stage: 'backlog', delivery: undefined } as Work;
+  assert.equal(faultClassIsCovered([open], 'capacity', preLanding, gy1711Now, faultClassPolicyDefaults), true);
+});
+
+test('unit:postlanding-instance-files-afresh — an instance first seen after the delivered cover\'s landing is not covered, so the class files when the recurrence sweep would', () => {
+  const gy1708 = deliveredCapacity('GY-1708', -60 * 60_000);
+  const after = [capacityInstance('capacity|post|1', -10 * 60_000), capacityInstance('capacity|post|2', -5 * 60_000), capacityInstance('capacity|post|3', -1 * 60_000)];
+  assert.equal(faultClassIsCovered([gy1708], 'capacity', after, gy1711Now, faultClassPolicyDefaults), false,
+    'post-landing instances withdraw the delivered cover');
+  assert.deepEqual(dedupDoctorFiles([capacityFiling()], [gy1708], after, gy1711Now, faultClassPolicyDefaults).map(entry => entry.covered), [false],
+    'dedupDoctorFiles lets the class through so the doctor files it');
+  const recurrence = recurringClasses(after, [gy1708], { threshold: 1, windowHours: 24 }, gy1711Now).find(entry => entry.faultClass === 'capacity')!;
+  assert.equal(recurrence.file, true, 'the loop\'s own recurrence sweep files at the same moment');
+  assert.equal(recurrence.item, null);
+});
+
+test('unit:delivered-cover-through-duplicate-ref — GY-1710 closed duplicate-of GY-1708 resolves the capacity cover through the answers set', () => {
+  const gy1708 = deliveredCapacity('GY-1708', -118 * 60_000);
+  const gy1710 = {
+    ...deliveredCapacity('GY-1710', -10 * 60_000),
+    stage: 'done',
+    delivery: undefined,
+    closure: { kind: 'duplicate', ref: 'GY-1708', reason: 'duplicate of the landed capacity fix', by: 'master', at: gy1711Iso(-5 * 60_000), from: 'backlog' },
+  } as Work;
+  assert.equal(deliveredFaultClassCover([gy1710, gy1708], 'capacity')?.item.key, 'GY-1708',
+    'deliveredFaultClassCover follows the duplicate ref to the delivered answer');
+  // The answer set still names GY-1708 as the class's delivered cover item after the duplicate closure.
+  assert.equal(deliveredFaultClassCover([gy1710, gy1708], 'capacity')?.item.key, 'GY-1708');
+  const preOnly = [capacityInstance('capacity|pre|1', -200 * 60_000)];
+  assert.equal(deliveredClassCover([gy1710, gy1708], 'capacity', preOnly)?.key, 'GY-1708');
+  assert.equal(faultClassIsCovered([gy1710, gy1708], 'capacity', preOnly, gy1711Now, faultClassPolicyDefaults), true);
 });
