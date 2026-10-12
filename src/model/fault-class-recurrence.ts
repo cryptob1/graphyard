@@ -95,6 +95,15 @@ export function doctorFaultClassSuppressReason(
   return null;
 }
 
+/** Human-readable reason the doctor skipped filing a fault class (GY-1711). */
+export function doctorCoverNote(work: readonly Work[], faultClass: FaultClass, instances: readonly FaultInstance[], now: number, policy: FaultClassPolicy): string {
+  const reason = doctorFaultClassSuppressReason(work, faultClass, instances, now, policy);
+  if (reason === 'open') return 'an open item';
+  if (reason === 'delivered') return 'a delivered item';
+  if (reason === 'below-threshold') return `post-landing instances below the recurrence threshold (${policy.threshold} in ${policy.windowHours} hours)`;
+  return openFaultClassItem(work, faultClass) ? 'an open item' : 'a delivered item';
+}
+
 export interface ClassRecurrence { faultClass: FaultClass; count: number; recent: FaultInstance[]; unlinked: FaultInstance[]; item: Work | null; file: boolean }
 /**
  * Every class with an instance inside the window. A class files an item when the instances in the

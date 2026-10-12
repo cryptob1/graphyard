@@ -9,7 +9,7 @@ import { doctorLimitRetryAt, doctorLimitUntilMarker, headlessTimeoutLimitCharge,
 import { isClosed } from '../model/closure.js';
 import { planeWideRefusal } from '../model/blocker-class.js';
 import { RefusedResponse } from '../model/refusal.js';
-import { doctorFaultClassSuppressReason, faultClassIsCovered, faultClassPolicyDefaults, faultClassPolicyFromEnv, openFaultClassItem, type FaultClassPolicy, type FaultInstance } from '../model/fault-classes.js';
+import { doctorCoverNote, faultClassIsCovered, faultClassPolicyDefaults, faultClassPolicyFromEnv, type FaultClassPolicy, type FaultInstance } from '../model/fault-classes.js';
 import { workerSubmissionBoundMs } from '../model/attempt-bound.js';
 import { scopeRefusalBlocker, unplannedPaths } from '../model/scope.js';
 import { approverSessionName, guardBroadScope } from '../master/autonomy.js';
@@ -245,29 +245,13 @@ export function clearDoctorRuns() { live = null; active = null; stopping = null;
 const keyOf = (subjects: string[]) => `doctor:${createHash('sha256').update(subjects.sort().join(',')).digest('hex').slice(0, 24)}`;
 const subjectKey = (work: readonly Work[], subject: string) => work.find(item => item.key === subject || item.id === subject)?.key ?? null;
 
-/** Human-readable reason the doctor skipped filing a fault class (GY-1711). */
-export function doctorCoverNote(work: readonly Work[], faultClass: DoctorFile['faultClass'], instances: readonly FaultInstance[], now: number, policy: FaultClassPolicy): string {
-  const reason = doctorFaultClassSuppressReason(work, faultClass, instances, now, policy);
-  if (reason === 'open') return 'an open item';
-  if (reason === 'delivered') return 'a delivered item';
-  if (reason === 'below-threshold') return `post-landing instances below the recurrence threshold (${policy.threshold} in ${policy.windowHours} hours)`;
-  return openFaultClassItem(work, faultClass) ? 'an open item' : 'a delivered item';
-}
-
 /**
  * What the loop keeps of a doctor payload: one event per item it found or acted on, and the run
- * summary. `filed` entries are deduplicated first: a fault class an open item already stands for,
- * a delivered item covers under the GY-1632 rule (every windowed unlinked instance predates its
- * landing), or a fallen delivered cover still below the recurrence threshold, is recorded as
- * covered, never filed ahead of the loop's own sweep (GY-1711).
+ * summary. `filed` entries are deduplicated first: a fault class an open item, a GY-1632 delivered
+ * cover, or a fallen cover still below the recurrence threshold stands for is recorded covered,
+ * never filed ahead of the loop's own sweep (GY-1711).
  */
-export function dedupDoctorFiles(
-  filed: readonly DoctorFile[],
-  work: readonly Work[],
-  instances: readonly FaultInstance[] = [],
-  now = 0,
-  policy: FaultClassPolicy = faultClassPolicyDefaults,
-): { file: DoctorFile; covered: boolean }[] {
+export function dedupDoctorFiles(filed: readonly DoctorFile[], work: readonly Work[], instances: readonly FaultInstance[] = [], now = 0, policy: FaultClassPolicy = faultClassPolicyDefaults): { file: DoctorFile; covered: boolean }[] {
   const seen = new Set<string>();
   return filed.map(entry => {
     const covered = seen.has(entry.faultClass) || faultClassIsCovered(work, entry.faultClass, instances, now, policy);
@@ -370,21 +354,13 @@ async function dropRefusedFiling(cycle: Pick<Cycle, 'state' | 'effects' | 'perfo
 export async function applyDoctorRun(cycle: Cycle, effects: DoctorEffects, run: DoctorRunRecord, payload: { findings: DoctorFinding[]; actions: DoctorAction[]; filed: DoctorFile[] }, now: () => number) {
   const { state, effects: daemon, performed } = cycle;
   const key = keyOf([run.at, ...payload.findings.map(finding => finding.subject)]);
-  // GY-1338: a run settles minutes after the cycle that launched it, and items filed meanwhile are
-  // not in that cycle's snapshot: a run started before GY-1332 existed filed GY-1333 for the same
-  // class. Its filings are deduplicated against a read taken now; without one, they wait for the
-  // retry, which deduplicates against its own cycle's snapshot, rather than file blind.
-  // Cover comparisons use the control-plane clock (fresh snapshot.now, else the cycle clock), not
-  // the coordinator host's now(): fault instances are stamped from that plane clock, and a host
-  // behind the plane would treat a post-landing instance as future and incorrectly keep the cover.
-  let work = cycle.snapshot.work;
-  let coverNow = cycle.clock;
-  let fresh: typeof work | null = payload.filed.length ? null : work;
+  // GY-1338: settle against a fresh snapshot (items filed meanwhile); without one, wait for retry.
+  // Cover times use the plane clock (snapshot.now, else cycle.clock): host now() can lag the stamps.
+  let work = cycle.snapshot.work, coverNow = cycle.clock, fresh: typeof work | null = payload.filed.length ? null : work;
   if (payload.filed.length) {
     const read = await daemon.snapshot().then(entry => entry, () => null);
     if (read) {
-      work = read.work;
-      fresh = read.work;
+      work = fresh = read.work;
       const observed = Date.parse(read.now);
       if (Number.isFinite(observed)) coverNow = observed;
     }
@@ -468,10 +444,8 @@ export async function postRun(cycle: Pick<Cycle, 'state' | 'effects'>, effects: 
 const retainedRuns = 20;
 
 /**
- * A filing the control plane did not accept when its run applied is filed again on a later cycle,
- * under the same stable key, until the control plane takes it, refuses it as written (GY-1530) or an
- * open or delivered cover comes to stand for the class (GY-1711). The cursor is updated before the
- * outcome is recorded, so an abrupt exit between the two leaves the filing pending rather than lost.
+ * Retry a filing the plane did not accept: until create takes it, refuses it (GY-1530), or an open
+ * or delivered cover stands (GY-1711). Cursor updates before the outcome so an abrupt exit keeps it pending.
  */
 export async function retryDoctorFile(cycle: Cycle, effects: DoctorEffects, pending: DoctorPendingFile, now: () => number) {
   const { state, effects: daemon, snapshot, clock } = cycle;
@@ -760,23 +734,11 @@ export async function relaunchUnansweredApprovers(cycle: Cycle) {
 export const decisionCheckMs = 2 * 60_000;
 
 /**
- * Remedy 4 (GY-1652): apply the Claude harness contract from the loop's own unconfined process.
- * The plan is derived live (second-install units on the host add denies, GY-1441), so the settings
- * the checkout's sessions load drift whenever the host changes. `master status` repairs drift in
- * place, but the only recurring automated reader is the doctor, whose checkout is bound read-only
- * (GY-888), so its repair always met EROFS and the row recurred every pass. The loop owns the file:
- * whenever the installed settings differ from the plan it makes the same idempotent write
- * `master harness claude --apply` makes — operator-added entries kept, only retired generated rules
- * removed — and journals one line. It runs on the loop's own checkout, the one its CLI runs from
- * (coordinatorCheckoutRoot, the doctor's checkout as fallback; GY-1662), never research's, which
- * runDaemon rewrites to the research scratch worktree: that worktree records no units, so on a host
- * whose legacy unit runs another checkout every cycle met the legacy unit refusal. A loop with no operator-agent identity or with the doctor off still owns
- * its checkout, and its own cycle is then the only recurring reader that would heal host-derived drift.
- * A checkout it may not apply against (harnessApplyCheckout) waits on the remedy it names, journaled once.
- * A failure is journaled once per distinct cause and retried every cycle; a repeat of the same cause
- * moves the standing row's time, so the failure stays open for as long as it lasts.
+ * Remedy 4 (GY-1652): apply the Claude harness contract from the loop's unconfined process — the
+ * doctor's checkout is read-only (GY-888), so only the loop can heal host-derived drift. Uses the
+ * CLI checkout (GY-1662), never research's scratch. Refusals wait; failures retry per distinct cause.
  */
-/** The settings file the Claude harness contract is written to, relative to the checkout (masterHarnessPlan's file). */
+/** Claude harness settings path relative to the checkout (masterHarnessPlan's file). */
 const claudeSettingsFile = '.claude/settings.local.json';
 
 export async function applyHarnessContract(cycle: Cycle) {
