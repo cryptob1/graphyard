@@ -19,10 +19,13 @@ import {
   classified,
   deliveredClassCover,
   deliveredFaultClassCover,
+  doctorCoverNote,
+  doctorFaultClassSuppressReason,
   faultClassIsCovered,
   faultClassOf,
   faultClassPolicyDefaults,
   recurringClasses,
+  standingFaultClassCover,
   trackFaults,
   type FaultInstance,
   type FaultRecord,
@@ -590,4 +593,36 @@ test('unit:delivered-cover-through-duplicate-ref — GY-1710 closed duplicate-of
   const preOnly = [capacityInstance('capacity|pre|1', -200 * 60_000)];
   assert.equal(deliveredClassCover([gy1710, gy1708], 'capacity', preOnly)?.key, 'GY-1708');
   assert.equal(faultClassIsCovered([gy1710, gy1708], 'capacity', preOnly, gy1711Now, faultClassPolicyDefaults), true);
+});
+
+test('unit:doctor-standing-diagnosed-cover — a closed recurring item whose diagnostician fix is still open covers the class the same way the recurrence sweep does', () => {
+  // Recurring GY-R closed duplicate-of open fix GY-F: fix has no class origin (diagnostician shape).
+  const fix = {
+    ...deliveredCapacity('GY-F', -30 * 60_000),
+    stage: 'build', delivery: undefined, origin: undefined,
+  } as Work;
+  const recurring = {
+    ...deliveredCapacity('GY-R', -50 * 60_000),
+    stage: 'done', delivery: undefined,
+    closure: { kind: 'duplicate', ref: 'GY-F', reason: 'answered by the diagnostician fix', by: 'master', at: gy1711Iso(-25 * 60_000), from: 'backlog' },
+  } as Work;
+  // Unlinked instances while the diagnosed fix is open: the sweep links them to GY-R and does not file.
+  const unlinked = [
+    capacityInstance('capacity|new|1', -20 * 60_000),
+    capacityInstance('capacity|new|2', -10 * 60_000),
+    capacityInstance('capacity|new|3', -5 * 60_000),
+  ];
+  assert.equal(standingFaultClassCover([recurring, fix], 'capacity')?.key, 'GY-R');
+  assert.equal(faultClassIsCovered([recurring, fix], 'capacity', unlinked, gy1711Now, faultClassPolicyDefaults), true,
+    'standing diagnosed item covers even with a full window of unlinked instances');
+  assert.equal(doctorFaultClassSuppressReason([recurring, fix], 'capacity', unlinked, gy1711Now, faultClassPolicyDefaults), 'standing');
+  assert.match(doctorCoverNote([recurring, fix], 'capacity', unlinked, gy1711Now, faultClassPolicyDefaults), /diagnosed class item/);
+  assert.deepEqual(dedupDoctorFiles([capacityFiling()], [recurring, fix], unlinked, gy1711Now, faultClassPolicyDefaults).map(e => e.covered), [true]);
+  const sweep = recurringClasses(unlinked, [recurring, fix], faultClassPolicyDefaults, gy1711Now, standingFaultClassCover)
+    .find(entry => entry.faultClass === 'capacity')!;
+  assert.equal(sweep.file, false, 'the loop\'s own sweep does not file while the diagnosed fix is open');
+  assert.equal(sweep.item?.key, 'GY-R');
+  // After linkage, recent is empty and the doctor gate still covers via standing.
+  const linked = unlinked.map(entry => ({ ...entry, linkedTo: 'GY-R' }));
+  assert.equal(faultClassIsCovered([recurring, fix], 'capacity', linked, gy1711Now, faultClassPolicyDefaults), true);
 });

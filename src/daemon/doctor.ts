@@ -247,9 +247,10 @@ const subjectKey = (work: readonly Work[], subject: string) => work.find(item =>
 
 /**
  * What the loop keeps of a doctor payload: one event per item it found or acted on, and the run
- * summary. `filed` entries are deduplicated first: a fault class an open item, a GY-1632 delivered
- * cover, or a fallen cover still below the recurrence threshold stands for is recorded covered,
- * never filed ahead of the loop's own sweep (GY-1711).
+ * summary. `filed` entries are deduplicated first: a fault class a standing item (open or closed as
+ * answered by an undelivered diagnostician fix), a GY-1632 delivered cover, or a fallen cover still
+ * below the recurrence threshold stands for is recorded covered, never filed ahead of the loop's
+ * own sweep (GY-1711).
  */
 export function dedupDoctorFiles(filed: readonly DoctorFile[], work: readonly Work[], instances: readonly FaultInstance[] = [], now = 0, policy: FaultClassPolicy = faultClassPolicyDefaults): { file: DoctorFile; covered: boolean }[] {
   const seen = new Set<string>();
@@ -444,8 +445,9 @@ export async function postRun(cycle: Pick<Cycle, 'state' | 'effects'>, effects: 
 const retainedRuns = 20;
 
 /**
- * Retry a filing the plane did not accept: until create takes it, refuses it (GY-1530), or an open
- * or delivered cover stands (GY-1711). Cursor updates before the outcome so an abrupt exit keeps it pending.
+ * Retry a filing the plane did not accept: until create takes it, refuses it (GY-1530), or a
+ * standing / delivered cover accounts for the class (GY-1711). Cursor updates before the outcome so
+ * an abrupt exit keeps it pending.
  */
 export async function retryDoctorFile(cycle: Cycle, effects: DoctorEffects, pending: DoctorPendingFile, now: () => number) {
   const { state, effects: daemon, snapshot, clock } = cycle;

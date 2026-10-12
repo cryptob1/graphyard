@@ -68,13 +68,30 @@ export function deliveredClassCover(work: readonly Work[], faultClass: FaultClas
 }
 
 /**
- * Whether the doctor must not file `faultClass` (GY-1711): an open item stands, a delivered cover
- * stands under the GY-1632 rule, or a delivered cover has fallen to post-landing instances that are
- * still below the recurrence threshold — the same filing eligibility as recurringClasses, so the
- * doctor files a class exactly when the loop's own sweep would and no later.
+ * The item standing for `faultClass` for doctor and recurrence (GY-439 / GY-1711): the open item
+ * naming it, else a recurring item closed as answered by a diagnostician fix that is not yet
+ * delivered. Same rule as `standingFaultClassItem` in the diagnosis step — kept here so the
+ * browser-safe cover gate matches `fileRecurringFaultClasses` without importing the daemon.
+ */
+export function standingFaultClassCover(work: readonly Work[], faultClass: FaultClass): Work | null {
+  const open = openFaultClassItem(work, faultClass);
+  if (open) return open;
+  return [...work].reverse().find(item => {
+    if (closesFaultClass(item) !== faultClass || item.stage !== 'done' || item.closure?.kind !== 'duplicate' || !item.closure.ref) return false;
+    const answer = work.find(other => other.key === item.closure!.ref);
+    return !answer || !isDelivered(answer);
+  }) ?? null;
+}
+
+/**
+ * Whether the doctor must not file `faultClass` (GY-1711): a standing class item (open, or closed
+ * as answered by an undelivered diagnostician fix), a delivered cover under the GY-1632 rule, or a
+ * fallen delivered cover whose post-landing instances are still below the recurrence threshold —
+ * the same filing eligibility as recurringClasses with standingFaultClassItem, so the doctor files
+ * a class exactly when the loop's own sweep would and no later.
  */
 export function faultClassIsCovered(work: readonly Work[], faultClass: FaultClass, instances: readonly FaultInstance[], now: number, policy: FaultClassPolicy): boolean {
-  if (openFaultClassItem(work, faultClass)) return true;
+  if (standingFaultClassCover(work, faultClass)) return true;
   const recent = windowedUnlinked(instances, faultClass, now, policy);
   if (deliveredClassCover(work, faultClass, recent) !== null) return true;
   // Delivered cover fell (at least one post-landing instance): suppress until the loop would file.
@@ -87,8 +104,9 @@ export function faultClassIsCovered(work: readonly Work[], faultClass: FaultClas
  */
 export function doctorFaultClassSuppressReason(
   work: readonly Work[], faultClass: FaultClass, instances: readonly FaultInstance[], now: number, policy: FaultClassPolicy,
-): 'open' | 'delivered' | 'below-threshold' | null {
-  if (openFaultClassItem(work, faultClass)) return 'open';
+): 'open' | 'standing' | 'delivered' | 'below-threshold' | null {
+  const standing = standingFaultClassCover(work, faultClass);
+  if (standing) return standing.stage !== 'done' ? 'open' : 'standing';
   const recent = windowedUnlinked(instances, faultClass, now, policy);
   if (deliveredClassCover(work, faultClass, recent) !== null) return 'delivered';
   if (deliveredFaultClassCover(work, faultClass) !== null && recent.length < policy.threshold) return 'below-threshold';
@@ -99,9 +117,10 @@ export function doctorFaultClassSuppressReason(
 export function doctorCoverNote(work: readonly Work[], faultClass: FaultClass, instances: readonly FaultInstance[], now: number, policy: FaultClassPolicy): string {
   const reason = doctorFaultClassSuppressReason(work, faultClass, instances, now, policy);
   if (reason === 'open') return 'an open item';
+  if (reason === 'standing') return 'a diagnosed class item whose fix is still open';
   if (reason === 'delivered') return 'a delivered item';
   if (reason === 'below-threshold') return `post-landing instances below the recurrence threshold (${policy.threshold} in ${policy.windowHours} hours)`;
-  return openFaultClassItem(work, faultClass) ? 'an open item' : 'a delivered item';
+  return standingFaultClassCover(work, faultClass) ? 'an open item' : 'a delivered item';
 }
 
 export interface ClassRecurrence { faultClass: FaultClass; count: number; recent: FaultInstance[]; unlinked: FaultInstance[]; item: Work | null; file: boolean }
