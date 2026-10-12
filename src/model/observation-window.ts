@@ -108,15 +108,16 @@ export function followUpRequest(item: Pick<Work, 'description'>): { work: string
 /**
  * GY-1735: the window the follow-up's filing owed it, derived from the delivered item its request id
  * names — the criterion's own bound, the live window served from the deployment recorded at that
- * release (else the filing) — or undefined for any other item or a criterion naming no window. A filer
- * older than GY-1698 or GY-1727 filed GY-1722 and GY-1725 without one, so each was dispatched before
- * its reading could exist and its worker could only escalate; the control plane now holds it itself.
+ * release (else the filing) and the intervention report's projection for the proof's pattern, the later
+ * of them, as the filer reads it — or undefined for any other item or a criterion naming no window. A
+ * filer older than GY-1698 or GY-1727 filed GY-1722 and GY-1725 without one, so each was dispatched
+ * before its reading could exist and its worker could only escalate; the control plane now holds it itself.
  */
-export function filedFollowUpWindow(item: Pick<Work, 'description' | 'createdAt'>, all: readonly Pick<Work, 'id' | 'key' | 'delivery' | 'criteria'>[]): ObservationWindow | undefined {
+export function filedFollowUpWindow(item: Pick<Work, 'description' | 'createdAt'>, all: readonly Pick<Work, 'id' | 'key' | 'delivery' | 'criteria'>[], projections: PatternProjections = {}): ObservationWindow | undefined {
   const request = followUpRequest(item), delivered = request && all.find(work => work.id === request.work);
   const criterion = delivered?.criteria.find(entry => entry.id === request!.criterion);
   if (!delivered?.delivery || !criterion) return undefined;
   const deployment = delivered.delivery.deployment, recorded = deployment?.sha === request!.release ? Date.parse(deployment.observedAt) : NaN;
   const served = Math.min(...[recorded, Date.parse(item.createdAt)].filter(Number.isFinite));
-  return observationWindowFor(delivered, criterion, request!.proof, null, Number.isFinite(served) ? served : undefined);
+  return observationWindowFor(delivered, criterion, request!.proof, projections[request!.proof], Number.isFinite(served) ? served : undefined);
 }

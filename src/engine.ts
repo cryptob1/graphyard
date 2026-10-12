@@ -11,7 +11,9 @@ import { compactHeartbeatReceipt } from './store/receipts.js';
 import { authorizedForProof, unauthorizedProofs } from './proof-grants.js';
 import { workspacePath, pathsOverlap, validBranch } from './workspace.js';
 import { activeLease, dropRetiredQueueFields, admin, assertReviewerProfiles, operatorCapability, escalationTriggers, raiseEscalation, releaseLeadHold, resolveEscalation, standingEscalations, attestationFor, attestationKinds, attestationsFromLedger, leaseLapseCause, leaseLossEpoch, leaseLossReason, settleableLeaseLoss, submittedEpoch, type Attestation, requireCurrent, createSchema, criteriaSchema, criterionSchema, bindingApproval, carriedApproval, currentCarry, refreshedCarriedApproval, currentEvidence, attachedCriteria, exerciseRefusal, proofExerciseSchema, decideCarry, exactApproval, type CarriedApproval, deploySmokeProof, deploySmokeRequired, inheritedObligations, pathScopeContains, requiredProofs, resourcesSchema, demand, evaluate, mergeabilityComputingRefusal, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Evidence, type EvidenceAttestation, type Lease, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability, deferBoundMs, observationWindowHold, servingReleaseProof } from './model.js';
-import { filedFollowUpWindow, followUpRequest } from './model/observation-window.js';
+import { filedFollowUpWindow, followUpRequest, patternOfProof, type PatternProjections, type PatternReader } from './model/observation-window.js';
+import { readInterventionReport } from './interventions/report.js';
+import { interventionPolicyFromEnv } from './model/interventions.js';
 import { Refusal, demandWork } from './model/refusal.js';
 import { resourceConflicts } from './coordination.js';
 import { containmentAttestation, containmentSettlementRefusals, containmentVerificationSchema } from './quarantine.js';
@@ -719,12 +721,14 @@ export function configuredReconcileFullMs(value = process.env.GRAPHYARD_RECONCIL
 /**
  * GY-1735: a post-deploy follow-up filed without its observation window takes the one its filing owed
  * it; one already recorded stands. The delivered item is read as its document: a settled stand-in
- * need not carry its criteria or deployment.
+ * need not carry its criteria or deployment. `projections` is the intervention report's reading for
+ * the proof's pattern, read before the transaction (`followUpProjections`), so the window is never
+ * earlier than the report's bound, as the filer derives it.
  */
-async function adoptFollowUpWindow(db: Queryable, work: Work) {
+async function adoptFollowUpWindow(db: Queryable, work: Work, projections: PatternProjections) {
   const request = work.observationWindow ? null : followUpRequest(work);
   const delivered: Work | undefined = request ? (await db.query('SELECT document FROM work_items WHERE id=$1', [request.work])).rows[0]?.document : undefined;
-  const window = delivered ? filedFollowUpWindow(work, [delivered]) : undefined;
+  const window = delivered ? filedFollowUpWindow(work, [delivered], projections) : undefined;
   if (window) work.observationWindow = window;
 }
 export class Engine {
@@ -752,6 +756,22 @@ export class Engine {
   gitRunner: GitRunner | null | undefined = undefined;
   /** The base branch a submitted head is observed against (GY-1523): the deployment's GITHUB_BASE_BRANCH, else `main`. */
   baseBranch = process.env.GITHUB_BASE_BRANCH ?? 'main';
+  /**
+   * GY-1735: reads the intervention report's projection for a pattern, which a window-less follow-up's
+   * derived window is bounded by. Left undefined, this store's own report under the environment's
+   * policy; null reads none, and the window is the criterion's bound alone.
+   */
+  followUpPatterns: PatternReader | null | undefined = undefined;
+  /** The report's projection for the proof a window-less follow-up owes, read outside any coordination transaction; a failed read is no reading, as the filer treats it. */
+  private async followUpProjections(item: Pick<Work, 'description' | 'observationWindow'> | undefined): Promise<PatternProjections> {
+    const request = item && !item.observationWindow ? followUpRequest(item) : null, pattern = request && patternOfProof(request.proof);
+    const read = this.followUpPatterns === undefined ? async ({ kind, stage }: { kind: string; stage: string }) => {
+      const row = (await readInterventionReport(this.store, interventionPolicyFromEnv())).patterns.find(entry => entry.kind === kind && entry.stage === stage);
+      return row ? { since: row.underThreshold.since ?? null, projected: row.underThreshold.projected ?? null } : null;
+    } : this.followUpPatterns;
+    if (!request || !pattern || !read) return {};
+    try { return { [request.proof]: await read(pattern) }; } catch { return {}; }
+  }
   /** Whether this process has warmed the locked read's stand-in cache (`warmLockedReads`). */
   private lockedReadsWarm = false;
   // Auto-dispatch transitions the last evaluation of a document produced, written to the ledger
@@ -1099,6 +1119,9 @@ export class Engine {
       return work;
     }, { lane: 'lease', fleetLock: false, itemLock: id });
     const observation = command === 'submit' ? context.observation ?? await this.observeSubmission(actor, id, data, key) : null;
+    // GY-1735: a command that may derive a legacy follow-up's window reads the report's projection first; a claim reads the item on its lease pool.
+    const projections = command === 'create' ? await this.followUpProjections(data) : command === 'ready' || command === 'unblock' || command === 'claim'
+      ? await this.followUpProjections((await (command === 'claim' ? this.store.leasePool : this.store.pool).query(`SELECT document FROM work_items WHERE id = ${workIdByRef('$1')}`, [id])).rows[0]?.document) : {};
     // GY-1735: a claim the observation window refuses rolls its transaction back, so the window a legacy follow-up
     // derives is recorded first, on its own: coordination then holds the item instead of dispatching refused claims.
     // Only a claim the main transaction would judge writes it: a caller without claim authority, or a key that
@@ -1108,7 +1131,7 @@ export class Engine {
       const all = await lockedWork(db, [id]);
       const work = all.find(w => w.id === id || w.key === id);
       if (!work || work.stage === 'done' || work.observationWindow) return;
-      await adoptFollowUpWindow(db, work);
+      await adoptFollowUpWindow(db, work, projections);
       if (!work.observationWindow) return;
       this.evaluate(work, all, now);
       await this.recordDispatch(db, work, now);
@@ -1168,7 +1191,7 @@ export class Engine {
         // repository configures (GY-215); nobody writes it into the ticket.
         const documentation = documentationObligation(data.type, this.documentation);
         if (documentation) work!.documentation = documentation;
-        await adoptFollowUpWindow(db, work!);
+        await adoptFollowUpWindow(db, work!, projections);
         const inserted = await db.query('INSERT INTO work_items(id,document) VALUES($1,$2) RETURNING number', [work!.id, JSON.stringify(work)]);
         work!.key = `GY-${inserted.rows[0].number}`;
         all.push(work!);
@@ -1245,8 +1268,8 @@ export class Engine {
         work.observation = null; work.mergeAuthorization = null; work.reviewRequest = null;
       }
       if (command === 'requirements') ({ widening, lateAnswer } = await this.reviseRequirements(db, actor, work, all, data, key, now, before));
-      if (command === 'ready') { if (actor.role !== 'operator-agent') admin(actor); work.ready = true; await adoptFollowUpWindow(db, work); }
-      if (command === 'unblock') { if (actor.role !== 'operator-agent') admin(actor); work.blocker = null; await adoptFollowUpWindow(db, work); }
+      if (command === 'ready') { if (actor.role !== 'operator-agent') admin(actor); work.ready = true; await adoptFollowUpWindow(db, work, projections); }
+      if (command === 'unblock') { if (actor.role !== 'operator-agent') admin(actor); work.blocker = null; await adoptFollowUpWindow(db, work, projections); }
       if (command === 'resolve') {
         // Resolution is a human judgement: no lead, worker, producer, or scoped
         // operator agent may clear the escalation that refuses its own delivery.
@@ -1337,7 +1360,7 @@ export class Engine {
         // resources and slice capacity are all derived from the document the new attempt will hold.
         demand(work.ready && !work.blocker, 'Task is not ready or has a blocker');
         // GY-1735: the observation window holds the claim itself, so no loop or launcher that predates it (GY-1722, GY-1725) can start an attempt that can only escalate.
-        await adoptFollowUpWindow(db, work);
+        await adoptFollowUpWindow(db, work, projections);
         const window = observationWindowHold(work, now);
         demand(!window, `${work.key} waits for its observation window: the reading it owes can first exist at ${window?.notBefore} (${window?.detail})`, 409);
         demand(work.dependencies.every(dep => all.find(w => w.id === dep)?.stage === 'done'), 'Unfinished dependencies');

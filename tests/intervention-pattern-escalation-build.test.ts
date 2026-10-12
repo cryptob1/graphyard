@@ -572,10 +572,10 @@ function staleFiling(parent: Work, criterion: Work['criteria'][number]) {
     criteria: [{ id: 'AC-1', text: `From this head against the serving release ${release1735.slice(0, 12)}: ${criterion.text}`, proofs: [`manual:${name}-on-serving-release`] }] };
 }
 /** One instance on one tree: the delivered parent as recorded, its follow-up filed as the stale filer filed it, released, and dispatched at once as the stale loop dispatched it. */
-async function replayFollowUp(tree: string | null, name: string, key: keyof typeof instances1735) {
+async function replayFollowUp(tree: string | null, name: string, key: keyof typeof instances1735, configure?: (engine: Engine) => void) {
   const instance = instances1735[key], { Engine, Store, interventions, dispatchable } = await plane(tree);
   const store = await databaseFor(name, Store);
-  const engine = new Engine(store, [15368], 120, 'owner/escalation-build'); engine.submissionObserver = null;
+  const engine = new Engine(store, [15368], 120, 'owner/escalation-build'); engine.submissionObserver = null; configure?.(engine);
   const now = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).getTime(), iso = (ms: number) => new Date(ms).toISOString();
   const parent = deliveredItem(instance.parent, instance.criterion, iso(now - instance.mergedAgo));
   if (instance.servedAgo !== null) (parent.delivery as any).deployment = { sha: release1735, at: iso(now - instance.servedAgo), observedAt: iso(now - instance.servedAgo), covers: 'descendant', source: 'endpoint', mergeSha: parent.delivery!.mergeSha, observer: 'graphyard-master' };
@@ -656,6 +656,28 @@ test('manual:intervention-pattern-escalation-build — GY-1725 as it stands, alr
   assert.deepEqual([held.lease, held.epoch], [null, 0], 'and started no attempt');
   assert.equal(dispatchable(held, now), false, 'so the loop holds it inside the window');
   assert.equal(dispatchable(held, notBefore + 60_000), true, 'and dispatches it once the reading can exist');
+});
+
+test('manual:intervention-pattern-escalation-build — GY-1722 when the intervention report projects its reading later than the merge-based bound: the derived window is the report\'s, so the follow-up is held until the reading can exist, not released at merge plus 7 days', { timeout: 300_000 }, async () => {
+  // The report projects the build-stage human-only-decision streak to begin 10 days from now; the criterion's own bound is the merge plus 7 days, 6 days from now.
+  const asked: unknown[] = [];
+  let projected = '';
+  const { store, engine, work: filed, filed: window, refusal, notBefore, now } = await replayFollowUp(null, 'gy1722_report', 'GY-1722', engine => {
+    engine.followUpPatterns = async pattern => { asked.push(pattern); return { since: null, projected }; };
+    projected = new Date(Date.now() + 10 * day).toISOString();
+  });
+  const { dispatchable } = await plane(null);
+  assert.deepEqual(asked[0], { kind: 'human-only-decision', stage: 'build' }, 'the report is read for the proof\'s pattern');
+  assert.ok(Date.parse(projected) > notBefore, 'the report bound is the later one');
+  assert.deepEqual([window?.notBefore, window?.basis], [projected, 'intervention-report'], 'create persists the report\'s bound, not the criterion\'s');
+  assert.match(refusal ?? '', new RegExp(`can first exist at ${projected}`));
+  assert.equal(dispatchable(filed, notBefore + 60_000), false, 'past the criterion bound the follow-up is still held');
+  assert.equal(dispatchable(filed, Date.parse(projected) + 60_000), true, 'and is dispatched once the report bound passes');
+  // A follow-up already ready without its window: the refused claim records the report's bound too.
+  await store.pool.query(`UPDATE work_items SET document = document - 'observationWindow' WHERE id=$1`, [filed.id]);
+  await assert.rejects(engine.execute(implementer, 'claim', filed.id, {}, randomUUID()), new RegExp(`can first exist at ${projected}`));
+  const held = (await store.list()).find((item: Work) => item.id === filed.id)! as Work;
+  assert.deepEqual([held.observationWindow?.notBefore, held.lease, dispatchable(held, notBefore + 60_000), dispatchable(held, now)], [projected, null, false, false]);
 });
 
 /** GY-1723's redelivery as recorded: a check_run naming only a delivered item's pull request, whose job is gone. */
