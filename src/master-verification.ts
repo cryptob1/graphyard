@@ -421,7 +421,7 @@ export function patternReader(read: (path: string) => Promise<unknown>): Pattern
 }
 
 /** Effects bound to the real coordinator process, mirroring the daemon's. */
-export function verificationEffects(config: MasterConfig, deps: { root: string; snapshot: () => Promise<{ work: Work[]; now: string }>; mutate: (path: string, data: unknown, requestId?: string) => Promise<any>; file?: VerificationEffects['file']; releaseWork?: VerificationEffects['releaseWork']; read?: (path: string) => Promise<unknown>; run?: Run }): VerificationEffects {
+export function verificationEffects(config: MasterConfig, deps: { root: string; snapshot: () => Promise<{ work: Work[]; now: string }>; mutate: (path: string, data: unknown, requestId?: string) => Promise<any>; file?: VerificationEffects['file']; read?: (path: string) => Promise<unknown>; run?: Run }): VerificationEffects {
   const run = deps.run ?? defaultRun;
   return {
     snapshot: deps.snapshot, repository: config.repository,
@@ -434,6 +434,13 @@ export function verificationEffects(config: MasterConfig, deps: { root: string; 
     record: (work, data) => deps.mutate(`work/${work.id}/deployment`, data),
     checks: localPostDeployChecks,
     ...(deps.file ? { file: deps.file } : {}),
-    ...(deps.releaseWork ? { releaseWork: deps.releaseWork } : {}),
+    // GY-1747: a master that can file a follow-up as its operator agent releases it as that agent, so the CLI path releases what the executor's does.
+    ...(deps.file ? { releaseWork: async (key: string) => {
+      const item = (await deps.snapshot()).work.find(entry => entry.key === key);
+      if (!item || item.stage !== 'backlog' || item.ready) return;
+      const { agentToken } = await import('./master/autonomy.js');
+      const response = await fetch(`${config.url}/api/work/${item.id}/ready`, { method: 'POST', body: JSON.stringify({ expectedRevision: item.revision, reason: 'the release serving the delivery is observed deployed' }), headers: { Authorization: `Bearer ${await agentToken(deps.root, config, 'operatorAgent')}`, 'Content-Type': 'application/json', 'Idempotency-Key': `release-${item.id}-${item.revision}` }, signal: AbortSignal.timeout(30_000) });
+      if (!response.ok) { const body = await response.json().catch(() => null) as { error?: unknown } | null; throw new Error(typeof body?.error === 'string' ? body.error : `releasing ${key} returned ${response.status}`); }
+    } } : {}),
   };
 }

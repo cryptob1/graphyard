@@ -89,3 +89,10 @@ test('unit:post-deploy-follow-up-released-when-served — master verify-deployme
   assert.equal(failing.attempt, 'release refused');
   assert.ok(!failing.log.includes('record'), 'a failed release leaves the delivery unobserved so the retry releases it');
 });
+
+test('unit:post-deploy-follow-up-released-when-served — the CLI\'s verification effects release through the operator agent only when they can file as it', async () => {
+  const { verificationEffects } = await modules();
+  const deps = { root: '/nonexistent', snapshot: async () => ({ work: [], now: at }), mutate: async () => ({}) };
+  assert.equal(typeof verificationEffects({ repository: 'o/r', cliPath: '' } as never, { ...deps, file: async () => ({}) }).releaseWork, 'function');
+  assert.equal(verificationEffects({ repository: 'o/r', cliPath: '' } as never, deps).releaseWork, undefined);
+});
