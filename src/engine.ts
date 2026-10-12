@@ -1099,6 +1099,18 @@ export class Engine {
       return work;
     }, { lane: 'lease', fleetLock: false, itemLock: id });
     const observation = command === 'submit' ? context.observation ?? await this.observeSubmission(actor, id, data, key) : null;
+    // GY-1735: a claim the observation window refuses rolls its transaction back, so the window a legacy follow-up
+    // derives is recorded first, on its own: coordination then holds the item instead of dispatching refused claims.
+    if (command === 'claim') await this.store.transaction(async (db, now) => {
+      const all = await lockedWork(db, [id]);
+      const work = all.find(w => w.id === id || w.key === id);
+      if (!work || work.stage === 'done' || work.observationWindow) return;
+      await adoptFollowUpWindow(db, work);
+      if (!work.observationWindow) return;
+      this.evaluate(work, all, now);
+      await this.recordDispatch(db, work, now);
+      await save(db, work, 'graphyard', 'observation-window', now, { observationWindow: work.observationWindow });
+    });
     // The transaction reruns this closure on a stale write: each run authorizes the principal as the
     // caller presented it, never the one an earlier run already resolved (GY-1276).
     const caller = actor;

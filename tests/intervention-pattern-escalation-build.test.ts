@@ -632,6 +632,22 @@ test('manual:intervention-pattern-escalation-build — GY-1722 and GY-1725 as th
   assert.equal((await engine.execute(implementer, 'claim', ordinary.id, {}, randomUUID()) as Work).epoch, 1);
 });
 
+test('manual:intervention-pattern-escalation-build — GY-1725 as it stands, already ready without its window: the refused claim still records the derived window, so the loop holds the item instead of dispatching refused claims through the whole window', { timeout: 300_000 }, async () => {
+  const { store, engine, work: filed, notBefore, now } = await replayFollowUp(null, 'gy1725_ready', 'GY-1725');
+  const { dispatchable } = await plane(null);
+  // As 98070f3538 left it: ready, unblocked and window-less, so no ready or unblock command will derive the window.
+  await store.pool.query(`UPDATE work_items SET document = document - 'observationWindow' WHERE id=$1`, [filed.id]);
+  const stripped = (await store.list()).find((item: Work) => item.id === filed.id)! as Work;
+  assert.deepEqual([stripped.ready, stripped.blocker, stripped.observationWindow], [true, null, undefined]);
+  assert.equal(dispatchable(stripped, now), true, 'the stale document reads as dispatchable');
+  await assert.rejects(engine.execute(implementer, 'claim', filed.id, {}, randomUUID()), /waits for its observation window/);
+  const held = (await store.list()).find((item: Work) => item.id === filed.id)! as Work;
+  assert.equal(held.observationWindow?.notBefore, new Date(notBefore).toISOString(), 'the refused claim persisted the window it derived');
+  assert.deepEqual([held.lease, held.epoch], [null, 0], 'and started no attempt');
+  assert.equal(dispatchable(held, now), false, 'so the loop holds it inside the window');
+  assert.equal(dispatchable(held, notBefore + 60_000), true, 'and dispatches it once the reading can exist');
+});
+
 /** GY-1723's redelivery as recorded: a check_run naming only a delivered item's pull request, whose job is gone. */
 async function replay1723(tree: string | null, name: string) {
   const { Engine, Store, server: serve } = await plane(tree);
