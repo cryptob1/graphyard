@@ -86,11 +86,11 @@ Installs share hosts: units named per repository (`graphyard-executor-OWNER-NAME
 
 ### The pipeline doctor (on by default)
 
-Every `run.doctor.intervalMinutes` (10) a Pi **doctor** fixes stuck work: `master scope`, `requirements`, `unblock`, `decide`+`approver`, `settle-containment`, `close`, `create`, `release`, `checkout-restore` (never merging, dispatching, evidencing; allowlist reads quoted final reasons as prose; refusals name rule, position); posts findings (`master status` `doctor`), escalates or files faults (deduped; check refusals and unregistered `e2e:` escalate; `create` 409 or 400 Invalid input skips that content as refused-as-written; GY-1705 holds). Off: `run.doctor.enabled=false`.
+Every `run.doctor.intervalMinutes` (10) a Pi **doctor** fixes stuck work: `master scope`, `requirements`, `unblock`, `decide`+`approver`, `settle-containment`, `close`, `create`, `release`, `checkout-restore` (never merging, dispatching, evidencing; allowlist reads quoted final reasons as prose; refusals name rule, position); posts findings (`master status` `doctor`), escalates or files faults (deduped — standing/diagnosed or GY-1632 cover/threshold; check refusals and unregistered `e2e:` escalate; `create` 409 or 400 Invalid input skips that content as refused-as-written; GY-1705 holds). Off: `run.doctor.enabled=false`.
 
 ### Supervised mode (up --local)
 
-`graphyard up --local` writes `"supervision": "supervised"` and your login (`operatorLogin`) to `master.json`; absent is autonomous. No reviewer App, no `master autonomy`; Setup omits reviewing account. Items keep `review: true`: your GitHub approval of the exact head passes review and auto-merge lands it. The loop launches no reviewer, approver or escalation session and requests no two-party decision. `master status` prints `supervision` and flags PRs your login authored. Promote: `master reviewer setup`, `master reviewer add`, then `master promote --admin-token-stdin` ([promotion](master-agent-reference.md#promotion-to-autonomy)).
+`graphyard up --local` writes `"supervision": "supervised"` and your login (`operatorLogin`) to `master.json`; absent is autonomous. No reviewer App, no `master autonomy`; Setup omits reviewing account. Items keep `review: true`: your GitHub approval of the exact head passes review and auto-merge lands it. The loop launches no reviewer, approver or escalation session. `master status` prints `supervision` and flags PRs your login authored. Promote: `master reviewer setup`, `master reviewer add`, then `master promote --admin-token-stdin` ([promotion](master-agent-reference.md#promotion-to-autonomy)).
 
 ## 4. Prove the first PR
 

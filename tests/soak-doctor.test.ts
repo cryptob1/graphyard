@@ -8,7 +8,8 @@ import { clearDoctorRuns, doctorRunsSettled, type DoctorEffects, type DoctorFile
 import { clearDiagnoses, diagnosesSettled, type DiagnosticianEffects } from '../src/daemon/diagnosis.js';
 import { doctorSettingsSchema } from '../src/master/doctor-settings.js';
 import { diagnosticianSettings, type DiagnosisPayload } from '../src/runner/payloads.js';
-import { faultClassItem, type FaultClass, type FaultInstance } from '../src/model/fault-classes.js';
+import { faultClassItem, noteFault, type FaultClass, type FaultInstance } from '../src/model/fault-classes.js';
+import { checkInvariants, emptyInvariantRecord } from '../src/model/invariants.js';
 import { RefusedResponse } from '../src/model/refusal.js';
 import type { RunOptions, RunResult, Runner } from '../src/runner/types.js';
 
@@ -353,5 +354,225 @@ test('unit:soak-refused-filing-outlives-any-gap — a refusal create gave once i
   assert.equal(submitted.filter(title => title === 'Master loop cannot restart or self-upgrade').length, 1, 'the first refused content reached create exactly once, however long it went unreported');
   assert.deepEqual(submitted.filter((title, i) => submitted.indexOf(title) !== i).slice(0, 5), [], 'no content reached create twice');
   assert.deepEqual(state.doctor.pendingFiles, [], 'nothing stays pending');
+  clearDoctorRuns();
+});
+
+/**
+ * GY-1711. Over a simulated half-day of the real loop: a delivered capacity cover stands, the doctor
+ * re-offers that class every interval, pending retries are dropped against the cover and again while
+ * post-landing instances sit below threshold, GY-1710 closes as duplicate-of GY-1708 so pre-landing
+ * instances link to the answer, and the third post-landing instance lets the loop's own sweep file
+ * once — every system invariant holding throughout.
+ */
+test('unit:soak-doctor-delivered-cover — over simulated hours a landed capacity cover suppresses repeated doctor re-offers and pending retries, duplicate linkage holds, post-landing recurrence files only at threshold, and every invariant holds', { timeout: 300_000 }, async () => {
+  clearDoctorRuns();
+  const dayStart = Date.parse('2030-06-15T00:00:00Z');
+  const landing = dayStart - 2 * hour;
+  let now = dayStart;
+  const state = emptyDaemonState(config());
+  const capacityTitle = 'Approver, reviewer and worker sessions exhaust their model-account limit mid-attempt';
+  const capacityFile: DoctorFile = {
+    faultClass: 'capacity', priority: 1, title: capacityTitle,
+    description: 'GY-1710-shaped doctor re-offer after GY-1708 landed',
+    plannedFiles: ['src/model/capacity.ts'],
+    criteria: [{ id: 'AC-1', text: 'Mid-attempt exhaustion redispatches within machine bounds', proofs: ['unit:capacity-redispatch'] }],
+  };
+  const gy1708 = item('GY-1708', landing, {
+    title: capacityTitle, stage: 'done',
+    origin: { faultClass: { class: 'capacity', threshold: 3, windowHours: 24, count: 3, detectedAt: iso(landing - hour), instances: [] } },
+    delivery: { mergedAt: iso(landing), mergeSha: 'b'.repeat(40), authorizationRevision: 1 },
+  } as Partial<Work>);
+  const work: Work[] = [gy1708];
+  // Pre-landing evidence the delivered cover accounts for.
+  for (const [n, at] of [[1, landing - 90 * minute], [2, landing - 60 * minute], [3, landing - 30 * minute]] as const)
+    noteFault(state.faults, { kind: 'concurrency-starved', faultClass: 'capacity', subject: `producer-${n}`, text: 'mid-attempt exhaustion' }, iso(at));
+
+  const creates: { key: string; title: string; at: number; outcome: string; origin: string | null }[] = [];
+  const created = new Map<string, Work>();
+  let next = 1800;
+  const create = async (input: any, key: string): Promise<Work> => {
+    creates.push({ key, title: input.title, at: now, outcome: 'created', origin: input.origin?.faultClass?.class ?? null });
+    if (created.has(key)) return created.get(key)!;
+    const filed = item(`GY-${next++}`, now, {
+      title: input.title, description: input.description, priority: input.priority, criteria: input.criteria,
+      plannedFiles: input.plannedFiles, type: input.type ?? 'bug', ...(input.origin ? { origin: input.origin } : {}),
+    } as Partial<Work>);
+    work.push(filed); created.set(key, filed);
+    return filed;
+  };
+
+  let doctorRuns = 0;
+  const doctor: DoctorEffects = {
+    settings: { ...doctorSettingsSchema.parse({}), command: 'pi' }, cwd: '/soak/checkout', env: {},
+    runner: async () => ({ runtime: 'pi', model: 'soak/doctor', release: async () => {}, runner: { name: 'pi', start: (_prompt: string, options: { tool: string }) => {
+      doctorRuns++;
+      const payload = { findings: [], actions: [], filed: [capacityFile] };
+      return { id: `soak-cover-doctor-${doctorRuns}`, events: [], onEvent: () => () => {}, cancel: () => {}, result: async () => ({ ok: true as const, tool: options.tool, payload, payloads: [payload] }) };
+    } } as unknown as Runner }),
+    file: create,
+    recordRun: async () => {},
+  };
+  const effects = {
+    agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
+    snapshot: async () => ({ work: work.map(entry => structuredClone(entry)), now: iso(now) }),
+    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, persist: async () => {},
+    observeDeployment: async () => ({ source: 'endpoint', sha: 'd'.repeat(40), at: iso(now), reason: null, deployed: [], pending: [] }),
+    recordDeployment: async () => {}, requestSmoke: () => {},
+    faultClassPolicy: policy, fileFaultClass: create, doctor,
+  } as unknown as DaemonEffects;
+
+  // A pending retry from a prior outage sits on the cursor; the first cycle must drop it against the cover.
+  state.doctor.pendingFiles = [{ key: 'doctor:prior:file:capacity', at: iso(dayStart - 5 * minute), file: capacityFile }];
+
+  const violations: string[] = [];
+  const halfDay = 6 * hour;
+  let belowThresholdRetryQueued = false;
+  for (let cycle = 0; now < dayStart + halfDay; cycle++, now += minute) {
+    // Minute 40: close a duplicate GY-1710 against the delivered answer (AC-3 shape).
+    if (now === dayStart + 40 * minute && !work.some(entry => entry.key === 'GY-1710')) {
+      work.push(item('GY-1710', now, {
+        title: capacityTitle, stage: 'done',
+        origin: { faultClass: { class: 'capacity', threshold: 3, windowHours: 24, count: 1, detectedAt: iso(now), instances: [] } },
+        closure: { kind: 'duplicate', ref: 'GY-1708', reason: 'duplicate of the landed capacity fix', by: 'master', at: iso(now), from: 'backlog' },
+      } as Partial<Work>));
+    }
+    // Minutes 90 and 100: one, then two, post-landing instances — still below threshold 3.
+    if (now === dayStart + 90 * minute)
+      noteFault(state.faults, { kind: 'concurrency-starved', faultClass: 'capacity', subject: 'producer-post-1', text: 'post-landing exhaustion' }, iso(now));
+    if (now === dayStart + 100 * minute)
+      noteFault(state.faults, { kind: 'concurrency-starved', faultClass: 'capacity', subject: 'producer-post-2', text: 'post-landing exhaustion' }, iso(now));
+    // Queue a pending retry once post-landing instances sit below threshold; the next cycle drops it.
+    if (now === dayStart + 105 * minute && !belowThresholdRetryQueued) {
+      state.doctor.pendingFiles = [{ key: 'doctor:below:file:capacity', at: iso(now), file: capacityFile }];
+      belowThresholdRetryQueued = true;
+    }
+    // Minute 150: the third post-landing instance — the loop's sweep becomes eligible.
+    if (now === dayStart + 150 * minute)
+      noteFault(state.faults, { kind: 'concurrency-starved', faultClass: 'capacity', subject: 'producer-post-3', text: 'post-landing exhaustion' }, iso(now));
+
+    await runCycle(config(), state, effects, () => now);
+    await doctorRunsSettled();
+    for (const check of checkInvariants(emptyInvariantRecord(), { work, now }))
+      if (!check.holds) violations.push(`cycle ${cycle}: ${check.invariant} — ${check.reading}`);
+    for (const check of state.invariants.report) if (!check.holds) violations.push(`cycle ${cycle} report: ${check.invariant} — ${check.reading}`);
+  }
+
+  assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
+  assert.ok(doctorRuns >= 30 && doctorRuns <= 40, `doctor re-offers every ten minutes over six hours: ${doctorRuns}`);
+  assert.deepEqual(state.doctor.pendingFiles, [], 'no filing stays pending against a standing or threshold-gated cover');
+  assert.equal(state.actions['doctor:prior:file:capacity']?.state, 'done', 'prior pending retry settled');
+  assert.match(state.actions['doctor:prior:file:capacity']?.detail ?? '', /delivered item/, 'prior pending drop names the delivered cover');
+  assert.equal(state.actions['doctor:below:file:capacity']?.state, 'done', 'below-threshold pending retry settled');
+  assert.match(state.actions['doctor:below:file:capacity']?.detail ?? '', /below the recurrence threshold/, 'below-threshold pending drop names the threshold');
+  // Doctor never submitted the capacity re-offer to create while covered or below threshold.
+  assert.deepEqual(creates.filter(entry => entry.title === capacityTitle), [], 'doctor capacity title never reached create');
+  // Pre-landing instances link to GY-1708 through the duplicate answer.
+  const linkedPre = state.faults.instances.filter(entry => entry.faultClass === 'capacity' && Date.parse(entry.at) < landing);
+  assert.ok(linkedPre.length > 0 && linkedPre.every(entry => entry.linkedTo === 'GY-1708'),
+    `pre-landing capacity instances link to GY-1708: ${JSON.stringify(linkedPre.map(e => [e.id, e.linkedTo]))}`);
+  // At threshold exactly one capacity class item is filed (the loop's recurrence sweep).
+  const capacityFiled = creates.filter(entry => entry.origin === 'capacity' || /^Recurring capacity/.test(entry.title));
+  assert.equal(capacityFiled.length, 1, `exactly one capacity filing after threshold: ${JSON.stringify(capacityFiled)}`);
+  assert.ok(capacityFiled[0]!.at >= dayStart + 150 * minute, 'that filing lands only once post-landing instances reach the threshold');
+  clearDoctorRuns();
+});
+
+/**
+ * GY-1711 AC-2 diagnosed-standing case. Over simulated hours: a recurring capacity item closed as
+ * duplicate of an open diagnostician fix stands for the class; the doctor re-offers and retries
+ * every interval; new instances link to the closed recurring item; the doctor never files a
+ * duplicate P0/P1 while the fix is open — matching the loop's recurrence sweep — and every
+ * invariant holds.
+ */
+test('unit:soak-doctor-standing-diagnosed — over simulated hours a diagnosed open fix keeps the doctor from re-filing while instances link to the standing recurring item', { timeout: 300_000 }, async () => {
+  clearDoctorRuns();
+  const dayStart = Date.parse('2030-07-01T00:00:00Z');
+  let now = dayStart;
+  const state = emptyDaemonState(config());
+  const capacityTitle = 'Approver sessions exhaust their model-account limit mid-attempt';
+  const capacityFile: DoctorFile = {
+    faultClass: 'capacity', priority: 1, title: capacityTitle,
+    description: 'Doctor re-offer while a diagnosed fix is still open',
+    plannedFiles: ['src/model/capacity.ts'],
+    criteria: [{ id: 'AC-1', text: 'Mid-attempt exhaustion redispatches within bounds', proofs: ['unit:capacity-redispatch'] }],
+  };
+  // Diagnostician fix: open, no faultClass origin. Recurring class item closed as its duplicate.
+  const fix = item('GY-F', dayStart - hour, {
+    title: 'Hold the spent account through its reset', stage: 'build',
+  } as Partial<Work>);
+  const recurringItem = item('GY-R', dayStart - 90 * minute, {
+    title: 'Recurring capacity faults: 3 in 24 hours', stage: 'done',
+    origin: { faultClass: { class: 'capacity', threshold: 3, windowHours: 24, count: 3, detectedAt: iso(dayStart - 2 * hour), instances: [] } },
+    closure: { kind: 'duplicate', ref: 'GY-F', reason: 'answered by the diagnostician fix', by: 'master', at: iso(dayStart - 80 * minute), from: 'backlog' },
+  } as Partial<Work>);
+  const work: Work[] = [fix, recurringItem];
+  for (const [n, at] of [[1, dayStart - 70 * minute], [2, dayStart - 60 * minute], [3, dayStart - 50 * minute]] as const)
+    noteFault(state.faults, { kind: 'concurrency-starved', faultClass: 'capacity', subject: `producer-${n}`, text: 'mid-attempt exhaustion' }, iso(at));
+
+  const creates: { key: string; title: string; at: number; origin: string | null }[] = [];
+  const create = async (input: any, key: string): Promise<Work> => {
+    creates.push({ key, title: input.title, at: now, origin: input.origin?.faultClass?.class ?? null });
+    const filed = item(key.startsWith('GY-') ? key : `GY-${1800 + creates.length}`, now, {
+      title: input.title, description: input.description, priority: input.priority, criteria: input.criteria,
+      plannedFiles: input.plannedFiles, type: input.type ?? 'bug', ...(input.origin ? { origin: input.origin } : {}),
+    } as Partial<Work>);
+    work.push(filed);
+    return filed;
+  };
+
+  let doctorRuns = 0;
+  const doctor: DoctorEffects = {
+    settings: { ...doctorSettingsSchema.parse({}), command: 'pi' }, cwd: '/soak/checkout', env: {},
+    runner: async () => ({ runtime: 'pi', model: 'soak/doctor', release: async () => {}, runner: { name: 'pi', start: (_prompt: string, options: { tool: string }) => {
+      doctorRuns++;
+      const payload = { findings: [], actions: [], filed: [capacityFile] };
+      return { id: `soak-standing-doctor-${doctorRuns}`, events: [], onEvent: () => () => {}, cancel: () => {}, result: async () => ({ ok: true as const, tool: options.tool, payload, payloads: [payload] }) };
+    } } as unknown as Runner }),
+    file: create,
+    recordRun: async () => {},
+  };
+  const effects = {
+    agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
+    snapshot: async () => ({ work: work.map(entry => structuredClone(entry)), now: iso(now) }),
+    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, persist: async () => {},
+    observeDeployment: async () => ({ source: 'endpoint', sha: 'e'.repeat(40), at: iso(now), reason: null, deployed: [], pending: [] }),
+    recordDeployment: async () => {}, requestSmoke: () => {},
+    faultClassPolicy: policy, fileFaultClass: create, doctor,
+  } as unknown as DaemonEffects;
+
+  state.doctor.pendingFiles = [{ key: 'doctor:prior:file:capacity', at: iso(dayStart - 5 * minute), file: capacityFile }];
+
+  const violations: string[] = [];
+  const window = 4 * hour;
+  for (let cycle = 0; now < dayStart + window; cycle++, now += minute) {
+    if (now === dayStart + 30 * minute)
+      noteFault(state.faults, { kind: 'concurrency-starved', faultClass: 'capacity', subject: 'producer-new-1', text: 'exhaustion while fix is open' }, iso(now));
+    if (now === dayStart + 40 * minute)
+      noteFault(state.faults, { kind: 'concurrency-starved', faultClass: 'capacity', subject: 'producer-new-2', text: 'exhaustion while fix is open' }, iso(now));
+    if (now === dayStart + 50 * minute)
+      noteFault(state.faults, { kind: 'concurrency-starved', faultClass: 'capacity', subject: 'producer-new-3', text: 'exhaustion while fix is open' }, iso(now));
+    if (now === dayStart + 90 * minute)
+      state.doctor.pendingFiles = [...state.doctor.pendingFiles, { key: 'doctor:mid:file:capacity', at: iso(now), file: capacityFile }];
+
+    await runCycle(config(), state, effects, () => now);
+    await doctorRunsSettled();
+    for (const check of checkInvariants(emptyInvariantRecord(), { work, now }))
+      if (!check.holds) violations.push(`cycle ${cycle}: ${check.invariant} — ${check.reading}`);
+    for (const check of state.invariants.report) if (!check.holds) violations.push(`cycle ${cycle} report: ${check.invariant} — ${check.reading}`);
+  }
+
+  assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
+  assert.ok(doctorRuns >= 20 && doctorRuns <= 30, `doctor re-offers every ten minutes over four hours: ${doctorRuns}`);
+  assert.deepEqual(state.doctor.pendingFiles, [], 'standing diagnosed cover drops every pending retry');
+  assert.equal(state.actions['doctor:prior:file:capacity']?.state, 'done');
+  assert.match(state.actions['doctor:prior:file:capacity']?.detail ?? '', /diagnosed class item|open item/,
+    'prior pending drop names the standing cover');
+  assert.equal(state.actions['doctor:mid:file:capacity']?.state, 'done');
+  assert.deepEqual(creates.filter(entry => entry.title === capacityTitle), [], 'doctor never submitted a duplicate capacity filing');
+  assert.deepEqual(creates.filter(entry => entry.origin === 'capacity' || /^Recurring capacity/.test(entry.title)), [],
+    'recurrence sweep never files while the diagnosed fix is open');
+  const capacityInstances = state.faults.instances.filter(entry => entry.faultClass === 'capacity');
+  assert.ok(capacityInstances.length >= 6 && capacityInstances.every(entry => entry.linkedTo === 'GY-R'),
+    `every capacity instance links to the standing recurring item: ${JSON.stringify(capacityInstances.map(e => [e.subject, e.linkedTo]))}`);
   clearDoctorRuns();
 });
