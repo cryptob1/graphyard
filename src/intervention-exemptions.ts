@@ -26,8 +26,8 @@ export interface ReworkDecision { seq: number; at: string; id: string; stage: St
 export type ExemptionMoment =
   /** An `autoscope` row deciding the item's open scope request. */
   | { at: 'autoscope'; decision: { state?: unknown } }
-  /** A `requirements` row that widens the plan (`widened`), with whether it answers open asks (`asked`). */
-  | { at: 'requirements'; details: Record<string, any>; reason: string; widened: boolean; asked: boolean; routed: readonly string[]; stage: Stage | null; work: { epoch?: number | null; blocker?: string | null } | null; blockerBefore: string | null | undefined }
+  /** A `requirements` row that widens the plan (`widened`), with whether it answers open asks (`asked`) and whether its revised record implies every added path (`implied`, GY-1719). */
+  | { at: 'requirements'; details: Record<string, any>; reason: string; widened: boolean; implied?: boolean; asked: boolean; routed: readonly string[]; stage: Stage | null; work: { epoch?: number | null; blocker?: string | null } | null; blockerBefore: string | null | undefined }
   /** A `rework` row (`rework`), or a rework decision still open past the last row (`open-rework`). */
   | { at: 'rework' | 'open-rework'; decision: ReworkDecision | null; asked: boolean; grounds: ReworkGroundsWork | null; candidate: { sha: string } | null | undefined }
   /** A `merge.operator-authorized` or `merge.reconciled` row. */
@@ -202,6 +202,14 @@ export const routedScopeWidening = rule('routed-scope-widening', moment => momen
 export const unstartedReplan = rule('unstarted-replan', moment => moment.at === 'requirements' && moment.widened && !moment.asked && (moment.stage === 'backlog' || moment.stage === 'ready')
   && !!moment.work && unstarted(moment.details.before, moment.work.epoch, moment.blockerBefore === undefined ? moment.work.blocker : moment.blockerBefore));
 /**
+ * GY-1719: a revision that widens the plan only by paths its own revised record implies — the files
+ * its criteria name, the test its proofs live in, the companions beside planned tests and
+ * documentation, which the engine's rule grants a worker with nobody stepping in — or that a
+ * duplicate closed into the item had already planned (interventions/implied-widening.ts) decided no
+ * scope. A widening that answers a worker's ask stays judged as that ask's answer.
+ */
+export const criteriaImpliedWidening = rule('criteria-implied-widening', moment => moment.at === 'requirements' && moment.widened && !moment.asked && moment.implied === true);
+/**
  * A round answering a ground the loop's own rule acts on needed nobody (GY-1386, rework-grounds.ts):
  * whoever asked for it first, the product handled it, and the asks it ended went with it.
  */
@@ -274,7 +282,7 @@ export const approvedDecisionWeakening = rule('approved-decision-weakening', mom
 
 /** Every exemption rule, in the order the fold consults them: the first that holds names the exemption. */
 export const interventionExemptions: readonly InterventionExemption[] = [
-  approvedAutoscope, successorReplan, auditedScopeWidening, routedScopeWidening, unstartedReplan,
+  approvedAutoscope, successorReplan, auditedScopeWidening, routedScopeWidening, unstartedReplan, criteriaImpliedWidening,
   routineReworkGround, laneReworkGround, failedCheckRound, loopReworkRound,
   directMergeWindow, loopAutosettleInBound, answeredOffLedger, undecidedScopeRequest, approverHoldsScopeRequest, leaseLossResolve, approvedDecisionWeakening,
 ];

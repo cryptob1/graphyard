@@ -1,9 +1,11 @@
 // Concern: the fold's rule for each ledger event kind — what one row opens, answers or settles in an item's state.
 import { pathScopeContains, type Stage } from '../model.js';
 import type { InterventionKind, Intervention } from '../model/interventions.js';
+import type { Work } from '../model/work.js';
 import { approvedRework, exemption, requestedRework, routedReason, type Ask, type ReworkDecision } from '../intervention-exemptions.js';
 import { routedWideningDecision } from '../model/scope-provenance.js';
 import { instant, type InterventionLedgerRow } from './ledger.js';
+import { impliedWidening } from './implied-widening.js';
 
 /**
  * One rule per ledger event kind (GY-1447): a fix to how the fold reads one kind edits that kind's
@@ -38,6 +40,8 @@ export interface FoldStep {
   source: { seq: number; kind: string };
   /** The planned scope and blocker as the previous row left them. */
   plannedBefore: string[] | null; blockerBefore: string | null | undefined;
+  /** The item as the current snapshot holds it (its documentation rule and review follow-up provenance), and the plan of every item closed as its duplicate (GY-1719). */
+  record?: { documentation?: Work['documentation']; origin?: Work['origin']; description?: Work['description'] } | null; absorbed?: () => string[];
   emit: Emit;
 }
 export type FoldRule = (step: FoldStep) => void;
@@ -70,7 +74,7 @@ const autoscope: FoldRule = ({ entry, details, source }) => {
 };
 
 /** A requirements revision: a widening answers the scope requests it covers, a cleared blocker the asks beside them. */
-const requirements: FoldRule = ({ row, entry, details, stage, source, plannedBefore, blockerBefore, emit }) => {
+const requirements: FoldRule = ({ row, entry, details, stage, source, plannedBefore, blockerBefore, record, absorbed, emit }) => {
   const after: string[] | null = Array.isArray(row.work?.plannedFiles) ? row.work!.plannedFiles! : Array.isArray(details.intent?.plannedFiles) ? details.intent.plannedFiles : Array.isArray(details.plannedFiles) ? details.plannedFiles : null;
   const before: string[] | null = Array.isArray(details.before?.plannedFiles) ? details.before.plannedFiles : plannedBefore;
   const covers = (path: string) => !!after && after.some(planned => pathScopeContains(planned, path));
@@ -80,7 +84,10 @@ const requirements: FoldRule = ({ row, entry, details, stage, source, plannedBef
   const reason = text(details.reason ?? details.intent?.reason, 'requirements revised');
   const cleared = row.work ? !row.work.blocker : true;
   // A widening the control plane settled on its own answers the asks it covers, and nothing is a signal.
-  const exempt = exemption({ at: 'requirements', details, reason, widened, asked: entry.asks.length > 0 && (widened || cleared), routed: entry.routed, stage, work: row.work ?? null, blockerBefore });
+  const added = after && before ? after.filter(path => !before.includes(path)) : [];
+  const documentation = details.before?.documentation ?? record?.documentation ?? null;
+  const implied = widened && !!before && impliedWidening({ added, before, criteria: details.intent?.criteria ?? details.criteria, documentation, origin: record?.origin ?? null, description: details.before?.description ?? record?.description ?? null, absorbed: absorbed?.() ?? [] });
+  const exempt = exemption({ at: 'requirements', details, reason, widened, implied, asked: entry.asks.length > 0 && (widened || cleared), routed: entry.routed, stage, work: row.work ?? null, blockerBefore });
   if (exempt) {
     entry.asks = entry.asks.filter(ask => !(ask.kind === 'scope-request' && ask.paths.length > 0 && ask.paths.every(covers)) && !(exempt === 'routed-scope-widening' && ask.kind === 'blocked-report'));
     return;
