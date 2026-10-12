@@ -75,7 +75,14 @@ test('unit:e2e-case-format — a case is a JSON file under e2e/cases/ with id, t
   assert.ok(shipped.length >= 5);
   assert.ok(shipped.every(entry => entry.file === `e2e/cases/${entry.definition.id}.json`));
   assert.ok(shipped.some(entry => entry.definition.steps.some(step => step.kind === 'browser')) && shipped.some(entry => entry.definition.steps.some(step => step.kind === 'http')), 'the shipped cases drive both the API and the dashboard');
-  assert.deepEqual(selectCases(shipped, { tag: 'dashboard' }).map(entry => entry.definition.id).sort(), ['sign-in', 'tests-page', 'work-item-detail']);
+  // GY-1728: the shipped dashboard cases stay selected, every selected case carries the tag and
+  // every tagged case is selected, so a newly accepted dashboard case does not fail this test.
+  const dashboard = selectCases(shipped, { tag: 'dashboard' });
+  const dashboardIds = dashboard.map(entry => entry.definition.id);
+  for (const id of ['sign-in', 'tests-page', 'work-item-detail']) assert.ok(dashboardIds.includes(id), `the dashboard tag selects the ${id} case`);
+  assert.ok(dashboard.every(entry => entry.definition.tags.includes('dashboard')), 'every case the dashboard tag selects carries the dashboard tag');
+  assert.deepEqual(dashboardIds.sort(), shipped.filter(entry => entry.definition.tags.includes('dashboard')).map(entry => entry.definition.id).sort());
+  assert.ok(!dashboardIds.includes('board'), 'a case without the dashboard tag is not selected');
   assert.equal(selectCases(shipped, { id: 'board' }).length, 1);
   assert.throws(() => selectCases(shipped, { id: 'missing' }), /No E2E case missing/);
 
