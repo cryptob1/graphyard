@@ -84,3 +84,54 @@ test('unit:soak-invariants-hold — over three simulated days of the real loop, 
   assert.equal(followUp.epoch, 1, 'at its first attempt');
   assert.ok(followUp.delivery && Date.parse(followUp.delivery.mergedAt) > notBefore, 'merged after the instant');
 });
+
+/**
+ * GY-1726 under the same real loop: the follow-up is filed without its window, as releases before
+ * GY-1698 filed GY-1689, GY-1721 and GY-1724, so the loop dispatches it at once. Its worker finds the
+ * reading cannot exist yet and defers the item to the instant instead of blocking it. The days after
+ * repeat the cycle many times: the item is held on the instant the worker recorded, never relaunched
+ * and never escalated, and the first cycle past the instant dispatches it once more, which delivers it.
+ */
+test('unit:soak-invariants-hold — over three simulated days of the real loop, an unwindowed post-deploy follow-up dispatched at once is deferred by its worker: held on the instant across every later cycle with no second session, no fault and no escalation, dispatched by Graphyard at the instant, delivered by that attempt, and every system invariant holds', { timeout: 600_000 }, async () => {
+  const day = await simulateDay({ hours: windowDays * 24 + 4, plan, observationWindow: { item: 1, windowDays, filedAfterMs, unwindowed: true } });
+  const window = day.observationWindowDay!, iso = (ms: number) => new Date(ms).toISOString();
+  assert.deepEqual(day.violations, [], 'every system invariant holds after every cycle');
+  assert.deepEqual(day.failures, [], 'no cycle failed');
+  assert.deepEqual(day.lost, [], 'no lease was lost');
+  assert.deepEqual(day.final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}`), [], 'the five items are delivered');
+
+  const parent = day.final[0], followUp = window.followUp!;
+  const notBefore = Date.parse(parent.delivery!.mergedAt) + windowDays * dayMs;
+  // Dispatched at once, unheld; its first attempt deferred it, once, to the instant the criterion names.
+  assert.equal(window.deferred.length, 1, `the worker deferred it once: ${JSON.stringify(window.deferred)}`);
+  const [deferred] = window.deferred;
+  assert.equal(deferred!.epoch, 1, 'on its first attempt');
+  assert.equal(deferred!.notBefore, iso(notBefore));
+  assert.deepEqual([followUp.observationWindow?.notBefore, followUp.observationWindow?.basis], [iso(notBefore), 'worker-reading']);
+  assert.ok(notBefore - deferred!.at > 2 * dayMs, `deferred ${Math.round((notBefore - deferred!.at) / hour)} hours before its instant`);
+
+  // From the defer to the instant, on every cycle: held, no new dispatch, no lease, no second session, no fault or escalation.
+  const held = window.samples.filter(sample => Date.parse(sample.at) > deferred!.at && Date.parse(sample.at) < notBefore);
+  const after = window.samples.filter(sample => Date.parse(sample.at) >= notBefore);
+  assert.ok(held.length >= 200, `the loop cycled across the held days: ${held.length} cycles`);
+  for (const sample of held) {
+    const label = `${sample.at} (+${Math.round(sample.elapsed / hour)} h)`;
+    assert.equal(sample.waiting, true, `${label}: master status reports the window holding`);
+    assert.equal(sample.sentence, `Waiting for its observation window — the reading it owes can first exist at ${iso(notBefore)}`, label);
+    assert.equal(sample.dispatches.length, 1, `${label}: only the first dispatch was ever requested`);
+    assert.deepEqual([sample.lease, sample.sessions, sample.faults, sample.escalations, sample.attention], [null, 1, [], [], null], `${label}: nobody holds it, one session ever, no fault, no escalation, no attention`);
+  }
+  for (const sample of window.samples) assert.deepEqual(sample.escalations, [], `${sample.at}: nothing escalated the follow-up`);
+  assert.deepEqual(window.samples.filter(sample => sample.masterLive).map(sample => sample.at), [], 'no master session was live on any cycle of the day');
+
+  // At the instant: the first cycle past it requests the dispatch as Graphyard, a second session is launched, and that attempt delivers it.
+  const first = after[0]!;
+  assert.ok(Date.parse(first.at) - notBefore <= 10 * minute, `the loop's first cycle past the instant ran within an idle step of it: ${first.at}`);
+  assert.equal(first.dispatches.length, 2, 'that cycle requested the second dispatch');
+  assert.deepEqual([...new Set(first.dispatches.map(action => action.requestedBy))], ['graphyard'], 'every dispatch is the loop\'s own');
+  assert.ok(Date.parse(first.dispatches.at(-1)!.at) >= notBefore, 'requested at or after the instant, never before');
+  assert.equal(Math.max(...after.map(sample => sample.sessions)), 2, 'one more worker session, no duplicate');
+  assert.equal(followUp.stage, 'done', `the follow-up is delivered: ${followUp.stage} — ${followUp.gates.flatMap(gate => gate.reasons).join('; ')}`);
+  assert.equal(followUp.epoch, 2, 'at its second attempt');
+  assert.ok(followUp.delivery && Date.parse(followUp.delivery.mergedAt) > notBefore, 'merged after the instant');
+});

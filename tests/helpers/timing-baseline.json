@@ -475,7 +475,7 @@
     "tests/intervention-exemptions.test.ts": 600,
     "tests/intervention-feedback.test.ts": 5125,
     "tests/intervention-pattern-escalation-backlog.test.ts": 274,
-    "tests/intervention-pattern-escalation-build.test.ts": 555,
+    "tests/intervention-pattern-escalation-build.test.ts": 8000,
     "tests/intervention-pattern-escalation-ready.test.ts": 1146,
     "tests/intervention-pattern-human-only-decision-build.test.ts": 3200,
     "tests/intervention-pattern-rework-merge.test.ts": 549,

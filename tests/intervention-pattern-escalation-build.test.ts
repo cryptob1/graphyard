@@ -21,9 +21,10 @@ import { Engine } from '../src/engine.js';
 import { Store } from '../src/store.js';
 import { dispatchable } from '../src/coordination.js';
 import { postDeployChecks } from '../src/master-verification.js';
-import { decideScopeRequest } from '../src/model/scope.js';
+import { server } from '../src/server.js';
+import { importAt } from './helpers/base-tree.js';
 // Time-bomb allowance (GY-1694): the 2026-10-07..09 instants are fixture clocks handed to foldInterventions, probeBlocker and sharedGithubStatus; Date.now() only clocks lease-less probes and anchors codex holds relative to itself.
-// GY-1726's 2026-10-11..12 instants are fixture clocks handed to postDeployChecks; its defer cases read the database clock.
+// GY-1726's 2026-10-11..13 and 2026-10-18 instants are fixture clocks handed to postDeployChecks and their expected windows; its defer cases read the database clock.
 
 // GY-1406 names this file for its proof: manual:intervention-pattern-escalation-build. Four
 // escalation interventions were needed at the build stage between 2026-09-30 and 2026-10-07, each a
@@ -310,64 +311,109 @@ test('manual:intervention-pattern-escalation-build — GY-1567 review: a spent r
 
 // GY-1726: four more escalations at the build stage between 2026-10-05 and 2026-10-12. Three
 // (GY-1724, GY-1721, GY-1689) were post-deploy follow-ups dispatched before the reading they owe
-// could exist, so the worker's only move was `blocked`, an escalation. GY-1727 files a follow-up
-// holding its instant; `defer` lets a worker hold one that was filed without it. GY-1700 was a
-// refused scope ask for the test file its own unit proof lives in, which the companion rule grants.
+// could exist, so the worker's only move was `blocked`, an escalation. GY-1700 asked for the test
+// file a requirements decision's AC-0 was about to name; the loop refused the ask before the
+// decision was approved, the approval was held until the attempt ended, and the refusal held the
+// item until an operator cleared it by hand.
+//
+// Each instance is replayed below against the code it ran on and against the candidate, in one
+// run: tests/helpers/base-tree.ts extracts a commit's src/ and imports it beside this checkout's.
+// GY-1689 and GY-1700 reproduce on the change's base, 47220a5adbdc (the pull request's merge base).
+// GY-1724 and GY-1721 were filed by releases older than that base: GY-1727 (6037889d68) and GY-1698
+// (20a58c6a42) had since given their follow-ups the instant they wait for, so each reproduces on the
+// commit before its fix, and the base and the candidate both file it held.
+const base = '47220a5adbdc7486f362eda80d4f8eafee0face4';
 const day = 86_400_000;
 const operator: Principal = { id: 'human-operator', role: 'admin', sessionKind: 'human' };
 const implementer: Principal = { id: 'implementer', role: 'worker', sessionKind: 'ai' };
-let database: EmbeddedPostgres | undefined, store: Store | undefined, engine: Engine;
-after(async () => { if (store) await store.close(); if (database) await database.stop(); });
-async function ledger() {
-  if (store) return store;
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1726;
-  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('escalation-build'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await database.initialise(); await database.start(); await database.createDatabase('escalation_build_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/escalation_build_test`); await store.init();
-  engine = new Engine(store, [15368], 120, 'owner/escalation-build'); engine.submissionObserver = null;
+const coordinator: Principal = { id: 'graphyard', role: 'coordinator', sessionKind: 'ai' };
+let database: EmbeddedPostgres | undefined, port = 0;
+const stores: { close(): Promise<void> }[] = [], servers: { close(): void; closeAllConnections(): void }[] = [];
+after(async () => { for (const http of servers) { http.closeAllConnections(); http.close(); } for (const store of stores) await store.close(); if (database) await database.stop(); });
+/** A fresh database on the file's one embedded Postgres, its schema made by the `Store` of the tree under test. */
+async function databaseFor(name: string, Store: typeof import('../src/store.js').Store) {
+  if (!database) {
+    port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1726;
+    database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('escalation-build'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+    await database.initialise(); await database.start();
+  }
+  await database.createDatabase(name);
+  const store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/${name}`); await store.init(); stores.push(store);
   return store;
 }
-const dbNow = async () => ((await (await ledger()).pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).getTime();
+/** The control-plane modules of one tree: the base's, extracted, or this checkout's own. */
+async function plane(tree: string | null) {
+  const load = async <T>(path: string, own: T): Promise<T> => tree ? importAt<T>(tree, path) : own;
+  return {
+    Engine: (await load('src/engine.ts', { Engine })).Engine, Store: (await load('src/store.ts', { Store })).Store,
+    interventions: await load('src/interventions.ts', { foldInterventions, readInterventionLedger }), dispatchable: (await load('src/coordination.ts', { dispatchable })).dispatchable,
+    server: (await load('src/server.ts', { server })).server, postDeployChecks: (await load('src/master-verification.ts', { postDeployChecks })).postDeployChecks,
+  };
+}
+type Plane = Awaited<ReturnType<typeof plane>>;
+
 /** GY-1689 as filed: a follow-up owing GY-1685 AC-1's rate reading on the serving release, with no window. */
 const followUpCriterion = { id: 'AC-1', text: 'From this head against the serving release f1984c118352: the intervention report shows the escalation rate at the build stage below 3 per 7 days after the change ships', proofs: ['manual:intervention-pattern-escalation-build-on-serving-release'] };
-async function claimed(criteria: unknown[]) {
-  await ledger();
-  let work = await engine.execute(operator, 'create', null, { title: `Follow-up ${randomUUID().slice(0, 8)}`, type: 'chore', criteria }, randomUUID());
+/** GY-1689's worker found the reading could not exist for days: it defers where the tree has the command, else blocks as it did. */
+async function replay1689(tree: string | null, name: string) {
+  const { Engine, Store, interventions, dispatchable } = await plane(tree);
+  const store = await databaseFor(name, Store);
+  const engine = new Engine(store, [15368], 120, 'owner/escalation-build'); engine.submissionObserver = null;
+  let work = await engine.execute(operator, 'create', null, { title: 'GY-1689 follow-up', type: 'chore', criteria: [followUpCriterion] }, randomUUID());
   work = await engine.execute(operator, 'ready', work.id, {}, randomUUID());
-  return engine.execute(implementer, 'claim', work.id, {}, randomUUID());
+  work = await engine.execute(implementer, 'claim', work.id, {}, randomUUID());
+  const now = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).getTime(), notBefore = new Date(now + 5 * day).toISOString();
+  let refusal: string | null = null;
+  try { work = await engine.execute(implementer, 'defer', work.id, { epoch: work.epoch, notBefore, reason: 'the 7-day window after the ship has not elapsed' }, randomUUID()); }
+  catch (error) {
+    refusal = error instanceof Error ? error.message : String(error);
+    work = await engine.execute(implementer, 'blocked', work.id, { epoch: work.epoch, reason: 'The observation AC-1 requires cannot exist before 2026-10-17T14:31:37Z' }, randomUUID());
+  }
+  const folded = interventions.foldInterventions((await interventions.readInterventionLedger(store.pool, { workId: work.id })).rows, [work], new Date(now).toISOString()).interventions;
+  return { refusal, work, notBefore, now, escalations: folded.filter((entry: { kind: string }) => entry.kind === 'escalation').length, dispatchable: (at: number) => dispatchable(work, at) as boolean };
 }
-const ledgerEscalations = async (work: Work) => foldInterventions((await readInterventionLedger((await ledger()).pool, { workId: work.id })).rows, [work], new Date(await dbNow()).toISOString()).interventions
-  .filter(entry => entry.kind === 'escalation');
 
-test('manual:intervention-pattern-escalation-build — GY-1689 on the base: a follow-up whose reading cannot exist yet can only block, and the block is an escalation', async () => {
-  const work = await claimed([followUpCriterion]);
-  const reported = await engine.execute(implementer, 'blocked', work.id, { epoch: work.epoch, reason: 'The observation AC-1 requires cannot exist before 2026-10-17T14:31:37Z' }, randomUUID());
-  assert.ok(reported.blocker);
-  assert.equal((await ledgerEscalations(reported)).length, 1);
+test('manual:intervention-pattern-escalation-build — GY-1689 against the base and the candidate: the base can only block an unready reading, an escalation; the candidate defers it, holding dispatch until the instant, and escalates nothing', { timeout: 300_000 }, async () => {
+  const onBase = await replay1689(base, 'gy1689_base');
+  assert.equal(onBase.refusal, 'Unknown command', 'the base has no defer command');
+  assert.ok(onBase.work.blocker, 'so the worker blocks');
+  assert.equal(onBase.escalations, 1, 'and the blocker is an escalation: the instance reproduces');
+
+  const onCandidate = await replay1689(null, 'gy1689_candidate'), deferred = onCandidate.work;
+  assert.equal(onCandidate.refusal, null);
+  assert.deepEqual([deferred.blocker, deferred.lease], [null, null], 'the attempt ends with no blocker');
+  assert.deepEqual([deferred.observationWindow?.notBefore, deferred.observationWindow?.basis], [onCandidate.notBefore, 'worker-reading']);
+  assert.equal(onCandidate.escalations, 0, 'nothing escalates: the instance does not recur');
+  assert.equal(onCandidate.dispatchable(onCandidate.now), false, 'held until the reading can exist');
+  assert.equal(onCandidate.dispatchable(onCandidate.now + 6 * day), true, 'the loop dispatches it once the instant passes');
 });
 
-test('manual:intervention-pattern-escalation-build — GY-1689 on the candidate: defer ends the attempt, holds dispatch until the instant and escalates nothing', async () => {
-  const work = await claimed([followUpCriterion]);
-  const now = await dbNow(), notBefore = new Date(now + 5 * day).toISOString();
-  const deferred = await engine.execute(implementer, 'defer', work.id, { epoch: work.epoch, notBefore, reason: 'the 7-day window after the ship has not elapsed' }, randomUUID());
-  assert.equal(deferred.blocker, null);
-  assert.equal(deferred.lease, null);
-  assert.deepEqual([deferred.observationWindow?.notBefore, deferred.observationWindow?.basis], [notBefore, 'worker-reading']);
-  assert.deepEqual(await ledgerEscalations(deferred), []);
-  assert.equal(dispatchable(deferred, now), false, 'held until the reading can exist');
-  assert.equal(dispatchable(deferred, now + 6 * day), true, 'the loop dispatches it once the instant passes');
-  // A later attempt may move the window on; an earlier instant never shortens it.
+/** A candidate engine for the defer bounds. */
+async function candidateEngine() {
+  const { Engine, Store } = await plane(null);
+  const store = await databaseFor(`defer_${randomUUID().slice(0, 8)}`, Store);
+  const engine = new Engine(store, [15368], 120, 'owner/escalation-build'); engine.submissionObserver = null;
+  const now = async () => ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).getTime();
+  const claimed = async (criteria: unknown[]) => {
+    let work = await engine.execute(operator, 'create', null, { title: `Follow-up ${randomUUID().slice(0, 8)}`, type: 'chore', criteria }, randomUUID());
+    work = await engine.execute(operator, 'ready', work.id, {}, randomUUID());
+    return engine.execute(implementer, 'claim', work.id, {}, randomUUID());
+  };
+  return { engine, now, claimed };
+}
+
+test('manual:intervention-pattern-escalation-build — a later defer never shortens the window; defer is refused for work owing no post-deploy observation, for a past instant and past its 30-day bound', async () => {
+  const { engine, now, claimed } = await candidateEngine();
+  const work = await claimed([followUpCriterion]), notBefore = new Date(await now() + 5 * day).toISOString();
+  await engine.execute(implementer, 'defer', work.id, { epoch: work.epoch, notBefore, reason: 'the window has not elapsed' }, randomUUID());
   const again = await engine.execute(implementer, 'claim', work.id, {}, randomUUID());
-  const shorter = await engine.execute(implementer, 'defer', work.id, { epoch: again.epoch, notBefore: new Date(now + day).toISOString(), reason: 'an earlier guess' }, randomUUID());
+  const shorter = await engine.execute(implementer, 'defer', work.id, { epoch: again.epoch, notBefore: new Date(await now() + day).toISOString(), reason: 'an earlier guess' }, randomUUID());
   assert.equal(shorter.observationWindow?.notBefore, notBefore);
-});
-
-test('manual:intervention-pattern-escalation-build — defer is refused for work owing no post-deploy observation, for a past instant and past its 30-day bound', async () => {
   const ordinary = await claimed([{ id: 'AC-1', text: 'Behaves', proofs: ['integration:behaves'] }]);
-  await assert.rejects(engine.execute(implementer, 'defer', ordinary.id, { epoch: ordinary.epoch, notBefore: new Date(await dbNow() + day).toISOString(), reason: 'not a follow-up' }, randomUUID()), /owes no post-deploy observation/);
-  const work = await claimed([followUpCriterion]);
-  await assert.rejects(engine.execute(implementer, 'defer', work.id, { epoch: work.epoch, notBefore: new Date(await dbNow() - day).toISOString(), reason: 'past' }, randomUUID()), /already passed/);
-  await assert.rejects(engine.execute(implementer, 'defer', work.id, { epoch: work.epoch, notBefore: new Date(await dbNow() + 31 * day).toISOString(), reason: 'far' }, randomUUID()), /more than 30 days/);
+  await assert.rejects(engine.execute(implementer, 'defer', ordinary.id, { epoch: ordinary.epoch, notBefore: new Date(await now() + day).toISOString(), reason: 'not a follow-up' }, randomUUID()), /owes no post-deploy observation/);
+  const fresh = await claimed([followUpCriterion]);
+  await assert.rejects(engine.execute(implementer, 'defer', fresh.id, { epoch: fresh.epoch, notBefore: new Date(await now() - day).toISOString(), reason: 'past' }, randomUUID()), /already passed/);
+  await assert.rejects(engine.execute(implementer, 'defer', fresh.id, { epoch: fresh.epoch, notBefore: new Date(await now() + 31 * day).toISOString(), reason: 'far' }, randomUUID()), /more than 30 days/);
 });
 
 test('manual:intervention-pattern-escalation-build — GY-1689: a follow-up worker is told to defer an unready reading, not to block it', () => {
@@ -385,21 +431,75 @@ const deliveredItem = (key: string, criterion: Work['criteria'][number], mergedA
   submission: { epoch: 1, pr: 1 }, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null, gates: [], violations: [],
   delivery: { mergeSha: 'a'.repeat(40), mergedAt, evidenceAsOf: mergedAt, authorizationRevision: 1 } as never,
 } as Work);
+/** The window verify-deployment files a follow-up with, by the tree's own postDeployChecks: the release served from `servedAt`. */
+const filedWindow = async (tree: string | null, item: Work, servedAt?: Date) =>
+  ((await plane(tree)).postDeployChecks(item, 'b'.repeat(40), new Date('2026-10-12T07:35:00Z'), {}, servedAt) as { followUp?: { input: Work } | null }[])[0]?.followUp?.input.observationWindow?.notBefore ?? null;
 
-test('manual:intervention-pattern-escalation-build — GY-1724 and GY-1721: their follow-ups are filed holding the instant the reading can first exist', () => {
-  const release = 'b'.repeat(40);
-  // GY-1700 AC-2, a 24-hour live window; its release first observed serving at 07:33:40Z.
-  const [webhooks] = postDeployChecks(deliveredItem('GY-1700', { id: 'AC-2', text: 'A 24-hour window of live GitHub activity shows zero failed webhook deliveries', proofs: ['manual:post-deploy/webhook-deliveries-clean-24h'] }, '2026-10-11T15:04:40Z'),
-    release, new Date('2026-10-12T07:35:00Z'), {}, new Date('2026-10-12T07:33:40Z'));
-  assert.equal(webhooks.followUp?.input.observationWindow?.notBefore, '2026-10-13T07:33:40.000Z');
-  // GY-1684 AC-1, a rate per 7 days; merged at 07:43:35Z.
-  const [rate] = postDeployChecks(deliveredItem('GY-1684', { id: 'AC-1', text: 'the intervention report shows the scope-widening rate at the build stage below 3 per 7 days after the change ships', proofs: ['manual:post-deploy/intervention-pattern-scope-widening-build'] }, '2026-10-11T07:43:35Z'),
-    release, new Date('2026-10-12T07:35:00Z'));
-  assert.equal(rate.followUp?.input.observationWindow?.notBefore, '2026-10-18T07:43:35.000Z');
+test('manual:intervention-pattern-escalation-build — GY-1724 and GY-1721 against the code that filed them, the base and the candidate: filed with no window before GY-1727 and GY-1698, held on the instant the reading can first exist since', { timeout: 300_000 }, async () => {
+  // GY-1724: GY-1700 AC-2, a 24-hour live window; its release first observed serving at 07:33:40Z.
+  const webhooks = deliveredItem('GY-1700', { id: 'AC-2', text: 'A 24-hour window of live GitHub activity shows zero failed webhook deliveries', proofs: ['manual:post-deploy/webhook-deliveries-clean-24h'] }, '2026-10-11T15:04:40Z');
+  const served = new Date('2026-10-12T07:33:40Z');
+  assert.equal(await filedWindow('6037889d68^', webhooks, served), null, 'before GY-1727 the follow-up is filed unheld and dispatched at once: GY-1724 reproduces');
+  for (const tree of [base, null]) assert.equal(await filedWindow(tree, webhooks, served), '2026-10-13T07:33:40.000Z', `${tree ?? 'the candidate'} files it held: it does not recur`);
+  // GY-1721: GY-1684 AC-1, a rate per 7 days; merged at 07:43:35Z.
+  const rate = deliveredItem('GY-1684', { id: 'AC-1', text: 'the intervention report shows the scope-widening rate at the build stage below 3 per 7 days after the change ships', proofs: ['manual:post-deploy/intervention-pattern-scope-widening-build'] }, '2026-10-11T07:43:35Z');
+  assert.equal(await filedWindow('20a58c6a42^', rate), null, 'before GY-1698 the follow-up is filed unheld: GY-1721 reproduces');
+  for (const tree of [base, null]) assert.equal(await filedWindow(tree, rate), '2026-10-18T07:43:35.000Z', `${tree ?? 'the candidate'} files it held: it does not recur`);
 });
 
-test('manual:intervention-pattern-escalation-build — GY-1700: the test file its own unit proof lives in is granted by the loop, not escalated', () => {
-  const verdict = decideScopeRequest({ plannedFiles: ['src/server/routes/github.ts'], criteria: [{ id: 'AC-0', text: 'A verified webhook delivery soft-accepts with HTTP 202', proofs: ['unit:webhook-soft-accept-no-5xx'] }] },
-    { paths: ['tests/webhook-soft-accept.test.ts'] });
-  assert.equal(verdict.state, 'approved', verdict.reason);
+/**
+ * GY-1700 as recorded (scope#2507595, autoscope#2507600, decision.held#2507617, unblock#2507778): the
+ * master requests a requirements decision adding AC-0, whose unit proof lives in a new test file; the
+ * worker asks for that file; the loop refuses the ask on the criteria the item carries; the approver
+ * approves the decision, which is held because the attempt is live. Returns the item after the hold.
+ */
+async function replay1700(tree: string | null, name: string) {
+  const { Engine, Store, server: serve } = await plane(tree);
+  const store = await databaseFor(name, Store);
+  const repository = 'owner/escalation-build';
+  const engine = new Engine(store, [15368], 120, repository); engine.submissionObserver = null;
+  const master = { id: 'gy1700-master', token: `gy1700-master-${'m'.repeat(32)}`, capabilities: ['intent:create', 'intent:ready', 'policy:requirements', 'decision:rework', 'intent:unblock'] };
+  const approver = { id: 'graphyard-approver-graphyard', token: `gy1700-approver-${'a'.repeat(32)}`, capabilities: ['decision:approve', 'policy:requirements', 'decision:rework', 'intent:ready', 'intent:unblock'] };
+  const admin = { ...operator, token: `gy1700-operator-${'o'.repeat(32)}` };
+  const http = serve(engine, [admin]); servers.push(http);
+  await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
+  const url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
+  const call = async (token: string, path: string, body: unknown) => {
+    const response = await fetch(`${url}/api/${path}`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() }, body: JSON.stringify(body) });
+    const answer = await response.json() as any;
+    assert.equal(response.status, 200, JSON.stringify(answer));
+    return answer;
+  };
+  for (const agent of [master, approver])
+    await call(admin.token, 'operator-agents', { id: agent.id, displayName: agent.id, capabilities: agent.capabilities, scope: { repositories: [repository], workItems: ['*'] }, token: agent.token, reason: 'GY-1700 replay' });
+  const plannedFiles = ['src/server/routes/github.ts', 'src/server/main.ts', 'docs/protocol/github-webhook.md'];
+  const live = [{ id: 'AC-1', text: 'Every failed delivery is redelivered and answered 2xx', proofs: ['manual:webhook-failed-deliveries-replay-clean'] },
+    { id: 'AC-2', text: 'A 24-hour window of live GitHub activity shows zero failed webhook deliveries', proofs: ['manual:webhook-deliveries-clean-24h'] },
+    { id: 'AC-3', text: 'The github-budget attention row clears', proofs: ['manual:github-budget-attention-row-clears'] }];
+  let work = await engine.execute(operator, 'create', null, { title: 'GY-1700 webhook deliveries failing with HTTP 500', plannedFiles, criteria: live }, randomUUID());
+  work = await engine.execute(operator, 'ready', work.id, {}, randomUUID());
+  work = await engine.execute(implementer, 'claim', work.id, {}, randomUUID());
+  const revision = { expectedPolicyRevision: work.policyRevision, dependencies: [], plannedFiles, exclusiveResources: [],
+    criteria: [{ id: 'AC-0', text: 'A verified webhook delivery soft-accepts with HTTP 202', proofs: ['unit:webhook-soft-accept-no-5xx'] }, ...live] };
+  const requested = await call(master.token, `work/${work.key}/decide`, { action: 'requirements', input: revision, reason: 'AC-1..3 are live observations; AC-0 is the buildable criterion' });
+  await engine.execute(implementer, 'scope', work.id, { epoch: work.epoch, paths: ['tests/webhook-soft-accept.test.ts'], reason: `Pending requirements decision ${requested.id} adds AC-0 unit:webhook-soft-accept-no-5xx naming this file` }, randomUUID());
+  const refused = await engine.execute(coordinator, 'autoscope', work.id, { epoch: work.epoch }, randomUUID());
+  const approved = await call(approver.token, `work/${work.key}/approve`, { decision: requested.id, reason: 'The buildable criterion is the item’s own' });
+  return { refused, held: approved.state as string, after: (await store.list()).find((item: Work) => item.id === work.id)! as Work };
+}
+
+test('manual:intervention-pattern-escalation-build — GY-1700 against the base and the candidate: the refused ask stands on the base until someone clears it; on the candidate the held decision grounds it at once', { timeout: 300_000 }, async () => {
+  const onBase = await replay1700(base, 'gy1700_base');
+  assert.equal(onBase.refused.scopeRequest?.decision?.state, 'refused', 'the loop refuses the ask on the criteria the item carries');
+  assert.equal(onBase.held, 'held', 'the decision is approved and held for the live attempt');
+  assert.match(onBase.after.blocker ?? '', /^Scope request refused/, 'the refusal still blocks the item, which only an operator clears: the instance reproduces');
+  assert.ok(!onBase.after.plannedFiles.includes('tests/webhook-soft-accept.test.ts'));
+
+  const onCandidate = await replay1700(null, 'gy1700_candidate');
+  assert.equal(onCandidate.refused.scopeRequest?.decision?.state, 'refused', 'refused alike before the approval');
+  assert.equal(onCandidate.held, 'held');
+  assert.equal(onCandidate.after.blocker, null, 'the hold grounds the ask, so nobody has to clear it: it does not recur');
+  assert.ok(onCandidate.after.plannedFiles.includes('tests/webhook-soft-accept.test.ts'));
+  assert.equal(onCandidate.after.scopeDecision?.state, 'approved');
+  assert.ok(onCandidate.after.lease, 'the attempt keeps its lease');
 });

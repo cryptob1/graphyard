@@ -320,8 +320,9 @@ export function inheritedScopeRequest(work: Pick<Work, 'plannedFiles' | 'carried
 /** The commands that end an attempt, or clear what an ended one left behind, and so close its scope request. */
 // A blocker ends its attempt (GY-1008); a cleared one (`blocked GY-N EPOCH -`) keeps the lease, so its request stays open.
 const attemptEndingCommands = new Set<string>(['submit', 'release', 'rework', 'requirements', 'unblock', 'blocked', 'defer']);
-export function applyScopeDecision(work: Work, request: NonNullable<Work['scopeRequest']>, now: Date): ScopeDecision {
-  const verdict = decideScopeRequest(work, request);
+/** `ground` is what the verdict is decided on: the item, or (GY-1726) the item with the criteria its held requirements decisions carry. */
+export function applyScopeDecision(work: Work, request: NonNullable<Work['scopeRequest']>, now: Date, ground: Parameters<typeof decideScopeRequest>[0] = work): ScopeDecision {
+  const verdict = decideScopeRequest(ground, request);
   const decision: ScopeDecision = { state: verdict.state, reason: verdict.reason, at: now.toISOString(), decidedBy: 'graphyard',
     waitedMs: Math.max(0, now.getTime() - Date.parse(request.at)), paths: verdict.paths, requestedBy: request.requestedBy, requestedAt: request.at, epoch: request.epoch };
   work.scopeDecision = decision;
@@ -1451,10 +1452,14 @@ export class Engine {
         if (!request && work.scopeDecision && (work.scopeDecision.epoch ?? data.epoch) === data.epoch) return work;
         demand(request, 'No scope request is open for this item', 404);
         demand(request!.epoch === data.epoch, 'Scope request belongs to another attempt; reload before deciding');
-        if (request!.decision && (request!.decision.state !== 'refused' || decideScopeRequest(work, request!).state !== 'approved')) return work;
+        // GY-1726: an approved requirements decision held until this attempt ends already carries the
+        // criteria it will apply, so they ground the ask now (GY-1700's held AC-0 named the test file
+        // its worker asked for, and the refusal stood until an operator cleared it by hand).
+        const ground = { ...work, criteria: [...work.criteria, ...await this.heldRequirementsCriteria(db, work)] };
+        if (request!.decision && (request!.decision.state !== 'refused' || decideScopeRequest(ground, request!).state !== 'approved')) return work;
         demand(work.lease && work.lease.epoch === request!.epoch && Date.parse(work.lease.expiresAt) > now.getTime(),
           'The requesting attempt no longer holds the lease; a fresh attempt asks afresh');
-        decision = applyScopeDecision(work, request!, now);
+        decision = applyScopeDecision(work, request!, now, ground);
       }
       if (command === 'session') {
         demand(['worker', 'producer', 'coordinator', 'admin'].includes(actor.role), 'Worker, producer or coordinator permission required', 403);
@@ -1917,6 +1922,14 @@ export class Engine {
    * (`rereview`) rather than being sent back on the stale verdict's rework. The document is changed in
    * place; the ledger writes come back as closures so a reconciliation dry run (GY-1290) records nothing.
    */
+  /** GY-1726: the criteria of the requirements decisions held for this item's live attempt, approved against its current policy revision. */
+  private async heldRequirementsCriteria(db: PoolClient, work: Work): Promise<{ id: string; text: string; proofs: string[] }[]> {
+    const rows = (await db.query("SELECT actor, kind, payload, created_at FROM events WHERE work_id=$1 AND kind LIKE 'decision.%' ORDER BY seq", [work.id])).rows as { actor: string; kind: string; payload: any; created_at: Date | string }[];
+    return foldDecisions(work.id, rows.map(row => ({ kind: row.kind, actor: row.actor, at: new Date(row.created_at).toISOString(), payload: row.payload })))
+      .filter(decision => decision.state === 'held' && decision.action === 'requirements' && decision.input?.expectedPolicyRevision === work.policyRevision)
+      .flatMap(decision => z.array(criterionSchema).safeParse(decision.input?.criteria).data?.map(({ id, text, proofs }) => ({ id, text, proofs })) ?? []);
+  }
+
   private async applyHeldDecisions(db: PoolClient, work: Work, all: Work[], before: Pick<Work, 'lease' | 'containmentQuarantine' | 'plannedFiles'> | null, now: Date, ended: { command: string | null; submitted: boolean }): Promise<((db: PoolClient) => Promise<void>)[]> {
     const free = (item: Pick<Work, 'lease' | 'containmentQuarantine'>) => !item.lease && !item.containmentQuarantine;
     if (!before || work.stage === 'done' || !free(work) || free(before)) return [];
