@@ -11,6 +11,7 @@ import { GitHubChargeLedger } from '../../src/github-charges.js';
 import { type Principal, Refusal, type Work, observationWindowHold } from '../../src/model.js';
 import { type PostDeployFiler, filePostDeployFollowUps, localPostDeployChecks, verifyDeployment } from '../../src/master-verification.js';
 import { plainStatus } from '../../src/model/plain-status.js';
+import { buildBoard, groupOf } from '../../src/model/board.js';
 import { conflictReworkBoundMs } from '../../src/model/approval.js';
 import * as deploymentStep from '../../src/daemon/deployment.js';
 import { DispatchReservedError, type HerdrAgent, type MasterConfig, type WorkerProfile, approverSessionName, assessContainment, containmentPhase, containmentQuarantines, decisionInput, dispatchWork, masterConfigSchema, reclaimableAgent } from '../../src/master.js';
@@ -311,7 +312,14 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
    * 98070f3538 filed GY-1721..GY-1725); the served release's isolated checkout carries the current filer.
    * `windowHours` makes the criterion a live window of that many hours instead of a rate per `windowDays`.
    */
-  observationWindow?: { item: number; windowDays: number; filedAfterMs: number; unwindowed?: boolean; staleCoordinator?: boolean; windowHours?: number } }) {
+  observationWindow?: { item: number; windowDays: number; filedAfterMs: number; unwindowed?: boolean; staleCoordinator?: boolean; windowHours?: number };
+  /**
+   * GY-1740: one post-deploy follow-up per entry of `hours`, filed as verify-deployment files them and
+   * blocked by its first worker on a reading that cannot exist before the day's start plus that many
+   * hours, as GY-1689, GY-1721 and GY-1724 were. The loop holds each on its instant itself (its blocker
+   * step's `window`, through the real route) and every cycle samples each one (blockedHoldDay).
+   */
+  blockedHolds?: { hours: number[] } }) {
   const dayStart = clock.now();
   // A day may restage the shared scenario: the day-scoped view of the plan is what every fault
   // below arms from, while each test's own assertions still read the shared base plan.
@@ -540,6 +548,17 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     deferred: [] as { at: number; epoch: number; notBefore: string }[],
     samples: [] as { elapsed: number; at: string; stage: string; waiting: boolean | null; attention: string | null; attentionRows: number; sentence: string; dispatches: { requestedBy: string; at: string }[]; lease: string | null; sessions: number; masterLive: boolean; faults: string[]; escalations: string[] }[],
   } : null;
+  // ---- GY-1740: blocked, unleased post-deploy follow-ups whose recorded blockers name future instants. ----
+  const holdDay = options.blockedHolds ? { seeded: [] as { id: string; key: string; notBefore: number }[], windows: [] as { key: string; at: number; notBefore: string }[], final: [] as Work[],
+    samples: [] as { key: string; at: string; notBefore: number; stage: string; blocker: string | null; window: string | null; group: string | null; overdue: boolean | null; lease: string | null; sessions: number; dispatches: { requestedBy: string; at: string }[]; faults: string[]; escalations: string[] }[] } : null;
+  for (const [index, after] of (options.blockedHolds?.hours ?? []).entries()) {
+    const notBefore = dayStart + after * hour, instant = new Date(notBefore).toISOString(), worker = { id: workers[index % workers.length].principal, role: 'worker' as const };
+    let work = await engine.execute(principals.operator, 'create', null, { title: `Post-deploy verification of soak release ${days}-${index}`, type: 'chore', priority: 1,
+      criteria: [{ id: 'AC-1', text: `From this head against the serving release: the escalation rate at the build stage stays below 3 over ${after} hours of live activity`, proofs: ['manual:intervention-pattern-escalation-build-on-serving-release'] }] }, id());
+    work = await engine.execute(worker, 'claim', (await engine.execute(principals.operator, 'ready', work.id, {}, id())).id, {}, id());
+    work = await engine.execute(worker, 'blocked', work.id, { epoch: work.epoch, reason: `AC-1's reading cannot exist yet: its ${after}-hour window on the serving release has not elapsed; not before ${instant} can it be observed` }, id());
+    holdDay!.seeded.push({ id: work.id, key: work.key, notBefore });
+  }
   // GY-1315: the unreleased backlog the stale-release step reads every cold cycle, beside the day's items.
   const staleReleaseDay = { hand: [] as { key: string; decision: string; outcome: string }[], races: [] as { key: string; decision: string; outcome: string; at: number }[], handReleased: [] as { key: string; elapsed: number }[],
     backlog: [] as Work[], backlogReads: 0, steps: [] as { elapsed: number; ms: number; backlogReads: number }[] };
@@ -1982,6 +2001,11 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
       },
     } : {}),
     promptSession,
+    // GY-1740: the loop holds a time-bound post-deploy follow-up on its instant through the real route, as production does.
+    deferWindow: async (work: Work, body: { expectedRevision: number; notBefore: string; reason: string }) => {
+      holdDay?.windows.push({ key: work.key, at: clock.now(), notBefore: body.notBefore });
+      return api(principals.coordinator, 'POST', `work/${work.id}/window`, body) as Promise<Work>;
+    },
     // GY-1008: the blocked day probes through the real probe code, over a world whose credential,
     // write path and control plane fail until their minute, and records through the real route.
     // The credential-blocked day's world answers every probe: what fails there is each session's own credential.
@@ -3226,6 +3250,18 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
         }
       }
     }
+    // GY-1740: every cycle samples each seeded follow-up as the board and the loop see it.
+    if (holdDay) {
+      const all = await store.list(), at = clock.now(), board = buildBoard(all, at);
+      for (const seeded of holdDay.seeded) {
+        const current = all.find(item => item.id === seeded.id)!, row = Object.values(board.groups).flat().find(entry => entry.id === seeded.id);
+        holdDay.samples.push({ key: seeded.key, at: new Date(at).toISOString(), notBefore: seeded.notBefore, stage: current.stage, blocker: current.blocker, window: current.observationWindow?.notBefore ?? null,
+          group: groupOf(current, at), overdue: row ? row.overdue : null, lease: current.lease?.owner ?? null, sessions: sessions.filter(session => session.key === current.key).length,
+          dispatches: [...(current.actionQueue?.actions ?? []), ...(current.actionQueue?.history ?? [])].filter(action => action.kind === 'dispatch').map(action => ({ requestedBy: action.requestedBy, at: action.requestedAt })),
+          faults: state.faults.instances.filter(instance => instance.subject === current.key).map(instance => instance.kind),
+          escalations: Object.values(state.actions).filter(action => action.kind === 'escalation' && action.work === current.key).map(action => action.detail) });
+      }
+    }
     const opened = (await store.list()).filter(item => item.stage !== 'done');
     // GY-1698: a day whose every open item is held on its observation window (and none is leased) is as
     // idle as one with nothing open — the production loop's 10-minute sleep. A live lease must keep
@@ -3234,7 +3270,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     // filing is due `filedAfterMs` after the parent's merge, and a ten-minute jump overshoots that.
     const tickAt = clock.now();
     const filingDue = !!windowDay && !windowDay.followUp;
-    const heldIdle = !!windowDay && !filingDue && opened.length > 0 && opened.every(item => {
+    const heldIdle = (!!windowDay || !!holdDay) && !filingDue && opened.length > 0 && opened.every(item => {
       const live = item.lease && Date.parse(item.lease.expiresAt) > tickAt;
       return !live && observationWindowHold(item, new Date(tickAt)) !== null;
     });
@@ -3276,6 +3312,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   for (const extra of staleReleaseDay.backlog) await api(principals.operator, 'POST', `work/${extra.key}/close`, { kind: 'obsolete', reason: 'soak: the stale-release day ends with its backlog never released' });
   engine.reconcileLanded = reconcileLanded; engine.directMergeEnvironment = null;
   const final = (await store.list()).filter(item => items.some(entry => entry.id === item.id));
+  if (holdDay) holdDay.final = (await store.list()).filter(item => holdDay.seeded.some(entry => entry.id === item.id));
   // The days share one control plane, and a later day's loop that reads every item would dispatch
   // this day's unfinished ones and push to their linked pull requests. With the day's record taken
   // above, each is taken out of the plane: its lease given up by the worker holding it, then closed.
@@ -3301,7 +3338,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   const tmp = { root: tmpRoot, backlog, deadOwned, cache, heldDirectory, liveOwned, hourly, passes: tmpPasses, peak: tmpPeak, reports: await readReclaimReports(reclaimRoot), left: existsSync(tmpRoot) ? readdirSync(tmpRoot) : [] };
   if (process.env.SOAK_TRACE) console.error(`landing: ${github.landingChecks} checks over ${github.landingBases.size} bases, ${github.ancestorCompares} ancestor compares, ${github.blindCompares} blind compares; false landing refusals: ${landingRefusals.map(entry => `${entry.key}@+${Math.round(entry.elapsed / minute)}min ${entry.sha.slice(0, 12)}`).join(', ') || 'none'}`);
   engine.execute = executeAll;
-  return { observationWindowDay: windowDay, unmatchedRefusals, capAnswers, readinessDay, supervisedDay, stuck, unboundedDay, provisionDay, promotion, throughput, reconciled, outside, items, final, github, sessions, docsSyncRuns, docsSyncRoot, lost, launches, violations, faulted, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, headless, herdr, hand, stranded, withdrawals, resumes, strandedLaunches, escalations, spent, attestations, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, guardReads, checkout, landingRefusals, foreignPane, previousWorktrees, closedLeased,
+  return { observationWindowDay: windowDay, blockedHoldDay: holdDay, unmatchedRefusals, capAnswers, readinessDay, supervisedDay, stuck, unboundedDay, provisionDay, promotion, throughput, reconciled, outside, items, final, github, sessions, docsSyncRuns, docsSyncRoot, lost, launches, violations, faulted, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, headless, herdr, hand, stranded, withdrawals, resumes, strandedLaunches, escalations, spent, attestations, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, guardReads, checkout, landingRefusals, foreignPane, previousWorktrees, closedLeased,
     mergeQueuePosts, config, refused, decideCalls, restarted, approverPanes, failing, herdrClosed: herdr.closed, diagnosisModel: settings.model, diagnosisRuns: diagnosed, baseBreak, capacityRefused, capacityLaunched, capacityWaiters,
     decided, misreads, prompts, screens, heldAccounts, approverAccounts, retryReset, limitMenuDay, menuReset, menuNotice, exitedLive, exitedClosed, exitedRowsSeen, reassign, workspaceFailures, workspaceCooled, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, fenced, mergeStallSightings, master, baseFailure,
     blockerEvents, blockerProbes, githubStatusReads, credentialReads, blockerRecords, blockerDecisions, blockerActions, blockerKeysPeak, attempts, lanesSeen, laneApplications, approverWorks, approverDecisions, failover, webhook, remedies, observeRequests, starvation, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size }, mechanical: { ledger, botRounds, misclassified, reviewHolds }, shared, charges: { ...charged, b: charged.b.length, instancesSeen: [...charged.instancesSeen], restarts: chargeRestarts },

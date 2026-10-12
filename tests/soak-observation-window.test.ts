@@ -162,3 +162,51 @@ test('integration:soak-stale-coordinator-no-early-dispatch — with the coordina
   assert.deepEqual(after[0]!.dispatches.map(action => action.requestedBy), ['graphyard'], 'the first cycle past the instant requests its dispatch');
   assert.ok(after.flatMap(sample => sample.dispatches).every(action => Date.parse(action.at) >= notBefore), 'no dispatch is dated before the instant');
 });
+
+/**
+ * GY-1740 under the real loop: three post-deploy follow-ups were each blocked by their first worker on a
+ * reading that cannot exist before an instant 6, 14 and 22 hours into the day, as GY-1689, GY-1721 and
+ * GY-1724 were. No worker can `defer` them (none holds a lease), so the loop's blocker step holds each
+ * on its instant itself (`window`). Every cycle samples each one: held once, out of Blocked from the first
+ * cycle with no worker launch, never dispatched or overdue before its instant, dispatched by Graphyard at
+ * it and delivered by that one attempt.
+ */
+test('unit:soak-invariants-hold — over a simulated day of the real loop, blocked unleased post-deploy follow-ups whose blockers name future instants are each held on their instant once, leave Blocked without a worker launch, stay undispatched and not overdue until it, resume at it, and every system invariant holds', { timeout: 600_000 }, async () => {
+  const hours = [6, 14, 22];
+  const day = await simulateDay({ hours: 26, plan, blockedHolds: { hours } });
+  const holds = day.blockedHoldDay!, iso = (ms: number) => new Date(ms).toISOString();
+  assert.deepEqual(day.violations, [], 'every system invariant holds after every cycle');
+  assert.deepEqual(day.failures, [], 'no cycle failed');
+  assert.deepEqual(day.lost, [], 'no lease was lost');
+  assert.equal(holds.seeded.length, hours.length);
+  // Each is held exactly once, on the instant its blocker names, by the loop's first cycle.
+  assert.deepEqual(holds.windows.map(entry => [entry.key, entry.notBefore]).sort(), holds.seeded.map(entry => [entry.key, iso(entry.notBefore)]).sort(), `each follow-up was held once: ${JSON.stringify(holds.windows)}`);
+  assert.ok(holds.windows.every(entry => entry.at - day.dayStart < 2 * minute), 'on the loop\'s first cycle');
+  for (const seeded of holds.seeded) {
+    const samples = holds.samples.filter(sample => sample.key === seeded.key);
+    const before = samples.filter(sample => Date.parse(sample.at) < seeded.notBefore), after = samples.filter(sample => Date.parse(sample.at) >= seeded.notBefore);
+    assert.ok(before.length >= 30, `${seeded.key}: the loop cycled across its held hours: ${before.length} cycles`);
+    // The seeded first attempt's own dispatch, requested before the loop's first cycle; every later one is new.
+    const held = holds.windows.find(entry => entry.key === seeded.key)!.at, seededDispatches = before[0]!.dispatches;
+    assert.ok(seededDispatches.length === 1 && Date.parse(seededDispatches[0]!.at) < held, `${seeded.key}: only its blocked first attempt was dispatched before the hold`);
+    const later = (sample: (typeof samples)[number]) => sample.dispatches.slice(seededDispatches.length);
+    for (const sample of before) {
+      const label = `${seeded.key} at ${sample.at}`;
+      assert.deepEqual([sample.blocker, sample.window, sample.stage], [null, iso(seeded.notBefore), 'ready'], `${label}: its blocker is gone and its window holds it`);
+      assert.notEqual(sample.group, 'blocked', `${label}: not in the Blocked group`);
+      assert.equal(sample.overdue, false, `${label}: not overdue`);
+      assert.deepEqual([sample.lease, sample.sessions, later(sample), sample.faults, sample.escalations], [null, 0, [], [], []], `${label}: no lease, no worker launch, no dispatch, no fault, no escalation`);
+    }
+    assert.ok(after.length > 0, `${seeded.key}: the day ran past its instant`);
+    const first = after[0]!;
+    assert.ok(Date.parse(first.at) - seeded.notBefore <= 10 * minute, `${seeded.key}: the first cycle past its instant ran within an idle step of it: ${first.at}`);
+    assert.deepEqual(later(first).map(action => action.requestedBy), ['graphyard'], `${seeded.key}: that cycle requested its dispatch as Graphyard`);
+    assert.ok(after.flatMap(later).every(action => Date.parse(action.at) >= seeded.notBefore), `${seeded.key}: no dispatch is dated before its instant`);
+    assert.equal(Math.max(...after.map(sample => sample.sessions)), 1, `${seeded.key}: one worker session was launched for it`);
+    for (const sample of after) assert.deepEqual([sample.faults, sample.escalations], [[], []], `${sample.key} at ${sample.at}: no fault or escalation`);
+    const final = holds.final.find(item => item.key === seeded.key)!;
+    assert.equal(final.stage, 'done', `${seeded.key} is delivered: ${final.stage} — ${final.gates.flatMap(gate => gate.reasons).join('; ')}`);
+    assert.equal(final.epoch, 2, `${seeded.key}: by the attempt after the blocked one`);
+    assert.ok(final.delivery && Date.parse(final.delivery.mergedAt) > seeded.notBefore, `${seeded.key}: merged after its instant`);
+  }
+});

@@ -46,7 +46,7 @@ export { declaredPostDeploy, liveObservationPhrase, postDeployCriterionRefusal, 
  */
 export const observationWindowSchema = z.object({
   notBefore: z.string().datetime({ offset: true }),
-  basis: z.enum(['intervention-report', 'criterion-window', 'worker-reading']),
+  basis: z.enum(['intervention-report', 'criterion-window', 'worker-reading', 'operator-hold']),
   detail: z.string().max(2000),
 }).strict();
 export type ObservationWindow = z.infer<typeof observationWindowSchema>;

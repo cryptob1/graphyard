@@ -140,6 +140,9 @@ const commands = {
   // GY-1726: a post-deploy follow-up whose reading cannot exist before `notBefore` ends its attempt
   // and waits for that instant, with no blocker and no intervention: the loop dispatches it then.
   defer: z.object({ epoch, notBefore: z.string().datetime({ offset: true }), reason: z.string().trim().min(1).max(2000) }).strict(),
+  // GY-1740: the master's (or the loop's) hold of an unleased post-deploy follow-up on the instant its
+  // reading can first exist: the observation window `defer` sets, with no lease, and the recorded blocker cleared.
+  window: z.object({ notBefore: z.string().datetime({ offset: true }), reason: z.string().trim().min(1).max(2000), expectedRevision: z.number().int().positive() }).strict(),
   // An empty request clears this attempt's open one; otherwise it must ask for something the
   // planned scope does not already carry. `paths` widens, and the two fields the loop never
   // decides are stated as plainly as the widening is: `remove` drops planned containment and
@@ -215,7 +218,7 @@ const pullAssignmentSchema = z.object({ host: executorName.optional(), work: z.s
 /** The refusal a replay of one idempotency key with different input earns; read back by the pull. */
 export const idempotencyMismatch = 'Idempotency key reused with different input';
 export type Command = keyof typeof commands;
-const operatorCapabilitiesByCommand: Partial<Record<Command, OperatorCapability>> = { create: 'intent:create', ready: 'intent:ready', unblock: 'intent:unblock', refresh: 'intent:unblock', requirements: 'policy:requirements', reviewpolicy: 'policy:review-provider' };
+const operatorCapabilitiesByCommand: Partial<Record<Command, OperatorCapability>> = { create: 'intent:create', ready: 'intent:ready', unblock: 'intent:unblock', refresh: 'intent:unblock', window: 'intent:unblock', requirements: 'policy:requirements', reviewpolicy: 'policy:review-provider' };
 
 function authorizeOperatorCommand(actor: Principal, command: Command, data: any, work: Work | undefined, repository: string) {
   const capability = operatorCapabilitiesByCommand[command];
@@ -227,6 +230,19 @@ function authorizeOperatorCommand(actor: Principal, command: Command, data: any,
     demand(data.policy.review, 'Operator-created work must require independent review');
     if (data.policy.reviewProvider !== undefined) operatorCapability(actor, 'policy:review-provider', undefined, repository);
   }
+}
+
+/**
+ * The observation window `defer` (a worker) and `window` (the master or the loop, GY-1740) record: only
+ * on a post-deploy follow-up, for a future instant within `deferBoundMs`; a later recorded window is never shortened.
+ */
+function observationHold(work: Work, notBefore: string, now: Date, basis: NonNullable<Work['observationWindow']>['basis'], detail: string) {
+  demand(work.criteria.some(criterion => criterion.proofs.some(servingReleaseProof)), `${work.key} owes no post-deploy observation (no manual:…-on-serving-release proof); only a follow-up whose reading cannot exist yet is deferred — record a blocker instead`, 409);
+  const at = Date.parse(notBefore);
+  demand(at > now.getTime(), `notBefore ${notBefore} has already passed; the reading can be taken now`, 422);
+  demand(at - now.getTime() <= deferBoundMs, `notBefore ${notBefore} is more than ${deferBoundMs / 86_400_000} days away; a reading that far off is a requirements question — record a blocker instead`, 422);
+  if (!work.observationWindow || Date.parse(work.observationWindow.notBefore) < at)
+    work.observationWindow = { notBefore: new Date(at).toISOString(), basis, detail: detail.slice(0, 2000) };
 }
 
 // Old deployments did not persist assignment labels. Preserve the known owner/epoch
@@ -1415,14 +1431,19 @@ export class Engine {
         // GY-1726: a reading that cannot exist yet is a wait the product holds, not an escalation
         // (GY-1689, GY-1721, GY-1724 each blocked for one). Only a post-deploy follow-up owes such a
         // reading; anything else blocks as before. A later recorded window is never shortened.
-        demand(work.criteria.some(criterion => criterion.proofs.some(servingReleaseProof)), `${work.key} owes no post-deploy observation (no manual:…-on-serving-release proof); only a follow-up whose reading cannot exist yet is deferred — record a blocker instead`, 409);
-        const at = Date.parse(data.notBefore);
-        demand(at > now.getTime(), `notBefore ${data.notBefore} has already passed; the reading can be taken now`, 422);
-        demand(at - now.getTime() <= deferBoundMs, `notBefore ${data.notBefore} is more than ${deferBoundMs / 86_400_000} days away; a reading that far off is a requirements question — record a blocker instead`, 422);
-        if (!work.observationWindow || Date.parse(work.observationWindow.notBefore) < at)
-          work.observationWindow = { notBefore: new Date(at).toISOString(), basis: 'worker-reading', detail: `${actor.id} found the reading cannot exist before then: ${data.reason}`.slice(0, 2000) };
+        observationHold(work, data.notBefore, now, 'worker-reading', `${actor.id} found the reading cannot exist before then: ${data.reason}`);
         endAttempt(work, data.epoch, 'released', now);
         work.lease = null;
+      }
+      if (command === 'window') {
+        // GY-1740: a post-deploy follow-up blocked for a reading that cannot exist yet (GY-1689, GY-1721,
+        // GY-1724) is moved to its wait without a worker launch spent only to call `defer`.
+        if (actor.role !== 'operator-agent') demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
+        // Every writer names the revision it read: a hold derived from a blocker since cleared or changed is refused.
+        demand(data.expectedRevision === work.revision, 'Task revision changed; reload before mutating');
+        demand(!work.lease || Date.parse(work.lease.expiresAt) <= now.getTime(), `${work.key} is held by ${work.lease?.owner} under epoch ${work.lease?.epoch}; its worker defers it with defer GY-N EPOCH NOT-BEFORE REASON`, 409);
+        observationHold(work, data.notBefore, now, 'operator-hold', `${actor.id} held it until then: ${data.reason}`);
+        work.blocker = null;
       }
       if (command === 'scope') {
         const asks = data.paths.length || data.remove?.length || data.criteria?.length;
