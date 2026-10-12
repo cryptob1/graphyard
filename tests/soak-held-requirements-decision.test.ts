@@ -199,8 +199,15 @@ test('unit:soak-invariants-hold — over three simulated days, decisions held th
   }
   assert.deepEqual(sessions, [], 'no approver session lingers');
   // The loop's own request path: the routed widening of GY-1692's and GY-1695's ask found the held decision standing and requested nothing, once.
+  // GY-1720: the held revision plans only the layout, not the cycle module the worker asks for, so since GY-1702 the loop
+  // adopts it with the wording that it does not widen for the ask (heldWaitDetail, unmatched) and the ask waits for the
+  // hold to settle. This soak's pattern still named the covering wording, so it counted zero records on candidate
+  // b991fb359b (run 38213291605). The pattern names the first attempt's held decision by id, so a hold the loop ignored or
+  // a widening routed in its place still finds no record here, and `requested` above stays empty.
   for (const key of ['GY-1692', 'GY-1695']) {
-    const adopted = Object.entries(state.actions).filter(([, action]) => action.work === key && /is approved by graphyard-approver and held \(.*\); the control plane applies it when the attempt ends, so nothing is requested/.test(action.detail ?? ''));
+    const held = decisions.get(key)![0].id;
+    const adopted = Object.entries(state.actions).filter(([, action]) => action.work === key && action.detail?.includes(`requirements decision ${held} is approved by graphyard-approver and held (`)
+      && /; it does not widen for this scope ask, so the ask waits until the hold settles and nothing is requested$/.test(action.detail));
     assert.ok(adopted.length >= 1 && adopted.length <= 2, `${key}: the held decision was adopted in place of the routed widening (${adopted.length} records)`);
   }
   // Bounded: a held decision costs the loop a few records in all (watched, closed, adopted, the head's review note), never one per
