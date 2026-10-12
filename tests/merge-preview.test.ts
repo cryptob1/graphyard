@@ -54,7 +54,7 @@ const work = (files: string[] = ['src/game.ts']) => ({
   submission: { epoch: 1, pr: 1 }, candidate: { sha: head, baseSha: tip, pr: 1, branch: 'graphyard/gy-1-1', author: 'worker' }, reworkRequested: false, scenarioRequirements: [], evidence: [],
   observation: { source: 'control-plane', candidate: { sha: head, baseSha: tip, pr: 1 }, files, checks: [], reviews: [], merged: false }, blocker: null, violations: [], gates: [], mergeLedger: null,
 }) as unknown as Work;
-const passingTrial: MergeTrialRun = { build: 'pass', tests: { passed: 3, failed: [], files: 1 }, durationMs: 10, files: ['tests/game.test.ts'], proofs: { 'unit:works': { executed: 1, failed: 0 } } } as MergeTrialRun;
+const passingTrial: MergeTrialRun = { build: 'pass', tests: { passed: 3, failed: [], files: 1 }, durationMs: 10, logTail: '', files: ['tests/game.test.ts'], proofs: { 'unit:works': { executed: 1, failed: 0 } } } as MergeTrialRun;
 function ports(preview?: MergePorts['preview']) {
   const events: MergeRecordEvent[] = [], pushes: string[] = [];
   const value: MergePorts = {
@@ -164,12 +164,40 @@ test('unit:preview-capped-and-cleaned-up — at most two previews run at once; e
   const failedBuild = await runPreview({ root: fixture.repo, base: fixture.base, mergeSha: fixture.mergeSha, site, token: '', timeoutMs: 30_000, shell: async () => ({ ok: false, output: 'boom' }) });
   assert.equal(failedBuild.result, 'fail'); assert.deepEqual(failedBuild.failed, ['build']);
   assert.deepEqual(await previewDirectories(fixture.base), []);
-  let hung: (() => void) | null = null;
-  const timedOut = await runPreview({ root: fixture.repo, base: fixture.base, mergeSha: fixture.mergeSha, site, token: '', timeoutMs: 1_500,
-    shell: async () => { await new Promise<void>(accept => { hung = accept; }); return { ok: true, output: '' }; } });
+  // Timeout in the build: the build is cancelled, and its late continuation still holds the slot and the checkout until it ends.
+  const timeoutSlots = previewSlots();
+  let buildCancelled = false, buildEnded = false;
+  const lateBuild = runPreview({ root: fixture.repo, base: fixture.base, mergeSha: fixture.mergeSha, site, token: '', timeoutMs: 1_000, slots: timeoutSlots,
+    shell: async (_command, cwd, signal) => {
+      await new Promise<void>(accept => signal!.addEventListener('abort', () => accept(), { once: true }));
+      buildCancelled = true;
+      // The late continuation: the build takes another moment to wind down after its cancellation.
+      await new Promise(accept => setTimeout(accept, 400));
+      assert.equal(timeoutSlots.running, 1, 'the slot is held while the cancelled build winds down');
+      assert.ok(existsSync(cwd), 'the checkout the cancelled build runs in is not removed under it');
+      buildEnded = true;
+      return { ok: true, output: '' };
+    } });
+  const timedOut = await lateBuild;
   assert.equal(timedOut.result, 'timeout');
+  assert.ok(buildCancelled && buildEnded, 'the timed-out build was cancelled and had ended before the preview answered');
+  assert.equal(timeoutSlots.running, 0);
   assert.deepEqual(await previewDirectories(fixture.base), [], 'a timed-out preview\'s checkout is removed');
-  (hung as (() => void) | null)?.();
+  // Timeout in the cases: in-flight requests are aborted, no further case or retry starts, and the run ends before the slot is freed.
+  const caseSlots = previewSlots();
+  let requests = 0, aborted = 0, afterTimeout = 0, expiredAt = 0;
+  const hangingFetcher: typeof fetch = async (input, init) => {
+    requests++;
+    if (expiredAt) afterTimeout++;
+    if (String(input).endsWith('/healthz')) return fetch(input, init);
+    return new Promise<Response>((_, reject) => init!.signal!.addEventListener('abort', () => { aborted++; expiredAt ||= Date.now(); reject(new Error('aborted')); }, { once: true }));
+  };
+  const caseTimeout = await runPreview({ root: fixture.repo, base: fixture.base, mergeSha: fixture.mergeSha, site, token: '', timeoutMs: 1_500, stepTimeoutMs: 20_000, shell: copySite, fetcher: hangingFetcher, slots: caseSlots });
+  assert.equal(caseTimeout.result, 'timeout', caseTimeout.detail);
+  assert.ok(requests >= 2 && aborted === 1, `the in-flight case request was aborted (${requests} requests, ${aborted} aborted)`);
+  assert.equal(afterTimeout, 0, 'no case, attempt or step started after the budget ran out');
+  assert.equal(caseSlots.running, 0);
+  assert.deepEqual(await previewDirectories(fixture.base), []);
   assert.equal(previewFailureReason(timedOut, trialFailurePrefix)!.startsWith(trialFailurePrefix), false, 'a timeout grounds no rework: the head stays queued');
   const requeue = ports(async () => timedOut);
   assert.equal((await mergeOne(requeue.value, work())).outcome, 'requeued');
