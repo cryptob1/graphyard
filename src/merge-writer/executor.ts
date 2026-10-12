@@ -6,6 +6,7 @@ import { trialFailurePrefix } from '../model/rework-ground.js';
 import { defaultChildRun, type ChildRun } from '../child-runner.js';
 import { submittedAtOf } from './shadow.js';
 import { runTrial, TrialCleanupError, type RunTrialInput, type TrialRun } from './trial.js';
+import { previewFailureReason, type PreviewVerdict } from './preview.js';
 
 /**
  * A proof's cases in a TAP stream, attributed by title prefix, as `graphyard verify` counts them
@@ -72,7 +73,8 @@ export interface MergeTrialRun extends TrialRun { files: string[]; proofs: Proof
 /** What `POST /api/work/:id/merge-record` takes: one of the five steps, with its ledger payload. */
 export type MergeRecordEvent =
   | { kind: 'intent'; head: string; baseTip: string; mergeSha: string; risk: string; at: string }
-  | { kind: 'trial'; head: string; baseTip: string; mergeSha: string; build: 'pass' | 'fail'; tests: TrialRun['tests']; files: string[]; proofs: ProofCounts; durationMs: number }
+  | { kind: 'trial'; head: string; baseTip: string; mergeSha: string; build: 'pass' | 'fail'; tests: TrialRun['tests']; files: string[]; proofs: ProofCounts; durationMs: number;
+    /** The preview's verdict (GY-1718), when the passing trial was previewed. */ preview?: PreviewVerdict }
   | { kind: 'pushed'; mergeSha: string; pushedAt: string }
   | { kind: 'reconciled'; mergeSha: string; observedTip: string }
   | { kind: 'refused'; head: string; reason: string };
@@ -228,6 +230,12 @@ export interface MergePorts {
   merge(head: string, baseTip: string): Promise<MergeOutcomeOfTrial>;
   /** The build and tests on `mergeSha` (`runMergeTrial`), `files` being what the merge changes, with the item's proofs counted. */
   trial(mergeSha: string, files: readonly string[], item: Pick<Work, 'key' | 'criteria'>): Promise<MergeTrialRun>;
+  /**
+   * GY-1718: the preview of a passing trial's `mergeSha` (preview.ts `runPreview`), the repository's
+   * required and uat cases run against it served; null when the merge needs none (`previewSkip`).
+   * Absent, nothing is previewed.
+   */
+  preview?(mergeSha: string, files: readonly string[], item: Pick<Work, 'key'>): Promise<PreviewVerdict | null>;
   /** The leased push of `mergeSha` onto `baseTip`; `rejected` when the remote reported a stale lease (`staleLeaseRejection`), any other failure thrown. */
   push(mergeSha: string, baseTip: string): Promise<'pushed' | 'rejected'>;
   /** Whether the base branch's first-parent history holds `sha`, as last fetched. */
@@ -237,7 +245,7 @@ export interface MergePorts {
 }
 export type MergeOutcome =
   | { outcome: 'merged'; mergeSha: string; baseTip: string; observedTip: string; pushes: number }
-  | { outcome: 'refused'; reason: string; trial: MergeTrialRun | null; conflict: string[] }
+  | { outcome: 'refused'; reason: string; trial: MergeTrialRun | null; conflict: string[]; preview?: PreviewVerdict | null }
   | { outcome: 'requeued'; reason: string; pushes: number }
   | { outcome: 'reconciled'; mergeSha: string; observedTip: string };
 
@@ -247,11 +255,14 @@ export type MergeOutcome =
  * pushed, or an open intent whose merge commit the base holds, is only fetched and reconciled,
  * never pushed again. Otherwise the head is trial-merged onto the fetched tip, the intent is
  * recorded before anything runs, the trial runs on the exact merge commit with the proof files
- * included, and the merge commit is pushed with a lease on the tip it was tested on. A rejected push
+ * included, a passing trial is previewed (GY-1718: its required and uat cases run against the merge
+ * commit served, the verdict recorded with the trial), and the merge commit is pushed with a lease
+ * on the tip it was tested on. A rejected push
  * re-reads the tip: one that moved is re-trialled on the new tip, at most `retrials` times (AC-3);
  * one that stood still was rejected for another cause and is refused `unmovedTipReason`, queued
- * for a later cycle rather than re-trialled. A failed trial or a conflict is refused naming what
- * failed, and the rework that refusal grounds is the loop's to request.
+ * for a later cycle rather than re-trialled. A failed trial, a failing required case on the preview
+ * or a conflict is refused naming what failed, and the rework that refusal grounds is the loop's to
+ * request; a preview that timed out is refused leaving the head queued, as a trial timeout does.
  */
 export async function mergeOne(ports: MergePorts, item: Work): Promise<MergeOutcome> {
   const candidate = item.candidate;
@@ -284,11 +295,14 @@ export async function mergeOne(ports: MergePorts, item: Work): Promise<MergeOutc
     // The intent first (AC-2): a crash from here on is reconciled against the base, never repeated blindly.
     await ports.record(item, { kind: 'intent', head, baseTip, mergeSha, risk: riskOf(item).risk, at: at() });
     const run = await ports.trial(mergeSha, merged.files, item);
-    await ports.record(item, { kind: 'trial', head, baseTip, mergeSha, build: run.build, tests: run.tests, files: run.files, proofs: run.proofs, durationMs: run.durationMs });
-    const failure = trialFailureReason({ run });
+    const trialFailure = trialFailureReason({ run });
+    const preview = !trialFailure && ports.preview ? await ports.preview(mergeSha, merged.files, item) : null;
+    await ports.record(item, { kind: 'trial', head, baseTip, mergeSha, build: run.build, tests: run.tests, files: run.files, proofs: run.proofs, durationMs: run.durationMs, ...(preview ? { preview } : {}) });
+    const failure = trialFailure ?? previewFailureReason(preview, trialFailurePrefix);
     if (failure) {
       await ports.record(item, { kind: 'refused', head, reason: failure });
-      return { outcome: 'refused', reason: failure, trial: run, conflict: [] };
+      if (preview?.result === 'timeout') return { outcome: 'requeued', reason: failure, pushes };
+      return { outcome: 'refused', reason: failure, trial: run, conflict: [], ...(preview ? { preview } : {}) };
     }
     pushes += 1;
     const pushed = await ports.push(mergeSha, baseTip);

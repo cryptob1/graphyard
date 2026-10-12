@@ -44,6 +44,21 @@ const asyncHolds = (git: AsyncGit, options: Parameters<typeof releaseHolds>[1]) 
   return { ...outcome, write: async () => { outcome.write(); for (const args of writes) await git(args); } };
 };
 
+/** Runs a shell command in a checkout: whether it exited zero, and what it printed. */
+export type StaticBuildShell = (command: string, cwd: string) => Promise<{ ok: boolean; output: string }>;
+/**
+ * Build a static site's output in `checkout` with its `build` shell command (`GRAPHYARD_UAT_BUILD`):
+ * null when the build passed, else the failure's detail naming the command and its last output
+ * lines. The release candidate (GY-1535) and the merge preview (GY-1718) build the same way.
+ */
+export async function buildStaticSite(build: string, checkout: string, timeoutMs: number, shell?: StaticBuildShell): Promise<string | null> {
+  const run = shell ?? ((command: string, cwd: string) => new Promise<{ ok: boolean; output: string }>(accept => {
+    execFile('sh', ['-c', command], { cwd, encoding: 'utf8', timeout: timeoutMs, maxBuffer: 64 * 1024 * 1024 }, (error, stdout, stderr) => accept({ ok: !error, output: `${stdout ?? ''}${stderr ?? ''}${error && !stderr ? error.message : ''}` }));
+  }));
+  const built = await run(build, checkout);
+  return built.ok ? null : `the static site's build \`${build}\` failed: ${built.output.trim().split('\n').slice(-5).join(' | ').slice(0, 900)}`;
+}
+
 /** The UAT a managed repository's candidate is validated on: a deployment's URL, or a static site's build output served on loopback (optionally built first by `build`, a shell command run in the checkout). */
 export type ProjectUat = { url: string } | { static: { directory: string; build?: string | null } };
 
@@ -57,7 +72,7 @@ export type ProjectUat = { url: string } | { static: { directory: string; build?
  */
 export async function validateProjectCandidate(sourceGit: AnyGit, id: string, options: { checkout: string; uat: ProjectUat; token: string; base: string; push: boolean; timeoutMs: number;
   file?: (item: object, requestId: string) => Promise<string>; fetcher?: typeof fetch; launcher?: E2eLauncher; stepTimeoutMs?: number; now?: () => Date;
-  shell?: (command: string, cwd: string) => Promise<{ ok: boolean; output: string }> }) {
+  shell?: StaticBuildShell }) {
   const git = async (args: string[]) => await sourceGit(args);
   await syncLedgerAsync(git, options.base);
   const candidate = findCandidate(await readLedgerAsync(git), id);
@@ -68,11 +83,8 @@ export async function validateProjectCandidate(sourceGit: AnyGit, id: string, op
   else {
     const { directory, build } = options.uat.static;
     if (build) {
-      const shell = options.shell ?? ((command: string, cwd: string) => new Promise<{ ok: boolean; output: string }>(accept => {
-        execFile('sh', ['-c', command], { cwd, encoding: 'utf8', timeout: options.timeoutMs, maxBuffer: 64 * 1024 * 1024 }, (error, stdout, stderr) => accept({ ok: !error, output: `${stdout ?? ''}${stderr ?? ''}${error && !stderr ? error.message : ''}` }));
-      }));
-      const built = await shell(build, options.checkout);
-      if (!built.ok) suites.push({ name: 'build', run: async () => ({ name: 'build', passed: false, detail: `the static site's build \`${build}\` failed: ${built.output.trim().split('\n').slice(-5).join(' | ').slice(0, 900)}` }) });
+      const failed = await buildStaticSite(build, options.checkout, options.timeoutMs, options.shell);
+      if (failed) suites.push({ name: 'build', run: async () => ({ name: 'build', passed: false, detail: failed }) });
     }
     served = await serveStaticSite(join(options.checkout, directory), candidate.sha);
     url = served.url;
