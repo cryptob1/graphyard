@@ -640,6 +640,16 @@ test('manual:intervention-pattern-escalation-build — GY-1725 as it stands, alr
   const stripped = (await store.list()).find((item: Work) => item.id === filed.id)! as Work;
   assert.deepEqual([stripped.ready, stripped.blocker, stripped.observationWindow], [true, null, undefined]);
   assert.equal(dispatchable(stripped, now), true, 'the stale document reads as dispatchable');
+  // A claim the control plane rejects before judging it writes nothing: neither a caller without claim
+  // authority nor a key already answered for another command may record the window or its history.
+  const history = async () => (await store.pool.query('SELECT count(*)::int AS n FROM events WHERE work_id=$1', [filed.id])).rows[0].n as number;
+  const events = await history();
+  await assert.rejects(engine.execute({ id: 'reader', role: 'reader', sessionKind: 'ai' }, 'claim', filed.id, {}, randomUUID()), /Worker permission required/);
+  const reused = randomUUID();
+  await store.pool.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [implementer.id, reused, 'another-command', JSON.stringify(stripped)]);
+  await assert.rejects(engine.execute(implementer, 'claim', filed.id, {}, reused), /Idempotency key reused with different input/);
+  const untouched = (await store.list()).find((item: Work) => item.id === filed.id)! as Work;
+  assert.deepEqual([untouched.observationWindow, await history()], [undefined, events], 'a rejected claim leaves the item and its history unchanged');
   await assert.rejects(engine.execute(implementer, 'claim', filed.id, {}, randomUUID()), /waits for its observation window/);
   const held = (await store.list()).find((item: Work) => item.id === filed.id)! as Work;
   assert.equal(held.observationWindow?.notBefore, new Date(notBefore).toISOString(), 'the refused claim persisted the window it derived');

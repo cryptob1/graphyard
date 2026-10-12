@@ -1101,7 +1101,10 @@ export class Engine {
     const observation = command === 'submit' ? context.observation ?? await this.observeSubmission(actor, id, data, key) : null;
     // GY-1735: a claim the observation window refuses rolls its transaction back, so the window a legacy follow-up
     // derives is recorded first, on its own: coordination then holds the item instead of dispatching refused claims.
-    if (command === 'claim') await this.store.transaction(async (db, now) => {
+    // Only a claim the main transaction would judge writes it: a caller without claim authority, or a key that
+    // already has a receipt (a replay or a mismatched reuse), leaves the item and its history untouched.
+    if (command === 'claim' && (actor.role === 'worker' || actor.role === 'admin')) await this.store.transaction(async (db, now) => {
+      if ((await db.query('SELECT 1 FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows.length) return;
       const all = await lockedWork(db, [id]);
       const work = all.find(w => w.id === id || w.key === id);
       if (!work || work.stage === 'done' || work.observationWindow) return;
