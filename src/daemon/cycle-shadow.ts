@@ -83,6 +83,8 @@ interface Flight { key: string; head: string; baseTip: string; settled: { error:
 const flights = new WeakMap<DaemonState, Flight>();
 /** The merger each loop state last read, so a failed read keeps the known mode; with none read, GitHub's behaviour stands. */
 const knownMerger = new WeakMap<DaemonState, MergerMode>();
+/** Loop states whose standing disagreements were re-examined under the github merger since the state was loaded or last read control-plane; a fresh state (a restart) is not in it. */
+const reexamined = new WeakSet<DaemonState>();
 /** A settled trial whose verdict the coordinator has not yet recorded; at most one per loop, since one trial runs at a time. */
 const unrecorded = new WeakMap<DaemonState, { verdict: Omit<ShadowVerdict, 'outcome'>; work: Work }>();
 /** Resolves once the trial in flight for `state` has settled; for the step's tests. */
@@ -217,7 +219,9 @@ export async function shadowStep(cycle: Cycle) {
   let controlPlane = previousMode === 'control-plane';
   try { const mode = await effects.mergeWriter?.merger(); if (mode) { knownMerger.set(state, mode); controlPlane = mode === 'control-plane'; } } catch { /* keeps the mode last read */ }
   // The cycle the merger returns to github re-examines every disagreement, so one first recorded under the control-plane merger gains its line.
-  const returned = !controlPlane && previousMode === 'control-plane';
+  // A freshly loaded state (a daemon restart) owes the same examination: its persisted verdicts are unchanged and no action stands for them.
+  if (controlPlane) reexamined.delete(state);
+  const returned = !controlPlane && !reexamined.has(state);
   for (const [index, verdict] of judged.entries()) {
     const current = state.shadow[index]!;
     const moved = verdict.outcome !== current.outcome;
@@ -228,6 +232,7 @@ export async function shadowStep(cycle: Cycle) {
       performed.push(storeAction(state, key, { kind: 'escalation', work: verdict.key, principal: null, state: 'done', detail: shadowDisagreementDetail(verdict), attempts: 1, epoch: null, cycle: state.cycle, at: new Date(now()).toISOString() }, null));
     }
   }
+  if (returned && explanationsRead) reexamined.add(state);
   // Clear `shadow:GY-N` once every disagreement still in the cursor for that item is explained, or
   // none remain (re-judged to agree). Unexplained rows are prefer-kept by keepVerdicts, so eviction
   // alone does not clear the action while a non-disagreement can make room.

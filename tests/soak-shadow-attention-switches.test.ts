@@ -53,7 +53,7 @@ test('unit:soak-shadow-attention-switches — shadow attention stays bounded and
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at, reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async () => {}, requestSmoke: () => {}, decisions: async () => ({ decisions: [] }), persist: async () => {},
     github: githubDouble, merge: githubDouble, shadow: reads, mergeWriter: { merger: async () => mode } } as unknown as DaemonEffects;
-  const state = emptyDaemonState(config);
+  let state = emptyDaemonState(config);
   const lines = () => Object.keys(state.actions).filter(name => /^shadow:GY-\d+$/.test(name));
   const phase = async (cycles: number, check: () => void) => {
     for (let cycle = 0; cycle < cycles; cycle++) {
@@ -87,4 +87,12 @@ test('unit:soak-shadow-attention-switches — shadow attention stays bounded and
   await phase(3, () => {});
   assert.deepEqual(lines(), [], 'explained pairs clear');
   assert.equal(state.shadow.length, items, 'the verdicts stay on the record');
+  // A daemon restart under github: a fresh state holds the persisted unexplained verdicts and no action, and raises every line.
+  explainRead = 'none';
+  const persisted = state.shadow.map(verdict => ({ ...verdict }));
+  state = emptyDaemonState(config);
+  state.shadow = persisted;
+  assert.deepEqual(lines(), [], 'the restarted state holds no line');
+  await phase(3, () => {});
+  assert.equal(lines().length, items, 'a restart in github mode raises every standing disagreement');
 });
