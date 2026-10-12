@@ -90,7 +90,7 @@ export function mergeWriterReads(config: Pick<MasterConfig, 'baseBranch' | 'run'
     preview: async (mergeSha, files) => {
       const environment = options.environment ?? process.env, site = previewSiteOf(environment);
       if (!site || previewSkip(files, site)) return null;
-      return (options.preview ?? runPreview)({ root, base: options.base, mergeSha, site, token: environment.GRAPHYARD_UAT_TOKEN ?? '', timeoutMs: shadow.timeoutMinutes * 60_000, run });
+      return (options.preview ?? runPreview)({ root, base: options.base, mergeSha, site, timeoutMs: shadow.timeoutMinutes * 60_000, run, hostEnvironment: environment });
     },
     // Only git's own stale-lease wording is a rejection the executor re-reads the tip for; a remote's refusal (a branch rule, a hook) or a transport failure is thrown as it came.
     push: async (mergeSha, baseTip) => {

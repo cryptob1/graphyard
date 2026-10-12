@@ -44,19 +44,20 @@ const asyncHolds = (git: AsyncGit, options: Parameters<typeof releaseHolds>[1]) 
   return { ...outcome, write: async () => { outcome.write(); for (const args of writes) await git(args); } };
 };
 
-/** Runs a shell command in a checkout: whether it exited zero, and what it printed. */
-export type StaticBuildShell = (command: string, cwd: string, signal?: AbortSignal) => Promise<{ ok: boolean; output: string }>;
+/** Runs a shell command in a checkout, in `env` when named: whether it exited zero, and what it printed. */
+export type StaticBuildShell = (command: string, cwd: string, signal?: AbortSignal, env?: NodeJS.ProcessEnv) => Promise<{ ok: boolean; output: string }>;
 /**
  * Build a static site's output in `checkout` with its `build` shell command (`GRAPHYARD_UAT_BUILD`):
  * null when the build passed, else the failure's detail naming the command and its last output
  * lines. The release candidate (GY-1535) and the merge preview (GY-1718) build the same way;
- * `signal` cancels the build, killing its shell.
+ * `signal` cancels the build, killing its shell; `env`, when named, is the build's whole environment
+ * (the merge preview's holds no coordinator credential), else it inherits this process's.
  */
-export async function buildStaticSite(build: string, checkout: string, timeoutMs: number, shell?: StaticBuildShell, signal?: AbortSignal): Promise<string | null> {
-  const run = shell ?? ((command: string, cwd: string, cancel?: AbortSignal) => new Promise<{ ok: boolean; output: string }>(accept => {
-    execFile('sh', ['-c', command], { cwd, encoding: 'utf8', timeout: timeoutMs, maxBuffer: 64 * 1024 * 1024, signal: cancel }, (error, stdout, stderr) => accept({ ok: !error, output: `${stdout ?? ''}${stderr ?? ''}${error && !stderr ? error.message : ''}` }));
+export async function buildStaticSite(build: string, checkout: string, timeoutMs: number, shell?: StaticBuildShell, signal?: AbortSignal, env?: NodeJS.ProcessEnv): Promise<string | null> {
+  const run = shell ?? ((command: string, cwd: string, cancel?: AbortSignal, environment?: NodeJS.ProcessEnv) => new Promise<{ ok: boolean; output: string }>(accept => {
+    execFile('sh', ['-c', command], { cwd, env: environment, encoding: 'utf8', timeout: timeoutMs, maxBuffer: 64 * 1024 * 1024, signal: cancel }, (error, stdout, stderr) => accept({ ok: !error, output: `${stdout ?? ''}${stderr ?? ''}${error && !stderr ? error.message : ''}` }));
   }));
-  const built = await run(build, checkout, signal);
+  const built = await run(build, checkout, signal, env);
   return built.ok ? null : `the static site's build \`${build}\` failed: ${built.output.trim().split('\n').slice(-5).join(' | ').slice(0, 900)}`;
 }
 

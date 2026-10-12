@@ -1,4 +1,5 @@
 // Concern: the merge preview (GY-1718) — a passing trial merge built and served as a throwaway static site, the repository's required and uat E2E cases run against it before the merge lands.
+import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { mkdtemp, readdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -7,6 +8,7 @@ import { loadCases } from '../e2e/case.js';
 import { releaseVerdict, type E2eLauncher, type E2eReport } from '../e2e/runner.js';
 import { docsOnlyPaths, testOnlyPaths } from '../model/policy.js';
 import { serveStaticSite, type ReleaseCandidate, type StaticUat } from '../release-candidate.js';
+import { hostPassthrough } from '../e2e/steps.js';
 import { buildStaticSite, projectCaseSuite, type StaticBuildShell } from '../release-project.js';
 import { readTempOwner, tempOwnerGone, tempOwnerMarker, writeTempOwner } from '../tmp-reclaim.js';
 
@@ -85,14 +87,25 @@ export interface PreviewInput {
   base: string;
   mergeSha: string;
   site: PreviewSite;
-  /** The UAT principal's token the cases run with (`GRAPHYARD_UAT_TOKEN`). */
-  token: string;
   /** The preview's whole budget: checkout, build, serve and every case. */
   timeoutMs: number;
   run?: ChildRun; shell?: StaticBuildShell; launcher?: E2eLauncher; fetcher?: typeof fetch; stepTimeoutMs?: number; now?: () => number;
   slots?: ReturnType<typeof previewSlots>;
   /** Where the startup sweep reads process liveness; tests point it at a fabricated /proc. */
   procRoot?: string;
+  /** The host environment the build's basics are drawn from; tests substitute it. */
+  hostEnvironment?: NodeJS.ProcessEnv;
+}
+
+/**
+ * The environment the candidate's build runs in: the host basics a command needs (e2e/steps.ts's
+ * `hostPassthrough`) and nothing else, so a build script the merge brings in reads no coordinator
+ * credential (`GRAPHYARD_UAT_TOKEN`, GitHub or Graphyard tokens).
+ */
+export function previewBuildEnvironment(host: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const name of hostPassthrough) if (host[name] !== undefined) env[name] = host[name];
+  return env;
 }
 
 const cut = (text: string) => text.replace(/\s+/g, ' ').trim().slice(0, 900);
@@ -101,9 +114,11 @@ const cut = (text: string) => text.replace(/\s+/g, ' ').trim().slice(0, 900);
  * The preview of one passing trial merge: in a free slot (at most `previewConcurrency` at once), a
  * detached checkout of `mergeSha` under `base` marked with this process as its owner, the site's
  * build, its output served on loopback (`serveStaticSite`, answering `mergeSha` on /healthz), and
- * every required and uat case of the checkout run against it (`projectCaseSuite`). When the budget
+ * every required and uat case of the checkout run against it (`projectCaseSuite`). The build runs
+ * with the host basics only and the cases with a throwaway token, since both come from the merge
+ * the preview exists to judge. When the budget
  * runs out the run is cancelled — the build's shell killed, the case runner's requests aborted and
- * its browser closed, no further step started — and awaited until it has ended; only then, whatever
+ * its browser and step processes killed, no further step started — and awaited until it has ended; only then, whatever
  * the outcome, is the server closed, the checkout removed and the slot freed, so no work of an
  * ended preview outlives its slot. The first preview of a process sweeps the leftovers of dead ones first.
  */
@@ -125,7 +140,7 @@ export async function runPreview(input: PreviewInput): Promise<PreviewVerdict> {
       await run('git', ['-C', input.root, 'worktree', 'add', '--detach', checkout, input.mergeSha], { timeoutMs: input.timeoutMs });
       cancelled();
       if (input.site.build) {
-        const failed = await buildStaticSite(input.site.build, checkout, input.timeoutMs, input.shell, signal);
+        const failed = await buildStaticSite(input.site.build, checkout, input.timeoutMs, input.shell, signal, previewBuildEnvironment(input.hostEnvironment));
         cancelled();
         if (failed) return verdict('fail', failed, [], ['build']);
       }
@@ -134,7 +149,8 @@ export async function runPreview(input: PreviewInput): Promise<PreviewVerdict> {
       cancelled();
       served = await serveStaticSite(join(checkout, input.site.directory), input.mergeSha);
       let report: E2eReport | null = null;
-      const suite = projectCaseSuite(checkout, input.token, { fetcher: input.fetcher, launcher: input.launcher, stepTimeoutMs: input.stepTimeoutMs, signal, report: value => { report = value; } });
+      // The cases come from the merge itself, so they run with a token minted for this preview, never the UAT principal's; the runner keeps their requests on the served origin.
+      const suite = projectCaseSuite(checkout, `preview-${randomUUID()}`, { fetcher: input.fetcher, launcher: input.launcher, stepTimeoutMs: input.stepTimeoutMs, signal, report: value => { report = value; } });
       const result = await suite.run(served.url, { id: `preview-${input.mergeSha.slice(0, 12)}` } as ReleaseCandidate);
       cancelled();
       const ran = report as E2eReport | null;

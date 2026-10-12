@@ -142,13 +142,20 @@ export function checkAnswer(step: Extract<E2eStep, { kind: 'http' }>, status: nu
   return null;
 }
 
+/** `path` resolved on the target, refused when it leaves the target's origin (a `//host/…` path would carry the case's token elsewhere, GY-1718). */
+const onTarget = (path: string, url: string) => {
+  const resolved = new URL(path, url);
+  if (resolved.origin !== new URL(url).origin) throw new Error(`the path ${path} leaves the target ${new URL(url).origin}`);
+  return resolved;
+};
+
 const withTimeout = <T>(work: Promise<T>, ms: number, what: string) => {
   let timer: NodeJS.Timeout | undefined;
   return Promise.race([work, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`${what} did not finish within ${ms} ms`)), ms); })]).finally(() => clearTimeout(timer));
 };
 
 interface CaseContext { url: string; vars: Record<string, string>; timeoutMs: number; fetcher: typeof fetch; page: () => Promise<E2ePage>; pageErrors: string[]; idempotency: (index: number) => string;
-  secrets: Record<string, string>; general: { root: string; env: Record<string, string>; run: ProcessRunner; artifacts: string; session: (index: number) => string } }
+  secrets: Record<string, string>; general: { root: string; env: Record<string, string>; run: ProcessRunner; artifacts: string; session: (index: number) => string; signal?: AbortSignal } }
 
 /** A step's own timeout: a command or agent step declares one; the request and browser steps share the run's. */
 const timeoutOf = (step: E2eStep, context: Pick<CaseContext, 'timeoutMs'>) => step.kind === 'command' || step.kind === 'agent' ? step.timeoutSeconds * 1000 : context.timeoutMs;
@@ -163,7 +170,7 @@ async function runStep(step: E2eStep, index: number, context: CaseContext): Prom
   if (step.kind === 'http') {
     const path = substitute(step.path, context.vars);
     const body = step.body === undefined ? undefined : JSON.stringify(substitute(step.body, context.vars));
-    const response = await context.fetcher(new URL(path, context.url), { method: step.method, signal: AbortSignal.timeout(context.timeoutMs),
+    const response = await context.fetcher(onTarget(path, context.url), { method: step.method, signal: AbortSignal.timeout(context.timeoutMs),
       headers: { Authorization: `Bearer ${context.vars.token}`, 'Content-Type': 'application/json', ...(step.method === 'POST' ? { 'Idempotency-Key': context.idempotency(index) } : {}) }, body });
     const text = await response.text();
     let parsed: unknown = undefined;
@@ -183,7 +190,7 @@ async function runStep(step: E2eStep, index: number, context: CaseContext): Prom
   const text = step.text === undefined ? '' : substitute(step.text, context.vars);
   const exact = step.exact ?? true;
   const target = () => step.role ? page.getByRole(step.role, { name: text, exact }).first() : page.getByText(text, { exact }).first();
-  if (step.action === 'open') await page.goto(new URL(substitute(step.path!, context.vars), context.url).toString(), { waitUntil: 'load', timeout });
+  if (step.action === 'open') await page.goto(onTarget(substitute(step.path!, context.vars), context.url).toString(), { waitUntil: 'load', timeout });
   else if (step.action === 'fill') await page.getByLabel(substitute(step.label!, context.vars)).first().fill(substitute(step.value!, context.vars), { timeout });
   else if (step.action === 'click') await target().click({ timeout });
   else await target().waitFor({ state: 'visible', timeout });
@@ -202,7 +209,7 @@ async function attemptCase(entry: CaseFile, options: Required<Pick<RunOptions, '
   let browser: E2eBrowser | null = null, page: E2ePage | null = null;
   const session = (index: number) => `graphyard-e2e-${options.runId}-${definition.id}-${options.attempt}-${index + 1}`.replace(/[^a-zA-Z0-9_.-]/g, '-').slice(0, 120);
   const context: CaseContext = { url: options.url, vars, timeoutMs: options.stepTimeoutMs, fetcher: options.fetcher, pageErrors, secrets,
-    general: { root: options.root, env: stepEnvironment(options.url, secrets, options.hostEnvironment), run: options.processRunner, artifacts: options.artifactsDirectory, session },
+    general: { root: options.root, env: stepEnvironment(options.url, secrets, options.hostEnvironment), run: options.processRunner, artifacts: options.artifactsDirectory, session, signal: options.signal },
     idempotency: index => `e2e:${definition.id}:${options.runId}:${options.attempt}:${index}`,
     page: async () => {
       if (!page) {

@@ -136,7 +136,9 @@ export async function decisionReads(effects: DaemonEffects, held: HeldDecisions,
     call && ((item: Work, ...rest: A) => { moves(item); const made = call(item, ...rest); made.then(() => moves(item), () => moves(item)); return made; });
   const reads: DaemonEffects = new Proxy(effects, { get: (target, property, receiver) => {
     if (property === 'decisions') return target.decisions && read;
-    if (property === 'decide' || property === 'withdraw') return writes(Reflect.get(target, property, receiver));
+    // Each by its own type: one call over their union would infer `writes`'s arguments from whichever member TypeScript orders first.
+    if (property === 'decide') return writes(target.decide);
+    if (property === 'withdraw') return writes(target.withdraw);
     if (property === 'resume') return writes(target.resume);
     return Reflect.get(target, property, receiver);
   } });

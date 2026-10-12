@@ -1,6 +1,8 @@
 import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { mkdir, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { daemonStateSchema, emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
@@ -21,7 +23,8 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
  * site built, served on loopback and its required and uat cases run over HTTP — while the script
  * injects the preview's three outcomes and the tip moving under a push: some heads serve a broken
  * score (a failing required case: refused, reworked once, resubmitted), some builds hang past the
- * budget (cancelled, the head queued and previewed again), some pushes are rejected on a moved tip
+ * budget (cancelled, the head queued and previewed again), some required cases run a command that
+ * hangs past the budget (its process group killed, the head previewed again), some pushes are rejected on a moved tip
  * (re-trialled and previewed again on the new tip), and some merges change only docs (never
  * previewed). Every item must be delivered exactly once, no preview checkout, slot or late build
  * may outlive its preview, the writer's state stays bounded and every system invariant holds.
@@ -41,6 +44,9 @@ const docsOnly = (n: number) => n % 9 === 0;
 const breaksScore = (n: number) => n % 7 === 0 && !docsOnly(n);
 const hangsBuild = (n: number) => n % 5 === 0 && !docsOnly(n) && !breaksScore(n);
 const tipMoves = (n: number) => n % 11 === 0 && !docsOnly(n);
+const hangsCommand = (n: number) => n % 13 === 0 && !docsOnly(n) && !breaksScore(n) && !hangsBuild(n) && !tipMoves(n);
+/** What a hanging command step's process line names, so the soak can look for it after its preview. */
+const hangingCommand = (marks: string, n: number) => `sleep 30 && touch ${join(marks, `survived-${n}`)}`;
 
 const made: string[] = [];
 after(async () => { for (const directory of made) await rm(directory, { recursive: true, force: true }); });
@@ -54,10 +60,10 @@ class World {
   submissions = new Map<number, { head: string; submittedAt: number }>();
   merges = new Map<string, { n: number; head: string }>();
   previews: { n: number; verdict: PreviewVerdict }[] = [];
-  hung = new Map<number, number>(); moved = new Set<number>();
+  hung = new Map<number, number>(); moved = new Set<number>(); commandHung = new Set<number>();
   trials = 0; activeBuilds = 0; lateBuilds = 0;
   slots = previewSlots();
-  constructor(readonly now: () => number, readonly root: string, readonly base: string) {}
+  constructor(readonly now: () => number, readonly root: string, readonly base: string, readonly marks: string) {}
   tip() { return this.main[0]!; }
   submit(n: number, attempt: number, at: number) { this.submissions.set(n, { head: sha(`head${n}-${attempt}`), submittedAt: at }); }
   firstHead(n: number) { return this.submissions.get(n)!.head === sha(`head${n}-1`); }
@@ -94,6 +100,12 @@ class World {
       await write('site/scores.json', { best: broken ? 'none' : merge.n });
       await write('site/index.html', 'play');
       await write('e2e/cases/scores.json', { id: 'scores', title: 'A player sees the best score', tags: ['api'], target: 'any', required: true, steps: [{ kind: 'http', name: 'read', method: 'GET', path: '/scores.json', status: 200, expect: [{ path: 'best', type: 'number' }] }] });
+      // A hanging command step, run first, in the first preview of such an item only.
+      if (hangsCommand(merge.n) && !this.commandHung.has(merge.n)) {
+        this.commandHung.add(merge.n);
+        await write('e2e/cases/a-hang.json', { id: 'a-hang', title: 'A command that never ends', tags: ['api'], target: 'uat', required: true,
+          steps: [{ kind: 'command', run: `touch ${join(this.marks, `started-${merge.n}`)} && ${hangingCommand(this.marks, merge.n)}`, timeoutSeconds: 600 }] });
+      }
       await write('e2e/cases/home.json', { id: 'home', title: 'The home page answers', tags: ['api'], target: 'uat', required: false, steps: [{ kind: 'http', name: 'home', method: 'GET', path: '/', status: 200, expect: [] }] });
     }
     return '';
@@ -139,7 +151,7 @@ class World {
       preview: async (mergeSha, files, item) => {
         if (files.every(path => path.startsWith('docs/'))) return null;
         world.building = world.merges.get(mergeSha)!;
-        const verdict = await runPreview({ root: world.root, base: world.base, mergeSha, site, token: '', timeoutMs: 400, stepTimeoutMs: 5_000, run: world.run, shell: world.shell, slots: world.slots });
+        const verdict = await runPreview({ root: world.root, base: world.base, mergeSha, site, timeoutMs: 400, stepTimeoutMs: 5_000, run: world.run, shell: world.shell, slots: world.slots });
         world.building = null;
         world.previews.push({ n: Number(item.key.slice(3)), verdict });
         return verdict;
@@ -163,9 +175,10 @@ class World {
 
 test('unit:soak-merge-preview — a simulated day on the real loop with the real preview: passing previews land, failing required cases are refused and reworked once, timed-out previews are cancelled and retried, moved tips are re-trialled and previewed again, docs-only merges skip it, every item lands exactly once, and no preview checkout, slot or late build outlives its preview while the state stays bounded and every invariant holds', { timeout: 300_000 }, async () => {
   const root = await realpath(await temporaryDirectory('soak-merge-preview')); made.push(root);
-  const base = join(root, 'worktrees'); await mkdir(base);
+  const base = join(root, 'worktrees'), marks = join(root, 'marks'); await mkdir(base); await mkdir(marks);
   let now = start;
-  const world = new World(() => now, root, base);
+  const world = new World(() => now, root, base, marks);
+  const running = (n: number) => { try { return execFileSync('pgrep', ['-f', hangingCommand(marks, n)], { encoding: 'utf8' }).trim(); } catch { return ''; } };
   for (let n = 1; n <= items; n++) world.submit(n, 1, start + n * submitEveryMs);
   const effects = { agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
     snapshot: async () => ({ work: world.snapshot(), now: iso(now) }),
@@ -184,6 +197,7 @@ test('unit:soak-merge-preview — a simulated day on the real loop with the real
     assert.equal(world.slots.running, 0, `cycle ${cycle}: every preview slot is freed`);
     assert.equal(world.activeBuilds, 0, `cycle ${cycle}: no build outlives its preview`);
     assert.deepEqual(await readdir(base), [], `cycle ${cycle}: every preview checkout and its owner marker removed`);
+    for (const n of world.commandHung) assert.equal(running(n), '', `cycle ${cycle}: GY-${n}'s hanging command step outlived its preview`);
     assert.ok(state.mergeWriter.queue.length <= mergeWriterKeptQueue && state.mergeWriter.refusals.length <= mergeWriterKeptRefusals && state.mergeWriter.reworks.length <= mergeWriterKeptReworks, `cycle ${cycle}: the state is bounded`);
     for (const check of state.invariants.report) assert.ok(check.holds, `cycle ${cycle}: invariant ${check.invariant} is violated: ${check.line}`);
   }
@@ -210,6 +224,15 @@ test('unit:soak-merge-preview — a simulated day on the real loop with the real
   for (const n of hanging) assert.deepEqual(ofItem(n), ['timeout', 'timeout', 'pass'], `GY-${n}`);
   assert.equal(world.lateBuilds, hanging.length * 2, 'every timed-out build was cancelled and ended before its slot was freed');
   assert.ok(hanging.every(n => !world.decided.includes(n)), 'a timeout grounds no rework');
+  // Command steps: the in-flight process was started, killed with its group at the budget, and the head previewed again.
+  const commands = all.filter(hangsCommand);
+  assert.ok(commands.length >= 2);
+  for (const n of commands) {
+    assert.deepEqual(ofItem(n), ['timeout', 'pass'], `GY-${n}`);
+    assert.ok(existsSync(join(marks, `started-${n}`)), `GY-${n}'s command step was in flight when the budget ran out`);
+    assert.equal(existsSync(join(marks, `survived-${n}`)), false);
+    assert.ok(!world.decided.includes(n), 'a timeout grounds no rework');
+  }
   // Retrials: a moved tip re-trialled the merge and previewed the new merge commit again.
   for (const n of all.filter(tipMoves)) assert.ok(new Set(world.previews.filter(entry => entry.n === n).map(entry => entry.verdict.mergeSha)).size >= 2, `GY-${n} was previewed again on the moved tip`);
   assert.ok(world.trials > items);
