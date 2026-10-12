@@ -221,7 +221,7 @@ export async function verifyDeployment(work: Work, effects: VerificationEffects,
   if (!assessment.verifiable) return result(assessment, null);
   // Follow-ups are filed before the observation is recorded: a filing that fails leaves the delivery
   // unobserved, so the retry files it, where recording first would refuse every retry as already observed.
-  const postDeploy = await filePostDeployFollowUps(current, assessment.record!.sha, snapshot.work, effects.file, new Date(now()), effects.patterns);
+  const postDeploy = await filePostDeployFollowUps(current, assessment.record!.sha, snapshot.work, effects.file, new Date(now()), effects.patterns, new Date(observation.at));
   const existing = current.delivery!.deployment?.sha === assessment.record!.sha;
   if (!existing) await effects.record(current, assessment.record!);
   return result(assessment, existing ? 'existing' : 'now', postDeploy);
@@ -237,7 +237,7 @@ export type PatternProjection = Pick<UnderThreshold, 'since' | 'projected'>;
 export type PatternReader = (pattern: { kind: InterventionKind; stage: Stage | 'none' }) => Promise<PatternProjection | null>;
 /** The projections `postDeployChecks` reads, keyed by the declared proof; a proof with no entry, or a null one, has no report reading. */
 export type PatternProjections = Readonly<Record<string, PatternProjection | null>>;
-const day = 86_400_000;
+const hour = 3_600_000, day = 24 * hour;
 /**
  * The kind-at-stage pair a declared `manual:post-deploy/intervention-pattern-KIND-STAGE` proof names
  * (interventions/patterns.ts files it so), or null for any other proof: the kinds carry hyphens
@@ -273,33 +273,53 @@ export function criterionHoldDays(text: string): number | null {
   return days.length ? Math.max(...days) : null;
 }
 /**
+ * The live window a criterion's reading needs, in hours, or null when it names none: "a 24-hour
+ * window of live activity", "during 24h of live activity". Unlike a day window, which the intervention
+ * ledger counts from the merge, an hour window is live activity on the serving release (GY-1727).
+ */
+export function criterionWindowHours(text: string): number | null {
+  const hours = [...text.matchAll(/\b(\d{1,3})[-\s]hours?\b|\b(\d{1,3})h\b/gi)].map(match => Number(match[1] ?? match[2])).filter(value => value > 0);
+  return hours.length ? Math.max(...hours) : null;
+}
+/**
  * GY-1698 AC-1: the earliest instant the follow-up's reading can exist, or undefined for a follow-up
  * whose criterion names no window and whose proof the report holds no row for. From the report's
  * reading for the pattern: `since` plus the criterion's window where the streak has begun, else the
  * instant the report projects the streak to begin plus any consecutive-day hold the criterion names
- * (`projected` is that start, not the hold's end); and never before the delivered item's merge
- * plus the window the criterion names, the later of the two where both exist.
+ * (`projected` is that start, not the hold's end); and never before the criterion's own bound — the
+ * delivered item's merge plus the day window it names, and (GY-1727) the instant the serving release
+ * was first observed, `servedAt`, plus the hour window it names — the later of all where several exist.
  */
-export function observationWindowFor(work: Pick<Work, 'key' | 'delivery'>, criterion: { id: string; text: string }, proof: string, projection: PatternProjection | null | undefined): ObservationWindow | undefined {
-  const windowDays = criterionWindowDays(criterion.text), holdDays = criterionHoldDays(criterion.text), mergedAt = work.delivery ? Date.parse(work.delivery.mergedAt) : NaN;
+export function observationWindowFor(work: Pick<Work, 'key' | 'delivery'>, criterion: { id: string; text: string }, proof: string, projection: PatternProjection | null | undefined, servedAt?: number): ObservationWindow | undefined {
+  const windowDays = criterionWindowDays(criterion.text), holdDays = criterionHoldDays(criterion.text), windowHours = criterionWindowHours(criterion.text), mergedAt = work.delivery ? Date.parse(work.delivery.mergedAt) : NaN;
   const iso = (ms: number) => new Date(ms).toISOString();
-  const fromMerge = windowDays !== null && Number.isFinite(mergedAt) ? mergedAt + windowDays * day : null;
+  const fromDays = windowDays !== null && Number.isFinite(mergedAt) ? mergedAt + windowDays * day : null;
+  // A live window runs on the serving release: from when it was first observed serving, or the merge where no observation is known.
+  const live = servedAt !== undefined && Number.isFinite(servedAt) ? servedAt : Number.isFinite(mergedAt) ? mergedAt : null;
+  const fromHours = windowHours !== null && live !== null ? live + windowHours * hour : null;
+  const fromMerge = fromDays !== null && (fromHours === null || fromDays >= fromHours) ? fromDays : fromHours;
   const pattern = patternOfProof(proof);
   const since = projection?.since ? Date.parse(projection.since) : null, projected = projection?.projected ? Date.parse(projection.projected) : null;
   // `projected` is the streak's start (UnderThreshold); a consecutive-day hold is satisfied only that many days later.
   const fromReport = since !== null ? since + (windowDays ?? 0) * day : projected !== null ? projected + (holdDays ?? 0) * day : null;
   const reading = pattern ? `the ${pattern.kind} reading at ${pattern.stage === 'none' ? 'no stage' : `the ${pattern.stage} stage`}` : `the reading ${proof} names`;
   const window = windowDays !== null ? `${criterion.id} names a ${windowDays}-day window` : `${criterion.id} names no window`;
+  const bound = fromMerge === null ? '' : fromMerge === fromDays
+    ? `${work.key} merged at ${iso(mergedAt)}, ${windowDays} days after which is no later`
+    : `${work.key}'s serving release was first observed at ${iso(live!)}, ${windowHours} hours after which is no later`;
   if (fromReport !== null && (fromMerge === null || fromReport >= fromMerge)) {
     const detail = since !== null
       ? `the intervention report reads ${reading} under its threshold since ${iso(since)}, and ${window}, so the reading can first exist at ${iso(fromReport)}`
       : holdDays !== null
         ? `the intervention report reads ${reading} not yet under its threshold (since null) and projects the streak to begin at ${iso(projected!)}, and ${criterion.id} names a ${holdDays}-consecutive-day hold, so the reading can first exist at ${iso(fromReport)}`
         : `the intervention report reads ${reading} not yet under its threshold (since null) and projects the streak to begin at ${iso(projected!)}, so the reading can first exist then`;
-    return { notBefore: iso(fromReport), basis: 'intervention-report', detail: `${detail}${fromMerge !== null ? `; ${work.key} merged at ${iso(mergedAt)}, ${windowDays} days after which is no later` : ''}`.slice(0, 2000) };
+    return { notBefore: iso(fromReport), basis: 'intervention-report', detail: `${detail}${bound ? `; ${bound}` : ''}`.slice(0, 2000) };
   }
   if (fromMerge === null) return undefined;
-  const detail = `${work.key} merged at ${iso(mergedAt)} and ${window}, so the reading can first exist at ${iso(fromMerge)}${fromReport !== null ? ` (the intervention report's projection for ${reading}, ${iso(fromReport)}, is earlier)` : pattern ? ` (the intervention report holds no reading for ${reading})` : ''}`;
+  const origin = fromMerge === fromDays
+    ? `${work.key} merged at ${iso(mergedAt)} and ${window}`
+    : `${work.key}'s serving release was first observed at ${iso(live!)} and ${criterion.id} names a ${windowHours}-hour live window`;
+  const detail = `${origin}, so the reading can first exist at ${iso(fromMerge)}${fromReport !== null ? ` (the intervention report's projection for ${reading}, ${iso(fromReport)}, is earlier)` : pattern ? ` (the intervention report holds no reading for ${reading})` : ''}`;
   return { notBefore: iso(fromMerge), basis: 'criterion-window', detail: detail.slice(0, 2000) };
 }
 /**
@@ -314,8 +334,12 @@ export function observationWindowFor(work: Pick<Work, 'key' | 'delivery'>, crite
  * from its own head against that serving release — a pre-merge observation there, never itself
  * declared post-deploy.
  */
-export function postDeployChecks(work: Work, release: string, now = new Date(), projections: PatternProjections = {}): PostDeployCheck[] {
+export function postDeployChecks(work: Work, release: string, now = new Date(), projections: PatternProjections = {}, servedAt?: Date): PostDeployCheck[] {
   const implementers = implementerIdentities(work), mergedAt = work.delivery ? Date.parse(work.delivery.mergedAt) : NaN;
+  // GY-1727: a live window runs from the earliest instant the release is known to serve the item — a
+  // deployment already recorded at this release, else the observation filing now, else the filing clock.
+  const recorded = work.delivery?.deployment?.sha === release ? Date.parse(work.delivery.deployment.observedAt) : NaN;
+  const served = Math.min(...[recorded, servedAt?.getTime() ?? now.getTime()].filter(Number.isFinite));
   // The latest applicable record decides, as on the evidence path: a later trusted failure outranks an earlier pass.
   const observes = (proof: string) => {
     const latest = (work.evidence ?? []).filter(evidence => !!work.delivery && evidence.proof === proof && evidence.sha === release && evidence.trusted && !evidence.revocation
@@ -331,7 +355,7 @@ export function postDeployChecks(work: Work, release: string, now = new Date(), 
     const text = `From this head against the serving release ${short} that carries ${work.key}'s merge ${work.delivery?.mergeSha.slice(0, 12) ?? ''}: ${criterion.text}`.slice(0, 2000);
     const requestId = postDeployFollowUpId(work, criterion.id, proof, release);
     // GY-1698: a windowed reading's earliest instant rides the follow-up, so nothing dispatches it before then.
-    const observationWindow = observationWindowFor(work, criterion, proof, projections[proof]);
+    const observationWindow = observationWindowFor(work, criterion, proof, projections[proof], served);
     return { criterion: criterion.id, proof, result: 'owed' as const, followUp: { title, requestId, input: {
       title, type: 'chore' as const, priority: 1, dependencies: [work.id], reason: `${work.key} ${criterion.id}'s declared post-deploy verification ${proof} is unobserved on the serving release ${short}`.slice(0, 2000),
       // The marker leads, so no truncation of a long criterion can cut the identity a later check matches by.
@@ -352,9 +376,9 @@ const followUpOf = (item: Pick<Work, 'description'>) => item.description?.starts
  * another so none is filed against a snapshot another has just changed — so the live observation
  * the merge never waited for is owned by an item rather than by nobody.
  */
-export async function filePostDeployFollowUps(work: Work, release: string, all: readonly Pick<Work, 'key' | 'description'>[], file?: VerificationEffects['file'], now = new Date(), patterns?: PatternReader) {
+export async function filePostDeployFollowUps(work: Work, release: string, all: readonly Pick<Work, 'key' | 'description'>[], file?: VerificationEffects['file'], now = new Date(), patterns?: PatternReader, servedAt?: Date) {
   const known = [...all], results: (Omit<PostDeployCheck, 'followUp'> & { followUp: string | null })[] = [];
-  for (const { followUp, ...rest } of postDeployChecks(work, release, now, await patternProjections(work, patterns))) {
+  for (const { followUp, ...rest } of postDeployChecks(work, release, now, await patternProjections(work, patterns), servedAt)) {
     if (!followUp) { results.push({ ...rest, followUp: null }); continue; }
     const filed = known.find(item => followUpOf(item) === followUp.requestId)?.key;
     if (filed || !file) { results.push({ ...rest, followUp: filed ?? null }); continue; }
