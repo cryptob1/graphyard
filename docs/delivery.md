@@ -14,7 +14,7 @@ Main→candidate→uat→production; `.railway/railway.ts` deploys `release/uat`
 - Failed candidates file a [hold](validation.md#release-holds) per failed outcome, else one follow-up (`release follow-up ID` retries), as the [filing credential](#release-filing-credential).
 - `release soak ID --sha SHA --result success|failure|cancelled [--run URL] [--report NAME]` (`release-candidate-soak.yml`) records advisory `rc-soak/ID` (promotion ignores it).
 
-**The master loop drives promotion** (`promote=true`) once main differs from the last `rc-production/` and cut SHAs, nothing queued, and `run.promoteEveryMinutes` (`graphyard master config promoteEveryMinutes=N`; 10, `0` off) passed; failed dispatches raise `promotion:failed`. Under a `control-plane` merger the loop cuts (`run.candidates.everyMerges` 10, `idleMinutes` 15), validates, promotes and verifies (`GRAPHYARD_UAT_URL`, `GRAPHYARD_PRODUCTION_URL`; no workflow; a managed repository runs its own [required cases](validation.md)); a failed required E2E case reverts the newest candidate item a matching verification map covers (`candidateReverts`; reopened); a main-watch freeze holds all. A `GRAPHYARD_UAT_STATIC` site's passing [merge-writer](delivery-redesign.md#merge-writer) trials (not docs/tests-only; ≤2 concurrent) run pre-build required/uat cases served (uncredentialed): failing/secret-declaring required ones, or none runnable, fail the trial; timeouts/errors re-queue; `mergeLedger.trial.preview` records. `release status` lists candidates; `release GY-N EPOCH` leases. Needs `vars.UAT_URL`/`PRODUCTION_URL`, `GRAPHYARD_UAT_TOKEN`/`RELEASE_TOKEN`/`E2E_RECORD_TOKEN`.
+**The master loop drives promotion** (`promote=true`) once main differs from the last `rc-production/` and cut SHAs, nothing queued, and `run.promoteEveryMinutes` (`graphyard master config promoteEveryMinutes=N`; 10, `0` off) passed; failed dispatches raise `promotion:failed`. Under a `control-plane` merger the loop cuts (`run.candidates.everyMerges` 10, `idleMinutes` 15), validates, promotes and verifies (`GRAPHYARD_UAT_URL`, `GRAPHYARD_PRODUCTION_URL`; no workflow; a managed repository runs its own [required cases](validation.md)); a failed required E2E case reverts the newest candidate item a matching verification map covers (`candidateReverts`; reopened); a main-watch freeze holds all. A `GRAPHYARD_UAT_STATIC` site's passing [merge-writer](delivery-redesign.md#merge-writer) trials (not docs/tests-only; ≤2 concurrent) run pre-build required/uat cases served uncredentialed: failing/secret-declaring required ones, or none runnable, fail it; timeouts/errors re-queue; `mergeLedger.trial.preview` records. `release status` lists candidates; `release GY-N EPOCH` leases. Needs `vars.UAT_URL`/`PRODUCTION_URL`, `GRAPHYARD_UAT_TOKEN`/`RELEASE_TOKEN`/`E2E_RECORD_TOKEN`.
 
 ### Release filing credential
 
@@ -32,7 +32,7 @@ Exact-head gates merge; [candidates](#release-candidates) deploy. [The redesign]
 
 ### Main guard
 
-Every 30 s the main guard reruns, then reverts, a merge failing a required check its parent passed (`graphyard-revert/` PR; item reopened). The [revert approver App](deployment.md#variables) approves only a green exact inverse (`doctor` names a missing one), a third refusal abandoning (`approval-refused`).
+Every 30 s the main guard reruns, then reverts, merges failing required checks their parents passed (`graphyard-revert/` PR; item reopened). The [revert approver App](deployment.md#variables) approves only a green exact inverse (`doctor` names a missing one), a third refusal abandoning (`approval-refused`).
 
 ## Managed repositories
 
@@ -72,7 +72,7 @@ Observers `POST /api/delivery/observe`:
 {"registration":{"id":"production-observer","revision":1},"epoch":4,"environment":{"id":"production","revision":1},"expectedGeneration":4,"snapshotId":"railway:snapshot:01J8Q4Z0Y3","observedAt":"2026-09-18T20:15:07Z","validFrom":"2026-09-18T20:12:31Z","validTo":"2026-09-18T20:15:07Z","services":[{"service":"api","complete":true,"deployment":{"id":"dep-a1","status":"success","deployedAt":"2026-09-18T20:12:31Z"},"instances":[{"instance":"api-1","digest":"sha256:1111111111111111111111111111111111111111111111111111111111111111","measurement":"host-attestation","healthy":true}]},{"service":"web","complete":true,"deployment":{"id":"dep-w7","status":"success","deployedAt":"2026-09-18T20:12:40Z"},"instances":[{"instance":"web-1","digest":"sha256:2222222222222222222222222222222222222222222222222222222222222222","measurement":"host-attestation","healthy":true}]}]}
 ```
 
-Only complete listings verify (`POST /api/delivery/notify` hints); sweeps (`graphyard delivery sweep`) verify generations sharing a `freshnessSeconds` interval; `graphyard delivery` shows state.
+Only complete listings verify (`POST /api/delivery/notify` hints); sweeps (`graphyard delivery sweep`) verify generations sharing `freshnessSeconds` intervals; `graphyard delivery` shows state.
 
 `master status` `delivery`: `readyToMerged`, `mergedToProduction`, `stages` p50/p90 (`24h`/`7d`); 7-day p90 over `deliverySpeed` (2 h; merged→production 45 min) raises attention.
 
