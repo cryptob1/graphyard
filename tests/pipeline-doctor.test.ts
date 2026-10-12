@@ -1096,9 +1096,13 @@ test('integration:doctor-filing-after-new-instance — an instance first seen af
   clearDoctorRuns();
   const filed: string[] = [];
   const preLanding = [capacityFault('capacity|pre|gate', -200 * 60_000)];
-  const afterLanding = [
+  const belowThreshold = [
     capacityFault('capacity|post|1', -10 * 60_000),
     capacityFault('capacity|post|2', -5 * 60_000),
+  ];
+  const atThreshold = [
+    ...belowThreshold,
+    capacityFault('capacity|post|3', -1 * 60_000),
   ];
   const doctor = filingDoctor([gy1711CapacityFile()], async input => { filed.push(input.title); return item({ id: 'id-GY-1712', key: 'GY-1712', title: input.title }); });
   const work = [gy1708Delivered()];
@@ -1109,17 +1113,48 @@ test('integration:doctor-filing-after-new-instance — an instance first seen af
   await doctorRunsSettled();
   assert.deepEqual(filed, [], 'pre-landing evidence alone does not file while the delivered cover stands');
   clearDoctorRuns();
-  // Post-landing: the cover falls and the doctor files exactly when the recurrence sweep would.
+  // Below the default recurrence threshold: cover has fallen, but the doctor matches the loop and waits.
+  const waiting = cycle(work, { doctor });
+  waiting.state.faults.instances = belowThreshold;
+  await doctorStep(waiting);
+  await doctorRunsSettled();
+  assert.deepEqual(filed, [], 'one or two post-landing instances stay suppressed under the default threshold of 3');
+  assert.equal(recurringClasses(belowThreshold, work, faultClassPolicyDefaults, Date.parse(observedAt)).find(entry => entry.faultClass === 'capacity')!.file, false);
+  assert.ok(Object.values(waiting.state.actions).some(action => /below the recurrence threshold/.test(action.detail)),
+    'the run notes the below-threshold suppress reason');
+  clearDoctorRuns();
+  // At threshold: the doctor files exactly when the recurrence sweep would.
   const replay = cycle(work, { doctor });
-  replay.state.faults.instances = afterLanding;
+  replay.state.faults.instances = atThreshold;
   await doctorStep(replay);
   await doctorRunsSettled();
-  assert.deepEqual(filed, [gy1711CapacityFile().title], 'the doctor files once a post-landing instance exists');
+  assert.deepEqual(filed, [gy1711CapacityFile().title], 'the doctor files once post-landing instances reach the recurrence threshold');
   assert.deepEqual(replay.state.doctor.runs[0].filed.map(entry => entry.work), ['GY-1712']);
-  const sweep = recurringClasses(afterLanding, work, { threshold: 1, windowHours: 24 }, Date.parse(observedAt)).find(entry => entry.faultClass === 'capacity')!;
+  const sweep = recurringClasses(atThreshold, work, faultClassPolicyDefaults, Date.parse(observedAt)).find(entry => entry.faultClass === 'capacity')!;
   assert.equal(sweep.file, true, 'the loop\'s recurrence sweep would file at the same moment');
   assert.equal(sweep.item, null);
   clearDoctorRuns();
+});
+
+test('integration:doctor-settlement-uses-plane-clock — applyDoctorRun compares fault times to the fresh snapshot clock, not a lagging coordinator now()', async () => {
+  // Plane ahead of the host: post-landing instances stamped on the plane clock look "in the future"
+  // against the coordinator's now(), and a host-clock comparison would keep the delivered cover.
+  const planeNow = Date.parse(observedAt);
+  const hostBehind = () => planeNow - 60 * 60_000;
+  const filed: string[] = [];
+  const atThreshold = [
+    capacityFault('capacity|skew|1', -10 * 60_000),
+    capacityFault('capacity|skew|2', -5 * 60_000),
+    capacityFault('capacity|skew|3', -1 * 60_000),
+  ];
+  const work = [gy1708Delivered()];
+  const effects = filingDoctor([gy1711CapacityFile()], async input => { filed.push(input.title); return item({ id: 'id-GY-1713', key: 'GY-1713', title: input.title }); });
+  const replay = cycle(work, { doctor: effects, now: hostBehind });
+  replay.state.faults.instances = atThreshold;
+  const run = summary(observedAt, 'running');
+  replay.state.doctor.runs = [run];
+  await applyDoctorRun(replay, effects, run, { findings: [], actions: [], filed: [gy1711CapacityFile()] }, hostBehind);
+  assert.deepEqual(filed, [gy1711CapacityFile().title], 'settlement against the plane clock files at threshold despite the lagging host clock');
 });
 
 test('integration:delivered-cover-through-duplicate-closure — with GY-1710 closed duplicate-of GY-1708, later capacity instances link to GY-1708 instead of producing a new filing', () => {

@@ -68,12 +68,31 @@ export function deliveredClassCover(work: readonly Work[], faultClass: FaultClas
 }
 
 /**
- * Whether an open item or a standing delivered cover already accounts for `faultClass` (GY-1711):
- * the doctor's filing gate, matching recurringClasses' GY-1632 rule.
+ * Whether the doctor must not file `faultClass` (GY-1711): an open item stands, a delivered cover
+ * stands under the GY-1632 rule, or a delivered cover has fallen to post-landing instances that are
+ * still below the recurrence threshold — the same filing eligibility as recurringClasses, so the
+ * doctor files a class exactly when the loop's own sweep would and no later.
  */
 export function faultClassIsCovered(work: readonly Work[], faultClass: FaultClass, instances: readonly FaultInstance[], now: number, policy: FaultClassPolicy): boolean {
   if (openFaultClassItem(work, faultClass)) return true;
-  return deliveredClassCover(work, faultClass, windowedUnlinked(instances, faultClass, now, policy)) !== null;
+  const recent = windowedUnlinked(instances, faultClass, now, policy);
+  if (deliveredClassCover(work, faultClass, recent) !== null) return true;
+  // Delivered cover fell (at least one post-landing instance): suppress until the loop would file.
+  return deliveredFaultClassCover(work, faultClass) !== null && recent.length < policy.threshold;
+}
+
+/**
+ * Why faultClassIsCovered suppresses a doctor filing, for the run note (GY-1711).
+ * Null when the class is free to file.
+ */
+export function doctorFaultClassSuppressReason(
+  work: readonly Work[], faultClass: FaultClass, instances: readonly FaultInstance[], now: number, policy: FaultClassPolicy,
+): 'open' | 'delivered' | 'below-threshold' | null {
+  if (openFaultClassItem(work, faultClass)) return 'open';
+  const recent = windowedUnlinked(instances, faultClass, now, policy);
+  if (deliveredClassCover(work, faultClass, recent) !== null) return 'delivered';
+  if (deliveredFaultClassCover(work, faultClass) !== null && recent.length < policy.threshold) return 'below-threshold';
+  return null;
 }
 
 export interface ClassRecurrence { faultClass: FaultClass; count: number; recent: FaultInstance[]; unlinked: FaultInstance[]; item: Work | null; file: boolean }

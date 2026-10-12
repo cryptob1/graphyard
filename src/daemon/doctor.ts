@@ -9,7 +9,7 @@ import { doctorLimitRetryAt, doctorLimitUntilMarker, headlessTimeoutLimitCharge,
 import { isClosed } from '../model/closure.js';
 import { planeWideRefusal } from '../model/blocker-class.js';
 import { RefusedResponse } from '../model/refusal.js';
-import { faultClassIsCovered, faultClassPolicyDefaults, faultClassPolicyFromEnv, openFaultClassItem, type FaultClassPolicy, type FaultInstance } from '../model/fault-classes.js';
+import { doctorFaultClassSuppressReason, faultClassIsCovered, faultClassPolicyDefaults, faultClassPolicyFromEnv, openFaultClassItem, type FaultClassPolicy, type FaultInstance } from '../model/fault-classes.js';
 import { workerSubmissionBoundMs } from '../model/attempt-bound.js';
 import { scopeRefusalBlocker, unplannedPaths } from '../model/scope.js';
 import { approverSessionName, guardBroadScope } from '../master/autonomy.js';
@@ -245,11 +245,21 @@ export function clearDoctorRuns() { live = null; active = null; stopping = null;
 const keyOf = (subjects: string[]) => `doctor:${createHash('sha256').update(subjects.sort().join(',')).digest('hex').slice(0, 24)}`;
 const subjectKey = (work: readonly Work[], subject: string) => work.find(item => item.key === subject || item.id === subject)?.key ?? null;
 
+/** Human-readable reason the doctor skipped filing a fault class (GY-1711). */
+export function doctorCoverNote(work: readonly Work[], faultClass: DoctorFile['faultClass'], instances: readonly FaultInstance[], now: number, policy: FaultClassPolicy): string {
+  const reason = doctorFaultClassSuppressReason(work, faultClass, instances, now, policy);
+  if (reason === 'open') return 'an open item';
+  if (reason === 'delivered') return 'a delivered item';
+  if (reason === 'below-threshold') return `post-landing instances below the recurrence threshold (${policy.threshold} in ${policy.windowHours} hours)`;
+  return openFaultClassItem(work, faultClass) ? 'an open item' : 'a delivered item';
+}
+
 /**
  * What the loop keeps of a doctor payload: one event per item it found or acted on, and the run
  * summary. `filed` entries are deduplicated first: a fault class an open item already stands for,
- * or a delivered item covers under the GY-1632 rule (every windowed unlinked instance predates its
- * landing), is recorded as covered, never filed twice (GY-1711).
+ * a delivered item covers under the GY-1632 rule (every windowed unlinked instance predates its
+ * landing), or a fallen delivered cover still below the recurrence threshold, is recorded as
+ * covered, never filed ahead of the loop's own sweep (GY-1711).
  */
 export function dedupDoctorFiles(
   filed: readonly DoctorFile[],
@@ -364,8 +374,21 @@ export async function applyDoctorRun(cycle: Cycle, effects: DoctorEffects, run: 
   // not in that cycle's snapshot: a run started before GY-1332 existed filed GY-1333 for the same
   // class. Its filings are deduplicated against a read taken now; without one, they wait for the
   // retry, which deduplicates against its own cycle's snapshot, rather than file blind.
-  const fresh = payload.filed.length ? await daemon.snapshot().then(read => read.work, () => null) : cycle.snapshot.work;
-  const work = fresh ?? cycle.snapshot.work;
+  // Cover comparisons use the control-plane clock (fresh snapshot.now, else the cycle clock), not
+  // the coordinator host's now(): fault instances are stamped from that plane clock, and a host
+  // behind the plane would treat a post-landing instance as future and incorrectly keep the cover.
+  let work = cycle.snapshot.work;
+  let coverNow = cycle.clock;
+  let fresh: typeof work | null = payload.filed.length ? null : work;
+  if (payload.filed.length) {
+    const read = await daemon.snapshot().then(entry => entry, () => null);
+    if (read) {
+      work = read.work;
+      fresh = read.work;
+      const observed = Date.parse(read.now);
+      if (Number.isFinite(observed)) coverNow = observed;
+    }
+  }
   const note = async (subject: string, detail: string, outcome: DaemonAction['state'] = 'done', kind: DaemonAction['kind'] = 'fault') => {
     const itemKey = subjectKey(work, subject);
     performed.push(await record(state, `${key}:${subject}:${performed.length}`, { kind, work: itemKey, principal: null, state: outcome, detail, attempts: 1, cycle: state.cycle }, now(), daemon.persist));
@@ -381,10 +404,9 @@ export async function applyDoctorRun(cycle: Cycle, effects: DoctorEffects, run: 
     await note(action.subject, `${action.outcome === 'applied' ? 'Ran' : 'Was refused'} \`${action.command}\`: ${action.detail}`.slice(0, 2000));
   const policy = daemon.faultClassPolicy ?? faultClassPolicyFromEnv(process.env);
   const instances = state.faults.instances;
-  const coveredBy = (faultClass: DoctorFile['faultClass']) => openFaultClassItem(work, faultClass) ? 'an open item' : 'a delivered item';
-  const deduped = dedupDoctorFiles(payload.filed, work, instances, now(), policy);
+  const deduped = dedupDoctorFiles(payload.filed, work, instances, coverNow, policy);
   for (const { file, covered } of deduped) {
-    if (covered) { await note('installation', `Not filing "${file.title}": the ${file.faultClass} fault class is already covered by ${coveredBy(file.faultClass)}`); continue; }
+    if (covered) { await note('installation', `Not filing "${file.title}": the ${file.faultClass} fault class is already covered by ${doctorCoverNote(work, file.faultClass, instances, coverNow, policy)}`); continue; }
     const filingKey = `${key}:file:${file.faultClass}`;
     if (isRefused(state.doctor.refusedFilings, filingDigest(file))) { state.doctor.refusedFilings = renewRefusal(state.doctor.refusedFilings, filingDigest(file), now()); await note('installation', `Not filing "${file.title}" again: master create refused this content earlier and the escalation for it stands; it is filed again only when the doctor corrects it`); continue; }
     if (!fresh) {
@@ -460,7 +482,7 @@ export async function retryDoctorFile(cycle: Cycle, effects: DoctorEffects, pend
   };
   const policy = daemon.faultClassPolicy ?? faultClassPolicyFromEnv(process.env);
   if (faultClassIsCovered(snapshot.work, pending.file.faultClass, state.faults.instances, clock, policy)) {
-    const by = openFaultClassItem(snapshot.work, pending.file.faultClass) ? 'an open item' : 'a delivered item';
+    const by = doctorCoverNote(snapshot.work, pending.file.faultClass, state.faults.instances, clock, policy);
     return drop(`Not filing "${pending.file.title}" on retry: the ${pending.file.faultClass} fault class is now covered by ${by}`, null, 'done');
   }
   // Queued through an outage beside another run's copy, the same content may already have been refused.

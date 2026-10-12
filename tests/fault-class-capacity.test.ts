@@ -558,12 +558,19 @@ test('unit:doctor-delivered-cover-dedup — a doctor re-offer of GY-1710\'s shap
 
 test('unit:postlanding-instance-files-afresh — an instance first seen after the delivered cover\'s landing is not covered, so the class files when the recurrence sweep would', () => {
   const gy1708 = deliveredCapacity('GY-1708', -60 * 60_000);
-  const after = [capacityInstance('capacity|post|1', -10 * 60_000), capacityInstance('capacity|post|2', -5 * 60_000), capacityInstance('capacity|post|3', -1 * 60_000)];
+  const below = [capacityInstance('capacity|post|1', -10 * 60_000), capacityInstance('capacity|post|2', -5 * 60_000)];
+  assert.equal(faultClassIsCovered([gy1708], 'capacity', below, gy1711Now, faultClassPolicyDefaults), true,
+    'one or two post-landing instances stay suppressed: the loop\'s default threshold is 3');
+  assert.deepEqual(dedupDoctorFiles([capacityFiling()], [gy1708], below, gy1711Now, faultClassPolicyDefaults).map(entry => entry.covered), [true],
+    'dedupDoctorFiles keeps the class covered until the recurrence threshold');
+  assert.equal(recurringClasses(below, [gy1708], faultClassPolicyDefaults, gy1711Now).find(entry => entry.faultClass === 'capacity')!.file, false,
+    'the loop\'s own sweep would not file below threshold either');
+  const after = [...below, capacityInstance('capacity|post|3', -1 * 60_000)];
   assert.equal(faultClassIsCovered([gy1708], 'capacity', after, gy1711Now, faultClassPolicyDefaults), false,
-    'post-landing instances withdraw the delivered cover');
+    'at the default threshold the delivered cover no longer suppresses filing');
   assert.deepEqual(dedupDoctorFiles([capacityFiling()], [gy1708], after, gy1711Now, faultClassPolicyDefaults).map(entry => entry.covered), [false],
     'dedupDoctorFiles lets the class through so the doctor files it');
-  const recurrence = recurringClasses(after, [gy1708], { threshold: 1, windowHours: 24 }, gy1711Now).find(entry => entry.faultClass === 'capacity')!;
+  const recurrence = recurringClasses(after, [gy1708], faultClassPolicyDefaults, gy1711Now).find(entry => entry.faultClass === 'capacity')!;
   assert.equal(recurrence.file, true, 'the loop\'s own recurrence sweep files at the same moment');
   assert.equal(recurrence.item, null);
 });
