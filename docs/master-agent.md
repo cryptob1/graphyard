@@ -5,7 +5,7 @@ The master (`coordinator`) routes and administers GitHub unasked, never implemen
 
 ## Operate
 
-Keep cycling: `master status`; `master run` dispatches (`schedule.order`); merge gate-passing candidates; rework findings; deployment verification (`master verify-deployment GY-N`, [refusals](operations-reference.md#perpetual-master-loop)); Close finished agent sessions. Live Confirm-access fixtures: [`master browser capture`](master-agent-reference.md#github-administration-through-the-browser), never a human. Stop when every in-scope item is Done or externally blocked, and every merge is live-verified or deployment-blocked. Ordinary findings, rework, idle workers, and proof setup are not stopping conditions. `controlPlane.production`: main ahead of production.
+Keep cycling: `master status`; `master run` dispatches (`schedule.order`); merge gate-passing candidates; rework findings; deployment verification (`master verify-deployment GY-N`, [refusals](operations-reference.md#perpetual-master-loop)); Close finished agent sessions. Live Confirm-access fixtures: [`master browser capture`](master-agent-reference.md#github-administration-through-the-browser), never a human. Stop only when every in-scope item is Done or has a genuinely external blocker recorded in Graphyard, and every merge is verified against the exact deployed release or deployment-blocked. Ordinary review findings, rework, idle workers, and proof setup are not stopping conditions. `controlPlane.production`: main ahead of production.
 
 `master restart` (stalled loop) runs `systemctl --user restart graphyard-master.service` if the [unit](onboarding.md#the-loop-must-be-supervised)'s ExecStart is node `cliPath` (or pin) `master run`, else detached; never from [dirty/non-forward checkouts](master-agent-sessions.md#the-coordinator-checkout-is-confined-at-the-os-level). [Confined](master-agent-sessions.md#the-coordinator-checkout-is-confined-at-the-os-level): a loop request.
 
@@ -29,7 +29,7 @@ Per cycle (`daemon.invariants.lines`): `follow-ups-per-parent` (1 open), `linger
 
 ## Research and diagnosis
 
-`Recurring <class>` and `invariant:` faults past `invariantBoundMinutes` get a diagnostician (`run.diagnostician`; none for parks); fix `plannedFiles` as `master create`; quota refusals wait until `retryAt` (`daemon.diagnoses`); `stale`/`withdrawn` decisions, stale backlog releases: re-requested ≤3×, then escalated (`decision-stale`); raced, delivered, [plane-wide](operations.md#incident-decision-tree) requests retry faultless; refused `create` 409/400 is `fix-item`; matching close 409 adopted, mismatched held through unread without re-POST (GY-1713); refusals name zod issues; overlong/`limit-wait` (GY-1705); no `loop` fault for restart-lost diagnoses, approver refusals, nor `merge` for base conflicts <30m.
+`Recurring <class>` and `invariant:` faults past `invariantBoundMinutes` get a diagnostician (`run.diagnostician`; none for parks); fix `plannedFiles` as `master create`; quota refusals wait until `retryAt` (`daemon.diagnoses`); `stale`/`withdrawn` decisions, stale backlog releases: re-requested ≤3×, then escalated (`decision-stale`); raced, delivered, [plane-wide](operations.md#incident-decision-tree) requests retry faultless; refused create 400; standing close 409 settles (GY-1713); overlong/`limit-wait` (GY-1705); no `loop` fault for restart-lost diagnoses, approver refusals, nor `merge` for base conflicts <30m.
 
 ## Machine-filed backlog
 

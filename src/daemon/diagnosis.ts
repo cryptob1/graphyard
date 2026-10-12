@@ -809,11 +809,27 @@ async function settleNoLongerOpen(state: DaemonState, entry: DiagnosisRecord, ta
   await note(entry, 'done', `${why}, so the diagnosis of ${entry.subject} is answered as no longer open`, null);
 }
 
-/** The independent approver for the entry's decision; a launch that fails is tried again next cycle while the decision stands. */
+/**
+ * The independent approver for the entry's decision; a launch that fails is tried again next cycle
+ * while the decision stands. GY-1713: an adopted standing close may already have an approval watch
+ * or launch record (concurrent triage/manual close) — reuse that agent rather than re-launching
+ * (Herdr rejects an active same-named session; a headless Pi could be launched twice).
+ */
 async function launchApprover(cycle: Cycle, entry: DiagnosisRecord, work: Work, note: Note, adopted = false) {
   const decision = entry.decision!;
   if (!cycle.effects.approver) return;
   try {
+    if (adopted) {
+      const launches = await cycle.effects.approverLaunches?.().catch(() => []) ?? [];
+      const fromLaunch = [...launches].reverse().find(row => row.decision === decision.id)?.agentName ?? null;
+      const fromWatch = Object.values(cycle.state.approvals).find(watch => watch.decision === decision.id)?.agentName ?? null;
+      const existing = fromLaunch ?? fromWatch;
+      if (existing) {
+        decision.approver = existing;
+        await note(entry, 'done', `Adopted ${decision.action} decision ${decision.id}, already standing on ${work.key}, reusing approver ${existing}`);
+        return;
+      }
+    }
     const launched = await cycle.effects.approver(work, decision.id);
     decision.approver = launched.agentName;
     // GY-1713: keep the adoption in the surviving note (request's note shares this diagnosis key).
