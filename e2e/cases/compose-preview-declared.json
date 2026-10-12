@@ -1,0 +1,40 @@
+{
+  "id": "compose-preview-declared",
+  "title": "The project's declared applications are served previews locally",
+  "description": "GET /api/status answers the project's declared applications: the static site keeps its existing preview path and the declared Compose-backed application gets a local preview, so neither Railway nor GitHub Actions is needed.",
+  "tags": [
+    "api",
+    "delivery"
+  ],
+  "target": "uat",
+  "required": true,
+  "secrets": [],
+  "steps": [
+    {
+      "kind": "http",
+      "name": "read the project's declared applications",
+      "method": "GET",
+      "path": "/api/status",
+      "status": 200,
+      "expect": [
+        {
+          "path": "project.apps",
+          "type": "array"
+        },
+        {
+          "path": "project.apps",
+          "includes": {
+            "kind": "static"
+          }
+        },
+        {
+          "path": "project.apps",
+          "includes": {
+            "kind": "compose",
+            "preview": "local"
+          }
+        }
+      ]
+    }
+  ]
+}

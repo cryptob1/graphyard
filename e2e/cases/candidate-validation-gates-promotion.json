@@ -1,0 +1,43 @@
+{
+  "id": "candidate-validation-gates-promotion",
+  "title": "A candidate's validation covers its combined cases and binds to its exact source",
+  "description": "GET /api/delivery answers the newest candidate with the combined required cases it validated, its result and recorded failures, its exact merge SHA, and a shipped release whose members each name their exact merge SHA.",
+  "tags": [
+    "api",
+    "delivery"
+  ],
+  "target": "uat",
+  "required": true,
+  "secrets": [],
+  "steps": [
+    {
+      "kind": "http",
+      "name": "read the newest candidate's validation and the shipped release",
+      "method": "GET",
+      "path": "/api/delivery",
+      "status": 200,
+      "expect": [
+        {
+          "path": "candidates.0.validation.cases",
+          "type": "array"
+        },
+        {
+          "path": "candidates.0.validation.result",
+          "type": "string"
+        },
+        {
+          "path": "candidates.0.validation.failed",
+          "type": "array"
+        },
+        {
+          "path": "candidates.0.mergeSha",
+          "type": "string"
+        },
+        {
+          "path": "releases.0.members.0.mergeSha",
+          "type": "string"
+        }
+      ]
+    }
+  ]
+}

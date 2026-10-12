@@ -1,0 +1,39 @@
+{
+  "id": "preview-isolation-record",
+  "title": "The delivery path shows previews are isolated, secret-free and cleaned up",
+  "description": "GET /api/status answers the project's preview declaration with the isolation facts an operator checks: each preview gets its own application state and database, no production secrets, bounded resources and automatic cleanup.",
+  "tags": [
+    "api",
+    "delivery"
+  ],
+  "target": "uat",
+  "required": true,
+  "secrets": [],
+  "steps": [
+    {
+      "kind": "http",
+      "name": "read the delivery path's preview isolation",
+      "method": "GET",
+      "path": "/api/status",
+      "status": 200,
+      "expect": [
+        {
+          "path": "project.preview.isolation",
+          "equals": "per-preview"
+        },
+        {
+          "path": "project.preview.secrets",
+          "equals": "none"
+        },
+        {
+          "path": "project.preview.cleanup",
+          "equals": "automatic"
+        },
+        {
+          "path": "project.preview.limits",
+          "type": "object"
+        }
+      ]
+    }
+  ]
+}

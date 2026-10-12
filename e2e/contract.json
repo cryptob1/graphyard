@@ -3,26 +3,127 @@
     {
       "id": "sign-in",
       "title": "An operator signs in and reaches the control plane",
-      "criteria": ["The dashboard accepts an access token and shows the primary navigation and the Work view"],
-      "cases": ["sign-in"]
+      "criteria": [
+        "The dashboard accepts an access token and shows the primary navigation and the Work view"
+      ],
+      "cases": [
+        "sign-in"
+      ]
     },
     {
       "id": "work-intake",
       "title": "An operator creates work and finds it where they look",
-      "criteria": ["A created work item is listed in the work list", "A created work item appears in the board's backlog group"],
-      "cases": ["create-work-item", "board"]
+      "criteria": [
+        "A created work item is listed in the work list",
+        "A created work item appears in the board's backlog group"
+      ],
+      "cases": [
+        "create-work-item",
+        "board"
+      ]
     },
     {
       "id": "work-detail",
       "title": "An operator reads an item's criteria and gates",
-      "criteria": ["An item's page shows its criteria, proofs and gates by id and by key"],
-      "cases": ["work-item-detail"]
+      "criteria": [
+        "An item's page shows its criteria, proofs and gates by id and by key"
+      ],
+      "cases": [
+        "work-item-detail"
+      ]
     },
     {
       "id": "test-visibility",
       "title": "An operator sees what is tested and whether it passes",
-      "criteria": ["The Tests page lists every case with its recent runs"],
-      "cases": ["tests-page"]
+      "criteria": [
+        "The Tests page lists every case with its recent runs"
+      ],
+      "cases": [
+        "tests-page"
+      ]
+    },
+    {
+      "id": "preview-proves-change",
+      "title": "My change is proven on its own local preview before it can join a candidate",
+      "criteria": [
+        "A change whose declared application cases need a running application is held out of every candidate until its local preview passes",
+        "The preview serves this change with its own application state and database and runs the change's declared application cases on it",
+        "The team sees the preview requirement and its results recorded with the change in the control plane"
+      ],
+      "cases": [
+        "preview-before-candidate"
+      ]
+    },
+    {
+      "id": "previews-cannot-touch-production",
+      "title": "Previews cannot see production data or secrets, and never outlive their run",
+      "criteria": [
+        "Each preview runs against its own application state and database, separate from every other preview and from production",
+        "No production secret is available inside a preview",
+        "Preview resources are bounded and cleaned up automatically, and the operator can see this on the delivery path"
+      ],
+      "cases": [
+        "preview-isolation-record"
+      ]
+    },
+    {
+      "id": "compose-and-static-previews",
+      "title": "Our static site and our declared Compose app both get previews, without Railway or GitHub Actions",
+      "criteria": [
+        "A static-site project keeps the preview path it already has, with no second implementation",
+        "A project that declares a Compose-backed application gets the same local preview treatment with no Railway requirement",
+        "GitHub Actions and Railway are never required for the local preview and candidate path"
+      ],
+      "cases": [
+        "compose-preview-declared"
+      ]
+    },
+    {
+      "id": "small-exact-candidates",
+      "title": "Our ready changes travel in small candidates that name exactly what is in them",
+      "criteria": [
+        "At most five ready changes are assembled into one candidate and the rest wait for the next one",
+        "A candidate that is not full proceeds after a short configurable wait instead of blocking",
+        "Every member is named with its exact source identity (merge SHA) so nothing untested rides along"
+      ],
+      "cases": [
+        "candidate-batch-exact"
+      ]
+    },
+    {
+      "id": "only-passing-candidates-promote",
+      "title": "Only a candidate whose combined required cases pass is promoted",
+      "criteria": [
+        "A candidate is validated by running the combined required end-to-end cases of every change it carries",
+        "The candidate's result and any promotion are bound to its exact source and artifact identities",
+        "A failed candidate never promotes and its failure stays recorded with the cases that failed"
+      ],
+      "cases": [
+        "candidate-validation-gates-promotion"
+      ]
+    },
+    {
+      "id": "production-release-verified",
+      "title": "What runs in production is verified to be the release that passed",
+      "criteria": [
+        "The live production environment reports the exact release it runs and the control plane matches it to the promoted candidate",
+        "The team sees production's verification state with that release identity, turning stale when the live release drifts"
+      ],
+      "cases": [
+        "production-verified-exact"
+      ]
+    },
+    {
+      "id": "onboarding-applies-the-path",
+      "title": "Installing Graphyard on a new repository turns this delivery path on by itself",
+      "criteria": [
+        "Normal project onboarding applies the rapid delivery path by itself: previews when the declared application cases need one, batches of at most five with a short wait, promotion gated on the combined required cases, and production verification",
+        "GitHub stays an optional asynchronous mirror under the control-plane merger, and implementation workers receive no trusted proof credentials",
+        "The user and operator docs under docs/ describe the defaults, project declarations, local isolation, failure recovery and production verification"
+      ],
+      "cases": [
+        "onboarding-default-delivery-path"
+      ]
     }
   ]
 }

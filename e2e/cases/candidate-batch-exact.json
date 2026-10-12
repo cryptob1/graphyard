@@ -1,0 +1,56 @@
+{
+  "id": "candidate-batch-exact",
+  "title": "Candidates hold at most five changes and name each member's exact source",
+  "description": "GET /api/status answers the batch limits (at most five members, a short configurable wait), and GET /api/delivery answers the newest candidate with its member cap and each member's exact merge SHA.",
+  "tags": [
+    "api",
+    "delivery"
+  ],
+  "target": "uat",
+  "required": true,
+  "secrets": [],
+  "steps": [
+    {
+      "kind": "http",
+      "name": "read the batch limits",
+      "method": "GET",
+      "path": "/api/status",
+      "status": 200,
+      "expect": [
+        {
+          "path": "project.delivery.batch.max",
+          "equals": 5
+        },
+        {
+          "path": "project.delivery.batch.waitSeconds",
+          "type": "number"
+        }
+      ]
+    },
+    {
+      "kind": "http",
+      "name": "read the newest candidate",
+      "method": "GET",
+      "path": "/api/delivery",
+      "status": 200,
+      "expect": [
+        {
+          "path": "candidates",
+          "type": "array"
+        },
+        {
+          "path": "candidates.0.maxMembers",
+          "equals": 5
+        },
+        {
+          "path": "candidates.0.members",
+          "type": "array"
+        },
+        {
+          "path": "candidates.0.members.0.mergeSha",
+          "type": "string"
+        }
+      ]
+    }
+  ]
+}

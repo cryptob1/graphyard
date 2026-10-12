@@ -1,0 +1,40 @@
+{
+  "id": "onboarding-default-delivery-path",
+  "title": "A managed project serves the delivery path as on and the control plane as merger",
+  "description": "GET /api/status answers the onboarded project with its delivery path enabled by default, and GET /api/merger answers the control-plane merger, so a new repository gets the path with no GitHub Actions or Railway wiring and workers get no trusted credentials.",
+  "tags": [
+    "api",
+    "delivery"
+  ],
+  "target": "uat",
+  "required": true,
+  "secrets": [],
+  "steps": [
+    {
+      "kind": "http",
+      "name": "read the project's delivery path",
+      "method": "GET",
+      "path": "/api/status",
+      "status": 200,
+      "expect": [
+        {
+          "path": "project.delivery.enabled",
+          "equals": true
+        }
+      ]
+    },
+    {
+      "kind": "http",
+      "name": "read the merger setting",
+      "method": "GET",
+      "path": "/api/merger",
+      "status": 200,
+      "expect": [
+        {
+          "path": "merger",
+          "equals": "control-plane"
+        }
+      ]
+    }
+  ]
+}

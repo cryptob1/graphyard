@@ -1,0 +1,117 @@
+{
+  "id": "preview-before-candidate",
+  "title": "A change that needs a running app is held for its local preview",
+  "description": "Declaring an item's application cases puts a local-preview gate on the change: GET /api/work/ID answers the item with its declared cases and a preview record that is required, and the item's page in the dashboard shows the gate and the cases it will run.",
+  "tags": [
+    "api",
+    "delivery",
+    "dashboard"
+  ],
+  "target": "uat",
+  "required": true,
+  "secrets": [],
+  "steps": [
+    {
+      "kind": "http",
+      "name": "declare the change's application cases",
+      "method": "POST",
+      "path": "/api/work",
+      "body": {
+        "title": "E2E case {{case}} run {{run}}",
+        "description": "Created by the preview-before-candidate E2E case.",
+        "type": "chore",
+        "priority": 3,
+        "appCases": [
+          "app-checkout"
+        ],
+        "criteria": [
+          {
+            "id": "AC-1",
+            "text": "The change passes its declared application cases on an isolated local preview",
+            "proofs": [
+              "manual:e2e-case-preview"
+            ]
+          }
+        ],
+        "policy": {
+          "checks": [
+            "test"
+          ],
+          "review": true
+        }
+      },
+      "status": 200,
+      "expect": [],
+      "save": {
+        "id": "id"
+      }
+    },
+    {
+      "kind": "http",
+      "name": "read the item's preview gate",
+      "method": "GET",
+      "path": "/api/work/{{id}}",
+      "status": 200,
+      "expect": [
+        {
+          "path": "appCases.0",
+          "equals": "app-checkout"
+        },
+        {
+          "path": "preview",
+          "type": "object"
+        },
+        {
+          "path": "preview.required",
+          "equals": true
+        },
+        {
+          "path": "preview.cases",
+          "type": "array"
+        }
+      ]
+    },
+    {
+      "kind": "browser",
+      "action": "open",
+      "path": "/"
+    },
+    {
+      "kind": "browser",
+      "action": "fill",
+      "label": "Access token",
+      "value": "{{token}}"
+    },
+    {
+      "kind": "browser",
+      "action": "click",
+      "role": "button",
+      "text": "Open control plane",
+      "exact": false
+    },
+    {
+      "kind": "browser",
+      "name": "unfold the backlog group",
+      "action": "click",
+      "text": "Backlog",
+      "exact": false
+    },
+    {
+      "kind": "browser",
+      "action": "click",
+      "text": "E2E case {{case}} run {{run}}",
+      "exact": false
+    },
+    {
+      "kind": "browser",
+      "action": "expectText",
+      "text": "app-checkout"
+    },
+    {
+      "kind": "browser",
+      "action": "expectText",
+      "text": "preview",
+      "exact": false
+    }
+  ]
+}

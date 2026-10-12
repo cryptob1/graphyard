@@ -1,0 +1,51 @@
+{
+  "id": "production-verified-exact",
+  "title": "The live production release is named and its verification visible",
+  "description": "GET /api/delivery answers the production environment with the release it is expected to run and its verification state, and GET /api/delivery/observations answers the live deployment observations recorded for that environment.",
+  "tags": [
+    "api",
+    "delivery"
+  ],
+  "target": "uat",
+  "required": true,
+  "secrets": [],
+  "steps": [
+    {
+      "kind": "http",
+      "name": "read the production environment's verification",
+      "method": "GET",
+      "path": "/api/delivery",
+      "status": 200,
+      "expect": [
+        {
+          "path": "environments.0.verification.status",
+          "type": "string"
+        },
+        {
+          "path": "environments.0.expected.releaseId",
+          "exists": true
+        }
+      ],
+      "save": {
+        "environmentId": "environments.0.environmentId"
+      }
+    },
+    {
+      "kind": "http",
+      "name": "read the live deployment observations",
+      "method": "GET",
+      "path": "/api/delivery/observations?environment={{environmentId}}",
+      "status": 200,
+      "expect": [
+        {
+          "path": "observations",
+          "type": "array"
+        },
+        {
+          "path": "observations.0.status",
+          "type": "string"
+        }
+      ]
+    }
+  ]
+}
