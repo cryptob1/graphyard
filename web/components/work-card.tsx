@@ -2,7 +2,7 @@ import type { Work } from '../../src/model';
 import { CandidatePr } from '../candidate';
 import { formatDuration } from '../../src/model/duration';
 import { groupOf, nextActor, timedGroups, type Group } from '../groups';
-import { phaseLabel, phaseOf, plainStatus } from '../../src/model/plain-status';
+import { blockerSummary, phaseLabel, phaseOf, plainStatus } from '../../src/model/plain-status';
 import { prSteps, stepHeld } from '../../src/model/pr-steps';
 import type { StepTransition } from '../flow-replay';
 import type { ActionlessCard } from '../../src/model/actionless';
@@ -30,7 +30,10 @@ export default function WorkCard({ item, all, repository, now, onOpen, group: gi
   const steps = group === 'moving' || group === 'blocked' ? prSteps(item, now, release) : null;
   const actor = nextActor(item, group, now, release, all);
   const pr = item.candidate && <CandidatePr repository={repository} candidate={item.candidate} workKey={item.key}/>;
+  // A blocker waiting for a future instant is no stall: its wait is the row's one sentence (GY-1739).
+  const waits = group === 'blocked' && item.blocker ? blockerSummary(item.blocker, now, item) : null;
   const why = group === 'needs-you' ? actor.does
+    : waits?.kind === 'waiting-until' ? waits.sentence
     : stall ? `Nothing is happening: ${stall.missing} — stuck at “${phaseLabel[phaseOf(item, now)]}” for ${formatDuration((now - Date.parse(stall.heldSince)) / 60000)} with nothing to do next`
       // Merged work held at Deploy is blocked by the release, never "Shipped": say what the release lacks.
       : group === 'blocked' ? (steps?.current === 'deploy' ? unprefixed(`${steps.detail}.`) : unprefixed(status.blocking ?? status.sentence))

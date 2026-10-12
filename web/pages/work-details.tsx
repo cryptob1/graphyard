@@ -178,7 +178,7 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
       </dl>
       {plain.blocking && <p className="blocking-now"><strong>Blocking now:</strong> <Explained sentence={plain.blocking}/></p>}
       {/* The recorded blocker as its agent wrote it, here and nowhere else (GY-1739): every other line reads its summary. */}
-      {item.blocker && <p className="blocker-recorded"><strong>Blocker as recorded:</strong> <span className="mono">{shortShas(item.blocker)}</span></p>}
+      {item.blocker && <p className="blocker-recorded"><strong>Blocker as recorded:</strong> <span className="mono">{item.blocker}</span></p>}
       <div className="tags"><span>{item.type}</span><span>P{item.priority}</span><span>{item.stage}</span><span>In this step for {age(item.stageEnteredAt)}</span><span>Policy v{item.policyRevision}</span><span>Revision {item.revision}</span>{deploySmokeRequired(item.policy) && <span><Term term="post-deploy check">e2e:deploy-smoke</Term> after deploy</span>}</div>
       <h3>Ownership</h3><p>{owner.text}</p>{owner.owner && <p className="muted">Worker ID: {owner.owner} · assignment {owner.epoch}</p>}<p>{owner.active && item.lease ? `Active lease · expires ${new Date(item.lease.expiresAt).toLocaleTimeString()}` : 'No active assignment'}</p>{item.workspaces.map(w => <code key={w.epoch}>{w.host}:{w.path}<br/>{w.branch} · assignment {w.epoch}</code>)}
       {!failedDelivery && postDeployment}

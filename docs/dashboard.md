@@ -9,7 +9,7 @@ A local dashboard listens on `127.0.0.1:4310`, or its install's free port ([inst
 
 ## Work
 
-Open items by group: **Needs you** (yours alone), **Blocked**, **Moving**, **Up next**, **Backlog**. `GET /api/board` items carry `group`, `stage`, `owner`, `actor`, `command`, `since`, `overdue` (Moving/Blocked past `overdueAfterMs`, 30 min); master-owed: `master status` `board.owed`. Blocked rows: one sentence naming who clears it (`blocker.summary`), or *Waiting until*.
+Open items by group: **Needs you** (yours alone), **Blocked**, **Moving**, **Up next**, **Backlog**. `GET /api/board` items carry `group`, `stage`, `owner`, `actor`, `command`, `since`, `overdue` (Moving/Blocked past `overdueAfterMs`, 30 min); master-owed: `master status` `board.owed`. Blocked rows: one sentence naming its clearer (`blocker.summary`), or *Waiting until*.
 
 ## Needs you
 
@@ -27,7 +27,7 @@ Cards: ask, **Recommended** choice (or safest way), one-line why, numbered steps
 
 ## The status sentence
 
-**Build, Validate, Test, Review, Prove, Merge, Deploy**, then *Merged*, *Live* once served. Item page: **What is left**, **Requirements**, **Pull request** (**Merge danger**), **Test cases**, **Activity**, **Technical details** (gates, sessions, evidence, overlaps).
+**Build, Validate, Test, Review, Prove, Merge, Deploy**, then *Merged*, *Live* once served. Item page: **What is left**, **Requirements**, **Pull request** (**Merge danger**), **Test cases**, **Activity**, **Technical details** (gates, sessions, evidence, overlaps, verbatim blocker).
 
 ## Insights
 

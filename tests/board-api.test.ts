@@ -239,7 +239,7 @@ test('unit:dashboard-uses-board-api — the Work page renders the groups GET /ap
  * next agent. A blocked row now reads one plain sentence; the recorded text is on the item page once.
  */
 const agentReason = 'Blocked at src/master-verification.ts:447: `node bin/graphyard.mjs master verify-deployment GY-1459 --json` exits 3 because '
-  + "document.querySelector('[data-row=GY-1459] .row-steps') still renders the old label on 3b7de1dc18aa1f2e; see https://api.github.com/repos/cryptob1/graphyard/pulls/1152 "
+  + "document.querySelector('[data-row=GY-1459] .row-steps') still renders the old label on 3b7de1dc18aa1f2e; see https://api.github.com/repos/cryptob1/graphyard/pulls/1152 at 0acd3d4d0a19e2f7c4b5a6d8e9f01234567890ab "
   + 'and tests/post-deploy-follow-ups.test.ts:212, then rebase onto 0acd3d4d0a and rerun npm test -- tests/board-api.test.ts before resubmitting; the JSON was {"state":"pending","sha":"14fb7da508"}.';
 function blockedScenario(blocker: string, key = 'GY-176') {
   const work = scenario();
@@ -259,7 +259,7 @@ function details(work: Work[], item: Work) {
     refresh: async () => {}, action: async () => {}, setError: noop, signOut: noop, item } as unknown as Dashboard & { item: Work };
   return renderToStaticMarkup(createElement(WorkDetails, dashboard));
 }
-const fragments = ['src/master-verification.ts:447', 'verify-deployment GY-1459', 'tests/post-deploy-follow-ups.test.ts:212', 'api.github.com', 'querySelector'];
+const fragments = ['0acd3d4d0a19e2f7c4b5a6d8e9f01234567890ab', 'src/master-verification.ts:447', 'verify-deployment GY-1459', 'tests/post-deploy-follow-ups.test.ts:212', 'api.github.com', 'querySelector'];
 
 test('unit:board-blocked-row-plain-summary — a blocked row shows one plain sentence of at most 25 words naming the kind of block and who clears it; the recorded reason is on no Work page row and once on the item page', async () => {
   const { work, item } = blockedScenario(agentReason);
@@ -268,7 +268,7 @@ test('unit:board-blocked-row-plain-summary — a blocked row shows one plain sen
   assert.equal(row.group, 'blocked');
   const summary = row.blocker!.summary;
   assert.ok(summary.split(/\s+/).length <= 25, `at most 25 words: ${summary}`);
-  assert.match(summary, /master agent must clear it/, 'it names who clears it');
+  assert.match(summary, /master agent clears it/, 'it names who clears it');
   assert.doesNotMatch(summary, /\.ts:|GY-1459|3b7de1|https?:|`/, 'none of the agent-facing detail');
   const html = page(work, board);
   const line = visible(rowOf(html, item.key));
@@ -281,6 +281,14 @@ test('unit:board-blocked-row-plain-summary — a blocked row shows one plain sen
   const view = details(work, item);
   for (const fragment of fragments) assert.equal(view.split(fragment).length - 1, 1, `${fragment} once on the item page`);
   assert.match(view, /Blocker as recorded/);
+  const unescaped = view.replace(/<[^>]+>/g, '').replace(/&#x27;/g, "'").replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+  assert.equal(unescaped.split(agentReason).length - 1, 1, 'the recorded reason once, whole and as written');
+  // A short reason in plain words is still the agent's own: the row summarises it and never echoes it.
+  const short = blockedScenario('Waiting for the coordinator to refresh');
+  const shortBoard = await served(short.work);
+  const shortRow = visible(rowOf(page(short.work, shortBoard), short.item.key));
+  assert.doesNotMatch(shortRow, /coordinator to refresh/, shortRow);
+  assert.ok(shortRow.includes(entry(shortBoard, short.item.key).blocker!.summary), shortRow);
 });
 
 test('unit:board-blocked-row-no-duplicate-reason — a blocked row never says the same reason in two places', async () => {
@@ -307,6 +315,12 @@ test('unit:board-blocked-row-waiting-until — a blocker naming a future not-bef
   assert.equal(summary, `Waiting until ${plain.localInstant(Date.parse(notBefore))}; Graphyard resumes it then, and nobody needs to act.`);
   assert.doesNotMatch(summary, /master agent|fault|problem/i);
   assert.ok(visible(rowOf(page(work, board), item.key)).includes(summary));
+  // With no next action the item is otherwise a stalled card: the wait still reads as the row's only sentence, never as a fault.
+  const idle = work.map(entry => entry.id === item.id ? { ...entry, nextAction: null } as Work : entry);
+  const idleBoard = await served(idle);
+  const line = visible(rowOf(page(idle, idleBoard), item.key));
+  assert.ok(line.includes(entry(idleBoard, item.key).blocker!.summary), line);
+  assert.doesNotMatch(line, /Nothing is happening|stuck at|nothing to do next/, line);
   // An instant already past is no wait: the block reads as the fault it is.
   const past = plain.blockerSummary(blocker.replace(notBefore, at(-60 * minute)), NOW).sentence;
   assert.doesNotMatch(past, /^Waiting until/);

@@ -235,7 +235,8 @@ test('What is left names who clears each step from the refusal itself: exhausted
   const blockedAll = [...all, blocked];
   const [held] = whatIsLeft(blocked, NOW);
   assert.deepEqual([held.label, held.who], ['Build', 'Master agent']);
-  assert.ok(held.lines.some(line => line.includes(blocker)), 'the blocker is shown as written');
+  // Its one plain sentence, never its recorded text, which only Technical details carries (GY-1739).
+  assert.ok(held.lines.includes('A fault blocks it; the master agent clears it.') && !held.lines.some(line => line.includes(blocker)), 'the blocker reads as its summary');
   assert.equal(nextActor(blocked, groupWithin(blocked, blockedAll, NOW), NOW).who, 'Master agent');
   assert.match(page(blocked, blockedAll), /<h3>Build <small>· cleared by Master agent<\/small><\/h3>/);
   // A parked human-only decision is also a ready-gate blocker, but it is yours: the panel agrees

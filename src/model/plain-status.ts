@@ -103,13 +103,9 @@ export function blockerSummary(text: string, now: number, work?: Pick<Work, 'key
   if (kind === 'planned-file-scope' && !spent) return { sentence: 'Needs files outside its plan; an approver agent decides whether to allow them.', kind };
   const cause = routineCause[kind];
   if (cause) return { sentence: spent ? `${cause}, again and again; the master agent must clear it.` : `${cause}; Graphyard re-checks it every cycle and clears it on its own.`, kind };
-  // A short blocker in plain words already says what blocks it: kept, with who clears it.
-  const plain = text.trim().replace(/[.;:\s]+$/, '');
-  if (plain && plain.split(/\s+/).length <= 15 && !agentDetail.test(plain)) return { sentence: `${plain}; master agent clears it.`, kind };
-  return { sentence: 'The builder hit a problem it could not get past; the master agent must clear it.', kind };
+  // Anything else is summarised, never echoed: even a short reason is the agent's words, kept for the item page.
+  return { sentence: 'A fault blocks it; the master agent clears it.', kind };
 }
-/** What marks text as written for an agent: code, paths, URLs, commit hashes, flags, line references. */
-const agentDetail = /[`{}[\]<>$=|\\/]|https?:|\b[0-9a-f]{7,40}\b|\s--?\w|\.\w+:\d+|[;:]/;
 
 /**
  * The step a stalled action is, in the words of somebody who has never read the docs. Every action
