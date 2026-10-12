@@ -46,7 +46,7 @@ export { declaredPostDeploy, liveObservationPhrase, postDeployCriterionRefusal, 
  */
 export const observationWindowSchema = z.object({
   notBefore: z.string().datetime({ offset: true }),
-  basis: z.enum(['intervention-report', 'criterion-window']),
+  basis: z.enum(['intervention-report', 'criterion-window', 'worker-reading']),
   detail: z.string().max(2000),
 }).strict();
 export type ObservationWindow = z.infer<typeof observationWindowSchema>;
@@ -83,6 +83,14 @@ export const createSchema = z.object({
   observationWindow: observationWindowSchema.optional(),
 }).strict();
 export type Create = z.infer<typeof createSchema>;
+/**
+ * GY-1726: a post-deploy follow-up's proof (`manual:…-on-serving-release`, master-verification.ts
+ * files it so): the one kind of criterion whose reading can lie in the future. A worker that finds
+ * the reading cannot exist yet defers the item to that instant (`defer`) instead of escalating.
+ */
+export const servingReleaseProof = (proof: string) => /^manual:.+-on-serving-release$/.test(proof);
+/** The longest a worker may defer an item: past it the reading is a requirements question, not a wait. */
+export const deferBoundMs = 30 * 24 * 3_600_000;
 /** The item's observation window while it still holds: `notBefore` is after `now`. Null for an item without one, or past it. */
 export function observationWindowHold(work: { observationWindow?: ObservationWindow | null }, now: Date): ObservationWindow | null {
   const window = work.observationWindow;
@@ -186,6 +194,13 @@ export interface Work extends Create {
   scopeRequest?: ScopeRequestState | null;
   /** An ask still with the approver when its attempt ended (GY-1484): the next claim adopts it; a widening covering it clears it. */
   carriedScopeRequest?: ScopeRequestState | null;
+  /**
+   * GY-1726: each live widening a held requirements decision grounded (`autoscope` deciding the ask on
+   * its criteria), by decision: the policy revision it was approved against (`from`), the one the
+   * widening moved the item to (`to`) and the planned entries it added. The widening does not make
+   * that decision stale, and the decision applies when the attempt ends with those entries kept.
+   */
+  heldGroundings?: { decision: string; from: number; to: number; paths: string[] }[] | null;
   /**
    * The last scope decision the control plane took for this item, applied or refused, with the
    * request it answered and how long that request waited. An approved request is applied and

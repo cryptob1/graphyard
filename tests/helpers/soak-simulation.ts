@@ -295,9 +295,11 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
    * days (its proof an intervention pattern). `filedAfterMs` after its merge, and on every cycle after,
    * the day files its follow-up exactly as master verify-deployment does (filePostDeployFollowUps over
    * the day's items, the report's projection read for the pattern), releases the one it files at once,
-   * and samples the loop's view of it after every cycle (observationWindowDay).
+   * and samples the loop's view of it after every cycle (observationWindowDay). GY-1726: `unwindowed`
+   * files it without its window, as releases before GY-1698 did (GY-1689, GY-1721, GY-1724), and the
+   * worker of its first attempt finds the reading cannot exist yet and defers it to that instant.
    */
-  observationWindow?: { item: number; windowDays: number; filedAfterMs: number } }) {
+  observationWindow?: { item: number; windowDays: number; filedAfterMs: number; unwindowed?: boolean } }) {
   const dayStart = clock.now();
   // A day may restage the shared scenario: the day-scoped view of the plan is what every fault
   // below arms from, while each test's own assertions still read the shared base plan.
@@ -521,6 +523,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   const windowDay = options.observationWindow ? {
     parent: items[options.observationWindow.item - 1], windowDays: options.observationWindow.windowDays, proof: windowedPatternProof,
     followUp: null as Work | null, filedAt: null as number | null, releasedAt: null as number | null, filings: 0, created: [] as string[],
+    deferred: [] as { at: number; epoch: number; notBefore: string }[],
     samples: [] as { elapsed: number; at: string; stage: string; waiting: boolean | null; attention: string | null; attentionRows: number; sentence: string; dispatches: { requestedBy: string; at: string }[]; lease: string | null; sessions: number; masterLive: boolean; faults: string[]; escalations: string[] }[],
   } : null;
   // GY-1315: the unreleased backlog the stale-release step reads every cold cycle, beside the day's items.
@@ -697,7 +700,9 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     /** GY-1566: when the session stops on Claude's usage-limit menu, or blocks a while over its own prose about a quota, and when that block clears. */
     limitMenuAt?: number | null; proseAt?: number | null; proseClearsAt?: number | null; files?: string[]; bot?: MechanicalFixRequest;
     /** GY-1460: the unbounded day's attempt that renews without submitting (a first attempt, or a rework on the linked pull request), the one that pushes once and stalls, or the long one that pushes as it goes, and when it last pushed. */
-    unbounded?: 'stuck' | 'progressing' | 'pushed-once'; pushedAt?: number }
+    unbounded?: 'stuck' | 'progressing' | 'pushed-once'; pushedAt?: number;
+    /** GY-1726: when the unwindowed follow-up's worker, finding its reading cannot exist yet, defers it. */
+    deferAt?: number | null }
   const sessions: Session[] = [], lost: string[] = [], launches: number[] = [];
   // GY-1566: what the usage-limit-menu day saw: each account the loop held, each spent session stopped, any keys sent, and the prose session's block.
   const limitMenuDay = { holds: [] as { account: string; resetsAt: string | null; elapsed: number }[], stoppedAt: [] as { key: string; epoch: number; elapsed: number }[], answered: [] as { pane: string; keys: string[] }[], proseBlocked: [] as string[],
@@ -989,7 +994,8 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
       // GY-1008: the blocked day's first attempts record their blocker; the repeating item's every attempt does.
       blockAt: options.blockers && blockerPlan.classes[n] && (attempt === 1 || n === blockerPlan.repeating) ? clock.now() + (blockerPlan.blockAfter[n] ?? blockerPlan.blockAfterMs) : null,
       credentialAt: credentialBlocks ? clock.now() + 5 * minute : null, retryingAt: options.retrying?.worker === n && attempt === 1 ? clock.now() + 5 * minute : null,
-      limitMenuAt: options.limitMenu?.worker === n && attempt === 1 ? clock.now() + 5 * minute : null, proseAt: options.limitMenu?.prose === n && attempt === 1 ? clock.now() + 5 * minute : null, settlementToken, files: sessionFiles, ...(bot ? { bot } : {}) });
+      limitMenuAt: options.limitMenu?.worker === n && attempt === 1 ? clock.now() + 5 * minute : null, proseAt: options.limitMenu?.prose === n && attempt === 1 ? clock.now() + 5 * minute : null, settlementToken, files: sessionFiles, ...(bot ? { bot } : {}),
+      deferAt: options.observationWindow?.unwindowed && work.id === windowDay?.followUp?.id && !work.observationWindow ? clock.now() + 3 * minute : null });
     // A scope scenario asks the moment it holds the lease, as a worker does, and keeps working
     // while the control plane decides. An ask carries at most fifty paths, so a wide ask is
     // filed in batches, which one open request of the attempt merges.
@@ -1079,6 +1085,19 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
         herdr.status(session.pane, 'idle');
         await engine.execute(principals.coordinator, 'autoscope', session.work, { epoch: session.epoch }, id());
         decided.push(`${session.key}:${session.epoch}`);
+      }
+      // GY-1726: the unwindowed follow-up's worker reads that its reading cannot exist before the
+      // parent's merge plus the criterion's window, and defers the item to that instant: the attempt
+      // ends with no blocker, and its runtime exits.
+      if (session.deferAt && now >= session.deferAt && windowDay?.parent.id) {
+        session.deferAt = null;
+        const parent = (await store.list()).find(item => item.id === windowDay.parent.id)!;
+        const notBefore = new Date(Date.parse(parent.delivery!.mergedAt) + windowDay.windowDays * 24 * hour).toISOString();
+        await engine.execute(principal, 'defer', session.work, { epoch: session.epoch, notBefore, reason: `the ${windowDay.windowDays}-day rate after ${parent.key} shipped cannot be read before ${notBefore}` }, id());
+        windowDay.deferred.push({ at: now, epoch: session.epoch, notBefore });
+        herdr.kill(session.pane);
+        session.state = 'blocked';
+        continue;
       }
       // GY-1008: the worker records its blocker, which ends the attempt in the same transaction; its
       // runtime then exits. The needs-decision item's master requested a decision first and put it
@@ -3142,20 +3161,22 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
             // File through the engine the same way the API create path does, so the window rides the
             // create schema onto the item (a missing window would dispatch at once and is the bug).
             assert.ok(input.observationWindow, `filePostDeployFollowUps must put observationWindow on the follow-up input: ${JSON.stringify(input)}`);
-            const filed = await engine.execute(principals.operator, 'create', null, input, key) as Work;
-            assert.ok(filed.observationWindow, `create must persist observationWindow: ${JSON.stringify(filed.observationWindow)}`);
+            // GY-1726: an older release's filing carried no window.
+            const { observationWindow: _window, ...unwindowed } = input;
+            const filed = await engine.execute(principals.operator, 'create', null, options.observationWindow!.unwindowed ? unwindowed : input, key) as Work;
+            assert.ok(options.observationWindow!.unwindowed ? !filed.observationWindow : filed.observationWindow, `create must persist what was filed: ${JSON.stringify(filed.observationWindow)}`);
             windowDay.created.push(filed.key); return filed;
           }, new Date(at), async () => ({ since: null, projected }));
         windowDay.filings += 1;
         const key = checks.find(check => check.proof === windowDay.proof)?.followUp ?? null;
         if (key && !windowDay.followUp) {
           const filed = (await store.list()).find(item => item.key === key)!;
-          assert.ok(filed.observationWindow, `the filed follow-up must carry observationWindow after create: ${filed.key}`);
+          assert.ok(options.observationWindow!.unwindowed || filed.observationWindow, `the filed follow-up must carry observationWindow after create: ${filed.key}`);
           windowDay.followUp = filed; windowDay.filedAt = at;
           // Released at once, days before its instant: GY-1689 was released three hours after its filing.
           await engine.execute(principals.operator, 'ready', filed.id, {}, id()); windowDay.releasedAt = clock.now();
           windowDay.followUp = (await store.list()).find(item => item.id === filed.id)!;
-          assert.ok(windowDay.followUp.observationWindow, `ready must keep observationWindow on ${filed.key}`);
+          assert.ok(options.observationWindow!.unwindowed || windowDay.followUp.observationWindow, `ready must keep observationWindow on ${filed.key}`);
         }
       }
       if (windowDay.followUp) {
