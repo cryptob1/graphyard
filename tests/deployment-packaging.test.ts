@@ -190,11 +190,11 @@ test('unit:exercise-forward-after-rollout — after step 3\'s upgrade the exerci
   const forward = shellFunction('forward');
   const at = (text: string, needle: string, from = 0) => { const index = text.indexOf(needle, from); assert.ok(index >= 0, `${JSON.stringify(needle)} appears`); return index; };
   // Inside forward(): rollout status, then the pod of the current ReplicaSet, then the forward to that pod, then /healthz.
-  const rolled = at(forward, 'k rollout status "deploy/$RELEASE-graphyard" --timeout="$HELM_TIMEOUT"');
+  const rolled = at(forward, 'k rollout status "deploy/$RELEASE-graphyard" --timeout="${remaining}s"');
   const selected = at(forward, 'k get rs,pods -l "app.kubernetes.io/instance=$RELEASE,app.kubernetes.io/component=server" -o json | select_pod', rolled);
   const forwarded = at(forward, 'k port-forward --address 127.0.0.1 "pod/${target% *}" "$LOCAL_PORT:${target#* }"', selected);
   const healthy = at(forward, 'curl -fsS "http://127.0.0.1:$LOCAL_PORT/healthz"', forwarded);
-  assert.ok(forward.slice(forwarded, healthy).includes('for _ in $(seq 1 30)'), 'the forward waits up to 30 s for /healthz');
+  assert.ok(forward.slice(forwarded, healthy).includes('probe_end=$(( $(date +%s) + 30 ))'), 'the forward waits up to 30 s for /healthz, within its FORWARD_BUDGET');
   assert.ok(!exercise.includes('port-forward --address 127.0.0.1 "svc/'), 'the forward never targets the Service, whose pod ranking prefers the longest-ready pod');
   // In the script: the upgrade, then the forward, then step 4's first request.
   const upgrade = at(exercise, 'install_args upgrade "$NEXT_REPOSITORY"');
