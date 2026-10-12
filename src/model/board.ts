@@ -1,4 +1,4 @@
-import type { Work } from './work.js';
+import { observationWindowHold, type Work } from './work.js';
 import { isClosed } from './closure.js';
 import { deliveryState } from './delivery.js';
 import { answerCommand, parkedOnHuman, type HumanRequestRow } from './human-request.js';
@@ -74,6 +74,9 @@ export function mergedAt(work: Work): number {
   return Date.parse(work.delivery?.mergedAt ?? work.observation?.mergedAt ?? work.stageEnteredAt);
 }
 
+/** An unstarted attempt held by a future observation window and nothing the control plane marks broken (a violation). */
+const windowHeld = (work: Work, now: number) => phaseOf(work, now) === 'needs-worker' && !work.violations.length && !!observationWindowHold(work, new Date(now));
+
 /** The group of one item. `humanOnly` is the set from `humanOnlyIds`; `stalled` the ids nothing is moving. */
 export function groupOf(work: Work, now: number, humanOnly: ReadonlySet<string> = new Set(), stalled: ReadonlySet<string> = new Set(), release: ReleaseView = noRelease): Group | null {
   if (isClosed(work)) return null;
@@ -87,6 +90,7 @@ export function groupOf(work: Work, now: number, humanOnly: ReadonlySet<string> 
   if (humanOnly.has(work.id) || parkedOnHuman(work)) return 'needs-you';
   const phase = phaseOf(work, now);
   if (phase === 'not-started') return 'backlog';
+  if (windowHeld(work, now)) return 'up-next'; // GY-1740: it waits for the window's instant; no fault blocks it
   if (stalled.has(work.id) || plainStatus(work, now).tone === 'stuck') return 'blocked';
   return phase === 'needs-worker' ? 'up-next' : 'moving';
 }
@@ -154,17 +158,12 @@ export function nextActor(work: Work, group: Group | null, now: number, release:
   return { who: steps.who, does: steps.label };
 }
 
-/**
- * Why an item in Up next is not waiting for a worker at all (GY-172): it is held by a dependency
- * that has not shipped — "Waiting for GY-N to ship first" — or by an exclusive resource another
- * claimed item holds, which names that item and the resource. Null for an item a free builder takes
- * next. The resource hold is the dispatcher's own (`resourceConflicts`, as `dispatchHold` applies
- * it), so the page says what the loop does; planned-file overlap holds nothing (dispatch is
- * optimistic), so an overlapping item is described as waiting for a worker, which it is.
- */
-export function upNextHold(work: Work, all: Work[], now: number): { kind: 'dependency' | 'resource'; text: string } | null {
+/** Why an Up next item waits for no worker (GY-172): an unshipped dependency, a future observation window (GY-1740), or an exclusive resource
+ * another claimed item holds, as the dispatcher's own `resourceConflicts` applies it; planned-file overlap holds nothing. Null: a free builder takes it. */
+export function upNextHold(work: Work, all: Work[], now: number): { kind: 'dependency' | 'resource' | 'window'; text: string } | null {
   const dependency = work.gates.find(gate => gate.name === 'ready')?.reasons.find(reason => reason.startsWith('Dependency '));
   if (dependency) return { kind: 'dependency', text: plainReason(dependency, 'ready').text };
+  const window = observationWindowHold(work, new Date(now)); if (window) return { kind: 'window', text: `Waiting for its observation window: the reading it owes can first exist at ${window.notBefore}` };
   const held = resourceConflicts(work, all, now);
   if (!held.length) return null;
   return { kind: 'resource', text: `Waiting for ${[...new Set(held.map(entry => entry.key))].join(', ')} to release ${[...new Set(held.map(entry => entry.resource))].join(', ')}: an exclusive resource it needs` };
@@ -273,7 +272,7 @@ export function buildBoard(work: Work[], now: number, humanRows?: HumanRequestRo
         : timed ? stepSince(entry, now, null, release) : statusSince(entry, now);
     // The board is built on the server, so a wait's time is written in UTC and served as `until` for a reader's own zone.
     const view = blockerView(entry), wait = view && blockerSummary(entry.blocker!, now, entry, 'UTC'), blocker = view && wait && { ...view, summary: wait.sentence, ...(wait.until ? { until: wait.until } : {}) }; return { id: entry.id, key: entry.key, title: entry.title, priority: entry.priority, group, stage: entry.stage, owner: entry.lease?.owner ?? entry.lastAssignment?.owner ?? null,
-      actor, who, does, command: nextCommand(entry, group, actor, rows.get(entry.id), now, scopeDecisions?.get(entry.id)), since, overdue: timed && statusDuration(since, now).overdue, ...(blocker ? { blocker } : {}) };
+      actor, who, does, command: nextCommand(entry, group, actor, rows.get(entry.id), now, scopeDecisions?.get(entry.id)), since, overdue: timed && !windowHeld(entry, now) && statusDuration(since, now).overdue, ...(blocker ? { blocker } : {}) };
   };
   const board = Object.fromEntries(groups.map(group => [group, byGroup[group].map(entry => item(entry, group))])) as Record<OpenGroup, BoardItem[]>;
   return { now: new Date(now).toISOString(), overdueAfterMs: OVERDUE_MINUTES * 60_000, groups: board,
