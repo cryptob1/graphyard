@@ -213,14 +213,16 @@ export async function shadowStep(cycle: Cycle) {
     } catch { explanations = []; explanationsRead = false; }
   }
   // GY-1748: under the control-plane merger a disagreement is history, recorded in the cursor and raising no line.
-  let controlPlane = knownMerger.get(state) === 'control-plane';
+  const previousMode = knownMerger.get(state);
+  let controlPlane = previousMode === 'control-plane';
   try { const mode = await effects.mergeWriter?.merger(); if (mode) { knownMerger.set(state, mode); controlPlane = mode === 'control-plane'; } } catch { /* keeps the mode last read */ }
+  // The cycle the merger returns to github re-examines every disagreement, so one first recorded under the control-plane merger gains its line.
+  const returned = !controlPlane && previousMode === 'control-plane';
   for (const [index, verdict] of judged.entries()) {
     const current = state.shadow[index]!;
-    if (verdict.outcome === current.outcome && verdict.delivered?.mergeSha === current.delivered?.mergeSha) continue;
-    state.shadow[index] = verdict;
-    changed = true;
-    if (verdict.outcome === current.outcome) continue;
+    const moved = verdict.outcome !== current.outcome;
+    if (moved || verdict.delivered?.mergeSha !== current.delivered?.mergeSha) { state.shadow[index] = verdict; changed = true; }
+    if (!moved && !returned) continue;
     const key = shadowAttentionKey(verdict.key);
     if (!controlPlane && shadowDisagreement(verdict.outcome) && !shadowPairExplained(verdict, explanations) && !state.actions[key]) {
       performed.push(storeAction(state, key, { kind: 'escalation', work: verdict.key, principal: null, state: 'done', detail: shadowDisagreementDetail(verdict), attempts: 1, epoch: null, cycle: state.cycle, at: new Date(now()).toISOString() }, null));
@@ -236,7 +238,8 @@ export async function shadowStep(cycle: Cycle) {
       return [name.slice('shadow:'.length)];
     }),
   ]);
-  for (const workKey of explanationsRead ? attentionKeys : []) {
+  // Under the control-plane merger every line clears whatever the explanations read did: they are immaterial there.
+  for (const workKey of explanationsRead || controlPlane ? attentionKeys : []) {
     const actionKey = shadowAttentionKey(workKey);
     if (!state.actions[actionKey]) continue;
     const unexplained = controlPlane ? [] : judged.filter(verdict => verdict.key === workKey && shadowDisagreement(verdict.outcome) && !shadowPairExplained(verdict, explanations));
