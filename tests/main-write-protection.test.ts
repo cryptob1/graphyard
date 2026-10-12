@@ -5,8 +5,8 @@ import { applyProtection } from '../src/install/github.js';
 import type { GitHubCli } from '../src/install/github.js';
 import { mainWriteRuleset, mainWriteRulesetCurrent, mainWriteRulesetName, mergeQueueRuleset } from '../src/protection.js';
 import { runUp, upControlPlaneSteps, upStateFile, type UpEvent, type UpRequest } from '../src/up.js';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, writeFile } from 'node:fs/promises';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { dirname, join } from 'node:path';
 
 // GY-1715: under the control-plane merger, setup protects the base branch with a ruleset that
@@ -108,8 +108,8 @@ test('unit:main-write-protection-ruleset — control-plane setup writes an activ
 
   // An install whose deploy-key step completed in an earlier run (before this protection existed) still
   // gets it: graphyard up checks the base branch on every control-plane run, through the install's own key.
-  const root = await mkdtemp(join(tmpdir(), 'main-write-protection-'));
-  try {
+  const root = await temporaryDirectory('main-write-protection');
+  {
     const installDir = join(root, 'install');
     await mkdir(installDir, { recursive: true });
     await writeFile(join(installDir, 'deploy-key'), 'private', { mode: 0o600 });
@@ -132,7 +132,7 @@ test('unit:main-write-protection-ruleset — control-plane setup writes an activ
     assert.deepEqual(resumed.writes[0]!.body, mainWriteRuleset('main'));
     assert.ok(events.some(event => event.kind === 'note' && /Base branch protection: Graphyard merge writer only on main/.test(event.text)), 'the run reports the protection');
     assert.ok(!ghCalls.some(args => args[1] === 'deploy-key' && args[2] === 'add'), 'the registered key is not added again');
-  } finally { await rm(root, { recursive: true, force: true }); }
+  }
 });
 
 test('unit:main-write-protection-idempotent — applying the protection twice writes once; a drifted Graphyard ruleset is rewritten in place; a base branch the operator already protects (classic protection or another ruleset) is left untouched and reported', async () => {
@@ -186,6 +186,17 @@ test('unit:main-write-protection-idempotent — applying the protection twice wr
   assert.match(rulesetResult.detail, /operator's rulesets; left as is/);
   assert.deepEqual(protectedRuleset.writes, []);
   assert.deepEqual(protectedRuleset.state.rulesets, [operatorRuleset]);
+
+  // The operator's protection is accepted only for a key that can push: a writer key registered read-only,
+  // or another read-write key sharing the deploy-key bypass, refuses and leaves the operator's rules untouched.
+  const readOnlyWriter = fakeGitHub(fresh({ classic, keys: [{ id: 1, key: WRITER, title: 'graphyard-merge-writer-box-1', readOnly: true }] }));
+  await assert.rejects(ensureMainWriteProtection('owner/project', readOnlyWriter.gh, { writerKey: WRITER }), /merge writer's deploy key is not registered read-write on owner\/project/);
+  assert.deepEqual(readOnlyWriter.writes, []);
+  assert.deepEqual(readOnlyWriter.state.classic, classic);
+  const sharedBypass = fakeGitHub(fresh({ rulesets: [operatorRuleset], keys: [...fresh().keys, { id: 2, key: OTHER, title: 'ci-deploy', readOnly: false }] }));
+  await assert.rejects(ensureMainWriteProtection('owner/project', sharedBypass.gh, { writerKey: WRITER }), /Read-write deploy keys ci-deploy on owner\/project would share the merge writer's bypass/);
+  assert.deepEqual(sharedBypass.writes, []);
+  assert.deepEqual(sharedBypass.state.rulesets, [operatorRuleset]);
 });
 
 test('unit:main-write-protection-github-mode-unchanged — github-mode setup (branch protection plus the merge queue) writes neither the merge-writer ruleset nor a deploy-key bypass, and the merge-queue ruleset keeps its single App bypass', async () => {

@@ -93,7 +93,8 @@ export interface MainWriteProtection {
  * deploy key may push to it, through the `Graphyard merge writer only` ruleset (`mainWriteRuleset`).
  * GitHub's deploy-key bypass covers every deploy key on the repository, so Graphyard claims the
  * branch only while WRITER_KEY is the one read-write deploy key listed: any other read-write key,
- * or a key list that cannot be read, refuses before anything is written or reported as protected.
+ * a writer key that is missing or read-only, or a key list that cannot be read, refuses before
+ * anything is written or reported as protected, the operator's own protection included.
  * Graphyard's own ruleset is rewritten only when it drifted, so a second run writes nothing; a
  * branch the operator already protects (classic protection or another active ruleset) is left as
  * is and reported. Github-mode installs never call this: GitHub executes their merges.
@@ -109,19 +110,19 @@ export async function ensureMainWriteProtection(repository: string, gh: GitHubCl
   const writable = keys.filter((entry: any) => entry?.readOnly === false);
   const others = writable.filter((entry: any) => publicKeyFingerprint(String(entry?.key ?? '')) !== writer).map((entry: any) => String(entry?.title ?? entry?.id)).sort();
   const writerListed = writable.length > others.length;
+  // The deploy-key bypass names no key, so exclusivity rests on the key list: refuse rather than claim
+  // it, and check it before the operator's protection too, which setup accepts only for a key that can push.
+  if (others.length) throw new Error(`Read-write deploy keys ${others.join(', ')} on ${repository} would share the merge writer's bypass, so ${baseBranch} was not protected; remove them (or make them read-only), then rerun`);
+  if (!writerListed) throw new Error(`The merge writer's deploy key is not registered read-write on ${repository}, so ${baseBranch} was not protected`);
 
   const ours = (await repositoryRulesets(repository, gh, baseBranch)).find(ruleset => ruleset?.name === mainWriteRulesetName);
   if (!ours?.id) {
     const classic = await gh(['api', `repos/${repository}/branches/${baseBranch}/protection`], { allowFailure: true });
     const rules = await ghJson(gh, ['api', `repos/${repository}/rules/branches/${baseBranch}`], []) as any[];
     if (classic.code === 0 || (Array.isArray(rules) && rules.length > 0)) {
-      const warning = others.length ? `; read-write deploy keys ${others.join(', ')} may also push` : '';
-      return { state: 'operator-protected', baseBranch, detail: `${baseBranch} already carries the operator's ${classic.code === 0 ? 'branch protection' : 'rulesets'}; left as is, so confirm it refuses pushes from everyone but the merge-writer deploy key${warning}` };
+      return { state: 'operator-protected', baseBranch, detail: `${baseBranch} already carries the operator's ${classic.code === 0 ? 'branch protection' : 'rulesets'}; left as is, so confirm it refuses pushes from everyone but the merge-writer deploy key` };
     }
   }
-  // The deploy-key bypass names no key, so exclusivity rests on the key list: refuse rather than claim it.
-  if (others.length) throw new Error(`Read-write deploy keys ${others.join(', ')} on ${repository} would share the merge writer's bypass, so ${baseBranch} was not protected; remove them (or make them read-only), then rerun`);
-  if (!writerListed) throw new Error(`The merge writer's deploy key is not registered read-write on ${repository}, so ${baseBranch} was not protected`);
   const body = { input: JSON.stringify(mainWriteRuleset(baseBranch)) };
   if (ours?.id) {
     if (mainWriteRulesetCurrent(await ghJson(gh, ['api', `repos/${repository}/rulesets/${ours.id}`]), baseBranch)) return { state: 'unchanged', baseBranch, detail: `${baseBranch} already refuses pushes from everyone but the merge-writer deploy key` };
