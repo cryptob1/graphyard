@@ -25,6 +25,11 @@ import type { RunOptions, RunResult, Runner } from '../src/runner/types.js';
  * stopped diagnosis is one session-liveness instance, nothing reaches an isolation record, every
  * escalation names what the master must mend, the diagnostician and approver sessions are bounded,
  * and every system invariant the loop checks holds.
+ *
+ * GY-1712 adds a second day below for the three unclassified instances of 2026-10-12: a doctor
+ * filing and a diagnostician fix refused with 400 Invalid input (zod), and a standing
+ * already-requested close that decideFresh adopts — each sustained across simulated cycles with
+ * the same invariants (bounded create/decide, no isolation, no unclassified fault, bounded sessions).
  */
 const minute = 60_000, hour = 60 * minute, start = Date.parse('2026-10-08T00:00:00Z');
 const iso = (at: number) => new Date(at).toISOString();
@@ -354,4 +359,177 @@ test('unit:soak-refused-filing-outlives-any-gap — a refusal create gave once i
   assert.deepEqual(submitted.filter((title, i) => submitted.indexOf(title) !== i).slice(0, 5), [], 'no content reached create twice');
   assert.deepEqual(state.doctor.pendingFiles, [], 'nothing stays pending');
   clearDoctorRuns();
+});
+
+/**
+ * GY-1712. Over a simulated day of the real loop (a cycle a minute for twelve hours, the doctor
+ * every ten minutes): the create route refuses one doctor filing and one diagnostician fix with
+ * 400 Invalid input (zod issues named), and a covering close meets an already-requested standing
+ * decision that decideFresh adopts. The doctor reports the refused content every interval; the
+ * diagnosis advances every cycle. After every cycle and at the end: each 400 reaches create once
+ * and never again, the standing close is asked once and adopted (never isolated), no unclassified
+ * instance opens, creates and decides stay bounded, sessions stay bounded, and every system
+ * invariant holds.
+ */
+const gy1712ZodIssues = [{ path: ['criteria', 0, 'proofs', 0], message: 'Invalid string: must match pattern /^(unit|integration|e2e|manual):[a-zA-Z0-9._/-]+$/' }];
+const gy1712ZodDetail = `Invalid input: ${JSON.stringify(gy1712ZodIssues)}`;
+const gy1712Zod400 = () => new RefusedResponse(`Graphyard refused work (400): ${gy1712ZodDetail}`, 400, { error: 'Invalid input', issues: gy1712ZodIssues });
+const gy1712StandingClose = '65bf0fef-d9c1-4cd2-8467-9f1866b0fd41';
+const gy1712CapacityTitle = 'Approver, reviewer and worker sessions exhaust their model-account limit mid-attempt';
+const gy1712FixTitle = 'Charge every named account whose own attempt reported a model limit';
+// Proofs are well-formed so the local create checks pass; the plane's zod refusal is what create throws.
+// Class is `loop` (not `capacity`) so the open GY-1700/GY-1710 capacity items do not dedup this filing away from create.
+const gy1712CapacityFiling = filing('loop', gy1712CapacityTitle, ['unit:capacity-account-hold']);
+
+test('unit:soak-invariants-hold — GY-1712: over a simulated day a 400 doctor filing and a 400 diagnostician fix are dropped once under fix-item, a standing already-requested close is adopted once, creates and decides stay bounded, nothing is isolated or unclassified, and every system invariant holds', { timeout: 300_000 }, async () => {
+  clearDoctorRuns(); clearDiagnoses();
+  let now = start;
+  const state = emptyDaemonState(config());
+  const control = item('GY-50', start - 2 * hour, { title: 'Hold spent model accounts through the wait', type: 'feature', stage: 'build' } as Partial<Work>);
+  const refusedFix = recurring(state, 'GY-1700', 'capacity', 'concurrency-starved', 'every model account sat at its limit while launches waited');
+  const adoptClose = recurring(state, 'GY-1710', 'capacity', 'concurrency-starved', 'the registry handed a spent account back after a null fallback');
+  const work: Work[] = [control, refusedFix, adoptClose];
+  const creates: { key: string; title: string; at: number; outcome: string }[] = [];
+  const created = new Map<string, Work>();
+  let next = 100;
+  const create = async (input: any, key: string): Promise<Work> => {
+    const title = String(input.title ?? '');
+    if (title === gy1712CapacityTitle || title === gy1712FixTitle) {
+      creates.push({ key, title, at: now, outcome: '400' });
+      throw gy1712Zod400();
+    }
+    creates.push({ key, title, at: now, outcome: 'created' });
+    if (created.has(key)) return created.get(key)!;
+    const filed = item(`GY-${next++}`, now, { title, description: input.description, priority: input.priority, criteria: input.criteria, plannedFiles: input.plannedFiles, type: input.type ?? 'bug', ...(input.origin ? { origin: input.origin } : {}) } as Partial<Work>);
+    work.push(filed); created.set(key, filed);
+    return filed;
+  };
+
+  let doctorRuns = 0;
+  const doctor: DoctorEffects = {
+    settings: { ...doctorSettingsSchema.parse({}), command: 'pi' }, cwd: '/soak/checkout', env: {},
+    runner: async () => ({ runtime: 'pi', model: 'soak/doctor', release: async () => {}, runner: { name: 'pi', start: (_prompt: string, options: { tool: string }) => {
+      const index = doctorRuns++;
+      // Every interval reports the same capacity filing: after the first 400 it must never reach create again.
+      const payload = { findings: [{ subject: control.key, check: 'worker' as const, detail: 'the scripted finding: model-account limits stood past the bound', unactionable: false }], actions: [],
+        filed: [gy1712CapacityFiling] };
+      return { id: `soak-gy1712-doctor-${index}`, events: [], onEvent: () => () => {}, cancel: () => {}, result: async () => ({ ok: true as const, tool: options.tool, payload, payloads: [payload] }) };
+    } } as unknown as Runner }),
+    file: create,
+    recordRun: async () => {},
+  };
+
+  const launched: { subject: string; attempt: string; at: number }[] = [];
+  const decides: { work: string; action: string; at: number }[] = [];
+  const diagnosisRunner = (attempt: 'primary' | 'fallback'): Runner => ({
+    name: 'soak-diagnostician',
+    start<T>(prompt: string, options: RunOptions<T>) {
+      const given = JSON.parse(prompt.slice(prompt.indexOf('{'))) as { subject: string; faultClass: FaultClass };
+      launched.push({ subject: given.subject, attempt, at: now });
+      const payload: DiagnosisPayload = { subject: given.subject, cause: 'A registry primary that timed out with a readable limit was left unheld while a null fallback waited',
+        evidence: { logLines: [`${iso(now)} graphyard-master: capacity hold skipped for account with readable reset`], commands: ['graphyard master status — the capacity line stood all day'] }, faultClass: given.faultClass, covering: null, fix: null };
+      if (given.subject === refusedFix.key) payload.fix = { title: gy1712FixTitle, description: 'Preserve and hold every named account whose own attempt reported a limit.', type: 'bug', priority: 1,
+        criteria: [{ id: 'AC-1', text: 'Every named account that reported a limit is held through its reset, by a test', proofs: ['unit:capacity-account-hold'] }], plannedFiles: ['src/daemon/capacity.ts'] };
+      else if (given.subject === adoptClose.key) payload.covering = control.key;
+      else payload.covering = control.key;
+      let result: RunResult<T>;
+      try { const parsed = options.validate(payload); result = { ok: true, tool: options.tool, payload: parsed, payloads: [parsed] }; }
+      catch (error) { result = { ok: false, failure: { reason: 'invalid-payload', detail: String(error) }, payloads: [] }; }
+      return { id: randomUUID(), events: [], onEvent: () => () => {}, cancel() {}, result: async () => result };
+    },
+  });
+  // The standing close the history read missed: already requested on GY-1710 before this day's decideFresh.
+  const ledger: { id: string; work: string; action: string; state: string; input: Record<string, any>; approvedBy: string | null; refusal: null; outcome: string | null }[] = [
+    { id: gy1712StandingClose, work: adoptClose.key, action: 'close', state: 'requested', input: { kind: 'duplicate', ref: control.key }, approvedBy: null, refusal: null, outcome: null },
+  ];
+  const approvers: { work: string; decision: string; at: number }[] = [];
+  const soakTree = {
+    ref: 'main',
+    files: new Set(['src/daemon/capacity.ts', 'tests/helpers/timing-baseline.json', 'tests/docs-budget.test.ts']),
+  };
+  const diagnostician: DiagnosticianEffects = {
+    settings, cwd: '/soak/checkout',
+    tree: async () => ({ ref: soakTree.ref, files: new Set(soakTree.files) }),
+    runner: async attempt => ({ runner: diagnosisRunner(attempt), runtime: 'pi', model: attempt === 'primary' ? settings.model : settings.fallbackModel }),
+    context: async () => ({ journal: [`${iso(now)} graphyard-master: capacity hold skipped`], serverLog: [`${iso(now)} POST /api/work 400`], pullRequests: [] }),
+    file: create,
+    decide: async (target, action, _reason, input = {}) => {
+      decides.push({ work: target.key, action, at: now });
+      if (action === 'close' && target.key === adoptClose.key) {
+        throw new RefusedResponse(
+          `Graphyard refused work/${target.key}/decide (409): Decision ${gy1712StandingClose} (close) is already requested on ${target.key}; wait for it before requesting another`,
+          409,
+          { error: `Decision ${gy1712StandingClose} (close) is already requested on ${target.key}; wait for it before requesting another` },
+        );
+      }
+      const id = `decision-${ledger.length + 1}`;
+      ledger.push({ id, work: target.key, action, state: 'requested', input, approvedBy: null, refusal: null, outcome: null });
+      return { id };
+    },
+  };
+  const effects = {
+    agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
+    snapshot: async () => ({ work: work.map(entry => structuredClone(entry)), now: iso(now) }),
+    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, persist: async () => {},
+    observeDeployment: async () => ({ source: 'endpoint', sha: 'd'.repeat(40), at: iso(now), reason: null, deployed: [], pending: [] }), recordDeployment: async () => {}, requestSmoke: () => {},
+    faultClassPolicy: policy, fileFaultClass: create, doctor, diagnostician,
+    approver: async (target: Work, decision: string) => {
+      approvers.push({ work: target.key, decision, at: now });
+      const entry = ledger.find(row => row.id === decision)!, closed = work.find(candidate => candidate.key === target.key)!;
+      assert.equal(entry.action, 'close', `only close decisions are put to an approver on this day, not ${entry.action}`);
+      Object.assign(entry, { state: 'applied', approvedBy: 'graphyard-approver' });
+      Object.assign(closed, { stage: 'done', closure: { kind: entry.input.kind, ref: entry.input.ref ?? null, reason: 'soak', by: 'graphyard-approver', at: iso(now), from: closed.stage }, revision: closed.revision + 1, updatedAt: iso(now) });
+      return { agentName: `gy-approver-${decision}`, pane: null };
+    },
+    decisions: async (target: Work) => ({ decisions: ledger.filter(row => row.work === target.key).map(row => structuredClone(row)) }),
+  } as unknown as DaemonEffects;
+
+  const violations: string[] = [];
+  const isolated = () => Object.keys(state.actions).filter(key => key.startsWith('isolated:'));
+  const instances = () => state.faults.instances.filter(entry => Date.parse(entry.at) >= start);
+  for (let cycle = 0; now < start + 12 * hour; cycle++, now += minute) {
+    const result = await runCycle(config(), state, effects, () => now);
+    await doctorRunsSettled(); await diagnosesSettled();
+    for (const check of state.invariants.report) if (!check.holds) violations.push(`cycle ${cycle} (+${(now - start) / minute} min): ${check.invariant} — ${check.reading}`);
+    assert.deepEqual(isolated(), [], `cycle ${cycle}: a failure was thrown on to the step's isolation record`);
+    assert.deepEqual(instances().filter(entry => entry.faultClass === 'unclassified'), [], `cycle ${cycle}: an unclassified instance opened`);
+    assert.equal(state.doctor.pendingFiles.length, 0, `cycle ${cycle}: a 400 filing must not stay pending`);
+  }
+  assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
+
+  // (a) Creates are bounded: each 400 content reaches create once, never again, however often the doctor reports it.
+  const of = (title: string) => creates.filter(entry => entry.title === title);
+  assert.deepEqual(of(gy1712CapacityTitle).map(entry => entry.outcome), ['400'], 'doctor 400 filed once, never re-filed');
+  assert.deepEqual(of(gy1712FixTitle).map(entry => entry.outcome), ['400'], 'diagnostician 400 fix filed once, never re-filed');
+  assert.ok(doctorRuns >= 70 && doctorRuns <= 73, `one doctor run per ten minutes over twelve hours: ${doctorRuns}`);
+  assert.deepEqual(state.doctor.pendingFiles, [], 'nothing stays pending');
+
+  // (b) Each 400 is one fix-item (proof) instance; the adopted close opens none.
+  const opened = instances().map(entry => [entry.kind, entry.faultClass, entry.subject] as const);
+  assert.deepEqual(opened.filter(entry => entry[0] === 'fix-item').length, 2, `two content refusals: ${JSON.stringify(opened)}`);
+  assert.ok(opened.every(entry => entry[1] === 'proof' && entry[0] === 'fix-item'), `only proof fix-item instances: ${JSON.stringify(opened)}`);
+  assert.deepEqual(instances().filter(entry => entry.faultClass === 'unclassified'), [], 'no unclassified instance all day');
+
+  // (c) The standing already-requested close is asked once, adopted, and applied — never re-decided, never isolated.
+  assert.deepEqual(decides.filter(entry => entry.work === adoptClose.key && entry.action === 'close').length, 1, `close asked once: ${JSON.stringify(decides)}`);
+  assert.equal(state.diagnoses[adoptClose.key]?.state, 'answered', state.diagnoses[adoptClose.key]?.detail);
+  assert.equal(state.diagnoses[adoptClose.key]?.decision?.id, gy1712StandingClose, 'the standing decision was adopted');
+  assert.equal(approvers.filter(entry => entry.decision === gy1712StandingClose).length, 1, 'one approver session for the adopted close');
+  assert.equal(work.find(entry => entry.key === adoptClose.key)!.stage, 'done', 'GY-1710 closed on the adopted decision');
+
+  // (d) The 400 diagnosis settles failed under fix-item and is never re-diagnosed; sessions stay bounded.
+  assert.equal(state.diagnoses[refusedFix.key]?.state, 'failed');
+  assert.match(state.diagnoses[refusedFix.key]?.detail ?? '', /refused the diagnostician's fix item for GY-1700 as written.*Invalid input/);
+  const runsOf = (subject: string) => launched.filter(entry => entry.subject === subject).map(entry => entry.attempt);
+  assert.deepEqual(runsOf(refusedFix.key), ['primary'], 'diagnosed once, refused fix never diagnosed again');
+  assert.deepEqual(runsOf(adoptClose.key), ['primary'], 'covering diagnosis once, then closed');
+  assert.ok(launched.length <= 4, `diagnostician sessions stay bounded: ${JSON.stringify(launched)}`);
+  assert.ok(decides.length <= 3, `decide calls stay bounded: ${JSON.stringify(decides)}`);
+
+  // (e) Escalation names the doctor's 400 so the master can mend by hand; the detail carries the zod issues.
+  const escalations = Object.values(state.actions).filter(action => action.kind === 'escalation').map(action => action.detail);
+  const doctorEscalation = escalations.find(text => text.includes(gy1712CapacityTitle));
+  assert.ok(doctorEscalation, `doctor escalation present: ${JSON.stringify(escalations)}`);
+  assert.match(doctorEscalation!, /Invalid input.*must match pattern/);
+  clearDoctorRuns(); clearDiagnoses();
 });
