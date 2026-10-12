@@ -292,6 +292,23 @@ test('unit:board-blocked-row-plain-summary — a blocked row shows one plain sen
   assert.ok(shortRow.includes(entry(shortBoard, short.item.key).blocker!.summary), shortRow);
 });
 
+test('unit:board-blocked-declined-human-names-master — a declined human answer reads as the master agent clearing the block, never as waiting on you', () => {
+  const declined = 'A human declined spending money or opening third-party accounts for this item: not this quarter';
+  const { item } = blockedScenario(declined);
+  const summary = plain.blockerSummary(declined, NOW, { ...item, humanRequest: null });
+  assert.match(summary.sentence, /master agent/);
+  assert.doesNotMatch(summary.sentence, /only you|Waiting on a human/);
+});
+
+test('unit:board-blocked-next-action-no-echo — the item page Next-action paragraph points at the recorded blocker instead of repeating it', () => {
+  const { work, item } = blockedScenario(agentReason);
+  const escalated = { ...item, nextAction: { kind: 'escalate', work: item.id, key: item.key, gate: 'ready', refusal: agentReason, reason: `${item.key} has waited past ${at(-minute)} on nobody named: ${agentReason}`,
+    inputs: { kind: 'escalate', trigger: 'stale-wait', detail: agentReason }, llmRole: 'decide', binding: 'liveness:stale-wait' } } as unknown as Work;
+  const view = details(work.map(entry => entry.id === item.id ? escalated : entry), escalated);
+  for (const fragment of fragments) assert.equal(view.split(fragment).length - 1, 1, `${fragment} once on the item page`);
+  assert.match(view, /the recorded blocker, above/);
+});
+
 test('unit:board-blocked-row-no-duplicate-reason — a blocked row never says the same reason in two places', async () => {
   for (const blocker of [agentReason, 'Waiting on GY-1689 to merge first', 'git push failed: could not read Username for https://github.com: terminal prompts disabled']) {
     const { work, item } = blockedScenario(blocker);

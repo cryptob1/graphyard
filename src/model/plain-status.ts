@@ -110,6 +110,8 @@ export function blockerSummary(text: string, now: number, work?: Pick<Work, 'key
   const human = !!work?.humanRequest && !work.humanRequest.answer;
   const classified = classifyBlocker(text, { humanRequest: human });
   const named = (pattern: RegExp) => text.match(pattern)?.[1];
+  // A declined answer is the human's last word (server/waits.ts): what happens next is the master's unblock.
+  if (classified.class === 'human-only' && !human && /^A human declined /.test(text)) return { sentence: 'A human declined the request; the master agent decides the next step and clears the block.', kind: 'human-only' };
   if (classified.class === 'human-only') { const on = named(/\b((?!AC-)[A-Z][A-Z0-9]*-\d+)\b/); return { sentence: `Waiting on a human answer${on && on !== work?.key ? ` to ${on}` : ''}; only you can clear it.`, kind: 'human' }; }
   const window = work ? observationWindowHold(work as Work, new Date(now)) : null;
   const future = [...notBeforeInstants(text), ...(window ? [Date.parse(window.notBefore)] : [])].filter(at => at > now);

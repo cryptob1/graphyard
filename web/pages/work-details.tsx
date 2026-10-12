@@ -55,6 +55,10 @@ const oneLine = (text: string) => { const first = text.split(/(?<=[.;:])\s/)[0];
 export default function WorkDetails({ item, work, status, token, observedAt, jobs, events, busy, codexAvailable, editingRequirements, setEditingRequirements, action, api, refresh, setSelected, setView, sessionEpoch, stepMoves, signOut }: Dashboard & { item: Work }) {
   const now = Number.isNaN(observedAt) ? Date.now() : observedAt;
   const plain = plainStatus(item, now);
+  // The recorded blocker is written once, under Blocker as recorded (GY-1739): any other line that
+  // quotes it, whole or from its opening words onward, points there instead.
+  const unechoed = (text: string) => { const b = item.blocker; if (!b) return text; if (text.includes(b)) return text.split(b).join('the recorded blocker, above');
+    const head = b.slice(0, 60), at = b.length > 60 ? text.indexOf(head) : -1; return at < 0 ? text : `${text.slice(0, at)}the recorded blocker, above`; };
   // The same duration and the same threshold the card carries; this view is another view of it.
   const release = releaseView(status);
   const held = stepHeld(item, now, stepMoves, release);
@@ -191,11 +195,11 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
       {item.nextAction && <p className="next-action"><strong>Next:</strong> <code>{item.nextAction.kind}</code>{(() => { const row = actions.find(entry => entry.kind === item.nextAction!.kind); return row?.claim ? ` — ${row.claim.executor} on ${row.claim.host} is running it` : row ? (unserved ? ` — nobody can claim it: no live executor serves ${row.kind} (waited ${age(unserved.since)}); ${unserved.start}` : ' — waiting for an executor to claim it') : ''; })()}</p>}
       {unserved && <p className="amber">This action is not queued behind other work: {status.executors.live === 0 ? 'no executor is alive' : `the ${status.executors.live} live executor(s) serve ${(status.executors.served ?? []).join(', ') || 'nothing'}`}, and nothing moves until one that serves <code>{unserved.kind}</code> is started.</p>}
       {item.nextAction
-        ? <p>The control plane computes <code>{item.nextAction.kind}</code> for this item{item.nextAction.gate ? <> from the <strong>{item.nextAction.gate}</strong> gate’s refusal “{shortShas(item.nextAction.refusal ?? '')}”</> : ''}: {shortShas(item.nextAction.reason)}. {item.nextAction.llmRole ? `The action starts a session whose judgment is ${item.nextAction.llmRole}; running the action itself needs no model.` : 'Running it needs no language model at all.'}</p>
+        ? <p>The control plane computes <code>{item.nextAction.kind}</code> for this item{item.nextAction.gate ? <> from the <strong>{item.nextAction.gate}</strong> gate’s refusal “{shortShas(unechoed(item.nextAction.refusal ?? ''))}”</> : ''}: {shortShas(unechoed(item.nextAction.reason))}. {item.nextAction.llmRole ? `The action starts a session whose judgment is ${item.nextAction.llmRole}; running the action itself needs no model.` : 'Running it needs no language model at all.'}</p>
         : <p className="muted">The control plane has no outstanding action for this item.</p>}
       {actions.map(row => <div className="criterion" key={row.id}><strong>{row.kind} · {row.state}{row.claim ? ` · ${row.claim.executor} on ${row.claim.host}` : ''}</strong>
-        <p>Requested by {row.requestedBy} {age(row.requestedAt)} ago · attempt {row.attempts}{row.resolution ? ` · last result: ${shortShas(row.resolution)}` : ''}</p>
-        <ul>{row.history.slice(-5).map((entry, index) => <li key={index}>{entry.event}{entry.executor ? ` by ${entry.executor}` : ''}: {shortShas(entry.reason)}</li>)}</ul></div>)}
+        <p>Requested by {row.requestedBy} {age(row.requestedAt)} ago · attempt {row.attempts}{row.resolution ? ` · last result: ${shortShas(unechoed(row.resolution))}` : ''}</p>
+        <ul>{row.history.slice(-5).map((entry, index) => <li key={index}>{entry.event}{entry.executor ? ` by ${entry.executor}` : ''}: {shortShas(unechoed(entry.reason))}</li>)}</ul></div>)}
       {running.length > 0 && <><h3>Sessions running now</h3><ul className="sessions">{running.map(handle => <li key={handle.id}>
         <strong>{handle.kind}</strong> · {handle.principal} · {handle.runtime} on {handle.host} · working on {shortShas(handle.subject)} · {age(handle.startedAt)} · seen {formatAge(handle.seenAt ?? handle.updatedAt, now)} ago<br/><code>{handle.attach}</code></li>)}</ul></>}
       <h3>Sessions ({sessions.length})</h3>
