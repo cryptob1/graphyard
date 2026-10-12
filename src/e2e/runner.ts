@@ -79,6 +79,11 @@ export interface RunOptions {
   root?: string;
   /** Where `e2e-secrets.<target>.env` is read from: the checkout's install directory by default. */
   secretsDirectory?: string;
+  /**
+   * Never read the install's secrets (GY-1718: a merge preview runs cases the candidate wrote): a
+   * case declaring any fails at its declared secrets, and no secrets file is opened.
+   */
+  withholdSecrets?: boolean;
   /** Where agent steps' screenshots go: a run-named directory under the temp directory by default. */
   artifactsDirectory?: string;
   /** The host environment a step's process draws its basics from, and how it is spawned; tests substitute both. */
@@ -198,11 +203,14 @@ async function runStep(step: E2eStep, index: number, context: CaseContext): Prom
 }
 
 /** Run one case once: its declared secrets resolved first, then its steps in order, stopping at the first that fails. */
-async function attemptCase(entry: CaseFile, options: Required<Pick<RunOptions, 'url' | 'token' | 'stepTimeoutMs' | 'root' | 'artifactsDirectory' | 'hostEnvironment' | 'processRunner'>> & { runId: string; attempt: number; fetcher: typeof fetch; launcher: () => Promise<E2eLauncher>; secretsDirectory: () => string; signal?: AbortSignal }) {
+async function attemptCase(entry: CaseFile, options: Required<Pick<RunOptions, 'url' | 'token' | 'stepTimeoutMs' | 'root' | 'artifactsDirectory' | 'hostEnvironment' | 'processRunner'>> & { runId: string; attempt: number; fetcher: typeof fetch; launcher: () => Promise<E2eLauncher>; secretsDirectory: () => string; signal?: AbortSignal; withholdSecrets?: boolean }) {
   const { definition } = entry;
   const steps: StepRecord[] = [];
   let secrets: Record<string, string>;
-  try { secrets = await loadSecrets(definition.secrets, definition.target, options.secretsDirectory); }
+  try {
+    if (options.withholdSecrets && definition.secrets.length) throw new Error(`declared secret ${definition.secrets[0]} is withheld: this run never reads the install's secrets`);
+    secrets = await loadSecrets(definition.secrets, definition.target, options.secretsDirectory);
+  }
   catch (error) { return { executed: 0, failingStep: { index: 0, name: 'declared secrets', reason: message(error) }, steps }; }
   const vars: Record<string, string> = { token: options.token, run: `${options.runId}-${options.attempt}`, case: definition.id, ...Object.fromEntries(Object.entries(secrets).map(([name, value]) => [`secret:${name}`, value])) };
   const pageErrors: string[] = [];
@@ -272,7 +280,7 @@ export async function runCases(cases: readonly CaseFile[], options: RunOptions):
     const attemptResults: AttemptResult[] = [];
     do {
       const began = now();
-      const result = await attemptCase(entry, { url: options.url, token: options.token, stepTimeoutMs, runId, attempt: attemptResults.length + 1, fetcher, launcher: launch, signal, ...general });
+      const result = await attemptCase(entry, { url: options.url, token: options.token, stepTimeoutMs, runId, attempt: attemptResults.length + 1, fetcher, launcher: launch, signal, withholdSecrets: options.withholdSecrets, ...general });
       attemptResults.push({ attempt: attemptResults.length + 1, outcome: result.failingStep ? 'fail' : 'pass', durationMs: Math.max(0, now() - began), ...result });
     } while (attemptResults.at(-1)!.outcome === 'fail' && attemptResults.length <= retries && !signal?.aborted);
     const last = attemptResults.at(-1)!;
@@ -385,13 +393,13 @@ export const e2eSuite = (cases: readonly CaseFile[], token: string, options: { f
   /** Which cases run: those targeting uat by default; a managed repository's candidate (GY-1535) runs every required case too. */
   select?: (entry: CaseFile) => boolean;
   /** Run every selected case even after a required one fails, so each records its own result (GY-1535). */
-  runAll?: boolean; signal?: AbortSignal } = {}) => ({
+  runAll?: boolean; signal?: AbortSignal; withholdSecrets?: boolean } = {}) => ({
   name: 'e2e',
   run: async (url: string, candidate: { id: string } | null) => {
     const selected = cases.filter(options.select ?? (entry => entry.definition.target === 'uat'));
     if (!selected.length) return { name: 'e2e', passed: false, detail: options.select ? 'no required or uat E2E case is in the checkout, so the suite exercised nothing' : 'no E2E case targets uat, so the suite exercised nothing' };
     const report = await runCases(selected, { url, token, environment: 'uat', runId: candidate ? `rc-${candidate.id}` : undefined, fetcher: options.fetcher, launcher: options.launcher, stepTimeoutMs: options.stepTimeoutMs,
-      root: options.root, retries: releaseRetries, stopOnRequiredFailure: !options.runAll, signal: options.signal });
+      root: options.root, retries: releaseRetries, stopOnRequiredFailure: !options.runAll, signal: options.signal, withholdSecrets: options.withholdSecrets });
     await options.report?.(report);
     const verdict = releaseVerdict(report), detail = failureDetail(report);
     const executed = report.cases.length - verdict.unrun.length;

@@ -2,7 +2,7 @@
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { contractFile, loadCases, loadContract } from './e2e/case.js';
+import { contractFile, loadCases, loadContract, type CaseFile } from './e2e/case.js';
 import { e2eSuite, type E2eLauncher, type E2eReport } from './e2e/runner.js';
 import { holdTagPrefix, releaseHolds } from './release-holds.js';
 import { findCandidate, readLedgerAsync, recordsArguments, serveStaticSite, syncLedgerAsync, validateAndRecord, type AnyGit, type AsyncGit, type Git, type HoldOutcome, type ReleaseCandidate, type StaticUat, type Suite, type UatRecord } from './release-candidate.js';
@@ -16,12 +16,12 @@ import { findCandidate, readLedgerAsync, recordsArguments, serveStaticSite, sync
  * candidate record names each case's result.
  */
 export function projectCaseSuite(root: string, token: string, options: { fetcher?: typeof fetch; launcher?: E2eLauncher; stepTimeoutMs?: number;
-  report?: (report: E2eReport) => void | Promise<void>; signal?: AbortSignal } = {}): Suite {
+  report?: (report: E2eReport) => void | Promise<void>; signal?: AbortSignal; select?: (entry: CaseFile) => boolean; withholdSecrets?: boolean } = {}): Suite {
   return {
     name: 'e2e',
     run: async (url, candidate) => {
       const suite = e2eSuite(await loadCases(root), token, { fetcher: options.fetcher, launcher: options.launcher, stepTimeoutMs: options.stepTimeoutMs, root, report: options.report, signal: options.signal,
-        select: entry => entry.definition.required || entry.definition.target === 'uat', runAll: true });
+        select: options.select ?? (entry => entry.definition.required || entry.definition.target === 'uat'), runAll: true, withholdSecrets: options.withholdSecrets });
       return suite.run(url, candidate);
     },
   };

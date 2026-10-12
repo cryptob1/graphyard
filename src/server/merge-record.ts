@@ -88,14 +88,19 @@ async function foldItemLedger(db: pg.PoolClient, work: Work, data: MergeRecordBo
   return { key: work.key, state: 'refused', head: data.head, baseTip: null, mergeSha: null, risk: null, intentAt: null, pushedAt: null, observedTip: null, refusal: { kind: 'merge', reason: data.reason }, events: 1 };
 }
 
+/** What a merge record's receipt is matched on: the item and the step, its instants and duration aside, so a retried post replays and a different step under the same key is refused. */
+export function mergeRecordFingerprint(id: string, data: unknown) {
+  const fingerprintData = typeof data === 'object' && data !== null
+    ? Object.fromEntries(Object.entries(data).filter(([k]) => k !== 'at' && k !== 'pushedAt' && k !== 'durationMs'))
+    : data;
+  return createHash('sha256').update(JSON.stringify({ id, data: fingerprintData })).digest('hex');
+}
+
 export async function recordMergeEvent(services: Services, actor: Principal, id: string, body: unknown, key: string) {
   demand(actor.role === 'coordinator', 'Only the loop\'s coordinator identity records the merge writer\'s ledger', 403);
   const data = (body as { kind?: unknown } | null)?.kind === 'revert' ? revertRecordBodySchema.parse(body) : mergeRecordBodySchema.parse(body);
   demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
-  const fingerprintData = typeof data === 'object' && data !== null
-    ? Object.fromEntries(Object.entries(data).filter(([k]) => k !== 'at' && k !== 'pushedAt' && k !== 'durationMs'))
-    : data;
-  const fingerprint = createHash('sha256').update(JSON.stringify({ id, data: fingerprintData })).digest('hex');
+  const fingerprint = mergeRecordFingerprint(id, data);
   const engine = services.engine, base = engine.baseBranch;
   // Whether the base branch holds the merge (or revert) commit is read from the checkout before the transaction, as every provider read is.
   let held: boolean | null = null;

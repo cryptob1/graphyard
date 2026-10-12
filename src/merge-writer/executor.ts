@@ -80,9 +80,17 @@ export type MergeRecordEvent =
   | { kind: 'refused'; head: string; reason: string };
 /** The ledger kind each recorded step writes; `trial` is the executor's own record beside the ledger, which the fold ignores. */
 export const mergeRecordKinds = { ...mergeLedgerKinds, trial: 'merge.trial' } as const;
-/** The idempotency key one step keeps across retries: the item, the step and the commits it names. */
-export const mergeRecordKey = (work: Pick<Work, 'id'>, event: MergeRecordEvent) =>
-  `merge-record:${work.id}:${event.kind}:${event.kind === 'pushed' || event.kind === 'reconciled' ? event.mergeSha : `${event.head}:${'baseTip' in event ? event.baseTip : 'refused'}`}`;
+/**
+ * The idempotency key one step keeps across retries: the item, the step and the commits it names.
+ * An attempt's intent, trial and refusal also name the ledger it started from (its event count,
+ * GY-1718): a head requeued on the same tip (a preview timeout, an unmoved-tip refusal) is merged
+ * again by a later cycle, whose fresh trial commit and verdict are a new attempt, not a replay.
+ */
+export const mergeRecordKey = (work: Pick<Work, 'id'> & { mergeLedger?: Pick<MergeLedgerState, 'events'> | null }, event: MergeRecordEvent) => {
+  if (event.kind === 'pushed' || event.kind === 'reconciled') return `merge-record:${work.id}:${event.kind}:${event.mergeSha}`;
+  const attempt = work.mergeLedger?.events ? `#${work.mergeLedger.events}` : '';
+  return `merge-record:${work.id}:${event.kind}:${event.head}:${'baseTip' in event ? event.baseTip : 'refused'}${attempt}`;
+};
 
 /** The refusal a failed trial records: the conflicting paths, the failing build step, or the failing test files (AC-3). */
 export function trialFailureReason(trial: { conflict?: readonly string[]; run?: Pick<TrialRun, 'build' | 'tests'> | null }): string | null {

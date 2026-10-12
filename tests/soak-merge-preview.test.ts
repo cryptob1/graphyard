@@ -7,7 +7,8 @@ import { mkdir, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promi
 import { join } from 'node:path';
 import { daemonStateSchema, emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { mergeWriterIdle, mergeWriterKeptQueue, mergeWriterKeptRefusals, mergeWriterKeptReworks, type MergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
-import type { MergeRecordEvent } from '../src/merge-writer/executor.js';
+import { mergeRecordKey, type MergeRecordEvent } from '../src/merge-writer/executor.js';
+import { mergeRecordBodySchema, mergeRecordFingerprint } from '../src/server/merge-record.js';
 import { previewConcurrency, previewSlots, runPreview, type PreviewSite, type PreviewVerdict } from '../src/merge-writer/preview.js';
 import { trialFailurePrefix } from '../src/model/rework-ground.js';
 import type { MergeLedgerState } from '../src/model/merge-ledger.js';
@@ -62,6 +63,7 @@ class World {
   previews: { n: number; verdict: PreviewVerdict }[] = [];
   hung = new Map<number, number>(); moved = new Set<number>(); commandHung = new Set<number>();
   trials = 0; activeBuilds = 0; lateBuilds = 0;
+  receipts = new Map<string, string>();
   slots = previewSlots();
   constructor(readonly now: () => number, readonly root: string, readonly base: string, readonly marks: string) {}
   tip() { return this.main[0]!; }
@@ -75,7 +77,7 @@ class World {
         if (event.kind === 'intent') ledger = { key: `GY-${n}`, state: 'intent', head: event.head, baseTip: event.baseTip, mergeSha: event.mergeSha, risk: event.risk, intentAt: event.at, pushedAt: null, observedTip: null, refusal: null, events: (ledger?.events ?? 0) + 1 };
         else if (event.kind === 'pushed' && ledger) ledger = { ...ledger, state: 'pushed', pushedAt: event.pushedAt, events: ledger.events + 1 };
         else if (event.kind === 'reconciled' && ledger) ledger = { ...ledger, state: 'reconciled', observedTip: event.observedTip, events: ledger.events + 1 };
-        else if (event.kind === 'refused') ledger = { key: `GY-${n}`, head: event.head, baseTip: null, mergeSha: null, risk: null, intentAt: null, pushedAt: null, observedTip: null, events: 1, ...ledger, state: 'refused', refusal: { kind: 'merge', reason: event.reason } };
+        else if (event.kind === 'refused') ledger = { key: `GY-${n}`, head: event.head, baseTip: null, mergeSha: null, risk: null, intentAt: null, pushedAt: null, observedTip: null, ...ledger, events: (ledger?.events ?? 0) + 1, state: 'refused', refusal: { kind: 'merge', reason: event.reason } };
       }
       const delivered = ledger?.state === 'reconciled' && ledger.head === entry.head;
       const candidate = { sha: entry.head, baseSha: sha('base'), pr: n, branch: `graphyard/gy-${n}-1`, author: 'worker' };
@@ -136,7 +138,8 @@ class World {
       baseBranch: 'main', retrials: 3, now: this.now, merger: async () => 'control-plane',
       fetch: async () => world.tip(),
       merge: async (head, baseTip) => {
-        const mergeSha = sha(`merge:${head}:${baseTip}`), n = [...world.submissions.entries()].find(([, entry]) => entry.head === head)![0];
+        // commit-tree stamps the time, so a head merged again on the same tip (a timed-out preview's retry) is a fresh merge commit.
+        const mergeSha = sha(`merge:${head}:${baseTip}:${world.trials}`), n = [...world.submissions.entries()].find(([, entry]) => entry.head === head)![0];
         world.merges.set(mergeSha, { n, head });
         return { mergeSha, files: world.files(n) };
       },
@@ -162,7 +165,13 @@ class World {
         return 'pushed';
       },
       holds: async sha => world.main.includes(sha),
-      record: async (item, event) => { const n = Number(item.key.slice(3)); world.recorded.set(n, [...(world.recorded.get(n) ?? []), event]); },
+      // The coordinator's receipt rule (server/merge-record.ts): a key replays its own input and refuses any other.
+      record: async (item, event) => {
+        const key = mergeRecordKey(item, event), fingerprint = mergeRecordFingerprint(item.id, mergeRecordBodySchema.parse(event)), receipt = world.receipts.get(key);
+        if (receipt !== undefined) { assert.equal(receipt, fingerprint, `Idempotency key reused with different input: ${key}`); return; }
+        world.receipts.set(key, fingerprint);
+        const n = Number(item.key.slice(3)); world.recorded.set(n, [...(world.recorded.get(n) ?? []), event]);
+      },
     };
   }
   decide: DaemonEffects['decide'] = async (work, action) => {
