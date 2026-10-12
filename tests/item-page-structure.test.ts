@@ -256,4 +256,11 @@ test('What is left names who clears each step from the refusal itself: exhausted
   const unreleasedAll = [...all, unreleased];
   assert.deepEqual(whatIsLeft(unreleased, NOW).map(group => [group.label, group.who])[0], ['Build', 'Master agent']);
   assert.equal(nextActor(unreleased, groupWithin(unreleased, unreleasedAll, NOW), NOW).who, 'Master agent');
+  // A split parent with an undelivered child (GY-1739 review): its ready reason is no recorded
+  // blocker, so it reads as the wait for that child, never as a fault the master agent clears.
+  const split = { ...blocked, blocker: null, children: ['GY-99'], lease: null,
+    gates: [gate('ready', ['Split into child items: GY-99 is not delivered']), ...blocked.gates.filter(entry => entry.name !== 'ready')] } as unknown as Work;
+  const [splitHeld] = whatIsLeft(split, NOW);
+  assert.deepEqual([splitHeld.label, splitHeld.who, splitHeld.lines[0]], ['Build', 'Nobody yet', 'Split into smaller items; waiting for GY-99 to ship first']);
+  assert.ok(!splitHeld.lines.some(line => /fault|master agent/i.test(line)), 'a split-child wait is not summarised as a recorded blocker');
 });

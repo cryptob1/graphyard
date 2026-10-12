@@ -44,12 +44,12 @@ export function plainLines(gate: Gate, work?: Work, now = Date.now()): string[] 
  * Who clears a failing ready gate, read from its refusal rather than from the Build step it holds,
  * the same way "Who acts next" reads it (web/groups.ts `nextActor`): a parked human-only decision
  * is yours; a recorded blocker, or an item not yet released from the backlog, is the master
- * agent's; unfinished dependencies are nobody's yet. Anything else leaves the step's own actor.
+ * agent's; unfinished dependencies and undelivered split children are nobody's yet. Anything else leaves the step's own actor.
  */
 export function readyOwner(work: Work, gate: Gate): string | undefined {
   if (parkedOnHuman(work)) return 'You';
   if ((work.blocker && gate.reasons.includes(work.blocker)) || gate.reasons.includes('Not released from backlog')) return 'Master agent';
-  if (gate.reasons.length && gate.reasons.every(reason => reason.startsWith('Dependency '))) return 'Nobody yet';
+  if (gate.reasons.length && gate.reasons.every(reason => /^(?:Dependency |Split into child items: )/.test(reason))) return 'Nobody yet';
   return undefined;
 }
 

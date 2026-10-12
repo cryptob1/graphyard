@@ -37,6 +37,7 @@ export function plainReason(reason: string, gate: string, now = Date.now(), work
   const rules: [RegExp, (m: RegExpMatchArray) => string, boolean?][] = [
     [/^Not released from backlog$/, () => 'Not released for work yet'],
     [/^Dependency (\S+) is unfinished$/, m => `Waiting for ${m[1]} to ship first`],
+    [/^Split into child items: (\S+) is not delivered$/, m => `Split into smaller items; waiting for ${m[1]} to ship first`],
     [/^Worker has not submitted implementation for this attempt$/, () => 'The work has not been handed in yet'],
     [/^Pull request has not been independently observed$/, () => 'Graphyard has not seen the pull request on GitHub yet'],
     [/^No workspace registered$/, () => 'The builder has not said where the code lives yet'],
@@ -60,7 +61,7 @@ export function plainReason(reason: string, gate: string, now = Date.now(), work
     [/^Slice lead (\S+) ruled \S+ under rule \S+; delivery is blocked until the authorized recovery: (.*)$/s, m => `Held by team lead ${m[1]}: ${m[2]}`, true],
   ];
   for (const [pattern, text, stuck] of rules) { const m = reason.match(pattern); if (m) return { text: text(m), stuck: !!stuck, known: true }; }
-  // The ready gate's only free-text reason is a recorded blocker, written for the next agent: it
+  // Every other ready reason has its rule above, so what is left is a recorded blocker, written for the next agent: it
   // reads as its one-sentence summary, and the item page's technical details show it as written.
   // Given the item, the summary reads its probe and window the way the row's own sentence does.
   if (gate === 'ready') return { text: blockerSummary(reason, now, work).sentence, stuck: true, known: true };
