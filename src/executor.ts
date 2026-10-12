@@ -12,7 +12,7 @@ import { registeredLaunch } from './model/session-state.js';
 import { answeredByPendingSession, independentProducerProfiles } from './producer.js';
 import { answeredByPendingReview } from './reviewer.js';
 import { daemonSummary, profileHealth, readDaemonState, type DaemonState, type DeploymentObservation } from './master-daemon.js';
-import { deferPostDeployFollowUps, filePostDeployFollowUps, localPostDeployChecks, patternReader, releasePostDeployFiler, type PatternReader } from './master-verification.js';
+import { deferPostDeployFollowUps, filePostDeployFollowUps, patternReader, releasePostDeployFiler, type PatternReader } from './master-verification.js';
 export { patternReader };
 import { withLaunchedRuntime } from './master/launch.js';
 import { launchedSessionHandle, selectReviewerProfile, type ExecutorEffects, type ExecutorHandler } from './auto-dispatch.js';
@@ -424,8 +424,10 @@ export function controlPlaneHandlers(config: () => MasterConfig, effects: Contro
       // action, which retries it, where a recorded observation would refuse every retry.
       // GY-1732: the follow-ups are filed by the observed release's own code, never by an executor checkout at another commit;
       // where that code cannot be had or run, each is deferred under its request id and the observation waits for a retry.
-      const sha = observation.sha, owes = deferPostDeployFollowUps(work, sha, all, 'owed').some(check => check.deferred);
-      const source = owes ? await (effects.postDeployFiler ?? (release => releasePostDeployFiler(config(), release)))(sha) : { filer: localPostDeployChecks, dispose: async () => {} };
+      // That code also decides whether anything is owed: this checkout may not recognise a proof the release does.
+      const sha = observation.sha, source = await (effects.postDeployFiler ?? (release => releasePostDeployFiler(config(), release)))(sha);
+      if ('reason' in source && !deferPostDeployFollowUps(work, sha, all, source.reason).some(check => check.deferred))
+        throw new Error(`${work.key}: whether the release ${sha.slice(0, 12)} owes post-deploy follow-ups is its own code's to decide, and ${source.reason}; the deployment observation waits for it`);
       const checks = 'reason' in source ? deferPostDeployFollowUps(work, sha, all, source.reason)
         : await filePostDeployFollowUps(work, sha, all, effects.fileWork, new Date(effects.now?.() ?? Date.now()), effects.readPattern, new Date(observation.at), source.filer).finally(source.dispose);
       const deferred = checks.filter(check => check.deferred);

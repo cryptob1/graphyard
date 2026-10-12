@@ -468,10 +468,20 @@ test('unit:post-deploy-filing-at-release-identity — the executor\'s verify-dep
   assert.deepEqual(filed.map(entry => entry.input.observationWindow?.notBefore), ['2026-10-13T07:33:40.939Z', '2026-10-13T07:33:40.939Z']);
   for (const entry of filed) assert.match(entry.input.description, /\n\nObservation window: the reading can first exist at /);
   assert.deepEqual(recorded.map(([path]: any) => path), [`work/${gy1700.id}/deployment`], 'recorded once its follow-ups are filed');
-  // Nothing owed: no release checkout is spent.
+  // The release's filer decides what is owed, even where this checkout's code sees nothing: a proof the
+  // release recognises and this checkout does not is filed, and without that filer nothing is recorded.
   const quiet = delivered({ key: 'GY-1701', criteria: [{ id: 'AC-1', text: 'The change ships', proofs: ['unit:ships'] }] });
-  const plain = await executorVerify(quiet, at, async () => assert.fail('nothing owed, so nothing is materialized'));
+  const plainLog: string[] = [];
+  const plain = await executorVerify(quiet, at, filerAt(plainLog));
   assert.match(await plain.run, /observed the release serving ba607f8a809e for GY-1701$/);
+  assert.deepEqual(plainLog, [`materialize ${serving.slice(0, 12)}`, `checks ${at}`, 'dispose'], 'the release\'s filer is asked though this checkout sees nothing owed');
+  const recognised = { criterion: 'AC-1', proof: 'unit:ships', result: 'owed', followUp: { title: 'Observe GY-1701 AC-1', requestId: `post-deploy:${quiet.id}:AC-1:unit:ships:${serving}`, input: { title: 'Observe GY-1701 AC-1', description: 'd', type: 'chore', priority: 2, dependencies: [], criteria: [], reason: 'r', observationWindow: { notBefore: '2026-10-13T07:33:40.939Z' } } } };
+  const newer = await executorVerify(quiet, at, filerAt([], async () => [recognised]));
+  assert.match(await newer.run, /AC-1 owes its post-deploy observation \(GY-1721\)/);
+  assert.deepEqual([newer.filed.map(entry => entry.requestId), newer.recorded.length], [[recognised.followUp.requestId], 1], 'filed by the release\'s own recognition, then recorded');
+  const unavailable = await executorVerify(quiet, at, async () => ({ reason: 'the observed release ba607f8a809e could not be checked out to file it at its own identity: Deployed release missing' }));
+  assert.match(await unavailable.run.then(() => assert.fail('the action fails'), (failure: Error) => failure.message), /GY-1701: whether the release ba607f8a809e owes post-deploy follow-ups is its own code's to decide, and the observed release ba607f8a809e could not be checked out .*; the deployment observation waits for it$/);
+  assert.deepEqual([unavailable.filed, unavailable.recorded], [[], []], 'nothing is recorded without the release\'s filer');
 
   // The default selection, over the executor's config: its checkout's own code only at the release's commit, or of
   // another repository; otherwise the release's isolated checkout, or the reason it cannot be had.
