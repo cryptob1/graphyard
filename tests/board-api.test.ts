@@ -9,6 +9,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import type { Work } from '../src/model.js';
 import { openHumanOnly } from '../src/model/human-request.js';
 import { scopeRefusalBlocker } from '../src/model/scope.js';
+import { maxAutomaticClears } from '../src/model/blocker-class.js';
 import { actorRole, groups, roleOf, type Board, type OpenGroup } from '../src/model/board.js';
 import { statusRoutes } from '../src/server/routes/status.js';
 import { masterStatusReport } from '../src/cli/master-status.js';
@@ -298,6 +299,24 @@ test('unit:board-blocked-declined-human-names-master — a declined human answer
   const summary = plain.blockerSummary(declined, NOW, { ...item, humanRequest: null });
   assert.match(summary.sentence, /master agent/);
   assert.doesNotMatch(summary.sentence, /only you|Waiting on a human/);
+});
+
+test('unit:board-blocked-classified-before-item-wait — a classified fault that mentions another item reads as that fault, not as a wait on the item', () => {
+  const failure = 'npm test failed outside plannedFiles in tests/ui-dashboard.test.ts after GY-1234 landed on main';
+  assert.equal(plain.blockerSummary(failure, NOW).kind, 'outside-scope-test-failure');
+  assert.doesNotMatch(plain.blockerSummary(failure, NOW).sentence, /GY-1234/);
+  assert.equal(plain.blockerSummary('Waiting on GY-1689 to merge first', NOW).kind, 'item');
+});
+
+test('unit:board-blocked-spent-decision-names-master — a needs-decision blocker cleared maxAutomaticClears times names the master agent, not the approver', () => {
+  const decision = 'Waiting on the approver decision for this scope';
+  const { item } = blockedScenario(decision);
+  const fresh = plain.blockerSummary(decision, NOW, { ...item, blocker: decision, blockerProbe: null });
+  assert.equal(fresh.kind, 'needs-decision');
+  assert.match(fresh.sentence, /approver agent/);
+  const spent = plain.blockerSummary(decision, NOW, { ...item, blocker: decision, blockerProbe: { clears: maxAutomaticClears } as Work['blockerProbe'] });
+  assert.match(spent.sentence, /master agent/);
+  assert.doesNotMatch(spent.sentence, /approver|Graphyard clears/);
 });
 
 test('unit:board-blocked-next-action-no-echo — the item page Next-action paragraph points at the recorded blocker instead of repeating it', () => {

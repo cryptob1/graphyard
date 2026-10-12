@@ -116,15 +116,18 @@ export function blockerSummary(text: string, now: number, work?: Pick<Work, 'key
   const window = work ? observationWindowHold(work as Work, new Date(now)) : null;
   const future = [...notBeforeInstants(text), ...(window ? [Date.parse(window.notBefore)] : [])].filter(at => at > now);
   if (future.length) { const until = Math.max(...future); return { sentence: `Waiting until ${localInstant(until, timeZone)}; nothing is broken, and the master agent lifts the hold once that time passes.`, kind: 'waiting-until', until: new Date(until).toISOString() }; }
-  const other = named(itemWait);
-  if (other && other !== work?.key) return { sentence: `Waiting on ${other}; the master agent clears it once that item is done.`, kind: 'item' };
   const view = work?.blocker === text ? blockerView(work) : null;
   const kind = view?.class ?? classified.class;
+  // Spent: the loop has cleared it `maxAutomaticClears` times (daemon/cycle-blockers.ts) and left it to the master.
   const spent = view?.needsSomeone ?? false;
-  if (kind === 'needs-decision') return { sentence: 'Waiting on an agent decision; an approver agent judges it, then Graphyard clears the block.', kind };
+  if (kind === 'needs-decision') return { sentence: spent ? 'Waiting on a decision that keeps coming back; the master agent decides it and clears the block.' : 'Waiting on an agent decision; an approver agent judges it, then Graphyard clears the block.', kind };
   if (kind === 'planned-file-scope' && !spent) return { sentence: 'Needs files outside its plan; an approver agent decides whether to allow them.', kind };
   const cause = routineCause[kind];
   if (cause) return { sentence: spent ? `${cause}, again and again; the master agent must clear it.` : `${cause}; Graphyard re-checks it every cycle and clears it on its own.`, kind };
+  // Only a blocker no class explains reads as a wait on another item: a classified fault that merely mentions one
+  // (`… failed after GY-1234`) is that fault, cleared by whoever clears its class.
+  const other = named(itemWait);
+  if (other && other !== work?.key) return { sentence: `Waiting on ${other}; the master agent clears it once that item is done.`, kind: 'item' };
   // Anything else is summarised, never echoed: even a short reason is the agent's words, kept for the item page.
   return { sentence: 'A fault blocks it; the master agent clears it.', kind };
 }
