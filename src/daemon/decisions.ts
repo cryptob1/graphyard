@@ -657,8 +657,10 @@ export const adoptedOnRefusal: readonly RoutineDecisionAction[] = ['rework', 're
  * is already requested on GY-N; wait for it". The loop's history read can miss it — a rework or
  * recover read that failed is taken as empty — and GY-1352's rework round was then logged failed
  * while the very decision it asked for stood, requested and awaiting its approver.
+ * `release` is the diagnosis step's fix release (not a routine decisions-step action); GY-1712's
+ * decideFresh adopts a standing close or release the same way the decisions step adopts close.
  */
-export function standingNamedIn(error: unknown, action: RoutineDecisionAction): string | null {
+export function standingNamedIn(error: unknown, action: RoutineDecisionAction | 'release'): string | null {
   const text = error instanceof Error ? error.message : String(error);
   return new RegExp(`Decision ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}) \\(${action}\\) is already requested on `).exec(text)?.[1] ?? null;
 }

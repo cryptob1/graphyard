@@ -1042,3 +1042,40 @@ test('unit:doctor-refusal-digest-is-normalised — reports whose create input is
   assert.equal(filingDigest(spelled(a, 'C1')), filingDigest(spelled(b, 'second')), 'criterion IDs create renumbers');
   assert.notEqual(filingDigest(a), filingDigest(selfUpgradeFiling(['e2e:another-scenario'])), 'different content is not conflated');
 });
+
+// ---- GY-1712: a 400 Invalid input create refusal is dropped like a 409 --------------------------------
+//
+// Instance 2 (doctor:a0cdc186f65394498c5a7123:file:capacity): master create answered 400 Invalid input
+// (zod). createRefused matched 409 only, so the doctor kept the filing pending and recorded each
+// retry as unclassified action:fault ("Still could not file … Invalid input").
+const zodIssues = [{ path: ['criteria', 0, 'proofs', 0], message: 'Invalid string: must match pattern /^(unit|integration|e2e|manual):[a-zA-Z0-9._/-]+$/' }];
+const zodRefusal = (detail: string) => new RefusedResponse(`Graphyard refused work (400): ${detail}`, 400, { error: 'Invalid input', issues: zodIssues });
+
+test('unit:doctor-filing-400-invalid-input-fix-item — a filing the create route refuses with 400 Invalid input is recorded failed under fix-item (proof), dropped, and never re-filed; the issues stand in the escalation', async () => {
+  clearDoctorRuns();
+  const filed: string[] = [];
+  const detail = `Invalid input: ${JSON.stringify(zodIssues)}`;
+  const refusing = filingDoctor([selfUpgradeFiling(['unit:self-upgrade'])], async (_input, key) => { filed.push(key); throw zodRefusal(detail); });
+  const replay = cycle([item()], { doctor: refusing });
+  await doctorStep(replay);
+  await doctorRunsSettled();
+  assert.equal(filed.length, 1, 'filed once');
+  assert.deepEqual(instanceKinds(replay.state), [['fix-item', 'proof']]);
+  assert.match(replay.state.faults.instances[0].text, /Could not file ".+", and it is not filed again: master create refused the filing itself: Graphyard refused work \(400\): Invalid input/);
+  assert.deepEqual(replay.state.doctor.pendingFiles, [], 'not kept for a retry');
+  assert.equal(escalationsOf(replay.state).length, 1);
+  assert.match(escalationsOf(replay.state)[0].detail, /Invalid input.*must match pattern/);
+  // A later cycle reporting the same content does not submit to create again.
+  for (let round = 1; round <= 4; round++) { replay.state.cycle += 1 << round; await doctorStep(cycle([item()], { doctor: refusing, state: replay.state })); await doctorRunsSettled(); }
+  assert.equal(filed.length, 1, 'never re-filed');
+  assert.equal(replay.state.faults.instances.length, 1, 'one refusal, one instance');
+  clearDoctorRuns();
+  // Textual: a 400 the post wrapped in plain text is the same class.
+  const textual = filingDoctor([selfUpgradeFiling(['unit:self-upgrade'])], async () => { throw new Error('Graphyard refused work (400): Invalid input'); });
+  const plain = cycle([item()], { doctor: textual });
+  await doctorStep(plain);
+  await doctorRunsSettled();
+  assert.deepEqual(instanceKinds(plain.state), [['fix-item', 'proof']]);
+  assert.deepEqual(plain.state.doctor.pendingFiles, []);
+  clearDoctorRuns();
+});

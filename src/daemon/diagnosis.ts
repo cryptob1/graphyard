@@ -20,7 +20,7 @@ import type { Runner } from '../runner/types.js';
 import { type DaemonAction, type DaemonState, message } from './state.js';
 import { record, selectDiagnosticianFleet } from './effects.js';
 import { createRefused } from './doctor.js';
-import { maxDecisionRequests } from './decisions.js';
+import { maxDecisionRequests, standingNamedIn } from './decisions.js';
 import type { Cycle } from './cycle.js';
 
 // ---------------------------------------------------------------------------
@@ -560,11 +560,11 @@ async function advance(cycle: Cycle, diagnostician: DiagnosticianEffects, entry:
     let fix: Work;
     try { fix = await diagnostician.file(input, `${diagnosisKey(entry.subject)}:fix`); }
     catch (error) {
-      // GY-1530: the create route's own refusal (a 409: an e2e proof naming a scenario nothing
-      // registered, GY-1516's "Register E2E scenario … before creating work that requires it") is the
-      // same malformed fix as one the local checks refuse, and settles the entry the same way, under
-      // the proof class's fix-item; thrown on, it reached cycle.isolate as an unclassified
-      // action:diagnosis. A plane-wide failure still throws to ridePlane, and the next cycle files again.
+      // GY-1530 / GY-1712: the create route's own refusal (a 409: an e2e proof naming a scenario
+      // nothing registered; or a 400: the server's zod Invalid input) is the same malformed fix as
+      // one the local checks refuse, and settles the entry the same way, under the proof class's
+      // fix-item; thrown on, it reached cycle.isolate as an unclassified action:diagnosis. A
+      // plane-wide failure still throws to ridePlane, and the next cycle files again.
       if (!createRefused(error)) throw error;
       entry.state = 'failed';
       await note(entry, 'failed', `The control plane refused the diagnostician's fix item for ${entry.subject} as written, so it is not filed again; the diagnosis stands for the master to file by hand: ${message(error)}`, 'fix-item');
@@ -642,6 +642,11 @@ const deliveredMeanwhile = (error: unknown) => /Delivered work is immutable/.tes
 async function decideFresh(cycle: Cycle, diagnostician: DiagnosticianEffects, entry: DiagnosisRecord, work: Work, action: 'release' | 'close', input: Record<string, unknown>, reason: string, note: Note) {
   try { return { decision: await diagnostician.decide(work, action, reason, input), target: work }; }
   catch (error) {
+    // GY-1712: the server names a standing request of this action the history read missed — adopt it
+    // for an approver like the decisions step (GY-1374 / standingNamedIn). Thrown on, a close that
+    // already stood on GY-1710 reached cycle.isolate as unclassified action:diagnosis.
+    const held = standingNamedIn(error, action);
+    if (held) return { decision: { id: held }, target: work };
     if (!revisionRaced(error) && !deliveredMeanwhile(error)) throw error;
     const why = `The ${action} request on ${work.key} for the diagnosis of ${entry.subject} was refused: ${message(error)}`;
     const fresh = (await cycle.effects.snapshot()).work.find(candidate => candidate.id === work.id);
@@ -657,6 +662,8 @@ async function decideFresh(cycle: Cycle, diagnostician: DiagnosticianEffects, en
     if (spent >= maxDecisionRequests) { await note(entry, 'done', `${why}; ${spent} ${action} request(s) already settled without applying, so it is not asked again here and the next cycle decides afresh`, null); return null; }
     try { return { decision: await diagnostician.decide(fresh, action, reason, input), target: fresh }; }
     catch (again) {
+      const heldAgain = standingNamedIn(again, action);
+      if (heldAgain) return { decision: { id: heldAgain }, target: fresh };
       if (!revisionRaced(again) && !deliveredMeanwhile(again)) throw again;
       await note(entry, 'done', `${why}; asked again against revision ${fresh.revision} and refused again (${message(again)}), so the next cycle decides afresh`, null);
       return null;

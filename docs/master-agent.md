@@ -29,7 +29,7 @@ Per cycle (`daemon.invariants.lines`): `follow-ups-per-parent` (1 open), `linger
 
 ## Research and diagnosis
 
-`Recurring <class>` and `invariant:` faults past `invariantBoundMinutes` get a diagnostician (`run.diagnostician`; none for parks); fix `plannedFiles` as `master create`; quota refusals wait until `retryAt` (`daemon.diagnoses`); `stale`/`withdrawn` decisions, stale backlog releases: re-requested ≤3×, then escalated (`decision-stale`); raced, delivered, [plane-wide](operations.md#incident-decision-tree) requests retry faultless; refused fix `create` is `fix-item`, never re-filed; overlong/`limit-wait` (GY-1705); no `loop` fault for restart-lost diagnoses, approver refusals, nor `merge` for base conflicts <30m.
+`Recurring <class>` and `invariant:` faults past `invariantBoundMinutes` get a diagnostician (`run.diagnostician`; none for parks); fix `plannedFiles` as `master create`; quota refusals wait until `retryAt` (`daemon.diagnoses`); `stale`/`withdrawn` decisions, stale backlog releases: re-requested ≤3×, then escalated (`decision-stale`); raced, delivered, [plane-wide](operations.md#incident-decision-tree) requests retry faultless; a standing `close`/`release` the history missed is adopted (same as the decisions step); refused fix `create` (409 demand or 400 zod `Invalid input`, with the zod issues named in the refusal text) is `fix-item`, never re-filed; overlong/`limit-wait` (GY-1705); no `loop` fault for restart-lost diagnoses, approver refusals, nor `merge` for base conflicts <30m.
 
 ## Machine-filed backlog
 

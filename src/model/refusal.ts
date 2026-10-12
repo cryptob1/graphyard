@@ -14,6 +14,20 @@ export class Refusal extends Error {
 export class RefusedResponse extends Error {
   constructor(message: string, public status: number, public body: unknown) { super(message); }
 }
+/**
+ * GY-1712: the detail a refused control-plane post names in its thrown text. A zod 400 answers
+ * `{ error: 'Invalid input', issues }` — without the issues the loop's fault lines and escalations
+ * only said "Invalid input", so nothing named what the filing failed. The body is still kept on
+ * `RefusedResponse`; this only shapes the prose callers already put after the status.
+ */
+export function refusedDetail(result: unknown): string {
+  if (!result || typeof result !== 'object') return JSON.stringify(result);
+  const body = result as { error?: unknown; issues?: unknown };
+  if (typeof body.error === 'string' && Array.isArray(body.issues) && body.issues.length)
+    return `${body.error}: ${JSON.stringify(body.issues)}`;
+  if (typeof body.error === 'string') return body.error;
+  return JSON.stringify(result);
+}
 export class ReconciliationRetry extends Refusal {}
 /** GitHub refused a merge Graphyard asked for because it conflicts (409). */
 export class MergeConflict extends Refusal {}

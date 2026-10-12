@@ -9,7 +9,7 @@ import { goalPlanSchema, maxPlanRounds, planNoteMaxWords, planRefusals, servedIn
 import { agentToken } from '../master/autonomy.js';
 import { capacityRefusal, selectFleetSession } from '../fleet.js';
 import { heldAwareProbe } from '../master/environments.js';
-import { Refusal, RefusedResponse } from '../model/refusal.js';
+import { Refusal, RefusedResponse, refusedDetail } from '../model/refusal.js';
 import { refusedOutright } from './acceptance.js';
 /** A plan the control plane rejects as input (422): it counts as a refused plan round. Authority and state refusals (401, 403, 409) do not, and are posted again in an hour. */
 const invalidPlan = (error: unknown) => (error instanceof Refusal || error instanceof RefusedResponse) && error.status === 422;
@@ -272,7 +272,7 @@ export function plannerEffects(config: MasterConfig, root: string, calls: Calls)
     const response = await calls.fetcher(`${config.url}/api/${path}`, { method: 'POST', headers: { Authorization: `Bearer ${await agentToken(root, config, 'approver')}`, 'Content-Type': 'application/json', 'Idempotency-Key': key },
       body: JSON.stringify(body), signal: AbortSignal.timeout(30_000) });
     const result = await response.json();
-    if (!response.ok) throw new RefusedResponse(`Graphyard refused ${path} (${response.status}): ${result?.error ?? JSON.stringify(result)}`, response.status, result);
+    if (!response.ok) throw new RefusedResponse(`Graphyard refused ${path} (${response.status}): ${refusedDetail(result)}`, response.status, result);
     return result;
   };
   return {
