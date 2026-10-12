@@ -57,8 +57,6 @@ const gy1700 = delivered({ id: 'e03bc94f-82f4-481d-a443-4b4e6abe9eb6', key: 'GY-
   { id: 'AC-3', text: 'The github-budget attention row in graphyard master status clears when a delivery arrives and does not re-fire during 24h of live repository activity while at least one pull request is open.', proofs: ['manual:post-deploy/github-budget-attention-row-clears'] }],
   delivery: { mergeSha: 'a14965e4ad9ad52069ce7dc0c5d5aabdbf4f8b43', mergedAt: '2026-10-11T15:08:24Z', evidenceAsOf: '2026-10-11T15:08:24Z', authorizationRevision: 1 } as never });
 /** master verify-deployment of one delivered item against the serving release, observed at `at`: the follow-up inputs it files. */
-/** A launcher checkout of another repository at another commit files through the served release's isolated checkout (GY-1732). */
-const otherRepositoryRelease = async (sha: string) => ({ release: { sha, clean: true, repository: 'other/repo', reason: null }, emit: async () => assert.fail('nothing is emitted'), checks: (await modules()).localPostDeployChecks, dispose: async () => {} });
 const verifyServing = async (item: Work, at: string) => {
   const { verifyDeployment } = await modules();
   const now = Date.parse(at) + 2_000, filed: any[] = [];
@@ -68,7 +66,7 @@ const verifyServing = async (item: Work, at: string) => {
     release: () => ({ sha: 'f'.repeat(40), clean: true, repository: 'other/repo', reason: null }),
     emit: async () => assert.fail('nothing is emitted'), repository: 'owner/project', now: () => now,
     record: async () => {}, file: async (input: any) => { filed.push(input); return { key: `GY-${1720 + filed.length}` }; },
-    patterns: async () => ({ since: null, projected: '2026-10-15T10:32:39.000Z' }), isolate: otherRepositoryRelease,
+    patterns: async () => ({ since: null, projected: '2026-10-15T10:32:39.000Z' }),
   });
   assert.equal(verified.result, 'verified', verified.refusals.join('; '));
   return filed;
@@ -165,7 +163,7 @@ test('unit:post-deploy-follow-up-observation-window — a windowed follow-up rec
     observe: async () => ({ source: 'endpoint' as const, sha: release, at: iso(now), reason: null, deployed: ['GY-1685'], pending: [] }),
     release: () => ({ sha: 'f'.repeat(40), clean: true, repository: 'other/repo', reason: null }),
     emit: async () => assert.fail('nothing is emitted'), repository: 'owner/project', now: () => now,
-    record: async () => {}, file: async (input: any) => { filedByVerify.push(input); return { key: 'GY-1689' }; }, patterns, isolate: otherRepositoryRelease,
+    record: async () => {}, file: async (input: any) => { filedByVerify.push(input); return { key: 'GY-1689' }; }, patterns,
   });
   assert.equal(verified.result, 'verified', verified.refusals.join('; '));
   assert.deepEqual(filedByVerify[0].observationWindow, filed);
@@ -319,7 +317,7 @@ const staleFiler = async (input: any) => {
 };
 const loopInstructions = (text => ({ guide: text, init: text }))('Keep cycling; deployment verification is a step of the cycle, against the exact deployed release. Stop only at a genuinely external blocker recorded in Graphyard. Ordinary review findings, rework, idle workers, and proof setup are not stopping conditions. Close finished agent sessions.');
 /** master verify-deployment of `item` with the coordinator checkout at 98070f3538 and the release ba607f8a809e observed serving at `at`. */
-const verifyBehind = async (item: Work, at: string, isolate: ((sha: string) => Promise<any>) | undefined, extra: { all?: Work[]; checkout?: string } = {}) => {
+const verifyBehind = async (item: Work, at: string, isolate: ((sha: string) => Promise<any>) | undefined, extra: { all?: Work[]; checkout?: string; checks?: (input: any) => Promise<any> } = {}) => {
   const { verifyDeployment } = await modules();
   const now = Date.parse(at) + 2_000, filed: { input: any; requestId: string }[] = [], recorded: unknown[] = [];
   const verified = await verifyDeployment(item, {
@@ -327,7 +325,7 @@ const verifyBehind = async (item: Work, at: string, isolate: ((sha: string) => P
     observe: async () => ({ source: 'endpoint' as const, sha: serving, at, reason: null, deployed: [item.key], pending: [] }),
     release: () => ({ sha: '98070f3538'.padEnd(40, '0'), clean: true, repository: extra.checkout ?? managed.repository, reason: null }),
     emit: async () => assert.fail('the coordinator checkout behind the release emits nothing'), ...managed, now: () => now,
-    checks: async () => assert.fail('the coordinator checkout behind the release files nothing'),
+    checks: extra.checks ?? (async () => assert.fail('the coordinator checkout behind the release files nothing')),
     record: async (_work, data) => { recorded.push(data); }, file: async (input: any, requestId: string) => { filed.push({ input, requestId }); return { key: `GY-${1720 + filed.length}` }; },
     patterns: async () => ({ since: null, projected: '2026-10-15T10:32:39.000Z' }), isolate,
   });
@@ -376,23 +374,18 @@ test('unit:post-deploy-filing-at-release-identity — with the coordinator check
     assert.deepEqual(verified.postDeploy.map(check => [check.result, check.followUp, check.deferred]), filed.map((_entry, index) => ['owed', `GY-${1721 + index}`, undefined]));
     assert.equal(recorded.length, 1, 'the observation is recorded once its follow-ups are filed');
   }
-  // A launcher checkout of another repository emits nothing, yet at another commit it files nothing with its own code either:
-  // the release's checkout files each follow-up with its window, or the filing is deferred where that checkout cannot be had.
+  // A launcher checkout of another repository has no commit comparable to the release, and the release carries no
+  // Graphyard filer (its commit is never in the launcher's store): the coordinator's code files, and nothing is isolated,
+  // so a cross-repository deployment owing a follow-up is recorded rather than deferred on every retry.
   const at = '2026-10-12T07:33:40.939Z', other = { checkout: 'owner/graphyard' };
-  const log: string[] = [];
-  const crossed = await verifyBehind(gy1700, at, releaseAt(log), other);
+  const crossed = await verifyBehind(gy1700, at, async () => assert.fail('nothing is isolated for another repository'), { ...other, checks: (await modules()).localPostDeployChecks });
   assert.equal(crossed.verified.result, 'verified', crossed.verified.refusals.join('; '));
   assert.equal(crossed.verified.emittedFrom, null, 'a checkout of another repository emits nothing');
-  assert.deepEqual(log, [`checks ${serving.slice(0, 12)} ${at}`, 'dispose']);
   assert.deepEqual(crossed.filed.map(entry => entry.input.observationWindow?.notBefore), ['2026-10-13T07:33:40.939Z', '2026-10-13T07:33:40.939Z']);
-  for (const isolate of [async () => ({ reason: 'Deployed release missing' }), undefined]) {
-    const deferred = await verifyBehind(gy1700, at, isolate, other);
-    assert.deepEqual([deferred.verified.result, deferred.filed, deferred.recorded], ['refused', [], []]);
-    assert.ok(deferred.verified.postDeploy.every(check => check.deferred && check.requestId && !check.followUp), 'each follow-up is deferred, never filed by the coordinator\'s code');
-  }
+  assert.equal(crossed.recorded.length, 1);
   // With nothing owed to file, a checkout of another repository spends no isolated checkout and verifies as before.
   const quiet = delivered({ key: 'GY-1701', criteria: [{ id: 'AC-1', text: 'The change ships', proofs: ['unit:ships'] }] });
-  const plain = await verifyBehind(quiet, at, async () => assert.fail('nothing owed, so nothing is isolated'), other);
+  const plain = await verifyBehind(quiet, at, async () => assert.fail('nothing owed, so nothing is isolated'), { ...other, checks: (await modules()).localPostDeployChecks });
   assert.deepEqual([plain.verified.result, plain.verified.postDeploy, plain.recorded.length], ['verified', [], 1]);
 });
 
@@ -443,6 +436,79 @@ test('unit:post-deploy-followup-window-or-deferral — with the coordinator chec
   assert.deepEqual(outcomes, ['filed', 'deferred', 'deferred', 'filed', 'filed', 'deferred', 'deferred', 'deferred', 'deferred']);
 });
 
+// The loop's executor files through the same seam: its verify-deployment handler, not only master verify-deployment.
+/** The executor's verify-deployment of `item` against the release ba607f8a809e observed serving at `at`, through `postDeployFiler`. */
+const executorVerify = async (item: Work, at: string, postDeployFiler: ((sha: string) => Promise<any>) | undefined, all: Work[] = [item], config: object = {}, sha = serving) => {
+  const { controlPlaneHandlers } = await modules();
+  const unusable = async (): Promise<never> => { throw new Error('not reached'); };
+  const filed: { input: any; requestId: string }[] = [], recorded: unknown[] = [];
+  const handlers = controlPlaneHandlers(() => config as never, {
+    snapshot: async () => ({ work: all, now: iso(Date.parse(at) + 2_000) }),
+    mutate: async (path: string, body: unknown) => { recorded.push([path, body]); return {}; },
+    agents: () => [], workerCredentials: async () => ({}), producerCredentials: async () => ({}), dispatchWorker: unusable, launchReview: unusable, launchProducer: unusable,
+    observeDeployment: async () => ({ source: 'endpoint' as const, sha, at, reason: null, deployed: [item.key], pending: [] }) as never,
+    fileWork: async (input: any, requestId: string) => { filed.push({ input, requestId }); return { key: `GY-${1720 + filed.length}` }; },
+    now: () => Date.parse(at) + 2_000, ...(postDeployFiler ? { postDeployFiler } : {}),
+  });
+  const action = { id: 'row-1', work: item.id, key: item.key, kind: 'verify-deployment', inputs: { kind: 'verify-deployment', mergeSha: item.delivery!.mergeSha } } as never;
+  const run = handlers['verify-deployment']!(action, { host: 'host-1', executor: 'executor-1' } as never) as unknown as Promise<string>;
+  return { run, filed, recorded };
+};
+/** The served release's filer as `releasePostDeployFiler` hands it over: `log` records its uses and its disposal. */
+const filerAt = (log: string[], checks: (input: any) => Promise<any> = async input => (await modules()).localPostDeployChecks(input)) => async (sha: string) => {
+  log.push(`materialize ${sha.slice(0, 12)}`);
+  return { filer: async (input: any) => { log.push(`checks ${input.servedAt}`); return checks(input); }, dispose: async () => { log.push('dispose'); } };
+};
+
+test('unit:post-deploy-filing-at-release-identity — the executor\'s verify-deployment files each owed follow-up with the observed release\'s filer, carrying its window, and the coordinator\'s own commit decides which filer that is', async () => {
+  const at = '2026-10-12T07:33:40.939Z', log: string[] = [];
+  const { run, filed, recorded } = await executorVerify(gy1700, at, filerAt(log));
+  assert.match(await run, /AC-2 owes its post-deploy observation \(GY-1721\), AC-3 owes its post-deploy observation \(GY-1722\)/);
+  assert.deepEqual(log, [`materialize ${serving.slice(0, 12)}`, `checks ${at}`, 'dispose']);
+  assert.deepEqual(filed.map(entry => entry.input.observationWindow?.notBefore), ['2026-10-13T07:33:40.939Z', '2026-10-13T07:33:40.939Z']);
+  for (const entry of filed) assert.match(entry.input.description, /\n\nObservation window: the reading can first exist at /);
+  assert.deepEqual(recorded.map(([path]: any) => path), [`work/${gy1700.id}/deployment`], 'recorded once its follow-ups are filed');
+  // Nothing owed: no release checkout is spent.
+  const quiet = delivered({ key: 'GY-1701', criteria: [{ id: 'AC-1', text: 'The change ships', proofs: ['unit:ships'] }] });
+  const plain = await executorVerify(quiet, at, async () => assert.fail('nothing owed, so nothing is materialized'));
+  assert.match(await plain.run, /observed the release serving ba607f8a809e for GY-1701$/);
+
+  // The default selection, over the executor's config: its checkout's own code only at the release's commit, or of
+  // another repository; otherwise the release's isolated checkout, or the reason it cannot be had.
+  const { releasePostDeployFiler, localPostDeployChecks } = await modules();
+  const master = { cliPath: '/coordinator/bin/graphyard.mjs', repository: 'owner/project' } as never;
+  const checkout = (sha: string, origin = 'git@github.com:owner/project.git') => (_command: string, args: string[]) => args.includes('rev-parse') ? `${sha}\n` : args.includes('get-url') ? `${origin}\n` : '';
+  const isolated = { release: {}, emit: async () => ({}), checks: async () => [], dispose: async () => {} } as never;
+  const refuse = async () => assert.fail('nothing is isolated');
+  assert.equal(((await releasePostDeployFiler(master, serving, checkout(serving), refuse)) as any).filer, localPostDeployChecks, 'at the release\'s commit its own code is the release\'s');
+  assert.equal(((await releasePostDeployFiler(master, serving, checkout('9'.repeat(40), 'git@github.com:owner/graphyard.git'), refuse)) as any).filer, localPostDeployChecks, 'another repository\'s release carries no Graphyard filer');
+  const asked: string[] = [];
+  const materialized = await releasePostDeployFiler(master, serving, checkout('98070f3538'.padEnd(40, '0')), async (_config, sha) => { asked.push(sha); return isolated; }) as any;
+  assert.deepEqual([asked, materialized.filer === (isolated as any).checks], [[serving], true], 'behind the release, its isolated checkout files');
+  assert.deepEqual(await releasePostDeployFiler(master, serving, checkout('98070f3538'.padEnd(40, '0')), async () => ({ reason: 'Deployed release missing' })), { reason: 'the observed release ba607f8a809e could not be checked out to file it at its own identity: Deployed release missing' });
+});
+
+test('unit:post-deploy-filing-defers-when-release-unavailable — the executor\'s verify-deployment files nothing window-less when the release\'s filer cannot be had or run: the action fails naming each deferred request id, nothing is recorded, and the retry files it with its window', async () => {
+  const at = '2026-10-12T07:33:40.939Z', { postDeployFollowUpId } = await modules();
+  const ids = gy1700.criteria.map(criterion => postDeployFollowUpId(gy1700, criterion.id, criterion.proofs[0], serving));
+  for (const [label, filer, reason] of [
+    ['the release commit is missing', async () => ({ reason: `the observed release ba607f8a809e could not be checked out to file it at its own identity: Deployed release ${serving} is missing from the coordinator checkout` }), /could not be checked out to file it at its own identity: Deployed release .* is missing/],
+    ['the release predates the filer', filerAt([], async () => { throw new Error('There is no master post-deploy-checks'); }), /the observed release ba607f8a809e's own filer could not run: There is no master post-deploy-checks/],
+  ] as const) {
+    const { run, filed, recorded } = await executorVerify(gy1700, at, filer);
+    const error = await run.then(() => assert.fail(`${label}: the action fails`), (failure: Error) => failure.message);
+    for (const id of ids) assert.ok(error.includes(`owes its post-deploy follow-up ${id}, whose filing is deferred: `), `${label}: ${error}`);
+    assert.match(error, reason);
+    assert.match(error, /the deployment observation waits for it$/);
+    assert.deepEqual([filed, recorded], [[], []], `${label}: nothing is filed and nothing is recorded`);
+  }
+  // The retry that can run the release's filer files each follow-up with its window, under the same request id.
+  const retried = await executorVerify(gy1700, '2026-10-12T07:43:40.939Z', filerAt([]));
+  await retried.run;
+  assert.deepEqual(retried.filed.map(entry => [entry.requestId, entry.input.observationWindow.notBefore]), ids.map(id => [id, '2026-10-13T07:43:40.939Z']));
+  assert.equal(retried.recorded.length, 1);
+});
+
 // The integration halves: a real coordinator checkout and a real release, its CLI run in the isolated checkout verify-deployment materializes.
 const repositoryRoot = fileURLToPath(new URL('..', import.meta.url));
 const nodeModules = fileURLToPath(import.meta.resolve('tsx')).replace(/\/node_modules\/.*$/, '/node_modules');
@@ -466,7 +532,7 @@ async function verifyReal(coordinator: { checkout: string; cliPath: string }, it
   const own = releaseChecks(coordinator.cliPath);
   let ownAsked = 0;
   const verified = await verifyDeployment(item, { ...effects, observe: async () => ({ source: 'endpoint' as const, sha: served, at, reason: null, deployed: [item.key], pending: [] }), checks: async input => { ownAsked++; return own(input); } });
-  return { verified, filed, recorded, ownAsked, own, at };
+  return { verified, filed, recorded, ownAsked, own, at, master };
 }
 const liveCriterion = { id: 'AC-2', text: 'Zero failed webhook deliveries over 24 hours of live activity on the serving release', proofs: ['manual:post-deploy/webhook-deliveries-clean-24h'] };
 const windowedParent = (served: string) => delivered({ id: 'e03bc94f-82f4-481d-a443-4b4e6abe9eb6', key: 'GY-1700', criteria: [liveCriterion],
@@ -484,7 +550,7 @@ test('integration:stale-coordinator-files-windowed-followup — a coordinator ch
     coordinator.git('commit', '-q', '-am', 'a coordinator filer from before observation windows');
     const stale = coordinator.git('rev-parse', 'HEAD');
     const item = windowedParent(served);
-    const { verified, filed, recorded, ownAsked, own, at } = await verifyReal(coordinator, item, served);
+    const { verified, filed, recorded, ownAsked, own, at, master } = await verifyReal(coordinator, item, served);
     assert.equal(verified.result, 'verified', verified.refusals.join('; '));
     assert.deepEqual([verified.checkout.sha, verified.emittedFrom], [stale, { sha: served, clean: true, isolated: true }]);
     assert.equal(ownAsked, 0, 'the coordinator\'s own filer is never asked');
@@ -496,6 +562,11 @@ test('integration:stale-coordinator-files-windowed-followup — a coordinator ch
     const [staleCheck] = await own({ work: item, release: served, now: at, projections: {}, servedAt: at });
     assert.equal(staleCheck.followUp!.input.observationWindow, undefined);
     assert.equal(staleCheck.followUp!.requestId, filed[0].requestId, 'the same follow-up, by its identity');
+    // The loop's executor, over the same config and its default filer, files it through the served release's CLI too.
+    const executor = await executorVerify(item, at, undefined, [item], master, served);
+    await executor.run;
+    assert.deepEqual(executor.filed.map(entry => [entry.requestId, entry.input.observationWindow?.notBefore]), [[filed[0].requestId, new Date(Date.parse(at) + day).toISOString()]]);
+    assert.equal(executor.recorded.length, 1);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 

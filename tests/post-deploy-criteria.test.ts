@@ -192,7 +192,7 @@ function delivered(overrides: Partial<Work> = {}): Work {
 }
 
 test('unit:post-deploy-criteria — master verify-deployment checks a declared criterion on the serving release and files one follow-up naming the delivered item when it fails', async () => {
-  const { createSchema, filePostDeployFollowUps, localPostDeployChecks, postDeployChecks, verifyDeployment } = await modules();
+  const { createSchema, filePostDeployFollowUps, postDeployChecks, verifyDeployment } = await modules();
   const checks = postDeployChecks(delivered(), release);
   assert.equal(checks.length, 1);
   const [owed] = checks;
@@ -256,9 +256,6 @@ test('unit:post-deploy-criteria — master verify-deployment checks a declared c
     emit: async () => assert.fail('nothing is emitted'), repository: 'owner/project', now: () => now,
     record: async (_work: Work, data: unknown) => { assert.equal(filed.length, 1, 'filed before the record'); records.push(data); },
     file: async (input: any, requestId: string) => { filed.push({ input, requestId }); return { key: 'GY-43' }; },
-    // At another commit than the served release, it files through that release's isolated checkout (GY-1732), never its own code.
-    checks: async () => assert.fail('the checkout at another commit files nothing'),
-    isolate: async (sha: string) => ({ release: { sha, clean: true, repository: 'other/repo', reason: null }, emit: async () => assert.fail('nothing is emitted'), checks: localPostDeployChecks, dispose: async () => {} }),
   };
   // A filing that fails leaves the delivery unobserved, so the retry files it.
   await assert.rejects(verifyDeployment(work[0], { ...effects, file: async () => { throw new Error('refused'); } }), /refused/);

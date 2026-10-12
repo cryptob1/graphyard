@@ -221,11 +221,10 @@ export async function verifyDeployment(work: Work, effects: VerificationEffects,
   const observation = await effects.observe(current.stage === 'done' && current.delivery ? [current] : []);
   const coordinator = effects.release();
   const emits = emitsManagedInstructions(coordinator, effects.repository);
-  const differs = !!observation.sha && !!coordinator.sha && coordinator.sha !== observation.sha;
-  // GY-1732 AC-1: a checkout at another commit than the observed release files nothing with its own code, whether or
-  // not it emits; one of another repository materializes the release only when it owes a follow-up to file.
-  const owes = differs && deferPostDeployFollowUps(current, observation.sha!, snapshot.work, 'owed').some(check => check.deferred);
-  const isolate = differs && (emits || owes);
+  // GY-1732 AC-1: a checkout of the observed release's repository at another commit files nothing with its own code.
+  // A checkout of another repository has no commit comparable to the release, and the release carries no Graphyard
+  // filer to run (its commit is never in the launcher's store), so the coordinator's Graphyard code is the only filer.
+  const isolate = emits && !!observation.sha && !!coordinator.sha && coordinator.sha !== observation.sha;
   let release = coordinator, isolated: boolean = false;
   const result = (assessment: ReturnType<typeof assessDeploymentVerification>, recorded: 'now' | 'existing' | null, postDeploy: Awaited<ReturnType<typeof filePostDeployFollowUps>> = []) => ({
     key: current.key, result: assessment.verifiable ? 'verified' as const : 'refused' as const,
@@ -272,6 +271,19 @@ export interface PostDeployCheck {
 export interface PostDeployChecksInput { work: Work; release: string; now: string; projections: PatternProjections; servedAt?: string }
 /** The code that decides a delivered item's post-deploy checks and their follow-ups: the observed release's own, wherever it differs from the coordinator's. */
 export type PostDeployFiler = (input: PostDeployChecksInput) => Promise<PostDeployCheck[]>;
+/**
+ * The filer for the observed release `sha` outside `verifyDeployment` (GY-1732): the executor's verify-deployment
+ * files through it. The coordinator checkout's own code at that commit (or of another repository, or with no commit, as in
+ * `verifyDeployment`); otherwise the release's isolated checkout, disposed by the caller; or the reason it cannot be had,
+ * for which each owed follow-up is deferred rather than filed by the coordinator's code.
+ */
+export async function releasePostDeployFiler(config: MasterConfig, sha: string, run: Run = defaultRun, isolate: typeof isolateRelease = isolateRelease): Promise<{ filer: PostDeployFiler; dispose: () => Promise<void> } | { reason: string }> {
+  const coordinator = checkoutRelease(config.cliPath, run);
+  if (!emitsManagedInstructions(coordinator, config.repository) || !coordinator.sha || coordinator.sha === sha) return { filer: localPostDeployChecks, dispose: async () => {} };
+  const materialized = await isolate(config, sha, run);
+  if ('reason' in materialized) return { reason: `the observed release ${sha.slice(0, 12)} could not be checked out to file it at its own identity: ${materialized.reason}` };
+  return { filer: materialized.checks ?? noReleaseFiler, dispose: materialized.dispose };
+}
 /** An isolated checkout that carries no filer: its filing is deferred, never done by the coordinator's code. */
 const noReleaseFiler: PostDeployFiler = async () => { throw new Error('the isolated release checkout carries no post-deploy filer'); };
 /** `postDeployChecks` over a filer's input: what this checkout's code decides, and what `master post-deploy-checks` prints. */
